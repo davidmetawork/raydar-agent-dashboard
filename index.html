@@ -49,10 +49,10 @@
     .pf-btn .ext { opacity:.75; font-size:12px; }
     /* per-row actions (Reschedule button on No-show rows) */
     .actions { display:flex; align-items:center; justify-content:flex-end; gap:10px; }
-    .resched { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:9px; background:var(--ink); color:var(--cream);
-      font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; letter-spacing:-.01em; transition:transform .08s ease, background .15s ease; }
-    .resched:hover { background:var(--orange); transform:translateY(-1px); }
-    .resched .x { font-size:10px; opacity:.85; }
+    .resched { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:9px; background:var(--bad); color:#fff;
+      font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; letter-spacing:-.01em; transition:transform .08s ease, filter .15s ease; }
+    .resched:hover { filter:brightness(.93); transform:translateY(-1px); }
+    .resched .x { font-size:10px; opacity:.9; }
     /* blue status pill — "Rescheduling requested" */
     .pill.blue { background:var(--blue-bg); color:var(--blue); } .pill.blue .d{background:var(--blue);}
     /* view tabs (Overview ⇄ Follow-ups) */
@@ -70,6 +70,16 @@
     .chk { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-3); cursor:pointer; white-space:nowrap; user-select:none; }
     .chk input { width:15px; height:15px; accent-color:var(--orange); cursor:pointer; margin:0; }
     .chk.on { color:var(--ink); }
+    .row.fu .what { display:flex; flex-direction:column; gap:5px; align-items:flex-start; }
+    .row.fu .what .sub { font-size:12.5px; color:var(--ink-3); line-height:1.3; }
+    .fu-group { margin-bottom:22px; }
+    .fu-group-head { display:flex; align-items:center; gap:9px; margin:0 2px 10px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-3); }
+    .fu-group-head .n { display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 6px; border-radius:9px; background:var(--line-2); color:var(--ink-2); font-size:11px; font-weight:700; }
+    .fu-completed { margin-top:28px; padding-top:24px; border-top:1px solid var(--line); }
+    .fu-group-head.done { color:var(--good); }
+    .fu-group-head.done .n { background:var(--good-bg); color:var(--good); }
+    .fu-completed .row.fu { opacity:.66; transition:opacity .12s ease; }
+    .fu-completed .row.fu:hover { opacity:1; }
     /* history — day cards */
     .day { background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); margin-bottom:13px; overflow:hidden; }
     .day-head { display:flex; align-items:center; gap:16px; padding:15px 22px; cursor:pointer; user-select:none; }
@@ -115,16 +125,6 @@
     .who a:hover { border-bottom-color:var(--orange); }
     .who a .ext { font-size:11px; color:var(--ink-3); margin-left:4px; opacity:0; transition:opacity .12s ease; }
     .who a:hover .ext { opacity:1; }
-
-    /* health banner */
-    .health { display:flex; align-items:center; gap:16px; padding:20px 24px; border-radius:18px; margin-bottom:22px; border:1px solid; }
-    .health.ok { background:var(--good-bg); border-color:#CDEAD9; }
-    .health.attention { background:var(--bad-bg); border-color:#F4CFCF; }
-    .health .icon { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; flex:0 0 auto; }
-    .health.ok .icon { background:var(--good); } .health.attention .icon { background:var(--bad); }
-    .health .icon svg { width:22px; height:22px; }
-    .health h2 { font-family:Fraunces,serif; font-weight:500; font-size:22px; margin:0 0 2px; letter-spacing:-.01em; }
-    .health p { margin:0; font-size:14px; color:var(--ink-2); }
 
     /* stat cards */
     .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin-bottom:30px; }
@@ -188,11 +188,6 @@
     </div>
 
     <div id="view-overview">
-      <div class="health ok" id="health">
-        <div class="icon" id="health-icon"></div>
-        <div><h2 id="health-title">Checking system…</h2><p id="health-sub">Loading the latest interview activity.</p></div>
-      </div>
-
       <div class="stats" id="stats"></div>
 
       <section>
@@ -209,7 +204,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">No-shows and failed interviews that need a human. Open the candidate in Paraform to add them to your sequence, then check off each step — the Overview updates to match.</p>
+        <p class="fu-intro">No-shows and failed interviews that need a human. Hit <b>Reschedule</b> to open the candidate in Paraform and add them to your sequence, then check off each step — the Overview updates to match, and finished ones move to <b>Completed</b>.</p>
         <div class="list" id="followups"></div>
       </section>
     </div>
@@ -329,23 +324,6 @@
       const completed = (t.success||0)+(t.partial||0);
       const total = calls.length;
 
-      // health banner — red ONLY for confirmed failures; softer cases get a calm note
-      const h=$("health");
-      const glanceNote = glance
-        ? `${glance} to glance at (${[review?`${review} joined-silent`:null, unconfirmed?`${unconfirmed} unconfirmed`:null].filter(Boolean).join(", ")}). `
-        : "";
-      if(failures>0){
-        h.className="health attention"; $("health-icon").innerHTML=ICON_ALERT;
-        $("health-title").textContent = `${failures} interview${failures>1?"s":""} need${failures>1?"":"s"} a manual follow-up`;
-        $("health-sub").textContent = glanceNote + "Flagged below — everything else is running normally.";
-      } else {
-        h.className="health ok"; $("health-icon").innerHTML=ICON_OK;
-        $("health-title").textContent = "All systems healthy";
-        $("health-sub").textContent = glance
-          ? `No confirmed failures. ${glanceNote}See below.`
-          : "Bots are joining, interviews are recording, and no failures need attention.";
-      }
-
       // stat cards
       const rate = d.successRate;
       const ringDash = rate==null ? 0 : Math.round((rate/100)*176);
@@ -388,35 +366,61 @@
     // ---- Follow-ups view: actionable rows with Reschedule + status checkboxes ----
     function shortWhat(verdict){
       switch(verdict){
-        case "no_show": return "Never joined the Meet";
-        case "audio_fail": return "Joined & spoke, but the agent didn't hear them (audio bridge failed)";
+        case "no_show": return "Didn't join the call";
+        case "audio_fail": return "Spoke, but the agent couldn't hear them";
         case "error": return "The call errored out";
-        case "joined_silent": return "Joined but no speech detected";
+        case "joined_silent": return "Joined, but no speech detected";
         default: return "";
       }
     }
+    // One follow-up row: name · time · status + reason · Reschedule + checkboxes.
+    function fuRow(c){
+      const act = actionsMap[c.id], st = (act||{}).status;
+      const ds = displayStatus(c.verdict, act);
+      const seqOn = st==="sequence_sent"||st==="rescheduled";
+      const reschedOn = st==="rescheduled";
+      return `<div class="row fu">
+        <div class="who">${nameLink(c.candidate)}</div>
+        <div class="when">${fmtTime(c.startedAt)}</div>
+        <div class="what"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span><span class="sub">${esc(shortWhat(c.verdict))}</span></div>
+        <div class="fu-actions">
+          <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
+          <label class="chk ${seqOn?'on':''}"><input type="checkbox" ${seqOn?'checked':''} onchange="setAction('${c.id}', this.checked?'sequence_sent':'none')">Sequence sent</label>
+          <label class="chk ${reschedOn?'on':''}"><input type="checkbox" ${reschedOn?'checked':''} onchange="setAction('${c.id}', this.checked?'rescheduled':'sequence_sent')">Rescheduled</label>
+        </div>
+      </div>`;
+    }
+    const groupBlock = (title, rows) =>
+      rows.length ? `<div class="fu-group"><div class="fu-group-head">${esc(title)} <span class="n">${rows.length}</span></div><div class="list">${rows.join("")}</div></div>` : "";
+
+    // Errors/failures on top, then no-shows; rescheduled rows drop into Completed.
+    const FU_SEVERITY = { error:0, audio_fail:1, joined_silent:2, no_show:3 };
     function renderFollowups(d){
       const calls = (d.calls||[]).filter(c=>ACTIONABLE.has(c.verdict));
-      const open = calls.filter(c=>(actionsMap[c.id]||{}).status!=="rescheduled").length;
-      $("fu-count").textContent = calls.length ? (open?`${open} still to action · ${calls.length} total`:`all ${calls.length} handled`) : "";
+      const isResched = (c) => (actionsMap[c.id]||{}).status==="rescheduled";
+      const byTime = (a,b) => new Date(b.startedAt)-new Date(a.startedAt);
+      const active = calls.filter(c=>!isResched(c))
+        .sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
+      const errors  = active.filter(c=>c.verdict!=="no_show");
+      const noshows = active.filter(c=>c.verdict==="no_show");
+      const done    = calls.filter(isResched).sort(byTime);
+      const open = active.length;
+
+      $("fu-count").textContent = calls.length
+        ? (open ? `${open} to action${done.length?` · ${done.length} completed`:""}` : `all ${calls.length} handled`)
+        : "";
       const badge=$("fu-badge");
       badge.textContent = open||""; badge.style.display = open?"inline-flex":"none";
-      $("followups").innerHTML = calls.length ? calls.map(c=>{
-        const act = actionsMap[c.id], st = (act||{}).status;
-        const ds = displayStatus(c.verdict, act);
-        const seqOn = st==="sequence_sent"||st==="rescheduled";
-        const reschedOn = st==="rescheduled";
-        return `<div class="row fu">
-          <div class="who">${nameLink(c.candidate)}</div>
-          <div class="when">${fmtTime(c.startedAt)}</div>
-          <div class="what"><span class="pill ${ds.cls}" style="margin-right:9px"><span class="d"></span>${esc(ds.label)}</span>${esc(shortWhat(c.verdict))}</div>
-          <div class="fu-actions">
-            <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform">Paraform <span class="x">↗</span></a>
-            <label class="chk ${seqOn?'on':''}"><input type="checkbox" ${seqOn?'checked':''} onchange="setAction('${c.id}', this.checked?'sequence_sent':'none')">Sequence sent</label>
-            <label class="chk ${reschedOn?'on':''}"><input type="checkbox" ${reschedOn?'checked':''} onchange="setAction('${c.id}', this.checked?'rescheduled':'sequence_sent')">Rescheduled</label>
-          </div>
-        </div>`;
-      }).join("") : `<div class="empty">No no-shows or failed interviews to follow up on. 🎉</div>`;
+
+      const completedBlock = done.length
+        ? `<div class="fu-completed"><div class="fu-group-head done">Completed <span class="n">${done.length}</span></div><div class="list">${done.map(fuRow).join("")}</div></div>`
+        : "";
+      const html = groupBlock("Errors & failures", errors.map(fuRow))
+                 + groupBlock("No-shows", noshows.map(fuRow))
+                 + completedBlock;
+      $("followups").innerHTML = (open||done.length)
+        ? html
+        : `<div class="empty">No no-shows or failed interviews to follow up on. 🎉</div>`;
     }
 
     function showView(name){
