@@ -80,6 +80,7 @@
     .fu-group-head.done .n { background:var(--good-bg); color:var(--good); }
     .fu-completed .row.fu { opacity:.66; transition:opacity .12s ease; }
     .fu-completed .row.fu:hover { opacity:1; }
+    .auto-tag { font-size:10.5px; font-weight:700; color:var(--ink-3); background:var(--line-2); padding:3px 9px; border-radius:7px; text-transform:uppercase; letter-spacing:.05em; }
     /* history — day cards */
     .day { background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); margin-bottom:13px; overflow:hidden; }
     .day-head { display:flex; align-items:center; gap:16px; padding:15px 22px; cursor:pointer; user-select:none; }
@@ -402,6 +403,16 @@
         </div>
       </div>`;
     }
+    // Read-only "Rescheduled (auto)" row — candidate the backend auto-detected as
+    // rebooked (has a new future interview). Shown in Completed as an audit trail.
+    function fuAutoRow(c){
+      return `<div class="row fu done-auto">
+        <div class="who">${nameLink(c.candidate)}</div>
+        <div class="when">${fmtTime(c.startedAt)}</div>
+        <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${esc(verdictView(c.verdict).label)} → new interview booked</span></div>
+        <div class="fu-actions"><span class="auto-tag">auto</span></div>
+      </div>`;
+    }
     const groupBlock = (title, rows) =>
       rows.length ? `<div class="fu-group"><div class="fu-group-head">${esc(title)} <span class="n">${rows.length}</span></div><div class="list">${rows.join("")}</div></div>` : "";
 
@@ -415,22 +426,24 @@
         .sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
       const errors  = active.filter(c=>c.verdict!=="no_show");
       const noshows = active.filter(c=>c.verdict==="no_show");
-      const done    = calls.filter(isResched).sort(byTime);
+      const done     = calls.filter(isResched).sort(byTime);   // manually marked "Rescheduled"
+      const autoDone = (d.rescheduledAwayRows||[]);             // backend auto-detected rebookings
+      const doneCount = done.length + autoDone.length;
       const open = active.length;
 
-      $("fu-count").textContent = calls.length
-        ? (open ? `${open} to action${done.length?` · ${done.length} completed`:""}` : `all ${calls.length} handled`)
+      $("fu-count").textContent = (calls.length||doneCount)
+        ? (open ? `${open} to action${doneCount?` · ${doneCount} completed`:""}` : `all handled · ${doneCount} completed`)
         : "";
       const badge=$("fu-badge");
       badge.textContent = open||""; badge.style.display = open?"inline-flex":"none";
 
-      const completedBlock = done.length
-        ? `<div class="fu-completed"><div class="fu-group-head done">Completed <span class="n">${done.length}</span></div><div class="list">${done.map(fuRow).join("")}</div></div>`
+      const completedBlock = doneCount
+        ? `<div class="fu-completed"><div class="fu-group-head done">Completed <span class="n">${doneCount}</span></div><div class="list">${done.map(fuRow).join("")}${autoDone.map(fuAutoRow).join("")}</div></div>`
         : "";
       const html = groupBlock("Errors & failures", errors.map(fuRow))
                  + groupBlock("No-shows", noshows.map(fuRow))
                  + completedBlock;
-      $("followups").innerHTML = (open||done.length)
+      $("followups").innerHTML = (open||doneCount)
         ? html
         : `<div class="list"><div class="empty">No no-shows or failed interviews to follow up on. 🎉</div></div>`;
     }
