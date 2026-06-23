@@ -18,6 +18,7 @@
       --warn:#C7791A; --warn-bg:#FaEEDC;
       --live:#7F72FF; --live-bg:#ECEAFE;
       --muted:#8C877B; --muted-bg:#EFEADE;
+      --yellow:#8F7400; --yellow-bg:#FAF1BE;
       --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
     }
     * { box-sizing:border-box; }
@@ -90,6 +91,7 @@
     .pill.warn { background:var(--warn-bg); color:var(--warn); } .pill.warn .d{background:var(--warn);}
     .pill.live { background:var(--live-bg); color:var(--live); } .pill.live .d{background:var(--live);}
     .pill.muted { background:var(--muted-bg); color:var(--muted); } .pill.muted .d{background:var(--muted);}
+    .pill.yellow { background:var(--yellow-bg); color:var(--yellow); } .pill.yellow .d{background:#E8B800;}
     .review { font-size:11px; font-weight:700; color:var(--bad); background:var(--bad-bg); padding:3px 8px; border-radius:6px; margin-left:8px; }
 
     .empty { padding:30px 22px; text-align:center; color:var(--ink-3); font-size:14px; }
@@ -158,7 +160,7 @@
       joined_silent:{ cls:"warn",  label:"Joined, silent", review:true },
       audio_fail:   { cls:"bad",   label:"Audio failed", review:true },
       error:        { cls:"bad",   label:"Error", review:true },
-      no_show:      { cls:"muted", label:"No-show" },
+      no_show:      { cls:"yellow", label:"No-show" },
     };
     const verdictView = (v) => VERDICT[v] || { cls:"muted", label:cap(v||"—") };
     const whatHappened = (r) => {
@@ -272,10 +274,9 @@
       $("foot").textContent = `Last updated ${new Date(d.generatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})} · updates automatically every 30 seconds`;
     }
 
-    // Absolute base so the dashboard works under ANY host — served direct, via a
-    // raydar.xyz/agent-dashboard proxy-rewrite, or an agent-dashboard.raydar.xyz
-    // subdomain. /api/status sets Access-Control-Allow-Origin:* so cross-origin
-    // reads (and the shared warm cache) work everywhere.
+    // Absolute base so the dashboard works under ANY host — served direct or via
+    // the monitor.raydar.xyz subdomain. /api/status sets Access-Control-Allow-Origin:*
+    // so cross-origin reads (and the shared warm cache) work everywhere.
     const API_BASE = "https://webview-lazy-prompt.vercel.app";
     async function load(){
       try {
