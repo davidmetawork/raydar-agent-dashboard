@@ -70,6 +70,45 @@
     .chk { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-3); cursor:pointer; white-space:nowrap; user-select:none; }
     .chk input { width:15px; height:15px; accent-color:var(--orange); cursor:pointer; margin:0; }
     .chk.on { color:var(--ink); }
+    /* history — day cards */
+    .day { background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); margin-bottom:13px; overflow:hidden; }
+    .day-head { display:flex; align-items:center; gap:16px; padding:15px 22px; cursor:pointer; user-select:none; }
+    .day-head:hover { background:var(--line-2); }
+    .day-date { font-family:Fraunces,serif; font-weight:500; font-size:17px; min-width:170px; }
+    .day-stats { display:flex; gap:16px; flex-wrap:wrap; flex:1; font-size:13px; color:var(--ink-2); align-items:center; }
+    .day-stats b { color:var(--ink); font-weight:600; }
+    .mixbar { display:flex; height:9px; width:120px; border-radius:5px; overflow:hidden; background:var(--line-2); }
+    .mixbar span { display:block; height:100%; }
+    .day-chev { color:var(--ink-3); transition:transform .15s ease; font-size:13px; }
+    .day.open .day-chev { transform:rotate(90deg); }
+    .day.collapsed .day-body { display:none; }
+    .day-body { border-top:1px solid var(--line-2); }
+    .hrow { display:grid; grid-template-columns:1.5fr 1fr 1.7fr 150px; gap:16px; align-items:center; padding:11px 22px; border-top:1px solid var(--line-2); font-size:13.5px; }
+    .hrow:first-child { border-top:none; }
+    .hrow .hc { font-weight:600; letter-spacing:-.01em; }
+    .hrow .hw { color:var(--ink-2); } .hrow .ht { color:var(--ink-2); }
+    .hrow > div:last-child { display:flex; justify-content:flex-end; }
+    @media (max-width:760px){ .hrow{grid-template-columns:1fr auto; row-gap:4px} .hrow .hw,.hrow .ht{grid-column:1/-1} }
+    /* analytics */
+    .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:24px; }
+    .kpi { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px 18px; box-shadow:var(--shadow); }
+    .kpi .k-label { font-size:11.5px; font-weight:600; color:var(--ink-3); text-transform:uppercase; letter-spacing:.05em; }
+    .kpi .k-num { font-family:Fraunces,serif; font-weight:500; font-size:30px; line-height:1.05; margin-top:7px; letter-spacing:-.02em; }
+    .kpi .k-sub { font-size:12px; color:var(--ink-3); margin-top:5px; }
+    .panel { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px 20px; box-shadow:var(--shadow); margin-bottom:18px; }
+    .panel h4 { font-family:Fraunces,serif; font-weight:500; font-size:16px; margin:0 0 4px; }
+    .panel .psub { font-size:12.5px; color:var(--ink-3); margin:0 0 14px; }
+    .panel-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; }
+    @media (max-width:760px){ .panel-grid{grid-template-columns:1fr} }
+    .legend { display:flex; gap:15px; flex-wrap:wrap; font-size:12px; color:var(--ink-2); margin-top:12px; }
+    .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:middle; }
+    .obar { display:flex; align-items:center; gap:12px; margin-bottom:10px; font-size:13px; }
+    .obar .ol { width:128px; color:var(--ink-2); }
+    .obar .ot { background:var(--line-2); border-radius:5px; height:15px; flex:1; overflow:hidden; }
+    .obar .of { height:100%; border-radius:5px; }
+    .obar .ov { width:78px; text-align:right; font-variant-numeric:tabular-nums; color:var(--ink); font-weight:600; }
+    .chart svg { width:100%; height:auto; display:block; overflow:visible; }
+    .chart text { fill:var(--ink-3); font-size:11px; }
     @media (max-width:760px){ .row.fu{grid-template-columns:1fr auto; row-gap:8px} .row.fu .when,.row.fu .what{grid-column:1/-1} .fu-actions{grid-column:1/-1; justify-content:flex-start} }
     /* candidate-name link → Paraform candidate search */
     .who a { color:inherit; text-decoration:none; border-bottom:1.5px solid transparent; transition:border-color .12s ease; }
@@ -144,6 +183,8 @@
     <div class="tabs">
       <button class="tab active" id="tab-overview" onclick="showView('overview')">Overview</button>
       <button class="tab" id="tab-followups" onclick="showView('followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></button>
+      <button class="tab" id="tab-history" onclick="showView('history')">History</button>
+      <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
     </div>
 
     <div id="view-overview">
@@ -170,6 +211,21 @@
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
         <p class="fu-intro">No-shows and failed interviews that need a human. Open the candidate in Paraform to add them to your sequence, then check off each step — the Overview updates to match.</p>
         <div class="list" id="followups"></div>
+      </section>
+    </div>
+
+    <div id="view-history" hidden>
+      <section>
+        <div class="sec-head"><h3>History</h3><span class="count" id="hist-count"></span></div>
+        <p class="fu-intro">Every interview, grouped by day (newest first). Click a day to expand. Past days are final; today updates live.</p>
+        <div id="history"><div class="empty">Loading history…</div></div>
+      </section>
+    </div>
+
+    <div id="view-analytics" hidden>
+      <section>
+        <div class="sec-head"><h3>Analytics</h3><span class="count" id="an-count"></span></div>
+        <div id="analytics"><div class="empty">Loading analytics…</div></div>
       </section>
     </div>
 
@@ -364,10 +420,163 @@
     }
 
     function showView(name){
-      document.getElementById("view-overview").hidden = name!=="overview";
-      document.getElementById("view-followups").hidden = name!=="followups";
-      $("tab-overview").classList.toggle("active", name==="overview");
-      $("tab-followups").classList.toggle("active", name==="followups");
+      ["overview","followups","history","analytics"].forEach(v=>{
+        document.getElementById("view-"+v).hidden = v!==name;
+        $("tab-"+v).classList.toggle("active", v===name);
+      });
+      if(name==="history"||name==="analytics") ensureHistory();
+    }
+
+    // ---- History + Analytics (from /api/history: per-day records) ----
+    const BUCKETS = [
+      {k:"completed", label:"Completed",     color:"#119865"},
+      {k:"no_show",   label:"No-show",       color:"#E6B400"},
+      {k:"failed",    label:"Agent failed",  color:"#E5484D"},
+      {k:"silent",    label:"Joined silent", color:"#C7791A"},
+      {k:"other",     label:"Other",         color:"#BCB4A4"},
+    ];
+    const dayBuckets = (s) => ({
+      completed:(s.success||0)+(s.partial||0),
+      no_show:s.no_show||0,
+      failed:(s.audio_fail||0)+(s.error||0),
+      silent:s.joined_silent||0,
+      other:(s.silent_fail||0)+(s.in_progress||0)+(s.pending||0),
+    });
+    const fmtClock = (iso) => iso ? new Date(iso).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}) : "";
+    function fmtDay(key){
+      const ptToday = new Date().toLocaleDateString("en-CA",{timeZone:"America/Los_Angeles"});
+      const ptYest  = new Date(Date.now()-864e5).toLocaleDateString("en-CA",{timeZone:"America/Los_Angeles"});
+      const wd = new Date(key+"T12:00:00").toLocaleDateString([],{weekday:"long",month:"short",day:"numeric"});
+      if(key===ptToday) return "Today · "+wd;
+      if(key===ptYest)  return "Yesterday · "+wd;
+      return wd;
+    }
+    function histWhat(v,m){
+      switch(v){
+        case "success": return `Completed — ${m} exchanges`;
+        case "partial": return `Brief — ${m} exchange${m===1?"":"s"} then ended`;
+        case "no_show": return "Candidate never joined";
+        case "audio_fail": return "Audio bridge failed — spoke but unheard";
+        case "error": return "Call errored out";
+        case "joined_silent": return "Joined but stayed silent";
+        case "silent_fail": return "Unconfirmed";
+        case "in_progress": return "In progress";
+        case "pending": return "Processing";
+        default: return v||"";
+      }
+    }
+
+    let historyDays=null, historyAt=0;
+    async function ensureHistory(force){
+      if(!force && historyDays && Date.now()-historyAt<90000) return;
+      try{
+        const r = await fetch(API_BASE+"/api/history");
+        const d = await r.json();
+        if(!d || !d.ok) throw new Error("bad");
+        historyDays=d.days||[]; historyAt=Date.now();
+        renderHistory(historyDays); renderAnalytics(historyDays);
+      }catch(e){
+        if(!historyDays){ const m=`<div class="empty">Couldn't load history right now — reopen the tab to retry.</div>`; $("history").innerHTML=m; $("analytics").innerHTML=m; }
+      }
+    }
+
+    function renderHistory(days){
+      $("hist-count").textContent = days.length ? `${days.length} day${days.length>1?"s":""}` : "";
+      if(!days.length){ $("history").innerHTML=`<div class="empty">No history yet.</div>`; return; }
+      $("history").innerHTML = days.map((day,i)=>{
+        const s=day.summary, b=dayBuckets(s);
+        const mix = BUCKETS.map(bk=> b[bk.k] ? `<span style="width:${(100*b[bk.k]/Math.max(1,s.total)).toFixed(1)}%;background:${bk.color}"></span>` : "").join("");
+        const rows = (day.calls||[]).map(c=>{
+          const ds=displayStatus(c.v,null);
+          return `<div class="hrow">
+            <div class="hc">${nameLink(c.c)}</div>
+            <div class="ht">${fmtClock(c.t)}</div>
+            <div class="hw">${esc(histWhat(c.v,c.m))}</div>
+            <div><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span></div>
+          </div>`;
+        }).join("");
+        return `<div class="day ${i===0?'open':'collapsed'}">
+          <div class="day-head" onclick="this.parentNode.classList.toggle('collapsed');this.parentNode.classList.toggle('open')">
+            <div class="day-date">${fmtDay(day.date)}</div>
+            <div class="day-stats">
+              <span><b>${s.total}</b> calls</span>
+              <span><b>${b.completed}</b> done</span>
+              <span><b>${b.no_show}</b> no-show</span>
+              ${b.failed?`<span style="color:var(--bad)"><b>${b.failed}</b> failed</span>`:""}
+              <span class="mixbar">${mix}</span>
+              <span style="font-weight:700">${s.successRate==null?"—":s.successRate+"%"}</span>
+            </div>
+            <div class="day-chev">▸</div>
+          </div>
+          <div class="day-body">${rows||'<div class="empty">No calls.</div>'}</div>
+        </div>`;
+      }).join("");
+    }
+
+    // --- tiny dependency-free SVG charts ---
+    function barChartSVG(days){
+      const data=days.slice().reverse(), n=data.length;
+      const W=Math.max(n*46,320), H=190, pad=22, max=Math.max(1,...data.map(d=>d.summary.total));
+      const slot=(W-pad*2)/n, bw=Math.min(28, slot-8);
+      const body=data.map((d,i)=>{
+        const x=pad+i*slot+(slot-bw)/2; const b=dayBuckets(d.summary); let y=H-pad;
+        const segs=BUCKETS.map(bk=>{const v=b[bk.k]; if(!v) return ""; const h=(v/max)*(H-pad*2); y-=h; return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${bk.color}" rx="1"/>`;}).join("");
+        const top=d.summary.total?`<text x="${(x+bw/2).toFixed(1)}" y="${(y-5).toFixed(1)}" text-anchor="middle" style="fill:#57534A;font-weight:600">${d.summary.total}</text>`:"";
+        const lab=`<text x="${(x+bw/2).toFixed(1)}" y="${H-pad+14}" text-anchor="middle">${d.date.slice(5)}</text>`;
+        return segs+top+lab;
+      }).join("");
+      return `<div class="chart"><svg viewBox="0 0 ${W} ${H+4}">${body}</svg></div>`;
+    }
+    function lineChartSVG(days){
+      const data=days.slice().reverse().filter(d=>d.summary.successRate!=null);
+      if(data.length<2) return `<p class="psub">Not enough finished days yet to chart a trend.</p>`;
+      const W=Math.max(data.length*46,320), H=180, pad=28;
+      const X=i=>pad+i*((W-pad*2)/(data.length-1)), Y=v=>pad+(1-v/100)*(H-pad*2);
+      const grid=[0,50,100].map(v=>`<line x1="${pad}" y1="${Y(v).toFixed(1)}" x2="${W-pad}" y2="${Y(v).toFixed(1)}" stroke="#E9E3D5"/><text x="2" y="${(Y(v)+3).toFixed(1)}">${v}</text>`).join("");
+      const path=data.map((d,i)=>`${i?"L":"M"}${X(i).toFixed(1)} ${Y(d.summary.successRate).toFixed(1)}`).join(" ");
+      const dots=data.map((d,i)=>`<circle cx="${X(i).toFixed(1)}" cy="${Y(d.summary.successRate).toFixed(1)}" r="3.2" fill="#FF5E00"/><text x="${X(i).toFixed(1)}" y="${(Y(d.summary.successRate)-9).toFixed(1)}" text-anchor="middle" style="fill:#57534A;font-weight:600">${d.summary.successRate}</text><text x="${X(i).toFixed(1)}" y="${H-7}" text-anchor="middle">${d.date.slice(5)}</text>`).join("");
+      return `<div class="chart"><svg viewBox="0 0 ${W} ${H}">${grid}<path d="${path}" fill="none" stroke="#FF5E00" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>${dots}</svg></div>`;
+    }
+    function outcomeMix(tot){
+      const total=Math.max(1,tot.total);
+      return BUCKETS.map(bk=>{const v=tot[bk.k]||0,p=Math.round(100*v/total); return `<div class="obar"><div class="ol">${bk.label}</div><div class="ot"><div class="of" style="width:${p}%;background:${bk.color}"></div></div><div class="ov">${v} · ${p}%</div></div>`;}).join("");
+    }
+    function renderAnalytics(days){
+      $("an-count").textContent = days.length?`last ${days.length} day${days.length>1?"s":""}`:"";
+      if(!days.length){ $("analytics").innerHTML=`<div class="empty">No data yet.</div>`; return; }
+      const tot={completed:0,no_show:0,failed:0,silent:0,other:0,total:0}; let durs=[],exch=[];
+      for(const day of days){ const b=dayBuckets(day.summary); for(const k of Object.keys(b)) tot[k]+=b[k]; tot.total+=day.summary.total;
+        for(const c of (day.calls||[])) if(c.v==="success"||c.v==="partial"){ if(c.d) durs.push(c.d); if(c.m!=null) exch.push(c.m); } }
+      const succ=(tot.completed+tot.failed)?Math.round(100*tot.completed/(tot.completed+tot.failed)):null;
+      const nsp=tot.total?Math.round(100*tot.no_show/tot.total):0, fp=tot.total?Math.round(100*tot.failed/tot.total):0;
+      const avgDay=Math.round(tot.total/days.length);
+      const avgLen=durs.length?Math.round(durs.reduce((a,b)=>a+b,0)/durs.length/6)/10:null;   // minutes (1dp)
+      const avgEx=exch.length?Math.round(exch.reduce((a,b)=>a+b,0)/exch.length):null;
+      const busiest=days.slice().sort((a,b)=>b.summary.total-a.summary.total)[0];
+      const legend=`<div class="legend">${BUCKETS.map(bk=>`<span><i style="background:${bk.color}"></i>${bk.label}</span>`).join("")}</div>`;
+      $("analytics").innerHTML=`
+        <div class="kpis">
+          <div class="kpi"><div class="k-label">Interviews</div><div class="k-num">${tot.total}</div><div class="k-sub">over ${days.length} day${days.length>1?"s":""}</div></div>
+          <div class="kpi"><div class="k-label">Success rate</div><div class="k-num">${succ==null?"—":succ+"%"}</div><div class="k-sub">${tot.completed} completed of finished</div></div>
+          <div class="kpi"><div class="k-label">No-show rate</div><div class="k-num" style="color:#8F7400">${nsp}%</div><div class="k-sub">${tot.no_show} of ${tot.total} calls</div></div>
+          <div class="kpi"><div class="k-label">Agent-failure rate</div><div class="k-num" style="color:${fp>5?'var(--bad)':'inherit'}">${fp}%</div><div class="k-sub">${tot.failed} audio/error</div></div>
+          <div class="kpi"><div class="k-label">Avg per day</div><div class="k-num">${avgDay}</div><div class="k-sub">interviews</div></div>
+        </div>
+        <div class="panel-grid">
+          <div class="panel"><h4>Interviews per day</h4><p class="psub">Volume and outcome mix.</p>${barChartSVG(days)}${legend}</div>
+          <div class="panel"><h4>Success-rate trend</h4><p class="psub">Completed ÷ finished interviews, by day.</p>${lineChartSVG(days)}</div>
+        </div>
+        <div class="panel"><h4>Outcome breakdown</h4><p class="psub">All ${tot.total} interviews in the window.</p>${outcomeMix(tot)}</div>
+        <div class="panel-grid">
+          <div class="panel"><h4>Engagement</h4><p class="psub">Completed interviews only.</p>
+            <div class="obar"><div class="ol">Avg length</div><div class="ov" style="width:auto;font-size:17px">${avgLen==null?"—":avgLen+" min"}</div></div>
+            <div class="obar"><div class="ol">Avg exchanges</div><div class="ov" style="width:auto;font-size:17px">${avgEx==null?"—":avgEx}</div></div>
+          </div>
+          <div class="panel"><h4>Busiest day</h4><p class="psub">Most interviews in the window.</p>
+            <div class="k-num" style="font-size:23px">${busiest?fmtDay(busiest.date):"—"}</div>
+            <div class="k-sub" style="margin-top:6px">${busiest?`${busiest.summary.total} interviews · ${busiest.summary.successRate??"—"}% success`:""}</div>
+          </div>
+        </div>`;
     }
 
     // Optimistic write: update locally + re-render instantly, then persist. Roll back on failure.
