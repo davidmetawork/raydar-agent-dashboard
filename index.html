@@ -145,6 +145,9 @@
     .stat.rate { display:flex; align-items:center; gap:18px; }
     .ring { --p:0; width:64px; height:64px; flex:0 0 auto; }
     .stat .hint { font-size:12.5px; color:var(--ink-3); margin-top:8px; }
+    .stat.clickable { cursor:pointer; transition:transform .08s ease, box-shadow .15s ease, border-color .15s ease; }
+    .stat.clickable:hover { transform:translateY(-2px); border-color:var(--blush); box-shadow:0 2px 4px rgba(20,16,8,.05), 0 14px 30px -14px rgba(20,16,8,.18); }
+    .stat.clickable:hover .hint { color:var(--orange); }
 
     /* sections */
     section { margin-bottom:34px; }
@@ -259,7 +262,7 @@
       in_progress:  { cls:"live",  label:"Happening now" },
       pending:      { cls:"warn",  label:"Processing…" },
       silent_fail:  { cls:"warn",  label:"Unconfirmed" },           // couldn't reach the recorder
-      joined_silent:{ cls:"warn",  label:"Joined, silent", review:true },
+      joined_silent:{ cls:"bad",   label:"Error", review:true },
       audio_fail:   { cls:"bad",   label:"Audio failed", review:true },
       error:        { cls:"bad",   label:"Error", review:true },
       no_show:      { cls:"yellow", label:"No-show" },
@@ -327,10 +330,9 @@
     function render(d){
       firstPaint=true;
       const t=d.tally||{}, calls=d.calls||[], up=d.upcoming||[];
-      const failures    = (t.audio_fail||0)+(t.error||0);  // confirmed agent failures — red
-      const review      = (t.joined_silent||0);            // candidate joined but stayed silent
+      const failures    = (t.audio_fail||0)+(t.error||0)+(t.joined_silent||0);  // agent failures incl. joined-silent ("Error") — red
       const unconfirmed = (t.silent_fail||0);              // recorder unreachable — auto-rechecks
-      const glance      = review + unconfirmed;            // softer "worth a look" bucket
+      const glance      = unconfirmed;                     // softer "worth a look" bucket
       const completed = (t.success||0)+(t.partial||0);
       const total = calls.length;
 
@@ -341,7 +343,7 @@
         <div class="stat"><div class="label">Interviews today</div><div class="num">${total}</div><div class="hint">in the last 18 hours</div></div>
         <div class="stat"><div class="label">Completed</div><div class="num">${completed}</div><div class="hint">${t.no_show||0} no-show${(t.no_show||0)===1?"":"s"} · ${t.in_progress||0} live</div></div>
         <div class="stat rate"><svg class="ring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="none" stroke="#EFEADE" stroke-width="7"/><circle cx="32" cy="32" r="28" fill="none" stroke="var(--orange)" stroke-width="7" stroke-linecap="round" stroke-dasharray="${ringDash} 176" transform="rotate(-90 32 32)"/></svg><div><div class="label">Success rate</div><div class="num">${rate==null?"—":rate+"<small>%</small>"}</div><div class="hint">completed, of finished interviews</div></div></div>
-        <div class="stat"><div class="label">Need review</div><div class="num" style="color:${failures?"var(--bad)":"inherit"}">${failures}</div><div class="hint">${glance?`+ ${glance} to glance at`:"flagged audio/error issues"}</div></div>`;
+        <div class="stat clickable" onclick="showView('followups')" title="Open Follow-ups"><div class="label">Need review</div><div class="num" style="color:${failures?"var(--bad)":"inherit"}">${failures}</div><div class="hint">${glance?`+ ${glance} to glance at`:"flagged audio/error issues"} →</div></div>`;
 
       // upcoming
       $("up-count").textContent = up.length ? `${up.length} scheduled` : "";
@@ -446,14 +448,12 @@
       {k:"completed", label:"Completed",     color:"#119865"},
       {k:"no_show",   label:"No-show",       color:"#E6B400"},
       {k:"failed",    label:"Agent failed",  color:"#E5484D"},
-      {k:"silent",    label:"Joined silent", color:"#C7791A"},
       {k:"other",     label:"Other",         color:"#BCB4A4"},
     ];
     const dayBuckets = (s) => ({
       completed:(s.success||0)+(s.partial||0),
       no_show:s.no_show||0,
-      failed:(s.audio_fail||0)+(s.error||0),
-      silent:s.joined_silent||0,
+      failed:(s.audio_fail||0)+(s.error||0)+(s.joined_silent||0),
       other:(s.silent_fail||0)+(s.in_progress||0)+(s.pending||0),
     });
     const fmtClock = (iso) => iso ? new Date(iso).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}) : "";
@@ -558,7 +558,7 @@
     function renderAnalytics(days){
       $("an-count").textContent = days.length?`last ${days.length} day${days.length>1?"s":""}`:"";
       if(!days.length){ $("analytics").innerHTML=`<div class="empty">No data yet.</div>`; return; }
-      const tot={completed:0,no_show:0,failed:0,silent:0,other:0,total:0}; let durs=[],exch=[];
+      const tot={completed:0,no_show:0,failed:0,other:0,total:0}; let durs=[],exch=[];
       for(const day of days){ const b=dayBuckets(day.summary); for(const k of Object.keys(b)) tot[k]+=b[k]; tot.total+=day.summary.total;
         for(const c of (day.calls||[])) if(c.v==="success"||c.v==="partial"){ if(c.d) durs.push(c.d); if(c.m!=null) exch.push(c.m); } }
       const succ=(tot.completed+tot.failed)?Math.round(100*tot.completed/(tot.completed+tot.failed)):null;
