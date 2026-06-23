@@ -19,6 +19,7 @@
       --live:#7F72FF; --live-bg:#ECEAFE;
       --muted:#8C877B; --muted-bg:#EFEADE;
       --yellow:#8F7400; --yellow-bg:#FAF1BE;
+      --blue:#2563C9; --blue-bg:#E7EEFB;
       --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
     }
     * { box-sizing:border-box; }
@@ -52,6 +53,24 @@
       font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; letter-spacing:-.01em; transition:transform .08s ease, background .15s ease; }
     .resched:hover { background:var(--orange); transform:translateY(-1px); }
     .resched .x { font-size:10px; opacity:.85; }
+    /* blue status pill — "Rescheduling requested" */
+    .pill.blue { background:var(--blue-bg); color:var(--blue); } .pill.blue .d{background:var(--blue);}
+    /* view tabs (Overview ⇄ Follow-ups) */
+    .tabs { display:flex; align-items:center; margin-bottom:24px; border-bottom:1px solid var(--line); }
+    .tab { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:14.5px; font-weight:600; color:var(--ink-3);
+      padding:9px 2px; margin-right:26px; border-bottom:2px solid transparent; margin-bottom:-1px; display:inline-flex; align-items:center; gap:8px; transition:color .12s ease; }
+    .tab:hover { color:var(--ink-2); }
+    .tab.active { color:var(--ink); border-bottom-color:var(--orange); }
+    .tab .badge { display:inline-flex; align-items:center; justify-content:center; min-width:19px; height:19px; padding:0 6px; border-radius:10px; background:var(--bad); color:#fff; font-size:11px; font-weight:700; }
+    /* follow-ups view */
+    .fu-intro { font-size:13.5px; color:var(--ink-2); margin:0 2px 16px; max-width:700px; }
+    .row.fu { grid-template-columns:1.3fr .95fr 1.15fr 374px; }
+    .row.fu .when { white-space:nowrap; }
+    .fu-actions { display:flex; align-items:center; justify-content:flex-end; gap:14px; flex-wrap:wrap; }
+    .chk { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-3); cursor:pointer; white-space:nowrap; user-select:none; }
+    .chk input { width:15px; height:15px; accent-color:var(--orange); cursor:pointer; margin:0; }
+    .chk.on { color:var(--ink); }
+    @media (max-width:760px){ .row.fu{grid-template-columns:1fr auto; row-gap:8px} .row.fu .when,.row.fu .what{grid-column:1/-1} .fu-actions{grid-column:1/-1; justify-content:flex-start} }
     /* candidate-name link → Paraform candidate search */
     .who a { color:inherit; text-decoration:none; border-bottom:1.5px solid transparent; transition:border-color .12s ease; }
     .who a:hover { border-bottom-color:var(--orange); }
@@ -122,22 +141,37 @@
       </div>
     </div>
 
-    <div class="health ok" id="health">
-      <div class="icon" id="health-icon"></div>
-      <div><h2 id="health-title">Checking system…</h2><p id="health-sub">Loading the latest interview activity.</p></div>
+    <div class="tabs">
+      <button class="tab active" id="tab-overview" onclick="showView('overview')">Overview</button>
+      <button class="tab" id="tab-followups" onclick="showView('followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></button>
     </div>
 
-    <div class="stats" id="stats"></div>
+    <div id="view-overview">
+      <div class="health ok" id="health">
+        <div class="icon" id="health-icon"></div>
+        <div><h2 id="health-title">Checking system…</h2><p id="health-sub">Loading the latest interview activity.</p></div>
+      </div>
 
-    <section>
-      <div class="sec-head"><h3>Recent &amp; live interviews</h3><span class="count" id="rec-count"></span></div>
-      <div class="list" id="recent"></div>
-    </section>
+      <div class="stats" id="stats"></div>
 
-    <section>
-      <div class="sec-head"><h3>Upcoming interviews</h3><span class="count" id="up-count"></span></div>
-      <div class="list" id="upcoming"></div>
-    </section>
+      <section>
+        <div class="sec-head"><h3>Recent &amp; live interviews</h3><span class="count" id="rec-count"></span></div>
+        <div class="list" id="recent"></div>
+      </section>
+
+      <section>
+        <div class="sec-head"><h3>Upcoming interviews</h3><span class="count" id="up-count"></span></div>
+        <div class="list" id="upcoming"></div>
+      </section>
+    </div>
+
+    <div id="view-followups" hidden>
+      <section>
+        <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
+        <p class="fu-intro">No-shows and failed interviews that need a human. Open the candidate in Paraform to add them to your sequence, then check off each step — the Overview updates to match.</p>
+        <div class="list" id="followups"></div>
+      </section>
+    </div>
 
     <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
   </div>
@@ -170,6 +204,17 @@
       no_show:      { cls:"yellow", label:"No-show" },
     };
     const verdictView = (v) => VERDICT[v] || { cls:"muted", label:cap(v||"—") };
+
+    // ---- follow-up action state (no-shows + failures the team actions) ----
+    const ACTIONABLE = new Set(["no_show","audio_fail","error","joined_silent"]);
+    let actionsMap = {};   // { callId: { status, by, at } } — from /api/actions
+    // A row's pill reflects the action status once set, else the raw verdict.
+    function displayStatus(verdict, action){
+      const st = action && action.status;
+      if (st === "rescheduled")   return { cls:"good", label:"Rescheduled" };
+      if (st === "sequence_sent") return { cls:"blue", label:"Rescheduling requested" };
+      return verdictView(verdict);
+    }
     const whatHappened = (r) => {
       switch (r.verdict) {
         case "success": return `Full interview — ${r.msgs} exchanges, recorded by Parascribe`;
@@ -269,19 +314,80 @@
       // recent
       $("rec-count").textContent = total ? `${total} today` : "";
       $("recent").innerHTML = total ? calls.map(c=>{
-        const v=verdictView(c.verdict);
+        const act = actionsMap[c.id];
+        const ds = displayStatus(c.verdict, act);
+        const showReview = verdictView(c.verdict).review && !act;   // drop REVIEW once actioned
         return `<div class="row">
-          <div class="who">${nameLink(c.candidate)}${v.review?'<span class="review">REVIEW</span>':""}</div>
+          <div class="who">${nameLink(c.candidate)}${showReview?'<span class="review">REVIEW</span>':""}</div>
           <div class="when">${fmtTime(c.startedAt)}</div>
           <div class="what">${esc(whatHappened(c))}</div>
-          <div class="actions">
-            <span class="pill ${v.cls}"><span class="d"></span>${esc(v.label)}</span>
-            ${c.verdict==="no_show" ? `<a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform — reschedule / add to sequence">Reschedule <span class="x">↗</span></a>` : ""}
-          </div>
+          <div><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span></div>
         </div>`;
       }).join("") : `<div class="empty">No interviews yet today.</div>`;
 
+      renderFollowups(d);   // keep the Follow-ups view in sync with every refresh
       $("foot").textContent = `Last updated ${new Date(d.generatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})} · updates automatically every 30 seconds`;
+    }
+
+    // ---- Follow-ups view: actionable rows with Reschedule + status checkboxes ----
+    function shortWhat(verdict){
+      switch(verdict){
+        case "no_show": return "Never joined the Meet";
+        case "audio_fail": return "Joined & spoke, but the agent didn't hear them (audio bridge failed)";
+        case "error": return "The call errored out";
+        case "joined_silent": return "Joined but no speech detected";
+        default: return "";
+      }
+    }
+    function renderFollowups(d){
+      const calls = (d.calls||[]).filter(c=>ACTIONABLE.has(c.verdict));
+      const open = calls.filter(c=>(actionsMap[c.id]||{}).status!=="rescheduled").length;
+      $("fu-count").textContent = calls.length ? (open?`${open} still to action · ${calls.length} total`:`all ${calls.length} handled`) : "";
+      const badge=$("fu-badge");
+      badge.textContent = open||""; badge.style.display = open?"inline-flex":"none";
+      $("followups").innerHTML = calls.length ? calls.map(c=>{
+        const act = actionsMap[c.id], st = (act||{}).status;
+        const ds = displayStatus(c.verdict, act);
+        const seqOn = st==="sequence_sent"||st==="rescheduled";
+        const reschedOn = st==="rescheduled";
+        return `<div class="row fu">
+          <div class="who">${nameLink(c.candidate)}</div>
+          <div class="when">${fmtTime(c.startedAt)}</div>
+          <div class="what"><span class="pill ${ds.cls}" style="margin-right:9px"><span class="d"></span>${esc(ds.label)}</span>${esc(shortWhat(c.verdict))}</div>
+          <div class="fu-actions">
+            <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform">Paraform <span class="x">↗</span></a>
+            <label class="chk ${seqOn?'on':''}"><input type="checkbox" ${seqOn?'checked':''} onchange="setAction('${c.id}', this.checked?'sequence_sent':'none')">Sequence sent</label>
+            <label class="chk ${reschedOn?'on':''}"><input type="checkbox" ${reschedOn?'checked':''} onchange="setAction('${c.id}', this.checked?'rescheduled':'sequence_sent')">Rescheduled</label>
+          </div>
+        </div>`;
+      }).join("") : `<div class="empty">No no-shows or failed interviews to follow up on. 🎉</div>`;
+    }
+
+    function showView(name){
+      document.getElementById("view-overview").hidden = name!=="overview";
+      document.getElementById("view-followups").hidden = name!=="followups";
+      $("tab-overview").classList.toggle("active", name==="overview");
+      $("tab-followups").classList.toggle("active", name==="followups");
+    }
+
+    // Optimistic write: update locally + re-render instantly, then persist. Roll back on failure.
+    async function setAction(callId, status){
+      const prev = actionsMap[callId] ? {...actionsMap[callId]} : null;
+      if (status==="none") delete actionsMap[callId];
+      else actionsMap[callId] = { status, by:"dashboard", at:new Date().toISOString() };
+      if (lastData) render(lastData);
+      try {
+        const r = await fetch(API_BASE + "/api/action", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ callId, status }),
+        });
+        const j = await r.json().catch(()=>({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP "+r.status));
+      } catch(e){
+        if (prev) actionsMap[callId]=prev; else delete actionsMap[callId];   // roll back
+        if (lastData) render(lastData);
+        alert("Couldn't save that change — please try again.");
+      }
     }
 
     // Absolute base so the dashboard works under ANY host — served direct or via
@@ -290,9 +396,13 @@
     const API_BASE = "https://webview-lazy-prompt.vercel.app";
     async function load(){
       try {
-        const r = await fetch(API_BASE + "/api/status");
-        if(!r.ok) throw new Error("HTTP "+r.status);
-        const d = await r.json();
+        const [sR, aR] = await Promise.allSettled([
+          fetch(API_BASE + "/api/status").then(r=> r.ok ? r.json() : Promise.reject(new Error("HTTP "+r.status))),
+          fetch(API_BASE + "/api/actions").then(r=>r.json()).catch(()=>null),   // best-effort
+        ]);
+        if (aR.status==="fulfilled" && aR.value && aR.value.ok) actionsMap = aR.value.actions || {};
+        if (sR.status!=="fulfilled") throw (sR.reason || new Error("status fetch failed"));
+        const d = sR.value;
         if(!d.ok) throw new Error(d.error||"degraded");
         lastData=d; render(d); setConn(true);
       } catch(e){
