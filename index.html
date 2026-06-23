@@ -36,9 +36,20 @@
     .brand img { height:30px; width:auto; display:block; }
     .brand .divider { width:1px; height:24px; background:var(--line); }
     .brand .sub { font-size:15px; color:var(--ink-2); font-weight:500; letter-spacing:-.01em; }
+    .topright { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
     .refresh { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-3); }
     .refresh .dot { width:7px; height:7px; border-radius:50%; background:var(--good); box-shadow:0 0 0 3px var(--good-bg); }
     .refresh .dot.stale { background:var(--warn); box-shadow:0 0 0 3px var(--warn-bg); }
+    /* Paraform quick-link */
+    .pf-btn { display:inline-flex; align-items:center; gap:7px; padding:9px 16px; border-radius:11px; background:var(--ink); color:var(--cream);
+      font-size:13.5px; font-weight:600; text-decoration:none; letter-spacing:-.01em; transition:transform .08s ease, background .15s ease; }
+    .pf-btn:hover { background:#000; transform:translateY(-1px); }
+    .pf-btn .ext { opacity:.75; font-size:12px; }
+    /* candidate-name link → Paraform candidate search */
+    .who a { color:inherit; text-decoration:none; border-bottom:1.5px solid transparent; transition:border-color .12s ease; }
+    .who a:hover { border-bottom-color:var(--orange); }
+    .who a .ext { font-size:11px; color:var(--ink-3); margin-left:4px; opacity:0; transition:opacity .12s ease; }
+    .who a:hover .ext { opacity:1; }
 
     /* health banner */
     .health { display:flex; align-items:center; gap:16px; padding:20px 24px; border-radius:18px; margin-bottom:22px; border:1px solid; }
@@ -96,7 +107,10 @@
         <div class="divider"></div>
         <div class="sub">Agent Dashboard</div>
       </div>
-      <div class="refresh"><span class="dot" id="rdot"></span><span id="rtxt">live · updates every 30s</span></div>
+      <div class="topright">
+        <a class="pf-btn" href="https://www.paraform.com/calls" target="_blank" rel="noopener noreferrer">Open Paraform Calls <span class="ext">↗</span></a>
+        <div class="refresh"><span class="dot" id="rdot"></span><span id="rtxt">live · updates every 30s</span></div>
+      </div>
     </div>
 
     <div class="health ok" id="health">
@@ -107,13 +121,13 @@
     <div class="stats" id="stats"></div>
 
     <section>
-      <div class="sec-head"><h3>Upcoming &amp; live interviews</h3><span class="count" id="up-count"></span></div>
-      <div class="list" id="upcoming"></div>
+      <div class="sec-head"><h3>Recent &amp; live interviews</h3><span class="count" id="rec-count"></span></div>
+      <div class="list" id="recent"></div>
     </section>
 
     <section>
-      <div class="sec-head"><h3>Recent interviews</h3><span class="count" id="rec-count"></span></div>
-      <div class="list" id="recent"></div>
+      <div class="sec-head"><h3>Upcoming interviews</h3><span class="count" id="up-count"></span></div>
+      <div class="list" id="upcoming"></div>
     </section>
 
     <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
@@ -123,6 +137,16 @@
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s ?? "").replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
     const cap = (s) => s ? s.charAt(0).toUpperCase()+s.slice(1) : s;
+
+    // Candidate name → clickable link to the Paraform candidate search (name prefilled).
+    // (The pipeline only carries first names, so the search is by first name.)
+    const paraformQ = (name) => `https://www.paraform.com/candidates?sort=added_at%3Adesc&q=${encodeURIComponent(String(name).trim()).replace(/%20/g,"+")}`;
+    const nameLink = (name) => {
+      const n = String(name ?? "").trim();
+      if (!n || n === "?" || n.toLowerCase() === "unknown")
+        return `<a href="https://www.paraform.com/candidates?sort=added_at%3Adesc" target="_blank" rel="noopener noreferrer" title="Open Paraform candidates">${esc(n || "Unknown")}<span class="ext">↗</span></a>`;
+      return `<a href="${paraformQ(n)}" target="_blank" rel="noopener noreferrer" title="Find ${esc(n)} on Paraform">${esc(n)}<span class="ext">↗</span></a>`;
+    };
 
     // ---- plain-language mapping (no jargon for non-technical teammates) ----
     const VERDICT = {
@@ -219,7 +243,7 @@
       $("upcoming").innerHTML = up.length ? up.map(u=>{
         const live = (u.status||"").startsWith("in_call");
         return `<div class="row">
-          <div class="who">${esc(u.candidate)}</div>
+          <div class="who">${nameLink(u.candidate)}</div>
           <div class="when">${fmtTime(u.join_at)}</div>
           <div class="what">Google Meet · bot ${esc(u.meeting||"")}</div>
           <div><span class="pill ${live?"live":"muted"}"><span class="d"></span>${esc(UPCOMING[u.status]||"Scheduled")}</span></div>
@@ -231,7 +255,7 @@
       $("recent").innerHTML = total ? calls.map(c=>{
         const v=verdictView(c.verdict);
         return `<div class="row">
-          <div class="who">${esc(c.candidate)}${v.review?'<span class="review">REVIEW</span>':""}</div>
+          <div class="who">${nameLink(c.candidate)}${v.review?'<span class="review">REVIEW</span>':""}</div>
           <div class="when">${fmtTime(c.startedAt)}</div>
           <div class="what">${esc(whatHappened(c))}</div>
           <div><span class="pill ${v.cls}"><span class="d"></span>${esc(v.label)}</span></div>
