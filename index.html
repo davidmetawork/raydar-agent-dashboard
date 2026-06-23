@@ -150,14 +150,15 @@
 
     // ---- plain-language mapping (no jargon for non-technical teammates) ----
     const VERDICT = {
-      success:    { cls:"good",  label:"Completed" },
-      partial:    { cls:"good",  label:"Completed" },
-      in_progress:{ cls:"live",  label:"Happening now" },
-      pending:    { cls:"warn",  label:"Processing…" },
-      silent_fail:{ cls:"warn",  label:"No audio" },
-      audio_fail: { cls:"bad",   label:"Audio issue", review:true },
-      error:      { cls:"bad",   label:"Error", review:true },
-      no_show:    { cls:"muted", label:"No-show" },
+      success:      { cls:"good",  label:"Completed" },
+      partial:      { cls:"good",  label:"Completed" },
+      in_progress:  { cls:"live",  label:"Happening now" },
+      pending:      { cls:"warn",  label:"Processing…" },
+      silent_fail:  { cls:"warn",  label:"Unconfirmed" },           // couldn't reach the recorder
+      joined_silent:{ cls:"warn",  label:"Joined, silent", review:true },
+      audio_fail:   { cls:"bad",   label:"Audio failed", review:true },
+      error:        { cls:"bad",   label:"Error", review:true },
+      no_show:      { cls:"muted", label:"No-show" },
     };
     const verdictView = (v) => VERDICT[v] || { cls:"muted", label:cap(v||"—") };
     const whatHappened = (r) => {
@@ -165,11 +166,12 @@
         case "success": return `Full interview — ${r.msgs} exchanges, recorded by Parascribe`;
         case "partial": return `Interview — ${r.msgs} exchange${r.msgs===1?"":"s"} before the call ended`;
         case "in_progress": return "Interview in progress right now";
-        case "pending": return "Finishing up — transcript processing";
-        case "silent_fail": return "Call connected but no speech came through — a quick test, a no-show, or a mic issue";
-        case "audio_fail": return `Candidate spoke but the agent didn't hear them — needs a manual follow-up`;
+        case "pending": return "Finishing up — confirming attendance with the recorder";
+        case "silent_fail": return "Couldn't confirm with the recorder yet (it was unreachable) — re-checks automatically";
+        case "joined_silent": return "Candidate joined but no speech was detected — mic off, or they left after hearing silence";
+        case "audio_fail": return `Candidate joined and spoke${r.humanSpeakSecs?` (${Math.round(r.humanSpeakSecs)}s)`:""} but the agent didn't hear them — audio bridge failed, needs follow-up`;
         case "error": return `The call errored out — worth a manual follow-up`;
-        case "no_show": return "Candidate didn't join or didn't speak";
+        case "no_show": return "Candidate never joined the Meet — confirmed by the recorder's participant log";
         default: return r.detail || "";
       }
     };
@@ -210,22 +212,27 @@
     function render(d){
       firstPaint=true;
       const t=d.tally||{}, calls=d.calls||[], up=d.upcoming||[];
-      const needReview = (t.audio_fail||0)+(t.error||0);   // high-confidence agent failures
-      const noAudio = (t.silent_fail||0);                  // ambiguous: test, no-show, or mic issue
+      const failures    = (t.audio_fail||0)+(t.error||0);  // confirmed agent failures — red
+      const review      = (t.joined_silent||0);            // candidate joined but stayed silent
+      const unconfirmed = (t.silent_fail||0);              // recorder unreachable — auto-rechecks
+      const glance      = review + unconfirmed;            // softer "worth a look" bucket
       const completed = (t.success||0)+(t.partial||0);
       const total = calls.length;
 
-      // health banner — red only for confirmed failures; no-audio gets a calm note
+      // health banner — red ONLY for confirmed failures; softer cases get a calm note
       const h=$("health");
-      if(needReview>0){
+      const glanceNote = glance
+        ? `${glance} to glance at (${[review?`${review} joined-silent`:null, unconfirmed?`${unconfirmed} unconfirmed`:null].filter(Boolean).join(", ")}). `
+        : "";
+      if(failures>0){
         h.className="health attention"; $("health-icon").innerHTML=ICON_ALERT;
-        $("health-title").textContent = `${needReview} interview${needReview>1?"s":""} need${needReview>1?"":"s"} a manual follow-up`;
-        $("health-sub").textContent = (noAudio? `${noAudio} more had no audio (test, no-show, or mic). ` : "") + "Flagged below — everything else is running normally.";
+        $("health-title").textContent = `${failures} interview${failures>1?"s":""} need${failures>1?"":"s"} a manual follow-up`;
+        $("health-sub").textContent = glanceNote + "Flagged below — everything else is running normally.";
       } else {
         h.className="health ok"; $("health-icon").innerHTML=ICON_OK;
         $("health-title").textContent = "All systems healthy";
-        $("health-sub").textContent = noAudio
-          ? `No failures need attention. ${noAudio} call${noAudio===1?"":"s"} received no audio — worth a glance below.`
+        $("health-sub").textContent = glance
+          ? `No confirmed failures. ${glanceNote}See below.`
           : "Bots are joining, interviews are recording, and no failures need attention.";
       }
 
@@ -236,7 +243,7 @@
         <div class="stat"><div class="label">Interviews today</div><div class="num">${total}</div><div class="hint">in the last 18 hours</div></div>
         <div class="stat"><div class="label">Completed</div><div class="num">${completed}</div><div class="hint">${t.no_show||0} no-show${(t.no_show||0)===1?"":"s"} · ${t.in_progress||0} live</div></div>
         <div class="stat rate"><svg class="ring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="none" stroke="#EFEADE" stroke-width="7"/><circle cx="32" cy="32" r="28" fill="none" stroke="var(--orange)" stroke-width="7" stroke-linecap="round" stroke-dasharray="${ringDash} 176" transform="rotate(-90 32 32)"/></svg><div><div class="label">Success rate</div><div class="num">${rate==null?"—":rate+"<small>%</small>"}</div><div class="hint">completed, of finished interviews</div></div></div>
-        <div class="stat"><div class="label">Need review</div><div class="num" style="color:${needReview?"var(--bad)":"inherit"}">${needReview}</div><div class="hint">${noAudio?`+ ${noAudio} no-audio call${noAudio===1?"":"s"}`:"flagged audio/error issues"}</div></div>`;
+        <div class="stat"><div class="label">Need review</div><div class="num" style="color:${failures?"var(--bad)":"inherit"}">${failures}</div><div class="hint">${glance?`+ ${glance} to glance at`:"flagged audio/error issues"}</div></div>`;
 
       // upcoming
       $("up-count").textContent = up.length ? `${up.length} scheduled` : "";
