@@ -46,6 +46,12 @@
       font-size:13.5px; font-weight:600; text-decoration:none; letter-spacing:-.01em; transition:transform .08s ease, background .15s ease; }
     .pf-btn:hover { background:#000; transform:translateY(-1px); }
     .pf-btn .ext { opacity:.75; font-size:12px; }
+    /* per-row actions (Reschedule button on No-show rows) */
+    .actions { display:flex; align-items:center; justify-content:flex-end; gap:10px; }
+    .resched { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:9px; background:var(--ink); color:var(--cream);
+      font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; letter-spacing:-.01em; transition:transform .08s ease, background .15s ease; }
+    .resched:hover { background:var(--orange); transform:translateY(-1px); }
+    .resched .x { font-size:10px; opacity:.85; }
     /* candidate-name link → Paraform candidate search */
     .who a { color:inherit; text-decoration:none; border-bottom:1.5px solid transparent; transition:border-color .12s ease; }
     .who a:hover { border-bottom-color:var(--orange); }
@@ -267,7 +273,10 @@
           <div class="who">${nameLink(c.candidate)}${v.review?'<span class="review">REVIEW</span>':""}</div>
           <div class="when">${fmtTime(c.startedAt)}</div>
           <div class="what">${esc(whatHappened(c))}</div>
-          <div><span class="pill ${v.cls}"><span class="d"></span>${esc(v.label)}</span></div>
+          <div class="actions">
+            <span class="pill ${v.cls}"><span class="d"></span>${esc(v.label)}</span>
+            ${c.verdict==="no_show" ? `<a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform — reschedule / add to sequence">Reschedule <span class="x">↗</span></a>` : ""}
+          </div>
         </div>`;
       }).join("") : `<div class="empty">No interviews yet today.</div>`;
 
