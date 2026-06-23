@@ -85,8 +85,9 @@
     .sec-head .count { font-size:13px; color:var(--ink-3); }
 
     .list { background:var(--card); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); overflow:hidden; }
-    .row { display:grid; grid-template-columns:1.4fr 1fr 1.6fr auto; gap:16px; align-items:center; padding:15px 22px; border-top:1px solid var(--line-2); }
+    .row { display:grid; grid-template-columns:1.4fr 1fr 1.6fr 248px; gap:16px; align-items:center; padding:15px 22px; border-top:1px solid var(--line-2); }
     .row:first-child { border-top:none; }
+    .row > div:last-child { display:flex; align-items:center; justify-content:flex-end; gap:10px; } /* status/action column, fixed-width so rows never reflow */
     .row .who { font-weight:600; font-size:15px; letter-spacing:-.01em; }
     .row .when { font-size:13.5px; color:var(--ink-2); }
     .row .what { font-size:13.5px; color:var(--ink-2); }
