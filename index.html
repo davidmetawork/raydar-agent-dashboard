@@ -35,7 +35,8 @@
     /* top bar */
     .top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:26px; flex-wrap:wrap; }
     .brand { display:flex; align-items:center; gap:14px; }
-    .brand img { height:30px; width:auto; display:block; }
+    .brand .logo { display:inline-flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:11px; background:var(--ink); flex:none; }
+    .brand .logo img { height:26px; width:auto; display:block; }
     .brand .divider { width:1px; height:24px; background:var(--line); }
     .brand .sub { font-size:15px; color:var(--ink-2); font-weight:500; letter-spacing:-.01em; }
     .topright { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
@@ -184,7 +185,7 @@
   <div class="wrap">
     <div class="top">
       <div class="brand">
-        <img src="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" alt="Raydar" />
+        <span class="logo"><img src="https://webview-lazy-prompt.vercel.app/assets/raydar-icon-white.png" alt="Raydar" /></span>
         <div class="divider"></div>
         <div class="sub">Agent Dashboard</div>
       </div>
