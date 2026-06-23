@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raydar · Agent Dashboard</title>
+  <link rel="icon" href="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --cream:#F6F3E9; --ink:#16140F; --ink-2:#57534A; --ink-3:#8C877B;
+      --orange:#FF5E00; --violet:#7F72FF; --blush:#E4D5D3;
+      --card:#FFFFFF; --line:#E9E3D5; --line-2:#F0EBDE;
+      --good:#119865; --good-bg:#E4F4EC;
+      --bad:#E5484D; --bad-bg:#FBE9E9;
+      --warn:#C7791A; --warn-bg:#FaEEDC;
+      --live:#7F72FF; --live-bg:#ECEAFE;
+      --muted:#8C877B; --muted-bg:#EFEADE;
+      --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+    }
+    * { box-sizing:border-box; }
+    html,body { margin:0; }
+    body {
+      background:var(--cream); color:var(--ink);
+      font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      -webkit-font-smoothing:antialiased; padding:28px clamp(16px,4vw,48px) 56px;
+    }
+    a { color:inherit; }
+    .wrap { max-width:1180px; margin:0 auto; }
+
+    /* top bar */
+    .top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:26px; flex-wrap:wrap; }
+    .brand { display:flex; align-items:center; gap:14px; }
+    .brand img { height:30px; width:auto; display:block; }
+    .brand .divider { width:1px; height:24px; background:var(--line); }
+    .brand .sub { font-size:15px; color:var(--ink-2); font-weight:500; letter-spacing:-.01em; }
+    .refresh { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-3); }
+    .refresh .dot { width:7px; height:7px; border-radius:50%; background:var(--good); box-shadow:0 0 0 3px var(--good-bg); }
+    .refresh .dot.stale { background:var(--warn); box-shadow:0 0 0 3px var(--warn-bg); }
+
+    /* health banner */
+    .health { display:flex; align-items:center; gap:16px; padding:20px 24px; border-radius:18px; margin-bottom:22px; border:1px solid; }
+    .health.ok { background:var(--good-bg); border-color:#CDEAD9; }
+    .health.attention { background:var(--bad-bg); border-color:#F4CFCF; }
+    .health .icon { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; flex:0 0 auto; }
+    .health.ok .icon { background:var(--good); } .health.attention .icon { background:var(--bad); }
+    .health .icon svg { width:22px; height:22px; }
+    .health h2 { font-family:Fraunces,serif; font-weight:500; font-size:22px; margin:0 0 2px; letter-spacing:-.01em; }
+    .health p { margin:0; font-size:14px; color:var(--ink-2); }
+
+    /* stat cards */
+    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin-bottom:30px; }
+    .stat { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:20px 22px; box-shadow:var(--shadow); }
+    .stat .label { font-size:12.5px; font-weight:600; color:var(--ink-3); text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px; }
+    .stat .num { font-family:Fraunces,serif; font-weight:500; font-size:42px; line-height:1; letter-spacing:-.02em; }
+    .stat .num small { font-size:20px; color:var(--ink-3); }
+    .stat.rate { display:flex; align-items:center; gap:18px; }
+    .ring { --p:0; width:64px; height:64px; flex:0 0 auto; }
+    .stat .hint { font-size:12.5px; color:var(--ink-3); margin-top:8px; }
+
+    /* sections */
+    section { margin-bottom:34px; }
+    .sec-head { display:flex; align-items:baseline; justify-content:space-between; margin:0 2px 14px; }
+    .sec-head h3 { font-family:Fraunces,serif; font-weight:500; font-size:20px; margin:0; letter-spacing:-.01em; }
+    .sec-head .count { font-size:13px; color:var(--ink-3); }
+
+    .list { background:var(--card); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); overflow:hidden; }
+    .row { display:grid; grid-template-columns:1.4fr 1fr 1.6fr auto; gap:16px; align-items:center; padding:15px 22px; border-top:1px solid var(--line-2); }
+    .row:first-child { border-top:none; }
+    .row .who { font-weight:600; font-size:15px; letter-spacing:-.01em; }
+    .row .when { font-size:13.5px; color:var(--ink-2); }
+    .row .what { font-size:13.5px; color:var(--ink-2); }
+    .pill { display:inline-flex; align-items:center; gap:7px; padding:5px 11px; border-radius:999px; font-size:12.5px; font-weight:600; white-space:nowrap; }
+    .pill .d { width:7px; height:7px; border-radius:50%; }
+    .pill.good { background:var(--good-bg); color:var(--good); } .pill.good .d{background:var(--good);}
+    .pill.bad { background:var(--bad-bg); color:var(--bad); } .pill.bad .d{background:var(--bad);}
+    .pill.warn { background:var(--warn-bg); color:var(--warn); } .pill.warn .d{background:var(--warn);}
+    .pill.live { background:var(--live-bg); color:var(--live); } .pill.live .d{background:var(--live);}
+    .pill.muted { background:var(--muted-bg); color:var(--muted); } .pill.muted .d{background:var(--muted);}
+    .review { font-size:11px; font-weight:700; color:var(--bad); background:var(--bad-bg); padding:3px 8px; border-radius:6px; margin-left:8px; }
+
+    .empty { padding:30px 22px; text-align:center; color:var(--ink-3); font-size:14px; }
+    .skeleton { background:linear-gradient(90deg,#efe9da 25%,#f6f1e4 50%,#efe9da 75%); background-size:200% 100%; animation:sh 1.3s infinite; border-radius:6px; }
+    @keyframes sh { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+    .foot { text-align:center; color:var(--ink-3); font-size:12.5px; margin-top:8px; }
+    @media (max-width:640px){ .row{grid-template-columns:1fr auto; row-gap:6px} .row .when,.row .what{grid-column:1/-1} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">
+        <img src="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" alt="Raydar" />
+        <div class="divider"></div>
+        <div class="sub">Agent Dashboard</div>
+      </div>
+      <div class="refresh"><span class="dot" id="rdot"></span><span id="rtxt">live · updates every 30s</span></div>
+    </div>
+
+    <div class="health ok" id="health">
+      <div class="icon" id="health-icon"></div>
+      <div><h2 id="health-title">Checking system…</h2><p id="health-sub">Loading the latest interview activity.</p></div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <section>
+      <div class="sec-head"><h3>Upcoming &amp; live interviews</h3><span class="count" id="up-count"></span></div>
+      <div class="list" id="upcoming"></div>
+    </section>
+
+    <section>
+      <div class="sec-head"><h3>Recent interviews</h3><span class="count" id="rec-count"></span></div>
+      <div class="list" id="recent"></div>
+    </section>
+
+    <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+    const cap = (s) => s ? s.charAt(0).toUpperCase()+s.slice(1) : s;
+
+    // ---- plain-language mapping (no jargon for non-technical teammates) ----
+    const VERDICT = {
+      success:    { cls:"good",  label:"Completed" },
+      partial:    { cls:"good",  label:"Completed" },
+      in_progress:{ cls:"live",  label:"Happening now" },
+      pending:    { cls:"warn",  label:"Processing…" },
+      silent_fail:{ cls:"warn",  label:"No audio" },
+      audio_fail: { cls:"bad",   label:"Audio issue", review:true },
+      error:      { cls:"bad",   label:"Error", review:true },
+      no_show:    { cls:"muted", label:"No-show" },
+    };
+    const verdictView = (v) => VERDICT[v] || { cls:"muted", label:cap(v||"—") };
+    const whatHappened = (r) => {
+      switch (r.verdict) {
+        case "success": return `Full interview — ${r.msgs} exchanges, recorded by Parascribe`;
+        case "partial": return `Interview — ${r.msgs} exchange${r.msgs===1?"":"s"} before the call ended`;
+        case "in_progress": return "Interview in progress right now";
+        case "pending": return "Finishing up — transcript processing";
+        case "silent_fail": return "Call connected but no speech came through — a quick test, a no-show, or a mic issue";
+        case "audio_fail": return `Candidate spoke but the agent didn't hear them — needs a manual follow-up`;
+        case "error": return `The call errored out — worth a manual follow-up`;
+        case "no_show": return "Candidate didn't join or didn't speak";
+        default: return r.detail || "";
+      }
+    };
+    const UPCOMING = {
+      queued:"Bot ready", ready_to_join:"Bot ready",
+      joining_call:"Joining…", waiting_room:"Joining…",
+      in_call_recording:"Live now", in_call_not_recording:"Live now",
+    };
+
+    // ---- friendly time ----
+    function fmtTime(iso){
+      if(!iso) return "";
+      const d=new Date(iso), now=new Date();
+      const t=d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
+      const diff=(d-now)/60000; const ad=Math.abs(diff);
+      let rel; if(ad<1) rel="now"; else if(ad<60) rel=Math.round(ad)+"m"; else rel=Math.round(ad/60)+"h";
+      const sameDay=d.toDateString()===now.toDateString();
+      const day=sameDay?"":(d.toLocaleDateString([], {weekday:"short"})+" ");
+      return `${day}${t} · ${diff>=0? "in "+rel : rel+" ago"}`;
+    }
+
+    // ---- resilient state ----
+    let lastData=null, firstPaint=false;
+    function setConn(ok){
+      $("rdot").className = "dot"+(ok?"":" stale");
+      $("rtxt").textContent = ok ? "live · updates every 30s" : "reconnecting… showing last update";
+    }
+
+    function skeleton(){
+      $("stats").innerHTML = Array(4).fill(0).map(()=>`<div class="stat"><div class="label skeleton" style="width:80px;height:12px"></div><div class="num skeleton" style="width:70px;height:38px;margin-top:6px"></div></div>`).join("");
+      const rows = Array(3).fill(0).map(()=>`<div class="row"><div class="skeleton" style="height:15px;width:120px"></div><div class="skeleton" style="height:13px;width:90px"></div><div class="skeleton" style="height:13px;width:180px"></div><div class="skeleton" style="height:24px;width:90px;border-radius:999px"></div></div>`).join("");
+      $("upcoming").innerHTML=rows; $("recent").innerHTML=rows;
+    }
+
+    const ICON_OK = '<svg viewBox="0 0 24 24" fill="none"><path d="M20 6L9 17l-5-5" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const ICON_ALERT = '<svg viewBox="0 0 24 24" fill="none"><path d="M12 8v5M12 17h.01" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>';
+
+    function render(d){
+      firstPaint=true;
+      const t=d.tally||{}, calls=d.calls||[], up=d.upcoming||[];
+      const needReview = (t.audio_fail||0)+(t.error||0);   // high-confidence agent failures
+      const noAudio = (t.silent_fail||0);                  // ambiguous: test, no-show, or mic issue
+      const completed = (t.success||0)+(t.partial||0);
+      const total = calls.length;
+
+      // health banner — red only for confirmed failures; no-audio gets a calm note
+      const h=$("health");
+      if(needReview>0){
+        h.className="health attention"; $("health-icon").innerHTML=ICON_ALERT;
+        $("health-title").textContent = `${needReview} interview${needReview>1?"s":""} need${needReview>1?"":"s"} a manual follow-up`;
+        $("health-sub").textContent = (noAudio? `${noAudio} more had no audio (test, no-show, or mic). ` : "") + "Flagged below — everything else is running normally.";
+      } else {
+        h.className="health ok"; $("health-icon").innerHTML=ICON_OK;
+        $("health-title").textContent = "All systems healthy";
+        $("health-sub").textContent = noAudio
+          ? `No failures need attention. ${noAudio} call${noAudio===1?"":"s"} received no audio — worth a glance below.`
+          : "Bots are joining, interviews are recording, and no failures need attention.";
+      }
+
+      // stat cards
+      const rate = d.successRate;
+      const ringDash = rate==null ? 0 : Math.round((rate/100)*176);
+      $("stats").innerHTML = `
+        <div class="stat"><div class="label">Interviews today</div><div class="num">${total}</div><div class="hint">in the last 18 hours</div></div>
+        <div class="stat"><div class="label">Completed</div><div class="num">${completed}</div><div class="hint">${t.no_show||0} no-show${(t.no_show||0)===1?"":"s"} · ${t.in_progress||0} live</div></div>
+        <div class="stat rate"><svg class="ring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="none" stroke="#EFEADE" stroke-width="7"/><circle cx="32" cy="32" r="28" fill="none" stroke="var(--orange)" stroke-width="7" stroke-linecap="round" stroke-dasharray="${ringDash} 176" transform="rotate(-90 32 32)"/></svg><div><div class="label">Success rate</div><div class="num">${rate==null?"—":rate+"<small>%</small>"}</div><div class="hint">completed, of finished interviews</div></div></div>
+        <div class="stat"><div class="label">Need review</div><div class="num" style="color:${needReview?"var(--bad)":"inherit"}">${needReview}</div><div class="hint">${noAudio?`+ ${noAudio} no-audio call${noAudio===1?"":"s"}`:"flagged audio/error issues"}</div></div>`;
+
+      // upcoming
+      $("up-count").textContent = up.length ? `${up.length} scheduled` : "";
+      $("upcoming").innerHTML = up.length ? up.map(u=>{
+        const live = (u.status||"").startsWith("in_call");
+        return `<div class="row">
+          <div class="who">${esc(u.candidate)}</div>
+          <div class="when">${fmtTime(u.join_at)}</div>
+          <div class="what">Google Meet · bot ${esc(u.meeting||"")}</div>
+          <div><span class="pill ${live?"live":"muted"}"><span class="d"></span>${esc(UPCOMING[u.status]||"Scheduled")}</span></div>
+        </div>`;
+      }).join("") : `<div class="empty">No interviews scheduled in the next 24 hours.</div>`;
+
+      // recent
+      $("rec-count").textContent = total ? `${total} today` : "";
+      $("recent").innerHTML = total ? calls.map(c=>{
+        const v=verdictView(c.verdict);
+        return `<div class="row">
+          <div class="who">${esc(c.candidate)}${v.review?'<span class="review">REVIEW</span>':""}</div>
+          <div class="when">${fmtTime(c.startedAt)}</div>
+          <div class="what">${esc(whatHappened(c))}</div>
+          <div><span class="pill ${v.cls}"><span class="d"></span>${esc(v.label)}</span></div>
+        </div>`;
+      }).join("") : `<div class="empty">No interviews yet today.</div>`;
+
+      $("foot").textContent = `Last updated ${new Date(d.generatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})} · updates automatically every 30 seconds`;
+    }
+
+    // Absolute base so the dashboard works under ANY host — served direct, via a
+    // raydar.xyz/agent-dashboard proxy-rewrite, or an agent-dashboard.raydar.xyz
+    // subdomain. /api/status sets Access-Control-Allow-Origin:* so cross-origin
+    // reads (and the shared warm cache) work everywhere.
+    const API_BASE = "https://webview-lazy-prompt.vercel.app";
+    async function load(){
+      try {
+        const r = await fetch(API_BASE + "/api/status");
+        if(!r.ok) throw new Error("HTTP "+r.status);
+        const d = await r.json();
+        if(!d.ok) throw new Error(d.error||"degraded");
+        lastData=d; render(d); setConn(true);
+      } catch(e){
+        if(lastData){ setConn(false); }          // keep last good data on screen — never wipe to an error
+        else if(!firstPaint){ $("health-title").textContent="Connecting…"; $("health-sub").textContent="Fetching the latest activity — one moment."; }
+      }
+    }
+    skeleton(); load(); setInterval(load, 30000);
+  </script>
+</body>
+</html>
