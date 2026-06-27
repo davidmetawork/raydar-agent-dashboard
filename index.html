@@ -242,7 +242,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">No-shows and failed interviews that need a human. Hit <b>Reschedule</b> to open the candidate in Paraform and add them to your sequence, then check off each step — the Overview updates to match, and finished ones move to <b>Completed</b>.</p>
+        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, kept here until it's resolved. <b>Nothing drops off on its own.</b> Hit <b>Reschedule</b> to open them in Paraform, then tick <b>Sequence sent</b> or <b>Rescheduled</b> to move them to <b>Handled</b>. Candidates who rebook clear themselves automatically.</p>
         <div id="followups"></div>
       </section>
     </div>
@@ -456,38 +456,74 @@
     const groupBlock = (title, rows) =>
       rows.length ? `<div class="fu-group"><div class="fu-group-head">${esc(title)} <span class="n">${rows.length}</span></div><div class="list">${rows.join("")}</div></div>` : "";
 
-    // Errors/failures on top, then no-shows; rescheduled rows drop into Completed.
+    // Errors/failures on top, then no-shows; resolved rows drop into Handled.
     const FU_SEVERITY = { error:0, audio_fail:1, joined_silent:2, no_show:3, incomplete:4 };
-    function renderFollowups(d){
-      const calls = (d.calls||[]).filter(c=>ACTIONABLE.has(c.verdict));
-      const isResched = (c) => (actionsMap[c.id]||{}).status==="rescheduled";
-      const byTime = (a,b) => new Date(b.startedAt)-new Date(a.startedAt);
-      const active = calls.filter(c=>!isResched(c))
-        .sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
-      const errors  = active.filter(c=>c.verdict==="audio_fail"||c.verdict==="error"||c.verdict==="joined_silent");
-      const noshows = active.filter(c=>c.verdict==="no_show");
-      const didnt   = active.filter(c=>c.verdict==="incomplete");   // joined but didn't finish — not a failure
-      const done     = calls.filter(isResched).sort(byTime);   // manually marked "Rescheduled"
-      const autoDone = (d.rescheduledAwayRows||[]);             // backend auto-detected rebookings
-      const doneCount = done.length + autoDone.length;
-      const open = active.length;
+    const fuNorm = (s) => String(s ?? "").trim().toLowerCase().replace(/\s+/g," ");
 
-      $("fu-count").textContent = (calls.length||doneCount)
-        ? (open ? `${open} to action${doneCount?` · ${doneCount} completed`:""}` : `all handled · ${doneCount} completed`)
+    // The PERSISTENT backlog. Every candidate whose most-recent outcome is an
+    // unresolved no-show/failure stays here across days — NO time cap — until it's
+    // resolved: they rebook (auto-detected via `upcoming`) or someone ticks
+    // Sequence sent / Rescheduled. Assembled entirely client-side from History +
+    // today's live calls + the persisted action map, so it needs no backend change
+    // and never touches the /api/status contract or the screener.
+    function buildBacklog(){
+      const all = [];
+      for (const day of (historyDays||[]))
+        for (const c of (day.calls||[])) all.push({ id:c.id, candidate:c.c, verdict:c.v, startedAt:c.t });
+      for (const c of ((lastData&&lastData.calls)||[]))
+        all.push({ id:c.id, candidate:c.candidate, verdict:c.verdict, startedAt:c.startedAt, msgs:c.msgs, humanSpeakSecs:c.humanSpeakSecs });
+      // de-dupe calls by id; the live status copy (pushed last) wins over the rollup.
+      const byId = new Map();
+      for (const c of all) if (c.id) byId.set(c.id, c);
+      // candidates with an active/upcoming bot have rebooked → auto-resolved.
+      const rebooked = new Set(((lastData&&lastData.upcoming)||[]).map(u=>fuNorm(u.candidate)));
+      // one entry per candidate (their most recent call decides their state).
+      const byCand = new Map();
+      for (const c of byId.values()){
+        const k = fuNorm(c.candidate);
+        if (!k || k==="?" || k==="unknown") continue;
+        let arr = byCand.get(k); if(!arr){ arr=[]; byCand.set(k,arr); } arr.push(c);
+      }
+      const byTime = (a,b)=> new Date(b.startedAt)-new Date(a.startedAt);
+      const open=[], manualDone=[], autoDone=[];
+      for (const list of byCand.values()){
+        list.sort(byTime);
+        const latest = list[0];
+        if (!ACTIONABLE.has(latest.verdict)) continue;          // most recent outcome is fine → not a follow-up
+        const st = (actionsMap[latest.id]||{}).status;
+        if (rebooked.has(fuNorm(latest.candidate)))          autoDone.push(latest);
+        else if (st==="rescheduled" || st==="sequence_sent")  manualDone.push(latest);
+        else                                                  open.push(latest);
+      }
+      open.sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
+      manualDone.sort(byTime); autoDone.sort(byTime);
+      return { open, manualDone, autoDone };
+    }
+
+    function renderFollowups(d){
+      const { open, manualDone, autoDone } = buildBacklog();
+      const errors  = open.filter(c=>c.verdict==="audio_fail"||c.verdict==="error"||c.verdict==="joined_silent");
+      const noshows = open.filter(c=>c.verdict==="no_show");
+      const didnt   = open.filter(c=>c.verdict==="incomplete");   // joined but didn't finish — not a failure
+      const doneCount = manualDone.length + autoDone.length;
+      const openN = open.length;
+
+      $("fu-count").textContent = (openN||doneCount)
+        ? (openN ? `${openN} to action${doneCount?` · ${doneCount} handled`:""}` : `all handled · ${doneCount} done`)
         : "";
       const badge=$("fu-badge");
-      badge.textContent = open||""; badge.style.display = open?"inline-flex":"none";
+      badge.textContent = openN||""; badge.style.display = openN?"inline-flex":"none";
 
       const completedBlock = doneCount
-        ? `<div class="fu-completed"><div class="fu-group-head done">Completed <span class="n">${doneCount}</span></div><div class="list">${done.map(fuRow).join("")}${autoDone.map(fuAutoRow).join("")}</div></div>`
+        ? `<div class="fu-completed"><div class="fu-group-head done">Handled <span class="n">${doneCount}</span></div><div class="list">${manualDone.map(fuRow).join("")}${autoDone.map(fuAutoRow).join("")}</div></div>`
         : "";
       const html = groupBlock("Errors & failures", errors.map(fuRow))
                  + groupBlock("No-shows", noshows.map(fuRow))
                  + groupBlock("Didn't finish", didnt.map(fuRow))
                  + completedBlock;
-      $("followups").innerHTML = (open||doneCount)
+      $("followups").innerHTML = (openN||doneCount)
         ? html
-        : `<div class="list"><div class="empty">No no-shows or failed interviews to follow up on. 🎉</div></div>`;
+        : `<div class="list"><div class="empty">No open no-shows or failed interviews — all caught up. 🎉</div></div>`;
     }
 
     function showView(name){
@@ -546,6 +582,7 @@
         if(!d || !d.ok) throw new Error("bad");
         historyDays=d.days||[]; historyAt=Date.now();
         renderHistory(historyDays); renderAnalytics(historyDays);
+        if(lastData) renderFollowups(lastData);   // refresh the persistent backlog with the full history
       }catch(e){
         if(!historyDays){ const m=`<div class="empty">Couldn't load history right now — reopen the tab to retry.</div>`; $("history").innerHTML=m; $("analytics").innerHTML=m; }
       }
@@ -718,6 +755,7 @@
         const d = sR.value;
         if(!d.ok) throw new Error(d.error||"degraded");
         lastData=d; render(d); setConn(true);
+        ensureHistory();   // keep the persistent Follow-ups backlog populated (90s-cached, so it only refetches occasionally)
       } catch(e){
         if(lastData){ setConn(false); }          // keep last good data on screen — never wipe to an error
         else if(!firstPaint){ $("health-title").textContent="Connecting…"; $("health-sub").textContent="Fetching the latest activity — one moment."; }
