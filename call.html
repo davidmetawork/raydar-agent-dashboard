@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Raydar · Screening Call</title>
+<link rel="icon" type="image/png" href="https://webview-lazy-prompt.vercel.app/assets/raydar-favicon.png?v=2" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --cream:#F6F3E9; --ink:#16140F; --ink-2:#57534A; --ink-3:#8C877B;
+    --orange:#FF5E00; --violet:#7F72FF; --blush:#E4D5D3;
+    --card:#FFFFFF; --line:#E9E3D5; --line-2:#F0EBDE;
+    --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FaEEDC; --muted:#8C877B; --muted-bg:#EFEADE;
+    --live:#7F72FF; --live-bg:#ECEAFE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; }
+  body { background:var(--cream); color:var(--ink); font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; padding:24px clamp(16px,4vw,48px) 64px; }
+  a { color:inherit; }
+  .wrap { max-width:900px; margin:0 auto; }
+  .top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:24px; }
+  .brand { display:flex; align-items:center; gap:13px; text-decoration:none; }
+  .brand img { height:28px; width:auto; display:block; }
+  .brand .divider { width:1px; height:22px; background:var(--line); }
+  .brand .sub { font-size:14.5px; color:var(--ink-2); font-weight:500; letter-spacing:-.01em; }
+  .back { font-size:13.5px; color:var(--ink-2); text-decoration:none; font-weight:600; }
+  .back:hover { color:var(--orange); }
+
+  .head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px; }
+  h1 { font-family:Fraunces,serif; font-weight:500; font-size:31px; letter-spacing:-.02em; margin:0; line-height:1.1; }
+  .meta { font-size:14px; color:var(--ink-2); margin-top:8px; display:flex; gap:9px; flex-wrap:wrap; align-items:center; }
+  .meta a { color:var(--violet); text-decoration:none; font-weight:600; }
+  .meta .dot { color:var(--ink-3); }
+  .copy { appearance:none; border:1.5px solid var(--line); background:var(--card); color:var(--ink-2); cursor:pointer; font-family:inherit; font-weight:600; font-size:13px; border-radius:10px; padding:9px 14px; transition:border-color .12s ease, color .12s ease; }
+  .copy:hover { border-color:var(--orange); color:var(--ink); }
+
+  .banner { border-radius:16px; padding:16px 18px; margin-bottom:18px; display:flex; gap:13px; align-items:flex-start; border:1px solid transparent; }
+  .banner .ic { width:26px; height:26px; flex:0 0 auto; border-radius:50%; display:grid; place-items:center; font-weight:700; color:#fff; font-size:15px; }
+  .banner .bt { font-weight:600; font-size:16px; letter-spacing:-.01em; }
+  .banner .bs { font-size:14px; color:var(--ink-2); margin-top:3px; line-height:1.5; }
+  .banner.good { background:var(--good-bg); border-color:#cfe9dd; } .banner.good .ic { background:var(--good); } .banner.good .bt { color:#0c6e49; }
+  .banner.bad { background:var(--bad-bg); border-color:#f3d2d2; } .banner.bad .ic { background:var(--bad); } .banner.bad .bt { color:#b3373b; }
+  .banner.muted { background:var(--muted-bg); border-color:#ddd4c2; } .banner.muted .ic { background:var(--ink-3); } .banner.muted .bt { color:var(--ink); }
+  .banner.pending { background:var(--warn-bg); border-color:#ecd9a6; } .banner.pending .ic { background:var(--warn); } .banner.pending .bt { color:#8a5a12; }
+
+  video { width:100%; border-radius:16px; background:#000; display:block; border:1px solid var(--line); box-shadow:var(--shadow); }
+  .norec { background:var(--card); border:1px dashed var(--line); border-radius:16px; padding:34px 20px; text-align:center; color:var(--ink-3); box-shadow:var(--shadow); }
+  .norec .big { font-size:15px; color:var(--ink-2); font-weight:600; margin-bottom:4px; }
+
+  .grid { display:grid; grid-template-columns:1fr; gap:18px; margin-top:18px; }
+  @media (min-width:760px){ .grid { grid-template-columns:1fr 278px; } }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:17px 19px; box-shadow:var(--shadow); }
+  .panel h3 { font-family:Fraunces,serif; font-weight:500; font-size:16px; margin:0 0 13px; }
+  .tx { max-height:580px; overflow:auto; display:flex; flex-direction:column; gap:13px; }
+  .turn .sp { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; margin-bottom:3px; }
+  .turn.agent .sp { color:var(--orange); } .turn.candidate .sp { color:var(--violet); }
+  .turn .tt { font-size:14.5px; line-height:1.55; color:var(--ink); }
+  .turn.agent .tt { color:var(--ink-2); }
+  .kv { font-size:13.5px; line-height:1.5; }
+  .kv .r { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--line-2); }
+  .kv .r:last-child { border-bottom:none; }
+  .kv .k { color:var(--ink-3); } .kv .v { font-weight:600; text-align:right; word-break:break-word; }
+  .kv .v a { color:var(--violet); text-decoration:none; }
+  .state { text-align:center; padding:72px 20px; color:var(--ink-3); }
+  .spin { width:26px; height:26px; border:3px solid var(--line); border-top-color:var(--orange); border-radius:50%; animation:spin .7s linear infinite; margin:0 auto 14px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:var(--ink); color:var(--cream); padding:10px 18px; border-radius:10px; font-size:14px; font-weight:500; opacity:0; pointer-events:none; transition:all .2s ease; }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  .foot { margin-top:32px; font-size:12px; color:var(--ink-3); line-height:1.6; border-top:1px solid var(--line); padding-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="brand" href="/">
+      <img src="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" alt="Raydar" />
+      <div class="divider"></div>
+      <div class="sub">Screening Call</div>
+    </a>
+    <a class="back" href="/#calls">← All calls</a>
+  </div>
+  <div id="app"><div class="state"><div class="spin"></div>Loading call…</div></div>
+  <div class="foot" id="foot"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+  const CALLS_API = "https://raydar-calls.vercel.app";
+  const app = document.getElementById("app");
+  const esc = (s) => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1500); }
+  function copyLink(){ navigator.clipboard.writeText(location.href).then(()=>toast("Link copied")).catch(()=>toast(location.href)); }
+  const fmtPT = (iso) => { try { return new Intl.DateTimeFormat("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/Los_Angeles"}).format(new Date(iso))+" PT"; } catch { return iso||""; } };
+  const fmtDur = (s) => s ? `${Math.floor(s/60)}m ${String(s%60).padStart(2,"0")}s` : "—";
+  const ICON = { good:"✓", bad:"!", muted:"–", pending:"…" };
+
+  function botId(){
+    const m = location.pathname.match(/\/c\/([^\/?#]+)/);
+    if(m) return decodeURIComponent(m[1]);
+    return new URLSearchParams(location.search).get("bot") || "";
+  }
+
+  function render(d){
+    const v = d.verdict, c = d.candidate, id = d.botId;
+    const videoSrc = `${CALLS_API}/api/media?bot=${encodeURIComponent(id)}&kind=video`;
+    const player = (v.hasRecording && d.media.hasVideo)
+      ? `<video controls preload="metadata" playsinline src="${videoSrc}"></video>`
+      : `<div class="norec"><div class="big">No recording for this call</div>${v.verdict==="no_show"?"The candidate never joined the meeting, so there’s nothing to play.":"A recording isn’t available for this call."}</div>`;
+
+    const tx = (d.transcript && d.transcript.length)
+      ? `<div class="panel"><h3>Transcript</h3><div class="tx">${d.transcript.map(t=>`<div class="turn ${t.role}"><div class="sp">${t.role==="agent"?"AI Screener":esc(t.speaker)}</div><div class="tt">${esc(t.text)}</div></div>`).join("")}</div></div>`
+      : "";
+
+    const who = (d.presence && d.presence.humans && d.presence.humans.length)
+      ? d.presence.humans.join(", ")
+      : (d.presence && d.presence.status && d.presence.status!=="done" ? "—" : "Only bots / notetakers");
+
+    const details = `<div class="panel"><h3>Details</h3><div class="kv">
+      <div class="r"><span class="k">When</span><span class="v">${esc(fmtPT(c.scheduledStart||d.joinAt))}</span></div>
+      <div class="r"><span class="k">Duration</span><span class="v">${fmtDur(d.durationSecs)}</span></div>
+      <div class="r"><span class="k">In the meeting</span><span class="v">${esc(who)}</span></div>
+      ${d.presence&&d.presence.humanSpeakSecs?`<div class="r"><span class="k">Candidate spoke</span><span class="v">${d.presence.humanSpeakSecs}s</span></div>`:""}
+      <div class="r"><span class="k">Meeting</span><span class="v">${esc(d.meeting||"—")}</span></div>
+      ${c.phone?`<div class="r"><span class="k">Phone</span><span class="v">${esc(c.phone)}</span></div>`:""}
+      ${c.linkedin?`<div class="r"><span class="k">LinkedIn</span><span class="v"><a href="${esc(c.linkedin)}" target="_blank" rel="noopener">Profile ↗</a></span></div>`:""}
+      ${d.vapi&&d.vapi.dashboardUrl?`<div class="r"><span class="k">Agent log</span><span class="v"><a href="${esc(d.vapi.dashboardUrl)}" target="_blank" rel="noopener">Vapi ↗</a></span></div>`:""}
+      ${(v.hasRecording&&d.media.hasVideo)?`<div class="r"><span class="k">Video</span><span class="v"><a href="${videoSrc}" target="_blank" rel="noopener">Download ↗</a></span></div>`:""}
+    </div></div>`;
+
+    app.innerHTML = `
+      <div class="head">
+        <div>
+          <h1>${esc(c.fullName)}</h1>
+          <div class="meta">${esc(fmtPT(c.scheduledStart||d.joinAt))}<span class="dot">·</span>${esc(d.meeting||"")}${c.linkedin?`<span class="dot">·</span><a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn ↗</a>`:""}</div>
+        </div>
+        <button class="copy" onclick="copyLink()">Copy link</button>
+      </div>
+      <div class="banner ${v.tone}"><div class="ic">${ICON[v.tone]||"•"}</div><div><div class="bt">${esc(v.label)}</div><div class="bs">${esc(v.summary)}</div></div></div>
+      ${player}
+      <div class="grid"><div>${tx}</div>${details}</div>`;
+    document.getElementById("foot").textContent = "Shareable, durable link — it re-fetches the recording on each load, so it never expires. Read-only; independent of the live screener.";
+  }
+
+  async function load(){
+    const id = botId();
+    if(!id){ app.innerHTML = `<div class="state">No call specified. <a class="back" href="/#calls">← Back to search</a></div>`; return; }
+    try {
+      const r = await fetch(CALLS_API + "/api/call?bot=" + encodeURIComponent(id));
+      const j = await r.json();
+      if(r.status===404){ app.innerHTML = `<div class="state">This call link isn’t valid.<br><a class="back" href="/#calls">← Back to search</a></div>`; return; }
+      if(!r.ok){ app.innerHTML = `<div class="state">${esc(j.error||"Couldn’t load this call.")}<br><a class="back" href="/#calls">← Back</a></div>`; return; }
+      render(j);
+    } catch(e){ app.innerHTML = `<div class="state">Network error — please refresh.</div>`; }
+  }
+  load();
+</script>
+</body>
+</html>
