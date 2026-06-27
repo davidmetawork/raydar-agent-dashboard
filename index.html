@@ -443,13 +443,16 @@
         </div>
       </div>`;
     }
-    // Read-only "Rescheduled (auto)" row — candidate the backend auto-detected as
-    // rebooked (has a new future interview). Shown in Completed as an audit trail.
+    // Read-only "Rescheduled (auto)" row — candidate auto-detected as rebooked.
+    // `via:"human"` = booked a live call with David (calendar); else a new AI interview.
     function fuAutoRow(c){
+      const sub = c.via==="human"
+        ? `${esc(verdictView(c.verdict).label)} → booked a live call with you`
+        : `${esc(verdictView(c.verdict).label)} → new interview booked`;
       return `<div class="row fu done-auto">
         <div class="who">${nameLink(c.candidate)}</div>
         <div class="when">${fmtTime(c.startedAt)}</div>
-        <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${esc(verdictView(c.verdict).label)} → new interview booked</span></div>
+        <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${sub}</span></div>
         <div class="fu-actions"><span class="auto-tag">auto</span></div>
       </div>`;
     }
@@ -459,6 +462,10 @@
     // Errors/failures on top, then no-shows; resolved rows drop into Handled.
     const FU_SEVERITY = { error:0, audio_fail:1, joined_silent:2, no_show:3, incomplete:4 };
     const fuNorm = (s) => String(s ?? "").trim().toLowerCase().replace(/\s+/g," ");
+    // Candidates who booked a LIVE call with David (Calendly etc.) — from /api/reschedules
+    // (the n8n calendar feed). The screener's bot `upcoming` can't see these, so they
+    // resolve the backlog here too. Empty until the calendar feed is wired.
+    let humanResched = new Set();
 
     // The PERSISTENT backlog. Every candidate whose most-recent outcome is an
     // unresolved no-show/failure stays here across days — NO time cap — until it's
@@ -491,7 +498,9 @@
         const latest = list[0];
         if (!ACTIONABLE.has(latest.verdict)) continue;          // most recent outcome is fine → not a follow-up
         const st = (actionsMap[latest.id]||{}).status;
-        if (rebooked.has(fuNorm(latest.candidate)))          autoDone.push(latest);
+        const k = fuNorm(latest.candidate);
+        if (humanResched.has(k))                             autoDone.push({ ...latest, via:"human" }); // booked a live call with David
+        else if (rebooked.has(k))                            autoDone.push({ ...latest, via:"rebook" }); // new AI interview booked
         else if (st==="rescheduled" || st==="sequence_sent")  manualDone.push(latest);
         else                                                  open.push(latest);
       }
@@ -713,6 +722,15 @@
     // ---- Calls (find-a-call) — reads from the isolated, read-only calls API.
     //      Separate Vercel project (raydar-calls); never touches the screener. ----
     const CALLS_API = "https://raydar-calls.vercel.app";
+    // Pull the human-reschedule feed (candidates who booked a live call with David).
+    // Best-effort + heavily cached upstream; never blocks or breaks the dashboard.
+    async function refreshReschedules(){
+      try{
+        const r = await fetch(CALLS_API + "/api/reschedules");
+        const j = await r.json();
+        if(Array.isArray(j.names)){ humanResched = new Set(j.names.map(fuNorm)); if(lastData) renderFollowups(lastData); }
+      }catch(e){ /* leave humanResched as-is */ }
+    }
     const CV_TONE = { good:"good", muted:"muted", pending:"live", bad:"bad" };
     let cvLoaded = false;
     const cvEsc = (s) => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -756,6 +774,7 @@
         if(!d.ok) throw new Error(d.error||"degraded");
         lastData=d; render(d); setConn(true);
         ensureHistory();   // keep the persistent Follow-ups backlog populated (90s-cached, so it only refetches occasionally)
+        refreshReschedules();   // human-reschedule feed (CDN-cached upstream; clears candidates who booked a live call)
       } catch(e){
         if(lastData){ setConn(false); }          // keep last good data on screen — never wipe to an error
         else if(!firstPaint){ $("health-title").textContent="Connecting…"; $("health-sub").textContent="Fetching the latest activity — one moment."; }
