@@ -119,7 +119,7 @@
 </div>
 
 <script>
-const API = "https://raydar-sequences.vercel.app";
+const API = ""; // same-origin: backend at /api/seq/*
 let ROWS = [], SEQS = [];
 let AUTH = { required:false, clientId:null, token:null, domains:["raydar.xyz","raydargroup.com"] };
 const $ = (id) => document.getElementById(id);
@@ -130,7 +130,7 @@ function setHealth(cls, txt){ const h=$("health"); h.className="pill "+cls; h.in
 
 async function loadHealth(){
   try{
-    const h = await fetch(API+"/api/health").then(r=>r.json());
+    const h = await fetch(API+"/api/seq/health").then(r=>r.json());
     if(h.paraform==="live"){ setHealth("live","Paraform: live"); }
     else if(h.paraform==="no_cookie"){ setHealth("bad","Paraform: no session");
       $("cookieBanner").classList.remove("hidden");
@@ -143,7 +143,7 @@ async function loadHealth(){
 }
 async function loadSeqs(){
   try{
-    const d = await fetch(API+"/api/sequences",{headers:authHeaders()}).then(r=>r.json());
+    const d = await fetch(API+"/api/seq/sequences",{headers:authHeaders()}).then(r=>r.json());
     SEQS = d.sequences||[];
     const sel=$("seq");
     if(!SEQS.length){ sel.innerHTML='<option value="">(no sequences — session not set)</option>'; return; }
@@ -198,7 +198,7 @@ async function run(kind){
   $("outTitle").textContent = kind==="preview" ? "Preview (dry run)" : "Enrollment result";
   $("outBody").innerHTML = "<div class='note'>Working… (large cohorts take a moment)</div>";
   try{
-    const d = await fetch(API+"/api/"+kind,{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body}).then(r=>r.json());
+    const d = await fetch(API+"/api/seq/"+kind,{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body}).then(r=>r.json());
     if(!d.ok){ $("outBody").innerHTML = "<div class='banner bad'>"+(d.error==="no_cookie"?"Paraform session not set.":("Error: "+(d.detail||d.error)))+"</div>"; return; }
     renderResult(kind, d);
   }catch(e){ $("outBody").innerHTML = "<div class='banner bad'>Request failed: "+e.message+"</div>"; }
@@ -229,7 +229,7 @@ function renderResult(kind, d){
 async function init(){
   loadHealth();
   let cfg = {};
-  try { cfg = await fetch(API+"/api/config").then(r=>r.json()); } catch(e) {}
+  try { cfg = await fetch(API+"/api/seq/config").then(r=>r.json()); } catch(e) {}
   AUTH.required = !!cfg.authRequired; AUTH.clientId = cfg.googleClientId;
   if (Array.isArray(cfg.allowedDomains) && cfg.allowedDomains.length) AUTH.domains = cfg.allowedDomains;
   if (!AUTH.required) { loadSeqs(); return; }  // auth not configured yet -> open
