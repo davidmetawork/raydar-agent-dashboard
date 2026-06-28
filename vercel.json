@@ -1,6 +1,7 @@
 {
   "rewrites": [
     { "source": "/agent-dashboard", "destination": "/index.html" },
-    { "source": "/c/:id", "destination": "/call.html" }
+    { "source": "/c/:id", "destination": "/call.html" },
+    { "source": "/sequences", "destination": "/sequences.html" }
   ]
 }
