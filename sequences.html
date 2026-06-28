@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
     --cream:#F6F3E9; --ink:#16140F; --card:#FFFFFF; --line:#E9E3D5; --muted:#8C877B;
@@ -57,9 +58,23 @@
   .summ{display:flex;gap:18px;flex-wrap:wrap;margin:4px 0 0}
   .summ b{font-size:20px;font-family:Fraunces,serif}
   .summ div{color:var(--muted);font-size:12.5px}
+  body.embed header .brand img, body.embed h1, body.embed .sub{display:none}
+  body.embed header{margin-bottom:10px}
+  #gate{position:fixed;inset:0;background:var(--cream);display:flex;align-items:center;justify-content:center;z-index:50}
+  #gate .gatebox{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px 40px;text-align:center;max-width:420px}
+  #gate h2{margin-bottom:6px}
+  #gate p{color:var(--muted);margin:0 0 20px}
+  #gsi{display:flex;justify-content:center}
+  #gateErr{color:var(--bad);font-size:13px;margin-top:14px;min-height:16px}
 </style>
 </head>
 <body>
+<div id="gate" style="display:none"><div class="gatebox">
+  <h2>Sequences</h2>
+  <p>Sign in with your Raydar Google account to continue.</p>
+  <div id="gsi"></div>
+  <div id="gateErr"></div>
+</div></div>
 <div class="wrap">
   <header>
     <div class="brand">
@@ -106,7 +121,10 @@
 <script>
 const API = "https://raydar-sequences.vercel.app";
 let ROWS = [], SEQS = [];
+let AUTH = { required:false, clientId:null, token:null, domains:["raydar.xyz","raydargroup.com"] };
 const $ = (id) => document.getElementById(id);
+const authHeaders = () => AUTH.token ? { "Authorization":"Bearer "+AUTH.token } : {};
+if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 
 function setHealth(cls, txt){ const h=$("health"); h.className="pill "+cls; h.innerHTML='<span class="dot"></span>'+txt; }
 
@@ -125,7 +143,7 @@ async function loadHealth(){
 }
 async function loadSeqs(){
   try{
-    const d = await fetch(API+"/api/sequences").then(r=>r.json());
+    const d = await fetch(API+"/api/sequences",{headers:authHeaders()}).then(r=>r.json());
     SEQS = d.sequences||[];
     const sel=$("seq");
     if(!SEQS.length){ sel.innerHTML='<option value="">(no sequences — session not set)</option>'; return; }
@@ -180,7 +198,7 @@ async function run(kind){
   $("outTitle").textContent = kind==="preview" ? "Preview (dry run)" : "Enrollment result";
   $("outBody").innerHTML = "<div class='note'>Working… (large cohorts take a moment)</div>";
   try{
-    const d = await fetch(API+"/api/"+kind,{method:"POST",headers:{"content-type":"application/json"},body}).then(r=>r.json());
+    const d = await fetch(API+"/api/"+kind,{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body}).then(r=>r.json());
     if(!d.ok){ $("outBody").innerHTML = "<div class='banner bad'>"+(d.error==="no_cookie"?"Paraform session not set.":("Error: "+(d.detail||d.error)))+"</div>"; return; }
     renderResult(kind, d);
   }catch(e){ $("outBody").innerHTML = "<div class='banner bad'>Request failed: "+e.message+"</div>"; }
@@ -208,7 +226,31 @@ function renderResult(kind, d){
   $("outBody").innerHTML = html;
 }
 
-loadHealth(); loadSeqs();
+async function init(){
+  loadHealth();
+  let cfg = {};
+  try { cfg = await fetch(API+"/api/config").then(r=>r.json()); } catch(e) {}
+  AUTH.required = !!cfg.authRequired; AUTH.clientId = cfg.googleClientId;
+  if (Array.isArray(cfg.allowedDomains) && cfg.allowedDomains.length) AUTH.domains = cfg.allowedDomains;
+  if (!AUTH.required) { loadSeqs(); return; }  // auth not configured yet -> open
+  $("gate").style.display = "flex";
+  (function start(){
+    if (!(window.google && google.accounts && google.accounts.id)) return setTimeout(start, 150);
+    google.accounts.id.initialize({ client_id: AUTH.clientId, callback: onCred });
+    google.accounts.id.renderButton($("gsi"), { theme:"filled_black", size:"large", text:"signin_with", shape:"pill" });
+  })();
+}
+function onCred(resp){
+  try {
+    const p = JSON.parse(atob(resp.credential.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
+    const dom = (p.hd || (p.email||"").split("@")[1] || "").toLowerCase();
+    if (!AUTH.domains.includes(dom)) { $("gateErr").textContent = "Use a "+AUTH.domains.join(" / ")+" account."; return; }
+    AUTH.token = resp.credential;
+    $("gate").style.display = "none";
+    loadHealth(); loadSeqs();
+  } catch(e) { $("gateErr").textContent = "Sign-in failed — try again."; }
+}
+init();
 </script>
 </body>
 </html>

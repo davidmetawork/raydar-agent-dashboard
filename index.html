@@ -223,6 +223,7 @@
       <button class="tab" id="tab-history" onclick="showView('history')">History</button>
       <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
       <button class="tab" id="tab-calls" onclick="showView('calls')">Calls</button>
+      <button class="tab" id="tab-sequences" onclick="showView('sequences')">Sequences</button>
     </div>
 
     <div id="view-overview">
@@ -272,6 +273,10 @@
         </div>
         <div id="cv-results"></div>
       </section>
+    </div>
+
+    <div id="view-sequences" hidden>
+      <iframe id="seq-frame" title="Sequences" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
     </div>
 
     <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
@@ -535,11 +540,13 @@
         : `<div class="list"><div class="empty">No open no-shows or failed interviews — all caught up. 🎉</div></div>`;
     }
 
+    let seqLoaded=false;
     function showView(name){
-      ["overview","followups","history","analytics","calls"].forEach(v=>{
+      ["overview","followups","history","analytics","calls","sequences"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
+      if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
       if(name==="history"||name==="analytics") ensureHistory();
       if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
       else if(location.hash==="#calls") history.replaceState(null,"",location.pathname);
