@@ -24,7 +24,8 @@ import { trpcGet, trpcPost } from "../../seq/_lib/core.mjs";
 
 export { cors, requireAuth, hasCookie, authConfig, paraformHealth } from "../../seq/_lib/core.mjs";
 
-const FULLENRICH_KEY = process.env.FULLENRICH_API_KEY || "";
+// Accept either name — the Vercel var was added as FULL_ENRICH_API.
+const FULLENRICH_KEY = process.env.FULLENRICH_API_KEY || process.env.FULL_ENRICH_API || process.env.FULLENRICH_API || "";
 const FE_BASE = "https://app.fullenrich.com/api/v2";
 export const FE_BULK_MAX = 100; // FullEnrich caps a bulk request at 100 contacts
 
