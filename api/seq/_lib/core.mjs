@@ -126,7 +126,9 @@ export function parseTitle(activeProject) {
   let s = String(activeProject).split("|")[0].trim();          // first project only
   s = s.replace(/\s*\([^)]*\)\s*$/, "").trim();                // drop trailing (status)
   const i = s.indexOf(" - ");                                   // split Company - Title
-  return (i >= 0 ? s.slice(i + 3) : s).trim();
+  let title = (i >= 0 ? s.slice(i + 3) : s).trim();
+  title = title.replace(/\s+v\d+(?:\.\d+)*$/i, "").trim();      // drop internal version suffix (v1, v12, v2.0)
+  return title;
 }
 export function isTemplateSequence(seq) {
   return seq && (seq.id === CONFIG.TEMPLATE_ID || seq.name === CONFIG.TEMPLATE_PREFIX);
@@ -177,6 +179,23 @@ export async function ensureRoleSequence(title, sendAs, seqCache) {
   return { id: newId, name: targetName, created: true };
 }
 
+// ---------- create / upsert a candidate from their LinkedIn URL ----------
+// candidates.createExternalCandidateFromManual takes ONLY linkedin_url and enriches
+// from LinkedIn/CrustData. Idempotent by URL: re-runs return status:"existing" with the
+// SAME candidate_user_id, so re-uploading a cohort never duplicates. Returns the id, or
+// throws (e.g. "CrustData failed to enrich" for a bad/dead LinkedIn URL) — caller catches
+// per-row so one bad URL doesn't sink the batch.
+export async function createCandidate(linkedinUrl) {
+  const r = await trpcPost("candidates.createExternalCandidateFromManual", { linkedin_url: linkedinUrl });
+  return { id: r?.candidate_user_id || null, status: r?.status || "unknown" };
+}
+
+// Best-effort: file created candidates under the "LinkedIn Job Applicants" CRM project.
+export async function addToProject(candidateUserIds, projectId = CONFIG.MATCH_PROJECT_ID) {
+  if (!candidateUserIds.length) return { count: 0 };
+  return (await trpcPost("candidateProjects.addCandidateUsersToProject", { project_id: projectId, candidate_user_ids: candidateUserIds })) || { count: 0 };
+}
+
 export async function enrollIntoCampaign(campaignId, candidateUserIds) {
   if (!candidateUserIds.length) return { enrolled: 0 };
   await trpcPost("campaigns.addToCampaigns", { campaign_ids: [campaignId], candidate_user_ids: candidateUserIds });
@@ -191,29 +210,37 @@ export async function buildPlan({ sequenceId, rows, sendAs }) {
   if (!seq) throw new Error("sequence not found");
   const idx = await projectEmailIndex();
 
-  const matched = [], unmatched = [];
-  for (const row of rows) {
+  // Annotate every row with its CRM match (if any) and parsed role title.
+  const annotated = rows.map((row) => {
     const em = (row.email || "").toLowerCase().trim();
-    const hit = em && idx.get(em);
-    if (hit) matched.push({ ...row, candidate_user_id: hit.id });
-    else unmatched.push(row);
-  }
+    const hit = em ? idx.get(em) : null;
+    return { ...row, email: em, candidate_user_id: hit ? hit.id : null, title: parseTitle(row.activeProject) || "(no role)" };
+  });
+  const matched = annotated.filter((r) => r.candidate_user_id);
+  const unmatched = annotated.filter((r) => !r.candidate_user_id);
 
   const templated = isTemplateSequence(seq);
-  const groups = []; // [{title, targetName, exists, candidate_user_ids:[]}]
+  // Group ALL rows (matched + not-yet-in-CRM), not just the ones already in the CRM —
+  // otherwise a cohort of brand-new applicants shows 0 role sequences.
+  const groups = [];
+  const mkGroup = (title, targetName, targetId, grows) => ({
+    title, targetName, targetId,
+    exists: targetId ? true : seqs.some((s) => s.name === targetName),
+    existingIds: grows.filter((r) => r.candidate_user_id).map((r) => r.candidate_user_id),
+    toCreate: grows.filter((r) => !r.candidate_user_id),   // rows needing createExternalCandidateFromManual
+    candidateCount: grows.length,
+  });
   if (templated) {
     const byTitle = new Map();
-    for (const m of matched) {
-      const title = parseTitle(m.activeProject) || "(no role)";
-      if (!byTitle.has(title)) byTitle.set(title, []);
-      byTitle.get(title).push(m.candidate_user_id);
+    for (const r of annotated) {
+      if (!byTitle.has(r.title)) byTitle.set(r.title, []);
+      byTitle.get(r.title).push(r);
     }
-    for (const [title, ids] of byTitle) {
-      const targetName = `${CONFIG.TEMPLATE_PREFIX} - ${title}`;
-      groups.push({ title, targetName, exists: seqs.some((s) => s.name === targetName), candidate_user_ids: ids });
+    for (const [title, grows] of byTitle) {
+      groups.push(mkGroup(title, `${CONFIG.TEMPLATE_PREFIX} - ${title}`, null, grows));
     }
   } else {
-    groups.push({ title: null, targetName: seq.name, targetId: seq.id, exists: true, candidate_user_ids: matched.map((m) => m.candidate_user_id) });
+    groups.push(mkGroup(null, seq.name, seq.id, annotated));
   }
 
   return { seq, templated, sendAs: sendAs || "david", matchedCount: matched.length, unmatchedCount: unmatched.length, unmatched, groups, seqs };

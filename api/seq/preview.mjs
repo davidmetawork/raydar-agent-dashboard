@@ -19,7 +19,14 @@ export default async function handler(req, res) {
       matched: plan.matchedCount,
       unmatched: plan.unmatchedCount,
       unmatchedSample: plan.unmatched.slice(0, 20).map((r) => ({ name: `${r.firstName || ""} ${r.lastName || ""}`.trim(), email: r.email })),
-      groups: plan.groups.map((g) => ({ role: g.title, target: g.targetName, willCreateSequence: plan.templated && !g.exists, candidates: g.candidate_user_ids.length })),
+      groups: plan.groups.map((g) => ({
+        role: g.title,
+        target: g.targetName,
+        willCreateSequence: plan.templated && !g.exists,
+        candidates: g.candidateCount,
+        alreadyInCrm: g.existingIds.length,
+        willCreateInCrm: g.toCreate.length,
+      })),
     });
   } catch (e) {
     const expired = e.code === "AUTH_EXPIRED";

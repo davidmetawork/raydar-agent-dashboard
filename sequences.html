@@ -206,11 +206,17 @@ async function run(kind){
 
 function renderResult(kind, d){
   const groups = d.groups||[];
-  let html = `<div class="summ">
-    <div><b>${d.totalRows ?? d.enrolledTotal ?? "—"}</b><div>${kind==="preview"?"rows":"enrolled"}</div></div>
-    <div><b>${d.matched ?? d.enrolledTotal ?? 0}</b><div>matched</div></div>
-    <div><b>${d.unmatched ?? 0}</b><div>not in CRM</div></div>
-    <div><b>${groups.length}</b><div>${d.templated?"role sequences":"target"}</div></div>
+  const seqLabel = (d.templated ?? (groups.length>1)) ? "role sequences" : "target";
+  let html = kind==="preview" ? `<div class="summ">
+    <div><b>${d.totalRows ?? "—"}</b><div>rows</div></div>
+    <div><b>${d.matched ?? 0}</b><div>already in CRM</div></div>
+    <div><b>${d.unmatched ?? 0}</b><div>will be created</div></div>
+    <div><b>${groups.length}</b><div>${seqLabel}</div></div>
+  </div>` : `<div class="summ">
+    <div><b>${d.enrolledTotal ?? 0}</b><div>enrolled</div></div>
+    <div><b>${d.createdTotal ?? 0}</b><div>created</div></div>
+    <div><b>${d.failedTotal ?? 0}</b><div>failed</div></div>
+    <div><b>${groups.length}</b><div>${seqLabel}</div></div>
   </div>`;
   html += `<div class="note">Sequence: <b>${d.sequence}</b> · send as <b>${d.sendAs}</b></div>`;
   html += `<table><tr><th>Role</th><th>Target sequence</th><th>${kind==="preview"?"Candidates":"Enrolled"}</th><th></th></tr>`;
@@ -220,9 +226,15 @@ function renderResult(kind, d){
     html += `<tr><td>${g.role||"—"}</td><td>${g.target||""}</td><td>${g.candidates ?? g.enrolled ?? 0}</td><td>${flag}${g.error?(" "+g.error):""}</td></tr>`;
   }
   html += `</table>`;
-  const un = d.unmatchedSample||[];
-  if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} not found in CRM</b> (need to be uploaded to Paraform first): `+un.map(u=>u.email).join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
-  if(kind==="enroll"){ html += `<div class="note">Ran at ${d.ranAt}.</div>`; }
+  if(kind==="preview"){
+    const un = d.unmatchedSample||[];
+    if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} new to Paraform</b> — will be auto-created from their LinkedIn URL and enrolled: `+un.map(u=>u.email).join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
+  }
+  if(kind==="enroll"){
+    const cf = d.createFailures||[];
+    if(cf.length){ html += `<div class="banner bad" style="margin-top:12px"><b>${d.failedTotal} could not be created</b> (bad/dead LinkedIn URL — enroll the rest, fix these by hand): `+cf.map(f=>(f.email||"?")+" — "+f.reason).join("; ")+`</div>`; }
+    html += `<div class="note">Ran at ${d.ranAt}.</div>`;
+  }
   $("outBody").innerHTML = html;
 }
 
