@@ -2,6 +2,10 @@
   "rewrites": [
     { "source": "/agent-dashboard", "destination": "/index.html" },
     { "source": "/c/:id", "destination": "/call.html" },
-    { "source": "/sequences", "destination": "/sequences.html" }
-  ]
+    { "source": "/sequences", "destination": "/sequences.html" },
+    { "source": "/enrich", "destination": "/enrich.html" }
+  ],
+  "functions": {
+    "api/enrich/*.mjs": { "maxDuration": 60 }
+  }
 }

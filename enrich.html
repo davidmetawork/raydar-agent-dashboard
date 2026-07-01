@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enrich — Raydar</title>
+<link rel="icon" href="https://webview-lazy-prompt.vercel.app/assets/raydar-favicon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9; --ink:#16140F; --card:#FFFFFF; --line:#E9E3D5; --muted:#8C877B;
+    --orange:#FF5E00; --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FaEEDC; --violet:#7F72FF; --muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 20px 80px}
+  h1{font-family:Fraunces,serif;font-weight:600;font-size:30px;margin:0}
+  h2{font-family:Fraunces,serif;font-weight:600;font-size:18px;margin:0 0 14px}
+  .sub{color:var(--muted);margin:4px 0 0}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand img{height:26px}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;font-weight:600;font-size:12.5px}
+  .pill .dot{width:8px;height:8px;border-radius:50%}
+  .pill.live{background:var(--good-bg);color:var(--good)} .pill.live .dot{background:var(--good)}
+  .pill.warn{background:var(--warn-bg);color:var(--warn)} .pill.warn .dot{background:var(--warn)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)} .pill.bad .dot{background:var(--bad)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:22px;margin-bottom:18px}
+  label{display:block;font-weight:600;margin:0 0 7px}
+  select,button{font-family:inherit;font-size:14px}
+  select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink)}
+  td select{padding:7px 8px;border-radius:9px}
+  .row{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:end}
+  .btn{display:inline-flex;align-items:center;gap:7px;padding:11px 18px;border-radius:11px;border:1px solid var(--ink);background:var(--ink);color:var(--cream);font-weight:600;cursor:pointer;white-space:nowrap}
+  .btn.ghost{background:#fff;color:var(--ink)}
+  .btn.go{background:var(--orange);border-color:var(--orange);color:#fff}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--muted);font-weight:600}
+  a{color:var(--violet);text-decoration:none} a:hover{text-decoration:underline}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+  .b-good{background:var(--good-bg);color:var(--good)} .b-warn{background:var(--warn-bg);color:var(--warn)} .b-bad{background:var(--bad-bg);color:var(--bad)} .b-mut{background:var(--muted-bg);color:var(--muted)}
+  .em{font-variant-numeric:tabular-nums}
+  .note{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .banner{padding:12px 14px;border-radius:11px;margin-bottom:16px;font-size:13px}
+  .banner.bad{background:var(--bad-bg);color:#7a2a2d;border:1px solid #f3c9cb}
+  .banner.warn{background:var(--warn-bg);color:#7a531a;border:1px solid #ecd9b0}
+  .banner.good{background:var(--good-bg);color:#0c6a48;border:1px solid #bfe6d3}
+  code{background:var(--muted-bg);padding:1px 6px;border-radius:6px;font-size:12.5px}
+  .hidden{display:none}
+  .summ{display:flex;gap:22px;flex-wrap:wrap;margin:2px 0 12px}
+  .summ b{font-size:22px;font-family:Fraunces,serif;display:block}
+  .summ span{color:var(--muted);font-size:12px}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid #d9d3c4;border-top-color:var(--orange);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  body.embed header .brand img, body.embed h1, body.embed .sub{display:none}
+  body.embed header{margin-bottom:10px}
+  #gate{position:fixed;inset:0;background:var(--cream);display:flex;align-items:center;justify-content:center;z-index:50}
+  #gate .gatebox{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px 40px;text-align:center;max-width:420px}
+  #gate h2{margin-bottom:6px} #gate p{color:var(--muted);margin:0 0 20px}
+  #gsi{display:flex;justify-content:center} #gateErr{color:var(--bad);font-size:13px;margin-top:14px;min-height:16px}
+</style>
+</head>
+<body>
+<div id="gate" style="display:none"><div class="gatebox">
+  <h2>Enrich</h2>
+  <p>Sign in with your Raydar Google account to continue.</p>
+  <div id="gsi"></div><div id="gateErr"></div>
+</div></div>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <img src="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" />
+      <div><h1>Enrich</h1><div class="sub">Find candidates in a sequence with no email → look up their email via FullEnrich</div></div>
+    </div>
+    <span id="health" class="pill warn"><span class="dot"></span>checking…</span>
+  </header>
+
+  <div id="cfgBanner" class="banner bad hidden"></div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>Sequence</label>
+        <select id="seq"><option value="">Loading sequences…</option></select>
+      </div>
+      <button id="enrichBtn" class="btn go" disabled>Enrich Sequence</button>
+    </div>
+    <div class="note">Pulls everyone enrolled in the sequence who has <b>no email</b>, then asks FullEnrich for one. Nothing is written to Paraform until you review the results and hit <b>Apply</b>.</div>
+  </div>
+
+  <div id="out" class="card hidden"><h2 id="outTitle">Results</h2><div id="outBody"></div></div>
+</div>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+let SEQS=[], CANDS={}, POLL=null, CURRENT={};
+let AUTH={ required:false, clientId:null, token:null, domains:["raydar.xyz","raydargroup.com"] };
+const authHeaders = ()=> AUTH.token ? { "Authorization":"Bearer "+AUTH.token } : {};
+if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
+
+function setHealth(cls,txt){ const h=$("health"); h.className="pill "+cls; h.innerHTML='<span class="dot"></span>'+txt; }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function loadHealth(){
+  try{
+    const h = await fetch("/api/enrich/health").then(r=>r.json());
+    const banner=$("cfgBanner"); banner.classList.add("hidden");
+    if(h.paraform==="live" && h.fullenrich){ setHealth("live","Ready"); }
+    else if(!h.cookieSet || h.paraform==="no_cookie"){ setHealth("bad","No Paraform session");
+      banner.classList.remove("hidden"); banner.innerHTML="⚠️ Paraform session not configured — set <code>PARAFORM_COOKIE</code> and redeploy."; }
+    else if(h.paraform==="expired"){ setHealth("bad","Session expired");
+      banner.classList.remove("hidden"); banner.innerHTML="⚠️ Paraform session expired — refresh <code>PARAFORM_COOKIE</code>."; }
+    else if(!h.fullenrich){ setHealth("bad","No FullEnrich key");
+      banner.classList.remove("hidden"); banner.innerHTML="⚠️ FullEnrich not configured — set the <code>FULLENRICH_API_KEY</code> env var in this Vercel project, then redeploy."; }
+    else { setHealth("warn","Paraform: "+(h.paraform||"unknown")); }
+  }catch(e){ setHealth("bad","backend unreachable"); }
+}
+async function loadSeqs(){
+  try{
+    const d = await fetch("/api/seq/sequences",{headers:authHeaders()}).then(r=>r.json());
+    SEQS = d.sequences||[];
+    const sel=$("seq");
+    if(!SEQS.length){ sel.innerHTML='<option value="">(no sequences — session not set)</option>'; return; }
+    sel.innerHTML = '<option value="">Choose a sequence…</option>' + SEQS.map(s=>`<option value="${s.id}">${esc(s.name)}${s.enabled?"":" (disabled)"}</option>`).join("");
+  }catch(e){ $("seq").innerHTML='<option value="">(failed to load)</option>'; }
+}
+$("seq").addEventListener("change",()=>{ $("enrichBtn").disabled = !$("seq").value; });
+$("enrichBtn").addEventListener("click", startEnrich);
+
+function statusBadge(st){
+  const map={DELIVERABLE:"b-good",HIGH_PROBABILITY:"b-good",CATCH_ALL:"b-warn",INVALID:"b-bad",INVALID_DOMAIN:"b-bad"};
+  return `<span class="badge ${map[st]||"b-mut"}">${esc((st||"").replace(/_/g," ").toLowerCase())}</span>`;
+}
+
+async function startEnrich(){
+  if(POLL){ clearInterval(POLL); POLL=null; }
+  const sequenceId=$("seq").value; if(!sequenceId) return;
+  $("enrichBtn").disabled=true;
+  $("out").classList.remove("hidden");
+  $("outTitle").textContent="Enriching";
+  $("outBody").innerHTML='<div class="note"><span class="spin"></span>Finding candidates without an email…</div>';
+  let d;
+  try{ d = await fetch("/api/enrich/start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify({sequenceId})}).then(r=>r.json()); }
+  catch(e){ $("outBody").innerHTML='<div class="banner bad">Request failed: '+esc(e.message)+'</div>'; $("enrichBtn").disabled=false; return; }
+  if(!d.ok){
+    const msg = d.error==="no_fullenrich_key" ? "FullEnrich API key not set in this project." : d.error==="no_cookie" ? "Paraform session not set." : ("Error: "+esc(d.detail||d.error));
+    $("outBody").innerHTML='<div class="banner bad">'+msg+'</div>'; $("enrichBtn").disabled=false; return;
+  }
+  CURRENT={ sequenceId, sequence:d.sequence };
+  if(!d.emailless){
+    $("outTitle").textContent="Results";
+    $("outBody").innerHTML='<div class="banner good">✓ Everyone enrolled in <b>'+esc(d.sequence)+'</b> already has an email. Nothing to enrich.</div><div class="note">'+d.totalLeads+' leads checked.</div>';
+    $("enrichBtn").disabled=false; return;
+  }
+  CANDS={}; (d.candidates||[]).forEach(c=>CANDS[c.cuid]=c);
+  const over = d.overflow ? ` <span class="badge b-warn">+${d.overflow} more will need a second run</span>` : "";
+  $("outBody").innerHTML =
+    `<div class="summ"><div><b class="em">${d.emailless}</b><span>without email</span></div>`+
+    `<div><b class="em">${d.submitted}</b><span>sent to FullEnrich</span></div>`+
+    `<div><b class="em">${d.totalLeads}</b><span>total in sequence</span></div></div>`+
+    `<div class="note" id="progress"><span class="spin"></span>Looking up emails via FullEnrich… this takes a minute or two.${over}</div>`+
+    `<div id="cands" class="note">${(d.candidates||[]).map(c=>esc(c.name)).join(" · ")}</div>`;
+  pollStatus(d.enrichmentId);
+}
+
+function pollStatus(id){
+  let tries=0;
+  const tick=async()=>{
+    tries++;
+    let r; try{ r=await fetch("/api/enrich/status?id="+encodeURIComponent(id),{headers:authHeaders()}).then(x=>x.json()); }catch(e){ return; }
+    if(!r.ok) return;
+    const done=(r.results||[]).filter(x=>x.picked||x.work||x.personal).length;
+    const p=$("progress"); if(p) p.innerHTML=`<span class="spin"></span>Enriching… (${done}/${Object.keys(CANDS).length} resolved so far)`;
+    if(r.status==="FINISHED" || r.status==="CANCELED" || r.status==="CREDITS_INSUFFICIENT"){
+      clearInterval(POLL); POLL=null; renderResults(r);
+    }
+  };
+  tick(); POLL=setInterval(tick, 6000);
+}
+
+function renderResults(r){
+  CURRENT.results = r.results||[];
+  $("outTitle").textContent="Review & apply";
+  $("enrichBtn").disabled=false;
+  const rows=(r.results||[]);
+  const found=rows.filter(x=>x.picked).length;
+  let warn="";
+  if(r.status==="CREDITS_INSUFFICIENT") warn='<div class="banner warn">FullEnrich ran out of credits partway — top up and re-run to finish the rest.</div>';
+  if(r.status==="CANCELED") warn='<div class="banner warn">Enrichment was canceled.</div>';
+  let html = warn +
+    `<div class="summ"><div><b class="em">${found}</b><span>emails found</span></div>`+
+    `<div><b class="em">${rows.length}</b><span>candidates</span></div>`+
+    (r.credits!=null?`<div><b class="em">${r.credits}</b><span>credits used</span></div>`:"")+`</div>`+
+    `<div class="note">Pick which email to write for each. Rows default to the best match found; set to <b>Skip</b> to leave one out. <b>Apply</b> writes the email onto the Paraform candidate — which lets the sequence email them.</div>`+
+    `<table><tr><th>Candidate</th><th>Work email</th><th>Personal email</th><th>Use</th></tr>`;
+  for(const x of rows){
+    const c=CANDS[x.cuid]||{};
+    const li=c.linkedinUrl?` · <a href="${esc(c.linkedinUrl)}" target="_blank" rel="noopener">in↗</a>`:"";
+    const work = x.work?`${esc(x.work.email)}<br>${statusBadge(x.work.status)}`:'<span class="badge b-mut">none</span>';
+    const pers = x.personal?`${esc(x.personal.email)}<br>${statusBadge(x.personal.status)}`:'<span class="badge b-mut">none</span>';
+    const sel = x.picked ? x.picked.kind : "skip";
+    const opts = [
+      x.work?`<option value="work"${sel==="work"?" selected":""}>Work — ${esc(x.work.email)}</option>`:"",
+      x.personal?`<option value="personal"${sel==="personal"?" selected":""}>Personal — ${esc(x.personal.email)}</option>`:"",
+      `<option value="skip"${sel==="skip"?" selected":""}>Skip</option>`
+    ].join("");
+    html += `<tr data-cuid="${esc(x.cuid)}"><td><b>${esc(c.name||x.name||"—")}</b>${li}${c.company?`<br><span class="note">${esc(c.company)}</span>`:""}</td><td>${work}</td><td>${pers}</td><td><select class="use">${opts}</select></td></tr>`;
+  }
+  html += `</table><div style="margin-top:16px"><button id="applyBtn" class="btn go">Apply to Paraform</button> <span id="applyNote" class="note"></span></div>`;
+  $("outBody").innerHTML=html;
+  updateApplyNote();
+  $("outBody").querySelectorAll("select.use").forEach(s=>s.addEventListener("change",updateApplyNote));
+  $("applyBtn").addEventListener("click",applyEmails);
+}
+function collectItems(){
+  const items=[];
+  $("outBody").querySelectorAll("tr[data-cuid]").forEach(tr=>{
+    const cuid=tr.getAttribute("data-cuid"); const kind=tr.querySelector("select.use").value;
+    if(kind==="skip") return;
+    const x=(CURRENT.results||[]).find(z=>z.cuid===cuid); const c=CANDS[cuid]||{};
+    const email = kind==="work" ? x?.work?.email : x?.personal?.email;
+    if(email) items.push({cuid, ctcuid:c.ctcuid, email});
+  });
+  return items;
+}
+function updateApplyNote(){
+  const n=collectItems().length;
+  const b=$("applyBtn"); if(b) b.disabled = n===0;
+  const note=$("applyNote"); if(note) note.textContent = n? `${n} email${n>1?"s":""} will be written.` : "Nothing selected.";
+}
+async function applyEmails(){
+  const items=collectItems(); if(!items.length) return;
+  if(!confirm(`Write ${items.length} email${items.length>1?"s":""} onto Paraform candidates in "${CURRENT.sequence}"? This lets the sequence email them.`)) return;
+  const b=$("applyBtn"); b.disabled=true; b.textContent="Applying…";
+  let d; try{ d=await fetch("/api/enrich/apply",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify({sequenceId:CURRENT.sequenceId, items})}).then(r=>r.json()); }
+  catch(e){ $("applyNote").innerHTML='<span class="badge b-bad">failed: '+esc(e.message)+'</span>'; b.disabled=false; b.textContent="Apply to Paraform"; return; }
+  if(!d.ok){ $("applyNote").innerHTML='<span class="badge b-bad">'+esc(d.detail||d.error)+'</span>'; b.disabled=false; b.textContent="Apply to Paraform"; return; }
+  const failed=(d.applied||[]).filter(x=>!x.ok);
+  b.textContent="Applied";
+  let msg=`<div class="banner good" style="margin-top:14px">✓ Wrote <b>${d.appliedCount}</b> email${d.appliedCount===1?"":"s"} to Paraform`+
+    (d.verifiedOnLead!=null?` — <b>${d.verifiedOnLead}</b> now confirmed on their sequence lead`:"")+`.`+
+    (failed.length?` <b>${failed.length}</b> failed.`:"")+
+    (d.skippedInvalid?` ${d.skippedInvalid} skipped (invalid).`:"")+`</div>`;
+  if(failed.length) msg+=`<div class="note">Failed: ${failed.map(f=>esc((f.cuid||"")+" — "+(f.error||"error"))).join("; ")}</div>`;
+  $("outBody").insertAdjacentHTML("beforeend", msg);
+}
+
+async function init(){
+  loadHealth();
+  let cfg={}; try{ cfg=await fetch("/api/seq/config").then(r=>r.json()); }catch(e){}
+  AUTH.required=!!cfg.authRequired; AUTH.clientId=cfg.googleClientId;
+  if(Array.isArray(cfg.allowedDomains)&&cfg.allowedDomains.length) AUTH.domains=cfg.allowedDomains;
+  if(!AUTH.required){ loadSeqs(); return; }
+  $("gate").style.display="flex";
+  (function start(){
+    if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
+    google.accounts.id.initialize({ client_id:AUTH.clientId, callback:onCred });
+    google.accounts.id.renderButton($("gsi"),{ theme:"filled_black", size:"large", text:"signin_with", shape:"pill" });
+  })();
+}
+function onCred(resp){
+  try{
+    const p=JSON.parse(atob(resp.credential.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
+    const dom=(p.hd||(p.email||"").split("@")[1]||"").toLowerCase();
+    if(!AUTH.domains.includes(dom)){ $("gateErr").textContent="Use a "+AUTH.domains.join(" / ")+" account."; return; }
+    AUTH.token=resp.credential; $("gate").style.display="none"; loadHealth(); loadSeqs();
+  }catch(e){ $("gateErr").textContent="Sign-in failed — try again."; }
+}
+init();
+</script>
+</body>
+</html>
