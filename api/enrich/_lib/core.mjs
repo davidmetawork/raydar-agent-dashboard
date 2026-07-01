@@ -81,14 +81,22 @@ export async function findEmaillessCandidates(sequenceId) {
 }
 
 // ---------- FullEnrich ----------
-export async function startEnrichment(name, candidates) {
+// Map the page's checkbox keys → FullEnrich enrich_fields.
+const FIELD_MAP = { personal: "contact.personal_emails", work: "contact.work_emails", phone: "contact.phones" };
+export function toEnrichFields(want) {
+  const fields = (Array.isArray(want) && want.length ? want : ["personal"]).map((k) => FIELD_MAP[k]).filter(Boolean);
+  return fields.length ? [...new Set(fields)] : ["contact.personal_emails"];
+}
+
+export async function startEnrichment(name, candidates, enrichFields) {
+  const fields = (Array.isArray(enrichFields) && enrichFields.length) ? enrichFields : ["contact.personal_emails"];
   const data = candidates.slice(0, FE_BULK_MAX).map((c) => {
     const row = {
       first_name: c.firstName || undefined,
       last_name: c.lastName || undefined,
       company_name: c.company || undefined,
       linkedin_url: c.linkedinUrl || undefined,
-      enrich_fields: ["contact.work_emails", "contact.personal_emails"],
+      enrich_fields: fields,
       custom: { cuid: c.cuid, ctcuid: c.ctcuid },
     };
     Object.keys(row).forEach((k) => row[k] === undefined && delete row[k]);
@@ -121,16 +129,18 @@ export async function getEnrichment(enrichmentId) {
     const ci = row.contact_info || {};
     const work = ci.most_probable_work_email || (ci.work_emails || [])[0] || null;
     const personal = ci.most_probable_personal_email || (ci.personal_emails || [])[0] || null;
-    // default pick: a "good" work email, else a "good" personal email, else nothing pre-selected
+    const phone = ci.most_probable_phone || (ci.phones || [])[0] || null;
+    // default email pick: prefer a "good" PERSONAL email, else a "good" work email
     let picked = null;
-    if (work && GOOD.has(work.status)) picked = { email: work.email, kind: "work", status: work.status };
-    else if (personal && GOOD.has(personal.status)) picked = { email: personal.email, kind: "personal", status: personal.status };
+    if (personal && GOOD.has(personal.status)) picked = { email: personal.email, kind: "personal", status: personal.status };
+    else if (work && GOOD.has(work.status)) picked = { email: work.email, kind: "work", status: work.status };
     return {
       cuid: row.custom?.cuid || null,
       ctcuid: row.custom?.ctcuid || null,
       name: row.input?.first_name ? `${row.input.first_name} ${row.input.last_name || ""}`.trim() : (row.profile?.full_name || ""),
       work: work ? { email: work.email, status: work.status } : null,
       personal: personal ? { email: personal.email, status: personal.status } : null,
+      phone: phone ? { number: phone.number, region: phone.region || null } : null,
       picked,
     };
   });

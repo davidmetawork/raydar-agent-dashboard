@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, fullenrichConfigured, findEmaillessCandidates, startEnrichment, FE_BULK_MAX } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, fullenrichConfigured, findEmaillessCandidates, startEnrichment, toEnrichFields, FE_BULK_MAX } from "./_lib/core.mjs";
 
 // POST { sequenceId } → finds emailless candidates in the sequence and kicks off a
 // FullEnrich bulk lookup. Returns the enrichment id to poll + the candidate list.
@@ -12,13 +12,14 @@ export default async function handler(req, res) {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const sequenceId = body.sequenceId;
     if (!sequenceId) return res.status(400).json({ ok: false, error: "sequenceId required" });
+    const enrichFields = toEnrichFields(body.fields); // which of personal/work/phone to look up
 
     const { sequence, totalLeads, candidates, skipped } = await findEmaillessCandidates(sequenceId);
     if (!candidates.length) {
       return res.status(200).json({ ok: true, sequence, totalLeads, emailless: 0, skipped, candidates: [], enrichmentId: null, note: "No emailless candidates to enrich." });
     }
     const batch = candidates.slice(0, FE_BULK_MAX);
-    const { enrichmentId, submitted } = await startEnrichment(`Raydar · ${sequence}`, batch);
+    const { enrichmentId, submitted } = await startEnrichment(`Raydar · ${sequence}`, batch, enrichFields);
     res.status(200).json({
       ok: true, sequence, totalLeads,
       emailless: candidates.length, submitted, skipped,

@@ -35,6 +35,9 @@
   select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink)}
   td select{padding:7px 8px;border-radius:9px}
   .row{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:end}
+  .checks{display:flex;gap:20px;flex-wrap:wrap;margin-top:16px}
+  .ck{display:flex;align-items:center;gap:7px;font-weight:500;margin:0;cursor:pointer}
+  .ck input{width:16px;height:16px;accent-color:var(--orange);cursor:pointer}
   .btn{display:inline-flex;align-items:center;gap:7px;padding:11px 18px;border-radius:11px;border:1px solid var(--ink);background:var(--ink);color:var(--cream);font-weight:600;cursor:pointer;white-space:nowrap}
   .btn.ghost{background:#fff;color:var(--ink)}
   .btn.go{background:var(--orange);border-color:var(--orange);color:#fff}
@@ -91,7 +94,12 @@
       </div>
       <button id="enrichBtn" class="btn go" disabled>Enrich Sequence</button>
     </div>
-    <div class="note">Pulls everyone enrolled in the sequence who has <b>no email</b>, then asks FullEnrich for one. Nothing is written to Paraform until you review the results and hit <b>Apply</b>.</div>
+    <div class="checks">
+      <label class="ck"><input type="checkbox" id="ck-personal" checked> Personal email</label>
+      <label class="ck"><input type="checkbox" id="ck-work"> Work email</label>
+      <label class="ck"><input type="checkbox" id="ck-phone"> Phone number</label>
+    </div>
+    <div class="note">Pulls everyone enrolled in the sequence who has <b>no email</b>, then asks FullEnrich for the checked fields. Emails get written back to Paraform after you review and hit <b>Apply</b>; phone numbers are shown for you to use (Paraform has no candidate-phone field to write into).</div>
   </div>
 
   <div id="out" class="card hidden"><h2 id="outTitle">Results</h2><div id="outBody"></div></div>
@@ -130,7 +138,10 @@ async function loadSeqs(){
     sel.innerHTML = '<option value="">Choose a sequence…</option>' + SEQS.map(s=>`<option value="${s.id}">${esc(s.name)}${s.enabled?"":" (disabled)"}</option>`).join("");
   }catch(e){ $("seq").innerHTML='<option value="">(failed to load)</option>'; }
 }
-$("seq").addEventListener("change",()=>{ $("enrichBtn").disabled = !$("seq").value; });
+function selectedFields(){ const f=[]; if($("ck-personal").checked)f.push("personal"); if($("ck-work").checked)f.push("work"); if($("ck-phone").checked)f.push("phone"); return f; }
+function refreshEnrichBtn(){ $("enrichBtn").disabled = !$("seq").value || selectedFields().length===0; }
+$("seq").addEventListener("change", refreshEnrichBtn);
+["ck-personal","ck-work","ck-phone"].forEach(id=>$(id).addEventListener("change", refreshEnrichBtn));
 $("enrichBtn").addEventListener("click", startEnrich);
 
 function statusBadge(st){
@@ -145,18 +156,19 @@ async function startEnrich(){
   $("out").classList.remove("hidden");
   $("outTitle").textContent="Enriching";
   $("outBody").innerHTML='<div class="note"><span class="spin"></span>Finding candidates without an email…</div>';
+  const fields = selectedFields();
   let d;
-  try{ d = await fetch("/api/enrich/start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify({sequenceId})}).then(r=>r.json()); }
-  catch(e){ $("outBody").innerHTML='<div class="banner bad">Request failed: '+esc(e.message)+'</div>'; $("enrichBtn").disabled=false; return; }
+  try{ d = await fetch("/api/enrich/start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify({sequenceId, fields})}).then(r=>r.json()); }
+  catch(e){ $("outBody").innerHTML='<div class="banner bad">Request failed: '+esc(e.message)+'</div>'; refreshEnrichBtn(); return; }
   if(!d.ok){
     const msg = d.error==="no_fullenrich_key" ? "FullEnrich API key not set in this project." : d.error==="no_cookie" ? "Paraform session not set." : ("Error: "+esc(d.detail||d.error));
-    $("outBody").innerHTML='<div class="banner bad">'+msg+'</div>'; $("enrichBtn").disabled=false; return;
+    $("outBody").innerHTML='<div class="banner bad">'+msg+'</div>'; refreshEnrichBtn(); return;
   }
-  CURRENT={ sequenceId, sequence:d.sequence };
+  CURRENT={ sequenceId, sequence:d.sequence, fields };
   if(!d.emailless){
     $("outTitle").textContent="Results";
     $("outBody").innerHTML='<div class="banner good">✓ Everyone enrolled in <b>'+esc(d.sequence)+'</b> already has an email. Nothing to enrich.</div><div class="note">'+d.totalLeads+' leads checked.</div>';
-    $("enrichBtn").disabled=false; return;
+    refreshEnrichBtn(); return;
   }
   CANDS={}; (d.candidates||[]).forEach(c=>CANDS[c.cuid]=c);
   const over = d.overflow ? ` <span class="badge b-warn">+${d.overflow} more will need a second run</span>` : "";
@@ -187,41 +199,65 @@ function pollStatus(id){
 function renderResults(r){
   CURRENT.results = r.results||[];
   $("outTitle").textContent="Review & apply";
-  $("enrichBtn").disabled=false;
+  refreshEnrichBtn();
   const rows=(r.results||[]);
-  const found=rows.filter(x=>x.picked).length;
+  const fields = CURRENT.fields || ["personal"];
+  const wantPersonal = fields.includes("personal"), wantWork = fields.includes("work"), wantPhone = fields.includes("phone");
+  const emailKinds = [ wantPersonal?"personal":null, wantWork?"work":null ].filter(Boolean); // Paraform-writable
+  const found=rows.filter(x=> (wantPersonal&&x.personal) || (wantWork&&x.work) ).length;
+  const phonesFound = rows.filter(x=>x.phone).length;
   let warn="";
   if(r.status==="CREDITS_INSUFFICIENT") warn='<div class="banner warn">FullEnrich ran out of credits partway — top up and re-run to finish the rest.</div>';
   if(r.status==="CANCELED") warn='<div class="banner warn">Enrichment was canceled.</div>';
+
   let html = warn +
-    `<div class="summ"><div><b class="em">${found}</b><span>emails found</span></div>`+
+    `<div class="summ">`+
+    (emailKinds.length?`<div><b class="em">${found}</b><span>emails found</span></div>`:"")+
+    (wantPhone?`<div><b class="em">${phonesFound}</b><span>phones found</span></div>`:"")+
     `<div><b class="em">${rows.length}</b><span>candidates</span></div>`+
     (r.credits!=null?`<div><b class="em">${r.credits}</b><span>credits used</span></div>`:"")+`</div>`+
-    `<div class="note">Pick which email to write for each. Rows default to the best match found; set to <b>Skip</b> to leave one out. <b>Apply</b> writes the email onto the Paraform candidate — which lets the sequence email them.</div>`+
-    `<table><tr><th>Candidate</th><th>Work email</th><th>Personal email</th><th>Use</th></tr>`;
+    (emailKinds.length
+      ? `<div class="note">Pick which email to write for each. Rows default to the best match found; set to <b>Skip</b> to leave one out. <b>Apply</b> writes the email onto the Paraform candidate — which lets the sequence email them.${wantPhone?" Phone numbers are shown for reference only (not written to Paraform)." : ""}</div>`
+      : `<div class="banner warn">Only phone was selected — phone numbers can't be written to Paraform (no candidate-phone field), so they're shown here for you to copy/use.</div>`);
+
+  html += `<table><tr><th>Candidate</th>`+
+    (wantPersonal?`<th>Personal email</th>`:"")+
+    (wantWork?`<th>Work email</th>`:"")+
+    (wantPhone?`<th>Phone</th>`:"")+
+    (emailKinds.length?`<th>Use</th>`:"")+`</tr>`;
   for(const x of rows){
     const c=CANDS[x.cuid]||{};
     const li=c.linkedinUrl?` · <a href="${esc(c.linkedinUrl)}" target="_blank" rel="noopener">in↗</a>`:"";
-    const work = x.work?`${esc(x.work.email)}<br>${statusBadge(x.work.status)}`:'<span class="badge b-mut">none</span>';
-    const pers = x.personal?`${esc(x.personal.email)}<br>${statusBadge(x.personal.status)}`:'<span class="badge b-mut">none</span>';
-    const sel = x.picked ? x.picked.kind : "skip";
+    const cell=(e)=> e?`${esc(e.email)}<br>${statusBadge(e.status)}`:'<span class="badge b-mut">none</span>';
+    const phoneCell = x.phone?`${esc(x.phone.number)}${x.phone.region?` <span class="badge b-mut">${esc(x.phone.region)}</span>`:""}`:'<span class="badge b-mut">none</span>';
+    // default use = personal (preferred) then work, constrained to requested kinds
+    let sel="skip";
+    if(wantPersonal && x.personal) sel="personal"; else if(wantWork && x.work) sel="work";
     const opts = [
-      x.work?`<option value="work"${sel==="work"?" selected":""}>Work — ${esc(x.work.email)}</option>`:"",
-      x.personal?`<option value="personal"${sel==="personal"?" selected":""}>Personal — ${esc(x.personal.email)}</option>`:"",
+      (wantPersonal&&x.personal)?`<option value="personal"${sel==="personal"?" selected":""}>Personal — ${esc(x.personal.email)}</option>`:"",
+      (wantWork&&x.work)?`<option value="work"${sel==="work"?" selected":""}>Work — ${esc(x.work.email)}</option>`:"",
       `<option value="skip"${sel==="skip"?" selected":""}>Skip</option>`
     ].join("");
-    html += `<tr data-cuid="${esc(x.cuid)}"><td><b>${esc(c.name||x.name||"—")}</b>${li}${c.company?`<br><span class="note">${esc(c.company)}</span>`:""}</td><td>${work}</td><td>${pers}</td><td><select class="use">${opts}</select></td></tr>`;
+    html += `<tr data-cuid="${esc(x.cuid)}"><td><b>${esc(c.name||x.name||"—")}</b>${li}${c.company?`<br><span class="note">${esc(c.company)}</span>`:""}</td>`+
+      (wantPersonal?`<td>${cell(x.personal)}</td>`:"")+
+      (wantWork?`<td>${cell(x.work)}</td>`:"")+
+      (wantPhone?`<td>${phoneCell}</td>`:"")+
+      (emailKinds.length?`<td><select class="use">${opts}</select></td>`:"")+`</tr>`;
   }
-  html += `</table><div style="margin-top:16px"><button id="applyBtn" class="btn go">Apply to Paraform</button> <span id="applyNote" class="note"></span></div>`;
+  html += `</table>`;
+  if(emailKinds.length) html += `<div style="margin-top:16px"><button id="applyBtn" class="btn go">Apply to Paraform</button> <span id="applyNote" class="note"></span></div>`;
   $("outBody").innerHTML=html;
-  updateApplyNote();
-  $("outBody").querySelectorAll("select.use").forEach(s=>s.addEventListener("change",updateApplyNote));
-  $("applyBtn").addEventListener("click",applyEmails);
+  if(emailKinds.length){
+    updateApplyNote();
+    $("outBody").querySelectorAll("select.use").forEach(s=>s.addEventListener("change",updateApplyNote));
+    $("applyBtn").addEventListener("click",applyEmails);
+  }
 }
 function collectItems(){
   const items=[];
   $("outBody").querySelectorAll("tr[data-cuid]").forEach(tr=>{
-    const cuid=tr.getAttribute("data-cuid"); const kind=tr.querySelector("select.use").value;
+    const useSel=tr.querySelector("select.use"); if(!useSel) return;
+    const cuid=tr.getAttribute("data-cuid"); const kind=useSel.value;
     if(kind==="skip") return;
     const x=(CURRENT.results||[]).find(z=>z.cuid===cuid); const c=CANDS[cuid]||{};
     const email = kind==="work" ? x?.work?.email : x?.personal?.email;
