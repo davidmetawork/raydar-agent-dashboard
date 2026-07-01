@@ -14,17 +14,25 @@ export default async function handler(req, res) {
     if (!sequenceId) return res.status(400).json({ ok: false, error: "sequenceId required" });
     const enrichFields = toEnrichFields(body.fields); // which of personal/work/phone to look up
 
-    const { sequence, totalLeads, candidates, skipped } = await findEmaillessCandidates(sequenceId);
-    if (!candidates.length) {
-      return res.status(200).json({ ok: true, sequence, totalLeads, emailless: 0, skipped, candidates: [], enrichmentId: null, note: "No emailless candidates to enrich." });
+    const { sequence, totalLeads, toEnrich, onFile, skipped } = await findEmaillessCandidates(sequenceId);
+    const onFileOut = onFile.map((c) => ({ cuid: c.cuid, ctcuid: c.ctcuid, name: c.name, linkedinUrl: c.linkedinUrl, company: c.company, email: c.email }));
+
+    if (!toEnrich.length) {
+      // nothing to look up — either fully covered, or only on-file emails to copy across
+      return res.status(200).json({
+        ok: true, sequence, totalLeads, emailless: onFile.length, skipped,
+        onFile: onFileOut, candidates: [], enrichmentId: null,
+        note: onFile.length ? "" : "No emailless candidates.",
+      });
     }
-    const batch = candidates.slice(0, FE_BULK_MAX);
+    const batch = toEnrich.slice(0, FE_BULK_MAX);
     const { enrichmentId, submitted } = await startEnrichment(`Raydar · ${sequence}`, batch, enrichFields);
     res.status(200).json({
       ok: true, sequence, totalLeads,
-      emailless: candidates.length, submitted, skipped,
-      overflow: Math.max(0, candidates.length - FE_BULK_MAX),
+      emailless: toEnrich.length + onFile.length, submitted, skipped,
+      overflow: Math.max(0, toEnrich.length - FE_BULK_MAX),
       enrichmentId,
+      onFile: onFileOut,
       candidates: batch.map((c) => ({ cuid: c.cuid, ctcuid: c.ctcuid, name: c.name, linkedinUrl: c.linkedinUrl, company: c.company })),
     });
   } catch (e) {

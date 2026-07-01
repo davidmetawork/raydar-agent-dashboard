@@ -164,19 +164,24 @@ async function startEnrich(){
     const msg = d.error==="no_fullenrich_key" ? "FullEnrich API key not set in this project." : d.error==="no_cookie" ? "Paraform session not set." : ("Error: "+esc(d.detail||d.error));
     $("outBody").innerHTML='<div class="banner bad">'+msg+'</div>'; refreshEnrichBtn(); return;
   }
-  CURRENT={ sequenceId, sequence:d.sequence, fields };
+  CURRENT={ sequenceId, sequence:d.sequence, fields, onFile:(d.onFile||[]) };
   if(!d.emailless){
     $("outTitle").textContent="Results";
     $("outBody").innerHTML='<div class="banner good">✓ Everyone enrolled in <b>'+esc(d.sequence)+'</b> already has an email. Nothing to enrich.</div><div class="note">'+d.totalLeads+' leads checked.</div>';
     refreshEnrichBtn(); return;
   }
-  CANDS={}; (d.candidates||[]).forEach(c=>CANDS[c.cuid]=c);
+  CANDS={};
+  (d.candidates||[]).forEach(c=>CANDS[c.cuid]=c);
+  (d.onFile||[]).forEach(c=>CANDS[c.cuid]=c);
+  // Nothing to look up (only on-file emails to copy across) → straight to review.
+  if(!d.enrichmentId){ renderResults({status:"FINISHED", results:[]}); return; }
   const over = d.overflow ? ` <span class="badge b-warn">+${d.overflow} more will need a second run</span>` : "";
+  const onFileNote = (d.onFile&&d.onFile.length) ? ` <span class="badge b-mut">${d.onFile.length} already have an email on file (no lookup needed)</span>` : "";
   $("outBody").innerHTML =
     `<div class="summ"><div><b class="em">${d.emailless}</b><span>without email</span></div>`+
     `<div><b class="em">${d.submitted}</b><span>sent to FullEnrich</span></div>`+
     `<div><b class="em">${d.totalLeads}</b><span>total in sequence</span></div></div>`+
-    `<div class="note" id="progress"><span class="spin"></span>Looking up emails via FullEnrich… this takes a minute or two.${over}</div>`+
+    `<div class="note" id="progress"><span class="spin"></span>Looking up emails via FullEnrich… this takes a minute or two.${over}${onFileNote}</div>`+
     `<div id="cands" class="note">${(d.candidates||[]).map(c=>esc(c.name)).join(" · ")}</div>`;
   pollStatus(d.enrichmentId);
 }
@@ -196,15 +201,19 @@ function pollStatus(id){
   tick(); POLL=setInterval(tick, 6000);
 }
 
+const GOOD_STATUS = new Set(["DELIVERABLE","HIGH_PROBABILITY"]);
 function renderResults(r){
-  CURRENT.results = r.results||[];
   $("outTitle").textContent="Review & apply";
   refreshEnrichBtn();
-  const rows=(r.results||[]);
   const fields = CURRENT.fields || ["personal"];
   const wantPersonal = fields.includes("personal"), wantWork = fields.includes("work"), wantPhone = fields.includes("phone");
   const emailKinds = [ wantPersonal?"personal":null, wantWork?"work":null ].filter(Boolean); // Paraform-writable
-  const found=rows.filter(x=> (wantPersonal&&x.personal) || (wantWork&&x.work) ).length;
+  // On-file candidates (email already known) render as rows too, pre-selected.
+  const onFileRows = (CURRENT.onFile||[]).map(c=>({ cuid:c.cuid, ctcuid:c.ctcuid, name:c.name, onFile:{email:c.email}, personal:null, work:null, phone:null }));
+  const rows = onFileRows.concat(r.results||[]);
+  CURRENT.results = rows;
+
+  const found=rows.filter(x=> x.onFile || (wantPersonal&&x.personal) || (wantWork&&x.work) ).length;
   const phonesFound = rows.filter(x=>x.phone).length;
   let warn="";
   if(r.status==="CREDITS_INSUFFICIENT") warn='<div class="banner warn">FullEnrich ran out of credits partway — top up and re-run to finish the rest.</div>';
@@ -212,12 +221,12 @@ function renderResults(r){
 
   let html = warn +
     `<div class="summ">`+
-    (emailKinds.length?`<div><b class="em">${found}</b><span>emails found</span></div>`:"")+
+    (emailKinds.length?`<div><b class="em">${found}</b><span>emails to write</span></div>`:"")+
     (wantPhone?`<div><b class="em">${phonesFound}</b><span>phones found</span></div>`:"")+
     `<div><b class="em">${rows.length}</b><span>candidates</span></div>`+
     (r.credits!=null?`<div><b class="em">${r.credits}</b><span>credits used</span></div>`:"")+`</div>`+
     (emailKinds.length
-      ? `<div class="note">Pick which email to write for each. Rows default to the best match found; set to <b>Skip</b> to leave one out. <b>Apply</b> writes the email onto the Paraform candidate — which lets the sequence email them.${wantPhone?" Phone numbers are shown for reference only (not written to Paraform)." : ""}</div>`
+      ? `<div class="note">Pick which email to write for each. Only <b>deliverable</b> matches are pre-selected — anything <b>invalid</b> or <b>catch-all</b> defaults to Skip (choose it manually if you trust it). <b>Apply</b> writes the email onto the candidate <b>and their sequence lead</b>, which lets the sequence email them.${wantPhone?" Phone numbers are shown for reference only (not written to Paraform)." : ""}</div>`
       : `<div class="banner warn">Only phone was selected — phone numbers can't be written to Paraform (no candidate-phone field), so they're shown here for you to copy/use.</div>`);
 
   html += `<table><tr><th>Candidate</th>`+
@@ -228,19 +237,23 @@ function renderResults(r){
   for(const x of rows){
     const c=CANDS[x.cuid]||{};
     const li=c.linkedinUrl?` · <a href="${esc(c.linkedinUrl)}" target="_blank" rel="noopener">in↗</a>`:"";
-    const cell=(e)=> e?`${esc(e.email)}<br>${statusBadge(e.status)}`:'<span class="badge b-mut">none</span>';
+    const cell=(e)=> e?`${esc(e.email)}<br>${statusBadge(e.status)}`:(x.onFile?'<span class="badge b-mut">on file</span>':'<span class="badge b-mut">none</span>');
     const phoneCell = x.phone?`${esc(x.phone.number)}${x.phone.region?` <span class="badge b-mut">${esc(x.phone.region)}</span>`:""}`:'<span class="badge b-mut">none</span>';
-    // default use = personal (preferred) then work, constrained to requested kinds
+    // default: on-file first; else a DELIVERABLE personal, then deliverable work. Bad/unknown → Skip.
     let sel="skip";
-    if(wantPersonal && x.personal) sel="personal"; else if(wantWork && x.work) sel="work";
+    if(x.onFile) sel="onfile";
+    else if(wantPersonal && x.personal && GOOD_STATUS.has(x.personal.status)) sel="personal";
+    else if(wantWork && x.work && GOOD_STATUS.has(x.work.status)) sel="work";
     const opts = [
+      x.onFile?`<option value="onfile"${sel==="onfile"?" selected":""}>On file — ${esc(x.onFile.email)}</option>`:"",
       (wantPersonal&&x.personal)?`<option value="personal"${sel==="personal"?" selected":""}>Personal — ${esc(x.personal.email)}</option>`:"",
       (wantWork&&x.work)?`<option value="work"${sel==="work"?" selected":""}>Work — ${esc(x.work.email)}</option>`:"",
       `<option value="skip"${sel==="skip"?" selected":""}>Skip</option>`
     ].join("");
+    const personalCell = x.onFile ? `<span class="badge b-mut">on file</span>` : cell(x.personal);
     html += `<tr data-cuid="${esc(x.cuid)}"><td><b>${esc(c.name||x.name||"—")}</b>${li}${c.company?`<br><span class="note">${esc(c.company)}</span>`:""}</td>`+
-      (wantPersonal?`<td>${cell(x.personal)}</td>`:"")+
-      (wantWork?`<td>${cell(x.work)}</td>`:"")+
+      (wantPersonal?`<td>${x.onFile?`${esc(x.onFile.email)}<br><span class="badge b-mut">on file</span>`:cell(x.personal)}</td>`:"")+
+      (wantWork?`<td>${x.onFile?'<span class="badge b-mut">—</span>':cell(x.work)}</td>`:"")+
       (wantPhone?`<td>${phoneCell}</td>`:"")+
       (emailKinds.length?`<td><select class="use">${opts}</select></td>`:"")+`</tr>`;
   }
@@ -260,7 +273,7 @@ function collectItems(){
     const cuid=tr.getAttribute("data-cuid"); const kind=useSel.value;
     if(kind==="skip") return;
     const x=(CURRENT.results||[]).find(z=>z.cuid===cuid); const c=CANDS[cuid]||{};
-    const email = kind==="work" ? x?.work?.email : x?.personal?.email;
+    const email = kind==="onfile" ? x?.onFile?.email : kind==="work" ? x?.work?.email : x?.personal?.email;
     if(email) items.push({cuid, ctcuid:c.ctcuid, email});
   });
   return items;

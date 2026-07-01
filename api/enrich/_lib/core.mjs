@@ -54,31 +54,45 @@ function currentCompany(cand) {
   return current?.company_name || "";
 }
 
-// One getCampaign call → the emailless candidates in a sequence, with enrichment inputs.
-// Returns { sequence, totalLeads, candidates:[{cuid, ctcuid, name, linkedinUrl, company, firstName, lastName}], skipped }
+function firstEmail(arr) {
+  for (const e of (Array.isArray(arr) ? arr : [])) {
+    const em = (typeof e === "string" ? e : e?.email || "").trim();
+    if (em) return em;
+  }
+  return "";
+}
+
+// One getCampaign call → the sequence leads that have no email ON THE LEAD.
+// Splits them: `onFile` = the candidate already has an email on record (just needs copying
+// to the lead — no FullEnrich, no credit) vs `toEnrich` = no email anywhere (FullEnrich).
+// Returns { sequence, totalLeads, toEnrich:[...], onFile:[{cuid,ctcuid,name,email,...}], skipped }
 export async function findEmaillessCandidates(sequenceId) {
   const camp = await trpcGet("campaigns.getCampaign", { campaign_id: sequenceId });
   if (!camp) throw new Error("sequence not found");
   const leads = Array.isArray(camp.campaign_to_candidate_users) ? camp.campaign_to_candidate_users : [];
 
-  const candidates = [];
+  const toEnrich = [], onFile = [];
   let skipped = 0;
   for (const l of leads) {
-    if ((l.candidate_email || "").trim()) continue;   // already has an email
+    if ((l.candidate_email || "").trim()) continue;   // lead already has an email
     if (l.is_archived) continue;                       // not an active lead
-    const cand = l.candidate_user?.candidate || {};
+    const cu = l.candidate_user || {};
+    const cand = cu.candidate || {};
     const { first, last } = splitName(cand.name);
     const li = linkedinUrl(cand.linkedin_user);
-    if (!first && !li) { skipped++; continue; }        // nothing to enrich on
-    candidates.push({
-      cuid: l.candidate_user_id,
-      ctcuid: l.id,
+    const base = {
+      cuid: l.candidate_user_id, ctcuid: l.id,
       name: (cand.name || "").trim() || `${first} ${last}`.trim(),
       firstName: first, lastName: last,
       linkedinUrl: li, company: currentCompany(cand),
-    });
+    };
+    // candidate already has an email on record → copy to lead, don't re-enrich
+    const known = firstEmail(cu.emails) || firstEmail(cand.emails);
+    if (known) { onFile.push({ ...base, email: known }); continue; }
+    if (!first && !li) { skipped++; continue; }        // nothing to enrich on
+    toEnrich.push(base);
   }
-  return { sequence: camp.name, totalLeads: leads.length, candidates, skipped };
+  return { sequence: camp.name, totalLeads: leads.length, toEnrich, onFile, skipped };
 }
 
 // ---------- FullEnrich ----------
@@ -162,15 +176,20 @@ export async function applyEmails(items) {
       const it = queue[idx++];
       const email = String(it.email).trim();
       const rec = { cuid: it.cuid, email, ok: false, sequenceUpdated: false };
+      // 1) set the email on the candidate record (so the lead-email write has a known email)
       try {
         await trpcPost("candidateUser.updateCandidateUserEmailForUser", { candidate_user_id: it.cuid, email });
-        rec.ok = true;
       } catch (e) { rec.error = String(e.message || e).slice(0, 160); }
+      // 2) set the LEAD's email — this is what the sequence actually sends from.
+      //    Field is `candidate_email` (verified via readback; `email` silently no-ops).
       if (it.ctcuid) {
         try {
-          await trpcPost("campaigns.updateSequenceCandidateEmail", { campaign_to_candidate_user_id: it.ctcuid, email });
+          await trpcPost("campaigns.updateSequenceCandidateEmail", { campaign_to_candidate_user_id: it.ctcuid, candidate_email: email });
           rec.sequenceUpdated = true;
-        } catch { /* best-effort; global email is the source of truth */ }
+          rec.ok = true; // the lead now carries the email → sequence can send
+        } catch (e) { rec.error = rec.error || String(e.message || e).slice(0, 160); }
+      } else {
+        rec.ok = !rec.error; // no lead id (shouldn't happen) → fall back to global-only success
       }
       out.push(rec);
     }
