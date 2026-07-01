@@ -202,6 +202,46 @@ export async function enrollIntoCampaign(campaignId, candidateUserIds) {
   return { enrolled: candidateUserIds.length };
 }
 
+// CrustData enrichment often can't find an email, leaving the lead un-sendable even
+// though the CSV had one. Set it explicitly: candidate record first (so it's a valid
+// source), then the per-lead send-to address. Both are best-effort/idempotent.
+export async function setCandidateEmail(candidateUserId, email) {
+  if (!email) return;
+  try { await trpcPost("candidateUser.updateCandidateUserEmailForUser", { candidate_user_id: candidateUserId, email }); } catch { /* non-fatal */ }
+}
+export async function setLeadEmail(ccuId, email) {
+  if (!ccuId || !email) return;
+  try { await trpcPost("campaigns.updateSequenceCandidateEmail", { campaign_to_candidate_user_id: ccuId, candidate_email: email }); } catch { /* non-fatal */ }
+}
+// After enrolling, map candidate_user_id -> campaign_to_candidate_user_id for a campaign.
+export async function ccuIndex(campaignId) {
+  const c = await trpcGet("campaigns.getCampaign", { campaign_id: campaignId });
+  const m = new Map();
+  for (const cc of (c?.campaign_to_candidate_users || [])) m.set(cc.candidate_user_id, { ccuId: cc.id, email: cc.candidate_email });
+  return m;
+}
+
+// Build the set of candidate_user_ids already enrolled in ANY of the recruiter's
+// sequences. Used to skip anyone already in a sequence (the "don't re-message"
+// rule) — this also makes re-running the same cohort a no-op (dedup/no double-email).
+// One scan per enroll (getCampaign per sequence, bounded concurrency).
+export async function enrolledElsewhereSet() {
+  const seqs = (await trpcGet("campaigns.getListOfCampaignsOptimized", {})) || [];
+  const set = new Set();
+  let i = 0;
+  const worker = async () => {
+    while (i < seqs.length) {
+      const s = seqs[i++];
+      try {
+        const c = await trpcGet("campaigns.getCampaign", { campaign_id: s.id });
+        for (const cc of (c?.campaign_to_candidate_users || [])) set.add(cc.candidate_user_id);
+      } catch { /* skip unreadable */ }
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  return set;
+}
+
 // ---------- plan builder (shared by preview + enroll) ----------
 // rows: [{firstName,lastName,email,linkedinUrl,activeProject}]
 export async function buildPlan({ sequenceId, rows, sendAs }) {
@@ -226,6 +266,7 @@ export async function buildPlan({ sequenceId, rows, sendAs }) {
   const mkGroup = (title, targetName, targetId, grows) => ({
     title, targetName, targetId,
     exists: targetId ? true : seqs.some((s) => s.name === targetName),
+    rows: grows,                                            // all rows (carry email + linkedinUrl through)
     existingIds: grows.filter((r) => r.candidate_user_id).map((r) => r.candidate_user_id),
     toCreate: grows.filter((r) => !r.candidate_user_id),   // rows needing createExternalCandidateFromManual
     candidateCount: grows.length,

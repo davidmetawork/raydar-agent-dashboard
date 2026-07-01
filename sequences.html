@@ -223,14 +223,17 @@ function renderResult(kind, d){
   for(const g of groups){
     const flag = kind==="preview" ? (g.willCreateSequence?'<span class="tag new">will create</span>':'<span class="tag exist">exists</span>')
                                   : (g.createdSequence?'<span class="tag new">created</span>':(g.error?('<span class="tag" style="background:var(--bad-bg);color:var(--bad)">error</span>'):'<span class="tag exist">enrolled</span>'));
-    html += `<tr><td>${g.role||"—"}</td><td>${g.target||""}</td><td>${g.candidates ?? g.enrolled ?? 0}</td><td>${flag}${g.error?(" "+g.error):""}</td></tr>`;
+    const skip = (g.willSkip||g.skipped) ? ` <span class="tag" style="background:#f3ede0;color:#8a7f66">${g.willSkip||g.skipped} skipped</span>` : "";
+    html += `<tr><td>${g.role||"—"}</td><td>${g.target||""}</td><td>${g.candidates ?? g.enrolled ?? 0}</td><td>${flag}${skip}${g.error?(" "+g.error):""}</td></tr>`;
   }
   html += `</table>`;
   if(kind==="preview"){
     const un = d.unmatchedSample||[];
     if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} new to Paraform</b> — will be auto-created from their LinkedIn URL and enrolled: `+un.map(u=>u.email).join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
+    if(d.skipEstimate){ html += `<div class="note" style="margin-top:8px"><b>~${d.skipEstimate} already in another sequence</b> — these will be skipped at enroll (not re-messaged). Final count is confirmed on enroll.</div>`; }
   }
   if(kind==="enroll"){
+    if(d.skippedTotal){ const ss=(d.skippedSample||[]).map(s=>s.email).filter(Boolean); html += `<div class="note" style="margin-top:12px"><b>${d.skippedTotal} skipped</b> (already in another sequence — not re-messaged)${ss.length?": "+ss.join(", "):""}.</div>`; }
     const cf = d.createFailures||[];
     if(cf.length){ html += `<div class="banner bad" style="margin-top:12px"><b>${d.failedTotal} could not be created</b> (bad/dead LinkedIn URL — enroll the rest, fix these by hand): `+cf.map(f=>(f.email||"?")+" — "+f.reason).join("; ")+`</div>`; }
     html += `<div class="note">Ran at ${d.ranAt}.</div>`;
