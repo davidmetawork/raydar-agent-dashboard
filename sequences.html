@@ -169,8 +169,16 @@ drop.addEventListener("click", ()=>$("file").click());
 drop.addEventListener("drop", e=>{ if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
 $("file").addEventListener("change", e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
 
-function handleFile(file){
-  Papa.parse(file,{header:true,skipEmptyLines:true,complete:(res)=>{
+async function handleFile(file){
+  // merge-csv.com prepends a "# CSV-File created…" banner + blank line above the real
+  // header row; Papa would treat that banner as the header -> columns unmapped -> 0 rows.
+  // Strip leading comment/blank lines first, then parse. (Papa's own comments:"#" option
+  // corrupts the quoted data fields here, so we do it deterministically.)
+  let text = await file.text();
+  const L = text.split(/\r?\n/); let s = 0;
+  while (s < L.length && (L[s].trim() === "" || L[s].trim().startsWith("#"))) s++;
+  text = L.slice(s).join("\n");
+  Papa.parse(text,{header:true,skipEmptyLines:true,complete:(res)=>{
     const raw = res.data||[];
     ROWS = raw.map(r=>({
       firstName:(r["First Name"]||"").trim(), lastName:(r["Last Name"]||"").trim(),
