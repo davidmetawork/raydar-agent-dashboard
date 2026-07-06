@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, bookedSet } from "./_lib/core.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -30,37 +30,44 @@ export default async function handler(req, res) {
     const already = await enrolledElsewhereSet();
 
     const results = [];
-    let createdTotal = 0, failedTotal = 0, skippedTotal = 0;
+    let createdTotal = 0, failedTotal = 0, skippedTotal = 0, skippedBookedTotal = 0;
     const createFailures = [], skippedSample = [];
     for (const g of plan.groups) {
       try {
         // 1) Resolve each row to a candidate_user_id (create-from-LinkedIn if new;
-        //    idempotent by URL). Keep the CSV email alongside for the email fix.
+        //    idempotent by URL). Track isNew so we only booked-check pre-existing people.
         const resolved = await mapPool(g.rows || [], 4, async (row) => {
-          if (row.candidate_user_id) return { ok: true, cu: row.candidate_user_id, email: row.email };
+          if (row.candidate_user_id) return { ok: true, cu: row.candidate_user_id, email: row.email, isNew: false };
           const url = (row.linkedinUrl || "").trim();
           if (!url) return { ok: false, email: row.email, reason: "no LinkedIn URL" };
           try {
-            const { id } = await createCandidate(url);
-            return id ? { ok: true, cu: id, email: row.email, created: true } : { ok: false, email: row.email, reason: "no id returned" };
+            const { id, status } = await createCandidate(url);
+            return id ? { ok: true, cu: id, email: row.email, created: true, isNew: status === "new" } : { ok: false, email: row.email, reason: "no id returned" };
           } catch (e) {
             return { ok: false, email: row.email, reason: String(e.message || e).slice(0, 120) };
           }
         });
 
-        // 2) Split into skip (already in a sequence) / keep, tally create failures.
+        // 1b) Booked check — only pre-existing candidates can have booked a call, so
+        //     only they hit getCandidateProfileInfo (fast for fresh LinkedIn cohorts).
+        const preexisting = resolved.filter((r) => r.ok && !r.isNew).map((r) => r.cu);
+        const booked = await bookedSet(preexisting);
+
+        // 2) Split into skip / keep, tally reasons.
         const keep = []; // {cu,email}
         const createdIds = [];
+        let groupSkipped = 0;
         for (const r of resolved) {
           if (!r.ok) { failedTotal++; createFailures.push({ email: r.email, reason: r.reason }); continue; }
-          if (already.has(r.cu)) { skippedTotal++; if (skippedSample.length < 50) skippedSample.push({ email: r.email, role: g.title }); continue; }
+          if (booked.has(r.cu)) { skippedBookedTotal++; groupSkipped++; if (skippedSample.length < 50) skippedSample.push({ email: r.email, role: g.title, reason: "already booked a call" }); continue; }
+          if (already.has(r.cu)) { skippedTotal++; groupSkipped++; if (skippedSample.length < 50) skippedSample.push({ email: r.email, role: g.title, reason: "already in another sequence" }); continue; }
           keep.push({ cu: r.cu, email: r.email });
           if (r.created) createdIds.push(r.cu);
         }
         if (createdIds.length) createdTotal += createdIds.length;
 
         if (!keep.length) {
-          results.push({ role: g.title, target: g.targetName, enrolled: 0, created: createdIds.length, skipped: resolved.filter((r) => r.ok && already.has(r.cu)).length, note: "nobody new to enroll" });
+          results.push({ role: g.title, target: g.targetName, enrolled: 0, created: createdIds.length, skipped: groupSkipped, note: "nobody new to enroll" });
           continue;
         }
 
@@ -86,7 +93,6 @@ export default async function handler(req, res) {
           });
         } catch { /* non-fatal */ }
 
-        const groupSkipped = resolved.filter((x) => x.ok && already.has(x.cu)).length;
         results.push({ role: g.title, target: g.targetName, targetId, createdSequence, created: createdIds.length, enrolled: r.enrolled, skipped: groupSkipped });
       } catch (e) {
         results.push({ role: g.title, target: g.targetName, error: String(e.message || e).slice(0, 160) });
@@ -95,7 +101,8 @@ export default async function handler(req, res) {
     const enrolledTotal = results.reduce((n, r) => n + (r.enrolled || 0), 0);
     res.status(200).json({
       ok: true, sequence: plan.seq.name, sendAs: plan.sendAs,
-      enrolledTotal, createdTotal, failedTotal, skippedTotal,
+      enrolledTotal, createdTotal, failedTotal,
+      skippedTotal: skippedTotal + skippedBookedTotal, skippedInSequence: skippedTotal, skippedBookedTotal,
       createFailures: createFailures.slice(0, 50),
       skippedSample,
       groups: results, ranAt: new Date().toISOString(),

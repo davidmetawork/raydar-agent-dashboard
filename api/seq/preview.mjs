@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet, bookedSet } from "./_lib/core.mjs";
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
@@ -15,10 +15,19 @@ export default async function handler(req, res) {
     // out to exist under a different email are caught at enroll time — so this is a
     // lower bound. Reported as an estimate.
     const already = await enrolledElsewhereSet();
-    let skipEstimate = 0;
+    // Booked check only applies to CRM-matched rows (brand-new applicants can't have
+    // booked). Enroll re-checks authoritatively after upsert.
+    const matchedIds = plan.groups.flatMap((g) => (g.rows || []).filter((r) => r.candidate_user_id).map((r) => r.candidate_user_id));
+    const booked = await bookedSet(matchedIds);
+    let skipEstimate = 0, bookedEstimate = 0;
     const groups = plan.groups.map((g) => {
-      const gs = (g.rows || []).filter((r) => r.candidate_user_id && already.has(r.candidate_user_id)).length;
-      skipEstimate += gs;
+      let gs = 0, gb = 0;
+      for (const r of (g.rows || [])) {
+        if (!r.candidate_user_id) continue;
+        if (booked.has(r.candidate_user_id)) { gb++; gs++; }
+        else if (already.has(r.candidate_user_id)) gs++;
+      }
+      skipEstimate += gs; bookedEstimate += gb;
       return {
         role: g.title,
         target: g.targetName,
@@ -38,6 +47,7 @@ export default async function handler(req, res) {
       matched: plan.matchedCount,
       unmatched: plan.unmatchedCount,
       skipEstimate,
+      bookedEstimate,
       unmatchedSample: plan.unmatched.slice(0, 20).map((r) => ({ name: `${r.firstName || ""} ${r.lastName || ""}`.trim(), email: r.email })),
       groups,
     });

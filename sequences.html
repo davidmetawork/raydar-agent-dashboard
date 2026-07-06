@@ -238,10 +238,10 @@ function renderResult(kind, d){
   if(kind==="preview"){
     const un = d.unmatchedSample||[];
     if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} new to Paraform</b> — will be auto-created from their LinkedIn URL and enrolled: `+un.map(u=>u.email).join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
-    if(d.skipEstimate){ html += `<div class="note" style="margin-top:8px"><b>~${d.skipEstimate} already in another sequence</b> — these will be skipped at enroll (not re-messaged). Final count is confirmed on enroll.</div>`; }
+    if(d.skipEstimate){ const b=d.bookedEstimate||0, s=d.skipEstimate-b, parts=[]; if(b)parts.push(`${b} already booked a call`); if(s)parts.push(`${s} already in another sequence`); html += `<div class="note" style="margin-top:8px"><b>~${d.skipEstimate} will be skipped</b> (${parts.join(", ")}) — not messaged. New applicants can't be booked, so the booked count is confirmed on enroll.</div>`; }
   }
   if(kind==="enroll"){
-    if(d.skippedTotal){ const ss=(d.skippedSample||[]).map(s=>s.email).filter(Boolean); html += `<div class="note" style="margin-top:12px"><b>${d.skippedTotal} skipped</b> (already in another sequence — not re-messaged)${ss.length?": "+ss.join(", "):""}.</div>`; }
+    if(d.skippedTotal){ const parts=[]; if(d.skippedBookedTotal)parts.push(`${d.skippedBookedTotal} already booked a call`); if(d.skippedInSequence)parts.push(`${d.skippedInSequence} already in another sequence`); html += `<div class="note" style="margin-top:12px"><b>${d.skippedTotal} skipped</b> (${parts.join(", ")||"already engaged"} — not messaged).</div>`; }
     const cf = d.createFailures||[];
     if(cf.length){ html += `<div class="banner bad" style="margin-top:12px"><b>${d.failedTotal} could not be created</b> (bad/dead LinkedIn URL — enroll the rest, fix these by hand): `+cf.map(f=>(f.email||"?")+" — "+f.reason).join("; ")+`</div>`; }
     html += `<div class="note">Ran at ${d.ranAt}.</div>`;

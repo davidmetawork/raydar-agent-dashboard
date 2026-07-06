@@ -242,6 +242,38 @@ export async function enrolledElsewhereSet() {
   return set;
 }
 
+// ---------- "already booked a call" skip ----------
+// Paraform relationship_status progresses CONTACTED -> REPLIED -> SCHEDULED_CALL ->
+// SCREENED -> interview stages. Anyone at SCHEDULED_CALL or FURTHER has booked/done a
+// call, so a "please schedule a call" nudge is wrong for them. (CONTACTED/REPLIED/NEW/
+// null still need the nudge.) Configurable via BOOKED_STATUSES.
+export const BOOKED_STATUSES = new Set(
+  (process.env.BOOKED_STATUSES ||
+    "SCHEDULED_CALL,SCREENED,INTERVIEWING,INTERVIEW,INTERVIEW_SCHEDULED,ONSITE,OFFER,OFFER_EXTENDED,HIRED,PLACED,ACCEPTED,CLIENT_SUBMITTED,SUBMITTED")
+    .split(",").map((s) => s.trim()).filter(Boolean)
+);
+export async function relationshipStatus(candidateUserId) {
+  try {
+    const p = await trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId });
+    return p?.candidate_user_relationship_status || null;
+  } catch { return null; }
+}
+// Return the subset of candidate ids whose relationship_status means "already booked".
+// Only pre-existing candidates can be booked, so callers pass just those (fast).
+export async function bookedSet(candidateUserIds) {
+  const booked = new Set();
+  let i = 0;
+  const worker = async () => {
+    while (i < candidateUserIds.length) {
+      const id = candidateUserIds[i++];
+      const s = await relationshipStatus(id);
+      if (s && BOOKED_STATUSES.has(s)) booked.add(id);
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  return booked;
+}
+
 // ---------- plan builder (shared by preview + enroll) ----------
 // rows: [{firstName,lastName,email,linkedinUrl,activeProject}]
 export async function buildPlan({ sequenceId, rows, sendAs }) {
