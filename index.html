@@ -355,7 +355,13 @@
       const d=new Date(iso), now=new Date();
       const t=d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
       const diff=(d-now)/60000; const ad=Math.abs(diff);
-      let rel; if(ad<1) rel="now"; else if(ad<60) rel=Math.round(ad)+"m"; else rel=Math.round(ad/60)+"h";
+      /* hours only up to 24h; past that the backlog reads in whole days (2026-07-06) —
+         keep in sync with the canonical copy: Raydar repo webview/dashboard.html */
+      let rel;
+      if(ad<1) rel="now";
+      else if(ad<60) rel=Math.round(ad)+"m";
+      else if(ad<1440) rel=Math.round(ad/60)+"h";
+      else rel=Math.round(ad/1440)+"d";
       const sameDay=d.toDateString()===now.toDateString();
       const day=sameDay?"":(d.toLocaleDateString([], {weekday:"short"})+" ");
       return `${day}${t} · ${diff>=0? "in "+rel : rel+" ago"}`;
