@@ -90,7 +90,7 @@
     <label>Upload CSV <span class="req">*</span></label>
     <div id="drop" class="drop">
       <div>📎&nbsp; Drag &amp; drop or browse (CSV)</div>
-      <div class="hint">Paraform pipeline export — needs First Name, Last Name, Email Address, Profile URL, Active Project</div>
+      <div class="hint">Paraform pipeline export — needs First Name, Last Name, Profile URL, Active Project · Email optional (no-email candidates enroll, then Enrich)</div>
     </div>
     <input id="file" type="file" accept=".csv,text/csv" class="hidden" />
     <div id="csvInfo" class="note hidden"></div>
@@ -184,12 +184,18 @@ async function handleFile(file){
       firstName:(r["First Name"]||"").trim(), lastName:(r["Last Name"]||"").trim(),
       email:(r["Email Address"]||"").trim(), linkedinUrl:(r["Profile URL"]||"").trim(),
       activeProject:(r["Active Project"]||"").trim(),
-    })).filter(r=> r.email && r.firstName!=="First Name" && !r.firstName.startsWith("#"));
-    const withEmail = ROWS.length;
-    const noEmail = raw.length - withEmail;
+    // Email is NOT required — candidates are created from their LinkedIn Profile URL.
+    // A row needs a Profile URL (to create) OR an email (to match an existing CRM record).
+    // No-email candidates enroll fine; they just can't be *sent* until an address is found.
+    })).filter(r=> (r.linkedinUrl || r.email) && r.firstName!=="First Name" && !r.firstName.startsWith("#"));
+    const total = ROWS.length;
+    const noEmail = ROWS.filter(r=>!r.email).length;
+    const dropped = raw.length - total;
     $("csvInfo").classList.remove("hidden");
-    $("csvInfo").innerHTML = `Loaded <b>${file.name}</b> — <b>${withEmail}</b> rows with email${noEmail>0?` · ${noEmail} skipped (no email)`:""}.`;
-    drop.querySelector("div").textContent = "✓ "+file.name+" ("+withEmail+" candidates)";
+    $("csvInfo").innerHTML = `Loaded <b>${file.name}</b> — <b>${total}</b> candidates`
+      + (noEmail>0?` · <b>${noEmail}</b> without an email (enrolled now, emailed once an address is found — use Enrich)`:"")
+      + (dropped>0?` · ${dropped} skipped (no Profile URL or email)`:"") + `.`;
+    drop.querySelector("div").textContent = "✓ "+file.name+" ("+total+" candidates)";
     refreshButtons();
   }});
 }
@@ -237,7 +243,7 @@ function renderResult(kind, d){
   html += `</table>`;
   if(kind==="preview"){
     const un = d.unmatchedSample||[];
-    if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} new to Paraform</b> — will be auto-created from their LinkedIn URL and enrolled: `+un.map(u=>u.email).join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
+    if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} new to Paraform</b> — will be auto-created from their LinkedIn URL and enrolled: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
     if(d.skipEstimate){ const b=d.bookedEstimate||0, s=d.skipEstimate-b, parts=[]; if(b)parts.push(`${b} already booked a call`); if(s)parts.push(`${s} already in another sequence`); html += `<div class="note" style="margin-top:8px"><b>~${d.skipEstimate} will be skipped</b> (${parts.join(", ")}) — not messaged. New applicants can't be booked, so the booked count is confirmed on enroll.</div>`; }
   }
   if(kind==="enroll"){
