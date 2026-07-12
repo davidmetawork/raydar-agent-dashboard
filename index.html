@@ -201,6 +201,36 @@
     .cv-toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:var(--ink); color:var(--cream); padding:10px 18px; border-radius:10px; font-size:14px; font-weight:500; opacity:0; pointer-events:none; transition:all .2s ease; z-index:50; }
     .cv-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
     @media (max-width:760px){ .cv-row{ grid-template-columns:1fr; row-gap:8px } .cv-act{ justify-content:flex-start } }
+
+    /* ---- Candidates (roster) ---- */
+    .cd-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 2px 14px; }
+    .cd-bar input[type="text"] { flex:1; min-width:180px; max-width:280px; padding:9px 13px; font-size:13.5px; font-family:inherit; border:1.5px solid var(--line); border-radius:10px; background:var(--card); color:var(--ink); outline:none; transition:border-color .15s ease; }
+    .cd-bar input[type="text"]:focus { border-color:var(--orange); }
+    .cd-bar select, .cd-sel { padding:8px 10px; font-size:12.5px; font-weight:500; font-family:inherit; border:1.5px solid var(--line); border-radius:9px; background:var(--card); color:var(--ink); cursor:pointer; outline:none; max-width:200px; transition:border-color .15s ease; }
+    .cd-bar select:focus, .cd-sel:focus { border-color:var(--orange); }
+    .cd-range { display:inline-flex; border:1.5px solid var(--line); border-radius:9px; overflow:hidden; }
+    .cd-range button { appearance:none; border:none; background:var(--card); color:var(--ink-3); font-family:inherit; font-size:12.5px; font-weight:600; padding:8px 13px; cursor:pointer; transition:color .12s ease, background .12s ease; }
+    .cd-range button + button { border-left:1.5px solid var(--line); }
+    .cd-range button:hover { color:var(--ink); }
+    .cd-range button.on { background:var(--ink); color:var(--cream); }
+    .cd-wrap { overflow-x:auto; }
+    .cd-table { width:100%; border-collapse:collapse; font-size:13.5px; }
+    .cd-table th { text-align:left; font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-3); padding:12px 16px; border-bottom:1px solid var(--line); white-space:nowrap; }
+    .cd-table td { padding:11px 16px; border-top:1px solid var(--line-2); vertical-align:middle; }
+    .cd-table tbody tr:first-child td { border-top:none; }
+    .cd-table .who { font-weight:600; letter-spacing:-.01em; white-space:nowrap; }
+    .cd-when { color:var(--ink-2); white-space:nowrap; font-size:13px; }
+    .cd-quick { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+    .cd-mini { appearance:none; border:1.5px solid var(--line); background:var(--card); color:var(--ink-2); font-family:inherit; font-size:11.5px; font-weight:600; border-radius:8px; padding:4px 10px; cursor:pointer; white-space:nowrap; transition:border-color .12s ease, color .12s ease; }
+    .cd-mini:hover { border-color:var(--orange); color:var(--ink); }
+    .cd-mini.good:hover { border-color:var(--good); color:var(--good); }
+    .cd-note { cursor:text; color:var(--ink-2); display:inline-block; max-width:260px; min-width:80px; border-bottom:1px dashed transparent; transition:border-color .12s ease; }
+    .cd-note:hover { border-bottom-color:var(--ink-3); }
+    .cd-note.blank { color:var(--ink-3); font-style:italic; }
+    .cd-note-input { width:190px; padding:5px 8px; font-size:12.5px; font-family:inherit; border:1.5px solid var(--orange); border-radius:8px; background:var(--card); color:var(--ink); outline:none; }
+    .cd-err { display:inline-block; font-size:11px; font-weight:700; color:var(--bad); background:var(--bad-bg); padding:3px 8px; border-radius:6px; margin-top:5px; }
+    .pill.cd-pulse .d { animation:cdpulse 1.3s ease-in-out infinite; }
+    @keyframes cdpulse { 0%,100%{opacity:1} 50%{opacity:.3} }
   </style>
 </head>
 <body>
@@ -219,6 +249,7 @@
 
     <div class="tabs">
       <button class="tab active" id="tab-overview" onclick="showView('overview')">Overview</button>
+      <button class="tab" id="tab-candidates" onclick="showView('candidates')">Candidates</button>
       <button class="tab" id="tab-followups" onclick="showView('followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></button>
       <button class="tab" id="tab-history" onclick="showView('history')">History</button>
       <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
@@ -238,6 +269,39 @@
       <section>
         <div class="sec-head"><h3>Upcoming interviews</h3><span class="count" id="up-count"></span></div>
         <div class="list" id="upcoming"></div>
+      </section>
+    </div>
+
+    <div id="view-candidates" hidden>
+      <section>
+        <div class="sec-head"><h3>Candidates</h3><span class="count" id="cd-count"></span></div>
+        <p class="fu-intro">Every screened candidate in one place. Set where they came from, log the outcome, and jot notes — edits save automatically.</p>
+        <div class="cd-bar">
+          <input id="cd-q" type="text" placeholder="Search candidates…" autocomplete="off" oninput="cdFilters.q=this.value;renderRoster()" />
+          <select id="cd-ftype" onchange="cdFilters.type=this.value;renderRoster()">
+            <option value="all">All types</option>
+            <option value="agent">Agent</option>
+            <option value="human">Human</option>
+          </select>
+          <select id="cd-fstatus" onchange="cdFilters.status=this.value;renderRoster()">
+            <option value="all">All statuses</option>
+          </select>
+          <select id="cd-foutcome" onchange="cdFilters.outcome=this.value;renderRoster()">
+            <option value="all">All outcomes</option>
+            <option value="__blank">Needs outcome</option>
+            <option value="Sent List">Sent List</option>
+            <option value="No Matches - Para AI">No Matches - Para AI</option>
+            <option value="Submitted">Submitted</option>
+            <option value="Disengage">Disengage</option>
+            <option value="Reschedule Email Sequence">Reschedule Email Sequence</option>
+          </select>
+          <div class="cd-range">
+            <button id="cd-r7" onclick="cdRange('7')">7d</button>
+            <button id="cd-r30" class="on" onclick="cdRange('30')">30d</button>
+            <button id="cd-rall" onclick="cdRange('all')">All</button>
+          </div>
+        </div>
+        <div class="list cd-wrap" id="cd-table-wrap"><div class="empty">Loading candidates…</div></div>
       </section>
     </div>
 
@@ -553,12 +617,13 @@
 
     let seqLoaded=false, enrichLoaded=false;
     function showView(name){
-      ["overview","followups","history","analytics","calls","sequences","enrich"].forEach(v=>{
+      ["overview","candidates","followups","history","analytics","calls","sequences","enrich"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
+      if(name==="candidates") ensureRoster();
       if(name==="history"||name==="analytics") ensureHistory();
       if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
       else if(location.hash==="#calls") history.replaceState(null,"",location.pathname);
@@ -732,6 +797,224 @@
         if (prev) actionsMap[callId]=prev; else delete actionsMap[callId];   // roll back
         if (lastData) render(lastData);
         alert("Couldn't save that change — please try again.");
+      }
+    }
+
+    // ---- Candidates tab (roster): every screened candidate, with editable
+    //      Source / Outcome / Notes / Status persisted via POST /api/roster-note.
+    //      Lazy: fetched on first tab open, re-fetched when the tab reopens >60s stale. ----
+    const CD_SOURCES  = ["Job Post","Connector","Outreach"];
+    const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
+    const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    let rosterRows=null, rosterAt=0, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
+    const cdFilters = { q:"", type:"all", status:"all", outcome:"all", range:"30" };
+    const cdSourceChecked = new Set();   // keys already asked of /api/roster/source
+
+    async function ensureRoster(force){
+      if(!force && rosterRows && Date.now()-rosterAt<60000) return;
+      if(!rosterRows) $("cd-table-wrap").innerHTML = `<div class="empty">Loading candidates…</div>`;
+      try{
+        const r = await fetch(API_BASE + "/api/roster");
+        const j = await r.json();
+        if(!j || !j.ok) throw new Error((j && j.error) || "bad");
+        rosterRows = j.rows || [];
+        rosterAt = Date.now();
+        renderRoster();
+        cdAutoSource();   // best-effort; hosts without the endpoint skip silently
+      }catch(e){
+        if(!rosterRows) $("cd-table-wrap").innerHTML = `<div class="empty">Couldn't load candidates — reopen the tab to retry.</div>`;
+      }
+    }
+
+    // row time: startedAt wins; a bare YYYY-MM-DD parses at local noon (avoids the UTC day-shift)
+    function cdWhen(r){
+      let t = Date.parse(r.startedAt || "");
+      if(isNaN(t)) t = Date.parse(String(r.date||"") + "T12:00:00");
+      return isNaN(t) ? 0 : t;
+    }
+    function cdDate(r){
+      const hasClock = !!r.startedAt && !isNaN(Date.parse(r.startedAt));
+      const t = cdWhen(r);
+      if(!t) return cdEsc(String(r.date||"—"));
+      const d = new Date(t), ds = d.toLocaleDateString([],{month:"short",day:"numeric"});
+      return hasClock ? `${ds} · ${d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}` : ds;
+    }
+    const cdIsHuman = (r) => {
+      const t = String(r.callType||"").toLowerCase();
+      return t ? t.includes("human") : String(r.via||"").toLowerCase()==="human";
+    };
+    // normalize the free-form status to a display bucket; unknown values stay gray with raw text
+    function cdStatusKey(status){
+      const s = String(status||"").trim().toLowerCase();
+      if(s==="success") return "success";
+      if(s.replace(/[\s_-]+/g,"")==="noshow") return "no_show";
+      if(s.includes("error")||s.includes("fail")) return "bad";
+      if(s==="upcoming") return "upcoming";
+      if(s.startsWith("held")) return "held";
+      if(s==="live") return "live";
+      if(s==="unconfirmed"||s==="incomplete"||s==="pending") return "quiet";
+      return "other";
+    }
+    const CD_STATUS_CLS = { success:"good", no_show:"yellow", bad:"bad", upcoming:"blue", held:"warn", live:"good cd-pulse", quiet:"muted", other:"muted" };
+    const cdStatusPill = (status) =>
+      `<span class="pill ${CD_STATUS_CLS[cdStatusKey(status)]}"><span class="d"></span>${cdEsc(String(status||"—").trim()||"—")}</span>`;
+
+    function cdFiltered(){
+      const f=cdFilters, q=f.q.trim().toLowerCase();
+      const cut = f.range==="all" ? 0 : Date.now() - Number(f.range)*864e5;
+      const rows = (rosterRows||[]).filter(r=>{
+        if(q && !String(r.candidate||"").toLowerCase().includes(q)) return false;
+        if(f.type!=="all" && (cdIsHuman(r)?"human":"agent")!==f.type) return false;
+        if(f.status!=="all" && String(r.status||"").trim()!==f.status) return false;
+        if(f.outcome!=="all"){
+          const o=String(r.outcome||"").trim();
+          if(f.outcome==="__blank"){ if(o) return false; }
+          else if(o!==f.outcome) return false;
+        }
+        if(cut){ const t=cdWhen(r); if(t && t<cut) return false; }   // undated rows stay visible
+        return true;
+      });
+      rows.sort((a,b)=>cdWhen(b)-cdWhen(a));
+      return rows;
+    }
+
+    // keep the status filter's options in sync with the data without stealing focus/selection
+    function cdSyncStatusOptions(){
+      const sel=$("cd-fstatus"); if(!sel) return;
+      const distinct=[...new Set((rosterRows||[]).map(r=>String(r.status||"").trim()).filter(Boolean))].sort();
+      const sig="all|"+distinct.join("|");
+      if(sel.dataset.opts===sig) return;
+      const cur=sel.value;
+      sel.innerHTML=`<option value="all">All statuses</option>`+distinct.map(s=>`<option value="${cdEsc(s)}">${cdEsc(s)}</option>`).join("");
+      sel.dataset.opts=sig;
+      if([...sel.options].some(o=>o.value===cur)) sel.value=cur; else cdFilters.status="all";
+    }
+
+    const cdErrIn = (r,field) =>
+      (cdErr && cdErr.key===r.key && cdErr.field===field) ? `<div class="cd-err">Couldn't save — reverted</div>` : "";
+    function cdSelect(i, field, opts, val){
+      const v=String(val||"").trim();
+      const all = (v && !opts.includes(v)) ? [v,...opts] : opts;   // keep unexpected stored values visible
+      return `<select class="cd-sel" onchange="cdSet(${i},'${field}',this.value)"><option value=""${v?"":" selected"}></option>${
+        all.map(o=>`<option value="${cdEsc(o)}"${o===v?" selected":""}>${cdEsc(o)}</option>`).join("")}</select>`;
+    }
+    const cdNoteCell = (i,r) => {
+      const n=String(r.notes||"").trim();
+      return `<span class="cd-note${n?"":" blank"}" title="Click to edit" onclick="cdEditNote(${i},this)">${n?cdEsc(n):"Add note…"}</span>`;
+    };
+
+    function cdRow(r,i){
+      const human = cdIsHuman(r);
+      const sKey = cdStatusKey(r.status);
+      const outcome = String(r.outcome||"").trim();
+      const typePill = human ? `<span class="pill warn"><span class="d"></span>Human</span>`
+                             : `<span class="pill live"><span class="d"></span>Agent</span>`;
+      const heldBtns = (human && sKey==="held")
+        ? `<div class="cd-quick"><button class="cd-mini good" onclick="cdSet(${i},'status','Success')">Success</button><button class="cd-mini" onclick="cdSet(${i},'status','No-show')">No-show</button></div>` : "";
+      const quickBtns = (sKey==="success" && !outcome)
+        ? `<div class="cd-quick"><button class="cd-mini" onclick="cdQuickSent(${i})">Sent List</button><button class="cd-mini" onclick="cdQuickNoMatch(${i})">No Matches</button></div>` : "";
+      return `<tr>
+        <td class="cd-when">${cdDate(r)}</td>
+        <td class="who">${nameLink(r.candidate)}</td>
+        <td>${cdSelect(i,"source",CD_SOURCES,r.source)}${cdErrIn(r,"source")}</td>
+        <td>${typePill}</td>
+        <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
+        <td>${cdSelect(i,"outcome",CD_OUTCOMES,r.outcome)}${quickBtns}${cdErrIn(r,"outcome")}</td>
+        <td>${cdNoteCell(i,r)}${cdErrIn(r,"notes")}</td>
+      </tr>`;
+    }
+
+    function renderRoster(){
+      if(!rosterRows) return;
+      cdSyncStatusOptions();
+      const rows = cdFiltered();
+      cdVisible = rows;
+      const need = rows.filter(r=>cdStatusKey(r.status)==="success" && !String(r.outcome||"").trim()).length;
+      $("cd-count").textContent = `${rows.length} call${rows.length===1?"":"s"} · ${need} need outcome`;
+      $("cd-table-wrap").innerHTML = rows.length
+        ? `<table class="cd-table"><thead><tr><th>Date</th><th>Candidate</th><th>Source</th><th>Call Type</th><th>Call Status</th><th>Outcome</th><th>Notes</th></tr></thead><tbody>${rows.map(cdRow).join("")}</tbody></table>`
+        : `<div class="empty">No candidates match these filters.</div>`;
+    }
+
+    function cdRange(v){
+      cdFilters.range=v;
+      [["cd-r7","7"],["cd-r30","30"],["cd-rall","all"]].forEach(([id,val])=>$(id).classList.toggle("on", val===v));
+      renderRoster();
+    }
+
+    // Optimistic write (same pattern as setAction): mutate + re-render instantly,
+    // persist via /api/roster-note, roll back with a small inline error on failure.
+    async function cdPersist(row, field, value){
+      const prev = row[field];
+      row[field] = value;
+      if(cdErr && cdErr.key===row.key) cdErr=null;
+      renderRoster();
+      try{
+        const r = await fetch(API_BASE + "/api/roster-note", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ key: row.key, fields: { [field]: value } }),
+        });
+        const j = await r.json().catch(()=>({}));
+        if(!r.ok || !j.ok) throw new Error(j.error || ("HTTP "+r.status));
+      }catch(e){
+        row[field] = prev;                                   // roll back
+        cdErr = { key: row.key, field };
+        renderRoster();
+        setTimeout(()=>{ if(cdErr && cdErr.key===row.key && cdErr.field===field){ cdErr=null; renderRoster(); } }, 4000);
+      }
+    }
+    function cdSet(i, field, value){ const row=cdVisible[i]; if(row) cdPersist(row, field, value); }
+
+    // Notes: click-to-edit inline input; Enter/blur saves, Escape cancels.
+    function cdEditNote(i, el){
+      const row=cdVisible[i]; if(!row) return;
+      const cur=String(row.notes||"");
+      const input=document.createElement("input");
+      input.type="text"; input.className="cd-note-input"; input.value=cur; input.placeholder="Add a note";
+      el.replaceWith(input); input.focus(); input.select();
+      let done=false;
+      const finish=(save)=>{
+        if(done) return; done=true;
+        const v=input.value.trim();
+        if(save && v!==cur.trim()) cdPersist(row,"notes",v); else renderRoster();
+      };
+      input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") finish(true); else if(e.key==="Escape") finish(false); });
+      input.addEventListener("blur",()=>finish(true));
+    }
+
+    // Quick actions on Success rows with no outcome yet.
+    function cdQuickSent(i){
+      const row=cdVisible[i]; if(!row) return;
+      cdPersist(row,"outcome","Sent List");
+      if(document.getElementById("view-sequences")) showView("sequences");   // hosts without a Sequences tab stay put
+    }
+    function cdQuickNoMatch(i){
+      const row=cdVisible[i]; if(!row) return;
+      const first=String(row.candidate||"").trim().split(/\s+/)[0]||"there";
+      const su=encodeURIComponent("Raydar — no current matches, but you're in our system");
+      const body=encodeURIComponent(`Hi ${first},\n\nThanks for taking the time to speak with us — right now we don't have an open role that matches what you're looking for, but I've added you to our system and will reach out as soon as something fits.\n\nBest,\nDavid`);
+      cdPersist(row,"outcome","No Matches - Para AI");
+      window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${su}&body=${body}`,"_blank","noopener");   // "to" left empty on purpose
+    }
+
+    // Source auto-detect: ask the same-origin lookup for up to 5 visible source-less rows.
+    // Hosts without /api/roster/source — or AUTH_EXPIRED / !ok responses — skip silently.
+    async function cdAutoSource(){
+      const cands = cdVisible.filter(r=>r.key && r.candidate && !String(r.source||"").trim() && !cdSourceChecked.has(r.key)).slice(0,5);
+      for(const row of cands){
+        cdSourceChecked.add(row.key);
+        try{
+          const r = await fetch("/api/roster/source?name="+encodeURIComponent(row.candidate));
+          if(!r.ok) continue;
+          const j = await r.json().catch(()=>null);
+          if(!j || !j.ok || !j.source) continue;
+          row.source = j.source;
+          renderRoster();
+          fetch(API_BASE + "/api/roster-note", {   // best-effort persist; display already updated
+            method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({ key: row.key, fields: { source: j.source } }),
+          }).catch(()=>{});
+        }catch(e){ /* endpoint absent on this host — skip */ }
       }
     }
 
