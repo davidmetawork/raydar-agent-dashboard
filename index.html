@@ -308,6 +308,9 @@
             <button id="cd-r30" class="on" onclick="cdRange('30')">30d</button>
             <button id="cd-rall" onclick="cdRange('all')">All</button>
           </div>
+          <div class="cd-range">
+            <button id="cd-fneeds" onclick="cdNeeds()" title="Only rows missing Source, Call Type, Call Status, or (for finished calls) Outcome — plus human calls awaiting confirm">Needs action</button>
+          </div>
         </div>
         <div class="list cd-wrap" id="cd-table-wrap"><div class="empty">Loading candidates…</div></div>
       </section>
@@ -815,7 +818,7 @@
     const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
     const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     let rosterRows=null, rosterAt=0, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
-    const cdFilters = { q:"", type:"all", status:"all", outcome:"all", range:"30" };
+    const cdFilters = { q:"", type:"all", status:"all", outcome:"all", range:"30", needs:false };
     const cdSourceChecked = new Set();   // keys already asked of /api/roster/source
 
     async function ensureRoster(force){
@@ -867,6 +870,26 @@
     const cdStatusPill = (status) =>
       `<span class="pill ${CD_STATUS_CLS[cdStatusKey(status)]}"><span class="d"></span>${cdEsc(String(status||"—").trim()||"—")}</span>`;
 
+    // "Needs action" inbox rule: missing Source / Call Type / Status is always
+    // actionable; "Held - confirm" awaits David's confirm; a FINISHED call
+    // (not Upcoming/Live/Pending) missing its Outcome is actionable. An
+    // upcoming call with no outcome yet is NOT — nothing to do until it runs.
+    function cdNeedsAction(r){
+      const s=String(r.status||"").trim(), sk=cdStatusKey(s);
+      if(!String(r.source||"").trim()) return true;
+      if(!String(r.callType||"").trim()) return true;
+      if(!s) return true;
+      if(sk==="held") return true;
+      const nonTerminal = sk==="upcoming" || sk==="live" || s.toLowerCase()==="pending";
+      if(!nonTerminal && !String(r.outcome||"").trim()) return true;
+      return false;
+    }
+    function cdNeeds(){
+      cdFilters.needs=!cdFilters.needs;
+      $("cd-fneeds").classList.toggle("on", cdFilters.needs);
+      if(cdFilters.needs) cdRange("all");   // the inbox ignores the date window
+      else renderRoster();
+    }
     function cdFiltered(){
       const f=cdFilters, q=f.q.trim().toLowerCase();
       const cut = f.range==="all" ? 0 : Date.now() - Number(f.range)*864e5;
@@ -880,6 +903,7 @@
           else if(o!==f.outcome) return false;
         }
         if(cut){ const t=cdWhen(r); if(t && t<cut) return false; }   // undated rows stay visible
+        if(f.needs && !cdNeedsAction(r)) return false;
         return true;
       });
       rows.sort((a,b)=>cdWhen(b)-cdWhen(a));
@@ -944,6 +968,8 @@
       cdVisible = rows;
       const need = rows.filter(r=>cdStatusKey(r.status)==="success" && !String(r.outcome||"").trim()).length;
       $("cd-count").textContent = `${rows.length} call${rows.length===1?"":"s"} · ${need} need outcome`;
+      const needsAll=(rosterRows||[]).filter(cdNeedsAction).length;
+      const nb=$("cd-fneeds"); if(nb) nb.textContent = `Needs action (${needsAll})`;
       $("cd-table-wrap").innerHTML = rows.length
         ? `<table class="cd-table"><thead><tr><th>Date</th><th>Candidate</th><th>Source</th><th>Call Type</th><th>Call Status</th><th>Outcome</th><th>Notes</th></tr></thead><tbody>${rows.map(cdRow).join("")}</tbody></table>`
         : `<div class="empty">No candidates match these filters.</div>`;
