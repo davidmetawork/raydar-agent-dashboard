@@ -151,6 +151,53 @@ export async function projectEmailIndex() {
   return idx;
 }
 
+// ---------- delayed enrollment (store = Paraform projects, no extra infra) ----------
+// A scheduled cohort is a CRM project named "⏳SeqDelay|YYYY-MM-DD|sendAs|TPL|<Role>"
+// (templated) or "⏳SeqDelay|YYYY-MM-DD|sendAs|SEQ|<sequenceId>|<label>". Candidates
+// are created + filed at upload time; the daily release cron enrolls due projects
+// (running the booked/in-sequence checks THEN — the whole point of the delay) and
+// deletes the project. State is visible/editable in Paraform's own Projects UI.
+export const DELAY_PREFIX = "⏳SeqDelay|";
+export function delayProjectName({ dueDate, sendAs, kind, key, label }) {
+  // key = role title (TPL) or sequence id (SEQ); label only used for SEQ display
+  const parts = [DELAY_PREFIX.slice(0, -1), dueDate, sendAs, kind, key];
+  if (kind === "SEQ" && label) parts.push(label.slice(0, 60));
+  return parts.join("|");
+}
+export function parseDelayProject(p) {
+  if (!p?.name?.startsWith(DELAY_PREFIX)) return null;
+  const seg = p.name.split("|");
+  if (seg.length < 5) return null;
+  const [, dueDate, sendAs, kind] = seg;
+  return { projectId: p.id, dueDate, sendAs, kind, key: kind === "TPL" ? seg.slice(4).join("|") : seg[4], label: kind === "SEQ" ? (seg[5] || seg[4]) : seg.slice(4).join("|") };
+}
+export async function listDelayProjects() {
+  const all = (await trpcGet("candidateProjects.getProjectsByUserId", {})) || [];
+  return all.map(parseDelayProject).filter(Boolean);
+}
+// Members of a project: [{id, name, email}] (first known email, for lead backfill).
+export async function projectMembers(projectId) {
+  const input = { cursor: 0, limit: 250, filters: { recruiters: [CONFIG.RECRUITER_ID], agency_id: CONFIG.AGENCY_ID, candidate_projects: [projectId], sort: { field: "added_at", order: "desc" } }, project_id: null, role_specific_id: null };
+  const url = `${BASE}/trpc/candidateUser.getCRMExternalCandidates?input=` +
+    encodeURIComponent(JSON.stringify({ json: input, meta: { values: { project_id: ["undefined"], role_specific_id: ["undefined"] }, v: 1 } }));
+  const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
+  if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+  const items = (await r.json())?.result?.data?.json?.items || [];
+  return items.map((it) => {
+    const em = (it.emails || []).map((e) => (typeof e === "string" ? e : e?.email || "")).find(Boolean) || "";
+    return { id: it.id, name: it.name, email: em.toLowerCase().trim() };
+  });
+}
+export async function createDelayProject(nameArgs, candidateUserIds) {
+  const proj = await trpcPost("candidateProjects.createProject", { name: delayProjectName(nameArgs) });
+  if (!proj?.id) throw new Error("createProject returned no id");
+  if (candidateUserIds.length) await trpcPost("candidateProjects.addCandidateUsersToProject", { project_id: proj.id, candidate_user_ids: candidateUserIds });
+  return proj.id;
+}
+export async function deleteDelayProject(projectId) {
+  try { await trpcPost("candidateProjects.deleteCandidateProject", { project_id: projectId }); } catch { /* non-fatal; will retry next run */ }
+}
+
 // ---------- templating: find-or-create the role-specific sequence ----------
 export async function ensureRoleSequence(title, sendAs, seqCache) {
   const targetName = `${CONFIG.TEMPLATE_PREFIX} - ${title}`;
@@ -213,18 +260,46 @@ export async function setLeadEmail(ccuId, email) {
   if (!ccuId || !email) return;
   try { await trpcPost("campaigns.updateSequenceCandidateEmail", { campaign_to_candidate_user_id: ccuId, candidate_email: email }); } catch { /* non-fatal */ }
 }
+// Membership read. ⚠ Paraform API change (seen 2026-07-12): campaigns.getCampaign no
+// longer embeds campaign_to_candidate_users/leads — the membership verb is now
+// campaigns.getCampaignLeads({campaign_id, cursor}), paginated 50/page with a NUMERIC
+// OFFSET cursor + totalCount. Always paginate to the end: a single-page read here is
+// the same silent-dedup-miss class as the duplicate-bot Code Red.
+export async function campaignLeads(campaignId) {
+  // Page 1 tells us totalCount; fetch the remaining pages concurrently (a 1,100-lead
+  // sequence is 23 pages — sequential would add ~10s to every scan).
+  const first = await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId });
+  const out = [...(first?.leads || [])];
+  const total = Math.min(first?.totalCount ?? out.length, 10000);
+  const pageSize = out.length || 50;
+  if (out.length >= total || !out.length) return out;
+  const cursors = [];
+  for (let c = pageSize; c < total; c += pageSize) cursors.push(c);
+  const pages = new Array(cursors.length);
+  let i = 0;
+  const worker = async () => {
+    while (i < cursors.length) {
+      const idx = i++;
+      try { pages[idx] = (await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor: cursors[idx] }))?.leads || []; }
+      catch { pages[idx] = []; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, cursors.length) }, worker));
+  for (const p of pages) out.push(...p);
+  return out; // [{cu_id, ccu_id, to_use_email, is_paused, ...}]
+}
+
 // After enrolling, map candidate_user_id -> campaign_to_candidate_user_id for a campaign.
 export async function ccuIndex(campaignId) {
-  const c = await trpcGet("campaigns.getCampaign", { campaign_id: campaignId });
   const m = new Map();
-  for (const cc of (c?.campaign_to_candidate_users || [])) m.set(cc.candidate_user_id, { ccuId: cc.id, email: cc.candidate_email });
+  for (const L of await campaignLeads(campaignId)) m.set(L.cu_id, { ccuId: L.ccu_id, email: L.to_use_email || null });
   return m;
 }
 
 // Build the set of candidate_user_ids already enrolled in ANY of the recruiter's
 // sequences. Used to skip anyone already in a sequence (the "don't re-message"
 // rule) — this also makes re-running the same cohort a no-op (dedup/no double-email).
-// One scan per enroll (getCampaign per sequence, bounded concurrency).
+// One scan per enroll (paginated getCampaignLeads per sequence, bounded concurrency).
 export async function enrolledElsewhereSet() {
   const seqs = (await trpcGet("campaigns.getListOfCampaignsOptimized", {})) || [];
   const set = new Set();
@@ -233,8 +308,7 @@ export async function enrolledElsewhereSet() {
     while (i < seqs.length) {
       const s = seqs[i++];
       try {
-        const c = await trpcGet("campaigns.getCampaign", { campaign_id: s.id });
-        for (const cc of (c?.campaign_to_candidate_users || [])) set.add(cc.candidate_user_id);
+        for (const L of await campaignLeads(s.id)) set.add(L.cu_id);
       } catch { /* skip unreadable */ }
     }
   };

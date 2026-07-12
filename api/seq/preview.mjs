@@ -1,5 +1,7 @@
 import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet, bookedSet } from "./_lib/core.mjs";
 
+export const config = { maxDuration: 120 }; // full-membership scan can take ~10-30s
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!(await requireAuth(req, res))) return;
