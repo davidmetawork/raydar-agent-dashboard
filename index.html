@@ -141,6 +141,13 @@
     .obar .ov { width:78px; text-align:right; font-variant-numeric:tabular-nums; color:var(--ink); font-weight:600; }
     .chart svg { width:100%; height:auto; display:block; overflow:visible; }
     .chart text { fill:var(--ink-3); font-size:11px; }
+    /* placements (Paraform): neutral slate/taupe accents so the screening verdict
+       colors (green/yellow/red) keep their meaning on this page */
+    .pf-est { display:inline-block; font-size:10px; font-weight:700; color:#8a6a12; background:#fdf3d9; border-radius:5px; padding:1px 6px; vertical-align:4px; margin-left:6px; letter-spacing:.04em; }
+    .pf-stale { display:inline-block; font-size:10.5px; font-weight:700; color:#8a6a12; background:#fdf3d9; border:1px solid #f3dfa0; border-radius:6px; padding:2px 7px; margin-left:8px; vertical-align:middle; }
+    .pf-dormant { display:inline-block; font-size:10px; font-weight:700; color:var(--ink-3); background:var(--line-2); border-radius:5px; padding:1px 6px; margin-left:6px; }
+    .pf-chips { font-size:12.5px; color:var(--ink-2); margin:-14px 2px 22px; }
+    .pf-chips b { color:var(--ink); font-weight:600; }
     @media (max-width:960px){
       .row.fu{ grid-template-columns:1fr auto; column-gap:20px; row-gap:6px; align-items:start; }
       .row.fu .who{ grid-column:1; grid-row:1; }
@@ -357,6 +364,10 @@
       <section>
         <div class="sec-head"><h3>Analytics</h3><span class="count" id="an-count"></span></div>
         <div id="analytics"><div class="empty">Loading analytics…</div></div>
+      </section>
+      <section>
+        <div class="sec-head"><h3>Placements · Paraform</h3><span class="count" id="pf-fresh"></span></div>
+        <div id="placements"><div class="empty">Loading placement metrics…</div></div>
       </section>
     </div>
 
@@ -789,6 +800,7 @@
       if(name==="candidates") ensureRoster();
       if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
+      if(name==="analytics") ensurePlacements();
       if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
       else if(location.hash==="#calls") history.replaceState(null,"",location.pathname);
     }
@@ -942,6 +954,153 @@
             <div class="k-sub" style="margin-top:6px">${busiest?`${busiest.summary.total} interviews · ${busiest.summary.successRate??"—"}% success`:""}</div>
           </div>
         </div>`;
+    }
+
+    // ---- Placements (Paraform) — business metrics below the screening analytics.
+    // Fed by /api/paraform-metrics (30-min edge cache), own 5-min refresh cycle,
+    // fully isolated: a failure here renders a message in its own section and can
+    // never break the screening analytics above it. Every estimated number carries
+    // a visible est. tag; every card names its window/basis. Neutral slate/taupe
+    // chart colors; verdict green/yellow/red stay reserved for screening outcomes.
+    let pfData=null, pfAt=0;
+    async function ensurePlacements(force){
+      if(!force && pfData && Date.now()-pfAt<300000) return;
+      try{
+        const r = await fetch(API_BASE+"/api/paraform-metrics");
+        const d = await r.json();
+        if(!d || d.version!==1) throw new Error("bad payload");
+        pfData=d; pfAt=Date.now();
+        renderPlacements(d);
+      }catch(e){
+        if(!pfData) $("placements").innerHTML=`<div class="empty">Paraform metrics unavailable right now. This section retries automatically.</div>`;
+      }
+    }
+    setInterval(()=>{ if(!document.getElementById("view-analytics").hidden) ensurePlacements(); }, 300000);
+
+    const pfInt = (n)=> n==null ? "n/a" : Math.round(n).toLocaleString();
+    const pfMoney = (n)=> n==null ? "n/a" : "$"+Math.round(n).toLocaleString();
+    const pfK = (n)=> n==null ? "" : (Math.abs(n)>=1000 ? "$"+Math.round(n/1000)+"k" : "$"+Math.round(n));
+    const pfMonName = (m)=> new Date(m+"-15T00:00:00Z").toLocaleDateString([],{month:"short",timeZone:"UTC"});
+    const pfEst = `<span class="pf-est" title="estimate">est.</span>`;
+
+    function pfHiresChartSVG(g){
+      const data=g.monthly||[]; if(!data.length) return "";
+      const W=Math.max(data.length*44,320), H=190, pad=24;
+      const max=Math.max(g.goal_per_month, ...data.map(m=>m.hires))*1.18;
+      const slot=(W-pad*2)/data.length, bw=Math.min(24,slot-8);
+      const Y=v=>H-pad-(v/max)*(H-pad*2);
+      const bars=data.map((m,i)=>{
+        const x=pad+i*slot+(slot-bw)/2, h=(m.hires/max)*(H-pad*2);
+        const lab = (i===0||m.month.endsWith("-01")) ? pfMonName(m.month)+" "+m.month.slice(2,4) : pfMonName(m.month);
+        return `<rect x="${x.toFixed(1)}" y="${(H-pad-h).toFixed(1)}" width="${bw}" height="${Math.max(h,1).toFixed(1)}" fill="#7E97AD" rx="2"/>`+
+          (m.hires?`<text x="${(x+bw/2).toFixed(1)}" y="${(H-pad-h-5).toFixed(1)}" text-anchor="middle" style="fill:#57534A;font-weight:600">${m.hires}</text>`:"")+
+          `<text x="${(x+bw/2).toFixed(1)}" y="${H-pad+14}" text-anchor="middle">${lab}</text>`;
+      }).join("");
+      const gy=Y(g.goal_per_month);
+      const goal=`<line x1="${pad}" y1="${gy.toFixed(1)}" x2="${W-pad}" y2="${gy.toFixed(1)}" stroke="#FF5E00" stroke-width="1.5" stroke-dasharray="5 4"/><text x="${W-pad}" y="${(gy-5).toFixed(1)}" text-anchor="end" style="fill:#FF5E00;font-weight:600">goal ${g.goal_per_month}/mo</text>`;
+      return `<div class="chart"><svg viewBox="0 0 ${W} ${H+4}">${bars}${goal}</svg></div>`;
+    }
+
+    function pfPayoutChartSVG(money){
+      const data=money.monthly_payouts||[]; if(!data.length) return "";
+      const W=Math.max(data.length*44,320), H=190, pad=24;
+      const max=Math.max(1,...data.map(m=>m.amount))*1.18;
+      const slot=(W-pad*2)/data.length, bw=Math.min(24,slot-8);
+      const bars=data.map((m,i)=>{
+        const x=pad+i*slot+(slot-bw)/2, h=(m.amount/max)*(H-pad*2);
+        const rec = m.month===money.record_month;
+        const lab = (i===0||m.month.endsWith("-01")) ? pfMonName(m.month)+" "+m.month.slice(2,4) : pfMonName(m.month);
+        return `<rect x="${x.toFixed(1)}" y="${(H-pad-h).toFixed(1)}" width="${bw}" height="${Math.max(h,1).toFixed(1)}" fill="${rec?"#7A6E58":"#AD9F87"}" rx="2"/>`+
+          (m.amount?`<text x="${(x+bw/2).toFixed(1)}" y="${(H-pad-h-5).toFixed(1)}" text-anchor="middle" style="fill:#57534A;font-weight:600">${pfK(m.amount)}</text>`:"")+
+          `<text x="${(x+bw/2).toFixed(1)}" y="${H-pad+14}" text-anchor="middle">${lab}</text>`;
+      }).join("");
+      return `<div class="chart"><svg viewBox="0 0 ${W} ${H+4}">${bars}</svg></div>`;
+    }
+
+    function pfFunnelHTML(f){
+      const st=f.stages||[]; const max=Math.max(1,...st.map(s=>s.count));
+      return st.map((s,i)=>{
+        const pct = i>0 && st[i-1].count>0 ? Math.round(100*s.count/st[i-1].count) : null;
+        const em = i===1; /* the Round 1 to Round 2 cliff is the strategic number */
+        return `<div class="obar"><div class="ol">${esc(s.stage)}</div><div class="ot"><div class="of" style="width:${(100*s.count/max).toFixed(1)}%;background:#7E97AD"></div></div><div class="ov" style="width:110px">${s.count}${pct!=null?` <span style="color:${em?"var(--orange)":"var(--ink-3)"};${em?"font-weight:700":""}">· ${pct}%</span>`:""}</div></div>`;
+      }).join("");
+    }
+
+    function pfWeeklyChartSVG(weekly){
+      const data=(weekly.agg||[]).filter(w=>w); if(data.length<2) return `<p class="psub">Not enough weekly data yet.</p>`;
+      const W=Math.max(data.length*52,320), H=190, pad=26;
+      const maxS=Math.max(1,...data.map(w=>w.submissions))*1.18;
+      const rates=data.map(w=> w.submissions>0 ? Math.min(100,Math.round(100*w.est_mid_rounds/w.submissions)) : null);
+      const maxR=Math.max(10,...rates.filter(r=>r!=null))*1.25;
+      const slot=(W-pad*2)/data.length, bw=Math.min(24,slot-10);
+      const Xc=i=>pad+i*slot+slot/2;
+      const bars=data.map((w,i)=>{
+        const x=Xc(i)-bw/2, h=(w.submissions/maxS)*(H-pad*2);
+        return `<rect x="${x.toFixed(1)}" y="${(H-pad-h).toFixed(1)}" width="${bw}" height="${Math.max(h,1).toFixed(1)}" fill="#AD9F87" rx="2"/>`+
+          (w.submissions?`<text x="${Xc(i).toFixed(1)}" y="${(H-pad-h-5).toFixed(1)}" text-anchor="middle">${w.submissions}</text>`:"")+
+          `<text x="${Xc(i).toFixed(1)}" y="${H-pad+14}" text-anchor="middle">${w.week.slice(5)}</text>`;
+      }).join("");
+      const pts=data.map((w,i)=> rates[i]==null?null:[Xc(i), H-pad-(rates[i]/maxR)*(H-pad*2), rates[i]]).filter(Boolean);
+      const path=pts.map((p,i)=>`${i?"L":"M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
+      const line=pts.length>1?`<path d="${path}" fill="none" stroke="#5B7A9E" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`:"";
+      const dots=pts.map(p=>`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#5B7A9E"/><text x="${p[0].toFixed(1)}" y="${(p[1]-8).toFixed(1)}" text-anchor="middle" style="fill:#5B7A9E;font-weight:600">${p[2]}%</text>`).join("");
+      return `<div class="chart"><svg viewBox="0 0 ${W} ${H+4}">${bars}${line}${dots}</svg></div>`;
+    }
+
+    function renderPlacements(d){
+      const t = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}) : null;
+      $("pf-fresh").innerHTML = (t?`fetched ${t} · cached ~30 min`:"") + (d.degraded?`<span class="pf-stale" title="${esc(d.degraded_reason||"serving last-good data")}">stale</span>`:"");
+      if(!d.lifetime && !d.ratios){
+        $("placements").innerHTML = `<div class="empty">Paraform metrics unavailable${d.degraded_reason?` (${esc(d.degraded_reason)})`:""}. Nothing is shown rather than fake zeros.</div>`;
+        return;
+      }
+      const r=d.ratios||{}, g=d.goal_pace, chips=d.sub_chips||{};
+      const heroCard=(label, ratio, opts={})=>{
+        if(!ratio) return `<div class="kpi"><div class="k-label">${label}</div><div class="k-num" style="font-size:20px;color:var(--ink-3)">${opts.emptyText||"n/a"}</div><div class="k-sub">${opts.emptySub||""}</div></div>`;
+        return `<div class="kpi" title="${esc(opts.tip||"")}"><div class="k-label">${label}</div><div class="k-num">${esc(ratio.display)}${ratio.estimated?pfEst:""}</div><div class="k-sub">${esc(opts.sub||"")}</div></div>`;
+      };
+      const mid=r.mid_round_per_hire;
+      const hero=`<div class="kpis">
+        ${heroCard("Submissions → Hire", r.submissions_per_hire, {sub:`lifetime · n=${r.submissions_per_hire?.n_hires} hires`, tip:"Submissions are events, not unique candidates; known duplicate-entry inflation."})}
+        ${heroCard((r.interviews_per_hire&&r.interviews_per_hire.label)||"Interviews → Hire", r.interviews_per_hire, {sub:`lifetime · n=${r.interviews_per_hire?.n_hires}`, tip:"Paraform's members interviews field; could not be confirmed as strictly first-round, so the label stays generic."})}
+        ${heroCard("Mid round → Hire", mid, {sub: mid ? (mid.window?`${mid.window} · estimate`:"estimate") : "", tip: mid?`Basis: ${mid.basis}. No exact mid-round count is available from Paraform; this is an estimate.`:"", emptyText:"no hires yet in window", emptySub:"estimate needs a basis"})}
+        ${g?`<div class="kpi"><div class="k-label">Hires this month</div><div class="k-num">${g.current_month??"n/a"}<small> / ${g.goal_per_month}</small></div><div class="k-sub">goal ${g.goal_per_month}/mo · trailing 3-mo avg ${g.trailing_3mo_avg??"n/a"}</div></div>`:""}
+      </div>`;
+      const chipLine = (chips.sourced_to_submission_pct!=null||chips.interview_rate_pct!=null||chips.revenue_per_hire!=null)
+        ? `<div class="pf-chips">Sourced → Submission <b>${chips.sourced_to_submission_pct??"n/a"}%</b> lifetime · Interview rate <b>${chips.interview_rate_pct??"n/a"}%</b> lifetime · Revenue per hire <b>${pfMoney(chips.revenue_per_hire)}</b> lifetime</div>` : "";
+
+      const goalPanel = g ? `<div class="panel"><h4>Hires vs goal</h4><p class="psub" title="Month attribution is Paraform's; hires lag submissions by weeks to months.">Last ${g.monthly.length} months · lifetime total ${d.lifetime?d.lifetime.hired:"n/a"}</p>${pfHiresChartSVG(g)}</div>` : "";
+      const moneyPanel = d.money && d.money.monthly_payouts ? `<div class="panel"><h4>Payouts</h4><p class="psub">Payment-date, not placement-date; payouts lag hires. Pending/earned ledger: <b>${pfMoney(d.money.pending_total)}</b> across ${pfInt(d.money.pending_count)} payments.</p>${pfPayoutChartSVG(d.money)}</div>` : "";
+
+      const funnelPanel = d.funnel_live ? `<div class="panel"><h4>Live pipeline funnel</h4><p class="psub">${esc(d.funnel_live.note)} · advance % vs the previous stage</p>${pfFunnelHTML(d.funnel_live)}</div>` : "";
+      const weeklyPanel = d.weekly ? `<div class="panel"><h4>Weekly submissions and mid-round rate</h4><p class="psub">Agency submissions per week (bars) with the estimated mid-round rate (line). Window grows as daily snapshots accumulate.</p>${pfWeeklyChartSVG(d.weekly)}</div>` : "";
+
+      const lb=d.standing&&d.standing.leaderboard, rt=d.standing&&d.standing.rating, pv=d.standing&&d.standing.pipeline_value;
+      const standing = (lb||rt||pv)?`<div class="kpis">
+        ${lb?`<div class="kpi"><div class="k-label">Leaderboard</div><div class="k-num" style="font-size:24px">#${lb.overall_rank??"n/a"}<small> · top ${lb.overall_percentile!=null?(lb.overall_percentile*100).toFixed(1):"n/a"}%</small></div><div class="k-sub">${esc(lb.specialty||"")} cohort${lb.specialty_rank!=null?` #${lb.specialty_rank}`:""} · window ${esc((lb.window||[]).join(" to "))} · ${lb.window_mid_rounds??"n/a"} mid-rounds · ${lb.window_interviews??"n/a"} interviews<br>Ranked by mid-rounds advanced, tiebreak interviews. Not by pipeline value or volume.</div></div>`:""}
+        ${rt?`<div class="kpi"><div class="k-label">Rating</div><div class="k-num" style="font-size:24px">${rt.rating??"n/a"}</div><div class="k-sub">David's account-level rates · candidate score ${rt.candidate_score??"n/a"} · interview rate ${rt.interview_rate??"n/a"}% · mid-round rate ${rt.mid_round_interview_rate??"n/a"}%</div></div>`:""}
+        ${pv?`<div class="kpi"><div class="k-label">Pipeline value</div><div class="k-num" style="font-size:24px">${pfK(pv.current)}</div><div class="k-sub">${pv.peak_12wk?`${pv.current>=pv.peak_12wk?"at the":"vs"} ${pv.weeks}-wk peak ${pfK(pv.peak_12wk)}${pv.peak_12wk>pv.current?` · ${Math.round(100*(pv.current-pv.peak_12wk)/pv.peak_12wk)}%`:""}`:""}</div></div>`:""}
+      </div>`:"";
+
+      const recRows=(d.recruiters||[]).map(m=>`<tr>
+        <td class="who">${esc(m.name)}${m.dormant?`<span class="pf-dormant" title="no submissions in the current weekly window">dormant</span>`:""}</td>
+        <td>${pfInt(m.sourced)}</td><td>${pfInt(m.submissions)}</td><td>${pfInt(m.interviews)}</td><td><b>${pfInt(m.hired)}</b></td>
+        <td>${m.sub_per_hire??"n/a"}</td><td>${m.int_per_hire??"n/a"}</td>
+        <td>${m.rating??"n/a"}</td><td>${m.four_star_pct!=null?m.four_star_pct+"%":"n/a"}</td><td>${pfMoney(m.earnings)}</td>
+      </tr>`).join("");
+      const recruiterPanel = recRows?`<div class="panel"><h4>Per recruiter</h4><p class="psub">Lifetime totals per agency member.</p><div class="cd-wrap"><table class="cd-table"><thead><tr><th>Name</th><th>Sourced</th><th>Subs</th><th>Interviews</th><th>Hired</th><th>Subs:Hire</th><th>Int:Hire</th><th>Rating</th><th>4★</th><th>Earnings</th></tr></thead><tbody>${recRows}</tbody></table></div></div>`:"";
+
+      const ro=d.roles;
+      const rolesPanel = ro?`<div class="panel"><h4>Role board</h4><p class="psub"><b>${pfInt(ro.count)}</b> approved roles · avg fee <b>${pfMoney(ro.avg_fee)}</b> · range ${pfK(ro.fee_min)} to ${pfK(ro.fee_max)} · total addressable <b>${pfMoney(ro.total_addressable)}</b> · ${pfInt(ro.boosted)} boosted</p>
+        ${ro.top_gaps&&ro.top_gaps.length?`<p class="psub" style="margin-bottom:6px">Highest-fee roles with no submission yet:</p>`+ro.top_gaps.map(gp=>`<div class="obar"><div class="ol" style="width:220px">${esc(gp.company)} · ${esc(gp.role)}</div><div class="ov" style="width:auto">${pfMoney(gp.fee)}</div></div>`).join(""):`<p class="psub">Every approved role has at least one submission right now.</p>`}
+      </div>`:"";
+
+      const errNote = d.fetch_errors&&d.fetch_errors.length?`<p class="psub" style="color:#8a6a12">Partial data: ${d.fetch_errors.length} of the Paraform reads failed this refresh (${esc(d.fetch_errors.map(e=>e.proc.split(".").pop()).join(", "))}). Affected cards are hidden, not zeroed.</p>`:"";
+
+      $("placements").innerHTML = errNote+hero+chipLine
+        +((goalPanel||moneyPanel)?`<div class="panel-grid">${goalPanel}${moneyPanel}</div>`:"")
+        +((funnelPanel||weeklyPanel)?`<div class="panel-grid">${funnelPanel}${weeklyPanel}</div>`:"")
+        +standing+recruiterPanel+rolesPanel;
     }
 
     // Optimistic write: update locally + re-render instantly, then persist. Roll back on failure.
