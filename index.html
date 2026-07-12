@@ -81,6 +81,27 @@
     .fu-completed .row.fu { opacity:.66; transition:opacity .12s ease; }
     .fu-completed .row.fu:hover { opacity:1; }
     .auto-tag { font-size:10.5px; font-weight:700; color:var(--ink-3); background:var(--line-2); padding:3px 9px; border-radius:7px; text-transform:uppercase; letter-spacing:.05em; }
+    /* lifecycle: "why wasn't this automated" chips + one-click Add-to-sequence */
+    .fu-pillrow { display:inline-flex; align-items:center; gap:7px; flex-wrap:wrap; }
+    .fu-why { display:inline-flex; align-items:center; padding:3px 9px; border-radius:7px; font-size:10.5px; font-weight:700; letter-spacing:.02em; white-space:nowrap; cursor:default; background:var(--line-2); color:var(--ink-3); }
+    .fu-why.amber { background:var(--warn-bg); color:var(--warn); }
+    .fu-why.green { background:var(--good-bg); color:var(--good); }
+    .row.fu.fu-flag { border-left:3px solid #EBC77F; padding-left:19px; }   /* soft amber = "needs a human" */
+    .fu-add { appearance:none; border:none; cursor:pointer; font-family:inherit; display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:9px; background:var(--orange); color:#fff; font-size:12px; font-weight:600; white-space:nowrap; letter-spacing:-.01em; transition:transform .08s ease, filter .15s ease; }
+    .fu-add:hover { filter:brightness(1.05); transform:translateY(-1px); }
+    .fu-add:disabled { opacity:.65; cursor:default; filter:none; transform:none; }
+    .fu-add.confirm { background:var(--ink); }
+    .fu-add-x { appearance:none; cursor:pointer; font-family:inherit; width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:1.5px solid var(--line); border-radius:8px; background:var(--card); color:var(--ink-3); font-size:11px; font-weight:700; transition:border-color .12s ease, color .12s ease; }
+    .fu-add-x:hover { border-color:var(--bad); color:var(--bad); }
+    .fu-added { font-size:12.5px; font-weight:600; color:var(--good); white-space:nowrap; }
+    .fu-add-note { font-size:11px; font-weight:600; padding:3px 8px; border-radius:6px; line-height:1.35; max-width:220px; }
+    .fu-add-note.warn { background:var(--warn-bg); color:var(--warn); }
+    .fu-add-note.bad { background:var(--bad-bg); color:var(--bad); }
+    .fu-add-note.mut { background:var(--line-2); color:var(--ink-3); }
+    .fu-anyway { appearance:none; cursor:pointer; font-family:inherit; border:1.5px solid var(--warn); background:var(--card); color:var(--warn); font-size:11.5px; font-weight:600; border-radius:8px; padding:4px 10px; white-space:nowrap; transition:background .12s ease, color .12s ease; }
+    .fu-anyway:hover { background:var(--warn); color:#fff; }
+    .fu-pf { display:inline-flex; align-items:center; gap:4px; font-size:12.5px; font-weight:600; color:var(--ink-2); text-decoration:none; border-bottom:1.5px solid var(--line); white-space:nowrap; transition:color .12s ease, border-color .12s ease; }
+    .fu-pf:hover { color:var(--ink); border-bottom-color:var(--orange); }
     /* history — day cards */
     .day { background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); margin-bottom:13px; overflow:hidden; }
     .day-head { display:flex; align-items:center; gap:16px; padding:15px 22px; cursor:pointer; user-select:none; }
@@ -523,11 +544,14 @@
       const ds = displayStatus(c.verdict, act);
       const seqOn = st==="sequence_sent"||st==="rescheduled";
       const reschedOn = st==="rescheduled";
-      return `<div class="row fu">
+      const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
+      fuAddInfo[c.id] = { candidate:c.candidate, verdict:c.verdict };   // captured for the one-click enroll POST
+      return `<div class="row fu${why&&why.border?" fu-flag":""}">
         <div class="who">${nameLink(c.candidate)}</div>
         <div class="when">${fmtTime(c.startedAt)}</div>
-        <div class="what"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span><span class="sub">${esc(shortWhat(c.verdict))}</span></div>
+        <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(shortWhat(c.verdict))}</span></div>
         <div class="fu-actions">
+          ${fuAddControl(c)}
           <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
           <label class="chk ${seqOn?'on':''}"><input type="checkbox" ${seqOn?'checked':''} onchange="setAction('${c.id}', this.checked?'sequence_sent':'none')">Sequence sent</label>
           <label class="chk ${reschedOn?'on':''}"><input type="checkbox" ${reschedOn?'checked':''} onchange="setAction('${c.id}', this.checked?'rescheduled':'sequence_sent')">Rescheduled</label>
@@ -626,6 +650,134 @@
         : `<div class="list"><div class="empty">No open no-shows or failed interviews — all caught up. 🎉</div></div>`;
     }
 
+    // ---- Lifecycle ledger: "why wasn't this automated?" + one-click Add to sequence ----
+    // The lifecycle engine (raydar-lifecycle.vercel.app) keeps a decision per candidate;
+    // GET /api/ledger explains why each backlog row was or wasn't auto-sequenced, and
+    // POST /api/enroll adds one candidate to the right recovery sequence (oracle-guarded).
+    // Fully additive + fail-soft: if the ledger is unreachable, no chips or buttons render.
+    /* keep in sync with the canonical copy: Raydar repo webview/dashboard.html (which defines its own fuNorm; here it lives above buildBacklog) */
+    const LIFECYCLE_API = "https://raydar-lifecycle.vercel.app";
+    const FU_SEQ_TARGET = {          // verdict → target sequence for the one-click add
+      no_show:"No Show - Agent Call",
+      audio_fail:"Audio Failed - Agent Call", error:"Audio Failed - Agent Call", joined_silent:"Audio Failed - Agent Call",
+    };
+    const fuSeqShort = (name) => String(name||"").replace(/\s*-\s*Agent Call\s*$/i,"");
+    let fuLedger=null, fuLedgerLoading=false;   // { "<name lower>": { stage, rule, at, sequenceName } } — one fetch per session
+    const fuAddState = {};   // per-call-id inline add-flow state (confirm/adding/added/blocked/…) — survives the 30s re-renders
+    const fuAddInfo  = {};   // per-call-id { candidate, verdict } captured at render time for the POST
+
+    async function ensureLedger(){
+      if (fuLedger || fuLedgerLoading) return;
+      fuLedgerLoading = true;
+      try{
+        const r = await fetch(LIFECYCLE_API + "/api/ledger");
+        const j = await r.json();
+        if (j && j.ok && j.byName){ fuLedger = j.byName; if (lastData) renderFollowups(lastData); }
+      }catch(e){ /* unreachable — chips stay hidden; next tab open retries */ }
+      finally{ fuLedgerLoading = false; }
+    }
+
+    // FEATURE 1 — the reason chip: why the engine did / didn't act on this row.
+    function fuReason(c){
+      if (c.verdict==="incomplete" || c.verdict==="silent_fail")
+        return { cls:"amber", border:true, label:"manual by design",
+          title:"Didn't-finish / unconfirmed calls are never auto-emailed — human judgment required." };
+      if (!fuLedger) return null;   // not loaded (or unreachable) — say nothing rather than guess
+      const e = fuLedger[fuNorm(c.candidate)];
+      if (!e)
+        return { cls:"amber", border:true, label:"not auto-evaluated",
+          title:"This call predates the automation's go-live window (the engine only watches the last 18 hours; the one-time backfill ran before bot-only rows were persisted). Use Add to sequence." };
+      const stage = String(e.stage||"");
+      if (stage==="enrolled" || stage==="manual_enrolled"){
+        const when = e.at && !isNaN(Date.parse(e.at)) ? new Date(e.at).toLocaleDateString([],{month:"short",day:"numeric"}) : "";
+        return { cls:"green", label:"✓ in sequence", title:`In "${e.sequenceName||"sequence"}"${when?` since ${when}`:""}` };
+      }
+      if (stage.startsWith("paused") || stage.startsWith("removed"))
+        return { cls:"", label:"pulled from sequence",
+          title:"Was wrongly auto-enrolled — pulled after call-evidence review. Only add back deliberately." };
+      if (stage.startsWith("skipped_")){
+        const why = stage.slice(8).replace(/_/g," ");
+        return { cls:"", label:"blocked: "+why, title:`The engine evaluated this candidate and held off — ${why}${e.rule?` (rule: ${e.rule})`:""}.` };
+      }
+      return null;   // unknown stage — no chip
+    }
+    const fuWhyChip = (why) =>
+      why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
+
+    // FEATURE 2 — inline Add-to-sequence state machine (per call id, no modals).
+    const fuAddButton = (c, target) =>
+      `<button type="button" class="fu-add" onclick="fuAddClick('${c.id}')" title="Add ${cdEsc(c.candidate)} to “${cdEsc(target)}”">Add to sequence →</button>`;
+    function fuAddControl(c){
+      const st = fuAddState[c.id];
+      if (st && st.step==="added")   // success sticks, even after the row moves to the handled section
+        return `<span class="fu-added">✓ Added to ${esc(st.sequenceName)}</span>`;
+      const target = FU_SEQ_TARGET[c.verdict];
+      if (!target || !fuLedger) return "";                            // manual-by-design verdict, or ledger not loaded
+      const a = (actionsMap[c.id]||{}).status;
+      if (a==="sequence_sent" || a==="rescheduled") return "";        // already handled by hand
+      const e = fuLedger[fuNorm(c.candidate)], stage = String((e&&e.stage)||"");
+      if (e && !(stage.startsWith("paused")||stage.startsWith("removed")||stage.startsWith("skipped_"))) return "";   // enrolled/manual_enrolled — the chip says it all
+      if (st){
+        if (st.step==="adding")  return `<button type="button" class="fu-add" disabled>Adding…</button>`;
+        if (st.step==="confirm") return `<button type="button" class="fu-add confirm" onclick="fuAddConfirm('${c.id}')">Confirm → ${esc(fuSeqShort(target))}?</button><button type="button" class="fu-add-x" onclick="fuAddCancel('${c.id}')" title="Never mind">✕</button>`;
+        if (st.step==="blocked") return fuAddButton(c,target)
+          + `<span class="fu-add-note warn">Blocked: ${cdEsc(st.evidence)}</span><button type="button" class="fu-anyway" onclick="fuAddConfirm('${c.id}',true)" title="Enroll anyway, overriding the call-evidence block">Add anyway</button>`;
+        if (st.step==="not_in_crm") return `<span class="fu-add-note mut">${cdEsc(st.detail)}</span><a class="fu-pf" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${cdEsc(c.candidate)} in Paraform">Open in Paraform ↗</a>`;
+        if (st.step==="failed")  return fuAddButton(c,target) + `<span class="fu-add-note bad">Couldn't add — try again</span>`;
+      }
+      return fuAddButton(c,target);
+    }
+    function fuAddClick(id){
+      const prev = fuAddState[id];
+      if (prev && prev.timer) clearTimeout(prev.timer);
+      const st = { step:"confirm" };
+      st.timer = setTimeout(()=>{ if (fuAddState[id]===st){ delete fuAddState[id]; if (lastData) renderFollowups(lastData); } }, 3000);
+      fuAddState[id] = st;
+      if (lastData) renderFollowups(lastData);
+    }
+    function fuAddCancel(id){
+      const st = fuAddState[id];
+      if (st && st.timer) clearTimeout(st.timer);
+      delete fuAddState[id];
+      if (lastData) renderFollowups(lastData);
+    }
+    function fuEvidence(j){
+      const e = j && j.evidence;
+      if (typeof e === "string" && e) return e;
+      if (e && typeof e === "object") return e.reason || e.detail || e.summary || JSON.stringify(e);
+      if (typeof (j&&j.blocked) === "string" && j.blocked) return j.blocked;
+      return "recent call evidence";
+    }
+    async function fuAddConfirm(id, force){
+      const info = fuAddInfo[id]; if (!info) return;
+      const prev = fuAddState[id];
+      if (prev && prev.timer) clearTimeout(prev.timer);
+      fuAddState[id] = { step:"adding" };
+      if (lastData) renderFollowups(lastData);
+      try{
+        const body = { candidate: info.candidate, verdict: info.verdict, rowId: id };
+        if (force) body.force = true;
+        const r = await fetch(LIFECYCLE_API + "/api/enroll", {
+          method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(()=>({}));
+        if (r.ok && j.ok){
+          const seq = j.sequenceName || FU_SEQ_TARGET[info.verdict] || "sequence";
+          fuAddState[id] = { step:"added", sequenceName: seq };
+          if (fuLedger) fuLedger[fuNorm(info.candidate)] = { stage:"manual_enrolled", at:new Date().toISOString(), sequenceName: seq };
+          setAction(id, "sequence_sent");   // tick the Sequence-sent checkbox exactly like a manual tick (re-renders)
+          return;
+        }
+        if (r.status===409)      fuAddState[id] = { step:"blocked", evidence: fuEvidence(j) };
+        else if (r.status===422) fuAddState[id] = { step:"not_in_crm",
+          detail: (j&&j.detail) || ((j&&j.error)==="ambiguous_identity" ? "Ambiguous identity — check Paraform" : "Not in CRM — enroll in Paraform") };
+        else fuAddState[id] = { step:"failed" };
+      }catch(e){
+        fuAddState[id] = { step:"failed" };
+      }
+      if (lastData) renderFollowups(lastData);
+    }
+
     let seqLoaded=false, enrichLoaded=false;
     function showView(name){
       ["overview","candidates","followups","history","analytics","calls","sequences","enrich"].forEach(v=>{
@@ -635,6 +787,7 @@
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
       if(name==="candidates") ensureRoster();
+      if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
       if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
       else if(location.hash==="#calls") history.replaceState(null,"",location.pathname);
