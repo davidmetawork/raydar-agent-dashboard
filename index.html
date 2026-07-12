@@ -208,6 +208,14 @@
     .cd-bar input[type="text"]:focus { border-color:var(--orange); }
     .cd-bar select, .cd-sel { padding:8px 10px; font-size:12.5px; font-weight:500; font-family:inherit; border:1.5px solid var(--line); border-radius:9px; background:var(--card); color:var(--ink); cursor:pointer; outline:none; max-width:200px; transition:border-color .15s ease; }
     .cd-bar select:focus, .cd-sel:focus { border-color:var(--orange); }
+    /* value-tinted chips, matching the Google Sheet's dropdown colors */
+    .cd-sel.chip-green  { background:#e7f4e8; border-color:#bfe3c3; color:#1e6b30; }
+    .cd-sel.chip-purple { background:#efeafa; border-color:#d9ccf2; color:#5b3ea8; }
+    .cd-sel.chip-blue   { background:#e7f0fb; border-color:#c5dbf5; color:#1d5a9e; }
+    .cd-sel.chip-amber  { background:#fdf3d9; border-color:#f3dfa0; color:#8a6a12; }
+    .cd-sel.chip-red    { background:#fde8e8; border-color:#f5c6c6; color:#a53030; }
+    .cd-sel.chip-teal   { background:#e2f3f1; border-color:#bfe3de; color:#176e63; }
+    .cd-sel.chip-orange { background:#fdeadd; border-color:#f5cfae; color:#9a531a; }
     .cd-range { display:inline-flex; border:1.5px solid var(--line); border-radius:9px; overflow:hidden; }
     .cd-range button { appearance:none; border:none; background:var(--card); color:var(--ink-3); font-family:inherit; font-size:12.5px; font-weight:600; padding:8px 13px; cursor:pointer; transition:color .12s ease, background .12s ease; }
     .cd-range button + button { border-left:1.5px solid var(--line); }
@@ -892,10 +900,15 @@
 
     const cdErrIn = (r,field) =>
       (cdErr && cdErr.key===r.key && cdErr.field===field) ? `<div class="cd-err">Couldn't save — reverted</div>` : "";
+    // chip tints per value — same palette the Google Sheet used for these dropdowns
+    const CD_CHIP = { "Job Post":"chip-green", "Connector":"chip-purple", "Outreach":"chip-blue",
+      "Sent List":"chip-green", "No Matches - Para AI":"chip-amber", "Submitted":"chip-teal",
+      "Disengage":"chip-red", "Reschedule Email Sequence":"chip-orange" };
     function cdSelect(i, field, opts, val){
       const v=String(val||"").trim();
       const all = (v && !opts.includes(v)) ? [v,...opts] : opts;   // keep unexpected stored values visible
-      return `<select class="cd-sel" onchange="cdSet(${i},'${field}',this.value)"><option value=""${v?"":" selected"}></option>${
+      const chip = CD_CHIP[v] ? " "+CD_CHIP[v] : "";
+      return `<select class="cd-sel${chip}" onchange="this.className='cd-sel '+(CD_CHIP[this.value]||'');cdSet(${i},'${field}',this.value)"><option value=""${v?"":" selected"}></option>${
         all.map(o=>`<option value="${cdEsc(o)}"${o===v?" selected":""}>${cdEsc(o)}</option>`).join("")}</select>`;
     }
     const cdNoteCell = (i,r) => {
