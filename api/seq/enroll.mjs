@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, bookedSet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, bookedSet, createDelayProject } from "./_lib/core.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -22,9 +22,49 @@ export default async function handler(req, res) {
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const { sequenceId, rows = [], sendAs } = body;
+    const delayDays = Math.max(0, Math.min(60, parseInt(body.delayDays, 10) || 0));
     if (!sequenceId || !rows.length) return res.status(400).json({ ok: false, error: "sequenceId and rows required" });
 
     const plan = await buildPlan({ sequenceId, rows, sendAs });
+
+    // ── Delayed mode: create candidates + set emails NOW, file them into dated
+    // "⏳SeqDelay" projects, and stop. The daily release cron enrolls them on the due
+    // date — running the booked/in-sequence checks THEN, so people who book during
+    // the window are never messaged. No checks now (that's the point of the wait).
+    if (delayDays > 0) {
+      const due = new Date(Date.now() + delayDays * 86400e3).toISOString().slice(0, 10);
+      let scheduledTotal = 0, failedTotal = 0;
+      const createFailures = [], scheduled = [];
+      for (const g of plan.groups) {
+        const resolved = await mapPool(g.rows || [], 4, async (row) => {
+          if (row.candidate_user_id) return { ok: true, cu: row.candidate_user_id, email: row.email };
+          const url = (row.linkedinUrl || "").trim();
+          if (!url) return { ok: false, email: row.email, reason: "no LinkedIn URL" };
+          try {
+            const { id } = await createCandidate(url);
+            return id ? { ok: true, cu: id, email: row.email, created: true } : { ok: false, email: row.email, reason: "no id returned" };
+          } catch (e) { return { ok: false, email: row.email, reason: String(e.message || e).slice(0, 120) }; }
+        });
+        const good = resolved.filter((r) => r.ok);
+        for (const r of resolved) if (!r.ok) { failedTotal++; createFailures.push({ email: r.email, reason: r.reason }); }
+        const createdIds = good.filter((r) => r.created).map((r) => r.cu);
+        if (createdIds.length) { try { await addToProject(createdIds); } catch { /* non-fatal */ } }
+        await mapPool(good, 4, (k) => setCandidateEmail(k.cu, k.email));
+        if (!good.length) { scheduled.push({ role: g.title, target: g.targetName, scheduled: 0, note: "no valid candidates" }); continue; }
+        const nameArgs = plan.templated
+          ? { dueDate: due, sendAs: plan.sendAs, kind: "TPL", key: g.title }
+          : { dueDate: due, sendAs: plan.sendAs, kind: "SEQ", key: g.targetId, label: g.targetName };
+        await createDelayProject(nameArgs, good.map((r) => r.cu));
+        scheduledTotal += good.length;
+        scheduled.push({ role: g.title, target: g.targetName, scheduled: good.length, dueDate: due });
+      }
+      return res.status(200).json({
+        ok: true, delayed: true, dueDate: due, sequence: plan.seq.name, sendAs: plan.sendAs,
+        scheduledTotal, failedTotal, createFailures: createFailures.slice(0, 50),
+        groups: scheduled, ranAt: new Date().toISOString(),
+      });
+    }
+
     // Who is already in ANY of the recruiter's sequences -> skip them (don't re-message;
     // also makes a re-run a no-op). One scan up front, shared across all groups.
     const already = await enrolledElsewhereSet();

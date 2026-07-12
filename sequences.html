@@ -89,10 +89,10 @@
   <div class="card">
     <label>Upload CSV <span class="req">*</span></label>
     <div id="drop" class="drop">
-      <div>📎&nbsp; Drag &amp; drop or browse (CSV)</div>
+      <div>📎&nbsp; Drag &amp; drop or browse (up to 15 CSVs)</div>
       <div class="hint">Paraform pipeline export — needs First Name, Last Name, Profile URL, Active Project · Email optional (no-email candidates enroll, then Enrich)</div>
     </div>
-    <input id="file" type="file" accept=".csv,text/csv" class="hidden" />
+    <input id="file" type="file" accept=".csv,text/csv" class="hidden" multiple />
     <div id="csvInfo" class="note hidden"></div>
 
     <div class="row">
@@ -106,6 +106,16 @@
         <select id="sendAs"><option value="david">David</option><option value="noah">Noah</option></select>
         <div class="note">Sets the “book directly” Calendly link.</div>
       </div>
+      <div>
+        <label>Enroll timing</label>
+        <select id="delay">
+          <option value="0">Now</option>
+          <option value="3">In 3 days</option>
+          <option value="7">In 7 days</option>
+          <option value="14">In 14 days</option>
+        </select>
+        <div class="note">Delayed cohorts are added to Paraform now but only enrolled (and booked-checked) on the due date — gives them time to book on their own.</div>
+      </div>
     </div>
 
     <div class="btns">
@@ -113,6 +123,7 @@
       <button id="goBtn" class="btn go" disabled>Go — Enroll</button>
     </div>
     <div class="note">Always preview first. Enrollment writes to live Paraform and starts emails on the next step.</div>
+    <div id="pending" class="note hidden"></div>
   </div>
 
   <div id="out" class="card hidden"><h2 id="outTitle">Preview</h2><div id="outBody"></div></div>
@@ -142,6 +153,7 @@ async function loadHealth(){
   }catch(e){ setHealth("bad","backend unreachable"); }
 }
 async function loadSeqs(){
+  loadPending(); // show any scheduled (delayed) cohorts alongside the form
   try{
     const d = await fetch(API+"/api/seq/sequences",{headers:authHeaders()}).then(r=>r.json());
     SEQS = d.sequences||[];
@@ -166,55 +178,82 @@ const drop = $("drop");
 drop.addEventListener("click", ()=>$("file").click());
 ["dragover","dragenter"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
 ["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
-drop.addEventListener("drop", e=>{ if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
-$("file").addEventListener("change", e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
+drop.addEventListener("drop", e=>{ if(e.dataTransfer.files.length) handleFiles([...e.dataTransfer.files]); });
+$("file").addEventListener("change", e=>{ if(e.target.files.length) handleFiles([...e.target.files]); });
 
-async function handleFile(file){
+function parseOne(file){
   // merge-csv.com prepends a "# CSV-File created…" banner + blank line above the real
   // header row; Papa would treat that banner as the header -> columns unmapped -> 0 rows.
   // Strip leading comment/blank lines first, then parse. (Papa's own comments:"#" option
   // corrupts the quoted data fields here, so we do it deterministically.)
-  let text = await file.text();
-  const L = text.split(/\r?\n/); let s = 0;
-  while (s < L.length && (L[s].trim() === "" || L[s].trim().startsWith("#"))) s++;
-  text = L.slice(s).join("\n");
-  Papa.parse(text,{header:true,skipEmptyLines:true,complete:(res)=>{
-    const raw = res.data||[];
-    ROWS = raw.map(r=>({
-      firstName:(r["First Name"]||"").trim(), lastName:(r["Last Name"]||"").trim(),
-      email:(r["Email Address"]||"").trim(), linkedinUrl:(r["Profile URL"]||"").trim(),
-      activeProject:(r["Active Project"]||"").trim(),
-    // Email is NOT required — candidates are created from their LinkedIn Profile URL.
-    // A row needs a Profile URL (to create) OR an email (to match an existing CRM record).
-    // No-email candidates enroll fine; they just can't be *sent* until an address is found.
-    })).filter(r=> (r.linkedinUrl || r.email) && r.firstName!=="First Name" && !r.firstName.startsWith("#"));
-    const total = ROWS.length;
-    const noEmail = ROWS.filter(r=>!r.email).length;
-    const dropped = raw.length - total;
-    $("csvInfo").classList.remove("hidden");
-    $("csvInfo").innerHTML = `Loaded <b>${file.name}</b> — <b>${total}</b> candidates`
-      + (noEmail>0?` · <b>${noEmail}</b> without an email (enrolled now, emailed once an address is found — use Enrich)`:"")
-      + (dropped>0?` · ${dropped} skipped (no Profile URL or email)`:"") + `.`;
-    drop.querySelector("div").textContent = "✓ "+file.name+" ("+total+" candidates)";
-    refreshButtons();
-  }});
+  return file.text().then(text=>{
+    const L = text.split(/\r?\n/); let s = 0;
+    while (s < L.length && (L[s].trim() === "" || L[s].trim().startsWith("#"))) s++;
+    return new Promise(resolve=>{
+      Papa.parse(L.slice(s).join("\n"),{header:true,skipEmptyLines:true,complete:(res)=>{
+        const raw = res.data||[];
+        const rows = raw.map(r=>({
+          firstName:(r["First Name"]||"").trim(), lastName:(r["Last Name"]||"").trim(),
+          email:(r["Email Address"]||"").trim(), linkedinUrl:(r["Profile URL"]||"").trim(),
+          activeProject:(r["Active Project"]||"").trim(),
+        // Email is NOT required — candidates are created from their LinkedIn Profile URL.
+        // A row needs a Profile URL (to create) OR an email (to match an existing CRM record).
+        // No-email candidates enroll fine; they just can't be *sent* until an address is found.
+        })).filter(r=> (r.linkedinUrl || r.email) && r.firstName!=="First Name" && !r.firstName.startsWith("#"));
+        resolve({name:file.name, rows, raw:raw.length});
+      }});
+    });
+  });
+}
+
+async function handleFiles(files){
+  const capped = files.slice(0,15);
+  const parsed = await Promise.all(capped.map(parseOne));
+  // merge + dedupe across files by LinkedIn URL (fallback email) — same person in two
+  // exports should upload once.
+  const seen = new Set(); ROWS = [];
+  let dupes = 0;
+  for (const p of parsed) for (const r of p.rows){
+    const key = (r.linkedinUrl || r.email).toLowerCase().replace(/\/+$/,"");
+    if (seen.has(key)) { dupes++; continue; }
+    seen.add(key); ROWS.push(r);
+  }
+  const total = ROWS.length;
+  const noEmail = ROWS.filter(r=>!r.email).length;
+  const dropped = parsed.reduce((n,p)=>n+p.raw,0) - total - dupes;
+  const label = capped.length===1 ? capped[0].name : capped.length+" files";
+  $("csvInfo").classList.remove("hidden");
+  $("csvInfo").innerHTML = `Loaded <b>${label}</b>`
+    + (capped.length>1?` (${parsed.map(p=>`${p.name}: ${p.rows.length}`).join(" · ")})`:"")
+    + ` — <b>${total}</b> candidates`
+    + (dupes>0?` · ${dupes} cross-file duplicates merged`:"")
+    + (noEmail>0?` · <b>${noEmail}</b> without an email (enrolled now, emailed once an address is found — use Enrich)`:"")
+    + (dropped>0?` · ${dropped} skipped (no Profile URL or email)`:"")
+    + (files.length>15?` · <b>only the first 15 files were used</b>`:"") + `.`;
+  drop.querySelector("div").textContent = "✓ "+label+" ("+total+" candidates)";
+  refreshButtons();
 }
 
 $("seq").addEventListener("change", onSeqChange);
 $("previewBtn").addEventListener("click", ()=>run("preview"));
 $("goBtn").addEventListener("click", ()=>{
-  if(confirm("Enroll "+ROWS.length+" candidates into live Paraform sequences? This starts real emails.")) run("enroll");
+  const days = parseInt($("delay").value,10)||0;
+  const msg = days>0
+    ? "Schedule "+ROWS.length+" candidates for enrollment in "+days+" days? They're added to Paraform now; no emails until the due date (booked-check runs then)."
+    : "Enroll "+ROWS.length+" candidates into live Paraform sequences? This starts real emails.";
+  if(confirm(msg)) run("enroll");
 });
 
 async function run(kind){
-  const body = JSON.stringify({sequenceId:$("seq").value, rows:ROWS, sendAs:$("sendAs").value});
+  const body = JSON.stringify({sequenceId:$("seq").value, rows:ROWS, sendAs:$("sendAs").value, delayDays: kind==="enroll" ? (parseInt($("delay").value,10)||0) : 0});
   $("out").classList.remove("hidden");
   $("outTitle").textContent = kind==="preview" ? "Preview (dry run)" : "Enrollment result";
   $("outBody").innerHTML = "<div class='note'>Working… (large cohorts take a moment)</div>";
   try{
     const d = await fetch(API+"/api/seq/"+kind,{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body}).then(r=>r.json());
     if(!d.ok){ $("outBody").innerHTML = "<div class='banner bad'>"+(d.error==="no_cookie"?"Paraform session not set.":("Error: "+(d.detail||d.error)))+"</div>"; return; }
-    renderResult(kind, d);
+    if(d.delayed){ $("outTitle").textContent="Scheduled — enrolls "+d.dueDate; renderDelayed(d); }
+    else renderResult(kind, d);
   }catch(e){ $("outBody").innerHTML = "<div class='banner bad'>Request failed: "+e.message+"</div>"; }
 }
 
@@ -253,6 +292,35 @@ function renderResult(kind, d){
     html += `<div class="note">Ran at ${d.ranAt}.</div>`;
   }
   $("outBody").innerHTML = html;
+}
+
+function renderDelayed(d){
+  const groups = d.groups||[];
+  let html = `<div class="summ">
+    <div><b>${d.scheduledTotal ?? 0}</b><div>scheduled</div></div>
+    <div><b>${d.failedTotal ?? 0}</b><div>failed</div></div>
+    <div><b>${groups.length}</b><div>${groups.length>1?"cohorts":"cohort"}</div></div>
+    <div><b>${d.dueDate}</b><div>enrolls on</div></div>
+  </div>`;
+  html += `<div class="note">Sequence: <b>${d.sequence}</b> · send as <b>${d.sendAs}</b> · candidates were created in Paraform now; enrollment + the booked-check run automatically on <b>${d.dueDate}</b> (daily 9am PT). Anyone who books before then is skipped.</div>`;
+  html += `<table><tr><th>Role</th><th>Target sequence</th><th>Scheduled</th></tr>`;
+  for(const g of groups) html += `<tr><td>${g.role||"—"}</td><td>${g.target||""}</td><td>${g.scheduled ?? 0}</td></tr>`;
+  html += `</table>`;
+  const cf = d.createFailures||[];
+  if(cf.length){ html += `<div class="banner bad" style="margin-top:12px"><b>${d.failedTotal} could not be created</b>: `+cf.map(f=>(f.email||"?")+" — "+f.reason).join("; ")+`</div>`; }
+  $("outBody").innerHTML = html;
+  loadPending();
+}
+
+async function loadPending(){
+  try{
+    const d = await fetch(API+"/api/seq/release?list=1",{headers:authHeaders()}).then(r=>r.json());
+    const p = d.pending||[];
+    if(!p.length){ $("pending").classList.add("hidden"); return; }
+    $("pending").classList.remove("hidden");
+    $("pending").innerHTML = `⏳ <b>${p.length} delayed cohort${p.length>1?"s":""} scheduled:</b> `
+      + p.map(x=>`${x.label} — ${x.candidates} candidates on ${x.dueDate}${x.due?" (due, releasing today)":""}`).join(" · ");
+  }catch(e){}
 }
 
 async function init(){
