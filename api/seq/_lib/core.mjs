@@ -5,7 +5,7 @@
 // project_sequences_launcher). NOTHING here touches the frozen screener contract.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BASE = "https://www.paraform.com/api";
+export const BASE = "https://www.paraform.com/api";
 const COOKIE = process.env.PARAFORM_COOKIE || "";          // value of __Secure-next-auth.session-token
 // Google domain-restricted auth: enforced IFF GOOGLE_CLIENT_ID is set.
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -69,7 +69,7 @@ export async function requireAuth(req, res) {
 
 export function hasCookie() { return !!COOKIE; }
 
-const headers = () => ({
+export const headers = () => ({
   accept: "application/json",
   "content-type": "application/json",
   cookie: `__Secure-next-auth.session-token=${COOKIE}`,
