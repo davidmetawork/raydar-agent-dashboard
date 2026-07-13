@@ -556,7 +556,7 @@
       const seqOn = st==="sequence_sent"||st==="rescheduled";
       const reschedOn = st==="rescheduled";
       const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
-      fuAddInfo[c.id] = { candidate:c.candidate, verdict:c.verdict };   // captured for the one-click enroll POST
+      fuAddInfo[c.id] = { candidate:c.candidate, verdict:c.verdict, botId:c.botId||null };   // captured for the one-click enroll POST (rowId is the Vapi call id when a call exists — the enroll API needs botId for booking metadata)
       return `<div class="row fu${why&&why.border?" fu-flag":""}">
         <div class="who">${nameLink(c.candidate)}</div>
         <div class="when">${fmtTime(c.startedAt)}</div>
@@ -767,6 +767,7 @@
       if (lastData) renderFollowups(lastData);
       try{
         const body = { candidate: info.candidate, verdict: info.verdict, rowId: id };
+        if (info.botId) body.botId = info.botId;
         if (force) body.force = true;
         const r = await fetch(LIFECYCLE_API + "/api/enroll", {
           method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
