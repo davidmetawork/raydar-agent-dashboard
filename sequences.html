@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
@@ -89,10 +90,10 @@
   <div class="card">
     <label>Upload CSV <span class="req">*</span></label>
     <div id="drop" class="drop">
-      <div>📎&nbsp; Drag &amp; drop or browse (up to 15 CSVs)</div>
-      <div class="hint">Paraform pipeline export — needs First Name, Last Name, Profile URL, Active Project · Email optional (no-email candidates enroll, then Enrich)</div>
+      <div>📎&nbsp; Drag &amp; drop or browse (up to 15 files — CSV or XLSX)</div>
+      <div class="hint">LinkedIn Recruiter "Export all to XLSX" works as-is (role from Job Title) · CSV needs First Name, Last Name, Profile URL, Active Project · Email optional (no-email candidates enroll, then Enrich)</div>
     </div>
-    <input id="file" type="file" accept=".csv,text/csv" class="hidden" multiple />
+    <input id="file" type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden" multiple />
     <div id="csvInfo" class="note hidden"></div>
 
     <div class="row">
@@ -181,7 +182,38 @@ drop.addEventListener("click", ()=>$("file").click());
 drop.addEventListener("drop", e=>{ if(e.dataTransfer.files.length) handleFiles([...e.dataTransfer.files]); });
 $("file").addEventListener("change", e=>{ if(e.target.files.length) handleFiles([...e.target.files]); });
 
+// Shared row mapper for both formats. Email is NOT required — candidates are created
+// from their LinkedIn Profile URL; a row needs a Profile URL (to create) OR an email
+// (to match an existing CRM record). No-email candidates enroll fine; they just can't
+// be *sent* until an address is found. LinkedIn Recruiter "Job Applicant Report" XLSX
+// has no Active Project column but has Job Title — synthesize "Raydar - <Job Title>"
+// so the existing role fan-out ("Company - Title" -> Title) works unchanged.
+function mapRows(raw){
+  return raw.map(r=>({
+    firstName:(r["First Name"]||"").trim(), lastName:(r["Last Name"]||"").trim(),
+    email:(r["Email Address"]||"").trim(), linkedinUrl:(r["Profile URL"]||"").trim(),
+    activeProject:((r["Active Project"]||"").trim()) || (r["Job Title"] ? ("Raydar - "+String(r["Job Title"]).trim()) : ""),
+  })).filter(r=> (r.linkedinUrl || r.email) && r.firstName!=="First Name" && !r.firstName.startsWith("#"));
+}
+
+function parseXlsx(file){
+  // LinkedIn Recruiter export: sheets "Overview" (metadata) + "Job Applicants" (data).
+  // Prefer the "Job Applicants" sheet; otherwise the sheet with the most rows.
+  return file.arrayBuffer().then(buf=>{
+    const wb = XLSX.read(buf,{type:"array"});
+    let best=null;
+    for(const name of wb.SheetNames){
+      const data = XLSX.utils.sheet_to_json(wb.Sheets[name],{defval:""});
+      if(/job applicants/i.test(name)) { best={data}; break; }
+      if(!best || data.length>best.data.length) best={data};
+    }
+    const raw = (best&&best.data)||[];
+    return {name:file.name, rows:mapRows(raw), raw:raw.length};
+  });
+}
+
 function parseOne(file){
+  if(/\.xlsx$/i.test(file.name)) return parseXlsx(file);
   // merge-csv.com prepends a "# CSV-File created…" banner + blank line above the real
   // header row; Papa would treat that banner as the header -> columns unmapped -> 0 rows.
   // Strip leading comment/blank lines first, then parse. (Papa's own comments:"#" option
@@ -192,14 +224,7 @@ function parseOne(file){
     return new Promise(resolve=>{
       Papa.parse(L.slice(s).join("\n"),{header:true,skipEmptyLines:true,complete:(res)=>{
         const raw = res.data||[];
-        const rows = raw.map(r=>({
-          firstName:(r["First Name"]||"").trim(), lastName:(r["Last Name"]||"").trim(),
-          email:(r["Email Address"]||"").trim(), linkedinUrl:(r["Profile URL"]||"").trim(),
-          activeProject:(r["Active Project"]||"").trim(),
-        // Email is NOT required — candidates are created from their LinkedIn Profile URL.
-        // A row needs a Profile URL (to create) OR an email (to match an existing CRM record).
-        // No-email candidates enroll fine; they just can't be *sent* until an address is found.
-        })).filter(r=> (r.linkedinUrl || r.email) && r.firstName!=="First Name" && !r.firstName.startsWith("#"));
+        const rows = mapRows(raw);
         resolve({name:file.name, rows, raw:raw.length});
       }});
     });
