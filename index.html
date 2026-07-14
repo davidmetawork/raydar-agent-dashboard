@@ -255,6 +255,8 @@
     .cd-table td { padding:11px 16px; border-top:1px solid var(--line-2); vertical-align:middle; }
     .cd-table tbody tr:first-child td { border-top:none; }
     .cd-table .who { font-weight:600; letter-spacing:-.01em; white-space:nowrap; }
+    .cd-table .who .gm { margin-left:7px; font-size:13px; color:var(--ink-3); opacity:.5; transition:opacity .12s ease, color .12s ease; }
+    .cd-table .who .gm:hover { opacity:1; color:var(--orange); border-bottom-color:transparent; }
     .cd-when { color:var(--ink-2); white-space:nowrap; font-size:13px; }
     .cd-quick { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
     .cd-mini { appearance:none; border:1.5px solid var(--line); background:var(--card); color:var(--ink-2); font-family:inherit; font-size:11.5px; font-weight:600; border-radius:8px; padding:4px 10px; cursor:pointer; white-space:nowrap; transition:border-color .12s ease, color .12s ease; }
@@ -408,6 +410,16 @@
       if (!n || n === "?" || n.toLowerCase() === "unknown")
         return `<a href="https://www.paraform.com/candidates?sort=added_at%3Adesc" target="_blank" rel="noopener noreferrer" title="Open Paraform candidates">${esc(n || "Unknown")}<span class="ext">↗</span></a>`;
       return `<a href="${paraformQ(n)}" target="_blank" rel="noopener noreferrer" title="Find ${esc(n)} on Paraform">${esc(n)}<span class="ext">↗</span></a>`;
+    };
+
+    // Candidate name → Gmail search (name in quotes, executed on open).
+    // /u/<email>/ pins the raydar.xyz mailbox — candidate mail lives there,
+    // not in whichever account Gmail treats as default (/u/0).
+    const gmailQ = (name) => `https://mail.google.com/mail/u/david@raydar.xyz/#search/${encodeURIComponent(`"${String(name).trim()}"`)}`;
+    const gmailLink = (name) => {
+      const n = String(name ?? "").trim();
+      if (!n || n === "?" || n.toLowerCase() === "unknown") return "";
+      return `<a class="gm" href="${gmailQ(n)}" target="_blank" rel="noopener noreferrer" title="Search Gmail for ${esc(n)}">✉&#xFE0E;</a>`;
     };
 
     // ---- plain-language mapping (no jargon for non-technical teammates) ----
@@ -1270,7 +1282,7 @@
         ? `<div class="cd-quick"><button class="cd-mini good" onclick="cdSet(${i},'status','Success')">Success</button><button class="cd-mini" onclick="cdSet(${i},'status','No-show')">No-show</button></div>` : "";
       return `<tr>
         <td class="cd-when">${cdDate(r)}</td>
-        <td class="who">${nameLink(r.candidate)}</td>
+        <td class="who">${nameLink(r.candidate)}${gmailLink(r.candidate)}</td>
         <td>${cdSelect(i,"source",CD_SOURCES,r.source)}${cdErrIn(r,"source")}</td>
         <td>${typePill}</td>
         <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
