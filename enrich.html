@@ -35,6 +35,14 @@
   select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink)}
   td select{padding:7px 8px;border-radius:9px}
   .row{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:end}
+  .credgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+  .cred{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:14px 18px}
+  .cred-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+  .cred-name{font-family:Fraunces,serif;font-weight:600;font-size:15.5px}
+  .cred-tag{font-size:11px;font-weight:600;color:var(--muted);background:var(--muted-bg);padding:2px 8px;border-radius:999px}
+  .cred-body b{font-size:20px;font-family:Fraunces,serif;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .cred-body .cr{margin-right:16px;white-space:nowrap}
+  @media (max-width:640px){.credgrid{grid-template-columns:1fr}}
   .checks{display:flex;gap:20px;flex-wrap:wrap;margin-top:16px}
   .ck{display:flex;align-items:center;gap:7px;font-weight:500;margin:0;cursor:pointer}
   .ck input{width:16px;height:16px;accent-color:var(--orange);cursor:pointer}
@@ -79,12 +87,23 @@
   <header>
     <div class="brand">
       <img src="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" />
-      <div><h1>Enrich</h1><div class="sub">Find candidates in a sequence with no email → look up their email via FullEnrich</div></div>
+      <div><h1>Enrich</h1><div class="sub">Find candidates in a sequence with no email → ContactOut first (cheap), FullEnrich fallback (automatic)</div></div>
     </div>
     <span id="health" class="pill warn"><span class="dot"></span>checking…</span>
   </header>
 
   <div id="cfgBanner" class="banner bad hidden"></div>
+
+  <div class="credgrid">
+    <div class="cred" id="cred-co">
+      <div class="cred-head"><span class="cred-name">ContactOut</span><span class="cred-tag">stage 1 · cheap</span></div>
+      <div class="cred-body note">loading…</div>
+    </div>
+    <div class="cred" id="cred-fe">
+      <div class="cred-head"><span class="cred-name">FullEnrich</span><span class="cred-tag">stage 2 · fallback</span></div>
+      <div class="cred-body note">loading…</div>
+    </div>
+  </div>
 
   <div class="card">
     <div class="row">
@@ -99,7 +118,7 @@
       <label class="ck"><input type="checkbox" id="ck-work"> Work email</label>
       <label class="ck"><input type="checkbox" id="ck-phone"> Phone number</label>
     </div>
-    <div class="note">Pulls everyone enrolled in the sequence who has <b>no email</b>, then asks FullEnrich for the checked fields. Emails get written back to Paraform after you review and hit <b>Apply</b>; phone numbers are shown for you to use (Paraform has no candidate-phone field to write into).</div>
+    <div class="note">Pulls everyone enrolled in the sequence who has <b>no email</b>, tries <b>ContactOut</b> first (1 credit per found email, misses free), then automatically falls back to <b>FullEnrich</b> (~3 credits per personal email) for whoever's left. Emails get written back to Paraform after you review and hit <b>Apply</b>; phone numbers are shown for you to use (Paraform has no candidate-phone field to write into).</div>
   </div>
 
   <div id="out" class="card hidden"><h2 id="outTitle">Results</h2><div id="outBody"></div></div>
@@ -119,15 +138,41 @@ async function loadHealth(){
   try{
     const h = await fetch("/api/enrich/health").then(r=>r.json());
     const banner=$("cfgBanner"); banner.classList.add("hidden");
-    if(h.paraform==="live" && h.fullenrich){ setHealth("live","Ready"); }
-    else if(!h.cookieSet || h.paraform==="no_cookie"){ setHealth("bad","No Paraform session");
+    if(!h.cookieSet || h.paraform==="no_cookie"){ setHealth("bad","No Paraform session");
       banner.classList.remove("hidden"); banner.innerHTML="⚠️ Paraform session not configured — set <code>PARAFORM_COOKIE</code> and redeploy."; }
     else if(h.paraform==="expired"){ setHealth("bad","Session expired");
       banner.classList.remove("hidden"); banner.innerHTML="⚠️ Paraform session expired — refresh <code>PARAFORM_COOKIE</code>."; }
-    else if(!h.fullenrich){ setHealth("bad","No FullEnrich key");
-      banner.classList.remove("hidden"); banner.innerHTML="⚠️ FullEnrich not configured — set the <code>FULLENRICH_API_KEY</code> env var in this Vercel project, then redeploy."; }
-    else { setHealth("warn","Paraform: "+(h.paraform||"unknown")); }
+    else if(!h.fullenrich && !h.contactout){ setHealth("bad","No provider keys");
+      banner.classList.remove("hidden"); banner.innerHTML="⚠️ Neither <code>CONTACTOUT_API_KEY</code> nor <code>FULLENRICH_API_KEY</code> is set on this Vercel project — enrichment is disabled."; }
+    else if(h.paraform!=="live"){ setHealth("warn","Paraform: "+(h.paraform||"unknown")); }
+    else if(!h.contactout){ setHealth("warn","FullEnrich only");
+      banner.classList.remove("hidden"); banner.className="banner warn";
+      banner.innerHTML="⚠️ <code>CONTACTOUT_API_KEY</code> isn't set on this project — runs skip the cheap stage and go straight to FullEnrich."; }
+    else if(!h.fullenrich){ setHealth("warn","ContactOut only");
+      banner.classList.remove("hidden"); banner.className="banner warn";
+      banner.innerHTML="⚠️ <code>FULLENRICH_API_KEY</code> isn't set — no fallback: candidates ContactOut can't find will stay unresolved."; }
+    else { setHealth("live","Ready"); }
   }catch(e){ setHealth("bad","backend unreachable"); }
+}
+
+function fmtNum(n){ return (n==null||isNaN(n)) ? "—" : Number(n).toLocaleString(); }
+async function loadCredits(){
+  try{
+    const d = await fetch("/api/enrich/credits",{headers:authHeaders()}).then(r=>r.json());
+    const co=d.contactout||{}, fe=d.fullenrich||{};
+    $("cred-co").querySelector(".cred-body").innerHTML = co.ok
+      ? `<span class="cr"><b>${fmtNum(co.email?.remaining)}</b> emails</span>`+
+        `<span class="cr"><b>${fmtNum(co.phone?.remaining)}</b> phones</span>`+
+        `<span class="cr"><b>${fmtNum(co.search?.remaining)}</b> searches</span>`+
+        (co.plan==="prepaid"?"":` <span class="badge b-mut">resets monthly</span>`)
+      : (co.error==="no_key" ? '<span class="badge b-warn">key not set</span>' : `<span class="badge b-bad">${esc(co.error||"error")}</span>`);
+    $("cred-fe").querySelector(".cred-body").innerHTML = fe.ok
+      ? `<span class="cr"><b>${fmtNum(fe.balance)}</b> credits</span> <span class="note">personal ≈3 · work 1 · phone 10</span>`
+      : (fe.error==="no_key" ? '<span class="badge b-warn">key not set</span>' : `<span class="badge b-bad">${esc(fe.error||"error")}</span>`);
+  }catch(e){
+    $("cred-co").querySelector(".cred-body").innerHTML='<span class="badge b-bad">unreachable</span>';
+    $("cred-fe").querySelector(".cred-body").innerHTML='<span class="badge b-bad">unreachable</span>';
+  }
 }
 async function loadSeqs(){
   try{
@@ -145,11 +190,29 @@ $("seq").addEventListener("change", refreshEnrichBtn);
 $("enrichBtn").addEventListener("click", startEnrich);
 
 function statusBadge(st){
-  const map={DELIVERABLE:"b-good",HIGH_PROBABILITY:"b-good",CATCH_ALL:"b-warn",INVALID:"b-bad",INVALID_DOMAIN:"b-bad"};
-  return `<span class="badge ${map[st]||"b-mut"}">${esc((st||"").replace(/_/g," ").toLowerCase())}</span>`;
+  const map={DELIVERABLE:"b-good",HIGH_PROBABILITY:"b-good",FOUND:"b-good",Verified:"b-good",CATCH_ALL:"b-warn",Unverified:"b-warn",INVALID:"b-bad",INVALID_DOMAIN:"b-bad"};
+  return `<span class="badge ${map[st]||"b-mut"}">${esc(String(st||"").replace(/_/g," ").toLowerCase())}</span>`;
+}
+function srcBadge(row){
+  const srcs=new Set([row.personal?.src,row.work?.src,row.phone?.src].filter(Boolean));
+  if(!srcs.size) return "";
+  const label = srcs.size>1 ? "CO+FE" : (srcs.has("co") ? "ContactOut" : "FullEnrich");
+  return ` <span class="badge b-mut">${label}</span>`;
 }
 
+function stageProgress(html){ const p=$("progress"); if(p) p.innerHTML=html; }
+function runSummaryHead(d){
+  return `<div class="summ"><div><b class="em">${d.emailless}</b><span>without email</span></div>`+
+    `<div><b class="em">${d.totalLeads}</b><span>total in sequence</span></div></div>`+
+    `<div class="note" id="progress"></div><div id="stageNotes"></div>`;
+}
+function stageNote(html){ const n=$("stageNotes"); if(n) n.insertAdjacentHTML("beforeend", `<div class="note">${html}</div>`); }
+
+let RUN=0; // run-generation token: bumps on every new run; stale async ticks self-terminate
+const stale=(run)=> run!==RUN;
+
 async function startEnrich(){
+  const run = ++RUN; // invalidates all in-flight ticks from previous runs
   if(POLL){ clearInterval(POLL); POLL=null; }
   const sequenceId=$("seq").value; if(!sequenceId) return;
   $("enrichBtn").disabled=true;
@@ -159,61 +222,188 @@ async function startEnrich(){
   const fields = selectedFields();
   let d;
   try{ d = await fetch("/api/enrich/start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify({sequenceId, fields})}).then(r=>r.json()); }
-  catch(e){ $("outBody").innerHTML='<div class="banner bad">Request failed: '+esc(e.message)+'</div>'; refreshEnrichBtn(); return; }
+  catch(e){ if(stale(run)) return; $("outBody").innerHTML='<div class="banner bad">Request failed: '+esc(e.message)+'</div>'; refreshEnrichBtn(); return; }
+  if(stale(run)) return;
   if(!d.ok){
-    const msg = d.error==="no_fullenrich_key" ? "FullEnrich API key not set in this project." : d.error==="no_cookie" ? "Paraform session not set." : ("Error: "+esc(d.detail||d.error));
+    const msg = d.error==="no_provider_keys" ? "No enrichment keys set (ContactOut / FullEnrich) — add one to this Vercel project."
+      : d.error==="no_fullenrich_key" ? "FullEnrich API key not set in this project."
+      : d.error==="co_out_of_credits" ? "ContactOut is out of credits and FullEnrich isn't configured — no provider available."
+      : d.error==="no_cookie" ? "Paraform session not set." : ("Error: "+esc(d.detail||d.error));
     $("outBody").innerHTML='<div class="banner bad">'+msg+'</div>'; refreshEnrichBtn(); return;
   }
-  CURRENT={ sequenceId, sequence:d.sequence, fields, onFile:(d.onFile||[]) };
+  CURRENT={ sequenceId, sequence:d.sequence||"", fields, onFile:(d.onFile||[]), coRows:[], coAttempted:0, feCredits:null, unresolved:[], feFired:false };
   if(!d.emailless){
     $("outTitle").textContent="Results";
-    $("outBody").innerHTML='<div class="banner good">✓ Everyone enrolled in <b>'+esc(d.sequence)+'</b> already has an email. Nothing to enrich.</div><div class="note">'+d.totalLeads+' leads checked.</div>';
+    $("outBody").innerHTML='<div class="banner good">✓ Everyone enrolled in <b>'+esc(CURRENT.sequence||"this sequence")+'</b> already has an email. Nothing to enrich.</div><div class="note">'+d.totalLeads+' leads checked.</div>';
     refreshEnrichBtn(); return;
   }
   CANDS={};
-  (d.candidates||[]).forEach(c=>CANDS[c.cuid]=c);
-  (d.onFile||[]).forEach(c=>CANDS[c.cuid]=c);
-  // Nothing to look up (only on-file emails to copy across) → straight to review.
-  if(!d.enrichmentId){ renderResults({status:"FINISHED", results:[]}); return; }
-  const over = d.overflow ? ` <span class="badge b-warn">+${d.overflow} more will need a second run</span>` : "";
-  const onFileNote = (d.onFile&&d.onFile.length) ? ` <span class="badge b-mut">${d.onFile.length} already have an email on file (no lookup needed)</span>` : "";
-  $("outBody").innerHTML =
-    `<div class="summ"><div><b class="em">${d.emailless}</b><span>without email</span></div>`+
-    `<div><b class="em">${d.submitted}</b><span>sent to FullEnrich</span></div>`+
-    `<div><b class="em">${d.totalLeads}</b><span>total in sequence</span></div></div>`+
-    `<div class="note" id="progress"><span class="spin"></span>Looking up emails via FullEnrich… this takes a minute or two.${over}${onFileNote}</div>`+
-    `<div id="cands" class="note">${(d.candidates||[]).map(c=>esc(c.name)).join(" · ")}</div>`;
-  pollStatus(d.enrichmentId);
+  [d.candidates, d.coCandidates, d.feCandidates, d.onFile].forEach(a=>(a||[]).forEach(c=>CANDS[c.cuid]=c));
+  $("outBody").innerHTML = runSummaryHead(d);
+  if(d.limited) stageNote(`<span class="badge b-warn">test cap: only ${d.coSubmitted||d.submitted||0} of ${d.emailless} entered this run (${d.limited} left out)</span>`);
+  if((d.onFile||[]).length) stageNote(`${d.onFile.length} already have an email on file — no lookup needed.`);
+  if(d.coSkipped) stageNote(`<span class="badge b-bad">ContactOut skipped</span> ${d.coSkipped==="out_of_credits"?"out of credits":esc(d.coSkipped)} — everyone went straight to FullEnrich.`);
+
+  if(d.provider==="contactout"){
+    stageProgress(`<span class="spin"></span><b>Stage 1/2 — ContactOut</b>: looking up ${d.coSubmitted} candidate${d.coSubmitted===1?"":"s"}…`);
+    CURRENT.coAttempted = d.coSubmitted;
+    pollCo(run, d.coJobId, d.coCandidates||[], d.feCandidates||[]);
+  } else if(d.provider==="fullenrich"){
+    stageProgress(`<span class="spin"></span><b>FullEnrich</b>: looking up ${d.submitted} candidate${d.submitted===1?"":"s"}…${d.coSkipped?"":" (no ContactOut key — cheap stage skipped)"}`);
+    if(d.overflow) stageNote(`<span class="badge b-warn">+${d.overflow} more will need a second run (FullEnrich caps at 100/run)</span>`);
+    CURRENT.feFired=true; // fe already started server-side; runFeStage must not fire again
+    pollFe(run, d.enrichmentId);
+  } else {
+    // only on-file candidates → straight to review
+    renderResults({status:"FINISHED", results:[]});
+  }
 }
 
-function pollStatus(id){
-  let tries=0;
-  const tick=async()=>{
-    tries++;
-    let r; try{ r=await fetch("/api/enrich/status?id="+encodeURIComponent(id),{headers:authHeaders()}).then(x=>x.json()); }catch(e){ return; }
-    if(!r.ok) return;
-    const done=(r.results||[]).filter(x=>x.picked||x.work||x.personal).length;
-    const p=$("progress"); if(p) p.innerHTML=`<span class="spin"></span>Enriching… (${done}/${Object.keys(CANDS).length} resolved so far)`;
-    if(r.status==="FINISHED" || r.status==="CANCELED" || r.status==="CREDITS_INSUFFICIENT"){
-      clearInterval(POLL); POLL=null; renderResults(r);
+// ---- stage 1: ContactOut ----
+function pollCo(run, jobId, coCandidates, feCandidates){
+  let tries=0, busy=false, ended=false;
+  const iv = POLL = setInterval(tick, 5000);
+  async function tick(){
+    if(ended || busy || stale(run)) return;
+    busy=true;
+    try{
+      tries++;
+      if(tries>75){ ended=true; clearInterval(iv);
+        $("outBody").insertAdjacentHTML("beforeend",`<div class="banner bad">ContactOut job didn't finish after ~6 minutes (job <code>${esc(jobId)}</code>). Re-run — misses are free, so a retry doesn't double-charge.</div>`);
+        refreshEnrichBtn(); return; }
+      let r; try{ r=await fetch("/api/enrich/co-status?id="+encodeURIComponent(jobId),{headers:authHeaders()}).then(x=>x.json()); }catch(e){ return; }
+      if(ended || stale(run)) return; // a newer run started (or another tick finished) while we were in flight
+      if(!r.ok){
+        if(r.error==="CO_OUT_OF_CREDITS"){ ended=true; clearInterval(iv);
+          stageNote('<span class="badge b-bad">ContactOut out of credits mid-run</span> — continuing with FullEnrich for everyone.');
+          runFeStage(run, coCandidates.concat(feCandidates)); }
+        return;
+      }
+      if(!r.done) return;
+      ended=true; clearInterval(iv);
+      if(r.failed){
+        stageNote(`<span class="badge b-bad">ContactOut job ended with status ${esc(r.status||"?")}</span> — results unusable; falling back to FullEnrich for everyone (a ContactOut re-run is free if you want to retry it first).`);
+        runFeStage(run, coCandidates.concat(feCandidates));
+        return;
+      }
+      const { rows, misses, foundCount } = coRowsFrom(coCandidates, r.results||{});
+      CURRENT.coRows = rows;
+      stageNote(`<b>ContactOut</b>: found contact info for <b>${foundCount}</b> of ${coCandidates.length} (~${foundCount} credit${foundCount===1?"":"s"}).`);
+      if(CURRENT.coAttempted>=5 && foundCount===0)
+        stageNote('<span class="badge b-warn">zero ContactOut matches</span> If this keeps happening, the key may not have contact-data access enabled (stats works but lookups return not-found) — check with ContactOut support.');
+      runFeStage(run, misses.concat(feCandidates));
+    } finally { busy=false; }
+  }
+  tick();
+}
+
+function coRowsFrom(coCandidates, results){
+  const fields=CURRENT.fields||["personal"];
+  const wantP=fields.includes("personal"), wantW=fields.includes("work");
+  const rows=[], misses=[]; let foundCount=0;
+  for(const c of coCandidates){
+    const v=results[c.linkedinUrl]||{};
+    let pe=(v.personalEmails||[])[0]||null;
+    // flat `emails` fallback: personal-only requests can come back in the combined array
+    if(!pe && wantP && !(v.workEmails||[]).length && (v.emails||[]).length) pe=v.emails[0];
+    const we=(v.workEmails||[])[0]||null;
+    const ph=(v.phones||[])[0]||null;
+    const hasWantedEmail=(wantP&&pe)||(wantW&&we);
+    if(pe||we||ph){
+      foundCount++;
+      rows.push({cuid:c.cuid, ctcuid:c.ctcuid, name:c.name,
+        personal: (wantP&&pe)?{email:pe,status:"FOUND",src:"co"}:null,
+        work: (wantW&&we)?{email:we,status:"FOUND",src:"co"}:null,
+        phone: ph?{number:ph,region:null,src:"co"}:null});
     }
-  };
-  tick(); POLL=setInterval(tick, 6000);
+    if(!hasWantedEmail && (wantP||wantW)) misses.push(c); // still needs an email → stage 2
+  }
+  return { rows, misses, foundCount };
 }
 
-const GOOD_STATUS = new Set(["DELIVERABLE","HIGH_PROBABILITY"]);
+// ---- stage 2: FullEnrich (automatic fallback) ----
+async function runFeStage(run, pool){
+  if(stale(run)) return;
+  if(CURRENT.feFired) return; // one-shot: overlapping stage-1 ticks must never double-submit
+  CURRENT.feFired = true;
+  if(!pool.length){ renderResults({status:"FINISHED", results:[]}); return; }
+  let d;
+  stageProgress(`<span class="spin"></span><b>Stage 2/2 — FullEnrich fallback</b>: submitting ${pool.length} candidate${pool.length===1?"":"s"}…`);
+  try{
+    d = await fetch("/api/enrich/fe-start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},
+      body:JSON.stringify({sequenceId:CURRENT.sequenceId, cuids:pool.map(c=>c.cuid), fields:CURRENT.fields})}).then(r=>r.json());
+  }catch(e){ d={ok:false,detail:e.message}; }
+  if(stale(run)) return;
+  if(!d || !d.ok){
+    if(d && d.error==="no_fullenrich_key"){
+      CURRENT.unresolved = pool.map(c=>c.name);
+      stageNote(`<span class="badge b-warn">${pool.length} unresolved</span> — no FullEnrich key set, so ContactOut misses stay email-less: ${esc(pool.map(c=>c.name).join(", ")).slice(0,300)}`);
+      renderResults({status:"FINISHED", results:[]}); return;
+    }
+    $("outBody").insertAdjacentHTML("beforeend",`<div class="banner bad">FullEnrich fallback failed: ${esc((d&&(d.detail||d.error))||"request failed")}. ContactOut finds below are still usable.</div>`);
+    renderResults({status:"FINISHED", results:[]}); return;
+  }
+  if(!d.enrichmentId){ // e.g. every requested candidate got an email since the scan
+    renderResults({status:"FINISHED", results:[]}); return;
+  }
+  if(d.overflow) stageNote(`<span class="badge b-warn">+${d.overflow} more will need a second run (FullEnrich caps at 100/run)</span>`);
+  if(d.unknown) stageNote(`${d.unknown} candidate${d.unknown===1?" is":"s are"} no longer emailless — skipped.`);
+  stageProgress(`<span class="spin"></span><b>Stage 2/2 — FullEnrich fallback</b>: looking up ${d.submitted} candidate${d.submitted===1?"":"s"}… this takes a minute or two.`);
+  pollFe(run, d.enrichmentId);
+}
+
+function pollFe(run, id){
+  let tries=0, busy=false, ended=false;
+  const iv = POLL = setInterval(tick, 6000);
+  async function tick(){
+    if(ended || busy || stale(run)) return;
+    busy=true;
+    try{
+      tries++;
+      if(tries>60){ ended=true; clearInterval(iv);
+        $("outBody").insertAdjacentHTML("beforeend",`<div class="banner bad">FullEnrich didn't finish after ~6 minutes (enrichment <code>${esc(id)}</code>) — re-run in a bit; already-found ContactOut results are shown below.</div>`);
+        renderResults({status:"FINISHED", results:[]}); return; }
+      let r; try{ r=await fetch("/api/enrich/status?id="+encodeURIComponent(id),{headers:authHeaders()}).then(x=>x.json()); }catch(e){ return; }
+      if(ended || stale(run)) return; // superseded while the slow FE GET was in flight
+      if(!r.ok) return;
+      const done=(r.results||[]).filter(x=>x.picked||x.work||x.personal).length;
+      const p=$("progress"); if(p && done) p.innerHTML=`<span class="spin"></span><b>FullEnrich</b>: ${done} resolved so far…`;
+      if(r.status==="FINISHED" || r.status==="CANCELED" || r.status==="CREDITS_INSUFFICIENT"){
+        ended=true; clearInterval(iv); renderResults(r);
+      }
+    } finally { busy=false; }
+  }
+  tick();
+}
+
+const GOOD_STATUS = new Set(["DELIVERABLE","HIGH_PROBABILITY","FOUND","Verified"]);
 function renderResults(r){
   $("outTitle").textContent="Review & apply";
   refreshEnrichBtn();
+  loadCredits(); // balances just changed — refresh the cards
   const fields = CURRENT.fields || ["personal"];
   const wantPersonal = fields.includes("personal"), wantWork = fields.includes("work"), wantPhone = fields.includes("phone");
   const emailKinds = [ wantPersonal?"personal":null, wantWork?"work":null ].filter(Boolean); // Paraform-writable
-  // On-file candidates (email already known) render as rows too, pre-selected.
+  // Merge: on-file rows + ContactOut rows + FullEnrich rows (FE fills gaps on CO rows).
   const onFileRows = (CURRENT.onFile||[]).map(c=>({ cuid:c.cuid, ctcuid:c.ctcuid, name:c.name, onFile:{email:c.email}, personal:null, work:null, phone:null }));
-  const rows = onFileRows.concat(r.results||[]);
+  const map = new Map();
+  for(const c of (CURRENT.coRows||[])) map.set(c.cuid, {...c});
+  for(const f of (r.results||[])){
+    const tag = (v)=> v?{...v, src:"fe"}:null;
+    const ex = map.get(f.cuid);
+    if(ex){
+      if(!ex.personal && f.personal) ex.personal=tag(f.personal);
+      if(!ex.work && f.work) ex.work=tag(f.work);
+      if(!ex.phone && f.phone) ex.phone={...f.phone, src:"fe"};
+    } else {
+      map.set(f.cuid, {...f, personal:tag(f.personal), work:tag(f.work), phone:f.phone?{...f.phone,src:"fe"}:null});
+    }
+  }
+  const rows = onFileRows.concat([...map.values()]);
   CURRENT.results = rows;
 
   const found=rows.filter(x=> x.onFile || (wantPersonal&&x.personal) || (wantWork&&x.work) ).length;
+  const coFound=(CURRENT.coRows||[]).length;
   const phonesFound = rows.filter(x=>x.phone).length;
   let warn="";
   if(r.status==="CREDITS_INSUFFICIENT") warn='<div class="banner warn">FullEnrich ran out of credits partway — top up and re-run to finish the rest.</div>';
@@ -222,9 +412,10 @@ function renderResults(r){
   let html = warn +
     `<div class="summ">`+
     (emailKinds.length?`<div><b class="em">${found}</b><span>emails to write</span></div>`:"")+
+    (coFound?`<div><b class="em">${coFound}</b><span>via ContactOut</span></div>`:"")+
     (wantPhone?`<div><b class="em">${phonesFound}</b><span>phones found</span></div>`:"")+
     `<div><b class="em">${rows.length}</b><span>candidates</span></div>`+
-    (r.credits!=null?`<div><b class="em">${r.credits}</b><span>credits used</span></div>`:"")+`</div>`+
+    (r.credits!=null?`<div><b class="em">${r.credits}</b><span>FullEnrich credits used</span></div>`:"")+`</div>`+
     (emailKinds.length
       ? `<div class="note">Pick which email to write for each. Only <b>deliverable</b> matches are pre-selected — anything <b>invalid</b> or <b>catch-all</b> defaults to Skip (choose it manually if you trust it). <b>Apply</b> writes the email onto the candidate <b>and their sequence lead</b>, which lets the sequence email them.${wantPhone?" Phone numbers are shown for reference only (not written to Paraform)." : ""}</div>`
       : `<div class="banner warn">Only phone was selected — phone numbers can't be written to Paraform (no candidate-phone field), so they're shown here for you to copy/use.</div>`);
@@ -250,8 +441,7 @@ function renderResults(r){
       (wantWork&&x.work)?`<option value="work"${sel==="work"?" selected":""}>Work — ${esc(x.work.email)}</option>`:"",
       `<option value="skip"${sel==="skip"?" selected":""}>Skip</option>`
     ].join("");
-    const personalCell = x.onFile ? `<span class="badge b-mut">on file</span>` : cell(x.personal);
-    html += `<tr data-cuid="${esc(x.cuid)}"><td><b>${esc(c.name||x.name||"—")}</b>${li}${c.company?`<br><span class="note">${esc(c.company)}</span>`:""}</td>`+
+    html += `<tr data-cuid="${esc(x.cuid)}"><td><b>${esc(c.name||x.name||"—")}</b>${li}${srcBadge(x)}${c.company?`<br><span class="note">${esc(c.company)}</span>`:""}</td>`+
       (wantPersonal?`<td>${x.onFile?`${esc(x.onFile.email)}<br><span class="badge b-mut">on file</span>`:cell(x.personal)}</td>`:"")+
       (wantWork?`<td>${x.onFile?'<span class="badge b-mut">—</span>':cell(x.work)}</td>`:"")+
       (wantPhone?`<td>${phoneCell}</td>`:"")+
@@ -274,7 +464,7 @@ function collectItems(){
     if(kind==="skip") return;
     const x=(CURRENT.results||[]).find(z=>z.cuid===cuid); const c=CANDS[cuid]||{};
     const email = kind==="onfile" ? x?.onFile?.email : kind==="work" ? x?.work?.email : x?.personal?.email;
-    if(email) items.push({cuid, ctcuid:c.ctcuid, email});
+    if(email) items.push({cuid, ctcuid:(x?.ctcuid || c.ctcuid), email});
   });
   return items;
 }
@@ -305,7 +495,7 @@ async function init(){
   let cfg={}; try{ cfg=await fetch("/api/seq/config").then(r=>r.json()); }catch(e){}
   AUTH.required=!!cfg.authRequired; AUTH.clientId=cfg.googleClientId;
   if(Array.isArray(cfg.allowedDomains)&&cfg.allowedDomains.length) AUTH.domains=cfg.allowedDomains;
-  if(!AUTH.required){ loadSeqs(); return; }
+  if(!AUTH.required){ loadSeqs(); loadCredits(); return; }
   $("gate").style.display="flex";
   (function start(){
     if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
@@ -318,7 +508,7 @@ function onCred(resp){
     const p=JSON.parse(atob(resp.credential.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
     const dom=(p.hd||(p.email||"").split("@")[1]||"").toLowerCase();
     if(!AUTH.domains.includes(dom)){ $("gateErr").textContent="Use a "+AUTH.domains.join(" / ")+" account."; return; }
-    AUTH.token=resp.credential; $("gate").style.display="none"; loadHealth(); loadSeqs();
+    AUTH.token=resp.credential; $("gate").style.display="none"; loadHealth(); loadSeqs(); loadCredits();
   }catch(e){ $("gateErr").textContent="Sign-in failed — try again."; }
 }
 init();

@@ -2,25 +2,29 @@
 // enrich/core.mjs — engine for the "Enrich" page.
 //
 // Finds candidates who are enrolled in a Paraform email sequence but have NO email
-// (so the sequence can't reach them), looks up their email via FullEnrich
-// (fullenrich.com), and — on explicit apply — writes the found email back onto the
-// Paraform candidate so the sequence can send.
+// (so the sequence can't reach them), looks up their email — ContactOut first (cheap,
+// see _lib/contactout.mjs), FullEnrich as the automatic fallback (this module) — and,
+// on explicit apply, writes the found email back onto the Paraform candidate so the
+// sequence can send.
 //
 // Reuses the Sequences launcher's Paraform session + auth plumbing (../../seq/_lib/core.mjs)
 // so there's ONE service cookie and ONE Google gate. Nothing here touches the frozen
 // screener / status contract.
 //
-// Live-verified 2026-06-30:
-//   • read leads   → campaigns.getCampaign { campaign_id } embeds campaign_to_candidate_users,
-//                    each with candidate_email (null = no email), id (= campaign_to_candidate_user_id),
-//                    candidate_user_id, and nested candidate_user.candidate {name, linkedin_user, experiences}
+// Live-verified 2026-06-30, lead-read MIGRATED 2026-07-14:
+//   • read leads   → campaigns.getCampaignLeads via the seq lib's paginated campaignLeads()
+//                    (⚠ getCampaign embeds NOTHING since Paraform's 2026-07-12 change — the old
+//                    embed read silently returned zero leads). Per lead (flat): cu_id, ccu_id
+//                    (= campaign_to_candidate_user_id), to_use_email (null = emailless),
+//                    user_emails[] (candidate's known emails), name, linkedin_url (full URL),
+//                    recent_experience.company_name, is_archived.
 //   • enrich       → POST app.fullenrich.com/api/v2/contact/enrich/bulk → { enrichment_id }
 //                    GET  .../bulk/{id} → { status, data:[{ custom, contact_info:{ most_probable_work_email:{email,status}, … }}] }
 //   • write email  → candidateUser.updateCandidateUserEmailForUser { candidate_user_id, email }  (zod: both required)
-//                    campaigns.updateSequenceCandidateEmail { campaign_to_candidate_user_id, email } (best-effort, lead-scoped)
+//                    campaigns.updateSequenceCandidateEmail { campaign_to_candidate_user_id, candidate_email } (field verified by readback)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { trpcGet, trpcPost } from "../../seq/_lib/core.mjs";
+import { trpcGet, trpcPost, campaignLeads } from "../../seq/_lib/core.mjs";
 
 export { cors, requireAuth, hasCookie, authConfig, paraformHealth } from "../../seq/_lib/core.mjs";
 
@@ -48,12 +52,6 @@ function linkedinUrl(handle) {
   if (/^https?:\/\//i.test(h)) return h;
   return "https://www.linkedin.com/in/" + h.replace(/^\/+|\/+$/g, "");
 }
-function currentCompany(cand) {
-  const exps = Array.isArray(cand?.experiences) ? cand.experiences : [];
-  const current = exps.find((e) => !e?.end_date) || exps[0];
-  return current?.company_name || "";
-}
-
 function firstEmail(arr) {
   for (const e of (Array.isArray(arr) ? arr : [])) {
     const em = (typeof e === "string" ? e : e?.email || "").trim();
@@ -62,37 +60,36 @@ function firstEmail(arr) {
   return "";
 }
 
-// One getCampaign call → the sequence leads that have no email ON THE LEAD.
-// Splits them: `onFile` = the candidate already has an email on record (just needs copying
-// to the lead — no FullEnrich, no credit) vs `toEnrich` = no email anywhere (FullEnrich).
+// Paginated getCampaignLeads scan → the sequence leads that have no email ON THE LEAD
+// (to_use_email). Splits them: `onFile` = the candidate already has an email on record
+// (user_emails — just needs copying to the lead, no lookup, no credit) vs `toEnrich`.
 // Returns { sequence, totalLeads, toEnrich:[...], onFile:[{cuid,ctcuid,name,email,...}], skipped }
 export async function findEmaillessCandidates(sequenceId) {
-  const camp = await trpcGet("campaigns.getCampaign", { campaign_id: sequenceId });
-  if (!camp) throw new Error("sequence not found");
-  const leads = Array.isArray(camp.campaign_to_candidate_users) ? camp.campaign_to_candidate_users : [];
+  const [leads, camp] = await Promise.all([
+    campaignLeads(sequenceId),
+    trpcGet("campaigns.getCampaign", { campaign_id: sequenceId }).catch(() => null), // name only
+  ]);
 
   const toEnrich = [], onFile = [];
   let skipped = 0;
   for (const l of leads) {
-    if ((l.candidate_email || "").trim()) continue;   // lead already has an email
+    if ((l.to_use_email || "").trim()) continue;      // lead already has a sending email
     if (l.is_archived) continue;                       // not an active lead
-    const cu = l.candidate_user || {};
-    const cand = cu.candidate || {};
-    const { first, last } = splitName(cand.name);
-    const li = linkedinUrl(cand.linkedin_user);
+    const { first, last } = splitName(l.name);
+    const li = linkedinUrl(l.linkedin_url);
     const base = {
-      cuid: l.candidate_user_id, ctcuid: l.id,
-      name: (cand.name || "").trim() || `${first} ${last}`.trim(),
+      cuid: l.cu_id, ctcuid: l.ccu_id,
+      name: (l.name || "").trim() || `${first} ${last}`.trim(),
       firstName: first, lastName: last,
-      linkedinUrl: li, company: currentCompany(cand),
+      linkedinUrl: li, company: l.recent_experience?.company_name || "",
     };
     // candidate already has an email on record → copy to lead, don't re-enrich
-    const known = firstEmail(cu.emails) || firstEmail(cand.emails);
+    const known = firstEmail(l.user_emails);
     if (known) { onFile.push({ ...base, email: known }); continue; }
     if (!first && !li) { skipped++; continue; }        // nothing to enrich on
     toEnrich.push(base);
   }
-  return { sequence: camp.name, totalLeads: leads.length, toEnrich, onFile, skipped };
+  return { sequence: camp?.name || null, totalLeads: leads.length, toEnrich, onFile, skipped };
 }
 
 // ---------- FullEnrich ----------
@@ -128,6 +125,16 @@ export async function startEnrichment(name, candidates, enrichFields) {
     e.status = r.status; throw e;
   }
   return { enrichmentId: body.enrichment_id, submitted: data.length };
+}
+
+// Remaining credit balance for the workspace (doc: api/v2/account/credits).
+export async function feCredits() {
+  const r = await fetch(FE_BASE + "/account/credits", {
+    headers: { authorization: "Bearer " + FULLENRICH_KEY }, signal: AbortSignal.timeout(15000),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.message || `FullEnrich credits failed (${r.status})`);
+  return { balance: body.balance ?? null };
 }
 
 const GOOD = new Set(["DELIVERABLE", "HIGH_PROBABILITY"]);
@@ -199,14 +206,13 @@ export async function applyEmails(items) {
   return { applied: out, appliedCount: out.filter((r) => r.ok).length, skippedInvalid: badInputs };
 }
 
-// Re-read the sequence and report which of the applied candidates now carry an email
-// on their lead — verified truth, not an assumption.
+// Re-read the sequence leads and report which of the applied candidates now carry an
+// email on their lead — verified truth, not an assumption.
 export async function verifyApplied(sequenceId, cuids) {
   try {
-    const camp = await trpcGet("campaigns.getCampaign", { campaign_id: sequenceId });
-    const leads = Array.isArray(camp?.campaign_to_candidate_users) ? camp.campaign_to_candidate_users : [];
+    const leads = await campaignLeads(sequenceId);
     const set = new Set(cuids);
-    const withEmail = leads.filter((l) => set.has(l.candidate_user_id) && (l.candidate_email || "").trim());
+    const withEmail = leads.filter((l) => set.has(l.cu_id) && (l.to_use_email || "").trim());
     return { verifiedOnLead: withEmail.length };
   } catch { return { verifiedOnLead: null }; }
 }
