@@ -337,7 +337,7 @@
             <button id="cd-rall" onclick="cdRange('all')">All</button>
           </div>
           <div class="cd-range">
-            <button id="cd-fneeds" onclick="cdNeeds()" title="Only rows missing Source, Call Type, Call Status, or (for finished calls) Outcome — plus human calls awaiting confirm">Needs action</button>
+            <button id="cd-fneeds" onclick="cdNeeds()" title="Only rows missing Source, Call Type, Call Status, or (for successful calls) Outcome — plus human calls awaiting confirm. No-shows and failures aren't listed once their fields are set.">Needs action</button>
           </div>
         </div>
         <div class="list cd-wrap" id="cd-table-wrap"><div class="empty">Loading candidates…</div></div>
@@ -1184,17 +1184,19 @@
       `<span class="pill ${CD_STATUS_CLS[cdStatusKey(status)]}"><span class="d"></span>${cdEsc(String(status||"—").trim()||"—")}</span>`;
 
     // "Needs action" inbox rule: missing Source / Call Type / Status is always
-    // actionable; "Held - confirm" awaits David's confirm; a FINISHED call
-    // (not Upcoming/Live/Pending) missing its Outcome is actionable. An
-    // upcoming call with no outcome yet is NOT — nothing to do until it runs.
+    // actionable; "Held - confirm" awaits David's confirm. Outcome is only
+    // actionable for a call that actually HAPPENED (success): the Sent List /
+    // No Matches disposition needs a real conversation. No-shows, errors, and
+    // audio-fails have no outcome to record here — their follow-up is the
+    // Follow-ups tab / lifecycle engine, so they don't belong in this inbox
+    // once Source/Type/Status are set.
     function cdNeedsAction(r){
       const s=String(r.status||"").trim(), sk=cdStatusKey(s);
       if(!String(r.source||"").trim()) return true;
       if(!String(r.callType||"").trim()) return true;
       if(!s) return true;
       if(sk==="held") return true;
-      const nonTerminal = sk==="upcoming" || sk==="live" || s.toLowerCase()==="pending";
-      if(!nonTerminal && !String(r.outcome||"").trim()) return true;
+      if(sk==="success" && !String(r.outcome||"").trim()) return true;
       return false;
     }
     function cdNeeds(){
