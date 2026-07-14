@@ -1268,15 +1268,13 @@
                              : `<span class="pill live"><span class="d"></span>Agent</span>`;
       const heldBtns = (human && sKey==="held")
         ? `<div class="cd-quick"><button class="cd-mini good" onclick="cdSet(${i},'status','Success')">Success</button><button class="cd-mini" onclick="cdSet(${i},'status','No-show')">No-show</button></div>` : "";
-      const quickBtns = (sKey==="success" && !outcome)
-        ? `<div class="cd-quick"><button class="cd-mini" onclick="cdQuickSent(${i})">Sent List</button><button class="cd-mini" onclick="cdQuickNoMatch(${i})">No Matches</button></div>` : "";
       return `<tr>
         <td class="cd-when">${cdDate(r)}</td>
         <td class="who">${nameLink(r.candidate)}</td>
         <td>${cdSelect(i,"source",CD_SOURCES,r.source)}${cdErrIn(r,"source")}</td>
         <td>${typePill}</td>
         <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
-        <td>${cdSelect(i,"outcome",CD_OUTCOMES,r.outcome)}${quickBtns}${cdErrIn(r,"outcome")}</td>
+        <td>${cdSelect(i,"outcome",CD_OUTCOMES,r.outcome)}${cdErrIn(r,"outcome")}</td>
         <td>${cdNoteCell(i,r)}${cdErrIn(r,"notes")}</td>
       </tr>`;
     }
@@ -1339,21 +1337,6 @@
       };
       input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") finish(true); else if(e.key==="Escape") finish(false); });
       input.addEventListener("blur",()=>finish(true));
-    }
-
-    // Quick actions on Success rows with no outcome yet.
-    function cdQuickSent(i){
-      const row=cdVisible[i]; if(!row) return;
-      cdPersist(row,"outcome","Sent List");
-      if(document.getElementById("view-sequences")) showView("sequences");   // hosts without a Sequences tab stay put
-    }
-    function cdQuickNoMatch(i){
-      const row=cdVisible[i]; if(!row) return;
-      const first=String(row.candidate||"").trim().split(/\s+/)[0]||"there";
-      const su=encodeURIComponent("Raydar — no current matches, but you're in our system");
-      const body=encodeURIComponent(`Hi ${first},\n\nThanks for taking the time to speak with us — right now we don't have an open role that matches what you're looking for, but I've added you to our system and will reach out as soon as something fits.\n\nBest,\nDavid`);
-      cdPersist(row,"outcome","No Matches - Para AI");
-      window.open(`https://mail.google.com/mail/?view=cm&fs=1&su=${su}&body=${body}`,"_blank","noopener");   // "to" left empty on purpose
     }
 
     // Source auto-detect: ask the same-origin lookup for up to 5 visible source-less rows.
