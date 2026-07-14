@@ -255,7 +255,7 @@
     .cd-table td { padding:11px 16px; border-top:1px solid var(--line-2); vertical-align:middle; }
     .cd-table tbody tr:first-child td { border-top:none; }
     .cd-table .who { font-weight:600; letter-spacing:-.01em; white-space:nowrap; }
-    .cd-table .who .gm { margin-left:7px; font-size:13px; color:var(--ink-3); opacity:.5; transition:opacity .12s ease, color .12s ease; }
+    .cd-table .who .gm { margin-left:8px; font-size:17px; color:var(--ink-3); opacity:.6; vertical-align:-1px; transition:opacity .12s ease, color .12s ease; }
     .cd-table .who .gm:hover { opacity:1; color:var(--orange); border-bottom-color:transparent; }
     .cd-when { color:var(--ink-2); white-space:nowrap; font-size:13px; }
     .cd-quick { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
@@ -413,9 +413,10 @@
     };
 
     // Candidate name → Gmail search (name in quotes, executed on open).
-    // /u/<email>/ pins the raydar.xyz mailbox — candidate mail lives there,
-    // not in whichever account Gmail treats as default (/u/0).
-    const gmailQ = (name) => `https://mail.google.com/mail/u/david@raydar.xyz/#search/${encodeURIComponent(`"${String(name).trim()}"`)}`;
+    // ?authuser=<email> pins the raydar.xyz mailbox — candidate mail lives
+    // there, not in whichever account Gmail treats as default (/u/0).
+    // NOT the /u/<email>/ path form: that intermittently 404s ("Temporary Error").
+    const gmailQ = (name) => `https://mail.google.com/mail/?authuser=david@raydar.xyz#search/${encodeURIComponent(`"${String(name).trim()}"`)}`;
     const gmailLink = (name) => {
       const n = String(name ?? "").trim();
       if (!n || n === "?" || n.toLowerCase() === "unknown") return "";
