@@ -25,6 +25,25 @@ export default async function handler(req, res) {
     const fields = body.fields;
     const enrichFields = toEnrichFields(fields); // FullEnrich field names
 
+    // ---- stage 2 entry (page calls this after the ContactOut job completes) ----
+    // POST { stage:"fallback", sequenceId, cuids, fields }
+    // SECURITY: client sends only candidate IDs — enrichment inputs are re-derived
+    // server-side from the sequence's live emailless leads, so a caller can only ever
+    // spend credits on genuinely emailless leads of a real sequence.
+    if (body.stage === "fallback") {
+      if (!fullenrichConfigured()) return res.status(200).json({ ok: false, error: "no_fullenrich_key" });
+      const cuids = Array.isArray(body.cuids) ? body.cuids.filter((x) => typeof x === "string" && x) : [];
+      if (!cuids.length) return res.status(400).json({ ok: false, error: "cuids required" });
+      const { sequence, toEnrich } = await findEmaillessCandidates(sequenceId);
+      const want = new Set(cuids);
+      const pool = toEnrich.filter((c) => want.has(c.cuid));
+      const unknown = cuids.length - pool.length; // ids not (or no longer) emailless here
+      if (!pool.length) return res.status(200).json({ ok: true, enrichmentId: null, submitted: 0, unknown, note: "none of the requested candidates are still emailless in this sequence" });
+      const fb = pool.slice(0, FE_BULK_MAX);
+      const { enrichmentId, submitted } = await startEnrichment(`Raydar · ${sequence || "enrich"} (fallback)`, fb, enrichFields);
+      return res.status(200).json({ ok: true, enrichmentId, submitted, unknown, overflow: Math.max(0, pool.length - FE_BULK_MAX) });
+    }
+
     const { sequence, totalLeads, toEnrich, onFile, skipped } = await findEmaillessCandidates(sequenceId);
     const limit = Number.isInteger(body.limit) && body.limit > 0 ? body.limit : null;
     const pool = limit ? toEnrich.slice(0, limit) : toEnrich;

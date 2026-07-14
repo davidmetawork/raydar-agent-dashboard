@@ -158,7 +158,7 @@ async function loadHealth(){
 function fmtNum(n){ return (n==null||isNaN(n)) ? "—" : Number(n).toLocaleString(); }
 async function loadCredits(){
   try{
-    const d = await fetch("/api/enrich/credits",{headers:authHeaders()}).then(r=>r.json());
+    const d = await fetch("/api/enrich/health?credits=1",{headers:authHeaders()}).then(r=>r.json());
     const co=d.contactout||{}, fe=d.fullenrich||{};
     $("cred-co").querySelector(".cred-body").innerHTML = co.ok
       ? `<span class="cr"><b>${fmtNum(co.email?.remaining)}</b> emails</span>`+
@@ -271,7 +271,7 @@ function pollCo(run, jobId, coCandidates, feCandidates){
       if(tries>75){ ended=true; clearInterval(iv);
         $("outBody").insertAdjacentHTML("beforeend",`<div class="banner bad">ContactOut job didn't finish after ~6 minutes (job <code>${esc(jobId)}</code>). Re-run — misses are free, so a retry doesn't double-charge.</div>`);
         refreshEnrichBtn(); return; }
-      let r; try{ r=await fetch("/api/enrich/co-status?id="+encodeURIComponent(jobId),{headers:authHeaders()}).then(x=>x.json()); }catch(e){ return; }
+      let r; try{ r=await fetch("/api/enrich/status?provider=co&id="+encodeURIComponent(jobId),{headers:authHeaders()}).then(x=>x.json()); }catch(e){ return; }
       if(ended || stale(run)) return; // a newer run started (or another tick finished) while we were in flight
       if(!r.ok){
         if(r.error==="CO_OUT_OF_CREDITS"){ ended=true; clearInterval(iv);
@@ -330,8 +330,8 @@ async function runFeStage(run, pool){
   let d;
   stageProgress(`<span class="spin"></span><b>Stage 2/2 — FullEnrich fallback</b>: submitting ${pool.length} candidate${pool.length===1?"":"s"}…`);
   try{
-    d = await fetch("/api/enrich/fe-start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},
-      body:JSON.stringify({sequenceId:CURRENT.sequenceId, cuids:pool.map(c=>c.cuid), fields:CURRENT.fields})}).then(r=>r.json());
+    d = await fetch("/api/enrich/start",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},
+      body:JSON.stringify({stage:"fallback", sequenceId:CURRENT.sequenceId, cuids:pool.map(c=>c.cuid), fields:CURRENT.fields})}).then(r=>r.json());
   }catch(e){ d={ok:false,detail:e.message}; }
   if(stale(run)) return;
   if(!d || !d.ok){
