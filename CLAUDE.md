@@ -1,7 +1,8 @@
 # raydar-agent-dashboard — repo instructions
 
 This repo serves **monitor.raydar.xyz** (static shell on Vercel team
-`raydar1`; live data comes from webview-lazy-prompt.vercel.app). Pushing to
+`lazy-prompt` — transferred from the retired `raydar1` team 2026-07-14;
+live data comes from webview-lazy-prompt.vercel.app). Pushing to
 `main` auto-deploys production.
 
 ## Hard rules
