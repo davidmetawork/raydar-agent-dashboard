@@ -1192,6 +1192,11 @@
     // once Source/Type/Status are set.
     function cdNeedsAction(r){
       const s=String(r.status||"").trim(), sk=cdStatusKey(s);
+      // No-shows never belong in the inbox: the candidate didn't engage, so
+      // there's no roster work here that matters (their Source, if unknown, is
+      // low-value metadata and often un-derivable). Reschedule / re-sequence
+      // for no-shows lives in the Follow-ups tab + the lifecycle engine.
+      if(sk==="no_show") return false;
       if(!String(r.source||"").trim()) return true;
       if(!String(r.callType||"").trim()) return true;
       if(!s) return true;
