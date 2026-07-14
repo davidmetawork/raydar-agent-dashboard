@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Raydar · Agent Dashboard</title>
-  <link rel="icon" type="image/png" href="https://webview-lazy-prompt.vercel.app/assets/raydar-favicon.png?v=2" />
+  <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=2" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -273,7 +273,7 @@
   <div class="wrap">
     <div class="top">
       <div class="brand">
-        <img src="https://webview-lazy-prompt.vercel.app/assets/raydar-black.png" alt="Raydar" />
+        <img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" />
         <div class="divider"></div>
         <div class="sub">Agent Dashboard</div>
       </div>
@@ -1405,7 +1405,7 @@
       } catch(e){ out.innerHTML = `<div class="empty">Couldn’t reach the calls service — try again.</div>`; }
     }
 
-    const API_BASE = "https://webview-lazy-prompt.vercel.app";
+    const API_BASE = "https://webview-lake.vercel.app";
     async function load(){
       try {
         const [sR, aR] = await Promise.allSettled([
