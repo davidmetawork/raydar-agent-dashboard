@@ -49,10 +49,10 @@
     .pf-btn .ext { opacity:.75; font-size:12px; }
     /* per-row actions (Reschedule button on No-show rows) */
     .actions { display:flex; align-items:center; justify-content:flex-end; gap:10px; }
-    .resched { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:9px; background:var(--bad); color:#fff;
-      font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; letter-spacing:-.01em; transition:transform .08s ease, filter .15s ease; }
-    .resched:hover { filter:brightness(.93); transform:translateY(-1px); }
-    .resched .x { font-size:10px; opacity:.9; }
+    .resched { display:inline-flex; align-items:center; gap:5px; padding:6px 11px; border-radius:9px; background:transparent; color:var(--ink-2);
+      border:1px solid var(--line-2); font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; letter-spacing:-.01em; transition:border-color .12s ease, color .12s ease; }
+    .resched:hover { border-color:var(--ink-3); color:var(--ink); }
+    .resched .x { font-size:10px; opacity:.8; }
     /* blue status pill — "Rescheduling requested" */
     .pill.blue { background:var(--blue-bg); color:var(--blue); } .pill.blue .d{background:var(--blue);}
     /* view tabs (Overview ⇄ Follow-ups) */
@@ -64,12 +64,15 @@
     .tab .badge { display:inline-flex; align-items:center; justify-content:center; min-width:19px; height:19px; padding:0 6px; border-radius:10px; background:var(--bad); color:#fff; font-size:11px; font-weight:700; }
     /* follow-ups view */
     .fu-intro { font-size:13.5px; color:var(--ink-2); margin:0 2px 16px; max-width:700px; }
-    .row.fu { grid-template-columns:1.3fr .95fr 1.15fr 374px; }
-    .row.fu .when { white-space:nowrap; }
-    .fu-actions { display:flex; align-items:center; justify-content:flex-end; gap:14px; flex-wrap:wrap; }
-    .chk { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-3); cursor:pointer; white-space:nowrap; user-select:none; }
-    .chk input { width:15px; height:15px; accent-color:var(--orange); cursor:pointer; margin:0; }
-    .chk.on { color:var(--ink); }
+    .row.fu { grid-template-columns:1fr 1.45fr auto; }
+    .row.fu .who { display:flex; flex-direction:column; gap:3px; }
+    .row.fu .who .t { font-size:12.5px; color:var(--ink-3); font-weight:500; white-space:nowrap; }
+    .fu-actions { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:nowrap; }
+    .fu-marks { display:inline-flex; align-items:center; gap:6px; padding-left:10px; border-left:1px solid var(--line-2); }
+    .mark { appearance:none; font-family:inherit; padding:5px 10px; border-radius:8px; border:1px solid var(--line-2); background:transparent;
+      font-size:12px; font-weight:600; color:var(--ink-3); cursor:pointer; white-space:nowrap; transition:border-color .12s ease, color .12s ease, background .12s ease; }
+    .mark:hover { border-color:var(--ink-3); color:var(--ink); }
+    .mark.on { background:var(--good-bg); border-color:transparent; color:var(--good); }
     .row.fu .what { display:flex; flex-direction:column; gap:5px; align-items:flex-start; }
     .row.fu .what .sub { font-size:12.5px; color:var(--ink-3); line-height:1.3; }
     .fu-group { margin-bottom:22px; }
@@ -349,7 +352,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, kept here until it's resolved. <b>Nothing drops off on its own.</b> Hit <b>Reschedule</b> to open them in Paraform, then tick <b>Sequence sent</b> or <b>Rescheduled</b> to move them to <b>Handled</b>. Candidates who rebook clear themselves automatically.</p>
+        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate. <b>Nothing drops off on its own.</b> Use <b>Add to sequence</b> or <b>Reschedule</b>, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who rebook clear themselves automatically.</p>
         <div id="followups"></div>
       </section>
     </div>
@@ -445,6 +448,7 @@
     function displayStatus(verdict, action){
       const st = action && action.status;
       if (st === "rescheduled")   return { cls:"good", label:"Rescheduled" };
+      if (st === "resolved")      return { cls:"good", label:"Resolved" };
       if (st === "sequence_sent") return { cls:"blue", label:"Rescheduling requested" };
       return verdictView(verdict);
     }
@@ -566,19 +570,19 @@
     function fuRow(c){
       const act = actionsMap[c.id], st = (act||{}).status;
       const ds = displayStatus(c.verdict, act);
-      const seqOn = st==="sequence_sent"||st==="rescheduled";
-      const reschedOn = st==="rescheduled";
       const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
       fuAddInfo[c.id] = { candidate:c.candidate, verdict:c.verdict, botId:c.botId||null };   // captured for the one-click enroll POST (rowId is the Vapi call id when a call exists — the enroll API needs botId for booking metadata)
       return `<div class="row fu${why&&why.border?" fu-flag":""}">
-        <div class="who">${nameLink(c.candidate)}</div>
-        <div class="when">${fmtTime(c.startedAt)}</div>
+        <div class="who">${nameLink(c.candidate)}<span class="t">${fmtTime(c.startedAt)}</span></div>
         <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(shortWhat(c.verdict))}</span></div>
         <div class="fu-actions">
           ${fuAddControl(c)}
           <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
-          <label class="chk ${seqOn?'on':''}"><input type="checkbox" ${seqOn?'checked':''} onchange="setAction('${c.id}', this.checked?'sequence_sent':'none')">Sequence sent</label>
-          <label class="chk ${reschedOn?'on':''}"><input type="checkbox" ${reschedOn?'checked':''} onchange="setAction('${c.id}', this.checked?'rescheduled':'sequence_sent')">Rescheduled</label>
+          <span class="fu-marks">
+            <button type="button" class="mark ${st==='sequence_sent'?'on':''}" onclick="setAction('${c.id}','${st==='sequence_sent'?'none':'sequence_sent'}')" title="A rescheduling sequence is reaching out">Sequence sent</button>
+            <button type="button" class="mark ${st==='rescheduled'?'on':''}" onclick="setAction('${c.id}','${st==='rescheduled'?'none':'rescheduled'}')" title="They rebooked — done">Rescheduled</button>
+            <button type="button" class="mark ${st==='resolved'?'on':''}" onclick="setAction('${c.id}','${st==='resolved'?'none':'resolved'}')" title="Checked it out — nothing more to do">✓ Resolved</button>
+          </span>
         </div>
       </div>`;
     }
@@ -589,8 +593,7 @@
         ? `${esc(verdictView(c.verdict).label)} → booked a live call with you`
         : `${esc(verdictView(c.verdict).label)} → new interview booked`;
       return `<div class="row fu done-auto">
-        <div class="who">${nameLink(c.candidate)}</div>
-        <div class="when">${fmtTime(c.startedAt)}</div>
+        <div class="who">${nameLink(c.candidate)}<span class="t">${fmtTime(c.startedAt)}</span></div>
         <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${sub}</span></div>
         <div class="fu-actions"><span class="auto-tag">auto</span></div>
       </div>`;
@@ -640,7 +643,7 @@
         const k = fuNorm(latest.candidate);
         if (humanResched.has(k))                             autoDone.push({ ...latest, via:"human" }); // booked a live call with David
         else if (rebooked.has(k))                            autoDone.push({ ...latest, via:"rebook" }); // new AI interview booked
-        else if (st==="rescheduled" || st==="sequence_sent")  manualDone.push(latest);
+        else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved")  manualDone.push(latest);
         else                                                  open.push(latest);
       }
       open.sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
@@ -738,7 +741,7 @@
       const target = FU_SEQ_TARGET[c.verdict];
       if (!target || !fuLedger) return "";                            // manual-by-design verdict, or ledger not loaded
       const a = (actionsMap[c.id]||{}).status;
-      if (a==="sequence_sent" || a==="rescheduled") return "";        // already handled by hand
+      if (a==="sequence_sent" || a==="rescheduled" || a==="resolved") return "";   // already handled by hand
       const e = fuLedger[fuNorm(c.candidate)], stage = String((e&&e.stage)||"");
       if (e && !(stage.startsWith("paused")||stage.startsWith("removed")||stage.startsWith("skipped_"))) return "";   // enrolled/manual_enrolled — the chip says it all
       if (st){
@@ -1210,6 +1213,8 @@
       // low-value metadata and often un-derivable). Reschedule / re-sequence
       // for no-shows lives in the Follow-ups tab + the lifecycle engine.
       if(sk==="no_show") return false;
+      // Upcoming/live/pending: nothing to complete until the call has happened
+      if(sk==="upcoming" || sk==="live" || s.toLowerCase()==="pending") return false;
       if(!String(r.source||"").trim()) return true;
       if(!String(r.callType||"").trim()) return true;
       if(!s) return true;
