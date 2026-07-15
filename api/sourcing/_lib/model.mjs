@@ -66,9 +66,19 @@ function requirementText(row) {
 
 function isRequired(row) {
   if (!row || typeof row === "string") return true;
-  const importance = text(row.importance || row.priority || row.type).toLowerCase();
+  const importance = [row.importance, row.type, row.priority].map((value) => text(value).toLowerCase()).join(" ");
   return row.required === true || row.is_required === true || row.must_have === true ||
     importance.includes("must") || importance.includes("required");
+}
+
+function isOptional(row) {
+  if (!row || typeof row === "string") return false;
+  return text(row.type || row.importance).toUpperCase() === "OPTIONAL";
+}
+
+function isExclusion(row) {
+  if (!row || typeof row === "string") return false;
+  return text(row.type).toUpperCase() === "DEALBREAKER" || text(row.group).toUpperCase() === "TRAITS_TO_AVOID";
 }
 
 function rangeLabel(value, unit = "years") {
@@ -106,16 +116,19 @@ function roleSummary(detail = {}) {
     title: text(role?.title || role?.job_title || role?.name) || "Untitled role",
     company: companyName(role),
     location: names(role?.locations || role?.normalized_locations).join(", "),
-    workplace: text(role?.workplace_type || role?.workplace || role?.remote_policy),
-    employment: text(role?.employment_type || role?.role_type),
+    workplace: text(role?.workplace_type || role?.workplaceType || role?.workplace || role?.workPlaceText || role?.remote_policy),
+    employment: text(role?.employment_type || role?.employmentType || role?.role_type),
     summary: text(role?.short_description || role?.summary || role?.description).slice(0, 2500),
   };
 }
 
 export function buildRoleRubric({ detail = {}, requirements = {}, filters = {} } = {}) {
-  const rows = requirementRows(requirements);
-  const mustHaves = unique(rows.filter(isRequired).map(requirementText));
-  const preferences = unique(rows.filter((row) => !isRequired(row)).map(requirementText));
+  const rows = requirementRows(requirements)
+    .filter((row) => typeof row === "string" || (row?.active !== false && row?.hidden !== true))
+    .sort((a, b) => Number(a?.priority ?? 999) - Number(b?.priority ?? 999));
+  const mustHaves = unique(rows.filter((row) => isRequired(row) && !isExclusion(row)).map(requirementText));
+  const preferences = unique(rows.filter((row) => isOptional(row) && !isExclusion(row)).map(requirementText));
+  const dealbreakers = unique(rows.filter(isExclusion).map(requirementText));
   const normalizedFilters = normalizeFilters(filters);
   return {
     role: roleSummary(detail),
@@ -133,6 +146,7 @@ export function buildRoleRubric({ detail = {}, requirements = {}, filters = {} }
       titles: normalizedFilters.excludedTitles,
       skills: normalizedFilters.excludedSkills,
       companies: normalizedFilters.avoidCompanies,
+      criteria: dealbreakers,
     },
   };
 }
@@ -148,6 +162,7 @@ export function normalizeSearchIdeas(raw) {
     id: text(idea?.id) || `idea-${index + 1}`,
     name: text(idea?.name || idea?.title || idea?.label) || `Search lane ${index + 1}`,
     rationale: text(idea?.rationale || idea?.reason || idea?.description).slice(0, 1200),
+    query: text(idea?.query || idea?.search_text || idea?.searchText || idea?.prompt).slice(0, 5000) || null,
     filters: ideaFilters(idea),
   }));
 }

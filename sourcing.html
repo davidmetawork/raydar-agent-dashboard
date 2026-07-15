@@ -31,44 +31,53 @@
   .banner{border-radius:13px;padding:14px 16px;margin-bottom:18px;display:flex;gap:11px;align-items:flex-start}.banner strong{display:block;margin-bottom:2px}.banner span{font-size:13px;color:var(--ink2)}
   .banner.lock{background:var(--amber-bg);border:1px solid #E8D0A3}.banner.info{background:var(--violet-bg);border:1px solid #D8D1FF}
   .stephead{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:15px}.stepname{display:flex;align-items:center;gap:10px}.stepnum{width:27px;height:27px;border-radius:9px;display:grid;place-items:center;background:var(--ink);color:#fff;font-weight:700;font-size:12px}
-  label{display:block;font-weight:650;margin-bottom:7px}select{width:100%;padding:12px 13px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink);font:inherit}select:disabled{color:var(--muted);background:#FAF8F3}
+  label{display:block;font-weight:650;margin-bottom:7px}select,input{width:100%;padding:12px 13px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink);font:inherit}select:disabled,input:disabled{color:var(--muted);background:#FAF8F3}
   .roleline{display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:12px;align-items:end}.btn{appearance:none;border:1px solid var(--ink);border-radius:11px;padding:11px 17px;background:var(--ink);color:#fff;font:600 14px Inter;cursor:pointer}.btn.secondary{background:#fff;color:var(--ink)}.btn.orange{background:var(--orange);border-color:var(--orange)}.btn:disabled{cursor:not-allowed;opacity:.42}
   .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.tag{display:inline-flex;padding:4px 9px;border-radius:999px;background:#F2EEE4;color:var(--ink2);font-size:12px;font-weight:600}
   .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.panel{border:1px solid var(--line);border-radius:13px;padding:15px;background:#FFFEFB;min-height:130px}.panel h3{margin-bottom:10px}.panel ul{margin:0;padding-left:18px;color:var(--ink2)}.panel li+li{margin-top:5px}.empty{color:var(--muted);font-size:13px}
   .summary{color:var(--ink2);margin:12px 0 0;white-space:pre-line}.lanes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.lane{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff}.lane .num{font:600 11px Inter;text-transform:uppercase;letter-spacing:.08em;color:var(--violet)}.lane h3{margin:3px 0 7px}.lane p{color:var(--ink2);font-size:13px;margin:0 0 12px}.chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 8px;border-radius:7px;background:#F2EEE4;color:var(--ink2);font-size:11.5px}.chip.neg{background:var(--red-bg);color:var(--red)}
   .runbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}.note{font-size:12.5px;color:var(--muted)}
+  .mapping{display:grid;grid-template-columns:1fr 1fr 120px auto;gap:11px;align-items:end;margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}
+  .run-history{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.run-history select{width:auto;min-width:220px;padding:8px 10px}
   .reviewtop{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.stat{padding:13px;border:1px solid var(--line);border-radius:12px;background:#FFFEFB}.stat b{display:block;font:600 23px Fraunces}.stat span{color:var(--muted);font-size:12px}
   .feedback-flow{display:grid;grid-template-columns:1fr 34px 1fr;align-items:stretch;gap:10px}.feedback-box{border:1px solid var(--line);border-radius:13px;padding:15px}.arrow{display:grid;place-items:center;color:var(--muted);font-size:22px}.feedback-box h3{margin-bottom:7px}.feedback-box p{font-size:13px;color:var(--ink2);margin:0 0 12px}.reason{display:inline-flex;padding:5px 8px;margin:0 5px 6px 0;border-radius:8px;background:var(--red-bg);color:#7C2B30;font-size:11.5px;font-weight:600}
   .labbar{display:flex;align-items:center;justify-content:space-between;gap:14px;border:1px solid #D8D1FF;background:var(--violet-bg);border-radius:13px;padding:14px 15px;margin-bottom:16px}.labbar strong{display:block}.labbar span{color:var(--ink2);font-size:12.5px}.labbtns{display:flex;gap:8px;flex-wrap:wrap}.labbtns .btn{padding:8px 12px;font-size:12.5px}
-  .review-table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px}.review-table th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;border-bottom:1px solid var(--line)}.review-table td{padding:10px;border-bottom:1px solid var(--line2);vertical-align:top}.candidate-title{font-weight:650}.candidate-meta{color:var(--muted);font-size:12px;margin-top:2px}.verdicts{display:flex;gap:5px;flex-wrap:wrap}.vbtn{appearance:none;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:#fff;color:var(--ink2);font:600 11.5px Inter;cursor:pointer}.vbtn.good.on{background:var(--green-bg);border-color:#B8DDCC;color:var(--green)}.vbtn.maybe.on{background:var(--amber-bg);border-color:#E8D0A3;color:var(--amber)}.vbtn.bad.on{background:var(--red-bg);border-color:#F0C4C6;color:var(--red)}.reason-select{margin-top:6px;padding:6px 8px;font-size:11.5px;max-width:220px}.proposal{padding:9px 10px;border-radius:9px;background:var(--orange-bg);font-size:12.5px;color:var(--ink2);margin-top:7px}.proposal b{color:var(--ink)}
-  .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);z-index:20;display:none;align-items:center;justify-content:center;padding:20px}.gatebox{max-width:430px;background:#fff;border:1px solid var(--line);border-radius:17px;padding:32px;text-align:center;box-shadow:var(--shadow)}.gatebox h2{margin-bottom:7px}.gatebox p{color:var(--muted);margin:0 0 19px}#gsi{display:flex;justify-content:center}#gateErr{color:var(--red);font-size:13px;margin-top:12px}
+  .review-table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px}.review-table th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;border-bottom:1px solid var(--line)}.review-table td{padding:10px;border-bottom:1px solid var(--line2);vertical-align:top}.candidate-title{font-weight:650}.candidate-title a{color:inherit}.candidate-meta{color:var(--muted);font-size:12px;margin-top:2px}.verdicts{display:flex;gap:5px;flex-wrap:wrap}.vbtn{appearance:none;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:#fff;color:var(--ink2);font:600 11.5px Inter;cursor:pointer}.vbtn.good.on{background:var(--green-bg);border-color:#B8DDCC;color:var(--green)}.vbtn.maybe.on{background:var(--amber-bg);border-color:#E8D0A3;color:var(--amber)}.vbtn.bad.on{background:var(--red-bg);border-color:#F0C4C6;color:var(--red)}.reason-select{margin-top:6px;padding:6px 8px;font-size:11.5px;max-width:240px}.feedback-note{margin-top:6px;padding:6px 8px;font-size:11.5px;max-width:240px}.proposal{padding:9px 10px;border-radius:9px;background:var(--orange-bg);font-size:12.5px;color:var(--ink2);margin-top:7px}.proposal b{color:var(--ink)}.proposal label{display:flex;gap:8px;align-items:flex-start;margin:0;font-weight:400}.proposal input,.enroll-check{width:auto;margin-top:3px}.blocked-row{opacity:.55}.mini-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);z-index:20;display:none;align-items:center;justify-content:center;padding:20px}.gatebox{max-width:430px;background:#fff;border:1px solid var(--line);border-radius:17px;padding:32px;text-align:center;box-shadow:var(--shadow)}.gatebox h2{margin-bottom:7px}.gatebox p{color:var(--muted);margin:0 0 19px}#gsi{display:flex;justify-content:center}.keygate{display:none;gap:8px}.keygate input{text-align:left}.gateor{display:none;color:var(--muted);font-size:12px;margin:14px 0}#gateErr{color:var(--red);font-size:13px;margin-top:12px}
   .skeleton{height:13px;border-radius:7px;background:linear-gradient(90deg,#F0ECE3,#F8F6F0,#F0ECE3);background-size:200% 100%;animation:shimmer 1.3s infinite}.skeleton+.skeleton{margin-top:8px;width:80%}@keyframes shimmer{to{background-position:-200% 0}}
   body.embed header .brand img,body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:10px}
-  @media(max-width:800px){.grid,.lanes{grid-template-columns:1fr}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}.labbar{align-items:flex-start;flex-direction:column}.review-table thead{display:none}.review-table,.review-table tbody,.review-table tr,.review-table td{display:block}.review-table tr{border-bottom:1px solid var(--line);padding:8px 0}.review-table td{border:0;padding:4px 2px}}
+  @media(max-width:800px){.grid,.lanes,.mapping{grid-template-columns:1fr}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}.labbar{align-items:flex-start;flex-direction:column}.review-table thead{display:none}.review-table,.review-table tbody,.review-table tr,.review-table td{display:block}.review-table tr{border-bottom:1px solid var(--line);padding:8px 0}.review-table td{border:0;padding:4px 2px}.runbar{align-items:flex-start;flex-direction:column}.keygate{flex-direction:column}}
 </style>
 </head>
 <body>
 <div id="gate" class="gate"><div class="gatebox">
   <h2>Raydar Sourcing</h2>
-  <p>Sign in with your Raydar Google account to read Paraform role intelligence.</p>
-  <div id="gsi"></div><div id="gateErr"></div>
+  <p>Authenticate to open the private role and candidate workspace.</p>
+  <div id="keyGate" class="keygate"><input id="accessKey" type="password" autocomplete="current-password" placeholder="Sourcing access key" /><button id="keySubmit" class="btn">Open</button></div>
+  <div id="gateOr" class="gateor">or use your Raydar Google account</div><div id="gsi"></div><div id="gateErr"></div>
 </div></div>
 
 <div class="wrap">
   <header>
-    <div class="brand"><img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" /><div><div class="eyebrow">Read-only pilot</div><h1>Sourcing</h1><div class="sub">Role brief → native Paraform search plan → human feedback → better rerun</div></div></div>
+    <div class="brand"><img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" /><div><div class="eyebrow">Controlled sourcing agent</div><h1>Sourcing</h1><div class="sub">Role brief → native Paraform Search → review project → feedback → better rerun</div></div></div>
     <span id="status" class="pill locked"><span class="dot"></span>checking gates…</span>
   </header>
 
   <div id="blocker" class="banner lock"><div>🔒</div><div><strong>Production access is locked</strong><span>Loading the launch gates. No Search session, candidate, project, or sequence can be changed from this build.</span></div></div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose the Paraform role</h2><div class="note">Only roles approved for the signed-in recruiter appear.</div></div></div><span class="tag">read only</span></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose and map the Paraform role</h2><div class="note">Map each job once to its dedicated review project and optional sequence.</div></div></div><span class="tag">job scoped</span></div>
     <div class="roleline">
       <div><label for="role">Active role</label><select id="role" disabled><option value="">Waiting for access gates…</option></select></div>
       <button id="refresh" class="btn secondary" disabled>Refresh roles</button>
     </div>
     <div id="roleMeta" class="meta"></div>
+    <div class="mapping">
+      <div><label for="project">Review project</label><select id="project" disabled><option value="">Choose a role first…</option></select></div>
+      <div><label for="sequence">Sequence after approval</label><select id="sequence" disabled><option value="">No sequence mapped</option></select></div>
+      <div><label for="candidateCap">Run cap</label><input id="candidateCap" type="number" min="1" max="100" value="100" disabled /></div>
+      <button id="saveMapping" class="btn secondary" disabled>Save mapping</button>
+    </div>
   </div>
 
   <div class="card">
@@ -82,18 +91,18 @@
   </div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">3</span><div><h2>Preview native Search lanes</h2><div class="note">Paraform's own role-derived ideas; no candidate search is executed in this pilot.</div></div></div><span class="tag">native ideas</span></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">3</span><div><h2>Run native Paraform Search lanes</h2><div class="note">Three bounded NL searches, deduped before candidates enter the mapped review project.</div></div></div><span class="tag">native Search</span></div>
     <div id="lanes" class="lanes">
       <div class="lane"><div class="num">Lane 1</div><h3>Core match</h3><p>Closest interpretation of the must-haves.</p></div>
       <div class="lane"><div class="num">Lane 2</div><h3>Adjacent titles</h3><p>Transferable profiles without diluting core requirements.</p></div>
       <div class="lane"><div class="num">Lane 3</div><h3>Company-led</h3><p>Target-company or talent-density angle.</p></div>
     </div>
-    <div class="runbar"><div class="note">Search creation and pagination are deliberately not implemented until Paraform approves the automation path.</div><button class="btn orange" disabled>Run native Search</button></div>
+    <div class="runbar"><div><div id="runNote" class="note">Choose and map a role to prepare a run.</div><div id="runHistory" class="run-history"></div></div><button id="runSearch" class="btn orange" disabled>Run native Search</button></div>
   </div>
 
   <div class="card">
     <div class="stephead"><div class="stepname"><span class="stepnum">4</span><div><h2>Review and teach the next run</h2><div class="note">Every candidate gets Good, Maybe, or Bad. Bad requires a reason.</div></div></div><span class="tag">job scoped</span></div>
-    <div class="labbar"><div><strong>Feedback lab · synthetic candidates only</strong><span>Exercise the exact review and proposal rules locally. Nothing is stored or sent to Paraform.</span></div><div class="labbtns"><button id="loadDemo" class="btn secondary">Load blank batch</button><button id="loadSample" class="btn">Load example labels</button></div></div>
+    <div id="feedbackMode" class="labbar"><div><strong>Feedback lab · available before the first live run</strong><span>Once a run completes, this becomes the persisted job-specific review queue.</span></div><div class="labbtns"><button id="loadDemo" class="btn secondary">Load blank batch</button><button id="loadSample" class="btn">Load example labels</button></div></div>
     <div class="reviewtop"><div class="stat"><b id="statUnreviewed">0</b><span>Unreviewed</span></div><div class="stat"><b id="statGood">0</b><span>Good</span></div><div class="stat"><b id="statMaybe">0</b><span>Maybe</span></div><div class="stat"><b id="statBad">0</b><span>Bad</span></div></div>
     <div id="reviewQueue" hidden><table class="review-table"><thead><tr><th>Candidate</th><th>Lane</th><th>Your feedback</th></tr></thead><tbody id="reviewRows"></tbody></table></div>
     <div class="feedback-flow">
@@ -101,11 +110,11 @@
       <div class="arrow">→</div>
       <div class="feedback-box"><h3>Proposed rubric delta</h3><p>Repeated reasons become evidence-backed changes for the next Search run. A human approves every change; the agent never silently rewrites the role.</p><div id="proposals"><div class="banner info" style="margin:0"><div>↻</div><div><span>Load example labels to see evidence-backed changes. Duplicates improve dedup, not fit filters.</span></div></div></div></div>
     </div>
-    <div class="runbar"><div class="note">Approved candidates will first enter the role's review project; sequence enrollment remains a separate explicit action.</div><button class="btn" disabled>Send approved to sequence</button></div>
+    <div class="runbar"><div class="note">Only Good candidates already filed in the mapped review project can be enrolled. The action rechecks booked and cross-sequence dedup, then reads membership back.</div><button id="enroll" class="btn" disabled>Send selected Good to sequence</button></div>
   </div>
 </div>
 
-<script type="module">
+<script type="text/plain">
 import { FEEDBACK_REASONS, applyFeedback, proposeNextRun, summarizeFeedback } from "/sourcing-domain.mjs";
 
 const $=(id)=>document.getElementById(id);
@@ -222,5 +231,6 @@ $("reviewRows").addEventListener("click",event=>{const button=event.target.close
 $("reviewRows").addEventListener("change",event=>{if(event.target.matches("[data-reason-for]"))setBadReason(event.target.dataset.reasonFor,event.target.value)});
 renderReasons();init();
 </script>
+<script type="module" src="/sourcing-app.mjs"></script>
 </body>
 </html>

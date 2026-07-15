@@ -6,7 +6,7 @@ export default async function handler(req, res) {
   if (!(await requireSourcingAccess(req, res))) return;
   try {
     const roles = await listSourcingRoles();
-    return res.status(200).json({ ok: true, roles, count: roles.length, readOnly: true, writesEnabled: false });
+    return res.status(200).json({ ok: true, roles, count: roles.length });
   } catch (error) {
     const expired = error?.code === "AUTH_EXPIRED";
     return res.status(expired ? 503 : 500).json({

@@ -8,7 +8,7 @@
   ],
   "functions": {
     "api/enrich/*.mjs": { "maxDuration": 60 },
-    "api/sourcing/*.mjs": { "maxDuration": 60 }
+    "api/sourcing/*.mjs": { "maxDuration": 300 }
   },
   "crons": [
     { "path": "/api/seq/release", "schedule": "0 16 * * *" }

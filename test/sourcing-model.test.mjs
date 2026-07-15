@@ -22,7 +22,9 @@ test("role rubric separates must-haves, preferences, filters, and exclusions", (
     detail: { id: "role-1", title: "Staff Engineer", company: { name: "Acme" }, locations: ["New York"] },
     requirements: { requirements: [
       { text: "Distributed systems", required: true },
-      { text: "Fintech experience", required: false },
+      { text: "Fintech experience", type: "OPTIONAL" },
+      { description: "Avoid pure people managers", type: "DEALBREAKER", priority: 2 },
+      { description: "Avoid low-agency profiles", type: "REQUIRED", group: "TRAITS_TO_AVOID", priority: 3 },
     ] },
     filters: {
       job_titles: ["Staff Software Engineer"],
@@ -39,6 +41,7 @@ test("role rubric separates must-haves, preferences, filters, and exclusions", (
   assert.deepEqual(rubric.searchSignals.skills, ["Go"]);
   assert.equal(rubric.searchSignals.experience, "7-12 years");
   assert.deepEqual(rubric.exclusions.titles, ["Engineering Manager"]);
+  assert.deepEqual(rubric.exclusions.criteria, ["Avoid pure people managers", "Avoid low-agency profiles"]);
 });
 
 test("native ideas normalize into small, structured lanes", () => {

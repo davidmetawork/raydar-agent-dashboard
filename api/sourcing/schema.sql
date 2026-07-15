@@ -1,6 +1,9 @@
--- PostgreSQL schema for the Paraform-native Sourcing workspace.
+-- Reference PostgreSQL migration target for the Paraform-native Sourcing workspace.
 --
--- Contains orchestration state only: stable Paraform IDs, normalized hashes,
+-- The first production operator is intentionally backed by the existing scoped
+-- Raydar Upstash/Vercel KV store (see _lib/store.mjs). Use this schema when the
+-- workflow becomes multi-user or needs relational reporting. It contains
+-- orchestration state only: stable Paraform IDs, normalized hashes,
 -- structured feedback, and audit metadata. Full candidate profiles stay in
 -- Paraform. RLS is enabled with no browser policies, so only a server-held
 -- service credential can access these tables when the schema is provisioned.
