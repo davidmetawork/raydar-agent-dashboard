@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sourcing — Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&amp;family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet" />
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9;--ink:#16140F;--ink2:#4E4A41;--muted:#8C877B;--card:#FFF;
+    --line:#E9E3D5;--line2:#F1EDE4;--orange:#FF5E00;--orange-bg:#FFF1E8;
+    --green:#119865;--green-bg:#E4F4EC;--amber:#A96712;--amber-bg:#FAEEDC;
+    --red:#C93C43;--red-bg:#FBE9E9;--violet:#6759D1;--violet-bg:#EEEBFF;
+    --shadow:0 1px 2px rgba(20,16,8,.04),0 10px 30px -15px rgba(20,16,8,.13);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font:14px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .wrap{max-width:1100px;margin:0 auto;padding:28px 22px 80px}
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:13px}.brand img{height:26px}
+  h1,h2,h3{font-family:Fraunces,serif;margin:0;font-weight:600}
+  h1{font-size:30px;line-height:1.15}h2{font-size:20px}h3{font-size:17px}
+  .sub{color:var(--muted);margin-top:5px}.eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:11px;font-weight:700;color:var(--orange);margin-bottom:4px}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:999px;font-size:12.5px;font-weight:650;white-space:nowrap}
+  .pill .dot{width:8px;height:8px;border-radius:50%}.pill.locked{color:var(--amber);background:var(--amber-bg)}.pill.locked .dot{background:var(--amber)}
+  .pill.ready{color:var(--green);background:var(--green-bg)}.pill.ready .dot{background:var(--green)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:22px;margin-bottom:18px}
+  .banner{border-radius:13px;padding:14px 16px;margin-bottom:18px;display:flex;gap:11px;align-items:flex-start}.banner strong{display:block;margin-bottom:2px}.banner span{font-size:13px;color:var(--ink2)}
+  .banner.lock{background:var(--amber-bg);border:1px solid #E8D0A3}.banner.info{background:var(--violet-bg);border:1px solid #D8D1FF}
+  .stephead{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:15px}.stepname{display:flex;align-items:center;gap:10px}.stepnum{width:27px;height:27px;border-radius:9px;display:grid;place-items:center;background:var(--ink);color:#fff;font-weight:700;font-size:12px}
+  label{display:block;font-weight:650;margin-bottom:7px}select{width:100%;padding:12px 13px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink);font:inherit}select:disabled{color:var(--muted);background:#FAF8F3}
+  .roleline{display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:12px;align-items:end}.btn{appearance:none;border:1px solid var(--ink);border-radius:11px;padding:11px 17px;background:var(--ink);color:#fff;font:600 14px Inter;cursor:pointer}.btn.secondary{background:#fff;color:var(--ink)}.btn.orange{background:var(--orange);border-color:var(--orange)}.btn:disabled{cursor:not-allowed;opacity:.42}
+  .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.tag{display:inline-flex;padding:4px 9px;border-radius:999px;background:#F2EEE4;color:var(--ink2);font-size:12px;font-weight:600}
+  .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.panel{border:1px solid var(--line);border-radius:13px;padding:15px;background:#FFFEFB;min-height:130px}.panel h3{margin-bottom:10px}.panel ul{margin:0;padding-left:18px;color:var(--ink2)}.panel li+li{margin-top:5px}.empty{color:var(--muted);font-size:13px}
+  .summary{color:var(--ink2);margin:12px 0 0;white-space:pre-line}.lanes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.lane{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff}.lane .num{font:600 11px Inter;text-transform:uppercase;letter-spacing:.08em;color:var(--violet)}.lane h3{margin:3px 0 7px}.lane p{color:var(--ink2);font-size:13px;margin:0 0 12px}.chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 8px;border-radius:7px;background:#F2EEE4;color:var(--ink2);font-size:11.5px}.chip.neg{background:var(--red-bg);color:var(--red)}
+  .runbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}.note{font-size:12.5px;color:var(--muted)}
+  .reviewtop{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.stat{padding:13px;border:1px solid var(--line);border-radius:12px;background:#FFFEFB}.stat b{display:block;font:600 23px Fraunces}.stat span{color:var(--muted);font-size:12px}
+  .feedback-flow{display:grid;grid-template-columns:1fr 34px 1fr;align-items:stretch;gap:10px}.feedback-box{border:1px solid var(--line);border-radius:13px;padding:15px}.arrow{display:grid;place-items:center;color:var(--muted);font-size:22px}.feedback-box h3{margin-bottom:7px}.feedback-box p{font-size:13px;color:var(--ink2);margin:0 0 12px}.reason{display:inline-flex;padding:5px 8px;margin:0 5px 6px 0;border-radius:8px;background:var(--red-bg);color:#7C2B30;font-size:11.5px;font-weight:600}
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);z-index:20;display:none;align-items:center;justify-content:center;padding:20px}.gatebox{max-width:430px;background:#fff;border:1px solid var(--line);border-radius:17px;padding:32px;text-align:center;box-shadow:var(--shadow)}.gatebox h2{margin-bottom:7px}.gatebox p{color:var(--muted);margin:0 0 19px}#gsi{display:flex;justify-content:center}#gateErr{color:var(--red);font-size:13px;margin-top:12px}
+  .skeleton{height:13px;border-radius:7px;background:linear-gradient(90deg,#F0ECE3,#F8F6F0,#F0ECE3);background-size:200% 100%;animation:shimmer 1.3s infinite}.skeleton+.skeleton{margin-top:8px;width:80%}@keyframes shimmer{to{background-position:-200% 0}}
+  body.embed header .brand img,body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:10px}
+  @media(max-width:800px){.grid,.lanes{grid-template-columns:1fr}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}}
+</style>
+</head>
+<body>
+<div id="gate" class="gate"><div class="gatebox">
+  <h2>Raydar Sourcing</h2>
+  <p>Sign in with your Raydar Google account to read Paraform role intelligence.</p>
+  <div id="gsi"></div><div id="gateErr"></div>
+</div></div>
+
+<div class="wrap">
+  <header>
+    <div class="brand"><img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" /><div><div class="eyebrow">Read-only pilot</div><h1>Sourcing</h1><div class="sub">Role brief → native Paraform search plan → human feedback → better rerun</div></div></div>
+    <span id="status" class="pill locked"><span class="dot"></span>checking gates…</span>
+  </header>
+
+  <div id="blocker" class="banner lock"><div>🔒</div><div><strong>Production access is locked</strong><span>Loading the launch gates. No Search session, candidate, project, or sequence can be changed from this build.</span></div></div>
+
+  <div class="card">
+    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose the Paraform role</h2><div class="note">Only roles approved for the signed-in recruiter appear.</div></div></div><span class="tag">read only</span></div>
+    <div class="roleline">
+      <div><label for="role">Active role</label><select id="role" disabled><option value="">Waiting for access gates…</option></select></div>
+      <button id="refresh" class="btn secondary" disabled>Refresh roles</button>
+    </div>
+    <div id="roleMeta" class="meta"></div>
+  </div>
+
+  <div class="card">
+    <div class="stephead"><div class="stepname"><span class="stepnum">2</span><div><h2>Digest the brief into a sourcing rubric</h2><div class="note">Structured requirements and role filters, kept separate from exclusions.</div></div></div><span class="tag">versioned at run time</span></div>
+    <div id="rubric" class="grid">
+      <div class="panel"><h3>Must-haves</h3><div class="empty">Choose a role to build the rubric.</div></div>
+      <div class="panel"><h3>Positive signals</h3><div class="empty">Titles, skills, companies, location, and experience.</div></div>
+      <div class="panel"><h3>Exclusions</h3><div class="empty">Bad-title, company, and skill patterns stay explicit.</div></div>
+    </div>
+    <div id="roleSummary" class="summary"></div>
+  </div>
+
+  <div class="card">
+    <div class="stephead"><div class="stepname"><span class="stepnum">3</span><div><h2>Preview native Search lanes</h2><div class="note">Paraform's own role-derived ideas; no candidate search is executed in this pilot.</div></div></div><span class="tag">native ideas</span></div>
+    <div id="lanes" class="lanes">
+      <div class="lane"><div class="num">Lane 1</div><h3>Core match</h3><p>Closest interpretation of the must-haves.</p></div>
+      <div class="lane"><div class="num">Lane 2</div><h3>Adjacent titles</h3><p>Transferable profiles without diluting core requirements.</p></div>
+      <div class="lane"><div class="num">Lane 3</div><h3>Company-led</h3><p>Target-company or talent-density angle.</p></div>
+    </div>
+    <div class="runbar"><div class="note">Search creation and pagination are deliberately not implemented until Paraform approves the automation path.</div><button class="btn orange" disabled>Run native Search</button></div>
+  </div>
+
+  <div class="card">
+    <div class="stephead"><div class="stepname"><span class="stepnum">4</span><div><h2>Review and teach the next run</h2><div class="note">Every candidate gets Good, Maybe, or Bad. Bad requires a reason.</div></div></div><span class="tag">job scoped</span></div>
+    <div class="reviewtop"><div class="stat"><b>0</b><span>Unreviewed</span></div><div class="stat"><b>0</b><span>Good</span></div><div class="stat"><b>0</b><span>Maybe</span></div><div class="stat"><b>0</b><span>Bad</span></div></div>
+    <div class="feedback-flow">
+      <div class="feedback-box"><h3>Human labels</h3><p>Fast verdict plus a structured reason. Optional notes explain edge cases but do not become filters automatically.</p><div id="reasons"></div></div>
+      <div class="arrow">→</div>
+      <div class="feedback-box"><h3>Proposed rubric delta</h3><p>Repeated reasons become evidence-backed changes for the next Search run. A human approves every change; the agent never silently rewrites the role.</p><div class="banner info" style="margin:0"><div>↻</div><div><span>Example: repeated “too junior” labels propose a higher experience floor. Duplicates improve dedup, not fit filters.</span></div></div></div>
+    </div>
+    <div class="runbar"><div class="note">Approved candidates will first enter the role's review project; sequence enrollment remains a separate explicit action.</div><button class="btn" disabled>Send approved to sequence</button></div>
+  </div>
+</div>
+
+<script>
+const $=(id)=>document.getElementById(id);
+const esc=(value)=>String(value??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const authHeaders=()=>STATE.token?{Authorization:"Bearer "+STATE.token}:{};
+const STATE={config:null,token:null,roles:[]};
+if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
+
+function status(kind,label){const el=$("status");el.className="pill "+kind;el.innerHTML='<span class="dot"></span>'+esc(label)}
+function blocker(title,body){$("blocker").innerHTML='<div>🔒</div><div><strong>'+esc(title)+'</strong><span>'+esc(body)+'</span></div>'}
+function tags(values,neg=false){return (values||[]).map(v=>'<span class="chip'+(neg?' neg':'')+'">'+esc(v)+'</span>').join("")}
+function bullets(values,empty){return values&&values.length?'<ul>'+values.map(v=>'<li>'+esc(v)+'</li>').join("")+'</ul>':'<div class="empty">'+esc(empty)+'</div>'}
+
+function renderReasons(){const reasons=STATE.config?.feedbackReasons||[];$("reasons").innerHTML=reasons.map(r=>'<span class="reason">'+esc(r.label)+'</span>').join("")}
+
+async function loadRoles(){
+  const sel=$("role");sel.disabled=true;sel.innerHTML='<option value="">Loading approved roles…</option>';
+  try{
+    const r=await fetch("/api/sourcing/roles",{headers:authHeaders()});const d=await r.json();
+    if(!r.ok||!d.ok)throw new Error(d.error||"roles unavailable");
+    STATE.roles=d.roles||[];sel.innerHTML='<option value="">Choose a role…</option>'+STATE.roles.map(role=>'<option value="'+esc(role.id)+'">'+esc((role.company?role.company+" · ":"")+role.title)+'</option>').join("");
+    sel.disabled=false;$("refresh").disabled=false;
+    const wanted=new URLSearchParams(location.search).get("roleId");if(wanted&&STATE.roles.some(r=>r.id===wanted)){sel.value=wanted;loadRole(wanted)}
+  }catch(error){sel.innerHTML='<option value="">'+esc(error.message)+'</option>';blocker("Role list unavailable",error.message)}
+}
+
+function renderRubric(rubric){
+  const positives=[...(rubric.searchSignals?.titles||[]),...(rubric.searchSignals?.skills||[]),...(rubric.searchSignals?.companies||[]),...(rubric.searchSignals?.locations||[])];
+  if(rubric.searchSignals?.experience)positives.push(rubric.searchSignals.experience);
+  const exclusions=[...(rubric.exclusions?.titles||[]),...(rubric.exclusions?.skills||[]),...(rubric.exclusions?.companies||[])];
+  $("rubric").innerHTML='<div class="panel"><h3>Must-haves</h3>'+bullets(rubric.mustHaves,"No structured must-haves returned.")+'</div>'+
+    '<div class="panel"><h3>Positive signals</h3><div class="chips">'+(tags(positives)||'<span class="empty">No structured positive filters returned.</span>')+'</div>'+bullets(rubric.preferences,"No separate preferences returned.")+'</div>'+
+    '<div class="panel"><h3>Exclusions</h3><div class="chips">'+(tags(exclusions,true)||'<span class="empty">No explicit exclusions returned.</span>')+'</div></div>';
+  const role=rubric.role||{};$("roleMeta").innerHTML=[role.company,role.location,role.workplace,role.employment].filter(Boolean).map(v=>'<span class="tag">'+esc(v)+'</span>').join("");
+  $("roleSummary").textContent=role.summary||"";
+}
+
+function renderLanes(ideas){
+  if(!ideas.length){$("lanes").innerHTML='<div class="lane"><div class="empty">Paraform returned no role-derived search ideas.</div></div>';return}
+  $("lanes").innerHTML=ideas.slice(0,3).map((idea,i)=>{
+    const f=idea.filters||{};const positive=[...(f.targetTitles||[]),...(f.skills||[]),...(f.idealCompanies||[]),...(f.locations||[])];if(f.experience)positive.push(f.experience);
+    const negative=[...(f.excludedTitles||[]),...(f.excludedSkills||[]),...(f.avoidCompanies||[])];
+    return '<div class="lane"><div class="num">Lane '+(i+1)+'</div><h3>'+esc(idea.name)+'</h3><p>'+esc(idea.rationale||"Paraform role-derived search")+'</p><div class="chips">'+tags(positive)+tags(negative,true)+'</div></div>';
+  }).join("");
+}
+
+async function loadRole(roleId){
+  if(!roleId)return;$("rubric").innerHTML='<div class="panel"><div class="skeleton"></div><div class="skeleton"></div></div>'.repeat(3);$("lanes").innerHTML='<div class="lane"><div class="skeleton"></div><div class="skeleton"></div></div>'.repeat(3);
+  try{
+    const r=await fetch("/api/sourcing/role?roleId="+encodeURIComponent(roleId),{headers:authHeaders()});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"role unavailable");
+    renderRubric(d.rubric);renderLanes(d.searchIdeas||[]);history.replaceState(null,"","/sourcing?roleId="+encodeURIComponent(roleId));
+  }catch(error){$("rubric").innerHTML='<div class="panel"><div class="empty">'+esc(error.message)+'</div></div>';$("lanes").innerHTML='<div class="lane"><div class="empty">Search ideas unavailable.</div></div>'}
+}
+
+function showGoogleGate(){
+  $("gate").style.display="flex";
+  (function start(){if(!(window.google&&google.accounts&&google.accounts.id))return setTimeout(start,150);google.accounts.id.initialize({client_id:STATE.config.googleClientId,callback:onCredential});google.accounts.id.renderButton($("gsi"),{theme:"filled_black",size:"large",text:"signin_with",shape:"pill"})})();
+}
+function onCredential(response){
+  try{const payload=JSON.parse(atob(response.credential.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));const domain=(payload.hd||(payload.email||"").split("@")[1]||"").toLowerCase();if(!(STATE.config.allowedDomains||[]).includes(domain))throw new Error("Use an approved Raydar account.");STATE.token=response.credential;$("gate").style.display="none";status("ready","read-only access ready");blocker("Read-only pilot","Role intelligence can load. Native Search and every write remain locked.");loadRoles()}catch(error){$("gateErr").textContent=error.message||"Sign-in failed"}
+}
+
+async function init(){
+  try{const r=await fetch("/api/sourcing/config");STATE.config=await r.json();renderReasons();const c=STATE.config;
+    if(!c.authRequired){status("locked","Google auth required");blocker("Google auth is not configured","Set GOOGLE_CLIENT_ID before this workspace can read any Paraform data. The sourcing APIs fail closed.");return}
+    if(!c.nativeAccessApproved){status("locked","Paraform approval required");blocker("Paraform approval is required","The read-only pilot stays locked until Paraform sanctions the native Search access path. No internal API call will run before then.");return}
+    if(!c.paraformSessionConfigured){status("locked","Paraform session required");blocker("Paraform session is not configured","An admin must configure the shared Paraform session after the access path is approved.");return}
+    showGoogleGate();
+  }catch(error){status("locked","configuration unavailable");blocker("Configuration unavailable","The sourcing API could not be reached.")}
+}
+
+$("role").addEventListener("change",event=>loadRole(event.target.value));$("refresh").addEventListener("click",loadRoles);init();
+</script>
+</body>
+</html>

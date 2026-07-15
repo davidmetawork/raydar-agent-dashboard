@@ -3,10 +3,12 @@
     { "source": "/agent-dashboard", "destination": "/index.html" },
     { "source": "/c/:id", "destination": "/call.html" },
     { "source": "/sequences", "destination": "/sequences.html" },
-    { "source": "/enrich", "destination": "/enrich.html" }
+    { "source": "/enrich", "destination": "/enrich.html" },
+    { "source": "/sourcing", "destination": "/sourcing.html" }
   ],
   "functions": {
-    "api/enrich/*.mjs": { "maxDuration": 60 }
+    "api/enrich/*.mjs": { "maxDuration": 60 },
+    "api/sourcing/*.mjs": { "maxDuration": 60 }
   },
   "crons": [
     { "path": "/api/seq/release", "schedule": "0 16 * * *" }
