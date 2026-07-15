@@ -123,13 +123,17 @@ function roleSummary(detail = {}) {
 }
 
 export function buildRoleRubric({ detail = {}, requirements = {}, filters = {} } = {}) {
-  const rows = requirementRows(requirements)
+  const role = detail?.role || detail?.data || detail;
+  const explicitRequirements = requirementRows(requirements);
+  const nestedRequirements = role?.requirements || role?.roleRequirements || role?.role_requirements || {};
+  const rows = (explicitRequirements.length ? explicitRequirements : requirementRows(nestedRequirements))
     .filter((row) => typeof row === "string" || (row?.active !== false && row?.hidden !== true))
     .sort((a, b) => Number(a?.priority ?? 999) - Number(b?.priority ?? 999));
   const mustHaves = unique(rows.filter((row) => isRequired(row) && !isExclusion(row)).map(requirementText));
   const preferences = unique(rows.filter((row) => isOptional(row) && !isExclusion(row)).map(requirementText));
   const dealbreakers = unique(rows.filter(isExclusion).map(requirementText));
-  const normalizedFilters = normalizeFilters(filters);
+  const explicitFilters = filters && Object.keys(filters).length ? filters : null;
+  const normalizedFilters = normalizeFilters(explicitFilters || role?.candidateFilters || role?.candidate_filters || role?.filters || {});
   return {
     role: roleSummary(detail),
     mustHaves,

@@ -12,6 +12,8 @@ const roleKey = (roleId) => `${PREFIX}:role:${roleId}`;
 const roleRunsKey = (roleId) => `${PREFIX}:role:${roleId}:runs`;
 const runKey = (runId) => `${PREFIX}:run:${runId}`;
 const seenKey = (roleId) => `${PREFIX}:role:${roleId}:seen`;
+const sourceCacheKey = (key) => `${PREFIX}:source:${key}`;
+const roleReadWindowKey = `${PREFIX}:paraform-role-read:window`;
 
 async function request(path, body) {
   if (!storeConfigured()) throw new Error("sourcing state store not configured");
@@ -106,4 +108,29 @@ export async function seenCandidateIds(roleId) {
 export async function markCandidatesSeen(roleId, ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   if (unique.length) await kv(["SADD", seenKey(roleId), ...unique]);
+}
+
+export async function getSourceCache(key) {
+  return parse(await kv(["GET", sourceCacheKey(key)]), null);
+}
+
+export async function setSourceCache(key, value, ttlSeconds = 600) {
+  await kv(["SET", sourceCacheKey(key), JSON.stringify(value), "EX", Math.max(60, ttlSeconds)]);
+  return value;
+}
+
+// Paraform sanctioned the role-data build at no more than two GETs per minute.
+// This rolling-window gate is global across serverless instances and is consumed
+// only on cache misses, immediately before the vendor request.
+export async function takeRoleReadSlot(now = Date.now()) {
+  const script = `
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+    if tonumber(redis.call('ZCARD', KEYS[1])) >= 2 then return 0 end
+    redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+    redis.call('EXPIRE', KEYS[1], 120)
+    return 1
+  `;
+  const cutoff = now - 60000;
+  const member = `${now}:${Math.random().toString(36).slice(2)}`;
+  return Number(await kv(["EVAL", script, 1, roleReadWindowKey, String(cutoff), String(now), member])) === 1;
 }

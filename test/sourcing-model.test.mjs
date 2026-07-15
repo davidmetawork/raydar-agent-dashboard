@@ -44,6 +44,23 @@ test("role rubric separates must-haves, preferences, filters, and exclusions", (
   assert.deepEqual(rubric.exclusions.criteria, ["Avoid pure people managers", "Avoid low-agency profiles"]);
 });
 
+test("role rubric can use the detailed-role payload without extra Paraform reads", () => {
+  const rubric = buildRoleRubric({
+    detail: {
+      id: "role-1",
+      title: "Chief of Staff",
+      requirements: [
+        { description: "Scaled founder-led operations", type: "REQUIRED", priority: 1 },
+        { description: "Avoid career consultants", type: "DEALBREAKER", priority: 2 },
+      ],
+      candidateFilters: { job_titles: ["Chief of Staff"], locations: ["New York"] },
+    },
+  });
+  assert.deepEqual(rubric.mustHaves, ["Scaled founder-led operations"]);
+  assert.deepEqual(rubric.exclusions.criteria, ["Avoid career consultants"]);
+  assert.deepEqual(rubric.searchSignals.titles, ["Chief of Staff"]);
+});
+
 test("native ideas normalize into small, structured lanes", () => {
   const ideas = normalizeSearchIdeas({ ideas: [{
     title: "Core profile",

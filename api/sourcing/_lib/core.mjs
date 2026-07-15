@@ -17,6 +17,12 @@ import {
   normalizeActiveRoles,
   normalizeSearchIdeas,
 } from "./model.mjs";
+import {
+  getSourceCache,
+  setSourceCache,
+  storeConfigured,
+  takeRoleReadSlot,
+} from "./store.mjs";
 
 const ACCESS_KEY = process.env.SOURCING_ACCESS_KEY || "";
 const ROLE_READ_APPROVED = process.env.PARAFORM_SOURCING_ROLE_READ_APPROVED === "true";
@@ -87,38 +93,39 @@ export async function requireSourcingAccess(req, res, capability = "role-read") 
 }
 
 export async function listSourcingRoles() {
-  const raw = await trpcGet("activeRoles.getActiveRoles", {});
+  const raw = await cachedRoleRead("active-roles", 300, () => trpcGet("activeRoles.getActiveRoles", {}));
   return normalizeActiveRoles(raw);
 }
 
 export async function getRoleWorkspace(roleId) {
-  const calls = [
-    ["detail", "role.getRoleByIdDetailed", { role_id: roleId }],
-    ["requirements", "role.getRoleRequirements", { role_id: roleId }],
-    ["filters", "candidates.getCandidateFiltersByRoleId", { role_id: roleId }],
-    ["ideas", "sourcing.getRoleSearchIdeas", { roleId }],
-  ];
-  const settled = await Promise.allSettled(calls.map(([, proc, input]) => trpcGet(proc, input)));
-  const data = {};
-  const unavailable = [];
-  settled.forEach((result, index) => {
-    const [key] = calls[index];
-    if (result.status === "fulfilled") data[key] = result.value;
-    else unavailable.push(key);
-  });
-  if (!data.detail && !data.requirements && !data.filters) {
-    const error = new Error("role intelligence unavailable");
-    error.code = unavailable.length === calls.length ? "ROLE_UNAVAILABLE" : "PARTIAL_FAILURE";
-    throw error;
-  }
+  const detail = await cachedRoleRead(`role-detail:${roleId}`, 1800, () =>
+    trpcGet("role.getRoleByIdDetailed", { role_id: roleId }));
   return {
     roleId,
-    rubric: buildRoleRubric(data),
-    searchIdeas: normalizeSearchIdeas(data.ideas),
-    unavailable,
+    rubric: buildRoleRubric({ detail }),
+    searchIdeas: normalizeSearchIdeas(detail?.searchIdeas || detail?.search_ideas),
+    unavailable: ["filters", "ideas"],
     readOnly: !SEARCH_APPROVED,
     writesEnabled: PROJECT_WRITES_APPROVED,
   };
+}
+
+async function cachedRoleRead(key, ttlSeconds, loader) {
+  if (!storeConfigured()) {
+    const error = new Error("role read cache is not configured");
+    error.code = "STATE_STORE_UNAVAILABLE";
+    throw error;
+  }
+  const cached = await getSourceCache(key);
+  if (cached !== null) return cached;
+  if (!(await takeRoleReadSlot())) {
+    const error = new Error("Paraform role-read limit reached; retry after one minute");
+    error.code = "ROLE_RATE_LIMIT";
+    throw error;
+  }
+  const value = await loader();
+  await setSourceCache(key, value, ttlSeconds);
+  return value;
 }
 
 export async function listSourcingProjects() {

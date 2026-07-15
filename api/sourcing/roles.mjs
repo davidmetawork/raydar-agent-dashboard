@@ -9,9 +9,10 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, roles, count: roles.length });
   } catch (error) {
     const expired = error?.code === "AUTH_EXPIRED";
-    return res.status(expired ? 503 : 500).json({
+    const limited = error?.code === "ROLE_RATE_LIMIT";
+    return res.status(limited ? 429 : expired ? 503 : 500).json({
       ok: false,
-      error: expired ? "paraform_session_expired" : "roles_unavailable",
+      error: limited ? "paraform_role_read_limited" : expired ? "paraform_session_expired" : "roles_unavailable",
       detail: String(error?.message || error).slice(0, 160),
     });
   }
