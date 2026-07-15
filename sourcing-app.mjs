@@ -85,7 +85,7 @@ function describeCapabilities() {
   }
   if (!config.searchApproved) {
     status("ready", "briefing mode ready");
-    blocker("Role briefing is live; Search is gated", "You can digest jobs, map projects and test feedback now. Native Search stays disabled until Paraform confirms that automation scope.", "✓");
+    blocker("Role briefing is live; Search is gated", "You can digest jobs and test the feedback lab now. Project and Sequence catalogs stay unread until their Paraform capability approvals are enabled.", "✓");
     return;
   }
   if (!config.projectWritesApproved) {

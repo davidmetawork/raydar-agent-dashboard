@@ -5,6 +5,7 @@ import {
   listSourcingProjects,
   listSourcingSequences,
   requireSourcingAccess,
+  sourcingConfig,
 } from "./_lib/core.mjs";
 import { getRoleState, saveRoleState, storeConfigured } from "./_lib/store.mjs";
 import { validateRoleMapping } from "../../sourcing-domain.mjs";
@@ -32,12 +33,19 @@ export default async function handler(req, res) {
       reviewProjectId: body.reviewProjectId,
       sequenceId: body.sequenceId,
     });
+    const config = sourcingConfig();
+    if (!config.projectWritesApproved) {
+      return res.status(503).json({ ok: false, error: "paraform_project_approval_required", capability: "project" });
+    }
+    if (mapping.sequenceId && !config.sequenceWritesApproved) {
+      return res.status(503).json({ ok: false, error: "paraform_sequence_approval_required", capability: "sequence" });
+    }
     const cap = Number(body.candidateCap || 100);
     if (!Number.isInteger(cap) || cap < 1 || cap > 100) throw new Error("candidateCap must be an integer from 1 to 100");
     const [workspace, projects, sequences, previous] = await Promise.all([
       getRoleWorkspace(roleId),
       listSourcingProjects(),
-      listSourcingSequences(),
+      mapping.sequenceId ? listSourcingSequences() : Promise.resolve([]),
       getRoleState(roleId),
     ]);
     const project = projects.find((item) => item.id === mapping.reviewProjectId);
