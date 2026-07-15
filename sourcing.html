@@ -39,10 +39,12 @@
   .runbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}.note{font-size:12.5px;color:var(--muted)}
   .reviewtop{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.stat{padding:13px;border:1px solid var(--line);border-radius:12px;background:#FFFEFB}.stat b{display:block;font:600 23px Fraunces}.stat span{color:var(--muted);font-size:12px}
   .feedback-flow{display:grid;grid-template-columns:1fr 34px 1fr;align-items:stretch;gap:10px}.feedback-box{border:1px solid var(--line);border-radius:13px;padding:15px}.arrow{display:grid;place-items:center;color:var(--muted);font-size:22px}.feedback-box h3{margin-bottom:7px}.feedback-box p{font-size:13px;color:var(--ink2);margin:0 0 12px}.reason{display:inline-flex;padding:5px 8px;margin:0 5px 6px 0;border-radius:8px;background:var(--red-bg);color:#7C2B30;font-size:11.5px;font-weight:600}
+  .labbar{display:flex;align-items:center;justify-content:space-between;gap:14px;border:1px solid #D8D1FF;background:var(--violet-bg);border-radius:13px;padding:14px 15px;margin-bottom:16px}.labbar strong{display:block}.labbar span{color:var(--ink2);font-size:12.5px}.labbtns{display:flex;gap:8px;flex-wrap:wrap}.labbtns .btn{padding:8px 12px;font-size:12.5px}
+  .review-table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px}.review-table th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;border-bottom:1px solid var(--line)}.review-table td{padding:10px;border-bottom:1px solid var(--line2);vertical-align:top}.candidate-title{font-weight:650}.candidate-meta{color:var(--muted);font-size:12px;margin-top:2px}.verdicts{display:flex;gap:5px;flex-wrap:wrap}.vbtn{appearance:none;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:#fff;color:var(--ink2);font:600 11.5px Inter;cursor:pointer}.vbtn.good.on{background:var(--green-bg);border-color:#B8DDCC;color:var(--green)}.vbtn.maybe.on{background:var(--amber-bg);border-color:#E8D0A3;color:var(--amber)}.vbtn.bad.on{background:var(--red-bg);border-color:#F0C4C6;color:var(--red)}.reason-select{margin-top:6px;padding:6px 8px;font-size:11.5px;max-width:220px}.proposal{padding:9px 10px;border-radius:9px;background:var(--orange-bg);font-size:12.5px;color:var(--ink2);margin-top:7px}.proposal b{color:var(--ink)}
   .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);z-index:20;display:none;align-items:center;justify-content:center;padding:20px}.gatebox{max-width:430px;background:#fff;border:1px solid var(--line);border-radius:17px;padding:32px;text-align:center;box-shadow:var(--shadow)}.gatebox h2{margin-bottom:7px}.gatebox p{color:var(--muted);margin:0 0 19px}#gsi{display:flex;justify-content:center}#gateErr{color:var(--red);font-size:13px;margin-top:12px}
   .skeleton{height:13px;border-radius:7px;background:linear-gradient(90deg,#F0ECE3,#F8F6F0,#F0ECE3);background-size:200% 100%;animation:shimmer 1.3s infinite}.skeleton+.skeleton{margin-top:8px;width:80%}@keyframes shimmer{to{background-position:-200% 0}}
   body.embed header .brand img,body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:10px}
-  @media(max-width:800px){.grid,.lanes{grid-template-columns:1fr}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}}
+  @media(max-width:800px){.grid,.lanes{grid-template-columns:1fr}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}.labbar{align-items:flex-start;flex-direction:column}.review-table thead{display:none}.review-table,.review-table tbody,.review-table tr,.review-table td{display:block}.review-table tr{border-bottom:1px solid var(--line);padding:8px 0}.review-table td{border:0;padding:4px 2px}}
 </style>
 </head>
 <body>
@@ -91,21 +93,25 @@
 
   <div class="card">
     <div class="stephead"><div class="stepname"><span class="stepnum">4</span><div><h2>Review and teach the next run</h2><div class="note">Every candidate gets Good, Maybe, or Bad. Bad requires a reason.</div></div></div><span class="tag">job scoped</span></div>
-    <div class="reviewtop"><div class="stat"><b>0</b><span>Unreviewed</span></div><div class="stat"><b>0</b><span>Good</span></div><div class="stat"><b>0</b><span>Maybe</span></div><div class="stat"><b>0</b><span>Bad</span></div></div>
+    <div class="labbar"><div><strong>Feedback lab · synthetic candidates only</strong><span>Exercise the exact review and proposal rules locally. Nothing is stored or sent to Paraform.</span></div><div class="labbtns"><button id="loadDemo" class="btn secondary">Load blank batch</button><button id="loadSample" class="btn">Load example labels</button></div></div>
+    <div class="reviewtop"><div class="stat"><b id="statUnreviewed">0</b><span>Unreviewed</span></div><div class="stat"><b id="statGood">0</b><span>Good</span></div><div class="stat"><b id="statMaybe">0</b><span>Maybe</span></div><div class="stat"><b id="statBad">0</b><span>Bad</span></div></div>
+    <div id="reviewQueue" hidden><table class="review-table"><thead><tr><th>Candidate</th><th>Lane</th><th>Your feedback</th></tr></thead><tbody id="reviewRows"></tbody></table></div>
     <div class="feedback-flow">
       <div class="feedback-box"><h3>Human labels</h3><p>Fast verdict plus a structured reason. Optional notes explain edge cases but do not become filters automatically.</p><div id="reasons"></div></div>
       <div class="arrow">→</div>
-      <div class="feedback-box"><h3>Proposed rubric delta</h3><p>Repeated reasons become evidence-backed changes for the next Search run. A human approves every change; the agent never silently rewrites the role.</p><div class="banner info" style="margin:0"><div>↻</div><div><span>Example: repeated “too junior” labels propose a higher experience floor. Duplicates improve dedup, not fit filters.</span></div></div></div>
+      <div class="feedback-box"><h3>Proposed rubric delta</h3><p>Repeated reasons become evidence-backed changes for the next Search run. A human approves every change; the agent never silently rewrites the role.</p><div id="proposals"><div class="banner info" style="margin:0"><div>↻</div><div><span>Load example labels to see evidence-backed changes. Duplicates improve dedup, not fit filters.</span></div></div></div></div>
     </div>
     <div class="runbar"><div class="note">Approved candidates will first enter the role's review project; sequence enrollment remains a separate explicit action.</div><button class="btn" disabled>Send approved to sequence</button></div>
   </div>
 </div>
 
-<script>
+<script type="module">
+import { FEEDBACK_REASONS, applyFeedback, proposeNextRun, summarizeFeedback } from "/sourcing-domain.mjs";
+
 const $=(id)=>document.getElementById(id);
 const esc=(value)=>String(value??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const authHeaders=()=>STATE.token?{Authorization:"Bearer "+STATE.token}:{};
-const STATE={config:null,token:null,roles:[]};
+const STATE={config:null,token:null,roles:[],demo:[]};
 if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
 
 function status(kind,label){const el=$("status");el.className="pill "+kind;el.innerHTML='<span class="dot"></span>'+esc(label)}
@@ -113,7 +119,44 @@ function blocker(title,body){$("blocker").innerHTML='<div>🔒</div><div><strong
 function tags(values,neg=false){return (values||[]).map(v=>'<span class="chip'+(neg?' neg':'')+'">'+esc(v)+'</span>').join("")}
 function bullets(values,empty){return values&&values.length?'<ul>'+values.map(v=>'<li>'+esc(v)+'</li>').join("")+'</ul>':'<div class="empty">'+esc(empty)+'</div>'}
 
-function renderReasons(){const reasons=STATE.config?.feedbackReasons||[];$("reasons").innerHTML=reasons.map(r=>'<span class="reason">'+esc(r.label)+'</span>').join("")}
+function renderReasons(){const reasons=STATE.config?.feedbackReasons||FEEDBACK_REASONS;$("reasons").innerHTML=reasons.map(r=>'<span class="reason">'+esc(r.label)+'</span>').join("")}
+
+const DEMO=[
+  {id:"demo-01",name:"Candidate A",title:"Operations Manager",company:"Northstar",location:"New York",lane:"Core match",state:"discovered"},
+  {id:"demo-02",name:"Candidate B",title:"Customer Success Lead",company:"Harbor",location:"Remote",lane:"Adjacent titles",state:"discovered"},
+  {id:"demo-03",name:"Candidate C",title:"Software Engineer",company:"Orbit",location:"San Francisco",lane:"Core match",state:"discovered"},
+  {id:"demo-04",name:"Candidate D",title:"Junior Platform Engineer",company:"Atlas",location:"Remote",lane:"Company-led",state:"discovered"},
+  {id:"demo-05",name:"Candidate E",title:"Staff Platform Engineer",company:"Beacon",location:"New York",lane:"Core match",state:"discovered"},
+  {id:"demo-06",name:"Candidate F",title:"Senior Infrastructure Engineer",company:"Summit",location:"Boston",lane:"Adjacent titles",state:"discovered"},
+];
+
+function loadDemo(withLabels=false){
+  STATE.demo=DEMO.map(candidate=>({...candidate}));
+  if(withLabels){
+    const labels=[["bad","wrong_title"],["bad","wrong_title"],["bad","too_junior"],["bad","too_junior"],["good",null],["maybe",null]];
+    STATE.demo=STATE.demo.map((candidate,index)=>applyFeedback(candidate,{verdict:labels[index][0],reason:labels[index][1]}));
+  }
+  $("reviewQueue").hidden=false;renderReview();
+}
+
+function verdictButton(candidate,verdict,label){const active=candidate.feedback?.verdict===verdict||(verdict==="bad"&&candidate.pendingBad);return '<button class="vbtn '+verdict+(active?' on':'')+'" data-candidate="'+candidate.id+'" data-verdict="'+verdict+'">'+label+'</button>'}
+function renderReview(){
+  const feedback=STATE.demo.map(candidate=>candidate.feedback||{});const summary=summarizeFeedback(feedback);
+  $("statUnreviewed").textContent=summary.unreviewed;$("statGood").textContent=summary.good;$("statMaybe").textContent=summary.maybe;$("statBad").textContent=summary.bad;
+  $("reviewRows").innerHTML=STATE.demo.map(candidate=>{
+    const showReason=candidate.pendingBad||candidate.feedback?.verdict==="bad";
+    const options='<option value="">Choose why…</option>'+FEEDBACK_REASONS.map(reason=>'<option value="'+reason.id+'"'+(candidate.feedback?.reason===reason.id?' selected':'')+'>'+esc(reason.label)+'</option>').join("");
+    return '<tr><td><div class="candidate-title">'+esc(candidate.name)+'</div><div class="candidate-meta">'+esc(candidate.title+' · '+candidate.company+' · '+candidate.location)+'</div></td><td>'+esc(candidate.lane)+'</td><td><div class="verdicts">'+verdictButton(candidate,"good","Good")+verdictButton(candidate,"maybe","Maybe")+verdictButton(candidate,"bad","Bad")+'</div>'+(showReason?'<select class="reason-select" data-reason-for="'+candidate.id+'">'+options+'</select>':'')+'</td></tr>';
+  }).join("");
+  const next=proposeNextRun(feedback);$("proposals").innerHTML=next.proposals.length?next.proposals.map(proposal=>'<div class="proposal"><b>'+proposal.evidence+'× '+esc(FEEDBACK_REASONS.find(reason=>reason.id===proposal.reason)?.label||proposal.reason)+'</b> · '+esc(proposal.action)+' <span class="tag">'+esc(proposal.scope)+'</span></div>').join(""):'<div class="empty">No repeated pattern has enough evidence yet. Two matching bad reasons create a proposal.</div>';
+}
+
+function setVerdict(id,verdict){
+  const index=STATE.demo.findIndex(candidate=>candidate.id===id);if(index<0)return;const candidate=STATE.demo[index];
+  if(verdict==="bad"){STATE.demo[index]={...candidate,pendingBad:true};renderReview();return}
+  STATE.demo[index]={...applyFeedback(candidate,{verdict}),pendingBad:false};renderReview();
+}
+function setBadReason(id,reason){const index=STATE.demo.findIndex(candidate=>candidate.id===id);if(index<0||!reason)return;STATE.demo[index]={...applyFeedback(STATE.demo[index],{verdict:"bad",reason}),pendingBad:false};renderReview()}
 
 async function loadRoles(){
   const sel=$("role");sel.disabled=true;sel.innerHTML='<option value="">Loading approved roles…</option>';
@@ -171,7 +214,13 @@ async function init(){
   }catch(error){status("locked","configuration unavailable");blocker("Configuration unavailable","The sourcing API could not be reached.")}
 }
 
-$("role").addEventListener("change",event=>loadRole(event.target.value));$("refresh").addEventListener("click",loadRoles);init();
+$("role").addEventListener("change",event=>loadRole(event.target.value));
+$("refresh").addEventListener("click",loadRoles);
+$("loadDemo").addEventListener("click",()=>loadDemo(false));
+$("loadSample").addEventListener("click",()=>loadDemo(true));
+$("reviewRows").addEventListener("click",event=>{const button=event.target.closest("[data-verdict]");if(button)setVerdict(button.dataset.candidate,button.dataset.verdict)});
+$("reviewRows").addEventListener("change",event=>{if(event.target.matches("[data-reason-for]"))setBadReason(event.target.dataset.reasonFor,event.target.value)});
+renderReasons();init();
 </script>
 </body>
 </html>

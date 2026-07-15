@@ -5,6 +5,14 @@
 // browser. Keep this module free of network calls so synthetic fixtures can
 // exercise the important behavior without candidate data or a live session.
 
+import {
+  FEEDBACK_REASONS,
+  proposeNextRun,
+  summarizeFeedback,
+} from "../../../sourcing-domain.mjs";
+
+export { FEEDBACK_REASONS, proposeNextRun, summarizeFeedback };
+
 const text = (value) => String(value ?? "").trim();
 const list = (value) => Array.isArray(value) ? value : [];
 const unique = (values) => [...new Set(values.map(text).filter(Boolean))];
@@ -142,58 +150,4 @@ export function normalizeSearchIdeas(raw) {
     rationale: text(idea?.rationale || idea?.reason || idea?.description).slice(0, 1200),
     filters: ideaFilters(idea),
   }));
-}
-
-export const FEEDBACK_REASONS = Object.freeze([
-  { id: "wrong_title", label: "Wrong function or title" },
-  { id: "too_junior", label: "Too junior" },
-  { id: "too_senior", label: "Too senior" },
-  { id: "wrong_industry", label: "Wrong industry" },
-  { id: "weak_company", label: "Company background misses" },
-  { id: "missing_skill", label: "Missing must-have skill" },
-  { id: "location", label: "Location mismatch" },
-  { id: "job_hopper", label: "Tenure pattern misses" },
-  { id: "duplicate_or_known", label: "Duplicate or already known" },
-  { id: "other", label: "Other" },
-]);
-
-const REASON_LABELS = new Map(FEEDBACK_REASONS.map((reason) => [reason.id, reason.label]));
-
-export function summarizeFeedback(items = []) {
-  const summary = { total: 0, good: 0, maybe: 0, bad: 0, unreviewed: 0, reasons: [] };
-  const counts = new Map();
-  for (const item of list(items)) {
-    const verdict = ["good", "maybe", "bad"].includes(item?.verdict) ? item.verdict : "unreviewed";
-    summary.total++;
-    summary[verdict]++;
-    if (verdict === "bad" && REASON_LABELS.has(item?.reason)) {
-      counts.set(item.reason, (counts.get(item.reason) || 0) + 1);
-    }
-  }
-  summary.reasons = [...counts.entries()]
-    .map(([id, count]) => ({ id, label: REASON_LABELS.get(id), count }))
-    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-  return summary;
-}
-
-export function proposeNextRun(items = []) {
-  const summary = summarizeFeedback(items);
-  const proposals = [];
-  for (const reason of summary.reasons) {
-    if (reason.count < 2) continue;
-    const action = {
-      wrong_title: "Tighten target titles and add the rejected title family to exclusions.",
-      too_junior: "Raise minimum years of experience or require a stronger seniority title.",
-      too_senior: "Lower maximum years of experience or exclude leadership titles.",
-      wrong_industry: "Add industry or ideal-company constraints; exclude the repeated off-target sector.",
-      weak_company: "Strengthen the ideal-company lane or talent-density requirement.",
-      missing_skill: "Promote the repeated missing capability to a required skill filter.",
-      location: "Tighten included locations and explicitly exclude the repeated mismatch.",
-      job_hopper: "Increase minimum time in current role or add a tenure requirement.",
-      duplicate_or_known: "Expand the pre-search dedup set; do not change fit filters for duplicates.",
-      other: "Review the notes and turn any repeated pattern into a named reason before rerunning.",
-    }[reason.id];
-    proposals.push({ reason: reason.id, evidence: reason.count, action });
-  }
-  return { summary, proposals, autoApply: false };
 }
