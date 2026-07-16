@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Prep · Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9; --ink:#16140F; --card:#FFFFFF; --line:#E9E3D5; --muted:#8C877B;
+    --orange:#FF5E00; --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FaEEDC; --violet:#7F72FF; --violet-bg:#ECEAFE; --muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 20px 80px}
+  h1{font-family:Fraunces,serif;font-weight:600;font-size:30px;margin:0}
+  h2{font-family:Fraunces,serif;font-weight:600;font-size:18px;margin:0 0 14px}
+  .sub{color:var(--muted);margin:4px 0 0}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand img{height:26px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:22px;margin-bottom:18px}
+  label{display:block;font-weight:600;margin:0 0 7px}
+  input[type=text],select,textarea,button{font-family:inherit;font-size:14px}
+  input[type=text],select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#fff;color:var(--ink)}
+  textarea{resize:vertical}
+  input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:var(--orange)}
+  .grid2{display:grid;grid-template-columns:1fr 200px;gap:16px}
+  @media (max-width:640px){.grid2{grid-template-columns:1fr}}
+  .field{margin-top:14px}
+  .rolefilter{margin-bottom:8px}
+  .btn{display:inline-flex;align-items:center;gap:7px;padding:11px 18px;border-radius:11px;border:1px solid var(--ink);background:var(--ink);color:var(--cream);font-weight:600;cursor:pointer;white-space:nowrap}
+  .btn.go{background:var(--orange);border-color:var(--orange);color:#fff}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .submitrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;white-space:nowrap}
+  a{color:var(--violet);text-decoration:none} a:hover{text-decoration:underline}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
+  .b-good{background:var(--good-bg);color:var(--good)} .b-warn{background:var(--warn-bg);color:var(--warn)}
+  .b-bad{background:var(--bad-bg);color:var(--bad)} .b-mut{background:var(--muted-bg);color:var(--muted)}
+  .b-live{background:var(--violet-bg);color:var(--violet)}
+  .note{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .reason{font-size:12px;color:var(--bad);margin-top:4px;max-width:260px}
+  .who{font-weight:600}
+  .banner{padding:12px 14px;border-radius:11px;margin-bottom:16px;font-size:13px}
+  .banner.bad{background:var(--bad-bg);color:#7a2a2d;border:1px solid #f3c9cb}
+  .banner.good{background:var(--good-bg);color:#0c6a48;border:1px solid #bfe6d3}
+  code{background:var(--muted-bg);padding:1px 6px;border-radius:6px;font-size:12.5px}
+  .hidden{display:none}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid #d9d3c4;border-top-color:var(--orange);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .act{white-space:nowrap}
+  .act a{margin-right:10px;font-weight:600}
+  .roleline .note{margin-top:2px}
+  body.embed header .brand img, body.embed h1, body.embed .sub{display:none}
+  body.embed header{margin-bottom:10px}
+  #gate{position:fixed;inset:0;background:var(--cream);display:flex;align-items:center;justify-content:center;z-index:50}
+  #gate .gatebox{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px 40px;text-align:center;max-width:420px}
+  #gate h2{margin-bottom:6px} #gate p{color:var(--muted);margin:0 0 20px}
+  #gsi{display:flex;justify-content:center} #gateErr{color:var(--bad);font-size:13px;margin-top:14px;min-height:16px}
+</style>
+</head>
+<body>
+<div id="gate" style="display:none"><div class="gatebox">
+  <h2>Prep</h2>
+  <p>Sign in with your Raydar Google account to continue.</p>
+  <div id="gsi"></div><div id="gateErr"></div>
+</div></div>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" />
+      <div><h1>Prep</h1><div class="sub">Request a candidate interview prep doc. The prep runner builds the PDF and drops a Gmail draft.</div></div>
+    </div>
+  </header>
+
+  <div id="cfgBanner" class="banner bad hidden"></div>
+
+  <div class="card">
+    <h2>Generate a prep doc</h2>
+    <div class="grid2">
+      <div>
+        <label for="cand">Candidate</label>
+        <input id="cand" type="text" placeholder="Candidate name or paraform.com profile URL" autocomplete="off" />
+      </div>
+      <div>
+        <label for="round">Round</label>
+        <select id="round">
+          <option value="">Choose round</option>
+          <option value="1">1st</option>
+          <option value="2">2nd</option>
+          <option value="3">3rd</option>
+          <option value="4">4th</option>
+          <option value="5">5th+</option>
+        </select>
+      </div>
+    </div>
+    <div class="field roleline">
+      <label for="role">Role</label>
+      <input id="roleFilter" class="rolefilter" type="text" placeholder="Type to filter roles" autocomplete="off" />
+      <select id="role"><option value="">Loading roles</option></select>
+      <div class="note" id="roleNote"></div>
+    </div>
+    <div class="field">
+      <label for="notes">Notes (optional)</label>
+      <textarea id="notes" rows="3" placeholder="Anything the prep doc should cover or emphasize"></textarea>
+    </div>
+    <div class="submitrow">
+      <button id="go" class="btn go" disabled>Generate prep doc</button>
+      <span class="note" id="whoNote" style="margin-top:0"></span>
+    </div>
+    <div class="note" id="formMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Requests</h2>
+    <div id="jobsBody"><div class="note">Loading requests</div></div>
+  </div>
+</div>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+const esc = (s)=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let AUTH={ required:false, clientId:null, token:null, email:"", domains:["raydar.xyz","raydargroup.com"] };
+const authHeaders = ()=> AUTH.token ? { "Authorization":"Bearer "+AUTH.token } : {};
+if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
+
+let ROLES=[], JOBS=null;
+
+// ---- form state ----
+function refreshGo(){
+  $("go").disabled = !$("cand").value.trim() || !$("role").value || !$("round").value;
+}
+["cand","round"].forEach(id=>$(id).addEventListener("input", refreshGo));
+$("round").addEventListener("change", refreshGo);
+$("role").addEventListener("change", refreshGo);
+
+// ---- roles picker (text filter above a plain select) ----
+function renderRoles(){
+  const sel=$("role");
+  const q=$("roleFilter").value.trim().toLowerCase();
+  const cur=sel.value;
+  const hits=ROLES.filter(r=>!q || (r.title+" "+r.company).toLowerCase().includes(q));
+  const keepCur = cur && !hits.some(r=>r.role_id===cur) ? ROLES.find(r=>r.role_id===cur) : null;
+  const list = keepCur ? [keepCur, ...hits] : hits;
+  if(!ROLES.length){ sel.innerHTML='<option value="">(no active roles)</option>'; refreshGo(); return; }
+  sel.innerHTML = '<option value="">Choose a role</option>' + list.map(r=>
+    `<option value="${esc(r.role_id)}" data-title="${esc(r.title)}" data-company="${esc(r.company)}"${r.role_id===cur?" selected":""}>${esc(r.company?r.company+" · "+r.title:r.title)}</option>`).join("");
+  $("roleNote").textContent = q ? `${hits.length} of ${ROLES.length} roles match` : `${ROLES.length} active roles`;
+  refreshGo();
+}
+$("roleFilter").addEventListener("input", renderRoles);
+
+async function loadRoles(){
+  try{
+    const d = await fetch("/api/prepdoc/roles",{headers:authHeaders()}).then(r=>r.json());
+    if(!d.ok){
+      $("role").innerHTML = '<option value="">(roles unavailable)</option>';
+      $("roleNote").textContent = d.error==="no_cookie" ? "Paraform session not configured on this project." :
+        d.error==="paraform_session_expired" ? "Paraform session expired. Refresh PARAFORM_COOKIE." :
+        d.error==="paraform_role_read_limited" ? "Role read rate limit hit. Retry in a minute." :
+        "Couldn't load roles: "+(d.detail||d.error);
+      return;
+    }
+    ROLES = d.roles||[];
+    renderRoles();
+  }catch(e){
+    $("role").innerHTML='<option value="">(failed to load)</option>';
+    $("roleNote").textContent="Couldn't reach the roles endpoint. Reload to retry.";
+  }
+}
+
+// ---- submit ----
+$("go").addEventListener("click", submitJob);
+async function submitJob(){
+  const raw=$("cand").value.trim();
+  if(!raw || !$("role").value || !$("round").value) return;
+  let candidate;
+  if(raw.toLowerCase().includes("paraform.com")){
+    candidate={ paraform_url: /^https?:\/\//i.test(raw) ? raw : "https://"+raw };
+  } else {
+    candidate={ name: raw };
+  }
+  const opt=$("role").selectedOptions[0]||{dataset:{}};
+  const body={
+    candidate,
+    role_id: $("role").value,
+    role_title: opt.dataset.title||"",
+    company: opt.dataset.company||"",
+    round: Number($("round").value),
+    notes: $("notes").value.trim(),
+  };
+  const b=$("go"); b.disabled=true; b.innerHTML='<span class="spin"></span>Queueing';
+  $("formMsg").textContent="";
+  try{
+    const r=await fetch("/api/prepdoc/enqueue",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok || !d.ok) throw new Error(d.detail||d.error||("HTTP "+r.status));
+    $("cand").value=""; $("notes").value="";
+    $("formMsg").textContent="Queued. The runner picks it up within a minute or two.";
+    loadJobs(true);
+  }catch(e){
+    $("formMsg").textContent="Couldn't queue the request: "+String(e.message||e);
+  }finally{
+    b.innerHTML="Generate prep doc"; refreshGo();
+  }
+}
+
+// ---- jobs table ----
+const STATUS_BADGE={ queued:"b-mut", claimed:"b-warn", fetching:"b-warn", generating:"b-live", verifying:"b-live", drafting:"b-live", done:"b-good", failed:"b-bad" };
+const IN_FLIGHT=new Set(["claimed","fetching","generating","verifying","drafting"]);
+function ordinal(n){ return n===1?"1st":n===2?"2nd":n===3?"3rd":n===4?"4th":n>=5?n+"th+":String(n); }
+function fmtWhen(iso){
+  const t=Date.parse(iso||""); if(isNaN(t)) return "";
+  const d=new Date(t);
+  return d.toLocaleDateString([],{month:"short",day:"numeric"})+" · "+d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+}
+function candCell(j){
+  const c=j.candidate||{};
+  const name=c.name?`<span class="who">${esc(c.name)}</span>`:"";
+  const link=c.paraform_url?`<a href="${esc(c.paraform_url)}" target="_blank" rel="noopener noreferrer">Paraform ↗</a>`:"";
+  return [name,link].filter(Boolean).join("<br>")||'<span class="note">unknown</span>';
+}
+function statusCell(j){
+  const cls=STATUS_BADGE[j.status]||"b-mut";
+  const spin=IN_FLIGHT.has(j.status)?'<span class="spin"></span>':"";
+  const reason=(j.status==="failed"&&j.reason)?`<div class="reason" title="${esc(j.reason)}">${esc(String(j.reason).slice(0,140))}</div>`:"";
+  return `${spin}<span class="badge ${cls}" title="${esc(j.reason||j.status)}">${esc(j.status)}</span>${reason}`;
+}
+function actionsCell(j){
+  if(j.status!=="done") return "";
+  return `<a href="#" onclick="dlPdf('${esc(j.id)}');return false" title="Download the prep PDF">PDF</a>`+
+    `<a href="https://mail.google.com/mail/u/0/#drafts" target="_blank" rel="noopener noreferrer" title="Open Gmail drafts">Draft ↗</a>`;
+}
+function renderJobs(){
+  const jobs=JOBS||[];
+  if(!jobs.length){ $("jobsBody").innerHTML='<div class="note">No prep requests yet. Queue one above.</div>'; return; }
+  let html='<table><tr><th>Created</th><th>Candidate</th><th>Role</th><th>Round</th><th>Requested by</th><th>Status</th><th>Actions</th></tr>';
+  for(const j of jobs){
+    const role=j.role_title?`${esc(j.role_title)}${j.company?`<br><span class="note" style="margin-top:0">${esc(j.company)}</span>`:""}`:`<code>${esc(j.role_id||"")}</code>`;
+    html+=`<tr>
+      <td style="white-space:nowrap">${esc(fmtWhen(j.created_at))}</td>
+      <td>${candCell(j)}</td>
+      <td>${role}</td>
+      <td>${esc(ordinal(Number(j.round)||0))}</td>
+      <td>${esc(j.requested_by||"")}</td>
+      <td>${statusCell(j)}</td>
+      <td class="act">${actionsCell(j)}</td>
+    </tr>`;
+  }
+  html+='</table>';
+  $("jobsBody").innerHTML=html;
+}
+async function loadJobs(force){
+  if(!AUTH.token && AUTH.required) return;
+  try{
+    const d=await fetch("/api/prepdoc/status",{headers:authHeaders()}).then(r=>r.json());
+    if(!d.ok) throw new Error(d.error||"bad");
+    JOBS=d.jobs||[];
+    renderJobs();
+  }catch(e){
+    if(!JOBS) $("jobsBody").innerHTML='<div class="note">Couldn\'t load requests. This list retries automatically.</div>';
+  }
+}
+
+// PDF download: the endpoint requires the Google ID token, which a plain link
+// can't send, so fetch with the header and hand the blob to the browser.
+async function dlPdf(id){
+  try{
+    const r=await fetch("/api/prepdoc/pdf?id="+encodeURIComponent(id),{headers:authHeaders()});
+    if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      alert(d.error==="pdf_not_found"?"No PDF stored for this job (it may have expired after 30 days).":"Couldn't fetch the PDF: "+(d.error||r.status));
+      return;
+    }
+    const cd=r.headers.get("content-disposition")||"";
+    const m=cd.match(/filename="([^"]+)"/);
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url; a.download=(m&&m[1])||("prep-"+id.slice(0,8)+".pdf");
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 30000);
+  }catch(e){ alert("Couldn't fetch the PDF: "+String(e.message||e)); }
+}
+
+// Auto-refresh every 20s, but only while this page is actually visible: the
+// browser tab must be foregrounded AND the dashboard's Prep tab selected (a
+// display:none iframe lays out at width 0, so clientWidth catches that).
+const pageVisible=()=> !document.hidden && document.documentElement.clientWidth>0;
+setInterval(()=>{ if(pageVisible()) loadJobs(); }, 20000);
+
+// ---- boot: same Google gate as the Sequences/Enrich tabs, fail-closed ----
+async function ready(){
+  $("whoNote").textContent = AUTH.email ? `Signed in as ${AUTH.email}. Draft will be created in this mailbox.` : "";
+  loadRoles(); loadJobs(true);
+}
+async function init(){
+  let cfg={}; try{ cfg=await fetch("/api/seq/config").then(r=>r.json()); }catch(e){}
+  AUTH.required=!!cfg.authRequired; AUTH.clientId=cfg.googleClientId;
+  if(Array.isArray(cfg.allowedDomains)&&cfg.allowedDomains.length) AUTH.domains=cfg.allowedDomains;
+  if(!AUTH.required){
+    $("cfgBanner").classList.remove("hidden");
+    $("cfgBanner").innerHTML="Google sign-in is not configured on this project (<code>GOOGLE_CLIENT_ID</code>). Prep is disabled until it is set, because prep endpoints refuse unauthenticated requests.";
+    $("role").innerHTML='<option value="">(sign-in not configured)</option>';
+    $("jobsBody").innerHTML='<div class="note">Unavailable until sign-in is configured.</div>';
+    return;
+  }
+  $("gate").style.display="flex";
+  (function start(){
+    if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
+    google.accounts.id.initialize({ client_id:AUTH.clientId, callback:onCred });
+    google.accounts.id.renderButton($("gsi"),{ theme:"filled_black", size:"large", text:"signin_with", shape:"pill" });
+  })();
+}
+function onCred(resp){
+  try{
+    const p=JSON.parse(atob(resp.credential.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
+    const dom=(p.hd||(p.email||"").split("@")[1]||"").toLowerCase();
+    if(!AUTH.domains.includes(dom)){ $("gateErr").textContent="Use a "+AUTH.domains.join(" / ")+" account."; return; }
+    AUTH.token=resp.credential; AUTH.email=p.email||"";
+    $("gate").style.display="none";
+    ready();
+  }catch(e){ $("gateErr").textContent="Sign-in failed. Try again."; }
+}
+init();
+</script>
+</body>
+</html>
