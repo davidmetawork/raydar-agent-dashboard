@@ -120,13 +120,17 @@ export function validateFeedback(input = {}) {
 
 export function applyFeedback(candidate, input = {}) {
   const feedback = validateFeedback(input);
-  const base = candidate?.state === "discovered"
+  const base = ["discovered", "enrollment_blocked"].includes(candidate?.state)
     ? transitionCandidate(candidate, "in_review", { source: "review" })
     : ["good", "maybe", "bad"].includes(candidate?.state)
       ? transitionCandidate(candidate, "in_review", { source: "relabel" })
       : candidate;
   const next = transitionCandidate(base, feedback.verdict, { source: "feedback", reason: feedback.reason });
-  return { ...next, feedback };
+  return {
+    ...next,
+    feedback,
+    ...(candidate?.state === "enrollment_blocked" ? { enrollmentStatus: null, enrollmentReason: null } : {}),
+  };
 }
 
 export function summarizeFeedback(items = []) {
@@ -193,7 +197,7 @@ export function buildRunPlan({ runId, mapping, rubricVersionId, lanes = [], cand
   if (!ID.test(id)) throw new Error("valid runId required");
   if (!role.rubricVersionId) throw new Error("rubricVersionId required");
   const cap = Number(candidateCap);
-  if (!Number.isInteger(cap) || cap < 1 || cap > 500) throw new Error("candidateCap must be an integer from 1 to 500");
+  if (!Number.isInteger(cap) || cap < 1 || cap > 100) throw new Error("candidateCap must be an integer from 1 to 100");
   const normalizedLanes = rows(lanes).map((lane, index) => ({
     id: text(lane?.id) || `lane-${index + 1}`,
     rationale: text(lane?.rationale).slice(0, 1200),

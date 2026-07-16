@@ -265,14 +265,18 @@ export async function setLeadEmail(ccuId, email) {
 // campaigns.getCampaignLeads({campaign_id, cursor}), paginated 50/page with a NUMERIC
 // OFFSET cursor + totalCount. Always paginate to the end: a single-page read here is
 // the same silent-dedup-miss class as the duplicate-bot Code Red.
-export async function campaignLeads(campaignId) {
+export async function campaignLeads(campaignId, { strict = false } = {}) {
   // Page 1 tells us totalCount; fetch the remaining pages concurrently (a 1,100-lead
   // sequence is 23 pages — sequential would add ~10s to every scan).
   const first = await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId });
   const out = [...(first?.leads || [])];
   const total = Math.min(first?.totalCount ?? out.length, 10000);
   const pageSize = out.length || 50;
-  if (out.length >= total || !out.length) return out;
+  if (out.length >= total) return out;
+  if (!out.length) {
+    if (strict && total > 0) throw new Error(`incomplete campaign membership read: 0/${total}`);
+    return out;
+  }
   const cursors = [];
   for (let c = pageSize; c < total; c += pageSize) cursors.push(c);
   const pages = new Array(cursors.length);
@@ -281,18 +285,22 @@ export async function campaignLeads(campaignId) {
     while (i < cursors.length) {
       const idx = i++;
       try { pages[idx] = (await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor: cursors[idx] }))?.leads || []; }
-      catch { pages[idx] = []; }
+      catch (error) {
+        if (strict) throw error;
+        pages[idx] = [];
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(6, cursors.length) }, worker));
   for (const p of pages) out.push(...p);
+  if (strict && out.length < total) throw new Error(`incomplete campaign membership read: ${out.length}/${total}`);
   return out; // [{cu_id, ccu_id, to_use_email, is_paused, ...}]
 }
 
 // After enrolling, map candidate_user_id -> campaign_to_candidate_user_id for a campaign.
-export async function ccuIndex(campaignId) {
+export async function ccuIndex(campaignId, options) {
   const m = new Map();
-  for (const L of await campaignLeads(campaignId)) m.set(L.cu_id, { ccuId: L.ccu_id, email: L.to_use_email || null });
+  for (const L of await campaignLeads(campaignId, options)) m.set(L.cu_id, { ccuId: L.ccu_id, email: L.to_use_email || null });
   return m;
 }
 
@@ -300,7 +308,7 @@ export async function ccuIndex(campaignId) {
 // sequences. Used to skip anyone already in a sequence (the "don't re-message"
 // rule) — this also makes re-running the same cohort a no-op (dedup/no double-email).
 // One scan per enroll (paginated getCampaignLeads per sequence, bounded concurrency).
-export async function enrolledElsewhereSet() {
+export async function enrolledElsewhereSet({ strict = false } = {}) {
   const seqs = (await trpcGet("campaigns.getListOfCampaignsOptimized", {})) || [];
   const set = new Set();
   let i = 0;
@@ -309,7 +317,11 @@ export async function enrolledElsewhereSet() {
       const s = seqs[i++];
       try {
         for (const L of await campaignLeads(s.id)) set.add(L.cu_id);
-      } catch { /* skip unreadable */ }
+      } catch (error) {
+        if (strict) throw error;
+        // Best-effort callers retain the legacy behavior; safety-sensitive
+        // sourcing callers pass strict:true and fail closed instead.
+      }
     }
   };
   await Promise.all(Array.from({ length: 8 }, worker));

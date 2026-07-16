@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cors, requireSourcingAuth } from "./_lib/core.mjs";
-import { getRun, saveRun, storeConfigured } from "./_lib/store.mjs";
+import { acquireRunLock, getRun, releaseRunLock, saveRun, storeConfigured } from "./_lib/store.mjs";
 import { applyFeedback, proposeNextRun } from "../../sourcing-domain.mjs";
 
 export default async function handler(req, res) {
@@ -8,9 +8,14 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
   if (!(await requireSourcingAuth(req, res))) return;
+  let runId = "";
+  let lockToken = null;
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const run = await getRun(String(body.runId || ""));
+    runId = String(body.runId || "");
+    lockToken = await acquireRunLock(runId);
+    if (!lockToken) return res.status(409).json({ ok: false, error: "run_busy" });
+    const run = await getRun(runId);
     if (!run) return res.status(404).json({ ok: false, error: "run_not_found" });
     const index = run.candidates.findIndex((candidate) => candidate.id === body.candidateId);
     if (index < 0) return res.status(404).json({ ok: false, error: "candidate_not_found" });
@@ -40,5 +45,7 @@ export default async function handler(req, res) {
   } catch (error) {
     const conflict = error?.code === "REVISION_CONFLICT";
     return res.status(conflict ? 409 : 400).json({ ok: false, error: conflict ? "revision_conflict" : "feedback_invalid", detail: String(error?.message || error).slice(0, 200) });
+  } finally {
+    if (lockToken) await releaseRunLock(runId, lockToken).catch(() => {});
   }
 }

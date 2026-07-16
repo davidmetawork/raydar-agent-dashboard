@@ -30,6 +30,21 @@ test("candidate feedback follows the review state machine and can be relabeled",
   assert.throws(() => transitionCandidate(discovered, "enrolled"), /invalid candidate transition/);
 });
 
+test("a blocked enrollment can return to review and be safely retried", () => {
+  const blocked = {
+    id: "candidate-1",
+    state: "enrollment_blocked",
+    projectStatus: "filed",
+    enrollmentStatus: "blocked",
+    enrollmentReason: "membership_readback_failed",
+  };
+  const good = applyFeedback(blocked, { verdict: "good" });
+  assert.equal(good.state, "good");
+  assert.equal(good.projectStatus, "filed");
+  assert.equal(good.enrollmentStatus, null);
+  assert.equal(good.enrollmentReason, null);
+});
+
 test("run states cannot skip the review gate", () => {
   const ready = transitionRun({ id: "run-123", state: "draft" }, "ready");
   const running = transitionRun(ready, "running");
@@ -68,6 +83,7 @@ test("role mappings and run plans require stable explicit IDs and bounded lanes"
   });
   assert.equal(run.reviewProjectId, "project-123");
   assert.equal(run.writesEnabled, false);
+  assert.throws(() => buildRunPlan({ runId: "run-123", mapping, rubricVersionId: "rubric-123", candidateCap: 101, lanes: [{}] }), /candidateCap/);
   assert.throws(() => buildRunPlan({ runId: "run-123", mapping, rubricVersionId: "rubric-123", candidateCap: 1000, lanes: [{}] }), /candidateCap/);
 });
 

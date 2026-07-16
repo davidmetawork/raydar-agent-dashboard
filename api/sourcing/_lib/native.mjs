@@ -6,12 +6,24 @@ import {
   nativeSearchSubmit,
 } from "./core.mjs";
 import { dedupeResults } from "../../../sourcing-domain.mjs";
-import { bookedSet, enrolledElsewhereSet } from "../../seq/_lib/core.mjs";
+import { bookedSet, enrolledElsewhereSet, projectMembers } from "../../seq/_lib/core.mjs";
 
 const text = (value) => String(value ?? "").trim();
 const rows = (value) => Array.isArray(value) ? value : [];
 const first = (...values) => values.map(text).find(Boolean) || "";
 const identity = (value) => createHash("sha256").update(String(value)).digest("hex").slice(0, 24);
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const DEFAULT_ADAPTERS = Object.freeze({
+  createSession: nativeSearchCreateSession,
+  submitSearch: nativeSearchSubmit,
+  paginateSearch: nativeSearchPaginate,
+  saveCandidate: nativeSaveCandidate,
+  projectMembers,
+  bookedSet,
+  enrolledElsewhereSet: () => enrolledElsewhereSet({ strict: true }),
+  wait,
+});
 
 export function normalizeNativeHit(hit = {}, lane = {}) {
   const current = hit.currentPosition || hit.current_position || hit.currentRole || hit.current_role || {};
@@ -73,12 +85,12 @@ async function pool(items, concurrency, fn) {
   return output;
 }
 
-async function searchLane(lane, rubric, adjustments, cap) {
-  const created = await nativeSearchCreateSession();
+async function searchLane(lane, rubric, adjustments, cap, adapters) {
+  const created = await adapters.createSession();
   const sessionId = text(created?.id || created?.session?.id);
   if (!sessionId) throw new Error("Paraform Search did not return a session id");
   const query = buildLaneQuery(rubric, lane, adjustments);
-  const firstPage = await nativeSearchSubmit(sessionId, query);
+  const firstPage = await adapters.submitSearch(sessionId, query);
   const results = firstPage?.results || {};
   const collected = [...rows(results.hits)];
   const total = Number(results.total || collected.length);
@@ -86,7 +98,7 @@ async function searchLane(lane, rubric, adjustments, cap) {
   let page = Number(firstPage?.session?.currentPage || 1);
   while (collected.length < Math.min(total, cap)) {
     page += 1;
-    const response = await nativeSearchPaginate(sessionId, page, pageSize);
+    const response = await adapters.paginateSearch(sessionId, page, pageSize);
     const hits = rows(response?.results?.hits);
     if (!hits.length) break;
     collected.push(...hits);
@@ -103,49 +115,129 @@ async function searchLane(lane, rubric, adjustments, cap) {
   };
 }
 
-export async function executeNativeSearch({ rubric, lanes, adjustments = [], candidateCap, reviewProject, seenCandidateIds = [], enrolledCandidateUserIds = null, bookedCandidateUserIds = null, fileToProject = false }) {
-  lanes = lanes.slice(0, Math.max(1, candidateCap));
-  const base = Math.floor(candidateCap / lanes.length);
-  let remainder = candidateCap % lanes.length;
+async function verifyProjectMembership(adapters, projectId, candidateUserIds) {
+  const expected = new Set(candidateUserIds.map(text).filter(Boolean));
+  const delays = [250, 750, 1500, 2500];
+  let members = new Set();
+  let lastError = null;
+  for (let attempt = 0; attempt <= delays.length && expected.size; attempt++) {
+    try {
+      members = new Set(rows(await adapters.projectMembers(projectId)).map((item) => text(item?.id)).filter(Boolean));
+      lastError = null;
+      if ([...expected].every((id) => members.has(id))) break;
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < delays.length) await adapters.wait(delays[attempt]);
+  }
+  return { members, error: lastError };
+}
+
+export async function executeNativeSearch({
+  rubric,
+  lanes,
+  adjustments = [],
+  candidateCap,
+  reviewProject,
+  seenCandidateIds = [],
+  enrolledCandidateUserIds = null,
+  bookedCandidateUserIds = null,
+  fileToProject = false,
+  adapters: adapterOverrides = {},
+}) {
+  const cap = Number(candidateCap);
+  if (!Number.isInteger(cap) || cap < 1 || cap > 100) throw new Error("candidateCap must be 1-100");
+  const searchLanes = rows(lanes).slice(0, Math.max(1, cap));
+  if (!searchLanes.length) throw new Error("at least one Search lane is required");
+  const adapters = { ...DEFAULT_ADAPTERS, ...adapterOverrides };
+  const base = Math.floor(cap / searchLanes.length);
+  let remainder = cap % searchLanes.length;
   const searched = [];
   // Sequential lanes keep Paraform load predictable and make partial failures auditable.
-  for (const lane of lanes) {
+  for (const lane of searchLanes) {
     const laneCap = Math.max(1, base + (remainder-- > 0 ? 1 : 0));
-    searched.push(await searchLane(lane, rubric, adjustments, laneCap));
+    searched.push(await searchLane(lane, rubric, adjustments, laneCap, adapters));
   }
   const normalized = searched.flatMap((lane) => lane.hits.map((hit) => normalizeNativeHit(hit, lane)).filter(Boolean));
   const existingIds = normalized.map((candidate) => candidate.candidateUserId).filter(Boolean);
-  if (!enrolledCandidateUserIds) enrolledCandidateUserIds = [...(await enrolledElsewhereSet())];
-  if (!bookedCandidateUserIds) bookedCandidateUserIds = [...(await bookedSet(existingIds))];
-  const deduped = dedupeResults(normalized, { seenCandidateIds, enrolledCandidateUserIds, bookedCandidateUserIds });
-  const accepted = deduped.accepted.slice(0, candidateCap);
+  const enrolled = new Set(enrolledCandidateUserIds === null
+    ? await adapters.enrolledElsewhereSet()
+    : enrolledCandidateUserIds);
+  const booked = new Set(bookedCandidateUserIds === null
+    ? await adapters.bookedSet(existingIds)
+    : bookedCandidateUserIds);
+  const deduped = dedupeResults(normalized, {
+    seenCandidateIds,
+    enrolledCandidateUserIds: [...enrolled],
+    bookedCandidateUserIds: [...booked],
+  });
+  const accepted = deduped.accepted.slice(0, cap);
   const blocked = deduped.blocked;
   let filed = accepted;
   if (fileToProject) {
     filed = await pool(accepted, 3, async (candidate) => {
       if (!candidate.linkedinSlug) return { ...candidate, state: "dedup_blocked", dedupReason: "missing_linkedin_identity", projectStatus: "failed" };
       try {
-        const saved = await nativeSaveCandidate(candidate.linkedinSlug, reviewProject.id, reviewProject.name);
+        const saved = await adapters.saveCandidate(candidate.linkedinSlug, reviewProject.id, reviewProject.name);
+        const candidateUserId = text(saved?.savedRecordId) || candidate.candidateUserId;
+        if (!candidateUserId) {
+          return { ...candidate, state: "discovered", projectStatus: "failed", projectError: "Paraform save returned no candidate identity" };
+        }
         return {
           ...candidate,
-          candidateUserId: text(saved?.savedRecordId) || candidate.candidateUserId,
+          candidateUserId,
           candidateDbId: text(saved?.candidateDbId) || null,
-          state: "in_review",
-          projectStatus: "filed",
+          state: "discovered",
+          projectStatus: "verification_pending",
         };
       } catch (error) {
         return { ...candidate, state: "discovered", projectStatus: "failed", projectError: text(error?.message).slice(0, 160) };
       }
     });
+    const pendingIds = filed
+      .filter((candidate) => candidate.projectStatus === "verification_pending")
+      .map((candidate) => candidate.candidateUserId);
+    const readback = await verifyProjectMembership(adapters, reviewProject.id, pendingIds);
+    filed = filed.map((candidate) => {
+      if (candidate.projectStatus !== "verification_pending") return candidate;
+      if (readback.members.has(candidate.candidateUserId)) {
+        return { ...candidate, state: "in_review", projectStatus: "filed", projectVerifiedAt: new Date().toISOString() };
+      }
+      return {
+        ...candidate,
+        state: "discovered",
+        projectStatus: "readback_failed",
+        projectError: text(readback.error?.message || "candidate not found in Project readback").slice(0, 160),
+      };
+    });
+
+    // saveCandidate resolves the stable candidate-user id for previously unseen
+    // profiles. Re-run the safety checks with those resolved ids before review.
+    const filedIds = filed.filter((candidate) => candidate.projectStatus === "filed").map((candidate) => candidate.candidateUserId);
+    const bookedAfterSave = new Set(bookedCandidateUserIds === null
+      ? await adapters.bookedSet(filedIds)
+      : bookedCandidateUserIds);
+    filed = filed.map((candidate) => {
+      if (candidate.projectStatus !== "filed") return candidate;
+      const reason = bookedAfterSave.has(candidate.candidateUserId)
+        ? "booked_or_later"
+        : enrolled.has(candidate.candidateUserId)
+          ? "already_in_sequence"
+          : null;
+      return reason
+        ? { ...candidate, state: "dedup_blocked", dedupReason: reason, dedupStage: "post_project_readback" }
+        : candidate;
+    });
   } else {
     filed = accepted.map((candidate) => ({ ...candidate, state: "in_review", projectStatus: "not_authorized" }));
   }
+  const candidates = [...filed, ...blocked];
   return {
     lanes: searched.map(({ hits, ...lane }) => ({ ...lane, resultCount: hits.length })),
-    candidates: [...filed, ...blocked],
+    candidates,
     discoveredCount: normalized.length,
-    reviewCount: filed.filter((candidate) => candidate.state === "in_review").length,
-    dedupedCount: blocked.length,
+    reviewCount: candidates.filter((candidate) => candidate.state === "in_review").length,
+    dedupedCount: candidates.filter((candidate) => candidate.state === "dedup_blocked").length,
     projectFiledCount: filed.filter((candidate) => candidate.projectStatus === "filed").length,
   };
 }

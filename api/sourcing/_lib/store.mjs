@@ -2,6 +2,8 @@
 // Candidate profiles remain in Paraform; run snapshots contain only the fields
 // needed to render a review queue and audit the decisions made there.
 
+import { randomUUID } from "node:crypto";
+
 const KV_URL = (process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
 const PREFIX = "sourcing:v1";
@@ -14,6 +16,7 @@ const runKey = (runId) => `${PREFIX}:run:${runId}`;
 const seenKey = (roleId) => `${PREFIX}:role:${roleId}:seen`;
 const sourceCacheKey = (key) => `${PREFIX}:source:${key}`;
 const roleReadWindowKey = `${PREFIX}:paraform-role-read:window`;
+const mutationLockKey = (scope, id) => `${PREFIX}:lock:${scope}:${id}`;
 
 async function request(path, body) {
   if (!storeConfigured()) throw new Error("sourcing state store not configured");
@@ -92,6 +95,58 @@ export async function saveRun(run, expectedRevision) {
   if (Number(result) !== 1) throw new Error("run no longer exists");
   return next;
 }
+
+// Proposal approval changes both the run audit log and the role's active
+// rubric. Commit them in one Redis script so neither half can exist alone.
+export async function saveRunAndRoleState(run, expectedRevision, roleId, state) {
+  const now = new Date().toISOString();
+  const nextRun = { ...run, revision: Number(expectedRevision) + 1, updatedAt: now };
+  const nextRole = { ...state, roleId, updatedAt: now };
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return -1 end
+    local current = cjson.decode(raw)
+    if tonumber(current.revision or 0) ~= tonumber(ARGV[1]) then return 0 end
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    redis.call('SET', KEYS[2], ARGV[4])
+    return 1
+  `;
+  const result = await kv([
+    "EVAL", script, 2, runKey(run.id), roleKey(roleId), String(expectedRevision),
+    JSON.stringify(nextRun), String(RUN_TTL_SECONDS), JSON.stringify(nextRole),
+  ]);
+  if (Number(result) === 0) {
+    const error = new Error("run changed; refresh and retry");
+    error.code = "REVISION_CONFLICT";
+    throw error;
+  }
+  if (Number(result) !== 1) throw new Error("run no longer exists");
+  return { run: nextRun, roleState: nextRole };
+}
+
+async function acquireMutationLock(scope, id, ttlSeconds = 330) {
+  const token = randomUUID();
+  const result = await kv([
+    "SET", mutationLockKey(scope, id), token, "NX", "EX", Math.max(30, ttlSeconds),
+  ]);
+  return result === "OK" ? token : null;
+}
+
+async function releaseMutationLock(scope, id, token) {
+  if (!token) return false;
+  const script = `
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+      return redis.call('DEL', KEYS[1])
+    end
+    return 0
+  `;
+  return Number(await kv(["EVAL", script, 1, mutationLockKey(scope, id), token])) === 1;
+}
+
+export const acquireRunLock = (runId, ttlSeconds) => acquireMutationLock("run", runId, ttlSeconds);
+export const releaseRunLock = (runId, token) => releaseMutationLock("run", runId, token);
+export const acquireRoleLock = (roleId, ttlSeconds) => acquireMutationLock("role", roleId, ttlSeconds);
+export const releaseRoleLock = (roleId, token) => releaseMutationLock("role", roleId, token);
 
 export async function listRuns(roleId, limit = 10) {
   const ids = await kv(["ZREVRANGE", roleRunsKey(roleId), 0, Math.max(0, Math.min(49, limit - 1))]);

@@ -7,7 +7,7 @@ import {
   requireSourcingAccess,
   sourcingConfig,
 } from "./_lib/core.mjs";
-import { getRoleState, saveRoleState, storeConfigured } from "./_lib/store.mjs";
+import { acquireRoleLock, getRoleState, releaseRoleLock, saveRoleState, storeConfigured } from "./_lib/store.mjs";
 import { validateRoleMapping } from "../../sourcing-domain.mjs";
 
 const ROLE_ID = /^[a-zA-Z0-9_-]{6,80}$/;
@@ -27,7 +27,10 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, state });
   }
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "GET or POST only" });
+  let roleLockToken = null;
   try {
+    roleLockToken = await acquireRoleLock(roleId);
+    if (!roleLockToken) return res.status(409).json({ ok: false, error: "role_busy" });
     const mapping = validateRoleMapping({
       roleId,
       reviewProjectId: body.reviewProjectId,
@@ -86,5 +89,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, state });
   } catch (error) {
     return res.status(400).json({ ok: false, error: "mapping_invalid", detail: String(error?.message || error).slice(0, 200) });
+  } finally {
+    if (roleLockToken) await releaseRoleLock(roleId, roleLockToken).catch(() => {});
   }
 }

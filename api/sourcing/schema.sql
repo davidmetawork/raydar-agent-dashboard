@@ -16,7 +16,7 @@ create table if not exists sourcing_role_config (
   sequence_id text,
   active_rubric_version_id uuid,
   owner_email text,
-  candidate_cap integer not null default 100 check (candidate_cap between 1 and 500),
+  candidate_cap integer not null default 100 check (candidate_cap between 1 and 100),
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -49,7 +49,7 @@ create table if not exists sourcing_run (
   rubric_version_id uuid not null references sourcing_rubric_version(id),
   status text not null default 'draft'
     check (status in ('draft','ready','running','review','complete','failed','cancelled')),
-  candidate_cap integer not null check (candidate_cap between 1 and 500),
+  candidate_cap integer not null check (candidate_cap between 1 and 100),
   discovered_count integer not null default 0 check (discovered_count >= 0),
   deduped_count integer not null default 0 check (deduped_count >= 0),
   review_count integer not null default 0 check (review_count >= 0),

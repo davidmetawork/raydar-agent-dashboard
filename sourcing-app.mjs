@@ -292,7 +292,7 @@ async function loadRun(runId) {
   const data = await api(`/api/sourcing/run?runId=${encodeURIComponent(runId)}`);
   STATE.currentRun = data.run;
   STATE.demo = [];
-  STATE.selectedEnroll = new Set([...STATE.selectedEnroll].filter((id) => data.run.candidates.some((candidate) => candidate.id === id && candidate.state === "good")));
+  STATE.selectedEnroll = new Set([...STATE.selectedEnroll].filter((id) => data.run.candidates.some((candidate) => candidate.id === id && ["good", "enrollment_queued"].includes(candidate.state))));
   renderRunHistory();
   renderReview();
 }
@@ -359,7 +359,7 @@ function candidateHref(candidate) {
 }
 
 function reviewable(candidate) {
-  return ["discovered", "in_review", "good", "maybe", "bad"].includes(candidate.state);
+  return ["discovered", "in_review", "good", "maybe", "bad", "enrollment_blocked"].includes(candidate.state);
 }
 
 function renderReview() {
@@ -385,7 +385,7 @@ function renderReview() {
     const name = href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(candidate.name)} ↗</a>` : esc(candidate.name);
     const showReason = candidate.pendingBad || candidate.feedback?.verdict === "bad";
     const options = '<option value="">Choose why…</option>' + FEEDBACK_REASONS.map((reason) => `<option value="${reason.id}"${candidate.feedback?.reason === reason.id ? " selected" : ""}>${esc(reason.label)}</option>`).join("");
-    const canEnroll = real && candidate.state === "good" && candidate.projectStatus === "filed" && Boolean(STATE.currentRun.mapping.sequenceId);
+    const canEnroll = real && ["good", "enrollment_queued"].includes(candidate.state) && candidate.projectStatus === "filed" && Boolean(STATE.currentRun.mapping.sequenceId);
     const feedbackControls = blocked
       ? `<span class="tag">blocked · ${esc(candidate.dedupReason || "dedup")}</span>`
       : candidate.state === "enrolled"
@@ -393,7 +393,7 @@ function renderReview() {
         : reviewable(candidate)
           ? `<div class="verdicts">${verdictButton(candidate, "good", "Good", real)}${verdictButton(candidate, "maybe", "Maybe", real)}${verdictButton(candidate, "bad", "Bad", real)}</div>${showReason ? `<select class="reason-select" data-reason-for="${esc(candidate.id)}" data-real="${real ? "1" : "0"}">${options}</select><input class="feedback-note" data-note-for="${esc(candidate.id)}" data-real="${real ? "1" : "0"}" placeholder="Optional note" value="${esc(candidate.feedback?.note || "")}" />` : ""}`
           : `<span class="tag">${esc(candidate.state)}</span>`;
-    const enroll = canEnroll ? `<label class="note"><input class="enroll-check" type="checkbox" data-enroll-id="${esc(candidate.id)}"${STATE.selectedEnroll.has(candidate.id) ? " checked" : ""} /> add to sequence</label>` : "";
+    const enroll = canEnroll ? `<label class="note"><input class="enroll-check" type="checkbox" data-enroll-id="${esc(candidate.id)}"${STATE.selectedEnroll.has(candidate.id) ? " checked" : ""} /> ${candidate.state === "enrollment_queued" ? "retry sequence readback" : "add to sequence"}</label>` : "";
     const meta = [candidate.title, candidate.company, candidate.location].filter(Boolean).join(" · ");
     return `<tr class="${blocked ? "blocked-row" : ""}"><td><div class="candidate-title">${name}</div><div class="candidate-meta">${esc(meta)}</div><div class="meta"><span class="tag">project: ${esc(candidate.projectStatus || "n/a")}</span>${enroll}</div></td><td>${esc(candidate.laneName || candidate.laneId || "—")}</td><td>${feedbackControls}</td></tr>`;
   }).join("");
@@ -471,6 +471,7 @@ async function enrollSelected() {
     renderReview();
     blocker("Sequence handoff finished", `${data.enrolled} enrolled; ${data.blocked} blocked by safety checks or vendor policy.`, "✓");
   } catch (error) {
+    if (STATE.currentRun?.id) await loadRun(STATE.currentRun.id).catch(() => {});
     blocker("Sequence handoff did not complete", error.message, "!");
   }
 }
