@@ -25,6 +25,7 @@ import {
   registerLifecycleEnrollment,
   resumeContact,
   scanCrm,
+  scoreIdentity,
   targetMembership,
   trpcGet,
   trpcPost,
@@ -115,6 +116,16 @@ function candidateFromCall(call) {
   };
 }
 
+export function scoreSelectedIdentity(candidate, crmItem) {
+  const score = scoreIdentity(candidate, crmItem);
+  const exactName = normName(candidate?.fullName) && normName(candidate?.fullName) === normName(crmItem?.name);
+  const strong = score.signals.some((signal) => ["linkedin", "phone", "scheduled_time"].includes(signal));
+  return {
+    signals: ["human_selected_id", ...score.signals],
+    ok: Boolean(exactName || strong),
+  };
+}
+
 function callLink(botId) {
   return `${String(process.env.MONITOR_URL || "https://monitor.raydar.xyz").replace(/\/+$/, "")}/c/${botId}`;
 }
@@ -160,12 +171,18 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
 
   try {
     let crmItem = candidateUserId ? await findCrmCandidate(candidateUserId) : null;
-    let identityScore = candidateUserId && crmItem ? { signals: ["human_selected_id"], ok: true } : null;
+    let identityScore = candidateUserId && crmItem ? scoreSelectedIdentity(candidate, crmItem) : null;
     let ambiguous = false;
     if (candidateUserId && !crmItem) {
       return saveJob(transition(job, "needs_identity_review", {
         identity: { candidateUserId: null, signals: [], ambiguous: false, reason: "selected candidate user ID was not found" },
         journalDetail: "selected identity not found",
+      }), job.revision);
+    }
+    if (candidateUserId && crmItem && !identityScore.ok) {
+      return saveJob(transition(job, "needs_identity_review", {
+        identity: { candidateUserId: null, signals: identityScore.signals, ambiguous: false, reason: "selected Paraform candidate does not match this call" },
+        journalDetail: "selected identity mismatched call",
       }), job.revision);
     }
     if (!crmItem) {

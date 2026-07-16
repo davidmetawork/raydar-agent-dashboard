@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 
 import { findIdentity, normLinkedin, normalizeEmail, scoreIdentity } from "../api/paraai/_lib/core.mjs";
 import { extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
-import { buildPreferences, matchCountFromResponse, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { buildPreferences, matchCountFromResponse, scoreSelectedIdentity, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 
 test("LinkedIn normalization repairs profile paths and rejects non-profiles", () => {
   assert.equal(normLinkedin("linkedin.com/alice-example"), "https://www.linkedin.com/in/alice-example");
@@ -19,6 +20,41 @@ test("identity requires two signals including a strong one", () => {
   assert.deepEqual(scoreIdentity(candidate, exact), { signals: ["linkedin", "phone", "name"], ok: true });
   assert.equal(scoreIdentity(candidate, homonym).ok, false);
   assert.equal(findIdentity(candidate, [exact, homonym]).match.id, "candidate-1");
+});
+
+test("candidate name search ranks exact and token-prefix Paraform matches", () => {
+  const items = [
+    { id: "3", name: "Alexandra Example", location: "Austin", updated_at: "2026-07-15" },
+    { id: "1", name: "Alex Example", location: "New York", updated_at: "2026-07-10" },
+    { id: "2", name: "Alex Smith", location: "Boston", updated_at: "2026-07-16" },
+  ];
+  assert.deepEqual(searchCandidates(items, "alex ex").map((candidate) => candidate.id), ["1", "3"]);
+  assert.equal(searchCandidates(items, "Alex Example")[0].name, "Alex Example");
+  assert.deepEqual(searchCandidates(items, "a"), []);
+});
+
+test("selected Paraform identity can resolve a call but mismatches still fail closed", () => {
+  const crm = { id: "candidate-1", name: "Alex Example", linkedin_user: "alex-example", phone_number: "+1 415 555 1212" };
+  const call = { candidate: { fullName: "Alex Example", linkedin: "https://linkedin.com/in/alex-example", phone: "(415) 555-1212" } };
+  assert.equal(selectedCallMatch(crm, call, 1).confidence, "strong");
+  assert.equal(selectedCallMatch({ ...crm, linkedin_user: "" }, { candidate: { fullName: "Alex Example" } }, 1).confidence, "selected_unique_name");
+  assert.equal(selectedCallMatch({ ...crm, linkedin_user: "" }, { candidate: { fullName: "Alex Example" } }, 2).ok, false);
+  assert.equal(scoreSelectedIdentity(call.candidate, crm).ok, true);
+  assert.equal(scoreSelectedIdentity({ fullName: "Jordan Other" }, crm).ok, false);
+});
+
+test("selected candidate resolution skips failed calls and returns the newest verified success", async () => {
+  const crm = { id: "candidate-1", name: "Alex Example", linkedin_user: "alex-example", phone_number: "+1 415 555 1212" };
+  const fetchImpl = async () => new Response(JSON.stringify({ results: [
+    { botId: "bot-failed", name: "Alex Example", linkedin: "https://linkedin.com/in/alex-example", joinAt: "2026-07-16T10:00:00Z" },
+    { botId: "bot-success", name: "Alex Example", linkedin: "https://linkedin.com/in/alex-example", joinAt: "2026-07-15T10:00:00Z" },
+  ] }), { status: 200, headers: { "content-type": "application/json" } });
+  const fetchCallImpl = async (botId) => botId === "bot-failed"
+    ? { botId, candidate: { fullName: "Alex Example", linkedin: "https://linkedin.com/in/alex-example" }, verdict: { verdict: "no_show" } }
+    : { botId, joinAt: "2026-07-15T10:00:00Z", candidate: { fullName: "Alex Example", linkedin: "https://linkedin.com/in/alex-example", phone: "415-555-1212" }, verdict: { verdict: "success" } };
+  const result = await resolveCandidateCall(crm, [crm], { fetchImpl, fetchCallImpl });
+  assert.equal(result.call.botId, "bot-success");
+  assert.equal(result.call.confidence, "strong");
 });
 
 test("email normalization rejects Paraform relay addresses", () => {
