@@ -75,6 +75,7 @@ export const headers = () => ({
   cookie: `__Secure-next-auth.session-token=${COOKIE}`,
 });
 const env = (json) => ({ json, meta: { values: {}, v: 1 } });
+const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 
 export async function trpcGet(proc, json, tries = 3) {
   const url = `${BASE}/trpc/${proc}?input=` + encodeURIComponent(JSON.stringify(env(json)));
@@ -92,6 +93,20 @@ export async function trpcPost(proc, json, tries = 3) {
   for (let a = 0; a < tries; a++) {
     try {
       const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
+      if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      const b = await r.json();
+      if (b?.error) throw new Error(b.error.json?.message || "trpc error");
+      return b?.result?.data?.json;
+    } catch (e) { if (e.code === "AUTH_EXPIRED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
+  }
+}
+// A few Paraform mutations use SuperJSON-only input types. Keep the ordinary
+// adapter deliberately simple, and opt into metadata only for those pinned
+// contracts (currently campaign start_date, which must deserialize as Date).
+export async function trpcPostWithMeta(proc, json, values = {}, tries = 3) {
+  for (let a = 0; a < tries; a++) {
+    try {
+      const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");

@@ -9,10 +9,12 @@ import {
   requireAuth,
   trpcGet,
   trpcPost,
+  trpcPostWithMeta,
 } from "../../seq/_lib/core.mjs";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   buildRoleRubric,
+  buildSequenceContext,
   FEEDBACK_REASONS,
   normalizeActiveRoles,
   normalizeSearchIdeas,
@@ -103,6 +105,7 @@ export async function getRoleWorkspace(roleId) {
   return {
     roleId,
     rubric: buildRoleRubric({ detail }),
+    sequenceContext: buildSequenceContext(detail),
     searchIdeas: normalizeSearchIdeas(detail?.searchIdeas || detail?.search_ideas),
     unavailable: ["filters", "ideas"],
     readOnly: !SEARCH_APPROVED,
@@ -142,6 +145,67 @@ export async function listSourcingSequences() {
     .filter((row) => row?.id)
     .map((row) => ({ id: String(row.id), name: String(row.name || "Untitled sequence"), enabled: Boolean(row.enabled), leads: row.leads_count ?? null }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function createSourcingProject(name) {
+  const project = await trpcPost("candidateProjects.createProject", { name });
+  if (!project?.id) throw new Error("Paraform createProject returned no id");
+  return { id: String(project.id), name: String(project.name || name) };
+}
+
+export async function getSourcingCampaign(sequenceId) {
+  return trpcGet("campaigns.getCampaign", { campaign_id: sequenceId });
+}
+
+export async function listSourcingGmailAccounts() {
+  const rows = (await trpcGet("gmail.getActiveUserGmailAccounts", {})) || [];
+  return rows.map((row) => ({
+    id: String(row?.account_id || row?.id || ""),
+    email: String(row?.email || "").trim().toLowerCase(),
+  })).filter((row) => row.id && row.email);
+}
+
+export async function createSourcingSequenceShell({ name, roleId, projectId }) {
+  const sequence = await trpcPost("campaigns.createCampaignFromScratch", {
+    name,
+    timezone: "America/Los_Angeles",
+    role_id: roleId,
+    project_id: projectId,
+    auto_add_project_candidates: false,
+  });
+  if (!sequence?.id) throw new Error("Paraform createCampaignFromScratch returned no id");
+  return { id: String(sequence.id), name: String(sequence.name || name) };
+}
+
+export async function updateSourcingSequenceSteps(sequenceId, steps) {
+  return trpcPost("campaigns.updateSequenceSteps", { campaign_id: sequenceId, steps });
+}
+
+export async function updateSourcingSequenceSettings(sequenceId, settings) {
+  const startDate = settings.startDate instanceof Date ? settings.startDate : new Date(settings.startDate);
+  if (Number.isNaN(startDate.getTime())) throw new Error("valid sequence start date required");
+  return trpcPostWithMeta("campaigns.updateSequence", {
+    sequence_id: sequenceId,
+    name: settings.name,
+    role_id: null,
+    enabled: false,
+    timezone: "America/Los_Angeles",
+    start_type: "DATE_TIME",
+    start_date: startDate.toISOString(),
+    days_to_send: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    time_start: "09:00",
+    time_end: "18:00",
+    daily_limit: 20,
+    include_signature: false,
+    enable_tracking: true,
+    prioritize_existing_candidates: false,
+    auto_add_project_candidates: false,
+    send_from_account_ids: settings.accountIds,
+  }, { start_date: ["Date"] });
+}
+
+export async function deleteSourcingSequence(sequenceId) {
+  return trpcPost("campaigns.deleteSequence", { sequence_id: sequenceId });
 }
 
 export async function nativeSearchCreateSession() {

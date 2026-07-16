@@ -65,18 +65,19 @@
   <div id="blocker" class="banner lock"><div>🔒</div><div><strong>Production access is locked</strong><span>Loading the launch gates. No Search session, candidate, project, or sequence can be changed from this build.</span></div></div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose and map the Paraform role</h2><div class="note">Map each job once to its dedicated review project and optional sequence.</div></div></div><span class="tag">job scoped</span></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose and prepare the Paraform role</h2><div class="note">Reuse the exact Project and Sequence when they exist, or create both as Company - Job Title.</div></div></div><span class="tag">job scoped</span></div>
     <div class="roleline">
       <div><label for="role">Active role</label><select id="role" disabled><option value="">Waiting for access gates…</option></select></div>
       <button id="refresh" class="btn secondary" disabled>Refresh roles</button>
     </div>
     <div id="roleMeta" class="meta"></div>
     <div class="mapping">
-      <div><label for="project">Review project</label><select id="project" disabled><option value="">Choose a role first…</option></select></div>
-      <div><label for="sequence">Sequence after approval</label><select id="sequence" disabled><option value="">No sequence mapped</option></select></div>
+      <div><label for="project">Review Project</label><select id="project" disabled><option value="">Choose a role first…</option></select></div>
+      <div><label for="sequence">Cold-sourcing Sequence</label><select id="sequence" disabled><option value="">Choose a role first…</option></select></div>
       <div><label for="candidateCap">Run cap</label><input id="candidateCap" type="number" min="1" max="100" value="100" disabled /></div>
-      <button id="saveMapping" class="btn secondary" disabled>Save mapping</button>
+      <button id="saveMapping" class="btn secondary" disabled>Prepare assets</button>
     </div>
+    <div id="mappingPreview" class="note" style="margin-top:9px">Choose a role to resolve its Project and Sequence.</div>
   </div>
 
   <div class="card">

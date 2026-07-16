@@ -194,22 +194,27 @@ function renderMapping() {
   const roleId = $("role").value;
   const project = $("project");
   const sequence = $("sequence");
-  project.innerHTML = '<option value="">Choose a review project…</option>' + STATE.options.projects.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
-  sequence.innerHTML = '<option value="">No sequence mapped yet</option>' + STATE.options.sequences.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}${item.enabled ? "" : " · disabled"}</option>`).join("");
+  const role = STATE.workspace?.rubric?.role || STATE.roles.find((item) => item.id === roleId) || {};
+  const targetName = role.company && role.title ? `${role.company} - ${role.title}` : "Company - Job Title";
+  project.innerHTML = `<option value="">Auto: reuse or create ${esc(targetName)}</option>` + STATE.options.projects.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
+  sequence.innerHTML = `<option value="">Auto: reuse or create full ${esc(targetName)}</option>` + STATE.options.sequences.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}${item.enabled ? " · active" : " · disabled"}</option>`).join("");
   const mapping = STATE.roleState?.mapping;
   if (mapping) {
     project.value = mapping.reviewProjectId || "";
     sequence.value = mapping.sequenceId || "";
     $("candidateCap").value = mapping.candidateCap || 100;
   } else {
-    project.value = "";
-    sequence.value = "";
+    project.value = STATE.options.projects.find((item) => item.name === targetName)?.id || "";
+    sequence.value = STATE.options.sequences.find((item) => item.name === targetName)?.id || "";
     $("candidateCap").value = 100;
   }
-  project.disabled = !roleId;
-  sequence.disabled = !roleId;
+  project.disabled = !roleId || !STATE.config?.projectWritesApproved;
+  sequence.disabled = !roleId || !STATE.config?.sequenceWritesApproved;
   $("candidateCap").disabled = !roleId;
-  $("saveMapping").disabled = !roleId;
+  $("saveMapping").disabled = !roleId || !STATE.config?.projectWritesApproved || !STATE.config?.sequenceWritesApproved;
+  $("mappingPreview").textContent = mapping
+    ? `${mapping.reviewProjectName} → ${mapping.sequenceName}${mapping.sequenceWarnings?.length ? ` · ${mapping.sequenceWarnings.length} playbook warning(s)` : " · playbook readback passed"}`
+    : `Auto mode will check ${targetName}, create only what is missing, write the full three-email playbook, and leave the campaign not started.`;
   updateRunControls();
 }
 
@@ -254,10 +259,10 @@ async function loadRole(roleId) {
 
 async function saveMapping() {
   const roleId = $("role").value;
-  if (!roleId || !$("project").value) return blocker("Mapping incomplete", "Choose the review project before saving.", "!");
+  if (!roleId) return blocker("Role required", "Choose a Paraform role before preparing its assets.", "!");
   const button = $("saveMapping");
   button.disabled = true;
-  button.textContent = "Saving…";
+  button.textContent = "Preparing…";
   try {
     const data = await api("/api/sourcing/mapping", {
       method: "POST",
@@ -269,13 +274,16 @@ async function saveMapping() {
       }),
     });
     STATE.roleState = data.state;
+    await loadOptions();
     renderMapping();
-    blocker("Job mapping saved", `${data.state.mapping.reviewProjectName}${data.state.mapping.sequenceName ? ` → ${data.state.mapping.sequenceName}` : " · sequence not mapped yet"}.`, "✓");
+    const made = [data.provisioned?.projectCreated ? "Project created" : "Project reused", data.provisioned?.sequenceCreated ? "full Sequence created" : "Sequence reused"].join("; ");
+    const warnings = data.provisioned?.sequenceWarnings || [];
+    blocker(warnings.length ? "Assets mapped with a review warning" : "Project and Sequence ready", `${made}. ${data.state.mapping.reviewProjectName} → ${data.state.mapping.sequenceName}.${warnings.length ? ` ${warnings.join("; ")}` : " Campaign remains not started."}`, warnings.length ? "!" : "✓");
   } catch (error) {
-    blocker("Mapping could not be saved", error.message, "!");
+    blocker("Assets could not be prepared", error.message, "!");
   } finally {
-    button.textContent = "Save mapping";
-    button.disabled = false;
+    button.textContent = "Prepare assets";
+    button.disabled = !STATE.config?.projectWritesApproved || !STATE.config?.sequenceWritesApproved;
   }
 }
 
