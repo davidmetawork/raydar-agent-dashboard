@@ -303,6 +303,10 @@ test("Para AI HTML inline JavaScript parses", async () => {
   assert.doesNotThrow(() => new Function(scripts[0]));
   assert.match(html, /I have screened this candidate and confirmed they are actively on the market/);
   assert.match(html, /max="200000"/);
+  assert.match(html, /async function submitReviewedBody/);
+  assert.match(html, /function reconcileOpenReview/);
+  assert.match(html, /latest\.state!=='ready_to_submit'/);
+  assert.match(html, /expectedRevision:latest\.revision/);
   assert.doesNotMatch(html, /action:\s*["']direct-submit/);
   const run = await readFile(new URL("../api/paraai/run.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(run, /["']direct-submit["']/);
