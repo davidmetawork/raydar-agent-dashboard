@@ -35,3 +35,20 @@ test("native Search query includes the role, exclusions, lane, and approved cali
   assert.match(query, /No pure people managers/);
   assert.match(query, /Raise the minimum seniority/);
 });
+
+test("native Search respects Paraform's 1,000-character query ceiling without dropping safety criteria", () => {
+  const query = buildLaneQuery({
+    role: { title: "Chief of Staff", company: "222place" },
+    mustHaves: Array.from({ length: 10 }, (_, index) => `must-have requirement ${index} with detailed evidence`),
+    preferences: Array.from({ length: 10 }, (_, index) => `preference ${index} with additional context`),
+    searchSignals: { titles: ["Chief of Staff"], skills: ["SQL", "FP&A"], locations: ["New York"] },
+    exclusions: {
+      titles: ["Consultant", "Investment Banker"],
+      criteria: ["Must work on-site", "No frequent job hopping", "No trend chasers"],
+    },
+  }, { rationale: "Core marketplace operations profile" }, [{ action: "Require stronger SQL ownership." }]);
+  assert.equal(query.length <= 1000, true);
+  assert.match(query, /Must work on-site/);
+  assert.match(query, /No frequent job hopping/);
+  assert.match(query, /Require stronger SQL ownership/);
+});

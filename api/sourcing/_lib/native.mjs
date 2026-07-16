@@ -57,19 +57,28 @@ export function buildLaneQuery(rubric, lane, adjustments = []) {
     `Find strong candidates for ${first(role.title, "this role")}${role.company ? ` at ${role.company}` : ""}.`,
     lane?.rationale ? `Search angle: ${lane.rationale}` : "",
     must.length ? `Must have: ${must.join("; ")}.` : "",
-    pref.length ? `Prefer: ${pref.join("; ")}.` : "",
+    rows(negative.titles).length ? `Exclude titles: ${negative.titles.join(", ")}.` : "",
+    rows(negative.criteria).length ? `Reject profiles matching these dealbreakers or traits to avoid: ${negative.criteria.join("; ")}.` : "",
+    adjustments.length ? `Reviewer-approved calibration: ${adjustments.map((item) => item.action || item).join(" ")}` : "",
     rows(positive.titles).length ? `Target titles: ${positive.titles.join(", ")}.` : "",
     rows(positive.skills).length ? `Skills: ${positive.skills.join(", ")}.` : "",
     rows(positive.companies).length ? `Ideal company backgrounds: ${positive.companies.join(", ")}.` : "",
     rows(positive.locations).length ? `Locations: ${positive.locations.join(", ")}.` : "",
     positive.experience ? `Experience: ${positive.experience}.` : "",
-    rows(negative.titles).length ? `Exclude titles: ${negative.titles.join(", ")}.` : "",
     rows(negative.skills).length ? `Exclude profiles missing or centered on: ${negative.skills.join(", ")}.` : "",
     rows(negative.companies).length ? `Avoid companies: ${negative.companies.join(", ")}.` : "",
-    rows(negative.criteria).length ? `Reject profiles matching these dealbreakers or traits to avoid: ${negative.criteria.join("; ")}.` : "",
-    adjustments.length ? `Reviewer-approved calibration: ${adjustments.map((item) => item.action || item).join(" ")}` : "",
+    pref.length ? `Prefer: ${pref.join("; ")}.` : "",
   ];
-  return parts.filter(Boolean).join(" ").slice(0, 5000);
+  // Paraform's current submitNlSearch schema rejects queries over 1,000
+  // characters. Preserve role, must-have, exclusion, and approved-calibration
+  // segments first; later positive/preference segments fill the remaining room.
+  let query = "";
+  for (const part of parts.filter(Boolean)) {
+    const room = 1000 - query.length - (query ? 1 : 0);
+    if (room <= 0) break;
+    query += `${query ? " " : ""}${part.slice(0, room)}`;
+  }
+  return query;
 }
 
 async function pool(items, concurrency, fn) {
