@@ -6,6 +6,7 @@ import { findIdentity, normLinkedin, normalizeEmail, paraAIConfig, scoreIdentity
 import { extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
 import { PARAAI_SALARY_CAP, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
+import { reclaimableLegacyJobLock } from "../api/paraai/_lib/store.mjs";
 
 test("LinkedIn normalization repairs profile paths and rejects non-profiles", () => {
   assert.equal(normLinkedin("linkedin.com/alice-example"), "https://www.linkedin.com/in/alice-example");
@@ -213,6 +214,14 @@ test("Para AI submit cannot bypass the market attestation", async () => {
     submitJob(job, { confirmation: `SUBMIT ${job.id}` }),
     (error) => error?.code === "MARKET_CONFIRMATION_REQUIRED",
   );
+});
+
+test("only expired legacy locks on an unwritten submission can be reclaimed", () => {
+  assert.equal(reclaimableLegacyJobLock("legacy-token", 210, "ready_to_submit"), true);
+  assert.equal(reclaimableLegacyJobLock("legacy-token", 211, "ready_to_submit"), false);
+  assert.equal(reclaimableLegacyJobLock("v2:new-token", 1, "ready_to_submit"), false);
+  assert.equal(reclaimableLegacyJobLock("legacy-token", 1, "submitting"), false);
+  assert.equal(reclaimableLegacyJobLock("legacy-token", -1, "ready_to_submit"), false);
 });
 
 test("current Paraform CRM submission origin is accepted as pinned", () => {

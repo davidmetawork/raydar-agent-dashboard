@@ -7,6 +7,9 @@ const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
 const INDEX_KEY = "paraai:index";
 const JOB_TTL_SECONDS = 180 * 24 * 60 * 60;
+const JOB_LOCK_TTL_SECONDS = 150;
+const LEGACY_JOB_LOCK_TTL_SECONDS = 330;
+const LEGACY_JOB_LOCK_STALE_AFTER_SECONDS = 120;
 const jobKey = (id) => `paraai:job:${id}`;
 const lockKey = (id) => `paraai:lock:${id}`;
 const alertKey = (key) => `paraai:alert:${key}`;
@@ -105,10 +108,39 @@ export async function listJobs(limit = 200) {
   return values.map((value) => parse(value, null)).filter(Boolean);
 }
 
-export async function acquireJobLock(id, ttlSeconds = 330) {
-  const token = randomUUID();
-  const result = await kv(["SET", lockKey(id), token, "NX", "EX", Math.max(30, ttlSeconds)]);
-  return result === "OK" ? token : null;
+export function reclaimableLegacyJobLock(value, ttlSeconds, state) {
+  const ttl = Number(ttlSeconds);
+  return Boolean(
+    value
+    && !String(value).startsWith("v2:")
+    && state === "ready_to_submit"
+    && Number.isFinite(ttl)
+    && ttl >= 0
+    && ttl <= LEGACY_JOB_LOCK_TTL_SECONDS - LEGACY_JOB_LOCK_STALE_AFTER_SECONDS
+  );
+}
+
+export async function acquireJobLock(id, { ttlSeconds = JOB_LOCK_TTL_SECONDS, reclaimLegacyReady = false } = {}) {
+  const token = `v2:${randomUUID()}`;
+  const ttl = Math.max(30, Number(ttlSeconds) || JOB_LOCK_TTL_SECONDS);
+  const result = await kv(["SET", lockKey(id), token, "NX", "EX", ttl]);
+  if (result === "OK") return token;
+  if (!reclaimLegacyReady) return null;
+
+  // Locks created before v2 survived for 330 seconds, while the function that
+  // owned them could run for at most 120. Reclaim only that legacy shape, only
+  // after the runtime ceiling, and only while the durable job is still safely
+  // waiting for its first write. New v2 locks simply expire after 150 seconds.
+  const [existing, remaining, rawJob] = await pipeline([
+    ["GET", lockKey(id)],
+    ["TTL", lockKey(id)],
+    ["GET", jobKey(id)],
+  ]);
+  const job = parse(rawJob, null);
+  if (!reclaimableLegacyJobLock(existing, remaining, job?.state)) return null;
+  if (!(await releaseJobLock(id, existing))) return null;
+  const retry = await kv(["SET", lockKey(id), token, "NX", "EX", ttl]);
+  return retry === "OK" ? token : null;
 }
 
 export async function releaseJobLock(id, token) {

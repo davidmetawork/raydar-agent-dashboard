@@ -43,8 +43,15 @@ export default async function handler(req, res) {
   if (!jobId) return res.status(400).json({ ok: false, error: "jobId_or_botId_required" });
   let lockToken = null;
   try {
-    lockToken = await acquireJobLock(jobId);
-    if (!lockToken) return res.status(409).json({ ok: false, error: "job_busy" });
+    lockToken = await acquireJobLock(jobId, { reclaimLegacyReady: action === "submit" });
+    if (!lockToken) {
+      return res.status(409).json({
+        ok: false,
+        error: "JOB_BUSY",
+        detail: "Another action is still finishing for this candidate. Wait a moment, then submit again.",
+        retryAfterSeconds: 5,
+      });
+    }
     let job;
     if (action === "prepare") {
       job = await prepareJob({ botId: jobId, candidateUserId: body.candidateUserId, force: body.force === true });
