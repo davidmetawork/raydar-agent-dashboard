@@ -107,9 +107,16 @@ export default async function handler(req, res) {
       completedAt: new Date().toISOString(),
     };
     const saved = await saveRun(completed, run.revision);
-    await markCandidatesFiled(roleId, result.candidates
-      .filter((candidate) => candidate.projectStatus === "filed")
-      .map((candidate) => candidate.candidateId));
+    try {
+      await markCandidatesFiled(roleId, result.candidates
+        .filter((candidate) => candidate.projectStatus === "filed")
+        .map((candidate) => candidate.candidateId));
+    } catch (error) {
+      // The completed run is the durable source of truth and the next run heals
+      // this index from history. Never report a failed Search after Project
+      // writes and the completed audit record have both succeeded.
+      console.error("sourcing filed-index reconciliation deferred", error);
+    }
     return res.status(200).json({ ok: true, run: saved });
   } catch (error) {
     const failed = { ...run, state: "failed", error: String(error?.message || error).slice(0, 240), completedAt: new Date().toISOString() };

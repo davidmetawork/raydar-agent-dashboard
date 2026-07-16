@@ -14,7 +14,6 @@ const roleKey = (roleId) => `${PREFIX}:role:${roleId}`;
 const roleRunsKey = (roleId) => `${PREFIX}:role:${roleId}:runs`;
 const runKey = (runId) => `${PREFIX}:run:${runId}`;
 const filedKey = (roleId) => `${PREFIX}:role:${roleId}:filed`;
-const filedMigrationKey = (roleId) => `${PREFIX}:role:${roleId}:filed:migrated`;
 const sourceCacheKey = (key) => `${PREFIX}:source:${key}`;
 const roleReadWindowKey = `${PREFIX}:paraform-role-read:window`;
 const mutationLockKey = (scope, id) => `${PREFIX}:lock:${scope}:${id}`;
@@ -164,23 +163,18 @@ export function filedCandidateIdsFromRuns(runs = []) {
 }
 
 // Search reruns should reconsider profiles that did not pass the agent's rubric.
-// Only people already written to the review project are excluded. The first read
-// backfills this set from retained run history so the old `:seen` set can be
-// retired without filing duplicate candidates.
+// Only people already written to the review project are excluded. Every read
+// reconciles against retained run history, retiring the old `:seen` set without
+// risking a duplicate if a prior filed-set update was interrupted.
 export async function filedCandidateIds(roleId) {
-  const [values, migrated] = await Promise.all([
+  const [values, history] = await Promise.all([
     kv(["SMEMBERS", filedKey(roleId)]),
-    kv(["GET", filedMigrationKey(roleId)]),
+    listRuns(roleId, 50),
   ]);
   const current = Array.isArray(values) ? values.filter(Boolean) : [];
-  if (migrated) return current;
-
-  const history = await listRuns(roleId, 50);
   const backfill = filedCandidateIdsFromRuns(history);
-  await pipeline([
-    ...(backfill.length ? [["SADD", filedKey(roleId), ...backfill]] : []),
-    ["SET", filedMigrationKey(roleId), "1"],
-  ]);
+  const missing = backfill.filter((id) => !current.includes(id));
+  if (missing.length) await kv(["SADD", filedKey(roleId), ...missing]);
   return [...new Set([...current, ...backfill])];
 }
 
