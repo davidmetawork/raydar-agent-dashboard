@@ -6,6 +6,7 @@
 <title>Enrich — Raydar</title>
 <link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
@@ -126,7 +127,7 @@
 <script>
 const $ = (id)=>document.getElementById(id);
 let SEQS=[], CANDS={}, POLL=null, CURRENT={};
-let AUTH={ required:false, clientId:null, token:null, domains:["raydar.xyz","raydargroup.com"] };
+let AUTH={ required:false, authenticated:false, clientId:null, token:null, email:"", domains:["raydar.xyz","raydargroup.com"] };
 const authHeaders = ()=> AUTH.token ? { "Authorization":"Bearer "+AUTH.token } : {};
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 
@@ -495,6 +496,13 @@ async function init(){
   AUTH.required=!!cfg.authRequired; AUTH.clientId=cfg.googleClientId;
   if(Array.isArray(cfg.allowedDomains)&&cfg.allowedDomains.length) AUTH.domains=cfg.allowedDomains;
   if(!AUTH.required){ loadSeqs(); loadCredits(); return; }
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(session?.authenticated){
+    AUTH.authenticated=true; AUTH.email=session.email||"";
+    $("gate").style.display="none";
+    loadSeqs(); loadCredits();
+    return;
+  }
   $("gate").style.display="flex";
   (function start(){
     if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
@@ -502,13 +510,12 @@ async function init(){
     google.accounts.id.renderButton($("gsi"),{ theme:"filled_black", size:"large", text:"signin_with", shape:"pill" });
   })();
 }
-function onCred(resp){
+async function onCred(resp){
   try{
-    const p=JSON.parse(atob(resp.credential.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
-    const dom=(p.hd||(p.email||"").split("@")[1]||"").toLowerCase();
-    if(!AUTH.domains.includes(dom)){ $("gateErr").textContent="Use a "+AUTH.domains.join(" / ")+" account."; return; }
-    AUTH.token=resp.credential; $("gate").style.display="none"; loadHealth(); loadSeqs(); loadCredits();
-  }catch(e){ $("gateErr").textContent="Sign-in failed — try again."; }
+    const session=await RaydarAuth.signIn(resp.credential);
+    AUTH.authenticated=true; AUTH.email=session.email||""; AUTH.token=null;
+    $("gate").style.display="none"; loadHealth(); loadSeqs(); loadCredits();
+  }catch(e){ $("gateErr").textContent=e.code==="auth_session_not_configured" ? "Long-lived sign-in is not configured yet." : "Sign-in failed — try again."; }
 }
 init();
 </script>

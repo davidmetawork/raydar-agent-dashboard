@@ -15,6 +15,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const STATE = {
   config: null,
+  authenticated: false,
   token: null,
   key: sessionStorage.getItem("raydar.sourcing.key") || null,
   roles: [],
@@ -124,6 +125,7 @@ async function authenticatedStart() {
   } catch (error) {
     if (error.status === 401 || error.status === 403) {
       STATE.key = null;
+      STATE.authenticated = false;
       STATE.token = null;
       sessionStorage.removeItem("raydar.sourcing.key");
       $("gateErr").textContent = "That credential was not accepted.";
@@ -143,15 +145,14 @@ async function submitKey() {
   await authenticatedStart();
 }
 
-function onCredential(response) {
+async function onCredential(response) {
   try {
-    const payload = JSON.parse(atob(response.credential.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    const domain = (payload.hd || (payload.email || "").split("@")[1] || "").toLowerCase();
-    if (!(STATE.config.allowedDomains || []).includes(domain)) throw new Error("Use an approved Raydar account.");
-    STATE.token = response.credential;
-    authenticatedStart();
+    const session = await RaydarAuth.signIn(response.credential);
+    STATE.authenticated = true;
+    STATE.token = null;
+    await authenticatedStart();
   } catch (error) {
-    $("gateErr").textContent = error.message || "Sign-in failed";
+    $("gateErr").textContent = error.code === "auth_session_not_configured" ? "Long-lived sign-in is not configured yet." : "Sign-in failed";
   }
 }
 
@@ -796,7 +797,11 @@ async function init() {
       blocker("Paraform session is not configured", "An admin must configure the shared service session.");
       return;
     }
-    if (STATE.key || STATE.token) await authenticatedStart();
+    if (!STATE.key && !STATE.token && STATE.config.authModes?.includes("google")) {
+      const session = await RaydarAuth.session().catch(() => null);
+      if (session?.authenticated) STATE.authenticated = true;
+    }
+    if (STATE.key || STATE.token || STATE.authenticated) await authenticatedStart();
     else renderGate();
   } catch {
     status("locked", "configuration unavailable");

@@ -5,12 +5,10 @@
 // project_sequences_launcher). NOTHING here touches the frozen screener contract.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { sessionConfig, sessionFromRequest, verifyGoogleCredential } from "../../auth/_lib/session.mjs";
+
 export const BASE = "https://www.paraform.com/api";
 const COOKIE = process.env.PARAFORM_COOKIE || "";          // value of __Secure-next-auth.session-token
-// Google domain-restricted auth: enforced IFF GOOGLE_CLIENT_ID is set.
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || "raydar.xyz,raydargroup.com")
-  .split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
 
 export const CONFIG = {
   TEMPLATE_ID: process.env.TEMPLATE_ID || "ms87yhip8wozzyrkpq6sx51b", // 1st-Round template (disabled, has *INSERT ROLE*)
@@ -42,27 +40,31 @@ export function cors(req, res) {
 }
 
 export function authConfig() {
-  return { googleClientId: GOOGLE_CLIENT_ID, allowedDomains: ALLOWED_DOMAINS, authRequired: !!GOOGLE_CLIENT_ID };
+  return sessionConfig();
 }
 
-// Google domain-restricted gate. Verifies the caller's Google ID token via Google's
-// tokeninfo endpoint (no deps): audience must be our client id, hosted-domain (hd)
-// must be an allowed Raydar domain, email verified, not expired. Enforced only when
-// GOOGLE_CLIENT_ID is configured (lets the tool run pre-auth-setup, then locks down).
+// Accept the durable, host-wide trusted-browser cookie first. Bearer ID tokens stay
+// supported as a rollout fallback and are still verified server-side with Google.
 export async function requireAuth(req, res) {
-  if (!GOOGLE_CLIENT_ID) return true; // auth not configured yet -> open (warn in logs)
+  const config = authConfig();
+  if (!config.authRequired) return true; // auth not configured yet -> open (warn in logs)
+  const session = sessionFromRequest(req);
+  if (session) {
+    req.authedEmail = session.email;
+    return true;
+  }
   const hdr = req.headers["authorization"] || "";
   const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
   if (!token) { res.status(401).json({ ok: false, error: "auth_required" }); return false; }
   try {
-    const r = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(token), { signal: AbortSignal.timeout(8000) });
-    const t = await r.json();
-    const ok = r.ok && t.aud === GOOGLE_CLIENT_ID && t.email_verified === "true" &&
-      Number(t.exp) * 1000 > Date.now() && ALLOWED_DOMAINS.includes(String(t.hd || t.email?.split("@")[1] || "").toLowerCase());
-    if (!ok) { res.status(403).json({ ok: false, error: "forbidden", detail: "must sign in with a " + ALLOWED_DOMAINS.join("/") + " Google account" }); return false; }
-    req.authedEmail = t.email;
+    const identity = await verifyGoogleCredential(token);
+    req.authedEmail = identity.email;
     return true;
   } catch (e) {
+    if (e?.code === "forbidden") {
+      res.status(403).json({ ok: false, error: "forbidden", detail: "must sign in with a " + config.allowedDomains.join("/") + " Google account" });
+      return false;
+    }
     res.status(401).json({ ok: false, error: "auth_check_failed" }); return false;
   }
 }
