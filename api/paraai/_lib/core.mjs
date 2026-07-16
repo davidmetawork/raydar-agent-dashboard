@@ -1,6 +1,7 @@
 // Shared Para AI adapter. Runtime is fully headless: Paraform is reached only
 // through its internal tRPC surface and the existing service-session cookie.
 
+import { randomUUID } from "node:crypto";
 import { authConfig, cors, requireAuth } from "../../seq/_lib/core.mjs";
 
 export { authConfig, cors, requireAuth };
@@ -383,10 +384,10 @@ export async function resumeContact(resumeUri, { trpcGetImpl = trpcGet } = {}) {
 
 export async function uploadResume(
   { bytes, fileName },
-  { trpcGetImpl = trpcGet, fetchImpl = fetch, resumeContactImpl = resumeContact } = {},
+  { trpcGetImpl = trpcGet, fetchImpl = fetch, resumeContactImpl = resumeContact, uuidImpl = randomUUID } = {},
 ) {
   if (!bytes?.length) throw new Error("resume PDF is empty");
-  const presign = await trpcGetImpl("file.getResumeUploadUrl", { fileName });
+  const presign = await trpcGetImpl("file.getResumeUploadUrl", { fileName: uuidImpl() });
   if (!presign?.url || !presign?.resumeUri) throw new Error("resume presign returned no upload target");
   const form = new FormData();
   for (const [key, value] of Object.entries(presign.fields || {})) form.append(key, String(value));

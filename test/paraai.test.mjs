@@ -226,6 +226,7 @@ test("only expired legacy locks on an unwritten submission can be reclaimed", ()
 
 test("resume upload uses Paraform queries around the signed storage POST", async () => {
   const calls = [];
+  const storageId = "54f6ff9c-75bd-4bcc-82bd-925d229a35d9";
   const result = await uploadResume(
     { bytes: Buffer.from("%PDF-1.7 test"), fileName: "candidate.pdf" },
     {
@@ -242,16 +243,18 @@ test("resume upload uses Paraform queries around the signed storage POST", async
         assert.equal(options.body.get("key"), "resumes/candidate.pdf");
         assert.equal(options.body.get("policy"), "signed-policy");
         assert.equal(options.body.get("file").type, "application/pdf");
+        assert.equal(options.body.get("file").name, "candidate.pdf");
         return new Response(null, { status: 204 });
       },
       resumeContactImpl: async (resumeUri) => {
         calls.push(["contact-query", resumeUri]);
         return { email: "candidate@example.com" };
       },
+      uuidImpl: () => storageId,
     },
   );
   assert.deepEqual(calls, [
-    ["query", "file.getResumeUploadUrl", { fileName: "candidate.pdf" }],
+    ["query", "file.getResumeUploadUrl", { fileName: storageId }],
     ["upload", "https://uploads.example.test/resume", "POST"],
     ["contact-query", "s3://resumes/candidate.pdf"],
   ]);
