@@ -7,6 +7,8 @@ import {
   SEQUENCE_NAMES,
   candidateAlreadySubmitted,
   candidateDetails,
+  candidatePreferences,
+  directSubmitQuota,
   fetchCall,
   findCrmCandidate,
   findIdentity,
@@ -31,7 +33,7 @@ import {
   trpcPost,
   uploadResume,
 } from "./core.mjs";
-import { extraNote, extractPreferences, normalizeExtraction } from "./extract.mjs";
+import { FUNDING_ROUNDS, PARAAI_LOCATIONS, WORKPLACE_TYPES, extraNote, extractPreferences, normalizeExtraction } from "./extract.mjs";
 import { createJob, getJob, saveJob, transition } from "./store.mjs";
 
 export const STATES = new Set([
@@ -44,6 +46,8 @@ export const STATES = new Set([
 const ZERO_SETTLE_SECONDS = Number(process.env.PARAAI_MATCH_ZERO_SETTLE_SECONDS || 120);
 const MATCH_TIMEOUT_SECONDS = Number(process.env.PARAAI_MATCH_TIMEOUT_SECONDS || 300);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
+export const PARAAI_SALARY_CAP = 200_000;
+export const VISA_SPONSORSHIP = new Set(["Available", "Not available"]);
 
 function stateError(message, code, job = null) {
   const error = new Error(message);
@@ -65,32 +69,65 @@ export function targetSequenceName(matchCount) {
   return Number(matchCount) === 1 ? SEQUENCE_NAMES.one : SEQUENCE_NAMES.multiple;
 }
 
-export function buildPreferences(extracted) {
-  const normalized = normalizeExtraction(extracted);
-  const locations = [...normalized.locations];
-  if (normalized.relocation.open === true && normalized.relocation.scope) {
-    locations.push(`Open to relocate: ${normalized.relocation.scope}`);
-  } else if (normalized.relocation.open === false) {
-    locations.push("Not open to relocation");
-  }
+const array = (value) => Array.isArray(value) ? value : [];
+const uniqueAllowed = (value, allowed, transform = (item) => item) => [...new Set(array(value).map(transform).filter((item) => allowed.has(item)))];
+const locationAliases = new Map([
+  ["new york", "new_york"], ["new york city", "new_york"], ["nyc", "new_york"], ["new jersey", "new_york"], ["nj", "new_york"],
+  ["san francisco", "san_francisco"], ["sf", "san_francisco"], ["south bay area", "south_bay_area"],
+  ["los angeles", "los_angeles"], ["la", "los_angeles"], ["washington dc", "washington_dc"], ["washington d.c.", "washington_dc"],
+  ...[...PARAAI_LOCATIONS].map((value) => [value.replaceAll("_", " "), value]),
+]);
+
+function legacyLocations(value) {
+  return [...new Set(array(value).map((item) => locationAliases.get(String(item || "").trim().toLowerCase())).filter(Boolean))];
+}
+
+function visaFromExtraction(sponsorship = {}) {
+  const statuses = array(sponsorship.statuses).map((item) => String(item).toUpperCase());
+  if (sponsorship.required === true || statuses.includes("VISA")) return ["Available"];
+  if (sponsorship.required === false || statuses.some((item) => ["CITIZEN", "GREEN_CARD"].includes(item))) return ["Not available"];
+  return [];
+}
+
+export function normalizeParaAIPreferences(value = {}) {
+  const salary = Number(value.salaryMin);
+  const ote = Number(value.ote);
   const preferences = {
-    locations: [...new Set(locations)],
-    workplaceTypes: normalized.workplaceTypes,
-    idealFundingRounds: normalized.companyStages,
-    requiresSponsorship: normalized.sponsorship.statuses,
+    locations: uniqueAllowed(value.locations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase()),
+    workplaceTypes: uniqueAllowed(value.workplaceTypes, WORKPLACE_TYPES, (item) => String(item || "").toUpperCase()),
+    idealFundingRounds: uniqueAllowed(value.idealFundingRounds, FUNDING_ROUNDS, (item) => String(item || "").toUpperCase()),
+    requiresSponsorship: uniqueAllowed(value.requiresSponsorship, VISA_SPONSORSHIP, (item) => String(item || "")),
   };
-  if (normalized.compensation.baseMin != null) preferences.salaryMin = normalized.compensation.baseMin;
-  if (normalized.compensation.ote != null) preferences.ote = normalized.compensation.ote;
+  if (Number.isFinite(salary) && salary >= 0) preferences.salaryMin = Math.min(salary, PARAAI_SALARY_CAP);
+  if (value.ote != null && value.ote !== "" && Number.isFinite(ote) && ote >= 0) preferences.ote = ote;
   return preferences;
 }
 
+export function buildPreferences(extracted, native = null) {
+  const normalized = normalizeExtraction(extracted);
+  const nativeLocations = uniqueAllowed(native?.locations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
+  const structuredLocations = uniqueAllowed(normalized.paraformLocations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
+  const salaryMin = normalized.compensation.baseMin ?? (Number.isFinite(Number(native?.salary_min)) ? Number(native.salary_min) : null);
+  const ote = normalized.compensation.ote ?? (Number.isFinite(Number(native?.ote)) ? Number(native.ote) : null);
+  return normalizeParaAIPreferences({
+    locations: structuredLocations.length ? structuredLocations : nativeLocations.length ? nativeLocations : legacyLocations(normalized.locations),
+    workplaceTypes: normalized.workplaceTypes.length ? normalized.workplaceTypes : native?.workplace,
+    idealFundingRounds: normalized.companyStages.length ? normalized.companyStages : native?.last_funding_round,
+    requiresSponsorship: visaFromExtraction(normalized.sponsorship).length ? visaFromExtraction(normalized.sponsorship) : native?.visa,
+    salaryMin,
+    ...(ote != null ? { ote } : {}),
+  });
+}
+
 export function missingRequiredPreferences(preferences = {}) {
+  const normalized = normalizeParaAIPreferences(preferences);
   const missing = [];
-  if (!Array.isArray(preferences.locations) || !preferences.locations.length) missing.push("locations");
-  if (!Array.isArray(preferences.workplaceTypes) || !preferences.workplaceTypes.length) missing.push("workplace types");
-  if (!Array.isArray(preferences.idealFundingRounds) || !preferences.idealFundingRounds.length) missing.push("company stages");
-  if (!Number.isFinite(Number(preferences.salaryMin))) missing.push("minimum base salary");
-  if (!Array.isArray(preferences.requiresSponsorship) || !preferences.requiresSponsorship.length) missing.push("work authorization");
+  if (!normalized.locations.length) missing.push("locations");
+  if (!normalized.workplaceTypes.length) missing.push("workplace types");
+  if (!normalized.idealFundingRounds.length) missing.push("company stages");
+  if (!Number.isFinite(Number(normalized.salaryMin))) missing.push("minimum base salary");
+  if (!normalized.requiresSponsorship.length) missing.push("visa sponsorship");
+  if (normalized.ote != null && normalized.ote < normalized.salaryMin) missing.push("OTE (must be at least minimum base salary)");
   return missing;
 }
 
@@ -219,15 +256,18 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
     }), job.revision);
 
     const extraction = await extractPreferences(call.transcript || []);
-    const [resume, details] = await Promise.all([
+    const [resume, details, nativePreferences] = await Promise.all([
       getResume(crmItem.id).catch(() => null),
       candidateDetails(crmItem.id).catch(() => ({ byId: null, profile: null })),
+      candidatePreferences(crmItem.id).catch(() => null),
     ]);
     const resumeUri = findResumeUri(resume);
     const contact = resumeUri ? await resumeContact(resumeUri).catch(() => null) : null;
     const email = firstEmail(crmItem) || firstEmail(details) || firstEmail(contact);
     const linkedin = candidate.linkedin || normLinkedin(contact?.linkedinUrl || crmItem?.linkedin_user);
     const extracted = extraction.extracted;
+    const reviewPreferences = buildPreferences(extracted, nativePreferences);
+    const statedBaseMin = extracted.compensation?.baseMin ?? null;
     return saveJob(transition(job, "ready_to_submit", {
       candidate: { ...candidate, fullName: candidate.fullName || contact?.name || crmItem.name },
       identity: { ...job.identity, candidateUserId: crmItem.id, candidateId: crmItem.candidate_id || job.identity?.candidateId || null },
@@ -240,6 +280,14 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
         screeningCallLink: callLink(id),
       },
       extracted,
+      reviewPreferences,
+      reviewPolicy: {
+        salaryCap: PARAAI_SALARY_CAP,
+        candidateStatedBaseMin: statedBaseMin,
+        candidateStatedBaseMax: extracted.compensation?.baseMax ?? null,
+        salaryWasCapped: Number.isFinite(Number(statedBaseMin)) && Number(statedBaseMin) > PARAAI_SALARY_CAP,
+        locationSource: extracted.paraformLocations?.length ? "screening_call" : nativePreferences?.locations?.length ? "paraform_profile" : "legacy_mapping",
+      },
       extraNote: extraNote(extracted),
       extraction: { provider: extraction.provider, model: extraction.model, usage: extraction.usage, at: new Date().toISOString() },
       error: null,
@@ -255,6 +303,7 @@ function mergeEdits(job, body = {}) {
   return {
     ...job,
     extracted,
+    reviewPreferences: normalizeParaAIPreferences(body.preferences || job.reviewPreferences || buildPreferences(extracted)),
     extraNote: extraNote(extracted),
     submission: {
       ...(job.submission || {}),
@@ -262,6 +311,7 @@ function mergeEdits(job, body = {}) {
       ...(body.email != null ? { email: normalizeEmail(body.email) } : {}),
       ...(body.linkedinUrl != null ? { linkedinUrl: normLinkedin(body.linkedinUrl) } : {}),
       ...(body.resumeUri != null ? { resumeUri: String(body.resumeUri).trim() } : {}),
+      ...(body.screeningCallLink != null ? { screeningCallLink: String(body.screeningCallLink).trim() } : {}),
     },
   };
 }
@@ -300,6 +350,7 @@ async function submitReadback(candidateUserId, mutationResponse) {
 export async function submitJob(job, body = {}) {
   if (job?.state !== "ready_to_submit") throw stateError("job is not ready to submit", "INVALID_STATE", job);
   if (String(body.confirmation || "") !== `SUBMIT ${job.id}`) throw stateError("submit confirmation mismatch", "CONFIRMATION_MISMATCH", job);
+  if (body.marketConfirmed !== true) throw stateError("Confirm that you screened this candidate and they are actively on the market", "MARKET_CONFIRMATION_REQUIRED", job);
   const config = paraAIConfig();
   if (!config.submitApproved) throw stateError("PARAAI_SUBMIT_APPROVED is false", "SUBMIT_APPROVAL_REQUIRED", job);
   if (config.dryRun) throw stateError("PARAAI_DRY_RUN must be explicitly false", "DRY_RUN", job);
@@ -307,7 +358,7 @@ export async function submitJob(job, body = {}) {
   if (INTERNAL_NAMES.has(normName(job.candidate?.fullName))) throw stateError("internal-name skip list", "INTERNAL_CANDIDATE", job);
 
   let edited = mergeEdits(job, body);
-  const preferences = buildPreferences(edited.extracted);
+  const preferences = edited.reviewPreferences;
   const missingPreferences = missingRequiredPreferences(preferences);
   if (missingPreferences.length) {
     throw stateError(
@@ -321,6 +372,14 @@ export async function submitJob(job, body = {}) {
   if (!submission.name || !normalizeEmail(submission.email) || !normLinkedin(submission.linkedinUrl) || !submission.resumeUri) {
     throw stateError("name, non-Paraform email, LinkedIn, and resume are required", "SUBMISSION_FIELDS_REQUIRED", edited);
   }
+  if (submission.screeningCallLink) {
+    try {
+      const url = new URL(submission.screeningCallLink);
+      if (!new Set(["http:", "https:"]).has(url.protocol)) throw new Error("invalid protocol");
+    } catch {
+      throw stateError("screening call link must be a valid http(s) URL", "INVALID_CALL_LINK", edited);
+    }
+  }
   const candidateUserId = edited.identity?.candidateUserId;
   const freshCrm = await findCrmCandidate(candidateUserId);
   const details = await candidateDetails(candidateUserId);
@@ -332,6 +391,10 @@ export async function submitJob(job, body = {}) {
   const membership = await targetMembership(candidateUserId);
   if (membership.memberships.some(({ lead }) => lead?.has_replied)) return fail(job, "HAS_REPLIED", "Candidate has replied in a target sequence");
   if (membership.memberships.length) return fail(job, "ALREADY_ENROLLED", `Candidate already belongs to ${membership.memberships[0].sequence.name}`);
+  const quota = await directSubmitQuota(RECRUITER_ID);
+  if (quota?.isAtLimit === true) {
+    throw stateError(`Paraform direct-submit quota reached (${quota.used}/${quota.limit}). ${quota.resetLabel || ""}`.trim(), "DIRECT_SUBMIT_QUOTA_REACHED", edited);
+  }
 
   edited = await saveJob(transition(edited, "submitting", {
     submission: { ...submission, email: normalizeEmail(submission.email), linkedinUrl: normLinkedin(submission.linkedinUrl) },
@@ -362,40 +425,6 @@ export async function submitJob(job, body = {}) {
     matchCount: null,
     error: null,
   }), edited.revision);
-}
-
-const POST_SUBMIT_STATES = new Set([
-  "submitting", "awaiting_matches", "ready_to_enroll", "needs_review",
-  "ensuring_email", "enrolling", "verifying", "enrolled", "no_email",
-]);
-
-// The primary UI action is intentionally one click: resolve the selected
-// candidate, extract their successful screening call, and submit the exact
-// prepared payload. Existing post-submit jobs are returned idempotently.
-export async function prepareAndSubmitJob(
-  { botId, candidateUserId = "", force = true, ...submitBody } = {},
-  { getJobImpl = getJob, prepareImpl = prepareJob, submitImpl = submitJob } = {},
-) {
-  const id = String(botId || "").trim();
-  if (!BOT_ID.test(id)) throw stateError("valid Recall bot id required", "INVALID_BOT_ID");
-  const existing = await getJobImpl(id);
-  if (existing && POST_SUBMIT_STATES.has(existing.state)) return existing;
-  if (existing?.state === "error" && existing.externalWriteMayHaveLanded) {
-    throw stateError(
-      "A previous Para AI submit may have landed. Reconcile the candidate in Paraform before retrying.",
-      "RECONCILIATION_REQUIRED",
-      existing,
-    );
-  }
-
-  const prepared = await prepareImpl({ botId: id, candidateUserId, force });
-  if (prepared?.state === "needs_identity_review") {
-    throw stateError("The selected Paraform profile does not match this call.", "IDENTITY_REQUIRED", prepared);
-  }
-  if (prepared?.state !== "ready_to_submit") {
-    throw stateError("The candidate could not be prepared for direct submission.", "INVALID_STATE", prepared);
-  }
-  return submitImpl(prepared, { ...submitBody, confirmation: `SUBMIT ${prepared.id}` });
 }
 
 function matchReadInput(job) {

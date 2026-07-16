@@ -317,6 +317,16 @@ export async function candidateDetails(candidateUserId) {
   return { byId, profile };
 }
 
+export async function candidatePreferences(candidateUserId) {
+  if (!candidateUserId) return null;
+  return trpcGet("candidateUserPreference.getCandidateUserPrefs", { candidate_user_id: candidateUserId });
+}
+
+export async function directSubmitQuota(recruiterId = RECRUITER_ID) {
+  const input = recruiterId && recruiterId !== RECRUITER_ID ? { recruiterId } : {};
+  return trpcGet("agency.getTalentNetworkDirectSubmitQuota", input);
+}
+
 export function candidateAlreadySubmitted(value) {
   const rows = [value, value?.byId, value?.profile].filter(Boolean);
   const visit = (node, depth = 0) => {

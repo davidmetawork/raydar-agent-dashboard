@@ -5,12 +5,18 @@
 export const WORKPLACE_TYPES = new Set(["REMOTE", "HYBRID", "ON_SITE"]);
 export const FUNDING_ROUNDS = new Set(["PRE_SEED", "SEED", "SERIES_A", "SERIES_B", "SERIES_C", "SERIES_D_PLUS", "UNKNOWN"]);
 export const SPONSORSHIP_STATUSES = new Set(["CITIZEN", "VISA", "GREEN_CARD"]);
+export const PARAAI_LOCATIONS = new Set([
+  "new_york", "san_francisco", "south_bay_area", "los_angeles", "boston", "seattle",
+  "texas", "chicago", "europe", "latam", "korea", "canada", "australia", "india",
+  "uk", "washington_dc", "asia", "denver", "florida", "minnesota", "sacramento",
+]);
 
 const schema = {
   type: "object",
   additionalProperties: false,
   properties: {
     locations: { type: "array", items: { type: "string" } },
+    paraformLocations: { type: "array", items: { type: "string", enum: [...PARAAI_LOCATIONS] } },
     relocation: {
       type: "object",
       additionalProperties: false,
@@ -69,7 +75,8 @@ const prompt = `Extract only preferences and facts the candidate explicitly stat
 Rules:
 - Never infer or invent a missing value. Omit it or return an empty array/null.
 - Normalize workplace to REMOTE, HYBRID, or ON_SITE only.
-- Normalize funding to PRE_SEED, SEED, SERIES_A, SERIES_B, SERIES_C, SERIES_D_PLUS, or UNKNOWN. Public/IPO may be SERIES_D_PLUS only when that is the candidate's clear stage preference; otherwise UNKNOWN.
+- Map explicitly acceptable target locations to Paraform's exact location enum in paraformLocations: ${[...PARAAI_LOCATIONS].join(", ")}. Do not treat the candidate's current residence as a preference unless they explicitly say they want to work there. Remote is a workplace type, not a location. New Jersey maps to new_york only when it is explicitly an acceptable target location.
+- Normalize funding to PRE_SEED, SEED, SERIES_A, SERIES_B, SERIES_C, SERIES_D_PLUS, or UNKNOWN. UNKNOWN means the explicit Paraform option “Other (e.g. Legal, Healthcare)”; it never means no preference. If the candidate has no company-stage preference, return an empty array so a human can review it.
 - Normalize immigration to CITIZEN, VISA, or GREEN_CARD. H-1B/OPT/visa sponsorship => VISA. No sponsorship needed because they are a citizen => CITIZEN. Permanent resident => GREEN_CARD.
 - Compensation baseMin/baseMax are pure base salary only. Exclude equity and bonus. Put OTE in compensation.ote only when OTE is explicitly discussed.
 - Preserve relocation scope, interview-process stage, named interviewing companies, off-market timeline, search activity, industry likes/dislikes, trips/obstacles, role types, and company headcount as concise facts.
@@ -78,6 +85,7 @@ Rules:
 const text = (value) => typeof value === "string" ? value.trim() : "";
 const strings = (value) => [...new Set((Array.isArray(value) ? value : []).map(text).filter(Boolean))];
 const enumStrings = (value, allowed) => strings(value).map((item) => item.toUpperCase()).filter((item) => allowed.has(item));
+const lowerEnumStrings = (value, allowed) => strings(value).map((item) => item.toLowerCase()).filter((item) => allowed.has(item));
 const number = (value) => value != null && value !== "" && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
 const integer = (value) => value != null && value !== "" && Number.isInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
 
@@ -105,6 +113,7 @@ export function normalizeExtraction(raw = {}) {
   } : { required: null, statuses: [], kind: null };
   return {
     locations: strings(raw.locations),
+    paraformLocations: lowerEnumStrings(raw.paraformLocations, PARAAI_LOCATIONS),
     relocation,
     otherInterviewProcesses: processes,
     interviewingCompanies: strings(raw.interviewingCompanies),
