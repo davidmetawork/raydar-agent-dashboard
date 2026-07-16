@@ -62,6 +62,28 @@ export const JOB_ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
 export const JOB_STATUSES = [
   "queued", "claimed", "fetching", "generating", "verifying", "drafting", "done", "failed",
 ];
+export const ACTIVE_JOB_STATUSES = new Set([
+  "claimed", "fetching", "generating", "verifying", "drafting",
+]);
+export const STALE_ACTIVE_JOB_MS = 15 * 60 * 1000;
+
+export function jobLastActivityAt(job) {
+  const history = Array.isArray(job?.history) ? job.history : [];
+  const latest = [...history].reverse().find((item) => Number.isFinite(Date.parse(item?.at || "")));
+  const value = latest?.at || job?.created_at || "";
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+// A Fly restart can interrupt a job after it has reported an active state.
+// The runner is a singleton and does not poll while it is busy, so reclaiming
+// an active job after 15 minutes cannot race a healthy in-process run. It does
+// let a fresh process recover work whose /tmp workspace disappeared on restart.
+export function isRunnablePrepJob(job, now = Date.now()) {
+  if (job?.status === "queued") return true;
+  if (!ACTIVE_JOB_STATUSES.has(job?.status)) return false;
+  return now - jobLastActivityAt(job) >= STALE_ACTIVE_JOB_MS;
+}
 
 const parse = (value, fallback = null) => {
   try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
