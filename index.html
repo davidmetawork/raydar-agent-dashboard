@@ -149,6 +149,7 @@
     .pf-dormant { display:inline-block; font-size:10px; font-weight:700; color:var(--ink-3); background:var(--line-2); border-radius:5px; padding:1px 6px; margin-left:6px; }
     .pf-chips { font-size:12.5px; color:var(--ink-2); margin:-14px 2px 22px; }
     .pf-chips b { color:var(--ink); font-weight:600; }
+    .pf-coverage { font-size:12.5px; color:#6f5810; background:#fff9e8; border:1px solid #f3dfa0; border-radius:10px; padding:10px 12px; margin:0 0 16px; }
     .pf-headctl { display:flex; align-items:center; gap:12px; }
     .pf-rangebar button { padding:5px 10px; font-size:12px; }
     @media (max-width:960px){
@@ -1010,17 +1011,20 @@
     // d.windows (honest bases + partial-coverage flags); Lifetime = the original
     // top-level fields. Toggling re-renders locally — never a refetch. The last
     // payload is cached in localStorage (no PII — the API whitelists fields) so
-    // the section paints instantly on revisit while the fetch runs.
+    // the section paints instantly on revisit while the fetch runs. v2 moves
+    // every browser to the new trailing-six-month default once, then persists
+    // the person's subsequent selection.
     let pfData=null, pfAt=0;
-    let pfWin="life";
-    try{ pfWin = localStorage.getItem("pfWindow") || "life"; }catch(e){}
+    const PF_WINDOW_PREF_KEY="pfWindowV2";
+    let pfWin="6m";
+    try{ pfWin = localStorage.getItem(PF_WINDOW_PREF_KEY) || "6m"; }catch(e){}
     const PF_WINS = { "1w":{days:7,label:"last week"}, "1m":{days:30,label:"last month"}, "3m":{days:91,label:"last 3 months"},
                       "6m":{days:182,label:"last 6 months"}, "1y":{days:365,label:"last year"}, "life":{days:null,label:"lifetime"} };
-    if(!PF_WINS[pfWin]) pfWin="life";
+    if(!PF_WINS[pfWin]) pfWin="6m";
     function pfSyncRange(){ document.querySelectorAll("#pf-range button").forEach(b=>b.classList.toggle("on", b.dataset.w===pfWin)); }
     function pfRange(k){
       pfWin = PF_WINS[k] ? k : "life";
-      try{ localStorage.setItem("pfWindow", pfWin); }catch(e){}
+      try{ localStorage.setItem(PF_WINDOW_PREF_KEY, pfWin); }catch(e){}
       if(pfData) renderPlacements(pfData); else pfSyncRange();
     }
     async function ensurePlacements(force){
@@ -1132,18 +1136,25 @@
         return `<div class="kpi" title="${esc(opts.tip||"")}"><div class="k-label">${label}</div><div class="k-num">${esc(ratio.display)}${ratio.estimated?pfEst:""}</div><div class="k-sub">${esc(opts.sub||"")}</div></div>`;
       };
 
-      let hero, chipLine;
+      let hero, chipLine, coverageNote="";
       if(w){
         // windowed view: precomputed server-side with explicit bases + coverage
         const m=w.metrics||{}, r=w.ratios||{}, ch=w.chips||{};
         const rsub=(x)=> `${wdef.label} · n=${x.n_hires} hires${x.partial?` · data since ${pfDay(x.since)}`:""}`;
         const rtip=(x,extra)=> x?`Basis: ${x.basis}.${x.partial?` Coverage starts ${x.since} — flagged, not hidden.`:""} ${extra||""}`:(extra||"");
         const noHires = m.hired && m.hired.value===0;
-        const empty = {emptyText: noHires?"no hires yet in window":"building history", emptySub: noHires?"":"daily snapshots accumulate — ratios appear once coverage reaches half the window"};
+        const partialStarts=[m.submissions,m.interviews,m.est_mid_rounds].filter(x=>x&&x.partial&&x.since).map(x=>x.since).sort();
+        const comparableSince=partialStarts.length?partialStarts[partialStarts.length-1]:null;
+        const unavailable=(x,noun,estimated=Boolean(x&&x.estimated))=>{
+          if(noHires) return {emptyText:"no hires yet in window",emptySub:""};
+          if(x&&x.value!=null) return {emptyText:`${estimated?"~":""}${pfInt(x.value)} ${noun}`,emptySub:`available since ${pfDay(x.since)} · ratio not yet measurable`};
+          return {emptyText:"not yet measurable",emptySub:"not loading · comparable period data is unavailable"};
+        };
+        if(!noHires&&Object.values(r).some(x=>!x)) coverageNote=`<p class="pf-coverage"><b>Not loading:</b> Paraform's comparable conversion inputs currently start ${comparableSince?pfDay(comparableSince):"later than this window"}, so a ${esc(wdef.label)} ratio would mix different periods. Available counts and complete hire history are shown now.</p>`;
         hero=`<div class="kpis">
-          ${heroCard("Submissions → Hire", r.submissions_per_hire, {...empty, sub:r.submissions_per_hire?rsub(r.submissions_per_hire):"", tip:rtip(r.submissions_per_hire,"Submissions are events, not unique candidates.")})}
-          ${heroCard("Interviews → Hire", r.interviews_per_hire, {...empty, sub:r.interviews_per_hire?rsub(r.interviews_per_hire):"", tip:rtip(r.interviews_per_hire,"Windowed interviews may be estimated from weekly interview rates.")})}
-          ${heroCard("Mid round → Hire", r.mid_round_per_hire, {...empty, sub:r.mid_round_per_hire?rsub(r.mid_round_per_hire):"", tip:rtip(r.mid_round_per_hire,"Always an estimate — Paraform exposes no exact mid-round count.")})}
+          ${heroCard("Submissions → Hire", r.submissions_per_hire, {...unavailable(m.submissions,"submissions"), sub:r.submissions_per_hire?rsub(r.submissions_per_hire):"", tip:rtip(r.submissions_per_hire,"Submissions are events, not unique candidates.")})}
+          ${heroCard("Interviews → Hire", r.interviews_per_hire, {...unavailable(m.interviews,"interviews"), sub:r.interviews_per_hire?rsub(r.interviews_per_hire):"", tip:rtip(r.interviews_per_hire,"Windowed interviews may be estimated from weekly interview rates.")})}
+          ${heroCard("Mid round → Hire", r.mid_round_per_hire, {...unavailable(m.est_mid_rounds,"mid rounds",true), sub:r.mid_round_per_hire?rsub(r.mid_round_per_hire):"", tip:rtip(r.mid_round_per_hire,"Always an estimate — Paraform exposes no exact mid-round count.")})}
           ${m.hired?`<div class="kpi" title="Basis: ${esc(m.hired.basis)}. Goal pace scales the 10/month goal to the window."><div class="k-label">Hires · ${esc(wdef.label)}</div><div class="k-num">${m.hired.value}<small> / ${w.goal_hires}</small></div><div class="k-sub">goal pace ${w.goal_hires}${m.hired.partial?` · data since ${pfDay(m.hired.since)}`:""}</div></div>`
                    :heroCard(`Hires · ${esc(wdef.label)}`, null, {emptyText:"n/a", emptySub:"no basis covers this window yet"})}
         </div>`;
@@ -1203,7 +1214,7 @@
 
       const errNote = d.fetch_errors&&d.fetch_errors.length?`<p class="psub" style="color:#8a6a12">Partial data: ${d.fetch_errors.length} of the Paraform reads failed this refresh (${esc(d.fetch_errors.map(e=>e.proc.split(".").pop()).join(", "))}). Affected cards are hidden, not zeroed.</p>`:"";
 
-      $("placements").innerHTML = errNote+winNote+hero+chipLine
+      $("placements").innerHTML = errNote+winNote+coverageNote+hero+chipLine
         +((goalPanel||moneyPanel)?`<div class="panel-grid">${goalPanel}${moneyPanel}</div>`:"")
         +((funnelPanel||weeklyPanel)?`<div class="panel-grid">${funnelPanel}${weeklyPanel}</div>`:"")
         +standing+recruiterPanel+rolesPanel;
