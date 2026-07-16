@@ -1,4 +1,15 @@
 import { FEEDBACK_REASONS, applyFeedback, proposeNextRun, summarizeFeedback } from "/sourcing-domain.mjs";
+import {
+  DEGREE_TYPES,
+  FUNDING_STAGES,
+  TALENT_DENSITY_TIERS,
+  deriveAgentCriteria,
+  deriveNativeFilters,
+  emptyEducationClause,
+  emptyWorkClause,
+  normalizeNativeFilters,
+  normalizeRankingConfig,
+} from "/sourcing-filters.mjs";
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -14,6 +25,8 @@ const STATE = {
   currentRun: null,
   demo: [],
   selectedEnroll: new Set(),
+  criteriaDraft: null,
+  criteriaDirty: false,
 };
 
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
@@ -164,6 +177,228 @@ async function loadOptions() {
   renderMapping();
 }
 
+const parseList = (value) => [...new Set(String(value || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+const joinList = (value) => (value || []).join(", ");
+const selectedOptions = (select) => [...(select?.selectedOptions || [])].map((option) => option.value).filter(Boolean);
+const numberOrEmpty = (value) => value === undefined || value === null ? "" : value;
+const inputNumber = (value) => value === "" || value == null ? undefined : Number(value);
+
+function activeRubricVersion() {
+  return STATE.roleState?.rubricVersions?.find((version) => version.id === STATE.roleState.activeRubricVersionId) || null;
+}
+
+function optionRows(options, selected = []) {
+  const chosen = new Set(selected || []);
+  return options.map(([value, label]) => `<option value="${esc(value)}"${chosen.has(value) ? " selected" : ""}>${esc(label)}</option>`).join("");
+}
+
+function workClauseHtml(clause, index, kind) {
+  const key = `${kind}-${index}`;
+  const scope = clause.scope || "any";
+  return `<div class="work-clause" data-work-kind="${kind}" data-work-index="${index}">
+    <div class="clause-top"><b>${kind === "include" ? "Included" : "Excluded"} work clause ${index + 1}</b><button class="remove-clause" type="button" data-remove-work="${key}">Remove</button></div>
+    <div class="segmented" aria-label="Employment timing">
+      ${[["any", "Any"], ["current", "Current"], ["past", "Past"]].map(([value, label]) => `<label><input type="radio" name="scope-${key}" value="${value}"${scope === value ? " checked" : ""} /><span>${label}</span></label>`).join("")}
+    </div>
+    <div class="form-grid" style="margin-top:12px"><div><label>Job titles</label><input data-work-field="titles" value="${esc(joinList(clause.titles))}" placeholder="Software Engineer, PM" /></div><div><label>Companies</label><input data-work-field="companies" value="${esc(joinList(clause.companies))}" placeholder="Stripe, Ramp, Cursor" /><div class="field-help">Company names are matched the same way as typed names in Paraform.</div></div></div>
+    <details class="advanced"><summary>Advanced company filters</summary><div class="form-grid">
+      <div><label>Company keywords</label><input data-work-field="companyKeywords" value="${esc(joinList(clause.companyKeywords))}" /></div>
+      <div><label>Investors</label><input data-work-field="companyInvestors" value="${esc(joinList(clause.companyInvestors))}" /></div>
+      <div><label>Headcount min</label><input data-work-field="companyHeadcountMin" type="number" min="0" value="${esc(numberOrEmpty(clause.companyHeadcountMin))}" /></div>
+      <div><label>Headcount max</label><input data-work-field="companyHeadcountMax" type="number" min="0" value="${esc(numberOrEmpty(clause.companyHeadcountMax))}" /></div>
+      <div><label>Funding stages</label><select data-work-field="companyFundingStages" multiple size="5">${optionRows(FUNDING_STAGES, clause.companyFundingStages)}</select></div>
+      <div><label>Funding stage timing</label><select data-work-field="companyFundingStageSemantic"><option value="current"${clause.companyFundingStageSemantic !== "tenure" ? " selected" : ""}>Now</option><option value="tenure"${clause.companyFundingStageSemantic === "tenure" ? " selected" : ""}>While candidate was there</option></select></div>
+      <div><label>Total funding min ($)</label><input data-work-field="companyTotalFundingMin" type="number" min="0" value="${esc(numberOrEmpty(clause.companyTotalFundingMin))}" /></div>
+      <div><label>Total funding max ($)</label><input data-work-field="companyTotalFundingMax" type="number" min="0" value="${esc(numberOrEmpty(clause.companyTotalFundingMax))}" /></div>
+      <div><label>Talent density</label><select data-work-field="companyTalentDensityTiers" multiple size="4">${optionRows(TALENT_DENSITY_TIERS, clause.companyTalentDensityTiers)}</select></div>
+    </div></details>
+  </div>`;
+}
+
+function educationClauseHtml(clause, index) {
+  return `<div class="education-clause" data-education-index="${index}"><div class="clause-top"><b>Education clause ${index + 1}</b><button class="remove-clause" type="button" data-remove-education="${index}">Remove</button></div><div class="form-grid three">
+    <div><label>Degrees</label><select data-education-field="degreeTypes" multiple size="4">${optionRows(DEGREE_TYPES, clause.degreeTypes)}</select></div>
+    <div><label>Schools</label><input data-education-field="schools" value="${esc(joinList(clause.schools))}" placeholder="Stanford, MIT" /></div>
+    <div><label>Fields of study</label><input data-education-field="fieldsOfStudy" value="${esc(joinList(clause.fieldsOfStudy))}" placeholder="Computer Science" /></div>
+  </div></div>`;
+}
+
+function collectWorkClauses(kind) {
+  return [...document.querySelectorAll(`[data-work-kind="${kind}"]`)].map((row) => {
+    const value = (field) => row.querySelector(`[data-work-field="${field}"]`);
+    return {
+      ...emptyWorkClause(),
+      scope: row.querySelector(`input[name^="scope-"]:checked`)?.value || "any",
+      titles: parseList(value("titles")?.value),
+      companies: parseList(value("companies")?.value),
+      companyKeywords: parseList(value("companyKeywords")?.value),
+      companyHeadcountMin: inputNumber(value("companyHeadcountMin")?.value),
+      companyHeadcountMax: inputNumber(value("companyHeadcountMax")?.value),
+      companyFundingStages: selectedOptions(value("companyFundingStages")),
+      companyFundingStageSemantic: value("companyFundingStageSemantic")?.value || "current",
+      companyInvestors: parseList(value("companyInvestors")?.value),
+      companyTotalFundingMin: inputNumber(value("companyTotalFundingMin")?.value),
+      companyTotalFundingMax: inputNumber(value("companyTotalFundingMax")?.value),
+      companyTalentDensityTiers: selectedOptions(value("companyTalentDensityTiers")),
+    };
+  });
+}
+
+function collectEducationClauses() {
+  return [...document.querySelectorAll("[data-education-index]")].map((row) => ({
+    degreeTypes: selectedOptions(row.querySelector('[data-education-field="degreeTypes"]')),
+    schools: parseList(row.querySelector('[data-education-field="schools"]')?.value),
+    fieldsOfStudy: parseList(row.querySelector('[data-education-field="fieldsOfStudy"]')?.value),
+  }));
+}
+
+function renderClauseEditors() {
+  const filters = STATE.criteriaDraft?.nativeFilters || {};
+  const include = filters.workExperienceGroups?.length ? filters.workExperienceGroups : [emptyWorkClause()];
+  const education = filters.educationGroups?.length ? filters.educationGroups : [emptyEducationClause()];
+  $("includeWorkClauses").innerHTML = include.map((clause, index) => workClauseHtml(clause, index, "include")).join("");
+  $("excludeWorkClauses").innerHTML = (filters.excludeWorkExperienceGroups || []).map((clause, index) => workClauseHtml(clause, index, "exclude")).join("");
+  $("educationClauses").innerHTML = education.map(educationClauseHtml).join("");
+}
+
+function collectCriteria() {
+  const nativeFilters = normalizeNativeFilters({
+    candidateName: $("fCandidateName").value,
+    linkedinSlug: $("fLinkedinSlug").value,
+    keyword: $("fKeyword").value,
+    excludeKeyword: $("fExcludeKeyword").value,
+    workExperienceGroups: collectWorkClauses("include"),
+    excludeWorkExperienceGroups: collectWorkClauses("exclude"),
+    yoeMin: inputNumber($("fYoeMin").value),
+    yoeMax: inputNumber($("fYoeMax").value),
+    timeAtCurrentRoleMinYears: inputNumber($("fTenureMin").value),
+    timeAtCurrentRoleMaxYears: inputNumber($("fTenureMax").value),
+    skills: parseList($("fSkills").value),
+    skillsMode: document.querySelector('input[name="skillsMode"]:checked')?.value || "boost",
+    excludeSkills: parseList($("fExcludeSkills").value),
+    locations: parseList($("fLocations").value),
+    excludeLocations: parseList($("fExcludeLocations").value),
+    minDegreeType: $("fMinDegree").value || undefined,
+    educationGroups: collectEducationClauses(),
+    excludeSchools: parseList($("fExcludeSchools").value),
+    excludeFieldsOfStudy: parseList($("fExcludeFields").value),
+  });
+  const rankingConfig = normalizeRankingConfig({
+    poolSize: $("poolSize").value,
+    saveLimit: $("saveLimit").value,
+    minimumScore: $("minimumScore").value,
+  }, STATE.roleState?.mapping?.candidateCap || 100);
+  return { nativeFilters, agentCriteria: $("agentCriteria").value.trim(), rankingConfig };
+}
+
+function updateFlow(config) {
+  $("flowPool").textContent = config.poolSize;
+  $("flowThreshold").textContent = `${config.minimumScore}+`;
+  $("flowSave").textContent = `≤ ${config.saveLimit}`;
+}
+
+function renderCriteria() {
+  if (!STATE.workspace) return;
+  const version = activeRubricVersion();
+  const rubric = version?.rubric || STATE.workspace.rubric || {};
+  const mappingCap = STATE.roleState?.mapping?.candidateCap || 100;
+  const nativeFilters = normalizeNativeFilters(version?.nativeFilters || deriveNativeFilters(rubric));
+  const rankingConfig = normalizeRankingConfig(version?.rankingConfig || {}, mappingCap);
+  STATE.criteriaDraft = {
+    nativeFilters: structuredClone(nativeFilters),
+    agentCriteria: version?.agentCriteria || deriveAgentCriteria(rubric, version?.adjustments || []),
+    rankingConfig,
+  };
+  $("criteriaEmpty").hidden = true;
+  $("criteriaEditor").hidden = false;
+  $("fMinDegree").innerHTML = '<option value="">Any degree</option>' + optionRows(DEGREE_TYPES, nativeFilters.minDegreeType ? [nativeFilters.minDegreeType] : []);
+  $("fCandidateName").value = nativeFilters.candidateName || "";
+  $("fLinkedinSlug").value = nativeFilters.linkedinSlug || "";
+  $("fKeyword").value = nativeFilters.keyword || "";
+  $("fExcludeKeyword").value = nativeFilters.excludeKeyword || "";
+  $("fYoeMin").value = numberOrEmpty(nativeFilters.yoeMin);
+  $("fYoeMax").value = numberOrEmpty(nativeFilters.yoeMax);
+  $("fTenureMin").value = numberOrEmpty(nativeFilters.timeAtCurrentRoleMinYears);
+  $("fTenureMax").value = numberOrEmpty(nativeFilters.timeAtCurrentRoleMaxYears);
+  $("fSkills").value = joinList(nativeFilters.skills);
+  document.querySelector(`input[name="skillsMode"][value="${nativeFilters.skillsMode || "boost"}"]`).checked = true;
+  $("fExcludeSkills").value = joinList(nativeFilters.excludeSkills);
+  $("fLocations").value = joinList(nativeFilters.locations);
+  $("fExcludeLocations").value = joinList(nativeFilters.excludeLocations);
+  $("fExcludeSchools").value = joinList(nativeFilters.excludeSchools);
+  $("fExcludeFields").value = joinList(nativeFilters.excludeFieldsOfStudy);
+  $("agentCriteria").value = STATE.criteriaDraft.agentCriteria;
+  $("poolSize").value = rankingConfig.poolSize;
+  $("saveLimit").value = rankingConfig.saveLimit;
+  $("minimumScore").value = rankingConfig.minimumScore;
+  $("roleSummary").textContent = rubric.role?.summary || "";
+  renderClauseEditors();
+  updateFlow(rankingConfig);
+  STATE.criteriaDirty = false;
+  $("criteriaStatus").textContent = version ? `Using sourcing setup v${version.version}.` : "Role brief loaded. Prepare assets to save this setup.";
+  $("saveCriteria").disabled = !STATE.roleState?.mapping;
+}
+
+function preserveDraft() {
+  if (!STATE.criteriaDraft || $("criteriaEditor").hidden) return;
+  try { STATE.criteriaDraft = collectCriteria(); } catch {}
+}
+
+function addWorkClause(kind) {
+  preserveDraft();
+  const key = kind === "include" ? "workExperienceGroups" : "excludeWorkExperienceGroups";
+  STATE.criteriaDraft.nativeFilters[key] = [...(STATE.criteriaDraft.nativeFilters[key] || []), emptyWorkClause()];
+  renderClauseEditors();
+  STATE.criteriaDirty = true;
+}
+
+function removeWorkClause(kind, index) {
+  preserveDraft();
+  const key = kind === "include" ? "workExperienceGroups" : "excludeWorkExperienceGroups";
+  STATE.criteriaDraft.nativeFilters[key] = (STATE.criteriaDraft.nativeFilters[key] || []).filter((_, itemIndex) => itemIndex !== index);
+  renderClauseEditors();
+  STATE.criteriaDirty = true;
+}
+
+function addEducationClause() {
+  preserveDraft();
+  STATE.criteriaDraft.nativeFilters.educationGroups = [...(STATE.criteriaDraft.nativeFilters.educationGroups || []), emptyEducationClause()];
+  renderClauseEditors();
+  STATE.criteriaDirty = true;
+}
+
+function removeEducationClause(index) {
+  preserveDraft();
+  STATE.criteriaDraft.nativeFilters.educationGroups = (STATE.criteriaDraft.nativeFilters.educationGroups || []).filter((_, itemIndex) => itemIndex !== index);
+  renderClauseEditors();
+  STATE.criteriaDirty = true;
+}
+
+async function saveCriteria({ quiet = false } = {}) {
+  const button = $("saveCriteria");
+  const criteria = collectCriteria();
+  if (!criteria.agentCriteria) throw new Error("Describe what the agent should consider a great candidate.");
+  button.disabled = true;
+  button.textContent = "Saving…";
+  try {
+    const data = await api("/api/sourcing/criteria", {
+      method: "POST",
+      body: JSON.stringify({ roleId: $("role").value, ...criteria }),
+    });
+    STATE.roleState = data.state;
+    STATE.criteriaDraft = criteria;
+    STATE.criteriaDirty = false;
+    updateFlow(criteria.rankingConfig);
+    $("criteriaStatus").textContent = data.unchanged ? `Sourcing setup v${data.rubricVersion.version} is current.` : `Saved sourcing setup v${data.rubricVersion.version}.`;
+    if (!quiet) blocker("Sourcing setup saved", `Version ${data.rubricVersion.version} will govern the next hybrid run.`, "✓");
+    updateRunControls();
+    return data;
+  } finally {
+    button.textContent = "Save search setup";
+    button.disabled = !STATE.roleState?.mapping;
+  }
+}
+
 function renderRubric(rubric) {
   const positives = [...(rubric.searchSignals?.titles || []), ...(rubric.searchSignals?.skills || []), ...(rubric.searchSignals?.companies || []), ...(rubric.searchSignals?.locations || [])];
   if (rubric.searchSignals?.experience) positives.push(rubric.searchSignals.experience);
@@ -220,12 +455,16 @@ function renderMapping() {
 
 function updateRunControls() {
   const mapping = STATE.roleState?.mapping;
-  const ready = Boolean(mapping && STATE.config?.searchApproved);
+  const ready = Boolean(mapping && STATE.config?.searchApproved && STATE.config?.rankingConfigured);
   $("runSearch").disabled = !ready;
   if (!mapping) $("runNote").textContent = "Choose a review project and save the job mapping first.";
   else if (!STATE.config?.searchApproved) $("runNote").textContent = "Mapping saved. Native Search is waiting on the Paraform automation approval flag.";
+  else if (!STATE.config?.rankingConfigured) $("runNote").textContent = "Mapping saved. Candidate ranking needs an OpenAI API key.";
   else if (!STATE.config?.projectWritesApproved) $("runNote").textContent = "Search is ready in evaluation mode; Project writes remain disabled.";
-  else $("runNote").textContent = `Ready: up to ${mapping.candidateCap} candidates → ${mapping.reviewProjectName}.`;
+  else {
+    const ranking = STATE.criteriaDraft?.rankingConfig || normalizeRankingConfig(activeRubricVersion()?.rankingConfig || {}, mapping.candidateCap);
+    $("runNote").textContent = `Ready: inspect ${ranking.poolSize}, save up to ${ranking.saveLimit} at ${ranking.minimumScore}+ → ${mapping.reviewProjectName}.`;
+  }
 }
 
 async function loadRole(roleId) {
@@ -233,8 +472,10 @@ async function loadRole(roleId) {
   STATE.currentRun = null;
   STATE.demo = [];
   STATE.selectedEnroll.clear();
-  $("rubric").innerHTML = '<div class="panel"><div class="skeleton"></div><div class="skeleton"></div></div>'.repeat(3);
-  $("lanes").innerHTML = '<div class="lane"><div class="skeleton"></div><div class="skeleton"></div></div>'.repeat(3);
+  STATE.criteriaDraft = null;
+  $("criteriaEmpty").hidden = false;
+  $("criteriaEmpty").textContent = "Loading role brief and saved sourcing setup…";
+  $("criteriaEditor").hidden = true;
   try {
     const [workspace, mapping, recent] = await Promise.all([
       api(`/api/sourcing/role?roleId=${encodeURIComponent(roleId)}`),
@@ -244,16 +485,16 @@ async function loadRole(roleId) {
     STATE.workspace = workspace;
     STATE.roleState = mapping.state;
     STATE.runs = recent.runs || [];
-    renderRubric(workspace.rubric);
-    renderLanes(workspace.searchIdeas || []);
     renderMapping();
+    renderCriteria();
     renderRunHistory();
     history.replaceState(null, "", `/sourcing?roleId=${encodeURIComponent(roleId)}`);
     if (STATE.runs[0]) await loadRun(STATE.runs[0].id);
     else renderReview();
   } catch (error) {
-    $("rubric").innerHTML = `<div class="panel"><div class="empty">${esc(error.message)}</div></div>`;
-    $("lanes").innerHTML = '<div class="lane"><div class="empty">Search ideas unavailable.</div></div>';
+    $("criteriaEmpty").hidden = false;
+    $("criteriaEmpty").textContent = error.message;
+    $("criteriaEditor").hidden = true;
   }
 }
 
@@ -276,6 +517,7 @@ async function saveMapping() {
     STATE.roleState = data.state;
     await loadOptions();
     renderMapping();
+    renderCriteria();
     const made = [data.provisioned?.projectCreated ? "Project created" : "Project reused", data.provisioned?.sequenceCreated ? "full Sequence created" : "Sequence reused"].join("; ");
     const warnings = data.provisioned?.sequenceWarnings || [];
     blocker(warnings.length ? "Assets mapped with a review warning" : "Project and Sequence ready", `${made}. ${data.state.mapping.reviewProjectName} → ${data.state.mapping.sequenceName}.${warnings.length ? ` ${warnings.join("; ")}` : " Campaign remains not started."}`, warnings.length ? "!" : "✓");
@@ -292,7 +534,7 @@ function renderRunHistory() {
     $("runHistory").innerHTML = "";
     return;
   }
-  $("runHistory").innerHTML = `<span class="note">Recent:</span><select id="runPicker">${STATE.runs.map((run) => `<option value="${esc(run.id)}"${STATE.currentRun?.id === run.id ? " selected" : ""}>${esc(`${new Date(run.createdAt).toLocaleString()} · ${run.state} · ${run.counts?.review || 0} review`)}</option>`).join("")}</select>`;
+  $("runHistory").innerHTML = `<span class="note">Recent:</span><select id="runPicker">${STATE.runs.map((run) => `<option value="${esc(run.id)}"${STATE.currentRun?.id === run.id ? " selected" : ""}>${esc(`${new Date(run.createdAt).toLocaleString()} · ${run.state} · ${run.counts?.selected ?? run.counts?.review ?? 0}/${run.counts?.evaluated ?? run.counts?.discovered ?? 0} selected`)}</option>`).join("")}</select>`;
   $("runPicker").addEventListener("change", (event) => loadRun(event.target.value));
 }
 
@@ -308,12 +550,13 @@ async function loadRun(runId) {
 async function runSearch() {
   const button = $("runSearch");
   button.disabled = true;
-  button.textContent = "Searching Paraform…";
-  $("runNote").textContent = "Running bounded Search lanes, dedup checks and Project filing. Keep this tab open.";
+  button.textContent = "Searching and ranking…";
+  $("runNote").textContent = "Retrieving the native pool, evaluating every profile, then filing only passing candidates. Keep this tab open.";
   try {
+    await saveCriteria({ quiet: true });
     const data = await api("/api/sourcing/runs", {
       method: "POST",
-      body: JSON.stringify({ roleId: $("role").value, candidateCap: Number($("candidateCap").value) }),
+      body: JSON.stringify({ roleId: $("role").value }),
     });
     STATE.currentRun = data.run;
     STATE.selectedEnroll.clear();
@@ -327,11 +570,11 @@ async function runSearch() {
     }, ...STATE.runs.filter((run) => run.id !== data.run.id)].slice(0, 12);
     renderRunHistory();
     renderReview();
-    blocker("Native Search run is ready for review", `${data.run.counts.review || 0} candidates need a verdict; ${data.run.counts.deduped || 0} were blocked by dedup.`, "✓");
+    blocker("Hybrid sourcing run is ready", `${data.run.counts.evaluated || 0} profiles inspected; ${data.run.counts.selected || 0} passed and ${data.run.counts.projectFiled || 0} were filed for review.`, "✓");
   } catch (error) {
-    blocker("Native Search did not complete", error.message, "!");
+    blocker("Hybrid sourcing did not complete", error.message, "!");
   } finally {
-    button.textContent = "Run native Search";
+    button.textContent = "Find and rank candidates";
     updateRunControls();
   }
 }
@@ -373,7 +616,7 @@ function reviewable(candidate) {
 function renderReview() {
   const real = Boolean(STATE.currentRun);
   const candidates = real ? STATE.currentRun.candidates || [] : STATE.demo;
-  const feedback = candidates.map((candidate) => candidate.feedback || {});
+  const feedback = candidates.filter(reviewable).map((candidate) => candidate.feedback || {});
   const summary = summarizeFeedback(feedback);
   $("statUnreviewed").textContent = summary.unreviewed;
   $("statGood").textContent = summary.good;
@@ -381,7 +624,7 @@ function renderReview() {
   $("statBad").textContent = summary.bad;
   $("reviewQueue").hidden = !candidates.length;
   $("feedbackMode").innerHTML = real
-    ? `<div><strong>Persisted review queue · run ${esc(STATE.currentRun.id.slice(-8))}</strong><span>${esc(`${STATE.currentRun.counts?.projectFiled || 0} filed to ${STATE.currentRun.mapping.reviewProjectName}; revision ${STATE.currentRun.revision}.`)}</span></div><div class="labbtns"><span class="tag">rubric v${esc(STATE.roleState?.rubricVersions?.find((version) => version.id === STATE.currentRun.rubricVersionId)?.version || "?")}</span></div>`
+    ? `<div><strong>Persisted review queue · run ${esc(STATE.currentRun.id.slice(-8))}</strong><span>${esc(`${STATE.currentRun.counts?.evaluated || 0} inspected → ${STATE.currentRun.counts?.selected || 0} selected → ${STATE.currentRun.counts?.projectFiled || 0} filed to ${STATE.currentRun.mapping.reviewProjectName}; revision ${STATE.currentRun.revision}.`)}</span></div><div class="labbtns"><span class="tag">setup v${esc(STATE.roleState?.rubricVersions?.find((version) => version.id === STATE.currentRun.rubricVersionId)?.version || "?")}</span><span class="tag">${esc(STATE.currentRun.ranking?.model || "agent ranked")}</span></div>`
     : '<div><strong>Feedback lab · synthetic candidates</strong><span>Exercise the review rules locally before the first live run.</span></div><div class="labbtns"><button id="loadDemoInner" class="btn secondary">Load blank batch</button><button id="loadSampleInner" class="btn">Load example labels</button></div>';
   if (!real) {
     $("loadDemoInner")?.addEventListener("click", () => loadDemo(false));
@@ -394,6 +637,10 @@ function renderReview() {
     const showReason = candidate.pendingBad || candidate.feedback?.verdict === "bad";
     const options = '<option value="">Choose why…</option>' + FEEDBACK_REASONS.map((reason) => `<option value="${reason.id}"${candidate.feedback?.reason === reason.id ? " selected" : ""}>${esc(reason.label)}</option>`).join("");
     const canEnroll = real && ["good", "enrollment_queued"].includes(candidate.state) && candidate.projectStatus === "filed" && Boolean(STATE.currentRun.mapping.sequenceId);
+    const evaluation = candidate.agentEvaluation;
+    const assessment = evaluation
+      ? `<div class="assessment"><span class="score">${esc(evaluation.score)}/100 · ${esc(evaluation.confidence)}</span><p>${esc(evaluation.reason)}</p>${evaluation.strengths?.length ? `<ul>${evaluation.strengths.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : ""}${evaluation.concerns?.length ? `<div class="field-help">Watch: ${esc(evaluation.concerns.join(" · "))}</div>` : ""}</div>`
+      : `<span class="tag">${blocked ? "dedup blocked" : "not ranked"}</span>`;
     const feedbackControls = blocked
       ? `<span class="tag">blocked · ${esc(candidate.dedupReason || "dedup")}</span>`
       : candidate.state === "enrolled"
@@ -403,7 +650,7 @@ function renderReview() {
           : `<span class="tag">${esc(candidate.state)}</span>`;
     const enroll = canEnroll ? `<label class="note"><input class="enroll-check" type="checkbox" data-enroll-id="${esc(candidate.id)}"${STATE.selectedEnroll.has(candidate.id) ? " checked" : ""} /> ${candidate.state === "enrollment_queued" ? "retry sequence readback" : "add to sequence"}</label>` : "";
     const meta = [candidate.title, candidate.company, candidate.location].filter(Boolean).join(" · ");
-    return `<tr class="${blocked ? "blocked-row" : ""}"><td><div class="candidate-title">${name}</div><div class="candidate-meta">${esc(meta)}</div><div class="meta"><span class="tag">project: ${esc(candidate.projectStatus || "n/a")}</span>${enroll}</div></td><td>${esc(candidate.laneName || candidate.laneId || "—")}</td><td>${feedbackControls}</td></tr>`;
+    return `<tr class="${blocked ? "blocked-row" : ""}"><td><div class="candidate-title">${name}</div><div class="candidate-meta">${esc(meta)}</div><div class="meta"><span class="tag">project: ${esc(candidate.projectStatus || "n/a")}</span>${enroll}</div></td><td>${assessment}</td><td>${feedbackControls}</td></tr>`;
   }).join("");
   const next = proposeNextRun(feedback);
   const decided = new Set((STATE.currentRun?.proposalDecisions || []).flatMap((decision) => decision.acceptedReasons || []));
@@ -451,7 +698,7 @@ async function approveProposals() {
     STATE.roleState.activeRubricVersionId = data.rubricVersion.id;
     STATE.roleState.rubricVersions.push(data.rubricVersion);
     renderReview();
-    blocker("Next rubric version approved", `Version ${data.rubricVersion.version} will govern the next native Search run.`, "✓");
+    blocker("Next sourcing version approved", `Version ${data.rubricVersion.version} will govern the next hybrid run.`, "✓");
   } catch (error) {
     blocker("Rubric update was not saved", error.message, "!");
   }
@@ -517,7 +764,35 @@ $("accessKey").addEventListener("keydown", (event) => { if (event.key === "Enter
 $("role").addEventListener("change", (event) => loadRole(event.target.value));
 $("refresh").addEventListener("click", loadRoles);
 $("saveMapping").addEventListener("click", saveMapping);
+$("saveCriteria").addEventListener("click", () => saveCriteria().catch((error) => blocker("Sourcing setup was not saved", error.message, "!")));
 $("runSearch").addEventListener("click", runSearch);
+$("addIncludeWork").addEventListener("click", () => addWorkClause("include"));
+$("addExcludeWork").addEventListener("click", () => addWorkClause("exclude"));
+$("addEducation").addEventListener("click", addEducationClause);
+$("criteriaEditor").addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-filter-tab]");
+  if (tab) {
+    document.querySelectorAll("[data-filter-tab]").forEach((item) => item.classList.toggle("active", item === tab));
+    document.querySelectorAll("[data-filter-panel]").forEach((item) => item.classList.toggle("active", item.dataset.filterPanel === tab.dataset.filterTab));
+    return;
+  }
+  const work = event.target.closest("[data-remove-work]");
+  if (work) {
+    const [kind, index] = work.dataset.removeWork.split("-");
+    removeWorkClause(kind, Number(index));
+    return;
+  }
+  const education = event.target.closest("[data-remove-education]");
+  if (education) removeEducationClause(Number(education.dataset.removeEducation));
+});
+const markCriteriaDirty = () => {
+  if ($("criteriaEditor").hidden) return;
+  STATE.criteriaDirty = true;
+  $("criteriaStatus").textContent = "Unsaved edits — the next run will save them first.";
+  try { updateFlow(collectCriteria().rankingConfig); } catch {}
+};
+$("criteriaEditor").addEventListener("input", markCriteriaDirty);
+$("criteriaEditor").addEventListener("change", markCriteriaDirty);
 $("loadDemo").addEventListener("click", () => loadDemo(false));
 $("loadSample").addEventListener("click", () => loadDemo(true));
 $("enroll").addEventListener("click", enrollSelected);

@@ -1,5 +1,5 @@
 import { cors, requireSourcingAccess, sourcingConfig } from "./_lib/core.mjs";
-import { executeNativeSearch, newRunId } from "./_lib/native.mjs";
+import { executeHybridSearch, newRunId } from "./_lib/native.mjs";
 import {
   createRun,
   getRoleState,
@@ -9,14 +9,10 @@ import {
   seenCandidateIds,
   storeConfigured,
 } from "./_lib/store.mjs";
+import { deriveAgentCriteria, deriveNativeFilters, normalizeRankingConfig } from "../../sourcing-filters.mjs";
 
 const ROLE_ID = /^[a-zA-Z0-9_-]{6,80}$/;
 const queryOf = (req) => req.query || (typeof req.url === "string" ? Object.fromEntries(new URL(req.url, "http://local").searchParams) : {});
-const defaultLanes = [
-  { id: "lane-core", name: "Core match", rationale: "Closest interpretation of the must-haves." },
-  { id: "lane-adjacent", name: "Adjacent titles", rationale: "Transferable profiles without diluting core requirements." },
-  { id: "lane-company", name: "Company-led", rationale: "Target-company and talent-density angle." },
-];
 
 export const config = { maxDuration: 300 };
 
@@ -52,19 +48,10 @@ export default async function handler(req, res) {
   const mapping = state?.mapping;
   const rubricVersion = state?.rubricVersions?.find((version) => version.id === state.activeRubricVersionId);
   if (!mapping || !rubricVersion) return res.status(409).json({ ok: false, error: "role_mapping_required" });
-  const requestedCap = Number(body.candidateCap || mapping.candidateCap || 100);
-  const candidateCap = Math.min(mapping.candidateCap || 100, requestedCap);
-  if (!Number.isInteger(candidateCap) || candidateCap < 1 || candidateCap > 100) {
-    return res.status(400).json({ ok: false, error: "candidateCap must be 1-100" });
-  }
-  const ideas = Array.isArray(rubricVersion.searchIdeas) && rubricVersion.searchIdeas.length
-    ? rubricVersion.searchIdeas.slice(0, 3)
-    : defaultLanes;
-  const lanes = ideas.map((lane, index) => ({
-    id: String(lane.id || `lane-${index + 1}`),
-    name: String(lane.name || `Lane ${index + 1}`),
-    rationale: String(lane.rationale || lane.query || defaultLanes[index]?.rationale || "Role-derived search angle").slice(0, 1200),
-  }));
+  const rankingConfig = normalizeRankingConfig(rubricVersion.rankingConfig || {}, mapping.candidateCap || 100);
+  const candidateCap = rankingConfig.poolSize;
+  const nativeFilters = rubricVersion.nativeFilters || deriveNativeFilters(rubricVersion.rubric);
+  const agentCriteria = rubricVersion.agentCriteria || deriveAgentCriteria(rubricVersion.rubric, rubricVersion.adjustments || []);
   const run = {
     id: newRunId(),
     roleId,
@@ -75,7 +62,9 @@ export default async function handler(req, res) {
     revision: 0,
     candidateCap,
     mapping,
-    lanes,
+    nativeFilters,
+    agentCriteria,
+    rankingConfig,
     candidates: [],
     feedbackEvents: [],
     proposalDecisions: [],
@@ -87,30 +76,38 @@ export default async function handler(req, res) {
   try {
     const cfg = sourcingConfig();
     const seen = await seenCandidateIds(roleId);
-    const result = await executeNativeSearch({
+    if (!cfg.rankingConfigured) throw new Error("OpenAI ranking is not configured");
+    const result = await executeHybridSearch({
       rubric: run.rubric,
-      lanes,
+      nativeFilters,
+      agentCriteria,
       adjustments: run.adjustments,
-      candidateCap,
+      rankingConfig,
       reviewProject: { id: mapping.reviewProjectId, name: mapping.reviewProjectName },
       seenCandidateIds: seen,
       fileToProject: cfg.projectWritesApproved,
+      searchName: mapping.targetName || `${run.rubric?.role?.company || "Raydar"} - ${run.rubric?.role?.title || "Sourcing"}`,
     });
     const completed = {
       ...run,
       state: "review",
-      nativeLanes: result.lanes,
+      nativeSearch: result.search,
+      ranking: result.ranking,
       candidates: result.candidates,
       counts: {
         discovered: result.discoveredCount,
-        review: result.candidates.filter((candidate) => candidate.state === "in_review").length,
-        deduped: result.candidates.filter((candidate) => candidate.state === "dedup_blocked").length,
+        evaluated: result.evaluatedCount,
+        qualified: result.qualifiedCount,
+        selected: result.selectedCount,
+        agentRejected: result.rejectedCount,
+        review: result.reviewCount,
+        deduped: result.dedupedCount,
         projectFiled: result.projectFiledCount,
       },
       completedAt: new Date().toISOString(),
     };
     const saved = await saveRun(completed, run.revision);
-    await markCandidatesSeen(roleId, result.candidates.map((candidate) => candidate.candidateId));
+    await markCandidatesSeen(roleId, result.seenCandidateIds);
     return res.status(200).json({ ok: true, run: saved });
   } catch (error) {
     const failed = { ...run, state: "failed", error: String(error?.message || error).slice(0, 240), completedAt: new Date().toISOString() };

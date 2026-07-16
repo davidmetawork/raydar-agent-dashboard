@@ -49,6 +49,8 @@ export function sourcingConfig() {
     readOnly: !SEARCH_APPROVED,
     writesEnabled: PROJECT_WRITES_APPROVED,
     feedbackReasons: FEEDBACK_REASONS,
+    rankingConfigured: Boolean(process.env.OPENAI_API_KEY),
+    rankingModel: process.env.SOURCING_OPENAI_MODEL || "gpt-5.6-terra",
   };
 }
 

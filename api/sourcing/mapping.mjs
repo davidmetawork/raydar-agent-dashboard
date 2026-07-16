@@ -17,6 +17,7 @@ import {
 import { acquireRoleLock, getRoleState, releaseRoleLock, saveRoleState, storeConfigured } from "./_lib/store.mjs";
 import { validateRoleMapping } from "../../sourcing-domain.mjs";
 import { provisionRoleAssets } from "./_lib/provision.mjs";
+import { deriveAgentCriteria, deriveNativeFilters, normalizeRankingConfig } from "../../sourcing-filters.mjs";
 
 const ROLE_ID = /^[a-zA-Z0-9_-]{6,80}$/;
 const queryOf = (req) => req.query || (typeof req.url === "string" ? Object.fromEntries(new URL(req.url, "http://local").searchParams) : {});
@@ -87,10 +88,17 @@ export default async function handler(req, res) {
         rubric: workspace.rubric,
         searchIdeas: workspace.searchIdeas,
         adjustments: active?.adjustments || [],
+        nativeFilters: active?.nativeFilters || deriveNativeFilters(workspace.rubric),
+        agentCriteria: active?.agentCriteria || deriveAgentCriteria(workspace.rubric, active?.adjustments || []),
+        rankingConfig: normalizeRankingConfig(active?.rankingConfig || {}, cap),
         parentVersionId: active?.id || null,
         createdAt: new Date().toISOString(),
         createdBy: req.authedEmail,
       });
+    } else if (active && (!active.nativeFilters || !active.rankingConfig)) {
+      active.nativeFilters = active.nativeFilters || deriveNativeFilters(active.rubric || workspace.rubric);
+      active.agentCriteria = active.agentCriteria || deriveAgentCriteria(active.rubric || workspace.rubric, active.adjustments || []);
+      active.rankingConfig = normalizeRankingConfig(active.rankingConfig || {}, cap);
     }
     const state = await saveRoleState(roleId, {
       ...(previous || {}),

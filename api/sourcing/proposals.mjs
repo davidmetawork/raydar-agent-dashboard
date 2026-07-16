@@ -46,6 +46,9 @@ export default async function handler(req, res) {
       rubric: run.rubric,
       searchIdeas: parent?.searchIdeas || [],
       adjustments: [...(parent?.adjustments || []), ...accepted.map((proposal) => ({ ...proposal, approvedFromRunId: run.id }))],
+      nativeFilters: parent?.nativeFilters,
+      agentCriteria: parent?.agentCriteria,
+      rankingConfig: parent?.rankingConfig,
       createdAt: new Date().toISOString(),
       createdBy: req.authedEmail,
     };
