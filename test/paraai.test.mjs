@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { findIdentity, normLinkedin, normalizeEmail, paraAIConfig, scoreIdentity } from "../api/paraai/_lib/core.mjs";
+import { findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
 import { PARAAI_SALARY_CAP, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
@@ -222,6 +222,52 @@ test("only expired legacy locks on an unwritten submission can be reclaimed", ()
   assert.equal(reclaimableLegacyJobLock("v2:new-token", 1, "ready_to_submit"), false);
   assert.equal(reclaimableLegacyJobLock("legacy-token", 1, "submitting"), false);
   assert.equal(reclaimableLegacyJobLock("legacy-token", -1, "ready_to_submit"), false);
+});
+
+test("resume upload uses Paraform queries around the signed storage POST", async () => {
+  const calls = [];
+  const result = await uploadResume(
+    { bytes: Buffer.from("%PDF-1.7 test"), fileName: "candidate.pdf" },
+    {
+      trpcGetImpl: async (procedure, input) => {
+        calls.push(["query", procedure, input]);
+        return {
+          url: "https://uploads.example.test/resume",
+          fields: { key: "resumes/candidate.pdf", policy: "signed-policy" },
+          resumeUri: "s3://resumes/candidate.pdf",
+        };
+      },
+      fetchImpl: async (url, options) => {
+        calls.push(["upload", url, options.method]);
+        assert.equal(options.body.get("key"), "resumes/candidate.pdf");
+        assert.equal(options.body.get("policy"), "signed-policy");
+        assert.equal(options.body.get("file").type, "application/pdf");
+        return new Response(null, { status: 204 });
+      },
+      resumeContactImpl: async (resumeUri) => {
+        calls.push(["contact-query", resumeUri]);
+        return { email: "candidate@example.com" };
+      },
+    },
+  );
+  assert.deepEqual(calls, [
+    ["query", "file.getResumeUploadUrl", { fileName: "candidate.pdf" }],
+    ["upload", "https://uploads.example.test/resume", "POST"],
+    ["contact-query", "s3://resumes/candidate.pdf"],
+  ]);
+  assert.deepEqual(result, {
+    resumeUri: "s3://resumes/candidate.pdf",
+    contact: { email: "candidate@example.com" },
+  });
+
+  const contactCalls = [];
+  await resumeContact("s3://resumes/candidate.pdf", {
+    trpcGetImpl: async (procedure, input) => contactCalls.push([procedure, input]),
+  });
+  assert.deepEqual(contactCalls, [[
+    "candidateUser.extractResumeContactFields",
+    { resumeUri: "s3://resumes/candidate.pdf" },
+  ]]);
 });
 
 test("current Paraform CRM submission origin is accepted as pinned", () => {

@@ -376,21 +376,24 @@ export async function getResume(candidateUserId) {
   return trpcGet("candidateUser.getMostRecentResume", { candidate_user_id: candidateUserId });
 }
 
-export async function resumeContact(resumeUri) {
+export async function resumeContact(resumeUri, { trpcGetImpl = trpcGet } = {}) {
   if (!resumeUri) return null;
-  return trpcPost("candidateUser.extractResumeContactFields", { resumeUri });
+  return trpcGetImpl("candidateUser.extractResumeContactFields", { resumeUri });
 }
 
-export async function uploadResume({ bytes, fileName }) {
+export async function uploadResume(
+  { bytes, fileName },
+  { trpcGetImpl = trpcGet, fetchImpl = fetch, resumeContactImpl = resumeContact } = {},
+) {
   if (!bytes?.length) throw new Error("resume PDF is empty");
-  const presign = await trpcPost("file.getResumeUploadUrl", { fileName });
+  const presign = await trpcGetImpl("file.getResumeUploadUrl", { fileName });
   if (!presign?.url || !presign?.resumeUri) throw new Error("resume presign returned no upload target");
   const form = new FormData();
   for (const [key, value] of Object.entries(presign.fields || {})) form.append(key, String(value));
   form.append("file", new Blob([bytes], { type: "application/pdf" }), fileName);
-  const response = await fetch(presign.url, { method: "POST", body: form, signal: AbortSignal.timeout(30_000) });
+  const response = await fetchImpl(presign.url, { method: "POST", body: form, signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`resume upload failed: ${response.status}`);
-  return { resumeUri: presign.resumeUri, contact: await resumeContact(presign.resumeUri).catch(() => null) };
+  return { resumeUri: presign.resumeUri, contact: await resumeContactImpl(presign.resumeUri).catch(() => null) };
 }
 
 export async function listSequences() {
