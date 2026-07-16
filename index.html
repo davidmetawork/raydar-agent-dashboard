@@ -1414,10 +1414,26 @@
       const url = location.origin + "/c/" + r.botId;
       const tone = CV_TONE[r.status.tone] || "muted";
       return `<div class="cv-row">
-        <div class="cv-name">${cvEsc(r.name)} <span class="pill ${tone}"><span class="d"></span>${cvEsc(r.status.label)}</span></div>
+        <div class="cv-name">${cvEsc(r.name)} <span class="pill ${tone}" id="cv-status-${cvEsc(r.botId)}"><span class="d"></span>${cvEsc(r.status.label)}</span></div>
         <div class="cv-when">${cvEsc(cvPT(r.scheduledStart||r.joinAt))} <span class="mid">· ${cvEsc(r.meeting||"")}</span></div>
         <div class="cv-act"><a class="cv-open" href="/c/${encodeURIComponent(r.botId)}">Open ↗</a><button class="cv-copy" onclick='cvCopy(${JSON.stringify(url)})'>Copy link</button></div>
       </div>`;
+    }
+    async function cvVerifyStatus(row){
+      const pill = $("cv-status-"+row.botId);
+      if(!pill) return;
+      try{
+        const r = await fetch(CALLS_API + "/api/call?bot=" + encodeURIComponent(row.botId));
+        const call = await r.json();
+        if(!r.ok || !call.verdict) return;
+        pill.className = "pill " + (CV_TONE[call.verdict.tone] || "muted");
+        pill.innerHTML = `<span class="d"></span>${cvEsc(call.verdict.label)}`;
+      }catch(e){ /* keep the conservative index label */ }
+    }
+    function cvVerifyVisibleStatuses(results){
+      // The lookup index is intentionally cheap and cannot prove a no-show.
+      // Verify the first visible rows against transcript + participant evidence.
+      results.slice(0, 8).forEach(cvVerifyStatus);
     }
     async function cvSearch(){
       const name = $("cv-q").value.trim();
@@ -1430,6 +1446,7 @@
         if(!j.results.length){ out.innerHTML = `<div class="empty">No screening calls found${name?` for “${cvEsc(name)}”`:""}. Try just the first name.</div>`; cvLoaded=true; return; }
         const head = name ? `${j.count} result${j.count>1?"s":""}` : "Most recent calls";
         out.innerHTML = `<div class="cv-head">${head}</div><div class="list">${j.results.map(cvCard).join("")}</div>`;
+        cvVerifyVisibleStatuses(j.results);
         cvLoaded = true;
       } catch(e){ out.innerHTML = `<div class="empty">Couldn’t reach the calls service — try again.</div>`; }
     }
