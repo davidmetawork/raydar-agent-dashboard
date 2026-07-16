@@ -2,11 +2,11 @@ import { cors, requireSourcingAccess, sourcingConfig } from "./_lib/core.mjs";
 import { executeHybridSearch, newRunId } from "./_lib/native.mjs";
 import {
   createRun,
+  filedCandidateIds,
   getRoleState,
   listRuns,
-  markCandidatesSeen,
+  markCandidatesFiled,
   saveRun,
-  seenCandidateIds,
   storeConfigured,
 } from "./_lib/store.mjs";
 import { deriveAgentCriteria, deriveNativeFilters, normalizeRankingConfig } from "../../sourcing-filters.mjs";
@@ -75,7 +75,7 @@ export default async function handler(req, res) {
   await createRun(run);
   try {
     const cfg = sourcingConfig();
-    const seen = await seenCandidateIds(roleId);
+    const alreadyFiled = await filedCandidateIds(roleId);
     if (!cfg.rankingConfigured) throw new Error("OpenAI ranking is not configured");
     const result = await executeHybridSearch({
       rubric: run.rubric,
@@ -84,7 +84,7 @@ export default async function handler(req, res) {
       adjustments: run.adjustments,
       rankingConfig,
       reviewProject: { id: mapping.reviewProjectId, name: mapping.reviewProjectName },
-      seenCandidateIds: seen,
+      seenCandidateIds: alreadyFiled,
       fileToProject: cfg.projectWritesApproved,
       searchName: mapping.targetName || `${run.rubric?.role?.company || "Raydar"} - ${run.rubric?.role?.title || "Sourcing"}`,
     });
@@ -107,7 +107,9 @@ export default async function handler(req, res) {
       completedAt: new Date().toISOString(),
     };
     const saved = await saveRun(completed, run.revision);
-    await markCandidatesSeen(roleId, result.seenCandidateIds);
+    await markCandidatesFiled(roleId, result.candidates
+      .filter((candidate) => candidate.projectStatus === "filed")
+      .map((candidate) => candidate.candidateId));
     return res.status(200).json({ ok: true, run: saved });
   } catch (error) {
     const failed = { ...run, state: "failed", error: String(error?.message || error).slice(0, 240), completedAt: new Date().toISOString() };

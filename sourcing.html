@@ -16,6 +16,7 @@
     --shadow:0 1px 2px rgba(20,16,8,.04),0 10px 30px -15px rgba(20,16,8,.13);
   }
   *{box-sizing:border-box}
+  [hidden]{display:none!important}
   body{margin:0;background:var(--cream);color:var(--ink);font:14px/1.5 "PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
   .wrap{max-width:1100px;margin:0 auto;padding:28px 22px 80px}
   header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:22px}
@@ -36,7 +37,9 @@
   .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.panel{border:1px solid var(--line);border-radius:13px;padding:15px;background:#FFFEFB;min-height:130px}.panel h3{margin-bottom:10px}.panel ul{margin:0;padding-left:18px;color:var(--ink2)}.panel li+li{margin-top:5px}.empty{color:var(--muted);font-size:13px}
   .summary{color:var(--ink2);margin:12px 0 0;white-space:pre-line}.lanes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.lane{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff}.lane .num{font:600 11px "PP Grafier Text";text-transform:uppercase;letter-spacing:.08em;color:var(--violet)}.lane h3{margin:3px 0 7px}.lane p{color:var(--ink2);font-size:13px;margin:0 0 12px}.chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 8px;border-radius:7px;background:#F2EEE4;color:var(--ink2);font-size:11.5px}.chip.neg{background:var(--red-bg);color:var(--red)}
   .runbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}.note{font-size:12.5px;color:var(--muted)}
-  .mapping{display:grid;grid-template-columns:1fr 1fr 120px auto;gap:11px;align-items:end;margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}
+  .mapping{display:grid;grid-template-columns:1fr 1fr 120px auto;gap:11px;align-items:end;margin-top:14px}
+  .destination{display:flex;align-items:center;gap:10px;margin-top:14px;padding:13px 15px;border-radius:12px;background:var(--green-bg);color:#176F50;font-weight:650}.destination::before{content:"✓";display:grid;place-items:center;width:23px;height:23px;border-radius:50%;background:var(--green);color:#fff;flex:0 0 23px}.destination.pending{background:#F2EEE4;color:var(--ink2)}.destination.pending::before{content:"→";background:#A49C8C}
+  .settings{margin-top:14px;border:1px solid var(--line);border-radius:12px;background:#FFFEFB}.settings>summary{cursor:pointer;padding:13px 15px;font-weight:650;list-style:none;display:flex;justify-content:space-between;align-items:center}.settings>summary::-webkit-details-marker{display:none}.settings>summary::after{content:"＋";color:var(--muted)}.settings[open]>summary{border-bottom:1px solid var(--line2)}.settings[open]>summary::after{content:"−"}.settings-body{padding:16px}
   .run-history{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.run-history select{width:auto;min-width:220px;padding:8px 10px}
   .reviewtop{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.stat{padding:13px;border:1px solid var(--line);border-radius:12px;background:#FFFEFB}.stat b{display:block;font:600 23px "PP Grafier Display"}.stat span{color:var(--muted);font-size:12px}
   .feedback-flow{display:grid;grid-template-columns:1fr 34px 1fr;align-items:stretch;gap:10px}.feedback-box{border:1px solid var(--line);border-radius:13px;padding:15px}.arrow{display:grid;place-items:center;color:var(--muted);font-size:22px}.feedback-box h3{margin-bottom:7px}.feedback-box p{font-size:13px;color:var(--ink2);margin:0 0 12px}.reason{display:inline-flex;padding:5px 8px;margin:0 5px 6px 0;border-radius:8px;background:var(--red-bg);color:#7C2B30;font-size:11.5px;font-weight:600}
@@ -44,9 +47,10 @@
   .review-table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px}.review-table th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;border-bottom:1px solid var(--line)}.review-table td{padding:10px;border-bottom:1px solid var(--line2);vertical-align:top}.candidate-title{font-weight:650}.candidate-title a{color:inherit}.candidate-meta{color:var(--muted);font-size:12px;margin-top:2px}.verdicts{display:flex;gap:5px;flex-wrap:wrap}.vbtn{appearance:none;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:#fff;color:var(--ink2);font:600 11.5px "PP Grafier Text";cursor:pointer}.vbtn.good.on{background:var(--green-bg);border-color:#B8DDCC;color:var(--green)}.vbtn.maybe.on{background:var(--amber-bg);border-color:#E8D0A3;color:var(--amber)}.vbtn.bad.on{background:var(--red-bg);border-color:#F0C4C6;color:var(--red)}.reason-select{margin-top:6px;padding:6px 8px;font-size:11.5px;max-width:240px}.feedback-note{margin-top:6px;padding:6px 8px;font-size:11.5px;max-width:240px}.proposal{padding:9px 10px;border-radius:9px;background:var(--orange-bg);font-size:12.5px;color:var(--ink2);margin-top:7px}.proposal b{color:var(--ink)}.proposal label{display:flex;gap:8px;align-items:flex-start;margin:0;font-weight:400}.proposal input,.enroll-check{width:auto;margin-top:3px}.blocked-row{opacity:.55}.mini-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
   .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);z-index:20;display:none;align-items:flex-start;justify-content:center;padding:32px 20px 20px;overflow:auto}.gatebox{max-width:430px;background:#fff;border:1px solid var(--line);border-radius:17px;padding:32px;text-align:center;box-shadow:var(--shadow)}.gatebox h2{margin-bottom:7px}.gatebox p{color:var(--muted);margin:0 0 19px}#gsi{display:flex;justify-content:center}.keygate{display:none;gap:8px}.keygate input{text-align:left}.gateor{display:none;color:var(--muted);font-size:12px;margin:14px 0}#gateErr{color:var(--red);font-size:13px;margin-top:12px}
   .filter-shell{display:grid;grid-template-columns:190px minmax(0,1fr);border:1px solid var(--line);border-radius:15px;overflow:hidden;background:#fff}.filter-nav{padding:10px;border-right:1px solid var(--line2);background:#FCFBF8}.filter-tab{width:100%;display:flex;align-items:center;gap:9px;padding:10px;border:0;border-radius:9px;background:transparent;color:var(--ink2);font:600 13px "PP Grafier Text";text-align:left;cursor:pointer}.filter-tab:hover,.filter-tab.active{background:#F3F0E9;color:var(--ink)}.filter-main{padding:20px;min-width:0}.filter-panel{display:none}.filter-panel.active{display:block}.filter-panel h3{font-size:20px;margin-bottom:16px}.filter-section{padding:0 0 18px;margin-bottom:18px;border-bottom:1px solid var(--line2)}.filter-section:last-child{border-bottom:0;margin-bottom:0}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.form-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}.field-help{font-size:11.5px;color:var(--muted);margin-top:5px}.segmented{display:flex;gap:4px;padding:4px;background:#F3F2EF;border-radius:9px;width:max-content;max-width:100%}.segmented label{margin:0}.segmented input{position:absolute;opacity:0;width:1px}.segmented span{display:block;padding:7px 11px;border-radius:7px;font-size:12px;cursor:pointer}.segmented input:checked+span{background:#fff;box-shadow:0 1px 4px #0002;color:var(--ink);font-weight:700}.work-clause,.education-clause{border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:11px;background:#FFFEFB}.clause-top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}.clause-top b{font-size:13px}.remove-clause{border:0;background:none;color:var(--red);cursor:pointer;font:600 12px "PP Grafier Text"}.advanced{margin-top:12px}.advanced summary{cursor:pointer;color:var(--violet);font-size:12px;font-weight:650}.advanced .form-grid{margin-top:12px}.add-clause{appearance:none;border:0;background:none;color:#315FBD;padding:5px 0;font:600 13px "PP Grafier Text";cursor:pointer}.criteria-box{margin-top:16px;padding:17px;border:1px solid var(--line);border-radius:14px;background:#FFFEFB}.criteria-box h3{margin-bottom:5px}.criteria-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line2)}.criteria-actions .note{max-width:650px}.score{display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:var(--green-bg);color:var(--green);font-weight:750;font-size:11.5px}.assessment{max-width:320px}.assessment p{margin:5px 0 0;color:var(--ink2);font-size:12px}.assessment ul{margin:5px 0 0;padding-left:16px;color:var(--muted);font-size:11.5px}.hybrid-flow{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.flow-step{border:1px solid var(--line);border-radius:12px;padding:13px;background:#FFFEFB}.flow-step b{display:block;font-family:"PP Grafier Display";font-size:18px}.flow-step span{color:var(--muted);font-size:11.5px}
+  .hybrid-flow{grid-template-columns:repeat(3,1fr);gap:12px}.flow-step{position:relative;padding:15px 15px 15px 54px;min-height:78px}.flow-step>.flow-num{position:absolute;left:15px;top:16px;width:27px;height:27px;border-radius:50%;display:grid;place-items:center;background:var(--ink);color:#fff;font-weight:750}.flow-step b{font-size:16px}.result-funnel{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0}.result-stat{padding:14px;border:1px solid var(--line);border-radius:12px;background:#FFFEFB}.result-stat b{display:block;font:600 24px "PP Grafier Display"}.result-stat span{font-size:12px;color:var(--muted)}.empty-result{padding:18px;border:1px dashed #D7CFBE;border-radius:13px;text-align:center;color:var(--muted)}.empty-result strong{display:block;color:var(--ink);font-family:"PP Grafier Display";font-size:18px;margin-bottom:3px}.review-tools{margin-top:16px}
   .skeleton{height:13px;border-radius:7px;background:linear-gradient(90deg,#F0ECE3,#F8F6F0,#F0ECE3);background-size:200% 100%;animation:shimmer 1.3s infinite}.skeleton+.skeleton{margin-top:8px;width:80%}@keyframes shimmer{to{background-position:-200% 0}}
   body.embed header .brand img,body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:10px}
-  @media(max-width:800px){.grid,.lanes,.mapping,.filter-shell{grid-template-columns:1fr}.stephead,.stepname{align-items:flex-start}.stepnum{flex:0 0 27px}.filter-nav{border-right:0;border-bottom:1px solid var(--line2);display:flex;overflow-x:auto}.filter-tab{width:auto;white-space:nowrap}.form-grid,.form-grid.three,.hybrid-flow{grid-template-columns:1fr}.filter-main{padding:15px}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}.labbar,.criteria-actions{align-items:flex-start;flex-direction:column}.review-table thead{display:none}.review-table,.review-table tbody,.review-table tr,.review-table td{display:block}.review-table tr{border-bottom:1px solid var(--line);padding:8px 0}.review-table td{border:0;padding:4px 2px}.assessment{max-width:none}.runbar{align-items:flex-start;flex-direction:column}.keygate{flex-direction:column}}
+  @media(max-width:800px){.grid,.lanes,.mapping,.filter-shell,.hybrid-flow,.result-funnel{grid-template-columns:1fr}.stephead,.stepname{align-items:flex-start}.stepnum{flex:0 0 27px}.filter-nav{border-right:0;border-bottom:1px solid var(--line2);display:flex;overflow-x:auto}.filter-tab{width:auto;white-space:nowrap}.form-grid,.form-grid.three{grid-template-columns:1fr}.filter-main{padding:15px}.feedback-flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.roleline{grid-template-columns:1fr}.reviewtop{grid-template-columns:repeat(2,1fr)}header{flex-direction:column;align-items:flex-start}.labbar,.criteria-actions{align-items:flex-start;flex-direction:column}.review-table thead{display:none}.review-table,.review-table tbody,.review-table tr,.review-table td{display:block}.review-table tr{border-bottom:1px solid var(--line);padding:8px 0}.review-table td{border:0;padding:4px 2px}.assessment{max-width:none}.runbar{align-items:stretch;flex-direction:column}.runbar .btn.orange{width:100%;padding:14px 17px}.keygate{flex-direction:column}}
 </style>
 </head>
 <body>
@@ -59,33 +63,40 @@
 
 <div class="wrap">
   <header>
-    <div class="brand"><img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" /><div><div class="eyebrow">Controlled sourcing agent</div><h1>Sourcing</h1><div class="sub">Native Paraform filters → full-pool agent review → best candidates filed → human feedback</div></div></div>
+    <div class="brand"><img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" /><div><div class="eyebrow">Controlled sourcing agent</div><h1>Sourcing</h1><div class="sub">Choose a job, tell the agent what good looks like, and save the best candidates.</div></div></div>
     <span id="status" class="pill locked"><span class="dot"></span>checking gates…</span>
   </header>
 
   <div id="blocker" class="banner lock"><div>🔒</div><div><strong>Production access is locked</strong><span>Loading the launch gates. No Search session, candidate, project, or sequence can be changed from this build.</span></div></div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose and prepare the Paraform role</h2><div class="note">Reuse the exact Project and Sequence when they exist, or create both as Company - Job Title.</div></div></div><span class="tag">job scoped</span></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">1</span><div><h2>Choose the job</h2><div class="note">The agent keeps each job's search, project, and feedback separate.</div></div></div></div>
     <div class="roleline">
-      <div><label for="role">Active role</label><select id="role" disabled><option value="">Waiting for access gates…</option></select></div>
+      <div><label for="role">Paraform job</label><select id="role" disabled><option value="">Waiting for access gates…</option></select></div>
       <button id="refresh" class="btn secondary" disabled>Refresh roles</button>
     </div>
     <div id="roleMeta" class="meta"></div>
-    <div class="mapping">
-      <div><label for="project">Review Project</label><select id="project" disabled><option value="">Choose a role first…</option></select></div>
-      <div><label for="sequence">Cold-sourcing Sequence</label><select id="sequence" disabled><option value="">Choose a role first…</option></select></div>
-      <div><label for="candidateCap">Run cap</label><input id="candidateCap" type="number" min="1" max="100" value="100" disabled /></div>
-      <button id="saveMapping" class="btn secondary" disabled>Prepare assets</button>
-    </div>
-    <div id="mappingPreview" class="note" style="margin-top:9px">Choose a role to resolve its Project and Sequence.</div>
+    <div id="mappingPreview" class="destination pending">Choose a job to set its review project.</div>
+    <details id="jobSettings" class="settings"><summary>Project &amp; sequence settings</summary><div class="settings-body"><div class="note">Raydar automatically reuses the matching “Company - Job Title” assets, or creates them if missing.</div>
+      <div class="mapping">
+        <div><label for="project">Review project</label><select id="project" disabled><option value="">Choose a role first…</option></select></div>
+        <div><label for="sequence">Sequence after your review</label><select id="sequence" disabled><option value="">Choose a role first…</option></select></div>
+        <div><label for="candidateCap">Search up to</label><input id="candidateCap" type="number" min="1" max="100" value="100" disabled /></div>
+        <button id="saveMapping" class="btn secondary" disabled>Set up job</button>
+      </div>
+    </div></details>
   </div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">2</span><div><h2>Set Paraform filters and agent requirements</h2><div class="note">The same native filter fields and clause semantics as Paraform Search, saved per job.</div></div></div><span class="tag">job-versioned</span></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">2</span><div><h2>Tell the agent what a good candidate looks like</h2><div class="note">Write this in plain English. Use MUST for non-negotiables and REJECT for automatic exclusions.</div></div></div></div>
     <div id="criteriaEmpty" class="empty">Choose and prepare a role to edit its sourcing setup.</div>
     <div id="criteriaEditor" hidden>
-      <div class="filter-shell">
+      <div class="criteria-box" style="margin-top:0">
+        <label for="agentCriteria">Candidate requirements</label>
+        <textarea id="agentCriteria" rows="8" placeholder="MUST: ...&#10;PREFER: ...&#10;REJECT: ..."></textarea>
+        <div id="criteriaStatus" class="note" style="margin-top:8px">Changes save automatically when you run a search.</div>
+      </div>
+      <details class="settings"><summary>Advanced Paraform filters and run settings <span class="note">optional</span></summary><div class="settings-body"><div class="filter-shell">
         <nav class="filter-nav" aria-label="Sourcing filter categories">
           <button class="filter-tab active" data-filter-tab="identity">▣ Identity</button>
           <button class="filter-tab" data-filter-tab="keywords"># Keywords</button>
@@ -135,36 +146,40 @@
         </div>
       </div>
       <div class="criteria-box">
-        <h3>What the agent should consider a great candidate</h3><div class="note">The role brief seeds this. Edit it freely; MUST and REJECT lines are treated as hard requirements.</div>
-        <textarea id="agentCriteria" rows="8" placeholder="MUST: ...&#10;PREFER: ...&#10;REJECT: ..."></textarea>
+        <h3>Run settings</h3><div class="note">The defaults inspect 100 profiles and save only the strongest 30.</div>
         <div class="form-grid three" style="margin-top:13px">
           <div><label for="poolSize">Candidates to inspect</label><input id="poolSize" type="number" min="1" max="100" value="100" /></div>
           <div><label for="saveLimit">Maximum to save</label><input id="saveLimit" type="number" min="1" max="100" value="30" /></div>
           <div><label for="minimumScore">Minimum score</label><input id="minimumScore" type="number" min="0" max="100" value="75" /></div>
         </div>
-        <div class="criteria-actions"><div id="criteriaStatus" class="note">Save a version before running. A run also saves any pending edits automatically.</div><button id="saveCriteria" class="btn secondary" type="button">Save search setup</button></div>
-      </div>
+        <div class="criteria-actions"><div class="note">These settings are also saved automatically when the search starts.</div><button id="saveCriteria" class="btn secondary" type="button">Save changes</button></div>
+      </div></div></details>
       <div id="roleSummary" class="summary"></div>
     </div>
   </div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">3</span><div><h2>Search, inspect, and file only the best</h2><div class="note">Paraform retrieves the pool; the agent evaluates every profile against the job before any Project write.</div></div></div><span class="tag">hybrid agent</span></div>
-    <div class="hybrid-flow"><div class="flow-step"><b id="flowPool">100</b><span>native matches inspected</span></div><div class="flow-step"><b>100%</b><span>evaluated against requirements</span></div><div class="flow-step"><b id="flowThreshold">75+</b><span>minimum agent score</span></div><div class="flow-step"><b id="flowSave">≤ 30</b><span>best profiles filed</span></div></div>
-    <div class="runbar"><div><div id="runNote" class="note">Choose, prepare, and configure a role to run the hybrid agent.</div><div id="runHistory" class="run-history"></div></div><button id="runSearch" class="btn orange" disabled>Find and rank candidates</button></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">3</span><div><h2>Search, review, and save</h2><div class="note">One click runs the whole workflow. Nothing is saved until the agent has checked it.</div></div></div></div>
+    <div class="hybrid-flow">
+      <div class="flow-step"><span class="flow-num">1</span><b>Search Paraform</b><span>Find up to <span id="flowPool">100</span> matching profiles.</span></div>
+      <div class="flow-step"><span class="flow-num">2</span><b>Agent reviews every result</b><span>Only candidates scoring <span id="flowThreshold">75+</span> can pass.</span></div>
+      <div class="flow-step"><span class="flow-num">3</span><b>Save the best</b><span>Up to <span id="flowSave">≤ 30</span> go to your review project.</span></div>
+    </div>
+    <div class="runbar"><div><div id="runNote" class="note">Choose a job and add requirements to begin.</div><div id="runHistory" class="run-history"></div></div><button id="runSearch" class="btn orange" disabled>Search, review &amp; save candidates</button></div>
   </div>
 
   <div class="card">
-    <div class="stephead"><div class="stepname"><span class="stepnum">4</span><div><h2>Review and teach the next run</h2><div class="note">Every candidate gets Good, Maybe, or Bad. Bad requires a reason.</div></div></div><span class="tag">job scoped</span></div>
-    <div id="feedbackMode" class="labbar"><div><strong>Feedback lab · available before the first live run</strong><span>Once a run completes, this becomes the persisted job-specific review queue.</span></div><div class="labbtns"><button id="loadDemo" class="btn secondary">Load blank batch</button><button id="loadSample" class="btn">Load example labels</button></div></div>
-    <div class="reviewtop"><div class="stat"><b id="statUnreviewed">0</b><span>Unreviewed</span></div><div class="stat"><b id="statGood">0</b><span>Good</span></div><div class="stat"><b id="statMaybe">0</b><span>Maybe</span></div><div class="stat"><b id="statBad">0</b><span>Bad</span></div></div>
+    <div class="stephead"><div class="stepname"><span class="stepnum">4</span><div><h2>Candidates saved for your review</h2><div class="note">Only people the agent approved and successfully saved to Paraform appear here.</div></div></div></div>
+    <div id="feedbackMode" class="empty-result"><strong>No search results yet</strong>Run a search above. Good candidates will appear here and in the mapped Paraform project.</div>
+    <div id="resultFunnel" class="result-funnel" hidden><div class="result-stat"><b id="resultFound">0</b><span>found in Paraform</span></div><div class="result-stat"><b id="resultReviewed">0</b><span>reviewed by the agent</span></div><div class="result-stat"><b id="resultSaved">0</b><span>saved to the project</span></div></div>
+    <div id="reviewStats" class="reviewtop" hidden><div class="stat"><b id="statUnreviewed">0</b><span>Awaiting your feedback</span></div><div class="stat"><b id="statGood">0</b><span>Good</span></div><div class="stat"><b id="statMaybe">0</b><span>Maybe</span></div><div class="stat"><b id="statBad">0</b><span>Bad</span></div></div>
     <div id="reviewQueue" hidden><table class="review-table"><thead><tr><th>Candidate</th><th>Agent assessment</th><th>Your feedback</th></tr></thead><tbody id="reviewRows"></tbody></table></div>
-    <div class="feedback-flow">
+    <details id="reviewLearning" class="settings review-tools" hidden><summary>Use your feedback to improve the next search</summary><div class="settings-body"><div class="feedback-flow">
       <div class="feedback-box"><h3>Human labels</h3><p>Fast verdict plus a structured reason. Optional notes explain edge cases but do not become filters automatically.</p><div id="reasons"></div></div>
       <div class="arrow">→</div>
       <div class="feedback-box"><h3>Proposed rubric delta</h3><p>Repeated reasons become evidence-backed changes for the next Search run. A human approves every change; the agent never silently rewrites the role.</p><div id="proposals"><div class="banner info" style="margin:0"><div>↻</div><div><span>Load example labels to see evidence-backed changes. Duplicates improve dedup, not fit filters.</span></div></div></div></div>
-    </div>
-    <div class="runbar"><div class="note">Only Good candidates already filed in the mapped review project can be enrolled. The action rechecks booked and cross-sequence dedup, then reads membership back.</div><button id="enroll" class="btn" disabled>Send selected Good to sequence</button></div>
+    </div></div></details>
+    <div id="enrollBar" class="runbar" hidden><div class="note">Optional: mark saved candidates Good, select them, then send them to the prepared sequence.</div><button id="enroll" class="btn" disabled>Send selected Good to sequence</button></div>
   </div>
 </div>
 

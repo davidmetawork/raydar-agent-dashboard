@@ -13,7 +13,8 @@ export const storeConfigured = () => Boolean(KV_URL && KV_TOKEN);
 const roleKey = (roleId) => `${PREFIX}:role:${roleId}`;
 const roleRunsKey = (roleId) => `${PREFIX}:role:${roleId}:runs`;
 const runKey = (runId) => `${PREFIX}:run:${runId}`;
-const seenKey = (roleId) => `${PREFIX}:role:${roleId}:seen`;
+const filedKey = (roleId) => `${PREFIX}:role:${roleId}:filed`;
+const filedMigrationKey = (roleId) => `${PREFIX}:role:${roleId}:filed:migrated`;
 const sourceCacheKey = (key) => `${PREFIX}:source:${key}`;
 const roleReadWindowKey = `${PREFIX}:paraform-role-read:window`;
 const mutationLockKey = (scope, id) => `${PREFIX}:lock:${scope}:${id}`;
@@ -155,14 +156,37 @@ export async function listRuns(roleId, limit = 10) {
   return values.map((value) => parse(value, null)).filter(Boolean);
 }
 
-export async function seenCandidateIds(roleId) {
-  const values = await kv(["SMEMBERS", seenKey(roleId)]);
-  return Array.isArray(values) ? values : [];
+export function filedCandidateIdsFromRuns(runs = []) {
+  return [...new Set(runs.flatMap((run) => (run?.candidates || [])
+    .filter((candidate) => candidate?.projectStatus === "filed")
+    .map((candidate) => candidate.candidateId)
+    .filter(Boolean)))];
 }
 
-export async function markCandidatesSeen(roleId, ids) {
+// Search reruns should reconsider profiles that did not pass the agent's rubric.
+// Only people already written to the review project are excluded. The first read
+// backfills this set from retained run history so the old `:seen` set can be
+// retired without filing duplicate candidates.
+export async function filedCandidateIds(roleId) {
+  const [values, migrated] = await Promise.all([
+    kv(["SMEMBERS", filedKey(roleId)]),
+    kv(["GET", filedMigrationKey(roleId)]),
+  ]);
+  const current = Array.isArray(values) ? values.filter(Boolean) : [];
+  if (migrated) return current;
+
+  const history = await listRuns(roleId, 50);
+  const backfill = filedCandidateIdsFromRuns(history);
+  await pipeline([
+    ...(backfill.length ? [["SADD", filedKey(roleId), ...backfill]] : []),
+    ["SET", filedMigrationKey(roleId), "1"],
+  ]);
+  return [...new Set([...current, ...backfill])];
+}
+
+export async function markCandidatesFiled(roleId, ids) {
   const unique = [...new Set(ids.filter(Boolean))];
-  if (unique.length) await kv(["SADD", seenKey(roleId), ...unique]);
+  if (unique.length) await kv(["SADD", filedKey(roleId), ...unique]);
 }
 
 export async function getSourceCache(key) {

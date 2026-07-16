@@ -447,9 +447,11 @@ function renderMapping() {
   sequence.disabled = !roleId || !STATE.config?.sequenceWritesApproved;
   $("candidateCap").disabled = !roleId;
   $("saveMapping").disabled = !roleId || !STATE.config?.projectWritesApproved || !STATE.config?.sequenceWritesApproved;
+  $("mappingPreview").classList.toggle("pending", !mapping);
   $("mappingPreview").textContent = mapping
-    ? `${mapping.reviewProjectName} → ${mapping.sequenceName}${mapping.sequenceWarnings?.length ? ` · ${mapping.sequenceWarnings.length} playbook warning(s)` : " · playbook readback passed"}`
-    : `Auto mode will check ${targetName}, create only what is missing, write the full three-email playbook, and leave the campaign not started.`;
+    ? `Good candidates will be saved to ${mapping.reviewProjectName}.`
+    : `Set up this job once. Raydar will reuse or create ${targetName} for review.`;
+  $("jobSettings").open = Boolean(roleId && !mapping);
   updateRunControls();
 }
 
@@ -457,14 +459,11 @@ function updateRunControls() {
   const mapping = STATE.roleState?.mapping;
   const ready = Boolean(mapping && STATE.config?.searchApproved && STATE.config?.rankingConfigured);
   $("runSearch").disabled = !ready;
-  if (!mapping) $("runNote").textContent = "Choose a review project and save the job mapping first.";
+  if (!mapping) $("runNote").textContent = "Set up this job's review project first.";
   else if (!STATE.config?.searchApproved) $("runNote").textContent = "Mapping saved. Native Search is waiting on the Paraform automation approval flag.";
   else if (!STATE.config?.rankingConfigured) $("runNote").textContent = "Mapping saved. Candidate ranking needs an OpenAI API key.";
   else if (!STATE.config?.projectWritesApproved) $("runNote").textContent = "Search is ready in evaluation mode; Project writes remain disabled.";
-  else {
-    const ranking = STATE.criteriaDraft?.rankingConfig || normalizeRankingConfig(activeRubricVersion()?.rankingConfig || {}, mapping.candidateCap);
-    $("runNote").textContent = `Ready: inspect ${ranking.poolSize}, save up to ${ranking.saveLimit} at ${ranking.minimumScore}+ → ${mapping.reviewProjectName}.`;
-  }
+  else $("runNote").textContent = `Ready. Good matches will be saved to ${mapping.reviewProjectName}.`;
 }
 
 async function loadRole(roleId) {
@@ -524,7 +523,7 @@ async function saveMapping() {
   } catch (error) {
     blocker("Assets could not be prepared", error.message, "!");
   } finally {
-    button.textContent = "Prepare assets";
+    button.textContent = "Set up job";
     button.disabled = !STATE.config?.projectWritesApproved || !STATE.config?.sequenceWritesApproved;
   }
 }
@@ -534,7 +533,17 @@ function renderRunHistory() {
     $("runHistory").innerHTML = "";
     return;
   }
-  $("runHistory").innerHTML = `<span class="note">Recent:</span><select id="runPicker">${STATE.runs.map((run) => `<option value="${esc(run.id)}"${STATE.currentRun?.id === run.id ? " selected" : ""}>${esc(`${new Date(run.createdAt).toLocaleString()} · ${run.state} · ${run.counts?.selected ?? run.counts?.review ?? 0}/${run.counts?.evaluated ?? run.counts?.discovered ?? 0} selected`)}</option>`).join("")}</select>`;
+  const label = (run) => {
+    const time = new Date(run.createdAt).toLocaleString();
+    if (run.state === "failed") return `${time} · search failed`;
+    const saved = Number(run.counts?.projectFiled || 0);
+    const reviewed = Number(run.counts?.evaluated || 0);
+    const skipped = Number(run.counts?.deduped || 0);
+    if (reviewed) return `${time} · ${saved} saved of ${reviewed} reviewed`;
+    if (skipped) return `${time} · no new profiles (${skipped} already handled)`;
+    return `${time} · no profiles found`;
+  };
+  $("runHistory").innerHTML = `<span class="note">Past searches:</span><select id="runPicker">${STATE.runs.map((run) => `<option value="${esc(run.id)}"${STATE.currentRun?.id === run.id ? " selected" : ""}>${esc(label(run))}</option>`).join("")}</select>`;
   $("runPicker").addEventListener("change", (event) => loadRun(event.target.value));
 }
 
@@ -550,8 +559,8 @@ async function loadRun(runId) {
 async function runSearch() {
   const button = $("runSearch");
   button.disabled = true;
-  button.textContent = "Searching and ranking…";
-  $("runNote").textContent = "Retrieving the native pool, evaluating every profile, then filing only passing candidates. Keep this tab open.";
+  button.textContent = "Searching and reviewing…";
+  $("runNote").textContent = "Searching Paraform, reviewing every new profile, and saving only good matches. Keep this tab open.";
   try {
     await saveCriteria({ quiet: true });
     const data = await api("/api/sourcing/runs", {
@@ -570,11 +579,14 @@ async function runSearch() {
     }, ...STATE.runs.filter((run) => run.id !== data.run.id)].slice(0, 12);
     renderRunHistory();
     renderReview();
-    blocker("Hybrid sourcing run is ready", `${data.run.counts.evaluated || 0} profiles inspected; ${data.run.counts.selected || 0} passed and ${data.run.counts.projectFiled || 0} were filed for review.`, "✓");
+    const saved = data.run.counts.projectFiled || 0;
+    blocker(saved ? `${saved} candidates saved for review` : "Search complete — nothing saved", saved
+      ? `The agent reviewed ${data.run.counts.evaluated || 0} profiles and saved the best matches to ${data.run.mapping.reviewProjectName}.`
+      : `The agent reviewed ${data.run.counts.evaluated || 0} new profiles, but none met the current requirements.`, saved ? "✓" : "◌");
   } catch (error) {
     blocker("Hybrid sourcing did not complete", error.message, "!");
   } finally {
-    button.textContent = "Find and rank candidates";
+    button.textContent = "Search, review & save candidates";
     updateRunControls();
   }
 }
@@ -613,22 +625,55 @@ function reviewable(candidate) {
   return ["discovered", "in_review", "good", "maybe", "bad", "enrollment_blocked"].includes(candidate.state);
 }
 
+function savedForReview(candidate) {
+  return candidate.projectStatus === "filed" && candidate.state !== "dedup_blocked";
+}
+
+function resultSummary(run, savedCount) {
+  const counts = run.counts || {};
+  const reviewed = Number(counts.evaluated || 0);
+  const skipped = Number(counts.deduped || 0);
+  const project = run.mapping?.reviewProjectName || "the review project";
+  if (run.state === "failed") return ["This search did not finish", run.error || "Try the search again."];
+  if (savedCount) return [
+    `${savedCount} good candidate${savedCount === 1 ? "" : "s"} saved to ${project}`,
+    `The agent reviewed ${reviewed} new profile${reviewed === 1 ? "" : "s"}. Open a candidate below to review the decision or add feedback.`,
+  ];
+  if (reviewed) return [
+    "No candidates met the requirements",
+    `The agent reviewed ${reviewed} new profile${reviewed === 1 ? "" : "s"}; none passed the current requirements, so nothing was saved. Adjust the requirements and search again.`,
+  ];
+  if (skipped) return [
+    "No new candidates to review",
+    `${skipped} matching profile${skipped === 1 ? " was" : "s were"} already handled by an earlier search or workflow, so nothing was saved twice.`,
+  ];
+  return ["No candidates found", "Try broadening the requirements or the optional Paraform filters, then search again."];
+}
+
 function renderReview() {
   const real = Boolean(STATE.currentRun);
-  const candidates = real ? STATE.currentRun.candidates || [] : STATE.demo;
-  const feedback = candidates.filter(reviewable).map((candidate) => candidate.feedback || {});
+  const allCandidates = real ? STATE.currentRun.candidates || [] : STATE.demo;
+  const candidates = real ? allCandidates.filter(savedForReview) : allCandidates;
+  const feedback = candidates.map((candidate) => candidate.feedback || {});
   const summary = summarizeFeedback(feedback);
   $("statUnreviewed").textContent = summary.unreviewed;
   $("statGood").textContent = summary.good;
   $("statMaybe").textContent = summary.maybe;
   $("statBad").textContent = summary.bad;
   $("reviewQueue").hidden = !candidates.length;
-  $("feedbackMode").innerHTML = real
-    ? `<div><strong>Persisted review queue · run ${esc(STATE.currentRun.id.slice(-8))}</strong><span>${esc(`${STATE.currentRun.counts?.evaluated || 0} inspected → ${STATE.currentRun.counts?.selected || 0} selected → ${STATE.currentRun.counts?.projectFiled || 0} filed to ${STATE.currentRun.mapping.reviewProjectName}; revision ${STATE.currentRun.revision}.`)}</span></div><div class="labbtns"><span class="tag">setup v${esc(STATE.roleState?.rubricVersions?.find((version) => version.id === STATE.currentRun.rubricVersionId)?.version || "?")}</span><span class="tag">${esc(STATE.currentRun.ranking?.model || "agent ranked")}</span></div>`
-    : '<div><strong>Feedback lab · synthetic candidates</strong><span>Exercise the review rules locally before the first live run.</span></div><div class="labbtns"><button id="loadDemoInner" class="btn secondary">Load blank batch</button><button id="loadSampleInner" class="btn">Load example labels</button></div>';
-  if (!real) {
-    $("loadDemoInner")?.addEventListener("click", () => loadDemo(false));
-    $("loadSampleInner")?.addEventListener("click", () => loadDemo(true));
+  $("reviewStats").hidden = !candidates.length;
+  $("reviewLearning").hidden = !candidates.length;
+  $("enrollBar").hidden = !candidates.length;
+  $("resultFunnel").hidden = !real;
+  if (real) {
+    const counts = STATE.currentRun.counts || {};
+    $("resultFound").textContent = counts.discovered || 0;
+    $("resultReviewed").textContent = counts.evaluated || 0;
+    $("resultSaved").textContent = counts.projectFiled ?? candidates.length;
+    const [title, body] = resultSummary(STATE.currentRun, candidates.length);
+    $("feedbackMode").innerHTML = `<strong>${esc(title)}</strong>${esc(body)}`;
+  } else {
+    $("feedbackMode").innerHTML = "<strong>No search results yet</strong>Run a search above. Good candidates will appear here and in the mapped Paraform project.";
   }
   $("reviewRows").innerHTML = candidates.map((candidate) => {
     const blocked = candidate.state === "dedup_blocked";
@@ -793,8 +838,8 @@ const markCriteriaDirty = () => {
 };
 $("criteriaEditor").addEventListener("input", markCriteriaDirty);
 $("criteriaEditor").addEventListener("change", markCriteriaDirty);
-$("loadDemo").addEventListener("click", () => loadDemo(false));
-$("loadSample").addEventListener("click", () => loadDemo(true));
+$("loadDemo")?.addEventListener("click", () => loadDemo(false));
+$("loadSample")?.addEventListener("click", () => loadDemo(true));
 $("enroll").addEventListener("click", enrollSelected);
 $("reviewRows").addEventListener("click", (event) => {
   const button = event.target.closest("[data-verdict]");

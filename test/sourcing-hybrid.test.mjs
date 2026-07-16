@@ -7,6 +7,7 @@ import {
 } from "../sourcing-filters.mjs";
 import { candidateEvaluationProfile, evaluateCandidates } from "../api/sourcing/_lib/ranking.mjs";
 import { executeHybridSearch } from "../api/sourcing/_lib/native.mjs";
+import { filedCandidateIdsFromRuns } from "../api/sourcing/_lib/store.mjs";
 
 test("Paraform filters preserve native clause semantics and reject reversed ranges", () => {
   const filters = normalizeNativeFilters({
@@ -132,4 +133,20 @@ test("hybrid Search evaluates the pool and saves only qualified top profiles", a
   assert.equal(result.rejectedCount, 1);
   assert.equal(result.projectFiledCount, 2);
   assert.equal(result.candidates.every((candidate) => candidate.agentEvaluation.score >= 80), true);
+});
+
+test("reruns exclude only candidates that were actually filed to the review project", () => {
+  const filed = filedCandidateIdsFromRuns([{
+    candidates: [
+      { candidateId: "saved-a", projectStatus: "filed", state: "in_review" },
+      { candidateId: "rejected-a", projectStatus: "pending", state: "agent_rejected" },
+      { candidateId: "duplicate-a", projectStatus: "pending", state: "dedup_blocked" },
+    ],
+  }, {
+    candidates: [
+      { candidateId: "saved-a", projectStatus: "filed", state: "good" },
+      { candidateId: "saved-b", projectStatus: "filed", state: "enrolled" },
+    ],
+  }]);
+  assert.deepEqual(filed, ["saved-a", "saved-b"]);
 });
