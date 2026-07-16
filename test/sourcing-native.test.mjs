@@ -20,7 +20,7 @@ test("native Search hits normalize to a small stable review record", () => {
   assert.equal(first.projectStatus, "pending");
 });
 
-test("native Search query includes the role, exclusions, lane, and approved calibration", () => {
+test("native Search query includes searchable role signals, exclusions, lane, and approved calibration", () => {
   const query = buildLaneQuery({
     role: { title: "Staff Engineer", company: "Acme" },
     mustHaves: ["Distributed systems"],
@@ -28,15 +28,17 @@ test("native Search query includes the role, exclusions, lane, and approved cali
     searchSignals: { titles: ["Staff Software Engineer"], skills: ["Go"], locations: ["New York"] },
     exclusions: { titles: ["Engineering Manager"], companies: ["Competitor"], criteria: ["No pure people managers"] },
   }, { rationale: "Core technical profile" }, [{ action: "Raise the minimum seniority." }]);
-  assert.match(query, /Staff Engineer at Acme/);
+  assert.match(query, /Staff Engineer or Staff Software Engineer candidates/);
+  assert.equal(query.includes("at Acme"), false);
   assert.match(query, /Distributed systems/);
   assert.match(query, /Core technical profile/);
   assert.match(query, /Engineering Manager/);
-  assert.match(query, /No pure people managers/);
+  assert.match(query, /Competitor/);
+  assert.equal(query.includes("No pure people managers"), false);
   assert.match(query, /Raise the minimum seniority/);
 });
 
-test("native Search respects Paraform's 1,000-character query ceiling without dropping safety criteria", () => {
+test("native Search respects Paraform's 1,000-character ceiling and keeps subjective exclusions review-only", () => {
   const query = buildLaneQuery({
     role: { title: "Chief of Staff", company: "222place" },
     mustHaves: Array.from({ length: 10 }, (_, index) => `must-have requirement ${index} with detailed evidence`),
@@ -48,7 +50,7 @@ test("native Search respects Paraform's 1,000-character query ceiling without dr
     },
   }, { rationale: "Core marketplace operations profile" }, [{ action: "Require stronger SQL ownership." }]);
   assert.equal(query.length <= 1000, true);
-  assert.match(query, /Must work on-site/);
-  assert.match(query, /No frequent job hopping/);
+  assert.match(query, /Consultant/);
+  assert.equal(query.includes("No frequent job hopping"), false);
   assert.match(query, /Require stronger SQL ownership/);
 });

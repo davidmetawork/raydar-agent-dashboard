@@ -53,25 +53,30 @@ export function buildLaneQuery(rubric, lane, adjustments = []) {
   const pref = rows(rubric?.preferences);
   const positive = rubric?.searchSignals || {};
   const negative = rubric?.exclusions || {};
+  const laneLabel = `${lane?.id || ""} ${lane?.name || ""}`.toLowerCase();
+  const targetTitles = [...new Set([first(role.title), ...rows(positive.titles)].filter(Boolean))].slice(0, 5);
+  const locations = rows(positive.locations).length ? rows(positive.locations) : [first(role.location)].filter(Boolean);
+  const experience = must.slice(0, laneLabel.includes("company") ? 2 : 3);
   const parts = [
-    `Find strong candidates for ${first(role.title, "this role")}${role.company ? ` at ${role.company}` : ""}.`,
-    lane?.rationale ? `Search angle: ${lane.rationale}` : "",
-    must.length ? `Must have: ${must.join("; ")}.` : "",
+    `Find ${targetTitles.join(" or ") || first(role.title, "relevant")} candidates${locations.length ? ` in ${locations.slice(0, 2).join(" or ")}` : ""}.`,
+    laneLabel.includes("adjacent") ? `Include adjacent titles with transferable experience for a ${first(role.title, "similar")} role.` : "",
+    laneLabel.includes("company") ? "Prioritize strong company backgrounds and relevant operating environments." : "",
+    lane?.rationale && !/^closest interpretation|transferable profiles|target-company/i.test(lane.rationale) ? `Search angle: ${lane.rationale}` : "",
+    experience.length ? `Relevant experience: ${experience.join("; ")}.` : "",
+    rows(positive.skills).length ? `Skills to boost: ${positive.skills.slice(0, 8).join(", ")}.` : "",
+    rows(positive.companies).length ? `Ideal company backgrounds: ${positive.companies.slice(0, 10).join(", ")}.` : "",
+    positive.experience ? `Experience range: ${positive.experience}.` : "",
+    pref.length ? `Prefer: ${pref.slice(0, 3).join("; ")}.` : "",
     rows(negative.titles).length ? `Exclude titles: ${negative.titles.join(", ")}.` : "",
-    rows(negative.criteria).length ? `Reject profiles matching these dealbreakers or traits to avoid: ${negative.criteria.join("; ")}.` : "",
-    adjustments.length ? `Reviewer-approved calibration: ${adjustments.map((item) => item.action || item).join(" ")}` : "",
-    rows(positive.titles).length ? `Target titles: ${positive.titles.join(", ")}.` : "",
-    rows(positive.skills).length ? `Skills: ${positive.skills.join(", ")}.` : "",
-    rows(positive.companies).length ? `Ideal company backgrounds: ${positive.companies.join(", ")}.` : "",
-    rows(positive.locations).length ? `Locations: ${positive.locations.join(", ")}.` : "",
-    positive.experience ? `Experience: ${positive.experience}.` : "",
     rows(negative.skills).length ? `Exclude profiles missing or centered on: ${negative.skills.join(", ")}.` : "",
     rows(negative.companies).length ? `Avoid companies: ${negative.companies.join(", ")}.` : "",
-    pref.length ? `Prefer: ${pref.join("; ")}.` : "",
+    adjustments.length ? `Reviewer-approved calibration: ${adjustments.map((item) => item.action || item).join(" ")}` : "",
   ];
   // Paraform's current submitNlSearch schema rejects queries over 1,000
-  // characters. Preserve role, must-have, exclusion, and approved-calibration
-  // segments first; later positive/preference segments fill the remaining room.
+  // characters. Keep the query to native, searchable attributes. Subjective
+  // review-only exclusions stay in the persisted rubric: feeding phrases such
+  // as "frequent job hopper" to NL Search has been observed to turn them into
+  // positive keyword filters instead of exclusions.
   let query = "";
   for (const part of parts.filter(Boolean)) {
     const room = 1000 - query.length - (query ? 1 : 0);

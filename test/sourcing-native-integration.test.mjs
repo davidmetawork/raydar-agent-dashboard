@@ -28,7 +28,8 @@ test("native Search uses the first-party call order, verifies Project filing, an
       },
       submitSearch: async (sessionId, query) => {
         calls.push(`submitSearch:${sessionId}`);
-        assert.match(query, /Staff Engineer at Acme/);
+        assert.match(query, /Find Staff Engineer candidates/);
+        assert.equal(query.includes("at Acme"), false, "target company must not become a candidate-company filter");
         return {
           results: {
             total: 3,

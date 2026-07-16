@@ -74,15 +74,15 @@ function requirementRows(raw) {
 }
 
 function requirementText(row) {
-  if (typeof row === "string") return text(row);
-  return text(row?.requirement || row?.text || row?.description || row?.name || row?.label || row?.question);
+  if (typeof row === "string") return stripHtml(row);
+  return stripHtml(row?.requirement || row?.text || row?.description || row?.name || row?.label || row?.question);
 }
 
 function isRequired(row) {
   if (!row || typeof row === "string") return true;
   const importance = [row.importance, row.type, row.priority].map((value) => text(value).toLowerCase()).join(" ");
   return row.required === true || row.is_required === true || row.must_have === true ||
-    importance.includes("must") || importance.includes("required");
+    text(row.type).toUpperCase() === "DEALBREAKER" || importance.includes("must") || importance.includes("required");
 }
 
 function isOptional(row) {
@@ -92,7 +92,9 @@ function isOptional(row) {
 
 function isExclusion(row) {
   if (!row || typeof row === "string") return false;
-  return text(row.type).toUpperCase() === "DEALBREAKER" || text(row.group).toUpperCase() === "TRAITS_TO_AVOID";
+  if (text(row.group).toUpperCase() === "TRAITS_TO_AVOID") return true;
+  const criterion = requirementText(row).toLowerCase();
+  return /^(?:no\b|not\b|avoid\b|exclude\b|must not\b|cannot\b|can't\b|without\b)|trend[- ]chas|job[- ]hopp|frequent job/i.test(criterion);
 }
 
 function rangeLabel(value, unit = "years") {

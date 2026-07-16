@@ -61,6 +61,24 @@ test("role rubric can use the detailed-role payload without extra Paraform reads
   assert.deepEqual(rubric.searchSignals.titles, ["Chief of Staff"]);
 });
 
+test("positive DEALBREAKER requirements remain must-haves while negative traits become exclusions", () => {
+  const rubric = buildRoleRubric({
+    detail: {
+      id: "role-222",
+      name: "Chief of Staff",
+      requirements: [
+        { description: "<strong><u>Proficiency in SQL</u></strong> for root cause analysis.", type: "DEALBREAKER" },
+        { description: "<strong><u>Must work on-site</u></strong> in SoHo.", type: "DEALBREAKER" },
+        { description: "'Trend-chasers' who jump between hyped industries.", type: "DEALBREAKER" },
+        { description: "Candidates with a history of frequent job-hopping.", type: "REQUIRED", group: "TRAITS_TO_AVOID" },
+      ],
+    },
+  });
+  assert.deepEqual(rubric.mustHaves, ["Proficiency in SQL for root cause analysis.", "Must work on-site in SoHo."]);
+  assert.deepEqual(rubric.exclusions.criteria, ["'Trend-chasers' who jump between hyped industries.", "Candidates with a history of frequent job-hopping."]);
+  assert.equal(rubric.mustHaves.some((item) => item.includes("<strong>")), false);
+});
+
 test("native ideas normalize into small, structured lanes", () => {
   const ideas = normalizeSearchIdeas({ ideas: [{
     title: "Core profile",
