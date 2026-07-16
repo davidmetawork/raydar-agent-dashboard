@@ -293,6 +293,7 @@
       <button class="tab" id="tab-history" onclick="showView('history')">History</button>
       <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
       <button class="tab" id="tab-calls" onclick="showView('calls')">Calls</button>
+      <button class="tab" id="tab-paraai" onclick="showView('paraai')">Para AI</button>
       <button class="tab" id="tab-sequences" onclick="showView('sequences')">Sequences</button>
       <button class="tab" id="tab-enrich" onclick="showView('enrich')">Enrich</button>
       <button class="tab" id="tab-prep" onclick="showView('prep')">Prep</button>
@@ -385,6 +386,10 @@
         </div>
         <div id="cv-results"></div>
       </section>
+    </div>
+
+    <div id="view-paraai" hidden>
+      <iframe id="paraai-frame" title="Para AI" style="width:100%;border:0;min-height:1800px;background:transparent"></iframe>
     </div>
 
     <div id="view-sequences" hidden>
@@ -809,12 +814,13 @@
       if (lastData) renderFollowups(lastData);
     }
 
-    let seqLoaded=false, enrichLoaded=false, prepLoaded=false;
+    let paraaiLoaded=false, seqLoaded=false, enrichLoaded=false, prepLoaded=false;
     function showView(name){
-      ["overview","candidates","followups","history","analytics","calls","sequences","enrich","prep"].forEach(v=>{
+      ["overview","candidates","followups","history","analytics","calls","paraai","sequences","enrich","prep"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
+      if(name==="paraai" && !paraaiLoaded){ $("paraai-frame").src="/paraai?embed=1"; paraaiLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
       if(name==="prep" && !prepLoaded){ $("prep-frame").src="/prep?embed=1"; prepLoaded=true; }
@@ -823,7 +829,8 @@
       if(name==="history"||name==="analytics") ensureHistory();
       if(name==="analytics") ensurePlacements();
       if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
-      else if(location.hash==="#calls") history.replaceState(null,"",location.pathname);
+      else if(name==="paraai"){ if(location.hash!=="#paraai") history.replaceState(null,"","#paraai"); }
+      else if(location.hash==="#calls"||location.hash==="#paraai") history.replaceState(null,"",location.pathname);
     }
 
     // ---- History + Analytics (from /api/history: per-day records) ----
@@ -1450,6 +1457,7 @@
     // Calls tab: Enter-to-search + shareable #calls deep-link.
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
     if(location.hash==="#calls") showView("calls");
+    if(location.hash==="#paraai") showView("paraai");
   </script>
 </body>
 </html>

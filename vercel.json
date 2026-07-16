@@ -5,12 +5,14 @@
     { "source": "/sequences", "destination": "/sequences.html" },
     { "source": "/enrich", "destination": "/enrich.html" },
     { "source": "/sourcing", "destination": "/sourcing.html" },
-    { "source": "/prep", "destination": "/prep.html" }
+    { "source": "/prep", "destination": "/prep.html" },
+    { "source": "/paraai", "destination": "/paraai.html" }
   ],
   "functions": {
     "api/enrich/*.mjs": { "maxDuration": 60 },
     "api/sourcing/*.mjs": { "maxDuration": 300 },
-    "api/prepdoc/*.mjs": { "maxDuration": 60 }
+    "api/prepdoc/*.mjs": { "maxDuration": 60 },
+    "api/paraai/*.mjs": { "maxDuration": 120 }
   },
   "crons": [
     { "path": "/api/seq/release", "schedule": "0 16 * * *" }

@@ -1,0 +1,7 @@
+[
+  { "role": "agent", "speaker": "Interviewer", "text": "Where would you like to work?" },
+  { "role": "candidate", "speaker": "Candidate", "text": "New York or remote. I could relocate anywhere in the US." },
+  { "role": "agent", "speaker": "Interviewer", "text": "What are you targeting for compensation?" },
+  { "role": "candidate", "speaker": "Candidate", "text": "A base between 180 and 210 thousand. Equity is separate." },
+  { "role": "candidate", "speaker": "Candidate", "text": "I am in two other processes, one at an onsite. I do not need sponsorship because I am a citizen." }
+]
