@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { findIdentity, normLinkedin, normalizeEmail, scoreIdentity } from "../api/paraai/_lib/core.mjs";
+import { findIdentity, normLinkedin, normalizeEmail, paraAIConfig, scoreIdentity } from "../api/paraai/_lib/core.mjs";
 import { extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
-import { buildPreferences, matchCountFromResponse, scoreSelectedIdentity, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { buildPreferences, matchCountFromResponse, missingRequiredPreferences, prepareAndSubmitJob, scoreSelectedIdentity, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 
 test("LinkedIn normalization repairs profile paths and rejects non-profiles", () => {
@@ -85,7 +85,10 @@ test("extraction normalization keeps only supported enums and base-only compensa
 });
 
 test("golden transcript is sent once and parsed from the forced structured tool", async () => {
+  const beforeAnthropic = process.env.ANTHROPIC_API_KEY;
+  const beforeOpenAI = process.env.OPENAI_API_KEY;
   process.env.ANTHROPIC_API_KEY = "test-only";
+  delete process.env.OPENAI_API_KEY;
   const transcript = JSON.parse(await readFile(new URL("./fixtures/paraai-screen.json", import.meta.url), "utf8"));
   let calls = 0;
   const fetchImpl = async (_url, options) => {
@@ -93,6 +96,7 @@ test("golden transcript is sent once and parsed from the forced structured tool"
     const request = JSON.parse(options.body);
     assert.equal(request.tool_choice.name, "record_candidate_preferences");
     assert.equal(request.messages.length, 1);
+    assert.equal("temperature" in request, false);
     return new Response(JSON.stringify({
       model: "claude-fable-5",
       usage: { input_tokens: 100, output_tokens: 50 },
@@ -106,10 +110,106 @@ test("golden transcript is sent once and parsed from the forced structured tool"
       } }],
     }), { status: 200, headers: { "content-type": "application/json" } });
   };
-  const result = await extractPreferences(transcript, { fetchImpl });
-  assert.equal(calls, 1);
-  assert.equal(result.extracted.compensation.baseMin, 180000);
-  assert.equal(result.extracted.otherInterviewProcesses.count, 2);
+  try {
+    const result = await extractPreferences(transcript, { fetchImpl });
+    assert.equal(calls, 1);
+    assert.equal(result.provider, "anthropic");
+    assert.equal(result.extracted.compensation.baseMin, 180000);
+    assert.equal(result.extracted.compensation.ote, null);
+    assert.equal(result.extracted.otherInterviewProcesses.count, 2);
+  } finally {
+    if (beforeAnthropic == null) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = beforeAnthropic;
+    if (beforeOpenAI == null) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = beforeOpenAI;
+  }
+});
+
+test("OpenAI structured extraction takes over when Anthropic is unavailable", async () => {
+  const beforeAnthropic = process.env.ANTHROPIC_API_KEY;
+  const beforeOpenAI = process.env.OPENAI_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "anthropic-test-only";
+  process.env.OPENAI_API_KEY = "openai-test-only";
+  const transcript = [{ role: "candidate", speaker: "Alex", text: "New York, remote, Series A, $180k base, and I am a citizen." }];
+  const urls = [];
+  const fetchImpl = async (url, options) => {
+    urls.push(url);
+    if (url.includes("anthropic.com")) {
+      return new Response(JSON.stringify({ error: { message: "credit balance is too low" } }), { status: 402, headers: { "content-type": "application/json" } });
+    }
+    const request = JSON.parse(options.body);
+    assert.equal(request.model, "gpt-5.6-luna");
+    assert.equal(request.reasoning_effort, "none");
+    assert.equal(request.tool_choice.function.name, "record_candidate_preferences");
+    assert.equal("temperature" in request, false);
+    return new Response(JSON.stringify({
+      model: "gpt-5.6-luna",
+      usage: { prompt_tokens: 40, completion_tokens: 20 },
+      choices: [{ message: { tool_calls: [{ function: { name: "record_candidate_preferences", arguments: JSON.stringify({
+        locations: ["New York"], workplaceTypes: ["REMOTE"], companyStages: ["SERIES_A"],
+        compensation: { baseMin: 180000 }, sponsorship: { required: false, statuses: ["CITIZEN"] },
+      }) } }] } }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await extractPreferences(transcript, { fetchImpl });
+    assert.deepEqual(urls, ["https://api.anthropic.com/v1/messages", "https://api.openai.com/v1/chat/completions"]);
+    assert.equal(result.provider, "openai");
+    assert.equal(result.extracted.compensation.baseMin, 180000);
+  } finally {
+    if (beforeAnthropic == null) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = beforeAnthropic;
+    if (beforeOpenAI == null) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = beforeOpenAI;
+  }
+});
+
+test("direct submit prepares and submits the selected candidate in one action", async () => {
+  const calls = [];
+  const prepared = { id: "bot-direct-001", state: "ready_to_submit", revision: 3 };
+  const result = await prepareAndSubmitJob(
+    { botId: prepared.id, candidateUserId: "candidate-1", resumeBase64: "cGRm", resumeFileName: "resume.pdf" },
+    {
+      getJobImpl: async () => null,
+      prepareImpl: async (input) => { calls.push(["prepare", input]); return prepared; },
+      submitImpl: async (job, body) => { calls.push(["submit", job, body]); return { ...job, state: "awaiting_matches" }; },
+    },
+  );
+  assert.equal(result.state, "awaiting_matches");
+  assert.deepEqual(calls[0], ["prepare", { botId: prepared.id, candidateUserId: "candidate-1", force: true }]);
+  assert.equal(calls[1][2].confirmation, `SUBMIT ${prepared.id}`);
+  assert.equal(calls[1][2].resumeFileName, "resume.pdf");
+});
+
+test("direct submit is idempotent after the Para AI write", async () => {
+  const existing = { id: "bot-direct-002", state: "awaiting_matches", revision: 8 };
+  let prepared = false;
+  const result = await prepareAndSubmitJob(
+    { botId: existing.id, candidateUserId: "candidate-2" },
+    { getJobImpl: async () => existing, prepareImpl: async () => { prepared = true; } },
+  );
+  assert.equal(result, existing);
+  assert.equal(prepared, false);
+});
+
+test("Para AI required preference validation names missing native fields", () => {
+  assert.deepEqual(missingRequiredPreferences({ locations: ["New York"] }), [
+    "workplace types", "company stages", "minimum base salary", "work authorization",
+  ]);
+  assert.deepEqual(missingRequiredPreferences({
+    locations: ["New York"], workplaceTypes: ["REMOTE"], idealFundingRounds: ["SERIES_A"],
+    salaryMin: 180000, requiresSponsorship: ["CITIZEN"],
+  }), []);
+});
+
+test("current Paraform CRM submission origin is accepted as pinned", () => {
+  const before = process.env.PARAAI_SUBMISSION_ORIGIN;
+  process.env.PARAAI_SUBMISSION_ORIGIN = "CRM";
+  try { assert.equal(paraAIConfig().submissionOriginPinned, true); }
+  finally {
+    if (before == null) delete process.env.PARAAI_SUBMISSION_ORIGIN;
+    else process.env.PARAAI_SUBMISSION_ORIGIN = before;
+  }
 });
 
 test("match result parser supports pinned response candidates without guessing pending", () => {

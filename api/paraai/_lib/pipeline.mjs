@@ -84,6 +84,16 @@ export function buildPreferences(extracted) {
   return preferences;
 }
 
+export function missingRequiredPreferences(preferences = {}) {
+  const missing = [];
+  if (!Array.isArray(preferences.locations) || !preferences.locations.length) missing.push("locations");
+  if (!Array.isArray(preferences.workplaceTypes) || !preferences.workplaceTypes.length) missing.push("workplace types");
+  if (!Array.isArray(preferences.idealFundingRounds) || !preferences.idealFundingRounds.length) missing.push("company stages");
+  if (!Number.isFinite(Number(preferences.salaryMin))) missing.push("minimum base salary");
+  if (!Array.isArray(preferences.requiresSponsorship) || !preferences.requiresSponsorship.length) missing.push("work authorization");
+  return missing;
+}
+
 export function matchCountFromResponse(value) {
   if (Array.isArray(value)) return { count: value.length, settled: true };
   if (!value || typeof value !== "object") return { count: null, settled: false };
@@ -231,7 +241,7 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
       },
       extracted,
       extraNote: extraNote(extracted),
-      extraction: { model: extraction.model, usage: extraction.usage, at: new Date().toISOString() },
+      extraction: { provider: extraction.provider, model: extraction.model, usage: extraction.usage, at: new Date().toISOString() },
       error: null,
     }), job.revision);
   } catch (error) {
@@ -296,10 +306,20 @@ export async function submitJob(job, body = {}) {
   if (!config.submissionOriginPinned) throw stateError("Phase 0 must pin PARAAI_SUBMISSION_ORIGIN", "PHASE0_ORIGIN_REQUIRED", job);
   if (INTERNAL_NAMES.has(normName(job.candidate?.fullName))) throw stateError("internal-name skip list", "INTERNAL_CANDIDATE", job);
 
-  let edited = await applyResumeUpload(mergeEdits(job, body), body);
+  let edited = mergeEdits(job, body);
+  const preferences = buildPreferences(edited.extracted);
+  const missingPreferences = missingRequiredPreferences(preferences);
+  if (missingPreferences.length) {
+    throw stateError(
+      `The screening call did not provide every preference Para AI requires. Add: ${missingPreferences.join(", ")}.`,
+      "PREFERENCES_REQUIRED",
+      edited,
+    );
+  }
+  edited = await applyResumeUpload(edited, body);
   const submission = edited.submission || {};
   if (!submission.name || !normalizeEmail(submission.email) || !normLinkedin(submission.linkedinUrl) || !submission.resumeUri) {
-    throw stateError("name, non-Paraform email, LinkedIn, and resume are required", "SUBMISSION_FIELDS_REQUIRED", job);
+    throw stateError("name, non-Paraform email, LinkedIn, and resume are required", "SUBMISSION_FIELDS_REQUIRED", edited);
   }
   const candidateUserId = edited.identity?.candidateUserId;
   const freshCrm = await findCrmCandidate(candidateUserId);
@@ -325,7 +345,7 @@ export async function submitJob(job, body = {}) {
       linkedinUrl: edited.submission.linkedinUrl,
       screeningCallLink: edited.submission.screeningCallLink,
       resumeUri: edited.submission.resumeUri,
-      preferences: buildPreferences(edited.extracted),
+      preferences,
       recruiterId: RECRUITER_ID,
       submissionOrigin: config.submissionOrigin,
     };
@@ -342,6 +362,40 @@ export async function submitJob(job, body = {}) {
     matchCount: null,
     error: null,
   }), edited.revision);
+}
+
+const POST_SUBMIT_STATES = new Set([
+  "submitting", "awaiting_matches", "ready_to_enroll", "needs_review",
+  "ensuring_email", "enrolling", "verifying", "enrolled", "no_email",
+]);
+
+// The primary UI action is intentionally one click: resolve the selected
+// candidate, extract their successful screening call, and submit the exact
+// prepared payload. Existing post-submit jobs are returned idempotently.
+export async function prepareAndSubmitJob(
+  { botId, candidateUserId = "", force = true, ...submitBody } = {},
+  { getJobImpl = getJob, prepareImpl = prepareJob, submitImpl = submitJob } = {},
+) {
+  const id = String(botId || "").trim();
+  if (!BOT_ID.test(id)) throw stateError("valid Recall bot id required", "INVALID_BOT_ID");
+  const existing = await getJobImpl(id);
+  if (existing && POST_SUBMIT_STATES.has(existing.state)) return existing;
+  if (existing?.state === "error" && existing.externalWriteMayHaveLanded) {
+    throw stateError(
+      "A previous Para AI submit may have landed. Reconcile the candidate in Paraform before retrying.",
+      "RECONCILIATION_REQUIRED",
+      existing,
+    );
+  }
+
+  const prepared = await prepareImpl({ botId: id, candidateUserId, force });
+  if (prepared?.state === "needs_identity_review") {
+    throw stateError("The selected Paraform profile does not match this call.", "IDENTITY_REQUIRED", prepared);
+  }
+  if (prepared?.state !== "ready_to_submit") {
+    throw stateError("The candidate could not be prepared for direct submission.", "INVALID_STATE", prepared);
+  }
+  return submitImpl(prepared, { ...submitBody, confirmation: `SUBMIT ${prepared.id}` });
 }
 
 function matchReadInput(job) {

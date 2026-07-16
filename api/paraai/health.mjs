@@ -16,6 +16,8 @@ export default async function handler(req, res) {
     allowedDomains: auth.allowedDomains,
     storeConfigured: storeConfigured(),
     anthropicConfigured: config.anthropicConfigured,
+    openaiConfigured: config.openaiConfigured,
+    extractorConfigured: config.extractorConfigured,
     lifecycleRegistrationConfigured: config.lifecycleRegistrationConfigured,
     submitApproved: config.submitApproved,
     enrollApproved: config.enrollApproved,
@@ -26,6 +28,8 @@ export default async function handler(req, res) {
     talentNetwork: null,
     quota: null,
     sequences: [],
+    submitReady: false,
+    enrollmentReady: false,
   };
   if (!(await hasParaformCookie())) {
     health.paraform = "no_cookie";
@@ -50,11 +54,15 @@ export default async function handler(req, res) {
       return { name, id: row?.id || null, found: Boolean(row), enabled: Boolean(row?.enabled) };
     });
     const networkEnabled = talentNetwork?.isTalentNetworkEnabled === true && talentNetwork?.isParaAIDisabled !== true;
-    health.ok = Boolean(
-      health.storeConfigured && health.anthropicConfigured && health.lifecycleRegistrationConfigured &&
-      health.submissionOriginPinned && health.matchReadPinned && networkEnabled &&
-      health.sequences.every((sequence) => sequence.found && sequence.enabled),
+    health.submitReady = Boolean(
+      health.storeConfigured && health.extractorConfigured && health.submissionOriginPinned &&
+      health.submitApproved && !health.dryRun && networkEnabled,
     );
+    health.enrollmentReady = Boolean(
+      health.submitReady && health.lifecycleRegistrationConfigured && health.matchReadPinned &&
+      health.enrollApproved && health.sequences.every((sequence) => sequence.found && sequence.enabled),
+    );
+    health.ok = health.submitReady;
     return res.status(200).json(health);
   } catch (error) {
     health.paraform = error?.code === "AUTH_EXPIRED" ? "expired" : "error";

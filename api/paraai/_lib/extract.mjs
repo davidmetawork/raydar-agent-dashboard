@@ -1,6 +1,6 @@
-// One-call screening transcript extractor. Claude is forced through a single
-// structured tool, then the result is normalized again before it can reach a
-// Paraform payload or the review UI.
+// One-call screening transcript extractor. Every provider is forced through
+// the same structured tool, then normalized before it can reach a Paraform
+// payload or the review UI.
 
 export const WORKPLACE_TYPES = new Set(["REMOTE", "HYBRID", "ON_SITE"]);
 export const FUNDING_ROUNDS = new Set(["PRE_SEED", "SEED", "SERIES_A", "SERIES_B", "SERIES_C", "SERIES_D_PLUS", "UNKNOWN"]);
@@ -78,8 +78,8 @@ Rules:
 const text = (value) => typeof value === "string" ? value.trim() : "";
 const strings = (value) => [...new Set((Array.isArray(value) ? value : []).map(text).filter(Boolean))];
 const enumStrings = (value, allowed) => strings(value).map((item) => item.toUpperCase()).filter((item) => allowed.has(item));
-const number = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
-const integer = (value) => Number.isInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+const number = (value) => value != null && value !== "" && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+const integer = (value) => value != null && value !== "" && Number.isInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
 
 export function normalizeExtraction(raw = {}) {
   const relocation = raw.relocation && typeof raw.relocation === "object" ? {
@@ -140,13 +140,47 @@ export function extraNote(extracted) {
   return rows.length ? ["### Raydar screening preferences", ...rows.map(([label, value]) => `- **${label}:** ${value}`)].join("\n") : "";
 }
 
-export async function extractPreferences(transcript, { fetchImpl = fetch } = {}) {
+async function extractWithOpenAI(rows, fetchImpl) {
+  const apiKey = process.env.OPENAI_API_KEY || "";
+  if (!apiKey) throw new Error("OpenAI API key not configured");
+  const model = process.env.PARAAI_OPENAI_MODEL || "gpt-5.6-luna";
+  const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      reasoning_effort: "none",
+      messages: [
+        { role: "system", content: prompt },
+        { role: "user", content: JSON.stringify(rows) },
+      ],
+      tools: [{
+        type: "function",
+        function: {
+          name: "record_candidate_preferences",
+          description: "Record only the candidate preferences explicitly supported by the transcript.",
+          parameters: schema,
+        },
+      }],
+      tool_choice: { type: "function", function: { name: "record_candidate_preferences" } },
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(body?.error?.message || `OpenAI extraction failed: ${response.status}`);
+  const call = body?.choices?.[0]?.message?.tool_calls?.find((item) => item?.function?.name === "record_candidate_preferences");
+  let input = null;
+  try { input = JSON.parse(call?.function?.arguments || "null"); } catch {}
+  if (!input) throw new Error("OpenAI extraction returned no structured preferences");
+  return { extracted: normalizeExtraction(input), model: body?.model || model, usage: body?.usage || null, provider: "openai" };
+}
+
+async function extractWithAnthropic(rows, fetchImpl) {
   const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API || "";
   if (!apiKey) throw new Error("Anthropic API key not configured");
-  const rows = (Array.isArray(transcript) ? transcript : [])
-    .map((row) => ({ role: row?.role === "candidate" ? "candidate" : "agent", speaker: text(row?.speaker), text: text(row?.text) }))
-    .filter((row) => row.text);
-  if (!rows.length) throw new Error("screening transcript is empty");
   const response = await fetchImpl("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -157,7 +191,6 @@ export async function extractPreferences(transcript, { fetchImpl = fetch } = {})
     body: JSON.stringify({
       model: process.env.PARAAI_MODEL || "claude-fable-5",
       max_tokens: 4096,
-      temperature: 0,
       system: prompt,
       messages: [{ role: "user", content: JSON.stringify(rows) }],
       tools: [{ name: "record_candidate_preferences", description: "Record only the candidate preferences explicitly supported by the transcript.", input_schema: schema }],
@@ -169,5 +202,23 @@ export async function extractPreferences(transcript, { fetchImpl = fetch } = {})
   if (!response.ok) throw new Error(body?.error?.message || `Claude extraction failed: ${response.status}`);
   const tool = (body?.content || []).find((item) => item?.type === "tool_use" && item?.name === "record_candidate_preferences");
   if (!tool?.input) throw new Error("Claude extraction returned no structured preferences");
-  return { extracted: normalizeExtraction(tool.input), model: body?.model || process.env.PARAAI_MODEL || "claude-fable-5", usage: body?.usage || null };
+  return { extracted: normalizeExtraction(tool.input), model: body?.model || process.env.PARAAI_MODEL || "claude-fable-5", usage: body?.usage || null, provider: "anthropic" };
+}
+
+export async function extractPreferences(transcript, { fetchImpl = fetch } = {}) {
+  const rows = (Array.isArray(transcript) ? transcript : [])
+    .map((row) => ({ role: row?.role === "candidate" ? "candidate" : "agent", speaker: text(row?.speaker), text: text(row?.text) }))
+    .filter((row) => row.text);
+  if (!rows.length) throw new Error("screening transcript is empty");
+
+  const hasAnthropic = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API);
+  const hasOpenAI = Boolean(process.env.OPENAI_API_KEY);
+  if (!hasAnthropic && !hasOpenAI) throw new Error("No extraction model API key configured");
+  if (hasAnthropic) {
+    try { return await extractWithAnthropic(rows, fetchImpl); }
+    catch (error) {
+      if (!hasOpenAI) throw error;
+    }
+  }
+  return extractWithOpenAI(rows, fetchImpl);
 }

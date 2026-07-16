@@ -36,10 +36,14 @@ export function paraAIConfig() {
     enrollApproved: process.env.PARAAI_ENROLL_APPROVED === "true",
     dryRun: process.env.PARAAI_DRY_RUN !== "false" || ["1", "true"].includes(String(process.env.DRY_RUN || "").toLowerCase()),
     submissionOrigin,
-    submissionOriginPinned: ["TALENT_NETWORK_PAGE", "SOURCING_PAGE"].includes(submissionOrigin),
+    // The current Paraform profile button sends CRM; the Talent Network page
+    // sends TALENT_NETWORK_PAGE. Both values were verified in the live bundle.
+    submissionOriginPinned: ["CRM", "TALENT_NETWORK_PAGE"].includes(submissionOrigin),
     matchReadProc,
     matchReadPinned: Boolean(matchReadProc),
     anthropicConfigured: Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API),
+    openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    extractorConfigured: Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API || process.env.OPENAI_API_KEY),
     lifecycleRegistrationConfigured: Boolean(process.env.PARAAI_LIFECYCLE_SECRET),
   };
 }
