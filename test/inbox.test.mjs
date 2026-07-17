@@ -2,13 +2,44 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
+  applyInboxTriage,
   buildInboxFeed,
   campaignInboxInput,
   campaignsToScan,
+  countInboxReplies,
   flattenCampaignInbox,
+  inboxReplyBucket,
   mergeAndSortReplies,
   normalizeReplyCategory,
+  parseInboxTriage,
+  readInboxTriage,
+  writeInboxTriage,
 } from "../api/inbox/_lib/core.mjs";
+import {
+  createInboxFeedHandler,
+} from "../api/inbox/feed.mjs";
+import {
+  createInboxTriageHandler,
+} from "../api/inbox/triage.mjs";
+
+function mockResponse() {
+  return {
+    body: null,
+    headers: {},
+    statusCode: 200,
+    setHeader(name, value) {
+      this.headers[name] = value;
+    },
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  };
+}
 
 test("live campaign inbox rows keep only nested inbound email and join lead metadata", () => {
   const rows = flattenCampaignInbox(
@@ -99,6 +130,306 @@ test("reply categories normalize Paraform values and fail closed to NA", () => {
   assert.equal(normalizeReplyCategory(""), "NA");
   assert.equal(normalizeReplyCategory("unexpected"), "NA");
   assert.equal(normalizeReplyCategory(null), "NA");
+});
+
+test("triage overlay assigns one effective bucket and recomputes active counts", () => {
+  const base = {
+    generated_at: "2026-07-17T18:00:00.000Z",
+    replies: [
+      {
+        gmail_id: "gmail-active",
+        reply_category: "INTERESTED",
+        is_archived: false,
+      },
+      {
+        gmail_id: "gmail-archived",
+        reply_category: "INTERESTED",
+        is_archived: false,
+      },
+      {
+        gmail_id: "gmail-complete",
+        reply_category: "UNCLEAR",
+        is_archived: true,
+      },
+      {
+        gmail_id: "gmail-paraform-archived",
+        reply_category: "NOT_INTERESTED",
+        is_archived: true,
+      },
+    ],
+  };
+  const triage = parseInboxTriage([
+    "gmail-archived",
+    JSON.stringify({
+      status: "archived",
+      updated_at: "2026-07-17T18:01:00.000Z",
+    }),
+    "gmail-complete",
+    JSON.stringify({
+      status: "complete",
+      updated_at: "2026-07-17T18:02:00.000Z",
+    }),
+  ]);
+
+  const feed = applyInboxTriage(base, triage);
+  assert.deepEqual(
+    feed.replies.map((reply) => inboxReplyBucket(reply)),
+    ["active", "archived", "complete", "archived"],
+  );
+  assert.equal(feed.replies[0].triage_status, null);
+  assert.equal(feed.replies[1].triage_status, "archived");
+  assert.equal(feed.replies[2].triage_status, "complete");
+  assert.deepEqual(feed.counts, {
+    total: 4,
+    interested: 1,
+    needs_review: 0,
+    not_interested: 0,
+    archived: 2,
+    complete: 1,
+  });
+
+  const restored = {
+    ...feed.replies[2],
+    triage_status: null,
+  };
+  assert.equal(inboxReplyBucket(restored), "archived");
+  assert.deepEqual(countInboxReplies([restored]), {
+    total: 1,
+    interested: 0,
+    needs_review: 0,
+    not_interested: 0,
+    archived: 1,
+    complete: 0,
+  });
+});
+
+test("triage hash parsing ignores orphan fields but fails closed on corrupt records", () => {
+  const valid = {
+    "gmail-valid": JSON.stringify({
+      status: "complete",
+      updated_at: "2026-07-17T18:00:00.000Z",
+    }),
+    "contains spaces": JSON.stringify({ status: "archived" }),
+  };
+  const triage = parseInboxTriage(valid);
+  assert.deepEqual([...triage.entries()], [[
+    "gmail-valid",
+    {
+      status: "complete",
+      updated_at: "2026-07-17T18:00:00.000Z",
+    },
+  ]]);
+  assert.throws(
+    () => parseInboxTriage({
+      ...valid,
+      "gmail-invalid-status": JSON.stringify({ status: "later" }),
+    }),
+    { code: "INVALID_TRIAGE_RECORD" },
+  );
+  assert.throws(
+    () => parseInboxTriage({
+      ...valid,
+      "gmail-invalid-json": "{",
+    }),
+    { code: "INVALID_TRIAGE_RECORD" },
+  );
+});
+
+test("triage reads fail closed when a valid stored record is corrupt", async () => {
+  const read = await readInboxTriage({
+    configured: true,
+    kvImpl: async () => [
+      "gmail-corrupt",
+      JSON.stringify({ status: "unknown" }),
+    ],
+  });
+  assert.deepEqual(read, { status: "error", value: null });
+});
+
+test("triage storage writes, reads back, and restores durable hash state", async () => {
+  const hash = new Map();
+  const commands = [];
+  const kvImpl = async (args) => {
+    commands.push(args);
+    const [command, , field, value] = args;
+    if (command === "EVAL") {
+      const gmailId = args[4];
+      const record = args[5];
+      if (record === undefined) {
+        hash.delete(gmailId);
+        return 0;
+      }
+      hash.set(gmailId, record);
+      return record;
+    }
+    if (command === "HGETALL") return [...hash.entries()].flat();
+    throw new Error(`Unexpected command ${command}`);
+  };
+
+  const saved = await writeInboxTriage("gmail-1", "archived", {
+    kvImpl,
+    now: () => new Date("2026-07-17T18:00:00.000Z"),
+  });
+  assert.deepEqual(saved, {
+    gmail_id: "gmail-1",
+    status: "archived",
+    updated_at: "2026-07-17T18:00:00.000Z",
+  });
+  const read = await readInboxTriage({ kvImpl, configured: true });
+  assert.equal(read.status, "ready");
+  assert.equal(read.value.get("gmail-1").status, "archived");
+
+  const restored = await writeInboxTriage("gmail-1", null, { kvImpl });
+  assert.deepEqual(restored, {
+    gmail_id: "gmail-1",
+    status: null,
+    updated_at: null,
+  });
+  assert.equal(hash.has("gmail-1"), false);
+  assert.equal(commands.some((args) => args.includes("EX")), false);
+});
+
+test("triage endpoint authenticates, validates, and returns confirmed state", async () => {
+  let writes = 0;
+  const unauthenticated = createInboxTriageHandler({
+    corsHandler: () => false,
+    authHandler: async (_req, res) => {
+      res.status(401).json({ ok: false, error: "auth_required" });
+      return false;
+    },
+    storeReady: () => true,
+    writeTriage: async () => {
+      writes += 1;
+    },
+  });
+  const unauthenticatedResponse = mockResponse();
+  await unauthenticated({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: { gmail_id: "gmail-1", status: "archived" },
+  }, unauthenticatedResponse);
+  assert.equal(unauthenticatedResponse.statusCode, 401);
+  assert.equal(writes, 0);
+
+  const calls = [];
+  const handler = createInboxTriageHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    storeReady: () => true,
+    writeTriage: async (gmailId, status) => {
+      calls.push([gmailId, status]);
+      return {
+        gmail_id: gmailId,
+        status,
+        updated_at: status ? "2026-07-17T18:00:00.000Z" : null,
+      };
+    },
+  });
+  const unsupportedResponse = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: JSON.stringify({ gmail_id: "gmail-1", status: "complete" }),
+  }, unsupportedResponse);
+  assert.equal(unsupportedResponse.statusCode, 415);
+  assert.equal(unsupportedResponse.body.error, "unsupported_media_type");
+  assert.equal(calls.length, 0);
+
+  const invalidResponse = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: { gmail_id: "gmail-1", status: "later" },
+  }, invalidResponse);
+  assert.equal(invalidResponse.statusCode, 400);
+  assert.equal(invalidResponse.body.error, "invalid_triage_status");
+
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ gmail_id: "gmail-1", status: "complete" }),
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, {
+    ok: true,
+    gmail_id: "gmail-1",
+    status: "complete",
+    updated_at: "2026-07-17T18:00:00.000Z",
+  });
+
+  const restoreResponse = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: { gmail_id: "gmail-1", status: "inbox" },
+  }, restoreResponse);
+  assert.equal(restoreResponse.statusCode, 200);
+  assert.deepEqual(calls, [
+    ["gmail-1", "complete"],
+    ["gmail-1", null],
+  ]);
+});
+
+test("cold feed builds apply the latest triage read before responding", async () => {
+  const triageReads = [
+    new Map([[
+      "gmail-1",
+      { status: "archived", updated_at: "2026-07-17T18:00:00.000Z" },
+    ]]),
+    new Map([[
+      "gmail-1",
+      { status: "complete", updated_at: "2026-07-17T18:01:00.000Z" },
+    ]]),
+  ];
+  let readCount = 0;
+  let released = "";
+  const handler = createInboxFeedHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    readCache: async () => ({ status: "miss", value: null }),
+    readTriage: async () => ({
+      status: "ready",
+      value: triageReads[readCount++],
+    }),
+    acquireLock: async () => ({ status: "acquired", token: "lock-1" }),
+    buildFeed: async () => ({
+      generated_at: "2026-07-17T18:00:00.000Z",
+      partial: false,
+      cacheable: true,
+      replies: [{
+        gmail_id: "gmail-1",
+        reply_category: "INTERESTED",
+        is_archived: false,
+      }],
+      counts: {},
+      scan: {},
+    }),
+    writeCache: async () => true,
+    releaseLock: async (token) => {
+      released = token;
+      return true;
+    },
+  });
+  const response = mockResponse();
+  await handler({ method: "GET" }, response);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(readCount, 2);
+  assert.equal(released, "lock-1");
+  assert.equal(response.body.replies[0].triage_status, "complete");
+  assert.deepEqual(response.body.counts, {
+    total: 1,
+    interested: 0,
+    needs_review: 0,
+    not_interested: 0,
+    archived: 0,
+    complete: 1,
+  });
+  assert.deepEqual(response.body.cache, {
+    status: "stored",
+    lock: "acquired",
+  });
 });
 
 test("campaign selection retains disabled reply history when aggregate counts exist", () => {
@@ -318,6 +649,7 @@ test("feed building bounds fanout and returns partial metadata with recent fallb
     needs_review: 0,
     not_interested: 0,
     archived: 1,
+    complete: 0,
   });
   assert.deepEqual(feed.scan, {
     campaigns_total: 4,
@@ -347,6 +679,40 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /RaydarAuth\.signIn\(/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/feed"/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/message\?gmail_id="/);
+  assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
+  assert.match(inboxHtml, /data-filter="archived"/);
+  assert.match(inboxHtml, /data-filter="complete"/);
+  assert.match(inboxHtml, /triageControl\(reply,"Archive","archived"/);
+  assert.match(inboxHtml, /triageControl\(reply,"Complete","complete"/);
+  assert.match(inboxHtml, /triageControl\(reply,"Restore","inbox"/);
+  assert.match(inboxHtml, /STATE\.triageRevision\+=1/);
+  assert.match(
+    inboxHtml,
+    /triageRevisionAtStart!==STATE\.triageRevision[\s\S]*?queueFeedRefresh\(\)/,
+  );
+  assert.match(inboxHtml, /role="group" aria-label="Reply filters"/);
+  assert.match(inboxHtml, /data-filter="complete" aria-pressed="false"/);
+  assert.match(inboxHtml, /item\.setAttribute\("aria-pressed"/);
+  assert.match(inboxHtml, /Archived in Paraform/);
+  assert.match(inboxHtml, /\.chip\.archived\{[^}]*color:#8A4F0E/);
+  assert.match(
+    inboxHtml,
+    /const focusToken=captureInboxFocus\(\);[\s\S]*?requestAnimationFrame\(\(\)=>restoreInboxFocus\(focusToken\)\)/,
+  );
+  assert.match(
+    inboxHtml,
+    /document\.activeElement===sourceButton[\s\S]*?selectAfterTriage\(previousIndex,shouldFocusNext\)/,
+  );
+  assert.match(inboxHtml, /showTriageBanner\("good","Moved to Complete\."\)/);
+  assert.match(inboxHtml, /State unavailable/);
+  assert.doesNotMatch(
+    inboxHtml,
+    /id="replyList"[^>]*aria-live/,
+  );
+  const inlineScript = [...inboxHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    .at(-1)?.[1];
+  assert.ok(inlineScript);
+  assert.doesNotThrow(() => new Function(inlineScript));
 
   assert.match(indexHtml, /id="tab-inbox"/);
   assert.match(indexHtml, /id="view-inbox"[^>]*hidden/);

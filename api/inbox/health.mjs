@@ -20,6 +20,7 @@ export default async function handler(req, res) {
         && authConfig().authRequired,
       cookieSet: hasCookie(),
       cacheConfigured: storeConfigured(),
+      stateStoreConfigured: storeConfigured(),
       authRequired: authConfig().authRequired,
       ...health,
     });
@@ -28,6 +29,7 @@ export default async function handler(req, res) {
       ok: false,
       cookieSet: hasCookie(),
       cacheConfigured: storeConfigured(),
+      stateStoreConfigured: storeConfigured(),
       authRequired: authConfig().authRequired,
       paraform: "error",
       detail: String(error?.message || error).slice(0, 160),

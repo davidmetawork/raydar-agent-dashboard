@@ -1,5 +1,5 @@
-// Read-only cross-sequence reply inbox. Paraform remains the source of truth;
-// this module only assembles and briefly caches a normalized feed for the
+// Cross-sequence reply inbox. Paraform remains the read-only message source;
+// Raydar separately owns durable Archive/Complete triage state for the
 // authenticated Monitor UI.
 
 import { randomUUID } from "node:crypto";
@@ -21,16 +21,24 @@ export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
 
 export const INBOX_CACHE_KEY = "inbox:v1:feed";
 export const INBOX_BUILD_LOCK_KEY = "inbox:v1:feed:lock";
+export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
 export const INBOX_CACHE_TTL_SECONDS = 90;
 export const INBOX_FANOUT_CONCURRENCY = 6;
 export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
+export const INBOX_TRIAGE_STATUSES = Object.freeze(["archived", "complete"]);
+
+const GMAIL_ID_RE = /^[a-zA-Z0-9._:-]{1,512}$/;
 
 const stringValue = (value) => (
   typeof value === "string" ? value.trim() : ""
 );
 
 const arrayValue = (value) => (Array.isArray(value) ? value : []);
+
+export function validInboxGmailId(value) {
+  return GMAIL_ID_RE.test(stringValue(value));
+}
 
 export async function requireInboxAuth(req, res) {
   if (!authConfig().authRequired) {
@@ -339,19 +347,7 @@ export async function buildInboxFeed({
     partial,
     cacheable: !partial,
     replies,
-    counts: {
-      total: replies.length,
-      interested: replies.filter((item) => (
-        !item.is_archived && item.reply_category === "INTERESTED"
-      )).length,
-      needs_review: replies.filter((item) => (
-        !item.is_archived && item.reply_category === "UNCLEAR"
-      )).length,
-      not_interested: replies.filter((item) => (
-        !item.is_archived && item.reply_category === "NOT_INTERESTED"
-      )).length,
-      archived: replies.filter((item) => item.is_archived).length,
-    },
+    counts: countInboxReplies(replies),
     scan: {
       campaigns_total: campaigns.length,
       campaigns_attempted: targets.length,
@@ -375,6 +371,180 @@ const parseJson = (value) => {
     return null;
   }
 };
+
+function normalizeInboxTriageRecord(value) {
+  const record = typeof value === "string" ? parseJson(value) : value;
+  if (!record || typeof record !== "object") return null;
+  const status = stringValue(record.status).toLowerCase();
+  if (!INBOX_TRIAGE_STATUSES.includes(status)) return null;
+  return {
+    status,
+    updated_at: stringValue(record.updated_at),
+  };
+}
+
+export function parseInboxTriage(value, { strict = true } = {}) {
+  const entries = [];
+  if (Array.isArray(value)) {
+    for (let index = 0; index + 1 < value.length; index += 2) {
+      entries.push([value[index], value[index + 1]]);
+    }
+  } else if (value && typeof value === "object") {
+    entries.push(...Object.entries(value));
+  }
+
+  const triage = new Map();
+  for (const [gmailIdRaw, recordRaw] of entries) {
+    const gmailId = stringValue(gmailIdRaw);
+    const record = normalizeInboxTriageRecord(recordRaw);
+    if (!validInboxGmailId(gmailId)) continue;
+    if (!record) {
+      if (strict) {
+        const error = new Error("invalid persisted Inbox triage record");
+        error.code = "INVALID_TRIAGE_RECORD";
+        throw error;
+      }
+      continue;
+    }
+    triage.set(gmailId, record);
+  }
+  return triage;
+}
+
+export function inboxReplyBucket(reply) {
+  if (reply?.triage_status === "complete") return "complete";
+  if (reply?.triage_status === "archived" || reply?.is_archived) {
+    return "archived";
+  }
+  return "active";
+}
+
+export function countInboxReplies(repliesRaw) {
+  const replies = arrayValue(repliesRaw);
+  const active = replies.filter((reply) => inboxReplyBucket(reply) === "active");
+  return {
+    total: replies.length,
+    interested: active.filter((reply) => (
+      reply.reply_category === "INTERESTED"
+    )).length,
+    needs_review: active.filter((reply) => (
+      reply.reply_category === "UNCLEAR"
+    )).length,
+    not_interested: active.filter((reply) => (
+      reply.reply_category === "NOT_INTERESTED"
+    )).length,
+    archived: replies.filter((reply) => (
+      inboxReplyBucket(reply) === "archived"
+    )).length,
+    complete: replies.filter((reply) => (
+      inboxReplyBucket(reply) === "complete"
+    )).length,
+  };
+}
+
+export function applyInboxTriage(feed, triageRaw) {
+  const triage = triageRaw instanceof Map
+    ? triageRaw
+    : parseInboxTriage(triageRaw);
+  const replies = arrayValue(feed?.replies).map((reply) => {
+    const record = validInboxGmailId(reply?.gmail_id)
+      ? triage.get(reply.gmail_id)
+      : null;
+    return {
+      ...reply,
+      triage_status: record?.status || null,
+      triage_updated_at: record?.updated_at || "",
+    };
+  });
+  return {
+    ...feed,
+    replies,
+    counts: countInboxReplies(replies),
+  };
+}
+
+export async function readInboxTriage({
+  kvImpl = kv,
+  configured = storeConfigured(),
+} = {}) {
+  if (!configured) return { status: "unavailable", value: null };
+  try {
+    const value = parseInboxTriage(await kvImpl(["HGETALL", INBOX_TRIAGE_KEY]));
+    return { status: "ready", value };
+  } catch {
+    return { status: "error", value: null };
+  }
+}
+
+export async function writeInboxTriage(
+  gmailIdRaw,
+  statusRaw,
+  {
+    kvImpl = kv,
+    now = () => new Date(),
+  } = {},
+) {
+  const gmailId = stringValue(gmailIdRaw);
+  const status = statusRaw === null
+    ? null
+    : stringValue(statusRaw).toLowerCase();
+  if (!validInboxGmailId(gmailId)) {
+    const error = new Error("invalid Gmail ID");
+    error.code = "INVALID_GMAIL_ID";
+    throw error;
+  }
+  if (status !== null && !INBOX_TRIAGE_STATUSES.includes(status)) {
+    const error = new Error("invalid triage status");
+    error.code = "INVALID_TRIAGE_STATUS";
+    throw error;
+  }
+
+  if (status === null) {
+    const script = `
+      redis.call('HDEL', KEYS[1], ARGV[1])
+      return redis.call('HEXISTS', KEYS[1], ARGV[1])
+    `;
+    const confirmed = await kvImpl([
+      "EVAL",
+      script,
+      1,
+      INBOX_TRIAGE_KEY,
+      gmailId,
+    ]);
+    if (Number(confirmed) !== 0) {
+      const error = new Error("triage restore was not confirmed");
+      error.code = "TRIAGE_WRITE_NOT_CONFIRMED";
+      throw error;
+    }
+    return { gmail_id: gmailId, status: null, updated_at: null };
+  }
+
+  const record = {
+    status,
+    updated_at: now().toISOString(),
+  };
+  const script = `
+    redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+    return redis.call('HGET', KEYS[1], ARGV[1])
+  `;
+  const confirmed = normalizeInboxTriageRecord(await kvImpl([
+    "EVAL",
+    script,
+    1,
+    INBOX_TRIAGE_KEY,
+    gmailId,
+    JSON.stringify(record),
+  ]));
+  if (
+    confirmed?.status !== record.status
+    || confirmed?.updated_at !== record.updated_at
+  ) {
+    const error = new Error("triage write was not confirmed");
+    error.code = "TRIAGE_WRITE_NOT_CONFIRMED";
+    throw error;
+  }
+  return { gmail_id: gmailId, ...record };
+}
 
 export async function readInboxCache() {
   if (!storeConfigured()) return { status: "unavailable", value: null };

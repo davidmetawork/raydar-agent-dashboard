@@ -3,10 +3,9 @@ import {
   publicMessage,
   requestQuery,
   requireInboxAuth,
+  validInboxGmailId,
 } from "./_lib/core.mjs";
 import { trpcGet } from "../seq/_lib/core.mjs";
-
-const GMAIL_ID_RE = /^[a-zA-Z0-9._:-]{1,512}$/;
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
@@ -19,7 +18,7 @@ export default async function handler(req, res) {
 
   const value = requestQuery(req).gmail_id;
   const gmailId = String(Array.isArray(value) ? value[0] : value || "").trim();
-  if (!GMAIL_ID_RE.test(gmailId)) {
+  if (!validInboxGmailId(gmailId)) {
     return res.status(400).json({ ok: false, error: "invalid_gmail_id" });
   }
 

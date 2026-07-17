@@ -32,6 +32,7 @@
   .pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.warn .dot{background:var(--warn)}
   .pill.bad{background:var(--bad-bg);color:var(--bad)}.pill.bad .dot{background:var(--bad)}
   .banner{padding:12px 14px;border-radius:11px;margin-bottom:14px;font-size:13px;border:1px solid transparent}
+  .banner.good{background:var(--good-bg);color:#176B4D;border-color:#C7E6D6}
   .banner.bad{background:var(--bad-bg);color:#7A2A2D;border-color:#F3C9CB}
   .banner.warn{background:var(--warn-bg);color:#7A531A;border-color:#ECD9B0}
   .hidden{display:none!important}
@@ -45,13 +46,14 @@
   .list-head{padding:14px;border-bottom:1px solid var(--line)}
   .search{width:100%;border:1px solid var(--line);border-radius:11px;padding:10px 12px;background:#FBFAF5;color:var(--ink)}
   .search::placeholder{color:var(--muted)}
-  .filters{display:flex;gap:6px;overflow-x:auto;padding:11px 0 1px;scrollbar-width:thin}
+  .filters{display:flex;gap:6px;flex-wrap:wrap;padding:11px 0 1px}
   .filter{appearance:none;border:1px solid var(--line);background:#fff;color:var(--ink-2);padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:700;white-space:nowrap;cursor:pointer}
   .filter:hover{border-color:#CFC7B5}.filter.active{background:var(--ink);border-color:var(--ink);color:var(--cream)}
   .filter .n{opacity:.68;margin-left:3px}
   .reply-list{max-height:790px;overflow:auto}
-  .reply-row{appearance:none;width:100%;display:block;text-align:left;border:0;border-bottom:1px solid var(--line);background:#fff;padding:15px;cursor:pointer;color:inherit}
+  .reply-row{width:100%;display:block;border-bottom:1px solid var(--line);background:#fff;color:inherit}
   .reply-row:last-child{border-bottom:0}.reply-row:hover{background:#FBFAF5}.reply-row.active{background:#FFF7F0;box-shadow:inset 3px 0 0 var(--orange)}
+  .reply-open{appearance:none;width:100%;display:block;text-align:left;border:0;background:transparent;padding:15px;cursor:pointer;color:inherit}
   .row-top{display:flex;align-items:flex-start;gap:10px}
   .avatar{width:36px;height:36px;border-radius:50%;background:var(--muted-bg);color:var(--ink-2);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex:none}
   .who{min-width:0;flex:1}.name-line{display:flex;align-items:center;justify-content:space-between;gap:8px}.name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -60,8 +62,9 @@
   .chip{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:10.5px;font-weight:700;line-height:1.3}
   .chip.sequence{background:var(--muted-bg);color:var(--ink-2);max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chip.interested{background:var(--good-bg);color:var(--good)}.chip.not-interested{background:var(--bad-bg);color:var(--bad)}
-  .chip.unclear{background:var(--blue-bg);color:var(--blue)}.chip.archived{background:var(--warn-bg);color:var(--warn)}
+  .chip.unclear{background:var(--blue-bg);color:var(--blue)}.chip.archived{background:var(--warn-bg);color:#8A4F0E}.chip.complete{background:#EEEAFB;color:#5B4AB8}
   .subject,.snippet{margin-left:46px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.subject{font-weight:650;font-size:13px}.snippet{color:var(--muted);font-size:12px;margin-top:2px}
+  .row-actions{display:none;align-items:center;gap:7px;flex-wrap:wrap;padding:0 15px 13px 61px}.reply-row.active .row-actions{display:flex}
   .empty{padding:48px 24px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--ink);font-family:"PP Grafier Display",serif;font-size:17px;margin-bottom:5px}
   .detail{min-height:540px}.detail-empty{padding:100px 30px;text-align:center;color:var(--muted)}.detail-empty strong{display:block;font-family:"PP Grafier Display",serif;color:var(--ink);font-size:19px;margin-bottom:6px}
   .detail-head{padding:20px 22px;border-bottom:1px solid var(--line)}
@@ -69,6 +72,11 @@
   .detail-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
   .btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 13px;border-radius:10px;border:1px solid var(--ink);background:var(--ink);color:var(--cream);font-weight:700;font-size:12.5px;text-decoration:none;white-space:nowrap}
   .btn:hover{background:#000}.btn.ghost{background:#fff;color:var(--ink);border-color:var(--line)}.btn.ghost:hover{border-color:var(--ink)}
+  .btn.archive{background:#fff;color:#8A4F0E;border-color:#D3A867}.btn.archive:hover{background:var(--warn-bg)}
+  .btn.complete{background:#087247;color:#fff;border-color:#087247}.btn.complete:hover{background:#065F3B}
+  .btn.restore{background:#fff;color:var(--ink-2);border-color:var(--line)}.btn.restore:hover{border-color:var(--ink-2)}
+  .btn.compact{padding:6px 10px;border-radius:8px;font-size:11.5px}
+  .btn:disabled{cursor:wait;opacity:.58}
   .detail-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:14px}.detail-meta .from{color:var(--muted);font-size:12px;margin-left:auto}
   .detail-body{padding:22px}.message-meta{color:var(--muted);font-size:12px;margin-bottom:16px}.message-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.62;min-height:180px}
   .reply-note{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
@@ -78,7 +86,7 @@
   #gate .gatebox{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px 40px;text-align:center;max-width:420px}
   #gate h2{margin-bottom:6px}#gate p{color:var(--muted);margin:0 0 20px}#gsi{display:flex;justify-content:center}#gateErr{color:var(--bad);font-size:13px;margin-top:14px;min-height:16px}
   @media(max-width:860px){.inbox{grid-template-columns:1fr}.reply-list{max-height:560px}.detail{min-height:440px}.detail-title-row{flex-direction:column}.detail-actions{justify-content:flex-start}.detail-meta .from{width:100%;margin-left:0}}
-  @media(max-width:560px){.wrap{padding:18px 12px 48px}.summary{align-items:flex-start}.reply-row{padding:13px 12px}.detail-head,.detail-body{padding:17px}.detail-actions{width:100%}.detail-actions .btn{flex:1}.row-chips,.subject,.snippet{margin-left:0}.row-chips{margin-top:9px}.chip.sequence{max-width:190px}}
+  @media(max-width:560px){.wrap{padding:18px 12px 48px}.summary{align-items:flex-start}.reply-open{padding:13px 12px}.detail-head,.detail-body{padding:17px}.detail-actions{width:100%}.detail-actions .btn{flex:1}.row-chips,.subject,.snippet{margin-left:0}.row-chips{margin-top:9px}.row-actions{padding:0 12px 12px}.chip.sequence{max-width:190px}}
 </style>
 </head>
 <body>
@@ -112,15 +120,16 @@
     <section class="card" aria-label="Reply list">
       <div class="list-head">
         <input id="search" class="search" type="search" autocomplete="off" placeholder="Search candidate, sequence, or subject…" aria-label="Search sequence replies" />
-        <div class="filters" aria-label="Reply filters">
-          <button class="filter active" type="button" data-filter="all">All <span class="n" data-count="all"></span></button>
-          <button class="filter" type="button" data-filter="interested">Interested <span class="n" data-count="interested"></span></button>
-          <button class="filter" type="button" data-filter="unclear">Needs review <span class="n" data-count="unclear"></span></button>
-          <button class="filter" type="button" data-filter="not_interested">Not interested <span class="n" data-count="not_interested"></span></button>
-          <button class="filter" type="button" data-filter="archived">Archived <span class="n" data-count="archived"></span></button>
+        <div class="filters" role="group" aria-label="Reply filters">
+          <button class="filter active" type="button" data-filter="all" aria-pressed="true">All <span class="n" data-count="all"></span></button>
+          <button class="filter" type="button" data-filter="interested" aria-pressed="false">Interested <span class="n" data-count="interested"></span></button>
+          <button class="filter" type="button" data-filter="unclear" aria-pressed="false">Needs review <span class="n" data-count="unclear"></span></button>
+          <button class="filter" type="button" data-filter="not_interested" aria-pressed="false">Not interested <span class="n" data-count="not_interested"></span></button>
+          <button class="filter" type="button" data-filter="archived" aria-pressed="false">Archived <span class="n" data-count="archived"></span></button>
+          <button class="filter" type="button" data-filter="complete" aria-pressed="false">Complete <span class="n" data-count="complete"></span></button>
         </div>
       </div>
-      <div id="replyList" class="reply-list" aria-live="polite">
+      <div id="replyList" class="reply-list">
         <div class="empty"><span class="loading"><span class="spinner"></span>Loading replies…</span></div>
       </div>
     </section>
@@ -135,18 +144,26 @@
 const $=(id)=>document.getElementById(id);
 let AUTH={required:false,authenticated:false,clientId:null,token:null,email:"",domains:["raydar.xyz","raydargroup.com"]};
 const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
-const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false};
+const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,triaging:new Set(),triageRevision:0};
 if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
 
 function setHealth(kind,label){
   $("health").className="pill "+kind;
   $("healthText").textContent=label;
 }
-function showBanner(kind,message){
+function showBanner(kind,message,source="system"){
   const banner=$("banner");
+  banner.dataset.source=source;
   if(!message){banner.className="banner hidden";banner.textContent="";return;}
   banner.className="banner "+kind;
   banner.textContent=message;
+}
+function showTriageBanner(kind,message){
+  showBanner(kind,message,"triage");
+  setTimeout(()=>{
+    const banner=$("banner");
+    if(banner.dataset.source==="triage"&&banner.textContent===message)showBanner("","");
+  },5000);
 }
 function formatDate(value,long=false){
   const date=new Date(value||"");
@@ -171,6 +188,23 @@ function sentimentChip(category){
   if(category==="UNCLEAR")return chip("Replied · unclear","unclear");
   return null;
 }
+function replyBucket(reply){
+  if(reply.triage_status==="complete")return "complete";
+  if(reply.triage_status==="archived"||reply.is_archived)return "archived";
+  return "active";
+}
+function triageChip(reply){
+  const bucket=replyBucket(reply);
+  if(bucket==="complete")return chip("Complete","complete");
+  if(bucket==="archived")return chip(
+    reply.triage_status==="archived"?"Archived":"Archived in Paraform",
+    "archived",
+  );
+  return null;
+}
+function canTriage(reply){
+  return /^[a-zA-Z0-9._:-]{1,512}$/.test(String(reply?.gmail_id||""));
+}
 function isLinkedInUrl(value){
   try{
     const url=new URL(value);
@@ -185,8 +219,10 @@ function filteredReplies(){
   const query=STATE.query.trim().toLowerCase();
   return STATE.replies.filter(reply=>{
     let matches=false;
-    if(STATE.filter==="archived")matches=!!reply.is_archived;
-    else if(reply.is_archived)matches=false;
+    const bucket=replyBucket(reply);
+    if(STATE.filter==="archived")matches=bucket==="archived";
+    else if(STATE.filter==="complete")matches=bucket==="complete";
+    else if(bucket!=="active")matches=false;
     else if(STATE.filter==="all")matches=true;
     else if(STATE.filter==="interested")matches=reply.reply_category==="INTERESTED";
     else if(STATE.filter==="unclear")matches=reply.reply_category==="UNCLEAR";
@@ -197,18 +233,88 @@ function filteredReplies(){
   });
 }
 function updateCounts(){
-  const active=STATE.replies.filter(reply=>!reply.is_archived);
+  const active=STATE.replies.filter(reply=>replyBucket(reply)==="active");
   const values={
     all:active.length,
     interested:active.filter(reply=>reply.reply_category==="INTERESTED").length,
     unclear:active.filter(reply=>reply.reply_category==="UNCLEAR").length,
     not_interested:active.filter(reply=>reply.reply_category==="NOT_INTERESTED").length,
-    archived:STATE.replies.filter(reply=>reply.is_archived).length,
+    archived:STATE.replies.filter(reply=>replyBucket(reply)==="archived").length,
+    complete:STATE.replies.filter(reply=>replyBucket(reply)==="complete").length,
   };
   document.querySelectorAll("[data-count]").forEach(node=>{node.textContent=values[node.dataset.count]??0;});
   $("replyCount").textContent=STATE.replies.length+" repl"+(STATE.replies.length===1?"y":"ies");
   $("interestedCount").textContent=values.interested+" interested";
   $("interestedCount").classList.toggle("hidden",values.interested===0);
+  return values;
+}
+function postInboxCounts(values){
+  if(window.parent!==window)window.parent.postMessage({
+    type:"raydar-inbox-counts",
+    interested:values.interested||0,
+    total:STATE.replies.length,
+  },location.origin);
+}
+function queueFeedRefresh(delay=0){
+  if(window.__inboxQueuedRefresh)return;
+  window.__inboxQueuedRefresh=setTimeout(()=>{
+    window.__inboxQueuedRefresh=null;
+    if(STATE.loading){queueFeedRefresh(250);return;}
+    loadFeed();
+  },delay);
+}
+function captureInboxFocus(){
+  const active=document.activeElement;
+  const key=active?.dataset?.focusKey;
+  if(!key)return null;
+  return {
+    key,
+    region:active.dataset.focusRegion||"",
+    replyId:active.dataset.replyId||"",
+  };
+}
+function restoreInboxFocus(token){
+  if(!token)return;
+  const target=[...document.querySelectorAll("[data-focus-key]")].find(node=>(
+    node.dataset.focusKey===token.key
+    && node.dataset.focusRegion===token.region
+    && node.dataset.replyId===token.replyId
+  ));
+  (target||document.querySelector(".reply-row.active .reply-open"))?.focus();
+}
+function triageControl(reply,label,status,compact=false){
+  const button=document.createElement("button");
+  button.type="button";
+  button.className="btn triage-control "+(status==="archived"?"archive":status==="complete"?"complete":"restore")+(compact?" compact":"");
+  button.dataset.replyId=reply.gmail_id||"";
+  button.dataset.label=label;
+  button.dataset.focusKey="triage-"+status;
+  button.dataset.focusRegion=compact?"row":"detail";
+  button.textContent=STATE.triaging.has(reply.gmail_id)?"Saving…":label;
+  button.disabled=STATE.triaging.has(reply.gmail_id)||!canTriage(reply);
+  button.addEventListener("click",event=>{event.stopPropagation();setReplyTriage(reply,status,button);});
+  return button;
+}
+function triageControls(reply,compact=false){
+  const controls=document.createDocumentFragment();
+  const bucket=replyBucket(reply);
+  if(bucket==="active"){
+    controls.append(
+      triageControl(reply,"Archive","archived",compact),
+      triageControl(reply,"Complete","complete",compact),
+    );
+  }else if(bucket==="archived"){
+    if(reply.triage_status==="archived"){
+      controls.append(triageControl(reply,"Restore","inbox",compact));
+    }
+    controls.append(triageControl(reply,"Complete","complete",compact));
+  }else{
+    controls.append(
+      triageControl(reply,"Restore","inbox",compact),
+      triageControl(reply,"Archive","archived",compact),
+    );
+  }
+  return controls;
 }
 function renderList(){
   const list=$("replyList");
@@ -224,11 +330,16 @@ function renderList(){
     return;
   }
   for(const reply of replies){
-    const row=document.createElement("button");
-    row.type="button";
+    const row=document.createElement("div");
     row.className="reply-row"+(STATE.selectedId===reply.gmail_id?" active":"");
-    row.setAttribute("aria-pressed",STATE.selectedId===reply.gmail_id?"true":"false");
-    row.addEventListener("click",()=>selectReply(reply));
+    const open=document.createElement("button");
+    open.type="button";
+    open.className="reply-open";
+    open.dataset.replyId=reply.gmail_id||"";
+    open.dataset.focusKey="reply-open";
+    open.dataset.focusRegion="row";
+    open.setAttribute("aria-pressed",STATE.selectedId===reply.gmail_id?"true":"false");
+    open.addEventListener("click",()=>selectReply(reply));
 
     const top=document.createElement("div");top.className="row-top";
     const avatar=document.createElement("div");avatar.className="avatar";avatar.textContent=initials(reply.candidate_name);
@@ -243,10 +354,15 @@ function renderList(){
     const chips=document.createElement("div");chips.className="row-chips";
     chips.append(chip(reply.sequence_name||"Untitled sequence","sequence"));
     const sentiment=sentimentChip(reply.reply_category);if(sentiment)chips.append(sentiment);
-    if(reply.is_archived)chips.append(chip("Archived","archived"));
+    const status=triageChip(reply);if(status)chips.append(status);
     const subject=document.createElement("div");subject.className="subject";subject.textContent=reply.subject||"(no subject)";
     const snippet=document.createElement("div");snippet.className="snippet";snippet.textContent=reply.snippet||"";
-    row.append(top,chips,subject,snippet);list.append(row);
+    open.append(top,chips,subject,snippet);row.append(open);
+    if(STATE.selectedId===reply.gmail_id&&canTriage(reply)){
+      const actions=document.createElement("div");actions.className="row-actions";
+      actions.append(triageControls(reply,true));row.append(actions);
+    }
+    list.append(row);
   }
 }
 function paraformLink(reply){
@@ -261,16 +377,17 @@ function detailHeader(reply){
   const email=document.createElement("div");email.className="email";email.textContent=reply.candidate_email||"";
   title.append(h2,candidate,email);
   const actions=document.createElement("div");actions.className="detail-actions";
+  if(canTriage(reply))actions.append(triageControls(reply));
   const linkedIn=isLinkedInUrl(reply.candidate_linkedin_url);
   if(linkedIn){
-    const link=document.createElement("a");link.className="btn ghost";link.href=linkedIn;link.target="_blank";link.rel="noopener noreferrer";link.textContent="LinkedIn ↗";actions.append(link);
+    const link=document.createElement("a");link.className="btn ghost";link.href=linkedIn;link.target="_blank";link.rel="noopener noreferrer";link.textContent="LinkedIn ↗";link.dataset.replyId=reply.gmail_id||"";link.dataset.focusKey="linkedin";link.dataset.focusRegion="detail";actions.append(link);
   }
-  const replyLink=document.createElement("a");replyLink.className="btn";replyLink.href=paraformLink(reply);replyLink.target="_blank";replyLink.rel="noopener noreferrer";replyLink.textContent=reply.can_reply?"Reply in Paraform ↗":"View in Paraform ↗";actions.append(replyLink);
+  const replyLink=document.createElement("a");replyLink.className="btn";replyLink.href=paraformLink(reply);replyLink.target="_blank";replyLink.rel="noopener noreferrer";replyLink.textContent=reply.can_reply?"Reply in Paraform ↗":"View in Paraform ↗";replyLink.dataset.replyId=reply.gmail_id||"";replyLink.dataset.focusKey="paraform";replyLink.dataset.focusRegion="detail";actions.append(replyLink);
   titleRow.append(title,actions);
   const meta=document.createElement("div");meta.className="detail-meta";
   meta.append(chip(reply.sequence_name||"Untitled sequence","sequence"));
   const sentiment=sentimentChip(reply.reply_category);if(sentiment)meta.append(sentiment);
-  if(reply.is_archived)meta.append(chip("Archived","archived"));
+  const status=triageChip(reply);if(status)meta.append(status);
   const from=document.createElement("span");from.className="from";from.textContent=formatDate(reply.date,true);meta.append(from);
   head.append(titleRow,meta);return head;
 }
@@ -318,6 +435,68 @@ function renderDetailError(reply,message){
   const banner=document.createElement("div");banner.className="banner bad";banner.textContent=message;
   body.append(banner);detail.append(body);
 }
+function setTriagePendingControls(gmailId,pending){
+  document.querySelectorAll(".triage-control").forEach(button=>{
+    if(button.dataset.replyId!==gmailId)return;
+    button.disabled=pending;
+    button.textContent=pending?"Saving…":button.dataset.label;
+  });
+}
+function selectAfterTriage(previousIndex,shouldFocus){
+  const visible=filteredReplies();
+  if(visible.length){
+    const index=Math.min(Math.max(previousIndex,0),visible.length-1);
+    selectReply(visible[index]);
+    if(shouldFocus)requestAnimationFrame(()=>document.querySelector(".reply-row.active .reply-open")?.focus());
+    return;
+  }
+  selectFirstVisible();
+  if(shouldFocus)requestAnimationFrame(()=>document.querySelector("[data-filter].active")?.focus());
+}
+async function setReplyTriage(reply,requestedStatus,sourceButton){
+  const gmailId=String(reply?.gmail_id||"");
+  if(!canTriage(reply)||STATE.triaging.has(gmailId))return;
+  const previousIndex=filteredReplies().findIndex(item=>item.gmail_id===gmailId);
+  STATE.triaging.add(gmailId);setTriagePendingControls(gmailId,true);
+  try{
+    const response=await fetch("/api/inbox/triage",{
+      method:"POST",
+      headers:{...authHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({gmail_id:gmailId,status:requestedStatus}),
+      cache:"no-store",
+    });
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok||!data.ok)throw new Error(data.error||"Triage unavailable");
+    const focusToken=captureInboxFocus();
+    const stillSelected=STATE.selectedId===gmailId;
+    const shouldFocusNext=stillSelected&&(
+      document.activeElement===sourceButton
+      || document.activeElement===document.body
+      || !document.activeElement
+    );
+    const target=STATE.replies.find(item=>item.gmail_id===gmailId);
+    if(target){
+      target.triage_status=data.status||null;
+      target.triage_updated_at=data.updated_at||"";
+    }
+    STATE.triageRevision+=1;
+    STATE.triaging.delete(gmailId);
+    const counts=updateCounts();postInboxCounts(counts);
+    if(requestedStatus==="archived")showTriageBanner("good","Moved to Archived.");
+    else if(requestedStatus==="complete")showTriageBanner("good","Moved to Complete.");
+    else if(reply.is_archived)showTriageBanner("warn","Raydar triage was cleared. This reply remains archived in Paraform.");
+    else showTriageBanner("good","Restored to Inbox.");
+    if(stillSelected)selectAfterTriage(previousIndex,shouldFocusNext);
+    else{
+      renderList();
+      requestAnimationFrame(()=>restoreInboxFocus(focusToken));
+    }
+  }catch(error){
+    STATE.triaging.delete(gmailId);setTriagePendingControls(gmailId,false);
+    showTriageBanner("bad","Couldn’t confirm this update. Refreshing the Inbox to reconcile its status.");
+    queueFeedRefresh();
+  }
+}
 async function selectReply(reply){
   STATE.selectedId=reply.gmail_id;renderList();
   if(STATE.messages.has(reply.gmail_id)){renderMessage(reply,STATE.messages.get(reply.gmail_id));return;}
@@ -352,13 +531,14 @@ async function loadHealth(){
     if(!health.authRequired){setHealth("bad","Sign-in unavailable");showBanner("bad","Inbox is disabled because the Google sign-in gate is not configured.");}
     else if(health.paraform==="expired"){setHealth("bad","Session expired");showBanner("bad","The Paraform session expired. Refresh the dashboard’s Paraform session before using Inbox.");}
     else if(health.paraform!=="live"){setHealth("bad","Paraform unavailable");showBanner("bad","Inbox cannot reach Paraform right now.");}
-    else if(!health.cacheConfigured){setHealth("warn","Cache unavailable");showBanner("warn","Inbox is live, but its short-term feed cache is unavailable.");}
+    else if(!(health.stateStoreConfigured??health.cacheConfigured)){setHealth("bad","State unavailable");showBanner("bad","Inbox is disabled because its durable triage store is not configured.");}
     else setHealth("live","Paraform · live");
     return health;
   }catch(error){setHealth("bad","Backend unreachable");showBanner("bad","Inbox could not reach its backend.");return null;}
 }
 async function loadFeed(){
   if(STATE.loading)return;
+  const triageRevisionAtStart=STATE.triageRevision;
   STATE.loading=true;$("feedMeta").textContent="Refreshing replies…";
   try{
     const response=await fetch("/api/inbox/feed",{headers:authHeaders(),cache:"no-store"});
@@ -366,14 +546,20 @@ async function loadFeed(){
     if(!response.ok||!data.ok){
       const error=new Error(data.error||"Feed unavailable");error.code=data.error;error.retryAfter=Number(data.retry_after_seconds)||0;throw error;
     }
+    if(triageRevisionAtStart!==STATE.triageRevision){
+      $("feedMeta").textContent="Refreshing after triage update…";
+      queueFeedRefresh();
+      return;
+    }
+    const focusToken=captureInboxFocus();
     STATE.replies=Array.isArray(data.replies)?data.replies:[];
-    updateCounts();renderList();selectFirstVisible();
+    const counts=updateCounts();postInboxCounts(counts);renderList();selectFirstVisible();
+    if(focusToken)requestAnimationFrame(()=>restoreInboxFocus(focusToken));
     const scan=data.scan||{};
     $("feedMeta").textContent="Updated "+formatDate(data.generated_at,true)+" · "+(scan.campaigns_succeeded??0)+" sequences checked";
     if(data.partial){
       showBanner("warn","Partial feed: "+(scan.campaigns_failed||0)+" sequence read"+((scan.campaigns_failed||0)===1?"":"s")+" failed. This result was not cached.");
-    }else showBanner("", "");
-    if(window.parent!==window)window.parent.postMessage({type:"raydar-inbox-counts",interested:data.counts?.interested||0,total:data.counts?.total||STATE.replies.length},location.origin);
+    }else if($("banner").dataset.source!=="triage")showBanner("", "");
   }catch(error){
     if(error.code==="feed_refresh_in_progress"){
       $("feedMeta").textContent="Another Inbox refresh is finishing…";
@@ -390,7 +576,11 @@ function startApp(){loadHealth();loadFeed();if(!window.__inboxPoll)window.__inbo
 $("search").addEventListener("input",event=>{STATE.query=event.target.value;renderList();selectFirstVisible();});
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{
   STATE.filter=button.dataset.filter;
-  document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));
+  document.querySelectorAll("[data-filter]").forEach(item=>{
+    const active=item===button;
+    item.classList.toggle("active",active);
+    item.setAttribute("aria-pressed",active?"true":"false");
+  });
   renderList();selectFirstVisible();
 }));
 
