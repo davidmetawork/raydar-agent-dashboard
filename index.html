@@ -272,8 +272,71 @@
     .cd-note.blank { color:var(--ink-3); font-style:italic; }
     .cd-note-input { width:190px; padding:5px 8px; font-size:12.5px; font-family:inherit; border:1.5px solid var(--orange); border-radius:8px; background:var(--card); color:var(--ink); outline:none; }
     .cd-err { display:inline-block; font-size:11px; font-weight:700; color:var(--bad); background:var(--bad-bg); padding:3px 8px; border-radius:6px; margin-top:5px; }
+    .cd-paraai { min-width:88px; justify-content:center; }
     .pill.cd-pulse .d { animation:cdpulse 1.3s ease-in-out infinite; }
     @keyframes cdpulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    /* The Candidates roster always fits its viewport. Desktop columns use a
+       fixed percentage contract; long content wraps inside its own cell. */
+    #cd-table-wrap { overflow-x:hidden; }
+    #cd-table-wrap .cd-table { table-layout:fixed; }
+    #cd-table-wrap .cd-table th,
+    #cd-table-wrap .cd-table td { padding-left:8px; padding-right:8px; min-width:0; }
+    #cd-table-wrap .cd-table th:nth-child(1) { width:11%; }
+    #cd-table-wrap .cd-table th:nth-child(2) { width:18%; }
+    #cd-table-wrap .cd-table th:nth-child(3) { width:10%; }
+    #cd-table-wrap .cd-table th:nth-child(4) { width:9%; }
+    #cd-table-wrap .cd-table th:nth-child(5) { width:12%; }
+    #cd-table-wrap .cd-table th:nth-child(6) { width:11%; }
+    #cd-table-wrap .cd-table th:nth-child(7) { width:18%; }
+    #cd-table-wrap .cd-table th:nth-child(8) { width:11%; }
+    #cd-table-wrap .cd-table .who,
+    #cd-table-wrap .cd-when { white-space:normal; overflow-wrap:anywhere; line-height:1.3; }
+    #cd-table-wrap .cd-sel,
+    #cd-table-wrap .cd-note,
+    #cd-table-wrap .cd-note-input { width:100%; min-width:0; max-width:100%; }
+    #cd-table-wrap .cd-note { overflow-wrap:anywhere; }
+
+    @media (max-width:1100px){
+      #cd-table-wrap .cd-table { font-size:12.5px; }
+      #cd-table-wrap .cd-table th { font-size:10.5px; letter-spacing:.035em; }
+      #cd-table-wrap .pill { gap:5px; padding:4px 7px; font-size:11.5px; }
+      #cd-table-wrap .pill .d { width:6px; height:6px; }
+      #cd-table-wrap .cd-paraai { min-width:0; }
+    }
+
+    /* On narrow screens each candidate becomes a labeled card, preserving all
+       eight fields without introducing horizontal panning. */
+    @media (max-width:800px){
+      .cd-bar input[type="text"] { flex-basis:100%; max-width:none; }
+      .cd-bar select { flex:1 1 140px; max-width:none; min-width:0; }
+      #cd-table-wrap { overflow:visible; border:0; border-radius:0; background:transparent; box-shadow:none; }
+      #cd-table-wrap .cd-table,
+      #cd-table-wrap .cd-table tbody { display:block; }
+      #cd-table-wrap .cd-table thead { display:none; }
+      #cd-table-wrap .cd-table tr {
+        display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 10px;
+        margin-bottom:12px; padding:8px; border:1px solid var(--line);
+        border-radius:14px; background:var(--card); box-shadow:var(--shadow);
+      }
+      #cd-table-wrap .cd-table td { display:block; width:auto; padding:7px 8px; border:0; }
+      #cd-table-wrap .cd-table td::before {
+        display:block; margin-bottom:5px; color:var(--ink-3); font-size:10px;
+        font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+      }
+      #cd-table-wrap .cd-table td:nth-child(1)::before { content:"Date"; }
+      #cd-table-wrap .cd-table td:nth-child(2)::before { content:"Candidate"; }
+      #cd-table-wrap .cd-table td:nth-child(3)::before { content:"Source"; }
+      #cd-table-wrap .cd-table td:nth-child(4)::before { content:"Call Type"; }
+      #cd-table-wrap .cd-table td:nth-child(5)::before { content:"Call Status"; }
+      #cd-table-wrap .cd-table td:nth-child(6)::before { content:"Para AI"; }
+      #cd-table-wrap .cd-table td:nth-child(7)::before { content:"Outcome"; }
+      #cd-table-wrap .cd-table td:nth-child(8)::before { content:"Notes"; }
+      #cd-table-wrap .cd-table td:nth-child(2),
+      #cd-table-wrap .cd-table td:nth-child(7),
+      #cd-table-wrap .cd-table td:nth-child(8) { grid-column:1/-1; }
+      #cd-table-wrap .cd-paraai { min-width:0; }
+    }
   </style>
 </head>
 <body>
@@ -331,6 +394,11 @@
           </select>
           <select id="cd-fstatus" onchange="cdFilters.status=this.value;renderRoster()">
             <option value="all">All statuses</option>
+          </select>
+          <select id="cd-fparaai" aria-label="Filter by Para AI status" onchange="cdFilters.paraai=this.value;renderRoster()">
+            <option value="all">All Para AI</option>
+            <option value="not_added">Not Added</option>
+            <option value="added">Added</option>
           </select>
           <select id="cd-foutcome" onchange="cdFilters.outcome=this.value;renderRoster()">
             <option value="all">All outcomes</option>
@@ -1266,12 +1334,13 @@
     const CD_SOURCES  = ["Job Post","Connector","Outreach"];
     const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
     const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-    let rosterRows=null, rosterAt=0, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
-    const cdFilters = { q:"", type:"all", status:"all", outcome:"all", range:"30", needs:false };
+    let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
+    const cdFilters = { q:"", type:"all", status:"all", paraai:"all", outcome:"all", range:"30", needs:false };
     const cdSourceChecked = new Set();   // keys already asked of /api/roster/source
+    const cdNormName = (value) => String(value||"").normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g," ");
 
     async function ensureRoster(force){
-      if(!force && rosterRows && Date.now()-rosterAt<60000) return;
+      if(!force && rosterRows && Date.now()-rosterAt<60000){ refreshRosterParaAI(); return; }
       if(!rosterRows) $("cd-table-wrap").innerHTML = `<div class="empty">Loading candidates…</div>`;
       try{
         const r = await fetch(API_BASE + "/api/roster");
@@ -1280,6 +1349,7 @@
         rosterRows = j.rows || [];
         rosterAt = Date.now();
         renderRoster();
+        refreshRosterParaAI(force === true);
         cdAutoSource();   // best-effort; hosts without the endpoint skip silently
       }catch(e){
         if(!rosterRows) $("cd-table-wrap").innerHTML = `<div class="empty">Couldn't load candidates — reopen the tab to retry.</div>`;
@@ -1318,6 +1388,18 @@
     const CD_STATUS_CLS = { success:"good", no_show:"yellow", bad:"bad", upcoming:"blue", held:"warn", live:"good cd-pulse", quiet:"muted", other:"muted" };
     const cdStatusPill = (status) =>
       `<span class="pill ${CD_STATUS_CLS[cdStatusKey(status)]}"><span class="d"></span>${cdEsc(String(status||"—").trim()||"—")}</span>`;
+    const cdParaAIKey = (row) => row?.paraAIStatus==="added" ? "added" : "not_added";
+    function cdParaAIPill(row){
+      const added=cdParaAIKey(row)==="added";
+      const title=row?.paraAIAmbiguous
+        ? "Multiple Paraform candidates share this name, so Added is not assumed."
+        : added
+          ? row?.paraAISource==="local_confirmed"
+            ? "A read-back-verified Para AI submission confirms Talent Network membership."
+            : "Paraform confirms this candidate is in the Para AI Talent Network."
+          : "Paraform does not currently confirm Talent Network membership.";
+      return `<span class="pill cd-paraai ${added?"good":"yellow"}" title="${cdEsc(title)}"><span class="d"></span>${added?"Added":"Not Added"}</span>`;
+    }
 
     // "Needs action" inbox rule: missing Source / Call Type / Status is always
     // actionable; "Held - confirm" awaits David's confirm. Outcome is only
@@ -1355,6 +1437,7 @@
         if(q && !String(r.candidate||"").toLowerCase().includes(q)) return false;
         if(f.type!=="all" && (cdIsHuman(r)?"human":"agent")!==f.type) return false;
         if(f.status!=="all" && String(r.status||"").trim()!==f.status) return false;
+        if(f.paraai!=="all" && cdParaAIKey(r)!==f.paraai) return false;
         if(f.outcome!=="all"){
           const o=String(r.outcome||"").trim();
           if(f.outcome==="__blank"){ if(o) return false; }
@@ -1412,6 +1495,7 @@
         <td>${cdSelect(i,"source",CD_SOURCES,r.source)}${cdErrIn(r,"source")}</td>
         <td>${typePill}</td>
         <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
+        <td>${cdParaAIPill(r)}</td>
         <td>${cdSelect(i,"outcome",CD_OUTCOMES,r.outcome)}${cdErrIn(r,"outcome")}</td>
         <td>${cdNoteCell(i,r)}${cdErrIn(r,"notes")}</td>
       </tr>`;
@@ -1427,8 +1511,40 @@
       const needsAll=(rosterRows||[]).filter(cdNeedsAction).length;
       const nb=$("cd-fneeds"); if(nb) nb.textContent = `Needs action (${needsAll})`;
       $("cd-table-wrap").innerHTML = rows.length
-        ? `<table class="cd-table"><thead><tr><th>Date</th><th>Candidate</th><th>Source</th><th>Call Type</th><th>Call Status</th><th>Outcome</th><th>Notes</th></tr></thead><tbody>${rows.map(cdRow).join("")}</tbody></table>`
+        ? `<table class="cd-table"><thead><tr><th>Date</th><th>Candidate</th><th>Source</th><th>Call Type</th><th>Call Status</th><th>Para AI</th><th>Outcome</th><th>Notes</th></tr></thead><tbody>${rows.map(cdRow).join("")}</tbody></table>`
         : `<div class="empty">No candidates match these filters.</div>`;
+    }
+
+    // Read-only, vendor-derived Talent Network status. Added is shown only
+    // when Paraform (or a locally read-back-confirmed submission) proves it.
+    // Missing and ambiguous identities deliberately remain Not Added.
+    async function refreshRosterParaAI(force){
+      if(!rosterRows || rosterParaAILoading) return;
+      if(!force && rosterParaAIAt && Date.now()-rosterParaAIAt<60000) return;
+      rosterParaAILoading=true;
+      try{
+        const r=await fetch("/api/roster/paraai-status"+(force?"?refresh=1":""));
+        const j=await r.json().catch(()=>null);
+        if(!r.ok || !j?.ok || !Array.isArray(j.statuses)) throw new Error(j?.error||("HTTP "+r.status));
+        const byName=new Map();
+        for(const item of j.statuses){
+          const key=cdNormName(item?.normalizedName||item?.name);
+          if(key) byName.set(key,item);
+        }
+        for(const row of rosterRows){
+          const hit=byName.get(cdNormName(row.candidate));
+          row.paraAIStatus=hit?.status==="added" && hit?.ambiguous!==true ? "added" : "not_added";
+          row.paraAIAmbiguous=hit?.ambiguous===true;
+          row.paraAICandidateUserId=hit?.ambiguous===true ? null : (hit?.candidateUserId||null);
+          row.paraAISource=hit?.source||null;
+        }
+        rosterParaAIAt=Date.now();
+        renderRoster();
+      }catch(e){
+        // A failed authoritative read must never create a false green state.
+      }finally{
+        rosterParaAILoading=false;
+      }
     }
 
     function cdRange(v){
@@ -1580,6 +1696,7 @@
       }
     }
     skeleton(); load(); setInterval(load, 30000);
+    setInterval(()=>{ if(!document.getElementById("view-candidates").hidden) refreshRosterParaAI(); },60000);
     // Calls tab: Enter-to-search + shareable #calls deep-link.
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
     if(location.hash==="#calls") showView("calls");
