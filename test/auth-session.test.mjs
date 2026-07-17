@@ -137,7 +137,7 @@ test("Google exchange, restore, rolling renewal, and logout form one complete co
 });
 
 test("every Google-gated dashboard page restores and exchanges the shared session", async () => {
-  const pages = ["paraai.html", "sequences.html", "enrich.html", "prep.html", "sourcing.html"];
+  const pages = ["paraai.html", "sequences.html", "inbox.html", "enrich.html", "prep.html", "sourcing.html"];
   for (const page of pages) {
     const html = await readFile(new URL(`../${page}`, import.meta.url), "utf8");
     const source = page === "sourcing.html"

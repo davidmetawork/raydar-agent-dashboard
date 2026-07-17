@@ -3,6 +3,7 @@
     { "source": "/agent-dashboard", "destination": "/index.html" },
     { "source": "/c/:id", "destination": "/call.html" },
     { "source": "/sequences", "destination": "/sequences.html" },
+    { "source": "/inbox", "destination": "/inbox.html" },
     { "source": "/enrich", "destination": "/enrich.html" },
     { "source": "/sourcing", "destination": "/sourcing.html" },
     { "source": "/prep", "destination": "/prep.html" },
@@ -10,6 +11,7 @@
   ],
   "functions": {
     "api/enrich/*.mjs": { "maxDuration": 60 },
+    "api/inbox/*.mjs": { "maxDuration": 120 },
     "api/sourcing/*.mjs": { "maxDuration": 300 },
     "api/prepdoc/*.mjs": { "maxDuration": 60 },
     "api/paraai/*.mjs": { "maxDuration": 120 }

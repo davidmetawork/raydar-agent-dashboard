@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Inbox — Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9;--ink:#16140F;--ink-2:#57534A;--card:#FFFFFF;--line:#E9E3D5;--muted:#8C877B;
+    --orange:#FF5E00;--good:#119865;--good-bg:#E4F4EC;--bad:#E5484D;--bad-bg:#FBE9E9;
+    --warn:#C7791A;--warn-bg:#FAEEDC;--blue:#2563C9;--blue-bg:#E7EEFB;--muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04),0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{background:var(--cream);color:var(--ink);font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  button,input{font:inherit}
+  button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid rgba(255,94,0,.28);outline-offset:2px}
+  .wrap{max-width:1260px;margin:0 auto;padding:28px 20px 72px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:20px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand img{height:27px;width:auto}
+  h1,h2,h3{font-family:"PP Grafier Display",serif;font-weight:600;margin:0}
+  h1{font-size:30px}.sub{color:var(--muted);margin-top:3px}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;font-weight:600;font-size:12.5px;white-space:nowrap}
+  .pill .dot{width:8px;height:8px;border-radius:50%}
+  .pill.live{background:var(--good-bg);color:var(--good)}.pill.live .dot{background:var(--good)}
+  .pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.warn .dot{background:var(--warn)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)}.pill.bad .dot{background:var(--bad)}
+  .banner{padding:12px 14px;border-radius:11px;margin-bottom:14px;font-size:13px;border:1px solid transparent}
+  .banner.bad{background:var(--bad-bg);color:#7A2A2D;border-color:#F3C9CB}
+  .banner.warn{background:var(--warn-bg);color:#7A531A;border-color:#ECD9B0}
+  .hidden{display:none!important}
+  .summary{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+  .summary-left{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .summary strong{font-family:"PP Grafier Display",serif;font-size:22px}
+  .summary .meta{color:var(--muted);font-size:12.5px}
+  .summary .interested{color:var(--good);font-weight:700;font-size:12.5px;background:var(--good-bg);padding:4px 9px;border-radius:999px}
+  .inbox{display:grid;grid-template-columns:minmax(330px,.86fr) minmax(0,1.3fr);gap:14px;align-items:start}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+  .list-head{padding:14px;border-bottom:1px solid var(--line)}
+  .search{width:100%;border:1px solid var(--line);border-radius:11px;padding:10px 12px;background:#FBFAF5;color:var(--ink)}
+  .search::placeholder{color:var(--muted)}
+  .filters{display:flex;gap:6px;overflow-x:auto;padding:11px 0 1px;scrollbar-width:thin}
+  .filter{appearance:none;border:1px solid var(--line);background:#fff;color:var(--ink-2);padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:700;white-space:nowrap;cursor:pointer}
+  .filter:hover{border-color:#CFC7B5}.filter.active{background:var(--ink);border-color:var(--ink);color:var(--cream)}
+  .filter .n{opacity:.68;margin-left:3px}
+  .reply-list{max-height:790px;overflow:auto}
+  .reply-row{appearance:none;width:100%;display:block;text-align:left;border:0;border-bottom:1px solid var(--line);background:#fff;padding:15px;cursor:pointer;color:inherit}
+  .reply-row:last-child{border-bottom:0}.reply-row:hover{background:#FBFAF5}.reply-row.active{background:#FFF7F0;box-shadow:inset 3px 0 0 var(--orange)}
+  .row-top{display:flex;align-items:flex-start;gap:10px}
+  .avatar{width:36px;height:36px;border-radius:50%;background:var(--muted-bg);color:var(--ink-2);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex:none}
+  .who{min-width:0;flex:1}.name-line{display:flex;align-items:center;justify-content:space-between;gap:8px}.name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .date{color:var(--muted);font-size:11.5px;white-space:nowrap}.one-liner{color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+  .row-chips{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:10px 0 7px 46px}
+  .chip{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:10.5px;font-weight:700;line-height:1.3}
+  .chip.sequence{background:var(--muted-bg);color:var(--ink-2);max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip.interested{background:var(--good-bg);color:var(--good)}.chip.not-interested{background:var(--bad-bg);color:var(--bad)}
+  .chip.unclear{background:var(--blue-bg);color:var(--blue)}.chip.archived{background:var(--warn-bg);color:var(--warn)}
+  .subject,.snippet{margin-left:46px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.subject{font-weight:650;font-size:13px}.snippet{color:var(--muted);font-size:12px;margin-top:2px}
+  .empty{padding:48px 24px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--ink);font-family:"PP Grafier Display",serif;font-size:17px;margin-bottom:5px}
+  .detail{min-height:540px}.detail-empty{padding:100px 30px;text-align:center;color:var(--muted)}.detail-empty strong{display:block;font-family:"PP Grafier Display",serif;color:var(--ink);font-size:19px;margin-bottom:6px}
+  .detail-head{padding:20px 22px;border-bottom:1px solid var(--line)}
+  .detail-title-row{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}.detail-title{min-width:0}.detail-title h2{font-size:22px;line-height:1.25}.detail-title .candidate{font-weight:700;margin-top:7px}.detail-title .email{color:var(--muted);font-size:12px;word-break:break-all}
+  .detail-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  .btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 13px;border-radius:10px;border:1px solid var(--ink);background:var(--ink);color:var(--cream);font-weight:700;font-size:12.5px;text-decoration:none;white-space:nowrap}
+  .btn:hover{background:#000}.btn.ghost{background:#fff;color:var(--ink);border-color:var(--line)}.btn.ghost:hover{border-color:var(--ink)}
+  .detail-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:14px}.detail-meta .from{color:var(--muted);font-size:12px;margin-left:auto}
+  .detail-body{padding:22px}.message-meta{color:var(--muted);font-size:12px;margin-bottom:16px}.message-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.62;min-height:180px}
+  .reply-note{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
+  .loading{display:inline-flex;align-items:center;gap:8px;color:var(--muted)}.spinner{width:14px;height:14px;border:2px solid #D9D3C4;border-top-color:var(--orange);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+  body.embed .brand img,body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:10px}
+  #gate{position:fixed;inset:0;background:var(--cream);display:flex;align-items:flex-start;justify-content:center;z-index:50;padding:32px 20px 20px;overflow:auto}
+  #gate .gatebox{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px 40px;text-align:center;max-width:420px}
+  #gate h2{margin-bottom:6px}#gate p{color:var(--muted);margin:0 0 20px}#gsi{display:flex;justify-content:center}#gateErr{color:var(--bad);font-size:13px;margin-top:14px;min-height:16px}
+  @media(max-width:860px){.inbox{grid-template-columns:1fr}.reply-list{max-height:560px}.detail{min-height:440px}.detail-title-row{flex-direction:column}.detail-actions{justify-content:flex-start}.detail-meta .from{width:100%;margin-left:0}}
+  @media(max-width:560px){.wrap{padding:18px 12px 48px}.summary{align-items:flex-start}.reply-row{padding:13px 12px}.detail-head,.detail-body{padding:17px}.detail-actions{width:100%}.detail-actions .btn{flex:1}.row-chips,.subject,.snippet{margin-left:0}.row-chips{margin-top:9px}.chip.sequence{max-width:190px}}
+</style>
+</head>
+<body>
+<div id="gate" style="display:none"><div class="gatebox">
+  <h2>Inbox</h2>
+  <p>Sign in with your Raydar Google account to review sequence replies.</p>
+  <div id="gsi"></div>
+  <div id="gateErr"></div>
+</div></div>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" />
+      <div><h1>Inbox</h1><div class="sub">Every Paraform sequence reply, triaged in one place</div></div>
+    </div>
+    <span id="health" class="pill warn"><span class="dot"></span><span id="healthText">checking…</span></span>
+  </header>
+
+  <div id="banner" class="banner hidden" role="status"></div>
+
+  <div class="summary">
+    <div class="summary-left">
+      <strong id="replyCount">— replies</strong>
+      <span id="interestedCount" class="interested hidden"></span>
+    </div>
+    <div id="feedMeta" class="meta">Connecting to Paraform…</div>
+  </div>
+
+  <main class="inbox">
+    <section class="card" aria-label="Reply list">
+      <div class="list-head">
+        <input id="search" class="search" type="search" autocomplete="off" placeholder="Search candidate, sequence, or subject…" aria-label="Search sequence replies" />
+        <div class="filters" aria-label="Reply filters">
+          <button class="filter active" type="button" data-filter="all">All <span class="n" data-count="all"></span></button>
+          <button class="filter" type="button" data-filter="interested">Interested <span class="n" data-count="interested"></span></button>
+          <button class="filter" type="button" data-filter="unclear">Needs review <span class="n" data-count="unclear"></span></button>
+          <button class="filter" type="button" data-filter="not_interested">Not interested <span class="n" data-count="not_interested"></span></button>
+          <button class="filter" type="button" data-filter="archived">Archived <span class="n" data-count="archived"></span></button>
+        </div>
+      </div>
+      <div id="replyList" class="reply-list" aria-live="polite">
+        <div class="empty"><span class="loading"><span class="spinner"></span>Loading replies…</span></div>
+      </div>
+    </section>
+
+    <section id="detail" class="card detail" aria-live="polite">
+      <div class="detail-empty"><strong>Select a reply</strong>Choose a message to read it here.</div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $=(id)=>document.getElementById(id);
+let AUTH={required:false,authenticated:false,clientId:null,token:null,email:"",domains:["raydar.xyz","raydargroup.com"]};
+const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
+const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false};
+if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
+
+function setHealth(kind,label){
+  $("health").className="pill "+kind;
+  $("healthText").textContent=label;
+}
+function showBanner(kind,message){
+  const banner=$("banner");
+  if(!message){banner.className="banner hidden";banner.textContent="";return;}
+  banner.className="banner "+kind;
+  banner.textContent=message;
+}
+function formatDate(value,long=false){
+  const date=new Date(value||"");
+  if(!Number.isFinite(date.getTime()))return "";
+  const options=long
+    ?{dateStyle:"medium",timeStyle:"short"}
+    :{month:"short",day:"numeric"};
+  return new Intl.DateTimeFormat(undefined,options).format(date);
+}
+function initials(name){
+  return String(name||"?").split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join("").toUpperCase()||"?";
+}
+function chip(label,className){
+  const node=document.createElement("span");
+  node.className="chip "+className;
+  node.textContent=label;
+  return node;
+}
+function sentimentChip(category){
+  if(category==="INTERESTED")return chip("Interested","interested");
+  if(category==="NOT_INTERESTED")return chip("Not interested","not-interested");
+  if(category==="UNCLEAR")return chip("Replied · unclear","unclear");
+  return null;
+}
+function isLinkedInUrl(value){
+  try{
+    const url=new URL(value);
+    return url.protocol==="https:"&&(url.hostname==="linkedin.com"||url.hostname.endsWith(".linkedin.com"))?url.href:"";
+  }catch(e){
+    return /^[a-zA-Z0-9_%.-]+$/.test(String(value||""))
+      ?"https://www.linkedin.com/in/"+encodeURIComponent(String(value))
+      :"";
+  }
+}
+function filteredReplies(){
+  const query=STATE.query.trim().toLowerCase();
+  return STATE.replies.filter(reply=>{
+    let matches=false;
+    if(STATE.filter==="archived")matches=!!reply.is_archived;
+    else if(reply.is_archived)matches=false;
+    else if(STATE.filter==="all")matches=true;
+    else if(STATE.filter==="interested")matches=reply.reply_category==="INTERESTED";
+    else if(STATE.filter==="unclear")matches=reply.reply_category==="UNCLEAR";
+    else if(STATE.filter==="not_interested")matches=reply.reply_category==="NOT_INTERESTED";
+    if(!matches||!query)return matches;
+    return [reply.candidate_name,reply.candidate_email,reply.sequence_name,reply.subject,reply.snippet]
+      .some(value=>String(value||"").toLowerCase().includes(query));
+  });
+}
+function updateCounts(){
+  const active=STATE.replies.filter(reply=>!reply.is_archived);
+  const values={
+    all:active.length,
+    interested:active.filter(reply=>reply.reply_category==="INTERESTED").length,
+    unclear:active.filter(reply=>reply.reply_category==="UNCLEAR").length,
+    not_interested:active.filter(reply=>reply.reply_category==="NOT_INTERESTED").length,
+    archived:STATE.replies.filter(reply=>reply.is_archived).length,
+  };
+  document.querySelectorAll("[data-count]").forEach(node=>{node.textContent=values[node.dataset.count]??0;});
+  $("replyCount").textContent=STATE.replies.length+" repl"+(STATE.replies.length===1?"y":"ies");
+  $("interestedCount").textContent=values.interested+" interested";
+  $("interestedCount").classList.toggle("hidden",values.interested===0);
+}
+function renderList(){
+  const list=$("replyList");
+  const replies=filteredReplies();
+  list.replaceChildren();
+  if(!replies.length){
+    const empty=document.createElement("div");
+    empty.className="empty";
+    const strong=document.createElement("strong");
+    strong.textContent=STATE.replies.length?"No matching replies":"No replies yet";
+    empty.append(strong,document.createTextNode(STATE.replies.length?"Try another filter or search.":"Paraform replies will appear here after the next refresh."));
+    list.append(empty);
+    return;
+  }
+  for(const reply of replies){
+    const row=document.createElement("button");
+    row.type="button";
+    row.className="reply-row"+(STATE.selectedId===reply.gmail_id?" active":"");
+    row.setAttribute("aria-pressed",STATE.selectedId===reply.gmail_id?"true":"false");
+    row.addEventListener("click",()=>selectReply(reply));
+
+    const top=document.createElement("div");top.className="row-top";
+    const avatar=document.createElement("div");avatar.className="avatar";avatar.textContent=initials(reply.candidate_name);
+    const who=document.createElement("div");who.className="who";
+    const nameLine=document.createElement("div");nameLine.className="name-line";
+    const name=document.createElement("span");name.className="name";name.textContent=reply.candidate_name||"Unknown candidate";
+    const date=document.createElement("time");date.className="date";date.dateTime=reply.date||"";date.textContent=formatDate(reply.date);
+    nameLine.append(name,date);
+    const one=document.createElement("div");one.className="one-liner";one.textContent=reply.candidate_one_liner||reply.candidate_email||"";
+    who.append(nameLine,one);top.append(avatar,who);
+
+    const chips=document.createElement("div");chips.className="row-chips";
+    chips.append(chip(reply.sequence_name||"Untitled sequence","sequence"));
+    const sentiment=sentimentChip(reply.reply_category);if(sentiment)chips.append(sentiment);
+    if(reply.is_archived)chips.append(chip("Archived","archived"));
+    const subject=document.createElement("div");subject.className="subject";subject.textContent=reply.subject||"(no subject)";
+    const snippet=document.createElement("div");snippet.className="snippet";snippet.textContent=reply.snippet||"";
+    row.append(top,chips,subject,snippet);list.append(row);
+  }
+}
+function paraformLink(reply){
+  return "https://www.paraform.com/sequences?detail="+encodeURIComponent(reply.sequence_id||"")+"&sequence_tab=inbox";
+}
+function detailHeader(reply){
+  const head=document.createElement("div");head.className="detail-head";
+  const titleRow=document.createElement("div");titleRow.className="detail-title-row";
+  const title=document.createElement("div");title.className="detail-title";
+  const h2=document.createElement("h2");h2.textContent=reply.subject||"(no subject)";
+  const candidate=document.createElement("div");candidate.className="candidate";candidate.textContent=reply.candidate_name||"Unknown candidate";
+  const email=document.createElement("div");email.className="email";email.textContent=reply.candidate_email||"";
+  title.append(h2,candidate,email);
+  const actions=document.createElement("div");actions.className="detail-actions";
+  const linkedIn=isLinkedInUrl(reply.candidate_linkedin_url);
+  if(linkedIn){
+    const link=document.createElement("a");link.className="btn ghost";link.href=linkedIn;link.target="_blank";link.rel="noopener noreferrer";link.textContent="LinkedIn ↗";actions.append(link);
+  }
+  const replyLink=document.createElement("a");replyLink.className="btn";replyLink.href=paraformLink(reply);replyLink.target="_blank";replyLink.rel="noopener noreferrer";replyLink.textContent=reply.can_reply?"Reply in Paraform ↗":"View in Paraform ↗";actions.append(replyLink);
+  titleRow.append(title,actions);
+  const meta=document.createElement("div");meta.className="detail-meta";
+  meta.append(chip(reply.sequence_name||"Untitled sequence","sequence"));
+  const sentiment=sentimentChip(reply.reply_category);if(sentiment)meta.append(sentiment);
+  if(reply.is_archived)meta.append(chip("Archived","archived"));
+  const from=document.createElement("span");from.className="from";from.textContent=formatDate(reply.date,true);meta.append(from);
+  head.append(titleRow,meta);return head;
+}
+function plainMessageBody(raw){
+  const entities={amp:"&",lt:"<",gt:">",quot:'"',apos:"'",nbsp:" ",ndash:"–",mdash:"—",hellip:"…"};
+  return String(raw||"")
+    .replace(/<(script|style|noscript|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,"")
+    .replace(/<\s*br\b[^>]*>/gi,"\n")
+    .replace(/<\s*\/?\s*(p|div|li|tr|blockquote|h[1-6])\b[^>]*>/gi,"\n")
+    .replace(/<[^>]*>/g,"")
+    .replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp|ndash|mdash|hellip);/gi,(match,entity)=>{
+      const key=entity.toLowerCase();
+      if(key[0]!=="#")return entities[key]??match;
+      const code=key[1]==="x"?parseInt(key.slice(2),16):parseInt(key.slice(1),10);
+      try{return Number.isFinite(code)?String.fromCodePoint(code):match;}catch(error){return match;}
+    })
+    .replace(/\r/g,"")
+    .replace(/[ \t]+\n/g,"\n")
+    .replace(/\n{3,}/g,"\n\n")
+    .trim();
+}
+function renderMessage(reply,message){
+  const detail=$("detail");detail.replaceChildren();
+  detail.append(detailHeader(reply));
+  const body=document.createElement("div");body.className="detail-body";
+  const meta=document.createElement("div");meta.className="message-meta";
+  const sender=[message?.from_name,message?.from].filter(Boolean).join(" · ");
+  meta.textContent=(sender?("From "+sender):"")+(message?.attachment_count?(" · "+message.attachment_count+" attachment"+(message.attachment_count===1?"":"s")):"");
+  const content=document.createElement("div");content.className="message-body";
+  content.textContent=plainMessageBody(message?.body)||reply.snippet||"No message body was returned.";
+  const note=document.createElement("div");note.className="reply-note";
+  note.textContent="Reply opens this sequence’s Inbox in Paraform. Choose the candidate thread there before sending.";
+  body.append(meta,content,note);detail.append(body);
+}
+function renderDetailLoading(reply){
+  const detail=$("detail");detail.replaceChildren();detail.append(detailHeader(reply));
+  const body=document.createElement("div");body.className="detail-body";
+  const loading=document.createElement("span");loading.className="loading";
+  const spinner=document.createElement("span");spinner.className="spinner";
+  loading.append(spinner,document.createTextNode("Loading message…"));body.append(loading);detail.append(body);
+}
+function renderDetailError(reply,message){
+  const detail=$("detail");detail.replaceChildren();detail.append(detailHeader(reply));
+  const body=document.createElement("div");body.className="detail-body";
+  const banner=document.createElement("div");banner.className="banner bad";banner.textContent=message;
+  body.append(banner);detail.append(body);
+}
+async function selectReply(reply){
+  STATE.selectedId=reply.gmail_id;renderList();
+  if(STATE.messages.has(reply.gmail_id)){renderMessage(reply,STATE.messages.get(reply.gmail_id));return;}
+  renderDetailLoading(reply);
+  try{
+    const response=await fetch("/api/inbox/message?gmail_id="+encodeURIComponent(reply.gmail_id),{headers:authHeaders(),cache:"no-store"});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok||!data.ok)throw new Error(data.error||"Message unavailable");
+    STATE.messages.set(reply.gmail_id,data.message||{});
+    if(STATE.selectedId===reply.gmail_id)renderMessage(reply,data.message||{});
+  }catch(error){
+    if(STATE.selectedId===reply.gmail_id)renderDetailError(reply,"Couldn’t load this message. Try selecting it again.");
+  }
+}
+function selectFirstVisible(){
+  const visible=filteredReplies();
+  const selected=visible.find(reply=>reply.gmail_id===STATE.selectedId);
+  if(selected){selectReply(selected);return;}
+  if(visible[0])selectReply(visible[0]);
+  else{
+    STATE.selectedId="";
+    $("detail").replaceChildren();
+    const empty=document.createElement("div");empty.className="detail-empty";
+    const strong=document.createElement("strong");strong.textContent="No message selected";
+    empty.append(strong,document.createTextNode("Choose a reply when one is available."));$("detail").append(empty);
+  }
+}
+async function loadHealth(){
+  try{
+    const response=await fetch("/api/inbox/health",{cache:"no-store"});
+    const health=await response.json();
+    if(!health.authRequired){setHealth("bad","Sign-in unavailable");showBanner("bad","Inbox is disabled because the Google sign-in gate is not configured.");}
+    else if(health.paraform==="expired"){setHealth("bad","Session expired");showBanner("bad","The Paraform session expired. Refresh the dashboard’s Paraform session before using Inbox.");}
+    else if(health.paraform!=="live"){setHealth("bad","Paraform unavailable");showBanner("bad","Inbox cannot reach Paraform right now.");}
+    else if(!health.cacheConfigured){setHealth("warn","Cache unavailable");showBanner("warn","Inbox is live, but its short-term feed cache is unavailable.");}
+    else setHealth("live","Paraform · live");
+    return health;
+  }catch(error){setHealth("bad","Backend unreachable");showBanner("bad","Inbox could not reach its backend.");return null;}
+}
+async function loadFeed(){
+  if(STATE.loading)return;
+  STATE.loading=true;$("feedMeta").textContent="Refreshing replies…";
+  try{
+    const response=await fetch("/api/inbox/feed",{headers:authHeaders(),cache:"no-store"});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok||!data.ok){
+      const error=new Error(data.error||"Feed unavailable");error.code=data.error;error.retryAfter=Number(data.retry_after_seconds)||0;throw error;
+    }
+    STATE.replies=Array.isArray(data.replies)?data.replies:[];
+    updateCounts();renderList();selectFirstVisible();
+    const scan=data.scan||{};
+    $("feedMeta").textContent="Updated "+formatDate(data.generated_at,true)+" · "+(scan.campaigns_succeeded??0)+" sequences checked";
+    if(data.partial){
+      showBanner("warn","Partial feed: "+(scan.campaigns_failed||0)+" sequence read"+((scan.campaigns_failed||0)===1?"":"s")+" failed. This result was not cached.");
+    }else showBanner("", "");
+    if(window.parent!==window)window.parent.postMessage({type:"raydar-inbox-counts",interested:data.counts?.interested||0,total:data.counts?.total||STATE.replies.length},location.origin);
+  }catch(error){
+    if(error.code==="feed_refresh_in_progress"){
+      $("feedMeta").textContent="Another Inbox refresh is finishing…";
+      showBanner("warn","Another Inbox refresh is already in progress. Retrying automatically.");
+      setTimeout(loadFeed,Math.max(1,error.retryAfter||3)*1000);
+    }else{
+      $("feedMeta").textContent="Refresh failed";
+      showBanner("bad",error.message==="paraform_auth_expired"?"The Paraform session expired.":"Replies could not be loaded. Try again in a moment.");
+    }
+  }finally{STATE.loading=false;}
+}
+function startApp(){loadHealth();loadFeed();if(!window.__inboxPoll)window.__inboxPoll=setInterval(loadFeed,180000);}
+
+$("search").addEventListener("input",event=>{STATE.query=event.target.value;renderList();selectFirstVisible();});
+document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{
+  STATE.filter=button.dataset.filter;
+  document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));
+  renderList();selectFirstVisible();
+}));
+
+async function init(){
+  const healthPromise=loadHealth();
+  let config={};
+  try{config=await fetch("/api/seq/config",{cache:"no-store"}).then(response=>response.json());}catch(error){}
+  AUTH.required=!!config.authRequired;AUTH.clientId=config.googleClientId;
+  if(Array.isArray(config.allowedDomains)&&config.allowedDomains.length)AUTH.domains=config.allowedDomains;
+  if(!AUTH.required){
+    $("gate").style.display="flex";$("gateErr").textContent="Google sign-in is not configured, so Inbox is fail-closed.";
+    await healthPromise;return;
+  }
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(session?.authenticated){
+    AUTH.authenticated=true;AUTH.email=session.email||"";$("gate").style.display="none";startApp();return;
+  }
+  $("gate").style.display="flex";
+  (function start(){
+    if(!(window.google&&google.accounts&&google.accounts.id))return setTimeout(start,150);
+    google.accounts.id.initialize({client_id:AUTH.clientId,callback:onCred});
+    google.accounts.id.renderButton($("gsi"),{theme:"filled_black",size:"large",text:"signin_with",shape:"pill"});
+  })();
+}
+async function onCred(response){
+  try{
+    const session=await RaydarAuth.signIn(response.credential);
+    AUTH.authenticated=true;AUTH.email=session.email||"";AUTH.token=null;
+    $("gate").style.display="none";startApp();
+  }catch(error){$("gateErr").textContent=error.code==="auth_session_not_configured"?"Long-lived sign-in is not configured yet.":"Sign-in failed — try again.";}
+}
+init();
+</script>
+</body>
+</html>

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const pages = ["paraai.html", "sequences.html", "enrich.html", "prep.html", "sourcing.html"];
+const pages = ["paraai.html", "sequences.html", "inbox.html", "enrich.html", "prep.html", "sourcing.html"];
 
 test("every authenticated dashboard page pins its sign-in gate to the top", async () => {
   for (const page of pages) {

@@ -54,12 +54,13 @@
     /* blue status pill — "Rescheduling requested" */
     .pill.blue { background:var(--blue-bg); color:var(--blue); } .pill.blue .d{background:var(--blue);}
     /* view tabs (Overview ⇄ Follow-ups) */
-    .tabs { display:flex; align-items:center; margin-bottom:24px; border-bottom:1px solid var(--line); }
+    .tabs { display:flex; align-items:center; margin-bottom:24px; border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:thin; }
     .tab { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:14.5px; font-weight:600; color:var(--ink-3);
-      padding:9px 2px; margin-right:26px; border-bottom:2px solid transparent; margin-bottom:-1px; display:inline-flex; align-items:center; gap:8px; transition:color .12s ease; }
+      padding:9px 2px; margin-right:26px; border-bottom:2px solid transparent; margin-bottom:-1px; display:inline-flex; align-items:center; gap:8px; transition:color .12s ease; flex:none; }
     .tab:hover { color:var(--ink-2); }
     .tab.active { color:var(--ink); border-bottom-color:var(--orange); }
     .tab .badge { display:inline-flex; align-items:center; justify-content:center; min-width:19px; height:19px; padding:0 6px; border-radius:10px; background:var(--bad); color:#fff; font-size:11px; font-weight:700; }
+    .tab .badge.good { background:var(--good); }
     /* follow-ups view */
     .fu-intro { font-size:13.5px; color:var(--ink-2); margin:0 2px 16px; max-width:700px; }
     .row.fu { grid-template-columns:1fr 1.45fr auto; }
@@ -298,6 +299,7 @@
       <button class="tab" id="tab-calls" onclick="showView('calls')">Calls</button>
       <button class="tab" id="tab-paraai" onclick="showView('paraai')">Para AI</button>
       <button class="tab" id="tab-sequences" onclick="showView('sequences')">Sequences</button>
+      <button class="tab" id="tab-inbox" onclick="showView('inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></button>
       <button class="tab" id="tab-enrich" onclick="showView('enrich')">Enrich</button>
       <button class="tab" id="tab-prep" onclick="showView('prep')">Prep</button>
     </div>
@@ -409,6 +411,10 @@
 
     <div id="view-sequences" hidden>
       <iframe id="seq-frame" title="Sequences" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
+    </div>
+
+    <div id="view-inbox" hidden>
+      <iframe id="inbox-frame" title="Inbox" style="width:100%;border:0;min-height:1250px;background:transparent"></iframe>
     </div>
 
     <div id="view-enrich" hidden>
@@ -829,14 +835,15 @@
       if (lastData) renderFollowups(lastData);
     }
 
-    let paraaiLoaded=false, seqLoaded=false, enrichLoaded=false, prepLoaded=false;
+    let paraaiLoaded=false, seqLoaded=false, inboxLoaded=false, enrichLoaded=false, prepLoaded=false;
     function showView(name){
-      ["overview","candidates","followups","history","analytics","calls","paraai","sequences","enrich","prep"].forEach(v=>{
+      ["overview","candidates","followups","history","analytics","calls","paraai","sequences","inbox","enrich","prep"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
       if(name==="paraai" && !paraaiLoaded){ $("paraai-frame").src="/paraai?embed=1"; paraaiLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
+      if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src="/inbox?embed=1"; inboxLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
       if(name==="prep" && !prepLoaded){ $("prep-frame").src="/prep?embed=1"; prepLoaded=true; }
       if(name==="candidates") ensureRoster();
@@ -845,8 +852,15 @@
       if(name==="analytics") ensurePlacements();
       if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
       else if(name==="paraai"){ if(location.hash!=="#paraai") history.replaceState(null,"","#paraai"); }
-      else if(location.hash==="#calls"||location.hash==="#paraai") history.replaceState(null,"",location.pathname);
+      else if(name==="inbox"){ if(location.hash!=="#inbox") history.replaceState(null,"","#inbox"); }
+      else if(location.hash==="#calls"||location.hash==="#paraai"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
     }
+    window.addEventListener("message",(event)=>{
+      if(event.origin!==location.origin||event.data?.type!=="raydar-inbox-counts") return;
+      const count=Math.max(0,Number(event.data.interested)||0);
+      $("inbox-badge").textContent=String(count);
+      $("inbox-badge").style.display=count?"inline-flex":"none";
+    });
 
     // ---- History + Analytics (from /api/history: per-day records) ----
     const BUCKETS = [
@@ -1570,6 +1584,7 @@
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
     if(location.hash==="#calls") showView("calls");
     if(location.hash==="#paraai") showView("paraai");
+    if(location.hash==="#inbox") showView("inbox");
   </script>
 </body>
 </html>
