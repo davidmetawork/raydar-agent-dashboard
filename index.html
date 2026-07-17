@@ -410,7 +410,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per durable screening call. <b>Nothing drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who rebook clear themselves automatically.</p>
+        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who complete or rebook clear themselves automatically.</p>
         <div id="followups"></div>
       </section>
     </div>
@@ -526,6 +526,11 @@
     // ---- follow-up action state (no-shows + failures the team actions) ----
     const ACTIONABLE = new Set(["no_show","audio_fail","error","joined_silent","incomplete"]);
     let actionsMap = {};   // { callId: { status, by, at } } — from /api/actions
+    function fuAction(c){
+      for (const alias of [c&&c.id,c&&c.rowId,c&&c.callId,c&&c.botId].filter(Boolean))
+        if (actionsMap[alias]) return actionsMap[alias];
+      return null;
+    }
     // A row's pill reflects the action status once set, else the raw verdict.
     function displayStatus(verdict, action){
       const st = action && action.status;
@@ -650,7 +655,7 @@
     }
     // One follow-up row: name · time · status + reason · Reschedule + checkboxes.
     function fuRow(c){
-      const act = actionsMap[c.id], st = (act||{}).status;
+      const act = fuAction(c), st = (act||{}).status;
       const ds = displayStatus(c.verdict, act);
       const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
       return `<div class="row fu${why&&why.border?" fu-flag":""}">
@@ -723,22 +728,52 @@
       }
       // candidates with an active/upcoming bot have rebooked → auto-resolved.
       const rebooked = new Set(((lastData&&lastData.upcoming)||[]).map(u=>fuNorm(u.candidate)));
-      const nameCounts = new Map();
+      // Follow-ups is a people queue, not a call archive: the newest outcome
+      // for one real candidate decides whether that person still needs follow-up.
+      // The lifecycle endpoint supplies a non-PII candidateRef derived from the
+      // exact Paraform profile. Legacy/unresolved calls fall back to normalized
+      // name; if one name is proven to represent multiple exact profiles, those
+      // ambiguous fallback calls stay separate instead of hiding a homonym.
+      const refsByName = new Map();
       for (const c of calls){
-        const key=fuNorm(c.candidate);
-        if (key) nameCounts.set(key,(nameCounts.get(key)||0)+1);
+        const name=fuNorm(c.candidate);
+        const ref=String((fuLedgerEntry(c)||{}).candidateRef||"").trim();
+        c.candidateRef=ref||null;
+        if (!name || !ref) continue;
+        let refs=refsByName.get(name);
+        if (!refs){ refs=new Set(); refsByName.set(name,refs); }
+        refs.add(ref);
+      }
+      const byCandidate = new Map();
+      for (const c of calls){
+        const name=fuNorm(c.candidate);
+        if (!name || name==="?" || name==="unknown") continue;
+        const knownRefs=refsByName.get(name);
+        const inferredRef=c.candidateRef
+          || (knownRefs&&knownRefs.size===1 ? [...knownRefs][0] : null);
+        const ambiguousFallback=!c.candidateRef&&knownRefs&&knownRefs.size>1;
+        const groupKey=inferredRef
+          ? "ref:"+inferredRef
+          : ambiguousFallback
+            ? "call:"+(c.botId||c.rowId||c.callId||c.id)
+            : "name:"+name;
+        let list=byCandidate.get(groupKey);
+        if (!list){ list=[]; byCandidate.set(groupKey,list); }
+        list.push(c);
       }
       const byTime = (a,b)=> new Date(b.startedAt)-new Date(a.startedAt);
       const open=[], manualDone=[], autoDone=[];
-      for (const call of calls){
-        const k = fuNorm(call.candidate);
-        if (!k || k==="?" || k==="unknown" || !ACTIONABLE.has(call.verdict)) continue;
-        const st = (actionsMap[call.id]||{}).status;
-        const uniqueName = nameCounts.get(k)===1;   // name-only rebook feeds fail closed on homonyms
-        if (uniqueName && humanResched.has(k))                  autoDone.push({ ...call, via:"human" }); // booked a live call with David
-        else if (uniqueName && rebooked.has(k))                 autoDone.push({ ...call, via:"rebook" }); // new AI interview booked
-        else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved") manualDone.push(call);
-        else                                                     open.push(call);
+      for (const list of byCandidate.values()){
+        list.sort(byTime);
+        const latest=list[0];
+        if (!ACTIONABLE.has(latest.verdict)) continue;
+        const k=fuNorm(latest.candidate);
+        const st=(fuAction(latest)||{}).status;
+        const nameIsExactHomonym=(refsByName.get(k)||new Set()).size>1;
+        if (!nameIsExactHomonym && humanResched.has(k))             autoDone.push({ ...latest, via:"human" });
+        else if (!nameIsExactHomonym && rebooked.has(k))            autoDone.push({ ...latest, via:"rebook" });
+        else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved") manualDone.push(latest);
+        else                                                        open.push(latest);
       }
       open.sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
       manualDone.sort(byTime); autoDone.sort(byTime);
@@ -854,9 +889,12 @@
         const when = e.at && !isNaN(Date.parse(e.at)) ? new Date(e.at).toLocaleDateString([],{month:"short",day:"numeric"}) : "";
         return { cls:"green", label:"✓ in sequence", title:`In "${e.sequenceName||"sequence"}"${when?` since ${when}`:""}` };
       }
-      if (stage==="observed")
+      if (stage==="observed" || stage==="confirmed_pending")
         return { cls:"amber", label:"automation pending",
-          title:"The lifecycle engine saw this call and is waiting for its confirmation pass before taking action." };
+          title:stage==="confirmed_pending" ? "The call passed its independent confirmation read and is durably queued for exact identity, booking, email, and delivery verification." : "The lifecycle engine saw this call and is waiting for its confirmation pass before taking action." };
+      if (fuStageIs(stage,["failed_booking_evidence"]))
+        return { cls:"amber", border:true, label:"booking check retrying",
+          title:"The exact original Calendar event, Paraform cancellation mail, or Paraform rebooking evidence could not be completely verified. Nothing was sent; automatic recovery will retry." };
       if (fuStageIs(stage,["failed_identity","failed_ambiguous_identity"]))
         return { cls:"amber", border:true, label:"needs recovery: identity",
           title:stage.includes("ambiguous") ? "The exact call matched more than one Paraform identity. Verify the candidate's LinkedIn profile." : "The exact call could not yet be tied to a Paraform profile. Automatic recovery will retry." };

@@ -29,15 +29,34 @@ function context(values = {}) {
   });
 }
 
-function backlogContext({ historyDays = [], calls = [], upcoming = [] } = {}) {
+function backlogContext({
+  historyDays = [],
+  calls = [],
+  upcoming = [],
+  actionsMap = {},
+  candidateRefs = {},
+} = {}) {
   return context({
     historyDays,
     lastData: { calls, upcoming },
-    actionsMap: {},
+    actionsMap,
     humanResched: new Set(),
     ACTIONABLE: new Set(["no_show", "audio_fail", "error", "joined_silent", "incomplete"]),
     FU_SEVERITY: { error: 0, audio_fail: 1, joined_silent: 2, no_show: 3, incomplete: 4 },
     fuNorm: (value) => String(value || "").trim().toLowerCase().replace(/\s+/g, " "),
+    fuAction: (row) => (
+      actionsMap[row?.id]
+      || actionsMap[row?.rowId]
+      || actionsMap[row?.callId]
+      || actionsMap[row?.botId]
+      || null
+    ),
+    fuLedgerEntry: (row) => {
+      for (const alias of [row?.id, row?.rowId, row?.callId, row?.botId]) {
+        if (candidateRefs[alias]) return { candidateRef: candidateRefs[alias] };
+      }
+      return null;
+    },
   });
 }
 
@@ -81,7 +100,7 @@ test("persistent backlog merges history/live copies only through durable call al
   assert.equal(result.open[0].endedAt, "2026-07-17T15:06:00.000Z");
 });
 
-test("same-name calls remain separate and name-only rebooking fails closed", () => {
+test("repeat calls collapse to the latest candidate outcome and clear on rebooking", () => {
   const ctx = backlogContext({
     historyDays: [{
       calls: [
@@ -93,11 +112,67 @@ test("same-name calls remain separate and name-only rebooking fails closed", () 
   });
 
   const result = runBacklog(ctx);
+  assert.equal(result.open.length, 0);
+  assert.equal(result.autoDone.length, 1);
+  assert.equal(result.autoDone[0].id, "row-b");
+});
+
+test("a newer successful call clears an older no-show for the same exact candidate", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [
+        { id: "old", b: "bot-old", t: "2026-07-17T15:00:00.000Z", c: "Ada Example", v: "no_show" },
+        { id: "new", b: "bot-new", t: "2026-07-17T16:00:00.000Z", c: "Ada Example", v: "success" },
+      ],
+    }],
+    candidateRefs: { "bot-old": "person-ada", "bot-new": "person-ada" },
+  }));
+  assert.equal(result.open.length, 0);
+  assert.equal(result.manualDone.length, 0);
+  assert.equal(result.autoDone.length, 0);
+});
+
+test("exact candidate refs preserve true homonyms and reject name-only rebooking", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [
+        { id: "row-a", b: "bot-a", t: "2026-07-17T15:00:00.000Z", c: "Same Name", v: "no_show" },
+        { id: "row-b", b: "bot-b", t: "2026-07-17T16:00:00.000Z", c: "Same Name", v: "no_show" },
+      ],
+    }],
+    upcoming: [{ candidate: "Same Name" }],
+    candidateRefs: { "bot-a": "person-one", "bot-b": "person-two" },
+  }));
   assert.deepEqual(
     Array.from(result.open, (row) => row.id).sort(),
     ["row-a", "row-b"],
   );
   assert.equal(result.autoDone.length, 0);
+});
+
+test("manual actions follow durable aliases after history/live id changes", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [{
+        id: "row-old",
+        b: "bot-one",
+        t: "2026-07-17T15:00:00.000Z",
+        c: "Ada Example",
+        v: "no_show",
+      }],
+    }],
+    calls: [{
+      id: "row-new",
+      rowId: "row-new",
+      botId: "bot-one",
+      startedAt: "2026-07-17T15:00:00.000Z",
+      candidate: "Ada Example",
+      verdict: "no_show",
+    }],
+    actionsMap: { "bot-one": { status: "resolved" } },
+  }));
+  assert.equal(result.open.length, 0);
+  assert.equal(result.manualDone.length, 1);
 });
 
 function lifecycleContext({ fetchImpl } = {}) {
@@ -249,6 +324,7 @@ test("follow-up stages explain pending, identity, email, verification, and expir
     failed_ambiguous_identity: "needs recovery: identity",
     failed_no_email: "needs email",
     enrolled_missing_email: "needs email",
+    failed_booking_evidence: "booking check retrying",
     failed_error: "recovery failed",
     enrolled_unverified: "verification pending",
     enrolling: "verification pending",
