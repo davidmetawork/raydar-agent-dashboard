@@ -1,5 +1,7 @@
 {
   "rewrites": [
+    { "source": "/login", "destination": "/login.html" },
+    { "source": "/login/", "destination": "/login.html" },
     { "source": "/agent-dashboard", "destination": "/index.html" },
     { "source": "/c/:id", "destination": "/call.html" },
     { "source": "/sequences", "destination": "/sequences.html" },

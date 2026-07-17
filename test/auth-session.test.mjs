@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   SESSION_COOKIE,
+  SESSION_COOKIE_DOMAIN,
   SESSION_TTL_SECONDS,
   clearSessionCookie,
   createSessionToken,
@@ -30,7 +31,7 @@ function responseRecorder() {
   };
 }
 
-test("signed trusted-browser sessions last one year and preserve the Raydar identity", () => {
+test("signed trusted-browser sessions last one year and preserve approved Raydar identities", () => {
   const token = createSessionToken({ email: "David@Raydar.xyz", domain: "raydar.xyz" }, { secret: SECRET, nowMs: NOW });
   const session = verifySessionToken(token, { secret: SECRET, nowMs: NOW, allowedDomains: ["raydar.xyz"] });
   assert.equal(session.email, "david@raydar.xyz");
@@ -40,6 +41,13 @@ test("signed trusted-browser sessions last one year and preserve the Raydar iden
   const aliasToken = createSessionToken({ email: "david@raydargroup.com", domain: "raydar.xyz" }, { secret: SECRET, nowMs: NOW });
   const aliasSession = verifySessionToken(aliasToken, { secret: SECRET, nowMs: NOW, allowedDomains: ["raydar.xyz", "raydargroup.com"] });
   assert.equal(aliasSession.email, "david@raydargroup.com", "Workspace aliases may differ from Google's hosted-domain claim");
+
+  const personalToken = createSessionToken({ email: "david@davidphillips.world" }, { secret: SECRET, nowMs: NOW });
+  assert.equal(verifySessionToken(personalToken, {
+    secret: SECRET,
+    nowMs: NOW,
+    allowedDomains: ["raydar.xyz", "raydargroup.com", "davidphillips.world"],
+  }).domain, "davidphillips.world");
 });
 
 test("sessions reject tampering, expiry, wrong secrets, and removed domains", () => {
@@ -51,7 +59,7 @@ test("sessions reject tampering, expiry, wrong secrets, and removed domains", ()
   assert.throws(() => createSessionToken({ email: "david@raydar.xyz" }, { secret: "too-short", nowMs: NOW }), /auth_session_not_configured/);
 });
 
-test("session cookies are host-wide, HttpOnly, secure, same-site, and explicitly clearable", () => {
+test("session cookies are Raydar-wide, HttpOnly, secure, same-site, and explicitly clearable", () => {
   const issued = issueSession({ email: "david@raydar.xyz", domain: "raydar.xyz" }, { secret: SECRET, nowMs: NOW });
   const cookie = sessionCookie(issued.token, { nowMs: NOW });
   assert.match(cookie, new RegExp(`^${SESSION_COOKIE}=`));
@@ -60,8 +68,9 @@ test("session cookies are host-wide, HttpOnly, secure, same-site, and explicitly
   assert.match(cookie, /Secure/);
   assert.match(cookie, /SameSite=Lax/);
   assert.match(cookie, new RegExp(`Max-Age=${SESSION_TTL_SECONDS}`));
-  assert.doesNotMatch(cookie, /Domain=/);
+  assert.match(cookie, new RegExp(`Domain=${SESSION_COOKIE_DOMAIN}`));
   assert.match(clearSessionCookie(), /Max-Age=0/);
+  assert.match(clearSessionCookie(), new RegExp(`Domain=${SESSION_COOKIE_DOMAIN}`));
 });
 
 test("protected APIs accept the shared session without another Google lookup", async () => {
@@ -151,4 +160,17 @@ test("every Google-gated dashboard page restores and exchanges the shared sessio
   assert.doesNotMatch(client, /localStorage|sessionStorage/);
   assert.match(client, /credentials: "same-origin"/);
   assert.match(client, /BroadcastChannel\("raydar-auth"\)/, "sign-in should wake already-loaded sibling tabs and iframes");
+});
+
+test("global middleware protects monitor pages but leaves login, APIs, and call links public", async () => {
+  const middleware = await readFile(new URL("../middleware.ts", import.meta.url), "utf8");
+  const config = await readFile(new URL("../vercel.json", import.meta.url), "utf8");
+  const login = await readFile(new URL("../login.html", import.meta.url), "utf8");
+  assert.match(middleware, /__Secure-raydar_session/);
+  assert.match(middleware, /davidphillips\.world/);
+  assert.match(middleware, /c\(\?:\/\|\$\)/, "the public /c/* capability links must bypass auth");
+  assert.match(middleware, /api\(\?:\/\|\$\)/, "machine and application APIs keep their own auth contracts");
+  assert.match(config, /"source": "\/login"/);
+  assert.match(login, /@davidphillips\.world/);
+  assert.match(login, /safeReturnTo/);
 });

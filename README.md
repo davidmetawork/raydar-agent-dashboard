@@ -4,11 +4,14 @@ Static host and isolated serverless tools for **monitor.raydar.xyz**. The main
 Monitor page loads its frozen status contract from `webview-lake.vercel.app`.
 Standalone workspaces live at `/sequences`, `/enrich`, and `/sourcing`.
 
-Protected workspaces share one Raydar-domain Google login. The server exchanges
-the verified Google credential for a host-wide, HttpOnly trusted-browser cookie
-with a rolling one-year lifetime, so navigating among Sequences, Enrich, Prep,
-Para AI, and Sourcing does not prompt again. `AUTH_SESSION_SECRET` signs the
-cookie; rotating it revokes every trusted-browser session.
+Every internal page shares one Raydar Google login. The server exchanges the
+verified Google credential for a `raydar.xyz` domain-wide, HttpOnly
+trusted-browser cookie with a rolling one-year lifetime, so monitor, docs,
+training, Sequences, Enrich, Prep, Para AI, and Sourcing do not prompt again.
+Allowed Google-account domains are `raydar.xyz`, `raydargroup.com`, and
+`davidphillips.world`. `AUTH_SESSION_SECRET` signs the cookie; rotating it on all
+protected projects revokes every trusted-browser session. Standalone `/c/<id>`
+call links remain intentionally public capability URLs.
 
 The Sourcing workspace turns an approved Paraform role into a versioned native
 filter set and job-specific evaluation rubric, maps the role to a review Project

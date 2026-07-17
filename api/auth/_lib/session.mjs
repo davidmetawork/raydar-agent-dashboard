@@ -1,11 +1,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export const SESSION_COOKIE = "__Host-raydar_session";
+export const SESSION_COOKIE = "__Secure-raydar_session";
 export const SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
+export const SESSION_COOKIE_DOMAIN = "raydar.xyz";
 
 const GOOGLE_CLIENT_ID = () => process.env.GOOGLE_CLIENT_ID || "";
 const SESSION_SECRET = () => process.env.AUTH_SESSION_SECRET || "";
-const allowedDomains = () => (process.env.ALLOWED_DOMAINS || "raydar.xyz,raydargroup.com")
+const allowedDomains = () => (process.env.ALLOWED_DOMAINS || "raydar.xyz,raydargroup.com,davidphillips.world")
   .split(",").map((domain) => domain.trim().toLowerCase()).filter(Boolean);
 
 function authError(code, message) {
@@ -88,11 +89,11 @@ export function sessionFromRequest(req) {
 export function sessionCookie(token, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
   const expires = new Date(nowMs + SESSION_TTL_SECONDS * 1000).toUTCString();
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}; Expires=${expires}; Priority=High`;
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Domain=${SESSION_COOKIE_DOMAIN}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}; Expires=${expires}; Priority=High`;
 }
 
 export function clearSessionCookie() {
-  return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Priority=High`;
+  return `${SESSION_COOKIE}=; Domain=${SESSION_COOKIE_DOMAIN}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Priority=High`;
 }
 
 export function issueSession(identity, options = {}) {

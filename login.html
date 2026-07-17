@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex" />
+<title>Raydar · Sign in</title>
+<link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=2" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root { --cream:#f6f3e9; --ink:#16140f; --muted:#716c61; --line:#e9e3d5; --orange:#ff5e00; --card:#fff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; }
+  body { min-height:100vh; display:grid; place-items:center; padding:24px; background:var(--cream); color:var(--ink); font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { width:min(430px,100%); padding:38px 34px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 18px 55px rgba(30,24,12,.09); text-align:center; }
+  .mark { width:52px; height:52px; margin:0 auto 20px; border-radius:50%; display:grid; place-items:center; background:var(--orange); color:#fff; font-family:"PP Grafier Display",Georgia,serif; font-size:29px; }
+  h1 { margin:0; font-family:"PP Grafier Display",Georgia,serif; font-size:31px; font-weight:500; letter-spacing:-.025em; }
+  p { margin:11px auto 25px; color:var(--muted); font-size:15px; line-height:1.5; }
+  #gsi { min-height:44px; display:flex; justify-content:center; }
+  #status { min-height:20px; margin-top:17px; color:#b33b3f; font-size:13px; }
+  .domains { margin-top:23px; padding-top:18px; border-top:1px solid var(--line); color:#918b7d; font-size:12px; line-height:1.55; }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark">R</div>
+  <h1>Sign in to Raydar</h1>
+  <p>Use an approved Google account to access Raydar’s internal tools, documentation, and training corpus.</p>
+  <div id="gsi"></div>
+  <div id="status" role="alert"></div>
+  <div class="domains">Allowed: @raydar.xyz · @raydargroup.com · @davidphillips.world</div>
+</main>
+<script>
+  const statusEl = document.getElementById("status");
+  const requested = new URLSearchParams(location.search).get("return_to") || "/";
+
+  function safeReturnTo(value) {
+    try {
+      const target = new URL(value, location.origin);
+      const raydarHost = target.hostname === "raydar.xyz" || target.hostname.endsWith(".raydar.xyz");
+      return target.protocol === "https:" && raydarHost ? target.href : location.origin + "/";
+    } catch {
+      return location.origin + "/";
+    }
+  }
+
+  const returnTo = safeReturnTo(requested);
+
+  async function onCredential(response) {
+    statusEl.textContent = "Signing in…";
+    try {
+      await RaydarAuth.signIn(response.credential);
+      location.replace(returnTo);
+    } catch (error) {
+      statusEl.textContent = error.code === "forbidden"
+        ? "Use a @raydar.xyz, @raydargroup.com, or @davidphillips.world Google account."
+        : "Sign-in failed. Please try again.";
+    }
+  }
+
+  async function start() {
+    const existing = await RaydarAuth.session().catch(() => null);
+    if (existing?.authenticated) {
+      location.replace(returnTo);
+      return;
+    }
+    const config = await fetch("/api/auth/config", { cache:"no-store" }).then((response) => response.json()).catch(() => null);
+    if (!config?.googleClientId || !config?.durableSessionEnabled) {
+      statusEl.textContent = "Raydar sign-in is temporarily unavailable.";
+      return;
+    }
+    if (!(window.google && google.accounts && google.accounts.id)) {
+      setTimeout(start, 150);
+      return;
+    }
+    google.accounts.id.initialize({ client_id: config.googleClientId, callback: onCredential });
+    google.accounts.id.renderButton(document.getElementById("gsi"), {
+      theme:"filled_black", size:"large", text:"signin_with", shape:"pill", width:300,
+    });
+  }
+
+  start();
+</script>
+</body>
+</html>
