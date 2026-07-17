@@ -48,6 +48,9 @@ const TERMINAL_ERROR_CODES = new Set([
 const PREWRITE_STATES = new Set([
   "detected", "resolving_identity", "extracting", "ready_to_submit", "error",
 ]);
+const SETTLED_NON_SUCCESS_VERDICTS = new Set([
+  "partial", "no_show", "audio_fail", "error", "joined_silent", "silent_fail", "incomplete",
+]);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 
 const bool = (value, fallback = false) => {
@@ -176,7 +179,15 @@ export function automationCallCutoff(call, config, { historicalAuthorized = fals
   return { allowed: true, reason: null };
 }
 
-function callReady(call, config, { historicalAuthorized = false } = {}) {
+export function automationCallReadiness(
+  call,
+  config,
+  {
+    historicalAuthorized = false,
+    queueSource = "unknown",
+    queueAttempts = 0,
+  } = {},
+) {
   if (config.strictScreenerSource && call?.source?.isScreener !== true) {
     return { ready: false, terminal: call?.source?.isScreener === false, reason: "call source unverified" };
   }
@@ -185,7 +196,19 @@ function callReady(call, config, { historicalAuthorized = false } = {}) {
     return { ready: false, terminal: cutoff.terminal, reason: cutoff.reason };
   }
   const verdict = String(call?.verdict?.verdict || call?.verdict || "").toLowerCase();
-  if (verdict === "pending" || !call?.media?.hasTranscript || !Array.isArray(call?.transcript) || !call.transcript.length) {
+  const transcriptReady = Boolean(
+    call?.media?.hasTranscript &&
+    Array.isArray(call?.transcript) &&
+    call.transcript.length,
+  );
+  if (verdict === "pending" || !transcriptReady) {
+    const terminalVerdict = SETTLED_NON_SUCCESS_VERDICTS.has(verdict);
+    const finalTranscriptSignal = queueSource === "recall:transcript.done";
+    const settleAttempts = Math.max(0, Number(queueAttempts) || 0);
+    const settleLimit = finalTranscriptSignal && verdict !== "silent_fail" ? 4 : 20;
+    if (terminalVerdict && settleAttempts >= settleLimit) {
+      return { ready: false, terminal: true, reason: `call verdict is ${verdict}` };
+    }
     return { ready: false, terminal: false, reason: "call artifacts are still settling" };
   }
   if (!isSuccessfulCall(call)) return { ready: false, terminal: true, reason: `call verdict is ${verdict || "unknown"}` };
@@ -245,7 +268,11 @@ export async function processAutoJob(
     (config.strictScreenerSource && job.callSourceVerified !== true && job.state === "ready_to_submit")
   ) {
     const call = await fetchCall(id);
-    const readiness = callReady(call, config, { historicalAuthorized });
+    const readiness = automationCallReadiness(call, config, {
+      historicalAuthorized,
+      queueSource,
+      queueAttempts,
+    });
     if (!readiness.ready) {
       return readiness.terminal
         ? { action: "complete", state: "ineligible_call", detail: readiness.reason }

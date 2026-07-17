@@ -7,6 +7,7 @@ import {
   autoEligibility,
   automationApprovalSource,
   automationCallCutoff,
+  automationCallReadiness,
   automationExecutionEnabled,
   automationRetryDecision,
 } from "../api/paraai/_lib/auto.mjs";
@@ -220,6 +221,77 @@ test("automation cutoff rejects old webhook jobs but preserves explicit backfill
   });
   assert.deepEqual(automationCallCutoff(oldCall, config, { historicalAuthorized: true }), {
     allowed: true,
+    reason: null,
+  });
+});
+
+test("final transcript events stop retrying settled no-shows without racing late success artifacts", () => {
+  const config = {
+    strictScreenerSource: true,
+    notBeforeMs: Date.parse("2026-07-16T20:00:00.000Z"),
+  };
+  const noShow = {
+    joinAt: "2026-07-16T20:01:00.000Z",
+    source: { isScreener: true },
+    verdict: { verdict: "no_show" },
+    media: { hasTranscript: false },
+    transcript: [],
+  };
+  assert.deepEqual(automationCallReadiness(noShow, config, {
+    queueSource: "recall:transcript.done",
+    queueAttempts: 3,
+  }), {
+    ready: false,
+    terminal: false,
+    reason: "call artifacts are still settling",
+  });
+  assert.deepEqual(automationCallReadiness(noShow, config, {
+    queueSource: "recall:transcript.done",
+    queueAttempts: 4,
+  }), {
+    ready: false,
+    terminal: true,
+    reason: "call verdict is no_show",
+  });
+  assert.equal(automationCallReadiness(noShow, config, {
+    queueSource: "recall:bot.done",
+    queueAttempts: 4,
+  }).terminal, false);
+  assert.equal(automationCallReadiness(noShow, config, {
+    queueSource: "recall:bot.done",
+    queueAttempts: 20,
+  }).terminal, true);
+  for (const verdict of ["in_progress", "unexpected_future_verdict"]) {
+    assert.equal(automationCallReadiness({
+      ...noShow,
+      verdict: { verdict },
+    }, config, {
+      queueSource: "recall:transcript.done",
+      queueAttempts: 100,
+    }).terminal, false, verdict);
+  }
+
+  const lateSuccess = {
+    ...noShow,
+    verdict: { verdict: "success" },
+  };
+  assert.equal(automationCallReadiness(lateSuccess, config, {
+    queueSource: "recall:transcript.done",
+    queueAttempts: 20,
+  }).terminal, false);
+  assert.deepEqual(automationCallReadiness({
+    ...lateSuccess,
+    media: { hasTranscript: true },
+    transcript: [
+      { role: "candidate", text: "I joined and I am actively exploring a new role with the right engineering team." },
+      { role: "candidate", text: "I am open to discussing the opportunity and sharing the relevant details." },
+    ],
+  }, config, {
+    queueSource: "recall:transcript.done",
+    queueAttempts: 20,
+  }), {
+    ready: true,
+    terminal: false,
     reason: null,
   });
 });
