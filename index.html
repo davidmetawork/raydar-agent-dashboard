@@ -656,11 +656,11 @@
     // One follow-up row: name · time · status + reason · Reschedule + checkboxes.
     function fuRow(c){
       const act = fuAction(c), st = (act||{}).status;
-      const ds = displayStatus(c.verdict, act);
+      const ds = fuDisplayStatus(c, act);
       const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
       return `<div class="row fu${why&&why.border?" fu-flag":""}">
         <div class="who">${nameLink(c.candidate)}<span class="t">${fmtTime(c.startedAt)}</span></div>
-        <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(shortWhat(c.verdict))}</span></div>
+        <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(fuShortWhat(c))}</span></div>
         <div class="fu-actions">
           <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
           <span class="fu-marks">
@@ -674,9 +674,10 @@
     // Read-only "Rescheduled (auto)" row — candidate auto-detected as rebooked.
     // `via:"human"` = booked a live call with David (calendar); else a new AI interview.
     function fuAutoRow(c){
+      const prior = fuPriorOutcomeLabel(c);
       const sub = c.via==="human"
-        ? `${esc(verdictView(c.verdict).label)} → booked a live call with you`
-        : `${esc(verdictView(c.verdict).label)} → new interview booked`;
+        ? `${esc(prior)} → booked a live call with you`
+        : `${esc(prior)} → new interview booked`;
       return `<div class="row fu done-auto">
         <div class="who">${nameLink(c.candidate)}<span class="t">${fmtTime(c.startedAt)}</span></div>
         <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${sub}</span></div>
@@ -783,7 +784,8 @@
     function renderFollowups(d){
       const { open, manualDone, autoDone } = buildBacklog();
       const errors  = open.filter(c=>c.verdict==="audio_fail"||c.verdict==="error"||c.verdict==="joined_silent");
-      const noshows = open.filter(c=>c.verdict==="no_show");
+      const noshows = open.filter(c=>c.verdict==="no_show" && fuIsDefinitiveNoShow(c));
+      const unverified = open.filter(c=>c.verdict==="no_show" && !fuIsDefinitiveNoShow(c));
       const didnt   = open.filter(c=>c.verdict==="incomplete");   // joined but didn't finish — not a failure
       const doneCount = manualDone.length + autoDone.length;
       const openN = open.length;
@@ -798,7 +800,8 @@
         ? `<div class="fu-completed"><div class="fu-group-head done">Handled <span class="n">${doneCount}</span></div><div class="list">${manualDone.map(fuRow).join("")}${autoDone.map(fuAutoRow).join("")}</div></div>`
         : "";
       const html = groupBlock("Errors & failures", errors.map(fuRow))
-                 + groupBlock("No-shows", noshows.map(fuRow))
+                 + groupBlock("Confirmed no-shows", noshows.map(fuRow))
+                 + groupBlock("Attendance unverified", unverified.map(fuRow))
                  + groupBlock("Didn't finish", didnt.map(fuRow))
                  + completedBlock;
       $("followups").innerHTML = (openN||doneCount)
@@ -864,6 +867,37 @@
       return Number.isFinite(endedMs) && nowMs-endedMs < FU_PENDING_MS;
     }
     const fuStageIs = (stage, names) => names.some(name=>stage===name||stage===`manual_${name}`);
+    function fuIsDefinitiveNoShow(c){
+      return c?.verdict==="no_show"
+        && fuLedgerEntry(c)?.definitiveNoShow===true;
+    }
+    function fuOutreachStopped(c){
+      const stage=String(fuLedgerEntry(c)?.stage||"");
+      return stage.startsWith("paused") || stage.startsWith("removed");
+    }
+    function fuDisplayStatus(c, action){
+      if (fuOutreachStopped(c))
+        return { cls:"muted", label:"Outreach stopped" };
+      if (action?.status==="rescheduled" || action?.status==="resolved")
+        return displayStatus(c.verdict,action);
+      if (c?.verdict==="no_show" && !fuIsDefinitiveNoShow(c))
+        return { cls:"warn", label:"Attendance unverified" };
+      if (c?.verdict==="no_show" && !action)
+        return { cls:"yellow", label:"Confirmed no-show" };
+      return displayStatus(c.verdict,action);
+    }
+    function fuShortWhat(c){
+      if (c?.verdict!=="no_show") return shortWhat(c?.verdict);
+      return fuIsDefinitiveNoShow(c)
+        ? "Explicit recorder outcome: nobody ever joined"
+        : "Recorder label only — exact no-one-ever-joined proof is unavailable";
+    }
+    function fuPriorOutcomeLabel(c){
+      if (c?.verdict!=="no_show") return verdictView(c?.verdict).label;
+      return fuIsDefinitiveNoShow(c)
+        ? "Confirmed no-show"
+        : "Attendance unverified";
+    }
 
     // FEATURE 1 — the reason chip: why the engine did / didn't act on this row.
     function fuReason(c){
@@ -882,6 +916,13 @@
         return { cls:"amber", border:true, label:"not auto-evaluated",
           title:"No durable lifecycle decision is attached to this call. Review the exact call in Paraform." };
       const stage = String(e.stage||"");
+      if (c.verdict==="no_show" && e.definitiveNoShow!==true){
+        if (stage.startsWith("paused") || stage.startsWith("removed"))
+          return { cls:"", label:"outreach stopped: unverified",
+            title:"The recorder's no-show label lacked explicit no-one-ever-joined proof, so sequence outreach was stopped. The action history is retained for audit." };
+        return { cls:"amber", border:true, label:"attendance unverified",
+          title:"The recorder labelled this call a no-show, but Recall did not provide its explicit no-one-ever-joined outcome. Nothing will be sent automatically." };
+      }
       if (stage==="enrolled" || stage==="manual_enrolled"){
         if (e.deliveryReady!==true)
           return { cls:"amber", border:true, label:"verification pending",
