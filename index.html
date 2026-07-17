@@ -415,7 +415,7 @@
             <button id="cd-rall" onclick="cdRange('all')">All</button>
           </div>
           <div class="cd-range">
-            <button id="cd-fneeds" onclick="cdNeeds()" title="Only rows missing Source, Call Type, Call Status, or (for successful calls) Outcome — plus human calls awaiting confirm. No-shows and failures aren't listed once their fields are set.">Needs action</button>
+            <button id="cd-fqueue" onclick="cdMatchQueue()" title="Successful Agent or Human calls that are confirmed Added to Para AI and still need a matching outcome. Paraform sequence membership is verified before a candidate is queued.">Match Queue (…)</button>
           </div>
         </div>
         <div class="list cd-wrap" id="cd-table-wrap"><div class="empty">Loading candidates…</div></div>
@@ -1334,8 +1334,8 @@
     const CD_SOURCES  = ["Job Post","Connector","Outreach"];
     const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
     const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-    let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
-    const cdFilters = { q:"", type:"all", status:"all", paraai:"all", outcome:"all", range:"30", needs:false };
+    let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, rosterOutcomeVerified=false, rosterOutcomeVerifyFailed=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
+    const cdFilters = { q:"", type:"all", status:"all", paraai:"all", outcome:"all", range:"30", matchQueue:false };
     const cdSourceChecked = new Set();   // keys already asked of /api/roster/source
     const cdNormName = (value) => String(value||"").normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g," ");
 
@@ -1388,63 +1388,88 @@
     const CD_STATUS_CLS = { success:"good", no_show:"yellow", bad:"bad", upcoming:"blue", held:"warn", live:"good cd-pulse", quiet:"muted", other:"muted" };
     const cdStatusPill = (status) =>
       `<span class="pill ${CD_STATUS_CLS[cdStatusKey(status)]}"><span class="d"></span>${cdEsc(String(status||"—").trim()||"—")}</span>`;
-    const cdParaAIKey = (row) => row?.paraAIStatus==="added" ? "added" : "not_added";
+    const cdParaAIKey = (row) => row?.paraAIStatus==="added" ? "added" : row?.paraAIStatus==="not_added" ? "not_added" : "unknown";
+    const cdEffectiveOutcome = (row) => String(row?.outcome||row?.verifiedOutcome||"").trim();
     function cdParaAIPill(row){
-      const added=cdParaAIKey(row)==="added";
+      const key=cdParaAIKey(row), added=key==="added";
       const title=row?.paraAIAmbiguous
         ? "Multiple Paraform candidates share this name, so Added is not assumed."
+        : key==="unknown"
+          ? "Checking Paraform Talent Network membership."
         : added
-          ? row?.paraAISource==="local_confirmed"
+          ? row?.paraAISource==="outcome_sequence"
+            ? "Exact candidate-ID membership in a reviewed outcome sequence confirms this candidate was added to Para AI."
+            : row?.paraAISource==="local_confirmed"
             ? "A read-back-verified Para AI submission confirms Talent Network membership."
             : "Paraform confirms this candidate is in the Para AI Talent Network."
           : "Paraform does not currently confirm Talent Network membership.";
-      return `<span class="pill cd-paraai ${added?"good":"yellow"}" title="${cdEsc(title)}"><span class="d"></span>${added?"Added":"Not Added"}</span>`;
+      return `<span class="pill cd-paraai ${added?"good":key==="unknown"?"muted":"yellow"}" title="${cdEsc(title)}"><span class="d"></span>${added?"Added":key==="unknown"?"Checking…":"Not Added"}</span>`;
     }
 
-    // "Needs action" inbox rule: missing Source / Call Type / Status is always
-    // actionable; "Held - confirm" awaits David's confirm. Outcome is only
-    // actionable for a call that actually HAPPENED (success): the Sent List /
-    // No Matches disposition needs a real conversation. No-shows, errors, and
-    // audio-fails have no outcome to record here — their follow-up is the
-    // Follow-ups tab / lifecycle engine, so they don't belong in this inbox
-    // once Source/Type/Status are set.
-    function cdNeedsAction(r){
-      const s=String(r.status||"").trim(), sk=cdStatusKey(s);
-      // No-shows never belong in the inbox: the candidate didn't engage, so
-      // there's no roster work here that matters (their Source, if unknown, is
-      // low-value metadata and often un-derivable). Reschedule / re-sequence
-      // for no-shows lives in the Follow-ups tab + the lifecycle engine.
-      if(sk==="no_show") return false;
-      // Upcoming/live/pending: nothing to complete until the call has happened
-      if(sk==="upcoming" || sk==="live" || s.toLowerCase()==="pending") return false;
-      if(!String(r.source||"").trim()) return true;
-      if(!String(r.callType||"").trim()) return true;
-      if(!s) return true;
-      if(sk==="held") return true;
-      if(sk==="success" && !String(r.outcome||"").trim()) return true;
-      return false;
+    // Match Queue is candidate-level, not call-level. For repeat callers only
+    // the newest successful call can appear. Exact Paraform candidate IDs are
+    // authoritative; normalized name is used only after the backend proves the
+    // name maps to one unambiguous candidate.
+    function cdQueueIdentity(r){
+      if(r?.paraAIAmbiguous===true) return "";
+      return r?.paraAICandidateUserId ? `id:${r.paraAICandidateUserId}` : "";
     }
-    function cdNeeds(){
-      cdFilters.needs=!cdFilters.needs;
-      $("cd-fneeds").classList.toggle("on", cdFilters.needs);
-      if(cdFilters.needs) cdRange("all");   // the inbox ignores the date window
-      else renderRoster();
+    function cdLatestSuccessfulRows(){
+      const latest=new Map();
+      for(const row of (rosterRows||[])){
+        if(cdStatusKey(row.status)!=="success" || !String(row.callType||"").trim()) continue;
+        const identity=cdQueueIdentity(row);
+        if(!identity) continue;
+        const prior=latest.get(identity);
+        if(!prior || cdWhen(row)>cdWhen(prior)) latest.set(identity,row);
+      }
+      return latest;
+    }
+    function cdInMatchQueue(r, latest=cdLatestSuccessfulRows()){
+      if(!rosterOutcomeVerified) return false;
+      const identity=cdQueueIdentity(r);
+      return Boolean(
+        identity
+        && latest.get(identity)===r
+        && String(r.callType||"").trim()
+        && cdStatusKey(r.status)==="success"
+        && cdParaAIKey(r)==="added"
+        && !r.outcomeComplete
+        && !cdEffectiveOutcome(r)
+      );
+    }
+    function cdMatchQueue(){
+      cdFilters.matchQueue=!cdFilters.matchQueue;
+      if(cdFilters.matchQueue){
+        cdFilters.q="";
+        cdFilters.type="all";
+        cdFilters.status="all";
+        cdFilters.paraai="all";
+        cdFilters.outcome="all";
+        $("cd-q").value="";
+        $("cd-ftype").value="all";
+        $("cd-fstatus").value="all";
+        $("cd-fparaai").value="all";
+        $("cd-foutcome").value="all";
+        cdRange("all");
+      }else renderRoster();
     }
     function cdFiltered(){
       const f=cdFilters, q=f.q.trim().toLowerCase();
       const cut = f.range==="all" ? 0 : Date.now() - Number(f.range)*864e5;
+      const latest=cdLatestSuccessfulRows();
       const rows = (rosterRows||[]).filter(r=>{
         if(q && !String(r.candidate||"").toLowerCase().includes(q)) return false;
         if(f.type!=="all" && (cdIsHuman(r)?"human":"agent")!==f.type) return false;
         if(f.status!=="all" && String(r.status||"").trim()!==f.status) return false;
         if(f.paraai!=="all" && cdParaAIKey(r)!==f.paraai) return false;
         if(f.outcome!=="all"){
-          const o=String(r.outcome||"").trim();
+          const o=cdEffectiveOutcome(r);
           if(f.outcome==="__blank"){ if(o) return false; }
           else if(o!==f.outcome) return false;
         }
         if(cut){ const t=cdWhen(r); if(t && t<cut) return false; }   // undated rows stay visible
-        if(f.needs && !cdNeedsAction(r)) return false;
+        if(f.matchQueue && !cdInMatchQueue(r,latest)) return false;
         return true;
       });
       rows.sort((a,b)=>cdWhen(b)-cdWhen(a));
@@ -1484,11 +1509,11 @@
     function cdRow(r,i){
       const human = cdIsHuman(r);
       const sKey = cdStatusKey(r.status);
-      const outcome = String(r.outcome||"").trim();
       const typePill = human ? `<span class="pill warn"><span class="d"></span>Human</span>`
                              : `<span class="pill live"><span class="d"></span>Agent</span>`;
       const heldBtns = (human && sKey==="held")
         ? `<div class="cd-quick"><button class="cd-mini good" onclick="cdSet(${i},'status','Success')">Success</button><button class="cd-mini" onclick="cdSet(${i},'status','No-show')">No-show</button></div>` : "";
+      const displayOutcome = cdEffectiveOutcome(r);
       return `<tr>
         <td class="cd-when">${cdDate(r)}</td>
         <td class="who">${nameLink(r.candidate)}${gmailLink(r.candidate)}</td>
@@ -1496,7 +1521,7 @@
         <td>${typePill}</td>
         <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
         <td>${cdParaAIPill(r)}</td>
-        <td>${cdSelect(i,"outcome",CD_OUTCOMES,r.outcome)}${cdErrIn(r,"outcome")}</td>
+        <td>${cdSelect(i,"outcome",CD_OUTCOMES,displayOutcome)}${cdErrIn(r,"outcome")}</td>
         <td>${cdNoteCell(i,r)}${cdErrIn(r,"notes")}</td>
       </tr>`;
     }
@@ -1506,13 +1531,26 @@
       cdSyncStatusOptions();
       const rows = cdFiltered();
       cdVisible = rows;
-      const need = rows.filter(r=>cdStatusKey(r.status)==="success" && !String(r.outcome||"").trim()).length;
-      $("cd-count").textContent = `${rows.length} call${rows.length===1?"":"s"} · ${need} need outcome`;
-      const needsAll=(rosterRows||[]).filter(cdNeedsAction).length;
-      const nb=$("cd-fneeds"); if(nb) nb.textContent = `Needs action (${needsAll})`;
+      const latest=cdLatestSuccessfulRows();
+      const queueCount=(rosterRows||[]).filter(r=>cdInMatchQueue(r,latest)).length;
+      $("cd-count").textContent = cdFilters.matchQueue
+        ? `${rows.length} candidate${rows.length===1?"":"s"} need a match outcome`
+        : `${rows.length} call${rows.length===1?"":"s"} · ${rosterOutcomeVerified?queueCount+" in Match Queue":"verifying Match Queue"}`;
+      const qb=$("cd-fqueue");
+      if(qb){
+        qb.classList.toggle("on",cdFilters.matchQueue);
+        qb.disabled=rosterOutcomeVerifyFailed;
+        qb.textContent=rosterOutcomeVerifyFailed ? "Match Queue unavailable" : `Match Queue (${rosterOutcomeVerified?queueCount:"…"})`;
+      }
       $("cd-table-wrap").innerHTML = rows.length
         ? `<table class="cd-table"><thead><tr><th>Date</th><th>Candidate</th><th>Source</th><th>Call Type</th><th>Call Status</th><th>Para AI</th><th>Outcome</th><th>Notes</th></tr></thead><tbody>${rows.map(cdRow).join("")}</tbody></table>`
-        : `<div class="empty">No candidates match these filters.</div>`;
+        : `<div class="empty">${cdFilters.matchQueue
+            ? rosterOutcomeVerifyFailed
+              ? "Match Queue verification is unavailable. No candidates are shown without complete Paraform read-backs."
+              : rosterOutcomeVerified
+                ? "Match Queue is clear — every added candidate has an outcome."
+                : "Verifying Para AI submissions and outcome sequences…"
+            : "No candidates match these filters."}</div>`;
     }
 
     // Read-only, vendor-derived Talent Network status. Added is shown only
@@ -1526,6 +1564,8 @@
         const r=await fetch("/api/roster/paraai-status"+(force?"?refresh=1":""));
         const j=await r.json().catch(()=>null);
         if(!r.ok || !j?.ok || !Array.isArray(j.statuses)) throw new Error(j?.error||("HTTP "+r.status));
+        rosterOutcomeVerified=j?.outcomeVerification?.complete===true;
+        rosterOutcomeVerifyFailed=!rosterOutcomeVerified;
         const byName=new Map();
         for(const item of j.statuses){
           const key=cdNormName(item?.normalizedName||item?.name);
@@ -1537,11 +1577,17 @@
           row.paraAIAmbiguous=hit?.ambiguous===true;
           row.paraAICandidateUserId=hit?.ambiguous===true ? null : (hit?.candidateUserId||null);
           row.paraAISource=hit?.source||null;
+          row.outcomeComplete=hit?.outcomeComplete===true;
+          row.verifiedOutcome=hit?.verifiedOutcome||null;
+          row.outcomeConflict=hit?.outcomeConflict===true;
         }
         rosterParaAIAt=Date.now();
         renderRoster();
       }catch(e){
         // A failed authoritative read must never create a false green state.
+        rosterOutcomeVerified=false;
+        rosterOutcomeVerifyFailed=true;
+        renderRoster();
       }finally{
         rosterParaAILoading=false;
       }
