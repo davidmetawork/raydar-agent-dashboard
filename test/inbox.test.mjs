@@ -807,15 +807,13 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
   assert.match(inboxHtml, /data-filter="archived"/);
   assert.match(inboxHtml, /data-filter="complete"/);
-  assert.match(inboxHtml, /class="gmail-nav" aria-label="Inbox views"/);
-  assert.match(inboxHtml, /id="viewToggle"[^>]*href="\/inbox\?style=classic"[^>]*>Classic view/);
-  assert.match(inboxHtml, /const GMAIL_VIEW=VIEW_PARAMS\.get\("style"\)!=="classic"/);
-  assert.match(inboxHtml, /document\.body\.classList\.add\(GMAIL_VIEW\?"gmail":"classic"\)/);
-  assert.match(inboxHtml, /GMAIL_VIEW\?"Classic view":"Gmail view"/);
-  assert.match(inboxHtml, /body\.gmail \.reply-open\{display:grid/);
-  assert.match(inboxHtml, /body\.gmail\.reading \.detail\{display:block\}/);
-  assert.match(inboxHtml, /className="back-control gmail-only"/);
+  assert.match(inboxHtml, /class="mailbox-nav" aria-label="Inbox views"/);
+  assert.match(inboxHtml, /\.reply-open\{[^}]*display:grid/);
+  assert.match(inboxHtml, /body\.reading \.detail\{display:block\}/);
+  assert.match(inboxHtml, /className="back-control"/);
   assert.match(inboxHtml, /className="message-copy"/);
+  // The Classic view is deprecated: no toggle, no style=classic branch, no dual-view CSS scope.
+  assert.doesNotMatch(inboxHtml, /GMAIL_VIEW|style=classic|Classic view|Gmail view|viewToggle|body\.gmail|class="filters"/);
   assert.match(inboxHtml, /triageControl\(reply,"Archive","archived"/);
   assert.match(inboxHtml, /triageControl\(reply,"Complete","complete"/);
   assert.match(inboxHtml, /triageControl\(reply,"Restore","inbox"/);
@@ -861,9 +859,11 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
     vercel.rewrites.find(({ source }) => source === "/inbox"),
     { source: "/inbox", destination: "/inbox.html" },
   );
+  // The retired Classic alias must redirect to the single Inbox, never serve a second view.
+  assert.equal(vercel.rewrites.find(({ source }) => source === "/inbox-classic"), undefined);
   assert.deepEqual(
-    vercel.rewrites.find(({ source }) => source === "/inbox-classic"),
-    { source: "/inbox-classic", destination: "/inbox.html?style=classic" },
+    vercel.redirects.find(({ source }) => source === "/inbox-classic"),
+    { source: "/inbox-classic", destination: "/inbox", permanent: false },
   );
   assert.deepEqual(
     vercel.functions["api/inbox/*.mjs"],
