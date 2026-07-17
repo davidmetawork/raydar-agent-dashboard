@@ -7,6 +7,7 @@ import { autoEligibility } from "../api/paraai/_lib/auto.mjs";
 import { enforceTranscriptSemantics } from "../api/paraai/_lib/extract.mjs";
 import { buildPreferences } from "../api/paraai/_lib/pipeline.mjs";
 import {
+  isCanonicalScreenerSource,
   isRecallCompletionSignal,
   recallWebhookEvent,
   verifyRecallWebhook,
@@ -159,6 +160,14 @@ test("Recall events normalize transcript and terminal bot status shapes", () => 
   assert.equal(isRecallCompletionSignal(terminal), true);
   assert.equal(isRecallCompletionSignal({ event: "recording.done" }), true);
   assert.equal(isRecallCompletionSignal({ event: "bot.status_change", status: "in_call_recording" }), false);
+});
+
+test("Recall intake accepts only the two canonical screener dispatch paths", () => {
+  assert.equal(isCanonicalScreenerSource("paraform-auto"), true);
+  assert.equal(isCanonicalScreenerSource("paraform-reconciliation"), true);
+  assert.equal(isCanonicalScreenerSource("fyxer-guardian-n8n"), false);
+  assert.equal(isCanonicalScreenerSource("manual-test"), false);
+  assert.equal(isCanonicalScreenerSource(""), false);
 });
 
 test("automatic eligibility admits a complete, source-verified green-lane job", () => {

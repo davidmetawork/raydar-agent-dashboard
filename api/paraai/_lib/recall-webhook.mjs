@@ -3,6 +3,14 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 const WEBHOOK_SECRET_PREFIX = "whsec_";
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 const DEFAULT_TOLERANCE_SECONDS = 5 * 60;
+const SCREENER_WORKFLOW_SOURCES = new Set([
+  "paraform-auto",
+  "paraform-reconciliation",
+]);
+
+export function isCanonicalScreenerSource(value) {
+  return SCREENER_WORKFLOW_SOURCES.has(String(value || ""));
+}
 
 function headerValue(headers, name) {
   if (!headers) return "";

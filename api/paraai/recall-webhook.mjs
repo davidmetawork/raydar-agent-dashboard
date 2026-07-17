@@ -1,5 +1,6 @@
 import { enqueueAutoJob, storeConfigured } from "./_lib/store.mjs";
 import {
+  isCanonicalScreenerSource,
   isRecallCompletionSignal,
   recallWebhookEvent,
   verifyRecallWebhook,
@@ -36,7 +37,7 @@ export default {
     if (!event.botId || !isRecallCompletionSignal(event)) {
       return json({ ok: true, ignored: true }, 202);
     }
-    if (String(event.metadata?.source || "") !== "paraform-auto") {
+    if (!isCanonicalScreenerSource(event.metadata?.source)) {
       return json({ ok: true, ignored: true }, 202);
     }
     const queued = await enqueueAutoJob(event.botId, {
