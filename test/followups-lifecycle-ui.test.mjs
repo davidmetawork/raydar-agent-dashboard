@@ -185,6 +185,16 @@ function lifecycleContext({ fetchImpl } = {}) {
     fuNorm: (value) => String(value || "").trim().toLowerCase().replace(/\s+/g, " "),
     esc: String,
     cdEsc: String,
+    displayStatus: (verdict, action) => {
+      if (action?.status === "rescheduled") return { cls: "good", label: "Rescheduled" };
+      if (action?.status === "resolved") return { cls: "good", label: "Resolved" };
+      if (action?.status === "sequence_sent") return { cls: "blue", label: "Rescheduling requested" };
+      return { cls: "yellow", label: verdict === "no_show" ? "No-show" : String(verdict || "") };
+    },
+    shortWhat: (verdict) => verdict === "no_show" ? "Didn't join the call" : String(verdict || ""),
+    verdictView: (verdict) => ({
+      label: verdict === "no_show" ? "No-show" : String(verdict || ""),
+    }),
   });
   vm.runInContext(`${between(
     html,
@@ -199,7 +209,12 @@ globalThis.refreshLedger = ensureLedger;
 globalThis.staleMs = FU_LEDGER_STALE_MS;
 globalThis.reason = fuReason;
 globalThis.entry = fuLedgerEntry;
-globalThis.pending = fuIsAutomationPending;`, ctx);
+globalThis.pending = fuIsAutomationPending;
+globalThis.status = fuDisplayStatus;
+globalThis.definitive = fuIsDefinitiveNoShow;
+globalThis.summary = fuShortWhat;
+globalThis.prior = fuPriorOutcomeLabel;
+globalThis.stopped = fuOutreachStopped;`, ctx);
   return ctx;
 }
 
@@ -215,15 +230,15 @@ test("ledger joins exact aliases and uses byName only for a legacy name-only pay
   };
 
   ctx.setLedger({
-    byCall: { "bot-1": { stage: "failed_no_email" } },
-    byKey: { "row-1": { stage: "failed_error" } },
+    byCall: { "bot-1": { stage: "failed_no_email", definitiveNoShow: true } },
+    byKey: { "row-1": { stage: "failed_error", definitiveNoShow: true } },
     byName: { "same name": { stage: "enrolled", deliveryReady: true } },
   });
   assert.equal(ctx.reason(row).label, "needs email");
 
   ctx.setLedger({
     byCall: {},
-    byKey: { "row-1": { stage: "failed_error" } },
+    byKey: { "row-1": { stage: "failed_error", definitiveNoShow: true } },
     byName: { "same name": { stage: "enrolled", deliveryReady: true } },
   });
   assert.equal(ctx.reason(row).label, "recovery failed");
@@ -245,7 +260,7 @@ test("ledger joins exact aliases and uses byName only for a legacy name-only pay
       },
     },
   });
-  assert.equal(ctx.reason(row).label, "verification pending", "name-only legacy joins can never render green");
+  assert.equal(ctx.reason(row).label, "attendance unverified", "name-only legacy joins can never prove a no-show or render green");
 });
 
 test("only delivery-ready enrolled states render green", () => {
@@ -258,20 +273,141 @@ test("only delivery-ready enrolled states render green", () => {
   };
 
   for (const stage of ["enrolled", "manual_enrolled"]) {
-    ctx.setLedger({ byCall: { "call-1": { stage, deliveryReady: false } }, byKey: {} });
+    ctx.setLedger({
+      byCall: { "call-1": { stage, deliveryReady: false, definitiveNoShow: true } },
+      byKey: {},
+    });
     assert.equal(ctx.reason(row).label, "verification pending", stage);
 
-    ctx.setLedger({ byCall: { "call-1": { stage, deliveryReady: true } }, byKey: {} });
+    ctx.setLedger({
+      byCall: { "call-1": { stage, deliveryReady: true, definitiveNoShow: true } },
+      byKey: {},
+    });
     assert.equal(ctx.reason(row).label, "✓ in sequence", stage);
   }
 });
 
+test("raw no_show without definitive proof stays attendance unverified", () => {
+  const ctx = lifecycleContext();
+  const row = {
+    id: "call-1",
+    candidate: "Ada Example",
+    verdict: "no_show",
+    endedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+  };
+
+  for (const entry of [
+    { stage: "observed" },
+    { stage: "observed", definitiveNoShow: false },
+  ]) {
+    ctx.setLedger({ byCall: { "call-1": entry }, byKey: {} });
+    assert.equal(ctx.definitive(row), false);
+    assert.equal(ctx.status(row, null).label, "Attendance unverified");
+    assert.equal(ctx.reason(row).label, "attendance unverified");
+    assert.match(ctx.summary(row), /Recorder label only/);
+    assert.equal(ctx.prior(row), "Attendance unverified");
+  }
+
+  assert.match(html, /groupBlock\("Attendance unverified", unverified\.map\(fuRow\)\)/);
+});
+
+test("definitive no-show proof is presented as confirmed", () => {
+  const ctx = lifecycleContext();
+  const row = {
+    id: "call-1",
+    candidate: "Ada Example",
+    verdict: "no_show",
+    endedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+  };
+  ctx.setLedger({
+    byCall: { "call-1": { stage: "observed", definitiveNoShow: true } },
+    byKey: {},
+  });
+
+  assert.equal(ctx.definitive(row), true);
+  assert.equal(ctx.status(row, null).label, "Confirmed no-show");
+  assert.equal(ctx.reason(row).label, "automation pending");
+  assert.match(ctx.summary(row), /Explicit recorder outcome/);
+  assert.equal(ctx.prior(row), "Confirmed no-show");
+});
+
+test("unsafe enrolled records never render as successfully in sequence", () => {
+  const ctx = lifecycleContext();
+  const row = {
+    id: "call-1",
+    candidate: "Ada Example",
+    verdict: "no_show",
+    endedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+  };
+
+  for (const definitiveNoShow of [undefined, false]) {
+    ctx.setLedger({
+      byCall: {
+        "call-1": {
+          stage: "enrolled",
+          deliveryReady: true,
+          ...(definitiveNoShow === undefined ? {} : { definitiveNoShow }),
+        },
+      },
+      byKey: {},
+    });
+    assert.equal(ctx.status(row, null).label, "Attendance unverified");
+    assert.equal(ctx.reason(row).label, "attendance unverified");
+    assert.notEqual(ctx.reason(row).cls, "green");
+  }
+
+  ctx.setLedger({
+    byCall: {
+      "call-1": { stage: "enrolled", deliveryReady: true, definitiveNoShow: true },
+    },
+    byKey: {},
+  });
+  assert.equal(ctx.reason(row).label, "✓ in sequence");
+});
+
+test("stopped unsafe outreach overrides sequence_sent display while retaining handled history", () => {
+  const ctx = lifecycleContext();
+  const row = {
+    id: "call-1",
+    candidate: "Ada Example",
+    verdict: "no_show",
+    endedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+  };
+
+  for (const stage of ["paused_wrong_enrollment", "removed_wrong_enrollment"]) {
+    ctx.setLedger({
+      byCall: {
+        "call-1": { stage, definitiveNoShow: false },
+      },
+      byKey: {},
+    });
+    assert.equal(ctx.stopped(row), true);
+    assert.equal(ctx.status(row, { status: "sequence_sent" }).label, "Outreach stopped");
+    assert.equal(ctx.reason(row).label, "outreach stopped: unverified");
+  }
+
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [{
+        id: "call-1",
+        t: row.endedAt,
+        c: row.candidate,
+        v: row.verdict,
+      }],
+    }],
+    actionsMap: { "call-1": { status: "sequence_sent" } },
+  }));
+  assert.equal(result.open.length, 0);
+  assert.equal(result.manualDone.length, 1);
+  assert.equal(result.manualDone[0].id, "call-1");
+});
+
 test("visible-tab refresh can move pending to green, then fail closed on lost delivery or reply", async () => {
   const payloads = [
-    { ok: true, byCall: { "call-1": { stage: "observed" } }, byKey: {} },
-    { ok: true, byCall: { "call-1": { stage: "enrolled", deliveryReady: true } }, byKey: {} },
-    { ok: true, byCall: { "call-1": { stage: "delivery_lost" } }, byKey: {} },
-    { ok: true, byCall: { "call-1": { stage: "stopped_replied" } }, byKey: {} },
+    { ok: true, byCall: { "call-1": { stage: "observed", definitiveNoShow: true } }, byKey: {} },
+    { ok: true, byCall: { "call-1": { stage: "enrolled", deliveryReady: true, definitiveNoShow: true } }, byKey: {} },
+    { ok: true, byCall: { "call-1": { stage: "delivery_lost", definitiveNoShow: true } }, byKey: {} },
+    { ok: true, byCall: { "call-1": { stage: "stopped_replied", definitiveNoShow: true } }, byKey: {} },
   ];
   let reads = 0;
   const ctx = lifecycleContext({
@@ -304,7 +440,7 @@ test("stale lifecycle data expires instead of leaving a last-good row green", ()
     endedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
   };
   ctx.setLedger({
-    byCall: { "call-1": { stage: "enrolled", deliveryReady: true } },
+    byCall: { "call-1": { stage: "enrolled", deliveryReady: true, definitiveNoShow: true } },
     byKey: {},
   }, ctx.staleMs + 1);
   assert.equal(ctx.reason(row).label, "status refresh delayed");
@@ -338,7 +474,10 @@ test("follow-up stages explain pending, identity, email, verification, and expir
   };
 
   for (const [stage, expected] of Object.entries(labels)) {
-    ctx.setLedger({ byCall: { "call-1": { stage } }, byKey: {} });
+    ctx.setLedger({
+      byCall: { "call-1": { stage, definitiveNoShow: true } },
+      byKey: {},
+    });
     assert.equal(ctx.reason(row).label, expected, stage);
   }
 });
