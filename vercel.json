@@ -17,6 +17,7 @@
     "api/paraai/*.mjs": { "maxDuration": 120 }
   },
   "crons": [
-    { "path": "/api/seq/release", "schedule": "0 16 * * *" }
+    { "path": "/api/seq/release", "schedule": "0 16 * * *" },
+    { "path": "/api/paraai/worker", "schedule": "*/5 * * * *" }
   ]
 }

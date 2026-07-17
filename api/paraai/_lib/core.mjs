@@ -310,17 +310,19 @@ export async function findCrmCandidate(candidateUserId) {
   return rows.find((item) => String(item?.id) === wanted) || null;
 }
 
-export async function candidateDetails(candidateUserId) {
-  const [byId, profile] = await Promise.all([
-    trpcGet("candidateUser.getCandidateUserById", { candidate_user_id: candidateUserId }).catch(() => null),
-    trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId }).catch(() => null),
-  ]);
+export async function candidateDetails(candidateUserId, { strict = false } = {}) {
+  const reads = [
+    trpcGet("candidateUser.getCandidateUserById", { candidate_user_id: candidateUserId }),
+    trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId }),
+  ];
+  const [byId, profile] = await Promise.all(strict ? reads : reads.map((read) => read.catch(() => null)));
   return { byId, profile };
 }
 
-export async function candidatePreferences(candidateUserId) {
+export async function candidatePreferences(candidateUserId, { strict = false } = {}) {
   if (!candidateUserId) return null;
-  return trpcGet("candidateUserPreference.getCandidateUserPrefs", { candidate_user_id: candidateUserId });
+  const read = trpcGet("candidateUserPreference.getCandidateUserPrefs", { candidate_user_id: candidateUserId });
+  return strict ? read : read.catch(() => null);
 }
 
 export async function directSubmitQuota(recruiterId = RECRUITER_ID) {
@@ -369,9 +371,17 @@ export async function fetchCall(botId) {
 export function isSuccessfulCall(call) {
   const verdict = String(call?.verdict?.verdict || call?.verdict?.value || call?.verdict || "").toLowerCase();
   if (verdict !== "success") return false;
-  const userChars = Number(call?.verdict?.userChars ?? call?.metrics?.userChars ?? 80);
-  const density = Number(call?.verdict?.speechDensity ?? call?.metrics?.speechDensity ?? 0.6);
-  return userChars >= 80 && density >= 0.6;
+  const candidateRows = (Array.isArray(call?.transcript) ? call.transcript : []).filter((row) => row?.role === "candidate");
+  const hasTranscript = Array.isArray(call?.transcript) && call.transcript.length > 0;
+  const transcriptChars = candidateRows.reduce((total, row) => total + String(row?.text || "").trim().length, 0);
+  const userCharsRaw = call?.verdict?.userChars ?? call?.metrics?.userChars;
+  const densityRaw = call?.verdict?.speechDensity ?? call?.metrics?.speechDensity;
+  const userChars = Number.isFinite(Number(userCharsRaw)) ? Number(userCharsRaw) : hasTranscript ? transcriptChars : 80;
+  const hasDensity = Number.isFinite(Number(densityRaw));
+  const density = hasDensity
+    ? Number(densityRaw)
+    : hasTranscript ? candidateRows.length / call.transcript.length : 0.6;
+  return (!hasTranscript || candidateRows.length >= 2) && userChars >= 80 && density >= (hasDensity ? 0.6 : hasTranscript ? 0.25 : 0.6);
 }
 
 export async function getResume(candidateUserId) {

@@ -6,16 +6,19 @@ export const config = { maxDuration: 120 };
 
 const ACTIONS = new Set(["prepare", "submit", "reconcile-submit", "refresh-matches", "enroll", "no-match-enroll"]);
 const ALERT_CODES = new Set([
-  "AUTH_EXPIRED", "SUBMIT_WRITE_FAILED", "SUBMIT_NOT_VISIBLE", "ENROLL_WRITE_FAILED",
+  "AUTH_EXPIRED", "SUBMIT_WRITE_FAILED", "SUBMIT_WRITE_UNKNOWN", "SUBMIT_NOT_VISIBLE", "ENROLL_WRITE_FAILED",
   "ENROLL_NOT_VISIBLE", "GLOBAL_EMAIL_NOT_VISIBLE", "LEAD_EMAIL_NOT_VISIBLE",
   "LIFECYCLE_REGISTRATION_FAILED", "NO_EMAIL",
 ]);
 
 const statusFor = (code) => {
   if (code === "JOB_NOT_FOUND") return 404;
-  if (["REVISION_CONFLICT", "INVALID_STATE", "RECONCILIATION_REQUIRED", "SUBMIT_STILL_UNCONFIRMED"].includes(code)) return 409;
+  if ([
+    "REVISION_CONFLICT", "INVALID_STATE", "RECONCILIATION_REQUIRED", "SUBMIT_STILL_UNCONFIRMED",
+    "SUBMISSION_ALREADY_CLAIMED", "SUBMISSION_ATTEMPT_ALREADY_STARTED", "SUBMISSION_PAYLOAD_CHANGED",
+  ].includes(code)) return 409;
   if (String(code || "").includes("APPROVAL") || String(code || "").startsWith("PHASE0") || code === "DRY_RUN" || code === "LIFECYCLE_REGISTRATION_REQUIRED") return 503;
-  if (String(code || "").includes("WRITE_FAILED") || String(code || "").includes("NOT_VISIBLE") || code === "LIFECYCLE_REGISTRATION_FAILED") return 502;
+  if (String(code || "").includes("WRITE_FAILED") || String(code || "").includes("WRITE_UNKNOWN") || String(code || "").includes("NOT_VISIBLE") || code === "LIFECYCLE_REGISTRATION_FAILED") return 502;
   return 400;
 };
 

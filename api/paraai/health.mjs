@@ -1,5 +1,6 @@
 import { authConfig, cors, hasParaformCookie, listSequences, paraAIConfig, trpcGet } from "./_lib/core.mjs";
-import { storeConfigured } from "./_lib/store.mjs";
+import { automationConfig } from "./_lib/auto.mjs";
+import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -7,6 +8,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
   const config = paraAIConfig();
+  const auto = automationConfig();
   const auth = authConfig();
   const health = {
     ok: false,
@@ -30,6 +32,25 @@ export default async function handler(req, res) {
     sequences: [],
     submitReady: false,
     enrollmentReady: false,
+    automation: {
+      enabled: auto.enabled,
+      detectEnabled: auto.detectEnabled,
+      prepareEnabled: auto.prepareEnabled,
+      autoSubmitApproved: auto.autoSubmitApproved,
+      dryRun: auto.dryRun,
+      notBeforePinned: auto.notBeforeMs != null,
+      consentCutoffPinned: auto.consentRequiredAtMs != null,
+      runnerConfigured: Boolean(process.env.PARAAI_AUTOMATION_RUNNER_KEY),
+      recallVerificationConfigured: Boolean(
+        process.env.RECALL_WORKSPACE_VERIFICATION_SECRET || process.env.RECALL_SVIX_WEBHOOK_SECRET,
+      ),
+      slackConfigured: Boolean(
+        (process.env.SLACK_BOT_TOKEN && (process.env.PARAAI_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS)) ||
+        process.env.SLACK_WEBHOOK_URL,
+      ),
+      queue: null,
+      ready: false,
+    },
   };
   if (!(await hasParaformCookie())) {
     health.paraform = "no_cookie";
@@ -61,6 +82,17 @@ export default async function handler(req, res) {
     health.enrollmentReady = Boolean(
       health.submitReady && health.lifecycleRegistrationConfigured && health.matchReadPinned &&
       health.enrollApproved && health.sequences.every((sequence) => sequence.found && sequence.enabled),
+    );
+    health.automation.queue = await getAutoQueueStats().catch(() => null);
+    health.automation.ready = Boolean(
+      health.submitReady &&
+      auto.enabled &&
+      auto.prepareEnabled &&
+      auto.autoSubmitApproved &&
+      !auto.dryRun &&
+      auto.notBeforeMs != null &&
+      health.automation.runnerConfigured &&
+      health.automation.recallVerificationConfigured,
     );
     health.ok = health.submitReady;
     return res.status(200).json(health);

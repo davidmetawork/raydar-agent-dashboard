@@ -35,11 +35,22 @@ import {
   uploadResume,
 } from "./core.mjs";
 import { FUNDING_ROUNDS, PARAAI_LOCATIONS, WORKPLACE_TYPES, extraNote, extractPreferences, normalizeExtraction } from "./extract.mjs";
-import { createJob, getJob, saveJob, transition } from "./store.mjs";
+import {
+  claimSubmissionIntent,
+  createJob,
+  finishSubmissionAttempt,
+  getJob,
+  getSubmissionIntent,
+  hashSubmissionPayload,
+  saveJob,
+  startSubmissionAttempt,
+  transition,
+} from "./store.mjs";
 
 export const STATES = new Set([
   "detected", "resolving_identity", "needs_identity_review", "extracting",
-  "ready_to_submit", "submitting", "awaiting_approval", "awaiting_matches", "ready_to_enroll",
+  "ready_to_submit", "submit_intent", "submitting", "submission_unknown",
+  "awaiting_approval", "awaiting_matches", "ready_to_enroll",
   "needs_review", "ensuring_email", "enrolling", "verifying", "enrolled",
   "no_email", "error",
 ]);
@@ -109,7 +120,10 @@ export function buildPreferences(extracted, native = null) {
   const nativeLocations = uniqueAllowed(native?.locations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
   const structuredLocations = uniqueAllowed(normalized.paraformLocations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
   const salaryMin = normalized.compensation.baseMin ?? (Number.isFinite(Number(native?.salary_min)) ? Number(native.salary_min) : null);
-  const ote = normalized.compensation.ote ?? (Number.isFinite(Number(native?.ote)) ? Number(native.ote) : null);
+  const nativeOte = native?.ote != null && native?.ote !== "" && Number.isFinite(Number(native.ote))
+    ? Number(native.ote)
+    : null;
+  const ote = normalized.compensation.ote ?? nativeOte;
   return normalizeParaAIPreferences({
     locations: structuredLocations.length ? structuredLocations : nativeLocations.length ? nativeLocations : legacyLocations(normalized.locations),
     workplaceTypes: normalized.workplaceTypes.length ? normalized.workplaceTypes : native?.workplace,
@@ -183,7 +197,7 @@ function newJournal(state, detail = null) {
   return [{ state, at, ...(detail ? { detail } : {}) }];
 }
 
-export async function prepareJob({ botId, candidateUserId = "", force = false } = {}) {
+export async function prepareJob({ botId, candidateUserId = "", force = false, strictReads = false } = {}) {
   const id = String(botId || "").trim();
   if (!BOT_ID.test(id)) throw stateError("valid Recall bot id required", "INVALID_BOT_ID");
   const existing = await getJob(id);
@@ -195,6 +209,8 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
     const base = existing || {
       id, state: "detected", createdAt: new Date().toISOString(), revision: 0,
       journal: newJournal("detected"), candidate, callLink: callLink(id),
+      callStartedAt: call.joinAt || null,
+      callSourceVerified: call?.source?.isScreener === true,
     };
     if (!existing) await createJob(base);
     const current = existing || await getJob(id);
@@ -205,6 +221,8 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
   if (existing) {
     job = await saveJob(transition(existing, "resolving_identity", {
       candidate, callLink: callLink(id), error: null, journalDetail: "manual re-prepare",
+      callStartedAt: call.joinAt || existing.callStartedAt || null,
+      callSourceVerified: call?.source?.isScreener === true,
     }), existing.revision);
   } else {
     job = await createJob({
@@ -212,6 +230,8 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
       state: "resolving_identity",
       candidate,
       callLink: callLink(id),
+      callStartedAt: call.joinAt || null,
+      callSourceVerified: call?.source?.isScreener === true,
       createdAt: new Date().toISOString(),
       journal: [...newJournal("detected"), ...newJournal("resolving_identity")],
     });
@@ -257,11 +277,18 @@ export async function prepareJob({ botId, candidateUserId = "", force = false } 
     }), job.revision);
 
     const extraction = await extractPreferences(call.transcript || []);
-    const [resume, details, nativePreferences] = await Promise.all([
-      getResume(crmItem.id).catch(() => null),
-      candidateDetails(crmItem.id).catch(() => ({ byId: null, profile: null })),
-      candidatePreferences(crmItem.id).catch(() => null),
-    ]);
+    const reads = [
+      getResume(crmItem.id),
+      candidateDetails(crmItem.id, { strict: strictReads }),
+      candidatePreferences(crmItem.id, { strict: strictReads }),
+    ];
+    const [resume, details, nativePreferences] = await Promise.all(strictReads
+      ? reads
+      : [
+          reads[0].catch(() => null),
+          reads[1].catch(() => ({ byId: null, profile: null })),
+          reads[2].catch(() => null),
+        ]);
     const resumeUri = findResumeUri(resume);
     const contact = resumeUri ? await resumeContact(resumeUri).catch(() => null) : null;
     const email = firstEmail(crmItem) || firstEmail(details) || firstEmail(contact);
@@ -339,14 +366,27 @@ async function applyResumeUpload(job, body) {
 
 async function submissionIsVisible(candidateUserId) {
   const [details, crm] = await Promise.all([
-    candidateDetails(candidateUserId),
+    candidateDetails(candidateUserId, { strict: true }),
     findCrmCandidate(candidateUserId),
   ]);
   return candidateAlreadySubmitted(details) || candidateAlreadySubmitted(crm);
 }
 
+export function buildSubmissionPayload(job, config = paraAIConfig()) {
+  return {
+    name: String(job?.submission?.name || "").trim(),
+    email: normalizeEmail(job?.submission?.email),
+    linkedinUrl: normLinkedin(job?.submission?.linkedinUrl),
+    screeningCallLink: String(job?.submission?.screeningCallLink || "").trim(),
+    resumeUri: String(job?.submission?.resumeUri || "").trim(),
+    preferences: normalizeParaAIPreferences(job?.reviewPreferences || {}),
+    recruiterId: RECRUITER_ID,
+    submissionOrigin: config.submissionOrigin,
+  };
+}
+
 export async function submitJob(job, body = {}) {
-  if (job?.state !== "ready_to_submit") throw stateError("job is not ready to submit", "INVALID_STATE", job);
+  if (!["ready_to_submit", "submit_intent", "submitting"].includes(job?.state)) throw stateError("job is not ready to submit", "INVALID_STATE", job);
   if (String(body.confirmation || "") !== `SUBMIT ${job.id}`) throw stateError("submit confirmation mismatch", "CONFIRMATION_MISMATCH", job);
   if (body.marketConfirmed !== true) throw stateError("Confirm that you screened this candidate and they are actively on the market", "MARKET_CONFIRMATION_REQUIRED", job);
   const config = paraAIConfig();
@@ -380,7 +420,7 @@ export async function submitJob(job, body = {}) {
   }
   const candidateUserId = edited.identity?.candidateUserId;
   const freshCrm = await findCrmCandidate(candidateUserId);
-  const details = await candidateDetails(candidateUserId);
+  const details = await candidateDetails(candidateUserId, { strict: true });
   if (!freshCrm) throw stateError("candidate identity no longer resolves in CRM", "IDENTITY_STALE", job);
   if (candidateAlreadySubmitted(freshCrm) || candidateAlreadySubmitted(details)) {
     return fail(job, "ALREADY_SUBMITTED", "Candidate is already in the Para AI talent network");
@@ -394,29 +434,89 @@ export async function submitJob(job, body = {}) {
     throw stateError(`Paraform direct-submit quota reached (${quota.used}/${quota.limit}). ${quota.resetLabel || ""}`.trim(), "DIRECT_SUBMIT_QUOTA_REACHED", edited);
   }
 
-  edited = await saveJob(transition(edited, "submitting", {
+  const payload = buildSubmissionPayload({
+    ...edited,
     submission: { ...submission, email: normalizeEmail(submission.email), linkedinUrl: normLinkedin(submission.linkedinUrl) },
-    submitClaimedAt: new Date().toISOString(),
-  }), job.revision);
+  }, config);
+  const payloadHash = hashSubmissionPayload(payload);
+  const intentResult = await claimSubmissionIntent({
+    candidateUserId,
+    jobId: job.id,
+    payloadHash,
+  });
+  let intent = intentResult.intent;
+  if (intent.attemptStartedAt) {
+    throw stateError(
+      "A submission attempt already started for this candidate. Reconcile read-only; never retry the write.",
+      "SUBMISSION_ATTEMPT_ALREADY_STARTED",
+      job,
+    );
+  }
+  if (job.state === "ready_to_submit") {
+    edited = await saveJob(transition(edited, "submit_intent", {
+      submission: { ...submission, email: payload.email, linkedinUrl: payload.linkedinUrl },
+      submitClaimedAt: intent.claimedAt,
+      submitAttemptId: intent.attemptId,
+      submitPayloadHash: payloadHash,
+      submitApprovalSource: String(body.approvalSource || "human_review").slice(0, 80),
+      journalDetail: "durable candidate submission intent claimed",
+    }), job.revision);
+  } else {
+    if (job.submitPayloadHash && job.submitPayloadHash !== payloadHash) {
+      throw stateError("submission payload changed after intent was claimed", "SUBMISSION_PAYLOAD_CHANGED", job);
+    }
+    edited = job;
+  }
+  edited = await saveJob(transition(edited, "submitting", {
+    journalDetail: "single external submit attempt reserved",
+  }), edited.revision);
+  const started = await startSubmissionAttempt({
+    candidateUserId,
+    jobId: job.id,
+    attemptId: intent.attemptId,
+  });
+  if (started.status !== "started") {
+    throw stateError(
+      "A submission attempt already started for this candidate. Reconcile read-only; never retry the write.",
+      "SUBMISSION_ATTEMPT_ALREADY_STARTED",
+      edited,
+    );
+  }
+  intent = started.intent;
   let response;
   try {
-    const payload = {
-      name: edited.submission.name,
-      email: edited.submission.email,
-      linkedinUrl: edited.submission.linkedinUrl,
-      screeningCallLink: edited.submission.screeningCallLink,
-      resumeUri: edited.submission.resumeUri,
-      preferences,
-      recruiterId: RECRUITER_ID,
-      submissionOrigin: config.submissionOrigin,
-    };
     response = await trpcPost("agency.submitTalentNetworkCandidate", payload, 1);
   } catch (error) {
-    return fail(edited, "SUBMIT_WRITE_FAILED", String(error?.message || error), { externalWriteMayHaveLanded: true });
+    await finishSubmissionAttempt({
+      candidateUserId,
+      jobId: job.id,
+      attemptId: intent.attemptId,
+      outcome: "unknown",
+      detail: String(error?.code || error?.message || "submit transport failed"),
+    }).catch(() => {});
+    const saved = await saveJob(transition(edited, "submission_unknown", {
+      error: {
+        code: "SUBMIT_WRITE_UNKNOWN",
+        detail: "Paraform submission result is unknown; reads only until reconciled",
+        at: new Date().toISOString(),
+      },
+      externalWriteMayHaveLanded: true,
+      submitAttemptStartedAt: intent.attemptStartedAt,
+      journalDetail: "external submit result unknown; mutation retry prohibited",
+    }), edited.revision);
+    throw stateError("Submission result is unknown. Reconcile read-only; do not retry.", "SUBMIT_WRITE_UNKNOWN", saved);
   }
+  await finishSubmissionAttempt({
+    candidateUserId,
+    jobId: job.id,
+    attemptId: intent.attemptId,
+    outcome: "accepted",
+    detail: "Paraform mutation returned successfully",
+  });
   return saveJob(transition(edited, "awaiting_approval", {
     submittedAt: new Date().toISOString(),
     submitAcceptedAt: new Date().toISOString(),
+    submitAttemptStartedAt: intent.attemptStartedAt,
     submitReadbackVerified: candidateAlreadySubmitted(response),
     externalWriteMayHaveLanded: false,
     matchCount: null,
@@ -427,15 +527,28 @@ export async function submitJob(job, body = {}) {
 
 export async function reconcileSubmittedJob(job) {
   const legacyAccepted = job?.state === "error" && job?.error?.code === "SUBMIT_NOT_VISIBLE";
-  const uncertainWrite = job?.state === "error" && job?.error?.code === "SUBMIT_WRITE_FAILED";
+  const uncertainWrite =
+    job?.state === "submission_unknown" ||
+    job?.state === "submitting" ||
+    (job?.state === "error" && ["SUBMIT_WRITE_FAILED", "SUBMIT_WRITE_UNKNOWN"].includes(job?.error?.code));
   if (job?.state !== "awaiting_approval" && !legacyAccepted && !uncertainWrite) {
     throw stateError("job is not awaiting submission reconciliation", "INVALID_STATE", job);
   }
   const candidateUserId = job.identity?.candidateUserId;
   if (!candidateUserId) throw stateError("candidate identity is missing", "IDENTITY_REQUIRED", job);
   const checkedAt = new Date().toISOString();
-  const visible = await submissionIsVisible(candidateUserId).catch(() => false);
+  const visible = await submissionIsVisible(candidateUserId);
   if (visible) {
+    const intent = await getSubmissionIntent(candidateUserId).catch(() => null);
+    if (intent?.attemptId && intent?.jobId === job.id) {
+      await finishSubmissionAttempt({
+        candidateUserId,
+        jobId: job.id,
+        attemptId: intent.attemptId,
+        outcome: "confirmed",
+        detail: "Talent Network state visible on read-back",
+      }).catch(() => {});
+    }
     return saveJob(transition(job, "awaiting_matches", {
       submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,
       submitAcceptedAt: job.submitAcceptedAt || job.submitClaimedAt || checkedAt,
@@ -448,7 +561,17 @@ export async function reconcileSubmittedJob(job) {
     }), job.revision);
   }
   if (uncertainWrite) {
-    throw stateError("Submission is still not visible. Do not retry the write; reconcile in Paraform first.", "SUBMIT_STILL_UNCONFIRMED", job);
+    return saveJob(transition(job, "submission_unknown", {
+      submissionApprovalCheckedAt: checkedAt,
+      submitReadbackVerified: false,
+      externalWriteMayHaveLanded: true,
+      error: {
+        code: "SUBMIT_STILL_UNCONFIRMED",
+        detail: "Submission is not visible yet; reads only and no mutation retry",
+        at: checkedAt,
+      },
+      journalDetail: "uncertain submit remains unconfirmed; read-only retry scheduled",
+    }), job.revision);
   }
   return saveJob(transition(job, "awaiting_approval", {
     submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,

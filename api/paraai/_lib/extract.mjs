@@ -34,6 +34,16 @@ const schema = {
     interviewingCompanies: { type: "array", items: { type: "string" } },
     offMarketTimeline: { type: ["string", "null"] },
     searchActivity: { type: ["string", "null"] },
+    marketStatus: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        activelyOnMarket: { type: ["boolean", "null"] },
+        openToOpportunities: { type: ["boolean", "null"] },
+        consentToTalentNetwork: { type: ["boolean", "null"] },
+        evidence: { type: "array", items: { type: "string" } },
+      },
+    },
     industries: {
       type: "object",
       additionalProperties: false,
@@ -79,6 +89,7 @@ Rules:
 - Normalize funding to PRE_SEED, SEED, SERIES_A, SERIES_B, SERIES_C, SERIES_D_PLUS, or UNKNOWN. UNKNOWN means the explicit Paraform option “Other (e.g. Legal, Healthcare)”; it never means no preference. If the candidate has no company-stage preference, return an empty array so a human can review it.
 - Normalize immigration to CITIZEN, VISA, or GREEN_CARD. H-1B/OPT/visa sponsorship => VISA. No sponsorship needed because they are a citizen => CITIZEN. Permanent resident => GREEN_CARD.
 - Compensation baseMin/baseMax are pure base salary only. Exclude equity and bonus. Put OTE in compensation.ote only when OTE is explicitly discussed.
+- marketStatus must be evidence-based. activelyOnMarket is true only when the candidate explicitly says they are currently searching or interviewing. openToOpportunities is true when they explicitly say they are open to considering a new role. consentToTalentNetwork is true only when they explicitly agree that Raydar may share their profile, resume, screening call, and preferences with Paraform's Talent Network or Para AI. Never infer consent. Include short verbatim candidate statements in evidence; omit interviewer language.
 - Preserve relocation scope, interview-process stage, named interviewing companies, off-market timeline, search activity, industry likes/dislikes, trips/obstacles, role types, and company headcount as concise facts.
 - Do not include interviewer statements unless the candidate agrees with them.`;
 
@@ -111,6 +122,21 @@ export function normalizeExtraction(raw = {}) {
     statuses: enumStrings(raw.sponsorship.statuses, SPONSORSHIP_STATUSES),
     kind: text(raw.sponsorship.kind) || null,
   } : { required: null, statuses: [], kind: null };
+  const marketStatus = raw.marketStatus && typeof raw.marketStatus === "object" ? {
+    activelyOnMarket: typeof raw.marketStatus.activelyOnMarket === "boolean" ? raw.marketStatus.activelyOnMarket : null,
+    openToOpportunities: typeof raw.marketStatus.openToOpportunities === "boolean" ? raw.marketStatus.openToOpportunities : null,
+    consentToTalentNetwork: typeof raw.marketStatus.consentToTalentNetwork === "boolean" ? raw.marketStatus.consentToTalentNetwork : null,
+    evidence: strings(raw.marketStatus.evidence).map((item) => item.slice(0, 280)).slice(0, 5),
+    evidenceVerified: raw.marketStatus.evidenceVerified === true,
+    consentVerifiedFromTranscript: raw.marketStatus.consentVerifiedFromTranscript === true,
+  } : {
+    activelyOnMarket: null,
+    openToOpportunities: null,
+    consentToTalentNetwork: null,
+    evidence: [],
+    evidenceVerified: false,
+    consentVerifiedFromTranscript: false,
+  };
   return {
     locations: strings(raw.locations),
     paraformLocations: lowerEnumStrings(raw.paraformLocations, PARAAI_LOCATIONS),
@@ -119,6 +145,7 @@ export function normalizeExtraction(raw = {}) {
     interviewingCompanies: strings(raw.interviewingCompanies),
     offMarketTimeline: text(raw.offMarketTimeline) || null,
     searchActivity: text(raw.searchActivity) || null,
+    marketStatus,
     industries: {
       interested: strings(raw.industries?.interested),
       notInterested: strings(raw.industries?.notInterested),
@@ -140,6 +167,7 @@ export function extraNote(extracted) {
     ["Interviewing companies", e.interviewingCompanies.join(", ")],
     ["Off-market timeline", e.offMarketTimeline],
     ["Search activity", e.searchActivity],
+    ["Market confirmation", e.marketStatus.evidence.join(" · ")],
     ["Industries interested", e.industries.interested.join(", ")],
     ["Industries not interested", e.industries.notInterested.join(", ")],
     ["Upcoming obstacles / trips", e.obstacles.join("; ")],
@@ -147,6 +175,91 @@ export function extraNote(extracted) {
     ["Role types", e.roleTypes.join(", ")],
   ].filter(([, value]) => value);
   return rows.length ? ["### Raydar screening preferences", ...rows.map(([label, value]) => `- **${label}:** ${value}`)].join("\n") : "";
+}
+
+export function enforceTranscriptSemantics(extracted, rows = []) {
+  const normalized = normalizeExtraction(extracted);
+  const transcript = Array.isArray(rows) ? rows : [];
+  const candidateRows = transcript
+    .filter((row) => row?.role === "candidate")
+    .map((row) => text(row?.text))
+    .filter(Boolean);
+  const candidateText = candidateRows.join(" ");
+  const explicitlyDiscussedOte = /\bOTE\b|on[\s-]*target earnings/i.test(candidateText);
+  const compact = (value) => text(value)
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const compactCandidateRows = candidateRows.map(compact);
+  const evidence = normalized.marketStatus.evidence.filter((quote) => {
+    const wanted = compact(quote);
+    return wanted.length >= 8 && compactCandidateRows.some((row) => row.includes(wanted));
+  });
+
+  const answer = (value) => {
+    const valueText = compact(value);
+    if (!valueText) return null;
+    if (/\b(no|not|dont|do not|cant|cannot|wouldnt|rather not)\b/.test(valueText)) return false;
+    return /^(yes|yeah|yep|sure|absolutely|definitely|correct|okay|ok|of course|i am|im open|that is fine|thats fine)\b/.test(valueText)
+      ? true
+      : null;
+  };
+  let finalOpen = null;
+  let finalConsent = null;
+  let finalEvidence = "";
+  for (let index = 0; index < transcript.length; index++) {
+    const row = transcript[index];
+    if (row?.role !== "agent") continue;
+    const question = compact(row?.text);
+    const combined =
+      question.includes("open to new opportunities") &&
+      question.includes("share") &&
+      question.includes("paraform") &&
+      (question.includes("talent network") || question.includes("para ai"));
+    const openOnly =
+      question.includes("are you currently open to new opportunities") &&
+      !question.includes("share");
+    const consentOnly =
+      question.includes("share") &&
+      question.includes("paraform") &&
+      (question.includes("is it okay") || question.includes("okay for raydar"));
+    if (!combined && !openOnly && !consentOnly) continue;
+    const response = transcript.slice(index + 1).find((next) => next?.role === "candidate");
+    const responseText = text(response?.text);
+    const parsed = answer(responseText);
+    if (combined && parsed === true) {
+      finalOpen = true;
+      finalConsent = true;
+      finalEvidence = responseText;
+    } else if (openOnly && parsed != null) {
+      finalOpen = parsed;
+      finalEvidence = responseText || finalEvidence;
+    } else if (consentOnly && parsed != null) {
+      finalConsent = parsed;
+      finalEvidence = responseText || finalEvidence;
+    }
+  }
+  if (finalEvidence) evidence.push(finalEvidence.slice(0, 280));
+  const verifiedEvidence = [...new Set(evidence)].slice(0, 5);
+  const hasVerifiedEvidence = verifiedEvidence.length > 0;
+  return {
+    ...normalized,
+    compensation: {
+      ...normalized.compensation,
+      ote: explicitlyDiscussedOte ? normalized.compensation.ote : null,
+    },
+    marketStatus: {
+      ...normalized.marketStatus,
+      activelyOnMarket: hasVerifiedEvidence ? normalized.marketStatus.activelyOnMarket : null,
+      openToOpportunities: finalOpen ?? (hasVerifiedEvidence ? normalized.marketStatus.openToOpportunities : null),
+      consentToTalentNetwork: finalConsent,
+      evidence: verifiedEvidence,
+      evidenceVerified: hasVerifiedEvidence,
+      consentVerifiedFromTranscript: finalConsent === true,
+    },
+  };
 }
 
 async function extractWithOpenAI(rows, fetchImpl) {
@@ -224,10 +337,14 @@ export async function extractPreferences(transcript, { fetchImpl = fetch } = {})
   const hasOpenAI = Boolean(process.env.OPENAI_API_KEY);
   if (!hasAnthropic && !hasOpenAI) throw new Error("No extraction model API key configured");
   if (hasAnthropic) {
-    try { return await extractWithAnthropic(rows, fetchImpl); }
+    try {
+      const result = await extractWithAnthropic(rows, fetchImpl);
+      return { ...result, extracted: enforceTranscriptSemantics(result.extracted, rows) };
+    }
     catch (error) {
       if (!hasOpenAI) throw error;
     }
   }
-  return extractWithOpenAI(rows, fetchImpl);
+  const result = await extractWithOpenAI(rows, fetchImpl);
+  return { ...result, extracted: enforceTranscriptSemantics(result.extracted, rows) };
 }
