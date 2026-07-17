@@ -467,9 +467,9 @@
         <p class="fu-intro">Search any candidate to pull up their screening — recording, transcript, and outcome. Every call has a durable link you can share with the team or Paraform, even when the Paraform recording shows “unavailable.” No-shows are labelled, so you know when there’s nothing to watch.</p>
         <div class="cv-search">
           <input id="cv-q" type="text" placeholder="Search a candidate — e.g. Luke Lu" autocomplete="off" />
-          <button class="cv-btn" onclick="cvSearch()">Search</button>
+          <button class="cv-btn" id="cv-search-btn" onclick="cvSearch()">Search</button>
         </div>
-        <div id="cv-results"></div>
+        <div id="cv-results"><div class="empty">Type a candidate name to find their screening call.</div></div>
       </section>
     </div>
 
@@ -918,7 +918,10 @@
       if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
       if(name==="analytics") ensurePlacements();
-      if(name==="calls"){ if(location.hash!=="#calls") history.replaceState(null,"","#calls"); if(!cvLoaded) cvSearch(); }
+      if(name==="calls"){
+        if(location.hash!=="#calls") history.replaceState(null,"","#calls");
+        requestAnimationFrame(()=>$('cv-q').focus());
+      }
       else if(name==="paraai"){ if(location.hash!=="#paraai") history.replaceState(null,"","#paraai"); }
       else if(name==="inbox"){ if(location.hash!=="#inbox") history.replaceState(null,"","#inbox"); }
       else if(location.hash==="#calls"||location.hash==="#paraai"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
@@ -1666,6 +1669,10 @@
     // ---- Calls (find-a-call) — reads from the isolated, read-only calls API.
     //      Separate Vercel project (raydar-calls); never touches the screener. ----
     const CALLS_API = "https://raydar-calls.vercel.app";
+    // Warm the exact lookup function while the user is elsewhere on Monitor.
+    // A five-minute URL bucket lets the CDN collapse all dashboard visitors to
+    // one harmless no-match read, avoiding a cold start on the real search.
+    fetch(CALLS_API + "/api/lookup?name=RaydarWarmup&warm=" + Math.floor(Date.now()/300000)).catch(()=>{});
     // Pull the human-reschedule feed (candidates who booked a live call with David).
     // Best-effort + heavily cached upstream; never blocks or breaks the dashboard.
     async function refreshReschedules(){
@@ -1676,7 +1683,8 @@
       }catch(e){ /* leave humanResched as-is */ }
     }
     const CV_TONE = { good:"good", muted:"muted", pending:"live", bad:"bad" };
-    let cvLoaded = false;
+    let cvSearchController = null;
+    let cvSearchRequest = 0;
     const cvEsc = (s) => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
     const cvPT = (iso) => { try { return new Intl.DateTimeFormat("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/Los_Angeles"}).format(new Date(iso))+" PT"; } catch { return iso||""; } };
     function cvToast(m){ const t=$("cv-toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1500); }
@@ -1706,20 +1714,41 @@
       // Verify the first visible rows against transcript + participant evidence.
       results.slice(0, 8).forEach(cvVerifyStatus);
     }
-    async function cvSearch(){
+    async function cvSearch(deep=false){
       const name = $("cv-q").value.trim();
       const out = $("cv-results");
+      const btn = $("cv-search-btn");
+      const requestId = ++cvSearchRequest;
+      if(cvSearchController) cvSearchController.abort();
+      cvSearchController = new AbortController();
+      btn.textContent = deep ? "Searching history…" : "Searching…";
       out.innerHTML = `<div class="cv-spin"></div>`;
       try {
-        const r = await fetch(CALLS_API + "/api/lookup" + (name ? ("?name="+encodeURIComponent(name)) : ""));
+        const params = new URLSearchParams();
+        if(name) params.set("name", name);
+        if(deep) params.set("deep", "1");
+        const r = await fetch(CALLS_API + "/api/lookup" + (params.size ? ("?"+params) : ""), {
+          signal: cvSearchController.signal,
+        });
+        if(requestId !== cvSearchRequest) return;
         const j = await r.json();
+        if(requestId !== cvSearchRequest) return;
         if(!r.ok){ out.innerHTML = `<div class="empty">${cvEsc(j.error||"Something went wrong.")}</div>`; return; }
-        if(!j.results.length){ out.innerHTML = `<div class="empty">No screening calls found${name?` for “${cvEsc(name)}”`:""}. Try just the first name.</div>`; cvLoaded=true; return; }
+        if(!j.results.length){
+          const deepButton = j.canDeepSearch
+            ? `<br><button class="cv-copy" style="margin-top:12px" onclick="cvSearch(true)">Search full history</button>`
+            : "";
+          out.innerHTML = `<div class="empty">No screening calls found${name?` for “${cvEsc(name)}”`:""}. Try just the first name.${deepButton}</div>`;
+          return;
+        }
         const head = name ? `${j.count} result${j.count>1?"s":""}` : "Most recent calls";
         out.innerHTML = `<div class="cv-head">${head}</div><div class="list">${j.results.map(cvCard).join("")}</div>`;
         cvVerifyVisibleStatuses(j.results);
-        cvLoaded = true;
-      } catch(e){ out.innerHTML = `<div class="empty">Couldn’t reach the calls service — try again.</div>`; }
+      } catch(e){
+        if(e.name!=="AbortError" && requestId===cvSearchRequest) out.innerHTML = `<div class="empty">Couldn’t reach the calls service — try again.</div>`;
+      } finally {
+        if(requestId===cvSearchRequest) btn.textContent="Search";
+      }
     }
 
     const API_BASE = "https://webview-lake.vercel.app";
