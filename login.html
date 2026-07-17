@@ -15,7 +15,8 @@
   html,body { margin:0; min-height:100%; }
   body { min-height:100vh; display:grid; place-items:center; padding:24px; background:var(--cream); color:var(--ink); font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
   main { width:min(430px,100%); padding:38px 34px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 18px 55px rgba(30,24,12,.09); text-align:center; }
-  .mark { width:52px; height:52px; margin:0 auto 20px; border-radius:50%; display:grid; place-items:center; background:var(--orange); color:#fff; font-family:"PP Grafier Display",Georgia,serif; font-size:29px; }
+  .mark { width:52px; height:52px; margin:0 auto 20px; border-radius:50%; display:grid; place-items:center; background:var(--orange); }
+  .mark img { width:34px; height:34px; object-fit:contain; }
   h1 { margin:0; font-family:"PP Grafier Display",Georgia,serif; font-size:31px; font-weight:500; letter-spacing:-.025em; }
   p { margin:11px auto 25px; color:var(--muted); font-size:15px; line-height:1.5; }
   #gsi { min-height:44px; display:flex; justify-content:center; }
@@ -25,7 +26,9 @@
 </head>
 <body>
 <main>
-  <div class="mark">R</div>
+  <div class="mark">
+    <img src="https://webview-lake.vercel.app/assets/raydar-icon-white.png" alt="Raydar" />
+  </div>
   <h1>Sign in to Raydar</h1>
   <p>Use an approved Google account to access Raydar’s internal tools, documentation, and training corpus.</p>
   <div id="gsi"></div>
