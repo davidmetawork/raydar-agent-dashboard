@@ -92,14 +92,15 @@
   .snippet::before{content:"— ";color:#B9B4A6}
   .row-actions{display:none;position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:2;align-items:center;gap:4px;padding:4px;margin:0;background:var(--card);border:1px solid var(--line);border-radius:999px;box-shadow:0 6px 18px -8px rgba(20,16,8,.28)}
   .reply-row:hover .row-actions,.reply-row:focus-within .row-actions{display:flex}
-  .row-actions .btn{width:28px;height:28px;min-width:28px;padding:0;border:0;border-radius:999px;background:transparent;font-size:0}
-  .row-actions .btn::before{font-size:14px;line-height:1;font-weight:400}
-  .row-actions .archive{color:var(--warn)}.row-actions .archive:hover{background:var(--warn-bg)}
-  .row-actions .complete{color:var(--good)}.row-actions .complete:hover{background:var(--good-bg)}
-  .row-actions .restore{color:var(--ink-2)}.row-actions .restore:hover{background:var(--muted-bg)}
-  .row-actions .archive::before{content:"↓"}
-  .row-actions .complete::before{content:"✓"}
-  .row-actions .restore::before{content:"↶"}
+  /* .reply-row prefix keeps these above the later .btn.archive/.complete/.compact detail-pane rules. */
+  .reply-row .row-actions .btn{width:28px;height:28px;min-width:28px;padding:0;border:0;border-radius:999px;background:transparent;font-size:0}
+  .reply-row .row-actions .btn::before{font-size:14px;line-height:1;font-weight:400}
+  .reply-row .row-actions .archive{color:var(--warn)}.reply-row .row-actions .archive:hover{background:var(--warn-bg)}
+  .reply-row .row-actions .complete{color:var(--good)}.reply-row .row-actions .complete:hover{background:var(--good-bg)}
+  .reply-row .row-actions .restore{color:var(--ink-2)}.reply-row .row-actions .restore:hover{background:var(--muted-bg)}
+  .reply-row .row-actions .archive::before{content:"↓"}
+  .reply-row .row-actions .complete::before{content:"✓"}
+  .reply-row .row-actions .restore::before{content:"↶"}
   .empty{padding:48px 24px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--ink);font-family:"PP Grafier Display",serif;font-size:17px;margin-bottom:5px}
   .detail{display:none;min-height:calc(100vh - 150px);border-radius:16px}
   body.reading .inbox>.card:first-of-type{display:none}
