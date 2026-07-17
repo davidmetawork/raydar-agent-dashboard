@@ -205,7 +205,7 @@ export function automationCallReadiness(
     const terminalVerdict = SETTLED_NON_SUCCESS_VERDICTS.has(verdict);
     const finalTranscriptSignal = queueSource === "recall:transcript.done";
     const settleAttempts = Math.max(0, Number(queueAttempts) || 0);
-    const settleLimit = finalTranscriptSignal ? 4 : 20;
+    const settleLimit = finalTranscriptSignal ? 10 : 20;
     if (terminalVerdict && settleAttempts >= settleLimit) {
       return { ready: false, terminal: true, reason: `call verdict is ${verdict}` };
     }

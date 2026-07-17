@@ -239,7 +239,7 @@ test("final transcript events stop retrying settled no-shows without racing late
   };
   assert.deepEqual(automationCallReadiness(noShow, config, {
     queueSource: "recall:transcript.done",
-    queueAttempts: 3,
+    queueAttempts: 9,
   }), {
     ready: false,
     terminal: false,
@@ -247,7 +247,7 @@ test("final transcript events stop retrying settled no-shows without racing late
   });
   assert.deepEqual(automationCallReadiness(noShow, config, {
     queueSource: "recall:transcript.done",
-    queueAttempts: 4,
+    queueAttempts: 10,
   }), {
     ready: false,
     terminal: true,
