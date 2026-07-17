@@ -682,6 +682,15 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
   assert.match(inboxHtml, /data-filter="archived"/);
   assert.match(inboxHtml, /data-filter="complete"/);
+  assert.match(inboxHtml, /class="gmail-nav" aria-label="Inbox views"/);
+  assert.match(inboxHtml, /id="viewToggle"[^>]*href="\/inbox\?style=classic"[^>]*>Classic view/);
+  assert.match(inboxHtml, /const GMAIL_VIEW=VIEW_PARAMS\.get\("style"\)!=="classic"/);
+  assert.match(inboxHtml, /document\.body\.classList\.add\(GMAIL_VIEW\?"gmail":"classic"\)/);
+  assert.match(inboxHtml, /GMAIL_VIEW\?"Classic view":"Gmail view"/);
+  assert.match(inboxHtml, /body\.gmail \.reply-open\{display:grid/);
+  assert.match(inboxHtml, /body\.gmail\.reading \.detail\{display:block\}/);
+  assert.match(inboxHtml, /className="back-control gmail-only"/);
+  assert.match(inboxHtml, /className="message-copy"/);
   assert.match(inboxHtml, /triageControl\(reply,"Archive","archived"/);
   assert.match(inboxHtml, /triageControl\(reply,"Complete","complete"/);
   assert.match(inboxHtml, /triageControl\(reply,"Restore","inbox"/);
@@ -693,6 +702,7 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /role="group" aria-label="Reply filters"/);
   assert.match(inboxHtml, /data-filter="complete" aria-pressed="false"/);
   assert.match(inboxHtml, /item\.setAttribute\("aria-pressed"/);
+  assert.match(inboxHtml, /item\.dataset\.filter===STATE\.filter/);
   assert.match(inboxHtml, /Archived in Paraform/);
   assert.match(inboxHtml, /\.chip\.archived\{[^}]*color:#8A4F0E/);
   assert.match(
@@ -725,6 +735,10 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.deepEqual(
     vercel.rewrites.find(({ source }) => source === "/inbox"),
     { source: "/inbox", destination: "/inbox.html" },
+  );
+  assert.deepEqual(
+    vercel.rewrites.find(({ source }) => source === "/inbox-classic"),
+    { source: "/inbox-classic", destination: "/inbox.html?style=classic" },
   );
   assert.deepEqual(
     vercel.functions["api/inbox/*.mjs"],

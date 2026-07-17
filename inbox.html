@@ -42,6 +42,7 @@
   .summary .meta{color:var(--muted);font-size:12.5px}
   .summary .interested{color:var(--good);font-weight:700;font-size:12.5px;background:var(--good-bg);padding:4px 9px;border-radius:999px}
   .inbox{display:grid;grid-template-columns:minmax(330px,.86fr) minmax(0,1.3fr);gap:14px;align-items:start}
+  .gmail-nav,.gmail-only,.row-marker,.row-star{display:none}
   .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
   .list-head{padding:14px;border-bottom:1px solid var(--line)}
   .search{width:100%;border:1px solid var(--line);border-radius:11px;padding:10px 12px;background:#FBFAF5;color:var(--ink)}
@@ -63,6 +64,7 @@
   .chip.sequence{background:var(--muted-bg);color:var(--ink-2);max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chip.interested{background:var(--good-bg);color:var(--good)}.chip.not-interested{background:var(--bad-bg);color:var(--bad)}
   .chip.unclear{background:var(--blue-bg);color:var(--blue)}.chip.archived{background:var(--warn-bg);color:#8A4F0E}.chip.complete{background:#EEEAFB;color:#5B4AB8}
+  .message-copy{display:contents}
   .subject,.snippet{margin-left:46px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.subject{font-weight:650;font-size:13px}.snippet{color:var(--muted);font-size:12px;margin-top:2px}
   .row-actions{display:none;align-items:center;gap:7px;flex-wrap:wrap;padding:0 15px 13px 61px}.reply-row.active .row-actions{display:flex}
   .empty{padding:48px 24px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--ink);font-family:"PP Grafier Display",serif;font-size:17px;margin-bottom:5px}
@@ -81,12 +83,121 @@
   .detail-body{padding:22px}.message-meta{color:var(--muted);font-size:12px;margin-bottom:16px}.message-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.62;min-height:180px}
   .reply-note{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
   .loading{display:inline-flex;align-items:center;gap:8px;color:var(--muted)}.spinner{width:14px;height:14px;border:2px solid #D9D3C4;border-top-color:var(--orange);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+  .header-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}
+  .view-toggle{display:inline-flex;align-items:center;justify-content:center;min-height:32px;padding:6px 11px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink-2);font-weight:700;font-size:11.5px;text-decoration:none}
+  .view-toggle:hover{border-color:var(--ink-2);color:var(--ink)}
   body.embed .brand img,body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:10px}
   #gate{position:fixed;inset:0;background:var(--cream);display:flex;align-items:flex-start;justify-content:center;z-index:50;padding:32px 20px 20px;overflow:auto}
   #gate .gatebox{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px 40px;text-align:center;max-width:420px}
   #gate h2{margin-bottom:6px}#gate p{color:var(--muted);margin:0 0 20px}#gsi{display:flex;justify-content:center}#gateErr{color:var(--bad);font-size:13px;margin-top:14px;min-height:16px}
   @media(max-width:860px){.inbox{grid-template-columns:1fr}.reply-list{max-height:560px}.detail{min-height:440px}.detail-title-row{flex-direction:column}.detail-actions{justify-content:flex-start}.detail-meta .from{width:100%;margin-left:0}}
   @media(max-width:560px){.wrap{padding:18px 12px 48px}.summary{align-items:flex-start}.reply-open{padding:13px 12px}.detail-head,.detail-body{padding:17px}.detail-actions{width:100%}.detail-actions .btn{flex:1}.row-chips,.subject,.snippet{margin-left:0}.row-chips{margin-top:9px}.row-actions{padding:0 12px 12px}.chip.sequence{max-width:190px}}
+
+  /* Gmail-inspired experiment. The unscoped rules above remain the Classic view. */
+  body.gmail{background:#F7F7F4;font-size:13px}
+  body.gmail .wrap{max-width:none;padding:14px 18px 42px}
+  body.gmail header{margin:0 0 12px;padding:0 4px}
+  body.gmail .brand img{height:24px}
+  body.gmail h1{font-size:22px}
+  body.gmail .sub{font-size:11.5px}
+  body.gmail .summary{margin:0 0 0 204px;padding:9px 13px;background:#fff;border:1px solid var(--line);border-bottom:0;border-radius:14px 14px 0 0}
+  body.gmail .summary strong{font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px}
+  body.gmail .summary .interested{font-size:11px;padding:3px 7px}
+  body.gmail .inbox{grid-template-columns:190px minmax(0,1fr);gap:14px;align-items:stretch}
+  body.gmail .gmail-nav{display:block;padding:7px 0}
+  body.gmail .gmail-nav-title{display:flex;align-items:center;gap:10px;margin:2px 10px 11px;padding:10px 12px;border-radius:13px;background:#FFE6D5;color:#8E3C0B;font-weight:800}
+  body.gmail .gmail-nav-title::before{content:"";width:14px;height:11px;border:2px solid currentColor;border-radius:2px;box-shadow:inset 0 3px 0 transparent;transform:skewY(-8deg)}
+  body.gmail .gmail-nav-group{display:grid;gap:2px}
+  body.gmail .nav-filter{appearance:none;width:100%;display:grid;grid-template-columns:18px 1fr auto;align-items:center;gap:9px;border:0;border-radius:0 16px 16px 0;background:transparent;color:var(--ink-2);padding:8px 12px;text-align:left;font-size:12px;font-weight:650;cursor:pointer}
+  body.gmail .nav-filter:hover{background:#ECEBE6;color:var(--ink)}
+  body.gmail .nav-filter.active{background:#E7E4DA;color:var(--ink);font-weight:800}
+  body.gmail .nav-filter .nav-mark{width:10px;height:10px;border:1.5px solid currentColor;border-radius:3px;opacity:.72}
+  body.gmail .nav-filter[data-filter="interested"] .nav-mark{border-radius:50%;background:var(--good);border-color:var(--good)}
+  body.gmail .nav-filter[data-filter="unclear"] .nav-mark{background:var(--blue);border-color:var(--blue)}
+  body.gmail .nav-filter[data-filter="not_interested"] .nav-mark{border-radius:50%;background:var(--bad);border-color:var(--bad)}
+  body.gmail .nav-filter[data-filter="archived"] .nav-mark{background:var(--warn);border-color:var(--warn)}
+  body.gmail .nav-filter[data-filter="complete"] .nav-mark{border-radius:50%;background:#6854C7;border-color:#6854C7}
+  body.gmail .nav-filter .n{font-variant-numeric:tabular-nums;color:var(--muted)}
+  body.gmail .card{border-radius:0 0 14px 14px;box-shadow:none}
+  body.gmail .inbox>.card{grid-column:2}
+  body.gmail .list-head{padding:10px 12px;background:#fff}
+  body.gmail .search{height:44px;border:0;border-radius:12px;padding:0 16px 0 42px;background:#F0F1EC;color:var(--ink);box-shadow:inset 0 0 0 1px transparent;background-image:linear-gradient(45deg,transparent 45%,#777 45%,#777 55%,transparent 55%),linear-gradient(-45deg,transparent 45%,#777 45%,#777 55%,transparent 55%),radial-gradient(circle at center,transparent 5px,#777 5.5px,#777 7px,transparent 7.5px);background-size:7px 7px,7px 7px,16px 16px;background-position:24px 27px,29px 27px,15px 10px;background-repeat:no-repeat}
+  body.gmail .search:focus{background-color:#fff;box-shadow:0 1px 2px rgba(20,16,8,.08),0 3px 12px rgba(20,16,8,.09)}
+  body.gmail .filters{display:none}
+  body.gmail .reply-list{max-height:calc(100vh - 182px);min-height:440px}
+  body.gmail .reply-row{position:relative;background:#FAFAF8}
+  body.gmail .reply-row:hover,body.gmail .reply-row:focus-within{background:#fff;box-shadow:0 1px 4px rgba(20,16,8,.15);z-index:1}
+  body.gmail .reply-row.active{background:#FFF8F2;box-shadow:inset 3px 0 0 var(--orange)}
+  body.gmail .reply-open{display:grid;grid-template-columns:17px 17px minmax(118px,160px) minmax(120px,190px) minmax(180px,1fr) 62px;align-items:center;gap:9px;min-height:45px;padding:7px 12px}
+  body.gmail .row-marker,body.gmail .row-star{display:block;color:#98958D;line-height:1}
+  body.gmail .row-marker{width:14px;height:14px;border:1.5px solid currentColor;border-radius:2px}
+  body.gmail .row-star{font-size:17px;transform:translateY(-1px)}
+  body.gmail .row-top,body.gmail .who,body.gmail .name-line{display:contents}
+  body.gmail .avatar,body.gmail .one-liner{display:none}
+  body.gmail .name{grid-column:3;font-weight:760}
+  body.gmail .date{grid-column:6;grid-row:1;text-align:right;font-size:10.5px;font-weight:650;color:var(--ink-2)}
+  body.gmail .row-chips{grid-column:4;grid-row:1;min-width:0;display:flex;flex-wrap:nowrap;margin:0;overflow:hidden}
+  body.gmail .chip{flex:none;border-radius:5px;padding:3px 6px;font-size:9.5px}
+  body.gmail .chip.sequence{max-width:130px}
+  body.gmail .message-copy{grid-column:5;grid-row:1;display:flex;align-items:baseline;gap:5px;min-width:0;overflow:hidden}
+  body.gmail .subject,body.gmail .snippet{min-width:0;margin:0;font-size:11.5px}
+  body.gmail .subject{flex:none;max-width:52%;font-weight:720}
+  body.gmail .snippet{flex:1;color:#79766E}
+  body.gmail .snippet::before{content:"— ";color:#A19D93}
+  body.gmail .row-actions{display:none;position:absolute;right:8px;top:6px;z-index:2;gap:4px;padding:0;background:#fff;border-radius:9px;box-shadow:-10px 0 10px #fff}
+  body.gmail .reply-row:hover .row-actions,body.gmail .reply-row:focus-within .row-actions{display:flex}
+  body.gmail .row-actions .btn{width:29px;height:29px;min-width:29px;padding:0;border-radius:7px;font-size:0}
+  body.gmail .row-actions .btn::before{font-size:15px;line-height:1}
+  body.gmail .row-actions .archive::before{content:"⌄"}
+  body.gmail .row-actions .complete::before{content:"✓"}
+  body.gmail .row-actions .restore::before{content:"↶"}
+  body.gmail .detail{display:none;min-height:calc(100vh - 132px);border-radius:14px}
+  body.gmail.reading .inbox>.card:first-of-type{display:none}
+  body.gmail.reading .detail{display:block}
+  body.gmail .gmail-only{display:inline-flex}
+  body.gmail .back-control{appearance:none;align-items:center;gap:6px;border:0;background:transparent;color:var(--ink-2);padding:3px 5px 12px 0;font-weight:750;cursor:pointer}
+  body.gmail .back-control::before{content:"←";font-size:17px}
+  body.gmail .detail-head{padding:17px 20px}
+  body.gmail .detail-title h2{font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:20px}
+  body.gmail .detail-body{padding:20px 22px}
+  body.gmail .view-toggle{background:#fff}
+  body.gmail.embed .summary{margin-left:204px}
+  body.gmail.embed header{min-height:32px}
+  @media(max-width:1080px){
+    body.gmail .summary{margin-left:174px}
+    body.gmail .inbox{grid-template-columns:160px minmax(0,1fr)}
+    body.gmail .reply-open{grid-template-columns:17px 17px minmax(100px,140px) minmax(105px,150px) minmax(150px,1fr) 54px}
+    body.gmail .chip.sequence{max-width:100px}
+    body.gmail.embed .summary{margin-left:174px}
+  }
+  @media(max-width:760px){
+    body.gmail .wrap{padding:10px 10px 36px}
+    body.gmail header{align-items:flex-start}
+    body.gmail .header-actions{gap:5px}
+    body.gmail .summary,body.gmail.embed .summary{margin-left:0;border-radius:12px 12px 0 0}
+    body.gmail .inbox{grid-template-columns:1fr;gap:0}
+    body.gmail .gmail-nav{grid-column:1;display:flex;overflow-x:auto;padding:8px 4px;background:#F7F7F4}
+    body.gmail .gmail-nav-title{display:none}
+    body.gmail .gmail-nav-group{display:flex;gap:5px}
+    body.gmail .nav-filter{display:flex;width:auto;border-radius:999px;padding:7px 10px;background:#fff;border:1px solid var(--line);white-space:nowrap}
+    body.gmail .nav-filter.active{background:var(--ink);border-color:var(--ink);color:var(--cream)}
+    body.gmail .nav-filter .nav-mark{display:none}
+    body.gmail .inbox>.card{grid-column:1}
+    body.gmail .reply-open{grid-template-columns:16px minmax(100px,130px) minmax(0,1fr) 46px;gap:7px}
+    body.gmail .row-star,body.gmail .row-chips{display:none}
+    body.gmail .name{grid-column:2}
+    body.gmail .message-copy{grid-column:3}
+    body.gmail .date{grid-column:4}
+    body.gmail .detail{min-height:520px}
+  }
+  @media(max-width:500px){
+    body.gmail .brand .sub{display:none}
+    body.gmail .pill{padding:5px 8px}
+    body.gmail .reply-open{grid-template-columns:14px minmax(82px,105px) minmax(0,1fr) 42px;padding:7px 9px}
+    body.gmail .subject{max-width:68%}
+    body.gmail .snippet{font-size:10.5px}
+    body.gmail .detail-title-row{gap:12px}
+  }
 </style>
 </head>
 <body>
@@ -103,7 +214,10 @@
       <img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" onerror="this.style.display='none'" />
       <div><h1>Inbox</h1><div class="sub">Every Paraform sequence reply, triaged in one place</div></div>
     </div>
-    <span id="health" class="pill warn"><span class="dot"></span><span id="healthText">checking…</span></span>
+    <div class="header-actions">
+      <a id="viewToggle" class="view-toggle" href="/inbox?style=classic">Classic view</a>
+      <span id="health" class="pill warn"><span class="dot"></span><span id="healthText">checking…</span></span>
+    </div>
   </header>
 
   <div id="banner" class="banner hidden" role="status"></div>
@@ -117,6 +231,18 @@
   </div>
 
   <main class="inbox">
+    <aside class="gmail-nav" aria-label="Inbox views">
+      <div class="gmail-nav-title">Inbox</div>
+      <div class="gmail-nav-group" role="group" aria-label="Reply filters">
+        <button class="nav-filter active" type="button" data-filter="all" aria-pressed="true"><span class="nav-mark" aria-hidden="true"></span><span>Inbox</span><span class="n" data-count="all"></span></button>
+        <button class="nav-filter" type="button" data-filter="interested" aria-pressed="false"><span class="nav-mark" aria-hidden="true"></span><span>Interested</span><span class="n" data-count="interested"></span></button>
+        <button class="nav-filter" type="button" data-filter="unclear" aria-pressed="false"><span class="nav-mark" aria-hidden="true"></span><span>Needs review</span><span class="n" data-count="unclear"></span></button>
+        <button class="nav-filter" type="button" data-filter="not_interested" aria-pressed="false"><span class="nav-mark" aria-hidden="true"></span><span>Not interested</span><span class="n" data-count="not_interested"></span></button>
+        <button class="nav-filter" type="button" data-filter="archived" aria-pressed="false"><span class="nav-mark" aria-hidden="true"></span><span>Archived</span><span class="n" data-count="archived"></span></button>
+        <button class="nav-filter" type="button" data-filter="complete" aria-pressed="false"><span class="nav-mark" aria-hidden="true"></span><span>Complete</span><span class="n" data-count="complete"></span></button>
+      </div>
+    </aside>
+
     <section class="card" aria-label="Reply list">
       <div class="list-head">
         <input id="search" class="search" type="search" autocomplete="off" placeholder="Search candidate, sequence, or subject…" aria-label="Search sequence replies" />
@@ -142,6 +268,15 @@
 
 <script>
 const $=(id)=>document.getElementById(id);
+const VIEW_PARAMS=new URLSearchParams(location.search);
+const GMAIL_VIEW=VIEW_PARAMS.get("style")!=="classic";
+document.body.classList.add(GMAIL_VIEW?"gmail":"classic");
+const viewToggle=$("viewToggle");
+viewToggle.textContent=GMAIL_VIEW?"Classic view":"Gmail view";
+const nextView=new URL("/inbox",location.origin);
+if(GMAIL_VIEW)nextView.searchParams.set("style","classic");
+if(VIEW_PARAMS.has("embed"))nextView.searchParams.set("embed","1");
+viewToggle.href=nextView.pathname+nextView.search;
 let AUTH={required:false,authenticated:false,clientId:null,token:null,email:"",domains:["raydar.xyz","raydargroup.com"]};
 const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
 const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,triaging:new Set(),triageRevision:0};
@@ -291,6 +426,7 @@ function triageControl(reply,label,status,compact=false){
   button.dataset.focusKey="triage-"+status;
   button.dataset.focusRegion=compact?"row":"detail";
   button.textContent=STATE.triaging.has(reply.gmail_id)?"Saving…":label;
+  button.title=label;
   button.disabled=STATE.triaging.has(reply.gmail_id)||!canTriage(reply);
   button.addEventListener("click",event=>{event.stopPropagation();setReplyTriage(reply,status,button);});
   return button;
@@ -341,6 +477,8 @@ function renderList(){
     open.setAttribute("aria-pressed",STATE.selectedId===reply.gmail_id?"true":"false");
     open.addEventListener("click",()=>selectReply(reply));
 
+    const marker=document.createElement("span");marker.className="row-marker";marker.setAttribute("aria-hidden","true");
+    const star=document.createElement("span");star.className="row-star";star.setAttribute("aria-hidden","true");star.textContent="☆";
     const top=document.createElement("div");top.className="row-top";
     const avatar=document.createElement("div");avatar.className="avatar";avatar.textContent=initials(reply.candidate_name);
     const who=document.createElement("div");who.className="who";
@@ -357,8 +495,9 @@ function renderList(){
     const status=triageChip(reply);if(status)chips.append(status);
     const subject=document.createElement("div");subject.className="subject";subject.textContent=reply.subject||"(no subject)";
     const snippet=document.createElement("div");snippet.className="snippet";snippet.textContent=reply.snippet||"";
-    open.append(top,chips,subject,snippet);row.append(open);
-    if(STATE.selectedId===reply.gmail_id&&canTriage(reply)){
+    const copy=document.createElement("div");copy.className="message-copy";copy.append(subject,snippet);
+    open.append(marker,star,top,chips,copy);row.append(open);
+    if(canTriage(reply)&&(GMAIL_VIEW||STATE.selectedId===reply.gmail_id)){
       const actions=document.createElement("div");actions.className="row-actions";
       actions.append(triageControls(reply,true));row.append(actions);
     }
@@ -370,6 +509,7 @@ function paraformLink(reply){
 }
 function detailHeader(reply){
   const head=document.createElement("div");head.className="detail-head";
+  const back=document.createElement("button");back.type="button";back.className="back-control gmail-only";back.textContent="Back to inbox";back.addEventListener("click",closeReadingPane);head.append(back);
   const titleRow=document.createElement("div");titleRow.className="detail-title-row";
   const title=document.createElement("div");title.className="detail-title";
   const h2=document.createElement("h2");h2.textContent=reply.subject||"(no subject)";
@@ -498,6 +638,7 @@ async function setReplyTriage(reply,requestedStatus,sourceButton){
   }
 }
 async function selectReply(reply){
+  if(GMAIL_VIEW)document.body.classList.add("reading");
   STATE.selectedId=reply.gmail_id;renderList();
   if(STATE.messages.has(reply.gmail_id)){renderMessage(reply,STATE.messages.get(reply.gmail_id));return;}
   renderDetailLoading(reply);
@@ -511,7 +652,16 @@ async function selectReply(reply){
     if(STATE.selectedId===reply.gmail_id)renderDetailError(reply,"Couldn’t load this message. Try selecting it again.");
   }
 }
+function closeReadingPane(){
+  document.body.classList.remove("reading");
+  requestAnimationFrame(()=>document.querySelector('.reply-open[data-reply-id="'+CSS.escape(STATE.selectedId)+'"]')?.focus());
+}
 function selectFirstVisible(){
+  if(GMAIL_VIEW&&!document.body.classList.contains("reading")){
+    STATE.selectedId="";
+    renderList();
+    return;
+  }
   const visible=filteredReplies();
   const selected=visible.find(reply=>reply.gmail_id===STATE.selectedId);
   if(selected){selectReply(selected);return;}
@@ -577,7 +727,7 @@ $("search").addEventListener("input",event=>{STATE.query=event.target.value;rend
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{
   STATE.filter=button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach(item=>{
-    const active=item===button;
+    const active=item.dataset.filter===STATE.filter;
     item.classList.toggle("active",active);
     item.setAttribute("aria-pressed",active?"true":"false");
   });

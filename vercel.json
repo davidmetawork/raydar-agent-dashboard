@@ -6,6 +6,7 @@
     { "source": "/c/:id", "destination": "/call.html" },
     { "source": "/sequences", "destination": "/sequences.html" },
     { "source": "/inbox", "destination": "/inbox.html" },
+    { "source": "/inbox-classic", "destination": "/inbox.html?style=classic" },
     { "source": "/enrich", "destination": "/enrich.html" },
     { "source": "/sourcing", "destination": "/sourcing.html" },
     { "source": "/prep", "destination": "/prep.html" },
