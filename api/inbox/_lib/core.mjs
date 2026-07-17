@@ -19,22 +19,88 @@ import {
 
 export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
 
-export const INBOX_CACHE_KEY = "inbox:v1:feed";
-export const INBOX_BUILD_LOCK_KEY = "inbox:v1:feed:lock";
+export const INBOX_CACHE_KEY = "inbox:v2:feed";
+export const INBOX_BUILD_LOCK_KEY = "inbox:v2:feed:lock";
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
 export const INBOX_CACHE_TTL_SECONDS = 90;
 export const INBOX_FANOUT_CONCURRENCY = 6;
 export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
 export const INBOX_TRIAGE_STATUSES = Object.freeze(["archived", "complete"]);
+export const INBOX_EXCLUDED_ADDRESSES = Object.freeze(["david@raydar.xyz"]);
 
 const GMAIL_ID_RE = /^[a-zA-Z0-9._:-]{1,512}$/;
+const EMAIL_TOKEN_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+const DELIVERY_SYSTEM_ADDRESS_RE = /^(?:mailer-daemon|mail-daemon|postmaster|bounce(?:s)?(?:[+._-].*)?)@/i;
+const DELIVERY_NOTICE_SUBJECT_RE = /(?:delivery status notification|undeliverable|mail delivery (?:failed|failure|subsystem)|delivery (?:failure|failed|delayed|delay|incomplete)|returned mail|failure notice|message (?:not delivered|delivery failure))/i;
+const DELIVERY_NOTICE_TEXT_RE = /(?:your message (?:wasn't|was not|couldn't|could not) (?:be )?delivered|address not found|recipient address rejected|user unknown|mailbox (?:unavailable|not found|full)|temporary delivery failure|permanent delivery failure|delivery to .{0,160} (?:failed|delayed)|(?:we'll|we will) keep trying to deliver)/i;
 
 const stringValue = (value) => (
   typeof value === "string" ? value.trim() : ""
 );
 
 const arrayValue = (value) => (Array.isArray(value) ? value : []);
+
+function addressParts(value) {
+  if (Array.isArray(value)) return value.flatMap(addressParts);
+  if (value && typeof value === "object") {
+    return [
+      value.email,
+      value.address,
+      value.value,
+    ].flatMap(addressParts);
+  }
+  return typeof value === "string" ? [value] : [];
+}
+
+function addressFields(source) {
+  if (!source || typeof source !== "object") return [];
+  return [
+    source.from,
+    source.from_email,
+    source.sender,
+    source.sender_email,
+    source.to,
+    source.to_email,
+    source.recipient,
+    source.recipient_email,
+    source.recipients,
+    source.cc,
+    source.bcc,
+    source.reply_to,
+    source.reply_to_email,
+  ].flatMap(addressParts);
+}
+
+function emailTokens(values) {
+  return arrayValue(values).flatMap((value) => (
+    String(value || "").toLowerCase().match(EMAIL_TOKEN_RE) || []
+  ));
+}
+
+export function shouldExcludeInboxReply(reply, addressValues = []) {
+  const subject = stringValue(reply?.subject || reply?.email_subject);
+  const snippet = stringValue(reply?.snippet || reply?.email_snippet);
+  const addresses = [
+    reply?.candidate_email,
+    ...arrayValue(addressValues),
+  ];
+  const tokens = emailTokens([
+    ...addresses,
+    subject,
+    snippet,
+  ]);
+  if (tokens.some((token) => INBOX_EXCLUDED_ADDRESSES.includes(token))) {
+    return true;
+  }
+  if (emailTokens(addresses).some((token) => (
+    DELIVERY_SYSTEM_ADDRESS_RE.test(token)
+  ))) {
+    return true;
+  }
+  return DELIVERY_NOTICE_SUBJECT_RE.test(subject)
+    || DELIVERY_NOTICE_TEXT_RE.test(`${subject}\n${snippet}`);
+}
 
 export function validInboxGmailId(value) {
   return GMAIL_ID_RE.test(stringValue(value));
@@ -162,7 +228,7 @@ export function flattenCampaignInbox(campaign, inboxData, recentByGmail = new Ma
     const gmailId = stringValue(email.gmail_id);
     const recent = recentByGmail.get(gmailId) || {};
 
-    rows.push({
+    const row = {
       candidate_name: stringValue(recent.candidate_name || candidate.name) || "Unknown candidate",
       candidate_email: stringValue(recent.candidate_email) || candidateEmail(lead),
       candidate_image: stringValue(recent.candidate_image || candidate.image_src),
@@ -184,7 +250,15 @@ export function flattenCampaignInbox(campaign, inboxData, recentByGmail = new Ma
       is_archived: Boolean(lead.is_archived),
       can_reply: Boolean(recent.can_reply ?? campaign.can_reply),
       attachment_count: attachmentCount(email, recent),
-    });
+    };
+    const addresses = [
+      ...addressFields(campaignEmail),
+      ...addressFields(email),
+      ...addressFields(email.email_info),
+      ...addressFields(recent),
+      ...addressFields(lead),
+    ];
+    if (!shouldExcludeInboxReply(row, addresses)) rows.push(row);
   }
   return rows;
 }
@@ -230,11 +304,13 @@ export function mergeAndSortReplies(rows, recentReplies, campaigns, categoryByLe
   );
   const merged = new Map();
   for (const row of arrayValue(rows)) {
+    if (shouldExcludeInboxReply(row)) continue;
     const key = rowKey(row);
     if (key) merged.set(key, row);
   }
   for (const recent of arrayValue(recentReplies)) {
     const row = recentFallbackRow(recent, campaignById, categoryByLead);
+    if (shouldExcludeInboxReply(row, addressFields(recent))) continue;
     const key = rowKey(row);
     if (key && !merged.has(key)) merged.set(key, row);
   }
@@ -446,16 +522,18 @@ export function applyInboxTriage(feed, triageRaw) {
   const triage = triageRaw instanceof Map
     ? triageRaw
     : parseInboxTriage(triageRaw);
-  const replies = arrayValue(feed?.replies).map((reply) => {
-    const record = validInboxGmailId(reply?.gmail_id)
-      ? triage.get(reply.gmail_id)
-      : null;
-    return {
-      ...reply,
-      triage_status: record?.status || null,
-      triage_updated_at: record?.updated_at || "",
-    };
-  });
+  const replies = arrayValue(feed?.replies)
+    .filter((reply) => !shouldExcludeInboxReply(reply))
+    .map((reply) => {
+      const record = validInboxGmailId(reply?.gmail_id)
+        ? triage.get(reply.gmail_id)
+        : null;
+      return {
+        ...reply,
+        triage_status: record?.status || null,
+        triage_updated_at: record?.updated_at || "",
+      };
+    });
   return {
     ...feed,
     replies,
