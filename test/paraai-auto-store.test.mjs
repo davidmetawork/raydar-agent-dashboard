@@ -95,7 +95,11 @@ test("auto enqueue deduplicates hashed webhook events and preserves the effectiv
   assert.equal(commands[0][0], "EVAL");
   assert.match(commands[0][4], /^paraai:auto:event:[a-f0-9]{64}$/);
   assert.equal(commands[0][4].includes("webhook-private-event"), false);
+  assert.equal(commands[0][5], `paraai:auto:meta:${jobId}`);
+  assert.match(JSON.parse(commands[0][10]).generation, /^[a-f0-9-]{36}$/);
+  assert.equal(Number(commands[0][12]), 180 * 24 * 60 * 60);
   assert.match(commands[0][1], /due < tonumber\(current\)/);
+  assert.match(commands[0][1], /old\.source == 'authorized_backfill'/);
 });
 
 test("due jobs receive fenced leases and remain scheduled at lease expiry", async () => {
@@ -107,29 +111,78 @@ test("due jobs receive fenced leases and remain scheduled at lease expiry", asyn
   }, {
     kvImpl: async (command) => {
       commands.push(command);
-      return [jobId, "worker-a:token:1", "35000", "bot_87654321", "worker-a:token:2", "35000"];
+      return [
+        jobId, "worker-a:token:1:generation-a", "35000", "recall:transcript.done", "generation-a", "2",
+        "bot_87654321", "worker-a:token:2:generation-b", "35000", "authorized_backfill", "generation-b", "0",
+      ];
     },
   });
   assert.deepEqual(claimed, [
-    { botId: jobId, leaseToken: "worker-a:token:1", leaseUntil: 35_000 },
-    { botId: "bot_87654321", leaseToken: "worker-a:token:2", leaseUntil: 35_000 },
+    {
+      botId: jobId,
+      leaseToken: "worker-a:token:1:generation-a",
+      leaseUntil: 35_000,
+      source: "recall:transcript.done",
+      generation: "generation-a",
+      attempts: 2,
+    },
+    {
+      botId: "bot_87654321",
+      leaseToken: "worker-a:token:2:generation-b",
+      leaseUntil: 35_000,
+      source: "authorized_backfill",
+      generation: "generation-b",
+      attempts: 0,
+    },
   ]);
   assert.match(commands[0][1], /redis\.call\('SET', leaseKey, token, 'PX'/);
   assert.match(commands[0][1], /redis\.call\('ZADD', KEYS\[1\], ARGV\[7\], jobId\)/);
+  assert.match(commands[0][1], /meta\.generation/);
 });
 
 test("only the current lease owner can complete or reschedule an auto job", async () => {
   assert.equal(await completeAutoJob(jobId), false);
-  assert.equal(await completeAutoJob(jobId, { leaseToken: "lease-a" }, { kvImpl: async () => 1 }), true);
+  assert.equal(await completeAutoJob(jobId, {
+    leaseToken: "lease-a",
+    generation: "generation-a",
+  }, { kvImpl: async () => 1 }), true);
   assert.equal(await completeAutoJob(jobId, { leaseToken: "stale" }, { kvImpl: async () => 0 }), false);
+  assert.equal(await completeAutoJob(jobId, {
+    leaseToken: "lease-a",
+    generation: "generation-a",
+  }, { kvImpl: async () => 2 }), false);
 
   const result = await rescheduleAutoJob(jobId, {
     leaseToken: "lease-a",
+    generation: "generation-a",
     delayMs: 60_000,
     error: "temporary read failure",
     now: 1_000,
   }, { kvImpl: async () => 1 });
-  assert.deepEqual(result, { rescheduled: true, dueAt: 61_000 });
+  assert.deepEqual(result, { rescheduled: true, superseded: false, dueAt: 61_000 });
+  const sourcePreserving = [];
+  await rescheduleAutoJob(jobId, {
+    leaseToken: "lease-a",
+    generation: "generation-a",
+    delayMs: 60_000,
+    now: 1_000,
+  }, {
+    kvImpl: async (command) => {
+      sourcePreserving.push(command);
+      return 1;
+    },
+  });
+  assert.match(sourcePreserving[0][1], /next\.source = old\.source/);
+  assert.match(sourcePreserving[0][1], /next\.generation = old\.generation/);
+  assert.match(sourcePreserving[0][1], /currentGeneration ~= ARGV\[6\]/);
+  assert.deepEqual(
+    await rescheduleAutoJob(jobId, {
+      leaseToken: "lease-a",
+      generation: "generation-a",
+      delayMs: 1_000,
+    }, { kvImpl: async () => 2 }),
+    { rescheduled: false, superseded: true, dueAt: null },
+  );
   assert.deepEqual(
     await rescheduleAutoJob(jobId, { delayMs: 1_000 }, { kvImpl: async () => 1 }),
     { rescheduled: false, dueAt: null },

@@ -3,10 +3,14 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 const WEBHOOK_SECRET_PREFIX = "whsec_";
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 const DEFAULT_TOLERANCE_SECONDS = 5 * 60;
-const SCREENER_WORKFLOW_SOURCES = new Set([
+const SCREENER_SOURCE_ROOTS = [
   "paraform-auto",
   "paraform-reconciliation",
-]);
+  "fyxer-guardian-n8n",
+];
+const SCREENER_WORKFLOW_SOURCES = new Set(
+  SCREENER_SOURCE_ROOTS.flatMap((source) => [source, `${source}-guardian`]),
+);
 
 export function isCanonicalScreenerSource(value) {
   return SCREENER_WORKFLOW_SOURCES.has(String(value || ""));

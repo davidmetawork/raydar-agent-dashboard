@@ -11,15 +11,16 @@ const JOB_LOCK_TTL_SECONDS = 150;
 const LEGACY_JOB_LOCK_TTL_SECONDS = 330;
 const LEGACY_JOB_LOCK_STALE_AFTER_SECONDS = 120;
 const AUTO_EVENT_TTL_SECONDS = 14 * 24 * 60 * 60;
-const AUTO_META_TTL_SECONDS = 30 * 24 * 60 * 60;
+const AUTO_META_TTL_SECONDS = JOB_TTL_SECONDS;
 const AUTO_LEASE_MS = 150_000;
 const AUTO_DUE_KEY = "paraai:auto:due";
 const AUTO_LEASES_KEY = "paraai:auto:leases";
+const AUTO_META_PREFIX = "paraai:auto:meta:";
 const jobKey = (id) => `paraai:job:${id}`;
 const lockKey = (id) => `paraai:lock:${id}`;
 const alertKey = (key) => `paraai:alert:${key}`;
 const autoLeaseKey = (id) => `paraai:auto:lease:${id}`;
-const autoMetaKey = (id) => `paraai:auto:meta:${storeHash("auto-job", id)}`;
+const autoMetaKey = (id) => `${AUTO_META_PREFIX}${id}`;
 const autoEventKey = (id) => `paraai:auto:event:${storeHash("auto-event", id)}`;
 const submissionClaimKey = (candidateUserId) => `paraai:submit-claim:${storeHash("candidate", candidateUserId)}`;
 
@@ -246,12 +247,27 @@ export async function enqueueAutoJob(
     source: String(source || "unknown").slice(0, 80),
     receivedAt: new Date(queuedAt).toISOString(),
   });
+  const metaValue = JSON.stringify({
+    source: String(source || "unknown").slice(0, 80),
+    enqueuedAt: new Date(queuedAt).toISOString(),
+    generation: randomUUID(),
+  });
   const script = `
     local recorded = redis.call('SET', KEYS[2], ARGV[3], 'NX', 'EX', ARGV[4])
     local current = redis.call('ZSCORE', KEYS[1], ARGV[1])
     if not recorded then
       return {0, current or ''}
     end
+    local next = cjson.decode(ARGV[5])
+    local raw = redis.call('GET', KEYS[3])
+    if raw then
+      local ok, old = pcall(cjson.decode, raw)
+      if ok and old then
+        if old.source == 'authorized_backfill' then next.source = old.source end
+        if old.enqueuedAt then next.enqueuedAt = old.enqueuedAt end
+      end
+    end
+    redis.call('SET', KEYS[3], cjson.encode(next), 'EX', ARGV[7])
     local due = tonumber(ARGV[2])
     if (not current) or due < tonumber(current) then
       redis.call('ZADD', KEYS[1], due, ARGV[1])
@@ -260,8 +276,9 @@ export async function enqueueAutoJob(
     return {1, current or tostring(due)}
   `;
   const result = await kvImpl([
-    "EVAL", script, 2, AUTO_DUE_KEY, eventKey,
+    "EVAL", script, 3, AUTO_DUE_KEY, eventKey, autoMetaKey(id),
     id, String(due), eventValue, String(AUTO_EVENT_TTL_SECONDS),
+    metaValue, String(source || "unknown"), String(AUTO_META_TTL_SECONDS),
   ]);
   const enqueued = Number(result?.[0]) === 1;
   const effectiveRaw = String(result?.[1] ?? "");
@@ -293,13 +310,28 @@ export async function claimDueAutoJobs(
       local leaseKey = ARGV[6] .. jobId
       if not redis.call('GET', leaseKey) then
         claimed = claimed + 1
-        local token = ARGV[5] .. ':' .. tostring(claimed)
+        local source = 'unknown'
+        local generation = ''
+        local attempts = 0
+        local raw = redis.call('GET', ARGV[8] .. jobId)
+        if raw then
+          local ok, meta = pcall(cjson.decode, raw)
+          if ok and meta then
+            if meta.source then source = tostring(meta.source) end
+            if meta.generation then generation = tostring(meta.generation) end
+            if meta.attempts then attempts = tonumber(meta.attempts) or 0 end
+          end
+        end
+        local token = ARGV[5] .. ':' .. tostring(claimed) .. ':' .. generation
         redis.call('SET', leaseKey, token, 'PX', ARGV[4])
         redis.call('ZADD', KEYS[1], ARGV[7], jobId)
         redis.call('ZADD', KEYS[2], ARGV[7], jobId)
         table.insert(out, jobId)
         table.insert(out, token)
         table.insert(out, ARGV[7])
+        table.insert(out, source)
+        table.insert(out, generation)
+        table.insert(out, attempts)
       end
     end
     return out
@@ -308,20 +340,38 @@ export async function claimDueAutoJobs(
   const result = await kvImpl([
     "EVAL", script, 2, AUTO_DUE_KEY, AUTO_LEASES_KEY,
     String(claimedAt), String(scanLimit), String(capped), String(leaseFor),
-    tokenPrefix, "paraai:auto:lease:", String(leaseUntil),
+    tokenPrefix, "paraai:auto:lease:", String(leaseUntil), AUTO_META_PREFIX,
   ]);
   const rows = [];
-  for (let i = 0; i + 2 < (Array.isArray(result) ? result.length : 0); i += 3) {
-    rows.push({ botId: String(result[i]), leaseToken: String(result[i + 1]), leaseUntil: Number(result[i + 2]) });
+  for (let i = 0; i + 5 < (Array.isArray(result) ? result.length : 0); i += 6) {
+    rows.push({
+      botId: String(result[i]),
+      leaseToken: String(result[i + 1]),
+      leaseUntil: Number(result[i + 2]),
+      source: String(result[i + 3] || "unknown"),
+      generation: String(result[i + 4] || ""),
+      attempts: Number(result[i + 5]) || 0,
+    });
   }
   return rows;
 }
 
-export async function completeAutoJob(botId, { leaseToken = "" } = {}, { kvImpl = kv } = {}) {
+export async function completeAutoJob(botId, { leaseToken = "", generation = "" } = {}, { kvImpl = kv } = {}) {
   const id = requireStoreId(botId, "bot id");
   if (!leaseToken) return false;
   const script = `
     if redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
+    local raw = redis.call('GET', KEYS[4])
+    local currentGeneration = ''
+    if raw then
+      local ok, meta = pcall(cjson.decode, raw)
+      if ok and meta and meta.generation then currentGeneration = tostring(meta.generation) end
+    end
+    if currentGeneration ~= ARGV[3] then
+      redis.call('DEL', KEYS[3])
+      redis.call('ZREM', KEYS[2], ARGV[1])
+      return 2
+    end
     redis.call('DEL', KEYS[3])
     redis.call('DEL', KEYS[4])
     redis.call('ZREM', KEYS[1], ARGV[1])
@@ -330,13 +380,13 @@ export async function completeAutoJob(botId, { leaseToken = "" } = {}, { kvImpl 
   `;
   return Number(await kvImpl([
     "EVAL", script, 4, AUTO_DUE_KEY, AUTO_LEASES_KEY, autoLeaseKey(id), autoMetaKey(id),
-    id, String(leaseToken),
+    id, String(leaseToken), String(generation || ""),
   ])) === 1;
 }
 
 export async function rescheduleAutoJob(
   botId,
-  { leaseToken = "", delayMs = 0, dueAt = null, error = "", now = Date.now() } = {},
+  { leaseToken = "", generation = "", delayMs = 0, dueAt = null, error = "", now = Date.now() } = {},
   { kvImpl = kv } = {},
 ) {
   const id = requireStoreId(botId, "bot id");
@@ -350,25 +400,45 @@ export async function rescheduleAutoJob(
   });
   const script = `
     if redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
+    local currentRaw = redis.call('GET', KEYS[4])
+    local currentGeneration = ''
+    if currentRaw then
+      local currentOk, currentMeta = pcall(cjson.decode, currentRaw)
+      if currentOk and currentMeta and currentMeta.generation then currentGeneration = tostring(currentMeta.generation) end
+    end
+    if currentGeneration ~= ARGV[6] then
+      redis.call('DEL', KEYS[3])
+      redis.call('ZREM', KEYS[2], ARGV[1])
+      return 2
+    end
     redis.call('DEL', KEYS[3])
     redis.call('ZREM', KEYS[2], ARGV[1])
     redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
     local attempts = 1
     local raw = redis.call('GET', KEYS[4])
+    local old = nil
     if raw then
-      local ok, old = pcall(cjson.decode, raw)
+      local ok
+      ok, old = pcall(cjson.decode, raw)
       if ok and old and old.attempts then attempts = tonumber(old.attempts) + 1 end
     end
     local next = cjson.decode(ARGV[4])
     next.attempts = attempts
+    if old and old.source then next.source = old.source end
+    if old and old.enqueuedAt then next.enqueuedAt = old.enqueuedAt end
+    if old and old.generation then next.generation = old.generation end
     redis.call('SET', KEYS[4], cjson.encode(next), 'EX', ARGV[5])
     return 1
   `;
   const rescheduled = Number(await kvImpl([
     "EVAL", script, 4, AUTO_DUE_KEY, AUTO_LEASES_KEY, autoLeaseKey(id), autoMetaKey(id),
-    id, String(leaseToken), String(due), meta, String(AUTO_META_TTL_SECONDS),
-  ])) === 1;
-  return { rescheduled, dueAt: rescheduled ? due : null };
+    id, String(leaseToken), String(due), meta, String(AUTO_META_TTL_SECONDS), String(generation || ""),
+  ]));
+  return {
+    rescheduled: rescheduled === 1,
+    superseded: rescheduled === 2,
+    dueAt: rescheduled === 1 ? due : null,
+  };
 }
 
 export async function getAutoQueueStats(

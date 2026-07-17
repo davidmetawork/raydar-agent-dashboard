@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import { candidateAlreadySubmitted, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
-import { extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
+import { PARAAI_LOCATIONS, extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
 import { PARAAI_SALARY_CAP, STATES, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 import { reclaimableLegacyJobLock } from "../api/paraai/_lib/store.mjs";
@@ -82,7 +82,7 @@ test("extraction normalization keeps only supported enums and base-only compensa
   assert.deepEqual(extracted.sponsorship.statuses, ["CITIZEN"]);
   const preferences = buildPreferences(extracted);
   assert.equal(preferences.salaryMin, 180000);
-  assert.deepEqual(preferences.locations, ["new_york"]);
+  assert.deepEqual(preferences.locations, [...PARAAI_LOCATIONS]);
   assert.deepEqual(preferences.requiresSponsorship, ["Not available"]);
   assert.equal("salaryMax" in preferences, false);
   assert.match(extraNote(extracted), /2 process\(es\)/);

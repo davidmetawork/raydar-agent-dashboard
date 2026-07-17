@@ -59,6 +59,7 @@ const ZERO_SETTLE_SECONDS = Number(process.env.PARAAI_MATCH_ZERO_SETTLE_SECONDS 
 const MATCH_TIMEOUT_SECONDS = Number(process.env.PARAAI_MATCH_TIMEOUT_SECONDS || 300);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 export const PARAAI_SALARY_CAP = 200_000;
+export const PARAAI_SALARY_ROUTING_BUFFER = 10_000;
 export const VISA_SPONSORSHIP = new Set(["Available", "Not available"]);
 
 function stateError(message, code, job = null) {
@@ -101,6 +102,41 @@ function visaFromExtraction(sponsorship = {}) {
   return [];
 }
 
+function hasUnmappedRelocationRestriction(scope, excludedLocations) {
+  const value = String(scope || "");
+  if (/\b(only|would not relocate|wouldn't relocate|cannot relocate|can't relocate|not willing to relocate|not open to relocat)\b/i.test(value)) {
+    return true;
+  }
+  return /\b(except|excluding|exclude)\b/i.test(value) && excludedLocations.size === 0;
+}
+
+function isHardSalaryFloor(compensation = {}) {
+  if (compensation.baseMinIsHardFloor === true) return true;
+  if (compensation.baseMinIsHardFloor === false) return false;
+  const evidence = `${compensation.baseMinEvidence || ""} ${compensation.notes || ""}`;
+  if (/\b(not (?:a )?hard minimum|not (?:my )?minimum|flexible|target|ideally|around|roughly|approximately)\b/i.test(evidence)) {
+    return false;
+  }
+  return /\b(hard minimum|no lower than|won't go below|wont go below|will not go below|minimum(?: base| salary| compensation)? is|salary floor|base floor)\b/i
+    .test(evidence);
+}
+
+function hasLegacyStartupOpenness(extracted = {}) {
+  const interested = array(extracted.industries?.interested);
+  const rejected = array(extracted.industries?.notInterested).join(" ");
+  const activity = String(extracted.searchActivity || "");
+  const negative = /\b(not|dont|do not|wont|wouldnt|never|avoid|exclude|rule out|no)\b[^.]{0,60}\b(startup|start-up|startups)\b/i;
+  const negativeReverse = /\b(startup|start-up|startups)\b[^.]{0,45}\b(not|no|never|avoid|exclude|rule out|not for me|are not)\b/i;
+  if (/\b(startup|start-up|startups)\b/i.test(rejected) || negative.test(activity) || negativeReverse.test(activity)) {
+    return false;
+  }
+  if (interested.some((value) => /^\s*(?:open to |interested in )?start-?ups?\s*$/i.test(String(value)))) {
+    return true;
+  }
+  return /\b(open to|would consider|will consider|interested in|okay with|fine with)\b[^.]{0,60}\b(startup|start-up|startups)\b/i
+    .test(activity);
+}
+
 export function normalizeParaAIPreferences(value = {}) {
   const salary = Number(value.salaryMin);
   const ote = Number(value.ote);
@@ -115,23 +151,93 @@ export function normalizeParaAIPreferences(value = {}) {
   return preferences;
 }
 
-export function buildPreferences(extracted, native = null) {
+export function buildPreferenceRouting(extracted, native = null) {
   const normalized = normalizeExtraction(extracted);
   const nativeLocations = uniqueAllowed(native?.locations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
   const structuredLocations = uniqueAllowed(normalized.paraformLocations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
-  const salaryMin = normalized.compensation.baseMin ?? (Number.isFinite(Number(native?.salary_min)) ? Number(native.salary_min) : null);
+  const legacyMappedLocations = legacyLocations(normalized.locations);
+  const relocationScope = String(normalized.relocation?.scope || "").trim();
+  const relocationEvidence = String(normalized.relocation?.evidence || "").trim();
+  const excludedLocations = new Set(normalized.excludedParaformLocations || []);
+  const expandsLocations = (
+    normalized.relocation?.open === true &&
+    !hasUnmappedRelocationRestriction(`${relocationScope} ${relocationEvidence}`, excludedLocations)
+  );
+  const allowedLocations = (value) => value.filter((location) => !excludedLocations.has(location));
+  const locations = expandsLocations
+    ? allowedLocations([...PARAAI_LOCATIONS])
+    : structuredLocations.length
+      ? allowedLocations(structuredLocations)
+      : nativeLocations.length
+        ? allowedLocations(nativeLocations)
+        : allowedLocations(legacyMappedLocations);
+
+  const statedBaseMin = normalized.compensation.baseMin;
+  const nativeBaseMin = native?.salary_min != null && native?.salary_min !== "" && Number.isFinite(Number(native.salary_min))
+    ? Number(native.salary_min)
+    : null;
+  const salaryWasWidened = statedBaseMin != null && isHardSalaryFloor(normalized.compensation);
+  const unboundedSalaryMin = statedBaseMin != null
+    ? Math.max(0, statedBaseMin - (salaryWasWidened ? PARAAI_SALARY_ROUTING_BUFFER : 0))
+    : nativeBaseMin;
+  const salaryMin = unboundedSalaryMin == null ? null : Math.min(unboundedSalaryMin, PARAAI_SALARY_CAP);
+
   const nativeOte = native?.ote != null && native?.ote !== "" && Number.isFinite(Number(native.ote))
     ? Number(native.ote)
     : null;
   const ote = normalized.compensation.ote ?? nativeOte;
-  return normalizeParaAIPreferences({
-    locations: structuredLocations.length ? structuredLocations : nativeLocations.length ? nativeLocations : legacyLocations(normalized.locations),
+
+  const explicitStages = uniqueAllowed(normalized.companyStages, FUNDING_ROUNDS, (item) => String(item || "").toUpperCase());
+  const excludedStages = new Set(normalized.excludedCompanyStages || []);
+  const nativeStages = uniqueAllowed(native?.last_funding_round, FUNDING_ROUNDS, (item) => String(item || "").toUpperCase());
+  const allowedStages = (value) => value.filter((stage) => !excludedStages.has(stage));
+  const startupOpen = normalized.openToStartups === true || (
+    normalized.openToStartups == null &&
+    hasLegacyStartupOpenness(normalized)
+  );
+  const expandsCompanyStages = startupOpen;
+  const companyStages = expandsCompanyStages
+    ? allowedStages([...FUNDING_ROUNDS])
+    : explicitStages.length
+      ? allowedStages(explicitStages)
+      : allowedStages(nativeStages);
+
+  const preferences = normalizeParaAIPreferences({
+    locations,
     workplaceTypes: normalized.workplaceTypes.length ? normalized.workplaceTypes : native?.workplace,
-    idealFundingRounds: normalized.companyStages.length ? normalized.companyStages : native?.last_funding_round,
+    idealFundingRounds: companyStages,
     requiresSponsorship: visaFromExtraction(normalized.sponsorship).length ? visaFromExtraction(normalized.sponsorship) : native?.visa,
     salaryMin,
     ...(ote != null ? { ote } : {}),
   });
+  return {
+    preferences,
+    policy: {
+      locationSource: expandsLocations
+        ? "relocation_expansion"
+        : structuredLocations.length
+          ? "screening_call"
+          : nativeLocations.length
+            ? "paraform_profile"
+            : "legacy_mapping",
+      locationsExpanded: expandsLocations,
+      companyStageSource: expandsCompanyStages
+        ? "startup_expansion"
+        : explicitStages.length
+          ? "screening_call"
+          : "paraform_profile",
+      companyStagesExpanded: expandsCompanyStages,
+      candidateStatedBaseMin: statedBaseMin,
+      routedSalaryMin: preferences.salaryMin ?? null,
+      salaryRoutingBuffer: salaryWasWidened ? PARAAI_SALARY_ROUTING_BUFFER : 0,
+      salaryWasWidened,
+      salaryWasCapped: unboundedSalaryMin != null && unboundedSalaryMin > PARAAI_SALARY_CAP,
+    },
+  };
+}
+
+export function buildPreferences(extracted, native = null) {
+  return buildPreferenceRouting(extracted, native).preferences;
 }
 
 export function missingRequiredPreferences(preferences = {}) {
@@ -294,7 +400,8 @@ export async function prepareJob({ botId, candidateUserId = "", force = false, s
     const email = firstEmail(crmItem) || firstEmail(details) || firstEmail(contact);
     const linkedin = candidate.linkedin || normLinkedin(contact?.linkedinUrl || crmItem?.linkedin_user);
     const extracted = extraction.extracted;
-    const reviewPreferences = buildPreferences(extracted, nativePreferences);
+    const routing = buildPreferenceRouting(extracted, nativePreferences);
+    const reviewPreferences = routing.preferences;
     const statedBaseMin = extracted.compensation?.baseMin ?? null;
     return saveJob(transition(job, "ready_to_submit", {
       candidate: { ...candidate, fullName: candidate.fullName || contact?.name || crmItem.name },
@@ -313,8 +420,7 @@ export async function prepareJob({ botId, candidateUserId = "", force = false, s
         salaryCap: PARAAI_SALARY_CAP,
         candidateStatedBaseMin: statedBaseMin,
         candidateStatedBaseMax: extracted.compensation?.baseMax ?? null,
-        salaryWasCapped: Number.isFinite(Number(statedBaseMin)) && Number(statedBaseMin) > PARAAI_SALARY_CAP,
-        locationSource: extracted.paraformLocations?.length ? "screening_call" : nativePreferences?.locations?.length ? "paraform_profile" : "legacy_mapping",
+        ...routing.policy,
       },
       extraNote: extraNote(extracted),
       extraction: { provider: extraction.provider, model: extraction.model, usage: extraction.usage, at: new Date().toISOString() },

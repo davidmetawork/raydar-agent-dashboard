@@ -6,7 +6,8 @@ import {
   recoverRecentSuccessfulCalls,
   runAutoTick,
 } from "./_lib/auto.mjs";
-import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
+import { notifySlack } from "./_lib/core.mjs";
+import { getAutoQueueStats, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
@@ -51,9 +52,32 @@ export default async function handler(req, res) {
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
-    const recovery = mode === "recover" ? await recoverRecentSuccessfulCalls() : null;
     const tick = await runAutoTick();
-    return res.status(200).json({ ok: true, recovery, tick, queue: await getAutoQueueStats() });
+    let recovery = null;
+    let recoveryError = null;
+    if (mode === "recover") {
+      try {
+        recovery = await recoverRecentSuccessfulCalls();
+      } catch (error) {
+        recoveryError = {
+          error: String(error?.code || "recovery_failed"),
+          detail: String(error?.message || error).slice(0, 180),
+        };
+        if (await takeAlertSlot("auto-recovery-failed", 3600).catch(() => false)) {
+          await notifySlack(
+            `🚨 Para AI recovery scan failed (${recoveryError.error}). Durable queue processing continued; inspect worker health.`,
+          ).catch(() => {});
+        }
+      }
+    }
+    return res.status(200).json({
+      ok: true,
+      degraded: Boolean(recoveryError),
+      recovery,
+      recoveryError,
+      tick,
+      queue: await getAutoQueueStats(),
+    });
   } catch (error) {
     return res.status(500).json({
       ok: false,

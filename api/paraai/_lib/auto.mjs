@@ -36,6 +36,18 @@ const SAFE_RETRY_CODES = new Set([
   "AUTH_EXPIRED", "PREPARE_FAILED", "REVISION_CONFLICT", "JOB_BUSY",
   "SUBMIT_WRITE_UNKNOWN", "SUBMIT_STILL_UNCONFIRMED",
 ]);
+const TERMINAL_ERROR_CODES = new Set([
+  "INVALID_BOT_ID",
+  "NOT_SUCCESSFUL_SCREEN",
+  "ALREADY_SUBMITTED",
+  "FUTURE_NEXT_STEP",
+  "HAS_REPLIED",
+  "ALREADY_ENROLLED",
+  "INTERNAL_CANDIDATE",
+]);
+const PREWRITE_STATES = new Set([
+  "detected", "resolving_identity", "extracting", "ready_to_submit", "error",
+]);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 
 const bool = (value, fallback = false) => {
@@ -65,6 +77,41 @@ export function automationConfig(env = process.env) {
       env.PARAAI_RECOVERY_STATUS_URL || "https://webview-lake.vercel.app/api/status",
     ).trim(),
   };
+}
+
+export function automationExecutionEnabled(config = {}) {
+  return Boolean(
+    config.enabled &&
+    config.detectEnabled &&
+    config.prepareEnabled &&
+    config.autoSubmitApproved &&
+    config.dryRun === false &&
+    config.notBeforeMs != null &&
+    config.consentRequiredAtMs != null,
+  );
+}
+
+export function automationApprovalSource(queueSource) {
+  return queueSource === "authorized_backfill"
+    ? "authorized_backfill_2026-07-16"
+    : "recall_verified_automation";
+}
+
+export function automationRetryDecision(code, state, attempts = 0) {
+  const normalizedCode = String(code || "AUTO_PROCESS_FAILED");
+  const normalizedState = String(state || "error");
+  const writeNeedsReconciliation = ["submit_intent", "submitting", "submission_unknown", "awaiting_approval"]
+    .includes(normalizedState);
+  const retry = !TERMINAL_ERROR_CODES.has(normalizedCode) && (
+    SAFE_RETRY_CODES.has(normalizedCode) ||
+    PREWRITE_STATES.has(normalizedState) ||
+    writeNeedsReconciliation
+  );
+  const exponent = Math.max(0, Math.min(5, Number(attempts) || 0));
+  const delayMs = normalizedCode === "AUTH_EXPIRED"
+    ? 15 * 60_000
+    : Math.min(15 * 60_000, 30_000 * (2 ** exponent));
+  return { retry, delayMs };
 }
 
 function validHttpUrl(value) {
@@ -114,9 +161,28 @@ export function autoEligibility(job, config = automationConfig()) {
   return { eligible: reasons.length === 0, reasons: [...new Set(reasons)] };
 }
 
-function callReady(call, config) {
+export function automationCallCutoff(call, config, { historicalAuthorized = false } = {}) {
+  if (historicalAuthorized) return { allowed: true, reason: null };
+  if (config.notBeforeMs == null) {
+    return { allowed: false, terminal: false, reason: "automation cutoff is not pinned" };
+  }
+  const startedAt = finiteDate(call?.joinAt || call?.startedAt || call?.startTime);
+  if (startedAt == null) {
+    return { allowed: false, terminal: true, reason: "call timestamp is missing" };
+  }
+  if (startedAt < config.notBeforeMs) {
+    return { allowed: false, terminal: true, reason: "call predates automation cutoff" };
+  }
+  return { allowed: true, reason: null };
+}
+
+function callReady(call, config, { historicalAuthorized = false } = {}) {
   if (config.strictScreenerSource && call?.source?.isScreener !== true) {
     return { ready: false, terminal: call?.source?.isScreener === false, reason: "call source unverified" };
+  }
+  const cutoff = automationCallCutoff(call, config, { historicalAuthorized });
+  if (!cutoff.allowed) {
+    return { ready: false, terminal: cutoff.terminal, reason: cutoff.reason };
   }
   const verdict = String(call?.verdict?.verdict || call?.verdict || "").toLowerCase();
   if (verdict === "pending" || !call?.media?.hasTranscript || !Array.isArray(call?.transcript) || !call.transcript.length) {
@@ -149,14 +215,29 @@ async function annotateAutomation(job, details) {
   }), job.revision);
 }
 
-export async function processAutoJob(botId, { config = automationConfig() } = {}) {
+export async function processAutoJob(
+  botId,
+  { config = automationConfig(), queueSource = "unknown", queueAttempts = 0 } = {},
+) {
   const id = String(botId || "").trim();
+  const historicalAuthorized = queueSource === "authorized_backfill";
+  const approvalSource = automationApprovalSource(queueSource);
   if (!BOT_ID.test(id)) return { action: "complete", state: "invalid", detail: "invalid bot id" };
-  if (!config.enabled || !config.prepareEnabled) {
+  if (!automationExecutionEnabled(config)) {
     return { action: "reschedule", delayMs: 5 * 60_000, state: "paused", detail: "automation is paused" };
   }
 
   let job = await getJob(id);
+  if (job && !historicalAuthorized) {
+    const startedAt = finiteDate(job.callStartedAt);
+    if (startedAt == null || startedAt < config.notBeforeMs) {
+      return {
+        action: "complete",
+        state: "ineligible_call",
+        detail: startedAt == null ? "call timestamp is missing" : "call predates automation cutoff",
+      };
+    }
+  }
   if (
     !job ||
     ["detected", "error"].includes(job.state) ||
@@ -164,7 +245,7 @@ export async function processAutoJob(botId, { config = automationConfig() } = {}
     (config.strictScreenerSource && job.callSourceVerified !== true && job.state === "ready_to_submit")
   ) {
     const call = await fetchCall(id);
-    const readiness = callReady(call, config);
+    const readiness = callReady(call, config, { historicalAuthorized });
     if (!readiness.ready) {
       return readiness.terminal
         ? { action: "complete", state: "ineligible_call", detail: readiness.reason }
@@ -177,6 +258,22 @@ export async function processAutoJob(botId, { config = automationConfig() } = {}
     });
   } else if (["resolving_identity", "extracting"].includes(job.state)) {
     return { action: "reschedule", delayMs: 60_000, state: job.state, detail: "preparation is still in progress" };
+  }
+
+  if (job.state === "error") {
+    const retry = automationRetryDecision(job.error?.code, job.state, queueAttempts);
+    return retry.retry
+      ? {
+          action: "reschedule",
+          delayMs: retry.delayMs,
+          state: job.state,
+          detail: String(job.error?.code || "PREPARE_FAILED"),
+        }
+      : {
+          action: "complete",
+          state: job.state,
+          detail: String(job.error?.code || "terminal preparation error"),
+        };
   }
 
   if (job.state === "needs_identity_review") {
@@ -194,17 +291,16 @@ export async function processAutoJob(botId, { config = automationConfig() } = {}
       return { action: "complete", state: job.state, detail: eligibility.reasons.join(", ") };
     }
     if (!config.autoSubmitApproved || config.dryRun) {
-      return { action: "complete", state: job.state, detail: "prepared; automatic writes are gated" };
+      return { action: "reschedule", delayMs: 5 * 60_000, state: job.state, detail: "prepared; automatic writes are gated" };
     }
     const manualConfig = paraAIConfig();
     if (!manualConfig.submitApproved || manualConfig.dryRun) {
       return { action: "reschedule", delayMs: 5 * 60_000, state: job.state, detail: "base submit gate is closed" };
     }
-    const historical = config.notBeforeMs != null && finiteDate(job.callStartedAt) < config.notBeforeMs;
     job = await submitJob(job, {
       confirmation: `SUBMIT ${job.id}`,
       marketConfirmed: true,
-      approvalSource: historical ? "authorized_backfill_2026-07-16" : "recall_verified_automation",
+      approvalSource,
     });
     return { action: "reschedule", delayMs: 30_000, state: job.state, detail: "submission accepted; approval pending" };
   }
@@ -212,11 +308,10 @@ export async function processAutoJob(botId, { config = automationConfig() } = {}
   if (["submit_intent", "submitting"].includes(job.state)) {
     const intent = await getSubmissionIntent(job.identity?.candidateUserId);
     if (intent && !intent.attemptStartedAt) {
-      const historical = config.notBeforeMs != null && finiteDate(job.callStartedAt) < config.notBeforeMs;
       job = await submitJob(job, {
         confirmation: `SUBMIT ${job.id}`,
         marketConfirmed: true,
-        approvalSource: historical ? "authorized_backfill_2026-07-16" : "recall_verified_automation",
+        approvalSource,
       });
       return { action: "reschedule", delayMs: 30_000, state: job.state, detail: "submission accepted; approval pending" };
     }
@@ -249,7 +344,9 @@ async function alertOnce(code, botId, detail) {
 }
 
 export async function runAutoTick({ config = automationConfig(), workerId = `vercel-${randomUUID()}` } = {}) {
-  if (!config.enabled) return { ok: true, disabled: true, processed: [] };
+  if (!automationExecutionEnabled(config)) {
+    return { ok: true, disabled: true, paused: true, processed: [] };
+  }
   const leases = await claimDueAutoJobs(config.workerBatch, { workerId });
   const processed = [];
   for (const lease of leases) {
@@ -259,38 +356,51 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
       if (!jobLock) {
         await rescheduleAutoJob(lease.botId, {
           leaseToken: lease.leaseToken,
+          generation: lease.generation,
           delayMs: 15_000,
           error: "JOB_BUSY",
         });
         processed.push({ botId: lease.botId, state: "busy", action: "rescheduled" });
         continue;
       }
-      const result = await processAutoJob(lease.botId, { config });
+      const result = await processAutoJob(lease.botId, {
+        config,
+        queueSource: lease.source,
+        queueAttempts: lease.attempts,
+      });
       if (result.action === "reschedule") {
         await rescheduleAutoJob(lease.botId, {
           leaseToken: lease.leaseToken,
+          generation: lease.generation,
           delayMs: result.delayMs,
           error: result.detail,
         });
       } else {
-        await completeAutoJob(lease.botId, { leaseToken: lease.leaseToken });
+        await completeAutoJob(lease.botId, {
+          leaseToken: lease.leaseToken,
+          generation: lease.generation,
+        });
       }
       processed.push({ botId: lease.botId, state: result.state, action: result.action, detail: result.detail });
     } catch (error) {
       const code = String(error?.code || "AUTO_PROCESS_FAILED");
       const state = error?.job?.state || (await getJob(lease.botId).catch(() => null))?.state || "error";
-      const safeRetry = SAFE_RETRY_CODES.has(code) || ["submitting", "submission_unknown", "awaiting_approval"].includes(state);
-      if (safeRetry) {
+      const retry = automationRetryDecision(code, state, lease.attempts);
+      if (retry.retry) {
         await rescheduleAutoJob(lease.botId, {
           leaseToken: lease.leaseToken,
-          delayMs: code === "AUTH_EXPIRED" ? 15 * 60_000 : 60_000,
+          generation: lease.generation,
+          delayMs: retry.delayMs,
           error: code,
         }).catch(() => {});
       } else {
-        await completeAutoJob(lease.botId, { leaseToken: lease.leaseToken }).catch(() => {});
+        await completeAutoJob(lease.botId, {
+          leaseToken: lease.leaseToken,
+          generation: lease.generation,
+        }).catch(() => {});
       }
       await alertOnce(code, lease.botId, error?.message);
-      processed.push({ botId: lease.botId, state, action: safeRetry ? "rescheduled" : "failed", detail: code });
+      processed.push({ botId: lease.botId, state, action: retry.retry ? "rescheduled" : "failed", detail: code });
     } finally {
       if (jobLock) await releaseJobLock(lease.botId, jobLock).catch(() => {});
     }
@@ -299,8 +409,7 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
 }
 
 export async function recoverRecentSuccessfulCalls({ config = automationConfig(), fetchImpl = fetch } = {}) {
-  if (!config.enabled || !config.detectEnabled) return { ok: true, disabled: true, discovered: 0 };
-  if (config.notBeforeMs == null) throw new Error("PARAAI_AUTO_NOT_BEFORE must be pinned before auto-detection");
+  if (!automationExecutionEnabled(config)) return { ok: true, disabled: true, paused: true, discovered: 0 };
   const base = config.recoveryStatusUrl;
   const url = `${base}${base.includes("?") ? "&" : "?"}fresh=${Date.now()}`;
   const response = await fetchImpl(url, {

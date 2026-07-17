@@ -1,5 +1,5 @@
 import { authConfig, cors, hasParaformCookie, listSequences, paraAIConfig, trpcGet } from "./_lib/core.mjs";
-import { automationConfig } from "./_lib/auto.mjs";
+import { automationConfig, automationExecutionEnabled } from "./_lib/auto.mjs";
 import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 30 };
@@ -41,9 +41,9 @@ export default async function handler(req, res) {
       notBeforePinned: auto.notBeforeMs != null,
       consentCutoffPinned: auto.consentRequiredAtMs != null,
       runnerConfigured: Boolean(process.env.PARAAI_AUTOMATION_RUNNER_KEY),
-      recallVerificationConfigured: Boolean(
-        process.env.RECALL_WORKSPACE_VERIFICATION_SECRET || process.env.RECALL_SVIX_WEBHOOK_SECRET,
-      ),
+      recallVerificationConfigured: String(
+        process.env.RECALL_SVIX_WEBHOOK_SECRET || process.env.RECALL_WORKSPACE_VERIFICATION_SECRET || "",
+      ).trim().startsWith("whsec_"),
       slackConfigured: Boolean(
         (process.env.SLACK_BOT_TOKEN && (process.env.PARAAI_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS)) ||
         process.env.SLACK_WEBHOOK_URL,
@@ -86,13 +86,11 @@ export default async function handler(req, res) {
     health.automation.queue = await getAutoQueueStats().catch(() => null);
     health.automation.ready = Boolean(
       health.submitReady &&
-      auto.enabled &&
-      auto.prepareEnabled &&
-      auto.autoSubmitApproved &&
-      !auto.dryRun &&
-      auto.notBeforeMs != null &&
+      automationExecutionEnabled(auto) &&
+      auto.consentRequiredAtMs != null &&
       health.automation.runnerConfigured &&
-      health.automation.recallVerificationConfigured,
+      health.automation.recallVerificationConfigured &&
+      health.automation.queue !== null,
     );
     health.ok = health.submitReady;
     return res.status(200).json(health);
