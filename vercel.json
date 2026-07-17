@@ -11,6 +11,9 @@
     { "source": "/prep", "destination": "/prep.html" },
     { "source": "/paraai", "destination": "/paraai.html" }
   ],
+  "redirects": [
+    { "source": "/inbox-classic", "destination": "/inbox", "permanent": false }
+  ],
   "functions": {
     "api/enrich/*.mjs": { "maxDuration": 60 },
     "api/inbox/*.mjs": { "maxDuration": 120 },

@@ -13,6 +13,7 @@ import {
   normalizeReplyCategory,
   parseInboxTriage,
   readInboxTriage,
+  shouldExcludeInboxReply,
   writeInboxTriage,
 } from "../api/inbox/_lib/core.mjs";
 import {
@@ -130,6 +131,130 @@ test("reply categories normalize Paraform values and fail closed to NA", () => {
   assert.equal(normalizeReplyCategory(""), "NA");
   assert.equal(normalizeReplyCategory("unexpected"), "NA");
   assert.equal(normalizeReplyCategory(null), "NA");
+});
+
+test("Inbox exclusion removes David mailbox traffic by exact address in either direction", () => {
+  assert.equal(shouldExcludeInboxReply({
+    candidate_email: "DAVID@RAYDAR.XYZ",
+    subject: "Test reply",
+  }), true);
+  assert.equal(shouldExcludeInboxReply({
+    candidate_email: "candidate@example.com",
+    subject: "Test reply",
+  }, [
+    "Candidate <candidate@example.com>",
+    "David Phillips <david@raydar.xyz>",
+  ]), true);
+  assert.equal(shouldExcludeInboxReply({
+    candidate_email: "candidate@example.com",
+    subject: "Forwarded note",
+    snippet: "Originally sent to david@raydar.xyz",
+  }), true);
+  assert.equal(shouldExcludeInboxReply({
+    candidate_email: "david@raydar.xyz.example.com",
+    subject: "A real candidate reply",
+    snippet: "Interested in learning more.",
+  }), false);
+});
+
+test("Inbox exclusion removes delay, bounce, and delivery-failure notifications", () => {
+  const excluded = [
+    { subject: "Delivery Status Notification (Delay)", snippet: "" },
+    { subject: "Delivery Status Notification (Failure)", snippet: "" },
+    { subject: "Undeliverable: Platform role", snippet: "" },
+    { subject: "Mail delivery failed: returning message to sender", snippet: "" },
+    { subject: "Re: Platform role", snippet: "Address not found. Your message wasn't delivered." },
+    { candidate_email: "mailer-daemon@example.com", subject: "Status", snippet: "" },
+    { candidate_email: "bounce+123@example.com", subject: "Status", snippet: "" },
+  ];
+  for (const reply of excluded) {
+    assert.equal(shouldExcludeInboxReply(reply), true, reply.subject);
+  }
+  assert.equal(shouldExcludeInboxReply({
+    candidate_email: "candidate@example.com",
+    subject: "Re: Delivery platform opportunity",
+    snippet: "Thanks, I am interested in the role.",
+  }), false);
+});
+
+test("campaign rows and cached feeds enforce Inbox exclusions before counts", () => {
+  const campaign = { id: "sequence-1", name: "Platform search" };
+  const inboxData = {
+    campaign_to_candidate_users: [
+      {
+        id: "lead-real",
+        candidate_email: "real@example.com",
+        candidate_user: { candidate: { name: "Real Candidate" } },
+      },
+      {
+        id: "lead-david",
+        candidate_email: "david@raydar.xyz",
+        candidate_user: { candidate: { name: "Internal Test" } },
+      },
+      {
+        id: "lead-delay",
+        candidate_email: "mailer-daemon@example.com",
+        candidate_user: { candidate: { name: "Mail Delivery Subsystem" } },
+      },
+    ],
+    campaign_emails: [
+      {
+        campaign_to_candidate_user_id: "lead-real",
+        email: {
+          gmail_id: "gmail-real",
+          sent_from_paraform: false,
+          subject: "Re: Platform role",
+          snippet: "I would like to discuss.",
+        },
+      },
+      {
+        campaign_to_candidate_user_id: "lead-david",
+        email: {
+          gmail_id: "gmail-david",
+          sent_from_paraform: false,
+          subject: "Test",
+        },
+      },
+      {
+        campaign_to_candidate_user_id: "lead-delay",
+        email: {
+          gmail_id: "gmail-delay",
+          sent_from_paraform: false,
+          subject: "Delivery Status Notification (Delay)",
+        },
+      },
+      {
+        campaign_to_candidate_user_id: "lead-real",
+        email: {
+          gmail_id: "gmail-to-david",
+          sent_from_paraform: false,
+          subject: "Another test",
+          to: ["David Phillips <david@raydar.xyz>"],
+        },
+      },
+    ],
+  };
+
+  const rows = flattenCampaignInbox(campaign, inboxData);
+  assert.deepEqual(rows.map(({ gmail_id }) => gmail_id), ["gmail-real"]);
+
+  const cached = applyInboxTriage({
+    replies: [
+      rows[0],
+      {
+        gmail_id: "cached-david",
+        candidate_email: "david@raydar.xyz",
+        subject: "Old cached test",
+      },
+      {
+        gmail_id: "cached-bounce",
+        candidate_email: "candidate@example.com",
+        subject: "Undeliverable: old sequence",
+      },
+    ],
+  }, new Map());
+  assert.deepEqual(cached.replies.map(({ gmail_id }) => gmail_id), ["gmail-real"]);
+  assert.equal(cached.counts.total, 1);
 });
 
 test("triage overlay assigns one effective bucket and recomputes active counts", () => {
@@ -682,6 +807,13 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
   assert.match(inboxHtml, /data-filter="archived"/);
   assert.match(inboxHtml, /data-filter="complete"/);
+  assert.match(inboxHtml, /class="mailbox-nav" aria-label="Inbox views"/);
+  assert.match(inboxHtml, /\.reply-open\{[^}]*display:grid/);
+  assert.match(inboxHtml, /body\.reading \.detail\{display:block\}/);
+  assert.match(inboxHtml, /className="back-control"/);
+  assert.match(inboxHtml, /className="message-copy"/);
+  // The Classic view is deprecated: no toggle, no style=classic branch, no dual-view CSS scope.
+  assert.doesNotMatch(inboxHtml, /GMAIL_VIEW|style=classic|Classic view|Gmail view|viewToggle|body\.gmail|class="filters"/);
   assert.match(inboxHtml, /triageControl\(reply,"Archive","archived"/);
   assert.match(inboxHtml, /triageControl\(reply,"Complete","complete"/);
   assert.match(inboxHtml, /triageControl\(reply,"Restore","inbox"/);
@@ -693,6 +825,7 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /role="group" aria-label="Reply filters"/);
   assert.match(inboxHtml, /data-filter="complete" aria-pressed="false"/);
   assert.match(inboxHtml, /item\.setAttribute\("aria-pressed"/);
+  assert.match(inboxHtml, /item\.dataset\.filter===STATE\.filter/);
   assert.match(inboxHtml, /Archived in Paraform/);
   assert.match(inboxHtml, /\.chip\.archived\{[^}]*color:#8A4F0E/);
   assert.match(
@@ -725,6 +858,12 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.deepEqual(
     vercel.rewrites.find(({ source }) => source === "/inbox"),
     { source: "/inbox", destination: "/inbox.html" },
+  );
+  // The retired Classic alias must redirect to the single Inbox, never serve a second view.
+  assert.equal(vercel.rewrites.find(({ source }) => source === "/inbox-classic"), undefined);
+  assert.deepEqual(
+    vercel.redirects.find(({ source }) => source === "/inbox-classic"),
+    { source: "/inbox-classic", destination: "/inbox", permanent: false },
   );
   assert.deepEqual(
     vercel.functions["api/inbox/*.mjs"],
