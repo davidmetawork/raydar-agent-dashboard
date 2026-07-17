@@ -359,10 +359,19 @@ export function hasFutureScheduledStep(value, now = Date.now()) {
   return visit(value);
 }
 
-export async function fetchCall(botId) {
+export async function fetchCall(
+  botId,
+  { fetchImpl = fetch, now = Date.now } = {},
+) {
   const base = String(process.env.RAYDAR_CALLS_API || "https://raydar-calls.vercel.app/api/call");
-  const url = `${base}${base.includes("?") ? "&" : "?"}bot=${encodeURIComponent(botId)}`;
-  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  const url = new URL(base);
+  url.searchParams.set("bot", String(botId || ""));
+  url.searchParams.set("fresh", String(now()));
+  const response = await fetchImpl(url.toString(), {
+    headers: { "cache-control": "no-cache", pragma: "no-cache" },
+    cache: "no-store",
+    signal: AbortSignal.timeout(30_000),
+  });
   const body = await response.json().catch(() => null);
   if (!response.ok || !body?.botId) throw new Error(body?.error || `call lookup failed: ${response.status}`);
   return body;

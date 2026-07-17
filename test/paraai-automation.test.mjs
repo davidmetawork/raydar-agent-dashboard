@@ -261,7 +261,7 @@ test("final transcript events stop retrying settled no-shows without racing late
     queueSource: "recall:bot.done",
     queueAttempts: 20,
   }).terminal, true);
-  for (const verdict of ["in_progress", "unexpected_future_verdict"]) {
+  for (const verdict of ["recorded", "pending", "unknown", "in_progress", "unexpected_future_verdict"]) {
     assert.equal(automationCallReadiness({
       ...noShow,
       verdict: { verdict },

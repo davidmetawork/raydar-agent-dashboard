@@ -49,7 +49,7 @@ const PREWRITE_STATES = new Set([
   "detected", "resolving_identity", "extracting", "ready_to_submit", "error",
 ]);
 const SETTLED_NON_SUCCESS_VERDICTS = new Set([
-  "partial", "no_show", "audio_fail", "error", "joined_silent", "silent_fail", "incomplete",
+  "no_show", "audio_fail", "error", "joined_silent", "incomplete",
 ]);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 
@@ -205,7 +205,7 @@ export function automationCallReadiness(
     const terminalVerdict = SETTLED_NON_SUCCESS_VERDICTS.has(verdict);
     const finalTranscriptSignal = queueSource === "recall:transcript.done";
     const settleAttempts = Math.max(0, Number(queueAttempts) || 0);
-    const settleLimit = finalTranscriptSignal && verdict !== "silent_fail" ? 4 : 20;
+    const settleLimit = finalTranscriptSignal ? 4 : 20;
     if (terminalVerdict && settleAttempts >= settleLimit) {
       return { ready: false, terminal: true, reason: `call verdict is ${verdict}` };
     }

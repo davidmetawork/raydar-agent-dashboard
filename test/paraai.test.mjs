@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { candidateAlreadySubmitted, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
+import { candidateAlreadySubmitted, fetchCall, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { PARAAI_LOCATIONS, extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
 import { PARAAI_SALARY_CAP, STATES, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
@@ -56,6 +56,27 @@ test("selected candidate resolution skips failed calls and returns the newest ve
   const result = await resolveCandidateCall(crm, [crm], { fetchImpl, fetchCallImpl });
   assert.equal(result.call.botId, "bot-success");
   assert.equal(result.call.confidence, "strong");
+});
+
+test("automatic call reads bypass the Calls API verdict cache", async () => {
+  let request = null;
+  const result = await fetchCall("bot_12345678", {
+    now: () => 1_784_267_374_599,
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return new Response(JSON.stringify({ botId: "bot_12345678" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const url = new URL(request.url);
+  assert.equal(url.searchParams.get("bot"), "bot_12345678");
+  assert.equal(url.searchParams.get("fresh"), "1784267374599");
+  assert.equal(request.options.headers["cache-control"], "no-cache");
+  assert.equal(request.options.headers.pragma, "no-cache");
+  assert.equal(request.options.cache, "no-store");
+  assert.equal(result.botId, "bot_12345678");
 });
 
 test("email normalization rejects Paraform relay addresses", () => {
