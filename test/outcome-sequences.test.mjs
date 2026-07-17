@@ -86,10 +86,32 @@ test("sequence reads run for every rule and fail as one authoritative snapshot",
   await assert.rejects(
     readOutcomeSequenceSnapshot({
       rules: [{ id: "broken", outcome: "Sent List" }],
+      attempts: 1,
       readLeads: async () => { throw new Error("incomplete campaign membership read"); },
     }),
     /incomplete campaign membership read/,
   );
+});
+
+test("sequence reads retry transient failures without parallel vendor fanout", async () => {
+  const calls = [];
+  const snapshot = await readOutcomeSequenceSnapshot({
+    rules: [
+      { id: "one", outcome: "Sent List" },
+      { id: "two", outcome: "No Matches - Para AI" },
+    ],
+    waitImpl: async () => {},
+    readLeads: async (id) => {
+      calls.push(id);
+      if (id === "one" && calls.filter((value) => value === id).length === 1) {
+        throw new Error("temporary");
+      }
+      return [{ cu_id: `candidate-${id}` }];
+    },
+  });
+
+  assert.equal(snapshot.complete, true);
+  assert.deepEqual(calls, ["one", "one", "two"]);
 });
 
 test("outcome sequence snapshots are cached and refreshable", async () => {
@@ -106,4 +128,30 @@ test("outcome sequence snapshots are cached and refreshable", async () => {
   now += 101;
   assert.equal((await load()).scan, 2);
   assert.equal((await load({ refresh: true })).scan, 3);
+});
+
+test("a recent last-good outcome snapshot survives a transient refresh failure", async () => {
+  let scans = 0;
+  let now = 1_000;
+  const load = createOutcomeSequenceSnapshotLoader({
+    now: () => now,
+    ttlMs: 100,
+    staleMaxAgeMs: 500,
+    scan: async () => {
+      scans++;
+      if (scans > 1) throw new Error("temporary vendor failure");
+      return { complete: true, entries: [], scan: scans };
+    },
+  });
+
+  const fresh = await load();
+  now += 101;
+  const stale = await load();
+  assert.equal(fresh.stale, undefined);
+  assert.equal(stale.complete, true);
+  assert.equal(stale.cached, true);
+  assert.equal(stale.stale, true);
+
+  now += 500;
+  await assert.rejects(load(), /temporary vendor failure/);
 });

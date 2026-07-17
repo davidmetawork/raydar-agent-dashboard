@@ -1337,7 +1337,7 @@
     const CD_SOURCES  = ["Job Post","Connector","Outreach"];
     const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
     const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-    let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, rosterOutcomeVerified=false, rosterOutcomeVerifyFailed=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
+    let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, rosterOutcomeLoading=false, rosterOutcomeRetryTimer=null, rosterOutcomeVerified=false, rosterOutcomeVerifyFailed=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
     const cdFilters = { q:"", type:"all", status:"all", paraai:"all", outcome:"all", range:"30", matchQueue:false };
     const cdSourceChecked = new Set();   // keys already asked of /api/roster/source
     const cdNormName = (value) => String(value||"").normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g," ");
@@ -1542,7 +1542,7 @@
       const qb=$("cd-fqueue");
       if(qb){
         qb.classList.toggle("on",cdFilters.matchQueue);
-        qb.disabled=rosterOutcomeVerifyFailed;
+        qb.disabled=!rosterOutcomeVerified;
         qb.textContent=rosterOutcomeVerifyFailed ? "Match Queue unavailable" : `Match Queue (${rosterOutcomeVerified?queueCount:"…"})`;
       }
       $("cd-table-wrap").innerHTML = rows.length
@@ -1559,6 +1559,61 @@
     // Read-only, vendor-derived Talent Network status. Added is shown only
     // when Paraform (or a locally read-back-confirmed submission) proves it.
     // Missing and ambiguous identities deliberately remain Not Added.
+    function cdApplyOutcomeRecords(outcomes){
+      const byId=new Map((Array.isArray(outcomes)?outcomes:[])
+        .filter(item=>item?.candidateUserId)
+        .map(item=>[String(item.candidateUserId),item]));
+      for(const row of (rosterRows||[])){
+        const candidateUserId=String(row?.paraAICandidateUserId||"");
+        if(!candidateUserId) continue;
+        const hit=byId.get(candidateUserId);
+        row.outcomeComplete=hit?.outcomeComplete===true;
+        row.verifiedOutcome=hit?.verifiedOutcome||null;
+        row.outcomeConflict=hit?.outcomeConflict===true;
+        if(hit){
+          const alreadyAdded=row.paraAIStatus==="added";
+          row.paraAIStatus="added";
+          if(!alreadyAdded) row.paraAISource="outcome_sequence";
+        }
+      }
+    }
+
+    // A full CRM walk is intentionally not repeated when only the five
+    // outcome sequences need another try. This lightweight read normally
+    // resolves in a few seconds and retries transient Paraform failures twice.
+    async function refreshRosterOutcomes(attempt=0){
+      if(!rosterRows || rosterOutcomeLoading) return;
+      rosterOutcomeLoading=true;
+      rosterOutcomeVerified=false;
+      rosterOutcomeVerifyFailed=false;
+      renderRoster();
+      try{
+        const suffix=attempt>0?"&refresh=1":"";
+        const r=await fetch("/api/roster/paraai-status?outcomes=1"+suffix);
+        const j=await r.json().catch(()=>null);
+        if(!r.ok || !j?.ok || j?.outcomeVerification?.complete!==true || !Array.isArray(j.outcomes)){
+          throw new Error(j?.outcomeVerification?.error||j?.error||("HTTP "+r.status));
+        }
+        cdApplyOutcomeRecords(j.outcomes);
+        rosterOutcomeVerified=true;
+        rosterOutcomeVerifyFailed=false;
+        if(rosterOutcomeRetryTimer) clearTimeout(rosterOutcomeRetryTimer);
+        rosterOutcomeRetryTimer=null;
+        renderRoster();
+      }catch(e){
+        if(attempt<2){
+          const delay=attempt===0?1500:5000;
+          if(rosterOutcomeRetryTimer) clearTimeout(rosterOutcomeRetryTimer);
+          rosterOutcomeRetryTimer=setTimeout(()=>refreshRosterOutcomes(attempt+1),delay);
+        }else{
+          rosterOutcomeVerifyFailed=true;
+          renderRoster();
+        }
+      }finally{
+        rosterOutcomeLoading=false;
+      }
+    }
+
     async function refreshRosterParaAI(force){
       if(!rosterRows || rosterParaAILoading) return;
       if(!force && rosterParaAIAt && Date.now()-rosterParaAIAt<60000) return;
@@ -1568,7 +1623,7 @@
         const j=await r.json().catch(()=>null);
         if(!r.ok || !j?.ok || !Array.isArray(j.statuses)) throw new Error(j?.error||("HTTP "+r.status));
         rosterOutcomeVerified=j?.outcomeVerification?.complete===true;
-        rosterOutcomeVerifyFailed=!rosterOutcomeVerified;
+        rosterOutcomeVerifyFailed=false;
         const byName=new Map();
         for(const item of j.statuses){
           const key=cdNormName(item?.normalizedName||item?.name);
@@ -1586,6 +1641,7 @@
         }
         rosterParaAIAt=Date.now();
         renderRoster();
+        if(!rosterOutcomeVerified) refreshRosterOutcomes();
       }catch(e){
         // A failed authoritative read must never create a false green state.
         rosterOutcomeVerified=false;

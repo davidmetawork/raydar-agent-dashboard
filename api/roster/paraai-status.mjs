@@ -42,6 +42,29 @@ const defaultOutcomeSnapshotLoader = createOutcomeSequenceSnapshotLoader({
   scan: () => readOutcomeSequenceSnapshot(),
 });
 
+function outcomeVerificationPayload(outcomeSnapshot, outcomeIndex, error = "") {
+  return {
+    complete: Boolean(outcomeSnapshot),
+    generatedAt: outcomeSnapshot?.generatedAt || null,
+    cached: outcomeSnapshot?.cached === true,
+    stale: outcomeSnapshot?.stale === true,
+    sequenceCount: outcomeSnapshot?.ruleCount || 0,
+    candidateCount: outcomeIndex?.candidateCount || 0,
+    leadCount: outcomeIndex?.leadCount || 0,
+    ...(outcomeSnapshot ? {} : { error: String(error || "unavailable").slice(0, 120) }),
+  };
+}
+
+function compactOutcomes(outcomeIndex) {
+  return [...(outcomeIndex?.memberships?.values() || [])].map((membership) => ({
+    candidateUserId: membership.candidateUserId,
+    outcomeComplete: membership.outcomeComplete === true,
+    verifiedOutcome: membership.verifiedOutcome || null,
+    outcomeConflict: membership.outcomeConflict === true,
+    outcomeSequenceIds: membership.sequenceIds,
+  }));
+}
+
 export function createParaAIStatusHandler({
   corsImpl = cors,
   requireAuthImpl = requireAuth,
@@ -60,6 +83,29 @@ export function createParaAIStatusHandler({
     res.setHeader("Cache-Control", "private, no-store");
 
     const refresh = String(queryOf(req).refresh || "") === "1";
+    const outcomesOnly = String(queryOf(req).outcomes || "") === "1";
+    if (outcomesOnly) {
+      try {
+        const outcomeSnapshot = await loadOutcomeSnapshot({ refresh });
+        const outcomeIndex = buildOutcomeMembershipIndex(outcomeSnapshot.entries);
+        return res.status(200).json({
+          ok: true,
+          outcomeVerification: outcomeVerificationPayload(outcomeSnapshot, outcomeIndex),
+          outcomes: compactOutcomes(outcomeIndex),
+        });
+      } catch (error) {
+        console.warn("[roster] outcome-only verification unavailable", {
+          code: String(error?.code || "unknown"),
+          sequenceId: String(error?.sequenceId || ""),
+          detail: String(error?.message || error).slice(0, 160),
+        });
+        return res.status(200).json({
+          ok: true,
+          outcomeVerification: outcomeVerificationPayload(null, null, error?.code || error?.message || error),
+          outcomes: [],
+        });
+      }
+    }
     try {
       const [snapshot, jobsResult, outcomeResult] = await Promise.all([
         loadSnapshot({ refresh }),
@@ -70,11 +116,18 @@ export function createParaAIStatusHandler({
         Promise.resolve()
           .then(() => loadOutcomeSnapshot({ refresh }))
           .then((outcomeSnapshot) => ({ snapshot: outcomeSnapshot, available: true }))
-          .catch((error) => ({
-            snapshot: null,
-            available: false,
-            error: String(error?.code || error?.message || error).slice(0, 120),
-          })),
+          .catch((error) => {
+            console.warn("[roster] outcome verification unavailable", {
+              code: String(error?.code || "unknown"),
+              sequenceId: String(error?.sequenceId || ""),
+              detail: String(error?.message || error).slice(0, 160),
+            });
+            return {
+              snapshot: null,
+              available: false,
+              error: String(error?.code || error?.message || error).slice(0, 120),
+            };
+          }),
       ]);
       const index = buildParaAIStatusIndex(snapshot.rows, {
         confirmedMemberships: confirmedLocalMemberships(jobsResult.jobs),
@@ -106,13 +159,11 @@ export function createParaAIStatusHandler({
         ambiguousCount: index.ambiguousCount,
         localJobsAvailable: jobsResult.available,
         outcomeVerification: {
-          complete: outcomeResult.available,
-          generatedAt: outcomeResult.snapshot?.generatedAt || null,
-          cached: outcomeResult.snapshot?.cached === true,
-          sequenceCount: outcomeResult.snapshot?.ruleCount || 0,
-          candidateCount: outcomeIndex?.candidateCount || 0,
-          leadCount: outcomeIndex?.leadCount || 0,
-          ...(outcomeResult.available ? {} : { error: outcomeResult.error || "unavailable" }),
+          ...outcomeVerificationPayload(
+            outcomeResult.available ? outcomeResult.snapshot : null,
+            outcomeIndex,
+            outcomeResult.error,
+          ),
         },
         statuses,
       });

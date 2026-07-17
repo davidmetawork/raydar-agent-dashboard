@@ -1,6 +1,8 @@
 import { campaignLeadsAll } from "../../paraai/_lib/core.mjs";
 
 export const OUTCOME_SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000;
+export const OUTCOME_SEQUENCE_STALE_MAX_AGE_MS = 15 * 60 * 1000;
+export const OUTCOME_SEQUENCE_READ_ATTEMPTS = 2;
 
 // Stable Paraform sequence IDs are the contract. Names can be edited in the
 // vendor UI and are therefore diagnostics only.
@@ -33,6 +35,7 @@ export const OUTCOME_SEQUENCE_RULES = Object.freeze([
 ]);
 
 const text = (value) => String(value || "").trim();
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function leadCandidateUserId(lead) {
   return text(
@@ -133,11 +136,33 @@ export function applyOutcomeMemberships(statuses = [], membershipIndex = new Map
 export async function readOutcomeSequenceSnapshot({
   readLeads = campaignLeadsAll,
   rules = OUTCOME_SEQUENCE_RULES,
+  attempts = OUTCOME_SEQUENCE_READ_ATTEMPTS,
+  waitImpl = wait,
 } = {}) {
-  const entries = await Promise.all(rules.map(async (rule) => ({
-    ...rule,
-    leads: await readLeads(rule.id),
-  })));
+  const entries = [];
+  for (const rule of rules) {
+    let leads = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < Math.max(1, Number(attempts) || 1); attempt++) {
+      try {
+        leads = await readLeads(rule.id);
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (error?.code === "AUTH_EXPIRED" || attempt >= attempts - 1) break;
+        await waitImpl(250 * (attempt + 1));
+      }
+    }
+    if (lastError) {
+      const error = new Error(`outcome sequence ${rule.id} read failed: ${String(lastError?.message || lastError)}`);
+      error.code = lastError?.code === "AUTH_EXPIRED" ? "AUTH_EXPIRED" : "OUTCOME_SEQUENCE_READ_FAILED";
+      error.sequenceId = rule.id;
+      error.cause = lastError;
+      throw error;
+    }
+    entries.push({ ...rule, leads: Array.isArray(leads) ? leads : [] });
+  }
   return {
     complete: true,
     entries,
@@ -149,6 +174,7 @@ export function createOutcomeSequenceSnapshotLoader({
   scan = readOutcomeSequenceSnapshot,
   now = Date.now,
   ttlMs = OUTCOME_SEQUENCE_CACHE_TTL_MS,
+  staleMaxAgeMs = OUTCOME_SEQUENCE_STALE_MAX_AGE_MS,
 } = {}) {
   let cache = { at: 0, snapshot: null, pending: null };
 
@@ -159,7 +185,7 @@ export function createOutcomeSequenceSnapshotLoader({
     }
     if (cache.pending) {
       const snapshot = await cache.pending;
-      return { ...snapshot, cached: false };
+      return { ...snapshot, cached: snapshot?.cached === true };
     }
     cache.pending = Promise.resolve()
       .then(() => scan())
@@ -178,10 +204,20 @@ export function createOutcomeSequenceSnapshotLoader({
         return value;
       })
       .catch((error) => {
+        const failedAt = Number(now());
+        const staleSnapshot = cache.snapshot && failedAt - cache.at <= staleMaxAgeMs
+          ? {
+              ...cache.snapshot,
+              cached: true,
+              stale: true,
+              refreshError: String(error?.code || error?.message || error).slice(0, 120),
+            }
+          : null;
         cache.pending = null;
+        if (staleSnapshot) return staleSnapshot;
         throw error;
       });
     const snapshot = await cache.pending;
-    return { ...snapshot, cached: false };
+    return { ...snapshot, cached: snapshot?.cached === true };
   };
 }
