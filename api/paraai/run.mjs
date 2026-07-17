@@ -1,10 +1,10 @@
 import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
-import { enrollJob, loadJob, prepareJob, refreshMatches, submitJob } from "./_lib/pipeline.mjs";
+import { enrollJob, loadJob, prepareJob, reconcileSubmittedJob, refreshMatches, submitJob } from "./_lib/pipeline.mjs";
 import { acquireJobLock, releaseJobLock, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
-const ACTIONS = new Set(["prepare", "submit", "refresh-matches", "enroll", "no-match-enroll"]);
+const ACTIONS = new Set(["prepare", "submit", "reconcile-submit", "refresh-matches", "enroll", "no-match-enroll"]);
 const ALERT_CODES = new Set([
   "AUTH_EXPIRED", "SUBMIT_WRITE_FAILED", "SUBMIT_NOT_VISIBLE", "ENROLL_WRITE_FAILED",
   "ENROLL_NOT_VISIBLE", "GLOBAL_EMAIL_NOT_VISIBLE", "LEAD_EMAIL_NOT_VISIBLE",
@@ -13,7 +13,7 @@ const ALERT_CODES = new Set([
 
 const statusFor = (code) => {
   if (code === "JOB_NOT_FOUND") return 404;
-  if (["REVISION_CONFLICT", "INVALID_STATE", "RECONCILIATION_REQUIRED"].includes(code)) return 409;
+  if (["REVISION_CONFLICT", "INVALID_STATE", "RECONCILIATION_REQUIRED", "SUBMIT_STILL_UNCONFIRMED"].includes(code)) return 409;
   if (String(code || "").includes("APPROVAL") || String(code || "").startsWith("PHASE0") || code === "DRY_RUN" || code === "LIFECYCLE_REGISTRATION_REQUIRED") return 503;
   if (String(code || "").includes("WRITE_FAILED") || String(code || "").includes("NOT_VISIBLE") || code === "LIFECYCLE_REGISTRATION_FAILED") return 502;
   return 400;
@@ -61,6 +61,7 @@ export default async function handler(req, res) {
         return res.status(409).json({ ok: false, error: "revision_conflict", job });
       }
       if (action === "submit") job = await submitJob(job, body);
+      if (action === "reconcile-submit") job = await reconcileSubmittedJob(job);
       if (action === "refresh-matches") job = await refreshMatches(job);
       if (action === "enroll") job = await enrollJob(job, body);
       if (action === "no-match-enroll") job = await enrollJob(job, body, { noMatch: true });

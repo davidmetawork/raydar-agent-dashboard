@@ -12,7 +12,7 @@ export default async function handler(req, res) {
     const jobs = await listJobs(Number(req.query?.limit || 200));
     const groups = {
       readyToSubmit: jobs.filter((job) => ["ready_to_submit", "needs_identity_review"].includes(job.state)),
-      awaiting: jobs.filter((job) => ["submitting", "awaiting_matches", "ready_to_enroll", "ensuring_email", "enrolling", "verifying", "no_email"].includes(job.state)),
+      awaiting: jobs.filter((job) => ["submitting", "awaiting_approval", "awaiting_matches", "ready_to_enroll", "ensuring_email", "enrolling", "verifying", "no_email"].includes(job.state)),
       needsReview: jobs.filter((job) => job.state === "needs_review"),
       enrolled: jobs.filter((job) => job.state === "enrolled"),
       errors: jobs.filter((job) => job.state === "error"),

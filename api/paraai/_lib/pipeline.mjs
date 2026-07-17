@@ -1,5 +1,6 @@
 // Human-confirm Para AI state machine. Every external write is claimed in KV
-// before it runs, performed once, and read back before the job advances.
+// before it runs and performed once. Paraform accepts direct submissions
+// asynchronously, so approval is reconciled read-only before match processing.
 
 import {
   INTERNAL_NAMES,
@@ -38,7 +39,7 @@ import { createJob, getJob, saveJob, transition } from "./store.mjs";
 
 export const STATES = new Set([
   "detected", "resolving_identity", "needs_identity_review", "extracting",
-  "ready_to_submit", "submitting", "awaiting_matches", "ready_to_enroll",
+  "ready_to_submit", "submitting", "awaiting_approval", "awaiting_matches", "ready_to_enroll",
   "needs_review", "ensuring_email", "enrolling", "verifying", "enrolled",
   "no_email", "error",
 ]);
@@ -336,15 +337,12 @@ async function applyResumeUpload(job, body) {
   };
 }
 
-async function submitReadback(candidateUserId, mutationResponse) {
-  if (candidateAlreadySubmitted(mutationResponse)) return true;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt) await new Promise((resolve) => setTimeout(resolve, 2_000));
-    const details = await candidateDetails(candidateUserId);
-    if (candidateAlreadySubmitted(details)) return true;
-  }
-  const crm = await findCrmCandidate(candidateUserId);
-  return candidateAlreadySubmitted(crm);
+async function submissionIsVisible(candidateUserId) {
+  const [details, crm] = await Promise.all([
+    candidateDetails(candidateUserId),
+    findCrmCandidate(candidateUserId),
+  ]);
+  return candidateAlreadySubmitted(details) || candidateAlreadySubmitted(crm);
 }
 
 export async function submitJob(job, body = {}) {
@@ -416,15 +414,51 @@ export async function submitJob(job, body = {}) {
   } catch (error) {
     return fail(edited, "SUBMIT_WRITE_FAILED", String(error?.message || error), { externalWriteMayHaveLanded: true });
   }
-  const verified = await submitReadback(candidateUserId, response).catch(() => false);
-  if (!verified) return fail(edited, "SUBMIT_NOT_VISIBLE", "Submit returned but talent-network status is not visible on read-back", { externalWriteMayHaveLanded: true });
-  return saveJob(transition(edited, "awaiting_matches", {
+  return saveJob(transition(edited, "awaiting_approval", {
     submittedAt: new Date().toISOString(),
-    submitReadbackVerified: true,
+    submitAcceptedAt: new Date().toISOString(),
+    submitReadbackVerified: candidateAlreadySubmitted(response),
     externalWriteMayHaveLanded: false,
     matchCount: null,
     error: null,
+    journalDetail: "Paraform accepted submission; approval pending",
   }), edited.revision);
+}
+
+export async function reconcileSubmittedJob(job) {
+  const legacyAccepted = job?.state === "error" && job?.error?.code === "SUBMIT_NOT_VISIBLE";
+  const uncertainWrite = job?.state === "error" && job?.error?.code === "SUBMIT_WRITE_FAILED";
+  if (job?.state !== "awaiting_approval" && !legacyAccepted && !uncertainWrite) {
+    throw stateError("job is not awaiting submission reconciliation", "INVALID_STATE", job);
+  }
+  const candidateUserId = job.identity?.candidateUserId;
+  if (!candidateUserId) throw stateError("candidate identity is missing", "IDENTITY_REQUIRED", job);
+  const checkedAt = new Date().toISOString();
+  const visible = await submissionIsVisible(candidateUserId).catch(() => false);
+  if (visible) {
+    return saveJob(transition(job, "awaiting_matches", {
+      submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,
+      submitAcceptedAt: job.submitAcceptedAt || job.submitClaimedAt || checkedAt,
+      submissionApprovalCheckedAt: checkedAt,
+      submitReadbackVerified: true,
+      externalWriteMayHaveLanded: false,
+      matchCount: null,
+      error: null,
+      journalDetail: "Paraform submission verified",
+    }), job.revision);
+  }
+  if (uncertainWrite) {
+    throw stateError("Submission is still not visible. Do not retry the write; reconcile in Paraform first.", "SUBMIT_STILL_UNCONFIRMED", job);
+  }
+  return saveJob(transition(job, "awaiting_approval", {
+    submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,
+    submitAcceptedAt: job.submitAcceptedAt || job.submitClaimedAt || checkedAt,
+    submissionApprovalCheckedAt: checkedAt,
+    submitReadbackVerified: false,
+    externalWriteMayHaveLanded: false,
+    error: null,
+    journalDetail: "Paraform approval still pending",
+  }), job.revision);
 }
 
 function matchReadInput(job) {

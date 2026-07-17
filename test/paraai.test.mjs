@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
+import { candidateAlreadySubmitted, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
-import { PARAAI_SALARY_CAP, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { PARAAI_SALARY_CAP, STATES, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 import { reclaimableLegacyJobLock } from "../api/paraai/_lib/store.mjs";
 
@@ -216,6 +216,14 @@ test("Para AI submit cannot bypass the market attestation", async () => {
   );
 });
 
+test("Paraform submission acceptance is asynchronous and recognizes native status signals", () => {
+  assert.equal(STATES.has("awaiting_approval"), true);
+  assert.equal(candidateAlreadySubmitted({ talent_network_submitted_at: "2026-07-16T18:47:00Z" }), true);
+  assert.equal(candidateAlreadySubmitted({ profile: { has_application_submission_ever: true } }), true);
+  assert.equal(candidateAlreadySubmitted({ matchingPoolStatus: "RECRUITER_ON_MARKET" }), true);
+  assert.equal(candidateAlreadySubmitted({ matching_pool_status: "NOT_SUBMITTED" }), false);
+});
+
 test("only expired legacy locks on an unwritten submission can be reclaimed", () => {
   assert.equal(reclaimableLegacyJobLock("legacy-token", 210, "ready_to_submit"), true);
   assert.equal(reclaimableLegacyJobLock("legacy-token", 211, "ready_to_submit"), false);
@@ -307,9 +315,14 @@ test("Para AI HTML inline JavaScript parses", async () => {
   assert.match(html, /function reconcileOpenReview/);
   assert.match(html, /latest\.state!=='ready_to_submit'/);
   assert.match(html, /expectedRevision:latest\.revision/);
+  assert.match(html, /action:'reconcile-submit'/);
+  assert.match(html, /Accepted by Paraform\. Approval may take a couple minutes/);
   assert.doesNotMatch(html, /action:\s*["']direct-submit/);
   const run = await readFile(new URL("../api/paraai/run.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(run, /["']direct-submit["']/);
+  const pipeline = await readFile(new URL("../api/paraai/_lib/pipeline.mjs", import.meta.url), "utf8");
+  assert.match(pipeline, /transition\(edited, "awaiting_approval"/);
+  assert.match(pipeline, /export async function reconcileSubmittedJob/);
 });
 
 test("Vercel config exposes one Para AI page and grouped API duration", async () => {

@@ -333,6 +333,7 @@ export function candidateAlreadySubmitted(value) {
   const visit = (node, depth = 0) => {
     if (!node || typeof node !== "object" || depth > 5) return false;
     if (node.talent_network_submitted_at || node.talentNetworkSubmittedAt) return true;
+    if (node.has_application_submission_ever === true || node.hasApplicationSubmissionEver === true) return true;
     const status = String(node.matching_pool_status || node.matchingPoolStatus || "").toUpperCase();
     if (status && !["NONE", "NOT_SUBMITTED", "INELIGIBLE", "OFF_MARKET"].includes(status)) return true;
     return Object.values(node).some((item) => visit(item, depth + 1));
