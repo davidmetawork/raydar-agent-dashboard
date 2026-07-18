@@ -126,7 +126,9 @@ export function headerValue(message, name) {
 }
 
 export function threadReplyContext(thread) {
-  const messages = thread?.messages || [];
+  const messages = (thread?.messages || []).filter(
+    (message) => !(message?.labelIds || []).includes("DRAFT"),
+  );
   if (!messages.length) return null;
   const first = messages[0];
   const last = messages[messages.length - 1];

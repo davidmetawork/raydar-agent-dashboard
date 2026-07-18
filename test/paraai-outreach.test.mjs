@@ -153,6 +153,15 @@ test("thread context follows the latest Gmail message and replies stop follow-up
           { name: "From", value: "Candidate <candidate@example.com>" },
         ] },
       },
+      {
+        internalDate: "3000",
+        labelIds: ["DRAFT"],
+        payload: { headers: [
+          { name: "Message-ID", value: "<unsent-draft@example.com>" },
+          { name: "References", value: "<first@example.com> <candidate@example.com>" },
+          { name: "From", value: "David Phillips <david@raydar.xyz>" },
+        ] },
+      },
     ],
   };
   const context = threadReplyContext(thread);
