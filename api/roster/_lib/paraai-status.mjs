@@ -69,6 +69,8 @@ function vendorCandidate(row, membershipPredicate) {
     normalizedName,
     added: membershipPredicate(row) === true,
     localConfirmed: false,
+    acquisitionSource: row?.source_info === "CONNECTOR_REFERRAL" ? "Connector" : null,
+    acquisitionSourceEvidence: row?.source_info === "CONNECTOR_REFERRAL" ? "paraform_connector" : null,
   };
 }
 
@@ -96,6 +98,10 @@ export function buildParaAIStatusIndex(
     // is one candidate, not a homonym; preserve the newest name and OR only
     // authoritative membership evidence across duplicate rows.
     existing.added ||= candidate.added;
+    if (candidate.acquisitionSource === "Connector") {
+      existing.acquisitionSource = "Connector";
+      existing.acquisitionSourceEvidence = "paraform_connector";
+    }
   }
 
   for (const local of Array.isArray(confirmedMemberships) ? confirmedMemberships : []) {
@@ -147,6 +153,8 @@ export function buildParaAIStatusIndex(
         added,
         ambiguous,
         source: added && candidate.localConfirmed ? "local_confirmed" : "paraform_crm",
+        acquisitionSource: ambiguous ? null : candidate.acquisitionSource,
+        acquisitionSourceEvidence: ambiguous ? null : candidate.acquisitionSourceEvidence,
       };
     })
     .sort((left, right) => left.normalizedName.localeCompare(right.normalizedName));

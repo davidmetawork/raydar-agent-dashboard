@@ -35,3 +35,14 @@ test("Candidates roster becomes labeled cards below 800 pixels", () => {
     assert.match(dashboard, new RegExp(`content:"${label}"`));
   }
 });
+
+test("Call Type stays explicit and editable instead of defaulting unknown rows to Agent", () => {
+  assert.match(dashboard, /<option value="unknown">Unknown<\/option>/);
+  assert.match(dashboard, /const CD_TYPES\s*= \["Agent","Human"\]/);
+  assert.match(dashboard, /cdSelect\(i,"source",CD_SOURCES,r\.source,"Unknown"\)/);
+  assert.match(dashboard, /cdSelect\(i,"callType",CD_TYPES,r\.callType,"Unknown"\)/);
+  assert.match(dashboard, /return t==="human" \? "human" : t==="agent" \? "agent" : "unknown"/);
+  assert.match(dashboard, /row\.sourceEvidence!=="manual"/);
+  assert.doesNotMatch(dashboard, /cdAutoSource/);
+  assert.doesNotMatch(dashboard, /typePill/);
+});

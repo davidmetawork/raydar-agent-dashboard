@@ -369,13 +369,14 @@
     <div id="view-candidates" hidden>
       <section>
         <div class="sec-head"><h3>Candidates</h3><span class="count" id="cd-count"></span></div>
-        <p class="fu-intro">Every screened candidate in one place. Set where they came from, log the outcome, and jot notes — edits save automatically.</p>
+        <p class="fu-intro">Every candidate call in one place. Source and Call Type are evidence-backed; blanks are explicit Unknowns, and edits save automatically.</p>
         <div class="cd-bar">
           <input id="cd-q" type="text" placeholder="Search candidates…" autocomplete="off" oninput="cdFilters.q=this.value;renderRoster()" />
           <select id="cd-ftype" onchange="cdFilters.type=this.value;renderRoster()">
             <option value="all">All types</option>
             <option value="agent">Agent</option>
             <option value="human">Human</option>
+            <option value="unknown">Unknown</option>
           </select>
           <select id="cd-fstatus" onchange="cdFilters.status=this.value;renderRoster()">
             <option value="all">All statuses</option>
@@ -1401,15 +1402,15 @@
       }
     }
 
-    // ---- Candidates tab (roster): every screened candidate, with editable
-    //      Source / Outcome / Notes / Status persisted via POST /api/roster-note.
+    // ---- Candidates tab (roster): every candidate call, with editable
+    //      Source / Call Type / Outcome / Notes / Status persisted via POST /api/roster-note.
     //      Lazy: fetched on first tab open, re-fetched when the tab reopens >60s stale. ----
     const CD_SOURCES  = ["Job Post","Connector","Outreach"];
+    const CD_TYPES    = ["Agent","Human"];
     const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
     const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, rosterOutcomeLoading=false, rosterOutcomeRetryTimer=null, rosterOutcomeVerified=false, rosterOutcomeVerifyFailed=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
     const cdFilters = { q:"", type:"all", status:"all", paraai:"all", outcome:"all", range:"30", matchQueue:false };
-    const cdSourceChecked = new Set();   // keys already asked of /api/roster/source
     const cdNormName = (value) => String(value||"").normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g," ");
 
     async function ensureRoster(force){
@@ -1423,7 +1424,6 @@
         rosterAt = Date.now();
         renderRoster();
         refreshRosterParaAI(force === true);
-        cdAutoSource();   // best-effort; hosts without the endpoint skip silently
       }catch(e){
         if(!rosterRows) $("cd-table-wrap").innerHTML = `<div class="empty">Couldn't load candidates — reopen the tab to retry.</div>`;
       }
@@ -1442,10 +1442,11 @@
       const d = new Date(t), ds = d.toLocaleDateString([],{month:"short",day:"numeric"});
       return hasClock ? `${ds} · ${d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}` : ds;
     }
-    const cdIsHuman = (r) => {
-      const t = String(r.callType||"").toLowerCase();
-      return t ? t.includes("human") : String(r.via||"").toLowerCase()==="human";
+    const cdCallTypeKey = (r) => {
+      const t = String(r.callType||"").trim().toLowerCase();
+      return t==="human" ? "human" : t==="agent" ? "agent" : "unknown";
     };
+    const cdIsHuman = (r) => cdCallTypeKey(r)==="human";
     // normalize the free-form status to a display bucket; unknown values stay gray with raw text
     function cdStatusKey(status){
       const s = String(status||"").trim().toLowerCase();
@@ -1533,7 +1534,7 @@
       const latest=cdLatestSuccessfulRows();
       const rows = (rosterRows||[]).filter(r=>{
         if(q && !String(r.candidate||"").toLowerCase().includes(q)) return false;
-        if(f.type!=="all" && (cdIsHuman(r)?"human":"agent")!==f.type) return false;
+        if(f.type!=="all" && cdCallTypeKey(r)!==f.type) return false;
         if(f.status!=="all" && String(r.status||"").trim()!==f.status) return false;
         if(f.paraai!=="all" && cdParaAIKey(r)!==f.paraai) return false;
         if(f.outcome!=="all"){
@@ -1565,13 +1566,14 @@
       (cdErr && cdErr.key===r.key && cdErr.field===field) ? `<div class="cd-err">Couldn't save — reverted</div>` : "";
     // chip tints per value — same palette the Google Sheet used for these dropdowns
     const CD_CHIP = { "Job Post":"chip-green", "Connector":"chip-purple", "Outreach":"chip-blue",
+      "Agent":"chip-purple", "Human":"chip-orange",
       "Sent List":"chip-green", "No Matches - Para AI":"chip-amber", "Submitted":"chip-teal",
       "Disengage":"chip-red", "Reschedule Email Sequence":"chip-orange" };
-    function cdSelect(i, field, opts, val){
+    function cdSelect(i, field, opts, val, emptyLabel=""){
       const v=String(val||"").trim();
       const all = (v && !opts.includes(v)) ? [v,...opts] : opts;   // keep unexpected stored values visible
       const chip = CD_CHIP[v] ? " "+CD_CHIP[v] : "";
-      return `<select class="cd-sel${chip}" onchange="this.className='cd-sel '+(CD_CHIP[this.value]||'');cdSet(${i},'${field}',this.value)"><option value=""${v?"":" selected"}></option>${
+      return `<select class="cd-sel${chip}" onchange="this.className='cd-sel '+(CD_CHIP[this.value]||'');cdSet(${i},'${field}',this.value)"><option value=""${v?"":" selected"}>${cdEsc(emptyLabel)}</option>${
         all.map(o=>`<option value="${cdEsc(o)}"${o===v?" selected":""}>${cdEsc(o)}</option>`).join("")}</select>`;
     }
     const cdNoteCell = (i,r) => {
@@ -1582,16 +1584,14 @@
     function cdRow(r,i){
       const human = cdIsHuman(r);
       const sKey = cdStatusKey(r.status);
-      const typePill = human ? `<span class="pill warn"><span class="d"></span>Human</span>`
-                             : `<span class="pill live"><span class="d"></span>Agent</span>`;
       const heldBtns = (human && sKey==="held")
         ? `<div class="cd-quick"><button class="cd-mini good" onclick="cdSet(${i},'status','Success')">Success</button><button class="cd-mini" onclick="cdSet(${i},'status','No-show')">No-show</button></div>` : "";
       const displayOutcome = cdEffectiveOutcome(r);
       return `<tr>
         <td class="cd-when">${cdDate(r)}</td>
         <td class="who">${nameLink(r.candidate)}${gmailLink(r.candidate)}</td>
-        <td>${cdSelect(i,"source",CD_SOURCES,r.source)}${cdErrIn(r,"source")}</td>
-        <td>${typePill}</td>
+        <td>${cdSelect(i,"source",CD_SOURCES,r.source,"Unknown")}${cdErrIn(r,"source")}</td>
+        <td>${cdSelect(i,"callType",CD_TYPES,r.callType,"Unknown")}${cdErrIn(r,"callType")}</td>
         <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
         <td>${cdParaAIPill(r)}</td>
         <td>${cdSelect(i,"outcome",CD_OUTCOMES,displayOutcome)}${cdErrIn(r,"outcome")}</td>
@@ -1705,6 +1705,10 @@
           row.paraAIAmbiguous=hit?.ambiguous===true;
           row.paraAICandidateUserId=hit?.ambiguous===true ? null : (hit?.candidateUserId||null);
           row.paraAISource=hit?.source||null;
+          if(!String(row.source||"").trim() && row.sourceEvidence!=="manual" && hit?.acquisitionSource && hit?.ambiguous!==true){
+            row.source=hit.acquisitionSource;
+            row.sourceEvidence=hit.acquisitionSourceEvidence||"paraform_connector";
+          }
           row.outcomeComplete=hit?.outcomeComplete===true;
           row.verifiedOutcome=hit?.verifiedOutcome||null;
           row.outcomeConflict=hit?.outcomeConflict===true;
@@ -1766,27 +1770,6 @@
       };
       input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") finish(true); else if(e.key==="Escape") finish(false); });
       input.addEventListener("blur",()=>finish(true));
-    }
-
-    // Source auto-detect: ask the same-origin lookup for up to 5 visible source-less rows.
-    // Hosts without /api/roster/source — or AUTH_EXPIRED / !ok responses — skip silently.
-    async function cdAutoSource(){
-      const cands = cdVisible.filter(r=>r.key && r.candidate && !String(r.source||"").trim() && !cdSourceChecked.has(r.key)).slice(0,5);
-      for(const row of cands){
-        cdSourceChecked.add(row.key);
-        try{
-          const r = await fetch("/api/roster/source?name="+encodeURIComponent(row.candidate));
-          if(!r.ok) continue;
-          const j = await r.json().catch(()=>null);
-          if(!j || !j.ok || !j.source) continue;
-          row.source = j.source;
-          renderRoster();
-          fetch(API_BASE + "/api/roster-note", {   // best-effort persist; display already updated
-            method:"POST", headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({ key: row.key, fields: { source: j.source } }),
-          }).catch(()=>{});
-        }catch(e){ /* endpoint absent on this host — skip */ }
-      }
     }
 
     // Absolute base so the dashboard works under ANY host — served direct or via

@@ -79,6 +79,8 @@ test("Para AI status endpoint joins exact-ID outcome membership onto CRM status"
     added: true,
     ambiguous: false,
     source: "outcome_sequence",
+    acquisitionSource: null,
+    acquisitionSourceEvidence: null,
     outcomeComplete: true,
     verifiedOutcome: "Sent List",
     outcomeConflict: false,
