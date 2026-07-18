@@ -437,6 +437,7 @@ export async function processMatchRequest(
             ...state.outbox[message.actionKey],
             status: "drafted",
             draftId: draft.id,
+            gmailDraftRfc822MessageId: draft.rfc822MessageId,
             threadId: context?.threadId || draft.threadId || null,
             draftedAt: new Date().toISOString(),
             copyVariant: copy.variant,
@@ -465,6 +466,7 @@ export async function processMatchRequest(
       sent = await deliverMessage({
         mailbox: config.mailbox,
         draftId: previousOutbox.draftId || null,
+        draftRfc822MessageId: previousOutbox.gmailDraftRfc822MessageId || null,
         message,
       });
     } catch (error) {

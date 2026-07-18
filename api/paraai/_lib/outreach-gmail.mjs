@@ -311,6 +311,7 @@ export async function createReviewDraft(
     id: draft.id,
     messageId: draft?.message?.id || fetched?.message?.id || null,
     threadId: draft?.message?.threadId || fetched?.message?.threadId || null,
+    rfc822MessageId: readHeader("Message-ID") || null,
     draftAction: draft.draftAction,
   };
 }
@@ -319,10 +320,22 @@ export async function deliverMessage(
   {
     mailbox = outreachMailbox(),
     draftId = null,
+    draftRfc822MessageId = null,
     message,
   } = {},
 ) {
-  const existing = await findMessageByRfc822Id(mailbox, message.messageId);
+  const reconciliationIds = [...new Set([
+    draftRfc822MessageId,
+    message.messageId,
+  ].filter(Boolean))];
+  const findDelivered = async () => {
+    for (const messageId of reconciliationIds) {
+      const found = await findMessageByRfc822Id(mailbox, messageId);
+      if (found) return found;
+    }
+    return null;
+  };
+  const existing = await findDelivered();
   if (existing) return { ...existing, delivery: "reconciled" };
   try {
     const sent = draftId
@@ -330,7 +343,7 @@ export async function deliverMessage(
       : await sendMessage(mailbox, message);
     return { ...sent, delivery: draftId ? "draft_sent" : "sent" };
   } catch (error) {
-    const recovered = await findMessageByRfc822Id(mailbox, message.messageId).catch(() => null);
+    const recovered = await findDelivered().catch(() => null);
     if (recovered) return { ...recovered, delivery: "reconciled_after_error" };
     const unknown = new Error("Gmail delivery could not be reconciled; no automatic retry is allowed");
     unknown.code = "GMAIL_SEND_UNKNOWN";
