@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   additionalMatchCopy,
   companySlug,
+  digestLinkLabel,
   followupCopy,
   initialMatchCopy,
   initialSubject,
@@ -13,6 +14,7 @@ import {
   buildMime,
   candidateRepliedAfter,
   deterministicMessageId,
+  threadDigestAnchorStatus,
   threadReplyContext,
 } from "../api/paraai/_lib/outreach-gmail.mjs";
 import {
@@ -31,6 +33,10 @@ const role = {
   roleUrl: "https://www.paraform.com/share/reform/role-12345678",
   digestUrl: "https://www.paraform.com/digest/digest-12345678",
 };
+const bodyPayload = (text, mimeType = "text/plain") => ({
+  mimeType,
+  body: { data: Buffer.from(text, "utf8").toString("base64url") },
+});
 
 test("initial subject matches the approved interview-request format", () => {
   assert.equal(
@@ -43,9 +49,12 @@ test("first-match copy preserves the approved wording and links", () => {
   assert.match(copy.text, /^Hey Amy,\n\nHope you are doing well!/);
   assert.match(copy.text, /I shared a redacted version of your resume with the Founder/);
   assert.match(copy.text, /will add all interview requests you get here:/);
+  assert.match(copy.text, /Amy's Interview Requests \(https:\/\/www\.paraform\.com\/digest\/digest-12345678\)/);
   assert.ok(copy.text.endsWith("Thanks,"));
   assert.match(copy.html, /<a href="https:\/\/www\.paraform\.com\/share\/reform\/role-12345678">Software Engineer @ Reform<\/a>/);
-  assert.match(copy.html, /<a href="https:\/\/www\.paraform\.com\/digest\/digest-12345678">/);
+  assert.match(copy.html, /<a href="https:\/\/www\.paraform\.com\/digest\/digest-12345678">Amy's Interview Requests<\/a>/);
+  assert.doesNotMatch(copy.html, />https:\/\/www\.paraform\.com\/digest\//);
+  assert.equal(digestLinkLabel("Amy"), "Amy's Interview Requests");
 });
 
 test("second match is exact while third and later matches vary deterministically", () => {
@@ -60,6 +69,7 @@ test("second match is exact while third and later matches vary deterministically
   assert.match(second.text, /The founders think you would be a very strong match!/);
   assert.match(second.text, /Open to connecting with the team to discuss\?/);
   assert.match(second.text, /Reminder that I am adding all of these requests in one place for you to review:/);
+  assert.match(second.html, />Amy's Interview Requests<\/a>/);
 
   const thirdA = additionalMatchCopy({
     firstName: "Amy",
@@ -171,6 +181,57 @@ test("thread context follows the latest Gmail message and replies stop follow-up
   assert.equal(context.references, "<first@example.com> <candidate@example.com>");
   assert.equal(candidateRepliedAfter(thread, "candidate@example.com", 1500), true);
   assert.equal(candidateRepliedAfter(thread, "candidate@example.com", 2500), false);
+});
+
+test("only an exact digest URL in the first delivered email anchors future replies", () => {
+  const digestUrl = role.digestUrl;
+  const oldThread = {
+    id: "old-caro-thread",
+    messages: [
+      {
+        internalDate: "1000",
+        payload: {
+          ...bodyPayload("A historical email without the candidate digest"),
+          headers: [{ name: "Subject", value: "1st Round @ CaroHQ 🎉" }],
+        },
+      },
+      {
+        internalDate: "2000",
+        labelIds: ["DRAFT"],
+        payload: bodyPayload(`Later unsent draft ${digestUrl}`),
+      },
+    ],
+  };
+  assert.equal(threadDigestAnchorStatus(oldThread, digestUrl), "missing");
+
+  const newDraftThread = {
+    id: "new-reform-draft",
+    messages: [{
+      internalDate: "3000",
+      labelIds: ["DRAFT"],
+      payload: bodyPayload(`Dhruva's Interview Requests (${digestUrl})`),
+    }],
+  };
+  assert.equal(threadDigestAnchorStatus(newDraftThread, digestUrl), "draft");
+
+  const anchoredThread = {
+    id: "anchored-thread",
+    messages: [
+      {
+        internalDate: "4000",
+        payload: bodyPayload(`<a href="${digestUrl}">Dhruva's Interview Requests</a>`, "text/html"),
+      },
+      {
+        internalDate: "5000",
+        payload: bodyPayload("A later reply does not need to repeat the URL"),
+      },
+    ],
+  };
+  assert.equal(threadDigestAnchorStatus(anchoredThread, digestUrl), "delivered");
+  assert.equal(
+    threadDigestAnchorStatus(anchoredThread, `${digestUrl}-different`),
+    "missing",
+  );
 });
 
 test("request normalization and ordinal count all Para AI requests for one candidate", () => {

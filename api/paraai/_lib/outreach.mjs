@@ -8,6 +8,7 @@ import {
   additionalMatchCopy,
   followupCopy,
   initialMatchCopy,
+  initialSubject,
   roleShareUrl,
 } from "./outreach-copy.mjs";
 import {
@@ -15,12 +16,13 @@ import {
   createReviewDraft,
   deliverMessage,
   deterministicMessageId,
-  findInterviewThread,
+  findDigestThread,
   getSignatureHtml,
   getThread,
   gmailConfigured,
   outreachMailbox,
   probeGmail,
+  threadDigestAnchorStatus,
   threadReplyContext,
 } from "./outreach-gmail.mjs";
 import {
@@ -201,20 +203,31 @@ function copyForMatch({ request, ordinal, contact, digest, roleUrl }) {
       });
 }
 
-async function threadForMatch({ state, request, ordinal, mailbox }) {
-  if (ordinal === 1) return { thread: null, context: null };
+async function threadForMatch({ state, request, mailbox, digestUrl }) {
   if (state?.threadId) {
-    const thread = await getThread(mailbox, state.threadId);
-    const context = threadReplyContext(thread);
-    if (context) return { thread, context };
+    try {
+      const thread = await getThread(mailbox, state.threadId);
+      const anchorStatus = threadDigestAnchorStatus(thread, digestUrl);
+      if (anchorStatus === "delivered") {
+        const context = threadReplyContext(thread);
+        if (context) return { thread, context, anchorStatus };
+      }
+      if (anchorStatus === "draft") {
+        return { thread, context: null, anchorStatus };
+      }
+    } catch {
+      // A stale state thread must not prevent exact digest-anchor discovery.
+    }
   }
-  const found = await findInterviewThread(mailbox, state?.candidateEmail);
-  if (!found?.context) {
-    const error = new Error("additional Para AI match has no original interview-request Gmail thread");
-    error.code = "OUTREACH_THREAD_NOT_FOUND";
-    throw error;
+  const found = await findDigestThread(mailbox, state?.candidateEmail, digestUrl);
+  if (found?.context) {
+    return {
+      thread: found.thread,
+      context: found.context,
+      anchorStatus: "delivered",
+    };
   }
-  return { thread: found.thread, context: found.context };
+  return { thread: null, context: null, anchorStatus: "none" };
 }
 
 function messageForMatch({
@@ -223,6 +236,7 @@ function messageForMatch({
   ordinal,
   copy,
   context,
+  draftThreadId,
   signatureHtml,
 }) {
   const actionKey = `match:${request.id}`;
@@ -230,13 +244,13 @@ function messageForMatch({
     actionKey,
     from: `David Phillips <${mailbox}>`,
     to: request.candidateEmail,
-    subject: ordinal === 1 ? copy.subject : context.replySubject,
+    subject: context?.replySubject || initialSubject(request.companyName),
     messageId: deterministicMessageId(actionKey),
     ...(context ? {
       threadId: context.threadId,
       inReplyTo: context.inReplyTo,
       references: context.references,
-    } : {}),
+    } : draftThreadId ? { threadId: draftThreadId } : {}),
     bodyText: copy.text,
     bodyHtml: ordinal === 1
       ? `${copy.html}<br>\n${signatureHtml || ""}`
@@ -381,12 +395,20 @@ export async function processMatchRequest(
     const digest = await ensureMatchDigest(request);
     const roleUrl = roleShareUrl(request);
     request = { ...request, candidateEmail: contact.email };
-    const { context } = await threadForMatch({
+    const actionKey = `match:${request.id}`;
+    const previousOutbox = state.outbox?.[actionKey] || {};
+    const previousThreadId = state.threadId || null;
+    const { context, anchorStatus } = await threadForMatch({
       state,
       request,
-      ordinal,
       mailbox: config.mailbox,
+      digestUrl: digest.digestUrl,
     });
+    const replaceExistingDraft = Boolean(
+      mode === "draft" &&
+      previousOutbox.draftId &&
+      anchorStatus === "none"
+    );
     const copy = copyForMatch({ request, ordinal, contact, digest, roleUrl });
     const signatureHtml = ordinal === 1
       ? await getSignatureHtml(config.mailbox).catch(() => "")
@@ -397,15 +419,18 @@ export async function processMatchRequest(
       ordinal,
       copy,
       context,
+      draftThreadId: anchorStatus === "draft" ? previousThreadId : null,
       signatureHtml,
     });
-    const previousOutbox = state.outbox?.[message.actionKey] || {};
+    const anchoredThreadId = context?.threadId
+      || (anchorStatus === "draft" ? previousThreadId : null);
     const claimed = appendOutreachJournal({
       ...state,
       digestId: digest.digestId,
       digestUrl: digest.digestUrl,
-      threadId: context?.threadId || state.threadId || null,
-      threadSubject: context?.originalSubject || state.threadSubject || copy.subject || null,
+      threadId: anchoredThreadId,
+      threadSubject: context?.originalSubject
+        || (anchorStatus === "draft" ? state.threadSubject : message.subject),
       outbox: {
         ...(state.outbox || {}),
         [message.actionKey]: {
@@ -419,6 +444,7 @@ export async function processMatchRequest(
     }, mode === "draft" ? "review_draft_claimed" : "gmail_delivery_claimed", {
       requestId: request.id,
       ordinal,
+      anchorStatus,
     });
     state = await saveOutreachState(claimed, state.revision);
 
@@ -426,17 +452,20 @@ export async function processMatchRequest(
       const draft = await createReviewDraft({
         mailbox: config.mailbox,
         existingDraftId: previousOutbox.draftId || null,
+        replaceExistingDraft,
         message,
       });
       const drafted = appendOutreachJournal({
         ...state,
-        threadId: context?.threadId || draft.threadId || state.threadId || null,
+        threadId: draft.threadId || anchoredThreadId,
+        threadSubject: context?.originalSubject || message.subject,
         outbox: {
           ...(state.outbox || {}),
           [message.actionKey]: {
             ...state.outbox[message.actionKey],
             status: "drafted",
             draftId: draft.id,
+            gmailDraftMessageId: draft.messageId,
             gmailDraftRfc822MessageId: draft.rfc822MessageId,
             threadId: context?.threadId || draft.threadId || null,
             draftedAt: new Date().toISOString(),
@@ -446,6 +475,8 @@ export async function processMatchRequest(
       }, "review_draft_created", {
         requestId: request.id,
         ordinal,
+        anchorStatus,
+        draftAction: draft.draftAction,
       });
       state = await saveOutreachState(drafted, state.revision);
       return {

@@ -44,6 +44,10 @@ export function initialSubject(companyName) {
   return `1st Round - Interview Request @ ${clean(companyName)} 🎉`;
 }
 
+export function digestLinkLabel(firstName) {
+  return `${clean(firstName) || "Your"}${clean(firstName) ? "'s" : ""} Interview Requests`;
+}
+
 export function initialMatchCopy({
   firstName,
   roleName,
@@ -53,6 +57,7 @@ export function initialMatchCopy({
 }) {
   const first = clean(firstName) || "there";
   const roleLabel = `${clean(roleName)} @ ${clean(companyName)}`;
+  const digestLabel = digestLinkLabel(first);
   const text = [
     `Hey ${first},`,
     "",
@@ -62,7 +67,7 @@ export function initialMatchCopy({
     "",
     "I shared a redacted version of your resume with the Founder and the team would love to chat if you are interested.",
     "",
-    `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${clean(digestUrl)}`,
+    `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${digestLabel} (${clean(digestUrl)})`,
     "",
     "Let me know!",
     "",
@@ -73,7 +78,7 @@ export function initialMatchCopy({
     "Hope you are doing well!",
     `I wanted to check in and see if you would be interested in this ${anchor(roleLabel, roleUrl)}`,
     "I shared a redacted version of your resume with the Founder and the team would love to chat if you are interested.",
-    `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${anchor(digestUrl, digestUrl)}`,
+    `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${anchor(digestLabel, digestUrl)}`,
     "Let me know!",
     "Thanks,",
   ]);
@@ -118,6 +123,7 @@ export function additionalMatchCopy({
 }) {
   const first = clean(firstName) || "there";
   const roleLabel = `${clean(roleName)} @ ${clean(companyName)}`;
+  const digestLabel = digestLinkLabel(first);
   if (Number(ordinal) === 2) {
     const text = [
       `Hey ${first},`,
@@ -128,7 +134,7 @@ export function additionalMatchCopy({
       "",
       "Open to connecting with the team to discuss?",
       "",
-      `Reminder that I am adding all of these requests in one place for you to review: ${clean(digestUrl)}`,
+      `Reminder that I am adding all of these requests in one place for you to review: ${digestLabel} (${clean(digestUrl)})`,
       "",
       "Let me know!",
       "",
@@ -140,7 +146,7 @@ export function additionalMatchCopy({
       `You just got a new interview request for the ${anchor(roleLabel, roleUrl)}`,
       "The founders think you would be a very strong match!",
       "Open to connecting with the team to discuss?",
-      `Reminder that I am adding all of these requests in one place for you to review: ${anchor(digestUrl, digestUrl)}`,
+      `Reminder that I am adding all of these requests in one place for you to review: ${anchor(digestLabel, digestUrl)}`,
       "Let me know!",
       "Thanks,<br>David",
     ]);
@@ -158,7 +164,7 @@ export function additionalMatchCopy({
     "",
     variant.ask,
     "",
-    `${variant.reminder} ${clean(digestUrl)}`,
+    `${variant.reminder} ${digestLabel} (${clean(digestUrl)})`,
     "",
     "Let me know!",
     "",
@@ -170,7 +176,7 @@ export function additionalMatchCopy({
     variant.opening(anchor(roleLabel, roleUrl)),
     variant.fit,
     variant.ask,
-    `${variant.reminder} ${anchor(digestUrl, digestUrl)}`,
+    `${variant.reminder} ${anchor(digestLabel, digestUrl)}`,
     "Let me know!",
     "Thanks,<br>David",
   ]);

@@ -125,6 +125,39 @@ export function headerValue(message, name) {
   )?.value || null;
 }
 
+function decodeBody(data) {
+  if (!data) return "";
+  try {
+    return Buffer.from(String(data), "base64url").toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function payloadContent(payload) {
+  if (!payload) return "";
+  const own = ["text/plain", "text/html"].includes(String(payload.mimeType || "").toLowerCase())
+    ? decodeBody(payload?.body?.data)
+    : "";
+  return [own, ...(payload.parts || []).map(payloadContent)].filter(Boolean).join("\n");
+}
+
+export function threadDigestAnchorStatus(thread, digestUrl) {
+  const exactUrl = clean(digestUrl);
+  if (!exactUrl) return "missing";
+  const messages = [...(thread?.messages || [])].sort(
+    (left, right) => Number(left?.internalDate || 0) - Number(right?.internalDate || 0),
+  );
+  const delivered = messages.filter((message) => !(message?.labelIds || []).includes("DRAFT"));
+  if (delivered.length) {
+    return payloadContent(delivered[0]?.payload).includes(exactUrl) ? "delivered" : "missing";
+  }
+  const drafts = messages.filter((message) => (message?.labelIds || []).includes("DRAFT"));
+  return drafts.some((message) => payloadContent(message?.payload).includes(exactUrl))
+    ? "draft"
+    : "missing";
+}
+
 export function threadReplyContext(thread) {
   const messages = (thread?.messages || []).filter(
     (message) => !(message?.labelIds || []).includes("DRAFT"),
@@ -218,7 +251,7 @@ export async function getThread(mailbox, threadId) {
   return gmailCall(mailbox, `/threads/${encodeURIComponent(threadId)}?format=full`);
 }
 
-export async function findInterviewThread(mailbox, candidateEmail) {
+export async function findDigestThread(mailbox, candidateEmail, digestUrl) {
   const refs = await searchThreads(
     mailbox,
     `from:${candidateEmail} OR to:${candidateEmail}`,
@@ -229,7 +262,7 @@ export async function findInterviewThread(mailbox, candidateEmail) {
     try {
       const thread = await getThread(mailbox, ref.id);
       const context = threadReplyContext(thread);
-      if (context && /1st round(?: - interview request)? @/i.test(context.originalSubject)) {
+      if (context && threadDigestAnchorStatus(thread, digestUrl) === "delivered") {
         candidates.push({ id: ref.id, context, thread });
       }
     } catch {
@@ -277,6 +310,17 @@ export async function upsertDraft(mailbox, existingDraftId, message) {
   return { ...created, draftAction: "created" };
 }
 
+export async function deleteDraft(mailbox, draftId) {
+  if (!draftId) return false;
+  try {
+    await gmailCall(mailbox, `/drafts/${encodeURIComponent(draftId)}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (error?.code === "GMAIL_NOT_FOUND") return false;
+    throw error;
+  }
+}
+
 export async function sendDraft(mailbox, draftId) {
   return gmailCall(mailbox, "/drafts/send", {
     method: "POST",
@@ -295,9 +339,15 @@ export async function createReviewDraft(
   {
     mailbox = outreachMailbox(),
     existingDraftId = null,
+    replaceExistingDraft = false,
     message,
   } = {},
 ) {
+  let replaced = false;
+  if (replaceExistingDraft && existingDraftId) {
+    replaced = await deleteDraft(mailbox, existingDraftId);
+    existingDraftId = null;
+  }
   const draft = await upsertDraft(mailbox, existingDraftId, message);
   const fetched = await gmailCall(mailbox, `/drafts/${encodeURIComponent(draft.id)}?format=metadata`);
   const headers = fetched?.message?.payload?.headers || [];
@@ -314,7 +364,7 @@ export async function createReviewDraft(
     messageId: draft?.message?.id || fetched?.message?.id || null,
     threadId: draft?.message?.threadId || fetched?.message?.threadId || null,
     rfc822MessageId: readHeader("Message-ID") || null,
-    draftAction: draft.draftAction,
+    draftAction: replaced ? "recreated" : draft.draftAction,
   };
 }
 
