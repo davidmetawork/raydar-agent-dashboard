@@ -1,5 +1,6 @@
 import { authConfig, cors, hasParaformCookie, listSequences, paraAIConfig, trpcGet } from "./_lib/core.mjs";
 import { automationConfig, automationExecutionEnabled } from "./_lib/auto.mjs";
+import { outreachHealth } from "./_lib/outreach.mjs";
 import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 30 };
@@ -51,6 +52,7 @@ export default async function handler(req, res) {
       queue: null,
       ready: false,
     },
+    outreach: await outreachHealth(),
   };
   if (!(await hasParaformCookie())) {
     health.paraform = "no_cookie";

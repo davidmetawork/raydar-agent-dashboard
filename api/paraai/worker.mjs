@@ -7,6 +7,7 @@ import {
   runAutoTick,
 } from "./_lib/auto.mjs";
 import { notifySlack } from "./_lib/core.mjs";
+import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import { getAutoQueueStats, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
@@ -42,7 +43,12 @@ export default async function handler(req, res) {
   const mode = String(body.mode || (req.method === "GET" ? "recover" : "tick"));
   try {
     if (mode === "status") {
-      return res.status(200).json({ ok: true, config: automationConfig(), queue: await getAutoQueueStats() });
+      return res.status(200).json({
+        ok: true,
+        config: automationConfig(),
+        queue: await getAutoQueueStats(),
+        outreach: await outreachHealth(),
+      });
     }
     if (mode === "enqueue") {
       const botIds = Array.isArray(body.botIds) ? body.botIds.slice(0, 10) : [];
@@ -53,6 +59,21 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
     const tick = await runAutoTick();
+    let outreach = null;
+    let outreachError = null;
+    try {
+      outreach = await runOutreachTick();
+    } catch (error) {
+      outreachError = {
+        error: String(error?.code || "outreach_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+      if (await takeAlertSlot("outreach-worker-failed", 3600).catch(() => false)) {
+        await notifySlack(
+          `🚨 Para AI outreach worker failed (${outreachError.error}). Direct-submit queue processing continued.`,
+        ).catch(() => {});
+      }
+    }
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -72,9 +93,11 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({
       ok: true,
-      degraded: Boolean(recoveryError),
+      degraded: Boolean(recoveryError || outreachError),
       recovery,
       recoveryError,
+      outreach,
+      outreachError,
       tick,
       queue: await getAutoQueueStats(),
     });
