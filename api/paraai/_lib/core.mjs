@@ -366,6 +366,62 @@ export async function candidateDetails(candidateUserId, { strict = false } = {})
   return { byId, profile };
 }
 
+export function candidateTagNames(...values) {
+  const names = [];
+  const visit = (value, depth = 0, insideTags = false) => {
+    if (value == null || depth > 4) return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1, insideTags);
+      return;
+    }
+    if (typeof value === "string") {
+      if (insideTags) {
+        const tag = value.trim().toLowerCase();
+        if (tag) names.push(tag);
+      }
+      return;
+    }
+    if (typeof value !== "object") return;
+    if (Array.isArray(value.tags)) visit(value.tags, depth + 1, true);
+    if (insideTags && typeof value.name === "string") {
+      visit(value.name, depth + 1, true);
+    }
+    for (const key of ["candidate", "candidate_user", "candidateUser", "profile"]) {
+      if (value[key]) visit(value[key], depth + 1, false);
+    }
+  };
+  for (const value of values) visit(value);
+  return [...new Set(names)];
+}
+
+export function isArchiveImportCandidate(...values) {
+  return candidateTagNames(...values).includes("archive-import");
+}
+
+export async function candidateProfileInfo(
+  candidateUserId,
+  { fetchImpl = fetch } = {},
+) {
+  const id = String(candidateUserId || "").trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(id)) {
+    throw new Error("CANDIDATE_PROFILE_ID_INVALID");
+  }
+  const response = await fetchImpl(
+    `${PARAFORM_BASE}/candidates/profile/${encodeURIComponent(id)}/info`,
+    {
+      headers: await paraformHeaders(),
+      signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
+    },
+  );
+  if (response.status === 401) throw authExpired();
+  if (!response.ok) throw new Error(`CANDIDATE_PROFILE_READ_FAILED_${response.status}`);
+  const body = await response.json();
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("CANDIDATE_PROFILE_READ_MALFORMED");
+  }
+  return body;
+}
+
 export async function candidatePreferences(candidateUserId, { strict = false } = {}) {
   if (!candidateUserId) return null;
   const read = trpcGet("candidateUserPreference.getCandidateUserPrefs", { candidate_user_id: candidateUserId });

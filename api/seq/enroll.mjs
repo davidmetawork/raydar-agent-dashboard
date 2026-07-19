@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, bookedSet, createDelayProject } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, bookedSet, archiveImportSet, createDelayProject } from "./_lib/core.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -41,11 +41,15 @@ export default async function handler(req, res) {
           const url = (row.linkedinUrl || "").trim();
           if (!url) return { ok: false, email: row.email, reason: "no LinkedIn URL" };
           try {
-            const { id } = await createCandidate(url);
-            return id ? { ok: true, cu: id, email: row.email, created: true } : { ok: false, email: row.email, reason: "no id returned" };
+            const { id, status } = await createCandidate(url);
+            return id ? { ok: true, cu: id, email: row.email, created: true, isNew: status === "new" } : { ok: false, email: row.email, reason: "no id returned" };
           } catch (e) { return { ok: false, email: row.email, reason: String(e.message || e).slice(0, 120) }; }
         });
-        const good = resolved.filter((r) => r.ok);
+        const archiveImports = await archiveImportSet(
+          resolved.filter((r) => r.ok && !r.isNew).map((r) => r.cu),
+        );
+        const good = resolved.filter((r) => r.ok && !archiveImports.has(r.cu));
+        failedTotal += archiveImports.size;
         for (const r of resolved) if (!r.ok) { failedTotal++; createFailures.push({ email: r.email, reason: r.reason }); }
         const createdIds = good.filter((r) => r.created).map((r) => r.cu);
         if (createdIds.length) { try { await addToProject(createdIds); } catch { /* non-fatal */ } }
@@ -70,7 +74,7 @@ export default async function handler(req, res) {
     const already = await enrolledElsewhereSet();
 
     const results = [];
-    let createdTotal = 0, failedTotal = 0, skippedTotal = 0, skippedBookedTotal = 0;
+    let createdTotal = 0, failedTotal = 0, skippedTotal = 0, skippedBookedTotal = 0, skippedArchiveTotal = 0;
     const createFailures = [], skippedSample = [];
     for (const g of plan.groups) {
       try {
@@ -91,7 +95,10 @@ export default async function handler(req, res) {
         // 1b) Booked check — only pre-existing candidates can have booked a call, so
         //     only they hit getCandidateProfileInfo (fast for fresh LinkedIn cohorts).
         const preexisting = resolved.filter((r) => r.ok && !r.isNew).map((r) => r.cu);
-        const booked = await bookedSet(preexisting);
+        const [booked, archiveImports] = await Promise.all([
+          bookedSet(preexisting),
+          archiveImportSet(preexisting),
+        ]);
 
         // 2) Split into skip / keep, tally reasons.
         const keep = []; // {cu,email}
@@ -99,6 +106,7 @@ export default async function handler(req, res) {
         let groupSkipped = 0;
         for (const r of resolved) {
           if (!r.ok) { failedTotal++; createFailures.push({ email: r.email, reason: r.reason }); continue; }
+          if (archiveImports.has(r.cu)) { skippedArchiveTotal++; groupSkipped++; if (skippedSample.length < 50) skippedSample.push({ email: r.email, role: g.title, reason: "historical archive import" }); continue; }
           if (booked.has(r.cu)) { skippedBookedTotal++; groupSkipped++; if (skippedSample.length < 50) skippedSample.push({ email: r.email, role: g.title, reason: "already booked a call" }); continue; }
           if (already.has(r.cu)) { skippedTotal++; groupSkipped++; if (skippedSample.length < 50) skippedSample.push({ email: r.email, role: g.title, reason: "already in another sequence" }); continue; }
           keep.push({ cu: r.cu, email: r.email });
@@ -142,7 +150,7 @@ export default async function handler(req, res) {
     res.status(200).json({
       ok: true, sequence: plan.seq.name, sendAs: plan.sendAs,
       enrolledTotal, createdTotal, failedTotal,
-      skippedTotal: skippedTotal + skippedBookedTotal, skippedInSequence: skippedTotal, skippedBookedTotal,
+      skippedTotal: skippedTotal + skippedBookedTotal + skippedArchiveTotal, skippedInSequence: skippedTotal, skippedBookedTotal, skippedArchiveTotal,
       createFailures: createFailures.slice(0, 50),
       skippedSample,
       groups: results, ranAt: new Date().toISOString(),

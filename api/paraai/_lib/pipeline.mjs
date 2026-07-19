@@ -8,6 +8,7 @@ import {
   SEQUENCE_NAMES,
   candidateAlreadySubmitted,
   candidateDetails,
+  candidateProfileInfo,
   candidatePreferences,
   directSubmitQuota,
   fetchCall,
@@ -20,6 +21,7 @@ import {
   hasFutureScheduledStep,
   hasEmail,
   isSuccessfulCall,
+  isArchiveImportCandidate,
   listSequences,
   normLinkedin,
   normName,
@@ -387,14 +389,23 @@ export async function prepareJob({ botId, candidateUserId = "", force = false, s
       getResume(crmItem.id),
       candidateDetails(crmItem.id, { strict: strictReads }),
       candidatePreferences(crmItem.id, { strict: strictReads }),
+      candidateProfileInfo(crmItem.id),
     ];
-    const [resume, details, nativePreferences] = await Promise.all(strictReads
+    const [resume, details, nativePreferences, profileInfo] = await Promise.all(strictReads
       ? reads
       : [
           reads[0].catch(() => null),
           reads[1].catch(() => ({ byId: null, profile: null })),
           reads[2].catch(() => null),
+          reads[3].catch(() => null),
         ]);
+    if (isArchiveImportCandidate(crmItem, details, profileInfo)) {
+      return fail(
+        job,
+        "ARCHIVE_IMPORT_EXCLUDED",
+        "Historical archive imports are excluded from Para AI automation",
+      );
+    }
     const resumeUri = findResumeUri(resume);
     const contact = resumeUri ? await resumeContact(resumeUri).catch(() => null) : null;
     const email = firstEmail(crmItem) || firstEmail(details) || firstEmail(contact);
@@ -526,8 +537,18 @@ export async function submitJob(job, body = {}) {
   }
   const candidateUserId = edited.identity?.candidateUserId;
   const freshCrm = await findCrmCandidate(candidateUserId);
-  const details = await candidateDetails(candidateUserId, { strict: true });
+  const [details, profileInfo] = await Promise.all([
+    candidateDetails(candidateUserId, { strict: true }),
+    candidateProfileInfo(candidateUserId),
+  ]);
   if (!freshCrm) throw stateError("candidate identity no longer resolves in CRM", "IDENTITY_STALE", job);
+  if (isArchiveImportCandidate(freshCrm, details, profileInfo)) {
+    return fail(
+      job,
+      "ARCHIVE_IMPORT_EXCLUDED",
+      "Historical archive imports are excluded from Para AI automation",
+    );
+  }
   if (candidateAlreadySubmitted(freshCrm) || candidateAlreadySubmitted(details)) {
     return fail(job, "ALREADY_SUBMITTED", "Candidate is already in the Para AI talent network");
   }

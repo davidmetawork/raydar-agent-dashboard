@@ -429,6 +429,57 @@ export async function relationshipStatus(candidateUserId) {
     return p?.candidate_user_relationship_status || null;
   } catch { return null; }
 }
+
+function normalizedCandidateTags(value) {
+  const tags = Array.isArray(value?.tags) ? value.tags : [];
+  return tags.map((tag) => String(tag?.name ?? tag).trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export async function archiveImportSet(
+  candidateUserIds,
+  { fetchImpl = fetch } = {},
+) {
+  const archived = new Set();
+  const ids = [...new Set(
+    (candidateUserIds || [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  )];
+  let index = 0;
+  const worker = async () => {
+    while (index < ids.length) {
+      const id = ids[index++];
+      const response = await fetchImpl(
+        `${BASE}/candidates/profile/${encodeURIComponent(id)}/info`,
+        {
+          headers: headers(),
+          signal: AbortSignal.timeout(20000),
+        },
+      );
+      if (response.status === 401) {
+        const error = new Error("AUTH_EXPIRED");
+        error.code = "AUTH_EXPIRED";
+        throw error;
+      }
+      if (!response.ok) {
+        throw new Error(`CANDIDATE_PROFILE_READ_FAILED_${response.status}`);
+      }
+      const profile = await response.json();
+      if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+        throw new Error("CANDIDATE_PROFILE_READ_MALFORMED");
+      }
+      if (normalizedCandidateTags(profile).includes("archive-import")) {
+        archived.add(id);
+      }
+    }
+  };
+  await Promise.all(Array.from({
+    length: Math.min(8, ids.length || 1),
+  }, worker));
+  return archived;
+}
+
 // Return the subset of candidate ids whose relationship_status means "already booked".
 // Only pre-existing candidates can be booked, so callers pass just those (fast).
 export async function bookedSet(candidateUserIds) {

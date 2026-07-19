@@ -3,7 +3,7 @@
 // For each due project: members -> booked/in-sequence checks (run NOW, at release —
 // the whole point of the delay) -> ensure role sequence (TPL) or target (SEQ) ->
 // enroll the clean ones -> backfill lead emails -> delete the delay project.
-import { cors, requireAuth, hasCookie, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, bookedSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, bookedSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -41,10 +41,22 @@ export default async function handler(req, res) {
       try {
         const members = await projectMembers(p.projectId);
         if (!members.length) { await deleteDelayProject(p.projectId); results.push({ label: p.label, enrolled: 0, note: "empty — removed" }); continue; }
-        const booked = await bookedSet(members.map((m) => m.id));
-        const keep = members.filter((m) => !booked.has(m.id) && !already.has(m.id));
-        const skippedBooked = members.filter((m) => booked.has(m.id)).length;
-        const skippedInSeq = members.length - keep.length - skippedBooked;
+        const [booked, archiveImports] = await Promise.all([
+          bookedSet(members.map((m) => m.id)),
+          archiveImportSet(members.map((m) => m.id)),
+        ]);
+        const keep = members.filter((m) =>
+          !archiveImports.has(m.id)
+          && !booked.has(m.id)
+          && !already.has(m.id));
+        const skippedArchive = members.filter((m) =>
+          archiveImports.has(m.id)).length;
+        const skippedBooked = members.filter((m) =>
+          !archiveImports.has(m.id) && booked.has(m.id)).length;
+        const skippedInSeq = members.filter((m) =>
+          !archiveImports.has(m.id)
+          && !booked.has(m.id)
+          && already.has(m.id)).length;
 
         let targetId = null;
         if (p.kind === "TPL") {
@@ -67,7 +79,7 @@ export default async function handler(req, res) {
           } catch { /* non-fatal */ }
         }
         await deleteDelayProject(p.projectId);
-        results.push({ label: p.label, dueDate: p.dueDate, enrolled, skippedBooked, skippedInSeq });
+        results.push({ label: p.label, dueDate: p.dueDate, enrolled, skippedArchive, skippedBooked, skippedInSeq });
       } catch (e) {
         // leave the project in place — next daily run retries
         results.push({ label: p.label, error: String(e.message || e).slice(0, 160) });

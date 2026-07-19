@@ -1,8 +1,10 @@
 import {
   cors,
+  candidateProfileInfo,
   findCrmCandidate,
   findResumeUri,
   getResume,
+  isArchiveImportCandidate,
   requireAuth,
   scanCrm,
 } from "./_lib/core.mjs";
@@ -42,8 +44,14 @@ export default async function handler(req, res) {
   try {
     const candidateUserId = String(q.candidateUserId || "").trim();
     if (candidateUserId) {
-      const candidate = await findCrmCandidate(candidateUserId);
+      const [candidate, profileInfo] = await Promise.all([
+        findCrmCandidate(candidateUserId),
+        candidateProfileInfo(candidateUserId),
+      ]);
       if (!candidate) return res.status(404).json({ ok: false, error: "candidate_not_found" });
+      if (isArchiveImportCandidate(candidate, profileInfo)) {
+        return res.status(404).json({ ok: false, error: "candidate_not_found" });
+      }
       const [resolved, resume] = await Promise.all([
         // An ID point lookup cannot prove global name uniqueness. Pass no
         // roster so the call resolver requires a strong identity signal
@@ -57,7 +65,14 @@ export default async function handler(req, res) {
     const name = String(q.q || q.name || "").trim();
     if (name.length < 2) return res.status(400).json({ ok: false, error: "type_at_least_two_characters" });
     const items = await crmItems();
-    return res.status(200).json({ ok: true, query: name, results: searchCandidates(items, name) });
+    return res.status(200).json({
+      ok: true,
+      query: name,
+      results: searchCandidates(
+        items.filter((item) => !isArchiveImportCandidate(item)),
+        name,
+      ),
+    });
   } catch (error) {
     const authExpired = error?.code === "AUTH_EXPIRED" || /AUTH_EXPIRED|401/.test(String(error?.message || error));
     return res.status(authExpired ? 503 : 502).json({

@@ -2,13 +2,38 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  candidateTagNames,
   findCrmCandidate,
+  isArchiveImportCandidate,
   scanCrm,
 } from "../api/paraai/_lib/core.mjs";
 import {
+  archiveImportSet,
   crmProjectMembers,
   projectMembers,
 } from "../api/seq/_lib/core.mjs";
+
+test("archive-import is a load-bearing automation exclusion tag", async () => {
+  assert.deepEqual(candidateTagNames({
+    tags: [{ name: "archive-import" }, "src-linkedin"],
+  }), ["archive-import", "src-linkedin"]);
+  assert.equal(isArchiveImportCandidate({
+    candidate: { tags: [{ name: "archive-import" }] },
+  }), true);
+
+  const archived = await archiveImportSet(["candidate-1", "candidate-2"], {
+    async fetchImpl(url) {
+      const tagged = url.includes("candidate-2");
+      return new Response(JSON.stringify({
+        tags: tagged ? [{ name: "archive-import" }] : [{ name: "live-pipeline" }],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.deepEqual([...archived], ["candidate-2"]);
+});
 
 test("Para AI CRM scan exhausts every cursor instead of truncating at six pages", async () => {
   const cursors = [];
