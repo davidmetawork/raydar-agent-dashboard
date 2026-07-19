@@ -15,6 +15,7 @@ export default async function handler(req, res) {
     const payload = await searchCandidates(req.query?.q, {
       trpcGet,
       limit: req.query?.limit,
+      roleId: req.query?.role_id,
     });
     return res.status(200).json({ ok: true, ...payload });
   } catch (e) {

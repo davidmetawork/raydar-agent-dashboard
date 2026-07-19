@@ -132,22 +132,70 @@ async function applicationsFor(candidateUserId, trpcGet) {
   })).filter((row) => row.role_id);
 }
 
-export async function searchCandidates(query, { trpcGet, limit = MAX_RESULTS, now = Date.now() }) {
+// Role-pipeline search: candidates who APPLIED to a role are not CRM entries
+// (the exact gap behind the old "candidate not found by name" failures), but
+// role.getMergedCandidates covers every candidate on the role. Rows carry the
+// application id; the exact candidate_user_id resolves through the proven
+// candidateUser.getCandidateUserByApplicationId read for name matches only.
+async function scanRolePipeline(term, roleId, trpcGet) {
+  const needle = term.toLowerCase();
+  const rows = await trpcGet("role.getMergedCandidates", { role_id: roleId }).catch(() => null);
+  const matches = (Array.isArray(rows) ? rows : []).filter((row) => {
+    const name = text(row?.candidate?.name || row?.candidate_to_application?.name, 120);
+    return name && name.toLowerCase().includes(needle);
+  }).slice(0, 4);
+  const cards = [];
+  for (const row of matches) {
+    const applicationId = row?.application?.id || row?.id || null;
+    if (!applicationId) continue;
+    const candidateUser = await trpcGet("candidateUser.getCandidateUserByApplicationId", {
+      application_id: applicationId,
+    }).catch(() => null);
+    const id = candidateUser?.id || candidateUser?.candidate_user_id || null;
+    if (!id) continue;
+    const stage = text(
+      row?.application?.interview_stage?.name || row?.application?.furthestStage, 60,
+    );
+    cards.push({
+      candidate_user_id: id,
+      name: text(row?.candidate?.name || candidateUser?.candidate?.name, 120),
+      headline: text(row?.candidate?.one_liner, 160),
+      location: null,
+      avatar_url: text(row?.candidate?.img_src || row?.candidate?.image_src, 500),
+      linkedin_present: false,
+      email_present: true,
+      updated_at: text(row?.rejected_at || row?.created_at, 40),
+      pipeline: { role_id: roleId, stage: stage || null, status: text(row?.type, 40) },
+    });
+  }
+  return cards;
+}
+
+export async function searchCandidates(query, { trpcGet, limit = MAX_RESULTS, roleId = null, now = Date.now() }) {
   const term = String(query || "").replace(/\s+/g, " ").trim();
   if (term.length < 2) return { query: term, results: [] };
   const boundedLimit = Math.max(1, Math.min(MAX_RESULTS, Number(limit) || MAX_RESULTS));
-  const key = `${term.toLowerCase()} ${boundedLimit}`;
+  const cleanRoleId = /^[A-Za-z0-9_-]{8,64}$/.test(String(roleId || "")) ? String(roleId) : null;
+  const key = `${term.toLowerCase()} ${boundedLimit} ${cleanRoleId || "-"}`;
   const cached = cacheGet(key, now);
   if (cached) return cached;
   if (inFlight.has(key)) return inFlight.get(key);
 
   const pending = (async () => {
-    const cards = (await scanCrm(term, trpcGet)).slice(0, boundedLimit);
+    const [crmCards, pipelineCards] = await Promise.all([
+      scanCrm(term, trpcGet),
+      cleanRoleId ? scanRolePipeline(term, cleanRoleId, trpcGet) : Promise.resolve([]),
+    ]);
+    const merged = new Map();
+    for (const card of [...pipelineCards, ...crmCards]) {
+      if (!merged.has(card.candidate_user_id)) merged.set(card.candidate_user_id, card);
+    }
+    const cards = [...merged.values()].slice(0, boundedLimit);
     const results = [];
     for (const card of cards) {
       results.push({ ...card, applications: await applicationsFor(card.candidate_user_id, trpcGet) });
     }
-    const value = { query: term, results };
+    const value = { query: term, roleScoped: !!cleanRoleId, results };
     cacheSet(key, value, Date.now());
     return value;
   })().finally(() => inFlight.delete(key));

@@ -195,7 +195,11 @@ function refreshGo(){
   $("go").disabled = !candidateBound() || !$("role").value || !$("round").value;
 }
 $("round").addEventListener("change", ()=>{ refreshGo(); refreshPreview(); });
-$("role").addEventListener("change", ()=>{ refreshGo(); refreshPreview(); });
+$("role").addEventListener("change", ()=>{
+  refreshGo(); refreshPreview();
+  const term=$("cand").value.trim();
+  if(!SELECTED && SEARCH_OK && term.length>=2 && !term.toLowerCase().includes("paraform.com")) runSearch(term);
+});
 
 // ---- candidate picker (M2: search-as-you-type against the Paraform CRM) ----
 function initialsOf(name){
@@ -217,15 +221,18 @@ function appChips(c, clickable){
       : `<span class="chip mut">${esc(label)}</span>`;
   }).join("");
 }
-function renderPickResults(results, term){
+function renderPickResults(results, term, roleScoped){
   const box=$("pickResults");
   if(!results.length){
-    box.innerHTML=`<div class="pickrow" style="cursor:default"><div class="pickmain"><div class="pickname">No matches in the Paraform CRM for &ldquo;${esc(term)}&rdquo;</div><div class="pickhead">Try a different spelling, or paste their paraform.com profile URL.</div></div></div>`;
+    const hint=roleScoped
+      ? "Try a different spelling, or paste their paraform.com profile URL."
+      : "Applicants only show up when their role is selected: pick the role above, then search again. Or paste their paraform.com profile URL.";
+    box.innerHTML=`<div class="pickrow" style="cursor:default"><div class="pickmain"><div class="pickname">No matches for &ldquo;${esc(term)}&rdquo;</div><div class="pickhead">${hint}</div></div></div>`;
   } else {
     box.innerHTML=results.map((c,i)=>`<div class="pickrow" data-i="${i}">
       ${avatarHtml(c)}
       <div class="pickmain">
-        <div class="pickname">${esc(c.name||"(no name)")} <span class="crmcheck">&#10003; Paraform CRM</span></div>
+        <div class="pickname">${esc(c.name||"(no name)")} <span class="crmcheck">&#10003; ${c.pipeline?"On this role":"Paraform CRM"}</span>${c.pipeline?.stage?` <span class="chip mut">${esc(c.pipeline.stage)}</span>`:""}</div>
         <div class="pickhead">${esc([c.headline,c.location].filter(Boolean).join(" · "))}</div>
         <div class="chips">${appChips(c,false)}</div>
       </div>
@@ -291,7 +298,8 @@ function ensureRoleOption(roleId, title, company){
 async function runSearch(term){
   const seq=++searchSeq;
   try{
-    const r=await fetch("/api/prepdoc/candidate-search?q="+encodeURIComponent(term),{headers:authHeaders()});
+    const roleQ=$("role").value?"&role_id="+encodeURIComponent($("role").value):"";
+    const r=await fetch("/api/prepdoc/candidate-search?q="+encodeURIComponent(term)+roleQ,{headers:authHeaders()});
     const d=await r.json().catch(()=>({}));
     if(seq!==searchSeq) return;
     if(!r.ok || !d.ok){
@@ -303,7 +311,7 @@ async function runSearch(term){
       }
       throw new Error(d.error||r.status);
     }
-    renderPickResults(d.results||[], term);
+    renderPickResults(d.results||[], term, !!d.roleScoped);
   }catch(e){
     if(seq===searchSeq){ hidePickResults(); $("candNote").textContent="Search failed. Paste the candidate's paraform.com URL, or retry."; }
   }

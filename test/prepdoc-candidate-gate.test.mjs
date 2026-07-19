@@ -72,3 +72,30 @@ test("enqueue rejects name-only candidates and accepts picker ids", async () => 
   const nameOnly = await call({ candidate: { name: "benjamin dayan" }, role_id: "r", round: 1 });
   assert.notEqual(nameOnly.payload?.ok, true);
 });
+
+test("role-scoped search finds pipeline applicants and resolves exact ids", async () => {
+  const trpcGet = async (proc, input) => {
+    if (proc === "candidateUser.getCRMExternalCandidates") return { items: [], next_cursor: null };
+    if (proc === "role.getMergedCandidates") {
+      assert.equal(input.role_id, "role-vals");
+      return [
+        { id: "app-benji", type: "application", candidate: { name: "Benjamin Dayan", img_src: null },
+          application: { id: "app-benji", interview_stage: { name: "Submitted" } } },
+        { id: "app-other", type: "application", candidate: { name: "Other Person" }, application: { id: "app-other" } },
+      ];
+    }
+    if (proc === "candidateUser.getCandidateUserByApplicationId") {
+      assert.equal(input.application_id, "app-benji");
+      return { id: "cu-benji" };
+    }
+    if (proc === "candidateUser.getCandidateUserApplications") {
+      return [{ id: "app-benji", role_id: "role-vals", role: { name: "Evaluations Engineer", company: { name: "Vals AI" } } }];
+    }
+    throw new Error("unexpected proc " + proc);
+  };
+  const out = await searchCandidates("dayan", { trpcGet, roleId: "role-vals" });
+  assert.equal(out.roleScoped, true);
+  assert.equal(out.results.length, 1);
+  assert.equal(out.results[0].candidate_user_id, "cu-benji");
+  assert.equal(out.results[0].pipeline.stage, "Submitted");
+});
