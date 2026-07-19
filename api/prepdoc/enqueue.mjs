@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { cors, indexAdd, requirePrepAuth, saveJob, storeConfigured } from "./_lib/core.mjs";
 
-// POST { candidate:{ name? | paraform_url? }, role_id, round, notes?,
-//        role_title?, company? }  ->  { ok:true, id }
+// POST { candidate:{ candidate_user_id? | name? | paraform_url? }, role_id,
+//        round, notes?, role_title?, company? }  ->  { ok:true, id }
+// candidate_user_id comes from the Prep tab's CRM picker (exact identity,
+// no name resolution); name/paraform_url remain the free-text fallback.
 // Signed-in Raydar users only. Writes a queued job the Fly runner will claim.
 const clean = (v, max) => String(v ?? "").trim().slice(0, max);
 
@@ -16,6 +18,10 @@ export default async function handler(req, res) {
     const cand = body.candidate && typeof body.candidate === "object" ? body.candidate : {};
     const name = clean(cand.name, 140);
     const paraformUrl = clean(cand.paraform_url, 500);
+    const candidateUserId = clean(cand.candidate_user_id, 64);
+    if (candidateUserId && !/^[A-Za-z0-9_-]{8,64}$/.test(candidateUserId)) {
+      return res.status(400).json({ ok: false, error: "candidate_user_id is not a valid id" });
+    }
     if (paraformUrl) {
       let host = "";
       try { host = new URL(paraformUrl).hostname.toLowerCase(); } catch { /* invalid URL */ }
@@ -23,8 +29,12 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: "paraform_url must be a paraform.com link" });
       }
     }
-    if (!name && !paraformUrl) {
-      return res.status(400).json({ ok: false, error: "candidate name or paraform_url required" });
+    // Hard identity gate (2026-07-19): free-text names can no longer queue a
+    // job. Every job carries an exact id (from the CRM picker) or a
+    // paraform.com URL the runner parses deterministically. This removes the
+    // "candidate not found by name" failure class entirely.
+    if (!paraformUrl && !candidateUserId) {
+      return res.status(400).json({ ok: false, error: "candidate must be picked from the CRM or given as a paraform.com URL" });
     }
     const roleId = clean(body.role_id, 100);
     if (!roleId) return res.status(400).json({ ok: false, error: "role_id required" });
@@ -43,6 +53,7 @@ export default async function handler(req, res) {
       created_at: now,
       requested_by: req.authedEmail || "",
       candidate: {
+        ...(candidateUserId ? { candidate_user_id: candidateUserId } : {}),
         ...(name ? { name } : {}),
         ...(paraformUrl ? { paraform_url: paraformUrl } : {}),
       },
