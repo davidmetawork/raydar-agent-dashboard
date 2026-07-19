@@ -59,6 +59,35 @@
   .act{white-space:nowrap}
   .act a{margin-right:10px;font-weight:600}
   .roleline .note{margin-top:2px}
+  /* M2 candidate picker: identity cards bound to the Paraform CRM */
+  .pickwrap{position:relative}
+  .pickresults{position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:20;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);max-height:340px;overflow:auto}
+  .pickrow{display:flex;gap:12px;align-items:center;padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .pickrow:last-child{border-bottom:0}
+  .pickrow:hover{background:var(--cream)}
+  .avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;flex:none;background:var(--violet-bg);
+    color:var(--violet);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  .pickmain{min-width:0;flex:1}
+  .pickname{font-weight:600}
+  .pickhead{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crmcheck{font-size:11px;font-weight:700;color:var(--good);white-space:nowrap}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+  .chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;
+    background:var(--violet-bg);color:var(--violet);cursor:pointer;border:1px solid transparent}
+  .chip:hover{border-color:var(--violet)}
+  .chip.mut{background:var(--muted-bg);color:var(--muted);cursor:default}
+  .selectedcard{display:flex;gap:12px;align-items:center;border:1px solid var(--line);border-radius:12px;
+    padding:10px 12px;background:var(--cream)}
+  .selectedcard .swap{margin-left:auto;font-size:12px;white-space:nowrap}
+  .preview{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:14px;background:var(--cream)}
+  .preview h3{margin:0 0 8px;font-size:13px;font-weight:700}
+  .srcline{display:flex;gap:8px;align-items:baseline;font-size:12.5px;margin:3px 0}
+  .srcline .ok{color:var(--good);font-weight:700}
+  .srcline .miss{color:var(--warn);font-weight:700}
+  .prompts{margin-top:8px;font-size:12.5px;color:var(--warn)}
+  .flagchip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;
+    background:var(--warn-bg);color:var(--warn);margin-left:6px}
   body.embed header .brand img, body.embed h1, body.embed .sub{display:none}
   body.embed header{margin-bottom:10px}
   #gate{position:fixed;inset:0;background:var(--cream);display:flex;align-items:flex-start;justify-content:center;z-index:50;padding:32px 20px 20px;overflow:auto}
@@ -88,7 +117,12 @@
     <div class="grid2">
       <div>
         <label for="cand">Candidate</label>
-        <input id="cand" type="text" placeholder="Candidate name or paraform.com profile URL" autocomplete="off" />
+        <div class="pickwrap">
+          <input id="cand" type="text" placeholder="Search the Paraform CRM by name, or paste a paraform.com URL" autocomplete="off" />
+          <div id="pickResults" class="pickresults hidden"></div>
+        </div>
+        <div id="selectedCand" class="hidden" style="margin-top:8px"></div>
+        <div class="note" id="candNote"></div>
       </div>
       <div>
         <label for="round">Round</label>
@@ -102,11 +136,20 @@
         </select>
       </div>
     </div>
+    <div class="field hidden" id="procField">
+      <label>Their processes</label>
+      <div class="chips" id="procChips"></div>
+      <div class="note" style="margin-top:4px">Click a process to set the role. Round stays yours to pick.</div>
+    </div>
     <div class="field roleline">
       <label for="role">Role</label>
       <input id="roleFilter" class="rolefilter" type="text" placeholder="Type to filter roles" autocomplete="off" />
       <select id="role"><option value="">Loading roles</option></select>
       <div class="note" id="roleNote"></div>
+    </div>
+    <div id="previewPanel" class="preview hidden">
+      <h3>What the system knows</h3>
+      <div id="previewBody"><span class="note"><span class="spin"></span>Checking sources</span></div>
     </div>
     <div class="field">
       <label for="notes">Notes (optional)</label>
@@ -133,14 +176,180 @@ const authHeaders = ()=> AUTH.token ? { "Authorization":"Bearer "+AUTH.token } :
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 
 let ROLES=[], JOBS=null;
+// M2 picker state: SELECTED binds candidate_user_id so name resolution can't
+// fail at runtime; SEARCH_OK=false degrades to the legacy free-text path
+// (runner search endpoint not deployed / unreachable).
+let SELECTED=null, SEARCH_OK=true, searchTimer=null, searchSeq=0;
 
 // ---- form state ----
+function candidateBound(){ return !!(SELECTED?.candidate_user_id) || !!$("cand").value.trim(); }
 function refreshGo(){
-  $("go").disabled = !$("cand").value.trim() || !$("role").value || !$("round").value;
+  $("go").disabled = !candidateBound() || !$("role").value || !$("round").value;
 }
-["cand","round"].forEach(id=>$(id).addEventListener("input", refreshGo));
-$("round").addEventListener("change", refreshGo);
-$("role").addEventListener("change", refreshGo);
+$("round").addEventListener("change", ()=>{ refreshGo(); refreshPreview(); });
+$("role").addEventListener("change", ()=>{ refreshGo(); refreshPreview(); });
+
+// ---- candidate picker (M2: search-as-you-type against the Paraform CRM) ----
+function initialsOf(name){
+  const parts=String(name||"").trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]||"")[0]||"?").toUpperCase()+(((parts[1]||"")[0])||"").toUpperCase();
+}
+function avatarHtml(c){
+  return c.avatar_url
+    ? `<img class="avatar" src="${esc(c.avatar_url)}" alt="" onerror="this.outerHTML='<span class=&quot;avatar&quot;>${esc(initialsOf(c.name))}</span>'">`
+    : `<span class="avatar">${esc(initialsOf(c.name))}</span>`;
+}
+function appChips(c, clickable){
+  const apps=c.applications||[];
+  if(!apps.length) return '<span class="chip mut">no applications yet</span>';
+  return apps.map(a=>{
+    const label=[a.client,a.role_title].filter(Boolean).join(" · ")||a.role_id;
+    return clickable
+      ? `<span class="chip" data-role="${esc(a.role_id)}" data-title="${esc(a.role_title||"")}" data-company="${esc(a.client||"")}">${esc(label)}</span>`
+      : `<span class="chip mut">${esc(label)}</span>`;
+  }).join("");
+}
+function renderPickResults(results, term){
+  const box=$("pickResults");
+  if(!results.length){
+    box.innerHTML=`<div class="pickrow" style="cursor:default"><div class="pickmain"><div class="pickname">No matches in the Paraform CRM for &ldquo;${esc(term)}&rdquo;</div><div class="pickhead">Try a different spelling, or paste their paraform.com profile URL.</div></div></div>`;
+  } else {
+    box.innerHTML=results.map((c,i)=>`<div class="pickrow" data-i="${i}">
+      ${avatarHtml(c)}
+      <div class="pickmain">
+        <div class="pickname">${esc(c.name||"(no name)")} <span class="crmcheck">&#10003; Paraform CRM</span></div>
+        <div class="pickhead">${esc([c.headline,c.location].filter(Boolean).join(" · "))}</div>
+        <div class="chips">${appChips(c,false)}</div>
+      </div>
+    </div>`).join("");
+    box.querySelectorAll(".pickrow[data-i]").forEach(row=>{
+      row.addEventListener("click", ()=>selectCandidate(results[Number(row.dataset.i)]));
+    });
+  }
+  box.classList.remove("hidden");
+}
+function hidePickResults(){ $("pickResults").classList.add("hidden"); }
+function selectCandidate(c){
+  SELECTED=c;
+  hidePickResults();
+  $("cand").value=c.name||"";
+  const card=$("selectedCand");
+  card.innerHTML=`<div class="selectedcard">
+    ${avatarHtml(c)}
+    <div class="pickmain">
+      <div class="pickname">${esc(c.name||"")} <span class="crmcheck">&#10003; Paraform CRM</span></div>
+      <div class="pickhead">${esc([c.headline,c.location].filter(Boolean).join(" · "))}${c.email_present?" · email on file":""}</div>
+    </div>
+    <a href="#" class="swap" onclick="resetCandidate();return false">wrong person?</a>
+  </div>`;
+  card.classList.remove("hidden");
+  $("cand").classList.add("hidden");
+  const apps=(c.applications||[]).filter(a=>a.role_id);
+  if(apps.length){
+    $("procChips").innerHTML=appChips(c,true);
+    $("procChips").querySelectorAll(".chip[data-role]").forEach(chip=>{
+      chip.addEventListener("click", ()=>{
+        ensureRoleOption(chip.dataset.role, chip.dataset.title, chip.dataset.company);
+        $("role").value=chip.dataset.role;
+        refreshGo(); refreshPreview();
+        $("round").focus();
+      });
+    });
+    $("procField").classList.remove("hidden");
+  } else {
+    $("procField").classList.add("hidden");
+  }
+  $("candNote").textContent="";
+  refreshGo(); refreshPreview();
+}
+function resetCandidate(){
+  SELECTED=null;
+  $("selectedCand").classList.add("hidden");
+  $("selectedCand").innerHTML="";
+  $("cand").classList.remove("hidden");
+  $("cand").value="";
+  $("procField").classList.add("hidden");
+  $("previewPanel").classList.add("hidden");
+  refreshGo();
+  $("cand").focus();
+}
+function ensureRoleOption(roleId, title, company){
+  if([...$("role").options].some(o=>o.value===roleId)) return;
+  const opt=document.createElement("option");
+  opt.value=roleId; opt.dataset.title=title||""; opt.dataset.company=company||"";
+  opt.textContent=(company?company+" · ":"")+(title||roleId);
+  $("role").appendChild(opt);
+}
+async function runSearch(term){
+  const seq=++searchSeq;
+  try{
+    const r=await fetch("/api/prepdoc/candidate-search?q="+encodeURIComponent(term),{headers:authHeaders()});
+    const d=await r.json().catch(()=>({}));
+    if(seq!==searchSeq) return;
+    if(!r.ok || !d.ok){
+      if(d.error==="runner_unavailable"||d.error==="runner_key_not_configured"){
+        SEARCH_OK=false;
+        $("candNote").textContent="CRM search is unavailable until the runner update deploys. Name or paraform.com URL still works.";
+        hidePickResults();
+        return;
+      }
+      throw new Error(d.error||r.status);
+    }
+    renderPickResults(d.results||[], term);
+  }catch(e){
+    if(seq===searchSeq){ hidePickResults(); $("candNote").textContent="Search failed; free-text still works."; }
+  }
+}
+$("cand").addEventListener("input", ()=>{
+  refreshGo();
+  const term=$("cand").value.trim();
+  clearTimeout(searchTimer);
+  if(SELECTED){ SELECTED=null; }
+  if(!SEARCH_OK || term.length<2 || term.toLowerCase().includes("paraform.com")){ hidePickResults(); return; }
+  searchTimer=setTimeout(()=>runSearch(term), 300);
+});
+document.addEventListener("click",(e)=>{ if(!e.target.closest(".pickwrap")) hidePickResults(); });
+
+// ---- pre-generation context preview (M2) ----
+let previewSeq=0;
+async function refreshPreview(){
+  const panel=$("previewPanel");
+  if(!SELECTED?.candidate_user_id || !$("role").value){ panel.classList.add("hidden"); return; }
+  const seq=++previewSeq;
+  panel.classList.remove("hidden");
+  $("previewBody").innerHTML='<span class="note"><span class="spin"></span>Checking sources</span>';
+  try{
+    const params=new URLSearchParams({
+      candidate_user_id:SELECTED.candidate_user_id,
+      role_id:$("role").value,
+      round:$("round").value||"1",
+    });
+    const r=await fetch("/api/prepdoc/precheck?"+params,{headers:authHeaders()});
+    const d=await r.json().catch(()=>({}));
+    if(seq!==previewSeq) return;
+    if(!r.ok || !d.ok){
+      $("previewBody").innerHTML='<span class="note">'+(d.error==="runner_unavailable"
+        ? "Source preview is unavailable until the runner update deploys."
+        : "Couldn't check sources: "+esc(d.error||r.status))+'</span>';
+      return;
+    }
+    const s=d.sources||{};
+    const line=(ok,label,extra)=>`<div class="srcline"><span class="${ok?"ok":"miss"}">${ok?"&#10003;":"&#9675;"}</span><span>${esc(label)}${extra?` <span class="note" style="margin-top:0">${esc(extra)}</span>`:""}</span></div>`;
+    let html="";
+    html+=line(s.applicationFound,"Application on this role");
+    html+=line(s.intakeTranscript,"Intake call transcript");
+    html+=line(s.screeningCall,"Screener call");
+    html+=line(s.hmFeedback,"HM feedback / activity notes", s.priorRoundTier && s.priorRoundTier!=="none" ? `prior round: ${s.priorRoundTier.replace(/_/g," ")}` : "");
+    html+=line(s.rejectionRows>0,`Rejection data rows (${s.rejectionRows||0})`);
+    html+=line(s.resume,"Resume on file");
+    if((d.doNotMention||[]).length) html+=`<div class="srcline"><span class="miss">&#9888;</span><span>${d.doNotMention.length} do-not-mention compan${d.doNotMention.length===1?"y":"ies"} (dead process, candidate may not know)</span></div>`;
+    if((d.prompts||[]).length) html+=`<div class="prompts">${d.prompts.map(p=>esc(p)).join("<br>")}</div>`;
+    $("previewBody").innerHTML=html;
+    if((d.prompts||[]).length && !$("notes").value) $("notes").placeholder=d.prompts[0]+" Paste anything you know here.";
+  }catch(e){
+    if(seq===previewSeq) $("previewBody").innerHTML='<span class="note">Source check failed; generation is unaffected.</span>';
+  }
+}
 
 // ---- roles picker (text filter above a plain select) ----
 function renderRoles(){
@@ -181,9 +390,12 @@ async function loadRoles(){
 $("go").addEventListener("click", submitJob);
 async function submitJob(){
   const raw=$("cand").value.trim();
-  if(!raw || !$("role").value || !$("round").value) return;
+  if(!candidateBound() || !$("role").value || !$("round").value) return;
   let candidate;
-  if(raw.toLowerCase().includes("paraform.com")){
+  if(SELECTED?.candidate_user_id){
+    // Picker path: the id is exact, the name rides along for display.
+    candidate={ candidate_user_id: SELECTED.candidate_user_id, ...(SELECTED.name?{ name: SELECTED.name }:{}) };
+  } else if(raw.toLowerCase().includes("paraform.com")){
     candidate={ paraform_url: /^https?:\/\//i.test(raw) ? raw : "https://"+raw };
   } else {
     candidate={ name: raw };
@@ -203,7 +415,7 @@ async function submitJob(){
     const r=await fetch("/api/prepdoc/enqueue",{method:"POST",headers:{"content-type":"application/json",...authHeaders()},body:JSON.stringify(body)});
     const d=await r.json().catch(()=>({}));
     if(!r.ok || !d.ok) throw new Error(d.detail||d.error||("HTTP "+r.status));
-    $("cand").value=""; $("notes").value="";
+    resetCandidate(); $("notes").value="";
     $("formMsg").textContent="Queued. The runner picks it up within a minute or two.";
     loadJobs(true);
   }catch(e){
@@ -232,7 +444,9 @@ function statusCell(j){
   const cls=STATUS_BADGE[j.status]||"b-mut";
   const spin=IN_FLIGHT.has(j.status)?'<span class="spin"></span>':"";
   const reason=(j.status==="failed"&&j.reason)?`<div class="reason" title="${esc(j.reason)}">${esc(String(j.reason).slice(0,140))}</div>`:"";
-  return `${spin}<span class="badge ${cls}" title="${esc(j.reason||j.status)}">${esc(j.status)}</span>${reason}`;
+  const flag=j.thread_mode==="new_thread_later_round_flagged"
+    ?'<span class="flagchip" title="Later round with no existing prep chain; reconcile threading before sending">needs reconciliation</span>':"";
+  return `${spin}<span class="badge ${cls}" title="${esc(j.reason||j.status)}">${esc(j.status)}</span>${flag}${reason}`;
 }
 function actionsCell(j){
   if(j.status!=="done") return "";
