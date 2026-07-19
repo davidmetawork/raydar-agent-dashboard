@@ -14,7 +14,9 @@ function anchor(label, href) {
 }
 
 function paragraphHtml(lines) {
-  return lines.map((line) => `<p>${line || "<br>"}</p>`).join("\n");
+  return lines
+    .map((line) => `<div>${line || "<br>"}</div>`)
+    .join("\n<div><br></div>\n");
 }
 
 function variantIndex(seed, size) {

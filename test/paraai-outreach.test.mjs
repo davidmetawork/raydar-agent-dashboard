@@ -58,6 +58,32 @@ test("first-match copy preserves the approved wording and links", () => {
   assert.equal(digestLinkLabel("Amy"), "Amy's Interview Requests");
 });
 
+test("HTML copy renders a literal blank Gmail line between every content block", () => {
+  const initial = initialMatchCopy({ firstName: "Amy", ...role });
+  const second = additionalMatchCopy({
+    firstName: "Amy",
+    ordinal: 2,
+    variationSeed: "request-2",
+    ...role,
+  });
+  const followup = followupCopy({
+    firstName: "Amy",
+    ordinal: 1,
+    followupNumber: 1,
+    ...role,
+  });
+  for (const copy of [initial, second, followup]) {
+    const blockCount = (copy.html.match(/<div>/g) || []).length;
+    const spacerCount = (copy.html.match(/<div><br><\/div>/g) || []).length;
+    assert.equal(spacerCount, (blockCount - spacerCount) - 1);
+    assert.doesNotMatch(copy.html, /<p>/);
+  }
+  assert.match(
+    initial.html,
+    /<div>Hey Amy,<\/div>\n<div><br><\/div>\n<div>Hope you are doing well!<\/div>/,
+  );
+});
+
 test("second match is exact while third and later matches vary deterministically", () => {
   const second = additionalMatchCopy({
     firstName: "Amy",
