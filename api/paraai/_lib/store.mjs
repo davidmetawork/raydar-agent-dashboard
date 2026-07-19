@@ -34,8 +34,19 @@ async function request(path, body) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(8_000),
   });
-  if (!response.ok) throw new Error(`state store HTTP ${response.status}`);
-  return response.json();
+  const raw = await response.text();
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch {}
+  if (!response.ok) {
+    const detail = String(parsed?.error || parsed?.message || raw || "request rejected")
+      .replace(/\s+/g, " ")
+      .slice(0, 180);
+    const error = new Error(`state store HTTP ${response.status}: ${detail}`);
+    error.code = "STATE_STORE_REQUEST_FAILED";
+    error.status = response.status;
+    throw error;
+  }
+  return parsed;
 }
 
 export async function kv(args) {
