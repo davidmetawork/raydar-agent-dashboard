@@ -118,7 +118,7 @@
       <div>
         <label for="cand">Candidate</label>
         <div class="pickwrap">
-          <input id="cand" type="text" placeholder="Search the Paraform CRM by name, or paste a paraform.com URL" autocomplete="off" />
+          <input id="cand" type="text" placeholder="Search the CRM by name and pick the person, or paste a paraform.com URL" autocomplete="off" />
           <div id="pickResults" class="pickresults hidden"></div>
         </div>
         <div id="selectedCand" class="hidden" style="margin-top:8px"></div>
@@ -182,7 +182,15 @@ let ROLES=[], JOBS=null;
 let SELECTED=null, SEARCH_OK=true, searchTimer=null, searchSeq=0;
 
 // ---- form state ----
-function candidateBound(){ return !!(SELECTED?.candidate_user_id) || !!$("cand").value.trim(); }
+function isParaformUrl(v){
+  const raw=String(v||"").trim();
+  if(!/paraform\.com/i.test(raw)) return false;
+  try{ const u=new URL(/^https?:\/\//i.test(raw)?raw:"https://"+raw); return u.hostname==="paraform.com"||u.hostname.endsWith(".paraform.com"); }
+  catch(e){ return false; }
+}
+// Hard gate: submission requires a picker-selected candidate (exact id) or a
+// valid paraform.com URL. A bare name can never enqueue a job.
+function candidateBound(){ return !!(SELECTED?.candidate_user_id) || isParaformUrl($("cand").value); }
 function refreshGo(){
   $("go").disabled = !candidateBound() || !$("role").value || !$("round").value;
 }
@@ -287,9 +295,9 @@ async function runSearch(term){
     const d=await r.json().catch(()=>({}));
     if(seq!==searchSeq) return;
     if(!r.ok || !d.ok){
-      if(d.error==="runner_unavailable"||d.error==="runner_key_not_configured"){
+      if(d.error==="runner_unavailable"||d.error==="runner_key_not_configured"||d.error==="no_cookie"||d.error==="paraform_session_expired"){
         SEARCH_OK=false;
-        $("candNote").textContent="CRM search is unavailable until the runner update deploys. Name or paraform.com URL still works.";
+        $("candNote").textContent="CRM search is unavailable right now. Paste the candidate's paraform.com profile URL instead.";
         hidePickResults();
         return;
       }
@@ -297,7 +305,7 @@ async function runSearch(term){
     }
     renderPickResults(d.results||[], term);
   }catch(e){
-    if(seq===searchSeq){ hidePickResults(); $("candNote").textContent="Search failed; free-text still works."; }
+    if(seq===searchSeq){ hidePickResults(); $("candNote").textContent="Search failed. Paste the candidate's paraform.com URL, or retry."; }
   }
 }
 $("cand").addEventListener("input", ()=>{
@@ -395,10 +403,11 @@ async function submitJob(){
   if(SELECTED?.candidate_user_id){
     // Picker path: the id is exact, the name rides along for display.
     candidate={ candidate_user_id: SELECTED.candidate_user_id, ...(SELECTED.name?{ name: SELECTED.name }:{}) };
-  } else if(raw.toLowerCase().includes("paraform.com")){
+  } else if(isParaformUrl(raw)){
     candidate={ paraform_url: /^https?:\/\//i.test(raw) ? raw : "https://"+raw };
   } else {
-    candidate={ name: raw };
+    $("formMsg").textContent="Pick the candidate from the search results or paste their paraform.com URL.";
+    return;
   }
   const opt=$("role").selectedOptions[0]||{dataset:{}};
   const body={

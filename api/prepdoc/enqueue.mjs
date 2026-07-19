@@ -29,8 +29,12 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: "paraform_url must be a paraform.com link" });
       }
     }
-    if (!name && !paraformUrl && !candidateUserId) {
-      return res.status(400).json({ ok: false, error: "candidate name, paraform_url, or candidate_user_id required" });
+    // Hard identity gate (2026-07-19): free-text names can no longer queue a
+    // job. Every job carries an exact id (from the CRM picker) or a
+    // paraform.com URL the runner parses deterministically. This removes the
+    // "candidate not found by name" failure class entirely.
+    if (!paraformUrl && !candidateUserId) {
+      return res.status(400).json({ ok: false, error: "candidate must be picked from the CRM or given as a paraform.com URL" });
     }
     const roleId = clean(body.role_id, 100);
     if (!roleId) return res.status(400).json({ ok: false, error: "role_id required" });
