@@ -152,18 +152,91 @@ export function isTemplateSequence(seq) {
 }
 
 // ---------- candidate matching (by email, within a CRM project) ----------
-export async function projectEmailIndex() {
-  const input = { cursor: 0, limit: 250, filters: { recruiters: [CONFIG.RECRUITER_ID], agency_id: CONFIG.AGENCY_ID, candidate_projects: [CONFIG.MATCH_PROJECT_ID], sort: { field: "added_at", order: "desc" } }, project_id: null, role_specific_id: null };
-  // project_id/role_specific_id null require meta markers:
-  const url = `${BASE}/trpc/candidateUser.getCRMExternalCandidates?input=` +
-    encodeURIComponent(JSON.stringify({ json: input, meta: { values: { project_id: ["undefined"], role_specific_id: ["undefined"] }, v: 1 } }));
-  const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
-  if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
-  const items = (await r.json())?.result?.data?.json?.items || [];
+export async function crmProjectMembers(
+  projectId,
+  {
+    fetchImpl = fetch,
+    pageSize = 250,
+    maxRows = 250_000,
+  } = {},
+) {
+  if (!projectId) throw new Error("PROJECT_ID_REQUIRED");
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+    throw new Error("CRM_PAGE_SIZE_INVALID");
+  }
+  if (!Number.isInteger(maxRows) || maxRows < 1) {
+    throw new Error("CRM_MAX_ROWS_INVALID");
+  }
+  const items = [];
+  const seenIds = new Set();
+  const seenCursors = new Set();
+  let cursor = 0;
+  while (true) {
+    const cursorKey = String(cursor);
+    if (seenCursors.has(cursorKey)) throw new Error("CRM_CURSOR_REPEATED");
+    seenCursors.add(cursorKey);
+    const input = {
+      cursor,
+      limit: pageSize,
+      filters: {
+        recruiters: [CONFIG.RECRUITER_ID],
+        agency_id: CONFIG.AGENCY_ID,
+        candidate_projects: [projectId],
+        sort: { field: "added_at", order: "desc" },
+      },
+      project_id: null,
+      role_specific_id: null,
+    };
+    // project_id/role_specific_id null require meta markers:
+    const url = `${BASE}/trpc/candidateUser.getCRMExternalCandidates?input=` +
+      encodeURIComponent(JSON.stringify({
+        json: input,
+        meta: {
+          values: {
+            project_id: ["undefined"],
+            role_specific_id: ["undefined"],
+          },
+          v: 1,
+        },
+      }));
+    const response = await fetchImpl(url, {
+      headers: headers(),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (response.status === 401) {
+      const error = new Error("AUTH_EXPIRED");
+      error.code = "AUTH_EXPIRED";
+      throw error;
+    }
+    if (!response.ok) throw new Error(`CRM_READ_FAILED_${response.status}`);
+    const body = (await response.json())?.result?.data?.json || {};
+    const page = Array.isArray(body.items) ? body.items : [];
+    for (const item of page) {
+      const id = String(item?.id || "").trim();
+      if (id && seenIds.has(id)) continue;
+      if (id) seenIds.add(id);
+      items.push(item);
+      if (items.length > maxRows) throw new Error("CRM_MAX_ROWS_EXCEEDED");
+    }
+    const nextCursor = body.next_cursor ?? null;
+    if (!page.length || nextCursor == null) break;
+    if (String(nextCursor) === cursorKey) throw new Error("CRM_CURSOR_REPEATED");
+    cursor = nextCursor;
+  }
+  return items;
+}
+
+export async function projectEmailIndex(options = {}) {
+  const items = await crmProjectMembers(CONFIG.MATCH_PROJECT_ID, options);
   const idx = new Map();
   for (const it of items) for (const e of (it.emails || [])) {
     const em = (typeof e === "string" ? e : e?.email || "").toLowerCase().trim();
-    if (em) idx.set(em, { id: it.id, name: it.name });
+    if (!em) continue;
+    const existing = idx.get(em);
+    if (existing && String(existing.id) !== String(it.id)) {
+      throw new Error("CRM_EMAIL_OWNER_CONFLICT");
+    }
+    idx.set(em, { id: it.id, name: it.name });
   }
   return idx;
 }
@@ -193,13 +266,8 @@ export async function listDelayProjects() {
   return all.map(parseDelayProject).filter(Boolean);
 }
 // Members of a project: [{id, name, email}] (first known email, for lead backfill).
-export async function projectMembers(projectId) {
-  const input = { cursor: 0, limit: 250, filters: { recruiters: [CONFIG.RECRUITER_ID], agency_id: CONFIG.AGENCY_ID, candidate_projects: [projectId], sort: { field: "added_at", order: "desc" } }, project_id: null, role_specific_id: null };
-  const url = `${BASE}/trpc/candidateUser.getCRMExternalCandidates?input=` +
-    encodeURIComponent(JSON.stringify({ json: input, meta: { values: { project_id: ["undefined"], role_specific_id: ["undefined"] }, v: 1 } }));
-  const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
-  if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
-  const items = (await r.json())?.result?.data?.json?.items || [];
+export async function projectMembers(projectId, options = {}) {
+  const items = await crmProjectMembers(projectId, options);
   return items.map((it) => {
     const em = (it.emails || []).map((e) => (typeof e === "string" ? e : e?.email || "")).find(Boolean) || "";
     return { id: it.id, name: it.name, email: em.toLowerCase().trim() };

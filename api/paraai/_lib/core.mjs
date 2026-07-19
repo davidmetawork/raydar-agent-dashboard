@@ -8,8 +8,8 @@ export { authConfig, cors, requireAuth };
 
 const PARAFORM_BASE = "https://www.paraform.com/api";
 const TRPC_TIMEOUT_MS = Number(process.env.PARAAI_TRPC_TIMEOUT_MS || 20_000);
-const MAX_CRM_PAGES = Number(process.env.PARAAI_MAX_CRM_PAGES || 6);
 const CRM_PAGE_SIZE = Number(process.env.PARAAI_CRM_PAGE_SIZE || 1000);
+const MAX_CRM_ROWS = Number(process.env.PARAAI_MAX_CRM_ROWS || 250_000);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const RECRUITER_ID = process.env.RECRUITER_ID || "clskvclu80066l60fhutn6kks";
@@ -290,24 +290,71 @@ export async function crmPage(cursor = 0, limit = CRM_PAGE_SIZE) {
   return { items: result?.items || [], nextCursor: result?.next_cursor ?? null };
 }
 
-export async function scanCrm({ stopWhen } = {}) {
+export async function scanCrm({
+  stopWhen,
+  fetchPage = crmPage,
+  maxRows = MAX_CRM_ROWS,
+} = {}) {
+  if (!Number.isInteger(maxRows) || maxRows < 1) {
+    throw new Error("CRM_SCAN_MAX_ROWS_INVALID");
+  }
   const items = [];
   let cursor = 0;
-  for (let page = 0; page < MAX_CRM_PAGES; page++) {
-    const result = await crmPage(cursor, CRM_PAGE_SIZE);
-    items.push(...result.items);
-    if (stopWhen?.(result.items, items)) break;
-    if (!result.items.length || result.nextCursor == null) break;
+  const seenCursors = new Set();
+  const seenIds = new Set();
+  while (true) {
+    const cursorKey = String(cursor);
+    if (seenCursors.has(cursorKey)) throw new Error("CRM_SCAN_CURSOR_REPEATED");
+    seenCursors.add(cursorKey);
+    const result = await fetchPage(cursor, CRM_PAGE_SIZE);
+    const page = Array.isArray(result?.items) ? result.items : [];
+    for (const item of page) {
+      const id = String(item?.id || "").trim();
+      if (id && seenIds.has(id)) continue;
+      if (id) seenIds.add(id);
+      items.push(item);
+      if (items.length > maxRows) throw new Error("CRM_SCAN_MAX_ROWS_EXCEEDED");
+    }
+    if (stopWhen?.(page, items)) break;
+    if (!page.length || result?.nextCursor == null) break;
+    if (String(result.nextCursor) === cursorKey) {
+      throw new Error("CRM_SCAN_CURSOR_REPEATED");
+    }
     cursor = result.nextCursor;
   }
   return items;
 }
 
-export async function findCrmCandidate(candidateUserId) {
+function candidateReadRow(value) {
+  return value?.candidate_user
+    || value?.candidateUser
+    || value?.candidate
+    || value?.item
+    || value
+    || null;
+}
+
+export async function findCrmCandidate(
+  candidateUserId,
+  { trpcGetImpl = trpcGet } = {},
+) {
   const wanted = String(candidateUserId || "");
   if (!wanted) return null;
-  const rows = await scanCrm({ stopWhen: (page) => page.some((item) => String(item?.id) === wanted) });
-  return rows.find((item) => String(item?.id) === wanted) || null;
+  const row = candidateReadRow(await trpcGetImpl(
+    "candidateUser.getCandidateUserById",
+    { candidate_user_id: wanted },
+  ));
+  if (!row || typeof row !== "object") return null;
+  const returnedId = String(
+    row.id
+    || row.candidate_user_id
+    || row.candidateUserId
+    || "",
+  );
+  if (returnedId && returnedId !== wanted) {
+    throw new Error("CRM_POINT_LOOKUP_ID_MISMATCH");
+  }
+  return returnedId ? row : { ...row, id: wanted };
 }
 
 export async function candidateDetails(candidateUserId, { strict = false } = {}) {

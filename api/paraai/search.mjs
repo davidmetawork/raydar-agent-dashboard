@@ -1,4 +1,11 @@
-import { cors, findResumeUri, getResume, requireAuth, scanCrm } from "./_lib/core.mjs";
+import {
+  cors,
+  findCrmCandidate,
+  findResumeUri,
+  getResume,
+  requireAuth,
+  scanCrm,
+} from "./_lib/core.mjs";
 import { candidateSummary, resolveCandidateCall, searchCandidates } from "./_lib/search.mjs";
 
 export const config = { maxDuration: 120 };
@@ -33,13 +40,15 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "private, no-store");
   const q = query(req);
   try {
-    const items = await crmItems();
     const candidateUserId = String(q.candidateUserId || "").trim();
     if (candidateUserId) {
-      const candidate = items.find((item) => String(item?.id || "") === candidateUserId);
+      const candidate = await findCrmCandidate(candidateUserId);
       if (!candidate) return res.status(404).json({ ok: false, error: "candidate_not_found" });
       const [resolved, resume] = await Promise.all([
-        resolveCandidateCall(candidate, items),
+        // An ID point lookup cannot prove global name uniqueness. Pass no
+        // roster so the call resolver requires a strong identity signal
+        // instead of accepting the unique-name fallback.
+        resolveCandidateCall(candidate, []),
         getResume(candidateUserId).catch(() => null),
       ]);
       const resumeStatus = findResumeUri(resume) ? "on_file" : "missing";
@@ -47,6 +56,7 @@ export default async function handler(req, res) {
     }
     const name = String(q.q || q.name || "").trim();
     if (name.length < 2) return res.status(400).json({ ok: false, error: "type_at_least_two_characters" });
+    const items = await crmItems();
     return res.status(200).json({ ok: true, query: name, results: searchCandidates(items, name) });
   } catch (error) {
     const authExpired = error?.code === "AUTH_EXPIRED" || /AUTH_EXPIRED|401/.test(String(error?.message || error));
