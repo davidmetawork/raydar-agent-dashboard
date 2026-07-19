@@ -1,17 +1,91 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { kv, pipeline, storeConfigured } from "./store.mjs";
-
 const INDEX_KEY = "paraai:outreach:index";
 const STATE_TTL_SECONDS = 730 * 24 * 60 * 60;
 const LOCK_TTL_SECONDS = 150;
 const POLL_LOCK_KEY = "paraai:outreach:poll-lock";
+const KV_URL = String(
+  process.env.PARAAI_OUTREACH_KV_REST_API_URL
+  || process.env.KV_REST_API_URL
+  || "",
+).replace(/\/+$/, "");
+const KV_TOKEN = process.env.PARAAI_OUTREACH_KV_REST_API_TOKEN
+  || process.env.KV_REST_API_TOKEN
+  || "";
 
 const parse = (value, fallback = null) => {
   try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
 };
 
-export { storeConfigured };
+export const storeConfigured = () => Boolean(KV_URL && KV_TOKEN);
+
+async function request(path, body) {
+  if (!storeConfigured()) {
+    const error = new Error("Para AI outreach state store not configured");
+    error.code = "OUTREACH_NOT_CONFIGURED";
+    throw error;
+  }
+  const response = await fetch(`${KV_URL}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${KV_TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8_000),
+  });
+  const raw = await response.text();
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch {}
+  if (!response.ok) {
+    const detail = String(parsed?.error || parsed?.message || raw || "request rejected")
+      .replace(/\s+/g, " ")
+      .slice(0, 180);
+    const error = new Error(`outreach state store HTTP ${response.status}: ${detail}`);
+    error.code = "OUTREACH_STORE_REQUEST_FAILED";
+    error.status = response.status;
+    throw error;
+  }
+  return parsed;
+}
+
+async function kv(args) {
+  const body = await request("", args);
+  if (body?.error) {
+    const error = new Error(String(body.error));
+    error.code = "OUTREACH_STORE_COMMAND_FAILED";
+    throw error;
+  }
+  return body?.result ?? null;
+}
+
+async function pipeline(commands) {
+  if (!commands.length) return [];
+  const body = await request("/pipeline", commands);
+  return body.map((item) => {
+    if (item?.error) {
+      const error = new Error(String(item.error));
+      error.code = "OUTREACH_STORE_COMMAND_FAILED";
+      throw error;
+    }
+    return item?.result ?? null;
+  });
+}
+
+export async function probeOutreachStore({ kvImpl = kv } = {}) {
+  const nonce = randomUUID();
+  const key = `paraai:outreach:canary:${nonce}`;
+  const value = `v1:${nonce}`;
+  const set = await kvImpl(["SET", key, value, "EX", 60]);
+  const read = await kvImpl(["GET", key]);
+  const removed = await kvImpl(["DEL", key]);
+  if (set !== "OK" || read !== value || Number(removed) !== 1) {
+    const error = new Error("outreach state-store canary did not read back");
+    error.code = "OUTREACH_STORE_CANARY_FAILED";
+    throw error;
+  }
+  return { ok: true, write: true, read: true, cleanup: true };
+}
 
 export function outreachCandidateHash(candidateUserId) {
   const value = String(candidateUserId || "").trim();

@@ -26,6 +26,7 @@ import {
   planDeliveredMatch,
   requestOrdinal,
 } from "../api/paraai/_lib/outreach.mjs";
+import { probeOutreachStore } from "../api/paraai/_lib/outreach-store.mjs";
 
 const role = {
   roleName: "Software Engineer",
@@ -232,6 +233,30 @@ test("only an exact digest URL in the first delivered email anchors future repli
     threadDigestAnchorStatus(anchoredThread, `${digestUrl}-different`),
     "missing",
   );
+});
+
+test("outreach state-store probe proves write, read, and cleanup", async () => {
+  const commands = [];
+  let stored = null;
+  const result = await probeOutreachStore({
+    kvImpl: async (command) => {
+      commands.push(command);
+      if (command[0] === "SET") {
+        stored = command[2];
+        return "OK";
+      }
+      if (command[0] === "GET") return stored;
+      if (command[0] === "DEL") {
+        stored = null;
+        return 1;
+      }
+      return null;
+    },
+  });
+  assert.deepEqual(result, { ok: true, write: true, read: true, cleanup: true });
+  assert.deepEqual(commands.map((command) => command[0]), ["SET", "GET", "DEL"]);
+  assert.match(commands[0][1], /^paraai:outreach:canary:/);
+  assert.equal(commands[0][4], 60);
 });
 
 test("request normalization and ordinal count all Para AI requests for one candidate", () => {

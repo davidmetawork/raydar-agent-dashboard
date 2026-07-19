@@ -32,6 +32,7 @@ import {
   createOutreachState,
   getOutreachState,
   listOutreachStates,
+  probeOutreachStore,
   releaseOutreachLock,
   releaseOutreachPollSlot,
   saveOutreachState,
@@ -788,6 +789,7 @@ export async function outreachHealth({
     mailbox: config.mailbox,
     executionReady: outreachExecutionEnabled(config),
     gmail: probe && config.gmailConfigured ? "checking" : null,
+    store: probe && config.storeConfigured ? "checking" : null,
   };
   if (probe && config.gmailConfigured) {
     try {
@@ -795,6 +797,17 @@ export async function outreachHealth({
     } catch (error) {
       result.gmail = "error";
       result.gmailError = clean(error?.code || "GMAIL_PROBE_FAILED");
+    }
+  }
+  if (probe && config.storeConfigured) {
+    try {
+      result.store = await probeOutreachStore();
+    } catch (error) {
+      result.store = {
+        ok: false,
+        error: clean(error?.code || "OUTREACH_STORE_FAILED"),
+        detail: clean(error?.message).slice(0, 180),
+      };
     }
   }
   return result;
