@@ -132,46 +132,56 @@ async function applicationsFor(candidateUserId, trpcGet) {
   })).filter((row) => row.role_id);
 }
 
-// Role-pipeline search: candidates who APPLIED to a role are not CRM entries
-// (the exact gap behind the old "candidate not found by name" failures), but
-// role.getMergedCandidates covers every candidate on the role. Rows carry the
-// application id; the exact candidate_user_id resolves through the proven
-// candidateUser.getCandidateUserByApplicationId read for name matches only.
-async function scanRolePipeline(term, roleId, trpcGet) {
-  const needle = term.toLowerCase();
-  const rows = await trpcGet("role.getMergedCandidates", { role_id: roleId }).catch(() => null);
-  const matches = (Array.isArray(rows) ? rows : []).filter((row) => {
-    const name = text(row?.candidate?.name || row?.candidate_to_application?.name, 120);
-    return name && name.toLowerCase().includes(needle);
-  }).slice(0, 4);
+// Token match: a query token (>=2 chars) is a prefix of any candidate-name
+// token. Paraform abbreviates applicant last names in the pipeline view
+// ("Benjamin D."), so "benjamin dayan" must still match "Benjamin D." on the
+// first-name token. Whole-substring matching alone missed exactly this case.
+function nameMatches(name, queryTokens) {
+  const nameTokens = String(name || "").toLowerCase().split(/\s+/).filter(Boolean);
+  if (!nameTokens.length) return false;
+  return queryTokens.some((qt) =>
+    nameTokens.some((nt) => nt.startsWith(qt) || qt.startsWith(nt.replace(/[.]$/, ""))));
+}
+
+// Role-pipeline search: applicants who applied through Paraform are NOT CRM
+// entries and are NOT in role.getMergedCandidates (that is the past/rejected
+// set). The active pipeline lives at the REST endpoint
+// /api/role/{role_id}/user_applications, which carries the full candidate
+// object (candidate.id === candidate_user_id) plus stage. This is the exact
+// source that was missing behind "candidate not found by name".
+async function scanRolePipeline(term, roleId, restGet) {
+  if (typeof restGet !== "function") return [];
+  const queryTokens = term.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
+  const rows = await restGet(`/role/${encodeURIComponent(roleId)}/user_applications`).catch(() => null);
+  const list = Array.isArray(rows) ? rows : (rows?.applications || rows?.items || []);
   const cards = [];
-  for (const row of matches) {
-    const applicationId = row?.application?.id || row?.id || null;
-    if (!applicationId) continue;
-    const candidateUser = await trpcGet("candidateUser.getCandidateUserByApplicationId", {
-      application_id: applicationId,
-    }).catch(() => null);
-    const id = candidateUser?.id || candidateUser?.candidate_user_id || null;
+  for (const row of Array.isArray(list) ? list : []) {
+    const candidate = row?.candidate && typeof row.candidate === "object" ? row.candidate : {};
+    const name = text(candidate.name || row?.candidateName, 120);
+    if (!name || !nameMatches(name, queryTokens)) continue;
+    const id = candidate.id || row?.candidate_id || row?.candidate_user_id || null;
     if (!id) continue;
-    const stage = text(
-      row?.application?.interview_stage?.name || row?.application?.furthestStage, 60,
-    );
     cards.push({
       candidate_user_id: id,
-      name: text(row?.candidate?.name || candidateUser?.candidate?.name, 120),
-      headline: text(row?.candidate?.one_liner, 160),
-      location: null,
-      avatar_url: text(row?.candidate?.img_src || row?.candidate?.image_src, 500),
-      linkedin_present: false,
-      email_present: true,
-      updated_at: text(row?.rejected_at || row?.created_at, 40),
-      pipeline: { role_id: roleId, stage: stage || null, status: text(row?.type, 40) },
+      name,
+      headline: text(candidate.one_liner || candidate.title || row?.greatFitReason, 160),
+      location: text(candidate.location, 120),
+      avatar_url: text(candidate.image_src || candidate.img_src || row?.recruiterImg, 500),
+      linkedin_present: !!(candidate.linkedin_user || row?.candidateLinkedinUrl),
+      email_present: !!(candidate.email || row?.candidateEmail),
+      updated_at: text(row?.updated_at || row?.lastUpdated, 40),
+      pipeline: {
+        role_id: roleId,
+        stage: text(row?.furthestStage || row?.status || row?.interviewStatus, 60),
+        status: text(row?.status, 40),
+      },
     });
+    if (cards.length >= 6) break;
   }
   return cards;
 }
 
-export async function searchCandidates(query, { trpcGet, limit = MAX_RESULTS, roleId = null, now = Date.now() }) {
+export async function searchCandidates(query, { trpcGet, restGet = null, limit = MAX_RESULTS, roleId = null, now = Date.now() }) {
   const term = String(query || "").replace(/\s+/g, " ").trim();
   if (term.length < 2) return { query: term, results: [] };
   const boundedLimit = Math.max(1, Math.min(MAX_RESULTS, Number(limit) || MAX_RESULTS));
@@ -184,7 +194,7 @@ export async function searchCandidates(query, { trpcGet, limit = MAX_RESULTS, ro
   const pending = (async () => {
     const [crmCards, pipelineCards] = await Promise.all([
       scanCrm(term, trpcGet),
-      cleanRoleId ? scanRolePipeline(term, cleanRoleId, trpcGet) : Promise.resolve([]),
+      cleanRoleId ? scanRolePipeline(term, cleanRoleId, restGet) : Promise.resolve([]),
     ]);
     const merged = new Map();
     for (const card of [...pipelineCards, ...crmCards]) {

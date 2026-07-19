@@ -73,29 +73,43 @@ test("enqueue rejects name-only candidates and accepts picker ids", async () => 
   assert.notEqual(nameOnly.payload?.ok, true);
 });
 
-test("role-scoped search finds pipeline applicants and resolves exact ids", async () => {
-  const trpcGet = async (proc, input) => {
+test("role-scoped search finds active-pipeline applicants via user_applications", async () => {
+  // Mirrors the real Benjamin D. case: not in the CRM, not in getMergedCandidates,
+  // last name abbreviated in the pipeline view.
+  const trpcGet = async (proc) => {
     if (proc === "candidateUser.getCRMExternalCandidates") return { items: [], next_cursor: null };
-    if (proc === "role.getMergedCandidates") {
-      assert.equal(input.role_id, "role-vals");
-      return [
-        { id: "app-benji", type: "application", candidate: { name: "Benjamin Dayan", img_src: null },
-          application: { id: "app-benji", interview_stage: { name: "Submitted" } } },
-        { id: "app-other", type: "application", candidate: { name: "Other Person" }, application: { id: "app-other" } },
-      ];
-    }
-    if (proc === "candidateUser.getCandidateUserByApplicationId") {
-      assert.equal(input.application_id, "app-benji");
-      return { id: "cu-benji" };
-    }
     if (proc === "candidateUser.getCandidateUserApplications") {
-      return [{ id: "app-benji", role_id: "role-vals", role: { name: "Evaluations Engineer", company: { name: "Vals AI" } } }];
+      return [{ id: "app-benji", role_id: "role-vals", role: { name: "MTS - Platform", company: { name: "Vals AI" } } }];
     }
     throw new Error("unexpected proc " + proc);
   };
-  const out = await searchCandidates("dayan", { trpcGet, roleId: "role-vals" });
+  const restGet = async (path) => {
+    assert.equal(path, "/role/role-vals/user_applications");
+    return [
+      { id: "app-benji", status: "INTERVIEWING", furthestStage: "INTERVIEWING",
+        candidateName: "Benjamin D.", candidateEmail: "b@x.com", candidate_id: "cu-benji",
+        candidate: { id: "cu-benji", name: "Benjamin D.", image_src: "https://img/b.png", one_liner: "MTS @ PayPal", location: "NYC", email: "b@x.com" } },
+      { id: "app-other", status: "INTERVIEWING", candidate: { id: "cu-other", name: "Someone Else" } },
+    ];
+  };
+  const out = await searchCandidates("benjamin dayan", { trpcGet, restGet, roleId: "role-vals" });
   assert.equal(out.roleScoped, true);
   assert.equal(out.results.length, 1);
   assert.equal(out.results[0].candidate_user_id, "cu-benji");
-  assert.equal(out.results[0].pipeline.stage, "Submitted");
+  assert.equal(out.results[0].pipeline.stage, "INTERVIEWING");
+  assert.equal(out.results[0].name, "Benjamin D.");
+  assert.ok(!JSON.stringify(out.results).includes("b@x.com"));
+});
+
+test("token matching handles abbreviated last names and ignores non-matches", async () => {
+  const trpcGet = async () => ({ items: [], next_cursor: null });
+  const restGet = async () => ([
+    { id: "a1", candidate: { id: "c1", name: "Benjamin D." } },
+    { id: "a2", candidate: { id: "c2", name: "Benji Smith" } },
+    { id: "a3", candidate: { id: "c3", name: "Unrelated Person" } },
+  ]);
+  const out = await searchCandidates("benjamin dayan", { trpcGet, restGet, roleId: "role-xxxxxxx" });
+  const ids = out.results.map((r) => r.candidate_user_id);
+  assert.ok(ids.includes("c1"));
+  assert.ok(!ids.includes("c3"));
 });
