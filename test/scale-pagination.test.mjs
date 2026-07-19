@@ -20,12 +20,17 @@ test("archive-import is a load-bearing automation exclusion tag", async () => {
   assert.equal(isArchiveImportCandidate({
     candidate: { tags: [{ name: "archive-import" }] },
   }), true);
+  assert.equal(isArchiveImportCandidate({
+    candidate: { tags: [{ name: "linkedin-applicant-inbound" }] },
+  }), false);
 
   const archived = await archiveImportSet(["candidate-1", "candidate-2"], {
     async fetchImpl(url) {
       const tagged = url.includes("candidate-2");
       return new Response(JSON.stringify({
-        tags: tagged ? [{ name: "archive-import" }] : [{ name: "live-pipeline" }],
+        tags: tagged
+          ? [{ name: "archive-import" }]
+          : [{ name: "linkedin-applicant-inbound" }],
       }), {
         status: 200,
         headers: { "content-type": "application/json" },
