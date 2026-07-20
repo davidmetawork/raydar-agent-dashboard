@@ -135,6 +135,17 @@ export function eligibleNewRequests(history, config = outreachConfig(), states =
   )).sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
 }
 
+export function pendingBackfillRequests(history) {
+  return (history || []).filter((request) => (
+    REQUEST_STATUSES.has(request.status) &&
+    request.reachedOut !== true
+  )).sort((left, right) => (
+    (left.createdAtMs ?? Number.MAX_SAFE_INTEGER) -
+      (right.createdAtMs ?? Number.MAX_SAFE_INTEGER)
+    || left.id.localeCompare(right.id)
+  ));
+}
+
 function firstName(name) {
   return clean(name).split(/\s+/)[0] || "there";
 }

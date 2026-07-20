@@ -22,6 +22,7 @@ import {
   normalizeSubmissionRequest,
   outreachConfig,
   outreachExecutionEnabled,
+  pendingBackfillRequests,
   planDeliveredFollowup,
   planDeliveredMatch,
   requestOrdinal,
@@ -328,6 +329,30 @@ test("eligibility requires pending, unreached, post-cutoff, and not already deli
   assert.deepEqual(eligibleNewRequests([base], config, [{
     matches: { [base.id]: { sentAt: "2026-07-18T02:00:00.000Z" } },
   }]), []);
+});
+
+test("manual backfill ignores only the rollout cutoff", () => {
+  const oldPending = {
+    id: "request-old",
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-10T01:00:00.000Z"),
+  };
+  const newPending = {
+    id: "request-new",
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-18T01:00:00.000Z"),
+  };
+  assert.deepEqual(
+    pendingBackfillRequests([
+      newPending,
+      { ...oldPending, id: "request-reached", reachedOut: true },
+      { ...oldPending, id: "request-expired", status: "expired" },
+      oldPending,
+    ]),
+    [oldPending, newPending],
+  );
 });
 
 test("new match supersedes the old follow-up and owns one new two-day follow-up", () => {

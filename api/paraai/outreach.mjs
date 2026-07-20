@@ -6,6 +6,7 @@ import {
   outreachConfig,
   outreachExecutionEnabled,
   outreachHealth,
+  pendingBackfillRequests,
   processMatchRequest,
   readSubmissionRequestHistory,
   runOutreachTick,
@@ -87,6 +88,39 @@ export default async function handler(req, res) {
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
       const result = await processMatchRequest(request, history, { mode: "send", config });
       return res.status(200).json({ ok: true, action: result.action, requestId });
+    }
+    if (action === "backfill-pending") {
+      if (body.confirmation !== "SEND ALL CURRENT PENDING") {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      const limit = Math.max(1, Math.min(5, Number(body.limit || 5)));
+      const history = await readSubmissionRequestHistory();
+      const batch = pendingBackfillRequests(history).slice(0, limit);
+      const results = [];
+      for (const request of batch) {
+        try {
+          const result = await processMatchRequest(request, history, { mode: "send", config });
+          results.push({ action: result.action, requestId: request.id });
+        } catch (error) {
+          results.push({
+            action: "error",
+            requestId: request.id,
+            code: String(error?.code || "OUTREACH_FAILED"),
+          });
+        }
+      }
+      const refreshed = await readSubmissionRequestHistory();
+      return res.status(200).json({
+        ok: true,
+        action,
+        processed: results.filter((result) => result.action === "sent").length,
+        results,
+        remaining: pendingBackfillRequests(refreshed).length,
+      });
     }
     return res.status(400).json({ ok: false, error: "unsupported_action" });
   } catch (error) {
