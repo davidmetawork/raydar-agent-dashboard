@@ -135,10 +135,16 @@ export function eligibleNewRequests(history, config = outreachConfig(), states =
   )).sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
 }
 
-export function pendingBackfillRequests(history) {
+export function pendingBackfillRequests(history, states = []) {
+  const delivered = new Set();
+  for (const state of states || []) {
+    for (const [requestId, record] of Object.entries(state?.matches || {})) {
+      if (record?.sentAt) delivered.add(requestId);
+    }
+  }
   return (history || []).filter((request) => (
     REQUEST_STATUSES.has(request.status) &&
-    request.reachedOut !== true
+    !delivered.has(request.id)
   )).sort((left, right) => (
     (left.createdAtMs ?? Number.MAX_SAFE_INTEGER) -
       (right.createdAtMs ?? Number.MAX_SAFE_INTEGER)

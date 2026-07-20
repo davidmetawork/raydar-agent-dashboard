@@ -98,8 +98,11 @@ export default async function handler(req, res) {
         return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
       }
       const limit = Math.max(1, Math.min(5, Number(body.limit || 5)));
-      const history = await readSubmissionRequestHistory();
-      const batch = pendingBackfillRequests(history).slice(0, limit);
+      const [history, states] = await Promise.all([
+        readSubmissionRequestHistory(),
+        listOutreachStates(),
+      ]);
+      const batch = pendingBackfillRequests(history, states).slice(0, limit);
       const results = [];
       for (const request of batch) {
         try {
@@ -113,13 +116,16 @@ export default async function handler(req, res) {
           });
         }
       }
-      const refreshed = await readSubmissionRequestHistory();
+      const [refreshedHistory, refreshedStates] = await Promise.all([
+        readSubmissionRequestHistory(),
+        listOutreachStates(),
+      ]);
       return res.status(200).json({
         ok: true,
         action,
         processed: results.filter((result) => result.action === "sent").length,
         results,
-        remaining: pendingBackfillRequests(refreshed).length,
+        remaining: pendingBackfillRequests(refreshedHistory, refreshedStates).length,
       });
     }
     return res.status(400).json({ ok: false, error: "unsupported_action" });

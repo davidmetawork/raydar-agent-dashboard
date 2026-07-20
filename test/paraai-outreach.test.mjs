@@ -331,7 +331,7 @@ test("eligibility requires pending, unreached, post-cutoff, and not already deli
   }]), []);
 });
 
-test("manual backfill ignores only the rollout cutoff", () => {
+test("manual backfill ignores the rollout cutoff and reached-out checkbox", () => {
   const oldPending = {
     id: "request-old",
     status: "pending",
@@ -350,8 +350,12 @@ test("manual backfill ignores only the rollout cutoff", () => {
       { ...oldPending, id: "request-reached", reachedOut: true },
       { ...oldPending, id: "request-expired", status: "expired" },
       oldPending,
-    ]),
-    [oldPending, newPending],
+    ], [{
+      matches: {
+        "request-new": { sentAt: "2026-07-19T00:00:00.000Z" },
+      },
+    }]),
+    [oldPending, { ...oldPending, id: "request-reached", reachedOut: true }],
   );
 });
 
