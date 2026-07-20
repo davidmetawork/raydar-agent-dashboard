@@ -75,13 +75,13 @@ export function outreachConfig(env = process.env) {
     pollLockSeconds: Math.max(15, Math.min(300, Number(env.PARAAI_OUTREACH_POLL_SECONDS || 45))),
   };
 }
-// INCIDENT 2026-07-20 — Para AI outreach emailed candidates on Kyra Wyman's
-// roles (e.g. the "Corporate Counsel" posting), violating the standing rule to
-// NEVER take down Kyra's job postings or message her candidates. The poll layer
-// had no recruiter-owner exclusion. ALL candidate-facing outreach sending is
-// halted here until the Kyra/internal-recruiter-owner exclusion is verified and
-// David explicitly re-arms. Flip to false ONLY on David's direct order.
-export const OUTREACH_INCIDENT_HALT = true;
+// INCIDENT 2026-07-20 — during triage of the Kyra "Corporate Counsel" outreach
+// incident this was set true as a precautionary full halt. Root cause was the
+// LinkedIn-cohort Paraform SEQUENCE, not this Para AI outreach path (which is
+// recruiter-scoped to David and never touched Kyra's candidates), so David
+// authorized lifting the halt. Kept as a documented one-flip kill switch: set
+// true to instantly close every outreach send path (tick/send-request/backfill).
+export const OUTREACH_INCIDENT_HALT = false;
 
 export function outreachExecutionEnabled(config = outreachConfig()) {
   if (OUTREACH_INCIDENT_HALT) return false;
