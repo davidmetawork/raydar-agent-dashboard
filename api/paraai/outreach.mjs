@@ -107,11 +107,20 @@ export default async function handler(req, res) {
       for (const request of batch) {
         try {
           const result = await processMatchRequest(request, history, { mode: "send", config });
-          results.push({ action: result.action, requestId: request.id });
+          results.push({
+            action: result.action,
+            requestId: request.id,
+            candidateName: request.candidateName,
+            roleName: request.roleName,
+            companyName: request.companyName,
+          });
         } catch (error) {
           results.push({
             action: "error",
             requestId: request.id,
+            candidateName: request.candidateName,
+            roleName: request.roleName,
+            companyName: request.companyName,
             code: String(error?.code || "OUTREACH_FAILED"),
           });
         }
