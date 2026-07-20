@@ -245,7 +245,7 @@
     .cd-table td { padding:11px 16px; border-top:1px solid var(--line-2); vertical-align:middle; }
     .cd-table tbody tr:first-child td { border-top:none; }
     .cd-table .who { font-weight:600; letter-spacing:-.01em; white-space:nowrap; }
-    .cd-table .who .gm { margin-left:8px; font-size:17px; color:var(--ink-3); opacity:.6; vertical-align:-1px; transition:opacity .12s ease, color .12s ease; }
+    .cd-table .who .gm { margin-left:8px; font-size:34px; color:var(--ink-3); opacity:.6; vertical-align:-6px; transition:opacity .12s ease, color .12s ease; }
     .cd-table .who .gm:hover { opacity:1; color:var(--orange); border-bottom-color:transparent; }
     .cd-when { color:var(--ink-2); white-space:nowrap; font-size:13px; }
     .cd-quick { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
@@ -494,8 +494,8 @@
     const nameLink = (name) => {
       const n = String(name ?? "").trim();
       if (!n || n === "?" || n.toLowerCase() === "unknown")
-        return `<a href="https://www.paraform.com/candidates?sort=added_at%3Adesc" target="_blank" rel="noopener noreferrer" title="Open Paraform candidates">${esc(n || "Unknown")}<span class="ext">↗</span></a>`;
-      return `<a href="${paraformQ(n)}" target="_blank" rel="noopener noreferrer" title="Find ${esc(n)} on Paraform">${esc(n)}<span class="ext">↗</span></a>`;
+        return `<a class="bg-open" href="https://www.paraform.com/candidates?sort=added_at%3Adesc" target="_blank" rel="noopener noreferrer" title="Open Paraform candidates">${esc(n || "Unknown")}<span class="ext">↗</span></a>`;
+      return `<a class="bg-open" href="${paraformQ(n)}" target="_blank" rel="noopener noreferrer" title="Find ${esc(n)} on Paraform">${esc(n)}<span class="ext">↗</span></a>`;
     };
 
     // Candidate name → Gmail search (name in quotes, executed on open).
@@ -506,8 +506,23 @@
     const gmailLink = (name) => {
       const n = String(name ?? "").trim();
       if (!n || n === "?" || n.toLowerCase() === "unknown") return "";
-      return `<a class="gm" href="${gmailQ(n)}" target="_blank" rel="noopener noreferrer" title="Search Gmail for ${esc(n)}">✉&#xFE0E;</a>`;
+      return `<a class="gm bg-open" href="${gmailQ(n)}" target="_blank" rel="noopener noreferrer" title="Search Gmail for ${esc(n)}">✉&#xFE0E;</a>`;
     };
+
+    // Background-tab open: a plain left-click on a .bg-open link opens the
+    // target in a new tab WITHOUT stealing focus (like ⌘/Ctrl-click). We
+    // intercept the plain click and re-dispatch a synthetic modifier-click,
+    // which Chromium honors as "open in background tab". Real modifier /
+    // middle clicks pass straight through to native behavior.
+    document.addEventListener("click", (e) => {
+      const a = e.target.closest && e.target.closest("a.bg-open");
+      if (!a) return;
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      a.dispatchEvent(new MouseEvent("click", {
+        bubbles: false, cancelable: true, view: window, ctrlKey: true, metaKey: true,
+      }));
+    });
 
     // ---- plain-language mapping (no jargon for non-technical teammates) ----
     const VERDICT = {
