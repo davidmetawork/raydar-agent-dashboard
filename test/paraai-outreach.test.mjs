@@ -28,6 +28,7 @@ import {
   eligibleNewRequests,
   missingEmailAlertCopy,
   normalizeSubmissionRequest,
+  OUTREACH_INCIDENT_HALT,
   outreachConfig,
   outreachExecutionEnabled,
   pendingBackfillRequests,
@@ -615,5 +616,11 @@ test("all three live-send gates and a pinned cutoff are required", () => {
   assert.equal(open.dryRun, false);
   assert.equal(open.notBeforeMs, Date.parse("2026-07-18T17:00:00.000Z"));
   assert.equal(open.gmailConfigured, true);
-  assert.equal(outreachExecutionEnabled({ ...open, storeConfigured: true }), true);
+  // INCIDENT 2026-07-20: the outreach incident halt is a top-level override that
+  // forces execution off even when every gate is live. It flips back to
+  // asserting `true` automatically once David lifts the halt.
+  assert.equal(
+    outreachExecutionEnabled({ ...open, storeConfigured: true }),
+    !OUTREACH_INCIDENT_HALT,
+  );
 });

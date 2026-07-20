@@ -75,7 +75,16 @@ export function outreachConfig(env = process.env) {
     pollLockSeconds: Math.max(15, Math.min(300, Number(env.PARAAI_OUTREACH_POLL_SECONDS || 45))),
   };
 }
+// INCIDENT 2026-07-20 — Para AI outreach emailed candidates on Kyra Wyman's
+// roles (e.g. the "Corporate Counsel" posting), violating the standing rule to
+// NEVER take down Kyra's job postings or message her candidates. The poll layer
+// had no recruiter-owner exclusion. ALL candidate-facing outreach sending is
+// halted here until the Kyra/internal-recruiter-owner exclusion is verified and
+// David explicitly re-arms. Flip to false ONLY on David's direct order.
+export const OUTREACH_INCIDENT_HALT = true;
+
 export function outreachExecutionEnabled(config = outreachConfig()) {
+  if (OUTREACH_INCIDENT_HALT) return false;
   return Boolean(
     config.approved &&
     config.sendApproved &&
@@ -437,6 +446,13 @@ export async function processMatchRequest(
     config = outreachConfig(),
   } = {},
 ) {
+  // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
+  // the outreach halt is active, regardless of caller. Drafts remain allowed.
+  if (mode === "send" && OUTREACH_INCIDENT_HALT) {
+    const error = new Error("Para AI outreach sending is halted (2026-07-20 Kyra incident)");
+    error.code = "OUTREACH_HALTED";
+    throw error;
+  }
   const lockToken = await acquireOutreachLock(request.candidateUserId);
   if (!lockToken) {
     const error = new Error("candidate outreach is already being processed");
