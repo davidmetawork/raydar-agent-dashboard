@@ -4,6 +4,8 @@ const INDEX_KEY = "paraai:outreach:index";
 const STATE_TTL_SECONDS = 730 * 24 * 60 * 60;
 const LOCK_TTL_SECONDS = 150;
 const POLL_LOCK_KEY = "paraai:outreach:poll-lock";
+const EXCEPTION_INDEX_KEY = "paraai:outreach:exception:index";
+const EXCEPTION_TTL_SECONDS = 730 * 24 * 60 * 60;
 const KV_URL = String(
   process.env.PARAAI_OUTREACH_KV_REST_API_URL
   || process.env.KV_REST_API_URL
@@ -98,6 +100,14 @@ export function outreachCandidateHash(candidateUserId) {
 }
 const stateKey = (candidateUserId) => `paraai:outreach:candidate:${outreachCandidateHash(candidateUserId)}`;
 const lockKey = (candidateUserId) => `paraai:outreach:lock:${outreachCandidateHash(candidateUserId)}`;
+const exceptionHash = (requestId) => createHash("sha256")
+  .update("paraai-outreach-exception")
+  .update("\0")
+  .update(String(requestId || "").trim())
+  .digest("hex");
+const exceptionKey = (requestId) => `paraai:outreach:exception:${exceptionHash(requestId)}`;
+const exceptionAlertKey = (requestId) =>
+  `paraai:outreach:exception-alert:${exceptionHash(requestId)}`;
 
 export function appendOutreachJournal(state, event, detail = {}) {
   return {
@@ -191,6 +201,121 @@ export async function listOutreachStates(limit = 500, {
   if (!Array.isArray(ids) || !ids.length) return [];
   const rows = await pipelineImpl(ids.map((id) => ["GET", `paraai:outreach:candidate:${id}`]));
   return rows.map((row) => parse(row, null)).filter(Boolean);
+}
+
+export async function recordOutreachException(
+  {
+    request,
+    code = "OUTREACH_FAILED",
+    discovery = null,
+  },
+  {
+    kvImpl = kv,
+    pipelineImpl = pipeline,
+  } = {},
+) {
+  if (!request?.id) throw new Error("request id required");
+  const now = new Date().toISOString();
+  const key = exceptionKey(request.id);
+  const previous = parse(await kvImpl(["GET", key]), null);
+  const record = {
+    version: 1,
+    requestId: String(request.id),
+    candidateUserId: String(request.candidateUserId || ""),
+    candidateName: String(request.candidateName || ""),
+    roleName: String(request.roleName || ""),
+    companyName: String(request.companyName || ""),
+    code: String(code || "OUTREACH_FAILED"),
+    status: "open",
+    firstSeenAt: previous?.firstSeenAt || now,
+    lastSeenAt: now,
+    attempts: Number(previous?.attempts || 0) + 1,
+    discovery: discovery ? {
+      confidence: String(discovery.confidence || "unresolved"),
+      gmailEmails: Array.isArray(discovery.gmailEmails) ? discovery.gmailEmails : [],
+      calendarEmails: Array.isArray(discovery.calendarEmails) ? discovery.calendarEmails : [],
+      suggestedEmails: Array.isArray(discovery.suggestedEmails)
+        ? discovery.suggestedEmails
+        : [],
+      gmailError: discovery.gmailError || null,
+      calendarError: discovery.calendarError || null,
+    } : null,
+    resolvedAt: null,
+  };
+  await pipelineImpl([
+    ["SET", key, JSON.stringify(record), "EX", EXCEPTION_TTL_SECONDS],
+    ["ZADD", EXCEPTION_INDEX_KEY, String(Date.parse(now)), exceptionHash(request.id)],
+  ]);
+  return record;
+}
+
+export async function resolveOutreachException(
+  requestId,
+  {
+    resolution = "email_available",
+    kvImpl = kv,
+  } = {},
+) {
+  if (!String(requestId || "").trim()) return null;
+  const key = exceptionKey(requestId);
+  const previous = parse(await kvImpl(["GET", key]), null);
+  if (!previous || previous.status === "resolved") return previous;
+  const now = new Date().toISOString();
+  const record = {
+    ...previous,
+    status: "resolved",
+    resolution: String(resolution),
+    resolvedAt: now,
+    lastSeenAt: now,
+  };
+  await kvImpl(["SET", key, JSON.stringify(record), "EX", EXCEPTION_TTL_SECONDS]);
+  return record;
+}
+
+export async function listOutreachExceptions(
+  limit = 200,
+  {
+    includeResolved = false,
+    kvImpl = kv,
+    pipelineImpl = pipeline,
+  } = {},
+) {
+  const capped = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const ids = await kvImpl(["ZREVRANGE", EXCEPTION_INDEX_KEY, 0, capped - 1]);
+  if (!Array.isArray(ids) || !ids.length) return [];
+  const rows = await pipelineImpl(
+    ids.map((id) => ["GET", `paraai:outreach:exception:${id}`]),
+  );
+  return rows
+    .map((row) => parse(row, null))
+    .filter((row) => row && (includeResolved || row.status === "open"));
+}
+
+export async function claimOutreachExceptionAlert(
+  requestId,
+  {
+    ttlSeconds = 24 * 60 * 60,
+    kvImpl = kv,
+  } = {},
+) {
+  const result = await kvImpl([
+    "SET",
+    exceptionAlertKey(requestId),
+    new Date().toISOString(),
+    "NX",
+    "EX",
+    Math.max(60, Number(ttlSeconds) || 24 * 60 * 60),
+  ]);
+  return result === "OK";
+}
+
+export async function releaseOutreachExceptionAlert(
+  requestId,
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  return Number(await kvImpl(["DEL", exceptionAlertKey(requestId)])) > 0;
 }
 
 export async function acquireOutreachLock(candidateUserId, {

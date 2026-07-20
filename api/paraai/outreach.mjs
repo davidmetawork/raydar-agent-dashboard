@@ -2,7 +2,9 @@ import { timingSafeEqual } from "node:crypto";
 
 import { cors, requireAuth } from "./_lib/core.mjs";
 import {
+  discoverOutreachRequestContact,
   draftOutreachRequest,
+  handleOutreachFailure,
   outreachConfig,
   outreachExecutionEnabled,
   outreachHealth,
@@ -11,7 +13,10 @@ import {
   readSubmissionRequestHistory,
   runOutreachTick,
 } from "./_lib/outreach.mjs";
-import { listOutreachStates } from "./_lib/outreach-store.mjs";
+import {
+  listOutreachExceptions,
+  listOutreachStates,
+} from "./_lib/outreach-store.mjs";
 
 export const config = { maxDuration: 120 };
 
@@ -48,10 +53,15 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
+      const [states, exceptions] = await Promise.all([
+        listOutreachStates(Number(req.query?.limit || 200)),
+        listOutreachExceptions(Number(req.query?.exceptionLimit || 200)),
+      ]);
       return res.status(200).json({
         ok: true,
         health: await outreachHealth({ probe: req.query?.probe === "1" }),
-        states: await listOutreachStates(Number(req.query?.limit || 200)),
+        states,
+        exceptions,
       });
     }
     const body = bodyOf(req);
@@ -86,8 +96,36 @@ export default async function handler(req, res) {
       const history = await readSubmissionRequestHistory();
       const request = history.find((row) => row.id === requestId);
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
-      const result = await processMatchRequest(request, history, { mode: "send", config });
+      let result;
+      try {
+        result = await processMatchRequest(request, history, { mode: "send", config });
+      } catch (error) {
+        await handleOutreachFailure(error, request, { config }).catch(() => {});
+        throw error;
+      }
       return res.status(200).json({ ok: true, action: result.action, requestId });
+    }
+    if (action === "inspect-pending") {
+      const [history, states] = await Promise.all([
+        readSubmissionRequestHistory(),
+        listOutreachStates(),
+      ]);
+      return res.status(200).json({
+        ok: true,
+        action,
+        requests: pendingBackfillRequests(history, states),
+      });
+    }
+    if (action === "discover-request-contact") {
+      const requestId = String(body.requestId || "").trim();
+      if (!requestId) return res.status(400).json({ ok: false, error: "requestId_required" });
+      const result = await discoverOutreachRequestContact(requestId);
+      return res.status(200).json({
+        ok: true,
+        action,
+        request: result.request,
+        discovery: result.discovery,
+      });
     }
     if (action === "backfill-pending") {
       if (body.confirmation !== "SEND ALL CURRENT PENDING") {
@@ -115,6 +153,7 @@ export default async function handler(req, res) {
             companyName: request.companyName,
           });
         } catch (error) {
+          await handleOutreachFailure(error, request, { config }).catch(() => {});
           results.push({
             action: "error",
             requestId: request.id,

@@ -18,7 +18,15 @@ import {
   threadReplyContext,
 } from "../api/paraai/_lib/outreach-gmail.mjs";
 import {
+  calendarCandidateEvidence,
+  discoverCandidateContact,
+  gmailCandidateEvidence,
+  normalizeContactName,
+  resolveContactEvidence,
+} from "../api/paraai/_lib/outreach-contact.mjs";
+import {
   eligibleNewRequests,
+  missingEmailAlertCopy,
   normalizeSubmissionRequest,
   outreachConfig,
   outreachExecutionEnabled,
@@ -27,7 +35,11 @@ import {
   planDeliveredMatch,
   requestOrdinal,
 } from "../api/paraai/_lib/outreach.mjs";
-import { probeOutreachStore } from "../api/paraai/_lib/outreach-store.mjs";
+import {
+  claimOutreachExceptionAlert,
+  probeOutreachStore,
+  recordOutreachException,
+} from "../api/paraai/_lib/outreach-store.mjs";
 
 const role = {
   roleName: "Software Engineer",
@@ -286,6 +298,132 @@ test("outreach state-store probe proves write, read, and cleanup", async () => {
   assert.equal(commands[0][4], 60);
 });
 
+test("Google contact recovery requires one address corroborated by Gmail and Calendar", () => {
+  assert.equal(normalizeContactName("⚡Serge-Éric Tremblay"), "serge eric tremblay");
+  const gmailThread = {
+    messages: [{
+      payload: { headers: [
+        { name: "From", value: "Serge-Eric Tremblay <set128@gmail.com>" },
+        { name: "To", value: "David Phillips <david@raydar.xyz>" },
+      ] },
+    }],
+  };
+  const calendarEvents = [{
+    summary: "Serge-Eric Tremblay and David Phillips",
+    attendees: [
+      { email: "david@raydar.xyz" },
+      { email: "set128@gmail.com" },
+      { email: "alzen@raydargroup.com" },
+    ],
+  }];
+  assert.deepEqual(
+    gmailCandidateEvidence(gmailThread, "⚡Serge-Eric Tremblay", "david@raydar.xyz"),
+    ["set128@gmail.com"],
+  );
+  assert.deepEqual(
+    calendarCandidateEvidence(
+      calendarEvents,
+      "⚡Serge-Eric Tremblay",
+      "david@raydar.xyz",
+    ),
+    ["set128@gmail.com"],
+  );
+  assert.deepEqual(resolveContactEvidence({
+    gmailEmails: ["set128@gmail.com"],
+    calendarEmails: ["set128@gmail.com"],
+  }), {
+    email: "set128@gmail.com",
+    confidence: "gmail_calendar_corroborated",
+    gmailEmails: ["set128@gmail.com"],
+    calendarEmails: ["set128@gmail.com"],
+    suggestedEmails: ["set128@gmail.com"],
+    gmailError: null,
+    calendarError: null,
+  });
+});
+
+test("one-source contact evidence remains a suggestion and cannot send", async () => {
+  const result = await discoverCandidateContact(
+    {
+      candidateName: "Candidate Name",
+      mailbox: "david@raydar.xyz",
+    },
+    {
+      gmailEvidenceImpl: async () => ["candidate@example.com"],
+      calendarEvidenceImpl: async () => {
+        const error = new Error("scope denied");
+        error.code = "GOOGLE_CALENDAR_SCOPE_MISSING";
+        throw error;
+      },
+    },
+  );
+  assert.equal(result.email, "");
+  assert.equal(result.confidence, "unresolved");
+  assert.deepEqual(result.suggestedEmails, ["candidate@example.com"]);
+  assert.equal(result.calendarError, "GOOGLE_CALENDAR_SCOPE_MISSING");
+});
+
+test("missing-email alert tells the operator what to fix without authorizing a send", () => {
+  const copy = missingEmailAlertCopy({
+    candidateName: "⚡Serge-Eric Tremblay",
+    roleName: "Product Manager",
+    companyName: "Traba",
+  }, {
+    suggestedEmails: ["set128@gmail.com"],
+  });
+  assert.equal(copy.subject, "Action needed: missing email for Serge-Eric Tremblay");
+  assert.match(copy.text, /set128@gmail\.com/);
+  assert.match(copy.text, /no email was sent/i);
+  assert.match(copy.text, /Add the correct email to the candidate's Paraform profile/);
+});
+
+test("missing-email exceptions are durable and notification claims are deduplicated", async () => {
+  const commands = [];
+  const request = {
+    id: "request-missing-email",
+    candidateUserId: "candidate-user",
+    candidateName: "Candidate Name",
+    roleName: "Product Manager",
+    companyName: "Example Co",
+  };
+  const record = await recordOutreachException({
+    request,
+    code: "OUTREACH_NO_EMAIL",
+    discovery: {
+      confidence: "unresolved",
+      gmailEmails: ["candidate@example.com"],
+      calendarEmails: [],
+      suggestedEmails: ["candidate@example.com"],
+      calendarError: "GOOGLE_CALENDAR_SCOPE_MISSING",
+    },
+  }, {
+    kvImpl: async (command) => {
+      commands.push(command);
+      return null;
+    },
+    pipelineImpl: async (pipeline) => {
+      commands.push(...pipeline);
+      return ["OK", 1];
+    },
+  });
+  assert.equal(record.status, "open");
+  assert.equal(record.attempts, 1);
+  assert.deepEqual(record.discovery.suggestedEmails, ["candidate@example.com"]);
+  assert.match(commands[1][1], /^paraai:outreach:exception:/);
+  assert.equal(commands[2][0], "ZADD");
+
+  assert.equal(await claimOutreachExceptionAlert(request.id, {
+    kvImpl: async (command) => {
+      assert.equal(command[0], "SET");
+      assert.equal(command[3], "NX");
+      return "OK";
+    },
+  }), true);
+  assert.equal(await claimOutreachExceptionAlert(request.id, {
+    kvImpl: async () => null,
+  }), false);
+});
+
 test("request normalization and ordinal count all Para AI requests for one candidate", () => {
   const first = normalizeSubmissionRequest({
     id: "request-first",
@@ -329,6 +467,18 @@ test("eligibility requires pending, unreached, post-cutoff, and not already deli
   assert.deepEqual(eligibleNewRequests([base], config, [{
     matches: { [base.id]: { sentAt: "2026-07-18T02:00:00.000Z" } },
   }]), []);
+  const historicalReached = {
+    ...base,
+    createdAtMs: Date.parse("2026-07-10T01:00:00.000Z"),
+    reachedOut: true,
+  };
+  assert.deepEqual(
+    eligibleNewRequests([historicalReached], config, [], [{
+      requestId: historicalReached.id,
+      status: "open",
+    }]),
+    [historicalReached],
+  );
 });
 
 test("manual backfill ignores the rollout cutoff and reached-out checkbox", () => {

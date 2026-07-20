@@ -25,21 +25,28 @@ import {
   threadDigestAnchorStatus,
   threadReplyContext,
 } from "./outreach-gmail.mjs";
+import { discoverCandidateContact } from "./outreach-contact.mjs";
 import {
   acquireOutreachLock,
   acquireOutreachPollSlot,
   appendOutreachJournal,
+  claimOutreachExceptionAlert,
   createOutreachState,
   getOutreachState,
+  listOutreachExceptions,
   listOutreachStates,
   probeOutreachStore,
+  recordOutreachException,
   releaseOutreachLock,
+  releaseOutreachExceptionAlert,
   releaseOutreachPollSlot,
+  resolveOutreachException,
   saveOutreachState,
   storeConfigured,
 } from "./outreach-store.mjs";
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+const EXCEPTION_RETRY_MS = 5 * 60 * 1000;
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -119,18 +126,40 @@ export function requestOrdinal(request, history) {
   return index >= 0 ? index + 1 : rows.length + 1;
 }
 
-export function eligibleNewRequests(history, config = outreachConfig(), states = []) {
+export function eligibleNewRequests(
+  history,
+  config = outreachConfig(),
+  states = [],
+  exceptions = [],
+) {
   const delivered = new Set();
   for (const state of states || []) {
     for (const [requestId, record] of Object.entries(state?.matches || {})) {
       if (record?.sentAt) delivered.add(requestId);
     }
   }
+  const retryAuthorized = new Set(
+    (exceptions || [])
+      .filter((row) => (
+        row?.status === "open" &&
+        (
+          finiteDate(row?.lastSeenAt) == null ||
+          finiteDate(row?.lastSeenAt) <= Date.now() - EXCEPTION_RETRY_MS
+        )
+      ))
+      .map((row) => clean(row?.requestId))
+      .filter(Boolean),
+  );
   return (history || []).filter((request) => (
     REQUEST_STATUSES.has(request.status) &&
-    request.reachedOut !== true &&
-    request.createdAtMs != null &&
-    request.createdAtMs >= config.notBeforeMs &&
+    (
+      retryAuthorized.has(request.id) ||
+      (
+        request.reachedOut !== true &&
+        request.createdAtMs != null &&
+        request.createdAtMs >= config.notBeforeMs
+      )
+    ) &&
     !delivered.has(request.id)
   )).sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
 }
@@ -152,28 +181,50 @@ export function pendingBackfillRequests(history, states = []) {
   ));
 }
 
-function firstName(name) {
-  return clean(name).split(/\s+/)[0] || "there";
+function displayName(name) {
+  return clean(name).replace(/^[^\p{L}\p{N}]+/u, "").trim();
 }
 
-async function candidateContact(candidateUserId) {
+function firstName(name) {
+  return displayName(name).split(/\s+/)[0] || "there";
+}
+
+async function candidateContact(request, config) {
   const rows = await trpcGet("candidateUser.getCandidateUsersByIds", {
-    candidate_user_ids: [candidateUserId],
+    candidate_user_ids: [request.candidateUserId],
   });
   const record = (Array.isArray(rows) ? rows : [rows]).find(
-    (row) => clean(row?.id) === clean(candidateUserId),
+    (row) => clean(row?.id) === clean(request.candidateUserId),
   ) || (Array.isArray(rows) ? rows[0] : rows);
   const emails = Array.isArray(record?.emails) ? record.emails : [record?.email];
   const email = emails.map(normalizeEmail).find(Boolean) || "";
+  const name = displayName(record?.name || record?.candidate?.name || request.candidateName);
+  if (email) {
+    return {
+      name,
+      email,
+      source: "paraform",
+      discovery: null,
+    };
+  }
+  const discovery = await discoverCandidateContact({
+    candidateName: name,
+    mailbox: config.mailbox,
+  });
+  if (discovery.email) {
+    return {
+      name,
+      email: discovery.email,
+      source: discovery.confidence,
+      discovery,
+    };
+  }
   if (!email) {
     const error = new Error("candidate has no deliverable email");
     error.code = "OUTREACH_NO_EMAIL";
+    error.discovery = discovery;
     throw error;
   }
-  return {
-    name: clean(record?.name || record?.candidate?.name),
-    email,
-  };
 }
 
 export async function ensureMatchDigest(request) {
@@ -393,18 +444,23 @@ export async function processMatchRequest(
     throw error;
   }
   try {
-    const contact = await candidateContact(request.candidateUserId);
+    const contact = await candidateContact(request, config);
+    await resolveOutreachException(request.id, {
+      resolution: contact.source,
+    }).catch(() => {});
     let state = await getOutreachState(request.candidateUserId);
     if (!state) {
       state = await createOutreachState(request.candidateUserId, {
         candidateName: contact.name || request.candidateName,
         candidateEmail: contact.email,
+        candidateEmailSource: contact.source,
       });
     }
     state = {
       ...state,
       candidateName: contact.name || request.candidateName,
       candidateEmail: contact.email,
+      candidateEmailSource: contact.source,
     };
     const existingMatch = state.matches?.[request.id];
     if (existingMatch?.sentAt) return { action: "existing", state, request, match: existingMatch };
@@ -697,7 +753,52 @@ export async function processDueFollowup(
   }
 }
 
-async function actionableAlert(error, label) {
+function htmlEscape(value) {
+  return String(value || "").replace(
+    /[&<>"']/g,
+    (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[character],
+  );
+}
+
+export function missingEmailAlertCopy(request, discovery = {}) {
+  const suggestions = Array.isArray(discovery?.suggestedEmails)
+    ? discovery.suggestedEmails.filter(Boolean)
+    : [];
+  const suggestionText = suggestions.length
+    ? `Google lookup found: ${suggestions.join(", ")}. This was not corroborated by both Gmail and Calendar, so no email was sent.`
+    : "Gmail and Google Calendar did not produce one corroborated address.";
+  const candidate = displayName(request?.candidateName) || "Unknown candidate";
+  const role = clean(request?.roleName) || "Unknown role";
+  const company = clean(request?.companyName) || "Unknown company";
+  const lines = [
+    `Para AI outreach is blocked for ${candidate}.`,
+    `${role} @ ${company}`,
+    suggestionText,
+    "Add the correct email to the candidate's Paraform profile. The worker will retry automatically after the address is available.",
+  ];
+  return {
+    subject: `Action needed: missing email for ${candidate}`,
+    text: lines.join("\n\n"),
+    html: lines
+      .map((line) => `<div>${htmlEscape(line)}</div>`)
+      .join("\n<div><br></div>\n"),
+    slack: `🚨 Para AI outreach blocked: ${candidate} has no deliverable email for ${role} @ ${company}. ${suggestionText} Add the correct email in Paraform; the worker will retry automatically.`,
+  };
+}
+
+export async function handleOutreachFailure(
+  error,
+  request,
+  {
+    config = outreachConfig(),
+  } = {},
+) {
   const code = clean(error?.code || "OUTREACH_FAILED");
   if (!new Set([
     "AUTH_EXPIRED",
@@ -707,8 +808,39 @@ async function actionableAlert(error, label) {
     "GMAIL_SEND_UNKNOWN",
     "GMAIL_AUTH_FAILED",
   ]).has(code)) return;
+  if (code === "OUTREACH_NO_EMAIL" && request?.id) {
+    const record = await recordOutreachException({
+      request,
+      code,
+      discovery: error?.discovery || null,
+    });
+    const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
+    if (!alertClaimed) return record;
+    const copy = missingEmailAlertCopy(request, error?.discovery);
+    let notified = await notifySlack(copy.slack).catch(() => false);
+    if (!notified) {
+      const day = new Date().toISOString().slice(0, 10);
+      const actionKey = `missing-email-alert:${request.id}:${day}`;
+      notified = Boolean(await deliverMessage({
+        mailbox: config.mailbox,
+        message: {
+          actionKey,
+          from: `David Phillips <${config.mailbox}>`,
+          to: config.mailbox,
+          subject: copy.subject,
+          messageId: deterministicMessageId(actionKey),
+          bodyText: copy.text,
+          bodyHtml: copy.html,
+        },
+      }).catch(() => null));
+    }
+    if (!notified) {
+      await releaseOutreachExceptionAlert(request.id).catch(() => {});
+    }
+    return { ...record, notified };
+  }
   await notifySlack(
-    `🚨 Para AI outreach: ${code} for ${label}. No duplicate email will be attempted; review the outreach ledger.`,
+    `🚨 Para AI outreach: ${code} for ${request?.id || "scheduled follow-up"}. No duplicate email will be attempted; review the outreach ledger.`,
   ).catch(() => {});
 }
 
@@ -726,19 +858,25 @@ export async function runOutreachTick({
   const pollToken = await acquireOutreachPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!pollToken) return { enabled: true, processed: 0, reason: "poll_not_due" };
   try {
-    const [history, states] = await Promise.all([
+    const [history, states, exceptions] = await Promise.all([
       readSubmissionRequestHistory(),
       listOutreachStates(),
+      listOutreachExceptions(),
     ]);
     const candidatesWithNewMatch = new Set();
     const results = [];
-    for (const request of eligibleNewRequests(history, config, states).slice(0, config.batchSize)) {
+    for (const request of eligibleNewRequests(
+      history,
+      config,
+      states,
+      exceptions,
+    ).slice(0, config.batchSize)) {
       candidatesWithNewMatch.add(request.candidateUserId);
       try {
         const result = await processMatchRequest(request, history, { mode: "send", config });
         results.push({ action: result.action, requestId: request.id });
       } catch (error) {
-        await actionableAlert(error, request.id);
+        await handleOutreachFailure(error, request, { config }).catch(() => {});
         results.push({ action: "error", requestId: request.id, code: clean(error?.code || "OUTREACH_FAILED") });
       }
     }
@@ -759,7 +897,7 @@ export async function runOutreachTick({
           const result = await processDueFollowup(state.candidateUserId, { config, now });
           results.push({ action: result.action, followup: true });
         } catch (error) {
-          await actionableAlert(error, "scheduled follow-up");
+          await handleOutreachFailure(error, null, { config }).catch(() => {});
           results.push({ action: "error", followup: true, code: clean(error?.code || "OUTREACH_FAILED") });
         }
       }
@@ -772,6 +910,26 @@ export async function runOutreachTick({
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});
   }
+}
+
+export async function discoverOutreachRequestContact(
+  requestId,
+  {
+    config = outreachConfig(),
+  } = {},
+) {
+  const history = await readSubmissionRequestHistory();
+  const request = history.find((row) => row.id === clean(requestId));
+  if (!request) {
+    const error = new Error("submission request not found");
+    error.code = "OUTREACH_REQUEST_NOT_FOUND";
+    throw error;
+  }
+  const discovery = await discoverCandidateContact({
+    candidateName: displayName(request.candidateName),
+    mailbox: config.mailbox,
+  });
+  return { request, discovery };
 }
 
 export async function draftOutreachRequest(requestId, {
@@ -805,6 +963,7 @@ export async function outreachHealth({
     storeConfigured: config.storeConfigured,
     mailbox: config.mailbox,
     executionReady: outreachExecutionEnabled(config),
+    contactRecoveryConfigured: config.gmailConfigured,
     gmail: probe && config.gmailConfigured ? "checking" : null,
     store: probe && config.storeConfigured ? "checking" : null,
   };

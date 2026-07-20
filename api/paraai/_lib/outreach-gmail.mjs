@@ -7,6 +7,8 @@ const SCOPES = Object.freeze([
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose",
 ]);
+export const GOOGLE_CALENDAR_READONLY_SCOPE =
+  "https://www.googleapis.com/auth/calendar.readonly";
 const tokenCache = new Map();
 let serviceAccountCache = null;
 
@@ -38,16 +40,30 @@ function serviceAccount() {
 }
 const base64urlJson = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 
-async function accessToken(mailbox, { fetchImpl = fetch, now = Date.now } = {}) {
+export async function delegatedGoogleAccessToken(
+  mailbox,
+  {
+    scopes = SCOPES,
+    fetchImpl = fetch,
+    now = Date.now,
+  } = {},
+) {
   const subject = clean(mailbox).toLowerCase();
-  const cached = tokenCache.get(subject);
+  const normalizedScopes = [...new Set((scopes || []).map(clean).filter(Boolean))].sort();
+  if (!normalizedScopes.length) {
+    const error = new Error("At least one Google OAuth scope is required");
+    error.code = "GOOGLE_SCOPE_REQUIRED";
+    throw error;
+  }
+  const cacheKey = `${subject}\0${normalizedScopes.join(" ")}`;
+  const cached = tokenCache.get(cacheKey);
   if (cached && cached.expiresAt - now() > 5 * 60_000) return cached.token;
   const key = serviceAccount();
   const issuedAt = Math.floor(now() / 1000);
   const header = base64urlJson({ alg: "RS256", typ: "JWT" });
   const payload = base64urlJson({
     iss: key.client_email,
-    scope: SCOPES.join(" "),
+    scope: normalizedScopes.join(" "),
     aud: TOKEN_URL,
     iat: issuedAt,
     exp: issuedAt + 3600,
@@ -74,7 +90,7 @@ async function accessToken(mailbox, { fetchImpl = fetch, now = Date.now } = {}) 
     throw error;
   }
   const expiresAt = now() + Math.max(300, Number(body.expires_in) || 3600) * 1000;
-  tokenCache.set(subject, { token: body.access_token, expiresAt });
+  tokenCache.set(cacheKey, { token: body.access_token, expiresAt });
   return body.access_token;
 }
 
@@ -86,7 +102,7 @@ async function gmailCall(
   const response = await fetchImpl(`${GMAIL_BASE}${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${await accessToken(mailbox, { fetchImpl })}`,
+      authorization: `Bearer ${await delegatedGoogleAccessToken(mailbox, { fetchImpl })}`,
       ...(data == null ? {} : { "content-type": "application/json" }),
     },
     ...(data == null ? {} : { body: JSON.stringify(data) }),
