@@ -67,10 +67,28 @@ export async function paraformCookie() {
     signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) throw new Error(`n8n variables read failed: ${response.status}`);
-  const item = ((await response.json())?.data || []).find((row) => row?.key === "PARAFORM_SESSION_COOKIE");
-  if (!item?.value) throw new Error("PARAFORM_SESSION_COOKIE not found in n8n variables");
-  cookieCache = item.value;
+  cookieCache = paraformCookieFromVariableRows(((await response.json())?.data) || []);
   return cookieCache;
+}
+
+// n8n caps one variable at 1,000 chars; a ~2 KB WorkOS seal is stored as two
+// ordered chunks selected by an explicit parts marker. Fail closed on any
+// inconsistent chunk state — mirrors lifecycle/_lib/clients.mjs exactly.
+export function paraformCookieFromVariableRows(rows = []) {
+  const variables = new Map(rows.map((entry) => [entry?.key, entry?.value]));
+  const parts = Number(variables.get("PARAFORM_SESSION_COOKIE_PARTS") || 0);
+  if (parts !== 0 && parts !== 2) {
+    throw new Error("PARAFORM_SESSION_COOKIE_PARTS_INVALID");
+  }
+  if (parts === 2) {
+    const first = variables.get("PARAFORM_SESSION_COOKIE_A");
+    const second = variables.get("PARAFORM_SESSION_COOKIE_B");
+    if (!first || !second) throw new Error("PARAFORM_SESSION_COOKIE_CHUNKS_INCOMPLETE");
+    return `${first}${second}`;
+  }
+  const legacy = variables.get("PARAFORM_SESSION_COOKIE");
+  if (!legacy) throw new Error("PARAFORM_SESSION_COOKIE not found in n8n variables");
+  return legacy;
 }
 
 export async function hasParaformCookie() {
