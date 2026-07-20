@@ -304,7 +304,10 @@ test("Google contact recovery requires one address corroborated by Gmail and Cal
     messages: [{
       payload: { headers: [
         { name: "From", value: "Serge-Eric Tremblay <set128@gmail.com>" },
-        { name: "To", value: "David Phillips <david@raydar.xyz>" },
+        {
+          name: "To",
+          value: "David Phillips <david@raydar.xyz>, Alzen Flores <alzen@raydargroup.com>",
+        },
       ] },
     }],
   };
@@ -320,6 +323,14 @@ test("Google contact recovery requires one address corroborated by Gmail and Cal
     gmailCandidateEvidence(gmailThread, "⚡Serge-Eric Tremblay", "david@raydar.xyz"),
     ["set128@gmail.com"],
   );
+  assert.deepEqual(gmailCandidateEvidence({
+    messages: [{
+      payload: { headers: [{
+        name: "To",
+        value: "Other Person <other@example.com>, Serge-Eric Tremblay <set128@gmail.com>, Another Person <another@example.com>",
+      }] },
+    }],
+  }, "Serge-Eric Tremblay", "david@raydar.xyz"), ["set128@gmail.com"]);
   assert.deepEqual(
     calendarCandidateEvidence(
       calendarEvents,

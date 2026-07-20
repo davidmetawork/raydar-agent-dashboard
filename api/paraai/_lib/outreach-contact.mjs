@@ -28,6 +28,28 @@ function extractEmails(value) {
   )];
 }
 
+function addressSegments(value) {
+  const segments = [];
+  let current = "";
+  let quoted = false;
+  let angleDepth = 0;
+  const raw = String(value || "");
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (character === '"' && raw[index - 1] !== "\\") quoted = !quoted;
+    if (!quoted && character === "<") angleDepth += 1;
+    if (!quoted && character === ">") angleDepth = Math.max(0, angleDepth - 1);
+    if (!quoted && angleDepth === 0 && character === ",") {
+      if (current.trim()) segments.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  if (current.trim()) segments.push(current.trim());
+  return segments;
+}
+
 function externalEmail(value, mailbox) {
   const email = normalizeEmail(value);
   if (!email || email === normalizeEmail(mailbox)) return "";
@@ -41,10 +63,12 @@ export function gmailCandidateEvidence(thread, candidateName, mailbox) {
   for (const message of thread?.messages || []) {
     for (const name of ["From", "To", "Cc"]) {
       const header = headerValue(message, name) || "";
-      if (!normalizeContactName(header).includes(wanted)) continue;
-      for (const email of extractEmails(header)) {
-        const candidate = externalEmail(email, mailbox);
-        if (candidate) emails.add(candidate);
+      for (const segment of addressSegments(header)) {
+        if (!normalizeContactName(segment).includes(wanted)) continue;
+        for (const email of extractEmails(segment)) {
+          const candidate = externalEmail(email, mailbox);
+          if (candidate) emails.add(candidate);
+        }
       }
     }
   }
