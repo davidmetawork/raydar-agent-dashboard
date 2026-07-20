@@ -26,6 +26,7 @@ import {
   threadReplyContext,
 } from "./outreach-gmail.mjs";
 import { discoverCandidateContact } from "./outreach-contact.mjs";
+import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import {
   acquireOutreachLock,
   acquireOutreachPollSlot,
@@ -161,6 +162,8 @@ export function eligibleNewRequests(
   );
   return (history || []).filter((request) => (
     REQUEST_STATUSES.has(request.status) &&
+    // GUARDRAIL: never outreach a protected recruiter's role (e.g. Kyra's).
+    !protectedRecruiterForRoleTitle(request.roleName) &&
     (
       retryAuthorized.has(request.id) ||
       (
@@ -182,6 +185,8 @@ export function pendingBackfillRequests(history, states = []) {
   }
   return (history || []).filter((request) => (
     REQUEST_STATUSES.has(request.status) &&
+    // GUARDRAIL: never backfill outreach for a protected recruiter's role.
+    !protectedRecruiterForRoleTitle(request.roleName) &&
     !delivered.has(request.id)
   )).sort((left, right) => (
     (left.createdAtMs ?? Number.MAX_SAFE_INTEGER) -

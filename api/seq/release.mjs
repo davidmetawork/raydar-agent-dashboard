@@ -4,6 +4,7 @@
 // the whole point of the delay) -> ensure role sequence (TPL) or target (SEQ) ->
 // enroll the clean ones -> backfill lead emails -> delete the delay project.
 import { cors, requireAuth, hasCookie, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, bookedSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
+import { protectedRecruiterForRoleTitle } from "./_lib/protected.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -38,6 +39,14 @@ export default async function handler(req, res) {
     const already = await enrolledElsewhereSet();
     const results = [];
     for (const p of due) {
+      // GUARDRAIL: never release a protected recruiter's delayed cohort (e.g.
+      // Kyra's). Remove the wrongful cohort so it can't email anyone.
+      const prot = protectedRecruiterForRoleTitle(p.key) || protectedRecruiterForRoleTitle(p.label);
+      if (prot) {
+        await deleteDelayProject(p.projectId).catch(() => {});
+        results.push({ label: p.label, enrolled: 0, protectedBlocked: true, recruiter: prot.displayName, note: "protected recruiter — cohort removed, not enrolled" });
+        continue;
+      }
       try {
         const members = await projectMembers(p.projectId);
         if (!members.length) { await deleteDelayProject(p.projectId); results.push({ label: p.label, enrolled: 0, note: "empty — removed" }); continue; }

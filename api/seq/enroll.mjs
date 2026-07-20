@@ -1,4 +1,5 @@
 import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, bookedSet, archiveImportSet, createDelayProject } from "./_lib/core.mjs";
+import { protectedRecruiterForRole } from "./_lib/protected.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -34,8 +35,11 @@ export default async function handler(req, res) {
     if (delayDays > 0) {
       const due = new Date(Date.now() + delayDays * 86400e3).toISOString().slice(0, 10);
       let scheduledTotal = 0, failedTotal = 0;
-      const createFailures = [], scheduled = [];
+      const createFailures = [], scheduled = [], protectedBlocked = [];
       for (const g of plan.groups) {
+        // GUARDRAIL: never enroll a protected recruiter's role (e.g. Kyra's).
+        const prot = protectedRecruiterForRole({ roleTitle: g.title });
+        if (prot) { protectedBlocked.push({ role: g.title, recruiter: prot.displayName, candidates: (g.rows || []).length }); continue; }
         const resolved = await mapPool(g.rows || [], 4, async (row) => {
           if (row.candidate_user_id) return { ok: true, cu: row.candidate_user_id, email: row.email };
           const url = (row.linkedinUrl || "").trim();
@@ -65,7 +69,7 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true, delayed: true, dueDate: due, sequence: plan.seq.name, sendAs: plan.sendAs,
         scheduledTotal, failedTotal, createFailures: createFailures.slice(0, 50),
-        groups: scheduled, ranAt: new Date().toISOString(),
+        protectedBlocked, groups: scheduled, ranAt: new Date().toISOString(),
       });
     }
 
@@ -75,8 +79,11 @@ export default async function handler(req, res) {
 
     const results = [];
     let createdTotal = 0, failedTotal = 0, skippedTotal = 0, skippedBookedTotal = 0, skippedArchiveTotal = 0;
-    const createFailures = [], skippedSample = [];
+    const createFailures = [], skippedSample = [], protectedBlocked = [];
     for (const g of plan.groups) {
+      // GUARDRAIL: never enroll a protected recruiter's role (e.g. Kyra's).
+      const prot = protectedRecruiterForRole({ roleTitle: g.title });
+      if (prot) { protectedBlocked.push({ role: g.title, recruiter: prot.displayName, candidates: (g.rows || []).length }); continue; }
       try {
         // 1) Resolve each row to a candidate_user_id (create-from-LinkedIn if new;
         //    idempotent by URL). Track isNew so we only booked-check pre-existing people.
@@ -152,7 +159,7 @@ export default async function handler(req, res) {
       enrolledTotal, createdTotal, failedTotal,
       skippedTotal: skippedTotal + skippedBookedTotal + skippedArchiveTotal, skippedInSequence: skippedTotal, skippedBookedTotal, skippedArchiveTotal,
       createFailures: createFailures.slice(0, 50),
-      skippedSample,
+      skippedSample, protectedBlocked,
       groups: results, ranAt: new Date().toISOString(),
     });
   } catch (e) {

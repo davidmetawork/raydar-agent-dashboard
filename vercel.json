@@ -23,6 +23,7 @@
   },
   "crons": [
     { "path": "/api/seq/release", "schedule": "0 16 * * *" },
-    { "path": "/api/paraai/worker", "schedule": "*/5 * * * *" }
+    { "path": "/api/paraai/worker", "schedule": "*/5 * * * *" },
+    { "path": "/api/seq/guardian", "schedule": "17 * * * *" }
   ]
 }
