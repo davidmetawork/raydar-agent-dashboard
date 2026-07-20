@@ -81,10 +81,15 @@ export async function hasParaformCookie() {
 // values start with "Fe26.2" and ride the `wos-session` cookie; legacy NextAuth
 // JWEs ("eyJ...") ride `__Secure-next-auth.session-token`. Auto-pick the name from
 // the value so a cookie refresh stays a value-only swap; PARAFORM_SESSION_COOKIE_NAME
-// overrides.
+// overrides (allowlisted).
+const PARAFORM_COOKIE_NAMES = new Set(["wos-session", "__Secure-next-auth.session-token"]);
 export function paraformCookieName(value) {
-  return process.env.PARAFORM_SESSION_COOKIE_NAME
-    || (String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token");
+  const override = process.env.PARAFORM_SESSION_COOKIE_NAME;
+  if (override) {
+    if (!PARAFORM_COOKIE_NAMES.has(override.trim())) throw new Error("PARAFORM_SESSION_COOKIE_NAME_INVALID");
+    return override.trim();
+  }
+  return String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token";
 }
 
 async function paraformHeaders() {
