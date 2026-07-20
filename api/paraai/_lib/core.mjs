@@ -77,11 +77,22 @@ export async function hasParaformCookie() {
   try { return Boolean(await paraformCookie()); } catch { return false; }
 }
 
+// Paraform migrated from NextAuth to WorkOS (2026-07): iron-sealed WorkOS session
+// values start with "Fe26.2" and ride the `wos-session` cookie; legacy NextAuth
+// JWEs ("eyJ...") ride `__Secure-next-auth.session-token`. Auto-pick the name from
+// the value so a cookie refresh stays a value-only swap; PARAFORM_SESSION_COOKIE_NAME
+// overrides.
+export function paraformCookieName(value) {
+  return process.env.PARAFORM_SESSION_COOKIE_NAME
+    || (String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token");
+}
+
 async function paraformHeaders() {
+  const value = await paraformCookie();
   return {
     accept: "application/json",
     "content-type": "application/json",
-    cookie: `__Secure-next-auth.session-token=${await paraformCookie()}`,
+    cookie: `${paraformCookieName(value)}=${value}`,
   };
 }
 

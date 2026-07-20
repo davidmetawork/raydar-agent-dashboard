@@ -71,10 +71,20 @@ export async function requireAuth(req, res) {
 
 export function hasCookie() { return !!COOKIE; }
 
+// Paraform migrated from NextAuth to WorkOS (2026-07): iron-sealed WorkOS session
+// values start with "Fe26.2" and ride the `wos-session` cookie; legacy NextAuth
+// JWEs ("eyJ...") ride `__Secure-next-auth.session-token`. Auto-pick the name from
+// the value so a cookie refresh stays a value-only swap; PARAFORM_SESSION_COOKIE_NAME
+// overrides.
+export function paraformCookieName(value) {
+  return process.env.PARAFORM_SESSION_COOKIE_NAME
+    || (String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token");
+}
+
 export const headers = () => ({
   accept: "application/json",
   "content-type": "application/json",
-  cookie: `__Secure-next-auth.session-token=${COOKIE}`,
+  cookie: `${paraformCookieName(COOKIE)}=${COOKIE}`,
 });
 const env = (json) => ({ json, meta: { values: {}, v: 1 } });
 const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
