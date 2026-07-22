@@ -1422,6 +1422,7 @@
         if(!j || !j.ok) throw new Error((j && j.error) || "bad");
         rosterRows = j.rows || [];
         rosterAt = Date.now();
+        cdApplyPending();   // a stale edge-cached feed must not revert a just-saved edit
         renderRoster();
         refreshRosterParaAI(force === true);
       }catch(e){
@@ -1732,6 +1733,69 @@
       renderRoster();
     }
 
+    // ---- Read-after-write guard for manual roster edits ----------------------
+    // The canonical /api/roster feed is edge-cached (stale-while-revalidate) and
+    // has a short in-process gist cache, so a refresh or tab re-open right after
+    // an edit can re-read a PRE-write snapshot and visibly revert the change —
+    // the "I set the outcome but it didn't save / had to do it twice" report.
+    // The write itself is durable (POST /api/roster-note is the single writer);
+    // only the read lags. So we stash every server-ACKed edit in localStorage
+    // briefly and re-apply it over each roster load until a fresh read already
+    // reflects it (server value matches) or it ages out. Purely additive: a
+    // confirmed read clears it, a genuine later change overwrites it.
+    const CD_PENDING_LS = "cdPendingEdits";
+    const CD_PENDING_TTL = 15 * 60 * 1000;   // safety backstop; reads normally confirm within seconds
+    const cdStr = (x) => String(x ?? "");
+    function cdLoadPending(){
+      try{
+        const m = JSON.parse(localStorage.getItem(CD_PENDING_LS) || "{}");
+        const now = Date.now(); let changed = false;
+        for(const [k,v] of Object.entries(m)){
+          if(!v || typeof v!=="object" || !v.fields || now-(v.at||0) > CD_PENDING_TTL){ delete m[k]; changed = true; }
+        }
+        if(changed) localStorage.setItem(CD_PENDING_LS, JSON.stringify(m));
+        return (m && typeof m==="object") ? m : {};
+      }catch{ return {}; }
+    }
+    function cdSavePending(m){ try{ localStorage.setItem(CD_PENDING_LS, JSON.stringify(m)); }catch{} }
+    // Record a server-ACKed edit as { v: new value, was: pre-edit value }. Storing
+    // `was` lets the reconcile tell a stale read (server still shows `was`) apart
+    // from a genuine newer change made elsewhere (server shows something else) —
+    // so this never overrides a real concurrent update; it only heals stale reads.
+    function cdRememberEdit(key, field, value, was){
+      if(!key) return;
+      const m = cdLoadPending();
+      const e = m[key] || { fields:{}, at:0 };
+      e.fields[field] = { v: value, was };
+      e.at = Date.now();
+      m[key] = e; cdSavePending(m);
+    }
+    // Re-apply not-yet-confirmed local edits over freshly loaded rows. Runs after
+    // every /api/roster load, before render, so a stale cached feed never reverts
+    // a saved edit. Per field: server already shows my value → confirmed, drop;
+    // server still shows the pre-edit value → stale read, re-apply; server shows
+    // anything else → a newer real change, yield to it and drop.
+    function cdApplyPending(){
+      const m = cdLoadPending();
+      const keys = Object.keys(m);
+      if(!keys.length || !Array.isArray(rosterRows) || !rosterRows.length) return;
+      const byKey = new Map(rosterRows.map(r=>[r.key, r]));
+      let changed = false;
+      for(const key of keys){
+        const row = byKey.get(key);
+        if(!row) continue;   // row outside the current window — leave pending, TTL clears it
+        const fields = m[key].fields || {};
+        for(const [field, rec] of Object.entries(fields)){
+          const cur = cdStr(row[field]);
+          if(cur === cdStr(rec.v)){ delete fields[field]; changed = true; continue; }   // server caught up → confirmed
+          if(cur === cdStr(rec.was)){ row[field] = rec.v; continue; }                    // stale read → re-apply, keep pending
+          delete fields[field]; changed = true;                                          // newer real change → yield
+        }
+        if(!Object.keys(fields).length){ delete m[key]; changed = true; }
+      }
+      if(changed) cdSavePending(m);
+    }
+
     // Optimistic write (same pattern as setAction): mutate + re-render instantly,
     // persist via /api/roster-note, roll back with a small inline error on failure.
     async function cdPersist(row, field, value){
@@ -1746,6 +1810,7 @@
         });
         const j = await r.json().catch(()=>({}));
         if(!r.ok || !j.ok) throw new Error(j.error || ("HTTP "+r.status));
+        cdRememberEdit(row.key, field, value, prev);   // ACKed → survive a stale re-read/refresh
       }catch(e){
         row[field] = prev;                                   // roll back
         cdErr = { key: row.key, field };
