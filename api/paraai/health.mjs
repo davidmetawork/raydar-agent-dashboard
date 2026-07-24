@@ -40,7 +40,10 @@ export default async function handler(req, res) {
       autoSubmitApproved: auto.autoSubmitApproved,
       dryRun: auto.dryRun,
       notBeforePinned: auto.notBeforeMs != null,
-      consentCutoffPinned: auto.consentRequiredAtMs != null,
+      phase1CutoffPinned: auto.phase1DeployedAtMs != null,
+      organicExceptionCount: auto.organicExceptionBotIds?.size || 0,
+      resumeWaitMinutes: auto.resumeWaitMinutes,
+      maxStepAttempts: auto.maxStepAttempts,
       runnerConfigured: Boolean(process.env.PARAAI_AUTOMATION_RUNNER_KEY),
       recallVerificationConfigured: String(
         process.env.RECALL_SVIX_WEBHOOK_SECRET || process.env.RECALL_WORKSPACE_VERIFICATION_SECRET || "",
@@ -89,9 +92,10 @@ export default async function handler(req, res) {
     health.automation.ready = Boolean(
       health.submitReady &&
       automationExecutionEnabled(auto) &&
-      auto.consentRequiredAtMs != null &&
+      auto.phase1DeployedAtMs != null &&
       health.automation.runnerConfigured &&
       health.automation.recallVerificationConfigured &&
+      health.automation.slackConfigured &&
       health.automation.queue !== null,
     );
     health.ok = health.submitReady;

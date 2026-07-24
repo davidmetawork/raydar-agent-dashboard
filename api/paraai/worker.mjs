@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import {
   automationConfig,
   enqueueBackfill,
+  enqueueOrganicExceptions,
   recoverRecentSuccessfulCalls,
   runAutoTick,
 } from "./_lib/auto.mjs";
@@ -54,6 +55,15 @@ export default async function handler(req, res) {
       const botIds = Array.isArray(body.botIds) ? body.botIds.slice(0, 10) : [];
       if (!botIds.length) return res.status(400).json({ ok: false, error: "botIds_required" });
       return res.status(200).json({ ok: true, results: await enqueueBackfill(botIds), queue: await getAutoQueueStats() });
+    }
+    if (mode === "phase1-exceptions") {
+      const results = await enqueueOrganicExceptions();
+      return res.status(200).json({
+        ok: true,
+        enqueued: results.filter((result) => result.enqueued).length,
+        total: results.length,
+        queue: await getAutoQueueStats(),
+      });
     }
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });

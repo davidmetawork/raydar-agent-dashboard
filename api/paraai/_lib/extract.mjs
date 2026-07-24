@@ -59,6 +59,7 @@ const schema = {
     },
     obstacles: { type: "array", items: { type: "string" } },
     workplaceTypes: { type: "array", items: { type: "string", enum: [...WORKPLACE_TYPES] } },
+    excludedWorkplaceTypes: { type: "array", items: { type: "string", enum: [...WORKPLACE_TYPES] } },
     roleTypes: { type: "array", items: { type: "string" } },
     compensation: {
       type: "object",
@@ -94,7 +95,7 @@ const prompt = `Extract only preferences and facts the candidate explicitly stat
 
 Rules:
 - Never infer or invent a missing value. Omit it or return an empty array/null.
-- Normalize workplace to REMOTE, HYBRID, or ON_SITE only.
+- Normalize explicitly acceptable workplace types to REMOTE, HYBRID, or ON_SITE only. Put explicitly rejected workplace types in excludedWorkplaceTypes. For "remote only" or an explicit refusal to go into an office, record REMOTE as acceptable and HYBRID and ON_SITE as rejected. Do not broaden "flexible" or a single mentioned workplace type in extraction; routing applies that policy. Preserve workplace-flexible wording verbatim in searchActivity.
 - Map explicitly acceptable target locations to Paraform's exact location enum in paraformLocations: ${[...PARAAI_LOCATIONS].join(", ")}. Put explicitly rejected locations in excludedParaformLocations. Set relocation.open true only when the candidate explicitly says they are willing to relocate or move for a role, summarize limits in relocation.scope, and preserve a short exact candidate quote in relocation.evidence. Do not treat the candidate's current residence as a preference unless they explicitly say they want to work there. Remote is a workplace type, not a location. New Jersey maps to new_york only when it is explicitly an acceptable target location.
 - Normalize funding to PRE_SEED, SEED, SERIES_A, SERIES_B, SERIES_C, SERIES_D_PLUS, or UNKNOWN. UNKNOWN means the explicit Paraform option “Other (e.g. Legal, Healthcare)”; it never means no preference. If the candidate has no company-stage preference, return an empty array so a human can review it.
 - Set openToStartups true only when the candidate explicitly says they are broadly open to startups without restricting that openness to a particular funding stage. Preserve a short candidate quote in startupOpennessEvidence. Put explicitly rejected stages in excludedCompanyStages. A specific stage preference remains specific and must not be broadened by the extractor.
@@ -175,6 +176,7 @@ export function normalizeExtraction(raw = {}) {
     },
     obstacles: strings(raw.obstacles),
     workplaceTypes: enumStrings(raw.workplaceTypes, WORKPLACE_TYPES),
+    excludedWorkplaceTypes: enumStrings(raw.excludedWorkplaceTypes, WORKPLACE_TYPES),
     roleTypes: strings(raw.roleTypes),
     compensation,
     companyStages: enumStrings(raw.companyStages, FUNDING_ROUNDS),
@@ -186,7 +188,7 @@ export function normalizeExtraction(raw = {}) {
   };
 }
 
-export function extraNote(extracted) {
+export function extraNote(extracted, preferenceRouting = null) {
   const e = normalizeExtraction(extracted);
   const rows = [
     ["Other interview processes", [e.otherInterviewProcesses.count != null ? `${e.otherInterviewProcesses.count} process(es)` : "", ...e.otherInterviewProcesses.stages, e.otherInterviewProcesses.details].filter(Boolean).join(" · ")],
@@ -202,7 +204,37 @@ export function extraNote(extracted) {
     ["Company headcount", e.companyHeadcounts.join(", ")],
     ["Role types", e.roleTypes.join(", ")],
   ].filter(([, value]) => value);
-  return rows.length ? ["### Raydar screening preferences", ...rows.map(([label, value]) => `- **${label}:** ${value}`)].join("\n") : "";
+  const routingLabels = {
+    workplaceTypes: "Workplace",
+    idealFundingRounds: "Company stages",
+    locations: "Locations",
+    salaryMin: "Minimum base salary",
+    requiresSponsorship: "Visa sponsorship",
+  };
+  const routeValue = (field, value, route) => {
+    if (value == null || value === "" || (Array.isArray(value) && !value.length)) return "not stated";
+    if (field === "salaryMin" && Number.isFinite(Number(value))) {
+      return `${route?.currency || "$"}${route?.currency ? " " : ""}${Number(value).toLocaleString("en-US")}`;
+    }
+    return (Array.isArray(value) ? value : [value]).map(String).join(", ");
+  };
+  const routingRows = preferenceRouting && typeof preferenceRouting === "object"
+    ? Object.entries(preferenceRouting)
+      .filter(([field, route]) => routingLabels[field] && route && typeof route === "object")
+      .map(([field, route]) => [
+        routingLabels[field],
+        `${routeValue(field, route.stated, route)} → ${routeValue(field, route.routed, route)} (${route.rule || "approved routing"})`,
+      ])
+    : [];
+  const sections = [];
+  if (rows.length) {
+    sections.push("### Raydar screening preferences", ...rows.map(([label, value]) => `- **${label}:** ${value}`));
+  }
+  if (routingRows.length) {
+    if (sections.length) sections.push("");
+    sections.push("### Para AI preference routing", ...routingRows.map(([label, value]) => `- **${label}:** ${value}`));
+  }
+  return sections.join("\n");
 }
 
 export function enforceTranscriptSemantics(extracted, rows = []) {
