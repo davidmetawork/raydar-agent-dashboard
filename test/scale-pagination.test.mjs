@@ -94,6 +94,34 @@ test("Para AI candidate ID reads use the exact point lookup", async () => {
   assert.equal(row.id, "candidate-7");
 });
 
+test("Para AI point lookup keeps the live root candidate-user record", async () => {
+  const row = await findCrmCandidate("candidate-user-7", {
+    async trpcGetImpl() {
+      return {
+        id: "candidate-user-7",
+        candidate: { id: "linkedin-person-99" },
+        emails: ["candidate@example.test"],
+      };
+    },
+  });
+  assert.equal(row.id, "candidate-user-7");
+  assert.equal(row.candidate.id, "linkedin-person-99");
+});
+
+test("Para AI point lookup still fails closed on a true candidate-user mismatch", async () => {
+  await assert.rejects(
+    findCrmCandidate("candidate-user-7", {
+      async trpcGetImpl() {
+        return {
+          id: "candidate-user-8",
+          candidate: { id: "linkedin-person-99" },
+        };
+      },
+    }),
+    /CRM_POINT_LOOKUP_ID_MISMATCH/u,
+  );
+});
+
 test("sequence project membership exhausts all pages and deduplicates overlap", async () => {
   const cursors = [];
   const fetchImpl = async (url) => {

@@ -121,15 +121,19 @@ async function paraformHeaders() {
 
 function vendorError(response, body) {
   if (response.status === 401) {
-    clearCookieCache();
-    const error = new Error("AUTH_EXPIRED");
-    error.code = "AUTH_EXPIRED";
-    return error;
+    return authExpired();
   }
   const message = body?.error?.json?.message || body?.message || `Paraform HTTP ${response.status}`;
   const error = new Error(String(message));
   error.code = body?.error?.json?.code || `HTTP_${response.status}`;
   error.status = response.status;
+  return error;
+}
+
+function authExpired() {
+  clearCookieCache();
+  const error = new Error("AUTH_EXPIRED");
+  error.code = "AUTH_EXPIRED";
   return error;
 }
 
@@ -362,7 +366,6 @@ export async function scanCrm({
 function candidateReadRow(value) {
   return value?.candidate_user
     || value?.candidateUser
-    || value?.candidate
     || value?.item
     || value
     || null;
