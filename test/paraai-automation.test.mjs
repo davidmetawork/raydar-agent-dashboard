@@ -8,8 +8,18 @@ import {
   automationApprovalSource,
   automationCallCutoff,
   automationCallReadiness,
+  automationConfig,
   automationExecutionEnabled,
+  automationFailureTransition,
+  automationFreezeDecision,
+  automationGraceDecision,
   automationRetryDecision,
+  automationStepSuccessTransition,
+  enqueueOrganicExceptions,
+  needsPhase1Routing,
+  resolveCallEndedAt,
+  trackedAutomationStep,
+  unstoredPhase1FreezeDecision,
 } from "../api/paraai/_lib/auto.mjs";
 import { enforceTranscriptSemantics } from "../api/paraai/_lib/extract.mjs";
 import { buildPreferences } from "../api/paraai/_lib/pipeline.mjs";
@@ -98,7 +108,6 @@ function greenJob(overrides = {}) {
 
 const eligibilityConfig = {
   strictScreenerSource: true,
-  consentRequiredAtMs: Date.parse("2026-07-16T19:00:00.000Z"),
 };
 
 test("Recall webhook verification accepts an authentic raw-body signature", () => {
@@ -190,7 +199,7 @@ test("Recall intake remains paused until every continuous-automation gate is ope
     autoSubmitApproved: true,
     dryRun: false,
     notBeforeMs: Date.parse("2026-07-16T20:00:00.000Z"),
-    consentRequiredAtMs: Date.parse("2026-07-16T19:00:00.000Z"),
+    phase1DeployedAtMs: Date.parse("2026-07-25T00:00:00.000Z"),
   };
   assert.equal(automationExecutionEnabled(live), true);
   for (const override of [
@@ -200,10 +209,14 @@ test("Recall intake remains paused until every continuous-automation gate is ope
     { autoSubmitApproved: false },
     { dryRun: true },
     { notBeforeMs: null },
-    { consentRequiredAtMs: null },
+    { phase1DeployedAtMs: null },
   ]) {
     assert.equal(automationExecutionEnabled({ ...live, ...override }), false);
   }
+  assert.equal(automationExecutionEnabled({
+    ...live,
+    consentRequiredAtMs: null,
+  }), true, "the retired consent cutoff cannot pause automation");
 });
 
 test("automation cutoff rejects old webhook jobs but preserves explicit backfill authority", () => {
@@ -223,6 +236,257 @@ test("automation cutoff rejects old webhook jobs but preserves explicit backfill
     allowed: true,
     reason: null,
   });
+});
+
+test("automation config removes consent and pins Phase 1 safety controls", () => {
+  const config = automationConfig({
+    PARAAI_AUTOMATION_APPROVED: "true",
+    PARAAI_AUTO_DETECT_ENABLED: "true",
+    PARAAI_AUTO_PREPARE_ENABLED: "true",
+    PARAAI_AUTOSUBMIT_APPROVED: "true",
+    PARAAI_AUTOMATION_DRY_RUN: "false",
+    PARAAI_AUTO_NOT_BEFORE: "2026-07-16T20:00:00.000Z",
+    PARAAI_PHASE1_DEPLOYED_AT: "2026-07-25T00:00:00.000Z",
+    PARAAI_ORGANIC_EXCEPTION_BOT_IDS: "bot_12345678,invalid",
+    PARAAI_RESUME_WAIT_MINUTES: "60",
+    PARAAI_MAX_STEP_ATTEMPTS: "20",
+    PARAAI_CONSENT_REQUIRED_AT: "invalid-retired-value",
+  });
+  assert.equal(config.phase1DeployedAtMs, Date.parse("2026-07-25T00:00:00.000Z"));
+  assert.deepEqual([...config.organicExceptionBotIds], ["bot_12345678"]);
+  assert.equal(config.resumeWaitMinutes, 60);
+  assert.equal(config.maxStepAttempts, 20);
+  assert.equal("consentRequiredAtMs" in config, false);
+  assert.equal(automationExecutionEnabled(config), true);
+});
+
+test("call end timestamp precedence and one-hour grace are deterministic", () => {
+  assert.equal(resolveCallEndedAt({
+    endedAt: "2026-07-24T12:45:00.000Z",
+    joinAt: "2026-07-24T12:00:00.000Z",
+    durationSecs: 1800,
+  }), Date.parse("2026-07-24T12:45:00.000Z"));
+  assert.equal(resolveCallEndedAt({
+    joinAt: "2026-07-24T12:00:00.000Z",
+    durationSecs: 2700,
+  }), Date.parse("2026-07-24T12:45:00.000Z"));
+  assert.equal(
+    resolveCallEndedAt({}, "2026-07-24T12:46:00.000Z"),
+    Date.parse("2026-07-24T12:46:00.000Z"),
+  );
+
+  const job = { callEndedAt: "2026-07-24T12:45:00.000Z" };
+  const config = { resumeWaitMinutes: 60 };
+  assert.deepEqual(
+    automationGraceDecision(job, config, Date.parse("2026-07-24T13:44:59.999Z")),
+    {
+      ready: false,
+      dueAt: Date.parse("2026-07-24T13:45:00.000Z"),
+      reason: "one-hour post-call grace period",
+    },
+  );
+  assert.deepEqual(
+    automationGraceDecision(job, config, Date.parse("2026-07-24T13:45:00.000Z")),
+    {
+      ready: true,
+      dueAt: Date.parse("2026-07-24T13:45:00.000Z"),
+      reason: null,
+    },
+  );
+});
+
+test("Phase 1 freezes pre-deploy jobs except explicit organic and backfill authority", () => {
+  const config = {
+    phase1DeployedAtMs: Date.parse("2026-07-25T00:00:00.000Z"),
+    organicExceptionBotIds: new Set(["bot_except_123"]),
+  };
+  assert.equal(automationFreezeDecision({
+    id: "bot_old_1234",
+    createdAt: "2026-07-24T23:59:59.999Z",
+  }, config).frozen, true);
+  assert.equal(automationFreezeDecision({
+    id: "bot_old_1234",
+    createdAt: null,
+  }, config).frozen, true);
+  assert.deepEqual(automationFreezeDecision({
+    id: "bot_new_1234",
+    createdAt: "2026-07-25T00:00:00.000Z",
+  }, config), {
+    frozen: false,
+    mode: "organic",
+    reason: null,
+  });
+  assert.equal(automationFreezeDecision({
+    id: "bot_except_123",
+    createdAt: "2026-07-20T00:00:00.000Z",
+  }, config).mode, "organic_exception");
+  assert.equal(automationFreezeDecision({
+    id: "bot_old_1234",
+    createdAt: "2026-07-20T00:00:00.000Z",
+  }, config, {
+    queueSource: "authorized_backfill",
+  }).mode, "authorized_backfill");
+
+  const oldUnstored = unstoredPhase1FreezeDecision(
+    "bot_old_5678",
+    {
+      joinAt: "2026-07-24T22:55:00.000Z",
+      durationSecs: 300,
+    },
+    config,
+  );
+  assert.equal(oldUnstored.frozen, true);
+  assert.equal(oldUnstored.endedAt, Date.parse("2026-07-24T23:00:00.000Z"));
+  assert.equal(unstoredPhase1FreezeDecision(
+    "bot_new_5678",
+    {
+      joinAt: "2026-07-24T23:58:00.000Z",
+      durationSecs: 180,
+    },
+    config,
+  ).frozen, false);
+});
+
+test("Phase 1 reroutes legacy ready jobs and replays only the pinned organic exceptions", async () => {
+  assert.equal(needsPhase1Routing({
+    state: "ready_to_submit",
+    reviewPolicy: { provenance: {} },
+  }), true);
+  assert.equal(needsPhase1Routing({
+    state: "ready_to_submit",
+    reviewPolicy: { preferenceRouting: {} },
+  }), false);
+  assert.equal(needsPhase1Routing({
+    state: "awaiting_approval",
+    reviewPolicy: {},
+  }), false);
+
+  const calls = [];
+  const results = await enqueueOrganicExceptions({
+    config: {
+      organicExceptionBotIds: new Set([
+        "bot_except_123",
+        "bot_except_456",
+        "bot_except_789",
+        "bot_except_abc",
+        "bot_except_def",
+        "bot_except_ghi",
+      ]),
+    },
+    enqueueImpl: async (botId, options) => {
+      calls.push({ botId, options });
+      return { botId, enqueued: true };
+    },
+    now: 1_784_956_800_000,
+    eventNonce: () => `nonce-${calls.length + 1}`,
+  });
+  assert.equal(results.length, 6);
+  assert.deepEqual(calls.map(({ botId, options }) => ({
+    botId,
+    source: options.source,
+    dueAt: options.dueAt,
+    eventId: options.eventId,
+  })), [
+    {
+      botId: "bot_except_123",
+      source: "phase1_organic_exception",
+      dueAt: 1_784_956_800_000,
+      eventId: "phase1-organic:bot_except_123:nonce-1",
+    },
+    {
+      botId: "bot_except_456",
+      source: "phase1_organic_exception",
+      dueAt: 1_784_956_800_000,
+      eventId: "phase1-organic:bot_except_456:nonce-2",
+    },
+    {
+      botId: "bot_except_789",
+      source: "phase1_organic_exception",
+      dueAt: 1_784_956_800_000,
+      eventId: "phase1-organic:bot_except_789:nonce-3",
+    },
+    {
+      botId: "bot_except_abc",
+      source: "phase1_organic_exception",
+      dueAt: 1_784_956_800_000,
+      eventId: "phase1-organic:bot_except_abc:nonce-4",
+    },
+    {
+      botId: "bot_except_def",
+      source: "phase1_organic_exception",
+      dueAt: 1_784_956_800_000,
+      eventId: "phase1-organic:bot_except_def:nonce-5",
+    },
+    {
+      botId: "bot_except_ghi",
+      source: "phase1_organic_exception",
+      dueAt: 1_784_956_800_000,
+      eventId: "phase1-organic:bot_except_ghi:nonce-6",
+    },
+  ]);
+
+  let partialCalls = 0;
+  await assert.rejects(
+    enqueueOrganicExceptions({
+      config: { organicExceptionBotIds: new Set(["bot_except_123"]) },
+      enqueueImpl: async () => { partialCalls++; },
+    }),
+    (error) => error?.code === "PHASE1_EXCEPTION_COUNT_INVALID",
+  );
+  assert.equal(partialCalls, 0);
+});
+
+test("step failure counters are durable, independent, and reset only on same-step success", () => {
+  const base = {
+    id: "bot_12345678",
+    state: "ready_to_submit",
+    automation: {},
+    journal: [],
+  };
+  const first = automationFailureTransition(base, {
+    code: "HTTP_503",
+    message: "profile unavailable",
+    step: "prepare",
+  }, { maxAttempts: 2, now: Date.parse("2026-07-25T00:00:00.000Z") });
+  assert.equal(first.automation.stepFailures.prepare.count, 1);
+  assert.deepEqual(
+    {
+      code: first.journal.at(-1).code,
+      message: first.journal.at(-1).message,
+      step: first.journal.at(-1).step,
+    },
+    { code: "HTTP_503", message: "profile unavailable", step: "prepare" },
+  );
+  const other = automationFailureTransition(first, {
+    code: "AUTH_EXPIRED",
+    message: "session expired",
+    step: "submit",
+  }, { maxAttempts: 2, now: Date.parse("2026-07-25T00:01:00.000Z") });
+  assert.equal(other.automation.stepFailures.prepare.count, 1);
+  assert.equal(other.automation.stepFailures.submit.count, 1);
+  const reset = automationStepSuccessTransition(other, "prepare");
+  assert.equal(reset.automation.stepFailures.prepare, undefined);
+  assert.equal(reset.automation.stepFailures.submit.count, 1);
+  const ceiling = automationFailureTransition(reset, {
+    code: "AUTH_EXPIRED",
+    message: "session still expired",
+    step: "submit",
+  }, { maxAttempts: 2, now: Date.parse("2026-07-25T00:02:00.000Z") });
+  assert.equal(ceiling.state, "needs_review");
+  assert.equal(ceiling.reviewReasons[0].code, "technical_failure_ceiling");
+  assert.match(ceiling.reviewReasons[0].message, /session still expired/);
+});
+
+test("worker step tracking preserves earlier successes when a later step fails", async () => {
+  const succeeded = new Set();
+  assert.equal(await trackedAutomationStep("call_read", async () => "ok", succeeded), "ok");
+  await assert.rejects(
+    trackedAutomationStep("prepare", async () => {
+      throw new Error("profile unavailable");
+    }, succeeded),
+    (error) => error?.step === "prepare",
+  );
+  assert.deepEqual([...succeeded], ["call_read"]);
 });
 
 test("final transcript events stop retrying settled no-shows without racing late success artifacts", () => {
@@ -330,12 +594,13 @@ test("transient pre-write failures retry with bounded backoff while proven busin
   }
 });
 
-test("a returned preparation error remains queued for the retry policy", async () => {
+test("a returned preparation error carries a structured durable failure", async () => {
   const source = await readFile(new URL("../api/paraai/_lib/auto.mjs", import.meta.url), "utf8");
   assert.match(
     source,
-    /if \(job\.state === "error"\)[\s\S]*automationRetryDecision\(job\.error\?\.code, job\.state, queueAttempts\)/,
+    /if \(job\.state === "error"\)[\s\S]*normalizeFailureRecord\([\s\S]*automationRetryDecision\([\s\S]*failure,/,
   );
+  assert.match(source, /persistAutomationFailure\([\s\S]*result\.failure/);
 });
 
 test("paused signed Recall completion is durably queued before a 202 acknowledgement", async () => {
@@ -368,7 +633,8 @@ test("paused signed Recall completion is durably queued before a 202 acknowledge
       autoSubmitApproved: true,
       dryRun: false,
       notBeforeMs: webhookTimestamp * 1000,
-      consentRequiredAtMs: webhookTimestamp * 1000,
+      phase1DeployedAtMs: webhookTimestamp * 1000,
+      resumeWaitMinutes: 60,
     }),
   });
   assert.equal(response.status, 202);
@@ -382,6 +648,8 @@ test("paused signed Recall completion is durably queued before a 202 acknowledge
   assert.equal(enqueued[0].botId, "bot_12345678");
   assert.equal(enqueued[0].options.source, "recall:transcript.done");
   assert.equal(enqueued[0].options.eventId, webhookId);
+  assert.equal(enqueued[0].options.callEndedAt, new Date(webhookTimestamp * 1000).toISOString());
+  assert.equal(enqueued[0].options.dueAt, (webhookTimestamp + 3600) * 1000);
 });
 
 test("Recall intake rejects bad signatures and ignores irrelevant events without touching the queue", async () => {
@@ -465,36 +733,30 @@ test("automatic eligibility admits a complete, source-verified green-lane job", 
   });
 });
 
-test("automatic eligibility requires consent only on and after the pinned cutoff", () => {
-  const withoutConsent = {
-    extracted: { marketStatus: { consentToTalentNetwork: null } },
-  };
-  const beforeCutoff = greenJob({
-    callStartedAt: "2026-07-16T18:59:59.999Z",
-    ...withoutConsent,
-  });
-  const atCutoff = greenJob({
-    callStartedAt: "2026-07-16T19:00:00.000Z",
-    ...withoutConsent,
-  });
-  assert.equal(autoEligibility(beforeCutoff, eligibilityConfig).eligible, true);
-  assert.deepEqual(autoEligibility(atCutoff, eligibilityConfig).reasons, ["talent-network consent"]);
+test("automatic eligibility never gates on consent or market evidence", () => {
+  const result = autoEligibility(greenJob({
+    callStartedAt: null,
+    extracted: {
+      marketStatus: {
+        activelyOnMarket: false,
+        openToOpportunities: false,
+        consentToTalentNetwork: false,
+        evidence: [],
+        evidenceVerified: false,
+        consentVerifiedFromTranscript: false,
+      },
+    },
+  }), eligibilityConfig);
+  assert.deepEqual(result, { eligible: true, reasons: [] });
 });
 
-test("automatic eligibility cannot bypass the consent cutoff with a missing call timestamp", () => {
-  assert.deepEqual(
-    autoEligibility(greenJob({ callStartedAt: null }), eligibilityConfig).reasons,
-    ["call timestamp"],
-  );
-});
-
-test("automatic eligibility fails closed for unverified source and missing resume", () => {
+test("automatic eligibility leaves resume handling to the timed resume gate", () => {
   const result = autoEligibility(greenJob({
     callSourceVerified: false,
     submission: { resumeUri: "" },
   }), eligibilityConfig);
   assert.equal(result.eligible, false);
-  assert.deepEqual([...result.reasons].sort(), ["call source", "resume"]);
+  assert.deepEqual(result.reasons, ["call source"]);
 });
 
 test("OTE survives only when candidate language literally discusses OTE", () => {

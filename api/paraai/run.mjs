@@ -1,10 +1,26 @@
 import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
-import { enrollJob, loadJob, prepareJob, reconcileSubmittedJob, refreshMatches, submitJob } from "./_lib/pipeline.mjs";
+import {
+  applyLadderAndSubmit,
+  enrollJob,
+  loadJob,
+  prepareJob,
+  reconcileSubmittedJob,
+  refreshMatches,
+  submitJob,
+} from "./_lib/pipeline.mjs";
 import { acquireJobLock, releaseJobLock, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
-const ACTIONS = new Set(["prepare", "submit", "reconcile-submit", "refresh-matches", "enroll", "no-match-enroll"]);
+const ACTIONS = new Set([
+  "prepare",
+  "submit",
+  "apply-ladder-submit",
+  "reconcile-submit",
+  "refresh-matches",
+  "enroll",
+  "no-match-enroll",
+]);
 const ALERT_CODES = new Set([
   "AUTH_EXPIRED", "SUBMIT_WRITE_FAILED", "SUBMIT_WRITE_UNKNOWN", "SUBMIT_NOT_VISIBLE", "ENROLL_WRITE_FAILED",
   "ENROLL_NOT_VISIBLE", "GLOBAL_EMAIL_NOT_VISIBLE", "LEAD_EMAIL_NOT_VISIBLE",
@@ -64,6 +80,7 @@ export default async function handler(req, res) {
         return res.status(409).json({ ok: false, error: "revision_conflict", job });
       }
       if (action === "submit") job = await submitJob(job, body);
+      if (action === "apply-ladder-submit") job = await applyLadderAndSubmit(job);
       if (action === "reconcile-submit") job = await reconcileSubmittedJob(job);
       if (action === "refresh-matches") job = await refreshMatches(job);
       if (action === "enroll") job = await enrollJob(job, body);

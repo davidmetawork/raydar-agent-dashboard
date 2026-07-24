@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 import { candidateAlreadySubmitted, candidateProfileInfo, clearCookieCache, fetchCall, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { PARAAI_LOCATIONS, extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
-import { PARAAI_SALARY_CAP, STATES, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { PARAAI_SALARY_CAP, STATES, buildPreferences, existingTalentNetworkTransition, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 import { reclaimableLegacyJobLock } from "../api/paraai/_lib/store.mjs";
 
@@ -210,7 +210,9 @@ test("native candidate preferences are a fallback for missing transcript enums",
     last_funding_round: ["SERIES_B"], visa: ["Available"], salary_min: 350000,
   });
   assert.deepEqual(preferences.locations, ["texas", "florida"]);
-  assert.deepEqual(preferences.idealFundingRounds, ["SERIES_B"]);
+  assert.deepEqual(preferences.idealFundingRounds, [
+    "SEED", "SERIES_A", "SERIES_B", "SERIES_C", "SERIES_D_PLUS", "UNKNOWN",
+  ]);
   assert.deepEqual(preferences.requiresSponsorship, ["Available"]);
   assert.equal(preferences.salaryMin, 200000);
 });
@@ -243,6 +245,24 @@ test("Paraform submission acceptance is asynchronous and recognizes native statu
   assert.equal(candidateAlreadySubmitted({ profile: { has_application_submission_ever: true } }), true);
   assert.equal(candidateAlreadySubmitted({ matchingPoolStatus: "RECRUITER_ON_MARKET" }), true);
   assert.equal(candidateAlreadySubmitted({ matching_pool_status: "NOT_SUBMITTED" }), false);
+});
+
+test("a returning Talent Network candidate skips the write and starts a fresh match leg", () => {
+  const checkedAt = "2026-07-25T01:00:00.000Z";
+  const transitioned = existingTalentNetworkTransition({
+    id: "bot-returning-001",
+    state: "ready_to_submit",
+    revision: 4,
+    journal: [],
+  }, {
+    approvalSource: "recall_verified_automation",
+    checkedAt,
+  });
+  assert.equal(transitioned.state, "awaiting_matches");
+  assert.equal(transitioned.matchLegStartedAt, checkedAt);
+  assert.equal(transitioned.submitReadbackVerified, true);
+  assert.equal(transitioned.submittedAt, undefined);
+  assert.match(transitioned.journal.at(-1).detail, /write skipped/);
 });
 
 test("Para AI REST profile reads classify an expired session without a ReferenceError", async () => {
@@ -352,7 +372,15 @@ test("Para AI HTML inline JavaScript parses", async () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((source) => source.trim());
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  assert.match(html, /I have screened this candidate and confirmed they are actively on the market/);
+  assert.doesNotMatch(html, /id="marketConfirmed"|market confirmation|I have screened this candidate and confirmed/);
+  assert.doesNotMatch(html, /<input[^>]+id="[^"]*(?:market|consent)[^"]*"/i);
+  assert.match(html, /marketConfirmed:true/);
+  assert.match(html, /function reviewReasonStack/);
+  assert.match(html, /reviewPolicy\?\.preferenceRouting/);
+  assert.match(html, /Stated → routed preferences/);
+  assert.match(html, /job\.reviewAction\?\.allowed===true/);
+  assert.match(html, /Apply ladder and submit/);
+  assert.match(html, /action:'apply-ladder-submit',jobId:id,expectedRevision:job\.revision/);
   assert.match(html, /max="200000"/);
   assert.match(html, /async function submitReviewedBody/);
   assert.match(html, /function reconcileOpenReview/);
@@ -363,6 +391,8 @@ test("Para AI HTML inline JavaScript parses", async () => {
   assert.doesNotMatch(html, /action:\s*["']direct-submit/);
   const run = await readFile(new URL("../api/paraai/run.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(run, /["']direct-submit["']/);
+  assert.match(run, /"apply-ladder-submit"/);
+  assert.match(run, /applyLadderAndSubmit\(job\)/);
   const pipeline = await readFile(new URL("../api/paraai/_lib/pipeline.mjs", import.meta.url), "utf8");
   assert.match(pipeline, /transition\(edited, "awaiting_approval"/);
   assert.match(pipeline, /export async function reconcileSubmittedJob/);

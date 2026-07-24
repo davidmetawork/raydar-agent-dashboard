@@ -120,14 +120,45 @@ export function submissionOutcomeTransition(current, next) {
   return "conflict";
 }
 
+const compactFailureText = (value, limit) => String(value || "")
+  .replace(/\s+/g, " ")
+  .trim()
+  .slice(0, limit);
+
+export function normalizeFailureRecord(value) {
+  if (!value || typeof value !== "object") return null;
+  const code = compactFailureText(value.code || "AUTO_PROCESS_FAILED", 100);
+  const message = compactFailureText(value.message || value.detail || code, 300);
+  const step = compactFailureText(value.step || "process", 100);
+  return {
+    code: code || "AUTO_PROCESS_FAILED",
+    message: message || code || "automation step failed",
+    step: step || "process",
+  };
+}
+
 export function transition(job, state, details = {}) {
   const at = new Date().toISOString();
+  const {
+    journalDetail,
+    journalFailure,
+    ...persistentDetails
+  } = details && typeof details === "object" ? details : {};
+  const failure = normalizeFailureRecord(journalFailure);
   return {
     ...job,
-    ...details,
+    ...persistentDetails,
     state,
     updatedAt: at,
-    journal: [...(job?.journal || []), { state, at, ...(details?.journalDetail ? { detail: details.journalDetail } : {}) }].slice(-100),
+    journal: [
+      ...(job?.journal || []),
+      {
+        state,
+        at,
+        ...(journalDetail ? { detail: journalDetail } : {}),
+        ...(failure || {}),
+      },
+    ].slice(-100),
   };
 }
 
@@ -245,7 +276,13 @@ export async function takeAlertSlot(key, ttlSeconds = 12 * 60 * 60) {
 
 export async function enqueueAutoJob(
   botId,
-  { source = "unknown", eventId = "", dueAt = null, now = Date.now() } = {},
+  {
+    source = "unknown",
+    eventId = "",
+    dueAt = null,
+    callEndedAt = null,
+    now = Date.now(),
+  } = {},
   { kvImpl = kv } = {},
 ) {
   const id = requireStoreId(botId, "bot id");
@@ -262,6 +299,7 @@ export async function enqueueAutoJob(
     source: String(source || "unknown").slice(0, 80),
     enqueuedAt: new Date(queuedAt).toISOString(),
     generation: randomUUID(),
+    ...(callEndedAt ? { callEndedAt: new Date(epochMs(callEndedAt, queuedAt)).toISOString() } : {}),
   });
   const script = `
     local recorded = redis.call('SET', KEYS[2], ARGV[3], 'NX', 'EX', ARGV[4])
@@ -276,6 +314,8 @@ export async function enqueueAutoJob(
       if ok and old then
         if old.source == 'authorized_backfill' then next.source = old.source end
         if old.enqueuedAt then next.enqueuedAt = old.enqueuedAt end
+        if old.lastFailure then next.lastFailure = old.lastFailure end
+        if old.callEndedAt then next.callEndedAt = old.callEndedAt end
       end
     end
     redis.call('SET', KEYS[3], cjson.encode(next), 'EX', ARGV[7])
@@ -324,6 +364,7 @@ export async function claimDueAutoJobs(
         local source = 'unknown'
         local generation = ''
         local attempts = 0
+        local callEndedAt = ''
         local raw = redis.call('GET', ARGV[8] .. jobId)
         if raw then
           local ok, meta = pcall(cjson.decode, raw)
@@ -331,6 +372,7 @@ export async function claimDueAutoJobs(
             if meta.source then source = tostring(meta.source) end
             if meta.generation then generation = tostring(meta.generation) end
             if meta.attempts then attempts = tonumber(meta.attempts) or 0 end
+            if meta.callEndedAt then callEndedAt = tostring(meta.callEndedAt) end
           end
         end
         local token = ARGV[5] .. ':' .. tostring(claimed) .. ':' .. generation
@@ -343,6 +385,7 @@ export async function claimDueAutoJobs(
         table.insert(out, source)
         table.insert(out, generation)
         table.insert(out, attempts)
+        table.insert(out, callEndedAt)
       end
     end
     return out
@@ -354,7 +397,7 @@ export async function claimDueAutoJobs(
     tokenPrefix, "paraai:auto:lease:", String(leaseUntil), AUTO_META_PREFIX,
   ]);
   const rows = [];
-  for (let i = 0; i + 5 < (Array.isArray(result) ? result.length : 0); i += 6) {
+  for (let i = 0; i + 6 < (Array.isArray(result) ? result.length : 0); i += 7) {
     rows.push({
       botId: String(result[i]),
       leaseToken: String(result[i + 1]),
@@ -362,6 +405,7 @@ export async function claimDueAutoJobs(
       source: String(result[i + 3] || "unknown"),
       generation: String(result[i + 4] || ""),
       attempts: Number(result[i + 5]) || 0,
+      callEndedAt: String(result[i + 6] || "") || null,
     });
   }
   return rows;
@@ -397,15 +441,25 @@ export async function completeAutoJob(botId, { leaseToken = "", generation = "" 
 
 export async function rescheduleAutoJob(
   botId,
-  { leaseToken = "", generation = "", delayMs = 0, dueAt = null, error = "", now = Date.now() } = {},
+  {
+    leaseToken = "",
+    generation = "",
+    delayMs = 0,
+    dueAt = null,
+    error = "",
+    failure = null,
+    now = Date.now(),
+  } = {},
   { kvImpl = kv } = {},
 ) {
   const id = requireStoreId(botId, "bot id");
   if (!leaseToken) return { rescheduled: false, dueAt: null };
   const current = epochMs(now);
   const due = epochMs(dueAt, current + Math.max(0, Number(delayMs) || 0));
+  const lastFailure = normalizeFailureRecord(failure);
   const meta = JSON.stringify({
-    lastError: String(error || "").slice(0, 240),
+    ...(error ? { lastError: String(error).slice(0, 240) } : {}),
+    ...(lastFailure ? { lastFailure } : {}),
     lastAt: new Date(current).toISOString(),
     dueAt: new Date(due).toISOString(),
   });
@@ -438,6 +492,8 @@ export async function rescheduleAutoJob(
     if old and old.source then next.source = old.source end
     if old and old.enqueuedAt then next.enqueuedAt = old.enqueuedAt end
     if old and old.generation then next.generation = old.generation end
+    if old and old.lastFailure and not next.lastFailure then next.lastFailure = old.lastFailure end
+    if old and old.callEndedAt then next.callEndedAt = old.callEndedAt end
     redis.call('SET', KEYS[4], cjson.encode(next), 'EX', ARGV[5])
     return 1
   `;
