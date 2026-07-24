@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { candidateAlreadySubmitted, fetchCall, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
+import { candidateAlreadySubmitted, candidateProfileInfo, clearCookieCache, fetchCall, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { PARAAI_LOCATIONS, extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
 import { PARAAI_SALARY_CAP, STATES, buildPreferences, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
@@ -243,6 +243,28 @@ test("Paraform submission acceptance is asynchronous and recognizes native statu
   assert.equal(candidateAlreadySubmitted({ profile: { has_application_submission_ever: true } }), true);
   assert.equal(candidateAlreadySubmitted({ matchingPoolStatus: "RECRUITER_ON_MARKET" }), true);
   assert.equal(candidateAlreadySubmitted({ matching_pool_status: "NOT_SUBMITTED" }), false);
+});
+
+test("Para AI REST profile reads classify an expired session without a ReferenceError", async () => {
+  const beforeCookie = process.env.PARAFORM_COOKIE;
+  const beforeSessionCookie = process.env.PARAFORM_SESSION_COOKIE;
+  process.env.PARAFORM_COOKIE = "Fe26.2-test-only";
+  delete process.env.PARAFORM_SESSION_COOKIE;
+  clearCookieCache();
+  try {
+    await assert.rejects(
+      candidateProfileInfo("candidate-user-7", {
+        fetchImpl: async () => new Response(null, { status: 401 }),
+      }),
+      (error) => error?.code === "AUTH_EXPIRED" && error?.message === "AUTH_EXPIRED",
+    );
+  } finally {
+    if (beforeCookie == null) delete process.env.PARAFORM_COOKIE;
+    else process.env.PARAFORM_COOKIE = beforeCookie;
+    if (beforeSessionCookie == null) delete process.env.PARAFORM_SESSION_COOKIE;
+    else process.env.PARAFORM_SESSION_COOKIE = beforeSessionCookie;
+    clearCookieCache();
+  }
 });
 
 test("only expired legacy locks on an unwritten submission can be reclaimed", () => {
