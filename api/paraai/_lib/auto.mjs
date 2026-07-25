@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   fetchCall,
@@ -12,6 +12,8 @@ import {
 } from "./core.mjs";
 import {
   advanceExistingTalentNetworkJob,
+  buildPreferenceRouting,
+  buildSubmissionPayload,
   loadJob,
   missingRequiredPreferences,
   prepareJob,
@@ -46,20 +48,27 @@ import {
 import {
   acquireJobLock,
   claimDueAutoJobs,
+  claimPhase2FirstTenCanaryCommit,
+  completePhase2FirstTenCanary,
   completeAutoJob,
+  createPhase2FirstTenCanaryPlan,
   createJob,
   enqueueAutoJob,
+  getCompletePhase2CanarySnapshot,
   getJob,
   getOrCreateResumeBackfillAnchor,
+  getPhase2FirstTenCanary,
   getRecentResumeAttachedSignal,
   getResumeAskSuppression,
   getSubmissionIntent,
+  hashSubmissionPayload,
   listJobs,
   normalizeFailureRecord,
   releaseJobLock,
   resumeChaseChainId,
   rescheduleAutoJob,
   saveJob,
+  stableStringify,
   stopResumeAskSuppression,
   takeAlertSlot,
   transition,
@@ -90,6 +99,14 @@ const SETTLED_NON_SUCCESS_VERDICTS = new Set([
   "no_show", "audio_fail", "error", "joined_silent", "incomplete",
 ]);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
+export const PHASE2_FIRST_TEN_CANARY_LIMIT = 10;
+const PHASE2_ATTACH_SUBMIT_MAX_MS = 15 * 60_000;
+const PHASE2_ATTACH_PROOF_MAX_AGE_MS = 24 * 60 * 60_000;
+const PHASE2_CANARY_VERIFIED_STATES = new Set([
+  "awaiting_matches",
+  "ready_to_enroll",
+  "enrolled",
+]);
 const DEFAULT_MAX_STEP_ATTEMPTS = 20;
 const DAY_MS = 24 * 60 * 60_000;
 export const RESUME_WAIT_TERMINAL_ACK_DEADLINE_MS =
@@ -2415,17 +2432,620 @@ function validBackfillResumeWait(job) {
   );
 }
 
+export function phase2CanaryManifestDigest(botIds = []) {
+  const ids = Array.isArray(botIds)
+    ? botIds.map((id) => String(id || ""))
+    : [];
+  return createHash("sha256")
+    .update(JSON.stringify(ids))
+    .digest("hex");
+}
+
+function phase2CanaryCreatedAt(job) {
+  return finiteDate(job?.createdAt) ?? Number.POSITIVE_INFINITY;
+}
+
+function phase2CanaryHasResume(job) {
+  return Boolean(String(job?.submission?.resumeUri || "").trim());
+}
+
+function journalHasDetail(job, predicate) {
+  return (Array.isArray(job?.journal) ? job.journal : [])
+    .some((row) => predicate(String(row?.detail || "")));
+}
+
+export function phase2LiveAttachProof(
+  job,
+  {
+    now = Date.now(),
+    maxAgeMs = PHASE2_ATTACH_PROOF_MAX_AGE_MS,
+  } = {},
+) {
+  const wait = job?.automation?.resumeWait;
+  const trigger = String(wait?.lastTrigger || "");
+  const checkedAt = finiteDate(wait?.lastCheckedAt);
+  const attemptAt = finiteDate(job?.submitAttemptStartedAt);
+  const acceptedAt = finiteDate(job?.submitAcceptedAt);
+  const approvalAt = finiteDate(job?.submissionApprovalCheckedAt);
+  const matchLegAt = finiteDate(job?.matchLegStartedAt);
+  const current = Number(now);
+  const maximumAge = Math.max(
+    PHASE2_ATTACH_SUBMIT_MAX_MS,
+    Number(maxAgeMs) || PHASE2_ATTACH_PROOF_MAX_AGE_MS,
+  );
+  return Boolean(
+    PHASE2_CANARY_VERIFIED_STATES.has(String(job?.state || ""))
+    && /^resume_attached:[a-f0-9]{64}$/u.test(trigger)
+    && checkedAt != null
+    && Number.isFinite(current)
+    && checkedAt <= current
+    && current - checkedAt <= maximumAge
+    && attemptAt != null
+    && acceptedAt != null
+    && approvalAt != null
+    && matchLegAt != null
+    && attemptAt >= checkedAt
+    && acceptedAt >= attemptAt
+    && acceptedAt - checkedAt <= PHASE2_ATTACH_SUBMIT_MAX_MS
+    && approvalAt >= acceptedAt
+    && matchLegAt >= acceptedAt
+    && job?.submitReadbackVerified === true
+    && journalHasDetail(
+      job,
+      (detail) => /^resume check \d+\/\d+ \(attach trigger\): resume on file$/u
+        .test(detail),
+    )
+    && journalHasDetail(
+      job,
+      (detail) => detail === "Paraform submission verified",
+    )
+  );
+}
+
+function authorizedBackfillJob(job) {
+  return Boolean(
+    job?.automation?.mode === "authorized_backfill"
+    || job?.automation?.resumeWait?.source === "authorized_backfill"
+    || job?.automation?.backfillBatchEntryAt
+  );
+}
+
+function phase2CanaryEligibleJobs(
+  jobs = [],
+  {
+    config = automationConfig(),
+  } = {},
+) {
+  const sorted = (Array.isArray(jobs) ? jobs : [])
+    .filter((job) => {
+      if (
+        !BOT_ID.test(String(job?.id || ""))
+        || job?.automation?.mode !== "backfill_only"
+        || !phase2CanaryHasResume(job)
+        || job?.automation?.resumeWait?.source === "authorized_backfill"
+        || job?.automation?.backfillBatchEntryAt
+        || !backfillReviewDecision(job).eligible
+      ) return false;
+      const freeze = automationFreezeDecision(job, config, {
+        queueSource: "unknown",
+      });
+      return freeze.frozen === true && freeze.mode === "backfill_only";
+    })
+    .sort((left, right) => {
+      const leftCreatedAt = phase2CanaryCreatedAt(left);
+      const rightCreatedAt = phase2CanaryCreatedAt(right);
+      if (leftCreatedAt !== rightCreatedAt) {
+        return leftCreatedAt < rightCreatedAt ? -1 : 1;
+      }
+      const leftId = String(left.id);
+      const rightId = String(right.id);
+      return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+    });
+  const seenCandidates = new Set();
+  return sorted.filter((job) => {
+    const candidateUserId = String(
+      job?.identity?.candidateUserId || "",
+    ).trim();
+    if (!candidateUserId || seenCandidates.has(candidateUserId)) return false;
+    seenCandidates.add(candidateUserId);
+    return true;
+  });
+}
+
+export function selectPhase2FirstTenCanary(
+  jobs = [],
+  options = {},
+) {
+  return phase2CanaryEligibleJobs(jobs, options)
+    .slice(0, PHASE2_FIRST_TEN_CANARY_LIMIT);
+}
+
+function phase2CanaryPublicResult(
+  record,
+  {
+    replayed = false,
+  } = {},
+) {
+  const result = record?.result && typeof record.result === "object"
+    ? record.result
+    : {};
+  const completed = record?.status === "complete";
+  const failed = Math.max(0, Math.floor(Number(result.failed) || 0));
+  const status = record?.status === "planned"
+    ? failed > 0
+      ? "retryable"
+      : "planned"
+    : completed
+      ? "completed"
+      : "in_progress";
+  return {
+    ok: failed === 0,
+    status,
+    replayed: replayed === true,
+    snapshotComplete: record?.snapshotComplete === true,
+    scanned: Math.max(0, Math.floor(Number(record?.snapshotTotal) || 0)),
+    eligible: Math.max(0, Math.floor(Number(record?.eligibleCount) || 0)),
+    selected: Math.max(0, Math.floor(Number(record?.count) || 0)),
+    attempted: Math.max(0, Math.floor(Number(result.attempted) || 0)),
+    enqueued: Math.max(0, Math.floor(Number(result.enqueued) || 0)),
+    duplicate: Math.max(0, Math.floor(Number(result.duplicate) || 0)),
+    failed,
+    manifestDigest: /^[a-f0-9]{64}$/u.test(
+      String(record?.manifestDigest || ""),
+    )
+      ? String(record.manifestDigest)
+      : null,
+    attachProof: record?.attachProof === true,
+  };
+}
+
+function assertCompletePhase2CanarySnapshot(snapshot) {
+  if (
+    snapshot?.complete !== true
+    || !Number.isInteger(snapshot?.total)
+    || snapshot.total < 0
+    || snapshot.total >= 500
+    || !/^[a-f0-9]{40}$/u.test(String(snapshot?.fingerprint || ""))
+    || !Array.isArray(snapshot?.jobs)
+    || snapshot.jobs.length !== snapshot.total
+  ) {
+    const error = new Error("phase 2 canary snapshot is incomplete");
+    error.code = "PHASE2_CANARY_SNAPSHOT_INCOMPLETE";
+    throw error;
+  }
+  return snapshot;
+}
+
+export async function planPhase2FirstTenCanary(
+  {
+    now = Date.now(),
+    config = automationConfig(),
+    getCanaryImpl = getPhase2FirstTenCanary,
+    snapshotImpl = getCompletePhase2CanarySnapshot,
+    createPlanImpl = createPhase2FirstTenCanaryPlan,
+  } = {},
+) {
+  const current = Number(now);
+  if (!Number.isFinite(current)) {
+    const error = new Error("phase 2 canary timestamp is invalid");
+    error.code = "PHASE2_CANARY_TIMESTAMP_INVALID";
+    throw error;
+  }
+  const existing = await getCanaryImpl();
+  if (existing) {
+    return phase2CanaryPublicResult(existing, { replayed: true });
+  }
+
+  const snapshot = assertCompletePhase2CanarySnapshot(
+    await snapshotImpl(),
+  );
+  if (!snapshot.jobs.some((job) => phase2LiveAttachProof(job, {
+    now: current,
+  }))) {
+    return {
+      ok: true,
+      status: "awaiting_attach_proof",
+      replayed: false,
+      snapshotComplete: true,
+      scanned: snapshot.total,
+      eligible: 0,
+      selected: 0,
+      attempted: 0,
+      enqueued: 0,
+      duplicate: 0,
+      failed: 0,
+      manifestDigest: null,
+      attachProof: false,
+    };
+  }
+  const eligible = phase2CanaryEligibleJobs(snapshot.jobs, { config });
+  if (eligible.length < PHASE2_FIRST_TEN_CANARY_LIMIT) {
+    return {
+      ok: true,
+      status: "insufficient",
+      replayed: false,
+      snapshotComplete: true,
+      scanned: snapshot.total,
+      eligible: eligible.length,
+      selected: 0,
+      attempted: 0,
+      enqueued: 0,
+      duplicate: 0,
+      failed: 0,
+      manifestDigest: null,
+      attachProof: true,
+    };
+  }
+  const selected = eligible.slice(0, PHASE2_FIRST_TEN_CANARY_LIMIT);
+  const manifestDigest = phase2CanaryManifestDigest(
+    selected.map((job) => job.id),
+  );
+  const plan = await createPlanImpl({
+    entries: selected.map((job) => ({
+      id: job.id,
+      revision: job.revision,
+    })),
+    manifestDigest,
+    snapshotFingerprint: snapshot.fingerprint,
+    snapshotTotal: snapshot.total,
+    eligibleCount: eligible.length,
+    authorizedBackfillCount: snapshot.jobs
+      .filter(authorizedBackfillJob).length,
+    attachProof: true,
+    now: current,
+  });
+  return phase2CanaryPublicResult(plan?.record, {
+    replayed: plan?.existing === true,
+  });
+}
+
+export async function commitPhase2FirstTenCanary(
+  {
+    manifestDigest,
+    now = Date.now(),
+    claimImpl = claimPhase2FirstTenCanaryCommit,
+    completeImpl = completePhase2FirstTenCanary,
+    enqueueImpl = enqueueBackfill,
+  } = {},
+) {
+  const current = Number(now);
+  const digest = String(manifestDigest || "").toLowerCase();
+  if (!Number.isFinite(current)) {
+    const error = new Error("phase 2 canary timestamp is invalid");
+    error.code = "PHASE2_CANARY_TIMESTAMP_INVALID";
+    throw error;
+  }
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    const error = new Error("phase 2 canary manifest digest is invalid");
+    error.code = "PHASE2_CANARY_DIGEST_INVALID";
+    throw error;
+  }
+  const claim = await claimImpl({
+    manifestDigest: digest,
+    now: current,
+  });
+  if (!claim?.acquired) {
+    return phase2CanaryPublicResult(claim?.record, {
+      replayed: true,
+    });
+  }
+  const manifestIds = claim.record.botIds.map(String);
+  let results;
+  try {
+    results = await enqueueImpl(manifestIds, {
+      now: current,
+      canaryManifestDigest: digest,
+      canaryExpectedRevisions: new Map(
+        manifestIds.map((id, index) => [
+          id,
+          Number(claim.record.revisions[index]),
+        ]),
+      ),
+    });
+  } catch {
+    const error = new Error("phase 2 canary enqueue failed");
+    error.code = "PHASE2_CANARY_ENQUEUE_FAILED";
+    throw error;
+  }
+  const rows = Array.isArray(results) ? results : [];
+  const summary = {
+    attempted: manifestIds.length,
+    enqueued: rows.filter((row) => row?.enqueued === true).length,
+    duplicate: rows.filter((row) => row?.duplicate === true).length,
+    failed: Math.max(
+      0,
+      manifestIds.length
+        - rows.filter((row) => (
+            row?.enqueued === true || row?.duplicate === true
+          )).length,
+    ),
+  };
+  const completed = await completeImpl({
+    ownerToken: claim.ownerToken,
+    manifestDigest: digest,
+    result: summary,
+    now: current,
+  });
+  return phase2CanaryPublicResult(completed, {
+    replayed: claim.recovered === true,
+  });
+}
+
+export async function phase2FirstTenCanaryStatus(
+  {
+    getCanaryImpl = getPhase2FirstTenCanary,
+    snapshotImpl = getCompletePhase2CanarySnapshot,
+  } = {},
+) {
+  const record = await getCanaryImpl();
+  if (!record) {
+    return {
+      ok: true,
+      status: "not_planned",
+      replayed: false,
+      snapshotComplete: false,
+      scanned: 0,
+      eligible: 0,
+      selected: 0,
+      attempted: 0,
+      enqueued: 0,
+      duplicate: 0,
+      failed: 0,
+      manifestDigest: null,
+      attachProof: false,
+      authorized: 0,
+      preferencesRouted: 0,
+      payloadHashVerified: 0,
+      submitAttemptStarted: 0,
+      submitAccepted: 0,
+      talentNetworkVisible: 0,
+      preexistingVisible: 0,
+      waitingForResume: 0,
+      needsReview: 0,
+      errors: 0,
+      missing: 0,
+      authorizedDelta: 0,
+      releaseFenceIntact: false,
+      verified: false,
+    };
+  }
+  const snapshot = assertCompletePhase2CanarySnapshot(
+    await snapshotImpl(),
+  );
+  const snapshotJobs = new Map(
+    snapshot.jobs.map((job) => [String(job.id), job]),
+  );
+  const jobs = record.botIds.map((id) => snapshotJobs.get(id) || null);
+  const checks = jobs.map((job) => phase2CanaryJobVerification(
+    job,
+    record.manifestDigest,
+  ));
+  const count = (field) => checks.filter((row) => row[field]).length;
+  const authorizedNow = snapshot.jobs.filter(authorizedBackfillJob).length;
+  const authorizedDelta = authorizedNow
+    - Math.max(
+      0,
+      Number(record?.authorizedBackfillCountAtPlan) || 0,
+    );
+  const releaseFenceIntact = authorizedDelta === record.count;
+  const base = phase2CanaryPublicResult(record, { replayed: true });
+  const verification = {
+    authorized: count("authorized"),
+    preferencesRouted: count("preferencesRouted"),
+    payloadHashVerified: count("payloadHashVerified"),
+    submitAttemptStarted: count("submitAttemptStarted"),
+    submitAccepted: count("submitAccepted"),
+    talentNetworkVisible: count("talentNetworkVisible"),
+    preexistingVisible: count("preexistingVisible"),
+    waitingForResume: count("waitingForResume"),
+    needsReview: count("needsReview"),
+    errors: count("error"),
+    missing: count("missing"),
+    authorizedDelta,
+    releaseFenceIntact,
+  };
+  const verified = Boolean(
+    record.status === "complete"
+    && record.count === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.authorized === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.preferencesRouted === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.payloadHashVerified === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.submitAttemptStarted === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.submitAccepted === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.talentNetworkVisible === PHASE2_FIRST_TEN_CANARY_LIMIT
+    && verification.preexistingVisible === 0
+    && verification.waitingForResume === 0
+    && verification.needsReview === 0
+    && verification.errors === 0
+    && verification.missing === 0
+    && releaseFenceIntact
+  );
+  return {
+    ...base,
+    ...verification,
+    verified,
+    ok: base.ok && verified,
+  };
+}
+
+function routingPreferencesConform(job) {
+  const provenance = job?.reviewPolicy?.preferenceRouting;
+  const input = job?.reviewPolicy?.preferenceRoutingInput;
+  const preferences = job?.reviewPreferences;
+  if (
+    !provenance
+    || typeof provenance !== "object"
+    || !preferences
+    || typeof preferences !== "object"
+    || !input
+    || typeof input !== "object"
+    || !input.native
+    || typeof input.native !== "object"
+    || !input.context
+    || typeof input.context !== "object"
+    || missingRequiredPreferences(preferences).length
+  ) return false;
+  for (const field of [
+    "locations",
+    "workplaceTypes",
+    "idealFundingRounds",
+    "salaryMin",
+    "requiresSponsorship",
+  ]) {
+    const row = provenance[field];
+    if (
+      !row
+      || typeof row !== "object"
+      || !Object.hasOwn(row, "stated")
+      || !Object.hasOwn(row, "routed")
+      || typeof row.rule !== "string"
+      || !row.rule
+      || stableStringify(row.routed) !== stableStringify(preferences[field])
+    ) return false;
+  }
+  let canonical;
+  try {
+    canonical = buildPreferenceRouting(
+      job.extracted,
+      input.native,
+      input.context,
+    );
+  } catch {
+    return false;
+  }
+  if (
+    stableStringify(canonical.preferences)
+      !== stableStringify(preferences)
+    || stableStringify(canonical.policy.preferenceRouting)
+      !== stableStringify(provenance)
+  ) return false;
+  const routedAt = finiteDate(job?.automation?.preferenceRoutedAt);
+  const batchAt = finiteDate(job?.automation?.backfillBatchEntryAt);
+  return Boolean(
+    job?.automation?.preferenceRerouteRequired === false
+    && routedAt != null
+    && batchAt != null
+    && routedAt >= batchAt
+  );
+}
+
+function payloadHashConforms(job) {
+  try {
+    return (
+      /^[a-f0-9]{64}$/u.test(String(job?.submitPayloadHash || ""))
+      && hashSubmissionPayload(buildSubmissionPayload(job))
+        === job.submitPayloadHash
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function phase2CanaryJobVerification(job, manifestDigest) {
+  if (!job) {
+    return {
+      missing: true,
+      authorized: false,
+      preferencesRouted: false,
+      payloadHashVerified: false,
+      submitAttemptStarted: false,
+      submitAccepted: false,
+      talentNetworkVisible: false,
+      preexistingVisible: false,
+      waitingForResume: false,
+      needsReview: false,
+      error: true,
+    };
+  }
+  const attemptAt = finiteDate(job.submitAttemptStartedAt);
+  const acceptedAt = finiteDate(job.submitAcceptedAt);
+  const approvalAt = finiteDate(job.submissionApprovalCheckedAt);
+  const matchLegAt = finiteDate(job.matchLegStartedAt);
+  const batchAt = finiteDate(job?.automation?.backfillBatchEntryAt);
+  const orderedCanarySubmission = Boolean(
+    batchAt != null
+    && attemptAt != null
+    && acceptedAt != null
+    && approvalAt != null
+    && matchLegAt != null
+    && attemptAt >= batchAt
+    && acceptedAt >= attemptAt
+    && approvalAt >= acceptedAt
+    && matchLegAt >= approvalAt
+  );
+  const readbackVisible = Boolean(
+    PHASE2_CANARY_VERIFIED_STATES.has(String(job.state || ""))
+    && job.submitReadbackVerified === true
+    && approvalAt != null
+    && matchLegAt != null
+    && journalHasDetail(
+      job,
+      (detail) => detail === "Paraform submission verified",
+    )
+  );
+  const visible = readbackVisible && orderedCanarySubmission;
+  const preexistingVisible = Boolean(
+    readbackVisible
+    && (
+      attemptAt == null
+      || journalHasDetail(
+        job,
+        (detail) => detail
+          === "Talent Network membership already visible; submission write skipped",
+      )
+    )
+  );
+  return {
+    missing: false,
+    authorized: Boolean(
+      authorizedBackfillJob(job)
+      && job?.automation?.canaryManifestDigest === manifestDigest
+    ),
+    preferencesRouted: routingPreferencesConform(job),
+    payloadHashVerified: payloadHashConforms(job),
+    submitAttemptStarted: Boolean(
+      batchAt != null
+      && attemptAt != null
+      && attemptAt >= batchAt
+    ),
+    submitAccepted: Boolean(
+      orderedCanarySubmission
+    ),
+    talentNetworkVisible: visible,
+    preexistingVisible,
+    waitingForResume: job.state === "waiting_for_resume",
+    needsReview: job.state === "needs_review",
+    error: Boolean(
+      job.state === "error"
+      || job.error
+      || job?.automation?.lastFailure
+      || Object.keys(job?.automation?.stepFailures || {}).length
+    ),
+  };
+}
+
 export async function enqueueBackfill(
   botIds = [],
   {
     config = automationConfig(),
     now = Date.now(),
+    canaryManifestDigest = null,
+    canaryExpectedRevisions = null,
     getJobImpl = getJob,
     getBackfillAnchorImpl = getOrCreateResumeBackfillAnchor,
     saveJobImpl = saveJob,
     enqueueImpl = enqueueAutoJob,
   } = {},
 ) {
+  const provenanceDigest = canaryManifestDigest == null
+    ? null
+    : String(canaryManifestDigest || "").toLowerCase();
+  if (
+    provenanceDigest != null
+    && !/^[a-f0-9]{64}$/u.test(provenanceDigest)
+  ) {
+    throw new Error("valid canary manifest digest required");
+  }
   const values = Array.isArray(botIds) ? botIds : [];
   const results = new Array(values.length);
   const entries = [];
@@ -2473,6 +3093,60 @@ export async function enqueueBackfill(
   }
 
   for (const { index, botId, current } of entries) {
+    const sameCanaryAuthorization = Boolean(
+      provenanceDigest
+      && current?.automation?.canaryManifestDigest === provenanceDigest
+      && authorizedBackfillJob(current)
+    );
+    if (
+      provenanceDigest
+      && current?.automation?.canaryManifestDigest
+      && current.automation.canaryManifestDigest !== provenanceDigest
+    ) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        preserved: true,
+        error: "canary_manifest_conflict",
+      };
+      continue;
+    }
+    if (provenanceDigest && !sameCanaryAuthorization) {
+      const expectedRevision = canaryExpectedRevisions instanceof Map
+        ? canaryExpectedRevisions.get(botId)
+        : null;
+      const freeze = automationFreezeDecision(current, config, {
+        queueSource: "unknown",
+      });
+      if (
+        !Number.isInteger(expectedRevision)
+        || Number(current.revision) !== expectedRevision
+        || current?.automation?.mode !== "backfill_only"
+        || !phase2CanaryHasResume(current)
+        || freeze.frozen !== true
+        || freeze.mode !== "backfill_only"
+      ) {
+        results[index] = {
+          botId,
+          enqueued: false,
+          preserved: true,
+          error: "canary_job_changed",
+        };
+        continue;
+      }
+    }
+    if (
+      sameCanaryAuthorization
+      && current?.state !== "ready_to_submit"
+    ) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        duplicate: true,
+        preserved: true,
+      };
+      continue;
+    }
     const decision = backfillReviewDecision(current);
     if (!decision.eligible) {
       results[index] = {
@@ -2522,6 +3196,9 @@ export async function enqueueBackfill(
             reasons: [],
             freezeReason: null,
             backfillBatchEntryAt: batchEntryAt,
+            ...(provenanceDigest
+              ? { canaryManifestDigest: provenanceDigest }
+              : {}),
             preferenceRerouteRequired: true,
             resumeWait,
           },
