@@ -17,8 +17,32 @@ import {
   prepareJob,
   reconcileSubmittedJob,
   reroutePreparedJob,
-  submitJob,
+  submitJob as pipelineSubmitJob,
 } from "./pipeline.mjs";
+import {
+  HUMAN_CALL_QUEUE_SOURCE,
+  callIdFromHumanJob,
+  fetchHumanCall,
+  humanCallReadiness,
+  isHumanCallJob,
+} from "./human-call.mjs";
+import {
+  DEFAULT_RESUME_BACKFILL_TERMINAL_ACK_DAYS,
+  DEFAULT_RESUME_RETRY_DAYS,
+  DEFAULT_RESUME_TERMINAL_ACK_HOURS,
+  DEFAULT_RESUME_WAIT_MINUTES,
+  MAX_RESUME_BACKFILL_TERMINAL_ACK_DAYS,
+  MAX_RESUME_TERMINAL_ACK_HOURS,
+  MIN_RESUME_BACKFILL_TERMINAL_ACK_DAYS,
+  MIN_RESUME_TERMINAL_ACK_HOURS,
+  RESUME_ATTACHMENT_PENDING_REVIEW_CODE,
+  RESUME_ATTACHMENT_PENDING_REVIEW_MESSAGE,
+  RESUME_RECEIVED_REVIEW_CODE,
+  RESUME_RECEIVED_REVIEW_MESSAGE,
+  resumeChaseNextDeliveryAckDeadline,
+  resumeWaitPlan,
+  resumeWaitSettings,
+} from "./resume-wait.mjs";
 import {
   acquireJobLock,
   claimDueAutoJobs,
@@ -26,11 +50,17 @@ import {
   createJob,
   enqueueAutoJob,
   getJob,
+  getOrCreateResumeBackfillAnchor,
+  getRecentResumeAttachedSignal,
+  getResumeAskSuppression,
   getSubmissionIntent,
+  listJobs,
   normalizeFailureRecord,
   releaseJobLock,
+  resumeChaseChainId,
   rescheduleAutoJob,
   saveJob,
+  stopResumeAskSuppression,
   takeAlertSlot,
   transition,
 } from "./store.mjs";
@@ -40,7 +70,8 @@ const TERMINAL_STATES = new Set([
 ]);
 const SAFE_RETRY_CODES = new Set([
   "AUTH_EXPIRED", "PREPARE_FAILED", "REVISION_CONFLICT", "JOB_BUSY",
-  "SUBMIT_WRITE_UNKNOWN", "SUBMIT_STILL_UNCONFIRMED",
+  "SUBMIT_WRITE_UNKNOWN", "SUBMIT_STILL_UNCONFIRMED", "RESUME_CHASE_STOP_FAILED",
+  "RESUME_CHASE_READ_FAILED", "RESUME_ATTACH_REDUE_FAILED",
 ]);
 const TERMINAL_ERROR_CODES = new Set([
   "INVALID_BOT_ID",
@@ -54,12 +85,37 @@ const TERMINAL_ERROR_CODES = new Set([
 const PREWRITE_STATES = new Set([
   "detected", "resolving_identity", "extracting", "ready_to_submit", "error",
 ]);
+const BACKFILL_REOPEN_STATES = new Set(["needs_review", "ready_to_submit"]);
 const SETTLED_NON_SUCCESS_VERDICTS = new Set([
   "no_show", "audio_fail", "error", "joined_silent", "incomplete",
 ]);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
-const DEFAULT_RESUME_WAIT_MINUTES = 60;
 const DEFAULT_MAX_STEP_ATTEMPTS = 20;
+const DAY_MS = 24 * 60 * 60_000;
+export const RESUME_WAIT_TERMINAL_ACK_DEADLINE_MS =
+  DEFAULT_RESUME_TERMINAL_ACK_HOURS * 60 * 60_000;
+// Compatibility aliases for the old boundary exports. They now represent the
+// generous terminal-acknowledgement operations deadline, not a blind grace.
+export const RESUME_WAIT_CHASE_GRACE_MS =
+  RESUME_WAIT_TERMINAL_ACK_DEADLINE_MS;
+export const RESUME_WAIT_TERMINAL_SETTLE_MS =
+  RESUME_WAIT_TERMINAL_ACK_DEADLINE_MS;
+const RESUME_ATTACH_SOURCE_PREFIX = "resume_attached:";
+export const RESUME_WAIT_TERMINAL_REASON = "No resume after 7 days of retries and chase emails";
+const LEGACY_BACKFILL_REASON_TOKENS = new Set([
+  "talent network consent",
+  "active market evidence",
+  "open to opportunities evidence",
+  "market evidence quote",
+  "preference company stages",
+  "preference workplace types",
+  "preference locations",
+  "location provenance",
+  "preference minimum base salary",
+  "resume",
+  "no resume phase1",
+  "no resume on profile resume wait ships phase 2",
+]);
 
 const bool = (value, fallback = false) => {
   if (value == null || value === "") return fallback;
@@ -67,6 +123,7 @@ const bool = (value, fallback = false) => {
 };
 
 const finiteDate = (value) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
   const parsed = Date.parse(String(value || ""));
   return Number.isFinite(parsed) ? parsed : null;
 };
@@ -74,7 +131,7 @@ const finiteDate = (value) => {
 export function automationConfig(env = process.env) {
   const notBeforeMs = finiteDate(env.PARAAI_AUTO_NOT_BEFORE);
   const phase1DeployedAtMs = finiteDate(env.PARAAI_PHASE1_DEPLOYED_AT);
-  const configuredResumeWait = Number(env.PARAAI_RESUME_WAIT_MINUTES);
+  const resumeWait = resumeWaitSettings(env);
   const configuredStepAttempts = Number(env.PARAAI_MAX_STEP_ATTEMPTS);
   return {
     enabled: bool(env.PARAAI_AUTOMATION_APPROVED),
@@ -91,9 +148,15 @@ export function automationConfig(env = process.env) {
         .map((value) => value.trim())
         .filter((value) => BOT_ID.test(value)),
     ),
-    resumeWaitMinutes: Number.isFinite(configuredResumeWait)
-      ? Math.max(0, configuredResumeWait)
-      : DEFAULT_RESUME_WAIT_MINUTES,
+    resumeWaitMinutes: resumeWait.waitMinutes,
+    resumeWaitEnabled: bool(env.PARAAI_RESUME_WAIT_ENABLED),
+    resumeSignalConfigured: (
+      String(env.PARAAI_RESUME_SIGNAL_SECRET || "").trim().length >= 24
+    ),
+    resumeRetryDays: resumeWait.retryDays,
+    resumeTerminalAckHours: resumeWait.terminalAckHours,
+    resumeBackfillTerminalAckDays:
+      resumeWait.backfillTerminalAckDays,
     maxStepAttempts: Number.isFinite(configuredStepAttempts)
       ? Math.max(1, configuredStepAttempts)
       : DEFAULT_MAX_STEP_ATTEMPTS,
@@ -112,14 +175,34 @@ export function automationExecutionEnabled(config = {}) {
     config.autoSubmitApproved &&
     config.dryRun === false &&
     config.notBeforeMs != null &&
-    config.phase1DeployedAtMs != null,
+    config.phase1DeployedAtMs != null &&
+    (!config.resumeWaitEnabled || config.resumeSignalConfigured === true),
   );
 }
 
 export function automationApprovalSource(queueSource) {
-  return queueSource === "authorized_backfill"
-    ? "authorized_backfill_2026-07-16"
-    : "recall_verified_automation";
+  if (queueSource === "authorized_backfill") {
+    return "authorized_backfill_2026-07-16";
+  }
+  if (queueSource === HUMAN_CALL_QUEUE_SOURCE) {
+    return "paraform_human_call_verified_automation";
+  }
+  return "recall_verified_automation";
+}
+
+export function automationApprovalSourceForJob(
+  job,
+  queueSource,
+  { historicalAuthorized = false } = {},
+) {
+  if (historicalAuthorized) {
+    return automationApprovalSource("authorized_backfill");
+  }
+  return automationApprovalSource(
+    job?.humanCall === true || isHumanCallJob(job?.id)
+      ? HUMAN_CALL_QUEUE_SOURCE
+      : queueSource,
+  );
 }
 
 export function automationRetryDecision(code, state, attempts = 0) {
@@ -135,7 +218,9 @@ export function automationRetryDecision(code, state, attempts = 0) {
   const exponent = Math.max(0, Math.min(5, Number(attempts) || 0));
   const delayMs = normalizedCode === "AUTH_EXPIRED"
     ? 15 * 60_000
-    : Math.min(15 * 60_000, 30_000 * (2 ** exponent));
+    : normalizedCode === "RESUME_ATTACH_REDUE_FAILED"
+      ? 1_000
+      : Math.min(15 * 60_000, 30_000 * (2 ** exponent));
   return { retry, delayMs };
 }
 
@@ -151,7 +236,13 @@ function validHttpUrl(value) {
 export function autoEligibility(job, config = automationConfig()) {
   const reasons = [];
   if (job?.state !== "ready_to_submit") reasons.push("state");
-  if (config.strictScreenerSource && job?.callSourceVerified !== true) reasons.push("call source");
+  if (job?.humanCall === true) {
+    if (job?.humanCallMeta?.provenanceVerified !== true) {
+      reasons.push("human call provenance");
+    }
+  } else if (config.strictScreenerSource && job?.callSourceVerified !== true) {
+    reasons.push("call source");
+  }
   const signals = Array.isArray(job?.identity?.signals) ? job.identity.signals : [];
   const strongIdentity = signals.some((signal) => ["linkedin", "phone", "scheduled_time"].includes(signal));
   if (!job?.identity?.candidateUserId || signals.length < 2 || !strongIdentity || job?.identity?.ambiguous) {
@@ -235,18 +326,71 @@ export function resolveCallEndedAt(call, fallback = null) {
 }
 
 export function automationGraceDecision(job, config = automationConfig(), now = Date.now()) {
+  const resumeFirstCheckAt = config.resumeWaitEnabled
+    ? finiteDate(job?.automation?.resumeWait?.firstCheckAt)
+    : null;
   const callEndedAtMs = finiteDate(job?.callEndedAt);
-  if (callEndedAtMs == null) {
+  if (callEndedAtMs == null && resumeFirstCheckAt == null) {
     return { ready: false, dueAt: null, reason: "call end timestamp is missing" };
   }
   const waitMinutes = Number.isFinite(Number(config.resumeWaitMinutes))
     ? Math.max(0, Number(config.resumeWaitMinutes))
     : DEFAULT_RESUME_WAIT_MINUTES;
-  const dueAt = callEndedAtMs + waitMinutes * 60_000;
+  const dueAt = resumeFirstCheckAt ?? callEndedAtMs + waitMinutes * 60_000;
   return {
     ready: Number(now) >= dueAt,
     dueAt,
     reason: Number(now) >= dueAt ? null : "one-hour post-call grace period",
+  };
+}
+
+function resumeWaitScheduledAt(wait, checkNumber) {
+  const anchor = finiteDate(wait?.enteredAt);
+  const first = finiteDate(wait?.firstCheckAt);
+  const normalizedCheck = Math.max(1, Math.floor(Number(checkNumber) || 1));
+  if (anchor == null || first == null) return null;
+  return normalizedCheck === 1
+    ? first
+    : anchor + (normalizedCheck - 1) * DAY_MS;
+}
+
+export { resumeWaitPlan };
+
+export function resumeWaitSource(queueSource = "unknown") {
+  const source = String(queueSource || "unknown");
+  if (source === "authorized_backfill") return "authorized_backfill";
+  if (source === "phase1_resume_sweep") return "phase1_sweep";
+  return "organic";
+}
+
+export function isResumeAttachTrigger(queueSource, resumeWait = null) {
+  const source = String(queueSource || "");
+  return Boolean(
+    source.startsWith(RESUME_ATTACH_SOURCE_PREFIX) &&
+    source !== String(resumeWait?.lastTrigger || ""),
+  );
+}
+
+export function resumeWaitCheckDecision(
+  job,
+  config = automationConfig(),
+  { queueSource = "unknown", now = Date.now() } = {},
+) {
+  const wait = job?.automation?.resumeWait;
+  const nextCheckAt = finiteDate(wait?.nextCheckAt);
+  const retryDays = Number.isFinite(Number(config.resumeRetryDays))
+    ? Math.max(1, Math.floor(Number(config.resumeRetryDays)))
+    : DEFAULT_RESUME_RETRY_DAYS;
+  const totalScheduledChecks = retryDays + 1;
+  const attachTriggered = isResumeAttachTrigger(queueSource, wait);
+  const scheduledDue = nextCheckAt != null && Number(now) >= nextCheckAt;
+  return {
+    check: attachTriggered || scheduledDue,
+    scheduled: !attachTriggered && scheduledDue,
+    attachTriggered,
+    trigger: attachTriggered ? String(queueSource) : "scheduled",
+    dueAt: nextCheckAt,
+    totalScheduledChecks,
   };
 }
 
@@ -255,7 +399,18 @@ export function automationFreezeDecision(
   config = automationConfig(),
   { queueSource = "unknown" } = {},
 ) {
-  if (queueSource === "authorized_backfill") {
+  if (
+    queueSource === HUMAN_CALL_QUEUE_SOURCE
+    || job?.humanCall === true
+    || isHumanCallJob(job?.id)
+  ) {
+    return { frozen: false, mode: "human_call", reason: null };
+  }
+  if (
+    queueSource === "authorized_backfill" ||
+    job?.automation?.mode === "authorized_backfill" ||
+    job?.automation?.resumeWait?.source === "authorized_backfill"
+  ) {
     return { frozen: false, mode: "authorized_backfill", reason: null };
   }
   const id = String(job?.id || "");
@@ -284,7 +439,10 @@ export function automationFreezeDecision(
 export function needsPhase1Routing(job) {
   return Boolean(
     job?.state === "ready_to_submit" &&
-    !job?.reviewPolicy?.preferenceRouting,
+    (
+      !job?.reviewPolicy?.preferenceRouting ||
+      job?.automation?.preferenceRerouteRequired === true
+    ),
   );
 }
 
@@ -318,6 +476,698 @@ function mergeReviewReasons(job, ...values) {
   const unique = new Map();
   for (const row of rows) unique.set(String(row.code || row.message), row);
   return [...unique.values()];
+}
+
+function backfillReasonToken(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function backfillReasonValues(job) {
+  const values = [];
+  for (const reason of Array.isArray(job?.reviewReasons) ? job.reviewReasons : []) {
+    if (!reason) continue;
+    if (typeof reason === "string") {
+      values.push(reason);
+      continue;
+    }
+    values.push(reason.code, reason.message || reason.detail);
+  }
+  values.push(job?.reviewReason);
+  values.push(...(Array.isArray(job?.automation?.reasons) ? job.automation.reasons : []));
+  return [...new Set(values.map(backfillReasonToken).filter(Boolean))];
+}
+
+export function backfillReviewDecision(job) {
+  if (job?.humanCall === true || isHumanCallJob(job?.id)) {
+    return { eligible: false, reason: "human_call_lane", reasons: [] };
+  }
+  if (!BACKFILL_REOPEN_STATES.has(String(job?.state || ""))) {
+    return { eligible: false, reason: "state_preserved", reasons: [] };
+  }
+  if (!job?.extracted || !job?.identity?.candidateUserId) {
+    return { eligible: false, reason: "stored_routing_inputs_missing", reasons: [] };
+  }
+  if (job?.identity?.ambiguous === true) {
+    return { eligible: false, reason: "identity_review", reasons: [] };
+  }
+  if (
+    job?.error ||
+    job?.automation?.lastFailure ||
+    Object.keys(job?.automation?.stepFailures || {}).length
+  ) {
+    return { eligible: false, reason: "technical_review", reasons: [] };
+  }
+  if (!normalizeEmail(job?.submission?.email)) {
+    return { eligible: false, reason: "email_review", reasons: [] };
+  }
+  if (!normLinkedin(job?.submission?.linkedinUrl)) {
+    return { eligible: false, reason: "linkedin_review", reasons: [] };
+  }
+
+  const reasons = backfillReasonValues(job);
+  const unknownReasons = reasons.filter((reason) => !LEGACY_BACKFILL_REASON_TOKENS.has(reason));
+  if (unknownReasons.length) {
+    return { eligible: false, reason: "hard_review_reason", reasons };
+  }
+  if (job.state === "needs_review" && !reasons.length) {
+    return { eligible: false, reason: "unclassified_review", reasons };
+  }
+  if (
+    job.state === "ready_to_submit" &&
+    job?.automation?.status === "needs_review" &&
+    !reasons.length
+  ) {
+    return { eligible: false, reason: "unclassified_review", reasons };
+  }
+  return { eligible: true, reason: null, reasons };
+}
+
+export function ensureResumeWaitPlan(
+  job,
+  config = automationConfig(),
+  {
+    queueSource = "unknown",
+    anchorAt = null,
+    source = null,
+  } = {},
+) {
+  const existing = job?.automation?.resumeWait;
+  if (
+    finiteDate(existing?.enteredAt) != null &&
+    finiteDate(existing?.firstCheckAt) != null &&
+    finiteDate(existing?.expiresAt) != null
+  ) {
+    return existing;
+  }
+  const resolvedAnchor = finiteDate(anchorAt) ?? finiteDate(job?.callEndedAt);
+  return resumeWaitPlan({
+    source: source || resumeWaitSource(queueSource),
+    anchorAt: resolvedAnchor,
+    callEndedAt: finiteDate(job?.callEndedAt) ?? resolvedAnchor,
+    waitMinutes: config.resumeWaitMinutes,
+    retryDays: config.resumeRetryDays,
+    terminalAckHours: config.resumeTerminalAckHours,
+    backfillTerminalAckDays:
+      config.resumeBackfillTerminalAckDays,
+  });
+}
+
+function resumeCheckJournalDetail(wait, total, { scheduled, found }) {
+  const count = Math.max(0, Number(wait?.scheduledChecks) || 0);
+  const trigger = scheduled ? "" : " (attach trigger)";
+  return `resume check ${count}/${total}${trigger}: ${found ? "resume on file" : "none on file"}`;
+}
+
+function resumeTerminalAckDeadlineAt(
+  wait,
+  config = {},
+  openedAt = Date.now(),
+) {
+  const hours = Number(config.resumeTerminalAckHours);
+  const organicDeadline = Number(openedAt) + (
+    Number.isFinite(hours)
+      ? Math.max(
+          MIN_RESUME_TERMINAL_ACK_HOURS,
+          Math.min(MAX_RESUME_TERMINAL_ACK_HOURS, hours),
+        )
+      : DEFAULT_RESUME_TERMINAL_ACK_HOURS
+  ) * 60 * 60_000;
+  const existingClaimDeadline = finiteDate(wait?.claimableThroughAt) ?? 0;
+  if (!["authorized_backfill", "phase1_sweep"].includes(wait?.source)) {
+    return Math.max(organicDeadline, existingClaimDeadline);
+  }
+  const configuredDays = Number(
+    config.resumeBackfillTerminalAckDays,
+  );
+  const days = Number.isFinite(configuredDays)
+    ? Math.max(
+        MIN_RESUME_BACKFILL_TERMINAL_ACK_DAYS,
+        Math.min(
+          MAX_RESUME_BACKFILL_TERMINAL_ACK_DAYS,
+          configuredDays,
+        ),
+      )
+    : DEFAULT_RESUME_BACKFILL_TERMINAL_ACK_DAYS;
+  const anchorAt = finiteDate(wait?.enteredAt);
+  return Math.max(
+    organicDeadline,
+    existingClaimDeadline,
+    (anchorAt ?? Number(openedAt)) + days * DAY_MS,
+  );
+}
+
+export function resumeWaitMissingTransition(
+  job,
+  config = automationConfig(),
+  {
+    queueSource = "unknown",
+    now = Date.now(),
+    probeStartedAt = now,
+    wait: suppliedWait = null,
+  } = {},
+) {
+  const wait = suppliedWait || ensureResumeWaitPlan(job, config, { queueSource });
+  const decision = resumeWaitCheckDecision({
+    ...job,
+    automation: { ...(job?.automation || {}), resumeWait: wait },
+  }, config, { queueSource, now });
+  if (!decision.check) return { job, decision, expired: false };
+
+  const scheduledChecks = decision.scheduled
+    ? Math.min(
+        decision.totalScheduledChecks,
+        Math.max(0, Number(wait.scheduledChecks) || 0) + 1,
+      )
+    : Math.max(0, Number(wait.scheduledChecks) || 0);
+  const nextScheduledAt = scheduledChecks < decision.totalScheduledChecks
+    ? resumeWaitScheduledAt(wait, scheduledChecks + 1)
+    : null;
+  const nextWait = {
+    ...wait,
+    scheduledChecks,
+    nextCheckAt: nextScheduledAt == null ? null : new Date(nextScheduledAt).toISOString(),
+    lastCheckedAt: new Date(now).toISOString(),
+    lastTrigger: decision.attachTriggered ? decision.trigger : wait.lastTrigger,
+  };
+  const expired = Boolean(
+    decision.scheduled &&
+    scheduledChecks >= decision.totalScheduledChecks &&
+    Number(now) >= finiteDate(wait.expiresAt),
+  );
+  if (expired) {
+    const openedAt = Number(now);
+    const markerSinceAt = finiteDate(probeStartedAt) ?? openedAt;
+    const opsDeadlineAt = resumeTerminalAckDeadlineAt(
+      wait,
+      config,
+      openedAt,
+    );
+    const nextJob = transition(job, "waiting_for_resume", {
+      reviewReason: (job?.reviewReasons || [])
+        .find((reason) => reason?.code !== "no_resume_phase1")?.code || null,
+      reviewReasons: (job?.reviewReasons || [])
+        .filter((reason) => reason?.code !== "no_resume_phase1"),
+      automation: {
+        ...(job?.automation || {}),
+        status: "waiting_for_resume",
+        reasons: [],
+        resumeWait: {
+          ...nextWait,
+          nextCheckAt: new Date(opsDeadlineAt).toISOString(),
+          terminalAck: {
+            status: "awaiting_ack",
+            openedAt: new Date(openedAt).toISOString(),
+            markerSinceAt: new Date(markerSinceAt).toISOString(),
+            opsDeadlineAt: new Date(opsDeadlineAt).toISOString(),
+          },
+        },
+        resumeWaitSweepEligible: false,
+      },
+      submission: {
+        ...(job?.submission || {}),
+        resumeUri: "",
+        resumeStatus: "missing",
+      },
+      journalDetail: resumeCheckJournalDetail(
+        nextWait,
+        decision.totalScheduledChecks,
+        { scheduled: decision.scheduled, found: false },
+      ),
+    });
+    return { job: nextJob, decision, expired: true, settling: true };
+  }
+
+  return {
+    job: transition(job, "waiting_for_resume", {
+      reviewReason: (job?.reviewReasons || [])
+        .find((reason) => reason?.code !== "no_resume_phase1")?.code || null,
+      reviewReasons: (job?.reviewReasons || [])
+        .filter((reason) => reason?.code !== "no_resume_phase1"),
+      automation: {
+        ...(job?.automation || {}),
+        status: "waiting_for_resume",
+        reasons: [],
+        resumeWait: nextWait,
+        resumeWaitSweepEligible: false,
+      },
+      submission: {
+        ...(job?.submission || {}),
+        resumeUri: "",
+        resumeStatus: "missing",
+      },
+      journalDetail: resumeCheckJournalDetail(
+        nextWait,
+        decision.totalScheduledChecks,
+        { scheduled: decision.scheduled, found: false },
+      ),
+    }),
+    decision,
+    expired: false,
+  };
+}
+
+export function resumeWaitFoundTransition(
+  job,
+  resumeUri,
+  config = automationConfig(),
+  {
+    queueSource = "unknown",
+    now = Date.now(),
+  } = {},
+) {
+  const wait = ensureResumeWaitPlan(job, config, { queueSource });
+  const decision = resumeWaitCheckDecision({
+    ...job,
+    automation: { ...(job?.automation || {}), resumeWait: wait },
+  }, config, { queueSource, now });
+  const scheduledChecks = decision.scheduled
+    ? Math.min(
+        decision.totalScheduledChecks,
+        Math.max(0, Number(wait.scheduledChecks) || 0) + 1,
+      )
+    : Math.max(0, Number(wait.scheduledChecks) || 0);
+  const nextWait = {
+    ...wait,
+    scheduledChecks,
+    nextCheckAt: null,
+    lastCheckedAt: new Date(now).toISOString(),
+    lastTrigger: decision.attachTriggered ? decision.trigger : wait.lastTrigger,
+    terminalAck: undefined,
+  };
+  const remainingReviewReasons = (job?.reviewReasons || [])
+    .filter((reason) => ![
+      "no_resume_phase1",
+      "no_resume_after_7_days",
+      RESUME_ATTACHMENT_PENDING_REVIEW_CODE,
+      RESUME_RECEIVED_REVIEW_CODE,
+    ].includes(reason?.code));
+  const nextState = remainingReviewReasons.length ? "needs_review" : "ready_to_submit";
+  return transition(job, nextState, {
+    reviewReason: remainingReviewReasons[0]?.code || null,
+    reviewReasons: remainingReviewReasons,
+    automation: {
+      ...(job?.automation || {}),
+      status: remainingReviewReasons.length ? "needs_review" : "resume_on_file",
+      reasons: remainingReviewReasons.map((reason) => reason.message || reason.code),
+      resumeWait: nextWait,
+      resumeWaitSweepEligible: false,
+    },
+    submission: {
+      ...(job?.submission || {}),
+      resumeUri: String(resumeUri || "").trim(),
+      resumeStatus: "on_file",
+    },
+    journalDetail: resumeCheckJournalDetail(
+      nextWait,
+      decision.totalScheduledChecks,
+      { scheduled: decision.scheduled, found: true },
+    ),
+  });
+}
+
+export function isTerminalResumeWaitReview(job) {
+  const terminalReasons = new Map([
+    ["no_resume_after_7_days", RESUME_WAIT_TERMINAL_REASON],
+    [
+      RESUME_ATTACHMENT_PENDING_REVIEW_CODE,
+      RESUME_ATTACHMENT_PENDING_REVIEW_MESSAGE,
+    ],
+    [RESUME_RECEIVED_REVIEW_CODE, RESUME_RECEIVED_REVIEW_MESSAGE],
+  ]);
+  const expectedMessage = terminalReasons.get(job?.reviewReason);
+  return Boolean(
+    job?.state === "needs_review" &&
+    expectedMessage &&
+    Array.isArray(job?.reviewReasons) &&
+    job.reviewReasons.some((reason) => (
+      reason?.code === job.reviewReason &&
+      reason?.message === expectedMessage
+    )) &&
+    finiteDate(job?.automation?.resumeWait?.expiresAt) != null
+  );
+}
+
+function terminalResumeReviewDetail(job) {
+  return String(
+    (job?.reviewReasons || []).find((reason) => (
+      reason?.code === job?.reviewReason
+    ))?.message
+    || RESUME_WAIT_TERMINAL_REASON,
+  );
+}
+
+export function resumeWaitTerminalSettleDecision(
+  job,
+  {
+    now = Date.now(),
+    sharedState = null,
+    config = automationConfig(),
+  } = {},
+) {
+  const terminal = job?.automation?.resumeWait?.terminalAck;
+  const terminalOpsDeadlineAt = finiteDate(terminal?.opsDeadlineAt);
+  const storedClaimDeadlineAt = finiteDate(
+    job?.automation?.resumeWait?.claimableThroughAt,
+  );
+  const storedOpsDeadlineAt = Math.max(
+    terminalOpsDeadlineAt ?? 0,
+    storedClaimDeadlineAt ?? 0,
+  ) || null;
+  const markerSinceAt = finiteDate(terminal?.markerSinceAt);
+  const settling = Boolean(
+    job?.state === "waiting_for_resume" &&
+    terminal?.status === "awaiting_ack" &&
+    terminalOpsDeadlineAt != null &&
+    markerSinceAt != null &&
+    Number(job?.automation?.resumeWait?.scheduledChecks) > 0
+  );
+  const chain = sharedState?.chain || null;
+  const terminalAck = chain?.terminalAck;
+  const explicitAck = Boolean(
+    terminalAck
+    && terminalAck.touch === 3
+    && ["delivered", "terminal_no_send"].includes(terminalAck.outcome)
+    && finiteDate(terminalAck.acknowledgedAt) != null
+  );
+  const chainStopped = Boolean(
+    chain?.stopped === true || chain?.status === "stopped",
+  );
+  const nextDeliveryDeadline = resumeChaseNextDeliveryAckDeadline(
+    chain,
+    {
+      terminalAckHours: config.resumeTerminalAckHours,
+    },
+  );
+  const opsDeadlineAt = Math.max(
+    storedOpsDeadlineAt ?? 0,
+    nextDeliveryDeadline ?? 0,
+  ) || null;
+  const acknowledged = explicitAck || chainStopped;
+  const deadlineElapsed = settling && Number(now) >= opsDeadlineAt;
+  const outcome = explicitAck
+    ? terminalAck.outcome
+    : chainStopped
+      ? "terminal_no_send"
+      : deadlineElapsed
+        ? "ops_deadline_elapsed"
+        : null;
+  const acknowledgedAt = explicitAck
+    ? finiteDate(terminalAck.acknowledgedAt)
+    : chainStopped
+      ? finiteDate(chain?.stoppedAt)
+      : null;
+  return {
+    settling,
+    acknowledged,
+    deadlineElapsed,
+    readyToClose: settling && (acknowledged || deadlineElapsed),
+    delayMs: settling
+      ? Math.max(1_000, opsDeadlineAt - Number(now))
+      : null,
+    markerSinceAt,
+    opsDeadlineAt,
+    deadlineExtended: Boolean(
+      settling
+      && storedOpsDeadlineAt != null
+      && opsDeadlineAt > storedOpsDeadlineAt
+    ),
+    outcome,
+    acknowledgedAt,
+    stopReason: chainStopped
+      ? String(chain?.stopReason || "terminal_no_send")
+      : null,
+  };
+}
+
+export function resumeWaitTerminalTransition(
+  job,
+  config = automationConfig(),
+  {
+    queueSource = "unknown",
+    now = Date.now(),
+    terminalOutcome = null,
+    acknowledgedAt = null,
+    terminalStopReason = null,
+  } = {},
+) {
+  const wait = job?.automation?.resumeWait;
+  const decision = resumeWaitCheckDecision(job, config, { queueSource, now });
+  const attachTriggered = decision.attachTriggered;
+  const resolvedTerminalOutcome = terminalOutcome
+    || wait?.terminalAck?.outcome
+    || "ops_deadline_elapsed";
+  const resolvedAcknowledgedAt = acknowledgedAt
+    ?? finiteDate(wait?.terminalAck?.acknowledgedAt);
+  const terminalReview = terminalStopReason === "resume_received"
+    ? {
+        code: RESUME_ATTACHMENT_PENDING_REVIEW_CODE,
+        message: RESUME_ATTACHMENT_PENDING_REVIEW_MESSAGE,
+      }
+    : terminalStopReason === RESUME_RECEIVED_REVIEW_CODE
+      ? {
+          code: RESUME_RECEIVED_REVIEW_CODE,
+          message: RESUME_RECEIVED_REVIEW_MESSAGE,
+        }
+      : {
+          code: "no_resume_after_7_days",
+          message: RESUME_WAIT_TERMINAL_REASON,
+        };
+  const nextWait = {
+    ...wait,
+    nextCheckAt: null,
+    lastCheckedAt: new Date(now).toISOString(),
+    lastTrigger: attachTriggered ? decision.trigger : wait?.lastTrigger || null,
+    terminalAck: wait?.terminalAck
+      ? {
+          ...wait.terminalAck,
+          status: resolvedTerminalOutcome === "ops_deadline_elapsed"
+            ? "deadline_elapsed"
+            : "acknowledged",
+          outcome: resolvedTerminalOutcome,
+          acknowledgedAt: resolvedAcknowledgedAt == null
+            ? null
+            : new Date(resolvedAcknowledgedAt).toISOString(),
+          closedAt: new Date(now).toISOString(),
+        }
+      : undefined,
+  };
+  return transition(job, "needs_review", {
+    reviewReason: terminalReview.code,
+    reviewReasons: mergeReviewReasons(
+      {
+        ...job,
+        reviewReasons: (job?.reviewReasons || [])
+          .filter((reason) => ![
+            "no_resume_phase1",
+            "no_resume_after_7_days",
+            RESUME_ATTACHMENT_PENDING_REVIEW_CODE,
+            RESUME_RECEIVED_REVIEW_CODE,
+          ].includes(reason?.code)),
+      },
+      reviewReason(terminalReview.code, terminalReview.message),
+    ),
+    automation: {
+      ...(job?.automation || {}),
+      status: "needs_review",
+      reasons: [terminalReview.message],
+      resumeWait: nextWait,
+      resumeWaitSweepEligible: false,
+    },
+    submission: {
+      ...(job?.submission || {}),
+      resumeUri: "",
+      resumeStatus: "missing",
+    },
+    journalDetail: attachTriggered
+      ? resumeCheckJournalDetail(
+          nextWait,
+          decision.totalScheduledChecks,
+          { scheduled: false, found: false },
+        )
+      : resolvedTerminalOutcome === "delivered"
+        ? "resume wait closed after touch-3 delivery acknowledgement"
+        : resolvedTerminalOutcome === "terminal_no_send"
+          ? "resume wait closed after touch-3 terminal no-send acknowledgement"
+          : "resume wait closed at the terminal acknowledgement operations deadline",
+  });
+}
+
+export function resumeWaitTerminalMarkerMissingTransition(
+  job,
+  config = automationConfig(),
+  {
+    queueSource = "unknown",
+    now = Date.now(),
+  } = {},
+) {
+  const wait = job?.automation?.resumeWait;
+  const decision = resumeWaitCheckDecision(job, config, { queueSource, now });
+  if (
+    job?.state !== "waiting_for_resume"
+    || wait?.terminalAck?.status !== "awaiting_ack"
+    || !decision.attachTriggered
+  ) {
+    return job;
+  }
+  const nextWait = {
+    ...wait,
+    lastCheckedAt: new Date(now).toISOString(),
+    lastTrigger: decision.trigger,
+  };
+  return transition(job, "waiting_for_resume", {
+    automation: {
+      ...(job?.automation || {}),
+      status: "waiting_for_resume",
+      resumeWait: nextWait,
+    },
+    journalDetail: resumeCheckJournalDetail(
+      nextWait,
+      decision.totalScheduledChecks,
+      { scheduled: false, found: false },
+    ),
+  });
+}
+
+export function resumeWaitTerminalDeadlineTransition(
+  job,
+  {
+    opsDeadlineAt,
+    now = Date.now(),
+  } = {},
+) {
+  const deadline = finiteDate(opsDeadlineAt);
+  const current = finiteDate(
+    job?.automation?.resumeWait?.terminalAck?.opsDeadlineAt,
+  );
+  if (
+    job?.state !== "waiting_for_resume"
+    || job?.automation?.resumeWait?.terminalAck?.status !== "awaiting_ack"
+    || deadline == null
+    || current == null
+    || deadline <= current
+  ) {
+    return job;
+  }
+  const nextWait = {
+    ...job.automation.resumeWait,
+    claimableThroughAt: new Date(deadline).toISOString(),
+    nextCheckAt: new Date(deadline).toISOString(),
+    terminalAck: {
+      ...job.automation.resumeWait.terminalAck,
+      opsDeadlineAt: new Date(deadline).toISOString(),
+    },
+  };
+  return transition(job, "waiting_for_resume", {
+    automation: {
+      ...(job.automation || {}),
+      status: "waiting_for_resume",
+      resumeWait: nextWait,
+    },
+    journalDetail:
+      "resume terminal acknowledgement deadline extended for the next legitimate chase delivery",
+  });
+}
+
+export function resumeWaitTerminalAttachMissingTransition(
+  job,
+  config = automationConfig(),
+  {
+    queueSource = "unknown",
+    now = Date.now(),
+  } = {},
+) {
+  if (!isTerminalResumeWaitReview(job)) return job;
+  const decision = resumeWaitCheckDecision(job, config, { queueSource, now });
+  if (!decision.attachTriggered) return job;
+  return resumeWaitTerminalTransition(job, config, { queueSource, now });
+}
+
+export async function ensureRecentResumeAttachRedue(
+  job,
+  {
+    probeStartedAt,
+    now = Date.now(),
+    getSignalImpl = getRecentResumeAttachedSignal,
+    enqueueImpl = enqueueAutoJob,
+  } = {},
+) {
+  const candidateUserId = String(job?.identity?.candidateUserId || "").trim();
+  const probeAt = Number(probeStartedAt);
+  if (!candidateUserId || !Number.isFinite(probeAt)) {
+    return { redue: false, reason: "probe_unavailable" };
+  }
+  try {
+    const signal = await getSignalImpl(candidateUserId, { now });
+    const receivedAt = finiteDate(signal?.receivedAt);
+    const eventHash = String(signal?.eventHash || "");
+    if (
+      receivedAt == null ||
+      receivedAt < probeAt ||
+      !/^[a-f0-9]{64}$/.test(eventHash)
+    ) {
+      return { redue: false, reason: "no_new_signal" };
+    }
+    const queued = await enqueueImpl(job.id, {
+      source: `${RESUME_ATTACH_SOURCE_PREFIX}${eventHash}`,
+      eventId: `resume-race:${job.id}:${eventHash}`,
+      dueAt: Number(now),
+      now: Number(now),
+    });
+    return {
+      redue: true,
+      enqueued: queued?.enqueued === true,
+      duplicate: queued?.duplicate === true,
+    };
+  } catch (error) {
+    const wrapped = new Error(String(error?.message || error || "resume attach re-due failed"));
+    wrapped.code = "RESUME_ATTACH_REDUE_FAILED";
+    wrapped.step = "resume_attach_redue";
+    wrapped.job = job;
+    throw wrapped;
+  }
+}
+
+export function isPhase1ResumeWaitCard(job) {
+  return Boolean(
+    job?.state === "needs_review" &&
+    job?.automation?.resumeWaitSweepEligible === true &&
+    job?.reviewReason === "no_resume_phase1" &&
+    Array.isArray(job?.reviewReasons) &&
+    job.reviewReasons.some((reason) => reason?.code === "no_resume_phase1"),
+  );
+}
+
+export function phase1ResumeWaitSweepTransition(
+  job,
+  config = automationConfig(),
+  { now = Date.now() } = {},
+) {
+  if (!isPhase1ResumeWaitCard(job)) return null;
+  const wait = resumeWaitPlan({
+    source: "phase1_sweep",
+    anchorAt: now,
+    waitMinutes: config.resumeWaitMinutes,
+    retryDays: config.resumeRetryDays,
+    terminalAckHours: config.resumeTerminalAckHours,
+    backfillTerminalAckDays:
+      config.resumeBackfillTerminalAckDays,
+  });
+  return transition(job, "waiting_for_resume", {
+    reviewReason: null,
+    reviewReasons: job.reviewReasons.filter((reason) => reason?.code !== "no_resume_phase1"),
+    automation: {
+      ...(job.automation || {}),
+      status: "waiting_for_resume",
+      reasons: [],
+      resumeWait: wait,
+      resumeWaitSweepEligible: false,
+    },
+    journalDetail: "Phase 1 no-resume card swept into the Phase 2 resume wait",
+  });
 }
 
 export function automationFailureTransition(
@@ -485,12 +1335,18 @@ async function persistAutomationMode(job, freeze) {
 
 async function ensureCallTiming(job, fallback = null, runStep = trackedAutomationStep) {
   if (finiteDate(job?.callEndedAt) != null) return job;
-  const call = await runStep("call_read", () => fetchCall(job.id));
+  const step = job?.humanCall === true ? "human_call_read" : "call_read";
+  const call = await runStep(
+    step,
+    () => job?.humanCall === true
+      ? fetchHumanCall(callIdFromHumanJob(job.id))
+      : fetchCall(job.id),
+  );
   const endedAt = resolveCallEndedAt(call, fallback || job?.updatedAt || job?.createdAt);
   if (endedAt == null) {
     const error = new Error("call end timestamp is missing");
     error.code = "CALL_END_TIMESTAMP_MISSING";
-    error.step = "call_read";
+    error.step = step;
     error.job = job;
     throw error;
   }
@@ -520,6 +1376,68 @@ async function refreshResumeForSubmission(job, runStep = trackedAutomationStep) 
   return { job: updated, resumeUri };
 }
 
+function resumeWaitDelay(wait, now = Date.now()) {
+  const nextCheckAt = finiteDate(wait?.nextCheckAt);
+  return nextCheckAt == null
+    ? 1_000
+    : Math.max(1_000, nextCheckAt - Number(now));
+}
+
+function resumeChaseScopeForJob(job) {
+  const chainAnchorAt = String(
+    job?.automation?.resumeWait?.enteredAt || "",
+  );
+  return {
+    jobId: String(job?.id || ""),
+    chainAnchorAt,
+    chainCallEndedAt: finiteDate(job?.callEndedAt) == null
+      ? ""
+      : new Date(finiteDate(job.callEndedAt)).toISOString(),
+    chainId: resumeChaseChainId(job?.id, chainAnchorAt),
+  };
+}
+
+async function stopResumeChase(job, reason, runStep = trackedAutomationStep) {
+  const candidateUserId = String(job?.identity?.candidateUserId || "").trim();
+  if (!candidateUserId || !job?.automation?.resumeWait) return null;
+  try {
+    return await runStep(
+      "resume_chase_stop",
+      () => stopResumeAskSuppression(candidateUserId, {
+        reason,
+        ...resumeChaseScopeForJob(job),
+      }),
+    );
+  } catch (error) {
+    error.code = "RESUME_CHASE_STOP_FAILED";
+    error.step = "resume_chase_stop";
+    error.job = job;
+    throw error;
+  }
+}
+
+async function readResumeChaseState(
+  job,
+  runStep = trackedAutomationStep,
+) {
+  const candidateUserId = String(
+    job?.identity?.candidateUserId || "",
+  ).trim();
+  if (!candidateUserId || !job?.automation?.resumeWait) return null;
+  const { chainId } = resumeChaseScopeForJob(job);
+  try {
+    return await runStep(
+      "resume_chase_read",
+      () => getResumeAskSuppression(candidateUserId, { chainId }),
+    );
+  } catch (error) {
+    error.code = "RESUME_CHASE_READ_FAILED";
+    error.step = "resume_chase_read";
+    error.job = job;
+    throw error;
+  }
+}
+
 function automationErrorResult(job, defaultStep = "process") {
   const failure = normalizeFailureRecord({
     code: job?.error?.code || "AUTO_PROCESS_FAILED",
@@ -546,18 +1464,35 @@ async function processAutoJobInner(
     queueAttempts = 0,
     queueCallEndedAt = null,
     succeededSteps = new Set(),
+    getJobImpl = getJob,
+    submitJobImpl = pipelineSubmitJob,
   } = {},
 ) {
   const id = String(botId || "").trim();
+  const submitJob = submitJobImpl;
   const runStep = (step, operation) => trackedAutomationStep(step, operation, succeededSteps);
-  const historicalAuthorized = queueSource === "authorized_backfill";
-  const approvalSource = automationApprovalSource(queueSource);
+  let historicalAuthorized = queueSource === "authorized_backfill";
+  let humanIntake = (
+    queueSource === HUMAN_CALL_QUEUE_SOURCE
+    || isHumanCallJob(id)
+  );
   if (!BOT_ID.test(id)) return { action: "complete", state: "invalid", detail: "invalid bot id" };
   if (!automationExecutionEnabled(config)) {
     return { action: "reschedule", delayMs: 5 * 60_000, state: "paused", detail: "automation is paused" };
   }
 
-  let job = await getJob(id);
+  let job = await getJobImpl(id);
+  let verifiedResumeUri = "";
+  humanIntake = humanIntake || job?.humanCall === true;
+  if (
+    job?.automation?.mode === "authorized_backfill" ||
+    job?.automation?.resumeWait?.source === "authorized_backfill"
+  ) {
+    historicalAuthorized = true;
+  }
+  const approvalSource = automationApprovalSourceForJob(job, queueSource, {
+    historicalAuthorized,
+  });
   if (job) {
     const freeze = automationFreezeDecision(job, config, { queueSource });
     job = await persistAutomationMode(job, freeze);
@@ -569,7 +1504,7 @@ async function processAutoJobInner(
       };
     }
   }
-  if (job && !historicalAuthorized) {
+  if (job && !historicalAuthorized && !humanIntake) {
     const startedAt = finiteDate(job.callStartedAt);
     if (startedAt == null || startedAt < config.notBeforeMs) {
       return {
@@ -584,18 +1519,54 @@ async function processAutoJobInner(
     ["detected", "error"].includes(job.state) ||
     staleTransient(job) ||
     needsPhase1Routing(job) ||
-    (config.strictScreenerSource && job.callSourceVerified !== true && job.state === "ready_to_submit")
+    (
+      !humanIntake
+      && config.strictScreenerSource
+      && job.callSourceVerified !== true
+      && job.state === "ready_to_submit"
+    )
   ) {
-    const call = await runStep("call_read", () => fetchCall(id));
-    const readiness = automationCallReadiness(call, config, {
-      historicalAuthorized,
-      queueSource,
-      queueAttempts,
-    });
+    const callReadStep = humanIntake ? "human_call_read" : "call_read";
+    const call = await runStep(
+      callReadStep,
+      () => humanIntake
+        ? fetchHumanCall(callIdFromHumanJob(id))
+        : fetchCall(id),
+    );
+    const readiness = humanIntake
+      ? humanCallReadiness(call)
+      : automationCallReadiness(call, config, {
+          historicalAuthorized,
+          queueSource,
+          queueAttempts,
+        });
     if (!readiness.ready) {
+      if (humanIntake && readiness.terminal && job) {
+        job = await saveJob(transition(job, "needs_review", {
+          reviewReason: "human_call_substance_gate",
+          reviewReasons: mergeReviewReasons(
+            job,
+            reviewReason("human_call_substance_gate", readiness.reason),
+          ),
+          automation: {
+            ...(job.automation || {}),
+            status: "needs_review",
+            reasons: [readiness.reason],
+            evaluatedAt: new Date().toISOString(),
+          },
+          journalDetail: readiness.reason,
+        }), job.revision);
+        return {
+          action: "complete",
+          state: job.state,
+          detail: readiness.reason,
+          step: callReadStep,
+          job,
+        };
+      }
       return readiness.terminal
-        ? { action: "complete", state: "ineligible_call", detail: readiness.reason, step: "call_read" }
-        : { action: "reschedule", delayMs: 30_000, state: "waiting_for_artifacts", detail: readiness.reason, step: "call_read" };
+        ? { action: "complete", state: "ineligible_call", detail: readiness.reason, step: callReadStep }
+        : { action: "reschedule", delayMs: 30_000, state: "waiting_for_artifacts", detail: readiness.reason, step: callReadStep };
     }
     if (!job) {
       const predeploy = unstoredPhase1FreezeDecision(id, call, config, {
@@ -641,6 +1612,7 @@ async function processAutoJobInner(
             botId: id,
             force: Boolean(job),
             strictReads: true,
+            callRecord: call,
           }),
     );
     const endedAt = resolveCallEndedAt(call, queueCallEndedAt);
@@ -684,6 +1656,286 @@ async function processAutoJobInner(
     return { action: "complete", state: job.state, detail: "identity needs review" };
   }
 
+  if (
+    config.resumeWaitEnabled &&
+    isTerminalResumeWaitReview(job) &&
+    isResumeAttachTrigger(queueSource, job.automation?.resumeWait)
+  ) {
+    const resume = await runStep(
+      "resume_read",
+      () => getResume(job.identity?.candidateUserId),
+    );
+    const resumeUri = findResumeUri(resume);
+    if (resumeUri) {
+      verifiedResumeUri = resumeUri;
+      await stopResumeChase(job, "resume_detected", runStep);
+      job = await saveJob(
+        resumeWaitFoundTransition(job, resumeUri, config, {
+          queueSource,
+          now: Date.now(),
+        }),
+        job.revision,
+      );
+    } else {
+      job = await saveJob(
+        resumeWaitTerminalAttachMissingTransition(job, config, {
+          queueSource,
+          now: Date.now(),
+        }),
+        job.revision,
+      );
+      return {
+        action: "complete",
+        state: job.state,
+        detail: terminalResumeReviewDetail(job),
+        alert: {
+          code: "NO_RESUME_AFTER_RETRIES",
+          detail: terminalResumeReviewDetail(job),
+          ttlSeconds: 180 * 24 * 60 * 60,
+        },
+        job,
+      };
+    }
+  }
+
+  let terminalSettle = resumeWaitTerminalSettleDecision(job, {
+    now: Date.now(),
+    config,
+  });
+  if (config.resumeWaitEnabled && terminalSettle.settling) {
+    if (isResumeAttachTrigger(queueSource, job.automation?.resumeWait)) {
+      const resume = await runStep(
+        "resume_read",
+        () => getResume(job.identity?.candidateUserId),
+      );
+      const resumeUri = findResumeUri(resume);
+      if (resumeUri) {
+        verifiedResumeUri = resumeUri;
+        await stopResumeChase(job, "resume_detected", runStep);
+        job = await saveJob(
+          resumeWaitFoundTransition(job, resumeUri, config, {
+            queueSource,
+            now: Date.now(),
+          }),
+          job.revision,
+        );
+      } else {
+        job = await saveJob(
+          resumeWaitTerminalMarkerMissingTransition(job, config, {
+            queueSource,
+            now: Date.now(),
+          }),
+          job.revision,
+        );
+      }
+    }
+    if (job.state === "waiting_for_resume") {
+      const sharedState = await readResumeChaseState(job, runStep);
+      terminalSettle = resumeWaitTerminalSettleDecision(job, {
+        now: Date.now(),
+        sharedState,
+        config,
+      });
+      if (terminalSettle.deadlineExtended) {
+        job = await saveJob(
+          resumeWaitTerminalDeadlineTransition(job, {
+            opsDeadlineAt: terminalSettle.opsDeadlineAt,
+            now: Date.now(),
+          }),
+          job.revision,
+        );
+        terminalSettle = resumeWaitTerminalSettleDecision(job, {
+          now: Date.now(),
+          sharedState,
+          config,
+        });
+      }
+      if (!terminalSettle.readyToClose) {
+        return {
+          action: "reschedule",
+          delayMs: terminalSettle.delayMs,
+          state: job.state,
+          detail: "awaiting touch-3 terminal acknowledgement",
+          job,
+        };
+      }
+      const raceRedue = await runStep(
+        "resume_attach_redue",
+        () => ensureRecentResumeAttachRedue(job, {
+          probeStartedAt: terminalSettle.markerSinceAt,
+          now: Date.now(),
+        }),
+      );
+      if (raceRedue.redue) {
+        return {
+          action: "complete",
+          state: job.state,
+          detail: "resume attach race re-due scheduled",
+          job,
+        };
+      }
+      job = await saveJob(
+        resumeWaitTerminalTransition(job, config, {
+          queueSource,
+          now: Date.now(),
+          terminalOutcome: terminalSettle.outcome,
+          acknowledgedAt: terminalSettle.acknowledgedAt,
+          terminalStopReason: terminalSettle.stopReason,
+        }),
+        job.revision,
+      );
+      return {
+        action: "complete",
+        state: job.state,
+        detail: terminalResumeReviewDetail(job),
+        alert: {
+          code: "NO_RESUME_AFTER_RETRIES",
+          detail: terminalResumeReviewDetail(job),
+          ttlSeconds: 180 * 24 * 60 * 60,
+        },
+        job,
+      };
+    }
+  }
+
+  if (job.state === "waiting_for_resume") {
+    if (!config.resumeWaitEnabled) {
+      return {
+        action: "reschedule",
+        delayMs: 5 * 60_000,
+        state: job.state,
+        detail: "resume-wait machinery is gated off",
+      };
+    }
+    const check = resumeWaitCheckDecision(job, config, {
+      queueSource,
+      now: Date.now(),
+    });
+    if (!check.check) {
+      return {
+        action: "reschedule",
+        delayMs: resumeWaitDelay(job.automation?.resumeWait),
+        state: job.state,
+        detail: "waiting for the next scheduled resume check",
+      };
+    }
+
+    const resumeProbeStartedAt = Date.now();
+    job = await runStep(
+      "submission_read",
+      () => advanceExistingTalentNetworkJob(job, { approvalSource }),
+    );
+    if (job.state === "awaiting_matches") {
+      await stopResumeChase(job, "already_submitted", runStep);
+      return {
+        action: "complete",
+        state: job.state,
+        detail: "existing Talent Network membership verified; resume wait skipped",
+        job,
+      };
+    }
+    if (job.state === "error") return automationErrorResult(job, "submission_read");
+
+    const resume = await runStep(
+      "resume_read",
+      () => getResume(job.identity?.candidateUserId),
+    );
+    const resumeUri = findResumeUri(resume);
+    if (resumeUri) {
+      verifiedResumeUri = resumeUri;
+      await stopResumeChase(job, "resume_detected", runStep);
+      job = await saveJob(
+        resumeWaitFoundTransition(job, resumeUri, config, {
+          queueSource,
+          now: Date.now(),
+        }),
+        job.revision,
+      );
+    } else {
+      const checked = resumeWaitMissingTransition(job, config, {
+        queueSource,
+        now: Date.now(),
+        probeStartedAt: resumeProbeStartedAt,
+      });
+      job = await saveJob(checked.job, job.revision);
+      const raceRedue = await runStep(
+        "resume_attach_redue",
+        () => ensureRecentResumeAttachRedue(job, {
+          probeStartedAt: resumeProbeStartedAt,
+          now: Date.now(),
+        }),
+      );
+      if (checked.settling) {
+        if (raceRedue.redue) {
+          return {
+            action: "complete",
+            state: job.state,
+            detail: "resume attach race re-due scheduled",
+            job,
+          };
+        }
+        const sharedState = await readResumeChaseState(job, runStep);
+        const terminalDecision = resumeWaitTerminalSettleDecision(job, {
+          now: Date.now(),
+          sharedState,
+          config,
+        });
+        if (terminalDecision.deadlineExtended) {
+          job = await saveJob(
+            resumeWaitTerminalDeadlineTransition(job, {
+              opsDeadlineAt: terminalDecision.opsDeadlineAt,
+              now: Date.now(),
+            }),
+            job.revision,
+          );
+        }
+        const extendedDecision = resumeWaitTerminalSettleDecision(job, {
+          now: Date.now(),
+          sharedState,
+          config,
+        });
+        if (extendedDecision.readyToClose) {
+          job = await saveJob(
+            resumeWaitTerminalTransition(job, config, {
+              queueSource,
+              now: Date.now(),
+              terminalOutcome: extendedDecision.outcome,
+              acknowledgedAt: extendedDecision.acknowledgedAt,
+              terminalStopReason: extendedDecision.stopReason,
+            }),
+            job.revision,
+          );
+          return {
+            action: "complete",
+            state: job.state,
+            detail: terminalResumeReviewDetail(job),
+            alert: {
+              code: "NO_RESUME_AFTER_RETRIES",
+              detail: terminalResumeReviewDetail(job),
+              ttlSeconds: 180 * 24 * 60 * 60,
+            },
+            job,
+          };
+        }
+        return {
+          action: "reschedule",
+          delayMs: resumeWaitDelay(job.automation?.resumeWait),
+          state: job.state,
+          detail: "awaiting touch-3 terminal acknowledgement",
+          job,
+        };
+      }
+      return {
+        action: "reschedule",
+        delayMs: resumeWaitDelay(job.automation?.resumeWait),
+        state: job.state,
+        detail: "resume is not on the profile",
+        step: "resume_read",
+        job,
+      };
+    }
+  }
+
   if (job.state === "ready_to_submit") {
     job = await ensureCallTiming(job, queueCallEndedAt, runStep);
     const grace = automationGraceDecision(job, config);
@@ -707,6 +1959,7 @@ async function processAutoJobInner(
       () => advanceExistingTalentNetworkJob(job, { approvalSource }),
     );
     if (job.state === "awaiting_matches") {
+      await stopResumeChase(job, "already_submitted", runStep);
       return {
         action: "complete",
         state: job.state,
@@ -716,9 +1969,57 @@ async function processAutoJobInner(
     }
     if (job.state === "error") return automationErrorResult(job, "submission_read");
 
-    const resume = await refreshResumeForSubmission(job, runStep);
+    const resumeProbeStartedAt = Date.now();
+    const resume = verifiedResumeUri
+      ? { job, resumeUri: verifiedResumeUri }
+      : await refreshResumeForSubmission(job, runStep);
     job = resume.job;
+    if (resume.resumeUri && job?.automation?.resumeWait) {
+      await stopResumeChase(job, "resume_detected", runStep);
+    }
     if (!resume.resumeUri) {
+      if (config.resumeWaitEnabled) {
+        const wait = ensureResumeWaitPlan(job, config, { queueSource });
+        const checked = resumeWaitMissingTransition(job, config, {
+          queueSource,
+          now: Date.now(),
+          probeStartedAt: resumeProbeStartedAt,
+          wait,
+        });
+        job = await saveJob(checked.job, job.revision);
+        const raceRedue = await runStep(
+          "resume_attach_redue",
+          () => ensureRecentResumeAttachRedue(job, {
+            probeStartedAt: resumeProbeStartedAt,
+            now: Date.now(),
+          }),
+        );
+        if (checked.settling) {
+          if (raceRedue.redue) {
+            return {
+              action: "complete",
+              state: job.state,
+              detail: "resume attach race re-due scheduled",
+              job,
+            };
+          }
+          return {
+            action: "reschedule",
+            delayMs: resumeWaitDelay(job.automation?.resumeWait),
+            state: job.state,
+            detail: "closing the day-7 resume attach boundary",
+            job,
+          };
+        }
+        return {
+          action: "reschedule",
+          delayMs: resumeWaitDelay(job.automation?.resumeWait),
+          state: job.state,
+          detail: "resume is not on the profile",
+          step: "resume_read",
+          job,
+        };
+      }
       const message = "no resume on profile (resume-wait ships Phase 2)";
       job = await saveJob(transition(job, "needs_review", {
         reviewReason: "no_resume_phase1",
@@ -787,6 +2088,7 @@ async function processAutoJobInner(
     }
     if (job.state === "error") return automationErrorResult(job, "submit");
     if (job.state === "awaiting_matches") {
+      await stopResumeChase(job, "already_submitted", runStep);
       return {
         action: "complete",
         state: job.state,
@@ -794,6 +2096,7 @@ async function processAutoJobInner(
         job,
       };
     }
+    await stopResumeChase(job, "submission_confirmed", runStep);
     return {
       action: "reschedule",
       delayMs: 30_000,
@@ -815,6 +2118,11 @@ async function processAutoJobInner(
         marketConfirmed: true,
         approvalSource,
       }));
+      await stopResumeChase(
+        job,
+        job.state === "awaiting_matches" ? "already_submitted" : "submission_confirmed",
+        runStep,
+      );
       return {
         action: "reschedule",
         delayMs: 30_000,
@@ -836,6 +2144,9 @@ async function processAutoJobInner(
   }
 
   if (job.state === "awaiting_approval" || job.state === "submission_unknown") {
+    if (job.state === "awaiting_approval") {
+      await stopResumeChase(job, "submission_confirmed", runStep);
+    }
     return {
       action: "reschedule",
       delayMs: approvalDelay(job),
@@ -844,6 +2155,9 @@ async function processAutoJobInner(
       step: "submit_reconciliation",
       job,
     };
+  }
+  if (job.state === "awaiting_matches") {
+    await stopResumeChase(job, "submission_confirmed", runStep);
   }
   if (TERMINAL_STATES.has(job.state)) return { action: "complete", state: job.state, detail: "automation step complete", job };
   return { action: "complete", state: job.state, detail: "manual workflow owns this state" };
@@ -868,7 +2182,16 @@ export async function processAutoJob(botId, options = {}) {
   }
 }
 
-async function alertOnce(code, botId, detail, { ceiling = false, objection = false } = {}) {
+async function alertOnce(
+  code,
+  botId,
+  detail,
+  {
+    ceiling = false,
+    objection = false,
+    ttlSeconds = null,
+  } = {},
+) {
   try {
     const key = objection
       ? `auto:sharing-objection:${botId}`
@@ -877,10 +2200,21 @@ async function alertOnce(code, botId, detail, { ceiling = false, objection = fal
         : code === "AUTH_EXPIRED"
           ? "auto-auth-expired"
           : `auto:${code}:${botId}`;
-    if (!(await takeAlertSlot(key, code === "AUTH_EXPIRED" ? 12 * 3600 : 3600))) return;
+    const ttl = Number.isFinite(Number(ttlSeconds))
+      ? Math.max(60, Number(ttlSeconds))
+      : code === "AUTH_EXPIRED"
+        ? 12 * 3600
+        : 3600;
+    if (!(await takeAlertSlot(key, ttl))) return;
     if (objection) {
       await notifySlack(
         `⚠️ Para AI automation: job ${botId} submitted with a recorded sharing objection — review if needed.`,
+      );
+      return;
+    }
+    if (code === "NO_RESUME_AFTER_RETRIES") {
+      await notifySlack(
+        `⚠️ Para AI automation: job ${botId} needs review. ${RESUME_WAIT_TERMINAL_REASON}.`,
       );
       return;
     }
@@ -947,6 +2281,14 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
             { ceiling: true },
           );
         }
+      }
+      if (result.alert) {
+        await alertOnce(
+          result.alert.code,
+          lease.botId,
+          result.alert.detail,
+          { ttlSeconds: result.alert.ttlSeconds },
+        );
       }
       if (action === "reschedule") {
         await rescheduleAutoJob(lease.botId, {
@@ -1054,21 +2396,244 @@ export async function recoverRecentSuccessfulCalls({ config = automationConfig()
   return { ok: true, disabled: false, discovered };
 }
 
-export async function enqueueBackfill(botIds = []) {
-  const results = [];
-  for (const value of botIds) {
-    const botId = String(value || "").trim();
+function persistedBackfillAnchor(job) {
+  if (
+    job?.automation?.mode !== "authorized_backfill" &&
+    job?.automation?.resumeWait?.source !== "authorized_backfill"
+  ) return null;
+  return finiteDate(job?.automation?.backfillBatchEntryAt)
+    ?? finiteDate(job?.automation?.resumeWait?.enteredAt);
+}
+
+function validBackfillResumeWait(job) {
+  const wait = job?.automation?.resumeWait;
+  return Boolean(
+    wait?.source === "authorized_backfill" &&
+    finiteDate(wait.enteredAt) != null &&
+    finiteDate(wait.firstCheckAt) != null &&
+    finiteDate(wait.expiresAt) != null,
+  );
+}
+
+export async function enqueueBackfill(
+  botIds = [],
+  {
+    config = automationConfig(),
+    now = Date.now(),
+    getJobImpl = getJob,
+    getBackfillAnchorImpl = getOrCreateResumeBackfillAnchor,
+    saveJobImpl = saveJob,
+    enqueueImpl = enqueueAutoJob,
+  } = {},
+) {
+  const values = Array.isArray(botIds) ? botIds : [];
+  const results = new Array(values.length);
+  const entries = [];
+  const seen = new Set();
+
+  for (let index = 0; index < values.length; index++) {
+    const botId = String(values[index] || "").trim();
     if (!BOT_ID.test(botId)) {
-      results.push({ botId, enqueued: false, error: "invalid_bot_id" });
+      results[index] = { botId, enqueued: false, error: "invalid_bot_id" };
       continue;
     }
-    results.push(await enqueueAutoJob(botId, {
-      source: "authorized_backfill",
-      eventId: `backfill:${botId}:${randomUUID()}`,
-      dueAt: Date.now(),
-    }));
+    if (seen.has(botId)) {
+      results[index] = { botId, enqueued: false, duplicate: true, error: "duplicate_input" };
+      continue;
+    }
+    seen.add(botId);
+    try {
+      const current = await getJobImpl(botId);
+      if (!current) {
+        results[index] = { botId, enqueued: false, error: "job_not_found" };
+        continue;
+      }
+      entries.push({ index, botId, current });
+    } catch (error) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        error: String(error?.code || "job_read_failed"),
+      };
+    }
   }
-  return results;
+
+  if (!entries.length) return results.filter(Boolean);
+  const priorRowAnchor = entries
+    .map(({ current }) => persistedBackfillAnchor(current))
+    .find((value) => value != null);
+  const batchAnchorRecord = await getBackfillAnchorImpl({
+    now: priorRowAnchor ?? now,
+  });
+  const commonAnchor = finiteDate(
+    batchAnchorRecord?.anchorAt ?? batchAnchorRecord,
+  );
+  if (commonAnchor == null) {
+    throw new Error("durable authorized-backfill anchor is invalid");
+  }
+
+  for (const { index, botId, current } of entries) {
+    const decision = backfillReviewDecision(current);
+    if (!decision.eligible) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        preserved: true,
+        error: decision.reason,
+      };
+      continue;
+    }
+
+    const existingAnchor = persistedBackfillAnchor(current);
+    if (
+      existingAnchor != null
+      && existingAnchor !== commonAnchor
+    ) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        preserved: true,
+        error: "backfill_anchor_conflict",
+      };
+      continue;
+    }
+    const rowAnchor = commonAnchor;
+    const resumeWait = validBackfillResumeWait(current)
+      ? current.automation.resumeWait
+      : resumeWaitPlan({
+          source: "authorized_backfill",
+          anchorAt: rowAnchor,
+          waitMinutes: config.resumeWaitMinutes,
+          retryDays: config.resumeRetryDays,
+          terminalAckHours: config.resumeTerminalAckHours,
+          backfillTerminalAckDays:
+            config.resumeBackfillTerminalAckDays,
+        });
+    const batchEntryAt = new Date(rowAnchor).toISOString();
+    let anchored = current;
+
+    if (!(existingAnchor != null && validBackfillResumeWait(current))) {
+      try {
+        anchored = await saveJobImpl(transition(current, "ready_to_submit", {
+          automation: {
+            ...(current.automation || {}),
+            mode: "authorized_backfill",
+            status: "prepared",
+            reasons: [],
+            freezeReason: null,
+            backfillBatchEntryAt: batchEntryAt,
+            preferenceRerouteRequired: true,
+            resumeWait,
+          },
+          reviewReason: null,
+          reviewReasons: [],
+          error: null,
+          journalDetail: "authorized backfill clocks anchored at batch entry",
+        }), current.revision);
+      } catch (error) {
+        results[index] = {
+          botId,
+          enqueued: false,
+          error: String(error?.code || "anchor_failed"),
+        };
+        continue;
+      }
+    }
+
+    try {
+      const eventAnchor = finiteDate(anchored.automation.resumeWait.enteredAt);
+      const queued = await enqueueImpl(botId, {
+        source: "authorized_backfill",
+        eventId: `backfill:${botId}:${eventAnchor}`,
+        dueAt: Number(now),
+      });
+      results[index] = {
+        ...queued,
+        batchEntryAt,
+        firstCheckAt: anchored.automation.resumeWait.firstCheckAt,
+      };
+    } catch (error) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        batchEntryAt,
+        firstCheckAt: anchored.automation.resumeWait.firstCheckAt,
+        error: String(error?.code || "enqueue_failed"),
+      };
+    }
+  }
+  return results.filter(Boolean);
+}
+
+export async function sweepPhase1ResumeWaitCards({
+  config = automationConfig(),
+  now = Date.now(),
+  listJobsImpl = listJobs,
+  saveJobImpl = saveJob,
+  enqueueImpl = enqueueAutoJob,
+} = {}) {
+  if (!config.resumeWaitEnabled || !automationExecutionEnabled(config)) {
+    return {
+      ok: true,
+      disabled: true,
+      reason: config.resumeWaitEnabled ? "automation_not_ready" : "resume_wait_disabled",
+      swept: 0,
+      enqueued: 0,
+      results: [],
+    };
+  }
+  const jobs = await listJobsImpl(500);
+  const results = [];
+  for (const current of jobs) {
+    let job = current;
+    if (isPhase1ResumeWaitCard(current)) {
+      const swept = phase1ResumeWaitSweepTransition(current, config, { now });
+      try {
+        job = await saveJobImpl(swept, current.revision);
+      } catch (error) {
+        results.push({
+          botId: current.id,
+          swept: false,
+          enqueued: false,
+          error: String(error?.code || "sweep_save_failed"),
+        });
+        continue;
+      }
+    } else if (!(
+      current?.state === "waiting_for_resume" &&
+      current?.automation?.resumeWait?.source === "phase1_sweep"
+    )) {
+      continue;
+    }
+
+    try {
+      const queued = await enqueueImpl(job.id, {
+        source: "phase1_resume_sweep",
+        eventId: `phase2-resume-sweep:${job.id}:${job.automation.resumeWait.enteredAt}`,
+        dueAt: finiteDate(job.automation.resumeWait.nextCheckAt) ?? now,
+      });
+      results.push({
+        botId: job.id,
+        swept: job !== current,
+        enqueued: queued.enqueued,
+        duplicate: queued.duplicate,
+      });
+    } catch (error) {
+      results.push({
+        botId: job.id,
+        swept: job !== current,
+        enqueued: false,
+        error: String(error?.code || "sweep_enqueue_failed"),
+      });
+    }
+  }
+  return {
+    ok: true,
+    disabled: false,
+    swept: results.filter((result) => result.swept).length,
+    enqueued: results.filter((result) => result.enqueued).length,
+    results,
+  };
 }
 
 export async function enqueueOrganicExceptions({

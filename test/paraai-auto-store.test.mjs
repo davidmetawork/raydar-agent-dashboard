@@ -109,16 +109,19 @@ test("job creation writes the job and index in one atomic Lua operation", async 
   const result = await createJob(job, {
     kvImpl: async (command) => {
       calls.push(command);
-      return [1, command[5]];
+      return [1, command[6]];
     },
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], "EVAL");
   assert.match(calls[0][1], /redis\.call\('SET'/);
   assert.match(calls[0][1], /redis\.call\('ZADD'/);
-  assert.equal(calls[0][2], 2);
+  assert.equal(calls[0][2], 3);
   assert.equal(calls[0][3], `paraai:job:${jobId}`);
   assert.equal(calls[0][4], "paraai:index");
+  assert.equal(calls[0][5], "paraai:resume-waiting");
+  assert.match(calls[0][1], /redis\.call\('SADD', KEYS\[3\]/);
+  assert.match(calls[0][1], /redis\.call\('SREM', KEYS\[3\]/);
   assert.equal(result.id, jobId);
   assert.equal(result.revision, 0);
 });

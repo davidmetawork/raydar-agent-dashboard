@@ -294,6 +294,7 @@ export function scoreIdentity(candidate, crmItem) {
   const rightLinkedin = linkedinHandle(crmItem?.linkedin_user || crmItem?.linkedinUrl || crmItem?.linkedin_url);
   if (leftLinkedin && rightLinkedin && leftLinkedin === rightLinkedin) signals.push("linkedin");
   if (phonesMatch(candidate?.phone, crmItem?.phone_number)) signals.push("phone");
+  if (normalizeEmail(candidate?.email) && hasEmail(crmItem, candidate.email)) signals.push("email");
 
   const scheduled = Date.parse(candidate?.scheduledStart || "");
   const crmScheduled = Date.parse(
