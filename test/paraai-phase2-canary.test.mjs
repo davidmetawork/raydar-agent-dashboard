@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -22,6 +23,7 @@ import {
   completePhase2FirstTenCanary,
   createPhase2FirstTenCanaryPlan,
   getCompletePhase2CanarySnapshot,
+  getPhase2FirstTenCanary,
   hashSubmissionPayload,
 } from "../api/paraai/_lib/store.mjs";
 import { runnerAuthorized } from "../api/paraai/worker.mjs";
@@ -201,6 +203,19 @@ function verifiedCanaryJob(job, digest, index = 0) {
     ),
   };
 }
+
+test("manifest digest canonically attests the ordered job IDs", () => {
+  const ids = tenEligibleJobs("bot_digest").map((job) => job.id);
+  const expected = createHash("sha256")
+    .update(JSON.stringify(ids))
+    .digest("hex");
+
+  assert.equal(phase2CanaryManifestDigest(ids), expected);
+  assert.notEqual(
+    phase2CanaryManifestDigest(ids.slice().reverse()),
+    expected,
+  );
+});
 
 test("atomic snapshot rejects saturation, missing rows, malformed rows, and index mismatches", async () => {
   const jobs = [
@@ -404,6 +419,80 @@ test("plan is one atomic immutable SET-NX against the unchanged complete snapsho
     }),
     /exactly ten jobs/,
   );
+
+  let mismatchedDigestKvCalls = 0;
+  await assert.rejects(
+    createPhase2FirstTenCanaryPlan({
+      entries: jobs.map((job) => ({
+        id: job.id,
+        revision: job.revision,
+      })),
+      manifestDigest: "b".repeat(64),
+      snapshotFingerprint: SNAPSHOT_FINGERPRINT,
+      snapshotTotal: 20,
+      eligibleCount: 12,
+      authorizedBackfillCount: 0,
+      attachProof: true,
+    }, {
+      kvImpl: async () => {
+        mismatchedDigestKvCalls += 1;
+        return null;
+      },
+    }),
+    (error) => error.code === "PHASE2_CANARY_DIGEST_MISMATCH",
+  );
+  assert.equal(mismatchedDigestKvCalls, 0);
+
+  await assert.rejects(
+    createPhase2FirstTenCanaryPlan({
+      entries: jobs.map((job) => ({
+        id: job.id,
+        revision: job.revision,
+      })),
+      manifestDigest: digest,
+      snapshotFingerprint: SNAPSHOT_FINGERPRINT,
+      snapshotTotal: 20,
+      eligibleCount: 12,
+      authorizedBackfillCount: 0,
+      attachProof: true,
+    }, {
+      kvImpl: async () => [2, JSON.stringify({
+        ...canaryRecord(jobs.map((job) => job.id), {
+          digest: "b".repeat(64),
+        }),
+        snapshotTotal: 20,
+        eligibleCount: 12,
+      })],
+    }),
+    (error) => error.code === "PHASE2_CANARY_RECORD_INVALID",
+  );
+});
+
+test("manifest reads reject a digest that does not attest the stored ID order", async () => {
+  const ids = tenEligibleJobs("bot_read").map((job) => job.id);
+  const valid = canaryRecord(ids);
+
+  assert.equal(
+    await getPhase2FirstTenCanary({
+      kvImpl: async () => null,
+    }),
+    null,
+  );
+  assert.deepEqual(
+    await getPhase2FirstTenCanary({
+      kvImpl: async () => JSON.stringify(valid),
+    }),
+    valid,
+  );
+  await assert.rejects(
+    getPhase2FirstTenCanary({
+      kvImpl: async () => JSON.stringify({
+        ...valid,
+        manifestDigest: "b".repeat(64),
+      }),
+    }),
+    (error) => error.code === "PHASE2_CANARY_RECORD_INVALID",
+  );
 });
 
 test("planning requires a live attach proof and exactly ten distinct resume-ready candidates", async () => {
@@ -574,6 +663,21 @@ test("commit is digest-bound, leased, retries the immutable manifest, and stamps
       kvImpl: async () => [-4, JSON.stringify(planned)],
     }),
     (error) => error.code === "PHASE2_CANARY_SNAPSHOT_CHANGED",
+  );
+  await assert.rejects(
+    claimPhase2FirstTenCanaryCommit({
+      manifestDigest: "b".repeat(64),
+      now: NOW,
+    }, {
+      kvImpl: async () => [1, JSON.stringify({
+        ...planned,
+        status: "committing",
+        manifestDigest: "b".repeat(64),
+        ownerToken: "owner-token-corrupt",
+        leaseUntil: NOW + 150_000,
+      })],
+    }),
+    (error) => error.code === "PHASE2_CANARY_RECORD_INVALID",
   );
 
   const completed = await completePhase2FirstTenCanary({

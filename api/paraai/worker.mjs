@@ -1,14 +1,17 @@
 import { timingSafeEqual } from "node:crypto";
 
 import {
+  armPhase2RemainderRelease,
   automationConfig,
   commitPhase2FirstTenCanary,
   enqueueBackfill,
   enqueueOrganicExceptions,
   phase2FirstTenCanaryStatus,
+  phase2RemainderReleaseStatus,
   planPhase2FirstTenCanary,
   recoverRecentSuccessfulCalls,
   runAutoTick,
+  runPhase2RemainderTick,
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
 import { notifySlack } from "./_lib/core.mjs";
@@ -49,6 +52,7 @@ export async function runAutomationCycle({
   config: automation = automationConfig(),
   sweepImpl = sweepPhase1ResumeWaitCards,
   tickImpl = runAutoTick,
+  remainderImpl = null,
 } = {}) {
   let resumeSweep = null;
   let resumeSweepError = null;
@@ -63,7 +67,29 @@ export async function runAutomationCycle({
     }
   }
   const tick = await tickImpl({ config: automation });
-  return { resumeSweep, resumeSweepError, tick };
+  let remainder = null;
+  let remainderError = null;
+  if (typeof remainderImpl === "function" || storeConfigured()) {
+    try {
+      remainder = await (remainderImpl || runPhase2RemainderTick)({
+        config: automation,
+      });
+    } catch (error) {
+      const code = String(error?.code || "");
+      remainderError = {
+        error: /^PHASE2_REMAINDER_[A-Z0-9_]+$/u.test(code)
+          ? code.toLowerCase()
+          : "phase2_remainder_failed",
+      };
+    }
+  }
+  return {
+    resumeSweep,
+    resumeSweepError,
+    tick,
+    remainder,
+    remainderError,
+  };
 }
 
 export default async function handler(req, res) {
@@ -79,17 +105,52 @@ export default async function handler(req, res) {
     "phase2-first-ten-commit",
     "phase2-first-ten-status",
   ]);
-  if (canaryModes.has(mode)) {
+  const remainderModes = new Set([
+    "phase2-remainder-arm",
+    "phase2-remainder-tick",
+    "phase2-remainder-status",
+  ]);
+  if (canaryModes.has(mode) || remainderModes.has(mode)) {
     if (!runnerAuthorized(req)) {
       return res.status(401).json({ ok: false, error: "runner_key_required" });
     }
     if (
       Object.prototype.hasOwnProperty.call(body, "botIds")
+      || Object.prototype.hasOwnProperty.call(body, "jobIds")
       || Object.prototype.hasOwnProperty.call(body, "limit")
+      || Object.prototype.hasOwnProperty.call(body, "batch")
+      || Object.prototype.hasOwnProperty.call(body, "batchSize")
+      || Object.prototype.hasOwnProperty.call(body, "cursor")
+      || Object.prototype.hasOwnProperty.call(body, "force")
     ) {
       return res.status(400).json({
         ok: false,
         error: "caller_selection_forbidden",
+      });
+    }
+    const allowedFields = new Map([
+      ["phase2-first-ten-plan", new Set(["mode"])],
+      [
+        "phase2-first-ten-commit",
+        new Set(["mode", "manifestDigest"]),
+      ],
+      ["phase2-first-ten-status", new Set(["mode"])],
+      [
+        "phase2-remainder-arm",
+        new Set(["mode", "canaryManifestDigest"]),
+      ],
+      ["phase2-remainder-tick", new Set(["mode"])],
+      ["phase2-remainder-status", new Set(["mode"])],
+    ]).get(mode);
+    if (
+      allowedFields
+      && Object.keys(body).some(
+        (field) => !allowedFields.has(field),
+      )
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "caller_parameters_forbidden",
       });
     }
     if (
@@ -99,6 +160,15 @@ export default async function handler(req, res) {
       return res.status(405).json({
         ok: false,
         error: "canary_mutation_POST_only",
+      });
+    }
+    if (
+      ["phase2-remainder-arm", "phase2-remainder-tick"].includes(mode)
+      && req.method !== "POST"
+    ) {
+      return res.status(405).json({
+        ok: false,
+        error: "remainder_mutation_POST_only",
       });
     }
   }
@@ -178,6 +248,18 @@ export default async function handler(req, res) {
         queue: await getAutoQueueStats(),
       });
     }
+    if (mode === "phase2-remainder-arm") {
+      const remainder = await armPhase2RemainderRelease({
+        canaryManifestDigest: body.canaryManifestDigest,
+      });
+      return res.status(200).json(remainder);
+    }
+    if (mode === "phase2-remainder-tick") {
+      return res.status(200).json(await runPhase2RemainderTick());
+    }
+    if (mode === "phase2-remainder-status") {
+      return res.status(200).json(await phase2RemainderReleaseStatus());
+    }
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
@@ -186,6 +268,8 @@ export default async function handler(req, res) {
       resumeSweep,
       resumeSweepError,
       tick,
+      remainder,
+      remainderError,
     } = await runAutomationCycle({ mode, config: automation });
     if (
       resumeSweepError &&
@@ -193,6 +277,20 @@ export default async function handler(req, res) {
     ) {
       await notifySlack(
         `🚨 Para AI resume-wait sweep failed (${resumeSweepError.error}). Direct-submit queue processing continued.`,
+      ).catch(() => {});
+    }
+    const remainderIssue = remainderError?.error || (
+      remainder?.ok === false ? remainder.status : null
+    );
+    if (
+      remainderIssue
+      && await takeAlertSlot(
+        "phase2-remainder-controller-degraded",
+        3600,
+      ).catch(() => false)
+    ) {
+      await notifySlack(
+        `🚨 Para AI Phase 2 remainder controller requires review (${remainderIssue}). Normal queue processing continued.`,
       ).catch(() => {});
     }
     let outreach = null;
@@ -229,7 +327,13 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({
       ok: true,
-      degraded: Boolean(recoveryError || resumeSweepError || outreachError),
+      degraded: Boolean(
+        recoveryError
+        || resumeSweepError
+        || outreachError
+        || remainderError
+        || remainder?.ok === false
+      ),
       recovery,
       recoveryError,
       resumeSweep,
@@ -237,9 +341,40 @@ export default async function handler(req, res) {
       outreach,
       outreachError,
       tick,
+      remainder,
+      remainderError,
       queue: await getAutoQueueStats(),
     });
   } catch (error) {
+    if (remainderModes.has(mode)) {
+      const code = String(error?.code || "");
+      const safeCode = /^PHASE2_REMAINDER_[A-Z0-9_]+$/u.test(code)
+        ? code.toLowerCase()
+        : "phase2_remainder_failed";
+      const status = new Set([
+        "PHASE2_REMAINDER_DIGEST_INVALID",
+        "PHASE2_REMAINDER_TIMESTAMP_INVALID",
+        "PHASE2_REMAINDER_ANCHOR_INVALID",
+      ]).has(code)
+        ? 400
+        : new Set([
+            "PHASE2_REMAINDER_ANCHOR_CONFLICT",
+            "PHASE2_REMAINDER_CANARY_NOT_VERIFIED",
+            "PHASE2_REMAINDER_DIGEST_MISMATCH",
+            "PHASE2_REMAINDER_INDEX_LIMIT",
+            "PHASE2_REMAINDER_JOB_CHANGED",
+            "PHASE2_REMAINDER_MANIFEST_CONFLICT",
+            "PHASE2_REMAINDER_RECORD_INVALID",
+            "PHASE2_REMAINDER_SNAPSHOT_CHANGED",
+            "PHASE2_REMAINDER_SNAPSHOT_INCOMPLETE",
+          ]).has(code)
+          ? 409
+          : 500;
+      return res.status(status).json({
+        ok: false,
+        error: safeCode,
+      });
+    }
     if (canaryModes.has(mode)) {
       const code = String(error?.code || "");
       const safeCode = /^PHASE2_CANARY_[A-Z0-9_]+$/u.test(code)

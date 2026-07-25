@@ -29,6 +29,13 @@ const PHASE2_FIRST_TEN_CANARY_KEY =
 const PHASE2_FIRST_TEN_CANARY_MAX_JOBS = 10;
 const PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT = 500;
 const PHASE2_FIRST_TEN_CANARY_LEASE_MS = 150_000;
+const PHASE2_REMAINDER_KEY =
+  "paraai:phase2:remainder-release:v1";
+const PHASE2_REMAINDER_BATCH_MAX = 5;
+const PHASE2_REMAINDER_LEASE_MS = 150_000;
+const PHASE2_REMAINDER_QUEUE_TOTAL_LIMIT = 200;
+const PHASE2_REMAINDER_QUEUE_DUE_LIMIT = 10;
+const PHASE2_REMAINDER_QUEUE_LEASED_LIMIT = 5;
 const jobKey = (id) => `paraai:job:${id}`;
 const lockKey = (id) => `paraai:lock:${id}`;
 const alertKey = (key) => `paraai:alert:${key}`;
@@ -323,6 +330,99 @@ export function hashSubmissionPayload(payload) {
   return createHash("sha256").update(stableStringify(payload)).digest("hex");
 }
 
+export function phase2CanaryManifestDigest(botIds = []) {
+  const ids = Array.isArray(botIds)
+    ? botIds.map((id) => String(id || ""))
+    : [];
+  return createHash("sha256")
+    .update(JSON.stringify(ids))
+    .digest("hex");
+}
+
+function phase2CanaryManifestMatches(record) {
+  return Boolean(
+    Array.isArray(record?.botIds)
+    && /^[a-f0-9]{64}$/u.test(String(record?.manifestDigest || ""))
+    && phase2CanaryManifestDigest(record.botIds)
+      === String(record.manifestDigest),
+  );
+}
+
+function phase2RemainderManifestValue({
+  canaryManifestDigest,
+  snapshotFingerprint,
+  commonAnchorAt,
+  entries,
+} = {}) {
+  return {
+    version: 1,
+    canaryManifestDigest: String(canaryManifestDigest || ""),
+    snapshotFingerprint: String(snapshotFingerprint || ""),
+    commonAnchorAt: String(commonAnchorAt || ""),
+    entries: (Array.isArray(entries) ? entries : []).map((entry) => ({
+      id: String(entry?.id || ""),
+      revision: Number(entry?.revision),
+      resumeReady: entry?.resumeReady === true,
+    })),
+  };
+}
+
+export function phase2RemainderManifestDigest(value = {}) {
+  return createHash("sha256")
+    .update(stableStringify(phase2RemainderManifestValue(value)))
+    .digest("hex");
+}
+
+export function phase2RemainderAttestationDigest(value = {}) {
+  return createHash("sha256")
+    .update(stableStringify({
+      version: 1,
+      canaryManifestDigest: String(value?.canaryManifestDigest || ""),
+      snapshotFingerprint: String(value?.snapshotFingerprint || ""),
+      commonAnchorAt: String(value?.commonAnchorAt || ""),
+      verified: value?.verified === true,
+      selected: Number(value?.selected),
+      authorized: Number(value?.authorized),
+      preferencesRouted: Number(value?.preferencesRouted),
+      payloadHashVerified: Number(value?.payloadHashVerified),
+      submitAttemptStarted: Number(value?.submitAttemptStarted),
+      submitAccepted: Number(value?.submitAccepted),
+      talentNetworkVisible: Number(value?.talentNetworkVisible),
+      preexistingVisible: Number(value?.preexistingVisible),
+      waitingForResume: Number(value?.waitingForResume),
+      needsReview: Number(value?.needsReview),
+      errors: Number(value?.errors),
+      missing: Number(value?.missing),
+      authorizedDelta: Number(value?.authorizedDelta),
+      releaseFenceIntact: value?.releaseFenceIntact === true,
+    }))
+    .digest("hex");
+}
+
+function phase2RemainderManifestMatches(record) {
+  return Boolean(
+    /^[a-f0-9]{64}$/u.test(String(record?.manifestDigest || ""))
+    && phase2RemainderManifestDigest({
+      canaryManifestDigest: record?.canaryManifestDigest,
+      snapshotFingerprint: record?.snapshotFingerprint,
+      commonAnchorAt: record?.commonAnchorAt,
+      entries: record?.entries,
+    }) === String(record.manifestDigest),
+  );
+}
+
+function phase2RemainderAttestationMatches(record) {
+  return Boolean(
+    record?.canaryVerification
+    && typeof record.canaryVerification === "object"
+    && /^[a-f0-9]{64}$/u.test(
+      String(record?.canaryVerificationDigest || ""),
+    )
+    && phase2RemainderAttestationDigest(record.canaryVerification)
+      === String(record.canaryVerificationDigest),
+  );
+}
+
 export function submissionOutcomeTransition(current, next) {
   const before = current == null || current === "" ? null : String(current);
   const after = String(next || "");
@@ -580,6 +680,7 @@ export async function getPhase2FirstTenCanary(
     || record.botIds.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
     || record.botIds.some((id) => !validStoreId(id))
     || new Set(record.botIds).size !== record.botIds.length
+    || !phase2CanaryManifestMatches(record)
     || !Array.isArray(record?.revisions)
     || record.revisions.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
     || record.revisions.some((revision) => (
@@ -629,6 +730,13 @@ export async function createPhase2FirstTenCanaryPlan(
   const digest = String(manifestDigest || "").toLowerCase();
   if (!/^[a-f0-9]{64}$/u.test(digest)) {
     throw new Error("phase 2 canary manifest digest is invalid");
+  }
+  if (digest !== phase2CanaryManifestDigest(ids)) {
+    const error = new Error(
+      "phase 2 canary manifest digest does not attest the ordered jobs",
+    );
+    error.code = "PHASE2_CANARY_DIGEST_MISMATCH";
+    throw error;
   }
   const fingerprint = String(snapshotFingerprint || "").toLowerCase();
   if (!/^[a-f0-9]{40}$/u.test(fingerprint)) {
@@ -778,6 +886,7 @@ export async function createPhase2FirstTenCanaryPlan(
     || record.botIds.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
     || record.botIds.some((id) => !validStoreId(id))
     || new Set(record.botIds).size !== record.botIds.length
+    || !phase2CanaryManifestMatches(record)
     || !Array.isArray(record.revisions)
     || record.revisions.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
     || record.revisions.some((revision) => (
@@ -923,6 +1032,7 @@ export async function claimPhase2FirstTenCanaryCommit(
     || record.botIds.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
     || record.botIds.some((id) => !validStoreId(id))
     || new Set(record.botIds).size !== record.botIds.length
+    || !phase2CanaryManifestMatches(record)
     || !Array.isArray(record.revisions)
     || record.revisions.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
     || !/^[a-f0-9]{40}$/u.test(String(record.snapshotFingerprint || ""))
@@ -1021,6 +1131,819 @@ export async function completePhase2FirstTenCanary(
   ) {
     const error = new Error("phase 2 canary completion is invalid");
     error.code = "PHASE2_CANARY_RECORD_INVALID";
+    throw error;
+  }
+  return record;
+}
+
+function validPhase2RemainderRecord(record) {
+  const entries = Array.isArray(record?.entries) ? record.entries : null;
+  const verification = record?.canaryVerification;
+  const status = String(record?.status || "");
+  if (
+    record?.version !== 1
+    || !["armed", "running", "complete", "paused"].includes(status)
+    || !/^[a-f0-9]{64}$/u.test(String(record?.canaryManifestDigest || ""))
+    || !/^[a-f0-9]{64}$/u.test(String(record?.manifestDigest || ""))
+    || !/^[a-f0-9]{40}$/u.test(String(record?.snapshotFingerprint || ""))
+    || !Number.isFinite(Date.parse(String(record?.commonAnchorAt || "")))
+    || !entries
+    || entries.length !== Number(record?.count)
+    || entries.length >= PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT
+    || entries.some((entry) => (
+      !validStoreId(entry?.id)
+      || !Number.isInteger(Number(entry?.revision))
+      || Number(entry.revision) < 0
+      || typeof entry?.resumeReady !== "boolean"
+      || !["pending", "claimed", "authorized", "review"].includes(
+        String(entry?.status || ""),
+      )
+      || !Number.isInteger(Number(entry?.attempts))
+      || Number(entry.attempts) < 0
+      || (
+        ["claimed", "authorized", "review"].includes(
+          String(entry?.status || ""),
+        )
+        && Number(entry.attempts) < 1
+      )
+    ))
+    || new Set(entries.map((entry) => entry.id)).size !== entries.length
+    || !phase2RemainderManifestMatches(record)
+    || !phase2RemainderAttestationMatches(record)
+    || verification?.verified !== true
+    || verification?.canaryManifestDigest !== record.canaryManifestDigest
+    || verification?.snapshotFingerprint !== record.snapshotFingerprint
+    || verification?.commonAnchorAt !== record.commonAnchorAt
+    || Number(verification?.selected) !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.authorized) !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.preferencesRouted)
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.payloadHashVerified)
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.submitAttemptStarted)
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.submitAccepted)
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.talentNetworkVisible)
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || Number(verification?.preexistingVisible) !== 0
+    || Number(verification?.waitingForResume) !== 0
+    || Number(verification?.needsReview) !== 0
+    || Number(verification?.errors) !== 0
+    || Number(verification?.missing) !== 0
+    || Number(verification?.authorizedDelta)
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || verification?.releaseFenceIntact !== true
+    || !Number.isInteger(Number(record?.snapshotTotal))
+    || Number(record.snapshotTotal) < entries.length
+    || Number(record.snapshotTotal) >= PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT
+    || !Number.isInteger(Number(record?.excludedReviewCount))
+    || Number(record.excludedReviewCount) < 0
+    || Number(record?.resumeReadyCount)
+      !== entries.filter((entry) => entry.resumeReady).length
+    || Number(record?.resumeMissingCount)
+      !== entries.filter((entry) => !entry.resumeReady).length
+    || !Number.isInteger(Number(record?.batchOrdinal))
+    || Number(record.batchOrdinal) < 0
+  ) return false;
+  const lease = record?.lease;
+  const claimed = entries.filter((entry) => entry.status === "claimed");
+  const pending = entries.filter((entry) => entry.status === "pending");
+  if (
+    (status === "armed" && (
+      entries.length < 1
+      || entries.some((entry) => entry.status !== "pending")
+      || Number(record.batchOrdinal) !== 0
+      || lease != null
+    ))
+    || (status === "running" && !pending.length && !claimed.length)
+    || (status === "complete" && (
+      entries.some((entry) => !["authorized", "review"].includes(entry.status))
+      || lease != null
+    ))
+    || (status === "paused" && (claimed.length || lease != null))
+    || (lease != null && status !== "running")
+  ) return false;
+  if (lease == null) {
+    return claimed.length === 0;
+  }
+  if (
+    typeof lease !== "object"
+    || !String(lease.token || "")
+    || !Number.isFinite(Number(lease.until))
+    || !Array.isArray(lease.indexes)
+    || lease.indexes.length < 1
+    || lease.indexes.length > PHASE2_REMAINDER_BATCH_MAX
+    || new Set(lease.indexes.map(Number)).size !== lease.indexes.length
+    || lease.indexes.some((index) => (
+      !Number.isInteger(Number(index))
+      || Number(index) < 1
+      || Number(index) > entries.length
+      || entries[Number(index) - 1]?.status !== "claimed"
+    ))
+  ) return false;
+  return entries.every((entry, index) => (
+    entry.status !== "claimed"
+    || lease.indexes.map(Number).includes(index + 1)
+  ));
+}
+
+export async function getPhase2RemainderRelease(
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const record = parse(await kvImpl(["GET", PHASE2_REMAINDER_KEY]), null);
+  if (!record) return null;
+  if (!validPhase2RemainderRecord(record)) {
+    const error = new Error("phase 2 remainder release record is invalid");
+    error.code = "PHASE2_REMAINDER_RECORD_INVALID";
+    throw error;
+  }
+  return record;
+}
+
+export async function createPhase2RemainderPlan(
+  {
+    entries = [],
+    manifestDigest,
+    canaryManifestDigest,
+    canaryVerification,
+    canaryVerificationDigest,
+    snapshotFingerprint,
+    snapshotTotal,
+    commonAnchorAt,
+    excludedReviewCount = 0,
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const rows = (Array.isArray(entries) ? entries : []).map((entry) => ({
+    id: requireStoreId(entry?.id),
+    revision: Number(entry?.revision),
+    resumeReady: entry?.resumeReady === true,
+    status: "pending",
+    attempts: 0,
+  }));
+  if (
+    rows.length >= PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT
+    || new Set(rows.map((entry) => entry.id)).size !== rows.length
+    || rows.some((entry) => (
+      !Number.isInteger(entry.revision) || entry.revision < 0
+    ))
+  ) {
+    throw new Error("phase 2 remainder manifest entries are invalid");
+  }
+  const canaryDigest = String(canaryManifestDigest || "").toLowerCase();
+  const releaseDigest = String(manifestDigest || "").toLowerCase();
+  const attestationDigest =
+    String(canaryVerificationDigest || "").toLowerCase();
+  const fingerprint = String(snapshotFingerprint || "").toLowerCase();
+  const anchorMs = Date.parse(String(commonAnchorAt || ""));
+  if (!Number.isFinite(anchorMs)) {
+    const error = new Error("phase 2 remainder anchor is invalid");
+    error.code = "PHASE2_REMAINDER_ANCHOR_INVALID";
+    throw error;
+  }
+  const anchor = new Date(anchorMs).toISOString();
+  if (
+    !/^[a-f0-9]{64}$/u.test(canaryDigest)
+    || !/^[a-f0-9]{64}$/u.test(releaseDigest)
+    || !/^[a-f0-9]{64}$/u.test(attestationDigest)
+    || !/^[a-f0-9]{40}$/u.test(fingerprint)
+    || releaseDigest !== phase2RemainderManifestDigest({
+      canaryManifestDigest: canaryDigest,
+      snapshotFingerprint: fingerprint,
+      commonAnchorAt: anchor,
+      entries: rows,
+    })
+    || attestationDigest !== phase2RemainderAttestationDigest(
+      canaryVerification,
+    )
+  ) {
+    const error = new Error("phase 2 remainder digest is invalid");
+    error.code = "PHASE2_REMAINDER_DIGEST_MISMATCH";
+    throw error;
+  }
+  const total = Number(snapshotTotal);
+  const excluded = Number(excludedReviewCount);
+  if (
+    !Number.isInteger(total)
+    || total < rows.length
+    || total >= PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT
+    || !Number.isInteger(excluded)
+    || excluded < 0
+  ) {
+    throw new Error("phase 2 remainder snapshot counts are invalid");
+  }
+  const current = epochMs(now);
+  const proposed = {
+    version: 1,
+    status: rows.length ? "armed" : "complete",
+    canaryManifestDigest: canaryDigest,
+    canaryVerification: { ...canaryVerification },
+    canaryVerificationDigest: attestationDigest,
+    manifestDigest: releaseDigest,
+    snapshotFingerprint: fingerprint,
+    snapshotTotal: total,
+    commonAnchorAt: anchor,
+    count: rows.length,
+    entries: rows,
+    resumeReadyCount: rows.filter((entry) => entry.resumeReady).length,
+    resumeMissingCount: rows.filter((entry) => !entry.resumeReady).length,
+    excludedReviewCount: excluded,
+    batchOrdinal: 0,
+    armedAt: new Date(current).toISOString(),
+    ...(rows.length ? {} : {
+      completedAt: new Date(current).toISOString(),
+    }),
+  };
+  if (!validPhase2RemainderRecord(proposed)) {
+    const error = new Error("phase 2 remainder plan is invalid");
+    error.code = "PHASE2_REMAINDER_RECORD_INVALID";
+    throw error;
+  }
+  const script = `
+    local function stringValue(value)
+      if value == nil or value == cjson.null then return '' end
+      return tostring(value)
+    end
+    local existingRaw = redis.call('GET', KEYS[1])
+    if existingRaw then return {2, existingRaw} end
+    local canaryRaw = redis.call('GET', KEYS[2])
+    if not canaryRaw then return {-1, ''} end
+    local canary = cjson.decode(canaryRaw)
+    local canaryResult = type(canary.result) == 'table'
+      and canary.result or {}
+    local canaryBotIds = type(canary.botIds) == 'table'
+      and canary.botIds or {}
+    if canary.status ~= 'complete'
+      or stringValue(canary.manifestDigest) ~= ARGV[5]
+      or tonumber(canary.count or 0) ~= 10
+      or #canaryBotIds ~= 10
+      or tonumber(canaryResult.attempted or 0) ~= 10
+      or tonumber(canaryResult.failed or -1) ~= 0
+      or (
+        tonumber(canaryResult.enqueued or 0)
+        + tonumber(canaryResult.duplicate or 0)
+      ) ~= 10 then
+      return {-1, canaryRaw}
+    end
+    local total = tonumber(redis.call('ZCARD', KEYS[3]) or 0)
+    if total >= tonumber(ARGV[1]) or total ~= tonumber(ARGV[2]) then
+      return {-2, tostring(total)}
+    end
+    local ids = redis.call('ZRANGE', KEYS[3], 0, -1)
+    if #ids ~= total then return {-2, tostring(total)} end
+    local fingerprintParts = {}
+    for _, id in ipairs(ids) do
+      local raw = redis.call('GET', ARGV[4] .. id)
+      if not raw then return {-2, tostring(total)} end
+      local job = cjson.decode(raw)
+      if tostring(job.id or '') ~= tostring(id) then
+        return {-2, tostring(total)}
+      end
+      table.insert(fingerprintParts, id)
+      table.insert(
+        fingerprintParts,
+        tostring(tonumber(job.revision or 0))
+      )
+    end
+    if redis.sha1hex(table.concat(fingerprintParts, '\\n')) ~= ARGV[3] then
+      return {-2, tostring(total)}
+    end
+    local canaryIds = {}
+    for _, id in ipairs(canaryBotIds) do
+      canaryIds[tostring(id)] = true
+    end
+    for rowIndex = 1, tonumber(ARGV[7]) do
+      local argumentIndex = 8 + ((rowIndex - 1) * 2)
+      local expectedId = ARGV[argumentIndex]
+      local expectedRevision = tonumber(ARGV[argumentIndex + 1])
+      if canaryIds[expectedId]
+        or not redis.call('ZSCORE', KEYS[3], expectedId) then
+        return {-3, tostring(rowIndex)}
+      end
+      local raw = redis.call('GET', ARGV[4] .. expectedId)
+      if not raw then return {-3, tostring(rowIndex)} end
+      local job = cjson.decode(raw)
+      local automation = type(job.automation) == 'table'
+        and job.automation or {}
+      local resumeWait = type(automation.resumeWait) == 'table'
+        and automation.resumeWait or {}
+      if stringValue(job.id) ~= expectedId
+        or tonumber(job.revision or -1) ~= expectedRevision
+        or stringValue(automation.mode) ~= 'backfill_only'
+        or stringValue(resumeWait.source) == 'authorized_backfill'
+        or stringValue(automation.backfillBatchEntryAt) ~= ''
+        or stringValue(automation.canaryManifestDigest) ~= ''
+        or stringValue(automation.remainderManifestDigest) ~= '' then
+        return {-3, tostring(rowIndex)}
+      end
+    end
+    local proposed = ARGV[8 + (tonumber(ARGV[7]) * 2)]
+    local stored = redis.call('SET', KEYS[1], proposed, 'NX')
+    if not stored then return {2, redis.call('GET', KEYS[1])} end
+    return {1, proposed}
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    3,
+    PHASE2_REMAINDER_KEY,
+    PHASE2_FIRST_TEN_CANARY_KEY,
+    INDEX_KEY,
+    String(PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT),
+    String(total),
+    fingerprint,
+    "paraai:job:",
+    canaryDigest,
+    releaseDigest,
+    String(rows.length),
+    ...rows.flatMap((entry) => [
+      entry.id,
+      String(entry.revision),
+    ]),
+    JSON.stringify(proposed),
+  ]);
+  const code = Number(result?.[0]);
+  if (code === -1) {
+    const error = new Error("phase 2 canary is not release-eligible");
+    error.code = "PHASE2_REMAINDER_CANARY_NOT_VERIFIED";
+    throw error;
+  }
+  if ([-2, -3].includes(code)) {
+    const error = new Error(
+      "phase 2 remainder snapshot changed before arm",
+    );
+    error.code = "PHASE2_REMAINDER_SNAPSHOT_CHANGED";
+    throw error;
+  }
+  if (![1, 2].includes(code)) {
+    const error = new Error("phase 2 remainder arm failed");
+    error.code = "PHASE2_REMAINDER_ARM_FAILED";
+    throw error;
+  }
+  const record = parse(result?.[1], null);
+  if (!validPhase2RemainderRecord(record)) {
+    const error = new Error("phase 2 remainder record is invalid");
+    error.code = "PHASE2_REMAINDER_RECORD_INVALID";
+    throw error;
+  }
+  if (
+    record.canaryManifestDigest !== canaryDigest
+    || record.manifestDigest !== releaseDigest
+  ) {
+    const error = new Error("phase 2 remainder manifest conflicts");
+    error.code = "PHASE2_REMAINDER_MANIFEST_CONFLICT";
+    throw error;
+  }
+  return {
+    created: code === 1,
+    existing: code === 2,
+    record,
+  };
+}
+
+export async function claimPhase2RemainderBatch(
+  {
+    now = Date.now(),
+    batchSize = 1,
+    ownerToken = randomUUID(),
+    leaseMs = PHASE2_REMAINDER_LEASE_MS,
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const current = epochMs(now);
+  const cappedBatch = Math.max(
+    1,
+    Math.min(PHASE2_REMAINDER_BATCH_MAX, Number(batchSize) || 1),
+  );
+  const token = String(ownerToken || randomUUID());
+  const leaseUntil = current + Math.max(
+    30_000,
+    Math.min(10 * 60_000, Number(leaseMs) || PHASE2_REMAINDER_LEASE_MS),
+  );
+  const script = `
+    redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', ARGV[1])
+    local queued = tonumber(redis.call('ZCARD', KEYS[2]) or 0)
+    local due = tonumber(
+      redis.call('ZCOUNT', KEYS[2], '-inf', ARGV[1]) or 0
+    )
+    local leased = tonumber(redis.call('ZCARD', KEYS[3]) or 0)
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then
+      return {
+        0,
+        '',
+        tostring(queued),
+        tostring(due),
+        tostring(leased)
+      }
+    end
+    local record = cjson.decode(raw)
+    if record.status == 'complete' then
+      return {
+        2,
+        raw,
+        tostring(queued),
+        tostring(due),
+        tostring(leased)
+      }
+    end
+    if record.status == 'paused' then
+      return {
+        7,
+        raw,
+        tostring(queued),
+        tostring(due),
+        tostring(leased)
+      }
+    end
+    local available = tonumber(ARGV[6]) - queued
+    available = math.min(available, tonumber(ARGV[7]) - due)
+    available = math.min(available, tonumber(ARGV[8]) - leased)
+    if record.lease and record.lease ~= cjson.null then
+      local storedUntil = 0
+      if type(record.lease.until) == 'number'
+        or type(record.lease.until) == 'string' then
+        storedUntil = tonumber(record.lease.until) or 0
+      end
+      if storedUntil > tonumber(ARGV[1]) then
+        return {
+          3,
+          raw,
+          tostring(queued),
+          tostring(due),
+          tostring(leased)
+        }
+      end
+      local indexes = type(record.lease.indexes) == 'table'
+        and record.lease.indexes or {}
+      local entries = type(record.entries) == 'table'
+        and record.entries or {}
+      local expected = {}
+      local mismatch = type(record.entries) ~= 'table'
+        or #indexes < 1
+        or #indexes > 5
+      for _, index in ipairs(indexes) do
+        local numericIndex = nil
+        if type(index) == 'number' or type(index) == 'string' then
+          numericIndex = tonumber(index)
+        end
+        local entry = numericIndex and entries[numericIndex] or nil
+        if not numericIndex
+          or numericIndex < 1
+          or numericIndex > #entries
+          or numericIndex % 1 ~= 0
+          or not entry
+          or entry.status ~= 'claimed'
+          or expected[numericIndex] then
+          mismatch = true
+        elseif numericIndex then
+          expected[numericIndex] = true
+        end
+      end
+      for index, entry in ipairs(entries) do
+        if entry.status == 'claimed' and not expected[index] then
+          mismatch = true
+        end
+      end
+      if mismatch then
+        for _, entry in ipairs(entries) do
+          if entry.status == 'claimed' then
+            entry.status = 'review'
+            entry.lastError = 'lease_entry_mismatch'
+            entry.reviewedAt = ARGV[5]
+          end
+        end
+        record.lease = nil
+        record.status = 'paused'
+        record.pauseReason = 'lease_entry_mismatch'
+        record.pausedAt = ARGV[5]
+        local paused = cjson.encode(record)
+        redis.call('SET', KEYS[1], paused)
+        return {
+          7,
+          paused,
+          tostring(queued),
+          tostring(due),
+          tostring(leased)
+        }
+      end
+      local recoveryCeiling = false
+      for _, index in ipairs(indexes) do
+        local entry = entries[tonumber(index)]
+        if tonumber(entry.attempts or 0) >= 3 then
+          recoveryCeiling = true
+        end
+      end
+      if recoveryCeiling then
+        for _, entry in ipairs(entries) do
+          if entry.status == 'claimed' then
+            entry.status = 'pending'
+            entry.lastError = 'release_retry_ceiling'
+            entry.lastAt = ARGV[5]
+          end
+        end
+        record.lease = nil
+        record.status = 'paused'
+        record.pauseReason = 'release_retry_ceiling'
+        record.pausedAt = ARGV[5]
+        local paused = cjson.encode(record)
+        redis.call('SET', KEYS[1], paused)
+        return {
+          7,
+          paused,
+          tostring(queued),
+          tostring(due),
+          tostring(leased)
+        }
+      end
+      if available < #indexes then
+        return {
+          5,
+          raw,
+          tostring(queued),
+          tostring(due),
+          tostring(leased)
+        }
+      end
+      for _, index in ipairs(indexes) do
+        local entry = entries[tonumber(index)]
+        entry.attempts = tonumber(entry.attempts or 0) + 1
+        entry.lastRecoveredAt = ARGV[5]
+      end
+      record.lease.token = ARGV[3]
+      record.lease.until = tonumber(ARGV[4])
+      record.lease.recoveredAt = ARGV[5]
+      local recovered = cjson.encode(record)
+      redis.call('SET', KEYS[1], recovered)
+      return {
+        4,
+        recovered,
+        tostring(queued),
+        tostring(due),
+        tostring(leased)
+      }
+    end
+
+    local capacity = math.min(tonumber(ARGV[2]), available)
+    if capacity < 1 then
+      return {
+        5,
+        raw,
+        tostring(queued),
+        tostring(due),
+        tostring(leased)
+      }
+    end
+    local indexes = {}
+    for index, entry in ipairs(record.entries or {}) do
+      if #indexes >= capacity then break end
+      if entry.status == 'pending' then
+        entry.status = 'claimed'
+        entry.attempts = tonumber(entry.attempts or 0) + 1
+        entry.claimedAt = ARGV[5]
+        table.insert(indexes, index)
+      end
+    end
+    if #indexes == 0 then
+      record.status = 'complete'
+      record.completedAt = ARGV[5]
+      local completed = cjson.encode(record)
+      redis.call('SET', KEYS[1], completed)
+      return {
+        2,
+        completed,
+        tostring(queued),
+        tostring(due),
+        tostring(leased)
+      }
+    end
+    record.status = 'running'
+    record.batchOrdinal = tonumber(record.batchOrdinal or 0) + 1
+    record.lease = {
+      token = ARGV[3],
+      until = tonumber(ARGV[4]),
+      indexes = indexes,
+      batchOrdinal = record.batchOrdinal,
+      claimedAt = ARGV[5]
+    }
+    local claimed = cjson.encode(record)
+    redis.call('SET', KEYS[1], claimed)
+    return {
+      1,
+      claimed,
+      tostring(queued),
+      tostring(due),
+      tostring(leased)
+    }
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    3,
+    PHASE2_REMAINDER_KEY,
+    AUTO_DUE_KEY,
+    AUTO_LEASES_KEY,
+    String(current),
+    String(cappedBatch),
+    token,
+    String(leaseUntil),
+    new Date(current).toISOString(),
+    String(PHASE2_REMAINDER_QUEUE_TOTAL_LIMIT),
+    String(PHASE2_REMAINDER_QUEUE_DUE_LIMIT),
+    String(PHASE2_REMAINDER_QUEUE_LEASED_LIMIT),
+  ]);
+  const code = Number(result?.[0]);
+  const record = parse(result?.[1], null);
+  const queue = {
+    queued: Math.max(0, Number(result?.[2]) || 0),
+    due: Math.max(0, Number(result?.[3]) || 0),
+    leased: Math.max(0, Number(result?.[4]) || 0),
+    totalLimit: PHASE2_REMAINDER_QUEUE_TOTAL_LIMIT,
+    dueLimit: PHASE2_REMAINDER_QUEUE_DUE_LIMIT,
+    leasedLimit: PHASE2_REMAINDER_QUEUE_LEASED_LIMIT,
+  };
+  if (code === 0) {
+    return {
+      claimed: false,
+      status: "not_armed",
+      record: null,
+      entries: [],
+      queue,
+    };
+  }
+  if (![1, 2, 3, 4, 5, 7].includes(code) || !record) {
+    const error = new Error("phase 2 remainder batch claim failed");
+    error.code = "PHASE2_REMAINDER_CLAIM_FAILED";
+    throw error;
+  }
+  if (!validPhase2RemainderRecord(record)) {
+    const error = new Error("phase 2 remainder record is invalid");
+    error.code = "PHASE2_REMAINDER_RECORD_INVALID";
+    throw error;
+  }
+  const indexes = code === 1 || code === 4
+    ? record.lease.indexes.map(Number)
+    : [];
+  return {
+    claimed: [1, 4].includes(code),
+    recovered: code === 4,
+    busy: code === 3,
+    saturated: code === 5,
+    complete: code === 2,
+    paused: code === 7,
+    status: code === 2
+      ? "complete"
+      : code === 3
+        ? "busy"
+        : code === 5
+          ? "waiting_for_capacity"
+          : code === 7
+            ? "paused"
+            : "running",
+    ownerToken: [1, 4].includes(code) ? token : null,
+    record,
+    entries: indexes.map((index) => ({
+      index: index - 1,
+      id: record.entries[index - 1].id,
+      revision: Number(record.entries[index - 1].revision),
+      resumeReady: record.entries[index - 1].resumeReady === true,
+    })),
+    queue,
+  };
+}
+
+export async function completePhase2RemainderBatch(
+  {
+    ownerToken,
+    manifestDigest,
+    outcomes = [],
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const token = String(ownerToken || "");
+  const digest = String(manifestDigest || "").toLowerCase();
+  const rows = Array.isArray(outcomes) ? outcomes : [];
+  if (
+    !token
+    || !/^[a-f0-9]{64}$/u.test(digest)
+    || rows.length < 1
+    || rows.length > PHASE2_REMAINDER_BATCH_MAX
+    || new Set(rows.map((row) => Number(row?.index))).size !== rows.length
+    || rows.some((row) => (
+      !Number.isInteger(Number(row?.index))
+      || Number(row.index) < 0
+      || !["authorized", "review", "retry"].includes(String(row?.status || ""))
+      || !/^[a-z0-9_]{0,80}$/u.test(String(row?.error || ""))
+    ))
+  ) {
+    throw new Error("phase 2 remainder completion is invalid");
+  }
+  const normalized = rows.map((row) => ({
+    index: Number(row.index) + 1,
+    status: String(row.status),
+    error: String(row.error || ""),
+  }));
+  const completedAt = new Date(epochMs(now)).toISOString();
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {0, ''} end
+    local record = cjson.decode(raw)
+    if tostring(record.manifestDigest or '') ~= ARGV[1]
+      or not record.lease
+      or record.lease == cjson.null
+      or tostring(record.lease.token or '') ~= ARGV[2] then
+      return {-1, raw}
+    end
+    local outcomes = cjson.decode(ARGV[4])
+    if #outcomes ~= #(record.lease.indexes or {}) then
+      return {-1, raw}
+    end
+    local expected = {}
+    for _, index in ipairs(record.lease.indexes or {}) do
+      expected[tonumber(index)] = true
+    end
+    local sawRetry = false
+    local pause = false
+    for _, outcome in ipairs(outcomes) do
+      local index = tonumber(outcome.index)
+      if not expected[index] then return {-1, raw} end
+      expected[index] = nil
+      local entry = record.entries[index]
+      if not entry or entry.status ~= 'claimed' then return {-1, raw} end
+      entry.lastAt = ARGV[3]
+      if outcome.status == 'authorized' then
+        entry.status = 'authorized'
+        entry.authorizedAt = ARGV[3]
+        entry.lastError = nil
+      elseif outcome.status == 'review' then
+        entry.status = 'review'
+        entry.reviewedAt = ARGV[3]
+        entry.lastError = outcome.error
+      else
+        entry.status = 'pending'
+        entry.lastError = outcome.error
+        sawRetry = true
+        if tonumber(entry.attempts or 0) >= 3 then pause = true end
+      end
+    end
+    for _, present in pairs(expected) do
+      if present then return {-1, raw} end
+    end
+    record.lease = nil
+    if pause then
+      record.status = 'paused'
+      record.pauseReason = 'release_retry_ceiling'
+      record.pausedAt = ARGV[3]
+    else
+      local pending = false
+      for _, entry in ipairs(record.entries or {}) do
+        if entry.status == 'pending' or entry.status == 'claimed' then
+          pending = true
+          break
+        end
+      end
+      if pending then
+        record.status = 'running'
+      else
+        record.status = 'complete'
+        record.completedAt = ARGV[3]
+      end
+      if sawRetry then record.lastRetryAt = ARGV[3] end
+    end
+    local completed = cjson.encode(record)
+    redis.call('SET', KEYS[1], completed)
+    return {1, completed}
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    1,
+    PHASE2_REMAINDER_KEY,
+    digest,
+    token,
+    completedAt,
+    JSON.stringify(normalized),
+  ]);
+  if (Number(result?.[0]) !== 1) {
+    const error = new Error("phase 2 remainder completion conflict");
+    error.code = "PHASE2_REMAINDER_COMPLETION_CONFLICT";
+    throw error;
+  }
+  const record = parse(result?.[1], null);
+  if (!validPhase2RemainderRecord(record)) {
+    const error = new Error("phase 2 remainder record is invalid");
+    error.code = "PHASE2_REMAINDER_RECORD_INVALID";
     throw error;
   }
   return record;
@@ -2352,6 +3275,534 @@ export async function enqueueAutoJob(
   return {
     enqueued,
     duplicate: !enqueued,
+    botId: id,
+    dueAt: Number.isFinite(effectiveDue) ? effectiveDue : due,
+  };
+}
+
+export async function authorizeAndEnqueuePhase2RemainderJob(
+  job,
+  expectedRevision,
+  {
+    source = "authorized_backfill",
+    eventId = "",
+    dueAt = null,
+    callEndedAt = null,
+    now = Date.now(),
+    manifestDigest,
+    ownerToken,
+    entryIndex,
+    commonAnchorAt,
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const id = requireStoreId(job?.id, "bot id");
+  const revision = Number(expectedRevision);
+  const digest = String(manifestDigest || "").toLowerCase();
+  const token = String(ownerToken || "");
+  const index = Number(entryIndex);
+  const anchorMs = Date.parse(String(commonAnchorAt || ""));
+  if (
+    !Number.isInteger(revision)
+    || revision < 0
+    || !/^[a-f0-9]{64}$/u.test(digest)
+    || !token
+    || !Number.isInteger(index)
+    || index < 0
+    || !Number.isFinite(anchorMs)
+    || job?.automation?.mode !== "authorized_backfill"
+    || job?.automation?.remainderManifestDigest !== digest
+    || Date.parse(String(job?.automation?.backfillBatchEntryAt || ""))
+      !== anchorMs
+  ) {
+    throw new Error("phase 2 remainder authorization is invalid");
+  }
+  const queuedAt = epochMs(now);
+  const due = epochMs(dueAt, queuedAt);
+  const next = {
+    ...job,
+    revision: revision + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  const dedupeId = String(eventId || randomUUID());
+  const eventKey = autoEventKey(dedupeId);
+  const eventValue = JSON.stringify({
+    botId: id,
+    source: String(source || "unknown").slice(0, 80),
+    receivedAt: new Date(queuedAt).toISOString(),
+  });
+  const metaValue = JSON.stringify({
+    source: String(source || "unknown").slice(0, 80),
+    enqueuedAt: new Date(queuedAt).toISOString(),
+    generation: randomUUID(),
+    ...(callEndedAt ? {
+      callEndedAt: new Date(
+        epochMs(callEndedAt, queuedAt),
+      ).toISOString(),
+    } : {}),
+  });
+  const anchor = new Date(anchorMs).toISOString();
+  const script = `
+    local function stringValue(value)
+      if value == nil or value == cjson.null then return '' end
+      return tostring(value)
+    end
+    local releaseRaw = redis.call('GET', KEYS[7])
+    if not releaseRaw then return {-1, '', ''} end
+    local release = cjson.decode(releaseRaw)
+    local lease = release.lease
+    local entry = type(release.entries) == 'table'
+      and release.entries[tonumber(ARGV[15])] or nil
+    local inLease = false
+    if lease and lease ~= cjson.null
+      and type(lease.indexes) == 'table' then
+      for _, leaseIndex in ipairs(lease.indexes) do
+        if tonumber(leaseIndex) == tonumber(ARGV[15]) then
+          inLease = true
+        end
+      end
+    end
+    if stringValue(release.status) ~= 'running'
+      or stringValue(release.manifestDigest) ~= ARGV[13]
+      or stringValue(release.commonAnchorAt) ~= ARGV[17]
+      or not lease
+      or lease == cjson.null
+      or stringValue(lease.token) ~= ARGV[14]
+      or tonumber(lease.until or 0) < tonumber(ARGV[16])
+      or not inLease
+      or not entry
+      or stringValue(entry.id) ~= ARGV[5]
+      or tonumber(entry.revision or -1) ~= tonumber(ARGV[1])
+      or stringValue(entry.status) ~= 'claimed' then
+      return {-1, '', ''}
+    end
+
+    local currentRaw = redis.call('GET', KEYS[1])
+    if not currentRaw
+      or not redis.call('ZSCORE', KEYS[2], ARGV[5]) then
+      return {-3, '', ''}
+    end
+    local current = cjson.decode(currentRaw)
+    local currentAutomation = type(current.automation) == 'table'
+      and current.automation or {}
+    if stringValue(current.id) ~= ARGV[5]
+      or tonumber(current.revision or -1) ~= tonumber(ARGV[1])
+      or stringValue(currentAutomation.mode) ~= 'backfill_only'
+      or stringValue(currentAutomation.backfillBatchEntryAt) ~= ''
+      or stringValue(currentAutomation.canaryManifestDigest) ~= ''
+      or stringValue(currentAutomation.remainderManifestDigest) ~= '' then
+      return {-3, '', ''}
+    end
+
+    local next = cjson.decode(ARGV[2])
+    local nextAutomation = type(next.automation) == 'table'
+      and next.automation or {}
+    local nextResumeWait = type(nextAutomation.resumeWait) == 'table'
+      and nextAutomation.resumeWait or {}
+    if stringValue(next.id) ~= ARGV[5]
+      or tonumber(next.revision or -1) ~= tonumber(ARGV[1]) + 1
+      or stringValue(next.state) ~= ARGV[6]
+      or stringValue(nextAutomation.mode) ~= 'authorized_backfill'
+      or stringValue(nextAutomation.remainderManifestDigest) ~= ARGV[13]
+      or stringValue(nextAutomation.canaryManifestDigest) ~= ''
+      or stringValue(nextAutomation.backfillBatchEntryAt) ~= ARGV[17]
+      or stringValue(nextResumeWait.source) ~= 'authorized_backfill'
+      or stringValue(nextResumeWait.enteredAt) ~= ARGV[17] then
+      return {-4, '', ''}
+    end
+
+    local currentDue = redis.call('ZSCORE', KEYS[4], ARGV[5])
+    local eventExists = redis.call('EXISTS', KEYS[5]) == 1
+    if eventExists then return {-3, '', currentDue or ''} end
+    if redis.call('EXISTS', KEYS[9]) == 1
+      or redis.call('EXISTS', KEYS[10]) == 1 then
+      return {-5, '', currentDue or ''}
+    end
+    redis.call('ZREMRANGEBYSCORE', KEYS[8], '-inf', ARGV[16])
+    local queued = tonumber(redis.call('ZCARD', KEYS[4]) or 0)
+    local dueCount = tonumber(
+      redis.call('ZCOUNT', KEYS[4], '-inf', ARGV[16]) or 0
+    )
+    local leased = tonumber(redis.call('ZCARD', KEYS[8]) or 0)
+    local queuedDelta = currentDue and 0 or 1
+    local dueDelta = 0
+    if tonumber(ARGV[7]) <= tonumber(ARGV[16])
+      and (
+        not currentDue
+        or tonumber(currentDue) > tonumber(ARGV[16])
+      ) then
+      dueDelta = 1
+    end
+    if queued + queuedDelta > tonumber(ARGV[18])
+      or dueCount + dueDelta > tonumber(ARGV[19])
+      or leased >= tonumber(ARGV[20]) then
+      return {-2, '', currentDue or ''}
+    end
+
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
+    redis.call('ZREMRANGEBYRANK', KEYS[2], 0, -501)
+    if ARGV[6] == 'waiting_for_resume' then
+      redis.call('SADD', KEYS[3], ARGV[5])
+    else
+      redis.call('SREM', KEYS[3], ARGV[5])
+    end
+    if not eventExists then
+      redis.call(
+        'SET',
+        KEYS[5],
+        ARGV[8],
+        'NX',
+        'EX',
+        ARGV[9]
+      )
+    end
+    local meta = cjson.decode(ARGV[10])
+    local metaRaw = redis.call('GET', KEYS[6])
+    if metaRaw then
+      local ok, old = pcall(cjson.decode, metaRaw)
+      if ok and old then
+        if old.source == 'authorized_backfill'
+          and string.sub(tostring(meta.source or ''), 1, 16)
+            ~= 'resume_attached:' then
+          meta.source = old.source
+        end
+        if old.enqueuedAt then meta.enqueuedAt = old.enqueuedAt end
+        if old.lastFailure then meta.lastFailure = old.lastFailure end
+        if old.callEndedAt then meta.callEndedAt = old.callEndedAt end
+      end
+    end
+    redis.call(
+      'SET',
+      KEYS[6],
+      cjson.encode(meta),
+      'EX',
+      ARGV[12]
+    )
+    local nextDue = tonumber(ARGV[7])
+    if (not currentDue) or nextDue < tonumber(currentDue) then
+      redis.call('ZADD', KEYS[4], nextDue, ARGV[5])
+      currentDue = tostring(nextDue)
+    end
+    return {1, ARGV[2], currentDue or tostring(nextDue)}
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    10,
+    jobKey(id),
+    INDEX_KEY,
+    RESUME_WAITING_KEY,
+    AUTO_DUE_KEY,
+    eventKey,
+    autoMetaKey(id),
+    PHASE2_REMAINDER_KEY,
+    AUTO_LEASES_KEY,
+    autoLeaseKey(id),
+    lockKey(id),
+    String(revision),
+    JSON.stringify(next),
+    String(JOB_TTL_SECONDS),
+    String(Date.parse(next.updatedAt) || queuedAt),
+    id,
+    String(next.state || ""),
+    String(due),
+    eventValue,
+    String(AUTO_EVENT_TTL_SECONDS),
+    metaValue,
+    String(source || "unknown"),
+    String(AUTO_META_TTL_SECONDS),
+    digest,
+    token,
+    String(index + 1),
+    String(queuedAt),
+    anchor,
+    String(PHASE2_REMAINDER_QUEUE_TOTAL_LIMIT),
+    String(PHASE2_REMAINDER_QUEUE_DUE_LIMIT),
+    String(PHASE2_REMAINDER_QUEUE_LEASED_LIMIT),
+  ]);
+  const code = Number(result?.[0]);
+  if (code === -2) {
+    return {
+      admitted: false,
+      job: null,
+      queue: {
+        enqueued: false,
+        duplicate: false,
+        botId: id,
+        dueAt: due,
+        error: "queue_capacity",
+      },
+    };
+  }
+  if (code === -1) {
+    const error = new Error("phase 2 remainder queue lease changed");
+    error.code = "PHASE2_REMAINDER_QUEUE_AUTHORITY_CHANGED";
+    throw error;
+  }
+  if (code === -3) {
+    const error = new Error("phase 2 remainder job changed");
+    error.code = "PHASE2_REMAINDER_JOB_CHANGED";
+    throw error;
+  }
+  if (code === -5) {
+    const error = new Error("phase 2 remainder job is busy");
+    error.code = "PHASE2_REMAINDER_JOB_BUSY";
+    throw error;
+  }
+  if (code === -4 || ![1, 2].includes(code)) {
+    const error = new Error("phase 2 remainder transition is invalid");
+    error.code = "PHASE2_REMAINDER_TRANSITION_INVALID";
+    throw error;
+  }
+  const stored = parse(result?.[1], null);
+  if (
+    !stored
+    || stored.id !== id
+    || Number(stored.revision) !== revision + 1
+    || stored?.automation?.mode !== "authorized_backfill"
+    || stored?.automation?.remainderManifestDigest !== digest
+  ) {
+    const error = new Error("phase 2 remainder transition is invalid");
+    error.code = "PHASE2_REMAINDER_TRANSITION_INVALID";
+    throw error;
+  }
+  const effectiveRaw = String(result?.[2] ?? "");
+  const effectiveDue = effectiveRaw ? Number(effectiveRaw) : NaN;
+  return {
+    admitted: true,
+    job: stored,
+    queue: {
+      enqueued: code === 1,
+      duplicate: code === 2,
+      botId: id,
+      dueAt: Number.isFinite(effectiveDue) ? effectiveDue : due,
+    },
+  };
+}
+
+export async function enqueuePhase2RemainderAutoJob(
+  botId,
+  {
+    source = "authorized_backfill",
+    eventId = "",
+    dueAt = null,
+    callEndedAt = null,
+    now = Date.now(),
+    manifestDigest,
+    ownerToken,
+    entryIndex,
+    expectedJobRevision,
+    commonAnchorAt,
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const id = requireStoreId(botId, "bot id");
+  const queuedAt = epochMs(now);
+  const due = epochMs(dueAt, queuedAt);
+  const digest = String(manifestDigest || "").toLowerCase();
+  const token = String(ownerToken || "");
+  const index = Number(entryIndex);
+  const jobRevision = Number(expectedJobRevision);
+  const anchorMs = Date.parse(String(commonAnchorAt || ""));
+  if (
+    !/^[a-f0-9]{64}$/u.test(digest)
+    || !token
+    || !Number.isInteger(index)
+    || index < 0
+    || !Number.isInteger(jobRevision)
+    || jobRevision < 0
+    || !Number.isFinite(anchorMs)
+  ) {
+    throw new Error("phase 2 remainder queue authority is invalid");
+  }
+  const dedupeId = String(eventId || randomUUID());
+  const eventKey = autoEventKey(dedupeId);
+  const eventValue = JSON.stringify({
+    botId: id,
+    source: String(source || "unknown").slice(0, 80),
+    receivedAt: new Date(queuedAt).toISOString(),
+  });
+  const metaValue = JSON.stringify({
+    source: String(source || "unknown").slice(0, 80),
+    enqueuedAt: new Date(queuedAt).toISOString(),
+    generation: randomUUID(),
+    ...(callEndedAt ? {
+      callEndedAt: new Date(
+        epochMs(callEndedAt, queuedAt),
+      ).toISOString(),
+    } : {}),
+  });
+  const script = `
+    local function stringValue(value)
+      if value == nil or value == cjson.null then return '' end
+      return tostring(value)
+    end
+    local releaseRaw = redis.call('GET', KEYS[4])
+    if not releaseRaw then return {-1, ''} end
+    local release = cjson.decode(releaseRaw)
+    local lease = release.lease
+    local entry = type(release.entries) == 'table'
+      and release.entries[tonumber(ARGV[10])] or nil
+    local inLease = false
+    if lease and lease ~= cjson.null
+      and type(lease.indexes) == 'table' then
+      for _, leaseIndex in ipairs(lease.indexes) do
+        if tonumber(leaseIndex) == tonumber(ARGV[10]) then
+          inLease = true
+        end
+      end
+    end
+    if stringValue(release.status) ~= 'running'
+      or stringValue(release.manifestDigest) ~= ARGV[8]
+      or stringValue(release.commonAnchorAt) ~= ARGV[16]
+      or not lease
+      or lease == cjson.null
+      or tostring(lease.token or '') ~= ARGV[9]
+      or tonumber(lease.until or 0) < tonumber(ARGV[11])
+      or not inLease
+      or not entry
+      or tostring(entry.id or '') ~= ARGV[1]
+      or tostring(entry.status or '') ~= 'claimed' then
+      return {-1, ''}
+    end
+    local jobRaw = redis.call('GET', KEYS[6])
+    if not jobRaw then return {-1, ''} end
+    local job = cjson.decode(jobRaw)
+    local automation = type(job.automation) == 'table'
+      and job.automation or {}
+    if stringValue(job.id) ~= ARGV[1]
+      or tonumber(job.revision or -1) ~= tonumber(ARGV[15])
+      or stringValue(job.state) ~= 'ready_to_submit'
+      or stringValue(automation.mode) ~= 'authorized_backfill'
+      or stringValue(automation.remainderManifestDigest) ~= ARGV[8]
+      or stringValue(automation.canaryManifestDigest) ~= ''
+      or stringValue(automation.backfillBatchEntryAt) ~= ARGV[16] then
+      return {-1, ''}
+    end
+
+    local current = redis.call('ZSCORE', KEYS[1], ARGV[1])
+    local eventExists = redis.call('EXISTS', KEYS[2]) == 1
+    if eventExists and current then
+      return {0, current or ''}
+    end
+    redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', ARGV[11])
+    local queued = tonumber(redis.call('ZCARD', KEYS[1]) or 0)
+    local dueCount = tonumber(
+      redis.call('ZCOUNT', KEYS[1], '-inf', ARGV[11]) or 0
+    )
+    local leased = tonumber(redis.call('ZCARD', KEYS[5]) or 0)
+    local queuedDelta = current and 0 or 1
+    local dueDelta = 0
+    if tonumber(ARGV[2]) <= tonumber(ARGV[11])
+      and (
+        not current
+        or tonumber(current) > tonumber(ARGV[11])
+      ) then
+      dueDelta = 1
+    end
+    if queued + queuedDelta > tonumber(ARGV[12])
+      or dueCount + dueDelta > tonumber(ARGV[13])
+      or leased >= tonumber(ARGV[14]) then
+      return {-2, current or ''}
+    end
+
+    if not eventExists then
+      local recorded = redis.call(
+        'SET',
+        KEYS[2],
+        ARGV[3],
+        'NX',
+        'EX',
+        ARGV[4]
+      )
+      if not recorded then return {0, current or ''} end
+    end
+    local next = cjson.decode(ARGV[5])
+    local raw = redis.call('GET', KEYS[3])
+    if raw then
+      local ok, old = pcall(cjson.decode, raw)
+      if ok and old then
+        if old.source == 'authorized_backfill'
+          and string.sub(tostring(next.source or ''), 1, 16)
+            ~= 'resume_attached:' then
+          next.source = old.source
+        end
+        if old.enqueuedAt then next.enqueuedAt = old.enqueuedAt end
+        if old.lastFailure then next.lastFailure = old.lastFailure end
+        if old.callEndedAt then next.callEndedAt = old.callEndedAt end
+      end
+    end
+    redis.call(
+      'SET',
+      KEYS[3],
+      cjson.encode(next),
+      'EX',
+      ARGV[7]
+    )
+    local nextDue = tonumber(ARGV[2])
+    if (not current) or nextDue < tonumber(current) then
+      redis.call('ZADD', KEYS[1], nextDue, ARGV[1])
+      current = tostring(nextDue)
+    end
+    return {1, current or tostring(nextDue)}
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    6,
+    AUTO_DUE_KEY,
+    eventKey,
+    autoMetaKey(id),
+    PHASE2_REMAINDER_KEY,
+    AUTO_LEASES_KEY,
+    jobKey(id),
+    id,
+    String(due),
+    eventValue,
+    String(AUTO_EVENT_TTL_SECONDS),
+    metaValue,
+    String(source || "unknown"),
+    String(AUTO_META_TTL_SECONDS),
+    digest,
+    token,
+    String(index + 1),
+    String(queuedAt),
+    String(PHASE2_REMAINDER_QUEUE_TOTAL_LIMIT),
+    String(PHASE2_REMAINDER_QUEUE_DUE_LIMIT),
+    String(PHASE2_REMAINDER_QUEUE_LEASED_LIMIT),
+    String(jobRevision),
+    new Date(anchorMs).toISOString(),
+  ]);
+  const code = Number(result?.[0]);
+  if (code === -1) {
+    const error = new Error("phase 2 remainder queue lease changed");
+    error.code = "PHASE2_REMAINDER_QUEUE_AUTHORITY_CHANGED";
+    throw error;
+  }
+  const effectiveRaw = String(result?.[1] ?? "");
+  const effectiveDue = effectiveRaw ? Number(effectiveRaw) : NaN;
+  if (code === -2) {
+    return {
+      enqueued: false,
+      duplicate: false,
+      botId: id,
+      dueAt: Number.isFinite(effectiveDue) ? effectiveDue : due,
+      error: "queue_capacity",
+    };
+  }
+  if (![0, 1].includes(code)) {
+    const error = new Error("phase 2 remainder queue failed");
+    error.code = "PHASE2_REMAINDER_QUEUE_FAILED";
+    throw error;
+  }
+  return {
+    enqueued: code === 1,
+    duplicate: code === 0,
     botId: id,
     dueAt: Number.isFinite(effectiveDue) ? effectiveDue : due,
   };
