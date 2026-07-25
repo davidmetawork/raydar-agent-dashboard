@@ -1569,9 +1569,9 @@ export async function claimPhase2RemainderBatch(
     available = math.min(available, tonumber(ARGV[8]) - leased)
     if record.lease and record.lease ~= cjson.null then
       local storedUntil = 0
-      if type(record.lease.until) == 'number'
-        or type(record.lease.until) == 'string' then
-        storedUntil = tonumber(record.lease.until) or 0
+      if type(record.lease['until']) == 'number'
+        or type(record.lease['until']) == 'string' then
+        storedUntil = tonumber(record.lease['until']) or 0
       end
       if storedUntil > tonumber(ARGV[1]) then
         return {
@@ -1679,7 +1679,7 @@ export async function claimPhase2RemainderBatch(
         entry.lastRecoveredAt = ARGV[5]
       end
       record.lease.token = ARGV[3]
-      record.lease.until = tonumber(ARGV[4])
+      record.lease['until'] = tonumber(ARGV[4])
       record.lease.recoveredAt = ARGV[5]
       local recovered = cjson.encode(record)
       redis.call('SET', KEYS[1], recovered)
@@ -1729,7 +1729,7 @@ export async function claimPhase2RemainderBatch(
     record.batchOrdinal = tonumber(record.batchOrdinal or 0) + 1
     record.lease = {
       token = ARGV[3],
-      until = tonumber(ARGV[4]),
+      ['until'] = tonumber(ARGV[4]),
       indexes = indexes,
       batchOrdinal = record.batchOrdinal,
       claimedAt = ARGV[5]
@@ -3370,7 +3370,7 @@ export async function authorizeAndEnqueuePhase2RemainderJob(
       or not lease
       or lease == cjson.null
       or stringValue(lease.token) ~= ARGV[14]
-      or tonumber(lease.until or 0) < tonumber(ARGV[16])
+      or tonumber(lease['until'] or 0) < tonumber(ARGV[16])
       or not inLease
       or not entry
       or stringValue(entry.id) ~= ARGV[5]
@@ -3663,7 +3663,7 @@ export async function enqueuePhase2RemainderAutoJob(
       or not lease
       or lease == cjson.null
       or tostring(lease.token or '') ~= ARGV[9]
-      or tonumber(lease.until or 0) < tonumber(ARGV[11])
+      or tonumber(lease['until'] or 0) < tonumber(ARGV[11])
       or not inLease
       or not entry
       or tostring(entry.id or '') ~= ARGV[1]

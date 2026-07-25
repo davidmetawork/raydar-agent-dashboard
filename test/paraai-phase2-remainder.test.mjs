@@ -529,6 +529,8 @@ test("global lease caps batches at five, waits for queue capacity, and recovers 
     capacityCommand[1],
     /record\.lease and record\.lease ~= cjson\.null/,
   );
+  assert.match(capacityCommand[1], /record\.lease\['until'\]/);
+  assert.doesNotMatch(capacityCommand[1], /record\.lease\.until|\buntil\s*=/u);
 
   const claimedRows = rows.map((row, index) => ({
     ...row,
@@ -718,6 +720,8 @@ test("first remainder admission atomically CAS-writes authorization and queue wo
   assert.match(command[1], /nextAutomation\.remainderManifestDigest/);
   assert.match(command[1], /release\.commonAnchorAt/);
   assert.match(command[1], /entry\.revision/);
+  assert.match(command[1], /lease\['until'\]/);
+  assert.doesNotMatch(command[1], /lease\.until|\buntil\s*=/u);
   assert.match(command[1], /queued \+ queuedDelta/);
   assert.ok(
     command[1].indexOf("if queued + queuedDelta")
@@ -785,6 +789,8 @@ test("each remainder enqueue atomically rechecks lease authority and queue capac
   assert.match(command[1], /release\.manifestDigest/);
   assert.match(command[1], /lease\.token/);
   assert.match(command[1], /entry\.status or ''\) ~= 'claimed'/);
+  assert.match(command[1], /lease\['until'\]/);
+  assert.doesNotMatch(command[1], /lease\.until|\buntil\s*=/u);
   assert.match(command[1], /queued \+ queuedDelta/);
   assert.match(command[1], /dueCount \+ dueDelta/);
   assert.deepEqual(command.slice(-5, -2), ["200", "10", "5"]);
