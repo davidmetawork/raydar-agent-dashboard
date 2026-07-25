@@ -2,8 +2,11 @@ import { timingSafeEqual } from "node:crypto";
 
 import {
   automationConfig,
+  commitPhase2FirstTenCanary,
   enqueueBackfill,
   enqueueOrganicExceptions,
+  phase2FirstTenCanaryStatus,
+  planPhase2FirstTenCanary,
   recoverRecentSuccessfulCalls,
   runAutoTick,
   sweepPhase1ResumeWaitCards,
@@ -25,6 +28,12 @@ function authorized(req) {
   return [process.env.PARAAI_AUTOMATION_RUNNER_KEY, process.env.CRON_SECRET]
     .filter(Boolean)
     .some((secret) => equalSecret(token, secret));
+}
+
+export function runnerAuthorized(req) {
+  const token = String(req.headers?.authorization || "")
+    .replace(/^Bearer\s+/i, "");
+  return equalSecret(token, process.env.PARAAI_AUTOMATION_RUNNER_KEY);
 }
 
 function requestBody(req) {
@@ -65,6 +74,34 @@ export default async function handler(req, res) {
 
   const body = requestBody(req);
   const mode = String(body.mode || (req.method === "GET" ? "recover" : "tick"));
+  const canaryModes = new Set([
+    "phase2-first-ten-plan",
+    "phase2-first-ten-commit",
+    "phase2-first-ten-status",
+  ]);
+  if (canaryModes.has(mode)) {
+    if (!runnerAuthorized(req)) {
+      return res.status(401).json({ ok: false, error: "runner_key_required" });
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body, "botIds")
+      || Object.prototype.hasOwnProperty.call(body, "limit")
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "caller_selection_forbidden",
+      });
+    }
+    if (
+      ["phase2-first-ten-plan", "phase2-first-ten-commit"].includes(mode)
+      && req.method !== "POST"
+    ) {
+      return res.status(405).json({
+        ok: false,
+        error: "canary_mutation_POST_only",
+      });
+    }
+  }
   try {
     if (mode === "status") {
       return res.status(200).json({
@@ -75,9 +112,31 @@ export default async function handler(req, res) {
       });
     }
     if (mode === "enqueue") {
+      if (
+        req.method !== "POST"
+        || !runnerAuthorized(req)
+        || process.env.PARAAI_BACKFILL_RAW_ENQUEUE_BREAK_GLASS !== "true"
+      ) {
+        return res.status(403).json({
+          ok: false,
+          error: "raw_enqueue_disabled",
+        });
+      }
       const botIds = Array.isArray(body.botIds) ? body.botIds.slice(0, 10) : [];
       if (!botIds.length) return res.status(400).json({ ok: false, error: "botIds_required" });
-      return res.status(200).json({ ok: true, results: await enqueueBackfill(botIds), queue: await getAutoQueueStats() });
+      const results = await enqueueBackfill(botIds);
+      return res.status(200).json({
+        ok: results.every((result) => (
+          result?.enqueued === true || result?.duplicate === true
+        )),
+        attempted: results.length,
+        enqueued: results.filter((result) => result?.enqueued === true).length,
+        duplicate: results.filter((result) => result?.duplicate === true).length,
+        failed: results.filter((result) => (
+          result?.enqueued !== true && result?.duplicate !== true
+        )).length,
+        queue: await getAutoQueueStats(),
+      });
     }
     if (mode === "phase1-exceptions") {
       const results = await enqueueOrganicExceptions();
@@ -93,6 +152,29 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         sweep,
+        queue: await getAutoQueueStats(),
+      });
+    }
+    if (mode === "phase2-first-ten-plan") {
+      const canary = await planPhase2FirstTenCanary();
+      return res.status(200).json({
+        ...canary,
+        queue: await getAutoQueueStats(),
+      });
+    }
+    if (mode === "phase2-first-ten-commit") {
+      const canary = await commitPhase2FirstTenCanary({
+        manifestDigest: body.manifestDigest,
+      });
+      return res.status(200).json({
+        ...canary,
+        queue: await getAutoQueueStats(),
+      });
+    }
+    if (mode === "phase2-first-ten-status") {
+      const canary = await phase2FirstTenCanaryStatus();
+      return res.status(200).json({
+        ...canary,
         queue: await getAutoQueueStats(),
       });
     }
@@ -158,6 +240,31 @@ export default async function handler(req, res) {
       queue: await getAutoQueueStats(),
     });
   } catch (error) {
+    if (canaryModes.has(mode)) {
+      const code = String(error?.code || "");
+      const safeCode = /^PHASE2_CANARY_[A-Z0-9_]+$/u.test(code)
+        ? code.toLowerCase()
+        : "phase2_canary_failed";
+      const status = new Set([
+        "PHASE2_CANARY_DIGEST_INVALID",
+        "PHASE2_CANARY_TIMESTAMP_INVALID",
+      ]).has(code)
+        ? 400
+        : new Set([
+            "PHASE2_CANARY_DIGEST_MISMATCH",
+            "PHASE2_CANARY_INDEX_LIMIT",
+            "PHASE2_CANARY_JOB_CHANGED",
+            "PHASE2_CANARY_PLAN_REQUIRED",
+            "PHASE2_CANARY_SNAPSHOT_CHANGED",
+            "PHASE2_CANARY_SNAPSHOT_INCOMPLETE",
+          ]).has(code)
+          ? 409
+          : 500;
+      return res.status(status).json({
+        ok: false,
+        error: safeCode,
+      });
+    }
     return res.status(500).json({
       ok: false,
       error: String(error?.code || "worker_failed"),

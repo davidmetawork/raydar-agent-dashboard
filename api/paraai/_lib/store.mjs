@@ -24,6 +24,11 @@ const RESUME_SATISFACTION_PREFIX = "paraai:resume-satisfied:v1:";
 const RESUME_CURRENT_CHAIN_PREFIX = "paraai:resume-current-chain:v1:";
 const RESUME_ATTACHED_SIGNAL_PREFIX = "paraai:resume-attached-signal:";
 const RESUME_ATTACHED_SIGNAL_TTL_SECONDS = 15 * 60;
+const PHASE2_FIRST_TEN_CANARY_KEY =
+  "paraai:phase2:first-ten-canary:v1";
+const PHASE2_FIRST_TEN_CANARY_MAX_JOBS = 10;
+const PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT = 500;
+const PHASE2_FIRST_TEN_CANARY_LEASE_MS = 150_000;
 const jobKey = (id) => `paraai:job:${id}`;
 const lockKey = (id) => `paraai:lock:${id}`;
 const alertKey = (key) => `paraai:alert:${key}`;
@@ -445,6 +450,580 @@ export async function listJobs(limit = 200) {
   if (!Array.isArray(ids) || !ids.length) return [];
   const values = await pipeline(ids.map((id) => ["GET", jobKey(id)]));
   return values.map((value) => parse(value, null)).filter(Boolean);
+}
+
+export async function getCompletePhase2CanarySnapshot(
+  {
+    maxExclusive = PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT,
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const maximum = Math.max(
+    1,
+    Math.min(
+      PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT,
+      Math.floor(Number(maxExclusive) || PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT),
+    ),
+  );
+  const script = `
+    local total = tonumber(redis.call('ZCARD', KEYS[1]) or 0)
+    if total >= tonumber(ARGV[1]) then
+      return {0, tostring(total)}
+    end
+    local ids = redis.call('ZRANGE', KEYS[1], 0, -1)
+    if #ids ~= total then
+      return {-1, tostring(total), tostring(#ids)}
+    end
+    local rows = {}
+    local fingerprintParts = {}
+    for _, id in ipairs(ids) do
+      local raw = redis.call('GET', ARGV[2] .. id)
+      if not raw then
+        return {-2, tostring(total), tostring(#ids)}
+      end
+      local job = cjson.decode(raw)
+      if tostring(job.id or '') ~= tostring(id) then
+        return {-3, tostring(total), tostring(#ids)}
+      end
+      table.insert(fingerprintParts, id)
+      table.insert(
+        fingerprintParts,
+        tostring(tonumber(job.revision or 0))
+      )
+      table.insert(rows, id)
+      table.insert(rows, raw)
+    end
+    local result = {
+      1,
+      tostring(total),
+      redis.sha1hex(table.concat(fingerprintParts, '\\n'))
+    }
+    for _, row in ipairs(rows) do
+      table.insert(result, row)
+    end
+    return result
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    1,
+    INDEX_KEY,
+    String(maximum),
+    "paraai:job:",
+  ]);
+  const code = Number(result?.[0]);
+  const total = Number(result?.[1]);
+  if (code !== 1 || !Number.isInteger(total) || total < 0) {
+    const error = new Error(
+      code === 0
+        ? "phase 2 canary index is at the completeness limit"
+        : "phase 2 canary snapshot is incomplete",
+    );
+    error.code = code === 0
+      ? "PHASE2_CANARY_INDEX_LIMIT"
+      : "PHASE2_CANARY_SNAPSHOT_INCOMPLETE";
+    throw error;
+  }
+  const fingerprint = String(result?.[2] || "");
+  if (
+    !/^[a-f0-9]{40}$/u.test(fingerprint)
+    || !Array.isArray(result)
+    || result.length !== 3 + total * 2
+  ) {
+    const error = new Error("phase 2 canary snapshot is incomplete");
+    error.code = "PHASE2_CANARY_SNAPSHOT_INCOMPLETE";
+    throw error;
+  }
+  const jobs = [];
+  for (let index = 0; index < total; index++) {
+    const indexedId = String(result[3 + index * 2] || "");
+    const job = parse(result[4 + index * 2], null);
+    if (
+      !validStoreId(indexedId)
+      || !job
+      || String(job.id || "") !== indexedId
+    ) {
+      const error = new Error("phase 2 canary snapshot is incomplete");
+      error.code = "PHASE2_CANARY_SNAPSHOT_INCOMPLETE";
+      throw error;
+    }
+    jobs.push(job);
+  }
+  return {
+    complete: true,
+    total,
+    fingerprint,
+    jobs,
+  };
+}
+
+export async function getPhase2FirstTenCanary(
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const record = parse(
+    await kvImpl(["GET", PHASE2_FIRST_TEN_CANARY_KEY]),
+    null,
+  );
+  if (!record) return null;
+  if (
+    record?.version !== 1
+    || !["planned", "committing", "complete"].includes(
+      String(record?.status || ""),
+    )
+    || !/^[a-f0-9]{64}$/u.test(String(record?.manifestDigest || ""))
+    || !Array.isArray(record?.botIds)
+    || record.botIds.length !== Number(record?.count)
+    || record.botIds.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || record.botIds.some((id) => !validStoreId(id))
+    || new Set(record.botIds).size !== record.botIds.length
+    || !Array.isArray(record?.revisions)
+    || record.revisions.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || record.revisions.some((revision) => (
+      !Number.isInteger(Number(revision)) || Number(revision) < 0
+    ))
+    || !/^[a-f0-9]{40}$/u.test(String(record?.snapshotFingerprint || ""))
+    || record?.attachProof !== true
+    || !Number.isInteger(Number(record?.authorizedBackfillCountAtPlan))
+    || Number(record.authorizedBackfillCountAtPlan) < 0
+    || Number(record.authorizedBackfillCountAtPlan)
+      > Number(record.snapshotTotal)
+  ) {
+    const error = new Error("phase 2 canary record is invalid");
+    error.code = "PHASE2_CANARY_RECORD_INVALID";
+    throw error;
+  }
+  return record;
+}
+
+export async function createPhase2FirstTenCanaryPlan(
+  {
+    entries = [],
+    manifestDigest,
+    snapshotFingerprint,
+    snapshotTotal,
+    eligibleCount,
+    authorizedBackfillCount,
+    attachProof = false,
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const rows = Array.isArray(entries) ? entries : [];
+  if (rows.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS) {
+    throw new Error("phase 2 canary requires exactly ten jobs");
+  }
+  const ids = rows.map((entry) => requireStoreId(entry?.id));
+  if (new Set(ids).size !== ids.length) {
+    throw new Error("phase 2 canary manifest contains duplicate jobs");
+  }
+  const revisions = rows.map((entry) => Number(entry?.revision));
+  if (revisions.some((revision) => !Number.isInteger(revision) || revision < 0)) {
+    throw new Error("phase 2 canary manifest requires job revisions");
+  }
+  const digest = String(manifestDigest || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new Error("phase 2 canary manifest digest is invalid");
+  }
+  const fingerprint = String(snapshotFingerprint || "").toLowerCase();
+  if (!/^[a-f0-9]{40}$/u.test(fingerprint)) {
+    throw new Error("phase 2 canary snapshot fingerprint is invalid");
+  }
+  const total = Number(snapshotTotal);
+  const eligible = Number(eligibleCount);
+  const authorizedAtPlan = Number(authorizedBackfillCount);
+  if (
+    !Number.isInteger(total)
+    || total < 0
+    || total >= PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT
+    || !Number.isInteger(eligible)
+    || eligible < rows.length
+    || eligible > total
+    || !Number.isInteger(authorizedAtPlan)
+    || authorizedAtPlan < 0
+    || authorizedAtPlan > total
+    || attachProof !== true
+  ) {
+    throw new Error("phase 2 canary snapshot counts are invalid");
+  }
+  const current = epochMs(now);
+  const proposed = {
+    version: 1,
+    status: "planned",
+    manifestDigest: digest,
+    count: ids.length,
+    botIds: ids,
+    revisions,
+    snapshotComplete: true,
+    snapshotTotal: total,
+    snapshotFingerprint: fingerprint,
+    eligibleCount: eligible,
+    authorizedBackfillCountAtPlan: authorizedAtPlan,
+    attachProof: true,
+    plannedAt: new Date(current).toISOString(),
+    result: null,
+  };
+  const script = `
+    local existingRaw = redis.call('GET', KEYS[1])
+    if existingRaw then
+      return {2, existingRaw}
+    end
+
+    local total = tonumber(redis.call('ZCARD', KEYS[2]) or 0)
+    if total >= tonumber(ARGV[1]) or total ~= tonumber(ARGV[2]) then
+      return {-1, tostring(total)}
+    end
+    local ids = redis.call('ZRANGE', KEYS[2], 0, -1)
+    if #ids ~= total then
+      return {-2, tostring(total)}
+    end
+    local fingerprintParts = {}
+    for _, id in ipairs(ids) do
+      local raw = redis.call('GET', ARGV[4] .. id)
+      if not raw then return {-2, tostring(total)} end
+      local job = cjson.decode(raw)
+      if tostring(job.id or '') ~= tostring(id) then
+        return {-2, tostring(total)}
+      end
+      table.insert(fingerprintParts, id)
+      table.insert(
+        fingerprintParts,
+        tostring(tonumber(job.revision or 0))
+      )
+    end
+    if redis.sha1hex(table.concat(fingerprintParts, '\\n')) ~= ARGV[3] then
+      return {-3, tostring(total)}
+    end
+
+    local seenCandidates = {}
+    for rowIndex = 1, tonumber(ARGV[5]) do
+      local argumentIndex = 6 + ((rowIndex - 1) * 2)
+      local expectedId = ARGV[argumentIndex]
+      local expectedRevision = tonumber(ARGV[argumentIndex + 1])
+      local raw = redis.call('GET', ARGV[4] .. expectedId)
+      if not raw or not redis.call('ZSCORE', KEYS[2], expectedId) then
+        return {-4, tostring(rowIndex)}
+      end
+      local job = cjson.decode(raw)
+      local automation = job.automation or {}
+      local resumeWait = automation.resumeWait or {}
+      local identity = job.identity or {}
+      local candidateId = string.match(
+        tostring(identity.candidateUserId or ''),
+        '^%s*(.-)%s*$'
+      )
+      if tostring(job.id or '') ~= expectedId
+        or tonumber(job.revision or 0) ~= expectedRevision
+        or tostring(automation.mode or '') ~= 'backfill_only'
+        or tostring(resumeWait.source or '') == 'authorized_backfill'
+        or tostring(automation.backfillBatchEntryAt or '') ~= ''
+        or candidateId == ''
+        or seenCandidates[candidateId] then
+        return {-4, tostring(rowIndex)}
+      end
+      seenCandidates[candidateId] = true
+    end
+    local proposed = ARGV[6 + (tonumber(ARGV[5]) * 2)]
+    local stored = redis.call('SET', KEYS[1], proposed, 'NX')
+    if not stored then
+      return {2, redis.call('GET', KEYS[1])}
+    end
+    return {1, proposed}
+  `;
+  const argumentsList = [
+    String(PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT),
+    String(total),
+    fingerprint,
+    "paraai:job:",
+    String(rows.length),
+    ...rows.flatMap((entry, index) => [
+      ids[index],
+      String(revisions[index]),
+    ]),
+    JSON.stringify(proposed),
+  ];
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    2,
+    PHASE2_FIRST_TEN_CANARY_KEY,
+    INDEX_KEY,
+    ...argumentsList,
+  ]);
+  const code = Number(result?.[0]);
+  if ([-1, -2, -3, -4].includes(code)) {
+    const error = new Error(
+      "phase 2 canary snapshot changed before plan creation",
+    );
+    error.code = "PHASE2_CANARY_SNAPSHOT_CHANGED";
+    throw error;
+  }
+  if (![1, 2].includes(code)) {
+    const error = new Error("phase 2 canary plan creation failed");
+    error.code = "PHASE2_CANARY_PLAN_FAILED";
+    throw error;
+  }
+  const record = parse(result?.[1], null);
+  if (
+    !record
+    || !["planned", "committing", "complete"].includes(
+      String(record.status || ""),
+    )
+    || !Array.isArray(record.botIds)
+    || record.botIds.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || record.botIds.some((id) => !validStoreId(id))
+    || new Set(record.botIds).size !== record.botIds.length
+    || !Array.isArray(record.revisions)
+    || record.revisions.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || record.revisions.some((revision) => (
+      !Number.isInteger(Number(revision)) || Number(revision) < 0
+    ))
+    || !/^[a-f0-9]{40}$/u.test(String(record.snapshotFingerprint || ""))
+    || !/^[a-f0-9]{64}$/u.test(String(record.manifestDigest || ""))
+    || record.attachProof !== true
+    || !Number.isInteger(Number(record.authorizedBackfillCountAtPlan))
+    || Number(record.authorizedBackfillCountAtPlan) < 0
+    || Number(record.authorizedBackfillCountAtPlan)
+      > Number(record.snapshotTotal)
+  ) {
+    const error = new Error("phase 2 canary plan is invalid");
+    error.code = "PHASE2_CANARY_RECORD_INVALID";
+    throw error;
+  }
+  return {
+    created: code === 1,
+    existing: code === 2,
+    record,
+  };
+}
+
+export async function claimPhase2FirstTenCanaryCommit(
+  {
+    manifestDigest,
+    now = Date.now(),
+    leaseMs = PHASE2_FIRST_TEN_CANARY_LEASE_MS,
+    ownerToken = randomUUID(),
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const digest = String(manifestDigest || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new Error("phase 2 canary manifest digest is invalid");
+  }
+  const current = epochMs(now);
+  const leaseUntil = current + Math.max(
+    1_000,
+    Math.min(
+      10 * 60_000,
+      Number(leaseMs) || PHASE2_FIRST_TEN_CANARY_LEASE_MS,
+    ),
+  );
+  const token = String(ownerToken || randomUUID());
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {0, ''} end
+    local record = cjson.decode(raw)
+    if tostring(record.manifestDigest or '') ~= ARGV[1] then
+      return {-1, raw}
+    end
+    if record.status == 'complete' then return {2, raw} end
+    if record.status == 'committing'
+      and tonumber(record.leaseUntil or 0) > tonumber(ARGV[2]) then
+      return {3, raw}
+    end
+    if record.status ~= 'planned' and record.status ~= 'committing' then
+      return {-2, raw}
+    end
+    if tonumber(redis.call('ZCARD', KEYS[2]) or 0) >= tonumber(ARGV[7]) then
+      return {-4, raw}
+    end
+    for rowIndex = 1, #record.botIds do
+      local id = tostring(record.botIds[rowIndex] or '')
+      local expectedRevision = tonumber(record.revisions[rowIndex] or -1)
+      if not redis.call('ZSCORE', KEYS[2], id) then return {-4, raw} end
+      local jobRaw = redis.call('GET', ARGV[6] .. id)
+      if not jobRaw then return {-3, raw} end
+      local job = cjson.decode(jobRaw)
+      local automation = job.automation or {}
+      local resumeWait = automation.resumeWait or {}
+      local sameManifest = (
+        tostring(automation.canaryManifestDigest or '')
+          == tostring(record.manifestDigest or '')
+        and (
+          tostring(automation.mode or '') == 'authorized_backfill'
+          or tostring(resumeWait.source or '') == 'authorized_backfill'
+          or tostring(automation.backfillBatchEntryAt or '') ~= ''
+        )
+      )
+      local unchanged = (
+        tonumber(job.revision or -1) == expectedRevision
+        and tostring(automation.mode or '') == 'backfill_only'
+        and tostring(resumeWait.source or '') ~= 'authorized_backfill'
+        and tostring(automation.backfillBatchEntryAt or '') == ''
+        and tostring(automation.canaryManifestDigest or '') == ''
+      )
+      if not sameManifest and not unchanged then return {-3, raw} end
+    end
+    local recovered = record.status == 'committing'
+    record.status = 'committing'
+    record.ownerToken = ARGV[3]
+    record.leaseUntil = tonumber(ARGV[4])
+    record.commitStartedAt = record.commitStartedAt or ARGV[5]
+    if recovered then record.recoveredAt = ARGV[5] end
+    local claimed = cjson.encode(record)
+    redis.call('SET', KEYS[1], claimed)
+    return {recovered and 4 or 1, claimed}
+  `;
+  const result = await kvImpl([
+    "EVAL",
+    script,
+    2,
+    PHASE2_FIRST_TEN_CANARY_KEY,
+    INDEX_KEY,
+    digest,
+    String(current),
+    token,
+    String(leaseUntil),
+    new Date(current).toISOString(),
+    "paraai:job:",
+    String(PHASE2_FIRST_TEN_CANARY_INDEX_LIMIT),
+  ]);
+  const code = Number(result?.[0]);
+  if (code === 0) {
+    const error = new Error("phase 2 canary plan is required");
+    error.code = "PHASE2_CANARY_PLAN_REQUIRED";
+    throw error;
+  }
+  if (code === -1) {
+    const error = new Error("phase 2 canary digest does not match");
+    error.code = "PHASE2_CANARY_DIGEST_MISMATCH";
+    throw error;
+  }
+  if (code === -2 || ![1, 2, 3, 4].includes(code)) {
+    const error = new Error("phase 2 canary commit claim failed");
+    error.code = code === -3
+      ? "PHASE2_CANARY_JOB_CHANGED"
+      : code === -4
+        ? "PHASE2_CANARY_SNAPSHOT_CHANGED"
+        : "PHASE2_CANARY_COMMIT_CLAIM_FAILED";
+    throw error;
+  }
+  const record = parse(result?.[1], null);
+  if (
+    !record
+    || !["committing", "complete"].includes(String(record.status || ""))
+    || !Array.isArray(record.botIds)
+    || record.botIds.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || record.botIds.some((id) => !validStoreId(id))
+    || new Set(record.botIds).size !== record.botIds.length
+    || !Array.isArray(record.revisions)
+    || record.revisions.length !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || !/^[a-f0-9]{40}$/u.test(String(record.snapshotFingerprint || ""))
+    || record.manifestDigest !== digest
+  ) {
+    const error = new Error("phase 2 canary commit claim is invalid");
+    error.code = "PHASE2_CANARY_RECORD_INVALID";
+    throw error;
+  }
+  return {
+    acquired: [1, 4].includes(code),
+    recovered: code === 4,
+    busy: code === 3,
+    complete: code === 2,
+    ownerToken: [1, 4].includes(code) ? token : null,
+    record,
+  };
+}
+
+export async function completePhase2FirstTenCanary(
+  {
+    ownerToken,
+    manifestDigest,
+    result,
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const token = String(ownerToken || "");
+  const digest = String(manifestDigest || "").toLowerCase();
+  if (!token || !/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new Error("phase 2 canary completion authority is invalid");
+  }
+  const summary = {
+    attempted: Math.max(0, Math.floor(Number(result?.attempted) || 0)),
+    enqueued: Math.max(0, Math.floor(Number(result?.enqueued) || 0)),
+    duplicate: Math.max(0, Math.floor(Number(result?.duplicate) || 0)),
+    failed: Math.max(0, Math.floor(Number(result?.failed) || 0)),
+  };
+  if (
+    summary.attempted !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+    || summary.enqueued + summary.duplicate + summary.failed
+      !== PHASE2_FIRST_TEN_CANARY_MAX_JOBS
+  ) {
+    throw new Error("phase 2 canary completion summary is invalid");
+  }
+  const completedAt = new Date(epochMs(now)).toISOString();
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {0, ''} end
+    local record = cjson.decode(raw)
+    if record.status == 'complete' then return {2, raw} end
+    if record.status ~= 'committing'
+      or tostring(record.ownerToken or '') ~= ARGV[1]
+      or tostring(record.manifestDigest or '') ~= ARGV[2] then
+      return {-1, raw}
+    end
+    local summary = cjson.decode(ARGV[4])
+    local retryable = tonumber(summary.failed or 0) > 0
+    record.status = retryable and 'planned' or 'complete'
+    if retryable then
+      record.lastFailedAt = ARGV[3]
+      record.commitAttempts = tonumber(record.commitAttempts or 0) + 1
+    else
+      record.completedAt = ARGV[3]
+    end
+    record.result = cjson.decode(ARGV[4])
+    record.ownerToken = nil
+    record.leaseUntil = nil
+    local completed = cjson.encode(record)
+    redis.call('SET', KEYS[1], completed)
+    return {retryable and 3 or 1, completed}
+  `;
+  const completed = await kvImpl([
+    "EVAL",
+    script,
+    1,
+    PHASE2_FIRST_TEN_CANARY_KEY,
+    token,
+    digest,
+    completedAt,
+    JSON.stringify(summary),
+  ]);
+  const code = Number(completed?.[0]);
+  if (![1, 2, 3].includes(code)) {
+    const error = new Error("phase 2 canary completion conflict");
+    error.code = "PHASE2_CANARY_COMPLETION_CONFLICT";
+    throw error;
+  }
+  const record = parse(completed?.[1], null);
+  if (
+    !record
+    || !["planned", "complete"].includes(String(record.status || ""))
+  ) {
+    const error = new Error("phase 2 canary completion is invalid");
+    error.code = "PHASE2_CANARY_RECORD_INVALID";
+    throw error;
+  }
+  return record;
 }
 
 export async function listWaitingResumeJobs(

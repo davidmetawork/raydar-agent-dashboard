@@ -310,6 +310,31 @@ function resolveRoutingGeography(context = {}) {
   return { currentLocation, country };
 }
 
+export function buildPreferenceRoutingInput(native = null, context = {}) {
+  const geography = resolveRoutingGeography(context);
+  const strings = (value) => values(value)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const salary = native?.salary_min == null
+    || native.salary_min === ""
+    || !Number.isFinite(Number(native.salary_min))
+    ? null
+    : Number(native.salary_min);
+  return {
+    native: {
+      workplace: strings(native?.workplace),
+      last_funding_round: strings(native?.last_funding_round),
+      locations: strings(native?.locations),
+      salary_min: salary,
+      visa: strings(native?.visa),
+    },
+    context: {
+      currentLocation: geography.currentLocation,
+      country: geography.country,
+    },
+  };
+}
+
 function visaFromExtraction(sponsorship = {}) {
   const statuses = array(sponsorship.statuses).map((item) => String(item).toUpperCase());
   if (sponsorship.required === true || statuses.includes("VISA")) return ["Available"];
@@ -1092,6 +1117,11 @@ export async function prepareJob({
       details,
       profileInfo,
     });
+    const routingInput = buildPreferenceRoutingInput(nativePreferences, {
+      crmItem,
+      details,
+      profileInfo,
+    });
     const reviewPreferences = routing.preferences;
     const statedBaseMin = extracted.compensation?.baseMin ?? null;
     const submission = {
@@ -1128,6 +1158,7 @@ export async function prepareJob({
         salaryCap: PARAAI_SALARY_CAP,
         candidateStatedBaseMin: statedBaseMin,
         candidateStatedBaseMax: extracted.compensation?.baseMax ?? null,
+        preferenceRoutingInput: routingInput,
         ...(humanReadiness?.profileOnly ? {
           humanIntroWithoutTranscript: true,
         } : {}),
@@ -1193,6 +1224,11 @@ export async function reroutePreparedJob(job) {
     details,
     profileInfo,
   });
+  const routingInput = buildPreferenceRoutingInput(nativePreferences, {
+    crmItem,
+    details,
+    profileInfo,
+  });
   return saveJob(transition(job, "ready_to_submit", {
     reviewPreferences: routing.preferences,
     reviewPolicy: {
@@ -1200,6 +1236,7 @@ export async function reroutePreparedJob(job) {
       salaryCap: PARAAI_SALARY_CAP,
       candidateStatedBaseMin: job.extracted?.compensation?.baseMin ?? null,
       candidateStatedBaseMax: job.extracted?.compensation?.baseMax ?? null,
+      preferenceRoutingInput: routingInput,
       ...routing.policy,
     },
     extraNote: extraNote(job.extracted, routing.policy.preferenceRouting),
