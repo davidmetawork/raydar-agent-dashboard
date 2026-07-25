@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   fetchCall,
@@ -47,23 +47,33 @@ import {
 } from "./resume-wait.mjs";
 import {
   acquireJobLock,
+  authorizeAndEnqueuePhase2RemainderJob,
   claimDueAutoJobs,
   claimPhase2FirstTenCanaryCommit,
+  claimPhase2RemainderBatch,
   completePhase2FirstTenCanary,
+  completePhase2RemainderBatch,
   completeAutoJob,
   createPhase2FirstTenCanaryPlan,
+  createPhase2RemainderPlan,
   createJob,
   enqueueAutoJob,
+  enqueuePhase2RemainderAutoJob,
+  getAutoQueueStats,
   getCompletePhase2CanarySnapshot,
   getJob,
   getOrCreateResumeBackfillAnchor,
   getPhase2FirstTenCanary,
+  getPhase2RemainderRelease,
   getRecentResumeAttachedSignal,
   getResumeAskSuppression,
   getSubmissionIntent,
   hashSubmissionPayload,
   listJobs,
   normalizeFailureRecord,
+  phase2CanaryManifestDigest,
+  phase2RemainderAttestationDigest,
+  phase2RemainderManifestDigest,
   releaseJobLock,
   resumeChaseChainId,
   rescheduleAutoJob,
@@ -100,6 +110,22 @@ const SETTLED_NON_SUCCESS_VERDICTS = new Set([
 ]);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 export const PHASE2_FIRST_TEN_CANARY_LIMIT = 10;
+export const PHASE2_REMAINDER_BATCH_MAX = 5;
+const PHASE2_REMAINDER_REVIEW_ERRORS = new Set([
+  "human_call_lane",
+  "state_preserved",
+  "stored_routing_inputs_missing",
+  "identity_review",
+  "technical_review",
+  "email_review",
+  "linkedin_review",
+  "hard_review_reason",
+  "unclassified_review",
+  "remainder_job_changed",
+  "remainder_manifest_conflict",
+  "backfill_anchor_conflict",
+  "job_not_found",
+]);
 const PHASE2_ATTACH_SUBMIT_MAX_MS = 15 * 60_000;
 const PHASE2_ATTACH_PROOF_MAX_AGE_MS = 24 * 60 * 60_000;
 const PHASE2_CANARY_VERIFIED_STATES = new Set([
@@ -2432,14 +2458,7 @@ function validBackfillResumeWait(job) {
   );
 }
 
-export function phase2CanaryManifestDigest(botIds = []) {
-  const ids = Array.isArray(botIds)
-    ? botIds.map((id) => String(id || ""))
-    : [];
-  return createHash("sha256")
-    .update(JSON.stringify(ids))
-    .digest("hex");
-}
+export { phase2CanaryManifestDigest };
 
 function phase2CanaryCreatedAt(job) {
   return finiteDate(job?.createdAt) ?? Number.POSITIVE_INFINITY;
@@ -3024,6 +3043,455 @@ export function phase2CanaryJobVerification(job, manifestDigest) {
   };
 }
 
+function phase2RemainderScan(
+  jobs = [],
+  {
+    config = automationConfig(),
+    canaryJobIds = new Set(),
+  } = {},
+) {
+  const eligible = [];
+  let excludedReview = 0;
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const id = String(job?.id || "");
+    if (
+      !BOT_ID.test(id)
+      || canaryJobIds.has(id)
+      || job?.automation?.mode !== "backfill_only"
+      || authorizedBackfillJob(job)
+      || job?.automation?.canaryManifestDigest
+      || job?.automation?.remainderManifestDigest
+    ) continue;
+    const freeze = automationFreezeDecision(job, config, {
+      queueSource: "unknown",
+    });
+    if (freeze.frozen !== true || freeze.mode !== "backfill_only") {
+      continue;
+    }
+    const decision = backfillReviewDecision(job);
+    if (!decision.eligible) {
+      excludedReview += 1;
+      continue;
+    }
+    eligible.push({
+      job,
+      resumeReady: phase2CanaryHasResume(job),
+    });
+  }
+  eligible.sort((left, right) => {
+    if (left.resumeReady !== right.resumeReady) {
+      return left.resumeReady ? -1 : 1;
+    }
+    const leftCreatedAt = phase2CanaryCreatedAt(left.job);
+    const rightCreatedAt = phase2CanaryCreatedAt(right.job);
+    if (leftCreatedAt !== rightCreatedAt) {
+      return leftCreatedAt < rightCreatedAt ? -1 : 1;
+    }
+    const leftId = String(left.job.id);
+    const rightId = String(right.job.id);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+  return { eligible, excludedReview };
+}
+
+export function selectPhase2RemainderJobs(
+  jobs = [],
+  options = {},
+) {
+  return phase2RemainderScan(jobs, options).eligible
+    .map(({ job }) => job);
+}
+
+function phase2RemainderPublicResult(
+  record,
+  {
+    queue = null,
+    replayed = false,
+    status = null,
+  } = {},
+) {
+  if (!record) {
+    return {
+      ok: true,
+      status: status || "not_armed",
+      replayed: false,
+      canaryVerified: false,
+      selected: 0,
+      resumeReady: 0,
+      resumeMissing: 0,
+      excludedReview: 0,
+      pending: 0,
+      claimed: 0,
+      authorized: 0,
+      review: 0,
+      retries: 0,
+      manifestDigest: null,
+      canaryManifestDigest: null,
+      queue: queue || {
+        queued: 0,
+        due: 0,
+        leased: 0,
+      },
+    };
+  }
+  const entries = Array.isArray(record.entries) ? record.entries : [];
+  const count = (value) => entries
+    .filter((entry) => entry.status === value).length;
+  const reviewCount = count("review");
+  const publicStatus = status || (
+    record.status === "complete" && reviewCount > 0
+      ? "complete_with_review"
+      : record.status
+  );
+  return {
+    ok: record.status !== "paused" && reviewCount === 0,
+    status: publicStatus,
+    replayed: replayed === true,
+    canaryVerified: record?.canaryVerification?.verified === true,
+    selected: entries.length,
+    resumeReady: Math.max(0, Number(record.resumeReadyCount) || 0),
+    resumeMissing: Math.max(0, Number(record.resumeMissingCount) || 0),
+    excludedReview: Math.max(
+      0,
+      Number(record.excludedReviewCount) || 0,
+    ),
+    pending: count("pending"),
+    claimed: count("claimed"),
+    authorized: count("authorized"),
+    review: reviewCount,
+    retries: entries.filter((entry) => Number(entry.attempts) > 1).length,
+    manifestDigest: /^[a-f0-9]{64}$/u.test(
+      String(record.manifestDigest || ""),
+    )
+      ? record.manifestDigest
+      : null,
+    canaryManifestDigest: /^[a-f0-9]{64}$/u.test(
+      String(record.canaryManifestDigest || ""),
+    )
+      ? record.canaryManifestDigest
+      : null,
+    queue: queue || {
+      queued: 0,
+      due: 0,
+      leased: 0,
+    },
+  };
+}
+
+function phase2RemainderCommonAnchor(canaryRecord, snapshot, now) {
+  const jobsById = new Map(
+    snapshot.jobs.map((job) => [String(job.id), job]),
+  );
+  const anchors = canaryRecord.botIds.map((id) => {
+    const job = jobsById.get(String(id));
+    const value = finiteDate(job?.automation?.backfillBatchEntryAt)
+      ?? finiteDate(job?.automation?.resumeWait?.enteredAt);
+    return value == null ? null : new Date(value).toISOString();
+  });
+  const unique = new Set(anchors.filter(Boolean));
+  const anchor = unique.size === 1 && anchors.every(Boolean)
+    ? [...unique][0]
+    : null;
+  const anchorMs = finiteDate(anchor);
+  if (
+    anchorMs == null
+    || anchorMs > Number(now) + 60_000
+    || Number(now) - anchorMs >= 7 * DAY_MS
+  ) {
+    const error = new Error("phase 2 remainder anchor is invalid");
+    error.code = "PHASE2_REMAINDER_ANCHOR_INVALID";
+    throw error;
+  }
+  return anchor;
+}
+
+export async function armPhase2RemainderRelease(
+  {
+    canaryManifestDigest,
+    now = Date.now(),
+    config = automationConfig(),
+    getReleaseImpl = getPhase2RemainderRelease,
+    getCanaryImpl = getPhase2FirstTenCanary,
+    snapshotImpl = getCompletePhase2CanarySnapshot,
+    canaryStatusImpl = phase2FirstTenCanaryStatus,
+    createPlanImpl = createPhase2RemainderPlan,
+  } = {},
+) {
+  const current = Number(now);
+  const digest = String(canaryManifestDigest || "").toLowerCase();
+  if (!Number.isFinite(current)) {
+    const error = new Error("phase 2 remainder timestamp is invalid");
+    error.code = "PHASE2_REMAINDER_TIMESTAMP_INVALID";
+    throw error;
+  }
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    const error = new Error("phase 2 canary digest is invalid");
+    error.code = "PHASE2_REMAINDER_DIGEST_INVALID";
+    throw error;
+  }
+  const existing = await getReleaseImpl();
+  if (existing) {
+    if (existing.canaryManifestDigest !== digest) {
+      const error = new Error("phase 2 canary digest does not match");
+      error.code = "PHASE2_REMAINDER_DIGEST_MISMATCH";
+      throw error;
+    }
+    return phase2RemainderPublicResult(existing, { replayed: true });
+  }
+  const canary = await getCanaryImpl();
+  if (!canary || canary.manifestDigest !== digest) {
+    const error = new Error("phase 2 canary digest does not match");
+    error.code = "PHASE2_REMAINDER_DIGEST_MISMATCH";
+    throw error;
+  }
+  let snapshot;
+  try {
+    snapshot = assertCompletePhase2CanarySnapshot(
+      await snapshotImpl(),
+    );
+  } catch (cause) {
+    const error = new Error("phase 2 remainder snapshot is incomplete");
+    error.code = cause?.code === "PHASE2_CANARY_INDEX_LIMIT"
+      ? "PHASE2_REMAINDER_INDEX_LIMIT"
+      : "PHASE2_REMAINDER_SNAPSHOT_INCOMPLETE";
+    throw error;
+  }
+  const verification = await canaryStatusImpl({
+    getCanaryImpl: async () => canary,
+    snapshotImpl: async () => snapshot,
+  });
+  if (
+    verification?.ok !== true
+    || verification?.verified !== true
+    || verification?.selected !== PHASE2_FIRST_TEN_CANARY_LIMIT
+    || verification?.releaseFenceIntact !== true
+  ) {
+    const error = new Error("phase 2 canary is not mechanically verified");
+    error.code = "PHASE2_REMAINDER_CANARY_NOT_VERIFIED";
+    throw error;
+  }
+  const commonAnchorAt = phase2RemainderCommonAnchor(
+    canary,
+    snapshot,
+    current,
+  );
+  const canaryJobIds = new Set(canary.botIds.map(String));
+  const scan = phase2RemainderScan(snapshot.jobs, {
+    config,
+    canaryJobIds,
+  });
+  const entries = scan.eligible.map(({ job, resumeReady }) => ({
+    id: job.id,
+    revision: Number(job.revision),
+    resumeReady,
+  }));
+  const canaryVerification = {
+    canaryManifestDigest: digest,
+    snapshotFingerprint: snapshot.fingerprint,
+    commonAnchorAt,
+    verified: true,
+    selected: Number(verification.selected),
+    authorized: Number(verification.authorized),
+    preferencesRouted: Number(verification.preferencesRouted),
+    payloadHashVerified: Number(verification.payloadHashVerified),
+    submitAttemptStarted: Number(verification.submitAttemptStarted),
+    submitAccepted: Number(verification.submitAccepted),
+    talentNetworkVisible: Number(verification.talentNetworkVisible),
+    preexistingVisible: Number(verification.preexistingVisible),
+    waitingForResume: Number(verification.waitingForResume),
+    needsReview: Number(verification.needsReview),
+    errors: Number(verification.errors),
+    missing: Number(verification.missing),
+    authorizedDelta: Number(verification.authorizedDelta),
+    releaseFenceIntact: verification.releaseFenceIntact === true,
+  };
+  const manifestDigest = phase2RemainderManifestDigest({
+    canaryManifestDigest: digest,
+    snapshotFingerprint: snapshot.fingerprint,
+    commonAnchorAt,
+    entries,
+  });
+  const plan = await createPlanImpl({
+    entries,
+    manifestDigest,
+    canaryManifestDigest: digest,
+    canaryVerification,
+    canaryVerificationDigest: phase2RemainderAttestationDigest(
+      canaryVerification,
+    ),
+    snapshotFingerprint: snapshot.fingerprint,
+    snapshotTotal: snapshot.total,
+    commonAnchorAt,
+    excludedReviewCount: scan.excludedReview,
+    now: current,
+  });
+  return phase2RemainderPublicResult(plan.record, {
+    replayed: plan.existing === true,
+  });
+}
+
+export async function phase2RemainderReleaseStatus(
+  {
+    getReleaseImpl = getPhase2RemainderRelease,
+    queueStatsImpl = getAutoQueueStats,
+  } = {},
+) {
+  const [record, queue] = await Promise.all([
+    getReleaseImpl(),
+    queueStatsImpl(),
+  ]);
+  return phase2RemainderPublicResult(record, { queue });
+}
+
+export async function runPhase2RemainderTick(
+  {
+    config = automationConfig(),
+    now = Date.now(),
+    claimImpl = claimPhase2RemainderBatch,
+    enqueueImpl = enqueueBackfill,
+    authorizeEnqueueImpl =
+      authorizeAndEnqueuePhase2RemainderJob,
+    queueEnqueueImpl = enqueuePhase2RemainderAutoJob,
+    completeImpl = completePhase2RemainderBatch,
+  } = {},
+) {
+  const current = Number(now);
+  if (!Number.isFinite(current)) {
+    const error = new Error("phase 2 remainder timestamp is invalid");
+    error.code = "PHASE2_REMAINDER_TIMESTAMP_INVALID";
+    throw error;
+  }
+  if (!automationExecutionEnabled(config)) {
+    return phase2RemainderPublicResult(null, {
+      status: "execution_disabled",
+    });
+  }
+  const claim = await claimImpl({
+    now: current,
+    batchSize: Math.max(
+      1,
+      Math.min(
+        PHASE2_REMAINDER_BATCH_MAX,
+        Number(config?.workerBatch) || 1,
+      ),
+    ),
+  });
+  if (!claim?.claimed) {
+    return phase2RemainderPublicResult(claim?.record || null, {
+      queue: claim?.queue,
+      replayed: Boolean(claim?.busy || claim?.complete),
+      status: claim?.status,
+    });
+  }
+  const ids = claim.entries.map((entry) => entry.id);
+  let results;
+  try {
+    results = await enqueueImpl(ids, {
+      config,
+      now: current,
+      remainderManifestDigest: claim.record.manifestDigest,
+      remainderExpectedRevisions: new Map(
+        claim.entries.map((entry) => [entry.id, entry.revision]),
+      ),
+      expectedBackfillAnchorAt: claim.record.commonAnchorAt,
+      authorizeEnqueueImpl: (
+        next,
+        expectedRevision,
+        options,
+      ) => {
+        const entry = claim.entries.find(
+          (row) => row.id === next?.id,
+        );
+        if (!entry) {
+          const error = new Error("phase 2 remainder row changed");
+          error.code = "PHASE2_REMAINDER_JOB_CHANGED";
+          throw error;
+        }
+        return authorizeEnqueueImpl(
+          next,
+          expectedRevision,
+          {
+            ...options,
+            now: current,
+            manifestDigest: claim.record.manifestDigest,
+            ownerToken: claim.ownerToken,
+            entryIndex: entry.index,
+            commonAnchorAt: claim.record.commonAnchorAt,
+          },
+        );
+      },
+      enqueueImpl: (id, options) => {
+        const entry = claim.entries.find((row) => row.id === id);
+        if (!entry) {
+          const error = new Error("phase 2 remainder row changed");
+          error.code = "PHASE2_REMAINDER_JOB_CHANGED";
+          throw error;
+        }
+        return queueEnqueueImpl(id, {
+          ...options,
+          now: current,
+          manifestDigest: claim.record.manifestDigest,
+          ownerToken: claim.ownerToken,
+          entryIndex: entry.index,
+          commonAnchorAt: claim.record.commonAnchorAt,
+        });
+      },
+    });
+  } catch (error) {
+    const code = String(error?.code || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/gu, "_")
+      .slice(0, 80);
+    const completed = await completeImpl({
+      ownerToken: claim.ownerToken,
+      manifestDigest: claim.record.manifestDigest,
+      outcomes: claim.entries.map((entry) => ({
+        index: entry.index,
+        status: "retry",
+        error: code || "batch_enqueue_failed",
+      })),
+      now: current,
+    });
+    return phase2RemainderPublicResult(completed, {
+      queue: claim.queue,
+      replayed: claim.recovered === true,
+    });
+  }
+  const byId = new Map(
+    (Array.isArray(results) ? results : []).map((row) => [
+      String(row?.botId || ""),
+      row,
+    ]),
+  );
+  const outcomes = claim.entries.map((entry) => {
+    const result = byId.get(entry.id);
+    if (result?.enqueued === true || result?.duplicate === true) {
+      return { index: entry.index, status: "authorized", error: "" };
+    }
+    const code = String(result?.error || "enqueue_failed")
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/gu, "_")
+      .slice(0, 80);
+    return {
+      index: entry.index,
+      status: PHASE2_REMAINDER_REVIEW_ERRORS.has(code)
+        ? "review"
+        : "retry",
+      error: code,
+    };
+  });
+  const completed = await completeImpl({
+    ownerToken: claim.ownerToken,
+    manifestDigest: claim.record.manifestDigest,
+    outcomes,
+    now: current,
+  });
+  return phase2RemainderPublicResult(completed, {
+    queue: claim.queue,
+    replayed: claim.recovered === true,
+  });
+}
+
 export async function enqueueBackfill(
   botIds = [],
   {
@@ -3031,20 +3499,56 @@ export async function enqueueBackfill(
     now = Date.now(),
     canaryManifestDigest = null,
     canaryExpectedRevisions = null,
+    remainderManifestDigest = null,
+    remainderExpectedRevisions = null,
+    expectedBackfillAnchorAt = null,
     getJobImpl = getJob,
     getBackfillAnchorImpl = getOrCreateResumeBackfillAnchor,
     saveJobImpl = saveJob,
+    authorizeEnqueueImpl = null,
     enqueueImpl = enqueueAutoJob,
   } = {},
 ) {
-  const provenanceDigest = canaryManifestDigest == null
+  const canaryDigest = canaryManifestDigest == null
     ? null
     : String(canaryManifestDigest || "").toLowerCase();
+  const remainderDigest = remainderManifestDigest == null
+    ? null
+    : String(remainderManifestDigest || "").toLowerCase();
+  if (canaryDigest != null && remainderDigest != null) {
+    const error = new Error("one backfill manifest provenance is required");
+    error.code = "PHASE2_REMAINDER_MANIFEST_CONFLICT";
+    throw error;
+  }
+  const provenanceKind = canaryDigest != null
+    ? "canary"
+    : remainderDigest != null
+      ? "remainder"
+      : null;
+  const provenanceDigest = canaryDigest ?? remainderDigest;
+  const expectedRevisions = provenanceKind === "canary"
+    ? canaryExpectedRevisions
+    : remainderExpectedRevisions;
   if (
     provenanceDigest != null
     && !/^[a-f0-9]{64}$/u.test(provenanceDigest)
   ) {
-    throw new Error("valid canary manifest digest required");
+    const error = new Error(`valid ${provenanceKind} manifest digest required`);
+    if (provenanceKind === "remainder") {
+      error.code = "PHASE2_REMAINDER_DIGEST_INVALID";
+    }
+    throw error;
+  }
+  const expectedAnchor = expectedBackfillAnchorAt == null
+    ? null
+    : finiteDate(expectedBackfillAnchorAt);
+  if (
+    expectedBackfillAnchorAt != null
+    && expectedAnchor == null
+  ) {
+    const error = new Error("phase 2 remainder anchor is invalid");
+    error.code = "PHASE2_REMAINDER_ANCHOR_INVALID";
+    throw error;
   }
   const values = Array.isArray(botIds) ? botIds : [];
   const results = new Array(values.length);
@@ -3091,29 +3595,57 @@ export async function enqueueBackfill(
   if (commonAnchor == null) {
     throw new Error("durable authorized-backfill anchor is invalid");
   }
+  if (expectedAnchor != null && commonAnchor !== expectedAnchor) {
+    const error = new Error("durable authorized-backfill anchor changed");
+    error.code = "PHASE2_REMAINDER_ANCHOR_CONFLICT";
+    throw error;
+  }
 
   for (const { index, botId, current } of entries) {
-    const sameCanaryAuthorization = Boolean(
+    const provenanceField = provenanceKind === "canary"
+      ? "canaryManifestDigest"
+      : "remainderManifestDigest";
+    const otherProvenanceField = provenanceKind === "canary"
+      ? "remainderManifestDigest"
+      : "canaryManifestDigest";
+    const sameManifestAuthorization = Boolean(
       provenanceDigest
-      && current?.automation?.canaryManifestDigest === provenanceDigest
+      && current?.automation?.[provenanceField] === provenanceDigest
       && authorizedBackfillJob(current)
     );
     if (
       provenanceDigest
-      && current?.automation?.canaryManifestDigest
-      && current.automation.canaryManifestDigest !== provenanceDigest
+      && String(current?.id || "") !== botId
     ) {
       results[index] = {
         botId,
         enqueued: false,
         preserved: true,
-        error: "canary_manifest_conflict",
+        error: `${provenanceKind}_job_changed`,
       };
       continue;
     }
-    if (provenanceDigest && !sameCanaryAuthorization) {
-      const expectedRevision = canaryExpectedRevisions instanceof Map
-        ? canaryExpectedRevisions.get(botId)
+    if (
+      provenanceDigest
+      && (
+        (
+          current?.automation?.[provenanceField]
+          && current.automation[provenanceField] !== provenanceDigest
+        )
+        || current?.automation?.[otherProvenanceField]
+      )
+    ) {
+      results[index] = {
+        botId,
+        enqueued: false,
+        preserved: true,
+        error: `${provenanceKind}_manifest_conflict`,
+      };
+      continue;
+    }
+    if (provenanceDigest && !sameManifestAuthorization) {
+      const expectedRevision = expectedRevisions instanceof Map
+        ? expectedRevisions.get(botId)
         : null;
       const freeze = automationFreezeDecision(current, config, {
         queueSource: "unknown",
@@ -3122,7 +3654,10 @@ export async function enqueueBackfill(
         !Number.isInteger(expectedRevision)
         || Number(current.revision) !== expectedRevision
         || current?.automation?.mode !== "backfill_only"
-        || !phase2CanaryHasResume(current)
+        || (
+          provenanceKind === "canary"
+          && !phase2CanaryHasResume(current)
+        )
         || freeze.frozen !== true
         || freeze.mode !== "backfill_only"
       ) {
@@ -3130,13 +3665,13 @@ export async function enqueueBackfill(
           botId,
           enqueued: false,
           preserved: true,
-          error: "canary_job_changed",
+          error: `${provenanceKind}_job_changed`,
         };
         continue;
       }
     }
     if (
-      sameCanaryAuthorization
+      sameManifestAuthorization
       && current?.state !== "ready_to_submit"
     ) {
       results[index] = {
@@ -3185,33 +3720,76 @@ export async function enqueueBackfill(
         });
     const batchEntryAt = new Date(rowAnchor).toISOString();
     let anchored = current;
+    let admittedQueue = null;
 
     if (!(existingAnchor != null && validBackfillResumeWait(current))) {
+      const next = transition(current, "ready_to_submit", {
+        automation: {
+          ...(current.automation || {}),
+          mode: "authorized_backfill",
+          status: "prepared",
+          reasons: [],
+          freezeReason: null,
+          backfillBatchEntryAt: batchEntryAt,
+          ...(provenanceDigest
+            ? { [provenanceField]: provenanceDigest }
+            : {}),
+          preferenceRerouteRequired: true,
+          resumeWait,
+        },
+        reviewReason: null,
+        reviewReasons: [],
+        error: null,
+        journalDetail: "authorized backfill clocks anchored at batch entry",
+      });
       try {
-        anchored = await saveJobImpl(transition(current, "ready_to_submit", {
-          automation: {
-            ...(current.automation || {}),
-            mode: "authorized_backfill",
-            status: "prepared",
-            reasons: [],
-            freezeReason: null,
-            backfillBatchEntryAt: batchEntryAt,
-            ...(provenanceDigest
-              ? { canaryManifestDigest: provenanceDigest }
-              : {}),
-            preferenceRerouteRequired: true,
-            resumeWait,
-          },
-          reviewReason: null,
-          reviewReasons: [],
-          error: null,
-          journalDetail: "authorized backfill clocks anchored at batch entry",
-        }), current.revision);
+        if (provenanceKind === "remainder") {
+          if (typeof authorizeEnqueueImpl !== "function") {
+            const error = new Error(
+              "phase 2 remainder atomic admission is required",
+            );
+            error.code = "PHASE2_REMAINDER_ATOMIC_ADMISSION_REQUIRED";
+            throw error;
+          }
+          const eventAnchor = finiteDate(
+            next.automation.resumeWait.enteredAt,
+          );
+          const admission = await authorizeEnqueueImpl(
+            next,
+            current.revision,
+            {
+              source: "authorized_backfill",
+              eventId: `backfill:${botId}:${eventAnchor}`,
+              dueAt: Number(now),
+            },
+          );
+          if (admission?.admitted !== true) {
+            results[index] = {
+              ...(admission?.queue || {}),
+              botId,
+              enqueued: false,
+              duplicate: false,
+              batchEntryAt,
+              firstCheckAt: resumeWait.firstCheckAt,
+              error: String(
+                admission?.queue?.error || "queue_capacity",
+              ),
+            };
+            continue;
+          }
+          anchored = admission.job;
+          admittedQueue = admission.queue;
+        } else {
+          anchored = await saveJobImpl(next, current.revision);
+        }
       } catch (error) {
+        const code = String(error?.code || "anchor_failed");
         results[index] = {
           botId,
           enqueued: false,
-          error: String(error?.code || "anchor_failed"),
+          error: code === "PHASE2_REMAINDER_JOB_CHANGED"
+            ? "remainder_job_changed"
+            : code,
         };
         continue;
       }
@@ -3219,11 +3797,16 @@ export async function enqueueBackfill(
 
     try {
       const eventAnchor = finiteDate(anchored.automation.resumeWait.enteredAt);
-      const queued = await enqueueImpl(botId, {
-        source: "authorized_backfill",
-        eventId: `backfill:${botId}:${eventAnchor}`,
-        dueAt: Number(now),
-      });
+      const queued = admittedQueue || await enqueueImpl(
+        botId,
+        {
+          source: "authorized_backfill",
+          eventId: `backfill:${botId}:${eventAnchor}`,
+          dueAt: Number(now),
+          expectedJobRevision: Number(anchored.revision),
+          commonAnchorAt: batchEntryAt,
+        },
+      );
       results[index] = {
         ...queued,
         batchEntryAt,
