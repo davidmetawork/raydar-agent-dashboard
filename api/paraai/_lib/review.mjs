@@ -1,3 +1,8 @@
+import {
+  normLinkedin,
+  normalizeEmail,
+} from "./core.mjs";
+
 const SOFT_REVIEW_CODES = new Set([
   "human_intro_without_transcript",
   "human_intro_preferences_confirmed_manually",
@@ -68,11 +73,31 @@ export function reviewActionFor(job, reasons = jobReviewReasons(job)) {
     )),
   );
   const graceComplete = Number.isFinite(endedAt) && Date.now() >= endedAt + POST_CALL_GRACE_MS;
+  const preferences = job?.reviewPreferences || {};
+  const routingOutputComplete = Boolean(
+    Array.isArray(preferences.locations)
+    && preferences.locations.length
+    && Array.isArray(preferences.workplaceTypes)
+    && preferences.workplaceTypes.length
+    && Array.isArray(preferences.idealFundingRounds)
+    && preferences.idealFundingRounds.length
+    && Number.isFinite(Number(preferences.salaryMin))
+    && Array.isArray(preferences.requiresSponsorship)
+    && preferences.requiresSponsorship.length
+  );
+  const submissionComplete = Boolean(
+    String(job?.submission?.name || "").trim()
+    && normalizeEmail(job?.submission?.email)
+    && normLinkedin(job?.submission?.linkedinUrl)
+    && String(job?.submission?.resumeUri || "").trim()
+  );
   const allowed = Boolean(
     job?.state === "needs_review" &&
     reasons.length &&
     reasons.every((reason) => reason.soft === true) &&
     routingComplete &&
+    routingOutputComplete &&
+    submissionComplete &&
     graceComplete,
   );
   return {

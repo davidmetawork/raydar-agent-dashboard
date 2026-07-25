@@ -38,6 +38,29 @@ import {
 } from "./core.mjs";
 import { FUNDING_ROUNDS, PARAAI_LOCATIONS, WORKPLACE_TYPES, extraNote, extractPreferences, normalizeExtraction } from "./extract.mjs";
 import {
+  HUMAN_CALL_SOFT_REVIEW_CODE,
+  HUMAN_CALL_SOFT_REVIEW_MESSAGE,
+  fetchHumanCall,
+  humanCallReadiness,
+  isHumanCallJob,
+  callIdFromHumanJob,
+  persistedHumanCallMetadata,
+} from "./human-call.mjs";
+import {
+  HUMAN_INTRO_PAYLOAD_CONFLICT_CODE,
+  HUMAN_INTRO_PAYLOAD_CONFLICT_MESSAGE,
+  HUMAN_INTRO_RESUME_AMBIGUOUS_CODE,
+  HUMAN_INTRO_RESUME_AMBIGUOUS_MESSAGE,
+  HUMAN_INTRO_RESUME_REVIEW_CODE,
+  HUMAN_INTRO_RESUME_REVIEW_MESSAGE,
+  humanIntroCallFromJob,
+  isHumanIntroJob,
+  persistedHumanIntroMetadata,
+} from "./human-intro.mjs";
+import {
+  resumeWaitPlanFromEnv,
+} from "./resume-wait.mjs";
+import {
   claimSubmissionIntent,
   createJob,
   finishSubmissionAttempt,
@@ -52,7 +75,7 @@ import { jobReviewReasons, reviewActionFor } from "./review.mjs";
 
 export const STATES = new Set([
   "detected", "resolving_identity", "needs_identity_review", "extracting",
-  "ready_to_submit", "submit_intent", "submitting", "submission_unknown",
+  "ready_to_submit", "waiting_for_resume", "submit_intent", "submitting", "submission_unknown",
   "awaiting_approval", "awaiting_matches", "ready_to_enroll",
   "needs_review", "ensuring_email", "enrolling", "verifying", "enrolled",
   "no_email", "error",
@@ -681,6 +704,7 @@ function candidateFromCall(call) {
   return {
     fullName: String(source.fullName || source.name || "").trim(),
     firstName: String(source.firstName || "").trim(),
+    email: normalizeEmail(source.email),
     linkedin: normLinkedin(source.linkedin),
     phone: String(source.phone || "").trim(),
     scheduledStart: source.scheduledStart || null,
@@ -701,13 +725,53 @@ function persistedCallEndedAt(call, existingValue = null) {
   return null;
 }
 
+function persistedBookingCreatedAt(
+  call,
+  {
+    existingAt = null,
+    existingSource = null,
+  } = {},
+) {
+  const existing = Date.parse(String(existingAt || ""));
+  if (Number.isFinite(existing) && String(existingSource || "").trim()) {
+    return {
+      bookingCreatedAt: new Date(existing).toISOString(),
+      bookingCreatedAtSource: String(existingSource).slice(0, 80),
+    };
+  }
+  const candidates = [
+    [
+      String(call?.bookingCreatedAtSource || "booking_created_at"),
+      call?.bookingCreatedAt ?? call?.booking_created_at,
+    ],
+    ["event_created_at", call?.eventCreatedAt ?? call?.event_created_at],
+    ["source_created_at", call?.createdAt ?? call?.created_at],
+    [
+      "source_created_at",
+      call?.source?.createdAt ?? call?.source?.created_at,
+    ],
+    ["source_created_at", call?.bot?.createdAt ?? call?.bot?.created_at],
+  ]
+    .map(([source, value]) => [
+      String(source || "").replace(/[^a-z0-9_:-]/giu, "_").slice(0, 80),
+      Date.parse(String(value || "")),
+    ])
+    .filter(([source, parsed]) => source && Number.isFinite(parsed))
+    .sort((left, right) => left[1] - right[1]);
+  if (!candidates.length) {
+    return { bookingCreatedAt: null, bookingCreatedAtSource: null };
+  }
+  return {
+    bookingCreatedAt: new Date(candidates[0][1]).toISOString(),
+    bookingCreatedAtSource: candidates[0][0],
+  };
+}
+
 export function scoreSelectedIdentity(candidate, crmItem) {
   const score = scoreIdentity(candidate, crmItem);
-  const exactName = normName(candidate?.fullName) && normName(candidate?.fullName) === normName(crmItem?.name);
-  const strong = score.signals.some((signal) => ["linkedin", "phone", "scheduled_time"].includes(signal));
   return {
-    signals: ["human_selected_id", ...score.signals],
-    ok: Boolean(exactName || strong),
+    signals: score.signals,
+    ok: score.ok,
   };
 }
 
@@ -720,64 +784,246 @@ function newJournal(state, detail = null) {
   return [{ state, at, ...(detail ? { detail } : {}) }];
 }
 
-export async function prepareJob({ botId, candidateUserId = "", force = false, strictReads = false } = {}) {
+function hardProfileReviewReasons({
+  submission = {},
+  preferences = {},
+  payloadConflict = null,
+  resumeLinkDisposition = "none",
+} = {}) {
+  const reasons = [];
+  const add = (code, message) => reasons.push({
+    code,
+    message,
+    soft: false,
+  });
+  if (!String(submission.name || "").trim()) {
+    add("candidate_name_missing", "Candidate name is required");
+  }
+  if (!normalizeEmail(submission.email)) {
+    add("candidate_email_missing", "A deliverable candidate email is required");
+  }
+  if (!normLinkedin(submission.linkedinUrl)) {
+    add("candidate_linkedin_missing", "A canonical candidate LinkedIn profile is required");
+  }
+  if (payloadConflict) {
+    add(
+      HUMAN_INTRO_PAYLOAD_CONFLICT_CODE,
+      HUMAN_INTRO_PAYLOAD_CONFLICT_MESSAGE,
+    );
+  }
+  if (resumeLinkDisposition === "received_review") {
+    add(
+      HUMAN_INTRO_RESUME_REVIEW_CODE,
+      HUMAN_INTRO_RESUME_REVIEW_MESSAGE,
+    );
+  } else if (resumeLinkDisposition === "ambiguous") {
+    add(
+      HUMAN_INTRO_RESUME_AMBIGUOUS_CODE,
+      HUMAN_INTRO_RESUME_AMBIGUOUS_MESSAGE,
+    );
+  }
+  for (const missing of missingRequiredPreferences(preferences)) {
+    add(
+      missing === "visa sponsorship"
+        ? "sponsorship_unknown"
+        : `routing_${missing.replace(/[^a-z0-9]+/giu, "_")}_missing`,
+      missing === "visa sponsorship"
+        ? "Sponsorship eligibility requires human review"
+        : `Required routing is incomplete: ${missing}`,
+    );
+  }
+  return reasons;
+}
+
+export function humanProfileReviewDecision(
+  readiness = null,
+  context = null,
+) {
+  if (readiness?.profileOnly !== true) {
+    return {
+      state: "ready_to_submit",
+      reviewReason: null,
+      reviewReasons: [],
+    };
+  }
+  const softReview = {
+    state: "needs_review",
+    reviewReason: HUMAN_CALL_SOFT_REVIEW_CODE,
+    reviewReasons: [{
+      code: HUMAN_CALL_SOFT_REVIEW_CODE,
+      message: HUMAN_CALL_SOFT_REVIEW_MESSAGE,
+      soft: true,
+    }],
+  };
+  if (!context) return softReview;
+  const hardReasons = hardProfileReviewReasons(context);
+  const artifactReview = hardReasons.find((reason) => [
+    HUMAN_INTRO_RESUME_REVIEW_CODE,
+    HUMAN_INTRO_RESUME_AMBIGUOUS_CODE,
+  ].includes(reason.code));
+  return {
+    ...softReview,
+    state: artifactReview
+      ? "needs_review"
+      : String(context?.submission?.resumeUri || "").trim()
+      ? "needs_review"
+      : "waiting_for_resume",
+    reviewReason: artifactReview?.code || softReview.reviewReason,
+    reviewReasons: [
+      ...softReview.reviewReasons,
+      ...hardReasons,
+    ],
+  };
+}
+
+export async function prepareJob({
+  botId,
+  candidateUserId = "",
+  force = false,
+  strictReads = false,
+  callRecord = null,
+} = {}) {
   const id = String(botId || "").trim();
-  if (!BOT_ID.test(id)) throw stateError("valid Recall bot id required", "INVALID_BOT_ID");
+  if (!BOT_ID.test(id)) throw stateError("valid call job id required", "INVALID_BOT_ID");
+  const paraformHumanCall = isHumanCallJob(id);
+  const humanIntro = isHumanIntroJob(id);
+  const humanCall = paraformHumanCall || humanIntro;
   const existing = await getJob(id);
   if (existing && !force && !["error", "needs_identity_review"].includes(existing.state)) return existing;
 
-  const call = await fetchCall(id);
+  const call = callRecord || (
+    humanIntro
+      ? humanIntroCallFromJob(existing)
+      : paraformHumanCall
+      ? await fetchHumanCall(callIdFromHumanJob(id))
+      : await fetchCall(id)
+  );
   const candidate = candidateFromCall(call);
   const callEndedAt = persistedCallEndedAt(call, existing?.callEndedAt);
-  if (!candidate.fullName || !isSuccessfulCall(call)) {
+  const booking = persistedBookingCreatedAt(call, {
+    existingAt: existing?.bookingCreatedAt,
+    existingSource: existing?.bookingCreatedAtSource,
+  });
+  const humanReadiness = humanCall ? humanCallReadiness(call) : null;
+  const successful = humanCall
+    ? humanReadiness.ready
+    : isSuccessfulCall(call);
+  const humanCallMeta = humanIntro
+    ? {
+        ...persistedHumanIntroMetadata(call),
+        ...(existing?.humanCallMeta?.payloadConflict ? {
+          payloadConflict: existing.humanCallMeta.payloadConflict,
+        } : {}),
+      }
+    : paraformHumanCall
+      ? persistedHumanCallMetadata(call)
+      : null;
+  const callTypeFields = {
+    humanCall,
+    humanIntro,
+    callType: humanCall ? "human" : "agent",
+    callTypeAt: callEndedAt || call.joinAt || null,
+    ...booking,
+    ...(humanIntro ? {
+      bookingSourceId: humanCallMeta?.sourceId || null,
+      resumeLinkDisposition:
+        humanCallMeta?.resumeLinkDisposition || "none",
+      resumeReceipt: humanCallMeta?.resumeReceipt || null,
+    } : {}),
+    ...(humanCall ? { humanCallMeta } : {}),
+  };
+  const callSourceVerified = humanCall
+    ? humanCallMeta?.provenanceVerified === true
+    : call?.source?.isScreener === true;
+  const screeningCallLink = humanCall
+    ? String(call?.screeningCallLink || "").trim()
+    : callLink(id);
+  if (!candidate.fullName || !successful) {
     const base = existing || {
       id, state: "detected", createdAt: new Date().toISOString(), revision: 0,
-      journal: newJournal("detected"), candidate, callLink: callLink(id),
+      journal: newJournal("detected"), candidate, callLink: screeningCallLink,
       callStartedAt: call.joinAt || null,
       callEndedAt,
-      callSourceVerified: call?.source?.isScreener === true,
+      callSourceVerified,
+      ...callTypeFields,
     };
     if (!existing) await createJob(base);
     const current = existing || await getJob(id);
-    return fail(current, "NOT_SUCCESSFUL_SCREEN", "Only successful screening calls can enter Para AI");
+    return fail(
+      current,
+      humanCall ? "HUMAN_CALL_NOT_READY" : "NOT_SUCCESSFUL_SCREEN",
+      humanCall
+        ? humanReadiness?.reason || "Paraform human call is not ready"
+        : "Only successful screening calls can enter Para AI",
+    );
   }
 
   let job;
   if (existing) {
     job = await saveJob(transition(existing, "resolving_identity", {
-      candidate, callLink: callLink(id), error: null, journalDetail: "manual re-prepare",
+      candidate, callLink: screeningCallLink, error: null, journalDetail: "manual re-prepare",
       callStartedAt: call.joinAt || existing.callStartedAt || null,
       callEndedAt,
-      callSourceVerified: call?.source?.isScreener === true,
+      callSourceVerified,
+      ...callTypeFields,
     }), existing.revision);
   } else {
     job = await createJob({
       id,
       state: "resolving_identity",
       candidate,
-      callLink: callLink(id),
+      callLink: screeningCallLink,
       callStartedAt: call.joinAt || null,
       callEndedAt,
-      callSourceVerified: call?.source?.isScreener === true,
+      callSourceVerified,
+      ...callTypeFields,
       createdAt: new Date().toISOString(),
       journal: [...newJournal("detected"), ...newJournal("resolving_identity")],
     });
   }
 
   try {
-    let crmItem = candidateUserId ? await findCrmCandidate(candidateUserId) : null;
-    let identityScore = candidateUserId && crmItem ? scoreSelectedIdentity(candidate, crmItem) : null;
+    const linkedCandidateUserId = String(
+      candidateUserId || (humanCall ? call?.candidateUserId : "") || "",
+    ).trim();
+    const manuallySelectedIdentity = Boolean(String(candidateUserId || "").trim());
+    let crmItem = linkedCandidateUserId
+      ? await findCrmCandidate(linkedCandidateUserId)
+      : null;
+    let identityScore = linkedCandidateUserId && crmItem
+      ? manuallySelectedIdentity
+        ? scoreSelectedIdentity(candidate, crmItem)
+        : scoreIdentity(candidate, crmItem)
+      : null;
     let ambiguous = false;
-    if (candidateUserId && !crmItem) {
+    if (linkedCandidateUserId && !crmItem) {
       return saveJob(transition(job, "needs_identity_review", {
-        identity: { candidateUserId: null, signals: [], ambiguous: false, reason: "selected candidate user ID was not found" },
-        journalDetail: "selected identity not found",
+        identity: {
+          candidateUserId: null,
+          signals: [],
+          ambiguous: false,
+          reason: manuallySelectedIdentity
+            ? "selected candidate user ID was not found"
+            : "linked booking candidate user ID was not found",
+        },
+        journalDetail: manuallySelectedIdentity
+          ? "selected identity not found"
+          : "linked booking identity not found",
       }), job.revision);
     }
-    if (candidateUserId && crmItem && !identityScore.ok) {
+    if (linkedCandidateUserId && crmItem && !identityScore.ok) {
       return saveJob(transition(job, "needs_identity_review", {
-        identity: { candidateUserId: null, signals: identityScore.signals, ambiguous: false, reason: "selected Paraform candidate does not match this call" },
-        journalDetail: "selected identity mismatched call",
+        identity: {
+          candidateUserId: null,
+          signals: identityScore.signals,
+          ambiguous: false,
+          reason: manuallySelectedIdentity
+            ? "selected Paraform candidate does not match this call"
+            : "linked booking candidate does not meet the multi-signal identity bar",
+        },
+        journalDetail: manuallySelectedIdentity
+          ? "selected identity mismatched call"
+          : "linked booking identity failed multi-signal verification",
       }), job.revision);
     }
     if (!crmItem) {
@@ -800,10 +1046,18 @@ export async function prepareJob({ botId, candidateUserId = "", force = false, s
         candidateId: crmItem.candidate_id || null,
         signals: identityScore?.signals || [],
         ambiguous: false,
+        ...(manuallySelectedIdentity ? { humanSelected: true } : {}),
       },
     }), job.revision);
 
-    const extraction = await extractPreferences(call.transcript || []);
+    const extraction = humanReadiness?.profileOnly
+      ? {
+          extracted: normalizeExtraction({}),
+          provider: "paraform_profile_defaults",
+          model: null,
+          usage: null,
+        }
+      : await extractPreferences(call.transcript || []);
     const reads = [
       getResume(crmItem.id),
       candidateDetails(crmItem.id, { strict: strictReads }),
@@ -827,7 +1081,10 @@ export async function prepareJob({ botId, candidateUserId = "", force = false, s
     }
     const resumeUri = findResumeUri(resume);
     const contact = resumeUri ? await resumeContact(resumeUri).catch(() => null) : null;
-    const email = firstEmail(crmItem) || firstEmail(details) || firstEmail(contact);
+    const email = candidate.email
+      || firstEmail(crmItem)
+      || firstEmail(details)
+      || firstEmail(contact);
     const linkedin = candidate.linkedin || normLinkedin(contact?.linkedinUrl || crmItem?.linkedin_user);
     const extracted = extraction.extracted;
     const routing = buildPreferenceRouting(extracted, nativePreferences, {
@@ -837,28 +1094,69 @@ export async function prepareJob({ botId, candidateUserId = "", force = false, s
     });
     const reviewPreferences = routing.preferences;
     const statedBaseMin = extracted.compensation?.baseMin ?? null;
-    return saveJob(transition(job, "ready_to_submit", {
+    const submission = {
+      name: candidate.fullName || contact?.name || crmItem.name || "",
+      email,
+      linkedinUrl: linkedin,
+      resumeUri,
+      resumeStatus: resumeUri ? "on_file" : "missing",
+      screeningCallLink,
+    };
+    const profileReview = humanProfileReviewDecision(humanReadiness, {
+      submission,
+      preferences: reviewPreferences,
+      payloadConflict: humanCallMeta?.payloadConflict || null,
+      resumeLinkDisposition:
+        humanCallMeta?.resumeLinkDisposition || "none",
+    });
+    const nextState = profileReview.state;
+    const reviewReasons = profileReview.reviewReasons;
+    const waitingForResume = nextState === "waiting_for_resume";
+    const resumeWait = waitingForResume
+      ? resumeWaitPlanFromEnv({
+          source: humanIntro ? "calendar_human_intro" : "human_call",
+          anchorAt: callEndedAt,
+        })
+      : null;
+    return saveJob(transition(job, nextState, {
       candidate: { ...candidate, fullName: candidate.fullName || contact?.name || crmItem.name },
       identity: { ...job.identity, candidateUserId: crmItem.id, candidateId: crmItem.candidate_id || job.identity?.candidateId || null },
-      submission: {
-        name: candidate.fullName || contact?.name || crmItem.name || "",
-        email,
-        linkedinUrl: linkedin,
-        resumeUri,
-        resumeStatus: resumeUri ? "on_file" : "missing",
-        screeningCallLink: callLink(id),
-      },
+      submission,
       extracted,
       reviewPreferences,
       reviewPolicy: {
         salaryCap: PARAAI_SALARY_CAP,
         candidateStatedBaseMin: statedBaseMin,
         candidateStatedBaseMax: extracted.compensation?.baseMax ?? null,
+        ...(humanReadiness?.profileOnly ? {
+          humanIntroWithoutTranscript: true,
+        } : {}),
         ...routing.policy,
       },
       extraNote: extraNote(extracted, routing.policy.preferenceRouting),
       extraction: { provider: extraction.provider, model: extraction.model, usage: extraction.usage, at: new Date().toISOString() },
+      ...(humanReadiness?.profileOnly ? {
+        reviewReason: profileReview.reviewReason,
+        reviewReasons,
+        automation: {
+          ...(job.automation || {}),
+          status: waitingForResume
+            ? "waiting_for_resume"
+            : "needs_review",
+          reasons: reviewReasons.map((reason) => reason.message),
+          evaluatedAt: new Date().toISOString(),
+          ...(waitingForResume ? {
+            resumeWait,
+            resumeWaitSweepEligible: false,
+          } : {}),
+        },
+      } : {}),
       error: null,
+      ...(humanReadiness?.profileOnly ? {
+        journalDetail: waitingForResume
+          ? "profile/default routing prepared; waiting for resume"
+          : "profile/default routing prepared for human review",
+      } : {}),
     }), job.revision);
   } catch (error) {
     if (error?.job) throw error;
@@ -905,6 +1203,11 @@ export async function reroutePreparedJob(job) {
       ...routing.policy,
     },
     extraNote: extraNote(job.extracted, routing.policy.preferenceRouting),
+    automation: {
+      ...(job.automation || {}),
+      preferenceRerouteRequired: false,
+      preferenceRoutedAt: new Date().toISOString(),
+    },
     error: null,
     journalDetail: "stored extraction rerouted under the Phase 1 policy",
   }), job.revision);
@@ -1015,7 +1318,7 @@ export function existingTalentNetworkTransition(job, {
 export async function advanceExistingTalentNetworkJob(job, {
   approvalSource = "talent_network_readback",
 } = {}) {
-  if (job?.state !== "ready_to_submit") {
+  if (!["ready_to_submit", "waiting_for_resume"].includes(job?.state)) {
     throw stateError("job is not ready for a pre-claim Talent Network read", "INVALID_STATE", job);
   }
   const candidateUserId = job.identity?.candidateUserId;

@@ -42,6 +42,33 @@ test("selected Paraform identity can resolve a call but mismatches still fail cl
   assert.equal(selectedCallMatch({ ...crm, linkedin_user: "" }, { candidate: { fullName: "Alex Example" } }, 2).ok, false);
   assert.equal(scoreSelectedIdentity(call.candidate, crm).ok, true);
   assert.equal(scoreSelectedIdentity({ fullName: "Jordan Other" }, crm).ok, false);
+  assert.deepEqual(
+    scoreSelectedIdentity(
+      { fullName: "Alex Example" },
+      {
+        ...crm,
+        linkedin_user: "different-person",
+        phone_number: "+1 646 555 0199",
+      },
+    ),
+    { signals: ["name"], ok: false },
+    "manual selection plus an exact name is not a second identity signal",
+  );
+  assert.deepEqual(
+    scoreSelectedIdentity(
+      { linkedin: "https://linkedin.com/in/alex-example" },
+      crm,
+    ),
+    { signals: ["linkedin"], ok: false },
+    "one strong signal still requires a second corroborating signal",
+  );
+  assert.equal(
+    scoreSelectedIdentity({
+      fullName: "Alex Example",
+      linkedin: "https://linkedin.com/in/alex-example",
+    }, crm).ok,
+    true,
+  );
 });
 
 test("selected candidate resolution skips failed calls and returns the newest verified success", async () => {
@@ -388,6 +415,9 @@ test("Para AI HTML inline JavaScript parses", async () => {
   assert.match(html, /expectedRevision:latest\.revision/);
   assert.match(html, /action:'reconcile-submit'/);
   assert.match(html, /Accepted by Paraform\. Approval may take a couple minutes/);
+  assert.match(html, /Waiting for resume/);
+  assert.match(html, /g\.waitingForResume\|\|\[\],waitingResumeCard/);
+  assert.match(html, /Resume attach signals re-check immediately/);
   assert.doesNotMatch(html, /action:\s*["']direct-submit/);
   const run = await readFile(new URL("../api/paraai/run.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(run, /["']direct-submit["']/);

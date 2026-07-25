@@ -6,6 +6,7 @@ import {
   enqueueOrganicExceptions,
   recoverRecentSuccessfulCalls,
   runAutoTick,
+  sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
 import { notifySlack } from "./_lib/core.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
@@ -32,6 +33,28 @@ function requestBody(req) {
     try { return JSON.parse(req.body || "{}"); } catch { return {}; }
   }
   return req.body && typeof req.body === "object" ? req.body : {};
+}
+
+export async function runAutomationCycle({
+  mode = "tick",
+  config: automation = automationConfig(),
+  sweepImpl = sweepPhase1ResumeWaitCards,
+  tickImpl = runAutoTick,
+} = {}) {
+  let resumeSweep = null;
+  let resumeSweepError = null;
+  if (mode === "recover") {
+    try {
+      resumeSweep = await sweepImpl({ config: automation });
+    } catch (error) {
+      resumeSweepError = {
+        error: String(error?.code || "resume_sweep_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+    }
+  }
+  const tick = await tickImpl({ config: automation });
+  return { resumeSweep, resumeSweepError, tick };
 }
 
 export default async function handler(req, res) {
@@ -65,10 +88,31 @@ export default async function handler(req, res) {
         queue: await getAutoQueueStats(),
       });
     }
+    if (mode === "resume-wait-sweep") {
+      const sweep = await sweepPhase1ResumeWaitCards();
+      return res.status(200).json({
+        ok: true,
+        sweep,
+        queue: await getAutoQueueStats(),
+      });
+    }
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
-    const tick = await runAutoTick();
+    const automation = automationConfig();
+    const {
+      resumeSweep,
+      resumeSweepError,
+      tick,
+    } = await runAutomationCycle({ mode, config: automation });
+    if (
+      resumeSweepError &&
+      await takeAlertSlot("resume-wait-sweep-failed", 3600).catch(() => false)
+    ) {
+      await notifySlack(
+        `🚨 Para AI resume-wait sweep failed (${resumeSweepError.error}). Direct-submit queue processing continued.`,
+      ).catch(() => {});
+    }
     let outreach = null;
     let outreachError = null;
     try {
@@ -103,9 +147,11 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({
       ok: true,
-      degraded: Boolean(recoveryError || outreachError),
+      degraded: Boolean(recoveryError || resumeSweepError || outreachError),
       recovery,
       recoveryError,
+      resumeSweep,
+      resumeSweepError,
       outreach,
       outreachError,
       tick,

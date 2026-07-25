@@ -47,6 +47,7 @@ export default async function handler(req, res) {
     const jobs = (await listJobs(Number(req.query?.limit || 200))).map(enrichReviewJob);
     const groups = {
       readyToSubmit: jobs.filter((job) => ["ready_to_submit", "needs_identity_review"].includes(job.state)),
+      waitingForResume: jobs.filter((job) => job.state === "waiting_for_resume"),
       awaiting: jobs.filter((job) => [
         "submit_intent", "submitting", "submission_unknown", "awaiting_approval",
         "awaiting_matches", "ready_to_enroll", "ensuring_email", "enrolling", "verifying", "no_email",

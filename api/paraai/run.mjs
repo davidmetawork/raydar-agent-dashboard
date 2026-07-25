@@ -8,7 +8,16 @@ import {
   refreshMatches,
   submitJob,
 } from "./_lib/pipeline.mjs";
-import { acquireJobLock, releaseJobLock, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
+import {
+  humanIntroResumeQueueOptions,
+} from "./_lib/human-intro.mjs";
+import {
+  acquireJobLock,
+  enqueueAutoJob,
+  releaseJobLock,
+  storeConfigured,
+  takeAlertSlot,
+} from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
@@ -74,6 +83,12 @@ export default async function handler(req, res) {
     let job;
     if (action === "prepare") {
       job = await prepareJob({ botId: jobId, candidateUserId: body.candidateUserId, force: body.force === true });
+      if (job?.humanIntro === true && job?.state === "waiting_for_resume") {
+        await enqueueAutoJob(
+          job.id,
+          humanIntroResumeQueueOptions(job),
+        );
+      }
     } else {
       job = await loadJob(jobId);
       if (body.expectedRevision != null && Number(body.expectedRevision) !== Number(job.revision)) {

@@ -54,6 +54,19 @@ test("apply-ladder action is exposed only when every reason is soft", () => {
     state: "needs_review",
     callEndedAt: "2026-07-24T00:00:00.000Z",
     identity: { candidateUserId: "candidate-user-2" },
+    submission: {
+      name: "Candidate Example",
+      email: "candidate@example.com",
+      linkedinUrl: "https://www.linkedin.com/in/candidate-example",
+      resumeUri: "s3://resumes/candidate-example.pdf",
+    },
+    reviewPreferences: {
+      locations: ["new_york"],
+      workplaceTypes: ["REMOTE"],
+      idealFundingRounds: ["SEED"],
+      salaryMin: 120_000,
+      requiresSponsorship: ["Not available"],
+    },
     reviewPolicy: { preferenceRouting: completeRouting },
     reviewReasons: [{
       code: "human_intro_without_transcript",
