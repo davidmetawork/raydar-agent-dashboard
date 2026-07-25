@@ -17,6 +17,7 @@ import {
   deliverMessage,
   deterministicMessageId,
   findDigestThread,
+  firstDeliveredInternalDate,
   getSignatureHtml,
   getThread,
   gmailConfigured,
@@ -48,6 +49,8 @@ import {
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 const EXCEPTION_RETRY_MS = 5 * 60 * 1000;
+// Exception codes that a later tick may legitimately retry on its own.
+const RECOVERABLE_EXCEPTION_CODES = new Set(["OUTREACH_NO_EMAIL"]);
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -152,6 +155,10 @@ export function eligibleNewRequests(
     (exceptions || [])
       .filter((row) => (
         row?.status === "open" &&
+        // Only a recoverable exception may re-enter the queue. A missing email
+        // becomes sendable the moment David adds it; a candidate-replied hold
+        // never does.
+        RECOVERABLE_EXCEPTION_CODES.has(clean(row?.code)) &&
         (
           finiteDate(row?.lastSeenAt) == null ||
           finiteDate(row?.lastSeenAt) <= Date.now() - EXCEPTION_RETRY_MS
@@ -160,10 +167,23 @@ export function eligibleNewRequests(
       .map((row) => clean(row?.requestId))
       .filter(Boolean),
   );
+  // A candidate-replied hold is a human decision, not a transient failure. Without
+  // this the request stays pending and unreached forever, so every tick would
+  // re-process it, re-throw, and burn a batch slot — starving real work.
+  const humanHeld = new Set(
+    (exceptions || [])
+      .filter((row) => (
+        row?.status === "open" &&
+        clean(row?.code) === "OUTREACH_CANDIDATE_REPLIED"
+      ))
+      .map((row) => clean(row?.requestId))
+      .filter(Boolean),
+  );
   return (history || []).filter((request) => (
     REQUEST_STATUSES.has(request.status) &&
     // GUARDRAIL: never outreach a protected recruiter's role (e.g. Kyra's).
     !protectedRecruiterForRoleTitle(request.roleName) &&
+    !humanHeld.has(request.id) &&
     (
       retryAuthorized.has(request.id) ||
       (
@@ -376,6 +396,8 @@ export function planDeliveredMatch(state, {
     digestUrl: digest.digestUrl,
     latestMatchId: request.id,
     lastOutboundAt: sentAt,
+    // Written once: the conversation anchor the reply window is measured from.
+    firstOutboundAt: state.firstOutboundAt || sentAt,
     matches: {
       ...(state.matches || {}),
       [request.id]: matchRecord({
@@ -393,7 +415,9 @@ export function planDeliveredMatch(state, {
         deliveredAt: sentAt,
       },
     },
-    followup: {
+    // A candidate who has already replied never gets a re-armed nudge ladder,
+    // even when an operator explicitly overrides the send for a new role.
+    followup: (state.repliedAt || state.stoppedReason) ? null : {
       ownerMatchId: request.id,
       ordinal,
       number: 1,
@@ -449,6 +473,7 @@ export async function processMatchRequest(
   {
     mode = "send",
     config = outreachConfig(),
+    allowAfterReply = false,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -485,6 +510,19 @@ export async function processMatchRequest(
     };
     const existingMatch = state.matches?.[request.id];
     if (existingMatch?.sentAt) return { action: "existing", state, request, match: existingMatch };
+
+    // INCIDENT 2026-07-26: the match path used to be entirely reply-blind, so a
+    // candidate who had written "I already accepted an offer" still received the
+    // next role's match email — threaded as a direct reply to their own decline —
+    // plus a freshly re-armed follow-up ladder. A recorded reply now blocks the
+    // AUTOMATIC send and routes the request to the human exception queue. The
+    // explicitly confirmed operator send (mode "send-request") is the override.
+    if (mode === "send" && !allowAfterReply && (state.repliedAt || state.stoppedReason)) {
+      const error = new Error("candidate has replied; automatic match send is blocked");
+      error.code = "OUTREACH_CANDIDATE_REPLIED";
+      error.candidateName = state.candidateName;
+      throw error;
+    }
 
     const ordinal = requestOrdinal(request, history);
     const digest = await ensureMatchDigest(request);
@@ -679,12 +717,32 @@ export async function processDueFollowup(
     now = Date.now(),
   } = {},
 ) {
+  // INCIDENT 2026-07-20 defense-in-depth: the halt must close this path on its
+  // own, not only via runOutreachTick's gate.
+  if (OUTREACH_INCIDENT_HALT) {
+    const error = new Error("Para AI outreach sending is halted (2026-07-20 Kyra incident)");
+    error.code = "OUTREACH_HALTED";
+    throw error;
+  }
   const lockToken = await acquireOutreachLock(candidateUserId);
   if (!lockToken) return { action: "busy" };
   try {
     let state = await getOutreachState(candidateUserId);
     const followup = state?.followup;
     if (!followup || finiteDate(followup.dueAt) > now) return { action: "not_due", state };
+    // INCIDENT 2026-07-26: the stop is now STICKY. Once a reply has been seen it
+    // is recorded durably and re-checked here before Gmail is even read, so no
+    // later outbound can slide the window past it and un-see it.
+    if (state.repliedAt || state.stoppedReason) {
+      state = await saveOutreachState(appendOutreachJournal({
+        ...state,
+        followup: null,
+      }, "followup_suppressed_after_reply", {
+        ownerMatchId: followup.ownerMatchId,
+        repliedAt: state.repliedAt || null,
+      }), state.revision);
+      return { action: "stopped_on_reply", state };
+    }
     if (followup.ownerMatchId !== state.latestMatchId) {
       state = await saveOutreachState(appendOutreachJournal({
         ...state,
@@ -701,11 +759,18 @@ export async function processDueFollowup(
       throw error;
     }
     const thread = await getThread(config.mailbox, state.threadId);
-    if (candidateRepliedAfter(thread, state.candidateEmail, finiteDate(state.lastOutboundAt))) {
+    // Anchor the reply window at the START of the conversation, not at our most
+    // recent send. The old `lastOutboundAt` cutoff meant a reply became
+    // permanently invisible the moment any outbound followed it.
+    const replyWindowStart = finiteDate(state.firstOutboundAt)
+      ?? firstDeliveredInternalDate(thread)
+      ?? 0;
+    if (candidateRepliedAfter(thread, config.mailbox, replyWindowStart)) {
       state = await saveOutreachState(appendOutreachJournal({
         ...state,
         followup: null,
         stoppedReason: "candidate_replied",
+        repliedAt: new Date().toISOString(),
       }, "followups_stopped_on_reply", {
         ownerMatchId: followup.ownerMatchId,
       }), state.revision);
@@ -824,11 +889,27 @@ export async function handleOutreachFailure(
   if (!new Set([
     "AUTH_EXPIRED",
     "OUTREACH_NO_EMAIL",
+    "OUTREACH_CANDIDATE_REPLIED",
     "OUTREACH_THREAD_NOT_FOUND",
     "OUTREACH_DIGEST_NOT_VISIBLE",
     "GMAIL_SEND_UNKNOWN",
     "GMAIL_AUTH_FAILED",
   ]).has(code)) return;
+  // A blocked post-reply match is a human decision, not a system fault: record it
+  // durably and alert once, exactly like the missing-email path. Never silent.
+  if (code === "OUTREACH_CANDIDATE_REPLIED" && request?.id) {
+    const record = await recordOutreachException({ request, code, discovery: null });
+    const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
+    if (!alertClaimed) return record;
+    const candidate = displayName(error?.candidateName || request?.candidateName)
+      || "a candidate";
+    const role = clean(request?.roleName) || "Unknown role";
+    const company = clean(request?.companyName) || "Unknown company";
+    await notifySlack(
+      `✋ Para AI outreach held: ${candidate} has already replied, so the ${role} @ ${company} match was NOT auto-sent. Review the thread and send manually if it still makes sense.`,
+    ).catch(() => false);
+    return record;
+  }
   if (code === "OUTREACH_NO_EMAIL" && request?.id) {
     const record = await recordOutreachException({
       request,

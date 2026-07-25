@@ -98,7 +98,13 @@ export default async function handler(req, res) {
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
       let result;
       try {
-        result = await processMatchRequest(request, history, { mode: "send", config });
+        // The explicitly confirmed operator send is the override for a candidate
+        // who has already replied; the automatic tick still refuses.
+        result = await processMatchRequest(request, history, {
+          mode: "send",
+          config,
+          allowAfterReply: true,
+        });
       } catch (error) {
         await handleOutreachFailure(error, request, { config }).catch(() => {});
         throw error;

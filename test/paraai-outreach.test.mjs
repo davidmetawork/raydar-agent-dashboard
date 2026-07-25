@@ -12,8 +12,10 @@ import {
 } from "../api/paraai/_lib/outreach-copy.mjs";
 import {
   buildMime,
+  canonicalAddress,
   candidateRepliedAfter,
   deterministicMessageId,
+  firstDeliveredInternalDate,
   threadDigestAnchorStatus,
   threadReplyContext,
 } from "../api/paraai/_lib/outreach-gmail.mjs";
@@ -220,8 +222,78 @@ test("thread context follows the latest Gmail message and replies stop follow-up
   assert.equal(context.replySubject, "Re: 1st Round @ CaroHQ 🎉");
   assert.equal(context.inReplyTo, "<candidate@example.com>");
   assert.equal(context.references, "<first@example.com> <candidate@example.com>");
-  assert.equal(candidateRepliedAfter(thread, "candidate@example.com", 1500), true);
-  assert.equal(candidateRepliedAfter(thread, "candidate@example.com", 2500), false);
+  assert.equal(candidateRepliedAfter(thread, "david@raydar.xyz", 1500), true);
+  // REGRESSION (incident 2026-07-26): the caller must anchor the reply window at
+  // the START of the conversation. Anchored there, a reply we have already talked
+  // over is still seen...
+  const anchor = firstDeliveredInternalDate(thread);
+  assert.equal(anchor, 1000);
+  assert.equal(candidateRepliedAfter(thread, "david@raydar.xyz", anchor), true);
+  // ...whereas the old lastOutboundAt anchor hid it permanently. This line is the
+  // defect itself, kept as documentation of why the anchor moved.
+  assert.equal(candidateRepliedAfter(thread, "david@raydar.xyz", 2500), false);
+  // Our own delivered mail is never a reply, at any cutoff.
+  assert.equal(candidateRepliedAfter({ messages: [thread.messages[0]] }, "david@raydar.xyz", 0), false);
+  // Unsent drafts sitting in the thread are not replies either.
+  assert.equal(candidateRepliedAfter({ messages: [thread.messages[2]] }, "david@raydar.xyz", 0), false);
+});
+
+test("a reply from an address Paraform never had still stops the ladder", () => {
+  // REGRESSION (incident 2026-07-26): Paraform held darrentas7@gmail.com and the
+  // candidate replied as darren.tas7@gmail.com. Same Gmail mailbox, different
+  // string — the old substring test missed it and sent two more follow-ups.
+  const reply = (from) => ({
+    messages: [
+      {
+        internalDate: "1000",
+        labelIds: ["SENT"],
+        payload: { headers: [
+          { name: "Subject", value: "1st Round @ Wayside 🎉" },
+          { name: "From", value: "David Phillips <david@raydar.xyz>" },
+        ] },
+      },
+      {
+        internalDate: "2000",
+        payload: { headers: [{ name: "From", value: from }] },
+      },
+    ],
+  });
+  assert.equal(canonicalAddress("darren.tas7@gmail.com"), "darrentas7@gmail.com");
+  assert.equal(canonicalAddress("Darren.Tas7+jobs@GoogleMail.com"), "darrentas7@googlemail.com");
+  assert.equal(canonicalAddress("first.last@company.com"), "first.last@company.com");
+  for (const from of [
+    "Darren Tas <darren.tas7@gmail.com>",
+    "Darren Tas <darrentas7+paraform@gmail.com>",
+    "Darren Tas <darren@some-other-domain.com>",
+    "darren.tas7@gmail.com",
+  ]) {
+    assert.equal(candidateRepliedAfter(reply(from), "david@raydar.xyz", 0), true, from);
+  }
+  // Our own address, however it is spelled, is still not a reply.
+  assert.equal(
+    candidateRepliedAfter(reply("David Phillips <david@raydar.xyz>"), "david@raydar.xyz", 0),
+    false,
+  );
+});
+
+test("a recorded reply blocks the automatic match send but not the operator override", async () => {
+  const replied = { repliedAt: "2026-07-22T14:19:00.000Z", matches: {}, outbox: {} };
+  const planned = planDeliveredMatch(
+    { ...replied, journal: [] },
+    {
+      request: { id: "req-1", roleId: "role-1", roleName: "Engineer", companyName: "Wayside" },
+      ordinal: 1,
+      roleUrl: "https://www.paraform.com/share/wayside/role-1",
+      digest: { digestId: "digest-1", digestUrl: "https://www.paraform.com/digest/digest-1" },
+      copy: { subject: "1st Round", variant: "initial_exact" },
+      sent: { id: "m1", threadId: "t1" },
+      sentAt: "2026-07-23T09:30:00.000Z",
+      messageId: "<x@raydar.xyz>",
+    },
+  );
+  // An override send must never re-arm a nudge ladder on someone who replied.
+  assert.equal(planned.followup, null);
+  assert.equal(planned.firstOutboundAt, "2026-07-23T09:30:00.000Z");
 });
 
 test("only an exact digest URL in the first delivered email anchors future replies", () => {
@@ -488,8 +560,30 @@ test("eligibility requires pending, unreached, post-cutoff, and not already deli
     eligibleNewRequests([historicalReached], config, [], [{
       requestId: historicalReached.id,
       status: "open",
+      code: "OUTREACH_NO_EMAIL",
     }]),
     [historicalReached],
+  );
+  // REGRESSION (incident 2026-07-26): a candidate-replied hold is a human
+  // decision, never a retryable failure. The request stays pending and unreached
+  // forever, so if it re-entered the queue the tick would retry it every five
+  // minutes and starve the batch.
+  assert.deepEqual(
+    eligibleNewRequests([base], config, [], [{
+      requestId: base.id,
+      status: "open",
+      code: "OUTREACH_CANDIDATE_REPLIED",
+    }]),
+    [],
+  );
+  // ...and it must not be resurrected by the retry-authorized path either.
+  assert.deepEqual(
+    eligibleNewRequests([historicalReached], config, [], [{
+      requestId: historicalReached.id,
+      status: "open",
+      code: "OUTREACH_CANDIDATE_REPLIED",
+    }]),
+    [],
   );
 });
 

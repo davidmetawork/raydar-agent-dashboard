@@ -195,13 +195,65 @@ export function threadReplyContext(thread) {
   };
 }
 
-export function candidateRepliedAfter(thread, candidateEmail, afterMs) {
-  const email = clean(candidateEmail).toLowerCase();
+const ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
+// INCIDENT 2026-07-26: a candidate declined ("I already accepted an offer") and
+// still received both scheduled follow-ups. Paraform held darrentas7@gmail.com;
+// he replied as darren.tas7@gmail.com. Same Gmail mailbox — Gmail ignores dots
+// and +tags on gmail.com — but a different STRING, so the old substring test
+// `from.includes(candidateEmail)` was false and the reply was invisible.
+// Canonicalize before any address comparison.
+export function canonicalAddress(value) {
+  const email = String(value || "").trim().toLowerCase();
+  const at = email.lastIndexOf("@");
+  if (at <= 0 || at === email.length - 1) return "";
+  let local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  const plus = local.indexOf("+");
+  if (plus > 0) local = local.slice(0, plus);
+  if (domain === "gmail.com" || domain === "googlemail.com") local = local.replace(/\./g, "");
+  return local ? `${local}@${domain}` : "";
+}
+
+export function headerAddresses(message, name = "From") {
+  return [...new Set(
+    (String(headerValue(message, name) || "").match(ADDRESS_PATTERN) || [])
+      .map(canonicalAddress)
+      .filter(Boolean),
+  )];
+}
+
+// Recognize "not us" rather than "the candidate". Matching a single stored
+// address can only ever be as good as that one string; identifying our own
+// outbound is exact, so anything else delivered in the thread is a reply. This
+// survives aliases, +tags, gmail dot-variants, forwarding rewrites, corporate
+// relays, and a candidate replying from an address Paraform never had.
+//
+// Deliberately fails SAFE: an auto-responder or bounce also counts as a reply
+// and pauses the ladder. Over-stopping costs one un-sent nudge; under-stopping
+// emails someone who already said no.
+export function candidateRepliedAfter(thread, mailbox, afterMs) {
+  const ours = canonicalAddress(mailbox);
   const cutoff = Number(afterMs) || 0;
   return (thread?.messages || []).some((message) => {
-    const from = String(headerValue(message, "From") || "").toLowerCase();
-    return Number(message?.internalDate || 0) > cutoff && from.includes(email);
+    const labels = message?.labelIds || [];
+    if (labels.includes("DRAFT") || labels.includes("SENT")) return false;
+    if (Number(message?.internalDate || 0) <= cutoff) return false;
+    const from = headerAddresses(message, "From");
+    if (!from.length) return false;
+    return !from.some((address) => address === ours);
   });
+}
+
+// The conversation anchor for the reply window: the first message we delivered.
+// Used instead of "our most recent send" so that talking over a reply can never
+// hide it.
+export function firstDeliveredInternalDate(thread) {
+  const delivered = (thread?.messages || []).filter(
+    (message) => !(message?.labelIds || []).includes("DRAFT"),
+  );
+  if (!delivered.length) return 0;
+  return Math.min(...delivered.map((message) => Number(message?.internalDate || 0) || 0));
 }
 
 export function buildMime({
