@@ -517,11 +517,35 @@ export async function processMatchRequest(
     // plus a freshly re-armed follow-up ladder. A recorded reply now blocks the
     // AUTOMATIC send and routes the request to the human exception queue. The
     // explicitly confirmed operator send (mode "send-request") is the override.
-    if (mode === "send" && !allowAfterReply && (state.repliedAt || state.stoppedReason)) {
+    const blockAfterReply = () => {
       const error = new Error("candidate has replied; automatic match send is blocked");
       error.code = "OUTREACH_CANDIDATE_REPLIED";
       error.candidateName = state.candidateName;
-      throw error;
+      return error;
+    };
+    if (mode === "send" && !allowAfterReply && (state.repliedAt || state.stoppedReason)) {
+      throw blockAfterReply();
+    }
+    // Every candidate who declined BEFORE this shipped has no stored reply flag —
+    // their ladder had already finished, so the follow-up gate will never run
+    // again to record one. Without a live read the guard above would be inert for
+    // exactly the people it most needs to protect, so consult the thread itself
+    // and latch the result for next time.
+    if (mode === "send" && !allowAfterReply && state.threadId) {
+      const priorThread = await getThread(config.mailbox, state.threadId).catch(() => null);
+      const priorAnchor = finiteDate(state.firstOutboundAt)
+        ?? firstDeliveredInternalDate(priorThread)
+        ?? 0;
+      if (priorThread && candidateRepliedAfter(priorThread, config.mailbox, priorAnchor)) {
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          followup: null,
+          stoppedReason: state.stoppedReason || "candidate_replied",
+          repliedAt: state.repliedAt || new Date().toISOString(),
+        }, "match_blocked_after_reply", { requestId: request.id }), state.revision)
+          .catch(() => state);
+        throw blockAfterReply();
+      }
     }
 
     const ordinal = requestOrdinal(request, history);
