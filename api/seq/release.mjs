@@ -3,7 +3,9 @@
 // For each due project: members -> booked/in-sequence checks (run NOW, at release —
 // the whole point of the delay) -> ensure role sequence (TPL) or target (SEQ) ->
 // enroll the clean ones -> backfill lead emails -> delete the delay project.
-import { cors, requireAuth, hasCookie, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, bookedSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
+// Calendly-aware booked check — see enroll.mjs.
+import { bookedSetWithCalendly as bookedSet } from "./_lib/booking-stop.mjs";
 import { protectedRecruiterForRoleTitle } from "./_lib/protected.mjs";
 
 export const config = { maxDuration: 300 };
