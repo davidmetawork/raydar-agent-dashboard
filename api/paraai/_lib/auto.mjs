@@ -38,7 +38,13 @@ import {
   fetchHumanCall,
   humanCallReadiness,
   isHumanCallJob,
+  persistedHumanCallMetadata,
 } from "./human-call.mjs";
+import {
+  humanIntroCallFromJob,
+  isHumanIntroJob,
+  persistedHumanIntroMetadata,
+} from "./human-intro.mjs";
 import {
   DEFAULT_RESUME_BACKFILL_TERMINAL_ACK_DAYS,
   DEFAULT_RESUME_RETRY_DAYS,
@@ -103,6 +109,7 @@ import {
   stopResumeAskSuppression,
   takeAlertSlot,
   transition,
+  upsertPhase3CandidateSuccessProof,
 } from "./store.mjs";
 
 const TERMINAL_STATES = new Set([
@@ -1770,6 +1777,159 @@ export async function ensureContinuousPhase3ShadowJob(
   return saveJobImpl(next, job.revision);
 }
 
+function missingPhase3CandidateSuccessProof(proof) {
+  const observedAt = String(proof?.storeObservedAt || "");
+  const observedAtMs = finiteDate(observedAt);
+  return Boolean(
+    proof
+    && typeof proof === "object"
+    && !Array.isArray(proof)
+    && proof.version === 1
+    && proof.source === "candidate_success_index_v1"
+    && proof.authoritative === false
+    && proof.complete === false
+    && proof.bootstrapComplete === true
+    && proof.quarantined === false
+    && proof.proofVersion === 0
+    && proof.proofUpdatedAt == null
+    && proof.proofSemanticDigest == null
+    && /^[a-f0-9]{40}$/u.test(
+      String(proof.bootstrapGenerationDigest || ""),
+    )
+    && proof.conflict === false
+    && observedAtMs != null
+    && new Date(observedAtMs).toISOString() === observedAt
+    && Array.isArray(proof.calls)
+    && proof.calls.length === 0
+  );
+}
+
+function phase3CallProofRepairError(cause = null) {
+  const error = new Error(
+    "the authoritative successful-call source could not repair the candidate proof",
+  );
+  error.code = "PHASE3_CALL_PROOF_REPAIR_SOURCE_INVALID";
+  if (cause) error.cause = cause;
+  return error;
+}
+
+/**
+ * Repair only a genuinely absent candidate-scoped proof. This does not infer
+ * provenance from legacy state: it re-reads the exact Recall/Paraform source,
+ * applies the existing success validators, and writes under the job's current
+ * candidateId-first identity. Poisoned, malformed, and merely incomplete
+ * records remain fail-closed.
+ */
+export async function repairMissingPhase3CandidateSuccessProof(
+  job,
+  proof,
+  {
+    now = Date.now,
+    fetchCallImpl = fetchCall,
+    fetchHumanCallImpl = fetchHumanCall,
+    humanIntroCallFromJobImpl = humanIntroCallFromJob,
+    humanCallReadinessImpl = humanCallReadiness,
+    persistedHumanCallMetadataImpl = persistedHumanCallMetadata,
+    persistedHumanIntroMetadataImpl = persistedHumanIntroMetadata,
+    upsertProofImpl = upsertPhase3CandidateSuccessProof,
+  } = {},
+) {
+  if (!missingPhase3CandidateSuccessProof(proof)) return proof;
+  const id = String(job?.id || "").trim();
+  const candidateUserId = String(
+    job?.identity?.candidateUserId || "",
+  ).trim();
+  const candidateId = String(job?.identity?.candidateId || "").trim();
+  const current = Number(typeof now === "function" ? now() : now);
+  if (
+    !BOT_ID.test(id)
+    || (!candidateId && !candidateUserId)
+    || !Number.isFinite(current)
+  ) {
+    throw phase3CallProofRepairError();
+  }
+
+  let call;
+  let humanCall = false;
+  let provenanceVerified = false;
+  try {
+    if (isHumanIntroJob(id)) {
+      if (job?.humanCall !== true || job?.humanIntro !== true) {
+        throw new Error("human intro job markers are invalid");
+      }
+      call = await humanIntroCallFromJobImpl(job);
+      const readiness = humanCallReadinessImpl(call);
+      const metadata = persistedHumanIntroMetadataImpl(call);
+      if (
+        readiness?.ready !== true
+        || metadata?.provenanceVerified !== true
+      ) {
+        throw new Error("human intro provenance is invalid");
+      }
+      humanCall = true;
+      provenanceVerified = true;
+    } else if (isHumanCallJob(id)) {
+      if (job?.humanCall !== true || job?.humanIntro === true) {
+        throw new Error("human call job markers are invalid");
+      }
+      const callId = callIdFromHumanJob(id);
+      call = await fetchHumanCallImpl(callId);
+      const readiness = humanCallReadinessImpl(call);
+      const metadata = persistedHumanCallMetadataImpl(call);
+      if (
+        String(call?.id || "") !== callId
+        || readiness?.ready !== true
+        || metadata?.provenanceVerified !== true
+        || (
+          String(call?.candidateUserId || "").trim()
+          && String(call.candidateUserId).trim() !== candidateUserId
+        )
+      ) {
+        throw new Error("human call provenance is invalid");
+      }
+      humanCall = true;
+      provenanceVerified = true;
+    } else {
+      if (job?.humanCall === true || job?.humanIntro === true) {
+        throw new Error("agent call job markers are invalid");
+      }
+      call = await fetchCallImpl(id);
+      if (
+        String(call?.botId || "") !== id
+        || call?.source?.isScreener !== true
+        || !isSuccessfulCall(call)
+      ) {
+        throw new Error("agent call provenance is invalid");
+      }
+    }
+  } catch (cause) {
+    throw phase3CallProofRepairError(cause);
+  }
+
+  const endedAtMs = resolveCallEndedAt(call);
+  if (
+    endedAtMs == null
+    || endedAtMs > current
+  ) {
+    throw phase3CallProofRepairError();
+  }
+  try {
+    return await upsertProofImpl({
+      candidateUserId,
+      candidateId,
+      endedAt: new Date(endedAtMs).toISOString(),
+      humanCall,
+      callType: humanCall ? "human" : "agent",
+      callSourceVerified: true,
+      humanProvenanceVerified: provenanceVerified,
+      successfulCallVerified: true,
+      now: current,
+    });
+  } catch (cause) {
+    throw phase3CallProofRepairError(cause);
+  }
+}
+
 async function processPhase3ShadowAutoJob(
   job,
   config,
@@ -1779,6 +1939,8 @@ async function processPhase3ShadowAutoJob(
     refreshMatchesImpl = refreshMatches,
     saveJobImpl = saveJob,
     phase3CallProofImpl = getPhase3CandidateSuccessProof,
+    phase3CallProofRepairImpl =
+      repairMissingPhase3CandidateSuccessProof,
     getPhase3ReleaseImpl = getPhase3ShadowRelease,
   } = {},
 ) {
@@ -1876,10 +2038,11 @@ async function processPhase3ShadowAutoJob(
     () => refreshMatchesImpl(job, {
       callSnapshotImpl: async () => {
         try {
-          return await phase3CallProofImpl({
+          const proof = await phase3CallProofImpl({
             candidateUserId: job?.identity?.candidateUserId,
             candidateId: job?.identity?.candidateId,
           });
+          return await phase3CallProofRepairImpl(job, proof, { now });
         } catch (cause) {
           throw phase3ScopedError(
             "PHASE3_CALL_SNAPSHOT_REQUIRED",
@@ -1960,6 +2123,8 @@ async function processAutoJobInner(
     refreshMatchesImpl = refreshMatches,
     saveJobImpl = saveJob,
     phase3CallProofImpl = getPhase3CandidateSuccessProof,
+    phase3CallProofRepairImpl =
+      repairMissingPhase3CandidateSuccessProof,
     getPhase3ReleaseImpl = getPhase3ShadowRelease,
     now = Date.now,
   } = {},
@@ -1988,6 +2153,7 @@ async function processAutoJobInner(
       refreshMatchesImpl,
       saveJobImpl,
       phase3CallProofImpl,
+      phase3CallProofRepairImpl,
       getPhase3ReleaseImpl,
     });
   }
@@ -2351,6 +2517,7 @@ async function processAutoJobInner(
           refreshMatchesImpl,
           saveJobImpl,
           phase3CallProofImpl,
+          phase3CallProofRepairImpl,
           getPhase3ReleaseImpl,
         });
       }
@@ -2498,6 +2665,7 @@ async function processAutoJobInner(
           refreshMatchesImpl,
           saveJobImpl,
           phase3CallProofImpl,
+          phase3CallProofRepairImpl,
           getPhase3ReleaseImpl,
         });
       }
@@ -2641,6 +2809,7 @@ async function processAutoJobInner(
           refreshMatchesImpl,
           saveJobImpl,
           phase3CallProofImpl,
+          phase3CallProofRepairImpl,
           getPhase3ReleaseImpl,
         });
       }
@@ -2724,6 +2893,7 @@ async function processAutoJobInner(
         refreshMatchesImpl,
         saveJobImpl,
         phase3CallProofImpl,
+        phase3CallProofRepairImpl,
         getPhase3ReleaseImpl,
       });
     }
@@ -2752,7 +2922,7 @@ export async function processAutoJob(botId, options = {}) {
   }
 }
 
-async function alertOnce(
+export async function alertOnce(
   code,
   botId,
   detail,
@@ -2762,54 +2932,62 @@ async function alertOnce(
     ttlSeconds = null,
     aggregateOnly = false,
   } = {},
+  {
+    takeAlertSlotImpl = takeAlertSlot,
+    notifySlackImpl = notifySlack,
+  } = {},
 ) {
+  // Phase 3 candidate failures are aggregate-only by contract. Their active
+  // retries and terminal reviews are counted by phase3ShadowReleaseStatus;
+  // the aggregate escalation path is the sole Slack owner.
+  if (aggregateOnly) return false;
   try {
-    const key = aggregateOnly
-      ? `auto:phase3-shadow:${code}`
-      : objection
+    const key = objection
       ? `auto:sharing-objection:${botId}`
       : ceiling
         ? `auto:ceiling:${code}:${botId}`
         : code === "AUTH_EXPIRED"
           ? "auto-auth-expired"
           : `auto:${code}:${botId}`;
-    const ttl = Number.isFinite(Number(ttlSeconds))
+    const ttl = (
+      ttlSeconds != null
+      && ttlSeconds !== ""
+      && Number.isFinite(Number(ttlSeconds))
+    )
       ? Math.max(60, Number(ttlSeconds))
       : code === "AUTH_EXPIRED"
         ? 12 * 3600
         : 3600;
-    if (!(await takeAlertSlot(key, ttl))) return;
-    if (aggregateOnly) {
-      await notifySlack(
-        `🚨 Para AI Phase 3 shadow requires review (${code}). Aggregate health and the durable retry policy remain authoritative.`,
-      );
-      return;
-    }
+    if (!(await takeAlertSlotImpl(key, ttl))) return false;
     if (objection) {
-      await notifySlack(
+      await notifySlackImpl(
         `⚠️ Para AI automation: job ${botId} submitted with a recorded sharing objection — review if needed.`,
       );
-      return;
+      return true;
     }
     if (code === "NO_RESUME_AFTER_RETRIES") {
-      await notifySlack(
+      await notifySlackImpl(
         `⚠️ Para AI automation: job ${botId} needs review. ${RESUME_WAIT_TERMINAL_REASON}.`,
       );
-      return;
+      return true;
     }
-    await notifySlack(
+    await notifySlackImpl(
       `🚨 Para AI automation: ${code} for job ${botId}. ${String(detail || "").slice(0, 160)} ` +
       (ceiling
         ? "The consecutive step-failure ceiling was reached; the candidate is in review."
         : "The durable retry policy remains in control."),
     );
+    return true;
   } catch { /* durable state and the worker response remain authoritative */ }
+  return false;
 }
 
 export async function runAutoTick({
   config = automationConfig(),
   workerId = `vercel-${randomUUID()}`,
   phase3CallProofImpl = getPhase3CandidateSuccessProof,
+  phase3CallProofRepairImpl =
+    repairMissingPhase3CandidateSuccessProof,
 } = {}) {
   if (
     !automationExecutionEnabled(config)
@@ -2843,6 +3021,7 @@ export async function runAutoTick({
         queueAttempts: lease.attempts,
         queueCallEndedAt: lease.callEndedAt,
         phase3CallProofImpl,
+        phase3CallProofRepairImpl,
       });
       let action = result.action;
       let durableFailure = null;
@@ -2861,31 +3040,30 @@ export async function runAutoTick({
         ) || 0;
         if (count >= maxStepAttempts || durableFailure?.state === "needs_review") {
           action = "complete";
-          await alertOnce(
-            result.failure.code,
-            lease.botId,
-            result.failure.message,
-            {
-              ceiling: true,
-              aggregateOnly: Boolean(
-                result.failure.step === "match_read"
-                && (
-                  String(result.failure.code).startsWith("PHASE3_")
-                  || result.failure.code === "MATCHES_PENDING_TIMEOUT"
-                )
-              ),
-            },
+          const aggregateOnly = Boolean(
+            result.failure.step === "match_read"
+            && (
+              String(result.failure.code).startsWith("PHASE3_")
+              || result.failure.code === "MATCHES_PENDING_TIMEOUT"
+            )
           );
+          if (!aggregateOnly) {
+            await alertOnce(
+              result.failure.code,
+              lease.botId,
+              result.failure.message,
+              { ceiling: true },
+            );
+          }
         }
       }
-      if (result.alert) {
+      if (result.alert && result.alert.aggregateOnly !== true) {
         await alertOnce(
           result.alert.code,
           lease.botId,
           result.alert.detail,
           {
             ttlSeconds: result.alert.ttlSeconds,
-            aggregateOnly: result.alert.aggregateOnly === true,
           },
         );
       }
@@ -2945,21 +3123,25 @@ export async function runAutoTick({
           generation: lease.generation,
         }).catch(() => {});
       }
-      await alertOnce(
-        failure.code,
-        lease.botId,
-        failure.message,
-        {
-          ceiling: reachedCeiling,
-          aggregateOnly: Boolean(
-            failure.step === "match_read"
-            && (
-              String(failure.code).startsWith("PHASE3_")
-              || failure.code === "MATCHES_PENDING_TIMEOUT"
-            )
-          ),
-        },
+      const aggregateOnly = Boolean(
+        failure.step === "match_read"
+        && (
+          String(failure.code).startsWith("PHASE3_")
+          || failure.code === "MATCHES_PENDING_TIMEOUT"
+        )
       );
+      // Both active retries and terminal reviews are represented by the
+      // durable Phase 3 aggregate; it is the sole notification owner.
+      if (!aggregateOnly) {
+        await alertOnce(
+          failure.code,
+          lease.botId,
+          failure.message,
+          {
+            ceiling: reachedCeiling,
+          },
+        );
+      }
       processed.push({
         botId: lease.botId,
         state,
@@ -4183,6 +4365,7 @@ function phase3ShadowReleasePublicResult(
       organicPending: 0,
       timedOut: 0,
       invalidAudits: 0,
+      activeRetryFailures: 0,
       technicalFailures: 0,
       hardTechnicalFailures: 0,
       recommended: 0,
@@ -4280,6 +4463,7 @@ function phase3ShadowReleasePublicResult(
       organicPending: 0,
       timedOut: 0,
       invalidAudits: 0,
+      activeRetryFailures: 0,
       technicalFailures: 0,
       hardTechnicalFailures: 0,
       recommended: 0,
@@ -4838,6 +5022,7 @@ export async function phase3ShadowReleaseStatus(
         organicPending: 0,
         timedOut: 0,
         invalidAudits: 0,
+        activeRetryFailures: 0,
         technicalFailures: Math.max(1, Number(record.count) || 1),
         hardTechnicalFailures: Math.max(
           1,
@@ -5077,8 +5262,20 @@ export async function phase3ShadowReleaseStatus(
   const releaseReviews = record.entries.filter(
     (entry) => entry.status === "review",
   ).length;
+  const activeRetryFailureIds = new Set(safetyJobs.filter((job) => {
+    const failure = job?.automation?.stepFailures?.match_read;
+    return Boolean(
+      job?.phase3Shadow?.policyVersion
+        === PHASE3_SHADOW_POLICY_VERSION
+      && job?.phase3Shadow?.complete !== true
+      && failure
+      && typeof failure === "object"
+      && !Array.isArray(failure)
+    );
+  }).map((job) => String(job.id)));
   const technicalFailureIds = new Set(safetyJobs.filter((job) => (
     invalidAuditIds.has(String(job.id))
+    || activeRetryFailureIds.has(String(job.id))
     || job.state === "needs_review"
     || job.phase3Shadow?.settlementDecision === "timeout"
     || Boolean(job.phase3Shadow?.technicalFailure)
@@ -5162,6 +5359,7 @@ export async function phase3ShadowReleaseStatus(
     organicPending,
     timedOut: timedOutJobs.length,
     invalidAudits: invalidAuditJobs.length,
+    activeRetryFailures: activeRetryFailureIds.size,
     technicalFailures,
     hardTechnicalFailures,
     recommended,

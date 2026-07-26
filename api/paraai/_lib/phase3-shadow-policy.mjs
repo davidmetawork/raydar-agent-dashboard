@@ -6,6 +6,10 @@
 // deterministic and independently testable.
 
 export const PHASE3_SHADOW_POLICY_VERSION = "phase3-shadow-policy-v1";
+export const PHASE3_AGGREGATE_ALERT_KEY =
+  "phase3-shadow-aggregate-health-v1";
+export const PHASE3_AGGREGATE_ALERT_TTL_SECONDS =
+  30 * 24 * 60 * 60;
 
 export const MATCH_INITIAL_POLL_MS = 5 * 60_000;
 export const MATCH_INITIAL_WINDOW_MS = 30 * 60_000;
