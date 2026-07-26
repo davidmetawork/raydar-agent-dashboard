@@ -400,56 +400,117 @@ export async function isSessionActuallyExpired({ probes = 3 } = {}) {
 }
 
 // ─── Membership reads ────────────────────────────────────────────────────────
-// getCampaignLeads paginates with a numeric OFFSET over an ordering that is not
-// injective, so a walk in page-size steps returns DUPLICATES on some pages and
-// SKIPS rows on others — while still returning `totalCount` rows, so a
-// row-count check passes. Measured 2026-07-26: a 211-lead sequence yields 211
-// rows containing 193 distinct at stride 50; a 534-lead sequence yields 491
-// distinct. Overlapping windows plus dedupe recover them (stride 25 -> 210).
+// getCampaignLeads orders on a NON-UNIQUE key with no tiebreaker. These
+// sequences are bulk-enrolled, so hundreds of rows share one `created_at` —
+// e.g. a 240-lead sequence whose rows have just three distinct timestamps
+// (blocks of 54/93/93). Postgres LIMIT/OFFSET across a tie block returns an
+// arbitrary order that changes with the (offset, limit) pair, so some rows
+// repeat across page boundaries and others NEVER surface — while the response
+// still reports the right totalCount, so a row-count check sails through.
 //
-// Completeness is judged on DISTINCT leads, never on rows.
-const LEAD_STRIDES = [25, 10, 7];
+// Crucially the order is DETERMINISTIC per (cursor, limit): the same request
+// twice is byte-identical. So retrying is useless, and so is varying only the
+// cursor stride — an earlier version of this reader did exactly that and could
+// never escape, because every call still used the server default limit of 50.
+// The lever is the PAGE SIZE. Measured on the 240-lead case:
+//   limit 50 -> 199 distinct   limit 100 -> 233   limit 89/83/71 -> 240
+// so we walk with coprime page sizes and union until the distinct count matches
+// totalCount. `limit` is server-capped at 100 (zod max) — 101 is a hard 400.
+//
+// Completeness is judged on DISTINCT ids with ZERO tolerance. A percentage
+// tolerance is actively dangerous here: 1% would silently swallow 11 missing
+// leads on the 1,124-lead sequence. 19 of 45 sequences have a tie block larger
+// than the default page size, so this is not an edge case.
+const LEAD_PAGE_SIZES = [100, 89, 83, 71];
 
-export async function completeCampaignLeads(campaignId, { strides = LEAD_STRIDES } = {}) {
+/**
+ * Authoritative membership oracle. The HEAVY `campaigns.getListOfCampaigns`
+ * embeds `campaign_to_candidate_users` in full with NO paging, so it is immune
+ * to the tie-block problem — it is the only read that can say what the true
+ * membership is. It costs ~13MB / ~7s for all campaigns, so it is fetched at
+ * most once per process and only when a paged walk actually came up short.
+ * (Note `getListOfCampaignsOptimized` carries no `leads_count` at all.)
+ */
+let _oracle = null;
+let _oracleAt = 0;
+const ORACLE_TTL_MS = 10 * 60 * 1000;
+
+export async function campaignMembershipOracle({ force = false } = {}) {
+  if (!force && _oracle && Date.now() - _oracleAt < ORACLE_TTL_MS) return _oracle;
+  const all = await withThrottleRetry(() => trpcGet("campaigns.getListOfCampaigns", {}, 1));
+  const map = new Map();
+  for (const c of all || []) {
+    map.set(c.id, (c.campaign_to_candidate_users || []).map((m) => ({
+      ccu_id: m.id,
+      cu_id: m.candidate_user_id,
+      candidate_email: m.candidate_email || null,
+    })));
+  }
+  _oracle = map;
+  _oracleAt = Date.now();
+  return map;
+}
+
+export async function completeCampaignLeads(campaignId, { pageSizes = LEAD_PAGE_SIZES, backfill = true } = {}) {
   const byCcu = new Map();
   let totalCount = null;
   let apiCalls = 0;
-  let strideUsed = null;
+  let pageSizeUsed = null;
 
-  for (const stride of strides) {
-    strideUsed = stride;
+  for (const limit of pageSizes) {
+    pageSizeUsed = limit;
     let cursor = 0;
-    let barren = 0;
-    for (let i = 0; i < 2000; i++) {
+    for (let i = 0; i < 500; i++) {
       const page = await withThrottleRetry(() =>
-        trpcGet("campaigns.getCampaignLeads", cursor ? { campaign_id: campaignId, cursor } : { campaign_id: campaignId }, 1));
+        trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor, limit }, 1));
       apiCalls++;
       const leads = page?.leads || [];
       if (totalCount === null) totalCount = Math.min(page?.totalCount ?? leads.length, 10000);
-      const before = byCcu.size;
       for (const l of leads) if (l?.ccu_id && !byCcu.has(l.ccu_id)) byCcu.set(l.ccu_id, l);
-      if (!leads.length) break;
-      barren = byCcu.size === before ? barren + 1 : 0;
-      if (byCcu.size >= totalCount) break;
-      if (cursor > totalCount + stride * 4) break; // straddling rows live near the seams
-      if (barren >= 6) break;
-      cursor += stride;
+      if (!leads.length || byCcu.size >= totalCount) break;
+      cursor += limit;
+      if (cursor >= totalCount) break;
     }
     if (totalCount !== null && byCcu.size >= totalCount) break;
   }
 
+  // Coprime page sizes recover most tie-block casualties but not always all of
+  // them. Anything still missing is resolved EXACTLY: ask the unpaginated oracle
+  // who should be here, then hydrate each missing row with a `search` read,
+  // which bypasses paging entirely. No lead is left to chance.
+  let backfilled = 0;
+  if (backfill && totalCount !== null && byCcu.size < totalCount) {
+    try {
+      const expected = (await campaignMembershipOracle()).get(campaignId) || [];
+      for (const e of expected) {
+        if (byCcu.has(e.ccu_id)) continue;
+        const row = await campaignLeadBySearch(campaignId, e.candidate_email || e.cu_id);
+        apiCalls++;
+        if (row?.ccu_id && !byCcu.has(row.ccu_id)) { byCcu.set(row.ccu_id, row); backfilled++; }
+      }
+    } catch { /* oracle unavailable -> fall through and report the shortfall */ }
+  }
+
   const leads = [...byCcu.values()];
   const shortfall = Math.max(0, (totalCount ?? leads.length) - leads.length);
-  const tolerance = Math.max(1, Math.floor((totalCount ?? 0) * 0.01));
   return {
     leads,
     totalCount: totalCount ?? leads.length,
     unique: leads.length,
     shortfall,
-    complete: shortfall <= tolerance,
-    strideUsed,
+    complete: shortfall === 0, // zero tolerance: totalCount is trustworthy
+    pageSizeUsed,
+    backfilled,
     apiCalls,
   };
+}
+
+export async function campaignLeads(campaignId, { strict = false } = {}) {
+  const read = await completeCampaignLeads(campaignId);
+  if (strict && !read.complete) {
+    throw new Error(`incomplete campaign membership read: ${read.unique}/${read.totalCount} distinct`);
+  }
+  return read.leads; // [{cu_id, ccu_id, to_use_email, is_paused, ...}]
 }
 
 /**
@@ -467,13 +528,6 @@ export async function campaignLeadBySearch(campaignId, term) {
   return (r?.leads || [])[0] || null;
 }
 
-export async function campaignLeads(campaignId, { strict = false } = {}) {
-  const read = await completeCampaignLeads(campaignId);
-  if (strict && !read.complete) {
-    throw new Error(`incomplete campaign membership read: ${read.unique}/${read.totalCount} distinct`);
-  }
-  return read.leads; // [{cu_id, ccu_id, to_use_email, is_paused, ...}]
-}
 
 // After enrolling, map candidate_user_id -> campaign_to_candidate_user_id for a campaign.
 export async function ccuIndex(campaignId, options) {

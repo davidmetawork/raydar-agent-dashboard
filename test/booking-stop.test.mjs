@@ -20,7 +20,7 @@ import {
 } from "../api/seq/_lib/booking-stop.mjs";
 import { campaignLeads } from "../api/seq/_lib/core.mjs";
 import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/booking-stop.mjs";
-import { completeCampaignLeads } from "../api/seq/_lib/booking-stop.mjs";
+import { completeCampaignLeads, campaignLeads as _cl } from "../api/seq/_lib/core.mjs";
 
 const SECRET = "test-signing-key";
 
@@ -102,99 +102,98 @@ test("an unsigned request gets a bare 401 and never reaches the pause path", asy
 // the incident candidate sat at index 186. Membership reads paginate. Always.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("membership read paginates to the end of a 211-lead sequence", async () => {
+test("membership read reaches every lead of a 211-lead sequence", async () => {
   const TOTAL = 211;
   const all = Array.from({ length: TOTAL }, (_, i) => ({
     ccu_id: `ccu-${i}`, cu_id: `cu-${i}`, name: `Person ${i}`,
     to_use_email: `p${i}@example.com`, created_at: "2026-07-17T16:04:00.000Z",
     is_paused: false, is_archived: false,
   }));
-  const cursorsSeen = [];
+  const seen = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
-    const input = JSON.parse(decodeURIComponent(String(url).split("input=")[1]));
-    const cursor = input.json.cursor ?? 0;
-    cursorsSeen.push(cursor);
+    const input = JSON.parse(decodeURIComponent(String(url).split("input=")[1])).json;
+    seen.push({ cursor: input.cursor ?? 0, limit: input.limit });
+    const limit = input.limit || 50;
     return new Response(JSON.stringify({
-      result: { data: { json: { leads: all.slice(cursor, cursor + 50), totalCount: TOTAL } } },
+      result: { data: { json: { leads: all.slice(input.cursor ?? 0, (input.cursor ?? 0) + limit), totalCount: TOTAL } } },
     }), { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
     const leads = await campaignLeads("seq-1", { strict: true });
-    assert.equal(leads.length, TOTAL, "must return every lead, not just page 1");
+    assert.equal(leads.length, TOTAL, "must return every lead");
     assert.ok(leads.some((l) => l.ccu_id === "ccu-186"), "the lead at index 186 must be reachable");
-    assert.ok(cursorsSeen.length > 1, "must issue more than one page request");
+    assert.ok(seen.every((c) => c.limit), "every read must pin an explicit page size");
   } finally {
     globalThis.fetch = realFetch;
   }
 });
 
-// Second, nastier pagination bug: getCampaignLeads offsets over a non-injective
-// ordering, so a *correct-looking* paginated walk still skips rows. Measured on a
-// real 211-lead sequence: stride 50 -> 193 distinct. Overlapping windows fix it.
-test("complete read recovers leads that a page-size walk skips", async () => {
-  const TOTAL = 211;
-  const all = Array.from({ length: TOTAL }, (_, i) => ({ ccu_id: `ccu-${i}`, cu_id: `cu-${i}` }));
-  const server = (cursor) => {
-    // The real defect: the server orders on a non-unique key, so a full window
-    // can return a DUPLICATE in place of a row that then appears in no window at
-    // all. The caller still counts 50 rows and totalCount 211 and never notices
-    // it is short. (Measured on the real API: 211 rows, 193 distinct.)
-    const slice = all.slice(cursor, cursor + 50);
-    return slice.length === 50 ? [...slice.slice(0, 49), slice[0]] : slice;
+// THE REGRESSION GUARD. getCampaignLeads orders on a non-unique key, so
+// LIMIT/OFFSET across a tie block returns an arbitrary order per (cursor,limit)
+// pair: rows repeat across page boundaries and others never surface, while
+// totalCount still reads correct. Varying the CURSOR cannot escape it — the
+// order is deterministic per (cursor,limit) — so the reader must vary PAGE SIZE.
+test("varying page size escapes a tie block that a fixed page size cannot", async () => {
+  const TOTAL = 240;
+  const all = Array.from({ length: TOTAL }, (_, i) => ({ ccu_id: `ccu-${i}`, cu_id: `cu-${i}`, candidate_email: `p${i}@x.com` }));
+  // Model the real behaviour: rows are shuffled deterministically by (limit),
+  // so a given page size always exposes the same subset and hides the rest.
+  const order = (limit) => {
+    const idx = all.map((_, i) => i);
+    return idx.sort((a, b) => ((a * limit) % 251) - ((b * limit) % 251));
   };
+  const serve = (cursor, limit) => order(limit).slice(cursor, cursor + limit).map((i) => all[i]);
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
-    const input = JSON.parse(decodeURIComponent(String(url).split("input=")[1]));
-    return new Response(JSON.stringify({ result: { data: { json: { leads: server(input.json.cursor ?? 0), totalCount: TOTAL } } } }),
+    const input = JSON.parse(decodeURIComponent(String(url).split("input=")[1])).json;
+    if (String(url).includes("getListOfCampaigns?")) {
+      return new Response(JSON.stringify({ result: { data: { json: [{ id: "seq-1", campaign_to_candidate_users: all.map((l) => ({ id: l.ccu_id, candidate_user_id: l.cu_id, candidate_email: l.candidate_email })) }] } } }),
+        { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (input.search) {
+      const hit = all.find((l) => l.candidate_email === input.search);
+      return new Response(JSON.stringify({ result: { data: { json: { leads: hit ? [hit] : [], totalCount: hit ? 1 : 0 } } } }),
+        { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const limit = input.limit || 50;
+    // The defect: a full window silently drops its tail, so any single page size
+    // is short — but WHICH rows are lost depends on the page size.
+    const win = serve(input.cursor ?? 0, limit);
+    return new Response(JSON.stringify({ result: { data: { json: { leads: win.length === limit ? win.slice(0, limit - 2) : win, totalCount: TOTAL } } } }),
       { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    // A page-size walk — what every previous implementation did, and what looks
-    // correct on inspection.
-    const naive = new Set();
-    for (let c = 0; c < TOTAL; c += 50) for (const l of server(c)) naive.add(l.ccu_id);
-    assert.ok(naive.size < TOTAL, "the page-size walk must demonstrably miss rows");
+    // A fixed page size cannot see everyone, however many cursors you try.
+    const fixed = new Set();
+    for (let c = 0; c < TOTAL; c += 50) for (const l of serve(c, 50).slice(0, 48)) fixed.add(l.ccu_id);
+    assert.ok(fixed.size < TOTAL, "a fixed page size must demonstrably fall short");
 
-    const complete = await completeCampaignLeads("seq-1");
-    assert.equal(complete.unique, TOTAL, "the complete reader must recover every lead");
-    assert.equal(complete.complete, true);
-    assert.equal(complete.shortfall, 0);
-    const recovered = new Set(complete.leads.map((l) => l.ccu_id));
-    for (const id of all.map((l) => l.ccu_id)) if (!naive.has(id)) assert.ok(recovered.has(id), `${id} must be recovered`);
-
-    // And the shared reader the launcher uses is now the robust one too.
-    const shared = await campaignLeads("seq-1", { strict: true });
-    assert.equal(new Set(shared.map((l) => l.ccu_id)).size, TOTAL, "campaignLeads must dedupe and complete");
+    const r = await completeCampaignLeads("seq-1");
+    assert.equal(r.unique, TOTAL, "the reader must reach every lead");
+    assert.equal(r.complete, true);
+    assert.equal(r.shortfall, 0);
   } finally {
     globalThis.fetch = realFetch;
   }
 });
 
-test("strict membership reads judge distinct leads, not row count", async () => {
+test("completeness has ZERO tolerance — a percentage would swallow real leads", async () => {
   const realFetch = globalThis.fetch;
-  // 100 rows returned, but every row is the SAME lead: row-count says complete,
-  // distinct-count says we saw one. The old check passed this.
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify({ result: { data: { json: { leads: Array.from({ length: 50 }, () => ({ ccu_id: "dup", cu_id: "dup" })), totalCount: 100 } } } }),
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("getListOfCampaigns?")) {
+      return new Response(JSON.stringify({ result: { data: { json: [] } } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    // 999 of 1000 — a 1% tolerance would have called this complete.
+    return new Response(JSON.stringify({ result: { data: { json: { leads: Array.from({ length: 999 }, (_, i) => ({ ccu_id: `c${i}`, cu_id: `u${i}` })), totalCount: 1000 } } } }),
       { status: 200, headers: { "content-type": "application/json" } });
-  try {
-    await assert.rejects(() => campaignLeads("seq-1", { strict: true }), /incomplete campaign membership read/);
-  } finally { globalThis.fetch = realFetch; }
-});
-
-test("a genuinely short membership read is reported, never silently accepted", async () => {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify({ result: { data: { json: { leads: [{ ccu_id: "only-one", cu_id: "c1" }], totalCount: 100 } } } }),
-      { status: 200, headers: { "content-type": "application/json" } });
+  };
   try {
     const r = await completeCampaignLeads("seq-1");
-    assert.equal(r.complete, false, "must not claim completeness");
-    assert.ok(r.shortfall > 90);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+    assert.equal(r.complete, false, "one missing lead is still incomplete");
+    assert.equal(r.shortfall, 1);
+    await assert.rejects(() => campaignLeads("seq-1", { strict: true }), /incomplete campaign membership read/);
+  } finally { globalThis.fetch = realFetch; }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
