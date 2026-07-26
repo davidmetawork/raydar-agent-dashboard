@@ -302,7 +302,16 @@ export async function calendlyBookingIndex({
 // being refused, and giving up costs a missed pause.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 
-export async function cachedRelationshipStatus(cuId, { ttlSeconds = 6 * 3600, force = false, onThrottle = null } = {}) {
+// TTL is deliberately SHORT. The rotor already bounds load to a few hundred
+// reads per pass, so the cache is no longer needed for that — and a long TTL
+// actively hides the thing we are looking for: a candidate who books via the
+// Paraform scheduler emits no webhook, so the sweep is the only detector, and a
+// 6h cache meant their booking could sit unnoticed for 6h behind a stale
+// "CONTACTED". Observed live: two candidates booked at 09:34 and 09:49 were
+// still unpaused at 13:30 for exactly this reason.
+const PROFILE_TTL_SECONDS = Number(process.env.BOOKING_STOP_PROFILE_TTL_S || 1800);
+
+export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null } = {}) {
   if (!force) {
     const cached = await kvGet(K.profile(cuId));
     if (cached) return cached;
