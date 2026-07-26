@@ -3,23 +3,28 @@
 // For each due project: members -> booked/in-sequence checks (run NOW, at release —
 // the whole point of the delay) -> ensure role sequence (TPL) or target (SEQ) ->
 // enroll the clean ones -> backfill lead emails -> delete the delay project.
-import { cors, requireAuth, hasCookie, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, cronAuth, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
 // Calendly-aware booked check — see enroll.mjs.
 import { bookedSetWithCalendly as bookedSet } from "./_lib/booking-stop.mjs";
 import { protectedRecruiterForRoleTitle } from "./_lib/protected.mjs";
+import { shouldAlert } from "./_lib/booking-stop.mjs";
+import { notifySlack } from "../paraai/_lib/core.mjs";
 
 export const config = { maxDuration: 300 };
 
-function isCron(req) {
-  if (req.headers["x-vercel-cron"]) return true; // set by Vercel's cron invoker
-  const secret = process.env.CRON_SECRET;
-  if (secret && (req.headers["authorization"] || "") === `Bearer ${secret}`) return true;
-  return false;
-}
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
-  if (!isCron(req) && !(await requireAuth(req, res))) return;
+  // release ENROLS candidates into sequences, so an unauthenticated trigger is a
+  // bigger blast radius than pausing. Bearer only; the x-vercel-cron header is
+  // not a credential (Vercel does not strip it from inbound traffic).
+  const cron = cronAuth(req);
+  if (!cron.ok && !(await requireAuth(req, res))) {
+    if (cron.headerPresent && (await shouldAlert(`cron-auth-${cron.reason}`, 3600))) {
+      await notifySlack(`:warning: A request to /api/seq/release carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}).`).catch(() => {});
+    }
+    return;
+  }
   if (!hasCookie()) return res.status(200).json({ ok: false, error: "no_cookie" });
   try {
     const url = new URL(req.url, "http://x");

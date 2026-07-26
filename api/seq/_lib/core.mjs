@@ -5,6 +5,7 @@
 // project_sequences_launcher). NOTHING here touches the frozen screener contract.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { timingSafeEqual } from "node:crypto";
 import { sessionConfig, sessionFromRequest, verifyGoogleCredential } from "../../auth/_lib/session.mjs";
 
 export const BASE = "https://www.paraform.com/api";
@@ -28,6 +29,32 @@ const ALLOW_ORIGINS = [
   "https://raydar-agent-dashboard.vercel.app",
   "http://localhost:3000",
 ];
+
+/**
+ * Cron authentication. Vercel attaches `Authorization: Bearer $CRON_SECRET` to
+ * scheduled invocations whenever CRON_SECRET exists on the project — verified in
+ * this org: webview's /api/monitor and lifecycle's /api/cron are both
+ * Bearer-ONLY and both demonstrably run on schedule.
+ *
+ * The `x-vercel-cron` header is NOT a credential. Vercel does not strip it from
+ * inbound traffic (proven with curl), so accepting it let anyone trigger
+ * endpoints that pause leads, disable sequences and enrol candidates.
+ *
+ * Fails CLOSED — and LOUDLY. If something arrives carrying the cron header but
+ * no valid bearer, that is either an intruder or our own assumption being wrong,
+ * and both need to be seen within the hour rather than discovered as a silently
+ * dead cron nine days later.
+ */
+export function cronAuth(req) {
+  const secret = process.env.CRON_SECRET || "";
+  const provided = req.headers?.["authorization"] || "";
+  const headerPresent = Boolean(req.headers?.["x-vercel-cron"]);
+  if (!secret) return { ok: false, reason: "no_cron_secret", headerPresent };
+  const a = Buffer.from(provided);
+  const b = Buffer.from(`Bearer ${secret}`);
+  const ok = a.length === b.length && timingSafeEqual(a, b);
+  return { ok, reason: ok ? "bearer" : headerPresent ? "header_without_bearer" : "unauthenticated", headerPresent };
+}
 
 export function cors(req, res) {
   const o = req.headers.origin;
