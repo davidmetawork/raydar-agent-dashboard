@@ -821,7 +821,7 @@ async function runtimeFiles(
   return files;
 }
 
-test("the client remains a hard-dark leaf with no production importer or release integration", async () => {
+test("the client remains inside the exact hard-dark observation closure with no release integration", async () => {
   const moduleUrl = new URL(
     "../api/paraai/_lib/source-recall-point-client.mjs",
     import.meta.url,
@@ -861,5 +861,15 @@ test("the client remains a hard-dark leaf with no production importer or release
       importers.push(file.pathname);
     }
   }
-  assert.deepEqual(importers, []);
+  assert.deepEqual(
+    importers.map(
+      (pathname) => pathname.slice(
+        pathname.lastIndexOf("/") + 1,
+      ),
+    ).sort(),
+    [
+      "source-recall-point-observation-store.mjs",
+      "source-recall-two-read-collector.mjs",
+    ],
+  );
 });

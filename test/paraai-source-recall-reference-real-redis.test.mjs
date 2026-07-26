@@ -22,6 +22,9 @@ import {
   createSourceRecallReferencePersistenceProtocol,
 } from "../api/paraai/_lib/source-recall-reference-persistence-protocol.mjs";
 import {
+  createSourceRecallPointObservationPersistenceAdapter,
+} from "../api/paraai/_lib/source-recall-point-observation-store.mjs";
+import {
   collectRecallReferenceHeadStep,
 } from "../api/paraai/_lib/source-recall-reference-collector.mjs";
 import {
@@ -277,6 +280,120 @@ realRedisTest(
         url: "https://redis-harness.invalid",
       });
     }
+
+    function observationAdapter() {
+      return createSourceRecallPointObservationPersistenceAdapter({
+        fetchImpl: async (_url, options) => {
+          const command = JSON.parse(options.body);
+          const result = await redisCommand(command, {
+            signal: options.signal,
+          });
+          return redisJsonResponse(result);
+        },
+        token: "synthetic-test-token-with-no-authority",
+        url: "https://redis-harness.invalid",
+      });
+    }
+
+    await t.test(
+      "point observations preserve exact absolute expiry and CAS fences",
+      async () => {
+        const pointPersistence = observationAdapter();
+        const firstTime = await pointPersistence.time();
+        const pointKey = (
+          "paraai:phase4:recall-point-observation:v1:work:"
+          + "d".repeat(64)
+        );
+        const pointExpiry =
+          firstTime.redisNowMs + 5 * 60 * 1_000;
+        const initialRaw = "{\"revision\":0}";
+        const nextRaw = "{\"revision\":1}";
+
+        const created = await pointPersistence.ensure({
+          key: pointKey,
+          proposedRaw: initialRaw,
+          expiresAtMs: pointExpiry,
+        });
+        assert.equal(created.status, "created");
+        assert.equal(created.raw, initialRaw);
+        assert.equal(created.expiresAtMs, pointExpiry);
+        assert.equal(await redisCommand([
+          "PEXPIRETIME",
+          pointKey,
+        ]), pointExpiry);
+
+        const replay = await pointPersistence.ensure({
+          key: pointKey,
+          proposedRaw: "{\"revision\":999}",
+          expiresAtMs: pointExpiry,
+        });
+        assert.equal(replay.status, "existing");
+        assert.equal(replay.raw, initialRaw);
+        assert.equal(replay.expiresAtMs, pointExpiry);
+
+        const read = await pointPersistence.read({
+          key: pointKey,
+        });
+        assert.equal(read.raw, initialRaw);
+        assert.equal(read.expiresAtMs, pointExpiry);
+
+        const wrongRaw =
+          await pointPersistence.compareAndSet({
+            key: pointKey,
+            expectedRaw: "{\"revision\":404}",
+            nextRaw,
+            expiresAtMs: pointExpiry,
+            notAfterMs: pointExpiry,
+          });
+        assert.equal(wrongRaw.status, "conflict");
+        assert.equal(wrongRaw.raw, initialRaw);
+        assert.equal(wrongRaw.expiresAtMs, pointExpiry);
+
+        const wrongExpiry =
+          await pointPersistence.compareAndSet({
+            key: pointKey,
+            expectedRaw: initialRaw,
+            nextRaw,
+            expiresAtMs: pointExpiry + 1,
+            notAfterMs: pointExpiry,
+          });
+        assert.equal(wrongExpiry.status, "expired");
+        assert.equal(wrongExpiry.raw, initialRaw);
+        assert.equal(wrongExpiry.expiresAtMs, pointExpiry);
+
+        const missedDeadline =
+          await pointPersistence.compareAndSet({
+            key: pointKey,
+            expectedRaw: initialRaw,
+            nextRaw,
+            expiresAtMs: pointExpiry,
+            notAfterMs: firstTime.redisNowMs,
+          });
+        assert.equal(missedDeadline.status, "expired");
+        assert.equal(missedDeadline.raw, initialRaw);
+        assert.equal(missedDeadline.expiresAtMs, pointExpiry);
+
+        const stored =
+          await pointPersistence.compareAndSet({
+            key: pointKey,
+            expectedRaw: initialRaw,
+            nextRaw,
+            expiresAtMs: pointExpiry,
+            notAfterMs: pointExpiry,
+          });
+        assert.equal(stored.status, "stored");
+        assert.equal(stored.raw, nextRaw);
+        assert.equal(stored.expiresAtMs, pointExpiry);
+        assert.equal(await redisCommand([
+          "GET",
+          pointKey,
+        ]), nextRaw);
+        assert.equal(await redisCommand([
+          "PEXPIRETIME",
+          pointKey,
+        ]), pointExpiry);
+      },
+    );
 
     const firstProtocol =
       createSourceRecallReferencePersistenceProtocol({
