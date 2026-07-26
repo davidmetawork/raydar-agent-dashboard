@@ -83,12 +83,27 @@ export default async function handler(req, res) {
   }
 
   try {
-    const [wfRes, exRes] = await Promise.all([
-      n8n("/api/v1/workflows?limit=250"),
-      n8n("/api/v1/executions?limit=250"),
-    ]);
+    const wfRes = await n8n("/api/v1/workflows?limit=250");
+    const workflows = (wfRes?.data || []).filter((w) => w.active);
     const names = new Map((wfRes?.data || []).map((w) => [w.id, { name: w.name, active: w.active }]));
-    const streaks = failureStreaks(exRes?.data || []).filter((s) => names.get(s.workflowId)?.active !== false);
+
+    // PER WORKFLOW, not one global list. A global `?limit=250` covers only the
+    // last few hours once a 5-minute workflow is in the mix, so a ONCE-DAILY
+    // job — exactly the one that died for nine days — never appears in it. The
+    // first version of this watchdog made that mistake and reported all-clear
+    // against a workflow that had failed nine times running.
+    const executions = [];
+    let scanned = 0;
+    let w = 0;
+    const worker = async () => {
+      while (w < workflows.length) {
+        const wf = workflows[w++];
+        const res = await n8n(`/api/v1/executions?workflowId=${encodeURIComponent(wf.id)}&limit=20`).catch(() => null);
+        for (const e of res?.data || []) { executions.push({ ...e, workflowId: wf.id }); scanned++; }
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, worker));
+    const streaks = failureStreaks(executions);
 
     const prev = (await kvGet(STATE_KEY)) || { alerted: {} };
     const alerted = { ...(prev.alerted || {}) };
@@ -121,7 +136,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       workflowsScanned: names.size,
-      executionsScanned: (exRes?.data || []).length,
+      executionsScanned: scanned,
+      workflowsWithHistory: new Set(executions.map((e) => e.workflowId)).size,
       failing: streaks.map((s) => ({ name: names.get(s.workflowId)?.name || s.workflowId, streak: s.streak })),
       alertedNow: fresh.length,
       checkedAt: new Date().toISOString(),
