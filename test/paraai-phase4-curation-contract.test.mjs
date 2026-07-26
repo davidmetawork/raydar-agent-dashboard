@@ -66,6 +66,7 @@ const POST_READ_AT = "2026-07-26T00:05:00.000Z";
 const COUNT_AT = "2026-07-26T00:06:00.000Z";
 const CAPTURED_AT = "2026-07-26T00:00:00.000Z";
 const CAPTURE_OBSERVED_THROUGH_AT = "2026-07-28T00:00:00.000Z";
+let authorizedContractCopyNumber = 0;
 
 const CONTEXT = Object.freeze({
   scopeDigest: SCOPE_DIGEST,
@@ -488,6 +489,67 @@ export function __mintTestStoreAuthority({
     captureEvidenceVerification,
   }));
   return authority;
+}
+
+export function __mintTestExecutionAuthorization({
+  plan,
+  notificationProof,
+  executionAt,
+  expiresAt,
+} = {}) {
+  const planData = writePlanRegistry.get(plan);
+  const notificationData = notificationProofRegistry.get(
+    notificationProof,
+  );
+  if (!planData || !notificationData) {
+    throw new TypeError("registered plan and notification proof required");
+  }
+  const globalWriteAuthority = __mintTestStoreAuthority({
+    plan,
+    serverTrustedNow: executionAt,
+    expiresAt,
+  });
+  const authorityData = globalWriteAuthorityRegistry.get(
+    globalWriteAuthority,
+  );
+  const captureVerification =
+    authorityData.captureEvidenceVerification;
+  const captureVerificationData =
+    captureEvidenceVerificationRegistry.get(captureVerification);
+  const fields = {
+    allowed: true,
+    plan,
+    ...proofScopeFields(planData),
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    planSemanticDigest: planData.planSemanticDigest,
+    lineageDigest: planData.lineageDigest,
+    attemptNumber: planData.attemptNumber,
+    maxAttempts: planData.maxAttempts,
+    captureSemanticDigest:
+      captureVerificationData.captureSemanticDigest,
+    captureImplementationDigest:
+      captureVerificationData.implementationDigest,
+    captureAttestationVersion:
+      PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
+    decisionAt: executionAt,
+    notificationObservedAt: notificationData.observedAt,
+    notificationResponseDigest: notificationData.responseDigest,
+    expiresAt,
+  };
+  return registerArtifact(
+    writeAuthorizationRegistry,
+    { ...fields },
+    {
+      ...fields,
+      planData,
+      notificationProof,
+      notificationData,
+      globalWriteAuthority,
+      authorityData,
+      captureVerification,
+      captureVerificationData,
+    },
+  );
 }`,
   );
   assert.notEqual(
@@ -495,9 +557,11 @@ export function __mintTestStoreAuthority({
     false,
     "test authority injection must be present only in the isolated copy",
   );
-  return import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-  );
+  authorizedContractCopyNumber += 1;
+  return import([
+    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`,
+    `#authorized-contract-copy-${authorizedContractCopyNumber}`,
+  ].join(""));
 }
 
 test("completed capture validation binds evidence, implementation, and time", () => {
@@ -910,6 +974,273 @@ test("unpinned capture and absent authority independently deny writes", () => {
   }), /NOT_AUTHORIZED/u);
 });
 
+test("authority and execution never extend private evidence freshness", async () => {
+  const contract = await loadAuthorizedContractTestCopy();
+  const makePlan = ({
+    candidateId,
+    candidateUserId,
+    matchAt = "2026-07-26T00:00:00.000Z",
+    identityAt = "2026-07-26T00:00:30.000Z",
+    readAt = "2026-07-26T00:01:00.000Z",
+    planAt = "2026-07-26T00:14:00.000Z",
+  }) => {
+    const exactMatchObservation = rankedObservation({
+      candidateId,
+      observedAt: matchAt,
+    });
+    const matchProof = contract.normalizePhase4RankedMatchObservation(
+      exactMatchObservation,
+      {
+        candidateId,
+        recruiterUserId: RECRUITER_USER_ID,
+        ...CONTEXT,
+        trustedNow: planAt,
+      },
+    );
+    const exactIdentityObservation = identityObservation({
+      candidateId,
+      candidateUserId,
+      observedAt: identityAt,
+    });
+    const exactIdentityProof =
+      contract.normalizePhase4CandidateIdentityObservation(
+        exactIdentityObservation,
+        {
+          candidateId,
+          candidateUserId,
+          ...CONTEXT,
+          trustedNow: planAt,
+        },
+      );
+    const exactReadbackObservation = readbackObservation({
+      candidateId,
+      candidateUserId,
+      exists: false,
+      observedAt: readAt,
+    });
+    const preReadback = contract.normalizePhase4CuratedListReadback(
+      exactReadbackObservation,
+      {
+        candidateId,
+        candidateUserId,
+        ...CONTEXT,
+        trustedNow: planAt,
+      },
+    );
+    return contract.planPhase4CuratedListWrite({
+      ...CONTEXT,
+      trustedNow: planAt,
+      candidateId,
+      candidateUserId,
+      matchProof,
+      preReadback,
+      identityProof: exactIdentityProof,
+    });
+  };
+  const makeNotificationProof = ({
+    candidateUserId,
+    observedAt,
+    trustedNow,
+  }) => {
+    const exactObservation = notificationObservation({
+      candidateUserId,
+      observedAt,
+    });
+    return contract.normalizePhase4NotificationSafetyProof(
+      exactObservation,
+      {
+        candidateUserId,
+        decisionAt: trustedNow,
+        ...CONTEXT,
+        trustedNow,
+      },
+    );
+  };
+  const decide = ({
+    plan,
+    candidateUserId,
+    decisionAt,
+    notificationAt,
+    expiresAt,
+  }) => {
+    const authority = contract.__mintTestStoreAuthority({
+      plan,
+      serverTrustedNow: decisionAt,
+      expiresAt,
+    });
+    return contract.phase4CuratedListWriteAuthorization({
+      plan,
+      notificationProof: makeNotificationProof({
+        candidateUserId,
+        observedAt: notificationAt,
+        trustedNow: decisionAt,
+      }),
+      trustedNow: decisionAt,
+      globalWriteAuthority: authority,
+    });
+  };
+
+  const staleCandidateId = "candidate-evidence-stale";
+  const staleCandidateUserId = "candidate-user-evidence-stale";
+  const stalePlan = makePlan({
+    candidateId: staleCandidateId,
+    candidateUserId: staleCandidateUserId,
+  });
+  const staleDecision = decide({
+    plan: stalePlan,
+    candidateUserId: staleCandidateUserId,
+    decisionAt: "2026-07-26T00:28:59.000Z",
+    notificationAt: "2026-07-26T00:28:30.000Z",
+    expiresAt: "2026-07-26T00:29:59.000Z",
+  });
+  assert.equal(staleDecision.allowed, false);
+  assert.equal(
+    staleDecision.reasons.includes("write_plan_stale"),
+    false,
+  );
+  for (const reason of [
+    "match_proof_stale",
+    "readback_proof_stale",
+    "identity_proof_stale",
+  ]) {
+    assert.equal(staleDecision.reasons.includes(reason), true);
+  }
+
+  const boundaryCandidateId = "candidate-evidence-boundary";
+  const boundaryCandidateUserId = "candidate-user-evidence-boundary";
+  const boundaryPlan = makePlan({
+    candidateId: boundaryCandidateId,
+    candidateUserId: boundaryCandidateUserId,
+  });
+  const boundaryDecision = decide({
+    plan: boundaryPlan,
+    candidateUserId: boundaryCandidateUserId,
+    decisionAt: "2026-07-26T00:15:00.000Z",
+    notificationAt: "2026-07-26T00:14:30.000Z",
+    expiresAt: "2026-07-26T00:20:00.000Z",
+  });
+  assert.equal(boundaryDecision.allowed, true);
+  assert.equal(
+    boundaryDecision.authorization.expiresAt,
+    "2026-07-26T00:15:00.000Z",
+  );
+  assert.doesNotThrow(() => (
+    contract.buildAuthorizedPhase4CuratedListAddRequest({
+      plan: boundaryPlan,
+      authorization: boundaryDecision.authorization,
+      executionAt: "2026-07-26T00:15:00.000Z",
+      ...CONTEXT,
+      trustedNow: "2026-07-26T00:15:00.000Z",
+    })
+  ));
+
+  const afterBoundaryCandidateId = "candidate-evidence-over-boundary";
+  const afterBoundaryCandidateUserId =
+    "candidate-user-evidence-over-boundary";
+  const afterBoundaryDecision = decide({
+    plan: makePlan({
+      candidateId: afterBoundaryCandidateId,
+      candidateUserId: afterBoundaryCandidateUserId,
+    }),
+    candidateUserId: afterBoundaryCandidateUserId,
+    decisionAt: "2026-07-26T00:15:00.001Z",
+    notificationAt: "2026-07-26T00:14:30.000Z",
+    expiresAt: "2026-07-26T00:20:00.000Z",
+  });
+  assert.equal(afterBoundaryDecision.allowed, false);
+  assert.equal(
+    afterBoundaryDecision.reasons.includes("match_proof_stale"),
+    true,
+  );
+
+  const futureCandidateId = "candidate-evidence-future";
+  const futureCandidateUserId = "candidate-user-evidence-future";
+  const futureDecision = decide({
+    plan: makePlan({
+      candidateId: futureCandidateId,
+      candidateUserId: futureCandidateUserId,
+      planAt: "2026-07-26T00:02:00.000Z",
+    }),
+    candidateUserId: futureCandidateUserId,
+    decisionAt: "2026-07-25T23:59:59.000Z",
+    notificationAt: "2026-07-25T23:59:59.000Z",
+    expiresAt: "2026-07-26T00:05:00.000Z",
+  });
+  assert.equal(futureDecision.allowed, false);
+  for (const reason of [
+    "write_plan_stale",
+    "match_proof_stale",
+    "readback_proof_stale",
+    "identity_proof_stale",
+  ]) {
+    assert.equal(futureDecision.reasons.includes(reason), true);
+  }
+
+  const executionCandidateId = "candidate-execution-evidence-stale";
+  const executionCandidateUserId =
+    "candidate-user-execution-evidence-stale";
+  const executionPlan = makePlan({
+    candidateId: executionCandidateId,
+    candidateUserId: executionCandidateUserId,
+  });
+  const executionNotification = makeNotificationProof({
+    candidateUserId: executionCandidateUserId,
+    observedAt: "2026-07-26T00:28:30.000Z",
+    trustedNow: "2026-07-26T00:28:59.000Z",
+  });
+  const staleExecutionAuthorization =
+    contract.__mintTestExecutionAuthorization({
+      plan: executionPlan,
+      notificationProof: executionNotification,
+      executionAt: "2026-07-26T00:28:59.000Z",
+      expiresAt: "2026-07-26T00:29:59.000Z",
+    });
+  assert.throws(() => (
+    contract.buildAuthorizedPhase4CuratedListAddRequest({
+      plan: executionPlan,
+      authorization: staleExecutionAuthorization,
+      executionAt: "2026-07-26T00:28:59.000Z",
+      ...CONTEXT,
+      trustedNow: "2026-07-26T00:28:59.000Z",
+    })
+  ), /NOT_AUTHORIZED/u);
+
+  for (const [suffix, notificationAt] of [
+    ["stale", "2026-07-26T00:00:00.000Z"],
+    ["future", "2026-07-26T00:07:00.000Z"],
+  ]) {
+    const candidateId = `candidate-execution-notification-${suffix}`;
+    const candidateUserId =
+      `candidate-user-execution-notification-${suffix}`;
+    const plan = makePlan({
+      candidateId,
+      candidateUserId,
+      planAt: "2026-07-26T00:02:00.000Z",
+    });
+    const exactNotificationProof = makeNotificationProof({
+      candidateUserId,
+      observedAt: notificationAt,
+      trustedNow: notificationAt,
+    });
+    const authorization =
+      contract.__mintTestExecutionAuthorization({
+        plan,
+        notificationProof: exactNotificationProof,
+        executionAt: "2026-07-26T00:06:00.000Z",
+        expiresAt: "2026-07-26T00:08:00.000Z",
+      });
+    assert.throws(() => (
+      contract.buildAuthorizedPhase4CuratedListAddRequest({
+        plan,
+        authorization,
+        executionAt: "2026-07-26T00:06:00.000Z",
+        ...CONTEXT,
+        trustedNow: "2026-07-26T00:06:00.000Z",
+      })
+    ), /NOT_AUTHORIZED/u);
+  }
+});
+
 test("Proxy brands, wrapped proofs, clones, and null pins stay untrusted", () => {
   const plan = curationPlan();
   const matchProof = rankedProof();
@@ -1280,13 +1611,22 @@ test("reconciliation rejects naked outcome strings and executable retry input", 
 
 test("retry lineage advances exactly once and cannot reset attempts", async () => {
   const contract = await loadAuthorizedContractTestCopy();
-  const normalizeMatch = (trustedNow) => {
-    const exactObservation = rankedObservation();
+  const normalizeMatch = (
+    trustedNow,
+    {
+      recruiterUserId = RECRUITER_USER_ID,
+      roles,
+    } = {},
+  ) => {
+    const exactObservation = rankedObservation({
+      recruiterUserId,
+      ...(roles === undefined ? {} : { roles }),
+    });
     return contract.normalizePhase4RankedMatchObservation(
       exactObservation,
       {
         candidateId: CANDIDATE_ID,
-        recruiterUserId: RECRUITER_USER_ID,
+        recruiterUserId,
         ...CONTEXT,
         trustedNow,
       },
@@ -1472,6 +1812,74 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     firstReconciliation.replanRequirement.nextAttemptNumber,
     2,
   );
+  assert.equal(
+    firstReconciliation.replanRequirement.matchResponseDigest,
+    matchProof.responseDigest,
+  );
+  assert.equal(
+    firstReconciliation.replanRequirement.matchRecruiterUserId,
+    RECRUITER_USER_ID,
+  );
+  assert.deepEqual(
+    firstReconciliation.replanRequirement.recommendedRoleIds,
+    ["role-recommended"],
+  );
+  assert.deepEqual(
+    firstReconciliation.replanRequirement.possibleRoleIds,
+    ["role-possible"],
+  );
+  const equivalentReplacementMatch = normalizeMatch(COUNT_AT);
+  const changedReplacementMatch = normalizeMatch(COUNT_AT, {
+    recruiterUserId: "recruiter-contract-b",
+    roles: [
+      {
+        roleId: "role-recommended",
+        endorsed: false,
+        suggested: true,
+      },
+      {
+        roleId: "role-possible",
+        endorsed: false,
+        suggested: true,
+      },
+    ],
+  });
+  assert.deepEqual(
+    changedReplacementMatch.targetRoleIds,
+    matchProof.targetRoleIds,
+  );
+  assert.deepEqual(
+    changedReplacementMatch.targetRoleIds.filter(
+      (roleId) => !firstPartialReadback.roleIds.includes(roleId),
+    ),
+    ["role-possible"],
+  );
+  assert.notEqual(
+    changedReplacementMatch.responseDigest,
+    matchProof.responseDigest,
+  );
+  assert.notEqual(
+    changedReplacementMatch.recruiterUserId,
+    matchProof.recruiterUserId,
+  );
+  assert.notDeepEqual(
+    changedReplacementMatch.recommendedRoleIds,
+    matchProof.recommendedRoleIds,
+  );
+  for (const replacementMatchProof of [
+    equivalentReplacementMatch,
+    changedReplacementMatch,
+  ]) {
+    assert.throws(() => contract.planPhase4CuratedListWrite({
+      ...CONTEXT,
+      trustedNow: COUNT_AT,
+      candidateId: CANDIDATE_ID,
+      candidateUserId: CANDIDATE_USER_ID,
+      matchProof: replacementMatchProof,
+      preReadback: firstPartialReadback,
+      replanRequirement: firstReconciliation.replanRequirement,
+    }), /replanRequirement is invalid/u);
+  }
   for (const omittedMatchProof of [
     matchProof,
     normalizeMatch(COUNT_AT),

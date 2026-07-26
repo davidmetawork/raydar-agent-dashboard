@@ -1804,6 +1804,20 @@ function writeLineageDigest(context, candidateId) {
   });
 }
 
+function matchProofSemanticDigest(matchData) {
+  return canonicalDigest({
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    ...proofScopeFields(matchData),
+    candidateId: matchData?.candidateId || null,
+    recruiterUserId: matchData?.recruiterUserId || null,
+    observedAt: matchData?.observedAt || null,
+    responseDigest: matchData?.responseDigest || null,
+    recommendedRoleIds: matchData?.recommendedRoleIds || null,
+    possibleRoleIds: matchData?.possibleRoleIds || null,
+    targetRoleIds: matchData?.targetRoleIds || null,
+  });
+}
+
 export function planPhase4CuratedListWrite(rawArguments = {}) {
   const args = shallowArgumentSnapshot(
     rawArguments,
@@ -1950,10 +1964,18 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
       || identityData.candidateId !== exactCandidateId
       || identityData.candidateUserId !== exactCandidateUserId
       || !sameScope(identityData, context)
+      || Date.parse(identityData.observedAt)
+        > Date.parse(readbackData.observedAt)
+      || !observationFreshAt(
+        identityData.observedAt,
+        context.trustedNow,
+        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+      )
     )
   ) {
     throw new TypeError("identityProof is invalid");
   }
+  const matchSemanticDigest = matchProofSemanticDigest(matchData);
   const lineageDigest = writeLineageDigest(
     context,
     exactCandidateId,
@@ -1972,11 +1994,32 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
       || lineageState.phase !== "replan_required"
       || lineageState.replanRequirement !== replanRequirement
       || lineageState.replanData !== replanData
+      || lineageState.matchProof !== replanData.matchProof
+      || lineageState.matchData !== replanData.matchData
+      || lineageState.matchSemanticDigest
+        !== replanData.matchSemanticDigest
       || consumedReplanRequirements.has(replanRequirement)
       || !sameScope(replanData, context)
       || replanData.lineageDigest !== lineageDigest
       || replanData.candidateId !== exactCandidateId
       || replanData.candidateUserId !== exactCandidateUserId
+      || replanData.matchProof !== matchProof
+      || replanData.matchData !== matchData
+      || registeredData(
+        matchProofRegistry,
+        replanData.matchProof,
+      ) !== replanData.matchData
+      || replanData.matchSemanticDigest !== matchSemanticDigest
+      || replanData.matchResponseDigest !== matchData.responseDigest
+      || replanData.matchRecruiterUserId !== matchData.recruiterUserId
+      || !sameStringArray(
+        replanData.recommendedRoleIds,
+        matchData.recommendedRoleIds,
+      )
+      || !sameStringArray(
+        replanData.possibleRoleIds,
+        matchData.possibleRoleIds,
+      )
       || replanData.postReadback !== preReadback
       || replanData.postReadbackData !== readbackData
       || replanData.postReadbackDigest
@@ -2021,6 +2064,11 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
         lineageDigest: replanData.lineageDigest,
         candidateId: replanData.candidateId,
         candidateUserId: replanData.candidateUserId,
+        matchSemanticDigest: replanData.matchSemanticDigest,
+        matchResponseDigest: replanData.matchResponseDigest,
+        matchRecruiterUserId: replanData.matchRecruiterUserId,
+        recommendedRoleIds: replanData.recommendedRoleIds,
+        possibleRoleIds: replanData.possibleRoleIds,
         priorPlanSemanticDigest:
           replanData.priorPlanSemanticDigest,
         mutationRequestDigest:
@@ -2083,6 +2131,7 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
     candidateId: exactCandidateId,
     candidateUserId: exactCandidateUserId,
     identityResponseDigest: identityData?.responseDigest || null,
+    matchSemanticDigest,
     matchResponseDigest: matchData.responseDigest,
     preReadbackResponseDigest: readbackData.responseDigest,
     replanRequirementDigest:
@@ -2099,6 +2148,7 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
     candidateId: exactCandidateId,
     candidateUserId: exactCandidateUserId,
     lineageDigest,
+    matchSemanticDigest,
     matchProof,
     preReadback,
     identityProof,
@@ -2140,6 +2190,9 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
       planData: registeredData(writePlanRegistry, artifact),
       attemptNumber: fields.attemptNumber,
       maxAttempts: fields.maxAttempts,
+      matchProof,
+      matchData,
+      matchSemanticDigest,
       replanRequirement,
       replanData,
     }));
@@ -2155,6 +2208,7 @@ function expectedWritePlanSemanticDigest(planData) {
     candidateUserId: planData.candidateUserId,
     identityResponseDigest:
       planData.identityData?.responseDigest || null,
+    matchSemanticDigest: planData.matchSemanticDigest,
     matchResponseDigest: planData.matchData.responseDigest,
     preReadbackResponseDigest: planData.readbackData.responseDigest,
     replanRequirementDigest:
@@ -2197,6 +2251,8 @@ function privateWritePlanLineageValid(
       planData,
       planData.candidateId,
     )
+    || planData.matchSemanticDigest
+      !== matchProofSemanticDigest(planData.matchData)
     || planData.planSemanticDigest
       !== expectedWritePlanSemanticDigest(planData)
   ) {
@@ -2221,6 +2277,22 @@ function privateWritePlanLineageValid(
       requirementData
       && requirementData === planData.replanData
       && requirementData.lineageDigest === planData.lineageDigest
+      && requirementData.matchProof === planData.matchProof
+      && requirementData.matchData === planData.matchData
+      && requirementData.matchSemanticDigest
+        === planData.matchSemanticDigest
+      && requirementData.matchResponseDigest
+        === planData.matchData.responseDigest
+      && requirementData.matchRecruiterUserId
+        === planData.matchData.recruiterUserId
+      && sameStringArray(
+        requirementData.recommendedRoleIds,
+        planData.matchData.recommendedRoleIds,
+      )
+      && sameStringArray(
+        requirementData.possibleRoleIds,
+        planData.matchData.possibleRoleIds,
+      )
       && planData.attemptNumber === requirementData.nextAttemptNumber
       && planData.maxAttempts === requirementData.maxAttempts
       && requirementData.nextAttemptNumber
@@ -2242,6 +2314,9 @@ function privateWritePlanLineageValid(
     && lineageState.planData === planData
     && lineageState.attemptNumber === planData.attemptNumber
     && lineageState.maxAttempts === planData.maxAttempts
+    && lineageState.matchProof === planData.matchProof
+    && lineageState.matchData === planData.matchData
+    && lineageState.matchSemanticDigest === planData.matchSemanticDigest
   ) {
     return true;
   }
@@ -2253,6 +2328,84 @@ function privateWritePlanLineageValid(
     && lineageState.attemptNumber === planData.attemptNumber
     && lineageState.maxAttempts === planData.maxAttempts
   );
+}
+
+function privateWritePlanEvidenceFreshnessAt(planData, trustedNow) {
+  if (!planData || !canonicalIso(trustedNow)) {
+    return Object.freeze({
+      match: false,
+      readback: false,
+      identity: false,
+    });
+  }
+  const match = (
+    registeredData(matchProofRegistry, planData.matchProof)
+      === planData.matchData
+    && observationFreshAt(
+      planData.matchData?.observedAt,
+      trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+  );
+  const readback = (
+    registeredData(readbackProofRegistry, planData.preReadback)
+      === planData.readbackData
+    && observationFreshAt(
+      planData.readbackData?.observedAt,
+      trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+  );
+  const identity = planData.identityProof === null
+    ? planData.identityData === null
+    : (
+      registeredData(identityProofRegistry, planData.identityProof)
+        === planData.identityData
+      && observationFreshAt(
+        planData.identityData?.observedAt,
+        trustedNow,
+        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+      )
+    );
+  return Object.freeze({ match, readback, identity });
+}
+
+function privateNotificationEvidenceFreshAt(
+  notificationProof,
+  notificationData,
+  trustedNow,
+) {
+  return Boolean(
+    notificationData
+    && registeredData(
+      notificationProofRegistry,
+      notificationProof,
+    ) === notificationData
+    && observationFreshAt(
+      notificationData.observedAt,
+      trustedNow,
+      PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
+    )
+  );
+}
+
+function writeEvidenceExpiresAt(planData, notificationData, authorityData) {
+  const expirations = [
+    Date.parse(planData.matchData.observedAt)
+      + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    Date.parse(planData.readbackData.observedAt)
+      + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    Date.parse(notificationData.observedAt)
+      + PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
+    Date.parse(authorityData.expiresAt),
+  ];
+  if (planData.identityData !== null) {
+    expirations.push(
+      Date.parse(planData.identityData.observedAt)
+        + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    );
+  }
+  return new Date(Math.min(...expirations)).toISOString();
 }
 
 /**
@@ -2298,6 +2451,8 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
   const validPlan = privateWritePlanLineageValid(plan, planData, {
     forNewRequest: true,
   });
+  const planEvidenceFreshness =
+    privateWritePlanEvidenceFreshnessAt(planData, decisionAtIso);
   const captureDecision = currentPhase4CuratedListCaptureDecision({
     trustedNow: decisionAtIso,
   });
@@ -2315,6 +2470,17 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
     )
   ) {
     reasons.push("write_plan_stale");
+  }
+  if (validPlan && decisionAtIso) {
+    if (!planEvidenceFreshness.match) {
+      reasons.push("match_proof_stale");
+    }
+    if (!planEvidenceFreshness.readback) {
+      reasons.push("readback_proof_stale");
+    }
+    if (!planEvidenceFreshness.identity) {
+      reasons.push("identity_proof_stale");
+    }
   }
   const captureVerification = authorityData
     ? authorityData.captureEvidenceVerification
@@ -2392,12 +2558,11 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
       reasons.push("candidate_role_added_email_enabled");
     }
     if (decisionAtIso) {
-      const ageMs =
-        Date.parse(decisionAtIso) - Date.parse(notificationData.observedAt);
-      if (
-        ageMs < 0
-        || ageMs > PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS
-      ) {
+      if (!privateNotificationEvidenceFreshAt(
+        notificationProof,
+        notificationData,
+        decisionAtIso,
+      )) {
         reasons.push("notification_proof_stale");
       }
       if (
@@ -2430,13 +2595,11 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
         decisionAt: decisionAtIso,
         notificationObservedAt: notificationData.observedAt,
         notificationResponseDigest: notificationData.responseDigest,
-        expiresAt: new Date(
-          Math.min(
-            Date.parse(notificationData.observedAt)
-              + PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
-            Date.parse(authorityData.expiresAt),
-          ),
-        ).toISOString(),
+        expiresAt: writeEvidenceExpiresAt(
+          planData,
+          notificationData,
+          authorityData,
+        ),
       };
       return registerArtifact(
         writeAuthorizationRegistry,
@@ -2444,6 +2607,7 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
         {
           ...fields,
           planData,
+          notificationProof,
           notificationData,
           globalWriteAuthority,
           authorityData,
@@ -2511,6 +2675,14 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     captureEvidenceVerificationRegistry,
     captureVerification,
   );
+  const notificationProof =
+    authorizationData?.notificationProof || null;
+  const notificationData = registeredData(
+    notificationProofRegistry,
+    notificationProof,
+  );
+  const planEvidenceFreshness =
+    privateWritePlanEvidenceFreshnessAt(planData, executionAtIso);
   const captureDecision = currentPhase4CuratedListCaptureDecision({
     trustedNow: executionAtIso,
   });
@@ -2530,6 +2702,24 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     || authorizationData.maxAttempts !== planData.maxAttempts
     || authorizationData.contractVersion
       !== PHASE4_CURATION_CONTRACT_VERSION
+    || !planEvidenceFreshness.match
+    || !planEvidenceFreshness.readback
+    || !planEvidenceFreshness.identity
+    || !notificationData
+    || authorizationData.notificationData !== notificationData
+    || notificationData.valid !== true
+    || notificationData.safe !== true
+    || notificationData.candidateUserId !== planData.candidateUserId
+    || !sameScope(notificationData, planData)
+    || authorizationData.notificationObservedAt
+      !== notificationData.observedAt
+    || authorizationData.notificationResponseDigest
+      !== notificationData.responseDigest
+    || !privateNotificationEvidenceFreshAt(
+      notificationProof,
+      notificationData,
+      executionAtIso,
+    )
     || !lowercaseDigest(authorizationData.captureSemanticDigest)
     || !lowercaseDigest(
       authorizationData.captureImplementationDigest,
@@ -2792,6 +2982,15 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
           lineageDigest: planData.lineageDigest,
           candidateId: planData.candidateId,
           candidateUserId: planData.candidateUserId,
+          matchSemanticDigest: planData.matchSemanticDigest,
+          matchResponseDigest: planData.matchData.responseDigest,
+          matchRecruiterUserId: planData.matchData.recruiterUserId,
+          recommendedRoleIds: frozenArray(
+            planData.matchData.recommendedRoleIds,
+          ),
+          possibleRoleIds: frozenArray(
+            planData.matchData.possibleRoleIds,
+          ),
           priorPlanSemanticDigest: planData.planSemanticDigest,
           mutationRequestDigest: outcomeData.requestDigest,
           mutationResponseDigest: outcomeData.responseDigest,
@@ -2812,6 +3011,8 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
           { ...publicFields },
           {
             ...publicFields,
+            matchProof: planData.matchProof,
+            matchData: planData.matchData,
             priorPlan: plan,
             priorPlanData: planData,
             priorRequest: request,
@@ -2845,6 +3046,9 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
           priorOutcomeData: outcomeData,
           postReadback,
           postReadbackData,
+          matchProof: planData.matchProof,
+          matchData: planData.matchData,
+          matchSemanticDigest: planData.matchSemanticDigest,
           replanRequirement,
           replanData: registeredData(
             replanRequirementRegistry,
