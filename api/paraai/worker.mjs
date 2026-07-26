@@ -25,6 +25,9 @@ import {
 } from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import {
+  runPhase4SourceCaptureTick,
+} from "./_lib/source-capture-coordinator.mjs";
+import {
   getAutoQueueStats,
   recordPhase3ShadowAggregateAuditResult,
   storeConfigured,
@@ -282,7 +285,11 @@ export default async function handler(req, res) {
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
   const body = requestBody(req);
-  const mode = String(body.mode || (req.method === "GET" ? "recover" : "tick"));
+  const requestedMode = body.mode
+    ?? (req.method === "GET" ? "recover" : "tick");
+  const mode = typeof requestedMode === "string"
+    ? requestedMode
+    : "";
   const canaryModes = new Set([
     "phase2-first-ten-plan",
     "phase2-first-ten-commit",
@@ -297,10 +304,14 @@ export default async function handler(req, res) {
     "phase3-shadow-arm",
     "phase3-shadow-status",
   ]);
+  const phase4SourceModes = new Set([
+    "phase4-source-capture-tick",
+  ]);
   if (
     canaryModes.has(mode)
     || remainderModes.has(mode)
     || phase3Modes.has(mode)
+    || phase4SourceModes.has(mode)
   ) {
     if (!runnerAuthorized(req)) {
       return res.status(401).json({ ok: false, error: "runner_key_required" });
@@ -334,6 +345,10 @@ export default async function handler(req, res) {
       ["phase2-remainder-status", new Set(["mode"])],
       ["phase3-shadow-arm", new Set(["mode"])],
       ["phase3-shadow-status", new Set(["mode"])],
+      [
+        "phase4-source-capture-tick",
+        new Set(["mode"]),
+      ],
     ]).get(mode);
     if (
       allowedFields
@@ -368,6 +383,15 @@ export default async function handler(req, res) {
       return res.status(405).json({
         ok: false,
         error: "phase3_shadow_mutation_POST_only",
+      });
+    }
+    if (
+      mode === "phase4-source-capture-tick"
+      && req.method !== "POST"
+    ) {
+      return res.status(405).json({
+        ok: false,
+        error: "phase4_source_capture_POST_only",
       });
     }
   }
@@ -469,6 +493,11 @@ export default async function handler(req, res) {
     if (mode === "phase3-shadow-status") {
       return res.status(200).json(
         await phase3ShadowStatusWithEscalation(),
+      );
+    }
+    if (mode === "phase4-source-capture-tick") {
+      return res.status(200).json(
+        await runPhase4SourceCaptureTick({ mode }),
       );
     }
     if (!new Set(["tick", "recover"]).has(mode)) {
@@ -583,6 +612,12 @@ export default async function handler(req, res) {
       queue: await getAutoQueueStats(),
     });
   } catch (error) {
+    if (phase4SourceModes.has(mode)) {
+      return res.status(500).json({
+        ok: false,
+        error: "phase4_source_capture_failed",
+      });
+    }
     if (phase3Modes.has(mode)) {
       const code = String(error?.code || "");
       const safeCode = /^PHASE3_SHADOW_RELEASE_[A-Z0-9_]+$/u.test(code)
