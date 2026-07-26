@@ -452,6 +452,21 @@ export async function completeCampaignLeads(campaignId, { strides = LEAD_STRIDES
   };
 }
 
+/**
+ * Exact single-lead read. `getCampaignLeads` accepts a `search` term and answers
+ * with just the matching row(s) — crucially, WITHOUT going through the broken
+ * offset pagination above. That makes it the right tool for verifying one write,
+ * where walking the whole sequence is both wasteful and unreliable: a paging
+ * shortfall made 31 successful pauses report "readback_unavailable" and left one
+ * lead looking like it had vanished when it was simply never returned.
+ */
+export async function campaignLeadBySearch(campaignId, term) {
+  if (!term) return null;
+  const r = await withThrottleRetry(() =>
+    trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, search: String(term) }, 1));
+  return (r?.leads || [])[0] || null;
+}
+
 export async function campaignLeads(campaignId, { strict = false } = {}) {
   const read = await completeCampaignLeads(campaignId);
   if (strict && !read.complete) {

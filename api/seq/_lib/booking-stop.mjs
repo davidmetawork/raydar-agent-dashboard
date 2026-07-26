@@ -37,7 +37,7 @@ import {
   trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
   // These three moved into core.mjs so the launcher's dedup and
   // enrolled-elsewhere scans get the same protection this module needed.
-  withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads,
+  withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads, campaignLeadBySearch,
 } from "./core.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
 
@@ -429,22 +429,23 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
   };
   await Promise.all(Array.from({ length: concurrency }, worker));
 
-  // One authoritative membership read per touched sequence.
-  const bySeq = new Map();
-  for (const d of attempted) {
-    if (!bySeq.has(d.sequenceId)) bySeq.set(d.sequenceId, []);
-    bySeq.get(d.sequenceId).push(d);
-  }
-  for (const [sequenceId, group] of bySeq) {
-    const leads = await completeCampaignLeads(sequenceId).then((r) => r.leads).catch(() => null);
-    if (!leads) {
-      for (const d of group) out.pauseErrors.push({ sequence: d.sequence, reason: "readback_unavailable" });
-      continue;
-    }
-    const byCcu = new Map(leads.map((l) => [l.ccu_id, l]));
-    for (const d of group) {
-      const row = byCcu.get(d.ccuId);
-      if (!row) { out.pauseErrors.push({ sequence: d.sequence, reason: "lead_missing_after_pause" }); continue; }
+  // TARGETED readback, one exact search per lead. Walking the whole sequence
+  // instead made 31 successful pauses report "readback_unavailable" (one failed
+  // membership read invalidated verification for every lead in that sequence)
+  // and made a paging shortfall look like a lead that had vanished. `search`
+  // sidesteps the offset pagination entirely.
+  let k = 0;
+  const verify = async () => {
+    while (k < attempted.length) {
+      const d = attempted[k++];
+      let row = null;
+      try { row = await campaignLeadBySearch(d.sequenceId, d.email || d.name); }
+      catch (e) {
+        if (e.code === "AUTH_EXPIRED" && (await isSessionActuallyExpired())) throw e;
+        out.pauseErrors.push({ sequence: d.sequence, reason: "readback_unavailable" });
+        continue;
+      }
+      if (!row) { out.pauseErrors.push({ sequence: d.sequence, reason: "lead_not_found_on_readback" }); continue; }
       if (!row.is_paused) { out.pauseErrors.push({ sequence: d.sequence, reason: "still_active_after_pause" }); continue; }
       out.paused++;
       await kvSet(K.paused(d.ccuId), {
@@ -454,7 +455,8 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
         evidence: d.evidence,
       });
     }
-  }
+  };
+  await Promise.all(Array.from({ length: 2 }, verify));
   return out;
 }
 
