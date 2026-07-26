@@ -110,6 +110,7 @@ export default async function handler(req, res) {
       calendlyTruncated: result.calendlyTruncated,
       profilesRead: result.profilesRead,
       profileCoverage: result.profileCoverage,
+      profileRotor: `${result.profileRotorFrom}/${result.profileRotorOf}`,
       matched: result.decisions.length,
       paused: result.paused,
       pauseErrors: result.pauseErrors,

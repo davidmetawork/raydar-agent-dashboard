@@ -33,7 +33,13 @@
 // candidate who already booked. That asymmetry is why this ships enforcing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep } from "./core.mjs";
+import {
+  trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
+  // These three moved into core.mjs so the launcher's dedup and
+  // enrolled-elsewhere scans get the same protection this module needed.
+  withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads,
+} from "./core.mjs";
+export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
 
 // ---------- which sequences are "please book a call" nudges ----------
 // Substring keys, matched with .includes() so every launcher-created
@@ -116,6 +122,7 @@ export const K = {
   invitees: (uri) => `seqguard:inv:${hash(uri)}`,
   profile: (cuId) => `seqguard:prof:${cuId}`,
   alert: (key) => `seqguard:alert:${key}`,
+  rotor: "seqguard:rotor",
 };
 
 function hash(value) {
@@ -295,41 +302,6 @@ export async function calendlyBookingIndex({
 // being refused, and giving up costs a missed pause.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 
-/**
- * Run a Paraform call, treating 401 as a THROTTLE until proven otherwise.
- * Used on both reads and writes: the write path is where a misread 401 is most
- * dangerous, because it aborts a partially-applied batch (learned the hard way —
- * the first containment apply run died mid-batch on exactly this).
- */
-export async function withThrottleRetry(fn, { onThrottle = null } = {}) {
-  for (let attempt = 0; ; attempt++) {
-    try { return await fn(); }
-    catch (e) {
-      if (e?.code !== "AUTH_EXPIRED" || attempt >= AUTH_RETRY_DELAYS_MS.length) throw e;
-      if (onThrottle) onThrottle();
-      await sleep(AUTH_RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400));
-    }
-  }
-}
-
-export async function isSessionActuallyExpired({ probes = 3 } = {}) {
-  // A cheap read, retried with growing backoff. One probe is NOT enough: it is
-  // issued while sibling workers still have requests in flight, so it competes
-  // in the very burst it is trying to rule out — that produced a false
-  // "expired" verdict against a session /api/seq/health showed as live. Only a
-  // session that refuses several spaced-out probes is really gone.
-  for (let i = 0; i < probes; i++) {
-    try {
-      await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1);
-      return false;
-    } catch (e) {
-      if (e?.code !== "AUTH_EXPIRED") return false; // a different fault is not an expiry
-      await sleep(1500 * (i + 1) + Math.floor(Math.random() * 600));
-    }
-  }
-  return true;
-}
-
 export async function cachedRelationshipStatus(cuId, { ttlSeconds = 6 * 3600, force = false, onThrottle = null } = {}) {
   if (!force) {
     const cached = await kvGet(K.profile(cuId));
@@ -364,64 +336,6 @@ export function leadAddresses(lead, profile) {
   for (const e of lead?.user_emails || []) add(e);
   for (const e of profile?.emails || []) add(e);
   return set;
-}
-
-// ---------- complete membership read ----------
-// getCampaignLeads paginates with a numeric OFFSET over an ordering that is not
-// injective, so a naive walk in page-size steps returns duplicates on some pages
-// and SKIPS rows on others. Measured 2026-07-26 on a 211-lead sequence: stepping
-// by 50 yields 211 rows but only 193 distinct — 18 leads unreachable. Stepping by
-// 25/10/7 recovers 210. Larger sequences are worse (534-lead: stride 50 -> 491).
-//
-// This is a different bug from the one that caused the incident (that one never
-// paginated at all) and it defeats a correct-looking paginated read, so it gets
-// its own reader. Overlapping windows + dedupe + an explicit completeness verdict:
-// a short read is REPORTED, never silently accepted as "everyone".
-const STRIDES = [25, 10, 7];
-
-export async function completeCampaignLeads(campaignId, { strides = STRIDES } = {}) {
-  const byCcu = new Map();
-  let totalCount = null;
-  let apiCalls = 0;
-  let strideUsed = null;
-
-  for (const stride of strides) {
-    strideUsed = stride;
-    let cursor = 0;
-    let barren = 0;
-    for (let i = 0; i < 2000; i++) {
-      const page = await withThrottleRetry(() =>
-        trpcGet("campaigns.getCampaignLeads", cursor ? { campaign_id: campaignId, cursor } : { campaign_id: campaignId }, 1));
-      apiCalls++;
-      const leads = page?.leads || [];
-      if (totalCount === null) totalCount = page?.totalCount ?? leads.length;
-      const before = byCcu.size;
-      for (const l of leads) if (l?.ccu_id && !byCcu.has(l.ccu_id)) byCcu.set(l.ccu_id, l);
-      if (!leads.length) break;
-      barren = byCcu.size === before ? barren + 1 : 0;
-      if (byCcu.size >= totalCount) break;
-      // Walk a little past totalCount: the straddling rows live near the seams.
-      if (cursor > totalCount + stride * 4) break;
-      if (barren >= 6) break;
-      cursor += stride;
-    }
-    if (totalCount !== null && byCcu.size >= totalCount) break;
-  }
-
-  const leads = [...byCcu.values()];
-  const shortfall = Math.max(0, (totalCount ?? leads.length) - leads.length);
-  // Tolerate a hair of drift (totalCount can include a row that no longer
-  // resolves) but treat anything more as an incomplete read.
-  const tolerance = Math.max(1, Math.floor((totalCount ?? 0) * 0.01));
-  return {
-    leads,
-    totalCount: totalCount ?? leads.length,
-    unique: leads.length,
-    shortfall,
-    complete: shortfall <= tolerance,
-    strideUsed,
-    apiCalls,
-  };
 }
 
 // ---------- decision ----------
@@ -580,6 +494,8 @@ export async function runBookingSweep({
     profileFailures: 0,
     profileErrorSample: null,
     indexedEmails: 0,
+    profileRotorFrom: 0,
+    profileRotorOf: 0,
     throttled: 0,
     throttleGaveUp: 0,
     incompleteReads: [],
@@ -654,7 +570,22 @@ export async function runBookingSweep({
   // catch candidates who booked from a different mailbox). Cached with a TTL and
   // bounded per run so this can never become the 188s serial leg that killed the
   // n8n version; coverage converges across runs and is reported below.
-  const pending = active.filter((a) => !matched.has(a.lead.ccu_id)).slice(0, profileBudget);
+  // ROTATION. A plain .slice(0, budget) always takes the SAME leads, so with a
+  // budget below the population the tail is never examined at all — coverage
+  // looks partial but is in fact permanently blind. Sort for a stable order,
+  // then start where the last run stopped so every lead is reached within
+  // ceil(N / budget) passes. One KV read + one write, not one per lead.
+  const candidates = active
+    .filter((a) => !matched.has(a.lead.ccu_id))
+    .sort((x, y) => String(x.lead.ccu_id).localeCompare(String(y.lead.ccu_id)));
+  const rotorState = await kvGet(K.rotor);
+  const startAt = candidates.length ? (Number(rotorState?.at) || 0) % candidates.length : 0;
+  const pending = candidates.length <= profileBudget
+    ? candidates
+    : [...candidates.slice(startAt), ...candidates.slice(0, startAt)].slice(0, profileBudget);
+  result.profileRotorFrom = startAt;
+  result.profileRotorOf = candidates.length;
+  await kvSet(K.rotor, { at: candidates.length ? (startAt + pending.length) % candidates.length : 0, updatedAt: new Date().toISOString() });
   let j = 0;
   const profWorker = async () => {
     while (j < pending.length) {

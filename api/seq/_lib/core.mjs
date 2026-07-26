@@ -365,36 +365,99 @@ export async function setLeadEmail(ccuId, email) {
 // campaigns.getCampaignLeads({campaign_id, cursor}), paginated 50/page with a NUMERIC
 // OFFSET cursor + totalCount. Always paginate to the end: a single-page read here is
 // the same silent-dedup-miss class as the duplicate-bot Code Red.
-export async function campaignLeads(campaignId, { strict = false } = {}) {
-  // Page 1 tells us totalCount; fetch the remaining pages concurrently (a 1,100-lead
-  // sequence is 23 pages — sequential would add ~10s to every scan).
-  const first = await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId });
-  const out = [...(first?.leads || [])];
-  const total = Math.min(first?.totalCount ?? out.length, 10000);
-  const pageSize = out.length || 50;
-  if (out.length >= total) return out;
-  if (!out.length) {
-    if (strict && total > 0) throw new Error(`incomplete campaign membership read: 0/${total}`);
-    return out;
-  }
-  const cursors = [];
-  for (let c = pageSize; c < total; c += pageSize) cursors.push(c);
-  const pages = new Array(cursors.length);
-  let i = 0;
-  const worker = async () => {
-    while (i < cursors.length) {
-      const idx = i++;
-      try { pages[idx] = (await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor: cursors[idx] }))?.leads || []; }
-      catch (error) {
-        if (strict) throw error;
-        pages[idx] = [];
-      }
+// ─── Paraform throttling ─────────────────────────────────────────────────────
+// Paraform answers HTTP 401 to a BURST, not only to a dead session. Measured
+// 2026-07-26: 40 concurrent getCandidateProfileInfo reads on a healthy session
+// returned 27x200 / 13x401, while the same reads issued serially were 100%
+// clean. Because trpcGet maps every 401 to AUTH_EXPIRED and throws without
+// retrying, a throttle is indistinguishable from an expiry — which silently
+// voided 780 of 945 profile reads in one run, every one of them scoring as
+// "not booked". Opt in with withThrottleRetry where a miss actually matters.
+const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
+
+export async function withThrottleRetry(fn, { onThrottle = null, delays = AUTH_RETRY_DELAYS_MS } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      if (e?.code !== "AUTH_EXPIRED" || attempt >= delays.length) throw e;
+      if (onThrottle) onThrottle();
+      await sleep(delays[attempt] + Math.floor(Math.random() * 400));
     }
+  }
+}
+
+/** A cheap read retried with growing backoff. One probe is not enough: it races
+ *  the very burst it is trying to rule out. */
+export async function isSessionActuallyExpired({ probes = 3 } = {}) {
+  for (let i = 0; i < probes; i++) {
+    try { await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1); return false; }
+    catch (e) {
+      if (e?.code !== "AUTH_EXPIRED") return false;
+      await sleep(1500 * (i + 1) + Math.floor(Math.random() * 600));
+    }
+  }
+  return true;
+}
+
+// ─── Membership reads ────────────────────────────────────────────────────────
+// getCampaignLeads paginates with a numeric OFFSET over an ordering that is not
+// injective, so a walk in page-size steps returns DUPLICATES on some pages and
+// SKIPS rows on others — while still returning `totalCount` rows, so a
+// row-count check passes. Measured 2026-07-26: a 211-lead sequence yields 211
+// rows containing 193 distinct at stride 50; a 534-lead sequence yields 491
+// distinct. Overlapping windows plus dedupe recover them (stride 25 -> 210).
+//
+// Completeness is judged on DISTINCT leads, never on rows.
+const LEAD_STRIDES = [25, 10, 7];
+
+export async function completeCampaignLeads(campaignId, { strides = LEAD_STRIDES } = {}) {
+  const byCcu = new Map();
+  let totalCount = null;
+  let apiCalls = 0;
+  let strideUsed = null;
+
+  for (const stride of strides) {
+    strideUsed = stride;
+    let cursor = 0;
+    let barren = 0;
+    for (let i = 0; i < 2000; i++) {
+      const page = await withThrottleRetry(() =>
+        trpcGet("campaigns.getCampaignLeads", cursor ? { campaign_id: campaignId, cursor } : { campaign_id: campaignId }, 1));
+      apiCalls++;
+      const leads = page?.leads || [];
+      if (totalCount === null) totalCount = Math.min(page?.totalCount ?? leads.length, 10000);
+      const before = byCcu.size;
+      for (const l of leads) if (l?.ccu_id && !byCcu.has(l.ccu_id)) byCcu.set(l.ccu_id, l);
+      if (!leads.length) break;
+      barren = byCcu.size === before ? barren + 1 : 0;
+      if (byCcu.size >= totalCount) break;
+      if (cursor > totalCount + stride * 4) break; // straddling rows live near the seams
+      if (barren >= 6) break;
+      cursor += stride;
+    }
+    if (totalCount !== null && byCcu.size >= totalCount) break;
+  }
+
+  const leads = [...byCcu.values()];
+  const shortfall = Math.max(0, (totalCount ?? leads.length) - leads.length);
+  const tolerance = Math.max(1, Math.floor((totalCount ?? 0) * 0.01));
+  return {
+    leads,
+    totalCount: totalCount ?? leads.length,
+    unique: leads.length,
+    shortfall,
+    complete: shortfall <= tolerance,
+    strideUsed,
+    apiCalls,
   };
-  await Promise.all(Array.from({ length: Math.min(6, cursors.length) }, worker));
-  for (const p of pages) out.push(...p);
-  if (strict && out.length < total) throw new Error(`incomplete campaign membership read: ${out.length}/${total}`);
-  return out; // [{cu_id, ccu_id, to_use_email, is_paused, ...}]
+}
+
+export async function campaignLeads(campaignId, { strict = false } = {}) {
+  const read = await completeCampaignLeads(campaignId);
+  if (strict && !read.complete) {
+    throw new Error(`incomplete campaign membership read: ${read.unique}/${read.totalCount} distinct`);
+  }
+  return read.leads; // [{cu_id, ccu_id, to_use_email, is_paused, ...}]
 }
 
 // After enrolling, map candidate_user_id -> campaign_to_candidate_user_id for a campaign.

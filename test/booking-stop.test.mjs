@@ -132,38 +132,55 @@ test("membership read paginates to the end of a 211-lead sequence", async () => 
 // Second, nastier pagination bug: getCampaignLeads offsets over a non-injective
 // ordering, so a *correct-looking* paginated walk still skips rows. Measured on a
 // real 211-lead sequence: stride 50 -> 193 distinct. Overlapping windows fix it.
-test("complete read recovers leads that offset paging skips", async () => {
+test("complete read recovers leads that a page-size walk skips", async () => {
   const TOTAL = 211;
   const all = Array.from({ length: TOTAL }, (_, i) => ({ ccu_id: `ccu-${i}`, cu_id: `cu-${i}` }));
+  const server = (cursor) => {
+    // The real defect: the server orders on a non-unique key, so a full window
+    // can return a DUPLICATE in place of a row that then appears in no window at
+    // all. The caller still counts 50 rows and totalCount 211 and never notices
+    // it is short. (Measured on the real API: 211 rows, 193 distinct.)
+    const slice = all.slice(cursor, cursor + 50);
+    return slice.length === 50 ? [...slice.slice(0, 49), slice[0]] : slice;
+  };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const input = JSON.parse(decodeURIComponent(String(url).split("input=")[1]));
-    const cursor = input.json.cursor ?? 0;
-    // Emulate the real defect. The server orders on a non-unique key, so a full
-    // window can return a DUPLICATE in place of a row that then appears in no
-    // window at all: the caller still counts 50 rows and 211 total, and never
-    // notices it is short. (Measured on the real API: 211 rows, 193 distinct.)
-    // Stepping by less than a page re-exposes the lost row mid-window.
-    const slice = all.slice(cursor, cursor + 50);
-    const window = slice.length === 50 ? [...slice.slice(0, 49), slice[0]] : slice;
-    return new Response(JSON.stringify({ result: { data: { json: { leads: window, totalCount: TOTAL } } } }),
+    return new Response(JSON.stringify({ result: { data: { json: { leads: server(input.json.cursor ?? 0), totalCount: TOTAL } } } }),
       { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    const naive = await campaignLeads("seq-1");
+    // A page-size walk — what every previous implementation did, and what looks
+    // correct on inspection.
+    const naive = new Set();
+    for (let c = 0; c < TOTAL; c += 50) for (const l of server(c)) naive.add(l.ccu_id);
+    assert.ok(naive.size < TOTAL, "the page-size walk must demonstrably miss rows");
+
     const complete = await completeCampaignLeads("seq-1");
-    const naiveUnique = new Set(naive.map((l) => l.ccu_id));
-    assert.ok(naiveUnique.size < TOTAL, "the naive reader must demonstrably miss rows");
-    const missedByNaive = all.map((l) => l.ccu_id).filter((id) => !naiveUnique.has(id));
-    assert.ok(missedByNaive.length > 0);
     assert.equal(complete.unique, TOTAL, "the complete reader must recover every lead");
-    const recovered = new Set(complete.leads.map((l) => l.ccu_id));
-    for (const id of missedByNaive) assert.ok(recovered.has(id), `${id} must be recovered`);
     assert.equal(complete.complete, true);
     assert.equal(complete.shortfall, 0);
+    const recovered = new Set(complete.leads.map((l) => l.ccu_id));
+    for (const id of all.map((l) => l.ccu_id)) if (!naive.has(id)) assert.ok(recovered.has(id), `${id} must be recovered`);
+
+    // And the shared reader the launcher uses is now the robust one too.
+    const shared = await campaignLeads("seq-1", { strict: true });
+    assert.equal(new Set(shared.map((l) => l.ccu_id)).size, TOTAL, "campaignLeads must dedupe and complete");
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("strict membership reads judge distinct leads, not row count", async () => {
+  const realFetch = globalThis.fetch;
+  // 100 rows returned, but every row is the SAME lead: row-count says complete,
+  // distinct-count says we saw one. The old check passed this.
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ result: { data: { json: { leads: Array.from({ length: 50 }, () => ({ ccu_id: "dup", cu_id: "dup" })), totalCount: 100 } } } }),
+      { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    await assert.rejects(() => campaignLeads("seq-1", { strict: true }), /incomplete campaign membership read/);
+  } finally { globalThis.fetch = realFetch; }
 });
 
 test("a genuinely short membership read is reported, never silently accepted", async () => {
@@ -403,6 +420,23 @@ test("a sweep that sees zero active leads FAILS instead of reporting success", a
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("profile checks rotate so the tail is never permanently blind", async () => {
+  // Regression for a .slice(0, budget) that always took the same leads: with a
+  // budget below the population, the leads past the budget were examined by
+  // nothing, ever. Rotation must cover everyone within ceil(N/budget) passes.
+  const N = 10, BUDGET = 4;
+  const all = Array.from({ length: N }, (_, i) => `ccu-${String(i).padStart(2, "0")}`).sort();
+  const seen = new Set();
+  let rotor = 0;
+  for (let pass = 0; pass < Math.ceil(N / BUDGET); pass++) {
+    const start = rotor % all.length;
+    const pending = [...all.slice(start), ...all.slice(0, start)].slice(0, BUDGET);
+    for (const id of pending) seen.add(id);
+    rotor = (start + pending.length) % all.length;
+  }
+  assert.equal(seen.size, N, "every lead must be reached within ceil(N/budget) passes");
 });
 
 test("staleness threshold is hours, not days — a dead sweep must surface same-day", () => {
