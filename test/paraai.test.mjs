@@ -381,6 +381,45 @@ test("current Paraform CRM submission origin is accepted as pinned", () => {
   }
 });
 
+test("Para AI Phase 3 write fences are closed by default", () => {
+  const names = [
+    "PARAAI_MATCH_STAGE_ENABLED",
+    "PARAAI_MATCH_SHADOW",
+    "PARAAI_CURATE_ENABLED",
+    "PARAAI_MATCH_STAGE_ENABLED_AT",
+  ];
+  const before = Object.fromEntries(
+    names.map((name) => [name, process.env[name]]),
+  );
+  for (const name of names) delete process.env[name];
+  try {
+    const config = paraAIConfig();
+    assert.equal(config.matchStageEnabled, false);
+    assert.equal(config.matchShadow, false);
+    assert.equal(config.curateEnabled, false);
+    assert.equal(config.matchStageEnabledAtMs, null);
+  } finally {
+    for (const name of names) {
+      if (before[name] == null) delete process.env[name];
+      else process.env[name] = before[name];
+    }
+  }
+});
+
+test("the match-read health pin accepts only the captured procedure", () => {
+  const before = process.env.PARAAI_MATCH_READ_PROC;
+  try {
+    process.env.PARAAI_MATCH_READ_PROC =
+      "candidateMatching.getRankedRolesForCandidate";
+    assert.equal(paraAIConfig().matchReadPinned, true);
+    process.env.PARAAI_MATCH_READ_PROC = "candidateMatching.otherRead";
+    assert.equal(paraAIConfig().matchReadPinned, false);
+  } finally {
+    if (before == null) delete process.env.PARAAI_MATCH_READ_PROC;
+    else process.env.PARAAI_MATCH_READ_PROC = before;
+  }
+});
+
 test("match result parser supports pinned response candidates without guessing pending", () => {
   assert.deepEqual(matchCountFromResponse([{ id: 1 }]), { count: 1, settled: true });
   assert.deepEqual(matchCountFromResponse({ match_potential_role_count: 3 }), { count: 3, settled: true });
@@ -414,6 +453,12 @@ test("Para AI HTML inline JavaScript parses", async () => {
   assert.match(html, /latest\.state!=='ready_to_submit'/);
   assert.match(html, /expectedRevision:latest\.revision/);
   assert.match(html, /action:'reconcile-submit'/);
+  assert.match(html, /Match shadow/);
+  assert.match(html, /Recommended fit/);
+  assert.match(html, /Possible fit/);
+  assert.match(html, /worker-owned/);
+  assert.doesNotMatch(html, /Check matches|action:'refresh-matches'/);
+  assert.match(html, /ready&&STATE\.health\?\.enrollmentReady===true/);
   assert.match(html, /Accepted by Paraform\. Approval may take a couple minutes/);
   assert.match(html, /Waiting for resume/);
   assert.match(html, /g\.waitingForResume\|\|\[\],waitingResumeCard/);
@@ -422,10 +467,30 @@ test("Para AI HTML inline JavaScript parses", async () => {
   const run = await readFile(new URL("../api/paraai/run.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(run, /["']direct-submit["']/);
   assert.match(run, /"apply-ladder-submit"/);
-  assert.match(run, /applyLadderAndSubmit\(job\)/);
+  assert.match(
+    run,
+    /applyLadderAndSubmit\([\s\S]*?phase3Dependencies/,
+  );
+  assert.match(run, /phase3AwaitingMatchesSaveBoundary/);
+  assert.match(run, /saveAndEnqueuePhase3ShadowJob/);
   const pipeline = await readFile(new URL("../api/paraai/_lib/pipeline.mjs", import.meta.url), "utf8");
   assert.match(pipeline, /transition\(edited, "awaiting_approval"/);
   assert.match(pipeline, /export async function reconcileSubmittedJob/);
+});
+
+test("Phase 3 health readiness includes runner, Slack, and durable queue", async () => {
+  const source = await readFile(
+    new URL("../api/paraai/health.mjs", import.meta.url),
+    "utf8",
+  );
+  const readiness = source.slice(
+    source.indexOf("health.matchShadowReady = Boolean("),
+    source.indexOf("health.enrollmentReady = Boolean("),
+  );
+  assert.match(readiness, /health\.automation\.runnerConfigured/);
+  assert.match(readiness, /health\.automation\.slackConfigured/);
+  assert.match(readiness, /health\.automation\.queue !== null/);
+  assert.match(readiness, /phase3ShadowExecutionEnabled\(auto, \{ now \}\)/);
 });
 
 test("Vercel config exposes one Para AI page and grouped API duration", async () => {

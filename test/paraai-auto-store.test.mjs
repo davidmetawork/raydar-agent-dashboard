@@ -199,8 +199,11 @@ test("due jobs receive fenced leases and remain scheduled at lease expiry", asyn
     },
   ]);
   assert.match(commands[0][1], /redis\.call\('SET', leaseKey, token, 'PX'/);
-  assert.match(commands[0][1], /redis\.call\('ZADD', KEYS\[1\], ARGV\[7\], jobId\)/);
+  assert.match(commands[0][1], /local redisTime = redis\.call\('TIME'\)/);
+  assert.match(commands[0][1], /local leaseUntil = serverNow \+ tonumber\(ARGV\[3\]\)/);
+  assert.match(commands[0][1], /redis\.call\('ZADD', KEYS\[1\], leaseUntil, jobId\)/);
   assert.match(commands[0][1], /meta\.generation/);
+  assert.equal(commands[0].includes("5000"), false);
 });
 
 test("only the current lease owner can complete or reschedule an auto job", async () => {
@@ -277,17 +280,20 @@ test("only the current lease owner can complete or reschedule an auto job", asyn
 
 test("queue stats clean expired leases and report due, leased, and next work", async () => {
   const kvCalls = [];
-  const pipelineCalls = [];
   const stats = await getAutoQueueStats({ now: 5_000 }, {
-    kvImpl: async (command) => kvCalls.push(command),
-    pipelineImpl: async (commands) => {
-      pipelineCalls.push(commands);
-      return [7, 3, 2, [jobId, "9000"]];
+    kvImpl: async (command) => {
+      kvCalls.push(command);
+      return ["7", "3", "2", "9000"];
     },
   });
   assert.deepEqual(stats, { queued: 7, due: 3, leased: 2, nextDueAt: 9_000 });
-  assert.deepEqual(kvCalls[0], ["ZREMRANGEBYSCORE", "paraai:auto:leases", "-inf", 5_000]);
-  assert.equal(pipelineCalls[0].length, 4);
+  assert.equal(kvCalls[0][0], "EVAL");
+  assert.match(kvCalls[0][1], /local redisTime = redis\.call\('TIME'\)/);
+  assert.match(
+    kvCalls[0][1],
+    /ZREMRANGEBYSCORE', KEYS\[2\], '-inf', serverNow/,
+  );
+  assert.equal(kvCalls[0].includes(5_000), false);
 });
 
 test("candidate submission claim is idempotent only for the same job and payload", async () => {

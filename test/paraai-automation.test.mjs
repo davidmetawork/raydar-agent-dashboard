@@ -260,6 +260,29 @@ test("automation config removes consent and pins Phase 1 safety controls", () =>
   assert.equal(automationExecutionEnabled(config), true);
 });
 
+test("Phase 3 gates are closed by default and pin one common enable anchor", () => {
+  const closed = automationConfig({});
+  assert.equal(closed.matchStageEnabled, false);
+  assert.equal(closed.matchShadow, false);
+  assert.equal(closed.curateEnabled, false);
+  assert.equal(closed.enrollApproved, false);
+  assert.equal(closed.matchStageEnabledAtMs, null);
+
+  const enabledAt = "2026-07-26T00:00:00.000Z";
+  const shadow = automationConfig({
+    PARAAI_MATCH_STAGE_ENABLED: "true",
+    PARAAI_MATCH_SHADOW: "true",
+    PARAAI_CURATE_ENABLED: "false",
+    PARAAI_ENROLL_APPROVED: "false",
+    PARAAI_MATCH_STAGE_ENABLED_AT: enabledAt,
+  });
+  assert.equal(shadow.matchStageEnabled, true);
+  assert.equal(shadow.matchShadow, true);
+  assert.equal(shadow.curateEnabled, false);
+  assert.equal(shadow.enrollApproved, false);
+  assert.equal(shadow.matchStageEnabledAtMs, Date.parse(enabledAt));
+});
+
 test("call end timestamp precedence and one-hour grace are deterministic", () => {
   assert.equal(resolveCallEndedAt({
     endedAt: "2026-07-24T12:45:00.000Z",
