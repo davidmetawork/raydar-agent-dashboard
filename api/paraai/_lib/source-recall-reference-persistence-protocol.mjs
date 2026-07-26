@@ -44,9 +44,15 @@ export const SOURCE_RECALL_REFERENCE_PERSISTENCE_PROTOCOL_VERSION =
   "recall-reference-head-dark-v1";
 export const SOURCE_RECALL_REFERENCE_RECORD_VERSION = 1;
 export const SOURCE_RECALL_REFERENCE_REQUIRED_PASSES = 2;
-export const SOURCE_RECALL_REFERENCE_CLAIM_LEASE_MS = 30_000;
+export const SOURCE_RECALL_REFERENCE_CLAIM_LEASE_MS = 150_000;
+export const SOURCE_RECALL_REFERENCE_CLAIM_PREPARATION_MARGIN_MS =
+  60_000;
 export const SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS =
   1_000;
+export const SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS =
+  60_000;
+export const SOURCE_RECALL_REFERENCE_ATOMIC_COMMIT_BUDGET_MS =
+  15_000;
 export const SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS =
   24 * 60 * 60 * 1_000;
 export const SOURCE_RECALL_REFERENCE_MAX_COLLECTION_AGE_MS =
@@ -59,6 +65,7 @@ export const SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS =
 export const SOURCE_RECALL_REFERENCE_MAX_PAGES = 200;
 
 const DIGEST = /^[a-f0-9]{64}$/u;
+const NATIVE_BYTE_PROOF_DIGEST = /^[a-f0-9]{40}$/u;
 const SOURCE = "recall";
 const SOURCE_BASE = "https://us-west-2.recall.ai/api/v1";
 const SOURCE_ORIGIN = new URL(SOURCE_BASE).origin;
@@ -129,6 +136,7 @@ const MANIFEST_KEYS = Object.freeze([
   "lastJoinAt",
   "nextCursorDigest",
   "pageExpiresAtMs",
+  "pageNativeByteProofDigest",
   "pageNumber",
   "pageRecordDigest",
   "pageSemanticDigest",
@@ -167,26 +175,6 @@ const PAGE_KEYS = Object.freeze([
   "scanned",
   "version",
 ]);
-const PRIVATE_PAGE_RECORD_KEYS = Object.freeze([
-  "clientVersion",
-  "contractPinsDigest",
-  "cursor",
-  "decisionBoundaryAtMs",
-  "kind",
-  "nextCursor",
-  "pageExpiresAtMs",
-  "pageNumber",
-  "pageSemanticDigest",
-  "passNumber",
-  "policyVersion",
-  "referenceCount",
-  "references",
-  "runNonceDigest",
-  "scannedCount",
-  "source",
-  "version",
-  "workKeyDigest",
-]);
 const REFERENCE_KEYS = Object.freeze([
   "candidate",
   "id",
@@ -203,6 +191,7 @@ const PAGE_MANIFEST_HEAD_KEYS = Object.freeze([
   "cursorDigest",
   "nextCursorDigest",
   "pageExpiresAtMs",
+  "pageNativeByteProofDigest",
   "pageNumber",
   "pageRecordDigest",
   "pageSemanticDigest",
@@ -253,11 +242,6 @@ const READ_RESULT_KEYS = Object.freeze([
   "raw",
   "redisNowMs",
 ]);
-const PAGE_READ_RESULT_KEYS = Object.freeze([
-  "raw",
-  "redisNowMs",
-  "remainingTtlMs",
-]);
 const CAS_RESULT_KEYS = Object.freeze([
   "headReceipt",
   "pageReceipt",
@@ -295,6 +279,7 @@ const REQUIRED_PAGE_KEYS = Object.freeze([
   "expectedExpiresAtMs",
   "key",
   "minimumRemainingTtlMs",
+  "nativeByteProofDigest",
   "rawDigest",
 ]);
 
@@ -648,6 +633,16 @@ function canonicalCommitment(value, code) {
   };
 }
 
+function nativeByteProofDigest(value, code) {
+  if (
+    typeof value !== "string"
+    || !NATIVE_BYTE_PROOF_DIGEST.test(value)
+  ) {
+    fail(code);
+  }
+  return value;
+}
+
 function canonicalManifest(value, expectedPageNumber, code) {
   const manifest = exactRecord(value, MANIFEST_KEYS, code);
   if (manifest.pageNumber !== expectedPageNumber) fail(code);
@@ -680,6 +675,10 @@ function canonicalManifest(value, expectedPageNumber, code) {
       code,
     ),
     pageRecordDigest: digest(manifest.pageRecordDigest, code),
+    pageNativeByteProofDigest: nativeByteProofDigest(
+      manifest.pageNativeByteProofDigest,
+      code,
+    ),
     pageExpiresAtMs: positiveInteger(
       manifest.pageExpiresAtMs,
       code,
@@ -1234,6 +1233,10 @@ function canonicalRequiredPageSet(
     return deepFreeze({
       key: required.key,
       rawDigest: digest(required.rawDigest, code),
+      nativeByteProofDigest: nativeByteProofDigest(
+        required.nativeByteProofDigest,
+        code,
+      ),
       expectedExpiresAtMs: positiveInteger(
         required.expectedExpiresAtMs,
         code,
@@ -1345,95 +1348,6 @@ function normalizedReference(value, boundaryAt) {
       paraformEventId: candidate.paraformEventId,
     },
   };
-}
-
-function canonicalPrivatePageRecord(
-  value,
-  run,
-  manifest,
-  expectedPassNumber,
-) {
-  const code = "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_MALFORMED";
-  const record = exactRecord(
-    value,
-    PRIVATE_PAGE_RECORD_KEYS,
-    code,
-  );
-  const pass = run.passes[expectedPassNumber - 1];
-  const pageIndex = manifest.pageNumber - 1;
-  const expectedCursor = pageIndex === 0
-    ? null
-    : pass.seenCursors[pageIndex - 1];
-  const expectedNextCursor =
-    pageIndex + 1 < pass.pageCount
-      ? pass.seenCursors[pageIndex]
-      : null;
-  const boundaryAt = canonicalBoundaryFromMs(
-    run.decisionBoundaryAtMs,
-    code,
-  );
-  const rawReferences = denseArraySnapshot(
-    record.references,
-    code,
-  );
-  const references = rawReferences.map(
-    (reference) => normalizedReference(reference, boundaryAt),
-  );
-  const referenceCommitments = references.map((reference) => ({
-    referenceIdDigest: semanticDigest(
-      "phase4-recall-reference-id-v1",
-      reference.id,
-    ),
-    referenceDigest: semanticDigest(
-      "phase4-recall-private-reference-v1",
-      reference,
-    ),
-  }));
-  if (
-    record.version !== 1
-    || record.policyVersion
-      !== SOURCE_RECALL_REFERENCE_PERSISTENCE_PROTOCOL_VERSION
-    || record.kind !== "recall_private_reference_page_dark"
-    || record.source !== SOURCE
-    || record.clientVersion !== SOURCE_RECALL_PAGE_CLIENT_VERSION
-    || record.workKeyDigest !== run.workKeyDigest
-    || record.runNonceDigest !== run.runNonceDigest
-    || record.decisionBoundaryAtMs !== run.decisionBoundaryAtMs
-    || record.contractPinsDigest !== run.contractPinsDigest
-    || record.passNumber !== expectedPassNumber
-    || record.pageNumber !== manifest.pageNumber
-    || record.cursor !== expectedCursor
-    || record.nextCursor !== expectedNextCursor
-    || record.pageExpiresAtMs !== manifest.pageExpiresAtMs
-    || record.scannedCount !== manifest.scannedCount
-    || record.referenceCount !== manifest.referenceCount
-    || record.referenceCount !== references.length
-    || record.pageSemanticDigest !== manifest.pageSemanticDigest
-    || canonicalJson(referenceCommitments)
-      !== canonicalJson(manifest.referenceCommitments)
-  ) {
-    fail(code);
-  }
-  return deepFreeze({
-    version: record.version,
-    policyVersion: record.policyVersion,
-    kind: record.kind,
-    source: record.source,
-    clientVersion: record.clientVersion,
-    workKeyDigest: record.workKeyDigest,
-    runNonceDigest: record.runNonceDigest,
-    decisionBoundaryAtMs: record.decisionBoundaryAtMs,
-    contractPinsDigest: record.contractPinsDigest,
-    passNumber: record.passNumber,
-    pageNumber: record.pageNumber,
-    pageExpiresAtMs: record.pageExpiresAtMs,
-    cursor: record.cursor,
-    nextCursor: record.nextCursor,
-    scannedCount: record.scannedCount,
-    referenceCount: record.referenceCount,
-    references,
-    pageSemanticDigest: record.pageSemanticDigest,
-  });
 }
 
 function pageEvidence(value, run, claim, nowMs) {
@@ -1575,6 +1489,8 @@ function pageEvidence(value, run, claim, nowMs) {
     nextCursorDigest,
     pageSemanticDigest,
     pageRecordDigest: rawDigest(pageRaw),
+    pageNativeByteProofDigest:
+      createHash("sha1").update(pageRaw).digest("hex"),
     pageExpiresAtMs:
       nowMs + SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS,
     scannedCount: page.scanned,
@@ -1923,6 +1839,10 @@ function canonicalHead(value, expectedRun) {
     digest(page.cursorDigest, code);
     digest(page.nextCursorDigest, code);
     digest(page.pageRecordDigest, code);
+    nativeByteProofDigest(
+      page.pageNativeByteProofDigest,
+      code,
+    );
     digest(page.pageSemanticDigest, code);
     nonNegativeInteger(page.scannedCount, code);
     nonNegativeInteger(page.referenceCount, code);
@@ -2091,38 +2011,6 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
     return snapshot;
   }
 
-  async function readPrivatePageExact({
-    key,
-    expectedRaw = null,
-    expectedRawDigest,
-    expectedExpiresAtMs,
-    minimumRemainingTtlMs,
-    notBeforeMs,
-  }) {
-    const result = persistenceResult(
-      await durable.readPage({ key }),
-      PAGE_READ_RESULT_KEYS,
-    );
-    if (
-      typeof result.raw !== "string"
-      || !Number.isSafeInteger(result.remainingTtlMs)
-      || result.remainingTtlMs < minimumRemainingTtlMs
-      || result.remainingTtlMs
-        > SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS
-      || result.remainingTtlMs
-        !== expectedExpiresAtMs - result.redisNowMs
-      || result.redisNowMs < notBeforeMs
-      || rawDigest(result.raw) !== expectedRawDigest
-      || (
-        expectedRaw !== null
-        && result.raw !== expectedRaw
-      )
-    ) {
-      fail("SOURCE_RECALL_REFERENCE_PAGE_READBACK_FAILED");
-    }
-    return result;
-  }
-
   async function verifySealedReferenceArtifacts(snapshot) {
     const code =
       "SOURCE_RECALL_REFERENCE_SEALED_ARTIFACTS_INVALID";
@@ -2169,6 +2057,8 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
             manifest.pageNumber,
           ),
           rawDigest: manifest.pageRecordDigest,
+          nativeByteProofDigest:
+            manifest.pageNativeByteProofDigest,
           expectedExpiresAtMs: manifest.pageExpiresAtMs,
           minimumRemainingTtlMs:
             SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS,
@@ -2176,34 +2066,12 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
       ),
       SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS,
     );
+    // The compare-and-set receipt proves each page's exact immutable
+    // generation when it is published. Re-reading every raw page here would
+    // add up to 200 private REST transfers. The persistence artifact-set
+    // operation is the fresh linearizable proof that those exact page
+    // generations, expiries, head, and run still coexist.
     let verifiedAtMs = headResult.redisNowMs;
-    for (const [index, manifest] of snapshot.record.passes[1]
-      .pageManifests.entries()) {
-      const pageResult = await readPrivatePageExact({
-        key: requiredPageSet[index].key,
-        expectedRawDigest: manifest.pageRecordDigest,
-        expectedExpiresAtMs: manifest.pageExpiresAtMs,
-        minimumRemainingTtlMs:
-          SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS,
-        notBeforeMs: verifiedAtMs,
-      });
-      let parsedPage;
-      try {
-        parsedPage = JSON.parse(pageResult.raw);
-      } catch {
-        fail(code);
-      }
-      const pageRecord = canonicalPrivatePageRecord(
-        parsedPage,
-        snapshot.record,
-        manifest,
-        2,
-      );
-      if (canonicalJson(pageRecord) !== pageResult.raw) {
-        fail(code);
-      }
-      verifiedAtMs = pageResult.redisNowMs;
-    }
     const runKey =
       `${RUN_PREFIX}${snapshot.record.workKeyDigest}`;
     const headKey =
@@ -2404,6 +2272,10 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
             || required.rawDigest
               !== artifactRecord.passes[1]
                 .pageManifests[index].pageRecordDigest
+            || required.nativeByteProofDigest
+              !== artifactRecord.passes[1]
+                .pageManifests[index]
+                .pageNativeByteProofDigest
             || required.expectedExpiresAtMs
               !== artifactRecord.passes[1]
                 .pageManifests[index].pageExpiresAtMs
@@ -2435,6 +2307,7 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
         headRaw,
         requiredPageSet: deepFreeze([...selectedPageSet]),
         requiredPageSetDigest: pageSetRequestDigest,
+        notBeforeMs,
         notAfterMs,
       }),
       CAS_RESULT_KEYS,
@@ -2459,7 +2332,9 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
     if (result.status === "deadline_exceeded") {
       if (
         notAfterMs === null
-        || result.redisNowMs < notAfterMs
+        || result.redisNowMs
+          + SOURCE_RECALL_REFERENCE_ATOMIC_COMMIT_BUDGET_MS
+          < notAfterMs
         || result.raw !== snapshot.raw
         || result.pageReceipt !== null
         || result.headReceipt !== null
@@ -2537,19 +2412,7 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
         fail("SOURCE_RECALL_REFERENCE_PERSISTENCE_RESULT_INVALID");
       }
     }
-    const stored = parseRun(result.raw, result.redisNowMs);
-    if (pageRaw !== null) {
-      await readPrivatePageExact({
-        key: pageKey,
-        expectedRaw: pageRaw,
-        expectedRawDigest: rawDigest(pageRaw),
-        expectedExpiresAtMs: pageExpiresAtMs,
-        minimumRemainingTtlMs:
-          SOURCE_RECALL_REFERENCE_MIN_PAGE_RETENTION_MS,
-        notBeforeMs: stored.redisNowMs,
-      });
-    }
-    return stored;
+    return parseRun(result.raw, result.redisNowMs);
   }
 
   async function casRun(snapshot, nextRecord, options = {}) {
@@ -2744,7 +2607,8 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
         - confirmedSnapshot.redisNowMs
       )
       - SOURCE_RECALL_PAGE_TIMEOUT_MS
-      - SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS;
+      - SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS
+      - SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS;
     if (
       confirmedSnapshot.redisNowMs
         >= durableReadDeadlineMs
@@ -2874,27 +2738,13 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
             manifest.pageNumber,
           ),
           rawDigest: manifest.pageRecordDigest,
+          nativeByteProofDigest:
+            manifest.pageNativeByteProofDigest,
           expectedExpiresAtMs: manifest.pageExpiresAtMs,
           minimumRemainingTtlMs:
             SOURCE_RECALL_REFERENCE_MIN_PAGE_RETENTION_MS,
         }),
       );
-    let pageSetVerifiedAtMs = snapshot.redisNowMs;
-    for (const required of requiredPageSet) {
-      if (required.key === pageKey) continue;
-      const verified = await readPrivatePageExact({
-        key: required.key,
-        expectedRawDigest: required.rawDigest,
-        expectedExpiresAtMs: required.expectedExpiresAtMs,
-        minimumRemainingTtlMs:
-          required.minimumRemainingTtlMs,
-        notBeforeMs: snapshot.redisNowMs,
-      });
-      pageSetVerifiedAtMs = Math.max(
-        pageSetVerifiedAtMs,
-        verified.redisNowMs,
-      );
-    }
     const nextSnapshot = await casRun(
       snapshot,
       transitioned.next,
@@ -2904,7 +2754,7 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
         pageExpiresAtMs,
         headRaw: transitioned.headRaw,
         requiredPageSet,
-        notBeforeMs: pageSetVerifiedAtMs,
+        notBeforeMs: snapshot.redisNowMs,
         notAfterMs: transitioned.pageRaw === null
           ? null
           : Math.min(
