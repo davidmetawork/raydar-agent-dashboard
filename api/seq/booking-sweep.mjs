@@ -22,6 +22,7 @@ import {
   recordSuccessfulSweep,
   sweepStaleness,
   shouldAlert,
+  isSessionActuallyExpired,
   kvConfigured,
   calendlyConfigured,
 } from "./_lib/booking-stop.mjs";
@@ -117,7 +118,13 @@ export default async function handler(req, res) {
       ranAt: new Date().toISOString(),
     });
   } catch (e) {
-    const expired = e?.code === "AUTH_EXPIRED";
+    // Never report (or alert) an expiry on the strength of one 401: Paraform
+    // answers 401 to bursts. Confirm with spaced probes first, or a busy pass
+    // cries wolf about the cookie and the real alarm stops being believed.
+    const expired = e?.code === "AUTH_EXPIRED" && (await isSessionActuallyExpired());
+    if (e?.code === "AUTH_EXPIRED" && !expired) {
+      return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform rate-limited this pass; session verified live. Next run retries.", ranAt: new Date().toISOString() });
+    }
     if (expired && (await shouldAlert("auth-expired"))) {
       await notifySlack(":rotating_light: Booking sweep hit AUTH_EXPIRED — the Paraform session cookie needs recapture. Booked candidates are unprotected until then.").catch(() => {});
     } else if (!expired && (await shouldAlert("sweep-error", 3600))) {
