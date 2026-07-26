@@ -108,6 +108,8 @@ export const kvSetNx = (key, value, ttlSeconds) =>
 
 export const K = {
   lastSweep: "seqguard:lastsweep",
+  leadIndex: "seqguard:leadindex",
+  deferred: (email) => `seqguard:deferred:${hash(email)}`,
   event: (uri) => `seqguard:event:${hash(uri)}`,
   paused: (ccuId) => `seqguard:paused:${ccuId}`,
   cancel: (uri) => `seqguard:cancel:${hash(uri)}`,
@@ -290,6 +292,23 @@ export async function calendlyBookingIndex({
 // anyone shouts about the cookie.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500];
 
+/**
+ * Run a Paraform call, treating 401 as a THROTTLE until proven otherwise.
+ * Used on both reads and writes: the write path is where a misread 401 is most
+ * dangerous, because it aborts a partially-applied batch (learned the hard way —
+ * the first containment apply run died mid-batch on exactly this).
+ */
+export async function withThrottleRetry(fn, { onThrottle = null } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      if (e?.code !== "AUTH_EXPIRED" || attempt >= AUTH_RETRY_DELAYS_MS.length) throw e;
+      if (onThrottle) onThrottle();
+      await sleep(AUTH_RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400));
+    }
+  }
+}
+
 export async function isSessionActuallyExpired() {
   // One cheap SERIAL read. A throttled session answers this fine; a dead one 401s.
   try {
@@ -454,8 +473,8 @@ export function decideLead({ lead, seq, booking, relStatus, now = Date.now() }) 
  * time would re-read a 211-lead membership 150 times (~750 page requests) and
  * reintroduce exactly the runtime blowup that killed the predecessor.
  */
-export async function applyDecisions(decisions, { concurrency = 4 } = {}) {
-  const out = { paused: 0, pauseErrors: [] };
+export async function applyDecisions(decisions, { concurrency = 3 } = {}) {
+  const out = { paused: 0, pauseErrors: [], throttled: 0 };
   if (!decisions.length) return out;
 
   const attempted = [];
@@ -464,10 +483,20 @@ export async function applyDecisions(decisions, { concurrency = 4 } = {}) {
     while (i < decisions.length) {
       const d = decisions[i++];
       try {
-        await trpcPost("campaigns.updateCandidatePauseStatus", { campaign_to_candidate_user_id: d.ccuId, is_paused: true }, 2);
+        await withThrottleRetry(
+          () => trpcPost("campaigns.updateCandidatePauseStatus", { campaign_to_candidate_user_id: d.ccuId, is_paused: true }, 1),
+          { onThrottle: () => { out.throttled++; } }
+        );
         attempted.push(d);
       } catch (e) {
-        if (e.code === "AUTH_EXPIRED") throw e;
+        if (e.code === "AUTH_EXPIRED") {
+          // Confirm serially before believing it. A real expiry aborts the batch
+          // loudly; a throttle must only cost this one lead, which the next
+          // sweep retries.
+          if (await isSessionActuallyExpired()) throw e;
+          out.pauseErrors.push({ sequence: d.sequence, reason: "throttled_after_retries" });
+          continue;
+        }
         out.pauseErrors.push({ sequence: d.sequence, reason: String(e.message || e).slice(0, 120) });
       }
     }
@@ -538,6 +567,7 @@ export async function runBookingSweep({
     profilesRead: 0,
     profileFailures: 0,
     profileErrorSample: null,
+    indexedEmails: 0,
     throttled: 0,
     throttleGaveUp: 0,
     incompleteReads: [],
@@ -655,29 +685,63 @@ export async function runBookingSweep({
   }
   if (onDecision) for (const d of result.decisions) await onDecision(d);
 
+  // Publish the index the webhook reads. Only active, unpaused leads: a paused
+  // lead needs no second pause, and the webhook must not resurrect stale rows.
+  const byEmail = {};
+  for (const { seq, lead } of active) {
+    for (const addr of leadAddresses(lead, null)) {
+      (byEmail[addr] ||= []).push({ s: seq.id, sn: seq.name, ccu: lead.ccu_id, cu: lead.cu_id, n: lead.name || null, t: lead.created_at });
+    }
+  }
+  result.indexedEmails = Object.keys(byEmail).length;
+  await kvSet(K.leadIndex, { builtAt: new Date().toISOString(), byEmail }, 6 * 3600);
+
   result.ok = true;
   result.durationMs = Date.now() - startedAt;
   return result;
 }
 
-/** Webhook path: pause every active nudge lead for one email that just booked. */
+/**
+ * Webhook path: pause every active nudge lead for one email that just booked.
+ *
+ * This CANNOT walk every sequence's membership inline — measured in production,
+ * that is a ~200-call read that blows the function budget and returns 504 to
+ * Calendly (which then retries, making it worse). Instead the hourly sweep
+ * publishes a lead index and the webhook does ONE KV read against it.
+ *
+ * On an index miss the work is deferred rather than dropped: the next sweep
+ * re-evaluates every lead against Calendly anyway, so the candidate is still
+ * caught. A miss only happens for someone enrolled within the last hour, whose
+ * next step is days away — so the delay costs nothing, and the deferral is
+ * recorded so "we deferred" can never be confused with "there was nothing to do".
+ */
 export async function pauseForBooking({ email, bookedAt, startsAt = null, eventName = null, apply = true }) {
   const target = normEmail(email);
   const at = typeof bookedAt === "number" ? bookedAt : Date.parse(bookedAt);
-  const out = { email: target ? "matched" : "missing", decisions: [], paused: 0, pauseErrors: [] };
+  const out = { decisions: [], paused: 0, pauseErrors: [], deferred: false, indexAgeMs: null };
   if (!target || !Number.isFinite(at)) return out;
 
-  const seqs = await loadNudgeSequences();
-  const booking = { bookedAt: at, startsAt, eventName, status: "active" };
+  const idx = await kvGet(K.leadIndex);
+  const builtAt = idx?.builtAt ? Date.parse(idx.builtAt) : null;
+  out.indexAgeMs = builtAt ? Date.now() - builtAt : null;
+  const usable = idx?.byEmail && builtAt && out.indexAgeMs < LEAD_INDEX_MAX_AGE_MS;
 
-  for (const seq of seqs) {
-    const { leads } = await completeCampaignLeads(seq.id);
-    for (const lead of leads) {
-      if (!leadAddresses(lead, null).has(target)) continue;
-      const d = decideLead({ lead, seq, booking, relStatus: null });
-      if (!d) continue;
-      out.decisions.push(d);
-    }
+  if (!usable) {
+    out.deferred = true;
+    await kvSet(K.deferred(target), { at: new Date().toISOString(), bookedAt: new Date(at).toISOString(), reason: idx ? "index_stale" : "index_missing" }, 7 * 24 * 3600);
+    return out;
+  }
+
+  const entries = idx.byEmail[target] || [];
+  const booking = { bookedAt: at, startsAt, eventName, status: "active" };
+  for (const e of entries) {
+    const d = decideLead({
+      lead: { ccu_id: e.ccu, cu_id: e.cu, name: e.n || null, to_use_email: target, created_at: e.t, is_paused: false, is_archived: false },
+      seq: { id: e.s, name: e.sn },
+      booking,
+      relStatus: null,
+    });
+    if (d) out.decisions.push(d);
   }
   if (apply && out.decisions.length) {
     const applied = await applyDecisions(out.decisions);
@@ -735,6 +799,8 @@ export async function bookedSetWithCalendly(candidateUserIds, { concurrency = 8,
 }
 
 // ---------- staleness ----------
+export const LEAD_INDEX_MAX_AGE_MS = Number(process.env.BOOKING_STOP_INDEX_MAX_AGE_MS || 3 * 3600 * 1000);
+
 export const SWEEP_STALE_AFTER_MS = Number(process.env.BOOKING_STOP_STALE_MS || 3 * 3600 * 1000);
 
 /** The single most important check here: it is what was missing when the n8n
