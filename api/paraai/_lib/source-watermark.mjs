@@ -952,9 +952,7 @@ function verifySourceBindingV2(binding, {
   invariant(
     binding.decisionBoundaryAt === decisionBoundaryAt
       && Date.parse(binding.observedAt)
-        >= Date.parse(decisionBoundaryAt)
-      && Date.parse(binding.observedAt)
-        <= Date.now() + AUTHORITY_CLOCK_SKEW_MS,
+        >= Date.parse(decisionBoundaryAt),
     "SOURCE_IDENTITY_BINDING_TIME_MISMATCH",
     "source identity binding does not share the capture boundary",
   );
@@ -1252,6 +1250,11 @@ export function buildCanonicalSourceAliasMap(
     exact.add(key);
     deduped.push(entry);
   }
+  invariant(
+    duplicateEntryCount === 0,
+    "SOURCE_ALIAS_DUPLICATE_EDGE",
+    "duplicate alias edges cannot be persisted losslessly",
+  );
 
   const aliasesByCanonical = new Map();
   const canonicalsByAlias = new Map();
@@ -1274,16 +1277,6 @@ export function buildCanonicalSourceAliasMap(
   const conflictCount =
     canonicalConflictCount + aliasConflictCount;
   const reasons = new Set();
-  let identityBindingAuthorityAvailable = false;
-  try {
-    identityBindingAuthorityAvailable =
-      Boolean(configuredIdentityBindingKey());
-  } catch {
-    identityBindingAuthorityAvailable = false;
-  }
-  if (!identityBindingAuthorityAvailable) {
-    reasons.add("identity_binding_authority_unavailable");
-  }
   if (
     SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST == null
   ) {
@@ -1334,9 +1327,6 @@ export function buildCanonicalSourceAliasMap(
     ]),
   );
   if (epochDigests.size !== 1) reasons.add("source_epoch_moved");
-  if (duplicateEntryCount > 0) {
-    reasons.add("duplicate_alias_edges");
-  }
   if (conflictCount > 0) reasons.add("alias_conflicts");
   const bindings = deduped.flatMap((entry) => entry.bindings);
   const bindingCount = bindings.length;
@@ -1368,8 +1358,7 @@ export function buildCanonicalSourceAliasMap(
       (pass) => pass.cursorExhausted,
     );
   const authoritative = Boolean(
-    identityBindingAuthorityAvailable
-    && SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST
+    SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST
       != null
     && bindingCount > 0
     && identityBindingUnprovenCount === 0
@@ -1411,7 +1400,6 @@ export function buildCanonicalSourceAliasMap(
     canonicalConflictCount,
     aliasConflictCount,
     conflictCount,
-    identityBindingAuthorityAvailable,
     bindingCount,
     edgeWithoutBindingCount,
     identityBindingProvenCount,
@@ -1490,7 +1478,10 @@ function q37FromNormalizedFacts(facts) {
     ["pending", "conflict"].includes(fact.classification)
     || (
       ["success", "failure"].includes(fact.classification)
-      && fact.provenanceVerified !== true
+      && (
+        fact.provenanceVerified !== true
+        || fact.recordRevisionDigest == null
+      )
     )
     || (
       fact.classification === "success"

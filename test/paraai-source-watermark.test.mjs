@@ -1041,22 +1041,45 @@ test("alias fan-in, fan-out, and duplicate edges fail closed", () => {
       candidateUserAliasDigest: CANDIDATE_USER_A,
     },
   ]);
-  const duplicate = aliasMapFixture([
-    {
-      canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: CANDIDATE_USER_A,
-    },
-    {
-      canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: CANDIDATE_USER_A,
-    },
-  ]);
   assert.equal(fanOut.complete, false);
   assert.equal(fanOut.canonicalConflictCount, 1);
   assert.equal(fanIn.complete, false);
   assert.equal(fanIn.aliasConflictCount, 1);
-  assert.equal(duplicate.complete, false);
-  assert.equal(duplicate.duplicateEntryCount, 1);
+  assert.throws(
+    () => aliasMapFixture([
+      {
+        canonicalCandidateDigest: CANDIDATE_A,
+        candidateUserAliasDigest: CANDIDATE_USER_A,
+      },
+      {
+        canonicalCandidateDigest: CANDIDATE_A,
+        candidateUserAliasDigest: CANDIDATE_USER_A,
+      },
+    ]),
+    (error) => error.code === "SOURCE_ALIAS_DUPLICATE_EDGE",
+  );
+});
+
+test("persisted alias semantics ignore wall clock and key availability", () => {
+  const generation = generationFixture();
+  const savedNow = Date.now;
+  const savedKey =
+    process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV];
+  Date.now = () => Date.parse("2030-01-01T00:00:00.000Z");
+  delete process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV];
+  try {
+    const validated =
+      validateSourceWatermarkGeneration(generation);
+    assert.equal(validated.recordDigest, generation.recordDigest);
+    assert.equal(
+      validated.aliasMap.aliasMapDigest,
+      generation.aliasMap.aliasMapDigest,
+    );
+  } finally {
+    Date.now = savedNow;
+    process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV] =
+      savedKey;
+  }
 });
 
 test("per-source bindings remain dark without a reviewed identity collector", () => {
@@ -1335,10 +1358,22 @@ test("Q37 cannot select from pending, conflicting, or unverified source evidence
       provenanceVerified: true,
     }],
   });
+  const missingRevision = q37NewestSuccessfulCallDecision({
+    decisionBoundaryAt: T,
+    facts: [{
+      ...recallSuccess(),
+      recordRevisionDigest: null,
+    }],
+  });
   assert.equal(pending.decision, "review_incomplete_source");
   assert.equal(unresolved.decision, "review_incomplete_source");
+  assert.equal(
+    missingRevision.decision,
+    "review_incomplete_source",
+  );
   assert.equal(pending.callType, null);
   assert.equal(unresolved.callType, null);
+  assert.equal(missingRevision.callType, null);
 });
 
 test("generation Q37 groups mapped pending facts before making a candidate decision", () => {
