@@ -16,6 +16,7 @@
 // activates, deactivates or re-runs a workflow.
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import { kvGet, kvSet, shouldAlert, kvConfigured } from "../seq/_lib/booking-stop.mjs";
+import { cronAuth } from "../seq/_lib/core.mjs";
 
 export const config = { maxDuration: 60 };
 

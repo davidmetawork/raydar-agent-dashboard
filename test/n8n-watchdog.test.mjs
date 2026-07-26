@@ -62,3 +62,20 @@ test("a once-daily failure is not drowned out by a five-minute workflow", () => 
   assert.ok(daily, "the daily workflow's failures must be visible");
   assert.equal(daily.streak, 9);
 });
+
+// Smoke test the ACTUAL handler, not just the pure helper. The first version of
+// the auth tightening referenced cronAuth without importing it here; every unit
+// test still passed because they only exercised failureStreaks, and production
+// answered 500 instead of 401. Exercising the request path catches that class.
+test("the handler rejects an unauthenticated request without throwing", async () => {
+  const { default: handler } = await import("../api/ops/n8n-watchdog.mjs");
+  let status = null, body = null;
+  const res = { status(c) { status = c; return this; }, json(b) { body = b; return this; } };
+  const prev = process.env.CRON_SECRET;
+  process.env.CRON_SECRET = "s3cret";
+  try {
+    await handler({ headers: { "x-vercel-cron": "1" } }, res);
+    assert.equal(status, 401, "must be a clean 401, not a crash");
+    assert.equal(body.ok, false);
+  } finally { if (prev === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = prev; }
+});
