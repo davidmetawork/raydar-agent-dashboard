@@ -478,6 +478,7 @@ export function __mintTestStoreAuthority({
     plan,
     planData,
     planSemanticDigest: planData.planSemanticDigest,
+    lineageDigest: planData.lineageDigest,
     sourceCasRevision: planData.sourceCasRevision,
     serverTrustedNow,
     issuedAt: serverTrustedNow,
@@ -1322,7 +1323,12 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
       },
     );
   };
-  const authorize = ({ plan, decisionAt, expiresAt, observedAt }) => {
+  const authorizationDecision = ({
+    plan,
+    decisionAt,
+    expiresAt,
+    observedAt,
+  }) => {
     const authority = contract.__mintTestStoreAuthority({
       plan,
       serverTrustedNow: decisionAt,
@@ -1336,6 +1342,15 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
       }),
       trustedNow: decisionAt,
       globalWriteAuthority: authority,
+    });
+    return decision;
+  };
+  const authorize = ({ plan, decisionAt, expiresAt, observedAt }) => {
+    const decision = authorizationDecision({
+      plan,
+      decisionAt,
+      expiresAt,
+      observedAt,
     });
     assert.equal(decision.allowed, true);
     return contract.buildAuthorizedPhase4CuratedListAddRequest({
@@ -1364,12 +1379,37 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
   });
   assert.equal(firstPlan.attemptNumber, 1);
   assert.equal(firstPlan.maxAttempts, 3);
+  const parallelRootPlan = contract.planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof,
+    preReadback: initialReadback,
+    maxAttempts: 3,
+  });
+  const parallelAuthorization = authorizationDecision({
+    plan: firstPlan,
+    decisionAt: AUTH_AT,
+    expiresAt: "2026-07-26T00:10:00.000Z",
+    observedAt: NOTIFICATION_AT,
+  });
+  assert.equal(parallelAuthorization.allowed, true);
   const firstRequest = authorize({
     plan: firstPlan,
     decisionAt: AUTH_AT,
     expiresAt: "2026-07-26T00:10:00.000Z",
     observedAt: NOTIFICATION_AT,
   });
+  assert.throws(() => (
+    contract.buildAuthorizedPhase4CuratedListAddRequest({
+      plan: firstPlan,
+      authorization: parallelAuthorization.authorization,
+      executionAt: AUTH_AT,
+      ...CONTEXT,
+      trustedNow: AUTH_AT,
+    })
+  ), /NOT_AUTHORIZED/u);
   for (const wrappedRequest of [
     new Proxy(firstRequest, {}),
     { ...firstRequest },
@@ -1400,6 +1440,24 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     observedAt: POST_READ_AT,
     trustedNow: COUNT_AT,
   });
+  const uncertainReconciliation =
+    contract.reconcilePhase4CuratedListWrite({
+      plan: firstPlan,
+      mutationOutcome: firstOutcome,
+      attemptCount: 1,
+      maxAttempts: 3,
+      trustedNow: COUNT_AT,
+    });
+  assert.equal(uncertainReconciliation.action, "readback_only");
+  assert.throws(() => contract.planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: COUNT_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof,
+    preReadback: firstPartialReadback,
+    maxAttempts: 3,
+  }), /active write lineage cannot mint a fresh root/u);
   const firstReconciliation =
     contract.reconcilePhase4CuratedListWrite({
       plan: firstPlan,
@@ -1413,6 +1471,31 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
   assert.equal(
     firstReconciliation.replanRequirement.nextAttemptNumber,
     2,
+  );
+  for (const omittedMatchProof of [
+    matchProof,
+    normalizeMatch(COUNT_AT),
+  ]) {
+    assert.throws(() => contract.planPhase4CuratedListWrite({
+      ...CONTEXT,
+      trustedNow: COUNT_AT,
+      candidateId: CANDIDATE_ID,
+      candidateUserId: CANDIDATE_USER_ID,
+      matchProof: omittedMatchProof,
+      preReadback: firstPartialReadback,
+      maxAttempts: 3,
+    }), /exact next replanRequirement/u);
+  }
+  const forkAuthorityDecision = authorizationDecision({
+    plan: parallelRootPlan,
+    decisionAt: "2026-07-26T00:06:30.000Z",
+    expiresAt: "2026-07-26T00:11:00.000Z",
+    observedAt: "2026-07-26T00:06:15.000Z",
+  });
+  assert.equal(forkAuthorityDecision.allowed, false);
+  assert.equal(
+    forkAuthorityDecision.reasons.includes("write_plan_invalid"),
+    true,
   );
 
   const secondPlan = contract.planPhase4CuratedListWrite({
@@ -1501,7 +1584,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     attemptCount: 2,
     maxAttempts: 3,
     trustedNow: "2026-07-26T00:10:00.000Z",
-  }), /exact registered/u);
+  }), /current write lineage/u);
 
   const thirdPlan = contract.planPhase4CuratedListWrite({
     ...CONTEXT,

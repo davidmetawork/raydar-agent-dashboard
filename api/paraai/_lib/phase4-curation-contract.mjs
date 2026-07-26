@@ -82,6 +82,10 @@ const mutationOutcomeRegistry = new WeakMap();
 const replanRequirementRegistry = new WeakMap();
 const globalWriteAuthorityRegistry = new WeakMap();
 const captureEvidenceVerificationRegistry = new WeakMap();
+// Process-local lineage state is an additional anti-fork fence. Operational
+// durability still comes from the separately registered store-CAS authority,
+// which must bind the same opaque lineage digest, attempt, and immutable max.
+const writeLineageRegistry = new Map();
 const consumedReplanRequirements = new WeakSet();
 const consumedGlobalWriteAuthorities = new WeakSet();
 const consumedWriteAuthorizations = new WeakSet();
@@ -1252,6 +1256,7 @@ export function phase4CuratedListMutationOutcome(rawArguments = {}) {
         contractVersion: requestData.contractVersion,
         ...proofScopeFields(requestData),
         planSemanticDigest: requestData.planSemanticDigest,
+        lineageDigest: requestData.lineageDigest,
         attemptNumber: requestData.attemptNumber,
         maxAttempts: requestData.maxAttempts,
         captureSemanticDigest: requestData.captureSemanticDigest,
@@ -1791,6 +1796,14 @@ export function normalizePhase4NotificationSafetyProof(
  * not a mutation authorization; the code-owned capture attestation remains
  * unpinned and no authorized request can currently be created.
  */
+function writeLineageDigest(context, candidateId) {
+  return canonicalDigest({
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    ...proofScopeFields(context),
+    candidateId,
+  });
+}
+
 export function planPhase4CuratedListWrite(rawArguments = {}) {
   const args = shallowArgumentSnapshot(
     rawArguments,
@@ -1941,12 +1954,27 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
   ) {
     throw new TypeError("identityProof is invalid");
   }
+  const lineageDigest = writeLineageDigest(
+    context,
+    exactCandidateId,
+  );
+  const lineageState = writeLineageRegistry.get(lineageDigest) || null;
+  if (replanRequirement === null && lineageState !== null) {
+    throw new TypeError(lineageState.phase === "replan_required"
+      ? "an existing write lineage requires its exact next replanRequirement"
+      : "an active write lineage cannot mint a fresh root plan");
+  }
   if (
     replanRequirement !== null
     && (
       !replanData
+      || !lineageState
+      || lineageState.phase !== "replan_required"
+      || lineageState.replanRequirement !== replanRequirement
+      || lineageState.replanData !== replanData
       || consumedReplanRequirements.has(replanRequirement)
       || !sameScope(replanData, context)
+      || replanData.lineageDigest !== lineageDigest
       || replanData.candidateId !== exactCandidateId
       || replanData.candidateUserId !== exactCandidateUserId
       || replanData.postReadback !== preReadback
@@ -1990,6 +2018,7 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
       || replanData.requirementDigest !== canonicalDigest({
         contractVersion: replanData.contractVersion,
         ...proofScopeFields(replanData),
+        lineageDigest: replanData.lineageDigest,
         candidateId: replanData.candidateId,
         candidateUserId: replanData.candidateUserId,
         priorPlanSemanticDigest:
@@ -2058,6 +2087,7 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
     preReadbackResponseDigest: readbackData.responseDigest,
     replanRequirementDigest:
       replanData?.requirementDigest || null,
+    lineageDigest,
     attemptNumber: replanData?.nextAttemptNumber || 1,
     maxAttempts: replanData?.maxAttempts || requestedMaxAttempts,
     plannedAt: context.trustedNow,
@@ -2068,6 +2098,7 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
     ...proofScopeFields(context),
     candidateId: exactCandidateId,
     candidateUserId: exactCandidateUserId,
+    lineageDigest,
     matchProof,
     preReadback,
     identityProof,
@@ -2103,6 +2134,15 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
   );
   if (replanRequirement !== null) {
     consumedReplanRequirements.add(replanRequirement);
+    writeLineageRegistry.set(lineageDigest, Object.freeze({
+      phase: "replan_planned",
+      plan: artifact,
+      planData: registeredData(writePlanRegistry, artifact),
+      attemptNumber: fields.attemptNumber,
+      maxAttempts: fields.maxAttempts,
+      replanRequirement,
+      replanData,
+    }));
   }
   return artifact;
 }
@@ -2119,6 +2159,7 @@ function expectedWritePlanSemanticDigest(planData) {
     preReadbackResponseDigest: planData.readbackData.responseDigest,
     replanRequirementDigest:
       planData.replanData?.requirementDigest || null,
+    lineageDigest: planData.lineageDigest,
     attemptNumber: planData.attemptNumber,
     maxAttempts: planData.maxAttempts,
     plannedAt: planData.plannedAt,
@@ -2126,7 +2167,11 @@ function expectedWritePlanSemanticDigest(planData) {
   });
 }
 
-function privateWritePlanLineageValid(plan, planData) {
+function privateWritePlanLineageValid(
+  plan,
+  planData,
+  { forNewRequest = false } = {},
+) {
   if (
     !planData
     || registeredData(writePlanRegistry, plan) !== planData
@@ -2147,13 +2192,19 @@ function privateWritePlanLineageValid(plan, planData) {
         ) !== planData.identityData
     )
     || planData.contractVersion !== PHASE4_CURATION_CONTRACT_VERSION
+    || !lowercaseDigest(planData.lineageDigest)
+    || planData.lineageDigest !== writeLineageDigest(
+      planData,
+      planData.candidateId,
+    )
     || planData.planSemanticDigest
       !== expectedWritePlanSemanticDigest(planData)
   ) {
     return false;
   }
+  let structurallyValid;
   if (planData.replanRequirement === null) {
-    return (
+    structurallyValid = (
       planData.replanData === null
       && planData.attemptNumber === 1
       && Number.isSafeInteger(planData.maxAttempts)
@@ -2161,19 +2212,46 @@ function privateWritePlanLineageValid(plan, planData) {
       && planData.maxAttempts
         <= PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX
     );
+  } else {
+    const requirementData = registeredData(
+      replanRequirementRegistry,
+      planData.replanRequirement,
+    );
+    structurallyValid = Boolean(
+      requirementData
+      && requirementData === planData.replanData
+      && requirementData.lineageDigest === planData.lineageDigest
+      && planData.attemptNumber === requirementData.nextAttemptNumber
+      && planData.maxAttempts === requirementData.maxAttempts
+      && requirementData.nextAttemptNumber
+        === requirementData.completedAttemptCount + 1
+      && requirementData.postReadback === planData.preReadback
+    );
   }
-  const requirementData = registeredData(
-    replanRequirementRegistry,
-    planData.replanRequirement,
-  );
+  if (!structurallyValid) return false;
+
+  const lineageState = writeLineageRegistry.get(
+    planData.lineageDigest,
+  ) || null;
+  if (lineageState === null) {
+    return planData.attemptNumber === 1;
+  }
+  if (
+    lineageState.phase === "replan_planned"
+    && lineageState.plan === plan
+    && lineageState.planData === planData
+    && lineageState.attemptNumber === planData.attemptNumber
+    && lineageState.maxAttempts === planData.maxAttempts
+  ) {
+    return true;
+  }
   return Boolean(
-    requirementData
-    && requirementData === planData.replanData
-    && planData.attemptNumber === requirementData.nextAttemptNumber
-    && planData.maxAttempts === requirementData.maxAttempts
-    && requirementData.nextAttemptNumber
-      === requirementData.completedAttemptCount + 1
-    && requirementData.postReadback === planData.preReadback
+    !forNewRequest
+    && lineageState.phase === "attempt_in_flight"
+    && lineageState.plan === plan
+    && lineageState.planData === planData
+    && lineageState.attemptNumber === planData.attemptNumber
+    && lineageState.maxAttempts === planData.maxAttempts
   );
 }
 
@@ -2217,7 +2295,9 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
   );
   const reasons = [];
   const decisionAtIso = canonicalIso(args.trustedNow);
-  const validPlan = privateWritePlanLineageValid(plan, planData);
+  const validPlan = privateWritePlanLineageValid(plan, planData, {
+    forNewRequest: true,
+  });
   const captureDecision = currentPhase4CuratedListCaptureDecision({
     trustedNow: decisionAtIso,
   });
@@ -2252,6 +2332,7 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
     || !sameScope(authorityData, planData)
     || authorityData.planSemanticDigest
       !== planData.planSemanticDigest
+    || authorityData.lineageDigest !== planData?.lineageDigest
     || authorityData.contractVersion
       !== PHASE4_CURATION_CONTRACT_VERSION
     || authorityData.sourceCasRevision !== planData?.sourceCasRevision
@@ -2337,6 +2418,7 @@ export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
         ...proofScopeFields(planData),
         contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
         planSemanticDigest: planData.planSemanticDigest,
+        lineageDigest: planData.lineageDigest,
         attemptNumber: planData.attemptNumber,
         maxAttempts: planData.maxAttempts,
         captureSemanticDigest:
@@ -2433,7 +2515,9 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     trustedNow: executionAtIso,
   });
   if (
-    !privateWritePlanLineageValid(plan, planData)
+    !privateWritePlanLineageValid(plan, planData, {
+      forNewRequest: true,
+    })
     || !authorizationData
     || consumedWriteAuthorizations.has(authorization)
     || authorizationData.allowed !== true
@@ -2441,6 +2525,7 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     || authorizationData.planData !== planData
     || authorizationData.planSemanticDigest
       !== planData.planSemanticDigest
+    || authorizationData.lineageDigest !== planData.lineageDigest
     || authorizationData.attemptNumber !== planData.attemptNumber
     || authorizationData.maxAttempts !== planData.maxAttempts
     || authorizationData.contractVersion
@@ -2470,6 +2555,7 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     || authorityData.planData !== planData
     || authorityData.planSemanticDigest
       !== planData.planSemanticDigest
+    || authorityData.lineageDigest !== planData.lineageDigest
     || authorityData.sourceCasRevision !== planData.sourceCasRevision
     || authorityData.attemptNumber !== planData.attemptNumber
     || authorityData.maxAttempts !== planData.maxAttempts
@@ -2497,6 +2583,7 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
     ...proofScopeFields(context),
     planSemanticDigest: planData.planSemanticDigest,
+    lineageDigest: planData.lineageDigest,
     attemptNumber: planData.attemptNumber,
     maxAttempts: planData.maxAttempts,
     captureSemanticDigest: authorizationData.captureSemanticDigest,
@@ -2512,6 +2599,7 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
     plan,
     planSemanticDigest: planData.planSemanticDigest,
+    lineageDigest: planData.lineageDigest,
     attemptNumber: planData.attemptNumber,
     maxAttempts: planData.maxAttempts,
     captureSemanticDigest: authorizationData.captureSemanticDigest,
@@ -2538,6 +2626,15 @@ export function buildAuthorizedPhase4CuratedListAddRequest(
       authorityExpiresAt: authorityData.expiresAt,
     },
   );
+  writeLineageRegistry.set(planData.lineageDigest, Object.freeze({
+    phase: "attempt_in_flight",
+    plan,
+    planData,
+    request,
+    requestData: registeredData(authorizedRequestRegistry, request),
+    attemptNumber: planData.attemptNumber,
+    maxAttempts: planData.maxAttempts,
+  }));
   consumedWriteAuthorizations.add(authorization);
   consumedGlobalWriteAuthorities.add(authority);
   return request;
@@ -2584,11 +2681,16 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
     readbackProofRegistry,
     postReadback,
   );
+  const lineageState = planData
+    ? writeLineageRegistry.get(planData.lineageDigest) || null
+    : null;
   if (
     !privateWritePlanLineageValid(plan, planData)
     || planData.noMutationRequired
   ) {
-    throw new TypeError("plan must require a Curated List mutation");
+    throw new TypeError(
+      "plan must require a Curated List mutation in the current write lineage",
+    );
   }
   strictPositiveInteger(attemptCount, "attemptCount");
   strictPositiveInteger(maxAttempts, "maxAttempts");
@@ -2600,6 +2702,14 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
     !context
     || !outcomeData
     || !requestData
+    || !lineageState
+    || lineageState.phase !== "attempt_in_flight"
+    || lineageState.plan !== plan
+    || lineageState.planData !== planData
+    || lineageState.request !== request
+    || lineageState.requestData !== requestData
+    || lineageState.attemptNumber !== planData.attemptNumber
+    || lineageState.maxAttempts !== planData.maxAttempts
     || reconciledMutationOutcomes.has(mutationOutcome)
     || outcomeData.requestData !== requestData
     || requestData.plan !== plan
@@ -2679,6 +2789,7 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
         const fields = {
           contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
           ...proofScopeFields(context),
+          lineageDigest: planData.lineageDigest,
           candidateId: planData.candidateId,
           candidateUserId: planData.candidateUserId,
           priorPlanSemanticDigest: planData.planSemanticDigest,
@@ -2721,6 +2832,45 @@ export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
   );
   if (!policyDecision.readbackOnly) {
     reconciledMutationOutcomes.add(mutationOutcome);
+    if (replanRequirement !== null) {
+      writeLineageRegistry.set(
+        planData.lineageDigest,
+        Object.freeze({
+          phase: "replan_required",
+          priorPlan: plan,
+          priorPlanData: planData,
+          priorRequest: request,
+          priorRequestData: requestData,
+          priorOutcome: mutationOutcome,
+          priorOutcomeData: outcomeData,
+          postReadback,
+          postReadbackData,
+          replanRequirement,
+          replanData: registeredData(
+            replanRequirementRegistry,
+            replanRequirement,
+          ),
+          nextAttemptNumber: attemptCount + 1,
+          maxAttempts,
+        }),
+      );
+    } else {
+      writeLineageRegistry.set(
+        planData.lineageDigest,
+        Object.freeze({
+          phase: "terminal",
+          plan,
+          planData,
+          request,
+          requestData,
+          outcome: mutationOutcome,
+          outcomeData,
+          action: policyDecision.action,
+          attemptNumber: attemptCount,
+          maxAttempts,
+        }),
+      );
+    }
   }
 
   return Object.freeze({
