@@ -10,6 +10,10 @@ import {
   SOURCE_WATERMARK_APPROVED_COLLECTORS,
   SOURCE_WATERMARK_AUTHORITY_KEY_ENV,
   SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION,
+  SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV,
+  SOURCE_IDENTITY_BINDING_RECEIPT_VERSION,
+  SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
+  SOURCE_IDENTITY_POINT_READ_PROCEDURES,
   SOURCE_WATERMARK_POLICY_VERSION,
   SOURCE_WATERMARK_SOURCES,
   SourceWatermarkInvariantError,
@@ -24,6 +28,13 @@ import {
   validatePhase4WriteBoundaryAttestation,
   validateSourceWatermarkGeneration,
 } from "../api/paraai/_lib/source-watermark.mjs";
+import {
+  activateSourceAuthorityGeneration,
+  consumeSourceAuthorityWriteReservation,
+  getSourceAuthorityOperationalStatus,
+  readCurrentSourceAuthority,
+  reserveSourceAuthorityWrite,
+} from "../api/paraai/_lib/source-authority-store.mjs";
 
 const T = "2026-07-26T00:00:00.000Z";
 const COMMITTED_AT = "2026-07-26T00:06:00.000Z";
@@ -38,6 +49,10 @@ const RECORD_RECALL_A = digest("3");
 const RECORD_RECALL_B = digest("4");
 const RECORD_HUMAN_A = digest("5");
 const RECORD_HUMAN_B = digest("6");
+const REVISION_RECALL_A = "31".repeat(32);
+const REVISION_RECALL_B = "41".repeat(32);
+const REVISION_HUMAN_A = "51".repeat(32);
+const REVISION_HUMAN_B = "61".repeat(32);
 const RECALL_EPOCH = digest("d");
 const PARAFORM_EPOCH = digest("e");
 const ALIAS_EPOCH = "ab".repeat(32);
@@ -45,13 +60,21 @@ const GENERATION_NONCE = digest("7");
 const COMMIT_REVISION = digest("8");
 const JOB_REVISION = digest("9");
 const WRITE_SCOPE = digest("0");
+const JOB_BINDING = "15".repeat(32);
+const SETTLED_RESULT = "16".repeat(32);
 const DURABLE_GENERATION_REVISION = "10".repeat(32);
 const RESERVED_JOB_REVISION = "11".repeat(32);
 const AUTHORITY_NONCE = "12".repeat(32);
 const RESERVATION_NONCE = "13".repeat(32);
 const AUTHORITY_KEY_BYTES = Buffer.alloc(32, 0x42);
 const AUTHORITY_KEY = AUTHORITY_KEY_BYTES.toString("base64url");
+const IDENTITY_KEY_BYTES = Buffer.alloc(32, 0x24);
+const IDENTITY_KEY = IDENTITY_KEY_BYTES.toString("base64url");
 process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV] = AUTHORITY_KEY;
+process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV] =
+  IDENTITY_KEY;
+process.env.KV_REST_API_URL = "https://kv.test.invalid";
+process.env.KV_REST_API_TOKEN = "test-token";
 
 function canonicalJson(value) {
   if (value === null) return "null";
@@ -89,6 +112,25 @@ function signAuthorityReceipt(
 ) {
   return createHmac("sha256", key)
     .update("phase4-source-authority-receipt-v1")
+    .update("\0")
+    .update(canonicalJson(material))
+    .digest("hex");
+}
+
+function identityBindingKeyId(key = IDENTITY_KEY_BYTES) {
+  return createHash("sha256")
+    .update("phase4-source-identity-binding-key-id-v1")
+    .update("\0")
+    .update(key)
+    .digest("hex");
+}
+
+function signIdentityBindingReceipt(
+  material,
+  key = IDENTITY_KEY_BYTES,
+) {
+  return createHmac("sha256", key)
+    .update("phase4-source-identity-binding-receipt-v1")
     .update("\0")
     .update(canonicalJson(material))
     .digest("hex");
@@ -217,6 +259,18 @@ function sourceRecordForAlias(candidateUser) {
     : RECORD_HUMAN_A;
 }
 
+function sourceRevisionForCandidate(candidate) {
+  return candidate === CANDIDATE_B
+    ? REVISION_RECALL_B
+    : REVISION_RECALL_A;
+}
+
+function sourceRevisionForAlias(candidateUser) {
+  return candidateUser === CANDIDATE_USER_B
+    ? REVISION_HUMAN_B
+    : REVISION_HUMAN_A;
+}
+
 function aliasEvidenceEntry(entry) {
   return {
     ...entry,
@@ -230,13 +284,98 @@ function aliasEvidenceEntry(entry) {
       || sourceRecordForAlias(
         entry.candidateUserAliasDigest,
       ),
+    recallRecordRevisionDigest:
+      entry.recallRecordRevisionDigest
+      || sourceRevisionForCandidate(
+        entry.canonicalCandidateDigest,
+      ),
+    paraformHumanRecordRevisionDigest:
+      entry.paraformHumanRecordRevisionDigest
+      || sourceRevisionForAlias(
+        entry.candidateUserAliasDigest,
+      ),
+  };
+}
+
+function identityBindingReceiptFixture(
+  entry,
+  {
+    decisionBoundaryAt = T,
+    overrides = {},
+  } = {},
+) {
+  const {
+    receiptMac: overrideMac,
+    signingKey = IDENTITY_KEY_BYTES,
+    ...fields
+  } = overrides;
+  const material = {
+    version: SOURCE_IDENTITY_BINDING_RECEIPT_VERSION,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    kind: "cross_source_identity_binding",
+    canonicalCandidateDigest:
+      entry.canonicalCandidateDigest,
+    candidateUserAliasDigest:
+      entry.candidateUserAliasDigest,
+    recallRecordDigest: entry.recallRecordDigest,
+    recallRecordRevisionDigest:
+      entry.recallRecordRevisionDigest,
+    paraformHumanRecordDigest:
+      entry.paraformHumanRecordDigest,
+    paraformHumanRecordRevisionDigest:
+      entry.paraformHumanRecordRevisionDigest,
+    recallPointReadProcedure:
+      SOURCE_IDENTITY_POINT_READ_PROCEDURES.recall,
+    recallNormalizedInputDigest: semanticDigest(
+      "test-recall-point-read-input-v1",
+      entry.recallRecordDigest,
+    ),
+    paraformHumanPointReadProcedure:
+      SOURCE_IDENTITY_POINT_READ_PROCEDURES.paraformHuman,
+    paraformHumanNormalizedInputDigest: semanticDigest(
+      "test-paraform-point-read-input-v1",
+      entry.paraformHumanRecordDigest,
+    ),
+    decisionBoundaryAt,
+    observedAt: "2026-07-26T00:00:30.000Z",
+    collectorArtifactDigest:
+      SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
+    joinEvidenceDigest: semanticDigest(
+      "test-identity-join-evidence-v1",
+      {
+        canonicalCandidateDigest:
+          entry.canonicalCandidateDigest,
+        candidateUserAliasDigest:
+          entry.candidateUserAliasDigest,
+      },
+    ),
+    receiptNonceDigest: "14".repeat(32),
+    authorityKeyIdDigest: identityBindingKeyId(),
+    ...fields,
+  };
+  return {
+    ...material,
+    receiptMac: overrideMac
+      || signIdentityBindingReceipt(material, signingKey),
   };
 }
 
 function aliasMapFixture(entries, overrides = {}) {
-  const normalizedEntries = entries.map(aliasEvidenceEntry);
   const decisionBoundaryAt =
     overrides.decisionBoundaryAt || T;
+  const normalizedEntries = entries.map((entry) => {
+    const normalized = aliasEvidenceEntry(entry);
+    return {
+      ...normalized,
+      identityBindingReceipt:
+        entry.identityBindingReceipt === null
+          ? null
+          : entry.identityBindingReceipt
+            || identityBindingReceiptFixture(normalized, {
+              decisionBoundaryAt,
+            }),
+    };
+  });
   const semanticDigest = sourceWatermarkAliasSetDigest({
     decisionBoundaryAt,
     entries: normalizedEntries,
@@ -284,6 +423,10 @@ const recallSuccess = ({
 } = {}) => ({
   source: SOURCE_WATERMARK_SOURCES.RECALL,
   recordDigest: record,
+  recordRevisionDigest:
+    record === RECORD_RECALL_B
+      ? REVISION_RECALL_B
+      : REVISION_RECALL_A,
   classification: "success",
   identityStatus: "resolved",
   identityKind: "canonical_candidate",
@@ -299,6 +442,10 @@ const humanSuccess = ({
 } = {}) => ({
   source: SOURCE_WATERMARK_SOURCES.PARAFORM_HUMAN,
   recordDigest: record,
+  recordRevisionDigest:
+    record === RECORD_HUMAN_B
+      ? REVISION_HUMAN_B
+      : REVISION_HUMAN_A,
   classification: "success",
   identityStatus: "resolved",
   identityKind: "candidate_user_alias",
@@ -439,6 +586,261 @@ function currentEpochs(overrides = {}) {
     paraformHuman: PARAFORM_EPOCH,
     aliases: ALIAS_EPOCH,
     ...overrides,
+  };
+}
+
+function createAuthorityKvFake({
+  nowMs = Date.now(),
+} = {}) {
+  const records = new Map();
+  const commands = [];
+  const redisTime = () => [
+    String(Math.floor(nowMs / 1_000)),
+    String((nowMs % 1_000) * 1_000),
+  ];
+  const read = (key) => records.get(key) || "";
+  const parse = (key) => {
+    const raw = read(key);
+    return raw ? JSON.parse(raw) : null;
+  };
+  const write = (key, value) => {
+    const raw = JSON.stringify(value);
+    records.set(key, raw);
+    return raw;
+  };
+  const kv = async (command) => {
+    commands.push(command);
+    const script = command[1];
+    const keys = command.slice(3, 3 + Number(command[2]));
+    const args = command.slice(3 + Number(command[2]));
+    const time = redisTime();
+
+    if (script.includes("proposed.activatedAtMs = nowMs")) {
+      const current = parse(keys[0]);
+      if (current) {
+        if (
+          !args[0]
+          || current.generationRecordDigest !== args[0]
+          || current.durableGenerationRevisionDigest !== args[1]
+          || current.durableRecordReceiptDigest !== args[2]
+          || current.sourceEpochs.recall !== args[3]
+          || current.sourceEpochs.paraformHuman !== args[4]
+          || current.sourceEpochs.aliases !== args[5]
+        ) {
+          return [-3, read(keys[0]), ...time];
+        }
+      } else if (args[0]) {
+        return [-4, "", ...time];
+      }
+      if (current && Number(args[6]) < nowMs) {
+        return [-7, read(keys[0]), ...time];
+      }
+      const proposed = JSON.parse(args[7]);
+      if (
+        proposed.evidenceCeilingAtMs
+          > nowMs + Number(args[8])
+      ) {
+        return [-8, "", ...time];
+      }
+      proposed.activatedAtMs = nowMs;
+      return [1, write(keys[0], proposed), ...time];
+    }
+
+    if (script.includes("reservation.status = 'consumed'")) {
+      const active = parse(keys[0]);
+      const job = parse(keys[1]);
+      const reservation = parse(keys[2]);
+      if (!active || !job || !reservation) {
+        return [-4, read(keys[2]), ...time];
+      }
+      if (
+        active.generationRecordDigest !== args[0]
+        || active.durableGenerationRevisionDigest !== args[1]
+        || active.durableRecordReceiptDigest !== args[2]
+        || active.sourceEpochs.recall !== args[3]
+        || active.sourceEpochs.paraformHuman !== args[4]
+        || active.sourceEpochs.aliases !== args[5]
+        || createHash("sha1").update(read(keys[0]))
+          .digest("hex") !== args[15]
+      ) {
+        return [-3, read(keys[2]), ...time];
+      }
+      if (
+        job.jobBindingDigest !== args[6]
+        || job.canonicalCandidateDigest !== args[7]
+        || job.candidateUserAliasDigest !== args[8]
+        || job.jobRevisionDigest !== args[9]
+        || job.writeScopeDigest !== args[10]
+      ) {
+        return [-5, read(keys[2]), ...time];
+      }
+      if (
+        reservation.reservationRecordSha1 !== args[11]
+        || reservation.reservationNonceDigest !== args[12]
+        || reservation.durableRecordReceiptDigest !== args[2]
+        || reservation.jobBindingDigest !== args[6]
+        || reservation.jobRevisionDigest !== args[9]
+        || reservation.writeScopeDigest !== args[10]
+        || reservation.activeRecordSha1 !== args[15]
+      ) {
+        return [-6, read(keys[2]), ...time];
+      }
+      if (reservation.status === "consumed") {
+        return reservation.settledResultDigest === args[13]
+          ? [2, read(keys[2]), ...time]
+          : [-9, read(keys[2]), ...time];
+      }
+      if (reservation.expiresAtMs < nowMs) {
+        return [-7, read(keys[2]), ...time];
+      }
+      reservation.status = "consumed";
+      reservation.settledResultDigest = args[13];
+      reservation.consumedAtMs = nowMs;
+      return [1, write(keys[2], reservation), ...time];
+    }
+
+    if (script.includes("local reservation = {")) {
+      const active = parse(keys[0]);
+      const job = parse(keys[1]);
+      if (!active || !job) {
+        return [-4, read(keys[0]), read(keys[1]), "", ...time];
+      }
+      if (
+        active.generationRecordDigest !== args[0]
+        || active.durableGenerationRevisionDigest !== args[1]
+        || active.durableRecordReceiptDigest !== args[2]
+        || active.sourceEpochs.recall !== args[3]
+        || active.sourceEpochs.paraformHuman !== args[4]
+        || active.sourceEpochs.aliases !== args[5]
+        || createHash("sha1").update(read(keys[0]))
+          .digest("hex") !== args[20]
+      ) {
+        return [
+          -3,
+          read(keys[0]),
+          read(keys[1]),
+          "",
+          ...time,
+        ];
+      }
+      if (
+        job.version !== 1
+        || job.policyVersion !== args[6]
+        || job.status !== "ready"
+        || job.jobBindingDigest !== args[7]
+        || job.canonicalCandidateDigest !== args[8]
+        || job.candidateUserAliasDigest !== args[9]
+        || job.jobRevisionDigest !== args[10]
+        || job.writeScopeDigest !== args[11]
+      ) {
+        return [
+          -5,
+          read(keys[0]),
+          read(keys[1]),
+          "",
+          ...time,
+        ];
+      }
+      const existing = parse(keys[2]);
+      if (existing) {
+        const exact = (
+          existing.durableRecordReceiptDigest === args[2]
+          && existing.jobBindingDigest === args[7]
+          && existing.canonicalCandidateDigest === args[8]
+          && existing.candidateUserAliasDigest === args[9]
+          && existing.jobRevisionDigest === args[10]
+          && existing.writeScopeDigest === args[11]
+          && existing.activeRecordSha1 === args[20]
+        );
+        return [
+          exact ? 2 : -6,
+          read(keys[0]),
+          read(keys[1]),
+          read(keys[2]),
+          ...time,
+        ];
+      }
+      const expiresAtMs = Math.min(
+        nowMs + Number(args[12]),
+        Number(args[13]),
+      );
+      if (expiresAtMs <= nowMs) {
+        return [
+          -7,
+          read(keys[0]),
+          read(keys[1]),
+          "",
+          ...time,
+        ];
+      }
+      const reservation = {
+        version: 1,
+        policyVersion: args[6],
+        status: "reserved",
+        generationRecordDigest: args[0],
+        durableGenerationRevisionDigest: args[1],
+        durableRecordReceiptDigest: args[2],
+        activeRecordSha1: args[20],
+        sourceEpochs: {
+          recall: args[3],
+          paraformHuman: args[4],
+          aliases: args[5],
+        },
+        jobBindingDigest: args[7],
+        canonicalCandidateDigest: args[8],
+        candidateUserAliasDigest: args[9],
+        jobRevisionDigest: args[10],
+        writeScopeDigest: args[11],
+        q37DecisionDigest: args[14],
+        callType: args[15],
+        callEndedAt: args[16],
+        reservedJobRevisionDigest: args[17],
+        reservationNonceDigest: args[18],
+        issuedAtMs: nowMs,
+        expiresAtMs,
+        settledResultDigest: null,
+        consumedAtMs: null,
+      };
+      reservation.reservationRecordSha1 = createHash("sha1")
+        .update(JSON.stringify(reservation))
+        .digest("hex");
+      return [
+        1,
+        read(keys[0]),
+        read(keys[1]),
+        write(keys[2], reservation),
+        ...time,
+      ];
+    }
+
+    return [read(keys[0]), ...time];
+  };
+  const putJob = (job = {}) => {
+    const value = {
+      version: 1,
+      policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+      status: "ready",
+      jobBindingDigest: JOB_BINDING,
+      canonicalCandidateDigest: CANDIDATE_A,
+      candidateUserAliasDigest: CANDIDATE_USER_A,
+      jobRevisionDigest: JOB_REVISION,
+      writeScopeDigest: WRITE_SCOPE,
+      ...job,
+    };
+    records.set(
+      `paraai:phase4:source-authority:job:v1:${value.jobBindingDigest}`,
+      JSON.stringify(value),
+    );
+    return value;
+  };
+  return {
+    kv,
+    putJob,
+    records,
+    commands,
+    advance(ms) {
+      nowMs += ms;
+    },
   };
 }
 
@@ -708,6 +1110,26 @@ test("source facts reject duplicates, post-boundary calls, and cross-source iden
 });
 
 test("collector versions and immutable code commitments are exact release pins", () => {
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.recall
+      .artifact.mergeCommit,
+    "e26818f6dc16725d132534cc8da5c7b84e6826e3",
+  );
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.recall
+      .artifact.runtimeFileSha256,
+    "b03ef301a7fe6037c81fa81a833f72231f1be8707fd001d117fdad15626dd04e",
+  );
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.paraform_human
+      .artifact.runtimeFileSha256,
+    "d5e1a75cb8884af409fd7750fb54ced80185c2881b48b3a2042e9b95af621c11",
+  );
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases
+      .collectorCodeCommitmentDigest,
+    null,
+  );
   const facts = [recallSuccess()];
   const certificate = certificateFixture(
     SOURCE_WATERMARK_SOURCES.RECALL,
@@ -838,6 +1260,78 @@ test("alias fan-in, fan-out, and duplicate edges fail closed", () => {
   assert.equal(fanIn.aliasConflictCount, 1);
   assert.equal(duplicate.complete, false);
   assert.equal(duplicate.duplicateEntryCount, 1);
+});
+
+test("cross-source alias edges require a separately authenticated binding receipt", () => {
+  const entry = aliasEvidenceEntry({
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  });
+  const missing = aliasMapFixture([{
+    ...entry,
+    identityBindingReceipt: null,
+  }]);
+  const validReceipt = identityBindingReceiptFixture(entry);
+  const forged = aliasMapFixture([{
+    ...entry,
+    identityBindingReceipt: {
+      ...validReceipt,
+      receiptMac: digest("f"),
+    },
+  }]);
+  const savedKey =
+    process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV];
+  delete process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV];
+  let unavailable;
+  try {
+    unavailable = aliasMapFixture([{
+      ...entry,
+      identityBindingReceipt: validReceipt,
+    }]);
+  } finally {
+    process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV] =
+      savedKey;
+  }
+
+  for (const aliasMap of [missing, forged, unavailable]) {
+    assert.equal(aliasMap.complete, false);
+    assert.equal(aliasMap.identityBindingProvenCount, 0);
+    assert.equal(aliasMap.identityBindingUnprovenCount, 1);
+    assert.ok(
+      aliasMap.reasons.includes(
+        "identity_binding_receipts_unproven",
+      ),
+    );
+  }
+});
+
+test("a swapped structural bijection cannot prove cross-source identity", () => {
+  const first = aliasEvidenceEntry({
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  });
+  const second = aliasEvidenceEntry({
+    canonicalCandidateDigest: CANDIDATE_B,
+    candidateUserAliasDigest: CANDIDATE_USER_B,
+  });
+  const swapped = aliasMapFixture([
+    {
+      ...first,
+      candidateUserAliasDigest: CANDIDATE_USER_B,
+      identityBindingReceipt:
+        identityBindingReceiptFixture(first),
+    },
+    {
+      ...second,
+      candidateUserAliasDigest: CANDIDATE_USER_A,
+      identityBindingReceipt:
+        identityBindingReceiptFixture(second),
+    },
+  ]);
+  assert.equal(swapped.canonicalConflictCount, 0);
+  assert.equal(swapped.aliasConflictCount, 0);
+  assert.equal(swapped.identityBindingProvenCount, 0);
+  assert.equal(swapped.complete, false);
 });
 
 test("Q37 selects the newest successful source and ignores newer failures", () => {
@@ -1149,7 +1643,7 @@ test("synthetic facts and caller assertions cannot replace private store authori
       generationAuthorityReceipt:
         generationAuthorityReceiptFixture(generation),
     });
-    assert.equal(status.status, "untrusted");
+    assert.equal(status.status, "store_required");
     assert.equal(status.phase4Q37Ready, false);
     assert.throws(
       () => buildPhase4WriteBoundaryAttestation({
@@ -1161,14 +1655,14 @@ test("synthetic facts and caller assertions cannot replace private store authori
         jobRevisionDigest: JOB_REVISION,
         writeScopeDigest: WRITE_SCOPE,
       }),
-      (error) => error.code === "SOURCE_AUTHORITY_UNAVAILABLE",
+      (error) => error.code === "SOURCE_AUTHORITY_STORE_REQUIRED",
     );
   } finally {
     process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV] = savedKey;
   }
 });
 
-test("public readiness requires a fresh authenticated durable generation receipt", () => {
+test("caller-fed durable generation receipts never create public readiness", () => {
   const generation = generationFixture({ status: "committed" });
   const authorityReceipt =
     generationAuthorityReceiptFixture(generation);
@@ -1187,12 +1681,12 @@ test("public readiness requires a fresh authenticated durable generation receipt
     generation,
     generationAuthorityReceipt: tamperedRevision,
   });
-  assert.equal(ready.status, "ready");
-  assert.equal(ready.sourceWatermarkComplete, true);
-  assert.equal(ready.phase4Q37Ready, true);
-  assert.equal(missing.status, "untrusted");
+  assert.equal(ready.status, "store_required");
+  assert.equal(ready.sourceWatermarkComplete, false);
+  assert.equal(ready.phase4Q37Ready, false);
+  assert.equal(missing.status, "store_required");
   assert.equal(missing.phase4Q37Ready, false);
-  assert.equal(untrusted.status, "untrusted");
+  assert.equal(untrusted.status, "store_required");
   assert.equal(untrusted.phase4Q37Ready, false);
 });
 
@@ -1211,7 +1705,7 @@ test("validly signed future and expired authority clocks fail closed", () => {
       generation,
       generationAuthorityReceipt: receipt,
     });
-    assert.equal(status.status, "untrusted");
+    assert.equal(status.status, "store_required");
     assert.equal(status.phase4Q37Ready, false);
   }
 });
@@ -1255,294 +1749,385 @@ test("invalid persisted generation fails closed in public status", () => {
   assert.equal(status.phase4Q37Ready, false);
 });
 
-test("write attestation binds manifest, alias, Q37, job revision, and write scope", () => {
+test("pure write APIs cannot mint or validate operational authority", () => {
   const generation = generationFixture({ status: "committed" });
   const generationAuthorityReceipt =
     generationAuthorityReceiptFixture(generation);
-  const attestation = buildPhase4WriteBoundaryAttestation({
-    generation,
-    generationAuthorityReceipt,
-    canonicalCandidateDigest: CANDIDATE_A,
-    candidateUserAliasDigest: CANDIDATE_USER_A,
-    jobRevisionDigest: JOB_REVISION,
-    writeScopeDigest: WRITE_SCOPE,
-  });
-  assert.equal(attestation.manifestDigest, generation.manifestDigest);
-  assert.equal(attestation.callType, "human");
-  assert.equal(
-    attestation.q37DecisionDigest,
-    generation.q37.decisions[0].decisionDigest,
-  );
-  assert.equal(
-    attestation.durableGenerationRevisionDigest,
-    DURABLE_GENERATION_REVISION,
-  );
-  assert.equal(attestation.sourceEpochs.recall, RECALL_EPOCH);
-  assert.equal(
-    attestation.sourceEpochs.paraformHuman,
-    PARAFORM_EPOCH,
-  );
-});
-
-test("atomic write-boundary validator allows only the exact current attestation", () => {
-  const generation = generationFixture({ status: "committed" });
-  const generationAuthorityReceipt =
-    generationAuthorityReceiptFixture(generation);
-  const attestation = buildPhase4WriteBoundaryAttestation({
-    generation,
-    generationAuthorityReceipt,
-    canonicalCandidateDigest: CANDIDATE_A,
-    candidateUserAliasDigest: CANDIDATE_USER_A,
-    jobRevisionDigest: JOB_REVISION,
-    writeScopeDigest: WRITE_SCOPE,
-  });
-  const writeAuthorityReceipt = writeAuthorityReceiptFixture({
-    generation,
-    generationAuthorityReceipt,
-    attestation,
-  });
-  const result = validatePhase4WriteBoundaryAttestation({
-    generation,
-    generationAuthorityReceipt,
-    attestation,
-    writeAuthorityReceipt,
-    expectedCanonicalCandidateDigest: CANDIDATE_A,
-    expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
-    expectedJobRevisionDigest: JOB_REVISION,
-    expectedWriteScopeDigest: WRITE_SCOPE,
-  });
-  assert.equal(result.allowed, true);
-  assert.equal(result.callType, "human");
-  assert.equal(result.manifestDigest, generation.manifestDigest);
-  assert.equal(
-    result.reservedJobRevisionDigest,
-    RESERVED_JOB_REVISION,
-  );
-});
-
-test("write authorization rejects missing, forged, or stale durable authority", () => {
-  const generation = generationFixture({ status: "committed" });
-  const generationAuthorityReceipt =
-    generationAuthorityReceiptFixture(generation);
-  const attestation = buildPhase4WriteBoundaryAttestation({
-    generation,
-    generationAuthorityReceipt,
-    canonicalCandidateDigest: CANDIDATE_A,
-    candidateUserAliasDigest: CANDIDATE_USER_A,
-    jobRevisionDigest: JOB_REVISION,
-    writeScopeDigest: WRITE_SCOPE,
-  });
-  const writeAuthorityReceipt = writeAuthorityReceiptFixture({
-    generation,
-    generationAuthorityReceipt,
-    attestation,
-  });
-  const base = {
-    generation,
-    generationAuthorityReceipt,
-    attestation,
-    writeAuthorityReceipt,
-    expectedCanonicalCandidateDigest: CANDIDATE_A,
-    expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
-    expectedJobRevisionDigest: JOB_REVISION,
-    expectedWriteScopeDigest: WRITE_SCOPE,
-  };
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      writeAuthorityReceipt: null,
-    }),
-    /write CAS authority receipt must be an object/,
-  );
-  const forgedWrite = {
-    ...writeAuthorityReceipt,
-    receiptMac: digest("f"),
-  };
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      writeAuthorityReceipt: forgedWrite,
-    }),
-    (error) => error.code === "SOURCE_AUTHORITY_RECEIPT_INVALID",
-  );
-  const staleGeneration = generationAuthorityReceiptFixture(
-    generation,
-    {
-      issuedAt: "2026-07-26T00:10:00.000Z",
-      expiresAt: "2026-07-26T00:10:30.000Z",
-    },
-  );
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      generationAuthorityReceipt: staleGeneration,
-    }),
-    (error) => error.code === "SOURCE_AUTHORITY_RECEIPT_STALE",
-  );
-});
-
-test("atomic validator rejects tampering and every expected-boundary mismatch", () => {
-  const generation = generationFixture({ status: "committed" });
-  const generationAuthorityReceipt =
-    generationAuthorityReceiptFixture(generation);
-  const attestation = buildPhase4WriteBoundaryAttestation({
-    generation,
-    generationAuthorityReceipt,
-    canonicalCandidateDigest: CANDIDATE_A,
-    candidateUserAliasDigest: CANDIDATE_USER_A,
-    jobRevisionDigest: JOB_REVISION,
-    writeScopeDigest: WRITE_SCOPE,
-  });
-  const writeAuthorityReceipt = writeAuthorityReceiptFixture({
-    generation,
-    generationAuthorityReceipt,
-    attestation,
-  });
-  const base = {
-    generation,
-    generationAuthorityReceipt,
-    attestation,
-    writeAuthorityReceipt,
-    expectedCanonicalCandidateDigest: CANDIDATE_A,
-    expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
-    expectedJobRevisionDigest: JOB_REVISION,
-    expectedWriteScopeDigest: WRITE_SCOPE,
-  };
-  const tampered = structuredClone(attestation);
-  tampered.jobRevisionDigest = digest("f");
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      attestation: tampered,
-    }),
-    (error) => error.code === "SOURCE_WRITE_ATTESTATION_TAMPERED",
-  );
-  const tamperedDerivedField = structuredClone(attestation);
-  tamperedDerivedField.callType = "agent";
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      attestation: tamperedDerivedField,
-    }),
-    (error) => error.code === "SOURCE_WRITE_ATTESTATION_TAMPERED",
-  );
-  for (const [field, value] of [
-    ["expectedCanonicalCandidateDigest", CANDIDATE_C],
-    ["expectedCandidateUserAliasDigest", digest("f")],
-    ["expectedJobRevisionDigest", digest("f")],
-    ["expectedWriteScopeDigest", digest("f")],
-  ]) {
-    assert.throws(
-      () => validatePhase4WriteBoundaryAttestation({
-        ...base,
-        [field]: value,
-      }),
-      (error) => error.code === "SOURCE_WRITE_EXPECTATION_MISMATCH",
-    );
-  }
-});
-
-test("stale revision and attestation replay cannot cross authority generations", () => {
-  const generation = generationFixture({ status: "committed" });
-  const firstAuthority =
-    generationAuthorityReceiptFixture(generation);
-  const attestation = buildPhase4WriteBoundaryAttestation({
-    generation,
-    generationAuthorityReceipt: firstAuthority,
-    canonicalCandidateDigest: CANDIDATE_A,
-    candidateUserAliasDigest: CANDIDATE_USER_A,
-    jobRevisionDigest: JOB_REVISION,
-    writeScopeDigest: WRITE_SCOPE,
-  });
-  const secondAuthority = generationAuthorityReceiptFixture(
-    generation,
-    {
-      durableGenerationRevisionDigest: digest("f"),
-      receiptNonceDigest: digest("e"),
-    },
-  );
-  const replayReceipt = writeAuthorityReceiptFixture({
-    generation,
-    generationAuthorityReceipt: firstAuthority,
-    attestation,
-  });
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      generation,
-      generationAuthorityReceipt: secondAuthority,
-      attestation,
-      writeAuthorityReceipt: replayReceipt,
-      expectedCanonicalCandidateDigest: CANDIDATE_A,
-      expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
-      expectedJobRevisionDigest: JOB_REVISION,
-      expectedWriteScopeDigest: WRITE_SCOPE,
-    }),
-    (error) => error.code === "SOURCE_WRITE_ATTESTATION_TAMPERED",
-  );
-  const wrongRevisionReceipt = writeAuthorityReceiptFixture({
-    generation,
-    generationAuthorityReceipt: firstAuthority,
-    attestation,
-    overrides: {
-      jobRevisionDigest: digest("f"),
-    },
-  });
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      generation,
-      generationAuthorityReceipt: firstAuthority,
-      attestation,
-      writeAuthorityReceipt: wrongRevisionReceipt,
-      expectedCanonicalCandidateDigest: CANDIDATE_A,
-      expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
-      expectedJobRevisionDigest: JOB_REVISION,
-      expectedWriteScopeDigest: WRITE_SCOPE,
-    }),
-    (error) => error.code === "SOURCE_WRITE_AUTHORITY_MISMATCH",
-  );
-});
-
-test("attestation rejects unknown aliases and candidates without a successful call", () => {
-  const noSuccessGeneration = generationFixture({
-    status: "committed",
-    recallFacts: [{
-      ...recallSuccess(),
-      classification: "failure",
-    }],
-    humanFacts: [{
-      ...humanSuccess(),
-      classification: "failure",
-    }],
-  });
-  const noSuccessAuthority =
-    generationAuthorityReceiptFixture(noSuccessGeneration);
-  assert.throws(
+  for (const operation of [
     () => buildPhase4WriteBoundaryAttestation({
-      generation: noSuccessGeneration,
-      generationAuthorityReceipt: noSuccessAuthority,
+      generation,
+      generationAuthorityReceipt,
       canonicalCandidateDigest: CANDIDATE_A,
       candidateUserAliasDigest: CANDIDATE_USER_A,
       jobRevisionDigest: JOB_REVISION,
       writeScopeDigest: WRITE_SCOPE,
     }),
-    (error) => (
-      error.code === "SOURCE_ATTESTATION_Q37_NOT_SELECTED"
-    ),
-  );
-  const generation = generationFixture({ status: "committed" });
-  const generationAuthorityReceipt =
-    generationAuthorityReceiptFixture(generation);
-  assert.throws(
-    () => buildPhase4WriteBoundaryAttestation({
+    () => validatePhase4WriteBoundaryAttestation({
       generation,
       generationAuthorityReceipt,
+    }),
+  ]) {
+    assert.throws(
+      operation,
+      (error) => (
+        error.code === "SOURCE_AUTHORITY_STORE_REQUIRED"
+      ),
+    );
+  }
+  assert.equal(
+    sourceWatermarkPublicStatus({
+      generation,
+      generationAuthorityReceipt,
+    }).phase4Q37Ready,
+    false,
+  );
+});
+
+test("KV authority alone reports a current ready generation from Redis TIME", async () => {
+  const fake = createAuthorityKvFake();
+  const generation = generationFixture({ status: "committed" });
+  const activated = await activateSourceAuthorityGeneration(
+    { generation },
+    { kvImpl: fake.kv },
+  );
+  const current = await readCurrentSourceAuthority({
+    kvImpl: fake.kv,
+  });
+  const status = await getSourceAuthorityOperationalStatus({
+    kvImpl: fake.kv,
+  });
+
+  assert.equal(
+    activated.active.generationRecordDigest,
+    generation.recordDigest,
+  );
+  assert.equal(
+    current.active.durableRecordReceiptDigest,
+    activated.active.durableRecordReceiptDigest,
+  );
+  assert.equal(
+    current.generationAuthorityReceipt
+      .durableRecordReceiptDigest,
+    activated.active.durableRecordReceiptDigest,
+  );
+  assert.equal(status.status, "ready");
+  assert.equal(status.current, true);
+  assert.equal(status.sourceWatermarkComplete, true);
+  assert.equal(status.phase4Q37Ready, true);
+  assert.match(
+    fake.commands[0][1],
+    /redis\.call\('TIME'\)/u,
+  );
+  assert.match(
+    fake.commands[0][1],
+    /durableGenerationRevisionDigest/u,
+  );
+  assert.match(
+    fake.commands[0][1],
+    /durableRecordReceiptDigest/u,
+  );
+});
+
+test("simultaneous fresh revisions cannot both remain current", async () => {
+  const fake = createAuthorityKvFake();
+  const generation = generationFixture({ status: "committed" });
+  const first = await activateSourceAuthorityGeneration(
+    { generation },
+    { kvImpl: fake.kv },
+  );
+  const attempts = await Promise.allSettled([
+    activateSourceAuthorityGeneration(
+      {
+        generation,
+        expectedActiveGenerationReceipt:
+          first.generationAuthorityReceipt,
+      },
+      { kvImpl: fake.kv },
+    ),
+    activateSourceAuthorityGeneration(
+      {
+        generation,
+        expectedActiveGenerationReceipt:
+          first.generationAuthorityReceipt,
+      },
+      { kvImpl: fake.kv },
+    ),
+  ]);
+  assert.equal(
+    attempts.filter((attempt) => attempt.status === "fulfilled")
+      .length,
+    1,
+  );
+  const rejected = attempts.find(
+    (attempt) => attempt.status === "rejected",
+  );
+  assert.equal(
+    rejected.reason.code,
+    "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT",
+  );
+  const current = await readCurrentSourceAuthority({
+    kvImpl: fake.kv,
+  });
+  assert.notEqual(
+    current.active.durableGenerationRevisionDigest,
+    first.active.durableGenerationRevisionDigest,
+  );
+});
+
+test("reserve compares current generation epochs and exact durable job state", async () => {
+  const fake = createAuthorityKvFake();
+  await activateSourceAuthorityGeneration(
+    { generation: generationFixture({ status: "committed" }) },
+    { kvImpl: fake.kv },
+  );
+  fake.putJob();
+  const reserved = await reserveSourceAuthorityWrite(
+    {
+      jobBindingDigest: JOB_BINDING,
       canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: digest("f"),
+      candidateUserAliasDigest: CANDIDATE_USER_A,
       jobRevisionDigest: JOB_REVISION,
       writeScopeDigest: WRITE_SCOPE,
-    }),
-    (error) => error.code === "SOURCE_ATTESTATION_ALIAS_MISMATCH",
+    },
+    { kvImpl: fake.kv },
   );
+  assert.equal(reserved.allowed, false);
+  assert.equal(reserved.status, "reserved");
+  assert.equal(reserved.duplicate, false);
+  assert.match(
+    reserved.reservationReceipt.reservationRecordSha1,
+    /^[a-f0-9]{40}$/u,
+  );
+  const reserveCommand = fake.commands.find(
+    (command) => command[1].includes("local reservation = {"),
+  );
+  assert.equal(reserveCommand[2], 3);
+  assert.match(reserveCommand[1], /redis\.call\('TIME'\)/u);
+  assert.match(
+    reserveCommand[1],
+    /active\.generationRecordDigest ~= ARGV\[1\]/u,
+  );
+  assert.match(
+    reserveCommand[1],
+    /active\.durableGenerationRevisionDigest ~= ARGV\[2\]/u,
+  );
+  assert.match(
+    reserveCommand[1],
+    /active\.sourceEpochs\.aliases ~= ARGV\[6\]/u,
+  );
+  assert.match(
+    reserveCommand[1],
+    /job\.jobRevisionDigest ~= ARGV\[11\]/u,
+  );
+  assert.match(
+    reserveCommand[1],
+    /job\.writeScopeDigest ~= ARGV\[12\]/u,
+  );
+});
+
+test("consume authorizes once and an exact retry returns the settled result", async () => {
+  const fake = createAuthorityKvFake();
+  await activateSourceAuthorityGeneration(
+    { generation: generationFixture({ status: "committed" }) },
+    { kvImpl: fake.kv },
+  );
+  fake.putJob();
+  const reserved = await reserveSourceAuthorityWrite(
+    {
+      jobBindingDigest: JOB_BINDING,
+      canonicalCandidateDigest: CANDIDATE_A,
+      candidateUserAliasDigest: CANDIDATE_USER_A,
+      jobRevisionDigest: JOB_REVISION,
+      writeScopeDigest: WRITE_SCOPE,
+    },
+    { kvImpl: fake.kv },
+  );
+  const input = {
+    reservationReceipt: reserved.reservationReceipt,
+    expectedJobBindingDigest: JOB_BINDING,
+    expectedJobRevisionDigest: JOB_REVISION,
+    expectedWriteScopeDigest: WRITE_SCOPE,
+    settledResultDigest: SETTLED_RESULT,
+  };
+  const first = await consumeSourceAuthorityWriteReservation(
+    input,
+    { kvImpl: fake.kv },
+  );
+  const retry = await consumeSourceAuthorityWriteReservation(
+    input,
+    { kvImpl: fake.kv },
+  );
+  assert.equal(first.allowed, true);
+  assert.equal(first.duplicate, false);
+  assert.equal(retry.allowed, false);
+  assert.equal(retry.duplicate, true);
+  assert.equal(retry.settledResultDigest, SETTLED_RESULT);
+  await assert.rejects(
+    consumeSourceAuthorityWriteReservation(
+      {
+        ...input,
+        settledResultDigest: digest("f"),
+      },
+      { kvImpl: fake.kv },
+    ),
+    (error) => (
+      error.code === "SOURCE_AUTHORITY_SETTLED_RESULT_CONFLICT"
+    ),
+  );
+  const consumeCommand = fake.commands.find(
+    (command) => command[1].includes(
+      "reservation.status = 'consumed'",
+    ),
+  );
+  assert.match(consumeCommand[1], /redis\.call\('TIME'\)/u);
+  assert.match(
+    consumeCommand[1],
+    /reservation\.status == 'consumed'/u,
+  );
+});
+
+test("old receipts and cross-job or cross-scope replay fail after replacement", async () => {
+  const fake = createAuthorityKvFake();
+  const generation = generationFixture({ status: "committed" });
+  const first = await activateSourceAuthorityGeneration(
+    { generation },
+    { kvImpl: fake.kv },
+  );
+  fake.putJob();
+  const reserved = await reserveSourceAuthorityWrite(
+    {
+      jobBindingDigest: JOB_BINDING,
+      canonicalCandidateDigest: CANDIDATE_A,
+      candidateUserAliasDigest: CANDIDATE_USER_A,
+      jobRevisionDigest: JOB_REVISION,
+      writeScopeDigest: WRITE_SCOPE,
+    },
+    { kvImpl: fake.kv },
+  );
+  const second = await activateSourceAuthorityGeneration(
+    {
+      generation,
+      expectedActiveGenerationReceipt:
+        first.generationAuthorityReceipt,
+    },
+    { kvImpl: fake.kv },
+  );
+  assert.notEqual(
+    second.active.durableRecordReceiptDigest,
+    first.active.durableRecordReceiptDigest,
+  );
+  await assert.rejects(
+    activateSourceAuthorityGeneration(
+      {
+        generation,
+        expectedActiveGenerationReceipt:
+          first.generationAuthorityReceipt,
+      },
+      { kvImpl: fake.kv },
+    ),
+    (error) => (
+      error.code === "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT"
+    ),
+  );
+  const consumeInput = {
+    reservationReceipt: reserved.reservationReceipt,
+    expectedJobBindingDigest: JOB_BINDING,
+    expectedJobRevisionDigest: JOB_REVISION,
+    expectedWriteScopeDigest: WRITE_SCOPE,
+    settledResultDigest: SETTLED_RESULT,
+  };
+  await assert.rejects(
+    consumeSourceAuthorityWriteReservation(
+      consumeInput,
+      { kvImpl: fake.kv },
+    ),
+    (error) => (
+      error.code === "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT"
+    ),
+  );
+  for (const overrides of [
+    { expectedJobBindingDigest: digest("f") },
+    { expectedJobRevisionDigest: digest("f") },
+    { expectedWriteScopeDigest: digest("f") },
+  ]) {
+    await assert.rejects(
+      consumeSourceAuthorityWriteReservation(
+        { ...consumeInput, ...overrides },
+        { kvImpl: fake.kv },
+      ),
+      (error) => (
+        error.code
+          === "SOURCE_AUTHORITY_RESERVATION_EXPECTATION_MISMATCH"
+      ),
+    );
+  }
+});
+
+test("missing keys/store and malformed durable state remain dark", async () => {
+  const fake = createAuthorityKvFake();
+  fake.records.set(
+    "paraai:phase4:source-authority:active:v1",
+    JSON.stringify({ version: 1 }),
+  );
+  await assert.rejects(
+    readCurrentSourceAuthority({ kvImpl: fake.kv }),
+    (error) => (
+      error.code === "SOURCE_AUTHORITY_DURABLE_STATE_MALFORMED"
+    ),
+  );
+  assert.equal(
+    (await getSourceAuthorityOperationalStatus({
+      kvImpl: fake.kv,
+    })).phase4Q37Ready,
+    false,
+  );
+
+  const savedAuthority =
+    process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV];
+  const savedUrl = process.env.KV_REST_API_URL;
+  const savedToken = process.env.KV_REST_API_TOKEN;
+  delete process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV];
+  delete process.env.KV_REST_API_URL;
+  delete process.env.KV_REST_API_TOKEN;
+  try {
+    const status = await getSourceAuthorityOperationalStatus({
+      kvImpl: fake.kv,
+    });
+    assert.equal(status.status, "store_unavailable");
+    assert.equal(status.current, false);
+    assert.equal(status.phase4Q37Ready, false);
+    await assert.rejects(
+      readCurrentSourceAuthority({ kvImpl: fake.kv }),
+      (error) => error.code === "SOURCE_AUTHORITY_UNAVAILABLE",
+    );
+  } finally {
+    process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV] =
+      savedAuthority;
+    process.env.KV_REST_API_URL = savedUrl;
+    process.env.KV_REST_API_TOKEN = savedToken;
+  }
+});
+
+test("stale or future Redis TIME cannot issue operational authority", async () => {
+  const fake = createAuthorityKvFake();
+  await activateSourceAuthorityGeneration(
+    { generation: generationFixture({ status: "committed" }) },
+    { kvImpl: fake.kv },
+  );
+  for (const clockMove of [60_000, -120_000]) {
+    fake.advance(clockMove);
+    await assert.rejects(
+      readCurrentSourceAuthority({ kvImpl: fake.kv }),
+      (error) => (
+        error.code === "SOURCE_AUTHORITY_REDIS_TIME_SKEWED"
+      ),
+    );
+    const status = await getSourceAuthorityOperationalStatus({
+      kvImpl: fake.kv,
+    });
+    assert.equal(status.current, false);
+    assert.equal(status.phase4Q37Ready, false);
+  }
 });
 
 test("dashboard health exposes only aggregate dark readiness and keeps enrollment closed", async () => {
@@ -1573,10 +2158,16 @@ test("authority receipt minting is not exported from the policy module", async (
   const policy = await import(
     "../api/paraai/_lib/source-watermark.mjs"
   );
-  for (const name of Object.keys(policy)) {
+  const authorityStore = await import(
+    "../api/paraai/_lib/source-authority-store.mjs"
+  );
+  for (const name of [
+    ...Object.keys(policy),
+    ...Object.keys(authorityStore),
+  ]) {
     assert.doesNotMatch(
       name,
-      /(mint|issue|sign).*authority.*receipt/i,
+      /(mint|issue|sign).*(authority|generation|reservation).*receipt/i,
     );
   }
 });

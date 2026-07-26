@@ -16,13 +16,78 @@ import {
 } from "node:crypto";
 
 export const SOURCE_WATERMARK_POLICY_VERSION =
-  "phase4-source-watermark-v2";
-export const SOURCE_WATERMARK_CERTIFICATE_VERSION = 2;
-export const SOURCE_WATERMARK_GENERATION_VERSION = 2;
-export const PHASE4_WRITE_ATTESTATION_VERSION = 2;
+  "phase4-source-watermark-v3";
+export const SOURCE_WATERMARK_CERTIFICATE_VERSION = 3;
+export const SOURCE_WATERMARK_GENERATION_VERSION = 3;
+export const PHASE4_WRITE_ATTESTATION_VERSION = 3;
 export const SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION = 1;
 export const SOURCE_WATERMARK_AUTHORITY_KEY_ENV =
   "PARAAI_SOURCE_WATERMARK_AUTHORITY_KEY";
+export const SOURCE_IDENTITY_BINDING_RECEIPT_VERSION = 1;
+export const SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV =
+  "PARAAI_SOURCE_IDENTITY_BINDING_AUTHORITY_KEY";
+export const SOURCE_IDENTITY_POINT_READ_PROCEDURES =
+  Object.freeze({
+    recall: "GET /api/v1/bot/{id}/",
+    paraformHuman: "candidateUserMeeting.getCallById",
+  });
+
+// Artifact commitments are derived from the exact immutable production file,
+// its focused test, and the merge commit that put both on main:
+//
+//   sha256(
+//     "phase4-source-collector-artifact-v1" || NUL
+//     || canonical_json({source, mergeCommit, runtimePath,
+//                        runtimeFileSha256, focusedTestPath,
+//                        focusedTestFileSha256})
+//   )
+//
+// This deliberately records the real merged artifacts rather than an
+// invented "code commitment" literal. There is no merged alias collector or
+// signer yet, so aliases carry no artifact commitment and can become complete
+// only when every edge has a separately authenticated identity receipt.
+const SOURCE_COLLECTOR_ARTIFACT_MERGE_COMMIT =
+  "e26818f6dc16725d132534cc8da5c7b84e6826e3";
+const RECALL_COLLECTOR_ARTIFACT = Object.freeze({
+  source: "recall",
+  mergeCommit: SOURCE_COLLECTOR_ARTIFACT_MERGE_COMMIT,
+  runtimePath: "calls-app/api/_lib/recall.js",
+  runtimeFileSha256:
+    "b03ef301a7fe6037c81fa81a833f72231f1be8707fd001d117fdad15626dd04e",
+  focusedTestPath: "calls-app/test/source-page.test.mjs",
+  focusedTestFileSha256:
+    "1ad5bcbe46d08fe3bc19dd8e41a1c9b53f3517bbbe61694e7e941762db6e928d",
+});
+const PARAFORM_HUMAN_COLLECTOR_ARTIFACT = Object.freeze({
+  source: "paraform_human",
+  mergeCommit: SOURCE_COLLECTOR_ARTIFACT_MERGE_COMMIT,
+  runtimePath: "webview/api/_lib/paraform-meetings.js",
+  runtimeFileSha256:
+    "d5e1a75cb8884af409fd7750fb54ced80185c2881b48b3a2042e9b95af621c11",
+  focusedTestPath: "webview/test/paraform-source-page.test.mjs",
+  focusedTestFileSha256:
+    "d3a1511d1716c6c6c7a8baa0de6252fd44b6d477c46b49b354164fb42e7d55ee",
+});
+
+function collectorArtifactCommitment(artifact) {
+  return semanticDigest(
+    "phase4-source-collector-artifact-v1",
+    artifact,
+  );
+}
+
+export const SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST =
+  semanticDigest(
+    "phase4-source-identity-binding-input-artifacts-v1",
+    {
+      recall: collectorArtifactCommitment(
+        RECALL_COLLECTOR_ARTIFACT,
+      ),
+      paraformHuman: collectorArtifactCommitment(
+        PARAFORM_HUMAN_COLLECTOR_ARTIFACT,
+      ),
+    },
+  );
 
 // These are release pins, not caller-selectable compatibility ranges. A
 // collector change must deliberately rotate both its version and immutable
@@ -32,17 +97,23 @@ export const SOURCE_WATERMARK_APPROVED_COLLECTORS =
     recall: Object.freeze({
       collectorVersion: "recall-source-v1",
       collectorCodeCommitmentDigest:
-        "cca12cf0125fc4f1b3ff7d80f94061ad51a4823855db98c856a91aa5bd2904d1",
+        collectorArtifactCommitment(RECALL_COLLECTOR_ARTIFACT),
+      artifact: RECALL_COLLECTOR_ARTIFACT,
     }),
     paraform_human: Object.freeze({
       collectorVersion: "paraform-human-source-v1",
       collectorCodeCommitmentDigest:
-        "f72a048dfbba4b81bcd867cbf70dd4dd2cab1c8cfa1e433bb4f553d5e31da00b",
+        collectorArtifactCommitment(
+          PARAFORM_HUMAN_COLLECTOR_ARTIFACT,
+        ),
+      artifact: PARAFORM_HUMAN_COLLECTOR_ARTIFACT,
     }),
     aliases: Object.freeze({
       collectorVersion: "source-alias-evidence-v1",
-      collectorCodeCommitmentDigest:
-        "282544aca1d82c2db498145275d0d225336a471c623d5d3fbba1dc1eeee8e13f",
+      collectorCodeCommitmentDigest: null,
+      artifact: null,
+      sourceArtifactsDigest:
+        SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
     }),
   });
 
@@ -147,11 +218,14 @@ function sourceName(value, field = "source") {
 
 function approvedCollectorPin(source, version, commitment) {
   const approved = SOURCE_WATERMARK_APPROVED_COLLECTORS[source];
+  const commitmentMatches = approved?.collectorCodeCommitmentDigest
+    == null
+    ? commitment == null
+    : commitment === approved.collectorCodeCommitmentDigest;
   invariant(
     Boolean(approved)
       && version === approved.collectorVersion
-      && commitment
-        === approved.collectorCodeCommitmentDigest,
+      && commitmentMatches,
     "SOURCE_COLLECTOR_PIN_MISMATCH",
     `${source} collector version and code commitment are not approved`,
   );
@@ -251,6 +325,12 @@ function normalizeSourceFact(raw, {
     fact.recordDigest,
     `${source} facts[${index}].recordDigest`,
   );
+  const recordRevisionDigest = fact.recordRevisionDigest == null
+    ? null
+    : digest(
+      fact.recordRevisionDigest,
+      `${source} facts[${index}].recordRevisionDigest`,
+    );
   const classification = enumValue(
     fact.classification,
     FACT_CLASSIFICATIONS,
@@ -312,6 +392,7 @@ function normalizeSourceFact(raw, {
   return {
     source,
     recordDigest,
+    recordRevisionDigest,
     classification,
     identityStatus,
     identityKind,
@@ -374,7 +455,10 @@ function factIssueCounts(facts) {
     }
     if (
       ["success", "failure"].includes(fact.classification)
-      && fact.provenanceVerified !== true
+      && (
+        fact.provenanceVerified !== true
+        || fact.recordRevisionDigest == null
+      )
     ) {
       invalidCount += 1;
     }
@@ -641,6 +725,234 @@ export function buildSourceWatermarkCertificate(input = {}) {
   return certificateBuildResult(input).certificate;
 }
 
+function configuredIdentityBindingKey() {
+  const encoded = process.env[
+    SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV
+  ];
+  let key = null;
+  if (typeof encoded === "string" && AUTHORITY_KEY.test(encoded)) {
+    try {
+      const decoded = Buffer.from(encoded, "base64url");
+      if (
+        decoded.length >= 32
+        && decoded.toString("base64url") === encoded
+      ) {
+        key = decoded;
+      }
+    } catch {
+      key = null;
+    }
+  }
+  invariant(
+    key,
+    "SOURCE_IDENTITY_BINDING_AUTHORITY_UNAVAILABLE",
+    "identity-binding authority key is unavailable or malformed",
+  );
+  return key;
+}
+
+function identityBindingKeyIdDigest(key) {
+  return createHash("sha256")
+    .update("phase4-source-identity-binding-key-id-v1")
+    .update("\0")
+    .update(key)
+    .digest("hex");
+}
+
+function identityBindingReceiptMac(key, material) {
+  return createHmac("sha256", key)
+    .update("phase4-source-identity-binding-receipt-v1")
+    .update("\0")
+    .update(canonicalJson(material))
+    .digest("hex");
+}
+
+function normalizeIdentityBindingReceipt(
+  rawReceipt,
+  {
+    entry,
+    decisionBoundaryAt,
+    index,
+  },
+) {
+  const raw = object(
+    rawReceipt,
+    `alias entries[${index}].identityBindingReceipt`,
+  );
+  exactKeys(
+    raw,
+    [
+      "version",
+      "policyVersion",
+      "kind",
+      "canonicalCandidateDigest",
+      "candidateUserAliasDigest",
+      "recallRecordDigest",
+      "recallRecordRevisionDigest",
+      "paraformHumanRecordDigest",
+      "paraformHumanRecordRevisionDigest",
+      "recallPointReadProcedure",
+      "recallNormalizedInputDigest",
+      "paraformHumanPointReadProcedure",
+      "paraformHumanNormalizedInputDigest",
+      "decisionBoundaryAt",
+      "observedAt",
+      "collectorArtifactDigest",
+      "joinEvidenceDigest",
+      "receiptNonceDigest",
+      "authorityKeyIdDigest",
+      "receiptMac",
+    ],
+    "SOURCE_IDENTITY_BINDING_RECEIPT_SHAPE_INVALID",
+    `alias entries[${index}].identityBindingReceipt`,
+  );
+  invariant(
+    raw.version === SOURCE_IDENTITY_BINDING_RECEIPT_VERSION
+      && raw.policyVersion === SOURCE_WATERMARK_POLICY_VERSION
+      && raw.kind === "cross_source_identity_binding",
+    "SOURCE_IDENTITY_BINDING_RECEIPT_VERSION_INVALID",
+    "identity-binding receipt version is invalid",
+  );
+  const observedAt = canonicalTimestamp(
+    raw.observedAt,
+    "identity-binding receipt observedAt",
+  );
+  const material = {
+    version: raw.version,
+    policyVersion: raw.policyVersion,
+    kind: raw.kind,
+    canonicalCandidateDigest: digest(
+      raw.canonicalCandidateDigest,
+      "identity-binding canonicalCandidateDigest",
+    ),
+    candidateUserAliasDigest: digest(
+      raw.candidateUserAliasDigest,
+      "identity-binding candidateUserAliasDigest",
+    ),
+    recallRecordDigest: digest(
+      raw.recallRecordDigest,
+      "identity-binding recallRecordDigest",
+    ),
+    recallRecordRevisionDigest: digest(
+      raw.recallRecordRevisionDigest,
+      "identity-binding recallRecordRevisionDigest",
+    ),
+    paraformHumanRecordDigest: digest(
+      raw.paraformHumanRecordDigest,
+      "identity-binding paraformHumanRecordDigest",
+    ),
+    paraformHumanRecordRevisionDigest: digest(
+      raw.paraformHumanRecordRevisionDigest,
+      "identity-binding paraformHumanRecordRevisionDigest",
+    ),
+    recallPointReadProcedure: String(
+      raw.recallPointReadProcedure,
+    ),
+    recallNormalizedInputDigest: digest(
+      raw.recallNormalizedInputDigest,
+      "identity-binding recallNormalizedInputDigest",
+    ),
+    paraformHumanPointReadProcedure: String(
+      raw.paraformHumanPointReadProcedure,
+    ),
+    paraformHumanNormalizedInputDigest: digest(
+      raw.paraformHumanNormalizedInputDigest,
+      "identity-binding paraformHumanNormalizedInputDigest",
+    ),
+    decisionBoundaryAt: canonicalTimestamp(
+      raw.decisionBoundaryAt,
+      "identity-binding decisionBoundaryAt",
+    ),
+    observedAt,
+    collectorArtifactDigest: digest(
+      raw.collectorArtifactDigest,
+      "identity-binding collectorArtifactDigest",
+    ),
+    joinEvidenceDigest: digest(
+      raw.joinEvidenceDigest,
+      "identity-binding joinEvidenceDigest",
+    ),
+    receiptNonceDigest: digest(
+      raw.receiptNonceDigest,
+      "identity-binding receiptNonceDigest",
+    ),
+    authorityKeyIdDigest: digest(
+      raw.authorityKeyIdDigest,
+      "identity-binding authorityKeyIdDigest",
+    ),
+  };
+  const key = configuredIdentityBindingKey();
+  invariant(
+    material.authorityKeyIdDigest
+      === identityBindingKeyIdDigest(key),
+    "SOURCE_IDENTITY_BINDING_KEY_MISMATCH",
+    "identity-binding receipt was issued by another key",
+  );
+  const suppliedMac = digest(
+    raw.receiptMac,
+    "identity-binding receiptMac",
+  );
+  const expectedMac = identityBindingReceiptMac(key, material);
+  invariant(
+    timingSafeEqual(
+      Buffer.from(suppliedMac, "hex"),
+      Buffer.from(expectedMac, "hex"),
+    ),
+    "SOURCE_IDENTITY_BINDING_RECEIPT_INVALID",
+    "identity-binding receipt MAC is invalid",
+  );
+  invariant(
+    material.canonicalCandidateDigest
+        === entry.canonicalCandidateDigest
+      && material.candidateUserAliasDigest
+        === entry.candidateUserAliasDigest
+      && material.recallRecordDigest
+        === entry.recallRecordDigest
+      && material.recallRecordRevisionDigest
+        === entry.recallRecordRevisionDigest
+      && material.paraformHumanRecordDigest
+        === entry.paraformHumanRecordDigest
+      && material.paraformHumanRecordRevisionDigest
+        === entry.paraformHumanRecordRevisionDigest,
+    "SOURCE_IDENTITY_BINDING_EDGE_MISMATCH",
+    "identity-binding receipt is not bound to the exact alias edge",
+  );
+  invariant(
+    material.recallPointReadProcedure
+        === SOURCE_IDENTITY_POINT_READ_PROCEDURES.recall
+      && material.paraformHumanPointReadProcedure
+        === SOURCE_IDENTITY_POINT_READ_PROCEDURES.paraformHuman,
+    "SOURCE_IDENTITY_BINDING_POINT_READ_MISMATCH",
+    "identity-binding receipt does not use the pinned point reads",
+  );
+  invariant(
+    material.decisionBoundaryAt === decisionBoundaryAt
+      && Date.parse(material.observedAt)
+        >= Date.parse(decisionBoundaryAt)
+      && Date.parse(material.observedAt)
+        <= Date.now() + AUTHORITY_CLOCK_SKEW_MS,
+    "SOURCE_IDENTITY_BINDING_TIME_MISMATCH",
+    "identity-binding receipt does not share the capture boundary and observation time",
+  );
+  invariant(
+    material.collectorArtifactDigest
+      === SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
+    "SOURCE_IDENTITY_BINDING_ARTIFACT_MISMATCH",
+    "identity-binding receipt is not bound to the approved source artifacts",
+  );
+  const receipt = {
+    ...material,
+    receiptMac: suppliedMac,
+  };
+  return deepFreeze({
+    ...receipt,
+    receiptDigest: semanticDigest(
+      "phase4-source-identity-binding-receipt-v1",
+      receipt,
+    ),
+  });
+}
+
 function aliasEntry(raw, index) {
   const entry = object(raw, `alias entries[${index}]`);
   const canonicalCandidateDigest = digest(
@@ -663,16 +975,70 @@ function aliasEntry(raw, index) {
       entry.recallRecordDigest,
       `alias entries[${index}].recallRecordDigest`,
     ),
+    recallRecordRevisionDigest: entry.recallRecordRevisionDigest
+      == null
+      ? null
+      : digest(
+        entry.recallRecordRevisionDigest,
+        `alias entries[${index}].recallRecordRevisionDigest`,
+      ),
     paraformHumanRecordDigest: digest(
       entry.paraformHumanRecordDigest,
       `alias entries[${index}].paraformHumanRecordDigest`,
     ),
+    paraformHumanRecordRevisionDigest:
+      entry.paraformHumanRecordRevisionDigest == null
+        ? null
+        : digest(
+          entry.paraformHumanRecordRevisionDigest,
+          `alias entries[${index}].paraformHumanRecordRevisionDigest`,
+        ),
+    identityBindingReceipt:
+      entry.identityBindingReceipt ?? null,
   };
 }
 
-function normalizedAliasEntries(entries) {
+function normalizedAliasEntries(
+  entries,
+  {
+    decisionBoundaryAt = null,
+  } = {},
+) {
   return array(entries, "alias entries")
-    .map(aliasEntry)
+    .map((raw, index) => {
+      const entry = aliasEntry(raw, index);
+      if (!decisionBoundaryAt) return entry;
+      let receipt = null;
+      let identityBindingFailureCode = null;
+      try {
+        receipt = normalizeIdentityBindingReceipt(
+          entry.identityBindingReceipt,
+          {
+            entry,
+            decisionBoundaryAt,
+            index,
+          },
+        );
+      } catch (error) {
+        identityBindingFailureCode =
+          error?.code || "SOURCE_IDENTITY_BINDING_RECEIPT_INVALID";
+      }
+      const receiptMaterial = receipt
+        ? Object.fromEntries(
+          Object.entries(receipt).filter(
+            ([field]) => field !== "receiptDigest",
+          ),
+        )
+        : null;
+      return {
+        ...entry,
+        identityBindingReceipt: receiptMaterial,
+        identityBindingReceiptDigest:
+          receipt?.receiptDigest || null,
+        identityBindingProven: Boolean(receipt),
+        identityBindingFailureCode,
+      };
+    })
     .sort((left, right) => (
       left.canonicalCandidateDigest.localeCompare(
         right.canonicalCandidateDigest,
@@ -708,7 +1074,9 @@ export function sourceWatermarkAliasSetDigest({
   );
   return aliasEdgeSetDigest(
     boundary,
-    normalizedAliasEntries(entries),
+    normalizedAliasEntries(entries, {
+      decisionBoundaryAt: boundary,
+    }),
   );
 }
 
@@ -789,10 +1157,13 @@ export function buildCanonicalSourceAliasMap(
     decisionBoundaryAt,
     "alias map decisionBoundaryAt",
   );
-  const normalizedCollectorCodeCommitmentDigest = digest(
-    collectorCodeCommitmentDigest,
-    "alias collectorCodeCommitmentDigest",
-  );
+  const normalizedCollectorCodeCommitmentDigest =
+    collectorCodeCommitmentDigest == null
+      ? null
+      : digest(
+        collectorCodeCommitmentDigest,
+        "alias collectorCodeCommitmentDigest",
+      );
   const approvedCollector = approvedCollectorPin(
     "aliases",
     collectorVersion,
@@ -806,7 +1177,9 @@ export function buildCanonicalSourceAliasMap(
     snapshotComplete,
     "alias map snapshotComplete",
   );
-  const normalized = normalizedAliasEntries(entries);
+  const normalized = normalizedAliasEntries(entries, {
+    decisionBoundaryAt: boundary,
+  });
   const edgeSetDigest = aliasEdgeSetDigest(boundary, normalized);
   const normalizedPasses = array(passes, "alias passes")
     .map((pass, index) => normalizeAliasPass(pass, {
@@ -850,6 +1223,16 @@ export function buildCanonicalSourceAliasMap(
   const conflictCount =
     canonicalConflictCount + aliasConflictCount;
   const reasons = new Set();
+  let identityBindingAuthorityAvailable = false;
+  try {
+    identityBindingAuthorityAvailable =
+      Boolean(configuredIdentityBindingKey());
+  } catch {
+    identityBindingAuthorityAvailable = false;
+  }
+  if (!identityBindingAuthorityAvailable) {
+    reasons.add("identity_binding_authority_unavailable");
+  }
   if (!normalizedAuthoritative) reasons.add("not_authoritative");
   if (!normalizedSnapshotComplete) {
     reasons.add("snapshot_incomplete");
@@ -900,11 +1283,19 @@ export function buildCanonicalSourceAliasMap(
     reasons.add("duplicate_alias_edges");
   }
   if (conflictCount > 0) reasons.add("alias_conflicts");
+  const identityBindingProvenCount = deduped.filter(
+    (entry) => entry.identityBindingProven,
+  ).length;
+  const identityBindingUnprovenCount =
+    deduped.length - identityBindingProvenCount;
+  if (identityBindingUnprovenCount > 0) {
+    reasons.add("identity_binding_receipts_unproven");
+  }
   const reasonList = [...reasons].sort();
   const epochStable = epochDigests.size === 1;
   const complete = reasonList.length === 0;
   const material = {
-    version: 2,
+    version: 3,
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     mapping: "candidate_user_to_canonical_candidate_bijection",
     decisionBoundaryAt: boundary,
@@ -938,6 +1329,9 @@ export function buildCanonicalSourceAliasMap(
     canonicalConflictCount,
     aliasConflictCount,
     conflictCount,
+    identityBindingAuthorityAvailable,
+    identityBindingProvenCount,
+    identityBindingUnprovenCount,
     complete,
     reasons: reasonList,
   };
@@ -1167,20 +1561,26 @@ function aliasSourceEvidence({
       entry.paraformHumanRecordDigest,
     );
     const recallProven = Boolean(
-      recall
+      entry.identityBindingProven === true
+      && recall
       && ["success", "failure"].includes(recall.classification)
       && recall.provenanceVerified === true
+      && recall.recordRevisionDigest
+        === entry.recallRecordRevisionDigest
       && recall.identityStatus === "resolved"
       && recall.identityKind === "canonical_candidate"
       && recall.identityDigest
         === entry.canonicalCandidateDigest
     );
     const paraformProven = Boolean(
-      paraform
+      entry.identityBindingProven === true
+      && paraform
       && ["success", "failure"].includes(
         paraform.classification,
       )
       && paraform.provenanceVerified === true
+      && paraform.recordRevisionDigest
+        === entry.paraformHumanRecordRevisionDigest
       && paraform.identityStatus === "resolved"
       && paraform.identityKind === "candidate_user_alias"
       && paraform.identityDigest
@@ -1548,6 +1948,8 @@ function emptyPublicStatus(status = "not_committed") {
       candidateUserAliasCount: 0,
       duplicateEntryCount: 0,
       conflictCount: 0,
+      identityBindingProvenCount: 0,
+      identityBindingUnprovenCount: 0,
     },
     q37: {
       candidateCount: 0,
@@ -1863,11 +2265,11 @@ function generationAuthorityReceipt(generation, value) {
 
 export function sourceWatermarkPublicStatus({
   generation = null,
-  generationAuthorityReceipt: authorityReceipt = null,
 } = {}) {
-  // Only a private durable-store signer may mint authorityReceipt. There is
-  // deliberately no exported minting helper in this module. Missing key,
-  // missing receipt, bad MAC, stale clock, or stale revision all stay dark.
+  // Operational readiness is deliberately not decidable from a caller-fed
+  // generation or receipt. The KV authority module must atomically read the
+  // current durable record before it can report current/ready. This pure
+  // evidence module therefore remains dark for every caller-supplied value.
   if (!generation) return emptyPublicStatus();
   let normalized;
   try {
@@ -1876,37 +2278,14 @@ export function sourceWatermarkPublicStatus({
     return emptyPublicStatus("invalid");
   }
   const committed = normalized.status === "committed";
-  let current = false;
-  try {
-    current = Boolean(
-      committed
-      && authorityReceipt
-      && generationAuthorityReceipt(
-        normalized,
-        authorityReceipt,
-      )
-    );
-  } catch {
-    current = false;
-  }
-  const sourceWatermarkComplete = Boolean(
-    committed
-    && current
-    && normalized.intrinsicSourceComplete
-  );
-  const phase4Q37Ready = Boolean(
-    sourceWatermarkComplete
-    && normalized.intrinsicQ37Ready
-  );
+  const current = false;
+  const sourceWatermarkComplete = false;
+  const phase4Q37Ready = false;
   const status = !committed
     ? "not_committed"
     : !normalized.intrinsicSourceComplete
       ? "incomplete"
-      : !current
-        ? "untrusted"
-        : phase4Q37Ready
-          ? "ready"
-          : "review";
+      : "store_required";
   return deepFreeze({
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     status,
@@ -1941,6 +2320,10 @@ export function sourceWatermarkPublicStatus({
       duplicateEntryCount:
         normalized.aliasMap.duplicateEntryCount,
       conflictCount: normalized.aliasMap.conflictCount,
+      identityBindingProvenCount:
+        normalized.aliasMap.identityBindingProvenCount,
+      identityBindingUnprovenCount:
+        normalized.aliasMap.identityBindingUnprovenCount,
     },
     q37: {
       candidateCount: normalized.q37.candidateCount,
@@ -2071,27 +2454,11 @@ function phase4WriteAttestationMaterial({
   });
 }
 
-export function buildPhase4WriteBoundaryAttestation({
-  generation,
-  generationAuthorityReceipt:
-    rawGenerationAuthorityReceipt,
-  canonicalCandidateDigest,
-  candidateUserAliasDigest,
-  jobRevisionDigest,
-  writeScopeDigest,
-} = {}) {
-  const trusted = authorizedReadyGeneration(
-    generation,
-    rawGenerationAuthorityReceipt,
+export function buildPhase4WriteBoundaryAttestation() {
+  throw new SourceWatermarkInvariantError(
+    "SOURCE_AUTHORITY_STORE_REQUIRED",
+    "write evidence must be reserved by the current KV authority store",
   );
-  return phase4WriteAttestationMaterial({
-    ...trusted,
-    canonicalCandidateDigest,
-    candidateUserAliasDigest,
-    jobRevisionDigest,
-    writeScopeDigest,
-    observedAt: new Date().toISOString(),
-  });
 }
 
 function canonicalWriteAttestation(
@@ -2330,75 +2697,9 @@ function writeCasAuthorityReceipt({
   });
 }
 
-export function validatePhase4WriteBoundaryAttestation({
-  generation,
-  generationAuthorityReceipt:
-    rawGenerationAuthorityReceipt,
-  attestation,
-  writeAuthorityReceipt,
-  expectedCanonicalCandidateDigest,
-  expectedCandidateUserAliasDigest,
-  expectedJobRevisionDigest,
-  expectedWriteScopeDigest,
-} = {}) {
-  // The private signer must issue writeAuthorityReceipt only after an atomic
-  // compare-and-swap reserves reservedJobRevisionDigest from the exact
-  // jobRevisionDigest. Its short-lived nonce is the downstream idempotency
-  // key. This module verifies receipts but intentionally cannot mint them.
-  const trusted = authorizedReadyGeneration(
-    generation,
-    rawGenerationAuthorityReceipt,
+export function validatePhase4WriteBoundaryAttestation() {
+  throw new SourceWatermarkInvariantError(
+    "SOURCE_AUTHORITY_STORE_REQUIRED",
+    "write authorization must be consumed by the current KV authority store",
   );
-  const normalizedAttestation = canonicalWriteAttestation(
-    trusted.generation,
-    trusted.authorityReceipt,
-    attestation,
-  );
-  const writeAuthority = writeCasAuthorityReceipt({
-    generation: trusted.generation,
-    generationAuthority: trusted.authorityReceipt,
-    attestation: normalizedAttestation,
-    value: writeAuthorityReceipt,
-  });
-  const expected = {
-    canonicalCandidateDigest: digest(
-      expectedCanonicalCandidateDigest,
-      "expectedCanonicalCandidateDigest",
-    ),
-    candidateUserAliasDigest: digest(
-      expectedCandidateUserAliasDigest,
-      "expectedCandidateUserAliasDigest",
-    ),
-    jobRevisionDigest: digest(
-      expectedJobRevisionDigest,
-      "expectedJobRevisionDigest",
-    ),
-    writeScopeDigest: digest(
-      expectedWriteScopeDigest,
-      "expectedWriteScopeDigest",
-    ),
-  };
-  for (const [field, value] of Object.entries(expected)) {
-    invariant(
-      normalizedAttestation[field] === value
-        && writeAuthority[field] === value,
-      "SOURCE_WRITE_EXPECTATION_MISMATCH",
-      "write attestation does not match the atomic write inputs",
-    );
-  }
-  return deepFreeze({
-    allowed: true,
-    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
-    manifestDigest: trusted.generation.manifestDigest,
-    decisionBoundaryAt:
-      trusted.generation.decisionBoundaryAt,
-    callType: normalizedAttestation.callType,
-    callEndedAt: normalizedAttestation.callEndedAt,
-    attestedAt: normalizedAttestation.observedAt,
-    validatedAt: new Date().toISOString(),
-    reservedJobRevisionDigest:
-      writeAuthority.reservedJobRevisionDigest,
-    reservationNonceDigest:
-      writeAuthority.reservationNonceDigest,
-  });
 }
