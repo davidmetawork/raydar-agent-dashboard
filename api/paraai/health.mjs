@@ -5,6 +5,12 @@ import {
   phase3ShadowExecutionEnabled,
 } from "./_lib/auto.mjs";
 import { outreachHealth } from "./_lib/outreach.mjs";
+import {
+  sourceWatermarkPublicStatus,
+} from "./_lib/source-watermark.mjs";
+import {
+  outcomeSequenceHealthDecision,
+} from "./_lib/phase3-shadow-policy.mjs";
 import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 30 };
@@ -22,6 +28,11 @@ export default async function handler(req, res) {
   const auto = automationConfig();
   const auth = authConfig();
   const now = Date.now();
+  // Phase 4 source collection and durable generation storage are deliberately
+  // not wired in this dark foundation. An absent generation is fail-closed;
+  // the aggregate projection can become ready only after a future rollout
+  // supplies a committed manifest plus matching current source epochs.
+  const sourceWatermark = sourceWatermarkPublicStatus();
   const matchStageEnabledAtCurrent = Boolean(
     Number.isFinite(config.matchStageEnabledAtMs)
     && config.matchStageEnabledAtMs <= now
@@ -50,10 +61,24 @@ export default async function handler(req, res) {
     paraform: "checking",
     talentNetwork: null,
     quota: null,
-    sequences: [],
+    sequenceHealth: {
+      healthy: false,
+      expectedCount: 5,
+      foundCount: 0,
+      enabledCount: 0,
+      missingCount: 5,
+      disabledCount: 0,
+      malformedCount: 0,
+      duplicateCount: 0,
+      nameDriftCount: 0,
+    },
     submitReady: false,
     enrollmentReady: false,
     matchShadowReady: false,
+    sourceWatermark,
+    sourceWatermarkComplete:
+      sourceWatermark.sourceWatermarkComplete,
+    phase4Q37Ready: sourceWatermark.phase4Q37Ready,
     automation: {
       enabled: auto.enabled,
       detectEnabled: auto.detectEnabled,
@@ -114,15 +139,22 @@ export default async function handler(req, res) {
     health.paraform = "live";
     health.talentNetwork = talentNetwork;
     health.quota = quota;
-    const required = [
-      "New Matches - Added to Para AI (one role)",
-      "New Matches - Added to Para AI (multiple)",
-      "No Matches - Added to Para AI",
-    ];
-    health.sequences = required.map((name) => {
-      const row = sequences.find((sequence) => sequence?.name === name);
-      return { name, id: row?.id || null, found: Boolean(row), enabled: Boolean(row?.enabled) };
+    const sequenceHealth = outcomeSequenceHealthDecision({
+      authoritative: true,
+      complete: true,
+      sequences,
     });
+    health.sequenceHealth = {
+      healthy: sequenceHealth.healthy,
+      expectedCount: sequenceHealth.expectedCount,
+      foundCount: sequenceHealth.foundCount,
+      enabledCount: sequenceHealth.enabledCount,
+      missingCount: sequenceHealth.missingCount,
+      disabledCount: sequenceHealth.disabledCount,
+      malformedCount: sequenceHealth.malformedCount,
+      duplicateCount: sequenceHealth.duplicateCount,
+      nameDriftCount: sequenceHealth.nameDriftCount,
+    };
     const networkEnabled = talentNetwork?.isTalentNetworkEnabled === true && talentNetwork?.isParaAIDisabled !== true;
     health.submitReady = Boolean(
       health.storeConfigured && health.extractorConfigured && health.submissionOriginPinned &&
@@ -146,7 +178,8 @@ export default async function handler(req, res) {
     health.enrollmentReady = Boolean(
       health.submitReady && health.lifecycleRegistrationConfigured && health.matchReadPinned &&
       config.matchStageEnabled && !config.matchShadow && config.curateEnabled &&
-      health.enrollApproved && health.sequences.every((sequence) => sequence.found && sequence.enabled),
+      health.enrollApproved && health.phase4Q37Ready &&
+      health.sequenceHealth.healthy,
     );
     health.automation.ready = Boolean(
       health.submitReady &&
