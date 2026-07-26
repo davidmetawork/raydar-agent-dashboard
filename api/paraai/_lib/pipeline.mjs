@@ -68,10 +68,23 @@ import {
   getSubmissionIntent,
   hashSubmissionPayload,
   saveJob,
+  savePhase3ShadowDecision,
   startSubmissionAttempt,
   transition,
 } from "./store.mjs";
 import { jobReviewReasons, reviewActionFor } from "./review.mjs";
+import {
+  ALL_OUTCOME_SEQUENCE_IDS,
+  PHASE3_SHADOW_POLICY_VERSION,
+  buildAggregateShadowAudit,
+  curatedPostAddMatchCount,
+  lateMatchDecision,
+  matchSettlementDecision,
+  mostRecentSuccessfulCallDecision,
+  nextMatchPollDecision,
+  outcomeMembershipDecision,
+  planCuratedAdds,
+} from "./phase3-shadow-policy.mjs";
 
 export const STATES = new Set([
   "detected", "resolving_identity", "needs_identity_review", "extracting",
@@ -81,8 +94,6 @@ export const STATES = new Set([
   "no_email", "error",
 ]);
 
-const ZERO_SETTLE_SECONDS = Number(process.env.PARAAI_MATCH_ZERO_SETTLE_SECONDS || 120);
-const MATCH_TIMEOUT_SECONDS = Number(process.env.PARAAI_MATCH_TIMEOUT_SECONDS || 300);
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 export const PARAAI_SALARY_CAP = 200_000;
 export const PARAAI_SALARY_ROUTING_BUFFER = 10_000;
@@ -724,6 +735,156 @@ export function matchCountFromResponse(value) {
   return { count: null, settled: ["COMPLETE", "COMPLETED", "READY", "SETTLED", "SUCCESS"].includes(status) };
 }
 
+export const PHASE3_MATCH_READ_PROC =
+  "candidateMatching.getRankedRolesForCandidate";
+
+const PHASE3_PENDING_MATCH_STATUSES = new Set([
+  "pending",
+  "processing",
+  "generating",
+  "queued",
+  "running",
+]);
+const PHASE3_STATUS_TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
+const PHASE3_STATUS_DIAGNOSTIC =
+  /^whitespace:[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
+
+function phase3ObservedStatus(value) {
+  if (value == null || value === "") return "missing";
+  if (typeof value !== "string") return "unrecognized";
+  // The capture is exact. In particular, variants such as "RANKED" or
+  // " ranked " must not be normalized into the only settling status.
+  if (PHASE3_STATUS_TOKEN.test(value)) return value;
+  const trimmed = value.trim();
+  if (trimmed !== value && PHASE3_STATUS_TOKEN.test(trimmed)) {
+    return `whitespace:${trimmed}`;
+  }
+  return "unrecognized";
+}
+
+function phase3UnsettledMatchResult({
+  status,
+  statusKind,
+  errorCode = null,
+} = {}) {
+  return Object.freeze({
+    status,
+    statusKind,
+    settled: false,
+    count: null,
+    roles: Object.freeze([]),
+    endorsedRoleIds: Object.freeze([]),
+    suggestedRoleIds: Object.freeze([]),
+    endorsedCount: 0,
+    suggestedCount: 0,
+    errorCode,
+  });
+}
+
+/**
+ * Normalize only the captured candidateMatching.getRankedRolesForCandidate
+ * response. Unknown status values remain unsettled even when they carry an
+ * empty roles array, and score/rank/display fields are ignored by construction.
+ */
+export function normalizePhase3RankedMatchResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return phase3UnsettledMatchResult({
+      status: "missing",
+      statusKind: "malformed",
+      errorCode: "response_not_object",
+    });
+  }
+
+  const status = phase3ObservedStatus(value.status);
+  if (status !== "ranked") {
+    return phase3UnsettledMatchResult({
+      status,
+      statusKind: PHASE3_PENDING_MATCH_STATUSES.has(status)
+        ? "pending"
+        : "unknown",
+      errorCode: PHASE3_PENDING_MATCH_STATUSES.has(status)
+        ? null
+        : "status_unrecognized",
+    });
+  }
+  if (!Array.isArray(value.roles)) {
+    return phase3UnsettledMatchResult({
+      status,
+      statusKind: "malformed",
+      errorCode: "roles_missing",
+    });
+  }
+
+  const seenRoleIds = new Set();
+  const roles = [];
+  const endorsedRoleIds = [];
+  const suggestedRoleIds = [];
+  for (const role of value.roles) {
+    if (!role || typeof role !== "object" || Array.isArray(role)) {
+      return phase3UnsettledMatchResult({
+        status,
+        statusKind: "malformed",
+        errorCode: "role_malformed",
+      });
+    }
+    const roleId = typeof role.roleId === "string"
+      ? role.roleId.trim()
+      : "";
+    if (!roleId || roleId.length > 256) {
+      return phase3UnsettledMatchResult({
+        status,
+        statusKind: "malformed",
+        errorCode: "role_id_invalid",
+      });
+    }
+    if (seenRoleIds.has(roleId)) {
+      return phase3UnsettledMatchResult({
+        status,
+        statusKind: "malformed",
+        errorCode: "role_id_duplicate",
+      });
+    }
+    if (
+      typeof role.endorsed !== "boolean"
+      || typeof role.suggested !== "boolean"
+      || role.endorsed === role.suggested
+    ) {
+      return phase3UnsettledMatchResult({
+        status,
+        statusKind: "malformed",
+        errorCode: "tier_invalid",
+      });
+    }
+
+    seenRoleIds.add(roleId);
+    const tier = role.endorsed ? "endorsed" : "suggested";
+    roles.push(Object.freeze({ roleId, tier }));
+    if (tier === "endorsed") endorsedRoleIds.push(roleId);
+    else suggestedRoleIds.push(roleId);
+  }
+
+  const parsed = matchCountFromResponse(value);
+  if (parsed.settled !== true || parsed.count !== roles.length) {
+    return phase3UnsettledMatchResult({
+      status,
+      statusKind: "malformed",
+      errorCode: "count_mismatch",
+    });
+  }
+  return Object.freeze({
+    status,
+    statusKind: "settled",
+    settled: true,
+    count: parsed.count,
+    roles: Object.freeze(roles),
+    endorsedRoleIds: Object.freeze(endorsedRoleIds),
+    suggestedRoleIds: Object.freeze(suggestedRoleIds),
+    endorsedCount: endorsedRoleIds.length,
+    suggestedCount: suggestedRoleIds.length,
+    errorCode: null,
+  });
+}
+
 function candidateFromCall(call) {
   const source = call?.candidate || {};
   return {
@@ -980,6 +1141,9 @@ export async function prepareJob({
       humanCall
         ? humanReadiness?.reason || "Paraform human call is not ready"
         : "Only successful screening calls can enter Para AI",
+      {
+        successfulCallVerified: false,
+      },
     );
   }
 
@@ -990,6 +1154,7 @@ export async function prepareJob({
       callStartedAt: call.joinAt || existing.callStartedAt || null,
       callEndedAt,
       callSourceVerified,
+      successfulCallVerified: true,
       ...callTypeFields,
     }), existing.revision);
   } else {
@@ -1001,6 +1166,7 @@ export async function prepareJob({
       callStartedAt: call.joinAt || null,
       callEndedAt,
       callSourceVerified,
+      successfulCallVerified: true,
       ...callTypeFields,
       createdAt: new Date().toISOString(),
       journal: [...newJournal("detected"), ...newJournal("resolving_identity")],
@@ -1293,7 +1459,7 @@ async function applyResumeUpload(job, body) {
 
 export async function applyLadderAndSubmit(job, {
   approvalSource = "human_ladder_review",
-} = {}) {
+} = {}, dependencies = {}) {
   const reasons = jobReviewReasons(job);
   const action = reviewActionFor(job, reasons);
   if (!action.allowed) {
@@ -1333,7 +1499,7 @@ export async function applyLadderAndSubmit(job, {
     confirmation: `SUBMIT ${ready.id}`,
     marketConfirmed: true,
     approvalSource,
-  });
+  }, dependencies);
 }
 
 export function existingTalentNetworkTransition(job, {
@@ -1354,6 +1520,7 @@ export function existingTalentNetworkTransition(job, {
 
 export async function advanceExistingTalentNetworkJob(job, {
   approvalSource = "talent_network_readback",
+  saveAwaitingMatchesImpl = saveJob,
 } = {}) {
   if (!["ready_to_submit", "waiting_for_resume"].includes(job?.state)) {
     throw stateError("job is not ready for a pre-claim Talent Network read", "INVALID_STATE", job);
@@ -1380,7 +1547,7 @@ export async function advanceExistingTalentNetworkJob(job, {
   }
   if (candidateAlreadySubmitted(freshCrm) || candidateAlreadySubmitted(details)) {
     const checkedAt = new Date().toISOString();
-    return saveJob(existingTalentNetworkTransition(job, {
+    return saveAwaitingMatchesImpl(existingTalentNetworkTransition(job, {
       approvalSource,
       checkedAt,
     }), job.revision);
@@ -1416,7 +1583,13 @@ export function buildSubmissionPayload(job, config = paraAIConfig()) {
   };
 }
 
-export async function submitJob(job, body = {}) {
+export async function submitJob(
+  job,
+  body = {},
+  {
+    saveAwaitingMatchesImpl = saveJob,
+  } = {},
+) {
   if (!["ready_to_submit", "submit_intent", "submitting"].includes(job?.state)) throw stateError("job is not ready to submit", "INVALID_STATE", job);
   if (String(body.confirmation || "") !== `SUBMIT ${job.id}`) throw stateError("submit confirmation mismatch", "CONFIRMATION_MISMATCH", job);
   if (body.marketConfirmed !== true) throw stateError("Confirm that you screened this candidate and they are actively on the market", "MARKET_CONFIRMATION_REQUIRED", job);
@@ -1429,6 +1602,7 @@ export async function submitJob(job, body = {}) {
   if (job.state === "ready_to_submit") {
     job = await advanceExistingTalentNetworkJob(job, {
       approvalSource: body.approvalSource || "preclaim_readback",
+      saveAwaitingMatchesImpl,
     });
     if (job.state === "awaiting_matches" || job.state === "error") return job;
   }
@@ -1570,7 +1744,12 @@ export async function submitJob(job, body = {}) {
   }), edited.revision);
 }
 
-export async function reconcileSubmittedJob(job) {
+export async function reconcileSubmittedJob(
+  job,
+  {
+    saveAwaitingMatchesImpl = saveJob,
+  } = {},
+) {
   const legacyAccepted = job?.state === "error" && job?.error?.code === "SUBMIT_NOT_VISIBLE";
   const uncertainWrite =
     job?.state === "submission_unknown" ||
@@ -1594,7 +1773,7 @@ export async function reconcileSubmittedJob(job) {
         detail: "Talent Network state visible on read-back",
       }).catch(() => {});
     }
-    return saveJob(transition(job, "awaiting_matches", {
+    return saveAwaitingMatchesImpl(transition(job, "awaiting_matches", {
       submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,
       submitAcceptedAt: job.submitAcceptedAt || job.submitClaimedAt || checkedAt,
       submissionApprovalCheckedAt: checkedAt,
@@ -1637,43 +1816,677 @@ function matchReadInput(job) {
   };
 }
 
-export async function refreshMatches(job) {
-  if (!["awaiting_matches", "needs_review"].includes(job?.state)) throw stateError("job is not awaiting matches", "INVALID_STATE", job);
-  const config = paraAIConfig();
-  if (!config.matchReadPinned) throw stateError("Phase 0 must pin PARAAI_MATCH_READ_PROC", "PHASE0_MATCH_READ_REQUIRED", job);
-  const response = await trpcGet(config.matchReadProc, matchReadInput(job));
-  const result = matchCountFromResponse(response);
-  const elapsed = Math.max(0, (Date.now() - Date.parse(job.submittedAt || job.updatedAt || "")) / 1000);
-  if (result.count != null && result.count >= 1) {
-    return saveJob(transition(job, "ready_to_enroll", {
-      matchCount: result.count,
-      matchCheckedAt: new Date().toISOString(),
-      targetSequenceName: targetSequenceName(result.count),
-      error: null,
-    }), job.revision);
+function phase3ScopeDigest(job) {
+  return hashSubmissionPayload({
+    kind: "phase3-shadow",
+    jobId: String(job.id || ""),
+    matchLegStartedAt: String(job.matchLegStartedAt || ""),
+  });
+}
+
+function phase3ExistingWriteCounter(shadow, field) {
+  return (
+    shadow
+    && typeof shadow === "object"
+    && Object.hasOwn(shadow, field)
+  )
+    ? shadow[field]
+    : 0;
+}
+
+function phase3StatusHistory(job, status) {
+  const prior = Array.isArray(job?.phase3Shadow?.observedStatuses)
+    ? job.phase3Shadow.observedStatuses
+    : [];
+  const statuses = [...new Set([
+    ...prior.filter((value) => (
+      typeof value === "string"
+      && (
+        PHASE3_STATUS_TOKEN.test(value)
+        || PHASE3_STATUS_DIAGNOSTIC.test(value)
+        || ["missing", "unrecognized"].includes(value)
+      )
+    )),
+    status,
+  ])];
+  return {
+    values: statuses.slice(-64),
+    overflow: statuses.length > 64,
+  };
+}
+
+const PHASE3_EVIDENCE_TOKEN = /^[a-z][a-z0-9_]{0,79}$/u;
+const PHASE3_PROOF_DIGEST = /^[a-f0-9]{40}$/u;
+const PHASE3_NO_MATCH_SEQUENCE_ID = "cmqpje4lh00040cki15nuuqc8";
+
+function phase3EvidenceHistory(job, field, value, validator) {
+  const prior = Array.isArray(job?.phase3Shadow?.[field])
+    ? job.phase3Shadow[field]
+    : [];
+  const values = [...new Set([
+    ...prior.filter((entry) => (
+      typeof entry === "string" && validator(entry)
+    )),
+    ...(typeof value === "string" && validator(value) ? [value] : []),
+  ])];
+  return {
+    values: values.slice(-64),
+    overflow: values.length > 64,
+  };
+}
+
+function phase3CompleteCallSnapshot(value) {
+  const observedAt = String(value?.storeObservedAt || "");
+  const observedAtMs = Date.parse(observedAt);
+  const proofUpdatedAt = String(value?.proofUpdatedAt || "");
+  const proofUpdatedAtMs = Date.parse(proofUpdatedAt);
+  const calls = Array.isArray(value?.calls) ? value.calls : null;
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || value.version !== 1
+    || value.source !== "candidate_success_index_v1"
+    || value.authoritative !== true
+    || value.complete !== true
+    || value.bootstrapComplete !== true
+    || !Number.isInteger(value.proofVersion)
+    || value.proofVersion < 1
+    || !PHASE3_PROOF_DIGEST.test(
+      String(value.proofSemanticDigest || ""),
+    )
+    || !PHASE3_PROOF_DIGEST.test(
+      String(value.bootstrapGenerationDigest || ""),
+    )
+    || !Number.isFinite(proofUpdatedAtMs)
+    || new Date(proofUpdatedAtMs).toISOString() !== proofUpdatedAt
+    || typeof value.conflict !== "boolean"
+    || !Number.isFinite(observedAtMs)
+    || new Date(observedAtMs).toISOString() !== observedAt
+    || !calls
+    || calls.length < 1
+    || calls.length > 2
+    || value.conflict !== (calls.length > 1)
+    || calls.some((call) => (
+      !call
+      || typeof call !== "object"
+      || Array.isArray(call)
+      || call.successful !== true
+      || typeof call.humanCall !== "boolean"
+      || call.provenanceVerified !== true
+      || !Number.isFinite(Date.parse(String(call.endedAt || "")))
+      || new Date(Date.parse(String(call.endedAt))).toISOString()
+        !== call.endedAt
+      || Date.parse(call.endedAt) > observedAtMs
+    ))
+    || (
+      calls.length === 2
+      && (
+        calls[0].humanCall === calls[1].humanCall
+        || calls[0].endedAt !== calls[1].endedAt
+      )
+    )
+  ) {
+    return null;
   }
-  if (result.settled && result.count === 0 && elapsed >= ZERO_SETTLE_SECONDS) {
-    return saveJob(transition(job, "needs_review", {
-      matchCount: 0,
-      matchCheckedAt: new Date().toISOString(),
-      reviewReason: "zero_matches",
-      targetSequenceName: null,
-    }), job.revision);
+  return value;
+}
+
+function phase3SettledZeroBaseline(job) {
+  const shadow = job?.phase3Shadow;
+  const audit = shadow?.audit;
+  const routing = shadow?.intendedRouting;
+  const baselineObservedAt = String(
+    shadow?.zeroBaselineObservedAt || "",
+  );
+  const baselineMs = Date.parse(baselineObservedAt);
+  const anchorMs = Date.parse(String(job?.matchLegStartedAt || ""));
+  if (
+    !Number.isFinite(baselineMs)
+    || !Number.isFinite(anchorMs)
+    || baselineMs < anchorMs
+    || audit?.aggregateOnly !== true
+    || audit?.observedAt !== baselineObservedAt
+    || audit?.match?.decision !== "zero_settled"
+    || audit?.match?.matchCount !== 0
+    || audit?.match?.settled !== true
+    || audit?.match?.timedOut !== false
+    || audit?.curation?.targetCount !== 0
+    || audit?.curation?.postAddMatchCount !== 0
+    || audit?.curation?.postAddMatchCountSource !== "projected"
+    || audit?.gates?.allowShadowAudit !== true
+    || audit?.gates?.allowCuratedWrite !== false
+    || audit?.gates?.allowEnrollment !== false
+    || audit?.gates?.candidateFacingWritesAllowed !== false
+    || audit?.lateMatch?.allowSecondEnrollment !== false
+    || audit?.targetSequenceId !== PHASE3_NO_MATCH_SEQUENCE_ID
+    || routing?.targetSequenceId !== PHASE3_NO_MATCH_SEQUENCE_ID
+    || routing?.matchCount !== 0
+  ) {
+    return null;
   }
-  if (result.count == null && elapsed >= MATCH_TIMEOUT_SECONDS) {
-    return saveJob(transition(job, "needs_review", {
-      matchCount: null,
-      matchCheckedAt: new Date().toISOString(),
+  return {
+    observedAt: baselineObservedAt,
+    audit,
+    intendedRouting: routing,
+  };
+}
+
+function phase3ProjectedShadowAudit({
+  job,
+  observedAt,
+  normalized,
+  settlement,
+  callSnapshot,
+  zeroBaseline = null,
+} = {}) {
+  const scopeDigest = phase3ScopeDigest(job);
+  const curationPlan = planCuratedAdds({
+    scopeDigest,
+    recommendedRoleIds: normalized.endorsedRoleIds,
+    possibleRoleIds: normalized.suggestedRoleIds,
+    curatedRoleIds: [],
+  });
+  const postAddReadback = curatedPostAddMatchCount({
+    scopeDigest,
+    source: "projected",
+    curatedRecommendedRoleIds: normalized.endorsedRoleIds,
+    curatedPossibleRoleIds: normalized.suggestedRoleIds,
+  });
+  const callDecision = mostRecentSuccessfulCallDecision({
+    scopeDigest,
+    snapshotObservedAt: observedAt,
+    authoritative: callSnapshot.authoritative,
+    complete: callSnapshot.complete,
+    calls: callSnapshot.calls,
+  });
+  const membership = outcomeMembershipDecision({
+    scopeDigest,
+    authoritative: false,
+    complete: false,
+    expectedTargetSequenceCount: ALL_OUTCOME_SEQUENCE_IDS.length,
+    scannedTargetSequenceCount: 0,
+    scannedTargetSequenceIds: [],
+    memberships: [],
+  });
+  const noMatchesEnrollmentRecorded = Boolean(
+    zeroBaseline
+    || (
+      job.enrolledAt
+      && job.targetSequenceId === PHASE3_NO_MATCH_SEQUENCE_ID
+    ),
+  );
+  const lateMatch = lateMatchDecision({
+    scopeDigest,
+    noMatchesEnrollmentRecorded,
+    recommendedRoleIds: normalized.endorsedRoleIds,
+    possibleRoleIds: normalized.suggestedRoleIds,
+    curatedRoleIds: [],
+    existingReviewNoteCodes: [],
+  });
+  return buildAggregateShadowAudit({
+    scopeDigest,
+    observedAt,
+    matchStageEnabled: true,
+    matchShadow: true,
+    curateEnabled: false,
+    enrollApproved: false,
+    sequenceHealth: null,
+    settlement,
+    curationPlan,
+    callDecision,
+    postAddReadback,
+    membership,
+    reconciliation: null,
+    lateMatch,
+  });
+}
+
+function phase3NextPoll(job, settlement, observedAt) {
+  if (["matches_settled", "timeout"].includes(settlement.decision)) {
+    return {
+      nextPollAt: null,
+      lateMatchMode: false,
+      complete: true,
+    };
+  }
+  const lateMatchMode = Boolean(
+    settlement.useLateMatchCadence
+    || job?.phase3Shadow?.lateMatchMode === true,
+  );
+  const next = nextMatchPollDecision({
+    matchLegStartedAt: job.matchLegStartedAt,
+    afterAt: observedAt,
+    lateMatchMode,
+  });
+  return {
+    nextPollAt: next.dueAt,
+    lateMatchMode,
+    complete: next.complete,
+  };
+}
+
+export async function refreshMatches(
+  job,
+  {
+    config = paraAIConfig(),
+    now = Date.now,
+    trpcGetImpl = trpcGet,
+    saveJobImpl = saveJob,
+    saveDecisionImpl = savePhase3ShadowDecision,
+    callSnapshot = null,
+    callSnapshotImpl = null,
+  } = {},
+) {
+  if (job?.state !== "awaiting_matches") {
+    throw stateError("job is not awaiting matches", "INVALID_STATE", job);
+  }
+  if (
+    config.matchReadPinned !== true
+    || config.matchReadProc !== PHASE3_MATCH_READ_PROC
+  ) {
+    throw stateError(
+      "PARAAI_MATCH_READ_PROC is not pinned to the captured procedure",
+      "PHASE3_MATCH_READ_REQUIRED",
+      job,
+    );
+  }
+  if (config.matchStageEnabled !== true || config.matchShadow !== true) {
+    throw stateError(
+      "Phase 3 match shadow is not enabled",
+      "PHASE3_SHADOW_REQUIRED",
+      job,
+    );
+  }
+  if (config.curateEnabled !== false || config.enrollApproved !== false) {
+    throw stateError(
+      "Phase 3 shadow requires curation and enrollment gates to remain false",
+      "PHASE3_SHADOW_WRITE_GATES_OPEN",
+      job,
+    );
+  }
+
+  const readStartedMs = Number(
+    typeof now === "function" ? now() : now,
+  );
+  const anchorMs = Date.parse(String(job.matchLegStartedAt || ""));
+  if (
+    !Number.isFinite(readStartedMs)
+    || !Number.isFinite(anchorMs)
+    || anchorMs > readStartedMs
+  ) {
+    throw stateError(
+      "a current match-leg anchor is required",
+      "MATCH_LEG_ANCHOR_REQUIRED",
+      job,
+    );
+  }
+  const input = matchReadInput(job);
+  if (!String(input.candidate_id || "").trim()) {
+    throw stateError(
+      "candidate identity is missing",
+      "IDENTITY_REQUIRED",
+      job,
+    );
+  }
+
+  const resolveCompleteCallSnapshot = async (stage) => {
+    let resolved = callSnapshot;
+    if (typeof callSnapshotImpl === "function") {
+      try {
+        resolved = await callSnapshotImpl(job, { stage });
+      } catch (cause) {
+        const error = stateError(
+          "a complete same-candidate successful-call proof is required",
+          "PHASE3_CALL_SNAPSHOT_REQUIRED",
+          job,
+        );
+        error.cause = cause;
+        throw error;
+      }
+    }
+    const complete = phase3CompleteCallSnapshot(resolved);
+    if (!complete) {
+      throw stateError(
+        "a complete same-candidate successful-call proof is required",
+        "PHASE3_CALL_SNAPSHOT_REQUIRED",
+        job,
+      );
+    }
+    return complete;
+  };
+  const persistCallProofConflict = (
+    proof,
+    {
+      rankedReadObserved = false,
+    } = {},
+  ) => {
+    const statusHistory = rankedReadObserved
+      ? phase3StatusHistory(job, "ranked")
+      : null;
+    const statusKindHistory = rankedReadObserved
+      ? phase3EvidenceHistory(
+          job,
+          "observedStatusKinds",
+          "settled",
+          (value) => [
+            "settled",
+            "pending",
+            "unknown",
+            "malformed",
+          ].includes(value),
+        )
+      : null;
+    return saveJobImpl(transition(job, "needs_review", {
+      ...(rankedReadObserved ? {
+        matchCheckedAt: proof.storeObservedAt,
+      } : {}),
+      reviewReason: "phase3_call_proof_conflict",
+      error: {
+        code: "PHASE3_CALL_PROOF_CONFLICT",
+        detail: "equal-time successful call types require review",
+        at: proof.storeObservedAt,
+      },
+      phase3Shadow: {
+        ...(job.phase3Shadow || {}),
+        policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+        ...(rankedReadObserved ? {
+          observedAt: proof.storeObservedAt,
+          observedStatus: "ranked",
+          observedStatuses: statusHistory.values,
+          observedStatusOverflow: (
+            job?.phase3Shadow?.observedStatusOverflow === true
+            || statusHistory.overflow
+          ),
+          observedStatusKinds: statusKindHistory.values,
+          observedStatusKindOverflow: (
+            job?.phase3Shadow?.observedStatusKindOverflow === true
+            || statusKindHistory.overflow
+          ),
+          statusKind: "settled",
+          responseErrorCode: null,
+          readCount: Math.max(
+            0,
+            Number(job?.phase3Shadow?.readCount) || 0,
+          ) + 1,
+        } : {}),
+        callProofCheckedAt: proof.storeObservedAt,
+        callProofConflict: true,
+        technicalFailure: true,
+        technicalFailureCode: "PHASE3_CALL_PROOF_CONFLICT",
+        complete: true,
+        nextPollAt: null,
+        policyMismatch:
+          job?.phase3Shadow?.policyMismatch === true,
+        candidateFacingWrites: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "candidateFacingWrites",
+        ),
+        curationWrites: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "curationWrites",
+        ),
+        enrollments: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "enrollments",
+        ),
+      },
+      journalDetail:
+        "Phase 3 successful-call proof conflict requires review",
+    }), job.revision);
+  };
+
+  // Prove candidate scope before spending a vendor read. A settling response
+  // gets a second proof observation after the read so Q37 and the settlement
+  // share one store-owned observation boundary.
+  const preflightCallSnapshot = await resolveCompleteCallSnapshot(
+    "preflight",
+  );
+  if (preflightCallSnapshot.conflict === true) {
+    return persistCallProofConflict(preflightCallSnapshot);
+  }
+  const response = await trpcGetImpl(config.matchReadProc, input);
+  const normalized = normalizePhase3RankedMatchResponse(response);
+  const completeCallSnapshot = normalized.settled
+    ? await resolveCompleteCallSnapshot("settlement")
+    : preflightCallSnapshot;
+  if (
+    normalized.settled
+    && completeCallSnapshot.conflict === true
+  ) {
+    return persistCallProofConflict(completeCallSnapshot, {
+      rankedReadObserved: true,
+    });
+  }
+  const proofObservedAt = String(
+    completeCallSnapshot.storeObservedAt || "",
+  );
+  const proofObservedMs = Date.parse(proofObservedAt);
+  const localObservedMs = Number(
+    typeof now === "function" ? now() : now,
+  );
+  const observedMs = normalized.settled
+    ? proofObservedMs
+    : localObservedMs;
+  if (!Number.isFinite(observedMs) || observedMs < anchorMs) {
+    throw stateError(
+      "the call proof observation timestamp is invalid",
+      "PHASE3_CALL_SNAPSHOT_REQUIRED",
+      job,
+    );
+  }
+  const observedAt = new Date(observedMs).toISOString();
+  const observedSettlement = matchSettlementDecision({
+    scopeDigest: phase3ScopeDigest(job),
+    matchLegStartedAt: job.matchLegStartedAt,
+    observedAt,
+    matchCount: normalized.settled ? normalized.count : null,
+  });
+  const zeroBaseline = phase3SettledZeroBaseline(job);
+  const positiveMatch = normalized.settled && normalized.count >= 1;
+  const preserveZeroBaseline = Boolean(zeroBaseline && !positiveMatch);
+  const settlement = preserveZeroBaseline
+    ? Object.freeze({
+        ...observedSettlement,
+        decision: "zero_settled",
+        matchCount: 0,
+        settled: true,
+        timedOut: false,
+        useLateMatchCadence: true,
+      })
+    : observedSettlement;
+  const audit = preserveZeroBaseline
+    ? zeroBaseline.audit
+    : settlement.settled
+      ? phase3ProjectedShadowAudit({
+        job,
+        observedAt,
+        normalized,
+        settlement,
+        callSnapshot: completeCallSnapshot,
+        zeroBaseline,
+      })
+      : null;
+  const poll = phase3NextPoll(job, settlement, observedAt);
+  const statusHistory = phase3StatusHistory(job, normalized.status);
+  const statusKindHistory = phase3EvidenceHistory(
+    job,
+    "observedStatusKinds",
+    normalized.statusKind,
+    (value) => [
+      "settled",
+      "pending",
+      "unknown",
+      "malformed",
+    ].includes(value),
+  );
+  const responseErrorHistory = phase3EvidenceHistory(
+    job,
+    "observedResponseErrors",
+    normalized.errorCode,
+    (value) => PHASE3_EVIDENCE_TOKEN.test(value),
+  );
+  const policyMismatch = Boolean(
+    job?.phase3Shadow?.policyMismatch === true
+    ||
+    normalized.statusKind === "malformed"
+    || (
+      audit
+      && (
+        audit.gates.allowShadowAudit !== true
+        || audit.gates.allowCuratedWrite !== false
+        || audit.gates.allowEnrollment !== false
+        || audit.gates.candidateFacingWritesAllowed !== false
+        || audit.gates.settlementCurationBound !== true
+      )
+    )
+  );
+  const projectedRouting = audit
+    ? {
+        targetSequenceId: audit.targetSequenceId,
+        matchCount: audit.curation.postAddMatchCount,
+        endorsedCount: normalized.endorsedCount,
+        suggestedCount: normalized.suggestedCount,
+        intendedCuratedAddCount: audit.curation.intendedAddCount,
+        postAddMatchCountSource: audit.curation.postAddMatchCountSource,
+        enrollmentAction: "projected",
+        lateMatchReview: false,
+        reviewNoteCode: null,
+        allowSecondEnrollment: false,
+      }
+    : null;
+  const lateMatchDetected = Boolean(
+    zeroBaseline && audit?.lateMatch?.detected === true,
+  );
+  const intendedRouting = preserveZeroBaseline
+    ? zeroBaseline.intendedRouting
+    : lateMatchDetected
+      ? {
+          ...projectedRouting,
+          enrollmentAction: "none",
+          lateMatchReview: true,
+          reviewNoteCode: audit.lateMatch.reviewNoteCode,
+          allowSecondEnrollment: false,
+        }
+      : projectedRouting;
+  const timedOut = settlement.decision === "timeout";
+  const state = timedOut ? "needs_review" : "awaiting_matches";
+  const endorsedCount = preserveZeroBaseline
+    ? 0
+    : normalized.endorsedCount;
+  const suggestedCount = preserveZeroBaseline
+    ? 0
+    : normalized.suggestedCount;
+  const matchCount = preserveZeroBaseline
+    ? 0
+    : normalized.settled
+      ? normalized.count
+      : null;
+  const zeroBaselineObservedAt = zeroBaseline?.observedAt || (
+    audit?.match?.decision === "zero_settled"
+      ? audit.observedAt
+      : null
+  );
+  const phase3Shadow = {
+    ...(job.phase3Shadow || {}),
+    policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+    observedAt,
+    observedStatus: normalized.status,
+    observedStatuses: statusHistory.values,
+    observedStatusOverflow: (
+      job?.phase3Shadow?.observedStatusOverflow === true
+      || statusHistory.overflow
+    ),
+    observedStatusKinds: statusKindHistory.values,
+    observedStatusKindOverflow: (
+      job?.phase3Shadow?.observedStatusKindOverflow === true
+      || statusKindHistory.overflow
+    ),
+    observedResponseErrors: responseErrorHistory.values,
+    observedResponseErrorOverflow: (
+      job?.phase3Shadow?.observedResponseErrorOverflow === true
+      || responseErrorHistory.overflow
+    ),
+    unknownStatusObserved: (
+      job?.phase3Shadow?.unknownStatusObserved === true
+      || normalized.statusKind === "unknown"
+    ),
+    malformedStatusObserved: (
+      job?.phase3Shadow?.malformedStatusObserved === true
+      || normalized.statusKind === "malformed"
+    ),
+    statusKind: normalized.statusKind,
+    responseErrorCode: normalized.errorCode,
+    readCount: Math.max(
+      0,
+      Number(job?.phase3Shadow?.readCount) || 0,
+    ) + 1,
+    endorsedCount,
+    suggestedCount,
+    matchCount,
+    settlementDecision: settlement.decision,
+    nextPollAt: poll.nextPollAt,
+    lateMatchMode: poll.lateMatchMode,
+    complete: poll.complete,
+    policyMismatch,
+    audit,
+    intendedRouting,
+    candidateFacingWrites: phase3ExistingWriteCounter(
+      job?.phase3Shadow,
+      "candidateFacingWrites",
+    ),
+    curationWrites: phase3ExistingWriteCounter(
+      job?.phase3Shadow,
+      "curationWrites",
+    ),
+    enrollments: phase3ExistingWriteCounter(
+      job?.phase3Shadow,
+      "enrollments",
+    ),
+    zeroBaselineObservedAt,
+    lateMatchDetected,
+    enrollmentAction: lateMatchDetected ? "none" : "projected",
+    lateMatchReview: lateMatchDetected,
+    reviewNoteCode: lateMatchDetected
+      ? audit?.lateMatch?.reviewNoteCode || null
+      : null,
+    allowSecondEnrollment: false,
+  };
+  const next = transition(job, state, {
+    matchCount,
+    matchCheckedAt: observedAt,
+    phase3Shadow,
+    ...(timedOut ? {
       reviewReason: "matches_pending_timeout",
-      targetSequenceName: null,
-      journalDetail: "match generation timed out",
-    }), job.revision);
+      error: {
+        code: "MATCHES_PENDING_TIMEOUT",
+        detail: "match generation never settled",
+        at: observedAt,
+      },
+    } : {
+      reviewReason: null,
+      error: null,
+    }),
+    journalDetail: timedOut
+      ? "Phase 3 shadow match generation timed out"
+      : lateMatchDetected
+        ? "Phase 3 late-match review recorded; second enrollment prohibited"
+      : audit
+        ? "Phase 3 aggregate shadow audit recorded"
+        : "Phase 3 shadow match read remains unsettled",
+  });
+  if (audit) {
+    return saveDecisionImpl(next, job.revision, {
+      candidateUserId: job?.identity?.candidateUserId,
+      candidateId: job?.identity?.candidateId,
+      expectedProofVersion: completeCallSnapshot.proofVersion,
+      expectedProofSemanticDigest:
+        completeCallSnapshot.proofSemanticDigest,
+      expectedBootstrapGenerationDigest:
+        completeCallSnapshot.bootstrapGenerationDigest,
+    });
   }
-  return saveJob(transition(job, "awaiting_matches", {
-    matchCount: result.count,
-    matchCheckedAt: new Date().toISOString(),
-    reviewReason: null,
-  }), job.revision);
+  return saveJobImpl(next, job.revision);
 }
 
 async function verifyCandidateEmail(candidateUserId, email) {

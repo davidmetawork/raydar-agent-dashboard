@@ -1,11 +1,15 @@
 import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
 import {
+  automationConfig,
+  continuousPhase3ShadowTransition,
+  phase3ShadowExecutionEnabled,
+} from "./_lib/auto.mjs";
+import {
   applyLadderAndSubmit,
   enrollJob,
   loadJob,
   prepareJob,
   reconcileSubmittedJob,
-  refreshMatches,
   submitJob,
 } from "./_lib/pipeline.mjs";
 import {
@@ -15,6 +19,7 @@ import {
   acquireJobLock,
   enqueueAutoJob,
   releaseJobLock,
+  saveAndEnqueuePhase3ShadowJob,
   storeConfigured,
   takeAlertSlot,
 } from "./_lib/store.mjs";
@@ -26,7 +31,6 @@ const ACTIONS = new Set([
   "submit",
   "apply-ladder-submit",
   "reconcile-submit",
-  "refresh-matches",
   "enroll",
   "no-match-enroll",
 ]);
@@ -55,6 +59,34 @@ async function alert(error, jobId) {
       await notifySlack(`🚨 Para AI: ${code} for job ${jobId || "unknown"} — ${String(error?.message || error).slice(0, 180)}. Review https://monitor.raydar.xyz/#paraai`);
     }
   } catch { /* the API response remains the primary, visible failure path */ }
+}
+
+export function phase3AwaitingMatchesSaveBoundary({
+  config: automation = automationConfig(),
+  now = Date.now,
+  saveAndEnqueueImpl = saveAndEnqueuePhase3ShadowJob,
+} = {}) {
+  const current = Number(typeof now === "function" ? now() : now);
+  if (!phase3ShadowExecutionEnabled(automation, { now: current })) {
+    return null;
+  }
+  return async (job, expectedRevision) => {
+    const actionNow = Number(
+      typeof now === "function" ? now() : now,
+    );
+    const stamped = continuousPhase3ShadowTransition(job, automation, {
+      now: actionNow,
+    });
+    const scheduled = await saveAndEnqueueImpl(
+      stamped,
+      expectedRevision,
+      {
+        dueAt: stamped.phase3Shadow.nextPollAt,
+        now: actionNow,
+      },
+    );
+    return scheduled.job;
+  };
 }
 
 export default async function handler(req, res) {
@@ -94,10 +126,24 @@ export default async function handler(req, res) {
       if (body.expectedRevision != null && Number(body.expectedRevision) !== Number(job.revision)) {
         return res.status(409).json({ ok: false, error: "revision_conflict", job });
       }
-      if (action === "submit") job = await submitJob(job, body);
-      if (action === "apply-ladder-submit") job = await applyLadderAndSubmit(job);
-      if (action === "reconcile-submit") job = await reconcileSubmittedJob(job);
-      if (action === "refresh-matches") job = await refreshMatches(job);
+      const saveAwaitingMatchesImpl =
+        phase3AwaitingMatchesSaveBoundary();
+      const phase3Dependencies = saveAwaitingMatchesImpl
+        ? { saveAwaitingMatchesImpl }
+        : {};
+      if (action === "submit") {
+        job = await submitJob(job, body, phase3Dependencies);
+      }
+      if (action === "apply-ladder-submit") {
+        job = await applyLadderAndSubmit(
+          job,
+          {},
+          phase3Dependencies,
+        );
+      }
+      if (action === "reconcile-submit") {
+        job = await reconcileSubmittedJob(job, phase3Dependencies);
+      }
       if (action === "enroll") job = await enrollJob(job, body);
       if (action === "no-match-enroll") job = await enrollJob(job, body, { noMatch: true });
     }

@@ -18,9 +18,20 @@ import {
   missingRequiredPreferences,
   prepareJob,
   reconcileSubmittedJob,
+  refreshMatches,
   reroutePreparedJob,
   submitJob as pipelineSubmitJob,
 } from "./pipeline.mjs";
+import {
+  LATE_MATCH_REVIEW_NOTE_CODE,
+  LIVE_OUTCOME_SEQUENCES_BY_ID,
+  MATCH_INITIAL_POLL_MS,
+  MATCH_INITIAL_WINDOW_MS,
+  MATCH_TIMEOUT_MS,
+  PHASE3_SHADOW_POLICY_VERSION,
+  nextMatchPollDecision,
+  stageEnableReanchorDecision,
+} from "./phase3-shadow-policy.mjs";
 import {
   HUMAN_CALL_QUEUE_SOURCE,
   callIdFromHumanJob,
@@ -48,23 +59,31 @@ import {
 import {
   acquireJobLock,
   authorizeAndEnqueuePhase2RemainderJob,
+  bootstrapPhase3CandidateSuccessIndex,
   claimDueAutoJobs,
   claimPhase2FirstTenCanaryCommit,
   claimPhase2RemainderBatch,
+  claimPhase3ShadowReleaseBatch,
   completePhase2FirstTenCanary,
   completePhase2RemainderBatch,
+  completePhase3ShadowReleaseBatch,
   completeAutoJob,
   createPhase2FirstTenCanaryPlan,
   createPhase2RemainderPlan,
+  createPhase3ShadowRelease,
   createJob,
   enqueueAutoJob,
   enqueuePhase2RemainderAutoJob,
   getAutoQueueStats,
   getCompletePhase2CanarySnapshot,
+  getCompletePhase3ShadowSnapshot,
   getJob,
   getOrCreateResumeBackfillAnchor,
   getPhase2FirstTenCanary,
   getPhase2RemainderRelease,
+  getPhase3CandidateSuccessProof,
+  getPhase3ShadowRelease,
+  getPhase3CandidateSuccessBootstrap,
   getRecentResumeAttachedSignal,
   getResumeAskSuppression,
   getSubmissionIntent,
@@ -74,6 +93,8 @@ import {
   phase2CanaryManifestDigest,
   phase2RemainderAttestationDigest,
   phase2RemainderManifestDigest,
+  phase3ShadowReleaseManifestDigest,
+  reanchorAndEnqueuePhase3ShadowJob,
   releaseJobLock,
   resumeChaseChainId,
   rescheduleAutoJob,
@@ -91,6 +112,9 @@ const SAFE_RETRY_CODES = new Set([
   "AUTH_EXPIRED", "PREPARE_FAILED", "REVISION_CONFLICT", "JOB_BUSY",
   "SUBMIT_WRITE_UNKNOWN", "SUBMIT_STILL_UNCONFIRMED", "RESUME_CHASE_STOP_FAILED",
   "RESUME_CHASE_READ_FAILED", "RESUME_ATTACH_REDUE_FAILED",
+  "PHASE3_CALL_SNAPSHOT_INCOMPLETE", "PHASE3_CALL_PROOF_REQUIRED",
+  "PHASE3_CALL_SNAPSHOT_REQUIRED", "PHASE3_CALL_PROOF_CHANGED",
+  "PHASE3_BOOTSTRAP_STATUS_FAILED",
 ]);
 const TERMINAL_ERROR_CODES = new Set([
   "INVALID_BOT_ID",
@@ -105,6 +129,14 @@ const PREWRITE_STATES = new Set([
   "detected", "resolving_identity", "extracting", "ready_to_submit", "error",
 ]);
 const BACKFILL_REOPEN_STATES = new Set(["needs_review", "ready_to_submit"]);
+const PHASE3_MATCH_READ_PROC =
+  "candidateMatching.getRankedRolesForCandidate";
+const PHASE3_SHADOW_RELEASE_PERMANENT_ERRORS = new Set([
+  "job_missing",
+  "job_changed",
+  "phase3_shadow_release_job_changed",
+  "phase3_shadow_release_transition_invalid",
+]);
 const SETTLED_NON_SUCCESS_VERDICTS = new Set([
   "no_show", "audio_fail", "error", "joined_silent", "incomplete",
 ]);
@@ -174,6 +206,10 @@ const finiteDate = (value) => {
 export function automationConfig(env = process.env) {
   const notBeforeMs = finiteDate(env.PARAAI_AUTO_NOT_BEFORE);
   const phase1DeployedAtMs = finiteDate(env.PARAAI_PHASE1_DEPLOYED_AT);
+  const matchStageEnabledAtMs = finiteDate(
+    env.PARAAI_MATCH_STAGE_ENABLED_AT,
+  );
+  const matchReadProc = String(env.PARAAI_MATCH_READ_PROC || "").trim();
   const resumeWait = resumeWaitSettings(env);
   const configuredStepAttempts = Number(env.PARAAI_MAX_STEP_ATTEMPTS);
   return {
@@ -181,6 +217,13 @@ export function automationConfig(env = process.env) {
     detectEnabled: bool(env.PARAAI_AUTO_DETECT_ENABLED),
     prepareEnabled: bool(env.PARAAI_AUTO_PREPARE_ENABLED),
     autoSubmitApproved: bool(env.PARAAI_AUTOSUBMIT_APPROVED),
+    matchStageEnabled: bool(env.PARAAI_MATCH_STAGE_ENABLED),
+    matchShadow: bool(env.PARAAI_MATCH_SHADOW),
+    curateEnabled: bool(env.PARAAI_CURATE_ENABLED),
+    enrollApproved: bool(env.PARAAI_ENROLL_APPROVED),
+    matchStageEnabledAtMs,
+    matchReadProc,
+    matchReadPinned: matchReadProc === PHASE3_MATCH_READ_PROC,
     dryRun: !("PARAAI_AUTOMATION_DRY_RUN" in env) || bool(env.PARAAI_AUTOMATION_DRY_RUN, true),
     strictScreenerSource: bool(env.PARAAI_REQUIRE_VERIFIED_CALL_SOURCE, true),
     notBeforeMs,
@@ -220,6 +263,27 @@ export function automationExecutionEnabled(config = {}) {
     config.notBeforeMs != null &&
     config.phase1DeployedAtMs != null &&
     (!config.resumeWaitEnabled || config.resumeSignalConfigured === true),
+  );
+}
+
+export function phase3ShadowExecutionEnabled(
+  config = {},
+  {
+    now = Date.now(),
+  } = {},
+) {
+  const current = Number(now);
+  const anchor = config?.matchStageEnabledAtMs;
+  return Boolean(
+    config?.matchStageEnabled === true
+    && config?.matchShadow === true
+    && config?.curateEnabled === false
+    && config?.enrollApproved === false
+    && config?.matchReadPinned === true
+    && config?.matchReadProc === PHASE3_MATCH_READ_PROC
+    && Number.isFinite(current)
+    && Number.isFinite(anchor)
+    && anchor <= current
   );
 }
 
@@ -1499,6 +1563,390 @@ function automationErrorResult(job, defaultStep = "process") {
   };
 }
 
+function phase3ScopedError(code, message, job, cause = null) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = code;
+  error.step = "match_read";
+  error.job = job;
+  return error;
+}
+
+function phase3ExistingWriteCounter(shadow, field) {
+  return (
+    shadow
+    && typeof shadow === "object"
+    && Object.hasOwn(shadow, field)
+  )
+    ? shadow[field]
+    : 0;
+}
+
+function phase3ShadowCompletionHasReadProof(job) {
+  const shadow = job?.phase3Shadow;
+  if (
+    shadow?.complete !== true
+    || Number(shadow?.readCount || 0) < 1
+    || finiteDate(shadow?.observedAt) == null
+    || finiteDate(job?.matchCheckedAt) == null
+  ) return false;
+  if (shadow.settlementDecision === "matches_settled") {
+    return Boolean(
+      Number(shadow.matchCount) >= 1
+      && shadow.audit?.match?.decision === "matches_settled"
+    );
+  }
+  if (shadow.settlementDecision === "zero_settled") {
+    return Boolean(
+      shadow.matchCount === 0
+      && finiteDate(shadow.zeroBaselineObservedAt) != null
+      && shadow.audit?.match?.decision === "zero_settled"
+    );
+  }
+  return false;
+}
+
+function phase3BootstrapAdmissionValid(job, config, release) {
+  const stageEnabledAt = new Date(
+    Number(config.matchStageEnabledAtMs),
+  ).toISOString();
+  const digest = String(job?.phase3Shadow?.releaseDigest || "");
+  const jobId = String(job?.id || "");
+  const entry = Array.isArray(release?.entries)
+    ? release.entries.find((row) => String(row?.id || "") === jobId)
+    : null;
+  return Boolean(
+    /^[a-f0-9]{64}$/u.test(digest)
+    && release?.manifestDigest === digest
+    && release?.commonAnchorAt === stageEnabledAt
+    && ["claimed", "scheduled"].includes(String(entry?.status || ""))
+    && job?.phase3Shadow?.bootstrap === true
+    && job?.phase3Shadow?.stageEnabledAt === stageEnabledAt
+    && job?.matchLegStartedAt === stageEnabledAt
+  );
+}
+
+async function phase3ContinuousAdmissionAllowed(
+  job,
+  config,
+  getReleaseImpl,
+) {
+  const anchorMs = finiteDate(job?.matchLegStartedAt);
+  const stageEnabledAtMs = Number(config?.matchStageEnabledAtMs);
+  const hasBootstrapMarker = Boolean(
+    job?.phase3Shadow?.bootstrap === true
+    || String(job?.phase3Shadow?.releaseDigest || ""),
+  );
+  if (hasBootstrapMarker) {
+    let release;
+    try {
+      release = await getReleaseImpl();
+    } catch (cause) {
+      throw phase3ScopedError(
+        "PHASE3_BOOTSTRAP_STATUS_FAILED",
+        "Phase 3 bootstrap admission could not be verified",
+        job,
+        cause,
+      );
+    }
+    return phase3BootstrapAdmissionValid(job, config, release)
+      ? "allowed"
+      : "invalid";
+  }
+  if (
+    anchorMs != null
+    && Number.isFinite(stageEnabledAtMs)
+    && anchorMs >= stageEnabledAtMs
+  ) return "allowed";
+  let release;
+  try {
+    release = await getReleaseImpl();
+  } catch (cause) {
+    throw phase3ScopedError(
+      "PHASE3_BOOTSTRAP_STATUS_FAILED",
+      "Phase 3 bootstrap admission could not be verified",
+      job,
+      cause,
+    );
+  }
+  if (!release) return "pending";
+  const entry = Array.isArray(release.entries)
+    ? release.entries.find(
+        (row) => String(row?.id || "") === String(job?.id || ""),
+      )
+    : null;
+  if (!entry || entry.status === "review") return "out_of_scope";
+  if (["pending", "claimed"].includes(String(entry.status || ""))) {
+    return "pending";
+  }
+  return "invalid";
+}
+
+export function continuousPhase3ShadowTransition(
+  job,
+  config,
+  {
+    now = Date.now(),
+  } = {},
+) {
+  if (
+    job?.state !== "awaiting_matches"
+    || !phase3ShadowExecutionEnabled(config, { now })
+  ) return job;
+  const anchorMs = finiteDate(job.matchLegStartedAt);
+  if (anchorMs == null || anchorMs > now) {
+    const error = new Error("a current match-leg anchor is required");
+    error.code = "MATCH_LEG_ANCHOR_REQUIRED";
+    error.step = "match_read";
+    error.job = job;
+    throw error;
+  }
+  if (
+    job?.phase3Shadow?.policyVersion === PHASE3_SHADOW_POLICY_VERSION
+    && (
+      phase3ShadowCompletionHasReadProof(job)
+      || finiteDate(job?.phase3Shadow?.nextPollAt) != null
+    )
+  ) return job;
+  if (job?.phase3Shadow?.bootstrap === true) {
+    throw phase3ScopedError(
+      "PHASE3_BOOTSTRAP_SCHEDULE_INVALID",
+      "the atomic Phase 3 bootstrap schedule is invalid",
+      job,
+    );
+  }
+  const afterAt = finiteDate(job?.matchCheckedAt) ?? anchorMs;
+  const poll = nextMatchPollDecision({
+    matchLegStartedAt: new Date(anchorMs).toISOString(),
+    afterAt: new Date(Math.max(anchorMs, afterAt)).toISOString(),
+    lateMatchMode: job?.phase3Shadow?.lateMatchMode === true,
+  });
+  const completedWithoutReadProof = Boolean(
+    poll.complete && !phase3ShadowCompletionHasReadProof(job),
+  );
+  const nextPollAt = completedWithoutReadProof
+    ? new Date(now).toISOString()
+    : poll.dueAt;
+  const stageEnabledAtMs = Number(config?.matchStageEnabledAtMs);
+  const stageEnabledAt = new Date(
+    Number.isFinite(stageEnabledAtMs) && stageEnabledAtMs <= now
+      ? stageEnabledAtMs
+      : anchorMs,
+  ).toISOString();
+  return transition(job, "awaiting_matches", {
+    phase3Shadow: {
+      ...(job?.phase3Shadow || {}),
+      policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+      stageEnabledAt,
+      bootstrap: false,
+      nextPollAt,
+      complete: false,
+      candidateFacingWrites: phase3ExistingWriteCounter(
+        job?.phase3Shadow,
+        "candidateFacingWrites",
+      ),
+      curationWrites: phase3ExistingWriteCounter(
+        job?.phase3Shadow,
+        "curationWrites",
+      ),
+      enrollments: phase3ExistingWriteCounter(
+        job?.phase3Shadow,
+        "enrollments",
+      ),
+    },
+    journalDetail: "Phase 3 continuous shadow polling scheduled",
+  });
+}
+
+export async function ensureContinuousPhase3ShadowJob(
+  job,
+  config,
+  {
+    now = Date.now(),
+    saveJobImpl = saveJob,
+  } = {},
+) {
+  const next = continuousPhase3ShadowTransition(job, config, { now });
+  if (next === job) return job;
+  return saveJobImpl(next, job.revision);
+}
+
+async function processPhase3ShadowAutoJob(
+  job,
+  config,
+  runStep,
+  {
+    now = Date.now,
+    refreshMatchesImpl = refreshMatches,
+    saveJobImpl = saveJob,
+    phase3CallProofImpl = getPhase3CandidateSuccessProof,
+    getPhase3ReleaseImpl = getPhase3ShadowRelease,
+  } = {},
+) {
+  const current = Number(typeof now === "function" ? now() : now);
+  const admission = await phase3ContinuousAdmissionAllowed(
+    job,
+    config,
+    getPhase3ReleaseImpl,
+  );
+  if (admission === "pending") {
+    return {
+      action: "reschedule",
+      dueAt: current + 60_000,
+      delayMs: 60_000,
+      state: job.state,
+      detail: "Phase 3 bootstrap admission is pending",
+      job,
+    };
+  }
+  if (admission === "out_of_scope") {
+    const at = new Date(current).toISOString();
+    job = await saveJobImpl(transition(job, "needs_review", {
+      reviewReason: "phase3_bootstrap_out_of_scope",
+      error: {
+        code: "PHASE3_BOOTSTRAP_OUT_OF_SCOPE",
+        detail: "job was not selected by the immutable Phase 3 bootstrap",
+        at,
+      },
+      phase3Shadow: {
+        ...(job?.phase3Shadow || {}),
+        policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+        releaseDisposition: "out_of_scope",
+        complete: true,
+        candidateFacingWrites: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "candidateFacingWrites",
+        ),
+        curationWrites: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "curationWrites",
+        ),
+        enrollments: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "enrollments",
+        ),
+      },
+      journalDetail: "Phase 3 bootstrap manifest excluded this job",
+    }), job.revision);
+    return {
+      action: "complete",
+      state: job.state,
+      detail: "Phase 3 bootstrap manifest excluded this job",
+      job,
+    };
+  }
+  if (admission !== "allowed") {
+    throw phase3ScopedError(
+      "PHASE3_BOOTSTRAP_SCHEDULE_INVALID",
+      "the Phase 3 bootstrap marker conflicts with its release",
+      job,
+    );
+  }
+  job = await ensureContinuousPhase3ShadowJob(job, config, {
+    now: current,
+    saveJobImpl,
+  });
+  if (job?.phase3Shadow?.complete === true) {
+    return {
+      action: "complete",
+      state: job.state,
+      detail: "Phase 3 shadow decision complete",
+      job,
+    };
+  }
+  const nextPollMs = finiteDate(job?.phase3Shadow?.nextPollAt);
+  if (nextPollMs == null) {
+    const error = new Error("Phase 3 shadow poll schedule is missing");
+    error.code = "PHASE3_SHADOW_SCHEDULE_REQUIRED";
+    error.step = "match_read";
+    error.job = job;
+    throw error;
+  }
+  if (nextPollMs > current) {
+    return {
+      action: "reschedule",
+      dueAt: nextPollMs,
+      delayMs: Math.max(1_000, nextPollMs - current),
+      state: job.state,
+      detail: "Phase 3 shadow match poll scheduled",
+      job,
+    };
+  }
+  job = await runStep(
+    "match_read",
+    () => refreshMatchesImpl(job, {
+      callSnapshotImpl: async () => {
+        try {
+          return await phase3CallProofImpl({
+            candidateUserId: job?.identity?.candidateUserId,
+            candidateId: job?.identity?.candidateId,
+          });
+        } catch (cause) {
+          throw phase3ScopedError(
+            "PHASE3_CALL_SNAPSHOT_REQUIRED",
+            "the durable same-candidate successful-call proof is unavailable",
+            job,
+            cause,
+          );
+        }
+      },
+    }),
+  );
+  if (job.state === "needs_review") {
+    const timeout =
+      job?.error?.code === "MATCHES_PENDING_TIMEOUT";
+    const code = timeout
+      ? "MATCHES_PENDING_TIMEOUT"
+      : String(
+          job?.error?.code || "PHASE3_SHADOW_REVIEW_REQUIRED",
+        );
+    const detail = String(
+      job?.error?.detail
+        || (
+          timeout
+            ? "match generation never settled"
+            : "aggregate Phase 3 proof requires review"
+        ),
+    ).slice(0, 160);
+    return {
+      action: "complete",
+      state: job.state,
+      detail,
+      alert: {
+        code,
+        detail,
+        aggregateOnly: true,
+      },
+      job,
+    };
+  }
+  if (job?.phase3Shadow?.complete === true) {
+    return {
+      action: "complete",
+      state: job.state,
+      detail: "Phase 3 shadow decision complete",
+      job,
+    };
+  }
+  const dueAt = finiteDate(job?.phase3Shadow?.nextPollAt);
+  if (dueAt == null) {
+    const error = new Error("Phase 3 shadow poll schedule is missing");
+    error.code = "PHASE3_SHADOW_SCHEDULE_REQUIRED";
+    error.step = "match_read";
+    error.job = job;
+    throw error;
+  }
+  return {
+    action: "reschedule",
+    dueAt,
+    delayMs: Math.max(1_000, dueAt - Number(
+      typeof now === "function" ? now() : now,
+    )),
+    state: job.state,
+    detail: "Phase 3 shadow match read remains unsettled",
+    job,
+  };
+}
+
 async function processAutoJobInner(
   botId,
   {
@@ -1509,6 +1957,11 @@ async function processAutoJobInner(
     succeededSteps = new Set(),
     getJobImpl = getJob,
     submitJobImpl = pipelineSubmitJob,
+    refreshMatchesImpl = refreshMatches,
+    saveJobImpl = saveJob,
+    phase3CallProofImpl = getPhase3CandidateSuccessProof,
+    getPhase3ReleaseImpl = getPhase3ShadowRelease,
+    now = Date.now,
   } = {},
 ) {
   const id = String(botId || "").trim();
@@ -1520,11 +1973,29 @@ async function processAutoJobInner(
     || isHumanCallJob(id)
   );
   if (!BOT_ID.test(id)) return { action: "complete", state: "invalid", detail: "invalid bot id" };
+  const phase3Enabled = phase3ShadowExecutionEnabled(config, {
+    now: typeof now === "function" ? now() : now,
+  });
+  let job = phase3Enabled ? await getJobImpl(id) : null;
+  if (phase3Enabled && job?.state === "awaiting_matches") {
+    await stopResumeChase(
+      job,
+      "submission_confirmed",
+      runStep,
+    ).catch(() => null);
+    return processPhase3ShadowAutoJob(job, config, runStep, {
+      now,
+      refreshMatchesImpl,
+      saveJobImpl,
+      phase3CallProofImpl,
+      getPhase3ReleaseImpl,
+    });
+  }
   if (!automationExecutionEnabled(config)) {
     return { action: "reschedule", delayMs: 5 * 60_000, state: "paused", detail: "automation is paused" };
   }
 
-  let job = await getJobImpl(id);
+  job ||= await getJobImpl(id);
   let verifiedResumeUri = "";
   humanIntake = humanIntake || job?.humanCall === true;
   if (
@@ -1869,6 +2340,20 @@ async function processAutoJobInner(
       () => advanceExistingTalentNetworkJob(job, { approvalSource }),
     );
     if (job.state === "awaiting_matches") {
+      if (phase3Enabled) {
+        await stopResumeChase(
+          job,
+          "already_submitted",
+          runStep,
+        ).catch(() => null);
+        return processPhase3ShadowAutoJob(job, config, runStep, {
+          now,
+          refreshMatchesImpl,
+          saveJobImpl,
+          phase3CallProofImpl,
+          getPhase3ReleaseImpl,
+        });
+      }
       await stopResumeChase(job, "already_submitted", runStep);
       return {
         action: "complete",
@@ -2002,6 +2487,20 @@ async function processAutoJobInner(
       () => advanceExistingTalentNetworkJob(job, { approvalSource }),
     );
     if (job.state === "awaiting_matches") {
+      if (phase3Enabled) {
+        await stopResumeChase(
+          job,
+          "already_submitted",
+          runStep,
+        ).catch(() => null);
+        return processPhase3ShadowAutoJob(job, config, runStep, {
+          now,
+          refreshMatchesImpl,
+          saveJobImpl,
+          phase3CallProofImpl,
+          getPhase3ReleaseImpl,
+        });
+      }
       await stopResumeChase(job, "already_submitted", runStep);
       return {
         action: "complete",
@@ -2131,6 +2630,20 @@ async function processAutoJobInner(
     }
     if (job.state === "error") return automationErrorResult(job, "submit");
     if (job.state === "awaiting_matches") {
+      if (phase3Enabled) {
+        await stopResumeChase(
+          job,
+          "already_submitted",
+          runStep,
+        ).catch(() => null);
+        return processPhase3ShadowAutoJob(job, config, runStep, {
+          now,
+          refreshMatchesImpl,
+          saveJobImpl,
+          phase3CallProofImpl,
+          getPhase3ReleaseImpl,
+        });
+      }
       await stopResumeChase(job, "already_submitted", runStep);
       return {
         action: "complete",
@@ -2200,6 +2713,20 @@ async function processAutoJobInner(
     };
   }
   if (job.state === "awaiting_matches") {
+    if (phase3Enabled) {
+      await stopResumeChase(
+        job,
+        "submission_confirmed",
+        runStep,
+      ).catch(() => null);
+      return processPhase3ShadowAutoJob(job, config, runStep, {
+        now,
+        refreshMatchesImpl,
+        saveJobImpl,
+        phase3CallProofImpl,
+        getPhase3ReleaseImpl,
+      });
+    }
     await stopResumeChase(job, "submission_confirmed", runStep);
   }
   if (TERMINAL_STATES.has(job.state)) return { action: "complete", state: job.state, detail: "automation step complete", job };
@@ -2233,10 +2760,13 @@ async function alertOnce(
     ceiling = false,
     objection = false,
     ttlSeconds = null,
+    aggregateOnly = false,
   } = {},
 ) {
   try {
-    const key = objection
+    const key = aggregateOnly
+      ? `auto:phase3-shadow:${code}`
+      : objection
       ? `auto:sharing-objection:${botId}`
       : ceiling
         ? `auto:ceiling:${code}:${botId}`
@@ -2249,6 +2779,12 @@ async function alertOnce(
         ? 12 * 3600
         : 3600;
     if (!(await takeAlertSlot(key, ttl))) return;
+    if (aggregateOnly) {
+      await notifySlack(
+        `🚨 Para AI Phase 3 shadow requires review (${code}). Aggregate health and the durable retry policy remain authoritative.`,
+      );
+      return;
+    }
     if (objection) {
       await notifySlack(
         `⚠️ Para AI automation: job ${botId} submitted with a recorded sharing objection — review if needed.`,
@@ -2270,8 +2806,15 @@ async function alertOnce(
   } catch { /* durable state and the worker response remain authoritative */ }
 }
 
-export async function runAutoTick({ config = automationConfig(), workerId = `vercel-${randomUUID()}` } = {}) {
-  if (!automationExecutionEnabled(config)) {
+export async function runAutoTick({
+  config = automationConfig(),
+  workerId = `vercel-${randomUUID()}`,
+  phase3CallProofImpl = getPhase3CandidateSuccessProof,
+} = {}) {
+  if (
+    !automationExecutionEnabled(config)
+    && !phase3ShadowExecutionEnabled(config)
+  ) {
     return { ok: true, disabled: true, paused: true, processed: [] };
   }
   const maxStepAttempts = Number.isFinite(Number(config.maxStepAttempts))
@@ -2299,6 +2842,7 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
         queueSource: lease.source,
         queueAttempts: lease.attempts,
         queueCallEndedAt: lease.callEndedAt,
+        phase3CallProofImpl,
       });
       let action = result.action;
       let durableFailure = null;
@@ -2321,7 +2865,16 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
             result.failure.code,
             lease.botId,
             result.failure.message,
-            { ceiling: true },
+            {
+              ceiling: true,
+              aggregateOnly: Boolean(
+                result.failure.step === "match_read"
+                && (
+                  String(result.failure.code).startsWith("PHASE3_")
+                  || result.failure.code === "MATCHES_PENDING_TIMEOUT"
+                )
+              ),
+            },
           );
         }
       }
@@ -2330,7 +2883,10 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
           result.alert.code,
           lease.botId,
           result.alert.detail,
-          { ttlSeconds: result.alert.ttlSeconds },
+          {
+            ttlSeconds: result.alert.ttlSeconds,
+            aggregateOnly: result.alert.aggregateOnly === true,
+          },
         );
       }
       if (action === "reschedule") {
@@ -2338,6 +2894,7 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
           leaseToken: lease.leaseToken,
           generation: lease.generation,
           delayMs: result.delayMs,
+          dueAt: result.dueAt,
           error: result.detail,
           failure: result.failure,
         });
@@ -2392,7 +2949,16 @@ export async function runAutoTick({ config = automationConfig(), workerId = `ver
         failure.code,
         lease.botId,
         failure.message,
-        { ceiling: reachedCeiling },
+        {
+          ceiling: reachedCeiling,
+          aggregateOnly: Boolean(
+            failure.step === "match_read"
+            && (
+              String(failure.code).startsWith("PHASE3_")
+              || failure.code === "MATCHES_PENDING_TIMEOUT"
+            )
+          ),
+        },
       );
       processed.push({
         botId: lease.botId,
@@ -2630,6 +3196,44 @@ function assertCompletePhase2CanarySnapshot(snapshot) {
   ) {
     const error = new Error("phase 2 canary snapshot is incomplete");
     error.code = "PHASE2_CANARY_SNAPSHOT_INCOMPLETE";
+    throw error;
+  }
+  return snapshot;
+}
+
+function assertCompletePhase3ShadowSnapshot(snapshot) {
+  const jobs = Array.isArray(snapshot?.jobs)
+    ? snapshot.jobs
+    : null;
+  const observedAt = String(snapshot?.observedAt || "");
+  const observedAtMs = finiteDate(observedAt);
+  const ids = jobs?.map((job) => String(job?.id || "")) || [];
+  if (
+    snapshot?.version !== 1
+    || snapshot?.source !== "phase3_shadow_job_index_v1"
+    || snapshot?.snapshotComplete !== true
+    || !Number.isInteger(snapshot?.total)
+    || snapshot.total < 0
+    || snapshot?.missing !== 0
+    || snapshot?.invalid !== 0
+    || !/^[a-f0-9]{40}$/u.test(
+      String(snapshot?.snapshotFingerprint || ""),
+    )
+    || observedAtMs == null
+    || new Date(observedAtMs).toISOString() !== observedAt
+    || !jobs
+    || jobs.length !== snapshot.total
+    || new Set(ids).size !== ids.length
+    || jobs.some((job) => (
+      !BOT_ID.test(String(job?.id || ""))
+      || !Number.isSafeInteger(Number(job?.revision))
+      || Number(job.revision) < 0
+      || job?.phase3Shadow?.policyVersion
+        !== PHASE3_SHADOW_POLICY_VERSION
+    ))
+  ) {
+    const error = new Error("phase 3 shadow snapshot is incomplete");
+    error.code = "PHASE3_SHADOW_SNAPSHOT_INCOMPLETE";
     throw error;
   }
   return snapshot;
@@ -3489,6 +4093,1123 @@ export async function runPhase2RemainderTick(
   return phase2RemainderPublicResult(completed, {
     queue: claim.queue,
     replayed: claim.recovered === true,
+  });
+}
+
+function phase3MatchLegPreviouslyRun(job) {
+  return Boolean(
+    finiteDate(job?.matchCheckedAt) != null
+    || finiteDate(job?.phase3Shadow?.observedAt) != null
+    || Number(job?.phase3Shadow?.readCount || 0) > 0
+  );
+}
+
+function phase3ReturningCandidate(job) {
+  return Boolean(
+    !job?.submittedAt
+    && job?.submitReadbackVerified === true
+    && journalHasDetail(
+      job,
+      (detail) => detail
+        === "Talent Network membership already visible; submission write skipped",
+    )
+  );
+}
+
+export function selectPhase3ShadowBootstrapJobs(
+  jobs = [],
+  {
+    stageEnabledAt,
+  } = {},
+) {
+  const anchor = new Date(
+    finiteDate(stageEnabledAt) ?? Number.NaN,
+  ).toISOString();
+  return (Array.isArray(jobs) ? jobs : [])
+    .filter((job) => {
+      try {
+        return stageEnableReanchorDecision({
+          stageEnabledAt: anchor,
+          submittedAt: job?.submittedAt,
+          state: job?.state,
+          submitReadbackVerified: job?.submitReadbackVerified === true,
+          matchLegStartedAt: job?.matchLegStartedAt || null,
+          matchLegPreviouslyRun: phase3MatchLegPreviouslyRun(job),
+          enrolledAt: job?.enrolledAt || null,
+          returningCandidate: phase3ReturningCandidate(job),
+        }).action === "reanchor";
+      } catch {
+        return false;
+      }
+    })
+    .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+
+function phase3ShadowReleasePublicResult(
+  record,
+  {
+    replayed = false,
+    aggregate = null,
+    callProofBootstrap = null,
+    queue = null,
+    status = null,
+  } = {},
+) {
+  if (!record) {
+    return {
+      ok: true,
+      status: status || "not_armed",
+      replayed: false,
+      policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+      snapshotComplete: false,
+      callProofBootstrapComplete: false,
+      callProofCandidates: 0,
+      callProofConflicts: 0,
+      callProofScope: "durable_pipeline_jobs",
+      sourceWatermarkComplete: false,
+      phase4Q37Ready: false,
+      scanned: 0,
+      selected: 0,
+      reanchored: 0,
+      queued: 0,
+      matchReads: 0,
+      decisions: 0,
+      uniqueCandidates: 0,
+      bootstrapDecisions: 0,
+      organicDecisions: 0,
+      settled: 0,
+      pending: 0,
+      bootstrapPending: 0,
+      organicPending: 0,
+      timedOut: 0,
+      invalidAudits: 0,
+      technicalFailures: 0,
+      hardTechnicalFailures: 0,
+      recommended: 0,
+      possible: 0,
+      zeroRoutes: 0,
+      oneRoutes: 0,
+      multipleRoutes: 0,
+      lateReviews: 0,
+      policyMismatches: 0,
+      candidateFacingWrites: 0,
+      curationWrites: 0,
+      enrollments: 0,
+      missing: 0,
+      firstAuditAt: null,
+      lastAuditAt: null,
+      manifestDigest: null,
+      releaseFenceIntact: false,
+      bootstrapAuditFenceIntact: false,
+      shadowFenceIntact: true,
+      verificationReady: false,
+      curationEvidence: "projected",
+      queue: queue || { queued: 0, due: 0, leased: 0 },
+    };
+  }
+  const entries = Array.isArray(record.entries) ? record.entries : [];
+  const count = (value) => entries.filter(
+    (entry) => entry.status === value,
+  ).length;
+  const review = count("review");
+  const aggregateHealthy = !aggregate || Boolean(
+    Number(aggregate.policyMismatches || 0) === 0
+    && Number(aggregate.candidateFacingWrites || 0) === 0
+    && Number(aggregate.curationWrites || 0) === 0
+    && Number(aggregate.enrollments || 0) === 0
+    && Number(aggregate.missing || 0) === 0
+    && Number(aggregate.invalidAudits || 0) === 0
+    && Number(aggregate.hardTechnicalFailures || 0) === 0
+    && aggregate.releaseFenceIntact === true
+    && aggregate.shadowFenceIntact !== false
+  );
+  const base = {
+    ok: review === 0 && aggregateHealthy,
+    status: status || (
+      record.status === "released" && review
+        ? "released_with_review"
+        : record.status
+    ),
+    replayed: replayed === true,
+    policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+    snapshotComplete: record.snapshotComplete === true,
+    callProofBootstrapComplete: Boolean(
+      callProofBootstrap?.status === "complete"
+      || callProofBootstrap?.snapshotComplete === true
+    ),
+    callProofCandidates: Math.max(
+      0,
+      Number(
+        callProofBootstrap?.candidateCount
+        ?? callProofBootstrap?.candidates,
+      ) || 0,
+    ),
+    callProofConflicts: Math.max(
+      0,
+      Number(callProofBootstrap?.conflicts) || 0,
+    ),
+    callProofScope: "durable_pipeline_jobs",
+    sourceWatermarkComplete: false,
+    phase4Q37Ready: false,
+    scanned: Math.max(0, Number(record.snapshotTotal) || 0),
+    selected: entries.length,
+    pendingRelease: count("pending"),
+    claimed: count("claimed"),
+    released: count("scheduled"),
+    releaseReview: review,
+    manifestDigest: /^[a-f0-9]{64}$/u.test(
+      String(record.manifestDigest || ""),
+    )
+      ? record.manifestDigest
+      : null,
+    queue: queue || { queued: 0, due: 0, leased: 0 },
+  };
+  return {
+    ...base,
+    ...(aggregate || {
+      reanchored: count("scheduled"),
+      queued: 0,
+      matchReads: 0,
+      decisions: 0,
+      uniqueCandidates: 0,
+      bootstrapDecisions: 0,
+      organicDecisions: 0,
+      settled: 0,
+      pending: count("scheduled"),
+      bootstrapPending: count("scheduled"),
+      organicPending: 0,
+      timedOut: 0,
+      invalidAudits: 0,
+      technicalFailures: 0,
+      hardTechnicalFailures: 0,
+      recommended: 0,
+      possible: 0,
+      zeroRoutes: 0,
+      oneRoutes: 0,
+      multipleRoutes: 0,
+      lateReviews: 0,
+      policyMismatches: 0,
+      candidateFacingWrites: 0,
+      curationWrites: 0,
+      enrollments: 0,
+      missing: 0,
+      firstAuditAt: null,
+      lastAuditAt: null,
+      releaseFenceIntact: false,
+      bootstrapAuditFenceIntact: false,
+      shadowFenceIntact: true,
+      verificationReady: false,
+      curationEvidence: "projected",
+      observedStatuses: {
+        ranked: 0,
+        pending: 0,
+        unknown: 0,
+      },
+    }),
+  };
+}
+
+function assertPhase3ShadowConfig(config, { now = Date.now() } = {}) {
+  if (!phase3ShadowExecutionEnabled(config, { now })) {
+    const error = new Error("phase 3 shadow gates are not safely configured");
+    error.code = "PHASE3_SHADOW_RELEASE_GATES_CLOSED";
+    throw error;
+  }
+}
+
+function assertPhase3ShadowReleaseAnchor(record, config) {
+  if (
+    record
+    && (
+      record.policyVersion !== PHASE3_SHADOW_POLICY_VERSION
+      || record.commonAnchorAt !== new Date(
+        Number(config.matchStageEnabledAtMs),
+      ).toISOString()
+    )
+  ) {
+    const error = new Error(
+      "phase 3 shadow release anchor conflicts with configuration",
+    );
+    error.code = "PHASE3_SHADOW_RELEASE_ANCHOR_CONFLICT";
+    throw error;
+  }
+}
+
+export async function armPhase3ShadowRelease(
+  {
+    now = Date.now(),
+    config = automationConfig(),
+    getReleaseImpl = getPhase3ShadowRelease,
+    getCallProofBootstrapImpl = getPhase3CandidateSuccessBootstrap,
+    snapshotImpl = getCompletePhase2CanarySnapshot,
+    bootstrapCallProofImpl = bootstrapPhase3CandidateSuccessIndex,
+    createReleaseImpl = createPhase3ShadowRelease,
+  } = {},
+) {
+  const current = Number(now);
+  if (!Number.isFinite(current)) {
+    const error = new Error("phase 3 shadow timestamp is invalid");
+    error.code = "PHASE3_SHADOW_RELEASE_TIMESTAMP_INVALID";
+    throw error;
+  }
+  assertPhase3ShadowConfig(config, { now: current });
+  const existing = await getReleaseImpl();
+  if (existing) {
+    assertPhase3ShadowReleaseAnchor(existing, config);
+  }
+  let callProofBootstrap = null;
+  try {
+    callProofBootstrap = await getCallProofBootstrapImpl();
+  } catch {
+    const error = new Error(
+      "phase 3 candidate success bootstrap record is invalid",
+    );
+    error.code = "PHASE3_SHADOW_RELEASE_CALL_PROOF_INVALID";
+    throw error;
+  }
+  if (existing && callProofBootstrap) {
+    return phase3ShadowReleasePublicResult(existing, {
+      replayed: true,
+      callProofBootstrap,
+    });
+  }
+  let snapshot;
+  try {
+    snapshot = assertCompletePhase2CanarySnapshot(
+      await snapshotImpl(),
+    );
+  } catch (cause) {
+    const error = new Error("phase 3 shadow snapshot is incomplete");
+    error.code = cause?.code === "PHASE2_CANARY_INDEX_LIMIT"
+      ? "PHASE3_SHADOW_RELEASE_INDEX_LIMIT"
+      : "PHASE3_SHADOW_RELEASE_SNAPSHOT_INCOMPLETE";
+    throw error;
+  }
+  if (!callProofBootstrap) {
+    try {
+      callProofBootstrap = await bootstrapCallProofImpl({
+        jobs: snapshot.jobs,
+        snapshotFingerprint: snapshot.fingerprint,
+        snapshotTotal: snapshot.total,
+        now: current,
+      });
+    } catch (cause) {
+      const error = new Error(
+        "phase 3 candidate success proof bootstrap failed",
+      );
+      error.code = cause?.code === "PHASE3_CALL_PROOF_SNAPSHOT_CHANGED"
+        ? "PHASE3_SHADOW_RELEASE_CALL_PROOF_SNAPSHOT_CHANGED"
+        : "PHASE3_SHADOW_RELEASE_CALL_PROOF_FAILED";
+      throw error;
+    }
+  }
+  if (existing) {
+    return phase3ShadowReleasePublicResult(existing, {
+      replayed: true,
+      callProofBootstrap,
+    });
+  }
+  const anchorMs = Number(config.matchStageEnabledAtMs);
+  const commonAnchorAt = new Date(anchorMs).toISOString();
+  const jobs = selectPhase3ShadowBootstrapJobs(snapshot.jobs, {
+    stageEnabledAt: commonAnchorAt,
+  });
+  const entries = jobs.map((job) => ({
+    id: job.id,
+    revision: Number(job.revision),
+  }));
+  const manifestDigest = phase3ShadowReleaseManifestDigest({
+    policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+    snapshotFingerprint: snapshot.fingerprint,
+    commonAnchorAt,
+    entries,
+  });
+  const release = await createReleaseImpl({
+    entries,
+    manifestDigest,
+    snapshotFingerprint: snapshot.fingerprint,
+    snapshotTotal: snapshot.total,
+    commonAnchorAt,
+    policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+    now: current,
+  });
+  return phase3ShadowReleasePublicResult(release.record, {
+    replayed: release.existing === true,
+    callProofBootstrap,
+  });
+}
+
+function phase3ShadowBootstrapTransition(
+  job,
+  release,
+  {
+    now = Date.now(),
+  } = {},
+) {
+  const anchor = release.commonAnchorAt;
+  const poll = nextMatchPollDecision({
+    matchLegStartedAt: anchor,
+    afterAt: anchor,
+  });
+  return transition(job, "awaiting_matches", {
+    matchLegStartedAt: anchor,
+    phase3Shadow: {
+      ...(job?.phase3Shadow || {}),
+      policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+      releaseDigest: release.manifestDigest,
+      stageEnabledAt: anchor,
+      bootstrap: true,
+      reanchorFromRevision: Number(job?.revision),
+      reanchoredAt: new Date(now).toISOString(),
+      nextPollAt: poll.dueAt,
+      complete: false,
+      candidateFacingWrites: phase3ExistingWriteCounter(
+        job?.phase3Shadow,
+        "candidateFacingWrites",
+      ),
+      curationWrites: phase3ExistingWriteCounter(
+        job?.phase3Shadow,
+        "curationWrites",
+      ),
+      enrollments: phase3ExistingWriteCounter(
+        job?.phase3Shadow,
+        "enrollments",
+      ),
+    },
+    journalDetail: "Phase 3 shadow match leg re-anchored",
+  });
+}
+
+export async function runPhase3ShadowReleaseTick(
+  {
+    config = automationConfig(),
+    now = Date.now(),
+    getReleaseImpl = getPhase3ShadowRelease,
+    claimImpl = claimPhase3ShadowReleaseBatch,
+    getJobImpl = getJob,
+    admitImpl = reanchorAndEnqueuePhase3ShadowJob,
+    completeImpl = completePhase3ShadowReleaseBatch,
+  } = {},
+) {
+  const current = Number(now);
+  if (!Number.isFinite(current)) {
+    const error = new Error("phase 3 shadow timestamp is invalid");
+    error.code = "PHASE3_SHADOW_RELEASE_TIMESTAMP_INVALID";
+    throw error;
+  }
+  try {
+    assertPhase3ShadowConfig(config, { now: current });
+  } catch {
+    return phase3ShadowReleasePublicResult(null, {
+      status: "stage_disabled",
+    });
+  }
+  const currentRelease = await getReleaseImpl();
+  assertPhase3ShadowReleaseAnchor(currentRelease, config);
+  const claim = await claimImpl({
+    now: current,
+    expectedCommonAnchorAt: new Date(
+      Number(config.matchStageEnabledAtMs),
+    ).toISOString(),
+    expectedPolicyVersion: PHASE3_SHADOW_POLICY_VERSION,
+    batchSize: Math.max(
+      1,
+      Math.min(5, Number(config?.workerBatch) || 1),
+    ),
+  });
+  assertPhase3ShadowReleaseAnchor(claim?.record, config);
+  if (!claim?.claimed) {
+    return phase3ShadowReleasePublicResult(claim?.record || null, {
+      queue: claim?.queue,
+      replayed: Boolean(claim?.busy || claim?.released),
+      status: claim?.status,
+    });
+  }
+  const outcomes = [];
+  for (const entry of claim.entries) {
+    try {
+      const currentJob = await getJobImpl(entry.id);
+      if (!currentJob) {
+        outcomes.push({
+          index: entry.index,
+          status: "review",
+          error: "job_missing",
+        });
+        continue;
+      }
+      const alreadyAdmitted = Boolean(
+        currentJob?.phase3Shadow?.releaseDigest
+          === claim.record.manifestDigest
+        && currentJob?.phase3Shadow?.stageEnabledAt
+          === claim.record.commonAnchorAt
+        && currentJob?.phase3Shadow?.bootstrap === true
+      );
+      if (!alreadyAdmitted) {
+        const decision = stageEnableReanchorDecision({
+          stageEnabledAt: claim.record.commonAnchorAt,
+          submittedAt: currentJob?.submittedAt,
+          state: currentJob?.state,
+          submitReadbackVerified:
+            currentJob?.submitReadbackVerified === true,
+          matchLegStartedAt: currentJob?.matchLegStartedAt || null,
+          matchLegPreviouslyRun:
+            phase3MatchLegPreviouslyRun(currentJob),
+          enrolledAt: currentJob?.enrolledAt || null,
+          returningCandidate: phase3ReturningCandidate(currentJob),
+        });
+        if (decision.action !== "reanchor") {
+          outcomes.push({
+            index: entry.index,
+            status: "review",
+            error: "job_changed",
+          });
+          continue;
+        }
+      }
+      const next = alreadyAdmitted
+        ? currentJob
+        : phase3ShadowBootstrapTransition(
+            currentJob,
+            claim.record,
+            { now: current },
+          );
+      const admission = await admitImpl(
+        next,
+        entry.revision,
+        {
+          manifestDigest: claim.record.manifestDigest,
+          ownerToken: claim.ownerToken,
+          entryIndex: entry.index,
+          commonAnchorAt: claim.record.commonAnchorAt,
+          dueAt: Date.parse(claim.record.commonAnchorAt)
+            + MATCH_INITIAL_POLL_MS,
+          now: current,
+        },
+      );
+      outcomes.push({
+        index: entry.index,
+        status: admission?.admitted === true
+          ? "scheduled"
+          : "retry",
+        error: admission?.queue?.error || "",
+      });
+    } catch (error) {
+      const code = String(error?.code || "release_failed")
+        .toLowerCase()
+        .replace(/[^a-z0-9_]+/gu, "_")
+        .slice(0, 80);
+      outcomes.push({
+        index: entry.index,
+        status: PHASE3_SHADOW_RELEASE_PERMANENT_ERRORS.has(code)
+          ? "review"
+          : "retry",
+        error: code,
+      });
+    }
+  }
+  const completed = await completeImpl({
+    ownerToken: claim.ownerToken,
+    manifestDigest: claim.record.manifestDigest,
+    outcomes,
+    now: current,
+  });
+  return phase3ShadowReleasePublicResult(completed, {
+    queue: claim.queue,
+    replayed: claim.recovered === true,
+  });
+}
+
+function phase3CanonicalIsoMs(value) {
+  const text = String(value || "");
+  const parsed = finiteDate(text);
+  return (
+    parsed != null
+    && new Date(parsed).toISOString() === text
+  )
+    ? parsed
+    : null;
+}
+
+function phase3WriteCounterViolationMagnitude(value) {
+  if (!Number.isSafeInteger(value) || value < 0) return 1;
+  return value;
+}
+
+function phase3PersistedWriteCounterViolation(job, field) {
+  const shadow = job?.phase3Shadow;
+  if (shadow?.policyVersion !== PHASE3_SHADOW_POLICY_VERSION) return 0;
+  return phase3WriteCounterViolationMagnitude(shadow?.[field]);
+}
+
+function phase3ShadowAuditEvidenceValid(job) {
+  const shadow = job?.phase3Shadow;
+  const audit = shadow?.audit;
+  const gates = audit?.gates;
+  const match = audit?.match;
+  const curation = audit?.curation;
+  const routing = shadow?.intendedRouting;
+  const lateMatch = audit?.lateMatch;
+  const matchCount = Number(shadow?.matchCount);
+  const endorsedCount = Number(shadow?.endorsedCount);
+  const suggestedCount = Number(shadow?.suggestedCount);
+  const intendedAddCount = Number(routing?.intendedCuratedAddCount);
+  const candidateKey = String(
+    job?.identity?.candidateId
+      || job?.identity?.candidateUserId
+      || "",
+  ).trim();
+  const settledDecision = String(shadow?.settlementDecision || "");
+  const expectedZero = settledDecision === "zero_settled";
+  const expectedMatches = settledDecision === "matches_settled";
+  const matchLegStartedMs = phase3CanonicalIsoMs(
+    job?.matchLegStartedAt,
+  );
+  const auditObservedMs = phase3CanonicalIsoMs(audit?.observedAt);
+  const currentObservedMs = phase3CanonicalIsoMs(shadow?.observedAt);
+  const zeroBaselineObservedMs = phase3CanonicalIsoMs(
+    shadow?.zeroBaselineObservedAt,
+  );
+  const preservedZeroBaseline = Boolean(
+    expectedZero
+    && shadow?.lateMatchMode === true
+    && zeroBaselineObservedMs != null
+    && auditObservedMs === zeroBaselineObservedMs
+    && currentObservedMs != null
+    && currentObservedMs >= zeroBaselineObservedMs
+  );
+  const currentAuditBound = Boolean(
+    auditObservedMs != null
+    && auditObservedMs === currentObservedMs
+    && shadow?.statusKind === "settled"
+  );
+  const auditTimingValid = Boolean(
+    matchLegStartedMs != null
+    && auditObservedMs != null
+    && auditObservedMs >= matchLegStartedMs
+    && auditObservedMs - matchLegStartedMs <= MATCH_TIMEOUT_MS
+    && (
+      !expectedZero
+      || auditObservedMs - matchLegStartedMs >= MATCH_INITIAL_WINDOW_MS
+    )
+  );
+  const writeCountersValid = [
+    shadow?.candidateFacingWrites,
+    shadow?.curationWrites,
+    shadow?.enrollments,
+  ].every((value) => Number.isSafeInteger(value) && value === 0);
+  const routingValid = Boolean(
+    routing
+    && Object.hasOwn(
+      LIVE_OUTCOME_SEQUENCES_BY_ID,
+      String(routing.targetSequenceId || ""),
+    )
+    && routing.targetSequenceId === audit?.targetSequenceId
+    && Number(routing.matchCount) === matchCount
+    && Number(routing.endorsedCount) === endorsedCount
+    && Number(routing.suggestedCount) === suggestedCount
+    && Number.isInteger(intendedAddCount)
+    && intendedAddCount >= 0
+    && intendedAddCount === Number(curation?.intendedAddCount)
+    && routing.postAddMatchCountSource === "projected"
+  );
+  const explicitLateReview = Boolean(
+    lateMatch?.detected === true
+    && lateMatch?.allowSecondEnrollment === false
+    && lateMatch?.reviewNoteCode === LATE_MATCH_REVIEW_NOTE_CODE
+    && lateMatch?.shouldAddReviewNote === true
+    && shadow?.lateMatchDetected === true
+    && routing?.lateMatchReview === true
+    && routing?.enrollmentAction === "none"
+    && routing?.allowSecondEnrollment === false
+    && routing?.reviewNoteCode === LATE_MATCH_REVIEW_NOTE_CODE
+  );
+  return Boolean(
+    shadow?.policyVersion === PHASE3_SHADOW_POLICY_VERSION
+    && candidateKey
+    && (
+      shadow?.complete === true
+      || preservedZeroBaseline
+    )
+    && shadow?.policyMismatch !== true
+    && shadow?.malformedStatusObserved !== true
+    && auditTimingValid
+    && writeCountersValid
+    && (currentAuditBound || preservedZeroBaseline)
+    && (expectedZero || expectedMatches)
+    && Number.isInteger(matchCount)
+    && matchCount >= 0
+    && (expectedZero ? matchCount === 0 : matchCount >= 1)
+    && Number.isInteger(endorsedCount)
+    && endorsedCount >= 0
+    && Number.isInteger(suggestedCount)
+    && suggestedCount >= 0
+    && endorsedCount + suggestedCount === matchCount
+    && audit
+    && audit.policyVersion === PHASE3_SHADOW_POLICY_VERSION
+    && audit.aggregateOnly === true
+    && (
+      audit.observedAt === shadow.observedAt
+      || (
+        preservedZeroBaseline
+        && audit.observedAt === shadow.zeroBaselineObservedAt
+      )
+    )
+    && match?.decision === settledDecision
+    && match?.settled === true
+    && match?.timedOut === false
+    && Number(match?.matchCount) === matchCount
+    && Number(curation?.recommendedCount) === endorsedCount
+    && Number(curation?.possibleCount) === suggestedCount
+    && Number(curation?.targetCount) === matchCount
+    && Number(curation?.postAddMatchCount) === matchCount
+    && curation?.postAddMatchCountSource === "projected"
+    && gates?.allowMatchRead === true
+    && gates?.allowCuratedRead === true
+    && gates?.allowShadowAudit === true
+    && gates?.allowCuratedWrite === false
+    && gates?.allowEnrollment === false
+    && gates?.candidateFacingWritesAllowed === false
+    && gates?.curationPlanHealthy === true
+    && gates?.settlementCurationBound === true
+    && gates?.proofScopeBound === true
+    && gates?.settlementDecision === settledDecision
+    && Number(gates?.settlementMatchCount) === matchCount
+    && gates?.settlementAllowsEnrollment === true
+    && gates?.lateMatchProofHealthy === true
+    && gates?.lateMatchCurationBound === true
+    && (
+      lateMatch?.detected === true
+        ? explicitLateReview && routingValid
+        : routingValid
+    )
+  );
+}
+
+export async function phase3ShadowReleaseStatus(
+  {
+    config = automationConfig(),
+    getReleaseImpl = getPhase3ShadowRelease,
+    getCallProofBootstrapImpl = getPhase3CandidateSuccessBootstrap,
+    snapshotImpl = getCompletePhase3ShadowSnapshot,
+    queueStatsImpl = getAutoQueueStats,
+    now = Date.now(),
+  } = {},
+) {
+  const [record, queue, callProofBootstrapResult] = await Promise.all([
+    getReleaseImpl(),
+    queueStatsImpl(),
+    getCallProofBootstrapImpl()
+      .then((value) => ({ value, failed: false }))
+      .catch(() => ({ value: null, failed: true })),
+  ]);
+  const callProofBootstrap = callProofBootstrapResult.value;
+  const callProofBootstrapComplete = Boolean(
+    callProofBootstrap?.status === "complete",
+  );
+  if (!record) {
+    return phase3ShadowReleasePublicResult(null, {
+      queue,
+      callProofBootstrap,
+    });
+  }
+  assertPhase3ShadowConfig(config, { now });
+  assertPhase3ShadowReleaseAnchor(record, config);
+  let snapshot;
+  try {
+    snapshot = assertCompletePhase3ShadowSnapshot(
+      await snapshotImpl(),
+    );
+  } catch {
+    return phase3ShadowReleasePublicResult(record, {
+      queue,
+      callProofBootstrap,
+      status: "snapshot_incomplete",
+      aggregate: {
+        reanchored: 0,
+        queued: 0,
+        matchReads: 0,
+        decisions: 0,
+        uniqueCandidates: 0,
+        bootstrapDecisions: 0,
+        organicDecisions: 0,
+        settled: 0,
+        pending: 0,
+        bootstrapPending: Number(record.count) || 0,
+        organicPending: 0,
+        timedOut: 0,
+        invalidAudits: 0,
+        technicalFailures: Math.max(1, Number(record.count) || 1),
+        hardTechnicalFailures: Math.max(
+          1,
+          Number(record.count) || 1,
+        ),
+        recommended: 0,
+        possible: 0,
+        zeroRoutes: 0,
+        oneRoutes: 0,
+        multipleRoutes: 0,
+        lateReviews: 0,
+        policyMismatches: 0,
+        candidateFacingWrites: 0,
+        curationWrites: 0,
+        enrollments: 0,
+        missing: record.count,
+        firstAuditAt: null,
+        lastAuditAt: null,
+        releaseFenceIntact: false,
+        bootstrapAuditFenceIntact: false,
+        shadowFenceIntact: false,
+        verificationReady: false,
+        curationEvidence: "projected",
+        observedStatuses: { ranked: 0, pending: 0, unknown: 0 },
+      },
+    });
+  }
+  const jobsById = new Map(
+    snapshot.jobs.map((job) => [String(job.id), job]),
+  );
+  const bootstrapJobs = record.entries.map(
+    (entry) => jobsById.get(String(entry.id)) || null,
+  );
+  const releaseAnchorMs = finiteDate(record.commonAnchorAt);
+  const currentPolicyJobs = snapshot.jobs.filter((job) => (
+    job?.phase3Shadow?.policyVersion === PHASE3_SHADOW_POLICY_VERSION
+  ));
+  const safetyJobs = [...new Map([
+    ...currentPolicyJobs,
+    ...bootstrapJobs.filter(Boolean),
+  ].map((job) => [String(job.id), job])).values()];
+  const shadowJobs = currentPolicyJobs.filter((job) => {
+    const shadow = job?.phase3Shadow;
+    if (
+      !shadow
+      || typeof shadow !== "object"
+      || releaseAnchorMs == null
+    ) return false;
+    const bootstrapBound = Boolean(
+      shadow.bootstrap === true
+      && shadow.releaseDigest === record.manifestDigest
+      && shadow.stageEnabledAt === record.commonAnchorAt
+      && job.matchLegStartedAt === record.commonAnchorAt
+    );
+    const matchLegStartedMs = finiteDate(job.matchLegStartedAt);
+    const stageEnabledMs = finiteDate(shadow.stageEnabledAt);
+    const continuousBound = Boolean(
+      shadow.bootstrap === false
+      && matchLegStartedMs != null
+      && matchLegStartedMs >= releaseAnchorMs
+      && stageEnabledMs != null
+      && stageEnabledMs >= releaseAnchorMs
+      && stageEnabledMs <= matchLegStartedMs
+    );
+    return bootstrapBound || continuousBound;
+  });
+  const observed = shadowJobs.filter(
+    (job) => finiteDate(job.phase3Shadow?.observedAt) != null,
+  );
+  const auditTimes = shadowJobs
+    .filter(phase3ShadowAuditEvidenceValid)
+    .map((job) => phase3CanonicalIsoMs(
+      job.phase3Shadow?.audit?.observedAt,
+    ))
+    .filter((value) => value != null)
+    .sort((left, right) => left - right);
+  const statusCounts = { ranked: 0, pending: 0, unknown: 0 };
+  for (const job of observed) {
+    const history = Array.isArray(job.phase3Shadow?.observedStatusKinds)
+      ? job.phase3Shadow.observedStatusKinds
+      : [job.phase3Shadow?.statusKind];
+    for (const statusKind of new Set(history.map(
+      (value) => String(value || ""),
+    ).filter(Boolean))) {
+      if (statusKind === "settled") {
+        statusCounts.ranked++;
+      } else if (statusKind === "pending") {
+        statusCounts.pending++;
+      } else if (["unknown", "malformed"].includes(statusKind)) {
+        statusCounts.unknown++;
+      }
+    }
+  }
+  const readCount = shadowJobs.reduce(
+    (total, job) => total
+      + Math.max(0, Number(job.phase3Shadow?.readCount) || 0),
+    0,
+  );
+  const completeJobs = shadowJobs.filter(
+    phase3ShadowAuditEvidenceValid,
+  );
+  const completedCandidateKeys = new Set(completeJobs.map((job) => String(
+    job?.identity?.candidateId
+      || job?.identity?.candidateUserId
+      || "",
+  )).filter(Boolean));
+  const bootstrapCompleteJobs = completeJobs.filter((job) => (
+    job.phase3Shadow?.bootstrap === true
+    && job.phase3Shadow?.releaseDigest === record.manifestDigest
+  ));
+  const organicCompleteJobs = completeJobs.filter((job) => (
+    job.phase3Shadow?.bootstrap === false
+  ));
+  const timedOutJobs = safetyJobs.filter(
+    (job) => job.phase3Shadow?.settlementDecision === "timeout",
+  );
+  const pendingJobs = shadowJobs.filter(
+    (job) => (
+      !phase3ShadowAuditEvidenceValid(job)
+      && job.phase3Shadow?.settlementDecision !== "timeout"
+    ),
+  );
+  const bootstrapPending = Math.max(
+    0,
+    Number(record.count) - bootstrapCompleteJobs.length,
+  );
+  const organicPending = pendingJobs.filter(
+    (job) => job.phase3Shadow?.bootstrap === false,
+  ).length;
+  const recommended = completeJobs.reduce(
+    (total, job) => total
+      + Math.max(0, Number(job.phase3Shadow?.endorsedCount) || 0),
+    0,
+  );
+  const possible = completeJobs.reduce(
+    (total, job) => total
+      + Math.max(0, Number(job.phase3Shadow?.suggestedCount) || 0),
+    0,
+  );
+  const routeCounts = {
+    zero: 0,
+    one: 0,
+    multiple: 0,
+    lateReview: 0,
+  };
+  for (const job of completeJobs) {
+    if (job.phase3Shadow?.intendedRouting?.lateMatchReview === true) {
+      routeCounts.lateReview++;
+      continue;
+    }
+    const matchCount = Number(job.phase3Shadow?.matchCount);
+    if (matchCount === 0) routeCounts.zero++;
+    else if (matchCount === 1) routeCounts.one++;
+    else if (Number.isFinite(matchCount) && matchCount >= 2) {
+      routeCounts.multiple++;
+    }
+  }
+  const invalidAuditJobs = safetyJobs.filter((job) => {
+    const shadow = job?.phase3Shadow;
+    const benignNonAuditReview = Boolean(
+      shadow?.policyMismatch !== true
+      && !shadow?.audit
+      && !shadow?.intendedRouting
+      && (
+        shadow?.settlementDecision === "timeout"
+        || shadow?.technicalFailure === true
+      )
+    );
+    return Boolean(
+      (
+        (shadow?.complete === true && !benignNonAuditReview)
+        || (shadow?.audit && typeof shadow.audit === "object")
+        || shadow?.intendedRouting
+      )
+      && !phase3ShadowAuditEvidenceValid(job)
+    );
+  });
+  const invalidAuditIds = new Set(
+    invalidAuditJobs.map((job) => String(job.id)),
+  );
+  const invalidWriteCounterIds = new Set(safetyJobs.filter((job) => {
+    const shadow = job?.phase3Shadow;
+    if (shadow?.policyVersion !== PHASE3_SHADOW_POLICY_VERSION) {
+      return false;
+    }
+    return [
+      shadow.candidateFacingWrites,
+      shadow.curationWrites,
+      shadow.enrollments,
+    ].some((value) => (
+      !Number.isSafeInteger(value) || value !== 0
+    ));
+  }).map((job) => String(job.id)));
+  const policyMismatchIds = new Set(safetyJobs.filter(
+    (job) => (
+      job.phase3Shadow?.policyMismatch === true
+      || invalidAuditIds.has(String(job.id))
+      || invalidWriteCounterIds.has(String(job.id))
+    ),
+  ).map((job) => String(job.id)));
+  const policyMismatches = policyMismatchIds.size;
+  const candidateFacingWrites = safetyJobs.reduce(
+    (total, job) => total + Math.max(
+      phase3PersistedWriteCounterViolation(
+        job,
+        "candidateFacingWrites",
+      ),
+      job.phase3Shadow?.audit?.gates?.candidateFacingWritesAllowed === true
+        ? 1
+        : 0,
+    ),
+    0,
+  );
+  const curationWrites = safetyJobs.reduce(
+    (total, job) => total
+      + phase3PersistedWriteCounterViolation(
+        job,
+        "curationWrites",
+      ),
+    0,
+  );
+  const enrollments = safetyJobs.reduce(
+    (total, job) => total
+      + phase3PersistedWriteCounterViolation(
+        job,
+        "enrollments",
+      ),
+    0,
+  );
+  const reanchored = bootstrapJobs.filter((job) => (
+    job?.phase3Shadow?.releaseDigest === record.manifestDigest
+    && job?.phase3Shadow?.stageEnabledAt === record.commonAnchorAt
+    && job?.phase3Shadow?.bootstrap === true
+    && job?.matchLegStartedAt === record.commonAnchorAt
+  )).length;
+  const missing = bootstrapJobs.filter((job) => !job).length;
+  const releaseReviews = record.entries.filter(
+    (entry) => entry.status === "review",
+  ).length;
+  const technicalFailureIds = new Set(safetyJobs.filter((job) => (
+    invalidAuditIds.has(String(job.id))
+    || job.state === "needs_review"
+    || job.phase3Shadow?.settlementDecision === "timeout"
+    || Boolean(job.phase3Shadow?.technicalFailure)
+  )).map((job) => String(job.id)));
+  const benignTechnicalReviewIds = new Set(safetyJobs.filter((job) => {
+    const shadow = job?.phase3Shadow;
+    if (shadow?.policyMismatch === true) return false;
+    if (
+      shadow?.technicalFailureCode
+        === "PHASE3_CALL_PROOF_CONFLICT"
+      && shadow?.callProofConflict === true
+    ) return true;
+    return Boolean(
+      !shadow?.audit
+      && !shadow?.intendedRouting
+      && shadow?.settlementDecision === "timeout"
+    );
+  }).map((job) => String(job.id)));
+  const hardTechnicalFailureIds = new Set(
+    [...technicalFailureIds].filter(
+      (id) => !benignTechnicalReviewIds.has(id),
+    ),
+  );
+  const infrastructureTechnicalFailures = (
+    releaseReviews
+    + missing
+    + Number(
+      callProofBootstrapResult.failed
+      || !callProofBootstrapComplete,
+    )
+  );
+  const technicalFailures = (
+    technicalFailureIds.size
+    + infrastructureTechnicalFailures
+  );
+  const hardTechnicalFailures = (
+    hardTechnicalFailureIds.size
+    + infrastructureTechnicalFailures
+  );
+  const queued = shadowJobs.filter((job) => (
+    job.phase3Shadow?.complete !== true
+    && finiteDate(job.phase3Shadow?.nextPollAt) != null
+  )).length;
+  const firstAuditAt = auditTimes.length
+    ? new Date(auditTimes[0]).toISOString()
+    : null;
+  const lastAuditAt = auditTimes.length
+    ? new Date(auditTimes.at(-1)).toISOString()
+    : null;
+  const monitoringWindowMs = auditTimes.length
+    && Number.isFinite(Number(now))
+    && Number(now) >= auditTimes[0]
+    ? Number(now) - auditTimes[0]
+    : 0;
+  const releaseFenceIntact = Boolean(
+    record.status === "released"
+    && record.entries.every((entry) => entry.status === "scheduled")
+    && reanchored === record.count
+    && missing === 0
+  );
+  const bootstrapAuditFenceIntact = Boolean(
+    releaseFenceIntact
+    && bootstrapCompleteJobs.length === record.count
+  );
+  const shadowFenceIntact = Boolean(
+    candidateFacingWrites === 0
+    && curationWrites === 0
+    && enrollments === 0
+  );
+  const aggregate = {
+    reanchored,
+    queued,
+    matchReads: readCount,
+    decisions: completeJobs.length,
+    uniqueCandidates: completedCandidateKeys.size,
+    bootstrapDecisions: bootstrapCompleteJobs.length,
+    organicDecisions: organicCompleteJobs.length,
+    settled: completeJobs.length,
+    pending: pendingJobs.length,
+    bootstrapPending,
+    organicPending,
+    timedOut: timedOutJobs.length,
+    invalidAudits: invalidAuditJobs.length,
+    technicalFailures,
+    hardTechnicalFailures,
+    recommended,
+    possible,
+    zeroRoutes: routeCounts.zero,
+    oneRoutes: routeCounts.one,
+    multipleRoutes: routeCounts.multiple,
+    lateReviews: routeCounts.lateReview,
+    policyMismatches,
+    candidateFacingWrites,
+    curationWrites,
+    enrollments,
+    missing,
+    firstAuditAt,
+    lastAuditAt,
+    observedStatuses: statusCounts,
+    releaseFenceIntact,
+    bootstrapAuditFenceIntact,
+    shadowFenceIntact,
+    verificationReady: Boolean(
+      completeJobs.length >= 10
+      && completedCandidateKeys.size >= 10
+      && monitoringWindowMs >= 48 * 60 * 60_000
+      && policyMismatches === 0
+      && invalidAuditJobs.length === 0
+      && hardTechnicalFailures === 0
+      && shadowFenceIntact
+      && releaseFenceIntact
+      && callProofBootstrapComplete
+      && Number(now) >= auditTimes.at(-1)
+    ),
+    curationEvidence: "projected",
+  };
+  return phase3ShadowReleasePublicResult(record, {
+    aggregate,
+    callProofBootstrap,
+    queue,
+    status: aggregate.verificationReady
+      ? "shadow_verified"
+      : record.status === "released"
+        && releaseFenceIntact
+        && shadowFenceIntact
+        && policyMismatches === 0
+        && hardTechnicalFailures === 0
+        ? "shadow_observing"
+      : record.status === "released"
+        ? "shadow_running"
+        : null,
   });
 }
 

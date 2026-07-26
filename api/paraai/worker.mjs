@@ -1,22 +1,31 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import {
   armPhase2RemainderRelease,
+  armPhase3ShadowRelease,
   automationConfig,
   commitPhase2FirstTenCanary,
   enqueueBackfill,
   enqueueOrganicExceptions,
   phase2FirstTenCanaryStatus,
   phase2RemainderReleaseStatus,
+  phase3ShadowExecutionEnabled,
+  phase3ShadowReleaseStatus,
   planPhase2FirstTenCanary,
   recoverRecentSuccessfulCalls,
   runAutoTick,
   runPhase2RemainderTick,
+  runPhase3ShadowReleaseTick,
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
 import { notifySlack } from "./_lib/core.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
-import { getAutoQueueStats, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
+import {
+  getAutoQueueStats,
+  recordPhase3ShadowAggregateAuditResult,
+  storeConfigured,
+  takeAlertSlot,
+} from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
@@ -47,12 +56,135 @@ function requestBody(req) {
   return req.body && typeof req.body === "object" ? req.body : {};
 }
 
+export function phase3AggregateAuditFailure(status) {
+  if (
+    !status
+    || typeof status !== "object"
+    || status.status === "not_armed"
+  ) return { checked: false, reason: null };
+  if (
+    ["armed", "running"].includes(String(status.status || ""))
+    || Number(status.pendingRelease) > 0
+    || Number(status.claimed) > 0
+  ) {
+    return { checked: false, reason: null };
+  }
+  const checks = [
+    ["candidate_facing_write", status.candidateFacingWrites],
+    ["curation_write", status.curationWrites],
+    ["enrollment_write", status.enrollments],
+    ["policy_mismatch", status.policyMismatches],
+    ["invalid_audit", status.invalidAudits],
+    ["hard_technical_failure", status.hardTechnicalFailures],
+    ["release_review", status.releaseReview],
+    ["missing_release_job", status.missing],
+  ];
+  const failed = checks.find(([, value]) => Number(value) > 0);
+  if (failed) return { checked: true, reason: failed[0] };
+  if (status.shadowFenceIntact === false) {
+    return { checked: true, reason: "shadow_fence_broken" };
+  }
+  if (status.status === "snapshot_incomplete") {
+    return { checked: true, reason: "snapshot_incomplete" };
+  }
+  return { checked: true, reason: null };
+}
+
+export function phase3AggregateSafetyDigest(status) {
+  const safetyState = {
+    candidateFacingWrites:
+      Math.max(0, Number(status?.candidateFacingWrites) || 0),
+    curationWrites: Math.max(0, Number(status?.curationWrites) || 0),
+    enrollments: Math.max(0, Number(status?.enrollments) || 0),
+    policyMismatches:
+      Math.max(0, Number(status?.policyMismatches) || 0),
+    invalidAudits: Math.max(0, Number(status?.invalidAudits) || 0),
+    hardTechnicalFailures:
+      Math.max(0, Number(status?.hardTechnicalFailures) || 0),
+    releaseReview: Math.max(0, Number(status?.releaseReview) || 0),
+    missing: Math.max(0, Number(status?.missing) || 0),
+    shadowFenceBroken: status?.shadowFenceIntact === false,
+    snapshotIncomplete: status?.status === "snapshot_incomplete",
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(safetyState))
+    .digest("hex");
+}
+
+export async function phase3ShadowStatusWithEscalation({
+  statusImpl = phase3ShadowReleaseStatus,
+  recordImpl = recordPhase3ShadowAggregateAuditResult,
+  alertSlotImpl = takeAlertSlot,
+  notifyImpl = notifySlack,
+} = {}) {
+  let status;
+  try {
+    status = await statusImpl();
+  } catch (cause) {
+    try {
+      const health = await recordImpl({
+        failed: true,
+        reason: "status_check_failed",
+        exception: true,
+      });
+      if (
+        health.shouldAlert
+        && await alertSlotImpl(
+          "phase3-shadow-aggregate-audit-failed",
+          3600,
+        )
+      ) {
+        await notifyImpl(
+          "🚨 Para AI Phase 3 shadow aggregate audit failed on consecutive status checks (status_check_failed). Shadow write fences remain authoritative.",
+        );
+      }
+    } catch { /* preserve the primary status failure */ }
+    throw cause;
+  }
+  const audit = phase3AggregateAuditFailure(status);
+  if (!audit.checked) return status;
+  let health = null;
+  try {
+    health = await recordImpl({
+      failed: Boolean(audit.reason),
+      reason: audit.reason || "clean",
+      manifestDigest: status.manifestDigest,
+      evidenceAt: status.lastAuditAt,
+      readCount: Math.max(0, Number(status.matchReads) || 0),
+      decisions: Math.max(0, Number(status.decisions) || 0),
+      safetyDigest: phase3AggregateSafetyDigest(status),
+    });
+    if (
+      health.shouldAlert
+      && await alertSlotImpl(
+        "phase3-shadow-aggregate-audit-failed",
+        3600,
+      )
+    ) {
+      await notifyImpl(
+        `🚨 Para AI Phase 3 shadow aggregate audit failed on ${health.failureStreak} consecutive status checks (${health.reason}). Shadow write fences remain authoritative.`,
+      );
+    }
+  } catch { /* status remains authoritative; the next check retries the streak */ }
+  return {
+    ...status,
+    ...(health ? {
+      auditFailureStreak: health.failureStreak,
+      aggregateAuditFailing: health.failing,
+    } : {
+      auditHealthRecorded: false,
+    }),
+  };
+}
+
 export async function runAutomationCycle({
   mode = "tick",
   config: automation = automationConfig(),
   sweepImpl = sweepPhase1ResumeWaitCards,
   tickImpl = runAutoTick,
   remainderImpl = null,
+  phase3ReleaseImpl = null,
+  phase3StatusImpl = null,
 } = {}) {
   let resumeSweep = null;
   let resumeSweepError = null;
@@ -83,12 +215,50 @@ export async function runAutomationCycle({
       };
     }
   }
+  let phase3Release = null;
+  let phase3ReleaseError = null;
+  if (typeof phase3ReleaseImpl === "function" || storeConfigured()) {
+    try {
+      phase3Release = await (
+        phase3ReleaseImpl || runPhase3ShadowReleaseTick
+      )({
+        config: automation,
+      });
+    } catch (error) {
+      const code = String(error?.code || "");
+      phase3ReleaseError = {
+        error: /^PHASE3_SHADOW_RELEASE_[A-Z0-9_]+$/u.test(code)
+          ? code.toLowerCase()
+          : "phase3_shadow_release_failed",
+      };
+    }
+  }
+  let phase3Status = null;
+  let phase3StatusError = null;
+  if (
+    phase3ShadowExecutionEnabled(automation)
+    && (typeof phase3StatusImpl === "function" || storeConfigured())
+  ) {
+    try {
+      phase3Status = await phase3ShadowStatusWithEscalation({
+        statusImpl: phase3StatusImpl || phase3ShadowReleaseStatus,
+      });
+    } catch (error) {
+      phase3StatusError = {
+        error: "phase3_shadow_status_failed",
+      };
+    }
+  }
   return {
     resumeSweep,
     resumeSweepError,
     tick,
     remainder,
     remainderError,
+    phase3Release,
+    phase3ReleaseError,
+    phase3Status,
+    phase3StatusError,
   };
 }
 
@@ -110,7 +280,15 @@ export default async function handler(req, res) {
     "phase2-remainder-tick",
     "phase2-remainder-status",
   ]);
-  if (canaryModes.has(mode) || remainderModes.has(mode)) {
+  const phase3Modes = new Set([
+    "phase3-shadow-arm",
+    "phase3-shadow-status",
+  ]);
+  if (
+    canaryModes.has(mode)
+    || remainderModes.has(mode)
+    || phase3Modes.has(mode)
+  ) {
     if (!runnerAuthorized(req)) {
       return res.status(401).json({ ok: false, error: "runner_key_required" });
     }
@@ -141,6 +319,8 @@ export default async function handler(req, res) {
       ],
       ["phase2-remainder-tick", new Set(["mode"])],
       ["phase2-remainder-status", new Set(["mode"])],
+      ["phase3-shadow-arm", new Set(["mode"])],
+      ["phase3-shadow-status", new Set(["mode"])],
     ]).get(mode);
     if (
       allowedFields
@@ -169,6 +349,12 @@ export default async function handler(req, res) {
       return res.status(405).json({
         ok: false,
         error: "remainder_mutation_POST_only",
+      });
+    }
+    if (mode === "phase3-shadow-arm" && req.method !== "POST") {
+      return res.status(405).json({
+        ok: false,
+        error: "phase3_shadow_mutation_POST_only",
       });
     }
   }
@@ -260,6 +446,18 @@ export default async function handler(req, res) {
     if (mode === "phase2-remainder-status") {
       return res.status(200).json(await phase2RemainderReleaseStatus());
     }
+    if (mode === "phase3-shadow-arm") {
+      const release = await armPhase3ShadowRelease();
+      return res.status(200).json({
+        ...release,
+        queue: await getAutoQueueStats(),
+      });
+    }
+    if (mode === "phase3-shadow-status") {
+      return res.status(200).json(
+        await phase3ShadowStatusWithEscalation(),
+      );
+    }
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
@@ -270,6 +468,10 @@ export default async function handler(req, res) {
       tick,
       remainder,
       remainderError,
+      phase3Release,
+      phase3ReleaseError,
+      phase3Status,
+      phase3StatusError,
     } = await runAutomationCycle({ mode, config: automation });
     if (
       resumeSweepError &&
@@ -291,6 +493,20 @@ export default async function handler(req, res) {
     ) {
       await notifySlack(
         `🚨 Para AI Phase 2 remainder controller requires review (${remainderIssue}). Normal queue processing continued.`,
+      ).catch(() => {});
+    }
+    const phase3ReleaseIssue = phase3ReleaseError?.error || (
+      phase3Release?.ok === false ? phase3Release.status : null
+    );
+    if (
+      phase3ReleaseIssue
+      && await takeAlertSlot(
+        "phase3-shadow-release-controller-degraded",
+        3600,
+      ).catch(() => false)
+    ) {
+      await notifySlack(
+        `🚨 Para AI Phase 3 shadow release requires review (${phase3ReleaseIssue}). Normal queue processing continued.`,
       ).catch(() => {});
     }
     let outreach = null;
@@ -333,6 +549,10 @@ export default async function handler(req, res) {
         || outreachError
         || remainderError
         || remainder?.ok === false
+        || phase3ReleaseError
+        || phase3Release?.ok === false
+        || phase3StatusError
+        || phase3Status?.aggregateAuditFailing === true
       ),
       recovery,
       recoveryError,
@@ -343,9 +563,39 @@ export default async function handler(req, res) {
       tick,
       remainder,
       remainderError,
+      phase3Release,
+      phase3ReleaseError,
+      phase3Status,
+      phase3StatusError,
       queue: await getAutoQueueStats(),
     });
   } catch (error) {
+    if (phase3Modes.has(mode)) {
+      const code = String(error?.code || "");
+      const safeCode = /^PHASE3_SHADOW_RELEASE_[A-Z0-9_]+$/u.test(code)
+        ? code.toLowerCase()
+        : "phase3_shadow_release_failed";
+      const status = new Set([
+        "PHASE3_SHADOW_RELEASE_TIMESTAMP_INVALID",
+      ]).has(code)
+        ? 400
+        : new Set([
+            "PHASE3_SHADOW_RELEASE_DIGEST_MISMATCH",
+            "PHASE3_SHADOW_RELEASE_ANCHOR_CONFLICT",
+            "PHASE3_SHADOW_RELEASE_GATES_CLOSED",
+            "PHASE3_SHADOW_RELEASE_INDEX_LIMIT",
+            "PHASE3_SHADOW_RELEASE_MANIFEST_CONFLICT",
+            "PHASE3_SHADOW_RELEASE_RECORD_INVALID",
+            "PHASE3_SHADOW_RELEASE_SNAPSHOT_CHANGED",
+            "PHASE3_SHADOW_RELEASE_SNAPSHOT_INCOMPLETE",
+          ]).has(code)
+          ? 409
+          : 500;
+      return res.status(status).json({
+        ok: false,
+        error: safeCode,
+      });
+    }
     if (remainderModes.has(mode)) {
       const code = String(error?.code || "");
       const safeCode = /^PHASE2_REMAINDER_[A-Z0-9_]+$/u.test(code)

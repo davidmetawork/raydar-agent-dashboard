@@ -1,9 +1,9 @@
-// Capture-independent Phase 3 policy.
+// Capture-independent Phase 3 decision policy.
 //
-// This module is intentionally uncalled by the runtime. It contains no vendor
-// response parser, client, mutation, environment read, or queue/store import.
-// Captured Paraform contracts can later feed normalized values into these pure
-// decisions without weakening the Phase 2/3 rollout boundary.
+// The shadow runtime feeds captured Paraform reads into these pure decisions.
+// This module itself contains no vendor response parser, client, mutation,
+// environment read, or queue/store import, which keeps policy evaluation
+// deterministic and independently testable.
 
 export const PHASE3_SHADOW_POLICY_VERSION = "phase3-shadow-policy-v1";
 

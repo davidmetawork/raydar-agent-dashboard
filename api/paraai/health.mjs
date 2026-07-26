@@ -1,5 +1,9 @@
 import { authConfig, cors, hasParaformCookie, listSequences, paraAIConfig, trpcGet } from "./_lib/core.mjs";
-import { automationConfig, automationExecutionEnabled } from "./_lib/auto.mjs";
+import {
+  automationConfig,
+  automationExecutionEnabled,
+  phase3ShadowExecutionEnabled,
+} from "./_lib/auto.mjs";
 import { outreachHealth } from "./_lib/outreach.mjs";
 import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
@@ -17,6 +21,11 @@ export default async function handler(req, res) {
   const config = paraAIConfig();
   const auto = automationConfig();
   const auth = authConfig();
+  const now = Date.now();
+  const matchStageEnabledAtCurrent = Boolean(
+    Number.isFinite(config.matchStageEnabledAtMs)
+    && config.matchStageEnabledAtMs <= now
+  );
   const health = {
     ok: false,
     generatedAt: new Date().toISOString(),
@@ -30,6 +39,11 @@ export default async function handler(req, res) {
     lifecycleRegistrationConfigured: config.lifecycleRegistrationConfigured,
     submitApproved: config.submitApproved,
     enrollApproved: config.enrollApproved,
+    curateEnabled: config.curateEnabled,
+    matchStageEnabled: config.matchStageEnabled,
+    matchShadow: config.matchShadow,
+    matchStageEnabledAtPinned:
+      matchStageEnabledAtCurrent,
     dryRun: config.dryRun,
     submissionOriginPinned: config.submissionOriginPinned,
     matchReadPinned: config.matchReadPinned,
@@ -39,11 +53,18 @@ export default async function handler(req, res) {
     sequences: [],
     submitReady: false,
     enrollmentReady: false,
+    matchShadowReady: false,
     automation: {
       enabled: auto.enabled,
       detectEnabled: auto.detectEnabled,
       prepareEnabled: auto.prepareEnabled,
       autoSubmitApproved: auto.autoSubmitApproved,
+      matchStageEnabled: auto.matchStageEnabled,
+      matchShadow: auto.matchShadow,
+      curateEnabled: auto.curateEnabled,
+      matchStageEnabledAtPinned:
+        Number.isFinite(auto.matchStageEnabledAtMs)
+        && auto.matchStageEnabledAtMs <= now,
       dryRun: auto.dryRun,
       notBeforePinned: auto.notBeforeMs != null,
       phase1CutoffPinned: auto.phase1DeployedAtMs != null,
@@ -107,11 +128,26 @@ export default async function handler(req, res) {
       health.storeConfigured && health.extractorConfigured && health.submissionOriginPinned &&
       health.submitApproved && !health.dryRun && networkEnabled,
     );
+    health.automation.queue = await getAutoQueueStats().catch(() => null);
+    health.matchShadowReady = Boolean(
+      health.storeConfigured
+      && health.matchReadPinned
+      && config.matchStageEnabled
+      && config.matchShadow
+      && !config.curateEnabled
+      && !config.enrollApproved
+      && matchStageEnabledAtCurrent
+      && phase3ShadowExecutionEnabled(auto, { now })
+      && health.automation.runnerConfigured
+      && health.automation.slackConfigured
+      && health.automation.queue !== null
+      && health.paraform === "live"
+    );
     health.enrollmentReady = Boolean(
       health.submitReady && health.lifecycleRegistrationConfigured && health.matchReadPinned &&
+      config.matchStageEnabled && !config.matchShadow && config.curateEnabled &&
       health.enrollApproved && health.sequences.every((sequence) => sequence.found && sequence.enabled),
     );
-    health.automation.queue = await getAutoQueueStats().catch(() => null);
     health.automation.ready = Boolean(
       health.submitReady &&
       automationExecutionEnabled(auto) &&

@@ -7,6 +7,8 @@ import { authConfig, cors, requireAuth } from "../../seq/_lib/core.mjs";
 export { authConfig, cors, requireAuth };
 
 const PARAFORM_BASE = "https://www.paraform.com/api";
+const CAPTURED_MATCH_READ_PROC =
+  "candidateMatching.getRankedRolesForCandidate";
 const TRPC_TIMEOUT_MS = Number(process.env.PARAAI_TRPC_TIMEOUT_MS || 20_000);
 const CRM_PAGE_SIZE = Number(process.env.PARAAI_CRM_PAGE_SIZE || 1000);
 const MAX_CRM_ROWS = Number(process.env.PARAAI_MAX_CRM_ROWS || 250_000);
@@ -31,17 +33,27 @@ export function paraAIConfig() {
   const auth = authConfig();
   const submissionOrigin = String(process.env.PARAAI_SUBMISSION_ORIGIN || "").trim();
   const matchReadProc = String(process.env.PARAAI_MATCH_READ_PROC || "").trim();
+  const matchStageEnabledAtMs = Date.parse(
+    String(process.env.PARAAI_MATCH_STAGE_ENABLED_AT || ""),
+  );
   return {
     ...auth,
     submitApproved: process.env.PARAAI_SUBMIT_APPROVED === "true",
     enrollApproved: process.env.PARAAI_ENROLL_APPROVED === "true",
+    curateEnabled: process.env.PARAAI_CURATE_ENABLED === "true",
+    matchStageEnabled:
+      process.env.PARAAI_MATCH_STAGE_ENABLED === "true",
+    matchShadow: process.env.PARAAI_MATCH_SHADOW === "true",
+    matchStageEnabledAtMs: Number.isFinite(matchStageEnabledAtMs)
+      ? matchStageEnabledAtMs
+      : null,
     dryRun: process.env.PARAAI_DRY_RUN !== "false" || ["1", "true"].includes(String(process.env.DRY_RUN || "").toLowerCase()),
     submissionOrigin,
     // The current Paraform profile button sends CRM; the Talent Network page
     // sends TALENT_NETWORK_PAGE. Both values were verified in the live bundle.
     submissionOriginPinned: ["CRM", "TALENT_NETWORK_PAGE"].includes(submissionOrigin),
     matchReadProc,
-    matchReadPinned: Boolean(matchReadProc),
+    matchReadPinned: matchReadProc === CAPTURED_MATCH_READ_PROC,
     anthropicConfigured: Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API),
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
     extractorConfigured: Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API || process.env.OPENAI_API_KEY),
