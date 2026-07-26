@@ -19,6 +19,7 @@ import {
   SWEEP_STALE_AFTER_MS,
 } from "../api/seq/_lib/booking-stop.mjs";
 import { campaignLeads } from "../api/seq/_lib/core.mjs";
+import { withThrottleRetry } from "../api/seq/_lib/booking-stop.mjs";
 import { completeCampaignLeads } from "../api/seq/_lib/booking-stop.mjs";
 
 const SECRET = "test-signing-key";
@@ -253,6 +254,35 @@ test("sequence family matching covers every role variant, OLD, and the followups
     assert.equal(isNudgeSequence({ name }), false, `${name} must NOT be covered`);
   }
   assert.ok(DEFAULT_SEQ_KEYS.length >= 7);
+});
+
+// Paraform answers 401 to a burst on a perfectly healthy session (measured:
+// 40 concurrent profile reads -> 13x401). core.mjs maps every 401 to
+// AUTH_EXPIRED and throws without retrying, which silently voided 780/945
+// reads and later aborted a half-applied pause batch. Both paths now retry.
+test("a throttling 401 is retried, not mistaken for an expired session", async () => {
+  let calls = 0, throttles = 0;
+  const value = await withThrottleRetry(async () => {
+    calls++;
+    if (calls < 3) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+    return "ok";
+  }, { onThrottle: () => { throttles++; } });
+  assert.equal(value, "ok");
+  assert.equal(calls, 3, "must retry through transient 401s");
+  assert.equal(throttles, 2, "each retry must be counted, not hidden");
+});
+
+test("a persistent 401 still surfaces as AUTH_EXPIRED once retries are spent", async () => {
+  await assert.rejects(
+    () => withThrottleRetry(async () => { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }),
+    (e) => e.code === "AUTH_EXPIRED"
+  );
+});
+
+test("a non-auth error is not retried", async () => {
+  let calls = 0;
+  await assert.rejects(() => withThrottleRetry(async () => { calls++; throw new Error("boom"); }));
+  assert.equal(calls, 1);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
