@@ -19,6 +19,10 @@ import {
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
 import { notifySlack } from "./_lib/core.mjs";
+import {
+  PHASE3_AGGREGATE_ALERT_KEY,
+  PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
+} from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import {
   getAutoQueueStats,
@@ -101,6 +105,8 @@ export function phase3AggregateSafetyDigest(status) {
     invalidAudits: Math.max(0, Number(status?.invalidAudits) || 0),
     hardTechnicalFailures:
       Math.max(0, Number(status?.hardTechnicalFailures) || 0),
+    activeRetryFailures:
+      Math.max(0, Number(status?.activeRetryFailures) || 0),
     releaseReview: Math.max(0, Number(status?.releaseReview) || 0),
     missing: Math.max(0, Number(status?.missing) || 0),
     shadowFenceBroken: status?.shadowFenceIntact === false,
@@ -109,6 +115,13 @@ export function phase3AggregateSafetyDigest(status) {
   return createHash("sha256")
     .update(JSON.stringify(safetyState))
     .digest("hex");
+}
+
+function phase3AggregateAlertSlotKey(health) {
+  const episode = Number(health?.failureEpisodeStartedAtMs);
+  return Number.isSafeInteger(episode) && episode > 0
+    ? `${PHASE3_AGGREGATE_ALERT_KEY}:${episode}`
+    : PHASE3_AGGREGATE_ALERT_KEY;
 }
 
 export async function phase3ShadowStatusWithEscalation({
@@ -130,8 +143,8 @@ export async function phase3ShadowStatusWithEscalation({
       if (
         health.shouldAlert
         && await alertSlotImpl(
-          "phase3-shadow-aggregate-audit-failed",
-          3600,
+          phase3AggregateAlertSlotKey(health),
+          PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
         )
       ) {
         await notifyImpl(
@@ -157,8 +170,8 @@ export async function phase3ShadowStatusWithEscalation({
     if (
       health.shouldAlert
       && await alertSlotImpl(
-        "phase3-shadow-aggregate-audit-failed",
-        3600,
+        phase3AggregateAlertSlotKey(health),
+        PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
       )
     ) {
       await notifyImpl(

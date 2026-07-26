@@ -143,6 +143,28 @@ test("proof reader binds candidate identity first and fails closed on a poison m
   assert.equal(JSON.stringify(clean).includes("canonical-private"), false);
 });
 
+test("a complete global bootstrap never makes a missing candidate proof authoritative", async () => {
+  const missing = await getPhase3CandidateSuccessProof({
+    candidateId: "canonical-private",
+    candidateUserId: "user-private",
+  }, {
+    kvImpl: async () => [
+      "",
+      bootstrapRecord,
+      "",
+      "1785024000",
+      "0",
+    ],
+  });
+
+  assert.equal(missing.bootstrapComplete, true);
+  assert.equal(missing.authoritative, false);
+  assert.equal(missing.complete, false);
+  assert.equal(missing.proofVersion, 0);
+  assert.equal(missing.proofSemanticDigest, null);
+  assert.deepEqual(missing.calls, []);
+});
+
 test("identity removal atomically archives and poisons the old proof without a generic pre-read", async () => {
   const original = {
     id: "proof-job-0001",

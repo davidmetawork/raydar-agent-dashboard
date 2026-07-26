@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  alertOnce,
   armPhase3ShadowRelease,
   phase3ShadowExecutionEnabled,
   phase3ShadowReleaseStatus,
@@ -29,6 +30,8 @@ import {
 } from "../api/paraai/worker.mjs";
 import {
   LATE_MATCH_REVIEW_NOTE_CODE,
+  PHASE3_AGGREGATE_ALERT_KEY,
+  PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
 } from "../api/paraai/_lib/phase3-shadow-policy.mjs";
 
 const POLICY_VERSION = "phase3-shadow-policy-v1";
@@ -1112,6 +1115,68 @@ test("aggregate rejects pre-anchor, early-zero, and post-timeout audits", async 
   assert.equal(result.verificationReady, false);
 });
 
+test("aggregate exposes active match-read retries as hard technical health, not policy mismatch", async () => {
+  const job = awaitingJob("bot_active_match_retry", {
+    matchLegStartedAt: ANCHOR,
+    automation: {
+      stepFailures: {
+        match_read: {
+          count: 2,
+          code: "PHASE3_CALL_SNAPSHOT_REQUIRED",
+          message: "private proof detail",
+          lastFailedAt: new Date(
+            ANCHOR_MS + 10 * 60_000,
+          ).toISOString(),
+        },
+      },
+    },
+    phase3Shadow: {
+      policyVersion: POLICY_VERSION,
+      stageEnabledAt: ANCHOR,
+      bootstrap: true,
+      complete: false,
+      nextPollAt: new Date(
+        ANCHOR_MS + 15 * 60_000,
+      ).toISOString(),
+      policyMismatch: false,
+      candidateFacingWrites: 0,
+      curationWrites: 0,
+      enrollments: 0,
+    },
+  });
+  const release = releaseRecord([job], {
+    status: "released",
+    entryStatus: "scheduled",
+    attempts: 1,
+  });
+  job.phase3Shadow.releaseDigest = release.manifestDigest;
+
+  const result = await phase3ShadowReleaseStatus({
+    config: shadowConfig,
+    getReleaseImpl: async () => release,
+    getCallProofBootstrapImpl: async () => (
+      completeCallProofBootstrap(1)
+    ),
+    snapshotImpl: async () => completePhase3ShadowSnapshot([job]),
+    queueStatsImpl: async () => ({ queued: 1, due: 0, leased: 0 }),
+    now: ANCHOR_MS + 20 * 60_000,
+  });
+
+  assert.equal(result.activeRetryFailures, 1);
+  assert.equal(result.technicalFailures, 1);
+  assert.equal(result.hardTechnicalFailures, 1);
+  assert.equal(result.policyMismatches, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "shadow_running");
+  assert.deepEqual(phase3AggregateAuditFailure(result), {
+    checked: true,
+    reason: "hard_technical_failure",
+  });
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("private proof detail"), false);
+  assert.equal(serialized.includes(job.id), false);
+});
+
 test("aggregate rejects every absent, malformed, or nonzero persisted write counter", async () => {
   const observedAt = new Date(
     ANCHOR_MS + 40 * 60_000,
@@ -1451,6 +1516,120 @@ test("worker escalation ignores benign timeout/conflict counts but catches hard 
   });
 });
 
+test("aggregate escalation uses one shared alert slot key", async () => {
+  const alertSlots = [];
+  const claimedAlertSlots = new Set();
+  const notifications = [];
+  const status = {
+    status: "shadow_running",
+    manifestDigest: "a".repeat(64),
+    lastAuditAt: ANCHOR,
+    matchReads: 0,
+    decisions: 0,
+    hardTechnicalFailures: 1,
+    activeRetryFailures: 1,
+    candidateFacingWrites: 0,
+    curationWrites: 0,
+    enrollments: 0,
+    policyMismatches: 0,
+    invalidAudits: 0,
+    releaseReview: 0,
+    missing: 0,
+    shadowFenceIntact: true,
+  };
+
+  await phase3ShadowStatusWithEscalation({
+    statusImpl: async () => status,
+    recordImpl: async () => ({
+      shouldAlert: true,
+      failureStreak: 2,
+      failureEpisodeStartedAtMs: ANCHOR_MS,
+      reason: "hard_technical_failure",
+      failing: true,
+    }),
+    alertSlotImpl: async (key, ttl) => {
+      alertSlots.push({ key, ttl });
+      if (claimedAlertSlots.has(key)) return false;
+      claimedAlertSlots.add(key);
+      return true;
+    },
+    notifyImpl: async (message) => {
+      notifications.push(message);
+    },
+  });
+  await phase3ShadowStatusWithEscalation({
+    statusImpl: async () => status,
+    recordImpl: async () => ({
+      shouldAlert: true,
+      failureStreak: 3,
+      failureEpisodeStartedAtMs: ANCHOR_MS,
+      reason: "hard_technical_failure",
+      failing: true,
+    }),
+    alertSlotImpl: async (key, ttl) => {
+      alertSlots.push({ key, ttl });
+      if (claimedAlertSlots.has(key)) return false;
+      claimedAlertSlots.add(key);
+      return true;
+    },
+    notifyImpl: async (message) => {
+      notifications.push(message);
+    },
+  });
+
+  assert.deepEqual(alertSlots, Array.from({ length: 2 }, () => ({
+    key: `${PHASE3_AGGREGATE_ALERT_KEY}:${ANCHOR_MS}`,
+    ttl: PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
+  })));
+  assert.equal(notifications.length, 1);
+  assert.equal(
+    notifications[0].includes("hard_technical_failure"),
+    true,
+  );
+});
+
+test("candidate Phase 3 retries and ceilings emit no direct Slack alert", async () => {
+  const directSlots = [];
+  const directNotifications = [];
+  const dependencies = {
+    takeAlertSlotImpl: async (key, ttl) => {
+      directSlots.push({ key, ttl });
+      return true;
+    },
+    notifySlackImpl: async (message) => {
+      directNotifications.push(message);
+    },
+  };
+
+  for (let index = 0; index < 17; index++) {
+    const notified = await alertOnce(
+      "PHASE3_CALL_SNAPSHOT_REQUIRED",
+      `bot_private_${index}`,
+      "private proof detail",
+      {
+        aggregateOnly: true,
+        ceiling: index % 2 === 0,
+        ttlSeconds: null,
+      },
+      dependencies,
+    );
+    assert.equal(notified, false);
+  }
+
+  assert.deepEqual(directSlots, []);
+  assert.deepEqual(directNotifications, []);
+
+  await alertOnce(
+    "NON_PHASE3_TEST_FAILURE",
+    "bot_private_non_phase3",
+    "private detail",
+    { ttlSeconds: null },
+    dependencies,
+  );
+  assert.equal(directSlots.at(-1).ttl, 3600);
+  assert.equal(directNotifications.length, 1);
+});
+
 test("a 17-row multi-batch release cannot escalate before cohort admission completes", async () => {
   const batches = [
     { status: "armed", pendingRelease: 17, claimed: 0, released: 0 },
@@ -1618,6 +1797,7 @@ test("aggregate streak applies one check per bucket and clean evidence reapplies
     lastNormalReadCount: -1,
     lastNormalDecisions: -1,
     lastCheckedAtMs: redisNow,
+    failureEpisodeStartedAtMs: 0,
   };
   const kvImpl = async (command) => {
     const failed = command[4] === "1";
@@ -1665,6 +1845,9 @@ test("aggregate streak applies one check per bucket and clean evidence reapplies
       durable.failureStreak = durable.failing
         ? durable.failureStreak + 1
         : 1;
+      if (!durable.failing) {
+        durable.failureEpisodeStartedAtMs = redisNow;
+      }
       durable.failing = true;
       durable.lastReason = reason;
     } else {
@@ -1705,6 +1888,26 @@ test("aggregate streak applies one check per bucket and clean evidence reapplies
   );
   assert.equal(consecutive.failureStreak, 2);
   assert.equal(consecutive.shouldAlert, true);
+
+  const duplicateAtThreshold = await recordPhase3ShadowAggregateAuditResult(
+    failedInput,
+    { kvImpl },
+  );
+  assert.equal(duplicateAtThreshold.updated, false);
+  assert.equal(duplicateAtThreshold.shouldAlert, true);
+  assert.equal(
+    duplicateAtThreshold.failureEpisodeStartedAtMs,
+    ANCHOR_MS,
+  );
+
+  redisNow += 5 * 60_000;
+  const ongoing = await recordPhase3ShadowAggregateAuditResult(
+    failedInput,
+    { kvImpl },
+  );
+  assert.equal(ongoing.failureStreak, 3);
+  assert.equal(ongoing.shouldAlert, true);
+  assert.equal(ongoing.failureEpisodeStartedAtMs, ANCHOR_MS);
 
   const cleanInput = {
     ...base,

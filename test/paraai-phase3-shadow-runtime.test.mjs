@@ -10,7 +10,15 @@ import {
 import {
   continuousPhase3ShadowTransition,
   processAutoJob,
+  repairMissingPhase3CandidateSuccessProof,
 } from "../api/paraai/_lib/auto.mjs";
+import {
+  HUMAN_INTRO_PARSER_VERSION,
+  HUMAN_INTRO_SOURCE,
+  humanIntroCallRecord,
+  humanIntroEventId,
+  persistedHumanIntroMetadata,
+} from "../api/paraai/_lib/human-intro.mjs";
 
 const ANCHOR = "2026-07-26T00:00:00.000Z";
 const MINUTE_MS = 60_000;
@@ -72,6 +80,40 @@ function durableCallProof(
     conflict: normalizedCalls.length > 1,
     storeObservedAt: observedAt,
     calls: normalizedCalls,
+  };
+}
+
+function missingCallProof(overrides = {}) {
+  return {
+    version: 1,
+    source: "candidate_success_index_v1",
+    authoritative: false,
+    complete: false,
+    bootstrapComplete: true,
+    proofVersion: 0,
+    proofUpdatedAt: null,
+    proofSemanticDigest: null,
+    bootstrapGenerationDigest: "c".repeat(40),
+    conflict: false,
+    storeObservedAt: atMinutes(5),
+    quarantined: false,
+    calls: [],
+    ...overrides,
+  };
+}
+
+function successfulAgentCall(job, overrides = {}) {
+  return {
+    botId: job.id,
+    endedAt: job.callEndedAt,
+    source: { isScreener: true },
+    verdict: { verdict: "success" },
+    transcript: [
+      { role: "candidate", text: "a".repeat(40) },
+      { role: "agent", text: "screening question" },
+      { role: "candidate", text: "b".repeat(40) },
+    ],
+    ...overrides,
   };
 }
 
@@ -626,6 +668,205 @@ test("a call-type conflict introduced after ranked is persisted as review", asyn
   assert.deepEqual(saved.phase3Shadow.observedStatusKinds, ["settled"]);
   assert.equal(saved.phase3Shadow.readCount, 1);
   assert.equal(saved.phase3Shadow.callProofConflict, true);
+});
+
+test("missing canonical proof repairs from the exact successful screener source", async () => {
+  const job = shadowJob({
+    phase3Shadow: {
+      policyVersion: "phase3-shadow-policy-v1",
+      releaseDigest: "d".repeat(64),
+      nextPollAt: atMinutes(5),
+      complete: false,
+    },
+  });
+  const before = structuredClone(job);
+  let reads = 0;
+  let upsert = null;
+  const repaired = durableCallProof(job);
+  const result = await repairMissingPhase3CandidateSuccessProof(
+    job,
+    missingCallProof(),
+    {
+      now: Date.parse(atMinutes(5)),
+      fetchCallImpl: async (id) => {
+        reads += 1;
+        assert.equal(id, job.id);
+        return successfulAgentCall(job);
+      },
+      upsertProofImpl: async (input) => {
+        upsert = input;
+        return repaired;
+      },
+    },
+  );
+
+  assert.equal(result, repaired);
+  assert.equal(reads, 1);
+  assert.equal(upsert.candidateId, "candidate-primary-secret");
+  assert.equal(upsert.candidateUserId, "candidate-user-secret");
+  assert.equal(upsert.callType, "agent");
+  assert.equal(upsert.callSourceVerified, true);
+  assert.equal(upsert.successfulCallVerified, true);
+  assert.deepEqual(job, before);
+});
+
+test("missing human proof repairs only after existing substance and provenance validators pass", async () => {
+  const job = shadowJob({
+    id: "hc-human_call_123",
+    humanCall: true,
+    humanIntro: false,
+  });
+  let requested = null;
+  let upsert = null;
+  const result = await repairMissingPhase3CandidateSuccessProof(
+    job,
+    missingCallProof(),
+    {
+      now: Date.parse(atMinutes(5)),
+      fetchHumanCallImpl: async (callId) => {
+        requested = callId;
+        return {
+          id: callId,
+          candidateUserId: job.identity.candidateUserId,
+          humanCall: true,
+          humanPopulation: "phone_screen",
+          candidate: { fullName: "Synthetic Candidate" },
+          transcriptPresent: true,
+          substance: {
+            substantive: true,
+            speakers: 2,
+            turns: 8,
+            quieterSpeakerChars: 500,
+            louderSpeakerChars: 700,
+          },
+          endedAt: job.callEndedAt,
+        };
+      },
+      upsertProofImpl: async (input) => {
+        upsert = input;
+        return durableCallProof(job);
+      },
+    },
+  );
+
+  assert.equal(requested, "human_call_123");
+  assert.equal(result.authoritative, true);
+  assert.equal(upsert.callType, "human");
+  assert.equal(upsert.humanProvenanceVerified, true);
+});
+
+test("quarantined or non-exact missing proof causes zero repair I/O", async () => {
+  const job = shadowJob();
+  let reads = 0;
+  let upserts = 0;
+  const dependencies = {
+    fetchCallImpl: async () => {
+      reads += 1;
+      return successfulAgentCall(job);
+    },
+    upsertProofImpl: async () => {
+      upserts += 1;
+      return durableCallProof(job);
+    },
+  };
+  const proofs = [
+    missingCallProof({ quarantined: true }),
+    missingCallProof({ bootstrapComplete: false }),
+    missingCallProof({ authoritative: true, complete: true }),
+    missingCallProof({ conflict: true }),
+    missingCallProof({ bootstrapGenerationDigest: null }),
+    missingCallProof({ storeObservedAt: "not-an-instant" }),
+    missingCallProof({ calls: [{}] }),
+  ];
+  for (const proof of proofs) {
+    assert.equal(
+      await repairMissingPhase3CandidateSuccessProof(
+        job,
+        proof,
+        dependencies,
+      ),
+      proof,
+    );
+  }
+  assert.equal(reads, 0);
+  assert.equal(upserts, 0);
+});
+
+test("mismatched, non-screener, and non-success sources never upsert", async () => {
+  const job = shadowJob();
+  const invalid = [
+    successfulAgentCall(job, { botId: "bot_other_123" }),
+    successfulAgentCall(job, { source: { isScreener: false } }),
+    successfulAgentCall(job, { verdict: { verdict: "failed" } }),
+  ];
+  let upserts = 0;
+  for (const call of invalid) {
+    await assert.rejects(
+      repairMissingPhase3CandidateSuccessProof(
+        job,
+        missingCallProof(),
+        {
+          now: Date.parse(atMinutes(5)),
+          fetchCallImpl: async () => call,
+          upsertProofImpl: async () => {
+            upserts += 1;
+            return durableCallProof(job);
+          },
+        },
+      ),
+      { code: "PHASE3_CALL_PROOF_REPAIR_SOURCE_INVALID" },
+    );
+  }
+  assert.equal(upserts, 0);
+});
+
+test("signed human-intro repair uses only its validated durable source", async () => {
+  const sourceId = "a".repeat(64);
+  const call = humanIntroCallRecord({
+    source: HUMAN_INTRO_SOURCE,
+    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    sourceId,
+    eventId: humanIntroEventId(sourceId),
+    bookingCreatedAt: "2026-07-25T22:00:00.000Z",
+    candidateName: "Synthetic Candidate",
+    inviteeEmail: "synthetic@example.test",
+    linkedinUrl: null,
+    resumeLinkDisposition: "none",
+    resumeReceipt: null,
+    scheduledStart: "2026-07-25T22:30:00.000Z",
+    scheduledEnd: "2026-07-25T23:00:00.000Z",
+  });
+  const job = shadowJob({
+    id: `hi-${sourceId}`,
+    humanCall: true,
+    humanIntro: true,
+    callStartedAt: call.joinAt,
+    callEndedAt: call.endedAt,
+    candidate: call.candidate,
+    humanCallMeta: persistedHumanIntroMetadata(call),
+  });
+  let externalReads = 0;
+  let upsert = null;
+  await repairMissingPhase3CandidateSuccessProof(
+    job,
+    missingCallProof(),
+    {
+      now: Date.parse(atMinutes(5)),
+      fetchCallImpl: async () => {
+        externalReads += 1;
+      },
+      fetchHumanCallImpl: async () => {
+        externalReads += 1;
+      },
+      upsertProofImpl: async (input) => {
+        upsert = input;
+        return durableCallProof(job);
+      },
+    },
+  );
+  assert.equal(externalReads, 0);
+  assert.equal(upsert.callType, "human");
+  assert.equal(upsert.humanProvenanceVerified, true);
 });
 
 test("the worker scopes durable proof reads to the current candidate", async () => {

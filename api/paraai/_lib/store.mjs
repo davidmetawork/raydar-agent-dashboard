@@ -446,12 +446,12 @@ function phase3CallProofPublic(
     return {
       version: 1,
       source: "candidate_success_index_v1",
-      authoritative:
-        quarantined !== true && bootstrapComplete === true,
-      complete:
-        quarantined !== true && bootstrapComplete === true,
-      bootstrapComplete:
-        quarantined !== true && bootstrapComplete === true,
+      // A complete global bootstrap does not prove that this candidate has a
+      // successful call record. Keep the global marker visible, but never
+      // advertise an absent or quarantined candidate proof as complete.
+      authoritative: false,
+      complete: false,
+      bootstrapComplete: bootstrapComplete === true,
       proofVersion: 0,
       proofUpdatedAt: null,
       proofSemanticDigest: null,
@@ -5397,11 +5397,17 @@ export async function recordPhase3ShadowAggregateAuditResult(
       failing = false,
       lastNormalEvidenceAtMs = -1,
       lastNormalReadCount = -1,
-      lastNormalDecisions = -1
+      lastNormalDecisions = -1,
+      failureEpisodeStartedAtMs = 0
     }
     if raw then
       local ok, parsed = pcall(cjson.decode, raw)
       if ok and parsed and parsed.version == 1 then record = parsed end
+    end
+    if record.failing == true
+      and tonumber(record.failureEpisodeStartedAtMs or 0) <= 0 then
+      record.failureEpisodeStartedAtMs =
+        tonumber(record.lastFailedAtMs or checkedAtMs)
     end
     local isException = ARGV[8] == '1'
     local evidenceToken = ARGV[7]
@@ -5456,6 +5462,10 @@ export async function recordPhase3ShadowAggregateAuditResult(
         record.failureStreak = tonumber(record.failureStreak or 0) + 1
       else
         record.failureStreak = 1
+        record.failureEpisodeStartedAtMs = checkedAtMs
+      end
+      if tonumber(record.failureEpisodeStartedAtMs or 0) <= 0 then
+        record.failureEpisodeStartedAtMs = checkedAtMs
       end
       record.failing = true
       record.lastReason = ARGV[2]
@@ -5510,7 +5520,18 @@ export async function recordPhase3ShadowAggregateAuditResult(
     failing: record.failing,
     failureStreak: Number(record.failureStreak),
     reason: record.failing ? record.lastReason : null,
-    shouldAlert: record.failing && Number(record.failureStreak) >= 2,
+    // The worker derives an episode-scoped slot from this store-owned
+    // timestamp. Concurrent and later checks can retry the slot without
+    // generating recurring notifications for the same unresolved episode.
+    failureEpisodeStartedAtMs: record.failing
+      ? Math.max(
+          0,
+          Number(record.failureEpisodeStartedAtMs) || 0,
+        )
+      : 0,
+    shouldAlert:
+      record.failing
+      && Number(record.failureStreak) >= 2,
     updated,
     checkedAt: new Date(Number(record.lastCheckedAtMs)).toISOString(),
   };
