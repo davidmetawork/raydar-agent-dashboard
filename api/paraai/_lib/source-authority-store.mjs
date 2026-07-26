@@ -3,6 +3,14 @@
 // The pure source-watermark module can normalize evidence but cannot report
 // operational readiness or authorize a write. Those decisions live here and
 // are made only from records returned by Redis TIME/Lua transitions.
+//
+// No activation mutation is exported while the alias snapshot collector and
+// its independently held signing authority do not exist. A future collector
+// integration must add that boundary deliberately; caller-provided generation
+// evidence can never install current authority through this module.
+// Readiness and both reservation transitions are also hard-locked until that
+// integration owns a Redis-TIME freshness lease advanced by a fresh stable
+// capture (including upstream head/delta invalidation).
 
 import {
   createHash,
@@ -25,14 +33,18 @@ const ACTIVE_GENERATION_KEY =
 const JOB_SNAPSHOT_PREFIX =
   "paraai:phase4:source-authority:job:v1:";
 const RESERVATION_PREFIX =
-  "paraai:phase4:source-authority:reservation:v1:";
+  "paraai:phase4:source-authority:reservation:v2:";
+const SETTLEMENT_PREFIX =
+  "paraai:phase4:source-authority:settlement:v1:";
 const AUTHORITY_RECORD_VERSION = 1;
 const JOB_SNAPSHOT_VERSION = 1;
-const RESERVATION_VERSION = 1;
+const RESERVATION_VERSION = 2;
+const SETTLEMENT_VERSION = 1;
 const GENERATION_RECEIPT_TTL_MS = 60_000;
 const RESERVATION_TTL_MS = 15_000;
 const RESERVATION_RECORD_TTL_SECONDS = 730 * 24 * 60 * 60;
 const CLOCK_SKEW_MS = 5_000;
+const SOURCE_CAPTURE_COORDINATOR_AVAILABLE = false;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const SHA1 = /^[a-f0-9]{40}$/u;
 const AUTHORITY_KEY = /^[A-Za-z0-9_-]{43,}$/u;
@@ -267,8 +279,10 @@ function evidenceCeilingAtMs(generation) {
     ...generation.aliasMap.passes.flatMap(
       (pass) => [pass.startedAt, pass.completedAt],
     ),
-    ...generation.aliasMap.entries.map(
-      (entry) => entry.identityBindingReceipt?.observedAt,
+    ...generation.aliasMap.entries.flatMap(
+      (entry) => entry.bindings.map(
+        (binding) => binding.observedAt,
+      ),
     ),
   ].filter(Boolean);
   return Math.max(...timestamps.map((value) => Date.parse(value)));
@@ -312,23 +326,6 @@ function activeBindingMaterial({
     durableGenerationRevisionDigest,
     sourceEpochs: sourceEpochs(generation),
     evidenceCeilingAtMs: evidenceCeilingAtMs(generation),
-  };
-}
-
-function proposedActiveRecord(generation) {
-  const binding = activeBindingMaterial({
-    generation,
-    durableGenerationRevisionDigest: randomDigest(),
-  });
-  return {
-    ...binding,
-    status: "active",
-    durableRecordReceiptDigest: semanticDigest(
-      "phase4-source-durable-active-record-v1",
-      binding,
-    ),
-    activatedAtMs: 0,
-    generation,
   };
 }
 
@@ -696,43 +693,6 @@ const REDIS_TIME_MS_LUA = `
     + math.floor(tonumber(redisTime[2]) / 1000)
 `;
 
-const ACTIVATE_GENERATION_LUA = `
-  ${REDIS_TIME_MS_LUA}
-  local currentRaw = redis.call('GET', KEYS[1])
-  if currentRaw then
-    local currentOk, current = pcall(cjson.decode, currentRaw)
-    if not currentOk or type(current) ~= 'table'
-      or type(current.sourceEpochs) ~= 'table' then
-      return {-8, currentRaw, redisTime[1], redisTime[2]}
-    end
-    if ARGV[1] == ''
-      or current.generationRecordDigest ~= ARGV[1]
-      or current.durableGenerationRevisionDigest ~= ARGV[2]
-      or current.durableRecordReceiptDigest ~= ARGV[3]
-      or current.sourceEpochs.recall ~= ARGV[4]
-      or current.sourceEpochs.paraformHuman ~= ARGV[5]
-      or current.sourceEpochs.aliases ~= ARGV[6] then
-      return {-3, currentRaw, redisTime[1], redisTime[2]}
-    end
-    if tonumber(ARGV[7]) < nowMs then
-      return {-7, currentRaw, redisTime[1], redisTime[2]}
-    end
-  elseif ARGV[1] ~= '' then
-    return {-4, '', redisTime[1], redisTime[2]}
-  end
-  local proposedOk, proposed = pcall(cjson.decode, ARGV[8])
-  if not proposedOk or type(proposed) ~= 'table'
-    or type(proposed.sourceEpochs) ~= 'table'
-    or proposed.status ~= 'active'
-    or proposed.evidenceCeilingAtMs > nowMs + tonumber(ARGV[9]) then
-    return {-8, '', redisTime[1], redisTime[2]}
-  end
-  proposed.activatedAtMs = nowMs
-  local encoded = cjson.encode(proposed)
-  redis.call('SET', KEYS[1], encoded)
-  return {1, encoded, redisTime[1], redisTime[2]}
-`;
-
 const READ_GENERATION_LUA = `
   local redisTime = redis.call('TIME')
   return {
@@ -742,111 +702,9 @@ const READ_GENERATION_LUA = `
   }
 `;
 
-function replacementExpectation(receipt) {
-  if (receipt == null) {
-    return {
-      generationRecordDigest: "",
-      durableGenerationRevisionDigest: "",
-      durableRecordReceiptDigest: "",
-      sourceEpochs: {
-        recall: "",
-        paraformHuman: "",
-        aliases: "",
-      },
-    };
-  }
-  const normalized = canonicalGenerationReceipt(receipt);
-  return normalized;
-}
-
-export async function activateSourceAuthorityGeneration(
-  {
-    generation,
-    expectedActiveGenerationReceipt = null,
-  } = {},
-  {
-    kvImpl = kv,
-  } = {},
-) {
+export async function readCurrentSourceAuthority() {
   authorityKey();
-  const normalizedGeneration = committedReadyGeneration(generation);
-  const expected = replacementExpectation(
-    expectedActiveGenerationReceipt,
-  );
-  const proposed = proposedActiveRecord(normalizedGeneration);
-  const result = await kvImpl([
-    "EVAL",
-    ACTIVATE_GENERATION_LUA,
-    1,
-    ACTIVE_GENERATION_KEY,
-    expected.generationRecordDigest,
-    expected.durableGenerationRevisionDigest,
-    expected.durableRecordReceiptDigest,
-    expected.sourceEpochs.recall,
-    expected.sourceEpochs.paraformHuman,
-    expected.sourceEpochs.aliases,
-    expected.expiresAtMs == null
-      ? ""
-      : String(expected.expiresAtMs),
-    JSON.stringify(proposed),
-    String(CLOCK_SKEW_MS),
-  ]);
-  const code = Number(result?.[0]);
-  if (code === -3 || code === -4) {
-    fail(
-      "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT",
-      "active source generation changed; retry from a fresh store read",
-    );
-  }
-  if (code === -7) {
-    fail(
-      "SOURCE_AUTHORITY_RECEIPT_STALE",
-      "active generation receipt expired during replacement",
-    );
-  }
-  invariant(
-    code === 1,
-    "SOURCE_AUTHORITY_DURABLE_STATE_MALFORMED",
-    "source generation activation was rejected",
-  );
-  const nowMs = redisTime(result, 2, "generation activation");
-  const activeRecordSha1 = createHash("sha1")
-    .update(result[1])
-    .digest("hex");
-  const active = canonicalActiveRecord(
-    parseJson(
-      result[1],
-      "SOURCE_AUTHORITY_DURABLE_STATE_MALFORMED",
-      "activated source authority record",
-    ),
-  );
-  invariant(
-    active.durableGenerationRevisionDigest
-        === proposed.durableGenerationRevisionDigest
-      && active.durableRecordReceiptDigest
-        === proposed.durableRecordReceiptDigest
-      && active.activatedAtMs === nowMs,
-    "SOURCE_AUTHORITY_DURABLE_STATE_MALFORMED",
-    "Redis did not persist the exact proposed source generation",
-  );
-  return deepFreeze({
-    active,
-    activeRecordSha1,
-    generationAuthorityReceipt: generationReceipt(
-      active,
-      activeRecordSha1,
-      nowMs,
-    ),
-  });
-}
-
-export async function readCurrentSourceAuthority(
-  {
-    kvImpl = kv,
-  } = {},
-) {
-  authorityKey();
-  const result = await kvImpl([
+  const result = await kv([
     "EVAL",
     READ_GENERATION_LUA,
     1,
@@ -899,17 +757,16 @@ function storeDarkStatus(status = "store_unavailable") {
   });
 }
 
-export async function getSourceAuthorityOperationalStatus(
-  {
-    kvImpl = kv,
-  } = {},
-) {
+export async function getSourceAuthorityOperationalStatus() {
   if (!sourceAuthorityStoreConfigured()) {
     return storeDarkStatus();
   }
+  if (!SOURCE_CAPTURE_COORDINATOR_AVAILABLE) {
+    return storeDarkStatus("capture_coordinator_unavailable");
+  }
   let current;
   try {
-    current = await readCurrentSourceAuthority({ kvImpl });
+    current = await readCurrentSourceAuthority();
   } catch {
     return storeDarkStatus("invalid");
   }
@@ -943,6 +800,17 @@ function reservationKey({
       jobBindingDigest,
       jobRevisionDigest,
       writeScopeDigest,
+    },
+  )}`;
+}
+
+function settlementKey(binding) {
+  return `${SETTLEMENT_PREFIX}${semanticDigest(
+    "phase4-source-write-settlement-key-v1",
+    {
+      jobBindingDigest: binding.jobBindingDigest,
+      jobRevisionDigest: binding.jobRevisionDigest,
+      writeScopeDigest: binding.writeScopeDigest,
     },
   )}`;
 }
@@ -1033,8 +901,14 @@ function selectedDecision(generation, {
 
 const RESERVE_WRITE_LUA = `
   ${REDIS_TIME_MS_LUA}
+  local function exactTableSize(value, expected)
+    local count = 0
+    for _ in pairs(value) do count = count + 1 end
+    return count == expected
+  end
   local activeRaw = redis.call('GET', KEYS[1])
   local jobRaw = redis.call('GET', KEYS[2])
+  local settlementRaw = redis.call('GET', KEYS[4])
   if not activeRaw or not jobRaw then
     return {-4, activeRaw or '', jobRaw or '', '', redisTime[1], redisTime[2]}
   end
@@ -1061,25 +935,57 @@ const RESERVE_WRITE_LUA = `
     or job.canonicalCandidateDigest ~= ARGV[9]
     or job.candidateUserAliasDigest ~= ARGV[10]
     or job.jobRevisionDigest ~= ARGV[11]
-    or job.writeScopeDigest ~= ARGV[12] then
+    or job.writeScopeDigest ~= ARGV[12]
+    or not exactTableSize(job, 8) then
     return {-5, activeRaw, jobRaw, '', redisTime[1], redisTime[2]}
   end
+  local jobSnapshotSha1 = redis.sha1hex(jobRaw)
   local existingRaw = redis.call('GET', KEYS[3])
   if existingRaw then
     local existingOk, existing = pcall(cjson.decode, existingRaw)
-    if not existingOk or type(existing) ~= 'table' then
+    if not existingOk or type(existing) ~= 'table'
+      or type(existing.sourceEpochs) ~= 'table'
+      or not exactTableSize(existing, 21)
+      or not exactTableSize(existing.sourceEpochs, 3) then
       return {-8, activeRaw, jobRaw, existingRaw, redisTime[1], redisTime[2]}
     end
-    if existing.durableRecordReceiptDigest ~= ARGV[3]
+    if existing.version ~= 2
+      or existing.policyVersion ~= ARGV[7]
+      or existing.status ~= 'reserved'
+      or existing.generationRecordDigest ~= ARGV[1]
+      or existing.durableGenerationRevisionDigest ~= ARGV[2]
+      or existing.durableRecordReceiptDigest ~= ARGV[3]
+      or existing.activeRecordSha1 ~= ARGV[21]
+      or existing.sourceEpochs.recall ~= ARGV[4]
+      or existing.sourceEpochs.paraformHuman ~= ARGV[5]
+      or existing.sourceEpochs.aliases ~= ARGV[6]
       or existing.jobBindingDigest ~= ARGV[8]
       or existing.canonicalCandidateDigest ~= ARGV[9]
       or existing.candidateUserAliasDigest ~= ARGV[10]
       or existing.jobRevisionDigest ~= ARGV[11]
       or existing.writeScopeDigest ~= ARGV[12]
-      or existing.activeRecordSha1 ~= ARGV[21] then
+      or existing.jobSnapshotSha1 ~= jobSnapshotSha1
+      or existing.q37DecisionDigest ~= ARGV[15]
+      or existing.callType ~= ARGV[16]
+      or existing.callEndedAt ~= ARGV[17]
+      or type(existing.reservedJobRevisionDigest) ~= 'string'
+      or string.len(existing.reservedJobRevisionDigest) ~= 64
+      or not string.match(existing.reservedJobRevisionDigest, '^[0-9a-f]+$')
+      or type(existing.reservationNonceDigest) ~= 'string'
+      or string.len(existing.reservationNonceDigest) ~= 64
+      or not string.match(existing.reservationNonceDigest, '^[0-9a-f]+$')
+      or type(existing.issuedAtMs) ~= 'number'
+      or type(existing.expiresAtMs) ~= 'number'
+      or existing.expiresAtMs < existing.issuedAtMs
+      or existing.expiresAtMs - existing.issuedAtMs > tonumber(ARGV[13]) then
       return {-6, activeRaw, jobRaw, existingRaw, redisTime[1], redisTime[2]}
     end
-    return {2, activeRaw, jobRaw, existingRaw, redisTime[1], redisTime[2]}
+    if existing.expiresAtMs >= nowMs or settlementRaw then
+      return {2, activeRaw, jobRaw, existingRaw, redisTime[1], redisTime[2]}
+    end
+    redis.call('DEL', KEYS[3])
+  elseif settlementRaw then
+    return {-8, activeRaw, jobRaw, '', redisTime[1], redisTime[2]}
   end
   local expiresAtMs = nowMs + tonumber(ARGV[13])
   local receiptExpiresAtMs = tonumber(ARGV[14])
@@ -1088,7 +994,7 @@ const RESERVE_WRITE_LUA = `
     return {-7, activeRaw, jobRaw, '', redisTime[1], redisTime[2]}
   end
   local reservation = {
-    version = 1,
+    version = 2,
     policyVersion = ARGV[7],
     status = 'reserved',
     generationRecordDigest = ARGV[1],
@@ -1105,26 +1011,25 @@ const RESERVE_WRITE_LUA = `
     candidateUserAliasDigest = ARGV[10],
     jobRevisionDigest = ARGV[11],
     writeScopeDigest = ARGV[12],
+    jobSnapshotSha1 = jobSnapshotSha1,
     q37DecisionDigest = ARGV[15],
     callType = ARGV[16],
     callEndedAt = ARGV[17],
     reservedJobRevisionDigest = ARGV[18],
     reservationNonceDigest = ARGV[19],
     issuedAtMs = nowMs,
-    expiresAtMs = expiresAtMs,
-    settledResultDigest = cjson.null,
-    consumedAtMs = cjson.null
+    expiresAtMs = expiresAtMs
   }
-  local baseEncoded = cjson.encode(reservation)
-  reservation.reservationRecordSha1 = redis.sha1hex(baseEncoded)
   local encoded = cjson.encode(reservation)
   redis.call('SET', KEYS[3], encoded, 'EX', ARGV[20])
   return {1, activeRaw, jobRaw, encoded, redisTime[1], redisTime[2]}
 `;
 
 function canonicalReservationRecord(value, {
-  active,
-  job,
+  active = null,
+  job = null,
+  jobSnapshotSha1 = null,
+  receipt = null,
 }) {
   const raw = object(value, "source write reservation");
   exactKeys(
@@ -1143,6 +1048,7 @@ function canonicalReservationRecord(value, {
       "candidateUserAliasDigest",
       "jobRevisionDigest",
       "writeScopeDigest",
+      "jobSnapshotSha1",
       "q37DecisionDigest",
       "callType",
       "callEndedAt",
@@ -1150,9 +1056,6 @@ function canonicalReservationRecord(value, {
       "reservationNonceDigest",
       "issuedAtMs",
       "expiresAtMs",
-      "reservationRecordSha1",
-      "settledResultDigest",
-      "consumedAtMs",
     ],
     "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
     "source write reservation",
@@ -1202,6 +1105,10 @@ function canonicalReservationRecord(value, {
       raw.writeScopeDigest,
       "reservation writeScopeDigest",
     ),
+    jobSnapshotSha1: sha1(
+      raw.jobSnapshotSha1,
+      "reservation jobSnapshotSha1",
+    ),
     q37DecisionDigest: digest(
       raw.q37DecisionDigest,
       "reservation q37DecisionDigest",
@@ -1224,28 +1131,22 @@ function canonicalReservationRecord(value, {
       raw.expiresAtMs,
       "reservation expiresAtMs",
     ),
-    reservationRecordSha1: sha1(
-      raw.reservationRecordSha1,
-      "reservation reservationRecordSha1",
-    ),
-    settledResultDigest: raw.settledResultDigest == null
-      ? null
-      : digest(
-        raw.settledResultDigest,
-        "reservation settledResultDigest",
-      ),
-    consumedAtMs: raw.consumedAtMs == null
-      ? null
-      : nonNegativeSafeInteger(
-        raw.consumedAtMs,
-        "reservation consumedAtMs",
-      ),
   };
+  if (receipt) {
+    invariant(
+      reservationRecordMatchesReceipt(normalized, receipt),
+      "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
+      "source write reservation does not match its receipt",
+    );
+    return deepFreeze(normalized);
+  }
   invariant(
+    active && job && jobSnapshotSha1
+      &&
     normalized.version === RESERVATION_VERSION
       && normalized.policyVersion
         === SOURCE_WATERMARK_POLICY_VERSION
-      && ["reserved", "consumed"].includes(normalized.status)
+      && normalized.status === "reserved"
       && normalized.generationRecordDigest
         === active.generationRecordDigest
       && normalized.durableGenerationRevisionDigest
@@ -1262,16 +1163,10 @@ function canonicalReservationRecord(value, {
         === job.candidateUserAliasDigest
       && normalized.jobRevisionDigest === job.jobRevisionDigest
       && normalized.writeScopeDigest === job.writeScopeDigest
+      && normalized.jobSnapshotSha1 === jobSnapshotSha1
       && normalized.expiresAtMs >= normalized.issuedAtMs
       && normalized.expiresAtMs - normalized.issuedAtMs
-        <= RESERVATION_TTL_MS
-      && (
-        normalized.status === "reserved"
-          ? normalized.settledResultDigest == null
-            && normalized.consumedAtMs == null
-          : normalized.settledResultDigest != null
-            && normalized.consumedAtMs != null
-      ),
+        <= RESERVATION_TTL_MS,
     "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
     "source write reservation is inconsistent",
   );
@@ -1306,6 +1201,7 @@ function reservationReceipt(reservation) {
       reservation.candidateUserAliasDigest,
     jobRevisionDigest: reservation.jobRevisionDigest,
     writeScopeDigest: reservation.writeScopeDigest,
+    jobSnapshotSha1: reservation.jobSnapshotSha1,
     q37DecisionDigest: reservation.q37DecisionDigest,
     callType: reservation.callType,
     callEndedAt: reservation.callEndedAt,
@@ -1348,6 +1244,7 @@ function canonicalReservationReceipt(value, {
       "candidateUserAliasDigest",
       "jobRevisionDigest",
       "writeScopeDigest",
+      "jobSnapshotSha1",
       "q37DecisionDigest",
       "callType",
       "callEndedAt",
@@ -1413,6 +1310,10 @@ function canonicalReservationReceipt(value, {
     writeScopeDigest: digest(
       raw.writeScopeDigest,
       "reservation receipt writeScopeDigest",
+    ),
+    jobSnapshotSha1: sha1(
+      raw.jobSnapshotSha1,
+      "reservation receipt jobSnapshotSha1",
     ),
     q37DecisionDigest: digest(
       raw.q37DecisionDigest,
@@ -1487,10 +1388,12 @@ export async function reserveSourceAuthorityWrite(
     jobRevisionDigest: rawJobRevisionDigest,
     writeScopeDigest: rawWriteScopeDigest,
   } = {},
-  {
-    kvImpl = kv,
-  } = {},
 ) {
+  invariant(
+    SOURCE_CAPTURE_COORDINATOR_AVAILABLE,
+    "SOURCE_AUTHORITY_CAPTURE_COORDINATOR_UNAVAILABLE",
+    "no reviewed capture-freshness coordinator is installed",
+  );
   const expectedJob = {
     version: JOB_SNAPSHOT_VERSION,
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
@@ -1518,7 +1421,7 @@ export async function reserveSourceAuthorityWrite(
   };
   // This read is internal. Its exact fields become the compare values in the
   // following Lua transition; callers cannot select an old generation.
-  const current = await readCurrentSourceAuthority({ kvImpl });
+  const current = await readCurrentSourceAuthority();
   invariant(
     current.active && current.generationAuthorityReceipt,
     "SOURCE_AUTHORITY_NO_ACTIVE_GENERATION",
@@ -1540,13 +1443,14 @@ export async function reserveSourceAuthorityWrite(
     active.generation,
     expectedJob,
   );
-  const result = await kvImpl([
+  const result = await kv([
     "EVAL",
     RESERVE_WRITE_LUA,
-    3,
+    4,
     ACTIVE_GENERATION_KEY,
     jobSnapshotKey(expectedJob.jobBindingDigest),
     reservationKey(expectedJob),
+    settlementKey(expectedJob),
     active.generationRecordDigest,
     active.durableGenerationRevisionDigest,
     active.durableRecordReceiptDigest,
@@ -1631,6 +1535,9 @@ export async function reserveSourceAuthorityWrite(
     ),
     expectedJob,
   );
+  const returnedJobSnapshotSha1 = createHash("sha1")
+    .update(result[2])
+    .digest("hex");
   const reservation = canonicalReservationRecord(
     parseJson(
       result[3],
@@ -1643,8 +1550,12 @@ export async function reserveSourceAuthorityWrite(
         activeRecordSha1: returnedActiveRecordSha1,
       },
       job,
+      jobSnapshotSha1: returnedJobSnapshotSha1,
     },
   );
+  const reservationRecordSha1 = createHash("sha1")
+    .update(result[3])
+    .digest("hex");
   invariant(
     reservation.issuedAtMs <= nowMs
       && (
@@ -1660,27 +1571,168 @@ export async function reserveSourceAuthorityWrite(
     duplicate: code === 2,
     reservedJobRevisionDigest:
       reservation.reservedJobRevisionDigest,
-    reservationReceipt: reservationReceipt(reservation),
+    reservationReceipt: reservationReceipt({
+      ...reservation,
+      reservationRecordSha1,
+    }),
   });
 }
 
 const CONSUME_WRITE_LUA = `
   ${REDIS_TIME_MS_LUA}
+  local function exactTableSize(value, expected)
+    local count = 0
+    for _ in pairs(value) do count = count + 1 end
+    return count == expected
+  end
   local activeRaw = redis.call('GET', KEYS[1])
   local jobRaw = redis.call('GET', KEYS[2])
   local reservationRaw = redis.call('GET', KEYS[3])
-  if not activeRaw or not jobRaw or not reservationRaw then
-    return {-4, reservationRaw or '', redisTime[1], redisTime[2]}
+  local settlementRaw = redis.call('GET', KEYS[4])
+  if not reservationRaw then
+    return {
+      -4,
+      activeRaw or '',
+      jobRaw or '',
+      reservationRaw or '',
+      settlementRaw or '',
+      redisTime[1],
+      redisTime[2]
+    }
+  end
+  local reservationOk, reservation = pcall(cjson.decode, reservationRaw)
+  if not reservationOk
+    or type(reservation) ~= 'table'
+    or type(reservation.sourceEpochs) ~= 'table'
+    or not exactTableSize(reservation, 21)
+    or not exactTableSize(reservation.sourceEpochs, 3) then
+    return {
+      -8,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      settlementRaw or '',
+      redisTime[1],
+      redisTime[2]
+    }
+  end
+  if reservation.version ~= 2
+    or reservation.policyVersion ~= ARGV[7]
+    or reservation.status ~= 'reserved'
+    or reservation.generationRecordDigest ~= ARGV[1]
+    or reservation.durableGenerationRevisionDigest ~= ARGV[2]
+    or reservation.durableRecordReceiptDigest ~= ARGV[3]
+    or reservation.activeRecordSha1 ~= ARGV[25]
+    or reservation.sourceEpochs.recall ~= ARGV[4]
+    or reservation.sourceEpochs.paraformHuman ~= ARGV[5]
+    or reservation.sourceEpochs.aliases ~= ARGV[6]
+    or reservation.jobBindingDigest ~= ARGV[8]
+    or reservation.canonicalCandidateDigest ~= ARGV[9]
+    or reservation.candidateUserAliasDigest ~= ARGV[10]
+    or reservation.jobRevisionDigest ~= ARGV[11]
+    or reservation.writeScopeDigest ~= ARGV[12]
+    or reservation.jobSnapshotSha1 ~= ARGV[13]
+    or reservation.q37DecisionDigest ~= ARGV[14]
+    or reservation.callType ~= ARGV[15]
+    or reservation.callEndedAt ~= ARGV[16]
+    or reservation.reservedJobRevisionDigest ~= ARGV[17]
+    or reservation.reservationNonceDigest ~= ARGV[18]
+    or tonumber(reservation.issuedAtMs) ~= tonumber(ARGV[19])
+    or tonumber(reservation.expiresAtMs) ~= tonumber(ARGV[20])
+    or redis.sha1hex(reservationRaw) ~= ARGV[21] then
+    return {
+      -6,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      settlementRaw or '',
+      redisTime[1],
+      redisTime[2]
+    }
+  end
+  if settlementRaw then
+    local settlementOk, settlement = pcall(cjson.decode, settlementRaw)
+    if not settlementOk or type(settlement) ~= 'table'
+      or not exactTableSize(settlement, 14) then
+      return {
+        -8,
+        activeRaw,
+        jobRaw,
+        reservationRaw,
+        settlementRaw,
+        redisTime[1],
+        redisTime[2]
+      }
+    end
+    if settlement.version ~= 1
+      or settlement.policyVersion ~= ARGV[7]
+      or settlement.status ~= 'consumed'
+      or settlement.reservationReceiptDigest ~= ARGV[22]
+      or settlement.reservationRecordSha1 ~= ARGV[21]
+      or settlement.activeRecordSha1 ~= ARGV[25]
+      or settlement.jobSnapshotSha1 ~= ARGV[13]
+      or settlement.jobBindingDigest ~= ARGV[8]
+      or settlement.jobRevisionDigest ~= ARGV[11]
+      or settlement.writeScopeDigest ~= ARGV[12]
+      or settlement.reservedJobRevisionDigest ~= ARGV[17]
+      or settlement.reservationNonceDigest ~= ARGV[18] then
+      return {
+        -6,
+        activeRaw,
+        jobRaw,
+        reservationRaw,
+        settlementRaw,
+        redisTime[1],
+        redisTime[2]
+      }
+    end
+    if settlement.settledResultDigest ~= ARGV[23] then
+      return {
+        -9,
+        activeRaw,
+        jobRaw,
+        reservationRaw,
+        settlementRaw,
+        redisTime[1],
+        redisTime[2]
+      }
+    end
+    return {
+      2,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      settlementRaw,
+      redisTime[1],
+      redisTime[2]
+    }
+  end
+  if not activeRaw or not jobRaw then
+    return {
+      -4,
+      activeRaw or '',
+      jobRaw or '',
+      reservationRaw,
+      '',
+      redisTime[1],
+      redisTime[2]
+    }
   end
   local activeOk, active = pcall(cjson.decode, activeRaw)
   local jobOk, job = pcall(cjson.decode, jobRaw)
-  local reservationOk, reservation = pcall(cjson.decode, reservationRaw)
-  if not activeOk or not jobOk or not reservationOk
+  if not activeOk or not jobOk
     or type(active) ~= 'table'
     or type(job) ~= 'table'
-    or type(reservation) ~= 'table'
     or type(active.sourceEpochs) ~= 'table' then
-    return {-8, reservationRaw, redisTime[1], redisTime[2]}
+    return {
+      -8,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      '',
+      redisTime[1],
+      redisTime[2]
+    }
   end
   if active.generationRecordDigest ~= ARGV[1]
     or active.durableGenerationRevisionDigest ~= ARGV[2]
@@ -1688,44 +1740,222 @@ const CONSUME_WRITE_LUA = `
     or active.sourceEpochs.recall ~= ARGV[4]
     or active.sourceEpochs.paraformHuman ~= ARGV[5]
     or active.sourceEpochs.aliases ~= ARGV[6]
-    or redis.sha1hex(activeRaw) ~= ARGV[16] then
-    return {-3, reservationRaw, redisTime[1], redisTime[2]}
+    or redis.sha1hex(activeRaw) ~= ARGV[25] then
+    return {
+      -3,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      '',
+      redisTime[1],
+      redisTime[2]
+    }
   end
-  if job.jobBindingDigest ~= ARGV[7]
-    or job.canonicalCandidateDigest ~= ARGV[8]
-    or job.candidateUserAliasDigest ~= ARGV[9]
-    or job.jobRevisionDigest ~= ARGV[10]
-    or job.writeScopeDigest ~= ARGV[11] then
-    return {-5, reservationRaw, redisTime[1], redisTime[2]}
-  end
-  if reservation.reservationRecordSha1 ~= ARGV[12]
-    or reservation.reservationNonceDigest ~= ARGV[13]
-    or reservation.durableRecordReceiptDigest ~= ARGV[3]
-    or reservation.jobBindingDigest ~= ARGV[7]
-    or reservation.jobRevisionDigest ~= ARGV[10]
-    or reservation.writeScopeDigest ~= ARGV[11]
-    or reservation.activeRecordSha1 ~= ARGV[16] then
-    return {-6, reservationRaw, redisTime[1], redisTime[2]}
-  end
-  if reservation.status == 'consumed' then
-    if reservation.settledResultDigest ~= ARGV[14] then
-      return {-9, reservationRaw, redisTime[1], redisTime[2]}
-    end
-    return {2, reservationRaw, redisTime[1], redisTime[2]}
-  end
-  if reservation.status ~= 'reserved' then
-    return {-8, reservationRaw, redisTime[1], redisTime[2]}
+  if job.version ~= 1
+    or job.policyVersion ~= ARGV[7]
+    or job.status ~= 'ready'
+    or job.jobBindingDigest ~= ARGV[8]
+    or job.canonicalCandidateDigest ~= ARGV[9]
+    or job.candidateUserAliasDigest ~= ARGV[10]
+    or job.jobRevisionDigest ~= ARGV[11]
+    or job.writeScopeDigest ~= ARGV[12]
+    or redis.sha1hex(jobRaw) ~= ARGV[13]
+    or not exactTableSize(job, 8) then
+    return {
+      -5,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      '',
+      redisTime[1],
+      redisTime[2]
+    }
   end
   if tonumber(reservation.expiresAtMs) < nowMs then
-    return {-7, reservationRaw, redisTime[1], redisTime[2]}
+    return {
+      -7,
+      activeRaw,
+      jobRaw,
+      reservationRaw,
+      '',
+      redisTime[1],
+      redisTime[2]
+    }
   end
-  reservation.status = 'consumed'
-  reservation.settledResultDigest = ARGV[14]
-  reservation.consumedAtMs = nowMs
-  local consumed = cjson.encode(reservation)
-  redis.call('SET', KEYS[3], consumed, 'EX', ARGV[15])
-  return {1, consumed, redisTime[1], redisTime[2]}
+  local settlement = {
+    version = 1,
+    policyVersion = ARGV[7],
+    status = 'consumed',
+    reservationReceiptDigest = ARGV[22],
+    reservationRecordSha1 = ARGV[21],
+    activeRecordSha1 = ARGV[25],
+    jobSnapshotSha1 = ARGV[13],
+    jobBindingDigest = ARGV[8],
+    jobRevisionDigest = ARGV[11],
+    writeScopeDigest = ARGV[12],
+    reservedJobRevisionDigest = ARGV[17],
+    reservationNonceDigest = ARGV[18],
+    settledResultDigest = ARGV[23],
+    consumedAtMs = nowMs
+  }
+  local consumed = cjson.encode(settlement)
+  redis.call('SET', KEYS[4], consumed, 'EX', ARGV[24])
+  return {
+    1,
+    activeRaw,
+    jobRaw,
+    reservationRaw,
+    consumed,
+    redisTime[1],
+    redisTime[2]
+  }
 `;
+
+function reservationRecordMatchesReceipt(reservation, receipt) {
+  return (
+    reservation.generationRecordDigest
+      === receipt.generationRecordDigest
+    && reservation.durableGenerationRevisionDigest
+      === receipt.durableGenerationRevisionDigest
+    && reservation.durableRecordReceiptDigest
+      === receipt.durableRecordReceiptDigest
+    && reservation.activeRecordSha1
+      === receipt.activeRecordSha1
+    && sameEpochs(
+      reservation.sourceEpochs,
+      receipt.sourceEpochs,
+    )
+    && reservation.jobBindingDigest
+      === receipt.jobBindingDigest
+    && reservation.canonicalCandidateDigest
+      === receipt.canonicalCandidateDigest
+    && reservation.candidateUserAliasDigest
+      === receipt.candidateUserAliasDigest
+    && reservation.jobRevisionDigest
+      === receipt.jobRevisionDigest
+    && reservation.writeScopeDigest
+      === receipt.writeScopeDigest
+    && reservation.jobSnapshotSha1
+      === receipt.jobSnapshotSha1
+    && reservation.q37DecisionDigest
+      === receipt.q37DecisionDigest
+    && reservation.callType === receipt.callType
+    && reservation.callEndedAt === receipt.callEndedAt
+    && reservation.reservedJobRevisionDigest
+      === receipt.reservedJobRevisionDigest
+    && reservation.reservationNonceDigest
+      === receipt.reservationNonceDigest
+    && reservation.issuedAtMs === receipt.issuedAtMs
+    && reservation.expiresAtMs === receipt.expiresAtMs
+  );
+}
+
+function canonicalSettlementRecord(value, {
+  receipt,
+  settledResultDigest,
+}) {
+  const raw = object(value, "source write settlement");
+  exactKeys(
+    raw,
+    [
+      "version",
+      "policyVersion",
+      "status",
+      "reservationReceiptDigest",
+      "reservationRecordSha1",
+      "activeRecordSha1",
+      "jobSnapshotSha1",
+      "jobBindingDigest",
+      "jobRevisionDigest",
+      "writeScopeDigest",
+      "reservedJobRevisionDigest",
+      "reservationNonceDigest",
+      "settledResultDigest",
+      "consumedAtMs",
+    ],
+    "SOURCE_AUTHORITY_SETTLEMENT_MALFORMED",
+    "source write settlement",
+  );
+  const normalized = {
+    version: raw.version,
+    policyVersion: raw.policyVersion,
+    status: raw.status,
+    reservationReceiptDigest: digest(
+      raw.reservationReceiptDigest,
+      "settlement reservationReceiptDigest",
+    ),
+    reservationRecordSha1: sha1(
+      raw.reservationRecordSha1,
+      "settlement reservationRecordSha1",
+    ),
+    activeRecordSha1: sha1(
+      raw.activeRecordSha1,
+      "settlement activeRecordSha1",
+    ),
+    jobSnapshotSha1: sha1(
+      raw.jobSnapshotSha1,
+      "settlement jobSnapshotSha1",
+    ),
+    jobBindingDigest: digest(
+      raw.jobBindingDigest,
+      "settlement jobBindingDigest",
+    ),
+    jobRevisionDigest: digest(
+      raw.jobRevisionDigest,
+      "settlement jobRevisionDigest",
+    ),
+    writeScopeDigest: digest(
+      raw.writeScopeDigest,
+      "settlement writeScopeDigest",
+    ),
+    reservedJobRevisionDigest: digest(
+      raw.reservedJobRevisionDigest,
+      "settlement reservedJobRevisionDigest",
+    ),
+    reservationNonceDigest: digest(
+      raw.reservationNonceDigest,
+      "settlement reservationNonceDigest",
+    ),
+    settledResultDigest: digest(
+      raw.settledResultDigest,
+      "settlement settledResultDigest",
+    ),
+    consumedAtMs: nonNegativeSafeInteger(
+      raw.consumedAtMs,
+      "settlement consumedAtMs",
+    ),
+  };
+  invariant(
+    normalized.version === SETTLEMENT_VERSION
+      && normalized.policyVersion
+        === SOURCE_WATERMARK_POLICY_VERSION
+      && normalized.status === "consumed"
+      && normalized.reservationReceiptDigest
+        === receipt.receiptDigest
+      && normalized.reservationRecordSha1
+        === receipt.reservationRecordSha1
+      && normalized.activeRecordSha1
+        === receipt.activeRecordSha1
+      && normalized.jobSnapshotSha1
+        === receipt.jobSnapshotSha1
+      && normalized.jobBindingDigest
+        === receipt.jobBindingDigest
+      && normalized.jobRevisionDigest
+        === receipt.jobRevisionDigest
+      && normalized.writeScopeDigest
+        === receipt.writeScopeDigest
+      && normalized.reservedJobRevisionDigest
+        === receipt.reservedJobRevisionDigest
+      && normalized.reservationNonceDigest
+        === receipt.reservationNonceDigest
+      && normalized.settledResultDigest
+        === settledResultDigest
+      && normalized.consumedAtMs >= receipt.issuedAtMs,
+    "SOURCE_AUTHORITY_SETTLEMENT_MALFORMED",
+    "source write settlement is inconsistent",
+  );
+  return deepFreeze(normalized);
+}
 
 export async function consumeSourceAuthorityWriteReservation(
   {
@@ -1735,19 +1965,28 @@ export async function consumeSourceAuthorityWriteReservation(
     expectedWriteScopeDigest,
     settledResultDigest: rawSettledResultDigest,
   } = {},
-  {
-    kvImpl = kv,
-  } = {},
 ) {
+  invariant(
+    SOURCE_CAPTURE_COORDINATOR_AVAILABLE,
+    "SOURCE_AUTHORITY_CAPTURE_COORDINATOR_UNAVAILABLE",
+    "no reviewed capture-freshness coordinator is installed",
+  );
   const receipt = canonicalReservationReceipt(
     rawReservationReceipt,
     { allowExpired: true },
   );
   const expected = {
+    version: JOB_SNAPSHOT_VERSION,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    status: "ready",
     jobBindingDigest: digest(
       expectedJobBindingDigest,
       "expectedJobBindingDigest",
     ),
+    canonicalCandidateDigest:
+      receipt.canonicalCandidateDigest,
+    candidateUserAliasDigest:
+      receipt.candidateUserAliasDigest,
     jobRevisionDigest: digest(
       expectedJobRevisionDigest,
       "expectedJobRevisionDigest",
@@ -1768,26 +2007,36 @@ export async function consumeSourceAuthorityWriteReservation(
     rawSettledResultDigest,
     "settledResultDigest",
   );
-  const result = await kvImpl([
+  const result = await kv([
     "EVAL",
     CONSUME_WRITE_LUA,
-    3,
+    4,
     ACTIVE_GENERATION_KEY,
     jobSnapshotKey(receipt.jobBindingDigest),
     reservationKey(receipt),
+    settlementKey(receipt),
     receipt.generationRecordDigest,
     receipt.durableGenerationRevisionDigest,
     receipt.durableRecordReceiptDigest,
     receipt.sourceEpochs.recall,
     receipt.sourceEpochs.paraformHuman,
     receipt.sourceEpochs.aliases,
+    SOURCE_WATERMARK_POLICY_VERSION,
     receipt.jobBindingDigest,
     receipt.canonicalCandidateDigest,
     receipt.candidateUserAliasDigest,
     receipt.jobRevisionDigest,
     receipt.writeScopeDigest,
-    receipt.reservationRecordSha1,
+    receipt.jobSnapshotSha1,
+    receipt.q37DecisionDigest,
+    receipt.callType,
+    receipt.callEndedAt,
+    receipt.reservedJobRevisionDigest,
     receipt.reservationNonceDigest,
+    String(receipt.issuedAtMs),
+    String(receipt.expiresAtMs),
+    receipt.reservationRecordSha1,
+    receipt.receiptDigest,
     settledResultDigest,
     String(RESERVATION_RECORD_TTL_SECONDS),
     receipt.activeRecordSha1,
@@ -1805,7 +2054,13 @@ export async function consumeSourceAuthorityWriteReservation(
       "reservation durable state is missing",
     );
   }
-  if (code === -5 || code === -6) {
+  if (code === -5) {
+    fail(
+      "SOURCE_AUTHORITY_JOB_STATE_MISMATCH",
+      "durable job snapshot changed before consumption",
+    );
+  }
+  if (code === -6) {
     fail(
       "SOURCE_AUTHORITY_RESERVATION_EXPECTATION_MISMATCH",
       "reservation cannot be replayed across job or scope",
@@ -1830,73 +2085,132 @@ export async function consumeSourceAuthorityWriteReservation(
   );
   const consumedAtRedisMs = redisTime(
     result,
-    2,
+    5,
     "write reservation consumption",
   );
-  const active = {
-    generationRecordDigest: receipt.generationRecordDigest,
-    durableGenerationRevisionDigest:
-      receipt.durableGenerationRevisionDigest,
-    durableRecordReceiptDigest:
-      receipt.durableRecordReceiptDigest,
-    activeRecordSha1: receipt.activeRecordSha1,
-    sourceEpochs: receipt.sourceEpochs,
-    generation: {
-      aliasMap: {
-        entries: [{
-          identityBindingProven: true,
-          canonicalCandidateDigest:
-            receipt.canonicalCandidateDigest,
-          candidateUserAliasDigest:
-            receipt.candidateUserAliasDigest,
-        }],
-      },
-      q37: {
-        decisions: [{
-          canonicalCandidateDigest:
-            receipt.canonicalCandidateDigest,
-          decision: "selected",
-          callType: receipt.callType,
-          endedAt: receipt.callEndedAt,
-          decisionDigest: receipt.q37DecisionDigest,
-        }],
-      },
-    },
-  };
-  const job = {
-    jobBindingDigest: receipt.jobBindingDigest,
-    canonicalCandidateDigest:
-      receipt.canonicalCandidateDigest,
-    candidateUserAliasDigest:
-      receipt.candidateUserAliasDigest,
-    jobRevisionDigest: receipt.jobRevisionDigest,
-    writeScopeDigest: receipt.writeScopeDigest,
-  };
-  const reservation = canonicalReservationRecord(
+  const reservationRaw = result[3];
+  const reservationRecordSha1 = createHash("sha1")
+    .update(reservationRaw)
+    .digest("hex");
+  invariant(
+    reservationRecordSha1
+      === receipt.reservationRecordSha1,
+    "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
+    "consumption reservation raw state changed",
+  );
+  if (code === 2) {
+    canonicalReservationRecord(
+      parseJson(
+        reservationRaw,
+        "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
+        "duplicate consumption reservation",
+      ),
+      { receipt },
+    );
+    const priorSettlement = canonicalSettlementRecord(
+      parseJson(
+        result[4],
+        "SOURCE_AUTHORITY_SETTLEMENT_MALFORMED",
+        "duplicate consumption settlement",
+      ),
+      { receipt, settledResultDigest },
+    );
+    invariant(
+      priorSettlement.consumedAtMs <= consumedAtRedisMs,
+      "SOURCE_AUTHORITY_SETTLEMENT_MALFORMED",
+      "duplicate settlement is from the future",
+    );
+    return deepFreeze({
+      allowed: false,
+      duplicate: true,
+      status: "consumed",
+      settledResultDigest:
+        priorSettlement.settledResultDigest,
+      consumedAtMs: priorSettlement.consumedAtMs,
+    });
+  }
+  const active = canonicalActiveRecord(
     parseJson(
       result[1],
-      "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
-      "consumed write reservation",
+      "SOURCE_AUTHORITY_DURABLE_STATE_MALFORMED",
+      "consumption active record",
     ),
-    { active, job },
+  );
+  const activeRecordSha1 = createHash("sha1")
+    .update(result[1])
+    .digest("hex");
+  invariant(
+    activeRecordSha1 === receipt.activeRecordSha1
+      && active.generationRecordDigest
+        === receipt.generationRecordDigest
+      && active.durableGenerationRevisionDigest
+        === receipt.durableGenerationRevisionDigest
+      && active.durableRecordReceiptDigest
+        === receipt.durableRecordReceiptDigest
+      && sameEpochs(active.sourceEpochs, receipt.sourceEpochs),
+    "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT",
+    "consumption active source generation changed",
+  );
+  const job = canonicalJobSnapshot(
+    parseJson(
+      result[2],
+      "SOURCE_AUTHORITY_JOB_STATE_MALFORMED",
+      "consumption job snapshot",
+    ),
+    expected,
+  );
+  const jobSnapshotSha1 = createHash("sha1")
+    .update(result[2])
+    .digest("hex");
+  invariant(
+    jobSnapshotSha1 === receipt.jobSnapshotSha1,
+    "SOURCE_AUTHORITY_JOB_STATE_MISMATCH",
+    "consumption job snapshot changed",
+  );
+  const reservation = canonicalReservationRecord(
+    parseJson(
+      reservationRaw,
+      "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
+      "consumption write reservation",
+    ),
+    {
+      active: {
+        ...active,
+        activeRecordSha1,
+      },
+      job,
+      jobSnapshotSha1,
+    },
   );
   invariant(
-    reservation.status === "consumed"
-      && reservation.settledResultDigest
-        === settledResultDigest
-      && reservation.consumedAtMs <= consumedAtRedisMs
-      && (
-        code === 2
-        || reservation.consumedAtMs === consumedAtRedisMs
+    reservationRecordSha1
+        === receipt.reservationRecordSha1
+      && reservationRecordMatchesReceipt(
+        reservation,
+        receipt,
       ),
     "SOURCE_AUTHORITY_RESERVATION_MALFORMED",
-    "consumed reservation does not match the settlement",
+    "consumption reservation does not match its receipt",
+  );
+  const settlement = canonicalSettlementRecord(
+    parseJson(
+      result[4],
+      "SOURCE_AUTHORITY_SETTLEMENT_MALFORMED",
+      "consumption settlement",
+    ),
+    { receipt, settledResultDigest },
+  );
+  invariant(
+    settlement.consumedAtMs <= consumedAtRedisMs
+      && settlement.consumedAtMs === consumedAtRedisMs,
+    "SOURCE_AUTHORITY_SETTLEMENT_MALFORMED",
+    "consumption settlement has an invalid Redis timestamp",
   );
   return deepFreeze({
-    allowed: code === 1,
-    duplicate: code === 2,
+    allowed: true,
+    duplicate: false,
     status: "consumed",
-    settledResultDigest: reservation.settledResultDigest,
-    consumedAtMs: reservation.consumedAtMs,
+    settledResultDigest: settlement.settledResultDigest,
+    consumedAtMs: settlement.consumedAtMs,
   });
 }

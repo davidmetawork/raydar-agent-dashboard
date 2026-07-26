@@ -16,20 +16,23 @@ import {
 } from "node:crypto";
 
 export const SOURCE_WATERMARK_POLICY_VERSION =
-  "phase4-source-watermark-v3";
-export const SOURCE_WATERMARK_CERTIFICATE_VERSION = 3;
-export const SOURCE_WATERMARK_GENERATION_VERSION = 3;
-export const PHASE4_WRITE_ATTESTATION_VERSION = 3;
+  "phase4-source-watermark-v5";
+export const SOURCE_WATERMARK_CERTIFICATE_VERSION = 5;
+export const SOURCE_WATERMARK_GENERATION_VERSION = 5;
+export const PHASE4_WRITE_ATTESTATION_VERSION = 5;
 export const SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION = 1;
 export const SOURCE_WATERMARK_AUTHORITY_KEY_ENV =
   "PARAAI_SOURCE_WATERMARK_AUTHORITY_KEY";
-export const SOURCE_IDENTITY_BINDING_RECEIPT_VERSION = 1;
+export const SOURCE_IDENTITY_BINDING_RECEIPT_VERSION = 2;
 export const SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV =
   "PARAAI_SOURCE_IDENTITY_BINDING_AUTHORITY_KEY";
 export const SOURCE_IDENTITY_POINT_READ_PROCEDURES =
   Object.freeze({
-    recall: "GET /api/v1/bot/{id}/",
-    paraformHuman: "candidateUserMeeting.getCallById",
+    recallSource: "GET /api/v1/bot/{id}/",
+    paraformHumanSource:
+      "candidateUserMeeting.getCallById",
+    candidateUserIdentity:
+      "candidateUser.getCandidateUserById",
   });
 
 // Artifact commitments are derived from the exact immutable production file,
@@ -88,6 +91,14 @@ export const SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST =
       ),
     },
   );
+
+// There is no reviewed alias/identity collector, Paraform human-vs-agent
+// discriminator, signed human-intro source, or freshness coordinator yet.
+// Null is the release pin: no caller-provided digest can stand in for one.
+export const SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST =
+  null;
+export const SOURCE_Q37_DISCRIMINATOR_ARTIFACT_DIGEST = null;
+export const SOURCE_HUMAN_INTRO_ARTIFACT_DIGEST = null;
 
 // These are release pins, not caller-selectable compatibility ranges. A
 // collector change must deliberately rotate both its version and immutable
@@ -621,6 +632,13 @@ function certificateBuildResult({
     }));
 
   const reasons = new Set();
+  if (
+    normalizedSource
+      === SOURCE_WATERMARK_SOURCES.PARAFORM_HUMAN
+    && SOURCE_Q37_DISCRIMINATOR_ARTIFACT_DIGEST == null
+  ) {
+    reasons.add("paraform_human_discriminator_unpinned");
+  }
   if (normalizedPasses.length < 2) {
     reasons.add("stable_passes_missing");
   }
@@ -761,282 +779,331 @@ function identityBindingKeyIdDigest(key) {
 
 function identityBindingReceiptMac(key, material) {
   return createHmac("sha256", key)
-    .update("phase4-source-identity-binding-receipt-v1")
+    .update("phase4-source-identity-binding-receipt-v2")
     .update("\0")
     .update(canonicalJson(material))
     .digest("hex");
 }
 
-function normalizeIdentityBindingReceipt(
-  rawReceipt,
-  {
-    entry,
-    decisionBoundaryAt,
-    index,
-  },
-) {
-  const raw = object(
-    rawReceipt,
-    `alias entries[${index}].identityBindingReceipt`,
-  );
+function sourceBindingV2(raw, {
+  entryIndex,
+  bindingIndex,
+}) {
+  const field =
+    `alias entries[${entryIndex}].bindings[${bindingIndex}]`;
+  const binding = object(raw, field);
   exactKeys(
-    raw,
+    binding,
     [
       "version",
       "policyVersion",
       "kind",
-      "canonicalCandidateDigest",
-      "candidateUserAliasDigest",
-      "recallRecordDigest",
-      "recallRecordRevisionDigest",
-      "paraformHumanRecordDigest",
-      "paraformHumanRecordRevisionDigest",
-      "recallPointReadProcedure",
-      "recallNormalizedInputDigest",
-      "paraformHumanPointReadProcedure",
-      "paraformHumanNormalizedInputDigest",
+      "source",
+      "sourceRecordDigest",
+      "sourceRecordRevisionDigest",
+      "sourcePointReadProcedure",
+      "sourceNormalizedInputDigest",
+      "identityPointReadProcedure",
+      "identityNormalizedInputDigest",
+      "identityPointRecordDigest",
+      "identityPointRecordRevisionDigest",
+      "resolutionEvidenceDigest",
       "decisionBoundaryAt",
       "observedAt",
-      "collectorArtifactDigest",
-      "joinEvidenceDigest",
+      "sourceCollectorArtifactDigest",
+      "identityCollectorArtifactDigest",
       "receiptNonceDigest",
       "authorityKeyIdDigest",
       "receiptMac",
     ],
     "SOURCE_IDENTITY_BINDING_RECEIPT_SHAPE_INVALID",
-    `alias entries[${index}].identityBindingReceipt`,
+    field,
   );
-  invariant(
-    raw.version === SOURCE_IDENTITY_BINDING_RECEIPT_VERSION
-      && raw.policyVersion === SOURCE_WATERMARK_POLICY_VERSION
-      && raw.kind === "cross_source_identity_binding",
-    "SOURCE_IDENTITY_BINDING_RECEIPT_VERSION_INVALID",
-    "identity-binding receipt version is invalid",
-  );
-  const observedAt = canonicalTimestamp(
-    raw.observedAt,
-    "identity-binding receipt observedAt",
-  );
-  const material = {
-    version: raw.version,
-    policyVersion: raw.policyVersion,
-    kind: raw.kind,
-    canonicalCandidateDigest: digest(
-      raw.canonicalCandidateDigest,
-      "identity-binding canonicalCandidateDigest",
+  return {
+    version: binding.version,
+    policyVersion: binding.policyVersion,
+    kind: binding.kind,
+    source: sourceName(binding.source, `${field}.source`),
+    sourceRecordDigest: digest(
+      binding.sourceRecordDigest,
+      `${field}.sourceRecordDigest`,
     ),
-    candidateUserAliasDigest: digest(
-      raw.candidateUserAliasDigest,
-      "identity-binding candidateUserAliasDigest",
+    sourceRecordRevisionDigest: digest(
+      binding.sourceRecordRevisionDigest,
+      `${field}.sourceRecordRevisionDigest`,
     ),
-    recallRecordDigest: digest(
-      raw.recallRecordDigest,
-      "identity-binding recallRecordDigest",
+    sourcePointReadProcedure: String(
+      binding.sourcePointReadProcedure,
     ),
-    recallRecordRevisionDigest: digest(
-      raw.recallRecordRevisionDigest,
-      "identity-binding recallRecordRevisionDigest",
+    sourceNormalizedInputDigest: digest(
+      binding.sourceNormalizedInputDigest,
+      `${field}.sourceNormalizedInputDigest`,
     ),
-    paraformHumanRecordDigest: digest(
-      raw.paraformHumanRecordDigest,
-      "identity-binding paraformHumanRecordDigest",
+    identityPointReadProcedure: String(
+      binding.identityPointReadProcedure,
     ),
-    paraformHumanRecordRevisionDigest: digest(
-      raw.paraformHumanRecordRevisionDigest,
-      "identity-binding paraformHumanRecordRevisionDigest",
+    identityNormalizedInputDigest: digest(
+      binding.identityNormalizedInputDigest,
+      `${field}.identityNormalizedInputDigest`,
     ),
-    recallPointReadProcedure: String(
-      raw.recallPointReadProcedure,
+    identityPointRecordDigest: digest(
+      binding.identityPointRecordDigest,
+      `${field}.identityPointRecordDigest`,
     ),
-    recallNormalizedInputDigest: digest(
-      raw.recallNormalizedInputDigest,
-      "identity-binding recallNormalizedInputDigest",
+    identityPointRecordRevisionDigest: digest(
+      binding.identityPointRecordRevisionDigest,
+      `${field}.identityPointRecordRevisionDigest`,
     ),
-    paraformHumanPointReadProcedure: String(
-      raw.paraformHumanPointReadProcedure,
-    ),
-    paraformHumanNormalizedInputDigest: digest(
-      raw.paraformHumanNormalizedInputDigest,
-      "identity-binding paraformHumanNormalizedInputDigest",
+    resolutionEvidenceDigest: digest(
+      binding.resolutionEvidenceDigest,
+      `${field}.resolutionEvidenceDigest`,
     ),
     decisionBoundaryAt: canonicalTimestamp(
-      raw.decisionBoundaryAt,
-      "identity-binding decisionBoundaryAt",
+      binding.decisionBoundaryAt,
+      `${field}.decisionBoundaryAt`,
     ),
-    observedAt,
-    collectorArtifactDigest: digest(
-      raw.collectorArtifactDigest,
-      "identity-binding collectorArtifactDigest",
+    observedAt: canonicalTimestamp(
+      binding.observedAt,
+      `${field}.observedAt`,
     ),
-    joinEvidenceDigest: digest(
-      raw.joinEvidenceDigest,
-      "identity-binding joinEvidenceDigest",
+    sourceCollectorArtifactDigest: digest(
+      binding.sourceCollectorArtifactDigest,
+      `${field}.sourceCollectorArtifactDigest`,
+    ),
+    identityCollectorArtifactDigest: digest(
+      binding.identityCollectorArtifactDigest,
+      `${field}.identityCollectorArtifactDigest`,
     ),
     receiptNonceDigest: digest(
-      raw.receiptNonceDigest,
-      "identity-binding receiptNonceDigest",
+      binding.receiptNonceDigest,
+      `${field}.receiptNonceDigest`,
     ),
     authorityKeyIdDigest: digest(
-      raw.authorityKeyIdDigest,
-      "identity-binding authorityKeyIdDigest",
+      binding.authorityKeyIdDigest,
+      `${field}.authorityKeyIdDigest`,
+    ),
+    receiptMac: digest(
+      binding.receiptMac,
+      `${field}.receiptMac`,
     ),
   };
+}
+
+function sourceBindingResolutionDigest(entry, binding) {
+  return semanticDigest(
+    "phase4-source-identity-resolution-evidence-v2",
+    {
+      canonicalCandidateDigest:
+        entry.canonicalCandidateDigest,
+      candidateUserAliasDigest:
+        entry.candidateUserAliasDigest,
+      source: binding.source,
+      sourceRecordDigest: binding.sourceRecordDigest,
+      sourceRecordRevisionDigest:
+        binding.sourceRecordRevisionDigest,
+      sourcePointReadProcedure:
+        binding.sourcePointReadProcedure,
+      sourceNormalizedInputDigest:
+        binding.sourceNormalizedInputDigest,
+      identityPointReadProcedure:
+        binding.identityPointReadProcedure,
+      identityNormalizedInputDigest:
+        binding.identityNormalizedInputDigest,
+      identityPointRecordDigest:
+        binding.identityPointRecordDigest,
+      identityPointRecordRevisionDigest:
+        binding.identityPointRecordRevisionDigest,
+      decisionBoundaryAt: binding.decisionBoundaryAt,
+      observedAt: binding.observedAt,
+      sourceCollectorArtifactDigest:
+        binding.sourceCollectorArtifactDigest,
+      identityCollectorArtifactDigest:
+        binding.identityCollectorArtifactDigest,
+    },
+  );
+}
+
+function verifySourceBindingV2(binding, {
+  entry,
+  decisionBoundaryAt,
+}) {
+  invariant(
+    binding.version === SOURCE_IDENTITY_BINDING_RECEIPT_VERSION
+      && binding.policyVersion
+        === SOURCE_WATERMARK_POLICY_VERSION
+      && binding.kind === "source_identity_binding",
+    "SOURCE_IDENTITY_BINDING_RECEIPT_VERSION_INVALID",
+    "source identity-binding receipt version is invalid",
+  );
+  const expectedSourceProcedure = binding.source
+      === SOURCE_WATERMARK_SOURCES.RECALL
+    ? SOURCE_IDENTITY_POINT_READ_PROCEDURES.recallSource
+    : SOURCE_IDENTITY_POINT_READ_PROCEDURES
+      .paraformHumanSource;
+  invariant(
+    binding.sourcePointReadProcedure
+        === expectedSourceProcedure
+      && binding.identityPointReadProcedure
+        === SOURCE_IDENTITY_POINT_READ_PROCEDURES
+          .candidateUserIdentity,
+    "SOURCE_IDENTITY_BINDING_POINT_READ_MISMATCH",
+    "source identity binding does not use the pinned point reads",
+  );
+  invariant(
+    binding.decisionBoundaryAt === decisionBoundaryAt
+      && Date.parse(binding.observedAt)
+        >= Date.parse(decisionBoundaryAt)
+      && Date.parse(binding.observedAt)
+        <= Date.now() + AUTHORITY_CLOCK_SKEW_MS,
+    "SOURCE_IDENTITY_BINDING_TIME_MISMATCH",
+    "source identity binding does not share the capture boundary",
+  );
+  invariant(
+    binding.sourceCollectorArtifactDigest
+      === SOURCE_WATERMARK_APPROVED_COLLECTORS[
+        binding.source
+      ].collectorCodeCommitmentDigest,
+    "SOURCE_IDENTITY_BINDING_ARTIFACT_MISMATCH",
+    "source identity binding is not pinned to its source collector",
+  );
+  invariant(
+    binding.resolutionEvidenceDigest
+      === sourceBindingResolutionDigest(entry, binding),
+    "SOURCE_IDENTITY_BINDING_RESOLUTION_MISMATCH",
+    "source identity binding resolution evidence is not canonical",
+  );
+  invariant(
+    SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST != null,
+    "SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_UNAVAILABLE",
+    "no reviewed candidate-user identity collector is pinned",
+  );
+  invariant(
+    binding.identityCollectorArtifactDigest
+      === SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST,
+    "SOURCE_IDENTITY_BINDING_ARTIFACT_MISMATCH",
+    "source identity binding is not pinned to the identity collector",
+  );
   const key = configuredIdentityBindingKey();
   invariant(
-    material.authorityKeyIdDigest
+    binding.authorityKeyIdDigest
       === identityBindingKeyIdDigest(key),
     "SOURCE_IDENTITY_BINDING_KEY_MISMATCH",
-    "identity-binding receipt was issued by another key",
+    "source identity binding was issued by another key",
   );
-  const suppliedMac = digest(
-    raw.receiptMac,
-    "identity-binding receiptMac",
-  );
-  const expectedMac = identityBindingReceiptMac(key, material);
+  const { receiptMac, ...bindingMaterial } = binding;
+  const expectedMac = identityBindingReceiptMac(key, {
+    version: SOURCE_IDENTITY_BINDING_RECEIPT_VERSION,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    kind: "source_identity_binding",
+    canonicalCandidateDigest:
+      entry.canonicalCandidateDigest,
+    candidateUserAliasDigest:
+      entry.candidateUserAliasDigest,
+    binding: bindingMaterial,
+  });
   invariant(
     timingSafeEqual(
-      Buffer.from(suppliedMac, "hex"),
+      Buffer.from(receiptMac, "hex"),
       Buffer.from(expectedMac, "hex"),
     ),
     "SOURCE_IDENTITY_BINDING_RECEIPT_INVALID",
-    "identity-binding receipt MAC is invalid",
+    "source identity-binding receipt MAC is invalid",
   );
-  invariant(
-    material.canonicalCandidateDigest
-        === entry.canonicalCandidateDigest
-      && material.candidateUserAliasDigest
-        === entry.candidateUserAliasDigest
-      && material.recallRecordDigest
-        === entry.recallRecordDigest
-      && material.recallRecordRevisionDigest
-        === entry.recallRecordRevisionDigest
-      && material.paraformHumanRecordDigest
-        === entry.paraformHumanRecordDigest
-      && material.paraformHumanRecordRevisionDigest
-        === entry.paraformHumanRecordRevisionDigest,
-    "SOURCE_IDENTITY_BINDING_EDGE_MISMATCH",
-    "identity-binding receipt is not bound to the exact alias edge",
-  );
-  invariant(
-    material.recallPointReadProcedure
-        === SOURCE_IDENTITY_POINT_READ_PROCEDURES.recall
-      && material.paraformHumanPointReadProcedure
-        === SOURCE_IDENTITY_POINT_READ_PROCEDURES.paraformHuman,
-    "SOURCE_IDENTITY_BINDING_POINT_READ_MISMATCH",
-    "identity-binding receipt does not use the pinned point reads",
-  );
-  invariant(
-    material.decisionBoundaryAt === decisionBoundaryAt
-      && Date.parse(material.observedAt)
-        >= Date.parse(decisionBoundaryAt)
-      && Date.parse(material.observedAt)
-        <= Date.now() + AUTHORITY_CLOCK_SKEW_MS,
-    "SOURCE_IDENTITY_BINDING_TIME_MISMATCH",
-    "identity-binding receipt does not share the capture boundary and observation time",
-  );
-  invariant(
-    material.collectorArtifactDigest
-      === SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
-    "SOURCE_IDENTITY_BINDING_ARTIFACT_MISMATCH",
-    "identity-binding receipt is not bound to the approved source artifacts",
-  );
-  const receipt = {
-    ...material,
-    receiptMac: suppliedMac,
-  };
-  return deepFreeze({
-    ...receipt,
-    receiptDigest: semanticDigest(
-      "phase4-source-identity-binding-receipt-v1",
-      receipt,
-    ),
-  });
+  return true;
 }
 
-function aliasEntry(raw, index) {
-  const entry = object(raw, `alias entries[${index}]`);
+function aliasEntryV2(raw, index) {
+  const field = `alias entries[${index}]`;
+  const entry = object(raw, field);
+  exactKeys(
+    entry,
+    [
+      "canonicalCandidateDigest",
+      "candidateUserAliasDigest",
+      "bindings",
+    ],
+    "SOURCE_ALIAS_ENTRY_SHAPE_INVALID",
+    field,
+  );
   const canonicalCandidateDigest = digest(
     entry.canonicalCandidateDigest,
-    `alias entries[${index}].canonicalCandidateDigest`,
+    `${field}.canonicalCandidateDigest`,
   );
   const candidateUserAliasDigest = digest(
     entry.candidateUserAliasDigest,
-    `alias entries[${index}].candidateUserAliasDigest`,
+    `${field}.candidateUserAliasDigest`,
   );
   if (canonicalCandidateDigest === candidateUserAliasDigest) {
     throw new TypeError(
       "canonical and candidate-user alias digests must be domain-separated",
     );
   }
+  const bindings = array(entry.bindings, `${field}.bindings`)
+    .map((binding, bindingIndex) => sourceBindingV2(binding, {
+      entryIndex: index,
+      bindingIndex,
+    }))
+    .sort((left, right) => (
+      left.source.localeCompare(right.source)
+      || left.sourceRecordDigest.localeCompare(
+        right.sourceRecordDigest,
+      )
+      || left.sourceRecordRevisionDigest.localeCompare(
+        right.sourceRecordRevisionDigest,
+      )
+    ));
   return {
     canonicalCandidateDigest,
     candidateUserAliasDigest,
-    recallRecordDigest: digest(
-      entry.recallRecordDigest,
-      `alias entries[${index}].recallRecordDigest`,
-    ),
-    recallRecordRevisionDigest: entry.recallRecordRevisionDigest
-      == null
-      ? null
-      : digest(
-        entry.recallRecordRevisionDigest,
-        `alias entries[${index}].recallRecordRevisionDigest`,
-      ),
-    paraformHumanRecordDigest: digest(
-      entry.paraformHumanRecordDigest,
-      `alias entries[${index}].paraformHumanRecordDigest`,
-    ),
-    paraformHumanRecordRevisionDigest:
-      entry.paraformHumanRecordRevisionDigest == null
-        ? null
-        : digest(
-          entry.paraformHumanRecordRevisionDigest,
-          `alias entries[${index}].paraformHumanRecordRevisionDigest`,
-        ),
-    identityBindingReceipt:
-      entry.identityBindingReceipt ?? null,
+    bindings,
   };
 }
 
-function normalizedAliasEntries(
+function normalizedAliasEntriesV2(
   entries,
   {
-    decisionBoundaryAt = null,
-  } = {},
+    decisionBoundaryAt,
+  },
 ) {
   return array(entries, "alias entries")
     .map((raw, index) => {
-      const entry = aliasEntry(raw, index);
-      if (!decisionBoundaryAt) return entry;
-      let receipt = null;
-      let identityBindingFailureCode = null;
-      try {
-        receipt = normalizeIdentityBindingReceipt(
-          entry.identityBindingReceipt,
-          {
+      const entry = aliasEntryV2(raw, index);
+      const bindings = entry.bindings.map((binding) => {
+        let failureCode = null;
+        try {
+          verifySourceBindingV2(binding, {
             entry,
             decisionBoundaryAt,
-            index,
-          },
-        );
-      } catch (error) {
-        identityBindingFailureCode =
-          error?.code || "SOURCE_IDENTITY_BINDING_RECEIPT_INVALID";
-      }
-      const receiptMaterial = receipt
-        ? Object.fromEntries(
-          Object.entries(receipt).filter(
-            ([field]) => field !== "receiptDigest",
+          });
+        } catch (error) {
+          failureCode =
+            error?.code
+            || "SOURCE_IDENTITY_BINDING_RECEIPT_INVALID";
+        }
+        return {
+          ...binding,
+          identityBindingProven: failureCode == null,
+          identityBindingFailureCode: failureCode,
+          receiptDigest: semanticDigest(
+            "phase4-source-identity-binding-receipt-v2",
+            {
+              canonicalCandidateDigest:
+                entry.canonicalCandidateDigest,
+              candidateUserAliasDigest:
+                entry.candidateUserAliasDigest,
+              binding,
+            },
           ),
-        )
-        : null;
+        };
+      });
       return {
         ...entry,
-        identityBindingReceipt: receiptMaterial,
-        identityBindingReceiptDigest:
-          receipt?.receiptDigest || null,
-        identityBindingProven: Boolean(receipt),
-        identityBindingFailureCode,
+        bindings,
+        identityBindingProven:
+          bindings.length > 0
+          && bindings.every(
+            (binding) => binding.identityBindingProven,
+          ),
       };
     })
     .sort((left, right) => (
@@ -1046,17 +1113,11 @@ function normalizedAliasEntries(
       || left.candidateUserAliasDigest.localeCompare(
         right.candidateUserAliasDigest,
       )
-      || left.recallRecordDigest.localeCompare(
-        right.recallRecordDigest,
-      )
-      || left.paraformHumanRecordDigest.localeCompare(
-        right.paraformHumanRecordDigest,
-      )
     ));
 }
 
 function aliasEdgeSetDigest(decisionBoundaryAt, entries) {
-  return semanticDigest("phase4-source-alias-edges-v2", {
+  return semanticDigest("phase4-source-alias-edges-v3", {
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     decisionBoundaryAt,
     collector: SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases,
@@ -1074,7 +1135,7 @@ export function sourceWatermarkAliasSetDigest({
   );
   return aliasEdgeSetDigest(
     boundary,
-    normalizedAliasEntries(entries, {
+    normalizedAliasEntriesV2(entries, {
       decisionBoundaryAt: boundary,
     }),
   );
@@ -1148,8 +1209,6 @@ export function buildCanonicalSourceAliasMap(
     decisionBoundaryAt,
     collectorVersion,
     collectorCodeCommitmentDigest,
-    authoritative = false,
-    snapshotComplete = false,
     passes = [],
   } = {},
 ) {
@@ -1169,15 +1228,7 @@ export function buildCanonicalSourceAliasMap(
     collectorVersion,
     normalizedCollectorCodeCommitmentDigest,
   );
-  const normalizedAuthoritative = strictBoolean(
-    authoritative,
-    "alias map authoritative",
-  );
-  const normalizedSnapshotComplete = strictBoolean(
-    snapshotComplete,
-    "alias map snapshotComplete",
-  );
-  const normalized = normalizedAliasEntries(entries, {
+  const normalized = normalizedAliasEntriesV2(entries, {
     decisionBoundaryAt: boundary,
   });
   const edgeSetDigest = aliasEdgeSetDigest(boundary, normalized);
@@ -1233,9 +1284,13 @@ export function buildCanonicalSourceAliasMap(
   if (!identityBindingAuthorityAvailable) {
     reasons.add("identity_binding_authority_unavailable");
   }
-  if (!normalizedAuthoritative) reasons.add("not_authoritative");
-  if (!normalizedSnapshotComplete) {
-    reasons.add("snapshot_incomplete");
+  if (
+    SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST == null
+  ) {
+    reasons.add("identity_collector_artifact_unpinned");
+  }
+  if (deduped.length === 0) {
+    reasons.add("identity_binding_receipts_missing");
   }
   if (normalizedPasses.length < 2) {
     reasons.add("stable_passes_missing");
@@ -1283,40 +1338,67 @@ export function buildCanonicalSourceAliasMap(
     reasons.add("duplicate_alias_edges");
   }
   if (conflictCount > 0) reasons.add("alias_conflicts");
-  const identityBindingProvenCount = deduped.filter(
-    (entry) => entry.identityBindingProven,
+  const bindings = deduped.flatMap((entry) => entry.bindings);
+  const bindingCount = bindings.length;
+  const identityBindingProvenCount = bindings.filter(
+    (binding) => binding.identityBindingProven,
   ).length;
   const identityBindingUnprovenCount =
-    deduped.length - identityBindingProvenCount;
+    bindingCount - identityBindingProvenCount;
+  const edgeWithoutBindingCount = deduped.filter(
+    (entry) => entry.bindings.length === 0,
+  ).length;
+  if (edgeWithoutBindingCount > 0) {
+    reasons.add("alias_edges_without_source_binding");
+  }
   if (identityBindingUnprovenCount > 0) {
     reasons.add("identity_binding_receipts_unproven");
   }
   const reasonList = [...reasons].sort();
   const epochStable = epochDigests.size === 1;
+  const stablePasses =
+    normalizedPasses.length >= 2
+    && semanticDigests.size === 1;
+  const exhaustive =
+    normalizedPasses.length >= 2
+    && normalizedPasses.every((pass) => pass.exhaustive);
+  const cursorExhausted =
+    normalizedPasses.length >= 2
+    && normalizedPasses.every(
+      (pass) => pass.cursorExhausted,
+    );
+  const authoritative = Boolean(
+    identityBindingAuthorityAvailable
+    && SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_DIGEST
+      != null
+    && bindingCount > 0
+    && identityBindingUnprovenCount === 0
+  );
+  const snapshotComplete = Boolean(
+    authoritative
+    && stablePasses
+    && exhaustive
+    && cursorExhausted
+    && duplicateEntryCount === 0
+    && conflictCount === 0
+    && edgeWithoutBindingCount === 0
+  );
   const complete = reasonList.length === 0;
   const material = {
-    version: 3,
+    version: 5,
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     mapping: "candidate_user_to_canonical_candidate_bijection",
     decisionBoundaryAt: boundary,
     collectorVersion: approvedCollector.collectorVersion,
     collectorCodeCommitmentDigest:
       approvedCollector.collectorCodeCommitmentDigest,
-    authoritative: normalizedAuthoritative,
-    snapshotComplete: normalizedSnapshotComplete,
+    authoritative,
+    snapshotComplete,
     passCount: normalizedPasses.length,
     passes: normalizedPasses,
-    stablePasses:
-      normalizedPasses.length >= 2
-      && semanticDigests.size === 1,
-    exhaustive:
-      normalizedPasses.length >= 2
-      && normalizedPasses.every((pass) => pass.exhaustive),
-    cursorExhausted:
-      normalizedPasses.length >= 2
-      && normalizedPasses.every(
-        (pass) => pass.cursorExhausted,
-      ),
+    stablePasses,
+    exhaustive,
+    cursorExhausted,
     edgeSetDigest,
     epochStable,
     aliasEpochDigest: epochStable
@@ -1330,6 +1412,8 @@ export function buildCanonicalSourceAliasMap(
     aliasConflictCount,
     conflictCount,
     identityBindingAuthorityAvailable,
+    bindingCount,
+    edgeWithoutBindingCount,
     identityBindingProvenCount,
     identityBindingUnprovenCount,
     complete,
@@ -1338,23 +1422,61 @@ export function buildCanonicalSourceAliasMap(
   return deepFreeze({
     ...material,
     aliasMapDigest: semanticDigest(
-      "phase4-source-alias-map-v1",
+      "phase4-source-alias-map-v2",
       material,
     ),
   });
 }
 
+function persistedAliasInputEntries(entries) {
+  return array(entries, "aliasMap.entries").map(
+    (rawEntry, entryIndex) => {
+      const entry = object(
+        rawEntry,
+        `aliasMap.entries[${entryIndex}]`,
+      );
+      return {
+        canonicalCandidateDigest:
+          entry.canonicalCandidateDigest,
+        candidateUserAliasDigest:
+          entry.candidateUserAliasDigest,
+        bindings: array(
+          entry.bindings,
+          `aliasMap.entries[${entryIndex}].bindings`,
+        ).map((rawBinding, bindingIndex) => {
+          const binding = object(
+            rawBinding,
+            (
+              `aliasMap.entries[${entryIndex}]`
+              + `.bindings[${bindingIndex}]`
+            ),
+          );
+          const {
+            identityBindingProven: _identityBindingProven,
+            identityBindingFailureCode:
+              _identityBindingFailureCode,
+            receiptDigest: _receiptDigest,
+            ...receiptMaterial
+          } = binding;
+          return receiptMaterial;
+        }),
+      };
+    },
+  );
+}
+
 function canonicalAliasMap(value) {
   const raw = object(value, "aliasMap");
-  const rebuilt = buildCanonicalSourceAliasMap(raw.entries, {
-    decisionBoundaryAt: raw.decisionBoundaryAt,
-    collectorVersion: raw.collectorVersion,
-    collectorCodeCommitmentDigest:
-      raw.collectorCodeCommitmentDigest,
-    authoritative: raw.authoritative,
-    snapshotComplete: raw.snapshotComplete,
-    passes: raw.passes,
-  });
+  const rebuilt = buildCanonicalSourceAliasMap(
+    persistedAliasInputEntries(raw.entries),
+    {
+      decisionBoundaryAt: raw.decisionBoundaryAt,
+      collectorVersion: raw.collectorVersion,
+      collectorCodeCommitmentDigest:
+        raw.collectorCodeCommitmentDigest,
+      passes: raw.passes,
+    },
+  );
   invariant(
     raw.aliasMapDigest === rebuilt.aliasMapDigest,
     "SOURCE_ALIAS_MAP_DIGEST_MISMATCH",
@@ -1529,9 +1651,6 @@ function sourceBundle(raw, expectedSource, decisionBoundaryAt) {
 function aliasLookup(aliasMap) {
   const candidateByAlias = new Map();
   const knownCandidates = new Set();
-  if (!aliasMap.complete) {
-    return { candidateByAlias, knownCandidates };
-  }
   for (const entry of aliasMap.entries) {
     candidateByAlias.set(
       entry.candidateUserAliasDigest,
@@ -1547,59 +1666,148 @@ function aliasSourceEvidence({
   recallFacts,
   paraformFacts,
 }) {
-  const recallByRecord = new Map(
-    recallFacts.map((fact) => [fact.recordDigest, fact]),
+  const sourceFacts = [...recallFacts, ...paraformFacts];
+  const resolvedFacts = sourceFacts.filter(
+    (fact) => fact.identityStatus === "resolved",
   );
-  const paraformByRecord = new Map(
-    paraformFacts.map((fact) => [fact.recordDigest, fact]),
+  const factKey = (fact) => (
+    `${fact.source}:${fact.recordDigest}:`
+    + (fact.recordRevisionDigest || "missing")
   );
-  const provenEdges = [];
-  let unprovenEntryCount = 0;
+  const bindingKey = (binding) => (
+    `${binding.source}:${binding.sourceRecordDigest}:`
+    + binding.sourceRecordRevisionDigest
+  );
+  const factsByRecord = new Map(
+    resolvedFacts.map((fact) => [factKey(fact), fact]),
+  );
+  const bindingsByRecord = new Map();
+  const bindingRows = [];
+  let duplicateBindingCount = 0;
+  let extraBindingCount = 0;
+  let mismatchedBindingCount = 0;
+  let unprovenBindingCount = 0;
+  const reachableCandidates = new Set();
+  const reachablePairs = new Set();
   for (const entry of aliasMap.entries) {
-    const recall = recallByRecord.get(entry.recallRecordDigest);
-    const paraform = paraformByRecord.get(
-      entry.paraformHumanRecordDigest,
-    );
-    const recallProven = Boolean(
-      entry.identityBindingProven === true
-      && recall
-      && ["success", "failure"].includes(recall.classification)
-      && recall.provenanceVerified === true
-      && recall.recordRevisionDigest
-        === entry.recallRecordRevisionDigest
-      && recall.identityStatus === "resolved"
-      && recall.identityKind === "canonical_candidate"
-      && recall.identityDigest
-        === entry.canonicalCandidateDigest
-    );
-    const paraformProven = Boolean(
-      entry.identityBindingProven === true
-      && paraform
-      && ["success", "failure"].includes(
-        paraform.classification,
-      )
-      && paraform.provenanceVerified === true
-      && paraform.recordRevisionDigest
-        === entry.paraformHumanRecordRevisionDigest
-      && paraform.identityStatus === "resolved"
-      && paraform.identityKind === "candidate_user_alias"
-      && paraform.identityDigest
-        === entry.candidateUserAliasDigest
-    );
-    if (!recallProven || !paraformProven) {
-      unprovenEntryCount += 1;
-      continue;
+    let edgeReachable = false;
+    for (const binding of entry.bindings) {
+      const key = bindingKey(binding);
+      const rows = bindingsByRecord.get(key) || [];
+      if (rows.length > 0) duplicateBindingCount += 1;
+      rows.push({ entry, binding });
+      bindingsByRecord.set(key, rows);
+      const fact = factsByRecord.get(key);
+      if (!fact) {
+        extraBindingCount += 1;
+      }
+      const identityMatches = Boolean(
+        fact
+        && (
+          fact.source === SOURCE_WATERMARK_SOURCES.RECALL
+            ? fact.identityKind === "canonical_candidate"
+              && fact.identityDigest
+                === entry.canonicalCandidateDigest
+            : fact.identityKind === "candidate_user_alias"
+              && fact.identityDigest
+                === entry.candidateUserAliasDigest
+        )
+      );
+      if (fact && !identityMatches) {
+        mismatchedBindingCount += 1;
+      }
+      if (!binding.identityBindingProven) {
+        unprovenBindingCount += 1;
+      }
+      if (fact && identityMatches) {
+        edgeReachable = true;
+        reachableCandidates.add(
+          entry.canonicalCandidateDigest,
+        );
+        reachablePairs.add(
+          `${entry.canonicalCandidateDigest}:`
+          + entry.candidateUserAliasDigest,
+        );
+      }
+      bindingRows.push({
+        source: binding.source,
+        sourceRecordDigest:
+          binding.sourceRecordDigest,
+        sourceRecordRevisionDigest:
+          binding.sourceRecordRevisionDigest,
+        canonicalCandidateDigest:
+          entry.canonicalCandidateDigest,
+        candidateUserAliasDigest:
+          entry.candidateUserAliasDigest,
+        factMatched: Boolean(fact && identityMatches),
+        proven: binding.identityBindingProven === true,
+      });
     }
-    provenEdges.push({
-      canonicalCandidateDigest:
-        entry.canonicalCandidateDigest,
-      candidateUserAliasDigest:
-        entry.candidateUserAliasDigest,
-      recallRecordDigest: entry.recallRecordDigest,
-      paraformHumanRecordDigest:
-        entry.paraformHumanRecordDigest,
-    });
+    if (!edgeReachable) {
+      reachablePairs.delete(
+        `${entry.canonicalCandidateDigest}:`
+        + entry.candidateUserAliasDigest,
+      );
+    }
   }
+  const sourceRecordKeys = [...factsByRecord.keys()].sort();
+  const bindingRecordKeys = [...bindingsByRecord.keys()].sort();
+  const missingBindingCount = sourceRecordKeys.filter(
+    (key) => (bindingsByRecord.get(key) || []).length !== 1,
+  ).length;
+  const nullRevisionFactCount = resolvedFacts.filter(
+    (fact) => fact.recordRevisionDigest == null,
+  ).length;
+  const aliasCandidates = new Set(
+    aliasMap.entries.map(
+      (entry) => entry.canonicalCandidateDigest,
+    ),
+  );
+  const candidateUniverseEqual = (
+    aliasCandidates.size === reachableCandidates.size
+    && [...aliasCandidates].every(
+      (candidate) => reachableCandidates.has(candidate),
+    )
+  );
+  const sourceRecordUniverseEqual = (
+    canonicalJson(sourceRecordKeys)
+      === canonicalJson(bindingRecordKeys)
+  );
+  const universeEqual = Boolean(
+    sourceRecordUniverseEqual
+    && candidateUniverseEqual
+    && reachablePairs.size === aliasMap.entries.length
+  );
+  const provenEntryCount = aliasMap.entries.filter((entry) => (
+    entry.bindings.length > 0
+    && entry.bindings.every((binding) => {
+      const fact = factsByRecord.get(bindingKey(binding));
+      return Boolean(
+        binding.identityBindingProven
+        && fact
+        && (
+          fact.source === SOURCE_WATERMARK_SOURCES.RECALL
+            ? fact.identityDigest
+                === entry.canonicalCandidateDigest
+            : fact.identityDigest
+                === entry.candidateUserAliasDigest
+        )
+      );
+    })
+  )).length;
+  const unprovenEntryCount =
+    aliasMap.entries.length - provenEntryCount;
+  const sourceProven = Boolean(
+    aliasMap.complete
+    && universeEqual
+    && missingBindingCount === 0
+    && extraBindingCount === 0
+    && duplicateBindingCount === 0
+    && mismatchedBindingCount === 0
+    && nullRevisionFactCount === 0
+    && unprovenBindingCount === 0
+    && unprovenEntryCount === 0
+  );
   const material = {
     decisionBoundaryAt: aliasMap.decisionBoundaryAt,
     aliasMapDigest: aliasMap.aliasMapDigest,
@@ -1609,18 +1817,45 @@ function aliasSourceEvidence({
       aliasMap.collectorCodeCommitmentDigest,
     aliasEpochDigest: aliasMap.aliasEpochDigest,
     passCount: aliasMap.passCount,
-    sourceProven: unprovenEntryCount === 0,
-    provenEntryCount: provenEdges.length,
+    sourceProven,
+    sourceRecordUniverseEqual,
+    candidateUniverseEqual,
+    universeEqual,
+    sourceRecordCount: sourceRecordKeys.length,
+    bindingRecordCount: bindingRecordKeys.length,
+    missingBindingCount,
+    extraBindingCount,
+    duplicateBindingCount,
+    mismatchedBindingCount,
+    nullRevisionFactCount,
+    unprovenBindingCount,
+    provenEntryCount,
     unprovenEntryCount,
+    sourceRecordUniverseDigest: semanticDigest(
+      "phase4-source-record-universe-v1",
+      sourceRecordKeys,
+    ),
+    bindingRecordUniverseDigest: semanticDigest(
+      "phase4-source-binding-record-universe-v1",
+      bindingRecordKeys,
+    ),
+    candidateUniverseDigest: semanticDigest(
+      "phase4-source-candidate-universe-v1",
+      [...reachableCandidates].sort(),
+    ),
+    aliasEdgeUniverseDigest: semanticDigest(
+      "phase4-source-alias-edge-universe-v1",
+      [...reachablePairs].sort(),
+    ),
     provenEdgeDigest: semanticDigest(
-      "phase4-source-proven-alias-edges-v1",
-      provenEdges,
+      "phase4-source-proven-alias-bindings-v2",
+      bindingRows,
     ),
   };
   return deepFreeze({
     ...material,
     evidenceDigest: semanticDigest(
-      "phase4-source-alias-evidence-v1",
+      "phase4-source-alias-evidence-v2",
       material,
     ),
   });
@@ -1639,7 +1874,6 @@ function generationQ37({
   let identityIssueCount = 0;
 
   for (const fact of [...recallFacts, ...paraformFacts]) {
-    if (fact.classification !== "success") continue;
     if (
       fact.identityStatus !== "resolved"
       || !fact.identityDigest
@@ -1661,7 +1895,7 @@ function generationQ37({
     factsByCandidate.get(canonicalCandidateDigest).push(fact);
   }
 
-  const decisions = [...factsByCandidate.entries()]
+  const hypotheticalDecisions = [...factsByCandidate.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([canonicalCandidateDigest, facts]) => {
       const decision = q37FromNormalizedFacts(facts);
@@ -1680,6 +1914,34 @@ function generationQ37({
         ),
       };
     });
+  const darkReasons = [
+    "human_intro_source_unpinned",
+    "paraform_human_discriminator_unpinned",
+  ];
+  const decisions = hypotheticalDecisions.map((decision) => {
+    const material = {
+      canonicalCandidateDigest:
+        decision.canonicalCandidateDigest,
+      decision: "review_source_contract_unpinned",
+      callType: null,
+      endedAt: null,
+      evidenceDigest: semanticDigest(
+        "phase4-q37-dark-evidence-v1",
+        {
+          hypotheticalDecisionDigest:
+            decision.decisionDigest,
+          reasons: darkReasons,
+        },
+      ),
+    };
+    return {
+      ...material,
+      decisionDigest: semanticDigest(
+        "phase4-q37-candidate-decision-v2",
+        material,
+      ),
+    };
+  });
   const count = (decision) => decisions.filter(
     (row) => row.decision === decision,
   ).length;
@@ -1690,6 +1952,10 @@ function generationQ37({
     ),
   ).length;
   const material = {
+    operational: false,
+    paraformHumanDiscriminatorPinned: false,
+    humanIntroSourcePinned: false,
+    reasons: darkReasons,
     decisions,
     candidateCount: decisions.length,
     selectedCount: count("selected"),
@@ -1700,11 +1966,15 @@ function generationQ37({
       (row) => row.decision.startsWith("review_"),
     ).length,
     identityIssueCount,
+    hypotheticalDecisionSetDigest: semanticDigest(
+      "phase4-q37-hypothetical-decision-set-v1",
+      hypotheticalDecisions,
+    ),
   };
   return deepFreeze({
     ...material,
     decisionSetDigest: semanticDigest(
-      "phase4-q37-decision-set-v1",
+      "phase4-q37-decision-set-v2",
       material,
     ),
   });
@@ -1774,6 +2044,7 @@ export function buildSourceWatermarkGeneration({
   );
   const intrinsicQ37Ready = Boolean(
     intrinsicSourceComplete
+    && q37.operational === true
     && q37.reviewCount === 0
   );
   const manifestMaterial = {

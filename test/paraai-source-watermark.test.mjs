@@ -12,7 +12,6 @@ import {
   SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION,
   SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV,
   SOURCE_IDENTITY_BINDING_RECEIPT_VERSION,
-  SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
   SOURCE_IDENTITY_POINT_READ_PROCEDURES,
   SOURCE_WATERMARK_POLICY_VERSION,
   SOURCE_WATERMARK_SOURCES,
@@ -29,7 +28,6 @@ import {
   validateSourceWatermarkGeneration,
 } from "../api/paraai/_lib/source-watermark.mjs";
 import {
-  activateSourceAuthorityGeneration,
   consumeSourceAuthorityWriteReservation,
   getSourceAuthorityOperationalStatus,
   readCurrentSourceAuthority,
@@ -42,7 +40,6 @@ const digest = (character) => character.repeat(64);
 
 const CANDIDATE_A = digest("a");
 const CANDIDATE_B = digest("b");
-const CANDIDATE_C = digest("c");
 const CANDIDATE_USER_A = digest("1");
 const CANDIDATE_USER_B = digest("2");
 const RECORD_RECALL_A = digest("3");
@@ -63,9 +60,7 @@ const WRITE_SCOPE = digest("0");
 const JOB_BINDING = "15".repeat(32);
 const SETTLED_RESULT = "16".repeat(32);
 const DURABLE_GENERATION_REVISION = "10".repeat(32);
-const RESERVED_JOB_REVISION = "11".repeat(32);
 const AUTHORITY_NONCE = "12".repeat(32);
-const RESERVATION_NONCE = "13".repeat(32);
 const AUTHORITY_KEY_BYTES = Buffer.alloc(32, 0x42);
 const AUTHORITY_KEY = AUTHORITY_KEY_BYTES.toString("base64url");
 const IDENTITY_KEY_BYTES = Buffer.alloc(32, 0x24);
@@ -130,7 +125,7 @@ function signIdentityBindingReceipt(
   key = IDENTITY_KEY_BYTES,
 ) {
   return createHmac("sha256", key)
-    .update("phase4-source-identity-binding-receipt-v1")
+    .update("phase4-source-identity-binding-receipt-v2")
     .update("\0")
     .update(canonicalJson(material))
     .digest("hex");
@@ -189,64 +184,6 @@ function generationAuthorityReceiptFixture(
   };
 }
 
-function generationAuthorityReceiptDigest(receipt) {
-  return semanticDigest(
-    "phase4-source-generation-authority-receipt-v1",
-    receipt,
-  );
-}
-
-function writeAuthorityReceiptFixture({
-  generation,
-  generationAuthorityReceipt,
-  attestation,
-  overrides = {},
-}) {
-  const issuedMs = Math.max(
-    Date.now(),
-    Date.parse(attestation.observedAt),
-  );
-  const {
-    receiptMac: overrideMac,
-    signingKey = AUTHORITY_KEY_BYTES,
-    ...fields
-  } = overrides;
-  const material = {
-    version: SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION,
-    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
-    kind: "phase4_write_cas_reserved",
-    generationRecordDigest: generation.recordDigest,
-    manifestDigest: generation.manifestDigest,
-    commitRevisionDigest: generation.commitRevisionDigest,
-    durableGenerationRevisionDigest:
-      generationAuthorityReceipt.durableGenerationRevisionDigest,
-    generationAuthorityReceiptDigest:
-      generationAuthorityReceiptDigest(
-        generationAuthorityReceipt,
-      ),
-    sourceEpochs: sourceEpochsFromGeneration(generation),
-    attestationDigest: attestation.attestationDigest,
-    canonicalCandidateDigest:
-      attestation.canonicalCandidateDigest,
-    candidateUserAliasDigest:
-      attestation.candidateUserAliasDigest,
-    jobRevisionDigest: attestation.jobRevisionDigest,
-    writeScopeDigest: attestation.writeScopeDigest,
-    reservedJobRevisionDigest: RESERVED_JOB_REVISION,
-    reservationNonceDigest: RESERVATION_NONCE,
-    issuedAt: new Date(issuedMs).toISOString(),
-    expiresAt: new Date(issuedMs + 10_000).toISOString(),
-    authorityKeyIdDigest: authorityKeyId(),
-    ...fields,
-  };
-  const receiptMac = overrideMac
-    || signAuthorityReceipt(material, signingKey);
-  return {
-    ...material,
-    receiptMac,
-  };
-}
-
 function sourceRecordForCandidate(candidate) {
   return candidate === CANDIDATE_B
     ? RECORD_RECALL_B
@@ -271,35 +208,44 @@ function sourceRevisionForAlias(candidateUser) {
     : REVISION_HUMAN_A;
 }
 
-function aliasEvidenceEntry(entry) {
-  return {
-    ...entry,
-    recallRecordDigest:
-      entry.recallRecordDigest
-      || sourceRecordForCandidate(
+function sourceBindingResolutionDigest(entry, binding) {
+  return semanticDigest(
+    "phase4-source-identity-resolution-evidence-v2",
+    {
+      canonicalCandidateDigest:
         entry.canonicalCandidateDigest,
-      ),
-    paraformHumanRecordDigest:
-      entry.paraformHumanRecordDigest
-      || sourceRecordForAlias(
+      candidateUserAliasDigest:
         entry.candidateUserAliasDigest,
-      ),
-    recallRecordRevisionDigest:
-      entry.recallRecordRevisionDigest
-      || sourceRevisionForCandidate(
-        entry.canonicalCandidateDigest,
-      ),
-    paraformHumanRecordRevisionDigest:
-      entry.paraformHumanRecordRevisionDigest
-      || sourceRevisionForAlias(
-        entry.candidateUserAliasDigest,
-      ),
-  };
+      source: binding.source,
+      sourceRecordDigest: binding.sourceRecordDigest,
+      sourceRecordRevisionDigest:
+        binding.sourceRecordRevisionDigest,
+      sourcePointReadProcedure:
+        binding.sourcePointReadProcedure,
+      sourceNormalizedInputDigest:
+        binding.sourceNormalizedInputDigest,
+      identityPointReadProcedure:
+        binding.identityPointReadProcedure,
+      identityNormalizedInputDigest:
+        binding.identityNormalizedInputDigest,
+      identityPointRecordDigest:
+        binding.identityPointRecordDigest,
+      identityPointRecordRevisionDigest:
+        binding.identityPointRecordRevisionDigest,
+      decisionBoundaryAt: binding.decisionBoundaryAt,
+      observedAt: binding.observedAt,
+      sourceCollectorArtifactDigest:
+        binding.sourceCollectorArtifactDigest,
+      identityCollectorArtifactDigest:
+        binding.identityCollectorArtifactDigest,
+    },
+  );
 }
 
 function identityBindingReceiptFixture(
   entry,
   {
+    source = SOURCE_WATERMARK_SOURCES.RECALL,
     decisionBoundaryAt = T,
     overrides = {},
   } = {},
@@ -307,41 +253,54 @@ function identityBindingReceiptFixture(
   const {
     receiptMac: overrideMac,
     signingKey = IDENTITY_KEY_BYTES,
+    resolutionEvidenceDigest:
+      overrideResolutionEvidenceDigest,
     ...fields
   } = overrides;
-  const material = {
+  const recall =
+    source === SOURCE_WATERMARK_SOURCES.RECALL;
+  const sourceRecordDigest = recall
+    ? entry.recallRecordDigest
+      || sourceRecordForCandidate(
+        entry.canonicalCandidateDigest,
+      )
+    : entry.paraformHumanRecordDigest
+      || sourceRecordForAlias(
+        entry.candidateUserAliasDigest,
+      );
+  const sourceRecordRevisionDigest = recall
+    ? entry.recallRecordRevisionDigest
+      || sourceRevisionForCandidate(
+        entry.canonicalCandidateDigest,
+      )
+    : entry.paraformHumanRecordRevisionDigest
+      || sourceRevisionForAlias(
+        entry.candidateUserAliasDigest,
+      );
+  const bindingWithoutResolution = {
     version: SOURCE_IDENTITY_BINDING_RECEIPT_VERSION,
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
-    kind: "cross_source_identity_binding",
-    canonicalCandidateDigest:
-      entry.canonicalCandidateDigest,
-    candidateUserAliasDigest:
+    kind: "source_identity_binding",
+    source,
+    sourceRecordDigest,
+    sourceRecordRevisionDigest,
+    sourcePointReadProcedure: recall
+      ? SOURCE_IDENTITY_POINT_READ_PROCEDURES.recallSource
+      : SOURCE_IDENTITY_POINT_READ_PROCEDURES
+        .paraformHumanSource,
+    sourceNormalizedInputDigest: semanticDigest(
+      "test-source-point-read-input-v2",
+      { source, sourceRecordDigest },
+    ),
+    identityPointReadProcedure:
+      SOURCE_IDENTITY_POINT_READ_PROCEDURES
+        .candidateUserIdentity,
+    identityNormalizedInputDigest: semanticDigest(
+      "test-candidate-user-point-read-input-v1",
       entry.candidateUserAliasDigest,
-    recallRecordDigest: entry.recallRecordDigest,
-    recallRecordRevisionDigest:
-      entry.recallRecordRevisionDigest,
-    paraformHumanRecordDigest:
-      entry.paraformHumanRecordDigest,
-    paraformHumanRecordRevisionDigest:
-      entry.paraformHumanRecordRevisionDigest,
-    recallPointReadProcedure:
-      SOURCE_IDENTITY_POINT_READ_PROCEDURES.recall,
-    recallNormalizedInputDigest: semanticDigest(
-      "test-recall-point-read-input-v1",
-      entry.recallRecordDigest,
     ),
-    paraformHumanPointReadProcedure:
-      SOURCE_IDENTITY_POINT_READ_PROCEDURES.paraformHuman,
-    paraformHumanNormalizedInputDigest: semanticDigest(
-      "test-paraform-point-read-input-v1",
-      entry.paraformHumanRecordDigest,
-    ),
-    decisionBoundaryAt,
-    observedAt: "2026-07-26T00:00:30.000Z",
-    collectorArtifactDigest:
-      SOURCE_IDENTITY_BINDING_SOURCE_ARTIFACT_DIGEST,
-    joinEvidenceDigest: semanticDigest(
-      "test-identity-join-evidence-v1",
+    identityPointRecordDigest: semanticDigest(
+      "test-candidate-user-point-record-v1",
       {
         canonicalCandidateDigest:
           entry.canonicalCandidateDigest,
@@ -349,14 +308,75 @@ function identityBindingReceiptFixture(
           entry.candidateUserAliasDigest,
       },
     ),
+    identityPointRecordRevisionDigest: semanticDigest(
+      "test-candidate-user-point-revision-v1",
+      entry.candidateUserAliasDigest,
+    ),
+    decisionBoundaryAt,
+    observedAt: "2026-07-26T00:00:30.000Z",
+    sourceCollectorArtifactDigest:
+      SOURCE_WATERMARK_APPROVED_COLLECTORS[
+        source
+      ].collectorCodeCommitmentDigest,
+    // Deliberately unapproved: production has no reviewed identity collector.
+    identityCollectorArtifactDigest: digest("c"),
     receiptNonceDigest: "14".repeat(32),
     authorityKeyIdDigest: identityBindingKeyId(),
     ...fields,
   };
+  const bindingMaterial = {
+    ...bindingWithoutResolution,
+    resolutionEvidenceDigest:
+      overrideResolutionEvidenceDigest
+      || sourceBindingResolutionDigest(
+        entry,
+        bindingWithoutResolution,
+      ),
+  };
+  const signedMaterial = {
+    version: SOURCE_IDENTITY_BINDING_RECEIPT_VERSION,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    kind: "source_identity_binding",
+    canonicalCandidateDigest:
+      entry.canonicalCandidateDigest,
+    candidateUserAliasDigest:
+      entry.candidateUserAliasDigest,
+    binding: bindingMaterial,
+  };
   return {
-    ...material,
+    ...bindingMaterial,
     receiptMac: overrideMac
-      || signIdentityBindingReceipt(material, signingKey),
+      || signIdentityBindingReceipt(
+        signedMaterial,
+        signingKey,
+      ),
+  };
+}
+
+function aliasEvidenceEntry(
+  entry,
+  {
+    decisionBoundaryAt = T,
+  } = {},
+) {
+  const base = {
+    canonicalCandidateDigest:
+      entry.canonicalCandidateDigest,
+    candidateUserAliasDigest:
+      entry.candidateUserAliasDigest,
+  };
+  const sources = entry.sources || [
+    SOURCE_WATERMARK_SOURCES.RECALL,
+    SOURCE_WATERMARK_SOURCES.PARAFORM_HUMAN,
+  ];
+  return {
+    ...base,
+    bindings: entry.bindings || sources.map((source) => (
+      identityBindingReceiptFixture(
+        { ...entry, ...base },
+        { source, decisionBoundaryAt },
+      )
+    )),
   };
 }
 
@@ -364,17 +384,9 @@ function aliasMapFixture(entries, overrides = {}) {
   const decisionBoundaryAt =
     overrides.decisionBoundaryAt || T;
   const normalizedEntries = entries.map((entry) => {
-    const normalized = aliasEvidenceEntry(entry);
-    return {
-      ...normalized,
-      identityBindingReceipt:
-        entry.identityBindingReceipt === null
-          ? null
-          : entry.identityBindingReceipt
-            || identityBindingReceiptFixture(normalized, {
-              decisionBoundaryAt,
-            }),
-    };
+    return aliasEvidenceEntry(entry, {
+      decisionBoundaryAt,
+    });
   });
   const semanticDigest = sourceWatermarkAliasSetDigest({
     decisionBoundaryAt,
@@ -409,8 +421,6 @@ function aliasMapFixture(entries, overrides = {}) {
   return buildCanonicalSourceAliasMap(normalizedEntries, {
     decisionBoundaryAt,
     ...SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases,
-    authoritative: true,
-    snapshotComplete: true,
     passes,
     ...overrides,
   });
@@ -594,254 +604,23 @@ function createAuthorityKvFake({
 } = {}) {
   const records = new Map();
   const commands = [];
-  const redisTime = () => [
-    String(Math.floor(nowMs / 1_000)),
-    String((nowMs % 1_000) * 1_000),
-  ];
-  const read = (key) => records.get(key) || "";
-  const parse = (key) => {
-    const raw = read(key);
-    return raw ? JSON.parse(raw) : null;
-  };
-  const write = (key, value) => {
-    const raw = JSON.stringify(value);
-    records.set(key, raw);
-    return raw;
-  };
   const kv = async (command) => {
     commands.push(command);
-    const script = command[1];
-    const keys = command.slice(3, 3 + Number(command[2]));
-    const args = command.slice(3 + Number(command[2]));
-    const time = redisTime();
-
-    if (script.includes("proposed.activatedAtMs = nowMs")) {
-      const current = parse(keys[0]);
-      if (current) {
-        if (
-          !args[0]
-          || current.generationRecordDigest !== args[0]
-          || current.durableGenerationRevisionDigest !== args[1]
-          || current.durableRecordReceiptDigest !== args[2]
-          || current.sourceEpochs.recall !== args[3]
-          || current.sourceEpochs.paraformHuman !== args[4]
-          || current.sourceEpochs.aliases !== args[5]
-        ) {
-          return [-3, read(keys[0]), ...time];
-        }
-      } else if (args[0]) {
-        return [-4, "", ...time];
-      }
-      if (current && Number(args[6]) < nowMs) {
-        return [-7, read(keys[0]), ...time];
-      }
-      const proposed = JSON.parse(args[7]);
-      if (
-        proposed.evidenceCeilingAtMs
-          > nowMs + Number(args[8])
-      ) {
-        return [-8, "", ...time];
-      }
-      proposed.activatedAtMs = nowMs;
-      return [1, write(keys[0], proposed), ...time];
-    }
-
-    if (script.includes("reservation.status = 'consumed'")) {
-      const active = parse(keys[0]);
-      const job = parse(keys[1]);
-      const reservation = parse(keys[2]);
-      if (!active || !job || !reservation) {
-        return [-4, read(keys[2]), ...time];
-      }
-      if (
-        active.generationRecordDigest !== args[0]
-        || active.durableGenerationRevisionDigest !== args[1]
-        || active.durableRecordReceiptDigest !== args[2]
-        || active.sourceEpochs.recall !== args[3]
-        || active.sourceEpochs.paraformHuman !== args[4]
-        || active.sourceEpochs.aliases !== args[5]
-        || createHash("sha1").update(read(keys[0]))
-          .digest("hex") !== args[15]
-      ) {
-        return [-3, read(keys[2]), ...time];
-      }
-      if (
-        job.jobBindingDigest !== args[6]
-        || job.canonicalCandidateDigest !== args[7]
-        || job.candidateUserAliasDigest !== args[8]
-        || job.jobRevisionDigest !== args[9]
-        || job.writeScopeDigest !== args[10]
-      ) {
-        return [-5, read(keys[2]), ...time];
-      }
-      if (
-        reservation.reservationRecordSha1 !== args[11]
-        || reservation.reservationNonceDigest !== args[12]
-        || reservation.durableRecordReceiptDigest !== args[2]
-        || reservation.jobBindingDigest !== args[6]
-        || reservation.jobRevisionDigest !== args[9]
-        || reservation.writeScopeDigest !== args[10]
-        || reservation.activeRecordSha1 !== args[15]
-      ) {
-        return [-6, read(keys[2]), ...time];
-      }
-      if (reservation.status === "consumed") {
-        return reservation.settledResultDigest === args[13]
-          ? [2, read(keys[2]), ...time]
-          : [-9, read(keys[2]), ...time];
-      }
-      if (reservation.expiresAtMs < nowMs) {
-        return [-7, read(keys[2]), ...time];
-      }
-      reservation.status = "consumed";
-      reservation.settledResultDigest = args[13];
-      reservation.consumedAtMs = nowMs;
-      return [1, write(keys[2], reservation), ...time];
-    }
-
-    if (script.includes("local reservation = {")) {
-      const active = parse(keys[0]);
-      const job = parse(keys[1]);
-      if (!active || !job) {
-        return [-4, read(keys[0]), read(keys[1]), "", ...time];
-      }
-      if (
-        active.generationRecordDigest !== args[0]
-        || active.durableGenerationRevisionDigest !== args[1]
-        || active.durableRecordReceiptDigest !== args[2]
-        || active.sourceEpochs.recall !== args[3]
-        || active.sourceEpochs.paraformHuman !== args[4]
-        || active.sourceEpochs.aliases !== args[5]
-        || createHash("sha1").update(read(keys[0]))
-          .digest("hex") !== args[20]
-      ) {
-        return [
-          -3,
-          read(keys[0]),
-          read(keys[1]),
-          "",
-          ...time,
-        ];
-      }
-      if (
-        job.version !== 1
-        || job.policyVersion !== args[6]
-        || job.status !== "ready"
-        || job.jobBindingDigest !== args[7]
-        || job.canonicalCandidateDigest !== args[8]
-        || job.candidateUserAliasDigest !== args[9]
-        || job.jobRevisionDigest !== args[10]
-        || job.writeScopeDigest !== args[11]
-      ) {
-        return [
-          -5,
-          read(keys[0]),
-          read(keys[1]),
-          "",
-          ...time,
-        ];
-      }
-      const existing = parse(keys[2]);
-      if (existing) {
-        const exact = (
-          existing.durableRecordReceiptDigest === args[2]
-          && existing.jobBindingDigest === args[7]
-          && existing.canonicalCandidateDigest === args[8]
-          && existing.candidateUserAliasDigest === args[9]
-          && existing.jobRevisionDigest === args[10]
-          && existing.writeScopeDigest === args[11]
-          && existing.activeRecordSha1 === args[20]
-        );
-        return [
-          exact ? 2 : -6,
-          read(keys[0]),
-          read(keys[1]),
-          read(keys[2]),
-          ...time,
-        ];
-      }
-      const expiresAtMs = Math.min(
-        nowMs + Number(args[12]),
-        Number(args[13]),
-      );
-      if (expiresAtMs <= nowMs) {
-        return [
-          -7,
-          read(keys[0]),
-          read(keys[1]),
-          "",
-          ...time,
-        ];
-      }
-      const reservation = {
-        version: 1,
-        policyVersion: args[6],
-        status: "reserved",
-        generationRecordDigest: args[0],
-        durableGenerationRevisionDigest: args[1],
-        durableRecordReceiptDigest: args[2],
-        activeRecordSha1: args[20],
-        sourceEpochs: {
-          recall: args[3],
-          paraformHuman: args[4],
-          aliases: args[5],
-        },
-        jobBindingDigest: args[7],
-        canonicalCandidateDigest: args[8],
-        candidateUserAliasDigest: args[9],
-        jobRevisionDigest: args[10],
-        writeScopeDigest: args[11],
-        q37DecisionDigest: args[14],
-        callType: args[15],
-        callEndedAt: args[16],
-        reservedJobRevisionDigest: args[17],
-        reservationNonceDigest: args[18],
-        issuedAtMs: nowMs,
-        expiresAtMs,
-        settledResultDigest: null,
-        consumedAtMs: null,
-      };
-      reservation.reservationRecordSha1 = createHash("sha1")
-        .update(JSON.stringify(reservation))
-        .digest("hex");
-      return [
-        1,
-        read(keys[0]),
-        read(keys[1]),
-        write(keys[2], reservation),
-        ...time,
-      ];
-    }
-
-    return [read(keys[0]), ...time];
+    return [
+      records.get(command[3]) || "",
+      String(Math.floor(nowMs / 1_000)),
+      String((nowMs % 1_000) * 1_000),
+    ];
   };
-  const putJob = (job = {}) => {
-    const value = {
-      version: 1,
-      policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
-      status: "ready",
-      jobBindingDigest: JOB_BINDING,
-      canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: CANDIDATE_USER_A,
-      jobRevisionDigest: JOB_REVISION,
-      writeScopeDigest: WRITE_SCOPE,
-      ...job,
-    };
-    records.set(
-      `paraai:phase4:source-authority:job:v1:${value.jobBindingDigest}`,
-      JSON.stringify(value),
-    );
-    return value;
-  };
-  return {
-    kv,
-    putJob,
-    records,
-    commands,
-    advance(ms) {
-      nowMs += ms;
+  globalThis.fetch = async (_url, { body }) => ({
+    ok: true,
+    async text() {
+      return JSON.stringify({
+        result: await kv(JSON.parse(body)),
+      });
     },
-  };
+  });
+  return { records, commands };
 }
 
 test("source certificate requires two exhaustive stable passes", () => {
@@ -861,6 +640,19 @@ test("source certificate requires two exhaustive stable passes", () => {
   assert.deepEqual(certificate.reasons, []);
   assert.equal(Object.isFrozen(certificate), true);
   assert.equal(Object.isFrozen(certificate.passes), true);
+});
+
+test("Paraform meeting evidence stays dark without a pinned human discriminator", () => {
+  const certificate = certificateFixture(
+    SOURCE_WATERMARK_SOURCES.PARAFORM_HUMAN,
+    [humanSuccess()],
+  );
+  assert.equal(certificate.complete, false);
+  assert.ok(
+    certificate.reasons.includes(
+      "paraform_human_discriminator_unpinned",
+    ),
+  );
 });
 
 test("source fact digest is deterministic across input order", () => {
@@ -1168,7 +960,7 @@ test("collector versions and immutable code commitments are exact release pins",
   );
 });
 
-test("alias map is a deterministic one-to-one canonical binding", () => {
+test("alias map derives a deterministic dark one-to-one binding", () => {
   const entries = [
     {
       canonicalCandidateDigest: CANDIDATE_B,
@@ -1183,27 +975,32 @@ test("alias map is a deterministic one-to-one canonical binding", () => {
   const reverse = aliasMapFixture(
     [...entries].reverse(),
   );
-  assert.equal(forward.complete, true);
-  assert.equal(forward.authoritative, true);
-  assert.equal(forward.snapshotComplete, true);
+  assert.equal(forward.complete, false);
+  assert.equal(forward.authoritative, false);
+  assert.equal(forward.snapshotComplete, false);
   assert.equal(forward.epochStable, true);
   assert.equal(forward.aliasEpochDigest, ALIAS_EPOCH);
   assert.equal(forward.conflictCount, 0);
   assert.equal(forward.canonicalCandidateCount, 2);
   assert.equal(forward.candidateUserAliasCount, 2);
+  assert.ok(
+    forward.reasons.includes(
+      "identity_collector_artifact_unpinned",
+    ),
+  );
   assert.equal(forward.aliasMapDigest, reverse.aliasMapDigest);
 });
 
-test("alias map requires an authoritative complete snapshot with a stable epoch", () => {
+test("caller snapshot assertions cannot override derived alias authority", () => {
   const entries = [{
     canonicalCandidateDigest: CANDIDATE_A,
     candidateUserAliasDigest: CANDIDATE_USER_A,
   }];
   const nonAuthoritative = aliasMapFixture(entries, {
-    authoritative: false,
+    authoritative: true,
   });
   const incomplete = aliasMapFixture(entries, {
-    snapshotComplete: false,
+    snapshotComplete: true,
   });
   const stable = aliasMapFixture(entries);
   const moved = aliasMapFixture(entries, {
@@ -1262,22 +1059,25 @@ test("alias fan-in, fan-out, and duplicate edges fail closed", () => {
   assert.equal(duplicate.duplicateEntryCount, 1);
 });
 
-test("cross-source alias edges require a separately authenticated binding receipt", () => {
+test("per-source bindings remain dark without a reviewed identity collector", () => {
   const entry = aliasEvidenceEntry({
     canonicalCandidateDigest: CANDIDATE_A,
     candidateUserAliasDigest: CANDIDATE_USER_A,
   });
   const missing = aliasMapFixture([{
     ...entry,
-    identityBindingReceipt: null,
+    bindings: [],
   }]);
-  const validReceipt = identityBindingReceiptFixture(entry);
+  const validReceipt = identityBindingReceiptFixture(
+    entry,
+    { source: SOURCE_WATERMARK_SOURCES.RECALL },
+  );
   const forged = aliasMapFixture([{
     ...entry,
-    identityBindingReceipt: {
+    bindings: [{
       ...validReceipt,
       receiptMac: digest("f"),
-    },
+    }],
   }]);
   const savedKey =
     process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV];
@@ -1286,23 +1086,65 @@ test("cross-source alias edges require a separately authenticated binding receip
   try {
     unavailable = aliasMapFixture([{
       ...entry,
-      identityBindingReceipt: validReceipt,
+      bindings: [validReceipt],
     }]);
   } finally {
     process.env[SOURCE_IDENTITY_BINDING_AUTHORITY_KEY_ENV] =
       savedKey;
   }
 
-  for (const aliasMap of [missing, forged, unavailable]) {
+  assert.equal(missing.edgeWithoutBindingCount, 1);
+  assert.ok(
+    missing.reasons.includes(
+      "alias_edges_without_source_binding",
+    ),
+  );
+  for (const aliasMap of [forged, unavailable]) {
     assert.equal(aliasMap.complete, false);
+    assert.equal(aliasMap.bindingCount, 1);
     assert.equal(aliasMap.identityBindingProvenCount, 0);
     assert.equal(aliasMap.identityBindingUnprovenCount, 1);
-    assert.ok(
-      aliasMap.reasons.includes(
-        "identity_binding_receipts_unproven",
-      ),
+    assert.equal(
+      aliasMap.entries[0].bindings[0]
+        .identityBindingFailureCode,
+      "SOURCE_IDENTITY_BINDING_IDENTITY_ARTIFACT_UNAVAILABLE",
     );
   }
+});
+
+test("empty snapshots and signer-chosen resolution digests never prove identity completeness", () => {
+  const empty = aliasMapFixture([]);
+  assert.equal(empty.complete, false);
+  assert.ok(
+    empty.reasons.includes(
+      "identity_binding_receipts_missing",
+    ),
+  );
+
+  const entry = aliasEvidenceEntry({
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  });
+  const arbitraryJoin = aliasMapFixture([{
+    ...entry,
+    bindings: [
+      identityBindingReceiptFixture(entry, {
+        overrides: {
+          resolutionEvidenceDigest: digest("f"),
+        },
+      }),
+    ],
+  }]);
+  assert.equal(arbitraryJoin.complete, false);
+  assert.equal(
+    arbitraryJoin.identityBindingProvenCount,
+    0,
+  );
+  assert.equal(
+    arbitraryJoin.entries[0].bindings[0]
+      .identityBindingFailureCode,
+    "SOURCE_IDENTITY_BINDING_RESOLUTION_MISMATCH",
+  );
 });
 
 test("a swapped structural bijection cannot prove cross-source identity", () => {
@@ -1318,20 +1160,97 @@ test("a swapped structural bijection cannot prove cross-source identity", () => 
     {
       ...first,
       candidateUserAliasDigest: CANDIDATE_USER_B,
-      identityBindingReceipt:
-        identityBindingReceiptFixture(first),
     },
     {
       ...second,
       candidateUserAliasDigest: CANDIDATE_USER_A,
-      identityBindingReceipt:
-        identityBindingReceiptFixture(second),
     },
   ]);
   assert.equal(swapped.canonicalConflictCount, 0);
   assert.equal(swapped.aliasConflictCount, 0);
   assert.equal(swapped.identityBindingProvenCount, 0);
   assert.equal(swapped.complete, false);
+});
+
+test("source bindings cover the exact union, including one-source candidates", () => {
+  const pair = {
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  };
+  const recallOnly = generationFixture({
+    recallFacts: [recallSuccess()],
+    humanFacts: [],
+    aliasEntries: [{
+      ...pair,
+      sources: [SOURCE_WATERMARK_SOURCES.RECALL],
+    }],
+  });
+  const humanOnly = generationFixture({
+    recallFacts: [],
+    humanFacts: [humanSuccess()],
+    aliasEntries: [{
+      ...pair,
+      sources: [
+        SOURCE_WATERMARK_SOURCES.PARAFORM_HUMAN,
+      ],
+    }],
+  });
+  const both = generationFixture();
+
+  for (const generation of [recallOnly, humanOnly]) {
+    assert.equal(
+      generation.aliasEvidence.sourceRecordCount,
+      1,
+    );
+    assert.equal(
+      generation.aliasEvidence.bindingRecordCount,
+      1,
+    );
+    assert.equal(
+      generation.aliasEvidence.sourceRecordUniverseEqual,
+      true,
+    );
+    assert.equal(
+      generation.aliasEvidence.candidateUniverseEqual,
+      true,
+    );
+    assert.equal(generation.aliasEvidence.universeEqual, true);
+    assert.equal(generation.q37.candidateCount, 1);
+    assert.equal(generation.q37.reviewCount, 1);
+  }
+  assert.equal(both.aliasEvidence.sourceRecordCount, 2);
+  assert.equal(both.aliasEvidence.bindingRecordCount, 2);
+  assert.equal(both.aliasEvidence.missingBindingCount, 0);
+  assert.equal(both.aliasEvidence.extraBindingCount, 0);
+});
+
+test("missing or extra per-source bindings break exact union equality", () => {
+  const pair = {
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  };
+  const missing = generationFixture({
+    aliasEntries: [{
+      ...pair,
+      sources: [SOURCE_WATERMARK_SOURCES.RECALL],
+    }],
+  });
+  const extra = generationFixture({
+    humanFacts: [],
+    aliasEntries: [pair],
+  });
+  assert.equal(missing.aliasEvidence.missingBindingCount, 1);
+  assert.equal(
+    missing.aliasEvidence.sourceRecordUniverseEqual,
+    false,
+  );
+  assert.equal(missing.aliasEvidence.universeEqual, false);
+  assert.equal(extra.aliasEvidence.extraBindingCount, 1);
+  assert.equal(
+    extra.aliasEvidence.sourceRecordUniverseEqual,
+    false,
+  );
+  assert.equal(extra.aliasEvidence.universeEqual, false);
 });
 
 test("Q37 selects the newest successful source and ignores newer failures", () => {
@@ -1422,13 +1341,69 @@ test("Q37 cannot select from pending, conflicting, or unverified source evidence
   assert.equal(unresolved.callType, null);
 });
 
+test("generation Q37 groups mapped pending facts before making a candidate decision", () => {
+  const pair = {
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  };
+  const pending = {
+    ...recallSuccess({
+      candidate: CANDIDATE_A,
+      record: RECORD_RECALL_B,
+    }),
+    classification: "pending",
+    endedAt: null,
+    provenanceVerified: false,
+  };
+  const successBinding = identityBindingReceiptFixture(
+    pair,
+    { source: SOURCE_WATERMARK_SOURCES.RECALL },
+  );
+  const pendingBinding = identityBindingReceiptFixture(
+    {
+      ...pair,
+      recallRecordDigest: RECORD_RECALL_B,
+      recallRecordRevisionDigest: REVISION_RECALL_B,
+    },
+    { source: SOURCE_WATERMARK_SOURCES.RECALL },
+  );
+  const baseline = generationFixture({
+    humanFacts: [],
+    aliasEntries: [{
+      ...pair,
+      bindings: [successBinding],
+    }],
+  });
+  const withPending = generationFixture({
+    recallFacts: [recallSuccess(), pending],
+    humanFacts: [],
+    aliasEntries: [{
+      ...pair,
+      bindings: [successBinding, pendingBinding],
+    }],
+  });
+  assert.equal(withPending.q37.identityIssueCount, 0);
+  assert.equal(withPending.q37.candidateCount, 1);
+  assert.equal(withPending.q37.reviewCount, 1);
+  assert.notEqual(
+    withPending.q37.hypotheticalDecisionSetDigest,
+    baseline.q37.hypotheticalDecisionSetDigest,
+  );
+});
+
 test("combined generation binds both source certificates, aliases, and Q37", () => {
   const generation = generationFixture();
   assert.equal(generation.status, "planned");
-  assert.equal(generation.intrinsicSourceComplete, true);
-  assert.equal(generation.intrinsicQ37Ready, true);
-  assert.equal(generation.q37.humanCount, 1);
-  assert.equal(generation.q37.reviewCount, 0);
+  assert.equal(generation.intrinsicSourceComplete, false);
+  assert.equal(generation.intrinsicQ37Ready, false);
+  assert.equal(generation.q37.operational, false);
+  assert.equal(generation.q37.selectedCount, 0);
+  assert.equal(generation.q37.humanCount, 0);
+  assert.equal(generation.q37.reviewCount, 1);
+  assert.deepEqual(generation.q37.reasons, [
+    "human_intro_source_unpinned",
+    "paraform_human_discriminator_unpinned",
+  ]);
   assert.match(generation.manifestDigest, /^[a-f0-9]{64}$/);
   assert.equal(
     validateSourceWatermarkGeneration(generation).recordDigest,
@@ -1551,10 +1526,12 @@ test("a bijective alias edge without matching source-record proof remains incomp
     recallRecordDigest: RECORD_RECALL_A,
     // This record proves candidate-user A, not the declared B edge.
     paraformHumanRecordDigest: RECORD_HUMAN_A,
+    paraformHumanRecordRevisionDigest: REVISION_HUMAN_A,
   }]);
-  assert.equal(aliasMap.complete, true);
+  assert.equal(aliasMap.complete, false);
   const generation = generationFixture({ aliasMap });
   assert.equal(generation.aliasEvidence.sourceProven, false);
+  assert.equal(generation.aliasEvidence.mismatchedBindingCount, 1);
   assert.equal(generation.aliasEvidence.unprovenEntryCount, 1);
   assert.equal(generation.intrinsicSourceComplete, false);
   assert.equal(generation.intrinsicQ37Ready, false);
@@ -1610,7 +1587,7 @@ test("commit metadata is state-bound and cannot predate the stable capture", () 
       committedAt: "2026-07-26T00:03:30.000Z",
     }),
     (error) => (
-      error.code === "SOURCE_WATERMARK_COMMIT_PREDATES_CAPTURE"
+      error.code === "SOURCE_WATERMARK_COMMIT_NOT_READY"
     ),
   );
 });
@@ -1632,7 +1609,7 @@ test("public readiness is false without a committed current generation", () => {
 });
 
 test("synthetic facts and caller assertions cannot replace private store authority", () => {
-  const generation = generationFixture({ status: "committed" });
+  const generation = generationFixture();
   const savedKey = process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV];
   delete process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV];
   try {
@@ -1643,7 +1620,7 @@ test("synthetic facts and caller assertions cannot replace private store authori
       generationAuthorityReceipt:
         generationAuthorityReceiptFixture(generation),
     });
-    assert.equal(status.status, "store_required");
+    assert.equal(status.status, "not_committed");
     assert.equal(status.phase4Q37Ready, false);
     assert.throws(
       () => buildPhase4WriteBoundaryAttestation({
@@ -1663,7 +1640,7 @@ test("synthetic facts and caller assertions cannot replace private store authori
 });
 
 test("caller-fed durable generation receipts never create public readiness", () => {
-  const generation = generationFixture({ status: "committed" });
+  const generation = generationFixture();
   const authorityReceipt =
     generationAuthorityReceiptFixture(generation);
   const ready = sourceWatermarkPublicStatus({
@@ -1681,17 +1658,17 @@ test("caller-fed durable generation receipts never create public readiness", () 
     generation,
     generationAuthorityReceipt: tamperedRevision,
   });
-  assert.equal(ready.status, "store_required");
+  assert.equal(ready.status, "not_committed");
   assert.equal(ready.sourceWatermarkComplete, false);
   assert.equal(ready.phase4Q37Ready, false);
-  assert.equal(missing.status, "store_required");
+  assert.equal(missing.status, "not_committed");
   assert.equal(missing.phase4Q37Ready, false);
-  assert.equal(untrusted.status, "store_required");
+  assert.equal(untrusted.status, "not_committed");
   assert.equal(untrusted.phase4Q37Ready, false);
 });
 
 test("validly signed future and expired authority clocks fail closed", () => {
-  const generation = generationFixture({ status: "committed" });
+  const generation = generationFixture();
   const future = generationAuthorityReceiptFixture(generation, {
     issuedAt: "2099-01-01T00:00:00.000Z",
     expiresAt: "2099-01-01T00:00:30.000Z",
@@ -1705,13 +1682,13 @@ test("validly signed future and expired authority clocks fail closed", () => {
       generation,
       generationAuthorityReceipt: receipt,
     });
-    assert.equal(status.status, "store_required");
+    assert.equal(status.status, "not_committed");
     assert.equal(status.phase4Q37Ready, false);
   }
 });
 
 test("public readiness is aggregate-only and strips all source and identity digests", () => {
-  const generation = generationFixture({ status: "committed" });
+  const generation = generationFixture();
   const status = sourceWatermarkPublicStatus({
     generation,
     generationAuthorityReceipt:
@@ -1736,7 +1713,7 @@ test("public readiness is aggregate-only and strips all source and identity dige
 
 test("invalid persisted generation fails closed in public status", () => {
   const generation = structuredClone(
-    generationFixture({ status: "committed" }),
+    generationFixture(),
   );
   generation.manifestDigest = digest("f");
   const status = sourceWatermarkPublicStatus({
@@ -1750,7 +1727,7 @@ test("invalid persisted generation fails closed in public status", () => {
 });
 
 test("pure write APIs cannot mint or validate operational authority", () => {
-  const generation = generationFixture({ status: "committed" });
+  const generation = generationFixture();
   const generationAuthorityReceipt =
     generationAuthorityReceiptFixture(generation);
   for (const operation of [
@@ -1783,286 +1760,128 @@ test("pure write APIs cannot mint or validate operational authority", () => {
   );
 });
 
-test("KV authority alone reports a current ready generation from Redis TIME", async () => {
-  const fake = createAuthorityKvFake();
-  const generation = generationFixture({ status: "committed" });
-  const activated = await activateSourceAuthorityGeneration(
-    { generation },
-    { kvImpl: fake.kv },
+test("public source activation is structurally unavailable", async () => {
+  const authorityStore = await import(
+    "../api/paraai/_lib/source-authority-store.mjs"
   );
-  const current = await readCurrentSourceAuthority({
-    kvImpl: fake.kv,
-  });
-  const status = await getSourceAuthorityOperationalStatus({
-    kvImpl: fake.kv,
-  });
-
-  assert.equal(
-    activated.active.generationRecordDigest,
-    generation.recordDigest,
-  );
-  assert.equal(
-    current.active.durableRecordReceiptDigest,
-    activated.active.durableRecordReceiptDigest,
-  );
-  assert.equal(
-    current.generationAuthorityReceipt
-      .durableRecordReceiptDigest,
-    activated.active.durableRecordReceiptDigest,
-  );
-  assert.equal(status.status, "ready");
-  assert.equal(status.current, true);
-  assert.equal(status.sourceWatermarkComplete, true);
-  assert.equal(status.phase4Q37Ready, true);
-  assert.match(
-    fake.commands[0][1],
-    /redis\.call\('TIME'\)/u,
-  );
-  assert.match(
-    fake.commands[0][1],
-    /durableGenerationRevisionDigest/u,
-  );
-  assert.match(
-    fake.commands[0][1],
-    /durableRecordReceiptDigest/u,
-  );
-});
-
-test("simultaneous fresh revisions cannot both remain current", async () => {
-  const fake = createAuthorityKvFake();
-  const generation = generationFixture({ status: "committed" });
-  const first = await activateSourceAuthorityGeneration(
-    { generation },
-    { kvImpl: fake.kv },
-  );
-  const attempts = await Promise.allSettled([
-    activateSourceAuthorityGeneration(
-      {
-        generation,
-        expectedActiveGenerationReceipt:
-          first.generationAuthorityReceipt,
-      },
-      { kvImpl: fake.kv },
+  const source = await readFile(
+    new URL(
+      "../api/paraai/_lib/source-authority-store.mjs",
+      import.meta.url,
     ),
-    activateSourceAuthorityGeneration(
-      {
-        generation,
-        expectedActiveGenerationReceipt:
-          first.generationAuthorityReceipt,
-      },
-      { kvImpl: fake.kv },
-    ),
-  ]);
-  assert.equal(
-    attempts.filter((attempt) => attempt.status === "fulfilled")
-      .length,
-    1,
-  );
-  const rejected = attempts.find(
-    (attempt) => attempt.status === "rejected",
+    "utf8",
   );
   assert.equal(
-    rejected.reason.code,
-    "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT",
+    "activateSourceAuthorityGeneration" in authorityStore,
+    false,
   );
-  const current = await readCurrentSourceAuthority({
-    kvImpl: fake.kv,
-  });
-  assert.notEqual(
-    current.active.durableGenerationRevisionDigest,
-    first.active.durableGenerationRevisionDigest,
-  );
+  assert.doesNotMatch(source, /ACTIVATE_GENERATION_LUA/u);
+  assert.doesNotMatch(source, /proposed\.activatedAtMs/u);
 });
 
-test("reserve compares current generation epochs and exact durable job state", async () => {
+test("runtime authority stays dark until the freshness coordinator is reviewed", async () => {
   const fake = createAuthorityKvFake();
-  await activateSourceAuthorityGeneration(
-    { generation: generationFixture({ status: "committed" }) },
-    { kvImpl: fake.kv },
-  );
-  fake.putJob();
-  const reserved = await reserveSourceAuthorityWrite(
-    {
-      jobBindingDigest: JOB_BINDING,
-      canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: CANDIDATE_USER_A,
-      jobRevisionDigest: JOB_REVISION,
-      writeScopeDigest: WRITE_SCOPE,
+  let callerKvUsed = false;
+  const callerStore = {
+    kvImpl: async () => {
+      callerKvUsed = true;
+      throw new Error("caller KV must never run");
     },
-    { kvImpl: fake.kv },
-  );
-  assert.equal(reserved.allowed, false);
-  assert.equal(reserved.status, "reserved");
-  assert.equal(reserved.duplicate, false);
-  assert.match(
-    reserved.reservationReceipt.reservationRecordSha1,
-    /^[a-f0-9]{40}$/u,
-  );
-  const reserveCommand = fake.commands.find(
-    (command) => command[1].includes("local reservation = {"),
-  );
-  assert.equal(reserveCommand[2], 3);
-  assert.match(reserveCommand[1], /redis\.call\('TIME'\)/u);
-  assert.match(
-    reserveCommand[1],
-    /active\.generationRecordDigest ~= ARGV\[1\]/u,
-  );
-  assert.match(
-    reserveCommand[1],
-    /active\.durableGenerationRevisionDigest ~= ARGV\[2\]/u,
-  );
-  assert.match(
-    reserveCommand[1],
-    /active\.sourceEpochs\.aliases ~= ARGV\[6\]/u,
-  );
-  assert.match(
-    reserveCommand[1],
-    /job\.jobRevisionDigest ~= ARGV\[11\]/u,
-  );
-  assert.match(
-    reserveCommand[1],
-    /job\.writeScopeDigest ~= ARGV\[12\]/u,
-  );
-});
-
-test("consume authorizes once and an exact retry returns the settled result", async () => {
-  const fake = createAuthorityKvFake();
-  await activateSourceAuthorityGeneration(
-    { generation: generationFixture({ status: "committed" }) },
-    { kvImpl: fake.kv },
-  );
-  fake.putJob();
-  const reserved = await reserveSourceAuthorityWrite(
-    {
-      jobBindingDigest: JOB_BINDING,
-      canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: CANDIDATE_USER_A,
-      jobRevisionDigest: JOB_REVISION,
-      writeScopeDigest: WRITE_SCOPE,
-    },
-    { kvImpl: fake.kv },
-  );
-  const input = {
-    reservationReceipt: reserved.reservationReceipt,
-    expectedJobBindingDigest: JOB_BINDING,
-    expectedJobRevisionDigest: JOB_REVISION,
-    expectedWriteScopeDigest: WRITE_SCOPE,
-    settledResultDigest: SETTLED_RESULT,
   };
-  const first = await consumeSourceAuthorityWriteReservation(
-    input,
-    { kvImpl: fake.kv },
+  const status = await getSourceAuthorityOperationalStatus(
+    callerStore,
   );
-  const retry = await consumeSourceAuthorityWriteReservation(
-    input,
-    { kvImpl: fake.kv },
+  assert.equal(
+    status.status,
+    "capture_coordinator_unavailable",
   );
-  assert.equal(first.allowed, true);
-  assert.equal(first.duplicate, false);
-  assert.equal(retry.allowed, false);
-  assert.equal(retry.duplicate, true);
-  assert.equal(retry.settledResultDigest, SETTLED_RESULT);
+  assert.equal(status.current, false);
+  assert.equal(status.sourceWatermarkComplete, false);
+  assert.equal(status.phase4Q37Ready, false);
+  assert.equal(fake.commands.length, 0);
+  assert.equal(callerKvUsed, false);
+
+  await assert.rejects(
+    reserveSourceAuthorityWrite(
+      {
+        jobBindingDigest: JOB_BINDING,
+        canonicalCandidateDigest: CANDIDATE_A,
+        candidateUserAliasDigest: CANDIDATE_USER_A,
+        jobRevisionDigest: JOB_REVISION,
+        writeScopeDigest: WRITE_SCOPE,
+      },
+      callerStore,
+    ),
+    (error) => (
+      error.code
+        === "SOURCE_AUTHORITY_CAPTURE_COORDINATOR_UNAVAILABLE"
+    ),
+  );
   await assert.rejects(
     consumeSourceAuthorityWriteReservation(
       {
-        ...input,
-        settledResultDigest: digest("f"),
+        reservationReceipt: {},
+        expectedJobBindingDigest: JOB_BINDING,
+        expectedJobRevisionDigest: JOB_REVISION,
+        expectedWriteScopeDigest: WRITE_SCOPE,
+        settledResultDigest: SETTLED_RESULT,
       },
-      { kvImpl: fake.kv },
+      callerStore,
     ),
     (error) => (
-      error.code === "SOURCE_AUTHORITY_SETTLED_RESULT_CONFLICT"
+      error.code
+        === "SOURCE_AUTHORITY_CAPTURE_COORDINATOR_UNAVAILABLE"
     ),
   );
-  const consumeCommand = fake.commands.find(
-    (command) => command[1].includes(
-      "reservation.status = 'consumed'",
+  assert.equal(fake.commands.length, 0);
+  assert.equal(callerKvUsed, false);
+});
+
+test("dormant reservation transitions preserve exact CAS and replay fences", async () => {
+  const source = await readFile(
+    new URL(
+      "../api/paraai/_lib/source-authority-store.mjs",
+      import.meta.url,
     ),
+    "utf8",
   );
-  assert.match(consumeCommand[1], /redis\.call\('TIME'\)/u);
   assert.match(
-    consumeCommand[1],
-    /reservation\.status == 'consumed'/u,
+    source,
+    /const SOURCE_CAPTURE_COORDINATOR_AVAILABLE = false;/u,
   );
+  assert.match(source, /Redis-TIME freshness lease/u);
+  assert.doesNotMatch(source, /\bkvImpl\b/u);
+  assert.match(
+    source,
+    /redis\.sha1hex\(activeRaw\) ~= ARGV\[21\]/u,
+  );
+  assert.match(
+    source,
+    /local jobSnapshotSha1 = redis\.sha1hex\(jobRaw\)/u,
+  );
+  assert.match(
+    source,
+    /reservation\.reservedJobRevisionDigest ~= ARGV\[17\]/u,
+  );
+  assert.match(
+    source,
+    /redis\.sha1hex\(reservationRaw\) ~= ARGV\[21\]/u,
+  );
+  assert.match(
+    source,
+    /redis\.sha1hex\(activeRaw\) ~= ARGV\[25\]/u,
+  );
+  assert.match(
+    source,
+    /redis\.sha1hex\(jobRaw\) ~= ARGV\[13\]/u,
+  );
+  assert.match(
+    source,
+    /if existing\.expiresAtMs >= nowMs or settlementRaw then/u,
+  );
+  assert.match(source, /elseif settlementRaw then/u);
+  assert.match(source, /local settlement = \{/u);
 });
-
-test("old receipts and cross-job or cross-scope replay fail after replacement", async () => {
-  const fake = createAuthorityKvFake();
-  const generation = generationFixture({ status: "committed" });
-  const first = await activateSourceAuthorityGeneration(
-    { generation },
-    { kvImpl: fake.kv },
-  );
-  fake.putJob();
-  const reserved = await reserveSourceAuthorityWrite(
-    {
-      jobBindingDigest: JOB_BINDING,
-      canonicalCandidateDigest: CANDIDATE_A,
-      candidateUserAliasDigest: CANDIDATE_USER_A,
-      jobRevisionDigest: JOB_REVISION,
-      writeScopeDigest: WRITE_SCOPE,
-    },
-    { kvImpl: fake.kv },
-  );
-  const second = await activateSourceAuthorityGeneration(
-    {
-      generation,
-      expectedActiveGenerationReceipt:
-        first.generationAuthorityReceipt,
-    },
-    { kvImpl: fake.kv },
-  );
-  assert.notEqual(
-    second.active.durableRecordReceiptDigest,
-    first.active.durableRecordReceiptDigest,
-  );
-  await assert.rejects(
-    activateSourceAuthorityGeneration(
-      {
-        generation,
-        expectedActiveGenerationReceipt:
-          first.generationAuthorityReceipt,
-      },
-      { kvImpl: fake.kv },
-    ),
-    (error) => (
-      error.code === "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT"
-    ),
-  );
-  const consumeInput = {
-    reservationReceipt: reserved.reservationReceipt,
-    expectedJobBindingDigest: JOB_BINDING,
-    expectedJobRevisionDigest: JOB_REVISION,
-    expectedWriteScopeDigest: WRITE_SCOPE,
-    settledResultDigest: SETTLED_RESULT,
-  };
-  await assert.rejects(
-    consumeSourceAuthorityWriteReservation(
-      consumeInput,
-      { kvImpl: fake.kv },
-    ),
-    (error) => (
-      error.code === "SOURCE_AUTHORITY_ACTIVE_REVISION_CONFLICT"
-    ),
-  );
-  for (const overrides of [
-    { expectedJobBindingDigest: digest("f") },
-    { expectedJobRevisionDigest: digest("f") },
-    { expectedWriteScopeDigest: digest("f") },
-  ]) {
-    await assert.rejects(
-      consumeSourceAuthorityWriteReservation(
-        { ...consumeInput, ...overrides },
-        { kvImpl: fake.kv },
-      ),
-      (error) => (
-        error.code
-          === "SOURCE_AUTHORITY_RESERVATION_EXPECTATION_MISMATCH"
-      ),
-    );
-  }
-});
-
 test("missing keys/store and malformed durable state remain dark", async () => {
   const fake = createAuthorityKvFake();
   fake.records.set(
@@ -2070,15 +1889,13 @@ test("missing keys/store and malformed durable state remain dark", async () => {
     JSON.stringify({ version: 1 }),
   );
   await assert.rejects(
-    readCurrentSourceAuthority({ kvImpl: fake.kv }),
+    readCurrentSourceAuthority(),
     (error) => (
       error.code === "SOURCE_AUTHORITY_DURABLE_STATE_MALFORMED"
     ),
   );
   assert.equal(
-    (await getSourceAuthorityOperationalStatus({
-      kvImpl: fake.kv,
-    })).phase4Q37Ready,
+    (await getSourceAuthorityOperationalStatus()).phase4Q37Ready,
     false,
   );
 
@@ -2090,14 +1907,12 @@ test("missing keys/store and malformed durable state remain dark", async () => {
   delete process.env.KV_REST_API_URL;
   delete process.env.KV_REST_API_TOKEN;
   try {
-    const status = await getSourceAuthorityOperationalStatus({
-      kvImpl: fake.kv,
-    });
+    const status = await getSourceAuthorityOperationalStatus();
     assert.equal(status.status, "store_unavailable");
     assert.equal(status.current, false);
     assert.equal(status.phase4Q37Ready, false);
     await assert.rejects(
-      readCurrentSourceAuthority({ kvImpl: fake.kv }),
+      readCurrentSourceAuthority(),
       (error) => error.code === "SOURCE_AUTHORITY_UNAVAILABLE",
     );
   } finally {
@@ -2108,26 +1923,25 @@ test("missing keys/store and malformed durable state remain dark", async () => {
   }
 });
 
-test("stale or future Redis TIME cannot issue operational authority", async () => {
-  const fake = createAuthorityKvFake();
-  await activateSourceAuthorityGeneration(
-    { generation: generationFixture({ status: "committed" }) },
-    { kvImpl: fake.kv },
+test("receipt TTL alone cannot establish source freshness", async () => {
+  const source = await readFile(
+    new URL(
+      "../api/paraai/_lib/source-authority-store.mjs",
+      import.meta.url,
+    ),
+    "utf8",
   );
-  for (const clockMove of [60_000, -120_000]) {
-    fake.advance(clockMove);
-    await assert.rejects(
-      readCurrentSourceAuthority({ kvImpl: fake.kv }),
-      (error) => (
-        error.code === "SOURCE_AUTHORITY_REDIS_TIME_SKEWED"
-      ),
-    );
-    const status = await getSourceAuthorityOperationalStatus({
-      kvImpl: fake.kv,
-    });
-    assert.equal(status.current, false);
-    assert.equal(status.phase4Q37Ready, false);
-  }
+  assert.match(source, /Redis-TIME freshness lease/u);
+  assert.match(source, /fresh stable/u);
+  assert.match(source, /capture \(including/u);
+  assert.match(source, /upstream head\/delta invalidation/u);
+  const status = await getSourceAuthorityOperationalStatus();
+  assert.equal(
+    status.status,
+    "capture_coordinator_unavailable",
+  );
+  assert.equal(status.current, false);
+  assert.equal(status.phase4Q37Ready, false);
 });
 
 test("dashboard health exposes only aggregate dark readiness and keeps enrollment closed", async () => {
