@@ -387,7 +387,8 @@ export async function completeCampaignLeads(campaignId, { strides = STRIDES } = 
     let cursor = 0;
     let barren = 0;
     for (let i = 0; i < 2000; i++) {
-      const page = await trpcGet("campaigns.getCampaignLeads", cursor ? { campaign_id: campaignId, cursor } : { campaign_id: campaignId });
+      const page = await withThrottleRetry(() =>
+        trpcGet("campaigns.getCampaignLeads", cursor ? { campaign_id: campaignId, cursor } : { campaign_id: campaignId }, 1));
       apiCalls++;
       const leads = page?.leads || [];
       if (totalCount === null) totalCount = page?.totalCount ?? leads.length;
@@ -542,7 +543,7 @@ export async function applyDecisions(decisions, { concurrency = 3 } = {}) {
 
 // ---------- the sweep ----------
 export async function loadNudgeSequences() {
-  const all = (await trpcGet("campaigns.getListOfCampaignsOptimized", {})) || [];
+  const all = (await withThrottleRetry(() => trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1))) || [];
   return all.filter((s) => isNudgeSequence(s));
 }
 
