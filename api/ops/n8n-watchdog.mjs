@@ -23,12 +23,7 @@ const STATE_KEY = "seqguard:n8nwatch";
 // A workflow that fails this many consecutive scheduled runs is broken, not flaky.
 const CONSECUTIVE_FAILURES_TO_ALERT = Number(process.env.N8N_WATCH_FAIL_STREAK || 2);
 
-function isCron(req) {
-  if (req.headers["x-vercel-cron"]) return true;
-  const secret = process.env.CRON_SECRET;
-  if (secret && (req.headers["authorization"] || "") === `Bearer ${secret}`) return true;
-  return false;
-}
+
 
 async function n8n(path) {
   const base = String(process.env.N8N_BASE_URL || "").replace(/\/+$/, "");
@@ -71,13 +66,18 @@ export function failureStreaks(executions) {
   return out.sort((a, b) => b.streak - a.streak);
 }
 
-export default async function handler(req, res) {
-  if (!isCron(req)) {
-    const secret = process.env.CRON_SECRET;
-    if (!secret || (req.headers["authorization"] || "") !== `Bearer ${secret}`) {
-      return res.status(401).json({ ok: false, error: "unauthorized" });
-    }
+// A request carrying the cron header but no valid bearer is either an intruder
+// or our own assumption about Vercel being wrong. Both must be visible fast.
+async function warnOnCronRejection(cron) {
+  if (cron.ok || !cron.headerPresent) return;
+  if (await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
+    await notifySlack(`:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`).catch(() => {});
   }
+}
+
+export default async function handler(req, res) {
+  const cron = cronAuth(req);
+  if (!cron.ok) { await warnOnCronRejection(cron); return res.status(401).json({ ok: false, error: "unauthorized" }); }
   if (!process.env.N8N_BASE_URL || !process.env.N8N_API_KEY) {
     return res.status(200).json({ ok: false, error: "n8n_not_configured" });
   }

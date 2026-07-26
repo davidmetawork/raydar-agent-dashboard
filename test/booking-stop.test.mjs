@@ -20,7 +20,7 @@ import {
 } from "../api/seq/_lib/booking-stop.mjs";
 import { campaignLeads } from "../api/seq/_lib/core.mjs";
 import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/booking-stop.mjs";
-import { completeCampaignLeads, campaignLeads as _cl } from "../api/seq/_lib/core.mjs";
+import { completeCampaignLeads, cronAuth } from "../api/seq/_lib/core.mjs";
 
 const SECRET = "test-signing-key";
 
@@ -441,4 +441,41 @@ test("profile checks rotate so the tail is never permanently blind", async () =>
 test("staleness threshold is hours, not days — a dead sweep must surface same-day", () => {
   assert.ok(SWEEP_STALE_AFTER_MS <= 6 * 3600 * 1000, "must catch a dead sweep within hours");
   assert.ok(SWEEP_STALE_AFTER_MS >= 3600 * 1000, "but not alert on a single missed tick");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cron authentication. `x-vercel-cron` is NOT a credential — Vercel does not
+// strip it from inbound traffic, so accepting it let anyone trigger endpoints
+// that pause leads, disable sequences and enrol candidates.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("the x-vercel-cron header alone does not authenticate", () => {
+  const prev = process.env.CRON_SECRET;
+  process.env.CRON_SECRET = "s3cret";
+  try {
+    const r = cronAuth({ headers: { "x-vercel-cron": "1" } });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, "header_without_bearer");
+    assert.equal(r.headerPresent, true, "must be flagged so it can be alerted on");
+  } finally { process.env.CRON_SECRET = prev; }
+});
+
+test("a matching bearer authenticates", () => {
+  const prev = process.env.CRON_SECRET;
+  process.env.CRON_SECRET = "s3cret";
+  try {
+    assert.equal(cronAuth({ headers: { authorization: "Bearer s3cret" } }).ok, true);
+    assert.equal(cronAuth({ headers: { authorization: "Bearer wrong" } }).ok, false);
+    assert.equal(cronAuth({ headers: {} }).ok, false);
+  } finally { process.env.CRON_SECRET = prev; }
+});
+
+test("no CRON_SECRET fails closed, never open", () => {
+  const prev = process.env.CRON_SECRET;
+  delete process.env.CRON_SECRET;
+  try {
+    const r = cronAuth({ headers: { "x-vercel-cron": "1", authorization: "Bearer anything" } });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, "no_cron_secret");
+  } finally { if (prev !== undefined) process.env.CRON_SECRET = prev; }
 });

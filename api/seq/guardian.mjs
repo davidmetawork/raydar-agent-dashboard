@@ -8,22 +8,27 @@
 // what would have caught the 2026-07-20 "Corporate Counsel" incident within the
 // hour instead of relying on a human noticing sent mail. Enrollment-time
 // refusal (enroll.mjs / release.mjs) is the primary prevention; this is the net.
-import { cors, requireAuth, hasCookie, trpcGet, trpcPost, campaignLeads } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, trpcGet, trpcPost, campaignLeads, cronAuth } from "./_lib/core.mjs";
 import { protectedRecruiterForSequence } from "./_lib/protected.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 
 export const config = { maxDuration: 120 };
 
-function isCron(req) {
-  if (req.headers["x-vercel-cron"]) return true;
-  const secret = process.env.CRON_SECRET;
-  if (secret && (req.headers["authorization"] || "") === `Bearer ${secret}`) return true;
-  return false;
+
+
+// A request carrying the cron header but no valid bearer is either an intruder
+// or our own assumption about Vercel being wrong. Both must be visible fast.
+async function warnOnCronRejection(cron) {
+  if (cron.ok || !cron.headerPresent) return;
+  if (await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
+    await notifySlack(`:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`).catch(() => {});
+  }
 }
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
-  if (!isCron(req) && !(await requireAuth(req, res))) return;
+  const cron = cronAuth(req);
+  if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
   if (!hasCookie()) return res.status(200).json({ ok: false, error: "no_cookie" });
   const apply = new URL(req.url, "http://x").searchParams.get("dry") !== "1";
   try {

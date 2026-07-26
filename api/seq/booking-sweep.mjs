@@ -16,7 +16,7 @@
 //
 // FAIL LOUDLY. The predecessor to this system died for nine days in silence.
 // Everything below that alerts is there because of a specific way that happened.
-import { cors, requireAuth, hasCookie } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
 import {
   runBookingSweep,
   recordSuccessfulSweep,
@@ -30,16 +30,21 @@ import { notifySlack } from "../paraai/_lib/core.mjs";
 
 export const config = { maxDuration: 300 };
 
-function isCron(req) {
-  if (req.headers["x-vercel-cron"]) return true;
-  const secret = process.env.CRON_SECRET;
-  if (secret && (req.headers["authorization"] || "") === `Bearer ${secret}`) return true;
-  return false;
+
+
+// A request carrying the cron header but no valid bearer is either an intruder
+// or our own assumption about Vercel being wrong. Both must be visible fast.
+async function warnOnCronRejection(cron) {
+  if (cron.ok || !cron.headerPresent) return;
+  if (await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
+    await notifySlack(`:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`).catch(() => {});
+  }
 }
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
-  if (!isCron(req) && !(await requireAuth(req, res))) return;
+  const cron = cronAuth(req);
+  if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
 
   const apply = new URL(req.url, "http://x").searchParams.get("dry") !== "1";
 
