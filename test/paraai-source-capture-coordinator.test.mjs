@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
   PHASE4_SOURCE_CAPTURE_TICK_MODE,
   SourceCaptureCoordinatorError,
+  createPhase4SourceCaptureCoordinator,
   phase4SourceCaptureDarkStatus,
   runPhase4SourceCaptureTick,
 } from "../api/paraai/_lib/source-capture-coordinator.mjs";
@@ -21,6 +23,33 @@ import {
 
 const TEST_REDIS_MS = Date.parse("2026-07-26T03:00:00.000Z");
 const digest = (character) => character.repeat(64);
+const sha256 = (value) => createHash("sha256")
+  .update(value, "utf8")
+  .digest("hex");
+
+function canonicalJson(value) {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => (
+    `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+  )).join(",")}}`;
+}
+
+function semanticDigest(namespace, value) {
+  return createHash("sha256")
+    .update(namespace)
+    .update("\0")
+    .update(canonicalJson(value))
+    .digest("hex");
+}
 
 process.env.PARAAI_SOURCE_AUTHORITY_KV_REST_API_URL =
   "https://source-capture-kv.test.invalid";
@@ -186,6 +215,271 @@ function completeDarkLease(initial) {
       );
     }
   }
+  return record;
+}
+
+function aliasArtifactFixture(record, {
+  failureAt = null,
+} = {}) {
+  const calls = [];
+  const context = {
+    runNonceDigest: record.runNonceDigest,
+    decisionBoundaryAtMs: record.decisionBoundaryAtMs,
+    contractPinsDigest: record.contractPinsDigest,
+  };
+  const policyVersion =
+    "phase4-source-identity-artifact-store-v1";
+  const entries = [];
+  const pageRaw = JSON.stringify({
+    version: 1,
+    policyVersion,
+    kind: "identity_alias_artifact_page_dark",
+    ...context,
+    pageNumber: 1,
+    pageSize: 100,
+    cursorToken: null,
+    nextCursorToken: null,
+    entryCount: 0,
+    entries,
+  });
+  const pageRecordDigest = sha256(pageRaw);
+  const pageSemanticDigest = semanticDigest(
+    "phase4-source-identity-alias-page-semantic-v1",
+    entries,
+  );
+  const workManifestDigest = sha256(
+    "empty-identity-work-manifest",
+  );
+  const terminalWorkSetDigest = sha256(
+    "empty-terminal-identity-work-set",
+  );
+  const headMaterial = {
+    version: 1,
+    policyVersion,
+    kind: "identity_alias_artifact_head_dark",
+    ...context,
+    pageSize: 100,
+    pageCount: 1,
+    resolvedEntryCount: 0,
+    unresolvedWorkCount: 0,
+    conflictWorkCount: 0,
+    workManifestDigest,
+    workManifestCount: 0,
+    terminalWorkSetDigest,
+    pages: [{
+      pageNumber: 1,
+      cursorToken: null,
+      nextCursorToken: null,
+      entryCount: 0,
+      pageRecordDigest,
+      pageSemanticDigest,
+    }],
+  };
+  const sealedArtifactDigest = semanticDigest(
+    "phase4-source-identity-alias-artifact-v1",
+    headMaterial,
+  );
+  const headRaw = JSON.stringify({
+    version: 1,
+    policyVersion,
+    kind: "identity_alias_artifact_head_dark",
+    ...context,
+    sealedArtifactDigest,
+    pageSize: 100,
+    pageCount: 1,
+    resolvedEntryCount: 0,
+    unresolvedWorkCount: 0,
+    conflictWorkCount: 0,
+    workManifestDigest,
+    workManifestCount: 0,
+    terminalWorkSetDigest,
+    pages: headMaterial.pages,
+  });
+  const headRecordDigest = sha256(headRaw);
+  const sourceHeadEpochDigest = createHash("sha256")
+    .update("phase4-source-identity-alias-head-epoch-v1")
+    .update("\0")
+    .update(headRaw, "utf8")
+    .digest("hex");
+  const sourceHeadRevisionDigest = createHash("sha256")
+    .update(
+      "phase4-source-identity-alias-head-revision-v1",
+    )
+    .update("\0")
+    .update(headRaw, "utf8")
+    .digest("hex");
+
+  function maybeFail(stage) {
+    if (failureAt === stage) {
+      throw new Error(
+        "private upstream response and candidate evidence",
+      );
+    }
+  }
+
+  return {
+    calls,
+    evidence: {
+      pageSemanticDigest,
+      sourceHeadEpochDigest,
+      sourceHeadRevisionDigest,
+      sourceHeadRecordDigest: headRecordDigest,
+    },
+    store: {
+      async prepareIdentityAliasArtifact(input) {
+        calls.push("prepare");
+        maybeFail("prepare");
+        assert.deepEqual(input, context);
+        return {
+          sealedArtifactDigest,
+          headRecordDigest,
+        };
+      },
+      async readIdentityAliasArtifactHead(input) {
+        calls.push("head");
+        maybeFail("head");
+        assert.deepEqual(input, {
+          sealedArtifactDigest,
+          ...context,
+        });
+        return {
+          raw: headRaw,
+          headRecordDigest,
+          record: JSON.parse(headRaw),
+          redisNowMs: TEST_REDIS_MS + 1,
+        };
+      },
+      async readIdentityAliasArtifactPage(input) {
+        calls.push("page");
+        maybeFail("page");
+        assert.deepEqual(input, {
+          sealedArtifactDigest,
+          ...context,
+          cursorToken: null,
+        });
+        return {
+          raw: pageRaw,
+          pageRecordDigest,
+          pageSemanticDigest,
+          recordCount: 0,
+          cursorToken: null,
+          nextCursorToken: null,
+          record: JSON.parse(pageRaw),
+          redisNowMs: TEST_REDIS_MS + 1,
+        };
+      },
+    },
+  };
+}
+
+function fakeCaptureStore(initialRecord, {
+  claimFailure = false,
+  checkpointFailure = false,
+} = {}) {
+  const calls = {
+    ensure: 0,
+    claim: 0,
+    checkpoint: 0,
+  };
+  let snapshot = {
+    record: initialRecord,
+    raw: JSON.stringify(initialRecord),
+    redisNowMs: initialRecord.updatedAtMs,
+  };
+  const claimNonceDigest = digest("f");
+  return {
+    calls,
+    current: () => snapshot,
+    store: {
+      async claimDarkSourceCaptureStep() {
+        calls.claim += 1;
+        if (claimFailure) {
+          throw new Error(
+            "private durable record and checkpoint details",
+          );
+        }
+        return {
+          record: snapshot.record,
+          raw: snapshot.raw,
+          claimNonceDigest,
+        };
+      },
+      async checkpointTrustedSourceCaptureEvent(
+        claim,
+        event,
+      ) {
+        calls.checkpoint += 1;
+        assert.equal(event.claimNonceDigest, claimNonceDigest);
+        assert.equal(claim.raw, snapshot.raw);
+        if (checkpointFailure) {
+          throw new Error(
+            "private CAS state and candidate evidence",
+          );
+        }
+        const next = transitionDarkSourceCaptureRecord(
+          snapshot.record,
+          event,
+          snapshot.redisNowMs + 1,
+        );
+        snapshot = {
+          record: next,
+          raw: JSON.stringify(next),
+          redisNowMs: next.updatedAtMs,
+        };
+        return snapshot;
+      },
+      async ensureDarkSourceCaptureRun() {
+        calls.ensure += 1;
+        return snapshot;
+      },
+      sourceCaptureAggregateStatus,
+      sourceCaptureStoreConfigured() {
+        return true;
+      },
+    },
+  };
+}
+
+function coordinatorFor(record, options = {}) {
+  const capture = fakeCaptureStore(
+    record,
+    options.capture,
+  );
+  const artifact = aliasArtifactFixture(
+    record,
+    options.artifact,
+  );
+  const coordinator = createPhase4SourceCaptureCoordinator({
+    captureStore: capture.store,
+    identityArtifactStore: artifact.store,
+  });
+  return { artifact, capture, coordinator };
+}
+
+async function recordAtFirstAliasPage() {
+  let record = (await initialSnapshot()).record;
+  for (const sourceEvidence of [
+    {
+      pageSemanticDigest: digest("1"),
+      sourceHeadEpochDigest: digest("4"),
+    },
+    {
+      pageSemanticDigest: digest("2"),
+      sourceHeadEpochDigest: digest("5"),
+    },
+    {
+      pageSemanticDigest: digest("3"),
+      sourceHeadEpochDigest: digest("6"),
+    },
+  ]) {
+    record = completeCurrentSource(record, sourceEvidence);
+  }
+  assert.deepEqual(record.activeStep, {
+    source: "aliases",
+    passNumber: 1,
+    pageNumber: 1,
+    cursorToken: null,
+  });
   return record;
 }
 
@@ -658,6 +952,163 @@ test("trusted checkpoint CAS binds the server-read raw revision", async () => {
   );
 });
 
+test("runner checkpoints exactly one server-selected alias page and remains hard-dark", async () => {
+  const record = await recordAtFirstAliasPage();
+  const { artifact, capture, coordinator } =
+    coordinatorFor(record);
+  const result =
+    await coordinator.runPhase4SourceCaptureTick({
+      mode: PHASE4_SOURCE_CAPTURE_TICK_MODE,
+    });
+
+  assert.deepEqual(capture.calls, {
+    ensure: 1,
+    claim: 1,
+    checkpoint: 1,
+  });
+  assert.deepEqual(artifact.calls, [
+    "prepare",
+    "head",
+    "page",
+  ]);
+  assert.equal(
+    capture.current().record.activeStep.source,
+    "aliases",
+  );
+  assert.equal(
+    capture.current().record.activeStep.passNumber,
+    2,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.status,
+    "identity_alias_step_checkpointed_dark",
+  );
+  assert.equal(result.completedPasses, 7);
+  assert.equal(result.completedSources, 3);
+  assert.equal(result.missingPrivateInterfaces, 4);
+  assert.equal(result.missingReleasePins, 3);
+  assert.equal(result.operational, false);
+  assert.equal(result.activationAvailable, false);
+  assert.equal(result.writeAuthorityAvailable, false);
+  assert.equal(result.curationAvailable, false);
+  assert.equal(result.enrollmentAvailable, false);
+});
+
+test("runner checkpoints exactly one server-selected alias head read and does not open authority", async () => {
+  let record = await recordAtFirstAliasPage();
+  const fixture = aliasArtifactFixture(record);
+  for (let passNumber = 1; passNumber <= 2; passNumber += 1) {
+    record = step(record, pageEvent(record, {
+      pageSemanticDigest:
+        fixture.evidence.pageSemanticDigest,
+      sourceHeadEpochDigest:
+        fixture.evidence.sourceHeadEpochDigest,
+      sourceHeadRevisionDigest:
+        fixture.evidence.sourceHeadRevisionDigest,
+      sourceHeadRecordDigest:
+        fixture.evidence.sourceHeadRecordDigest,
+      recordCount: 0,
+    }));
+  }
+  assert.equal(record.status, "verifying_heads");
+  for (let index = 0; index < 3; index += 1) {
+    record = step(
+      record,
+      headEvent(
+        record,
+        record.sources[index].passes[0]
+          .sourceHeadEpochDigest,
+      ),
+    );
+  }
+  assert.equal(record.headVerificationIndex, 3);
+
+  const capture = fakeCaptureStore(record);
+  const coordinator = createPhase4SourceCaptureCoordinator({
+    captureStore: capture.store,
+    identityArtifactStore: fixture.store,
+  });
+  const result = await coordinator.runPhase4SourceCaptureTick({
+    mode: PHASE4_SOURCE_CAPTURE_TICK_MODE,
+  });
+
+  assert.deepEqual(capture.calls, {
+    ensure: 1,
+    claim: 1,
+    checkpoint: 1,
+  });
+  assert.deepEqual(fixture.calls, ["prepare", "head"]);
+  assert.equal(
+    capture.current().record.headVerificationRound,
+    2,
+  );
+  assert.equal(
+    capture.current().record.headVerificationIndex,
+    0,
+  );
+  assert.equal(
+    result.status,
+    "identity_alias_step_checkpointed_dark",
+  );
+  assert.equal(result.operational, false);
+  assert.equal(result.activationAvailable, false);
+  assert.equal(result.writeAuthorityAvailable, false);
+  assert.equal(result.missingReleasePins, 3);
+});
+
+test("unsupported source steps do not claim or call the alias adapter", async () => {
+  const record = (await initialSnapshot()).record;
+  const { artifact, capture, coordinator } =
+    coordinatorFor(record);
+  const result =
+    await coordinator.runPhase4SourceCaptureTick({
+      mode: PHASE4_SOURCE_CAPTURE_TICK_MODE,
+    });
+
+  assert.deepEqual(capture.calls, {
+    ensure: 1,
+    claim: 0,
+    checkpoint: 0,
+  });
+  assert.deepEqual(artifact.calls, []);
+  assert.equal(
+    result.status,
+    "capture_interfaces_unavailable",
+  );
+  assert.equal(result.missingPrivateInterfaces, 4);
+  assert.equal(result.operational, false);
+});
+
+test("claim, alias adapter, and checkpoint failures collapse to one aggregate-only hard-dark response", async () => {
+  for (const failure of [
+    { capture: { claimFailure: true } },
+    { artifact: { failureAt: "prepare" } },
+    { capture: { checkpointFailure: true } },
+  ]) {
+    const record = await recordAtFirstAliasPage();
+    const { coordinator } = coordinatorFor(record, failure);
+    const result =
+      await coordinator.runPhase4SourceCaptureTick({
+        mode: PHASE4_SOURCE_CAPTURE_TICK_MODE,
+      });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "capture_step_failed_dark");
+    assert.equal(result.operational, false);
+    assert.equal(result.activationAvailable, false);
+    assert.equal(result.writeAuthorityAvailable, false);
+    assert.equal(result.curationAvailable, false);
+    assert.equal(result.enrollmentAvailable, false);
+    assert.equal(result.missingReleasePins, 3);
+    const serialized = JSON.stringify(result);
+    assert.doesNotMatch(
+      serialized,
+      /(candidate evidence|upstream response|durable record|CAS state|cause|error)/iu,
+    );
+  }
+});
+
 test("runner tick remains dark and returns aggregate-only state", async () => {
   const result = await withFetch(async (_url, options) => {
     const command = JSON.parse(options.body);
@@ -682,7 +1133,7 @@ test("runner tick remains dark and returns aggregate-only state", async () => {
   assert.equal(result.enrollmentAvailable, false);
   assert.equal(result.activationAvailable, false);
   assert.equal(result.writeAuthorityAvailable, false);
-  assert.equal(result.missingPrivateInterfaces, 5);
+  assert.equal(result.missingPrivateInterfaces, 4);
   assert.equal(result.missingReleasePins, 3);
   const allKeys = JSON.stringify(Object.keys(result));
   assert.doesNotMatch(
@@ -712,7 +1163,7 @@ test("malformed durable state returns one aggregate dark failure", async () => {
     },
     {
       ok: false,
-      status: "capture_store_invalid",
+      status: "capture_step_failed_dark",
       operational: false,
       activationAvailable: false,
       writeAuthorityAvailable: false,

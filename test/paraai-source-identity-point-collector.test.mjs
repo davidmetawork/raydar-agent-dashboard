@@ -419,7 +419,11 @@ test("all coordinator and release authority pins remain hard-dark", async () => 
   ]);
   assert.match(
     coordinator,
-    /identityAliasClient:\s*null/u,
+    /identityAliasClient,\s*\n\s*sourceHeadClient:\s*null/u,
+  );
+  assert.match(
+    coordinator,
+    /createSourceIdentityAliasAdapter\(\{\s*\n\s*artifactStore:\s*trustedIdentityArtifactStore,/u,
   );
   assert.match(
     authority,
