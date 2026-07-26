@@ -1365,7 +1365,7 @@ test("every rejected or incomplete HTTP body is cancelled before the stable erro
   }
 });
 
-test("the adapter remains absent from every production route, worker, coordinator, and gate", async () => {
+test("the adapter has only the exact hard-dark runtime importer and remains absent from every route, worker, coordinator, and gate", async () => {
   const root = new URL("../api/paraai/", import.meta.url);
   const adapterName =
     "source-recall-reference-persistence-adapter.mjs";
@@ -1398,14 +1398,35 @@ test("the adapter remains absent from every production route, worker, coordinato
     (url) => url.pathname.endsWith(`/${adapterName}`),
   );
   assert.ok(adapterUrl);
+  const adapterImporters = [];
+  const credentialReaders = [];
   for (const file of files) {
     if (file.href === adapterUrl.href) continue;
     const source = await readFile(file, "utf8");
-    assert.equal(source.includes(adapterName), false);
+    if (source.includes(adapterName)) {
+      adapterImporters.push(
+        file.pathname.slice(
+          file.pathname.lastIndexOf("/") + 1,
+        ),
+      );
+    }
     for (const name of dedicatedNames) {
-      assert.equal(source.includes(name), false);
+      if (source.includes(name)) {
+        credentialReaders.push(
+          file.pathname.slice(
+            file.pathname.lastIndexOf("/") + 1,
+          ),
+        );
+        break;
+      }
     }
   }
+  assert.deepEqual(adapterImporters.sort(), [
+    "source-recall-point-observation-runtime.mjs",
+  ]);
+  assert.deepEqual(credentialReaders.sort(), [
+    "source-recall-point-observation-store.mjs",
+  ]);
 
   const adapterSource = await readFile(adapterUrl, "utf8");
   for (const forbiddenImport of [
