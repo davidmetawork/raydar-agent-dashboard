@@ -5,6 +5,9 @@ import {
   phase3ShadowExecutionEnabled,
 } from "./_lib/auto.mjs";
 import { outreachHealth } from "./_lib/outreach.mjs";
+import {
+  sourceWatermarkPublicStatus,
+} from "./_lib/source-watermark.mjs";
 import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 30 };
@@ -22,6 +25,11 @@ export default async function handler(req, res) {
   const auto = automationConfig();
   const auth = authConfig();
   const now = Date.now();
+  // Phase 4 source collection and durable generation storage are deliberately
+  // not wired in this dark foundation. An absent generation is fail-closed;
+  // the aggregate projection can become ready only after a future rollout
+  // supplies a committed manifest plus matching current source epochs.
+  const sourceWatermark = sourceWatermarkPublicStatus();
   const matchStageEnabledAtCurrent = Boolean(
     Number.isFinite(config.matchStageEnabledAtMs)
     && config.matchStageEnabledAtMs <= now
@@ -54,6 +62,10 @@ export default async function handler(req, res) {
     submitReady: false,
     enrollmentReady: false,
     matchShadowReady: false,
+    sourceWatermark,
+    sourceWatermarkComplete:
+      sourceWatermark.sourceWatermarkComplete,
+    phase4Q37Ready: sourceWatermark.phase4Q37Ready,
     automation: {
       enabled: auto.enabled,
       detectEnabled: auto.detectEnabled,
@@ -146,7 +158,8 @@ export default async function handler(req, res) {
     health.enrollmentReady = Boolean(
       health.submitReady && health.lifecycleRegistrationConfigured && health.matchReadPinned &&
       config.matchStageEnabled && !config.matchShadow && config.curateEnabled &&
-      health.enrollApproved && health.sequences.every((sequence) => sequence.found && sequence.enabled),
+      health.enrollApproved && health.phase4Q37Ready &&
+      health.sequences.every((sequence) => sequence.found && sequence.enabled),
     );
     health.automation.ready = Boolean(
       health.submitReady &&
