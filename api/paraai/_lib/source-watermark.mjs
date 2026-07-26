@@ -1,21 +1,50 @@
-// Pure Phase 4 upstream-source barrier.
+// Phase 4 upstream-source barrier.
 //
-// This module has no environment, vendor, queue, or store dependency. It
-// validates normalized Recall and Paraform-human snapshots, binds them to one
-// immutable decision boundary, resolves only digest-based one-to-one aliases,
-// applies Q37, and validates a store-owned write-boundary attestation.
+// Evidence normalization remains vendor, queue, and store independent. The
+// authorization boundary reads one server-held HMAC key and verifies receipts
+// that only a private durable-store transition may mint; this module exports
+// no signer. Missing authority always leaves readiness and writes closed.
 //
 // Raw source IDs, candidate IDs, candidate-user IDs, names, emails, links, and
 // response bodies do not belong in this contract. Identifier-shaped inputs are
 // domain-separated lowercase SHA-256 digests only.
 
-import { createHash } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  timingSafeEqual,
+} from "node:crypto";
 
 export const SOURCE_WATERMARK_POLICY_VERSION =
-  "phase4-source-watermark-v1";
-export const SOURCE_WATERMARK_CERTIFICATE_VERSION = 1;
-export const SOURCE_WATERMARK_GENERATION_VERSION = 1;
-export const PHASE4_WRITE_ATTESTATION_VERSION = 1;
+  "phase4-source-watermark-v2";
+export const SOURCE_WATERMARK_CERTIFICATE_VERSION = 2;
+export const SOURCE_WATERMARK_GENERATION_VERSION = 2;
+export const PHASE4_WRITE_ATTESTATION_VERSION = 2;
+export const SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION = 1;
+export const SOURCE_WATERMARK_AUTHORITY_KEY_ENV =
+  "PARAAI_SOURCE_WATERMARK_AUTHORITY_KEY";
+
+// These are release pins, not caller-selectable compatibility ranges. A
+// collector change must deliberately rotate both its version and immutable
+// code commitment here before its evidence can participate in Phase 4.
+export const SOURCE_WATERMARK_APPROVED_COLLECTORS =
+  Object.freeze({
+    recall: Object.freeze({
+      collectorVersion: "recall-source-v1",
+      collectorCodeCommitmentDigest:
+        "cca12cf0125fc4f1b3ff7d80f94061ad51a4823855db98c856a91aa5bd2904d1",
+    }),
+    paraform_human: Object.freeze({
+      collectorVersion: "paraform-human-source-v1",
+      collectorCodeCommitmentDigest:
+        "f72a048dfbba4b81bcd867cbf70dd4dd2cab1c8cfa1e433bb4f553d5e31da00b",
+    }),
+    aliases: Object.freeze({
+      collectorVersion: "source-alias-evidence-v1",
+      collectorCodeCommitmentDigest:
+        "282544aca1d82c2db498145275d0d225336a471c623d5d3fbba1dc1eeee8e13f",
+    }),
+  });
 
 export const SOURCE_WATERMARK_SOURCES = Object.freeze({
   RECALL: "recall",
@@ -28,7 +57,6 @@ const SOURCE_LIST = Object.freeze([
 ]);
 const SOURCE_SET = new Set(SOURCE_LIST);
 const DIGEST = /^[a-f0-9]{64}$/u;
-const COLLECTOR_VERSION = /^[a-z0-9][a-z0-9._-]{0,79}$/u;
 const FACT_CLASSIFICATIONS = new Set([
   "success",
   "failure",
@@ -45,6 +73,14 @@ const IDENTITY_KINDS = new Set([
   "candidate_user_alias",
 ]);
 const GENERATION_STATUSES = new Set(["planned", "committed"]);
+const AUTHORITY_RECEIPT_KINDS = Object.freeze({
+  GENERATION_CURRENT: "source_generation_current",
+  WRITE_CAS_RESERVED: "phase4_write_cas_reserved",
+});
+const AUTHORITY_KEY = /^[A-Za-z0-9_-]{43,}$/u;
+const AUTHORITY_CLOCK_SKEW_MS = 5_000;
+const GENERATION_RECEIPT_MAX_LIFETIME_MS = 60_000;
+const WRITE_RECEIPT_MAX_LIFETIME_MS = 15_000;
 
 export class SourceWatermarkInvariantError extends Error {
   constructor(code, message = code) {
@@ -102,11 +138,6 @@ function digest(value, field) {
   return value;
 }
 
-function optionalDigest(value, field) {
-  if (value == null) return null;
-  return digest(value, field);
-}
-
 function sourceName(value, field = "source") {
   if (!SOURCE_SET.has(value)) {
     throw new TypeError(`${field} must be a supported source`);
@@ -114,16 +145,17 @@ function sourceName(value, field = "source") {
   return value;
 }
 
-function collectorVersion(value) {
-  if (
-    typeof value !== "string"
-    || !COLLECTOR_VERSION.test(value)
-  ) {
-    throw new TypeError(
-      "collectorVersion must be a bounded lowercase version token",
-    );
-  }
-  return value;
+function approvedCollectorPin(source, version, commitment) {
+  const approved = SOURCE_WATERMARK_APPROVED_COLLECTORS[source];
+  invariant(
+    Boolean(approved)
+      && version === approved.collectorVersion
+      && commitment
+        === approved.collectorCodeCommitmentDigest,
+    "SOURCE_COLLECTOR_PIN_MISMATCH",
+    `${source} collector version and code commitment are not approved`,
+  );
+  return approved;
 }
 
 function canonicalTimestamp(value, field) {
@@ -206,6 +238,15 @@ function normalizeSourceFact(raw, {
   index,
 }) {
   const fact = object(raw, `${source} facts[${index}]`);
+  if (
+    Object.prototype.hasOwnProperty.call(fact, "source")
+    && fact.source !== source
+  ) {
+    throw new SourceWatermarkInvariantError(
+      "SOURCE_FACT_SOURCE_MISMATCH",
+      `${source} facts[${index}] declares a different source`,
+    );
+  }
   const recordDigest = digest(
     fact.recordDigest,
     `${source} facts[${index}].recordDigest`,
@@ -458,6 +499,8 @@ function certificateBuildResult({
   source,
   decisionBoundaryAt,
   collectorVersion: rawCollectorVersion,
+  collectorCodeCommitmentDigest:
+    rawCollectorCodeCommitmentDigest,
   facts = [],
   passes = [],
 } = {}) {
@@ -466,8 +509,15 @@ function certificateBuildResult({
     decisionBoundaryAt,
     "decisionBoundaryAt",
   );
-  const normalizedCollectorVersion =
-    collectorVersion(rawCollectorVersion);
+  const normalizedCollectorCodeCommitmentDigest = digest(
+    rawCollectorCodeCommitmentDigest,
+    "collectorCodeCommitmentDigest",
+  );
+  const approvedCollector = approvedCollectorPin(
+    normalizedSource,
+    rawCollectorVersion,
+    normalizedCollectorCodeCommitmentDigest,
+  );
   const normalizedFacts = normalizeSourceFacts({
     source: normalizedSource,
     decisionBoundaryAt: boundary,
@@ -551,7 +601,9 @@ function certificateBuildResult({
     version: SOURCE_WATERMARK_CERTIFICATE_VERSION,
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     source: normalizedSource,
-    collectorVersion: normalizedCollectorVersion,
+    collectorVersion: approvedCollector.collectorVersion,
+    collectorCodeCommitmentDigest:
+      approvedCollector.collectorCodeCommitmentDigest,
     decisionBoundaryAt: boundary,
     historyMode: "source_exhaustion",
     passCount: normalizedPasses.length,
@@ -607,40 +659,19 @@ function aliasEntry(raw, index) {
   return {
     canonicalCandidateDigest,
     candidateUserAliasDigest,
+    recallRecordDigest: digest(
+      entry.recallRecordDigest,
+      `alias entries[${index}].recallRecordDigest`,
+    ),
+    paraformHumanRecordDigest: digest(
+      entry.paraformHumanRecordDigest,
+      `alias entries[${index}].paraformHumanRecordDigest`,
+    ),
   };
 }
 
-export function buildCanonicalSourceAliasMap(
-  entries = [],
-  {
-    authoritative = false,
-    snapshotComplete = false,
-    epochAtStart = null,
-    epochAtEnd = null,
-  } = {},
-) {
-  const normalizedAuthoritative = strictBoolean(
-    authoritative,
-    "alias map authoritative",
-  );
-  const normalizedSnapshotComplete = strictBoolean(
-    snapshotComplete,
-    "alias map snapshotComplete",
-  );
-  const normalizedEpochAtStart = optionalDigest(
-    epochAtStart,
-    "alias map epochAtStart",
-  );
-  const normalizedEpochAtEnd = optionalDigest(
-    epochAtEnd,
-    "alias map epochAtEnd",
-  );
-  const epochStable = Boolean(
-    normalizedEpochAtStart
-    && normalizedEpochAtEnd
-    && normalizedEpochAtStart === normalizedEpochAtEnd
-  );
-  const normalized = array(entries, "alias entries")
+function normalizedAliasEntries(entries) {
+  return array(entries, "alias entries")
     .map(aliasEntry)
     .sort((left, right) => (
       left.canonicalCandidateDigest.localeCompare(
@@ -649,7 +680,139 @@ export function buildCanonicalSourceAliasMap(
       || left.candidateUserAliasDigest.localeCompare(
         right.candidateUserAliasDigest,
       )
+      || left.recallRecordDigest.localeCompare(
+        right.recallRecordDigest,
+      )
+      || left.paraformHumanRecordDigest.localeCompare(
+        right.paraformHumanRecordDigest,
+      )
     ));
+}
+
+function aliasEdgeSetDigest(decisionBoundaryAt, entries) {
+  return semanticDigest("phase4-source-alias-edges-v2", {
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    decisionBoundaryAt,
+    collector: SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases,
+    entries,
+  });
+}
+
+export function sourceWatermarkAliasSetDigest({
+  decisionBoundaryAt,
+  entries = [],
+} = {}) {
+  const boundary = canonicalTimestamp(
+    decisionBoundaryAt,
+    "alias map decisionBoundaryAt",
+  );
+  return aliasEdgeSetDigest(
+    boundary,
+    normalizedAliasEntries(entries),
+  );
+}
+
+function normalizeAliasPass(raw, {
+  decisionBoundaryAt,
+  index,
+}) {
+  const pass = object(raw, `alias passes[${index}]`);
+  const passNumber = positiveInteger(
+    pass.passNumber,
+    `alias passes[${index}].passNumber`,
+  );
+  if (passNumber !== index + 1) {
+    throw new TypeError("alias pass numbers must be contiguous");
+  }
+  const startedAt = canonicalTimestamp(
+    pass.startedAt,
+    `alias passes[${index}].startedAt`,
+  );
+  const completedAt = canonicalTimestamp(
+    pass.completedAt,
+    `alias passes[${index}].completedAt`,
+  );
+  if (Date.parse(completedAt) < Date.parse(startedAt)) {
+    throw new RangeError(
+      "alias pass cannot complete before it starts",
+    );
+  }
+  return {
+    passNumber,
+    startedAt,
+    completedAt,
+    exhaustive: strictBoolean(
+      pass.exhaustive,
+      `alias passes[${index}].exhaustive`,
+    ),
+    cursorExhausted: strictBoolean(
+      pass.cursorExhausted,
+      `alias passes[${index}].cursorExhausted`,
+    ),
+    pageCount: positiveInteger(
+      pass.pageCount,
+      `alias passes[${index}].pageCount`,
+    ),
+    edgeCount: nonNegativeInteger(
+      pass.edgeCount,
+      `alias passes[${index}].edgeCount`,
+    ),
+    semanticDigest: digest(
+      pass.semanticDigest,
+      `alias passes[${index}].semanticDigest`,
+    ),
+    epochAtStart: digest(
+      pass.epochAtStart,
+      `alias passes[${index}].epochAtStart`,
+    ),
+    epochAtEnd: digest(
+      pass.epochAtEnd,
+      `alias passes[${index}].epochAtEnd`,
+    ),
+    boundaryPredatesPass:
+      Date.parse(decisionBoundaryAt) <= Date.parse(startedAt),
+  };
+}
+
+export function buildCanonicalSourceAliasMap(
+  entries = [],
+  {
+    decisionBoundaryAt,
+    collectorVersion,
+    collectorCodeCommitmentDigest,
+    authoritative = false,
+    snapshotComplete = false,
+    passes = [],
+  } = {},
+) {
+  const boundary = canonicalTimestamp(
+    decisionBoundaryAt,
+    "alias map decisionBoundaryAt",
+  );
+  const normalizedCollectorCodeCommitmentDigest = digest(
+    collectorCodeCommitmentDigest,
+    "alias collectorCodeCommitmentDigest",
+  );
+  const approvedCollector = approvedCollectorPin(
+    "aliases",
+    collectorVersion,
+    normalizedCollectorCodeCommitmentDigest,
+  );
+  const normalizedAuthoritative = strictBoolean(
+    authoritative,
+    "alias map authoritative",
+  );
+  const normalizedSnapshotComplete = strictBoolean(
+    snapshotComplete,
+    "alias map snapshotComplete",
+  );
+  const normalized = normalizedAliasEntries(entries);
+  const edgeSetDigest = aliasEdgeSetDigest(boundary, normalized);
+  const normalizedPasses = array(passes, "alias passes")
+    .map((pass, index) => normalizeAliasPass(pass, {
+      decisionBoundaryAt: boundary,
+      index,
+    }));
   const exact = new Set();
   const deduped = [];
   let duplicateEntryCount = 0;
@@ -686,22 +849,87 @@ export function buildCanonicalSourceAliasMap(
     .filter((canonicals) => canonicals.size !== 1).length;
   const conflictCount =
     canonicalConflictCount + aliasConflictCount;
-  const complete =
-    normalizedAuthoritative
-    && normalizedSnapshotComplete
-    && epochStable
-    && duplicateEntryCount === 0
-    && conflictCount === 0;
+  const reasons = new Set();
+  if (!normalizedAuthoritative) reasons.add("not_authoritative");
+  if (!normalizedSnapshotComplete) {
+    reasons.add("snapshot_incomplete");
+  }
+  if (normalizedPasses.length < 2) {
+    reasons.add("stable_passes_missing");
+  }
+  for (let index = 0; index < normalizedPasses.length; index += 1) {
+    const pass = normalizedPasses[index];
+    if (!pass.boundaryPredatesPass) {
+      reasons.add("pass_predates_boundary");
+    }
+    if (!pass.exhaustive) reasons.add("source_not_exhaustive");
+    if (!pass.cursorExhausted) {
+      reasons.add("cursor_not_exhausted");
+    }
+    if (pass.edgeCount !== normalized.length) {
+      reasons.add("edge_count_mismatch");
+    }
+    if (pass.semanticDigest !== edgeSetDigest) {
+      reasons.add("semantic_digest_mismatch");
+    }
+    if (pass.epochAtStart !== pass.epochAtEnd) {
+      reasons.add("source_epoch_moved");
+    }
+    const prior = normalizedPasses[index - 1];
+    if (
+      prior
+      && Date.parse(pass.startedAt) < Date.parse(prior.completedAt)
+    ) {
+      reasons.add("passes_not_sequential");
+    }
+  }
+  const semanticDigests = new Set(
+    normalizedPasses.map((pass) => pass.semanticDigest),
+  );
+  if (semanticDigests.size > 1) {
+    reasons.add("stable_pass_digest_mismatch");
+  }
+  const epochDigests = new Set(
+    normalizedPasses.flatMap((pass) => [
+      pass.epochAtStart,
+      pass.epochAtEnd,
+    ]),
+  );
+  if (epochDigests.size !== 1) reasons.add("source_epoch_moved");
+  if (duplicateEntryCount > 0) {
+    reasons.add("duplicate_alias_edges");
+  }
+  if (conflictCount > 0) reasons.add("alias_conflicts");
+  const reasonList = [...reasons].sort();
+  const epochStable = epochDigests.size === 1;
+  const complete = reasonList.length === 0;
   const material = {
-    version: 1,
+    version: 2,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     mapping: "candidate_user_to_canonical_candidate_bijection",
+    decisionBoundaryAt: boundary,
+    collectorVersion: approvedCollector.collectorVersion,
+    collectorCodeCommitmentDigest:
+      approvedCollector.collectorCodeCommitmentDigest,
     authoritative: normalizedAuthoritative,
     snapshotComplete: normalizedSnapshotComplete,
+    passCount: normalizedPasses.length,
+    passes: normalizedPasses,
+    stablePasses:
+      normalizedPasses.length >= 2
+      && semanticDigests.size === 1,
+    exhaustive:
+      normalizedPasses.length >= 2
+      && normalizedPasses.every((pass) => pass.exhaustive),
+    cursorExhausted:
+      normalizedPasses.length >= 2
+      && normalizedPasses.every(
+        (pass) => pass.cursorExhausted,
+      ),
+    edgeSetDigest,
     epochStable,
-    epochAtStart: normalizedEpochAtStart,
-    epochAtEnd: normalizedEpochAtEnd,
     aliasEpochDigest: epochStable
-      ? normalizedEpochAtStart
+      ? [...epochDigests][0]
       : null,
     entries: deduped,
     canonicalCandidateCount: aliasesByCanonical.size,
@@ -711,6 +939,7 @@ export function buildCanonicalSourceAliasMap(
     aliasConflictCount,
     conflictCount,
     complete,
+    reasons: reasonList,
   };
   return deepFreeze({
     ...material,
@@ -724,10 +953,13 @@ export function buildCanonicalSourceAliasMap(
 function canonicalAliasMap(value) {
   const raw = object(value, "aliasMap");
   const rebuilt = buildCanonicalSourceAliasMap(raw.entries, {
+    decisionBoundaryAt: raw.decisionBoundaryAt,
+    collectorVersion: raw.collectorVersion,
+    collectorCodeCommitmentDigest:
+      raw.collectorCodeCommitmentDigest,
     authoritative: raw.authoritative,
     snapshotComplete: raw.snapshotComplete,
-    epochAtStart: raw.epochAtStart,
-    epochAtEnd: raw.epochAtEnd,
+    passes: raw.passes,
   });
   invariant(
     raw.aliasMapDigest === rebuilt.aliasMapDigest,
@@ -866,6 +1098,8 @@ function revalidateCertificate(certificate, facts) {
     source: raw.source,
     decisionBoundaryAt: raw.decisionBoundaryAt,
     collectorVersion: raw.collectorVersion,
+    collectorCodeCommitmentDigest:
+      raw.collectorCodeCommitmentDigest,
     facts,
     passes: raw.passes,
   });
@@ -912,6 +1146,84 @@ function aliasLookup(aliasMap) {
     knownCandidates.add(entry.canonicalCandidateDigest);
   }
   return { candidateByAlias, knownCandidates };
+}
+
+function aliasSourceEvidence({
+  aliasMap,
+  recallFacts,
+  paraformFacts,
+}) {
+  const recallByRecord = new Map(
+    recallFacts.map((fact) => [fact.recordDigest, fact]),
+  );
+  const paraformByRecord = new Map(
+    paraformFacts.map((fact) => [fact.recordDigest, fact]),
+  );
+  const provenEdges = [];
+  let unprovenEntryCount = 0;
+  for (const entry of aliasMap.entries) {
+    const recall = recallByRecord.get(entry.recallRecordDigest);
+    const paraform = paraformByRecord.get(
+      entry.paraformHumanRecordDigest,
+    );
+    const recallProven = Boolean(
+      recall
+      && ["success", "failure"].includes(recall.classification)
+      && recall.provenanceVerified === true
+      && recall.identityStatus === "resolved"
+      && recall.identityKind === "canonical_candidate"
+      && recall.identityDigest
+        === entry.canonicalCandidateDigest
+    );
+    const paraformProven = Boolean(
+      paraform
+      && ["success", "failure"].includes(
+        paraform.classification,
+      )
+      && paraform.provenanceVerified === true
+      && paraform.identityStatus === "resolved"
+      && paraform.identityKind === "candidate_user_alias"
+      && paraform.identityDigest
+        === entry.candidateUserAliasDigest
+    );
+    if (!recallProven || !paraformProven) {
+      unprovenEntryCount += 1;
+      continue;
+    }
+    provenEdges.push({
+      canonicalCandidateDigest:
+        entry.canonicalCandidateDigest,
+      candidateUserAliasDigest:
+        entry.candidateUserAliasDigest,
+      recallRecordDigest: entry.recallRecordDigest,
+      paraformHumanRecordDigest:
+        entry.paraformHumanRecordDigest,
+    });
+  }
+  const material = {
+    decisionBoundaryAt: aliasMap.decisionBoundaryAt,
+    aliasMapDigest: aliasMap.aliasMapDigest,
+    edgeSetDigest: aliasMap.edgeSetDigest,
+    collectorVersion: aliasMap.collectorVersion,
+    collectorCodeCommitmentDigest:
+      aliasMap.collectorCodeCommitmentDigest,
+    aliasEpochDigest: aliasMap.aliasEpochDigest,
+    passCount: aliasMap.passCount,
+    sourceProven: unprovenEntryCount === 0,
+    provenEntryCount: provenEdges.length,
+    unprovenEntryCount,
+    provenEdgeDigest: semanticDigest(
+      "phase4-source-proven-alias-edges-v1",
+      provenEdges,
+    ),
+  };
+  return deepFreeze({
+    ...material,
+    evidenceDigest: semanticDigest(
+      "phase4-source-alias-evidence-v1",
+      material,
+    ),
+  });
 }
 
 function generationQ37({
@@ -1038,6 +1350,16 @@ export function buildSourceWatermarkGeneration({
     boundary,
   );
   const normalizedAliasMap = canonicalAliasMap(aliasMap);
+  invariant(
+    normalizedAliasMap.decisionBoundaryAt === boundary,
+    "SOURCE_ALIAS_BOUNDARY_MISMATCH",
+    "alias evidence must share the exact source decision boundary",
+  );
+  const normalizedAliasEvidence = aliasSourceEvidence({
+    aliasMap: normalizedAliasMap,
+    recallFacts: recallBundle.facts,
+    paraformFacts: paraformBundle.facts,
+  });
   const q37 = generationQ37({
     recallFacts: recallBundle.facts,
     paraformFacts: paraformBundle.facts,
@@ -1047,6 +1369,7 @@ export function buildSourceWatermarkGeneration({
     recallBundle.certificate.complete
     && paraformBundle.certificate.complete
     && normalizedAliasMap.complete
+    && normalizedAliasEvidence.sourceProven
     && q37.identityIssueCount === 0
   );
   const intrinsicQ37Ready = Boolean(
@@ -1063,6 +1386,12 @@ export function buildSourceWatermarkGeneration({
     paraformHumanCertificateDigest:
       paraformBundle.certificate.certificateDigest,
     aliasMapDigest: normalizedAliasMap.aliasMapDigest,
+    aliasEvidenceDigest:
+      normalizedAliasEvidence.evidenceDigest,
+    collectorPinsDigest: semanticDigest(
+      "phase4-source-approved-collector-pins-v1",
+      SOURCE_WATERMARK_APPROVED_COLLECTORS,
+    ),
     q37DecisionSetDigest: q37.decisionSetDigest,
   };
   const manifestDigest = semanticDigest(
@@ -1089,6 +1418,7 @@ export function buildSourceWatermarkGeneration({
     const captureCompletedAt = latestPassCompletedAt(
       recallBundle.certificate,
       paraformBundle.certificate,
+      normalizedAliasMap,
     );
     invariant(
       Date.parse(normalizedCommittedAt)
@@ -1127,6 +1457,7 @@ export function buildSourceWatermarkGeneration({
       },
     },
     aliasMap: normalizedAliasMap,
+    aliasEvidence: normalizedAliasEvidence,
     q37,
   };
   return deepFreeze({
@@ -1212,6 +1543,7 @@ function emptyPublicStatus(status = "not_committed") {
       authoritative: false,
       snapshotComplete: false,
       epochStable: false,
+      sourceProven: false,
       canonicalCandidateCount: 0,
       candidateUserAliasCount: 0,
       duplicateEntryCount: 0,
@@ -1260,14 +1592,282 @@ function currentEpochsMatch(generation, currentSourceEpochs) {
   }
 }
 
+function exactKeys(value, expected, code, field) {
+  const actual = Object.keys(object(value, field)).sort();
+  const required = [...expected].sort();
+  invariant(
+    canonicalJson(actual) === canonicalJson(required),
+    code,
+    `${field} has an unexpected shape`,
+  );
+}
+
+function collectorPinsDigest() {
+  return semanticDigest(
+    "phase4-source-approved-collector-pins-v1",
+    SOURCE_WATERMARK_APPROVED_COLLECTORS,
+  );
+}
+
+function configuredAuthorityKey() {
+  const encoded = process.env[
+    SOURCE_WATERMARK_AUTHORITY_KEY_ENV
+  ];
+  let key = null;
+  if (typeof encoded === "string" && AUTHORITY_KEY.test(encoded)) {
+    try {
+      const decoded = Buffer.from(encoded, "base64url");
+      if (
+        decoded.length >= 32
+        && decoded.toString("base64url") === encoded
+      ) {
+        key = decoded;
+      }
+    } catch {
+      key = null;
+    }
+  }
+  invariant(
+    key,
+    "SOURCE_AUTHORITY_UNAVAILABLE",
+    "source authority key is unavailable or malformed",
+  );
+  return key;
+}
+
+function authorityKeyIdDigest(key) {
+  return createHash("sha256")
+    .update("phase4-source-authority-key-id-v1")
+    .update("\0")
+    .update(key)
+    .digest("hex");
+}
+
+function authorityReceiptMac(key, material) {
+  return createHmac("sha256", key)
+    .update("phase4-source-authority-receipt-v1")
+    .update("\0")
+    .update(canonicalJson(material))
+    .digest("hex");
+}
+
+function verifyAuthorityMac(raw, material) {
+  const key = configuredAuthorityKey();
+  const expectedKeyId = authorityKeyIdDigest(key);
+  invariant(
+    material.authorityKeyIdDigest === expectedKeyId,
+    "SOURCE_AUTHORITY_KEY_MISMATCH",
+    "authority receipt was issued by another key",
+  );
+  const suppliedMac = digest(
+    raw.receiptMac,
+    "authority receiptMac",
+  );
+  const expectedMac = authorityReceiptMac(key, material);
+  invariant(
+    timingSafeEqual(
+      Buffer.from(suppliedMac, "hex"),
+      Buffer.from(expectedMac, "hex"),
+    ),
+    "SOURCE_AUTHORITY_RECEIPT_INVALID",
+    "authority receipt MAC is invalid",
+  );
+  return suppliedMac;
+}
+
+function authorityReceiptTimes(
+  raw,
+  {
+    field,
+    maxLifetimeMs,
+  },
+) {
+  const issuedAt = canonicalTimestamp(
+    raw.issuedAt,
+    `${field}.issuedAt`,
+  );
+  const expiresAt = canonicalTimestamp(
+    raw.expiresAt,
+    `${field}.expiresAt`,
+  );
+  const issuedMs = Date.parse(issuedAt);
+  const expiresMs = Date.parse(expiresAt);
+  const nowMs = Date.now();
+  invariant(
+    expiresMs >= issuedMs
+      && expiresMs - issuedMs <= maxLifetimeMs,
+    "SOURCE_AUTHORITY_RECEIPT_LIFETIME_INVALID",
+    "authority receipt lifetime is invalid",
+  );
+  invariant(
+    issuedMs <= nowMs + AUTHORITY_CLOCK_SKEW_MS,
+    "SOURCE_AUTHORITY_RECEIPT_FROM_FUTURE",
+    "authority receipt was issued in the future",
+  );
+  invariant(
+    expiresMs >= nowMs
+      && nowMs - issuedMs
+        <= maxLifetimeMs + AUTHORITY_CLOCK_SKEW_MS,
+    "SOURCE_AUTHORITY_RECEIPT_STALE",
+    "authority receipt is stale",
+  );
+  return { issuedAt, expiresAt, issuedMs, expiresMs, nowMs };
+}
+
+function generationAuthorityReceipt(generation, value) {
+  const raw = object(value, "generation authority receipt");
+  exactKeys(
+    raw,
+    [
+      "version",
+      "policyVersion",
+      "kind",
+      "generationRecordDigest",
+      "manifestDigest",
+      "commitRevisionDigest",
+      "durableGenerationRevisionDigest",
+      "decisionBoundaryAt",
+      "sourceEpochs",
+      "aliasMapDigest",
+      "aliasEvidenceDigest",
+      "collectorPinsDigest",
+      "issuedAt",
+      "expiresAt",
+      "receiptNonceDigest",
+      "authorityKeyIdDigest",
+      "receiptMac",
+    ],
+    "SOURCE_AUTHORITY_RECEIPT_SHAPE_INVALID",
+    "generation authority receipt",
+  );
+  invariant(
+    raw.version === SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION
+      && raw.policyVersion === SOURCE_WATERMARK_POLICY_VERSION
+      && raw.kind
+        === AUTHORITY_RECEIPT_KINDS.GENERATION_CURRENT,
+    "SOURCE_AUTHORITY_RECEIPT_VERSION_INVALID",
+    "generation authority receipt version is invalid",
+  );
+  exactKeys(
+    raw.sourceEpochs,
+    ["recall", "paraformHuman", "aliases"],
+    "SOURCE_AUTHORITY_RECEIPT_SHAPE_INVALID",
+    "generation authority sourceEpochs",
+  );
+  const times = authorityReceiptTimes(raw, {
+    field: "generation authority receipt",
+    maxLifetimeMs: GENERATION_RECEIPT_MAX_LIFETIME_MS,
+  });
+  const material = {
+    version: raw.version,
+    policyVersion: raw.policyVersion,
+    kind: raw.kind,
+    generationRecordDigest: digest(
+      raw.generationRecordDigest,
+      "generation authority generationRecordDigest",
+    ),
+    manifestDigest: digest(
+      raw.manifestDigest,
+      "generation authority manifestDigest",
+    ),
+    commitRevisionDigest: digest(
+      raw.commitRevisionDigest,
+      "generation authority commitRevisionDigest",
+    ),
+    durableGenerationRevisionDigest: digest(
+      raw.durableGenerationRevisionDigest,
+      "generation authority durableGenerationRevisionDigest",
+    ),
+    decisionBoundaryAt: canonicalTimestamp(
+      raw.decisionBoundaryAt,
+      "generation authority decisionBoundaryAt",
+    ),
+    sourceEpochs: {
+      recall: digest(
+        raw.sourceEpochs.recall,
+        "generation authority Recall epoch",
+      ),
+      paraformHuman: digest(
+        raw.sourceEpochs.paraformHuman,
+        "generation authority Paraform-human epoch",
+      ),
+      aliases: digest(
+        raw.sourceEpochs.aliases,
+        "generation authority alias epoch",
+      ),
+    },
+    aliasMapDigest: digest(
+      raw.aliasMapDigest,
+      "generation authority aliasMapDigest",
+    ),
+    aliasEvidenceDigest: digest(
+      raw.aliasEvidenceDigest,
+      "generation authority aliasEvidenceDigest",
+    ),
+    collectorPinsDigest: digest(
+      raw.collectorPinsDigest,
+      "generation authority collectorPinsDigest",
+    ),
+    issuedAt: times.issuedAt,
+    expiresAt: times.expiresAt,
+    receiptNonceDigest: digest(
+      raw.receiptNonceDigest,
+      "generation authority receiptNonceDigest",
+    ),
+    authorityKeyIdDigest: digest(
+      raw.authorityKeyIdDigest,
+      "generation authority authorityKeyIdDigest",
+    ),
+  };
+  const receiptMac = verifyAuthorityMac(raw, material);
+  invariant(
+    material.generationRecordDigest === generation.recordDigest
+      && material.manifestDigest === generation.manifestDigest
+      && material.commitRevisionDigest
+        === generation.commitRevisionDigest
+      && material.decisionBoundaryAt
+        === generation.decisionBoundaryAt
+      && material.aliasMapDigest
+        === generation.aliasMap.aliasMapDigest
+      && material.aliasEvidenceDigest
+        === generation.aliasEvidence.evidenceDigest
+      && material.collectorPinsDigest === collectorPinsDigest()
+      && currentEpochsMatch(generation, material.sourceEpochs),
+    "SOURCE_AUTHORITY_GENERATION_MISMATCH",
+    "authority receipt is not bound to this exact generation",
+  );
+  const captureCompletedAt = latestPassCompletedAt(
+    generation.sources.recall.certificate,
+    generation.sources.paraformHuman.certificate,
+    generation.aliasMap,
+  );
+  invariant(
+    times.issuedMs >= Date.parse(generation.decisionBoundaryAt)
+      && times.issuedMs >= Date.parse(captureCompletedAt)
+      && times.issuedMs >= Date.parse(generation.committedAt),
+    "SOURCE_AUTHORITY_RECEIPT_PREDATES_GENERATION",
+    "authority receipt predates generation evidence or commit",
+  );
+  const receipt = {
+    ...material,
+    receiptMac,
+  };
+  return deepFreeze({
+    ...receipt,
+    receiptDigest: semanticDigest(
+      "phase4-source-generation-authority-receipt-v1",
+      receipt,
+    ),
+  });
+}
+
 export function sourceWatermarkPublicStatus({
   generation = null,
-  currentManifestDigest = null,
-  currentSourceEpochs = null,
+  generationAuthorityReceipt: authorityReceipt = null,
 } = {}) {
-  // A future runtime must supply only durable server-owned state here. This
-  // projection validates and redacts that state; it is not a request-body
-  // authorization mechanism.
+  // Only a private durable-store signer may mint authorityReceipt. There is
+  // deliberately no exported minting helper in this module. Missing key,
+  // missing receipt, bad MAC, stale clock, or stale revision all stay dark.
   if (!generation) return emptyPublicStatus();
   let normalized;
   try {
@@ -1276,22 +1876,19 @@ export function sourceWatermarkPublicStatus({
     return emptyPublicStatus("invalid");
   }
   const committed = normalized.status === "committed";
-  let manifestCurrent = false;
+  let current = false;
   try {
-    manifestCurrent = Boolean(
+    current = Boolean(
       committed
-      && optionalDigest(
-        currentManifestDigest,
-        "currentManifestDigest",
-      ) === normalized.manifestDigest
+      && authorityReceipt
+      && generationAuthorityReceipt(
+        normalized,
+        authorityReceipt,
+      )
     );
   } catch {
-    manifestCurrent = false;
+    current = false;
   }
-  const epochCurrent =
-    committed
-    && currentEpochsMatch(normalized, currentSourceEpochs);
-  const current = manifestCurrent && epochCurrent;
   const sourceWatermarkComplete = Boolean(
     committed
     && current
@@ -1306,7 +1903,7 @@ export function sourceWatermarkPublicStatus({
     : !normalized.intrinsicSourceComplete
       ? "incomplete"
       : !current
-        ? "stale"
+        ? "untrusted"
         : phase4Q37Ready
           ? "ready"
           : "review";
@@ -1336,6 +1933,7 @@ export function sourceWatermarkPublicStatus({
       authoritative: normalized.aliasMap.authoritative,
       snapshotComplete: normalized.aliasMap.snapshotComplete,
       epochStable: normalized.aliasMap.epochStable,
+      sourceProven: normalized.aliasEvidence.sourceProven,
       canonicalCandidateCount:
         normalized.aliasMap.canonicalCandidateCount,
       candidateUserAliasCount:
@@ -1367,6 +1965,20 @@ function committedReadyGeneration(generation) {
   return normalized;
 }
 
+function authorizedReadyGeneration(
+  generation,
+  authorityReceipt,
+) {
+  const normalized = committedReadyGeneration(generation);
+  return {
+    generation: normalized,
+    authorityReceipt: generationAuthorityReceipt(
+      normalized,
+      authorityReceipt,
+    ),
+  };
+}
+
 function candidateDecision(generation, canonicalCandidateDigest) {
   return generation.q37.decisions.find(
     (row) => (
@@ -1376,15 +1988,15 @@ function candidateDecision(generation, canonicalCandidateDigest) {
   ) || null;
 }
 
-export function buildPhase4WriteBoundaryAttestation({
-  generation,
+function phase4WriteAttestationMaterial({
+  generation: normalized,
+  authorityReceipt,
   canonicalCandidateDigest,
   candidateUserAliasDigest,
   jobRevisionDigest,
   writeScopeDigest,
   observedAt,
-} = {}) {
-  const normalized = committedReadyGeneration(generation);
+}) {
   const candidate = digest(
     canonicalCandidateDigest,
     "canonicalCandidateDigest",
@@ -1428,6 +2040,10 @@ export function buildPhase4WriteBoundaryAttestation({
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
     manifestDigest: normalized.manifestDigest,
     commitRevisionDigest: normalized.commitRevisionDigest,
+    durableGenerationRevisionDigest:
+      authorityReceipt.durableGenerationRevisionDigest,
+    generationAuthorityReceiptDigest:
+      authorityReceipt.receiptDigest,
     decisionBoundaryAt: normalized.decisionBoundaryAt,
     canonicalCandidateDigest: candidate,
     candidateUserAliasDigest: candidateUser,
@@ -1455,88 +2071,295 @@ export function buildPhase4WriteBoundaryAttestation({
   });
 }
 
-export function validatePhase4WriteBoundaryAttestation({
+export function buildPhase4WriteBoundaryAttestation({
   generation,
-  attestation,
-  currentManifestDigest,
-  currentSourceEpochs,
-  expectedCanonicalCandidateDigest,
-  expectedCandidateUserAliasDigest,
-  expectedJobRevisionDigest,
-  expectedWriteScopeDigest,
-  observedAt,
+  generationAuthorityReceipt:
+    rawGenerationAuthorityReceipt,
+  canonicalCandidateDigest,
+  candidateUserAliasDigest,
+  jobRevisionDigest,
+  writeScopeDigest,
 } = {}) {
-  // The generation, attestation, current manifest/epochs, and expected write
-  // digests must all be read or derived inside one server-owned atomic write
-  // boundary. These SHA-256 bindings detect substitution; they are not a MAC
-  // and must never grant authority to caller-supplied values.
-  const normalized = committedReadyGeneration(generation);
-  const currentManifest = digest(
-    currentManifestDigest,
-    "currentManifestDigest",
+  const trusted = authorizedReadyGeneration(
+    generation,
+    rawGenerationAuthorityReceipt,
   );
+  return phase4WriteAttestationMaterial({
+    ...trusted,
+    canonicalCandidateDigest,
+    candidateUserAliasDigest,
+    jobRevisionDigest,
+    writeScopeDigest,
+    observedAt: new Date().toISOString(),
+  });
+}
+
+function canonicalWriteAttestation(
+  generation,
+  authorityReceipt,
+  value,
+) {
+  const raw = object(value, "write attestation");
+  exactKeys(
+    raw,
+    [
+      "version",
+      "policyVersion",
+      "manifestDigest",
+      "commitRevisionDigest",
+      "durableGenerationRevisionDigest",
+      "generationAuthorityReceiptDigest",
+      "decisionBoundaryAt",
+      "canonicalCandidateDigest",
+      "candidateUserAliasDigest",
+      "q37DecisionDigest",
+      "callType",
+      "callEndedAt",
+      "jobRevisionDigest",
+      "writeScopeDigest",
+      "sourceEpochs",
+      "observedAt",
+      "attestationDigest",
+    ],
+    "SOURCE_WRITE_ATTESTATION_TAMPERED",
+    "write attestation",
+  );
+  const observedAt = canonicalTimestamp(
+    raw.observedAt,
+    "write attestation observedAt",
+  );
+  const observedMs = Date.parse(observedAt);
+  const nowMs = Date.now();
   invariant(
-    currentManifest === normalized.manifestDigest,
-    "SOURCE_WRITE_GENERATION_STALE",
-    "current generation manifest does not match the attestation generation",
+    observedMs >= Date.parse(authorityReceipt.issuedAt)
+      && observedMs <= nowMs + AUTHORITY_CLOCK_SKEW_MS
+      && nowMs - observedMs
+        <= WRITE_RECEIPT_MAX_LIFETIME_MS
+          + AUTHORITY_CLOCK_SKEW_MS,
+    "SOURCE_WRITE_ATTESTATION_STALE",
+    "write attestation is stale or from the future",
   );
-  invariant(
-    currentEpochsMatch(normalized, currentSourceEpochs),
-    "SOURCE_WRITE_EPOCH_STALE",
-    "a source epoch changed after generation commit",
-  );
-  const raw = object(attestation, "write attestation");
-  const rebuilt = buildPhase4WriteBoundaryAttestation({
-    generation: normalized,
+  const rebuilt = phase4WriteAttestationMaterial({
+    generation,
+    authorityReceipt,
     canonicalCandidateDigest:
       raw.canonicalCandidateDigest,
     candidateUserAliasDigest:
       raw.candidateUserAliasDigest,
     jobRevisionDigest: raw.jobRevisionDigest,
     writeScopeDigest: raw.writeScopeDigest,
-    observedAt: raw.observedAt,
+    observedAt,
   });
-  for (const field of [
-    "version",
-    "policyVersion",
-    "manifestDigest",
-    "commitRevisionDigest",
-    "decisionBoundaryAt",
-    "canonicalCandidateDigest",
-    "candidateUserAliasDigest",
-    "q37DecisionDigest",
-    "callType",
-    "callEndedAt",
-    "jobRevisionDigest",
-    "writeScopeDigest",
-    "sourceEpochs",
-    "observedAt",
-  ]) {
-    let matches = false;
-    try {
-      matches = canonicalJson(raw[field])
-        === canonicalJson(rebuilt[field]);
-    } catch {
-      matches = false;
-    }
-    invariant(
-      matches,
-      "SOURCE_WRITE_ATTESTATION_TAMPERED",
-      "write attestation fields do not match its evidence",
-    );
-  }
   invariant(
-    raw.attestationDigest === rebuilt.attestationDigest,
+    canonicalJson(raw) === canonicalJson(rebuilt),
     "SOURCE_WRITE_ATTESTATION_TAMPERED",
-    "write attestation digest does not match its evidence",
+    "write attestation does not match its authoritative evidence",
+  );
+  return rebuilt;
+}
+
+function writeCasAuthorityReceipt({
+  generation,
+  generationAuthority,
+  attestation,
+  value,
+}) {
+  const raw = object(value, "write CAS authority receipt");
+  exactKeys(
+    raw,
+    [
+      "version",
+      "policyVersion",
+      "kind",
+      "generationRecordDigest",
+      "manifestDigest",
+      "commitRevisionDigest",
+      "durableGenerationRevisionDigest",
+      "generationAuthorityReceiptDigest",
+      "sourceEpochs",
+      "attestationDigest",
+      "canonicalCandidateDigest",
+      "candidateUserAliasDigest",
+      "jobRevisionDigest",
+      "writeScopeDigest",
+      "reservedJobRevisionDigest",
+      "reservationNonceDigest",
+      "issuedAt",
+      "expiresAt",
+      "authorityKeyIdDigest",
+      "receiptMac",
+    ],
+    "SOURCE_WRITE_AUTHORITY_RECEIPT_SHAPE_INVALID",
+    "write CAS authority receipt",
   );
   invariant(
-    raw.manifestDigest === normalized.manifestDigest
-      && raw.commitRevisionDigest
-        === normalized.commitRevisionDigest,
-    "SOURCE_WRITE_ATTESTATION_GENERATION_MISMATCH",
-    "write attestation is bound to another generation",
+    raw.version === SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION
+      && raw.policyVersion === SOURCE_WATERMARK_POLICY_VERSION
+      && raw.kind
+        === AUTHORITY_RECEIPT_KINDS.WRITE_CAS_RESERVED,
+    "SOURCE_WRITE_AUTHORITY_RECEIPT_VERSION_INVALID",
+    "write CAS authority receipt version is invalid",
   );
+  exactKeys(
+    raw.sourceEpochs,
+    ["recall", "paraformHuman", "aliases"],
+    "SOURCE_WRITE_AUTHORITY_RECEIPT_SHAPE_INVALID",
+    "write CAS authority sourceEpochs",
+  );
+  const times = authorityReceiptTimes(raw, {
+    field: "write CAS authority receipt",
+    maxLifetimeMs: WRITE_RECEIPT_MAX_LIFETIME_MS,
+  });
+  const material = {
+    version: raw.version,
+    policyVersion: raw.policyVersion,
+    kind: raw.kind,
+    generationRecordDigest: digest(
+      raw.generationRecordDigest,
+      "write authority generationRecordDigest",
+    ),
+    manifestDigest: digest(
+      raw.manifestDigest,
+      "write authority manifestDigest",
+    ),
+    commitRevisionDigest: digest(
+      raw.commitRevisionDigest,
+      "write authority commitRevisionDigest",
+    ),
+    durableGenerationRevisionDigest: digest(
+      raw.durableGenerationRevisionDigest,
+      "write authority durableGenerationRevisionDigest",
+    ),
+    generationAuthorityReceiptDigest: digest(
+      raw.generationAuthorityReceiptDigest,
+      "write authority generationAuthorityReceiptDigest",
+    ),
+    sourceEpochs: {
+      recall: digest(
+        raw.sourceEpochs.recall,
+        "write authority Recall epoch",
+      ),
+      paraformHuman: digest(
+        raw.sourceEpochs.paraformHuman,
+        "write authority Paraform-human epoch",
+      ),
+      aliases: digest(
+        raw.sourceEpochs.aliases,
+        "write authority alias epoch",
+      ),
+    },
+    attestationDigest: digest(
+      raw.attestationDigest,
+      "write authority attestationDigest",
+    ),
+    canonicalCandidateDigest: digest(
+      raw.canonicalCandidateDigest,
+      "write authority canonicalCandidateDigest",
+    ),
+    candidateUserAliasDigest: digest(
+      raw.candidateUserAliasDigest,
+      "write authority candidateUserAliasDigest",
+    ),
+    jobRevisionDigest: digest(
+      raw.jobRevisionDigest,
+      "write authority jobRevisionDigest",
+    ),
+    writeScopeDigest: digest(
+      raw.writeScopeDigest,
+      "write authority writeScopeDigest",
+    ),
+    reservedJobRevisionDigest: digest(
+      raw.reservedJobRevisionDigest,
+      "write authority reservedJobRevisionDigest",
+    ),
+    reservationNonceDigest: digest(
+      raw.reservationNonceDigest,
+      "write authority reservationNonceDigest",
+    ),
+    issuedAt: times.issuedAt,
+    expiresAt: times.expiresAt,
+    authorityKeyIdDigest: digest(
+      raw.authorityKeyIdDigest,
+      "write authority authorityKeyIdDigest",
+    ),
+  };
+  const receiptMac = verifyAuthorityMac(raw, material);
+  invariant(
+    material.reservedJobRevisionDigest
+      !== material.jobRevisionDigest,
+    "SOURCE_WRITE_CAS_REVISION_INVALID",
+    "write reservation must advance the durable job revision",
+  );
+  invariant(
+    times.issuedMs >= Date.parse(attestation.observedAt)
+      && times.expiresMs
+        <= Date.parse(generationAuthority.expiresAt),
+    "SOURCE_WRITE_AUTHORITY_TIME_MISMATCH",
+    "write reservation is outside its generation authority window",
+  );
+  invariant(
+    material.generationRecordDigest === generation.recordDigest
+      && material.manifestDigest === generation.manifestDigest
+      && material.commitRevisionDigest
+        === generation.commitRevisionDigest
+      && material.durableGenerationRevisionDigest
+        === generationAuthority.durableGenerationRevisionDigest
+      && material.generationAuthorityReceiptDigest
+        === generationAuthority.receiptDigest
+      && currentEpochsMatch(generation, material.sourceEpochs)
+      && material.attestationDigest
+        === attestation.attestationDigest
+      && material.canonicalCandidateDigest
+        === attestation.canonicalCandidateDigest
+      && material.candidateUserAliasDigest
+        === attestation.candidateUserAliasDigest
+      && material.jobRevisionDigest
+        === attestation.jobRevisionDigest
+      && material.writeScopeDigest
+        === attestation.writeScopeDigest,
+    "SOURCE_WRITE_AUTHORITY_MISMATCH",
+    "write reservation is not bound to the exact current write",
+  );
+  const receipt = { ...material, receiptMac };
+  return deepFreeze({
+    ...receipt,
+    receiptDigest: semanticDigest(
+      "phase4-source-write-cas-authority-receipt-v1",
+      receipt,
+    ),
+  });
+}
+
+export function validatePhase4WriteBoundaryAttestation({
+  generation,
+  generationAuthorityReceipt:
+    rawGenerationAuthorityReceipt,
+  attestation,
+  writeAuthorityReceipt,
+  expectedCanonicalCandidateDigest,
+  expectedCandidateUserAliasDigest,
+  expectedJobRevisionDigest,
+  expectedWriteScopeDigest,
+} = {}) {
+  // The private signer must issue writeAuthorityReceipt only after an atomic
+  // compare-and-swap reserves reservedJobRevisionDigest from the exact
+  // jobRevisionDigest. Its short-lived nonce is the downstream idempotency
+  // key. This module verifies receipts but intentionally cannot mint them.
+  const trusted = authorizedReadyGeneration(
+    generation,
+    rawGenerationAuthorityReceipt,
+  );
+  const normalizedAttestation = canonicalWriteAttestation(
+    trusted.generation,
+    trusted.authorityReceipt,
+    attestation,
+  );
+  const writeAuthority = writeCasAuthorityReceipt({
+    generation: trusted.generation,
+    generationAuthority: trusted.authorityReceipt,
+    attestation: normalizedAttestation,
+    value: writeAuthorityReceipt,
+  });
   const expected = {
     canonicalCandidateDigest: digest(
       expectedCanonicalCandidateDigest,
@@ -1557,29 +2380,25 @@ export function validatePhase4WriteBoundaryAttestation({
   };
   for (const [field, value] of Object.entries(expected)) {
     invariant(
-      rebuilt[field] === value,
+      normalizedAttestation[field] === value
+        && writeAuthority[field] === value,
       "SOURCE_WRITE_EXPECTATION_MISMATCH",
       "write attestation does not match the atomic write inputs",
     );
   }
-  const currentObservedAt = canonicalTimestamp(
-    observedAt,
-    "observedAt",
-  );
-  invariant(
-    Date.parse(currentObservedAt)
-      >= Date.parse(rebuilt.observedAt),
-    "SOURCE_WRITE_ATTESTATION_FROM_FUTURE",
-    "write attestation observation is in the future",
-  );
   return deepFreeze({
     allowed: true,
     policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
-    manifestDigest: normalized.manifestDigest,
-    decisionBoundaryAt: normalized.decisionBoundaryAt,
-    callType: rebuilt.callType,
-    callEndedAt: rebuilt.callEndedAt,
-    attestedAt: rebuilt.observedAt,
-    validatedAt: currentObservedAt,
+    manifestDigest: trusted.generation.manifestDigest,
+    decisionBoundaryAt:
+      trusted.generation.decisionBoundaryAt,
+    callType: normalizedAttestation.callType,
+    callEndedAt: normalizedAttestation.callEndedAt,
+    attestedAt: normalizedAttestation.observedAt,
+    validatedAt: new Date().toISOString(),
+    reservedJobRevisionDigest:
+      writeAuthority.reservedJobRevisionDigest,
+    reservationNonceDigest:
+      writeAuthority.reservationNonceDigest,
   });
 }

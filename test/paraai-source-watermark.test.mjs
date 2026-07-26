@@ -1,8 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {
+  createHash,
+  createHmac,
+} from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
+  SOURCE_WATERMARK_APPROVED_COLLECTORS,
+  SOURCE_WATERMARK_AUTHORITY_KEY_ENV,
+  SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION,
   SOURCE_WATERMARK_POLICY_VERSION,
   SOURCE_WATERMARK_SOURCES,
   SourceWatermarkInvariantError,
@@ -11,6 +18,7 @@ import {
   buildSourceWatermarkCertificate,
   buildSourceWatermarkGeneration,
   q37NewestSuccessfulCallDecision,
+  sourceWatermarkAliasSetDigest,
   sourceWatermarkFactSetDigest,
   sourceWatermarkPublicStatus,
   validatePhase4WriteBoundaryAttestation,
@@ -19,8 +27,6 @@ import {
 
 const T = "2026-07-26T00:00:00.000Z";
 const COMMITTED_AT = "2026-07-26T00:06:00.000Z";
-const ATTESTED_AT = "2026-07-26T00:07:00.000Z";
-const VALIDATED_AT = "2026-07-26T00:08:00.000Z";
 const digest = (character) => character.repeat(64);
 
 const CANDIDATE_A = digest("a");
@@ -39,15 +45,237 @@ const GENERATION_NONCE = digest("7");
 const COMMIT_REVISION = digest("8");
 const JOB_REVISION = digest("9");
 const WRITE_SCOPE = digest("0");
+const DURABLE_GENERATION_REVISION = "10".repeat(32);
+const RESERVED_JOB_REVISION = "11".repeat(32);
+const AUTHORITY_NONCE = "12".repeat(32);
+const RESERVATION_NONCE = "13".repeat(32);
+const AUTHORITY_KEY_BYTES = Buffer.alloc(32, 0x42);
+const AUTHORITY_KEY = AUTHORITY_KEY_BYTES.toString("base64url");
+process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV] = AUTHORITY_KEY;
 
-const aliasMapFixture = (entries, overrides = {}) =>
-  buildCanonicalSourceAliasMap(entries, {
+function canonicalJson(value) {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => (
+    `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+  )).join(",")}}`;
+}
+
+function semanticDigest(namespace, value) {
+  return createHash("sha256")
+    .update(namespace)
+    .update("\0")
+    .update(canonicalJson(value))
+    .digest("hex");
+}
+
+function authorityKeyId(key = AUTHORITY_KEY_BYTES) {
+  return createHash("sha256")
+    .update("phase4-source-authority-key-id-v1")
+    .update("\0")
+    .update(key)
+    .digest("hex");
+}
+
+function signAuthorityReceipt(
+  material,
+  key = AUTHORITY_KEY_BYTES,
+) {
+  return createHmac("sha256", key)
+    .update("phase4-source-authority-receipt-v1")
+    .update("\0")
+    .update(canonicalJson(material))
+    .digest("hex");
+}
+
+function sourceEpochsFromGeneration(generation) {
+  return {
+    recall:
+      generation.sources.recall.certificate.sourceEpochDigest,
+    paraformHuman:
+      generation.sources.paraformHuman
+        .certificate.sourceEpochDigest,
+    aliases: generation.aliasMap.aliasEpochDigest,
+  };
+}
+
+function generationAuthorityReceiptFixture(
+  generation,
+  overrides = {},
+) {
+  const now = Date.now();
+  const {
+    receiptMac: overrideMac,
+    signingKey = AUTHORITY_KEY_BYTES,
+    ...fields
+  } = overrides;
+  const material = {
+    version: SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    kind: "source_generation_current",
+    generationRecordDigest: generation.recordDigest,
+    manifestDigest: generation.manifestDigest,
+    commitRevisionDigest: generation.commitRevisionDigest,
+    durableGenerationRevisionDigest:
+      DURABLE_GENERATION_REVISION,
+    decisionBoundaryAt: generation.decisionBoundaryAt,
+    sourceEpochs: sourceEpochsFromGeneration(generation),
+    aliasMapDigest: generation.aliasMap.aliasMapDigest,
+    aliasEvidenceDigest:
+      generation.aliasEvidence.evidenceDigest,
+    collectorPinsDigest: semanticDigest(
+      "phase4-source-approved-collector-pins-v1",
+      SOURCE_WATERMARK_APPROVED_COLLECTORS,
+    ),
+    issuedAt: new Date(now - 1_000).toISOString(),
+    expiresAt: new Date(now + 50_000).toISOString(),
+    receiptNonceDigest: AUTHORITY_NONCE,
+    authorityKeyIdDigest: authorityKeyId(),
+    ...fields,
+  };
+  const receiptMac = overrideMac
+    || signAuthorityReceipt(material, signingKey);
+  return {
+    ...material,
+    receiptMac,
+  };
+}
+
+function generationAuthorityReceiptDigest(receipt) {
+  return semanticDigest(
+    "phase4-source-generation-authority-receipt-v1",
+    receipt,
+  );
+}
+
+function writeAuthorityReceiptFixture({
+  generation,
+  generationAuthorityReceipt,
+  attestation,
+  overrides = {},
+}) {
+  const issuedMs = Math.max(
+    Date.now(),
+    Date.parse(attestation.observedAt),
+  );
+  const {
+    receiptMac: overrideMac,
+    signingKey = AUTHORITY_KEY_BYTES,
+    ...fields
+  } = overrides;
+  const material = {
+    version: SOURCE_WATERMARK_AUTHORITY_RECEIPT_VERSION,
+    policyVersion: SOURCE_WATERMARK_POLICY_VERSION,
+    kind: "phase4_write_cas_reserved",
+    generationRecordDigest: generation.recordDigest,
+    manifestDigest: generation.manifestDigest,
+    commitRevisionDigest: generation.commitRevisionDigest,
+    durableGenerationRevisionDigest:
+      generationAuthorityReceipt.durableGenerationRevisionDigest,
+    generationAuthorityReceiptDigest:
+      generationAuthorityReceiptDigest(
+        generationAuthorityReceipt,
+      ),
+    sourceEpochs: sourceEpochsFromGeneration(generation),
+    attestationDigest: attestation.attestationDigest,
+    canonicalCandidateDigest:
+      attestation.canonicalCandidateDigest,
+    candidateUserAliasDigest:
+      attestation.candidateUserAliasDigest,
+    jobRevisionDigest: attestation.jobRevisionDigest,
+    writeScopeDigest: attestation.writeScopeDigest,
+    reservedJobRevisionDigest: RESERVED_JOB_REVISION,
+    reservationNonceDigest: RESERVATION_NONCE,
+    issuedAt: new Date(issuedMs).toISOString(),
+    expiresAt: new Date(issuedMs + 10_000).toISOString(),
+    authorityKeyIdDigest: authorityKeyId(),
+    ...fields,
+  };
+  const receiptMac = overrideMac
+    || signAuthorityReceipt(material, signingKey);
+  return {
+    ...material,
+    receiptMac,
+  };
+}
+
+function sourceRecordForCandidate(candidate) {
+  return candidate === CANDIDATE_B
+    ? RECORD_RECALL_B
+    : RECORD_RECALL_A;
+}
+
+function sourceRecordForAlias(candidateUser) {
+  return candidateUser === CANDIDATE_USER_B
+    ? RECORD_HUMAN_B
+    : RECORD_HUMAN_A;
+}
+
+function aliasEvidenceEntry(entry) {
+  return {
+    ...entry,
+    recallRecordDigest:
+      entry.recallRecordDigest
+      || sourceRecordForCandidate(
+        entry.canonicalCandidateDigest,
+      ),
+    paraformHumanRecordDigest:
+      entry.paraformHumanRecordDigest
+      || sourceRecordForAlias(
+        entry.candidateUserAliasDigest,
+      ),
+  };
+}
+
+function aliasMapFixture(entries, overrides = {}) {
+  const normalizedEntries = entries.map(aliasEvidenceEntry);
+  const decisionBoundaryAt =
+    overrides.decisionBoundaryAt || T;
+  const semanticDigest = sourceWatermarkAliasSetDigest({
+    decisionBoundaryAt,
+    entries: normalizedEntries,
+  });
+  const passes = overrides.passes || [
+    {
+      passNumber: 1,
+      startedAt: "2026-07-26T00:01:00.000Z",
+      completedAt: "2026-07-26T00:02:00.000Z",
+      exhaustive: true,
+      cursorExhausted: true,
+      pageCount: 1,
+      edgeCount: normalizedEntries.length,
+      semanticDigest,
+      epochAtStart: ALIAS_EPOCH,
+      epochAtEnd: ALIAS_EPOCH,
+    },
+    {
+      passNumber: 2,
+      startedAt: "2026-07-26T00:03:00.000Z",
+      completedAt: "2026-07-26T00:04:00.000Z",
+      exhaustive: true,
+      cursorExhausted: true,
+      pageCount: 1,
+      edgeCount: normalizedEntries.length,
+      semanticDigest,
+      epochAtStart: ALIAS_EPOCH,
+      epochAtEnd: ALIAS_EPOCH,
+    },
+  ];
+  return buildCanonicalSourceAliasMap(normalizedEntries, {
+    decisionBoundaryAt,
+    ...SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases,
     authoritative: true,
     snapshotComplete: true,
-    epochAtStart: ALIAS_EPOCH,
-    epochAtEnd: ALIAS_EPOCH,
+    passes,
     ...overrides,
   });
+}
 
 const recallSuccess = ({
   candidate = CANDIDATE_A,
@@ -151,9 +379,9 @@ function certificateFixture(
   return buildSourceWatermarkCertificate({
     source,
     decisionBoundaryAt,
-    collectorVersion: source === SOURCE_WATERMARK_SOURCES.RECALL
-      ? "recall-source-v1"
-      : "paraform-human-source-v1",
+    ...(source === SOURCE_WATERMARK_SOURCES.RECALL
+      ? SOURCE_WATERMARK_APPROVED_COLLECTORS.recall
+      : SOURCE_WATERMARK_APPROVED_COLLECTORS.paraform_human),
     facts,
     passes: rows,
   });
@@ -466,6 +694,56 @@ test("source facts reject duplicates, post-boundary calls, and cross-source iden
     }),
     /identity kind/,
   );
+  assert.throws(
+    () => sourceWatermarkFactSetDigest({
+      source: SOURCE_WATERMARK_SOURCES.RECALL,
+      decisionBoundaryAt: T,
+      facts: [{
+        ...recallSuccess(),
+        source: SOURCE_WATERMARK_SOURCES.PARAFORM_HUMAN,
+      }],
+    }),
+    (error) => error.code === "SOURCE_FACT_SOURCE_MISMATCH",
+  );
+});
+
+test("collector versions and immutable code commitments are exact release pins", () => {
+  const facts = [recallSuccess()];
+  const certificate = certificateFixture(
+    SOURCE_WATERMARK_SOURCES.RECALL,
+    facts,
+  );
+  for (const overrides of [
+    { collectorVersion: "recall-source-v999" },
+    { collectorCodeCommitmentDigest: digest("f") },
+  ]) {
+    assert.throws(
+      () => buildSourceWatermarkCertificate({
+        source: SOURCE_WATERMARK_SOURCES.RECALL,
+        decisionBoundaryAt: T,
+        ...SOURCE_WATERMARK_APPROVED_COLLECTORS.recall,
+        ...overrides,
+        facts,
+        passes: certificate.passes,
+      }),
+      (error) => error.code === "SOURCE_COLLECTOR_PIN_MISMATCH",
+    );
+  }
+  const aliases = aliasMapFixture([{
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+  }]);
+  assert.throws(
+    () => buildCanonicalSourceAliasMap(aliases.entries, {
+      decisionBoundaryAt: T,
+      ...SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases,
+      collectorVersion: "source-alias-evidence-v999",
+      authoritative: true,
+      snapshotComplete: true,
+      passes: aliases.passes,
+    }),
+    (error) => error.code === "SOURCE_COLLECTOR_PIN_MISMATCH",
+  );
 });
 
 test("alias map is a deterministic one-to-one canonical binding", () => {
@@ -505,8 +783,12 @@ test("alias map requires an authoritative complete snapshot with a stable epoch"
   const incomplete = aliasMapFixture(entries, {
     snapshotComplete: false,
   });
+  const stable = aliasMapFixture(entries);
   const moved = aliasMapFixture(entries, {
-    epochAtEnd: digest("f"),
+    passes: stable.passes.map((pass, index) => ({
+      ...pass,
+      epochAtEnd: index === 1 ? digest("f") : ALIAS_EPOCH,
+    })),
   });
   for (const aliasMap of [
     nonAuthoritative,
@@ -768,6 +1050,22 @@ test("missing canonical alias coverage keeps a planned generation incomplete", (
   assert.equal(generation.q37.identityIssueCount, 1);
 });
 
+test("a bijective alias edge without matching source-record proof remains incomplete", () => {
+  const aliasMap = aliasMapFixture([{
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_B,
+    recallRecordDigest: RECORD_RECALL_A,
+    // This record proves candidate-user A, not the declared B edge.
+    paraformHumanRecordDigest: RECORD_HUMAN_A,
+  }]);
+  assert.equal(aliasMap.complete, true);
+  const generation = generationFixture({ aliasMap });
+  assert.equal(generation.aliasEvidence.sourceProven, false);
+  assert.equal(generation.aliasEvidence.unprovenEntryCount, 1);
+  assert.equal(generation.intrinsicSourceComplete, false);
+  assert.equal(generation.intrinsicQ37Ready, false);
+});
+
 test("an incomplete source or ambiguous Q37 generation cannot be committed", () => {
   const pending = {
     source: SOURCE_WATERMARK_SOURCES.RECALL,
@@ -827,6 +1125,7 @@ test("public readiness is false without a committed current generation", () => {
   const empty = sourceWatermarkPublicStatus();
   const planned = sourceWatermarkPublicStatus({
     generation: generationFixture(),
+    // Former caller-supplied "current" assertions are deliberately ignored.
     currentManifestDigest: digest("f"),
     currentSourceEpochs: currentEpochs(),
   });
@@ -838,47 +1137,91 @@ test("public readiness is false without a committed current generation", () => {
   assert.equal(planned.phase4Q37Ready, false);
 });
 
-test("public readiness requires committed manifest and both current source epochs", () => {
+test("synthetic facts and caller assertions cannot replace private store authority", () => {
   const generation = generationFixture({ status: "committed" });
+  const savedKey = process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV];
+  delete process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV];
+  try {
+    const status = sourceWatermarkPublicStatus({
+      generation,
+      currentManifestDigest: generation.manifestDigest,
+      currentSourceEpochs: currentEpochs(),
+      generationAuthorityReceipt:
+        generationAuthorityReceiptFixture(generation),
+    });
+    assert.equal(status.status, "untrusted");
+    assert.equal(status.phase4Q37Ready, false);
+    assert.throws(
+      () => buildPhase4WriteBoundaryAttestation({
+        generation,
+        generationAuthorityReceipt:
+          generationAuthorityReceiptFixture(generation),
+        canonicalCandidateDigest: CANDIDATE_A,
+        candidateUserAliasDigest: CANDIDATE_USER_A,
+        jobRevisionDigest: JOB_REVISION,
+        writeScopeDigest: WRITE_SCOPE,
+      }),
+      (error) => error.code === "SOURCE_AUTHORITY_UNAVAILABLE",
+    );
+  } finally {
+    process.env[SOURCE_WATERMARK_AUTHORITY_KEY_ENV] = savedKey;
+  }
+});
+
+test("public readiness requires a fresh authenticated durable generation receipt", () => {
+  const generation = generationFixture({ status: "committed" });
+  const authorityReceipt =
+    generationAuthorityReceiptFixture(generation);
   const ready = sourceWatermarkPublicStatus({
     generation,
-    currentManifestDigest: generation.manifestDigest,
-    currentSourceEpochs: currentEpochs(),
+    generationAuthorityReceipt: authorityReceipt,
   });
-  const staleManifest = sourceWatermarkPublicStatus({
+  const missing = sourceWatermarkPublicStatus({
     generation,
-    currentManifestDigest: digest("f"),
-    currentSourceEpochs: currentEpochs(),
   });
-  const staleEpoch = sourceWatermarkPublicStatus({
+  const tamperedRevision = {
+    ...authorityReceipt,
+    durableGenerationRevisionDigest: digest("f"),
+  };
+  const untrusted = sourceWatermarkPublicStatus({
     generation,
-    currentManifestDigest: generation.manifestDigest,
-    currentSourceEpochs: currentEpochs({
-      paraformHuman: digest("f"),
-    }),
+    generationAuthorityReceipt: tamperedRevision,
   });
   assert.equal(ready.status, "ready");
   assert.equal(ready.sourceWatermarkComplete, true);
   assert.equal(ready.phase4Q37Ready, true);
-  assert.equal(staleManifest.status, "stale");
-  assert.equal(staleManifest.phase4Q37Ready, false);
-  assert.equal(staleEpoch.status, "stale");
-  assert.equal(staleEpoch.phase4Q37Ready, false);
-  const malformedCurrent = sourceWatermarkPublicStatus({
-    generation,
-    currentManifestDigest: "not-a-digest",
-    currentSourceEpochs: currentEpochs(),
+  assert.equal(missing.status, "untrusted");
+  assert.equal(missing.phase4Q37Ready, false);
+  assert.equal(untrusted.status, "untrusted");
+  assert.equal(untrusted.phase4Q37Ready, false);
+});
+
+test("validly signed future and expired authority clocks fail closed", () => {
+  const generation = generationFixture({ status: "committed" });
+  const future = generationAuthorityReceiptFixture(generation, {
+    issuedAt: "2099-01-01T00:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:30.000Z",
   });
-  assert.equal(malformedCurrent.status, "stale");
-  assert.equal(malformedCurrent.phase4Q37Ready, false);
+  const expired = generationAuthorityReceiptFixture(generation, {
+    issuedAt: "2026-07-26T00:10:00.000Z",
+    expiresAt: "2026-07-26T00:10:30.000Z",
+  });
+  for (const receipt of [future, expired]) {
+    const status = sourceWatermarkPublicStatus({
+      generation,
+      generationAuthorityReceipt: receipt,
+    });
+    assert.equal(status.status, "untrusted");
+    assert.equal(status.phase4Q37Ready, false);
+  }
 });
 
 test("public readiness is aggregate-only and strips all source and identity digests", () => {
   const generation = generationFixture({ status: "committed" });
   const status = sourceWatermarkPublicStatus({
     generation,
-    currentManifestDigest: generation.manifestDigest,
-    currentSourceEpochs: currentEpochs(),
+    generationAuthorityReceipt:
+      generationAuthorityReceiptFixture(generation),
   });
   const serialized = JSON.stringify(status);
   for (const privateDigest of [
@@ -904,8 +1247,8 @@ test("invalid persisted generation fails closed in public status", () => {
   generation.manifestDigest = digest("f");
   const status = sourceWatermarkPublicStatus({
     generation,
-    currentManifestDigest: digest("f"),
-    currentSourceEpochs: currentEpochs(),
+    generationAuthorityReceipt:
+      generationAuthorityReceiptFixture(generation),
   });
   assert.equal(status.status, "invalid");
   assert.equal(status.sourceWatermarkComplete, false);
@@ -914,19 +1257,25 @@ test("invalid persisted generation fails closed in public status", () => {
 
 test("write attestation binds manifest, alias, Q37, job revision, and write scope", () => {
   const generation = generationFixture({ status: "committed" });
+  const generationAuthorityReceipt =
+    generationAuthorityReceiptFixture(generation);
   const attestation = buildPhase4WriteBoundaryAttestation({
     generation,
+    generationAuthorityReceipt,
     canonicalCandidateDigest: CANDIDATE_A,
     candidateUserAliasDigest: CANDIDATE_USER_A,
     jobRevisionDigest: JOB_REVISION,
     writeScopeDigest: WRITE_SCOPE,
-    observedAt: ATTESTED_AT,
   });
   assert.equal(attestation.manifestDigest, generation.manifestDigest);
   assert.equal(attestation.callType, "human");
   assert.equal(
     attestation.q37DecisionDigest,
     generation.q37.decisions[0].decisionDigest,
+  );
+  assert.equal(
+    attestation.durableGenerationRevisionDigest,
+    DURABLE_GENERATION_REVISION,
   );
   assert.equal(attestation.sourceEpochs.recall, RECALL_EPOCH);
   assert.equal(
@@ -937,98 +1286,127 @@ test("write attestation binds manifest, alias, Q37, job revision, and write scop
 
 test("atomic write-boundary validator allows only the exact current attestation", () => {
   const generation = generationFixture({ status: "committed" });
+  const generationAuthorityReceipt =
+    generationAuthorityReceiptFixture(generation);
   const attestation = buildPhase4WriteBoundaryAttestation({
     generation,
+    generationAuthorityReceipt,
     canonicalCandidateDigest: CANDIDATE_A,
     candidateUserAliasDigest: CANDIDATE_USER_A,
     jobRevisionDigest: JOB_REVISION,
     writeScopeDigest: WRITE_SCOPE,
-    observedAt: ATTESTED_AT,
+  });
+  const writeAuthorityReceipt = writeAuthorityReceiptFixture({
+    generation,
+    generationAuthorityReceipt,
+    attestation,
   });
   const result = validatePhase4WriteBoundaryAttestation({
     generation,
+    generationAuthorityReceipt,
     attestation,
-    currentManifestDigest: generation.manifestDigest,
-    currentSourceEpochs: currentEpochs(),
+    writeAuthorityReceipt,
     expectedCanonicalCandidateDigest: CANDIDATE_A,
     expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
     expectedJobRevisionDigest: JOB_REVISION,
     expectedWriteScopeDigest: WRITE_SCOPE,
-    observedAt: VALIDATED_AT,
   });
   assert.equal(result.allowed, true);
   assert.equal(result.callType, "human");
   assert.equal(result.manifestDigest, generation.manifestDigest);
+  assert.equal(
+    result.reservedJobRevisionDigest,
+    RESERVED_JOB_REVISION,
+  );
 });
 
-test("atomic validator rejects manifest substitution and source epoch drift", () => {
+test("write authorization rejects missing, forged, or stale durable authority", () => {
   const generation = generationFixture({ status: "committed" });
+  const generationAuthorityReceipt =
+    generationAuthorityReceiptFixture(generation);
   const attestation = buildPhase4WriteBoundaryAttestation({
     generation,
+    generationAuthorityReceipt,
     canonicalCandidateDigest: CANDIDATE_A,
     candidateUserAliasDigest: CANDIDATE_USER_A,
     jobRevisionDigest: JOB_REVISION,
     writeScopeDigest: WRITE_SCOPE,
-    observedAt: ATTESTED_AT,
+  });
+  const writeAuthorityReceipt = writeAuthorityReceiptFixture({
+    generation,
+    generationAuthorityReceipt,
+    attestation,
   });
   const base = {
     generation,
+    generationAuthorityReceipt,
     attestation,
-    currentManifestDigest: generation.manifestDigest,
-    currentSourceEpochs: currentEpochs(),
+    writeAuthorityReceipt,
     expectedCanonicalCandidateDigest: CANDIDATE_A,
     expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
     expectedJobRevisionDigest: JOB_REVISION,
     expectedWriteScopeDigest: WRITE_SCOPE,
-    observedAt: VALIDATED_AT,
   };
   assert.throws(
     () => validatePhase4WriteBoundaryAttestation({
       ...base,
-      currentManifestDigest: digest("f"),
+      writeAuthorityReceipt: null,
     }),
-    (error) => error.code === "SOURCE_WRITE_GENERATION_STALE",
+    /write CAS authority receipt must be an object/,
+  );
+  const forgedWrite = {
+    ...writeAuthorityReceipt,
+    receiptMac: digest("f"),
+  };
+  assert.throws(
+    () => validatePhase4WriteBoundaryAttestation({
+      ...base,
+      writeAuthorityReceipt: forgedWrite,
+    }),
+    (error) => error.code === "SOURCE_AUTHORITY_RECEIPT_INVALID",
+  );
+  const staleGeneration = generationAuthorityReceiptFixture(
+    generation,
+    {
+      issuedAt: "2026-07-26T00:10:00.000Z",
+      expiresAt: "2026-07-26T00:10:30.000Z",
+    },
   );
   assert.throws(
     () => validatePhase4WriteBoundaryAttestation({
       ...base,
-      currentSourceEpochs: currentEpochs({
-        recall: digest("f"),
-      }),
+      generationAuthorityReceipt: staleGeneration,
     }),
-    (error) => error.code === "SOURCE_WRITE_EPOCH_STALE",
-  );
-  assert.throws(
-    () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      currentSourceEpochs: currentEpochs({
-        aliases: digest("f"),
-      }),
-    }),
-    (error) => error.code === "SOURCE_WRITE_EPOCH_STALE",
+    (error) => error.code === "SOURCE_AUTHORITY_RECEIPT_STALE",
   );
 });
 
 test("atomic validator rejects tampering and every expected-boundary mismatch", () => {
   const generation = generationFixture({ status: "committed" });
+  const generationAuthorityReceipt =
+    generationAuthorityReceiptFixture(generation);
   const attestation = buildPhase4WriteBoundaryAttestation({
     generation,
+    generationAuthorityReceipt,
     canonicalCandidateDigest: CANDIDATE_A,
     candidateUserAliasDigest: CANDIDATE_USER_A,
     jobRevisionDigest: JOB_REVISION,
     writeScopeDigest: WRITE_SCOPE,
-    observedAt: ATTESTED_AT,
+  });
+  const writeAuthorityReceipt = writeAuthorityReceiptFixture({
+    generation,
+    generationAuthorityReceipt,
+    attestation,
   });
   const base = {
     generation,
+    generationAuthorityReceipt,
     attestation,
-    currentManifestDigest: generation.manifestDigest,
-    currentSourceEpochs: currentEpochs(),
+    writeAuthorityReceipt,
     expectedCanonicalCandidateDigest: CANDIDATE_A,
     expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
     expectedJobRevisionDigest: JOB_REVISION,
     expectedWriteScopeDigest: WRITE_SCOPE,
-    observedAt: VALIDATED_AT,
   };
   const tampered = structuredClone(attestation);
   tampered.jobRevisionDigest = digest("f");
@@ -1062,14 +1440,65 @@ test("atomic validator rejects tampering and every expected-boundary mismatch", 
       (error) => error.code === "SOURCE_WRITE_EXPECTATION_MISMATCH",
     );
   }
+});
+
+test("stale revision and attestation replay cannot cross authority generations", () => {
+  const generation = generationFixture({ status: "committed" });
+  const firstAuthority =
+    generationAuthorityReceiptFixture(generation);
+  const attestation = buildPhase4WriteBoundaryAttestation({
+    generation,
+    generationAuthorityReceipt: firstAuthority,
+    canonicalCandidateDigest: CANDIDATE_A,
+    candidateUserAliasDigest: CANDIDATE_USER_A,
+    jobRevisionDigest: JOB_REVISION,
+    writeScopeDigest: WRITE_SCOPE,
+  });
+  const secondAuthority = generationAuthorityReceiptFixture(
+    generation,
+    {
+      durableGenerationRevisionDigest: digest("f"),
+      receiptNonceDigest: digest("e"),
+    },
+  );
+  const replayReceipt = writeAuthorityReceiptFixture({
+    generation,
+    generationAuthorityReceipt: firstAuthority,
+    attestation,
+  });
   assert.throws(
     () => validatePhase4WriteBoundaryAttestation({
-      ...base,
-      observedAt: "2026-07-26T00:06:30.000Z",
+      generation,
+      generationAuthorityReceipt: secondAuthority,
+      attestation,
+      writeAuthorityReceipt: replayReceipt,
+      expectedCanonicalCandidateDigest: CANDIDATE_A,
+      expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
+      expectedJobRevisionDigest: JOB_REVISION,
+      expectedWriteScopeDigest: WRITE_SCOPE,
     }),
-    (error) => (
-      error.code === "SOURCE_WRITE_ATTESTATION_FROM_FUTURE"
-    ),
+    (error) => error.code === "SOURCE_WRITE_ATTESTATION_TAMPERED",
+  );
+  const wrongRevisionReceipt = writeAuthorityReceiptFixture({
+    generation,
+    generationAuthorityReceipt: firstAuthority,
+    attestation,
+    overrides: {
+      jobRevisionDigest: digest("f"),
+    },
+  });
+  assert.throws(
+    () => validatePhase4WriteBoundaryAttestation({
+      generation,
+      generationAuthorityReceipt: firstAuthority,
+      attestation,
+      writeAuthorityReceipt: wrongRevisionReceipt,
+      expectedCanonicalCandidateDigest: CANDIDATE_A,
+      expectedCandidateUserAliasDigest: CANDIDATE_USER_A,
+      expectedJobRevisionDigest: JOB_REVISION,
+      expectedWriteScopeDigest: WRITE_SCOPE,
+    }),
+    (error) => error.code === "SOURCE_WRITE_AUTHORITY_MISMATCH",
   );
 });
 
@@ -1085,28 +1514,32 @@ test("attestation rejects unknown aliases and candidates without a successful ca
       classification: "failure",
     }],
   });
+  const noSuccessAuthority =
+    generationAuthorityReceiptFixture(noSuccessGeneration);
   assert.throws(
     () => buildPhase4WriteBoundaryAttestation({
       generation: noSuccessGeneration,
+      generationAuthorityReceipt: noSuccessAuthority,
       canonicalCandidateDigest: CANDIDATE_A,
       candidateUserAliasDigest: CANDIDATE_USER_A,
       jobRevisionDigest: JOB_REVISION,
       writeScopeDigest: WRITE_SCOPE,
-      observedAt: ATTESTED_AT,
     }),
     (error) => (
       error.code === "SOURCE_ATTESTATION_Q37_NOT_SELECTED"
     ),
   );
   const generation = generationFixture({ status: "committed" });
+  const generationAuthorityReceipt =
+    generationAuthorityReceiptFixture(generation);
   assert.throws(
     () => buildPhase4WriteBoundaryAttestation({
       generation,
+      generationAuthorityReceipt,
       canonicalCandidateDigest: CANDIDATE_A,
       candidateUserAliasDigest: digest("f"),
       jobRevisionDigest: JOB_REVISION,
       writeScopeDigest: WRITE_SCOPE,
-      observedAt: ATTESTED_AT,
     }),
     (error) => error.code === "SOURCE_ATTESTATION_ALIAS_MISMATCH",
   );
@@ -1134,6 +1567,18 @@ test("dashboard health exposes only aggregate dark readiness and keeps enrollmen
     source.indexOf("health.automation.ready = Boolean("),
   );
   assert.match(enrollment, /health\.phase4Q37Ready/);
+});
+
+test("authority receipt minting is not exported from the policy module", async () => {
+  const policy = await import(
+    "../api/paraai/_lib/source-watermark.mjs"
+  );
+  for (const name of Object.keys(policy)) {
+    assert.doesNotMatch(
+      name,
+      /(mint|issue|sign).*authority.*receipt/i,
+    );
+  }
 });
 
 test("policy module stays capture-independent and contains no identifier-shaped public fields", () => {
