@@ -14,9 +14,9 @@ import {
 } from "./phase3-shadow-policy.mjs";
 
 export const PHASE4_CURATION_CONTRACT_VERSION =
-  "phase4-curation-contract-v1";
-export const PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION = 1;
-export const PHASE4_CURATION_OBSERVATION_VERSION = 1;
+  "phase4-curation-contract-v2";
+export const PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION = 2;
+export const PHASE4_CURATION_OBSERVATION_VERSION = 2;
 
 export const PHASE4_MATCH_READ_PROCEDURE =
   "candidateMatching.getRankedRolesForCandidate";
@@ -26,6 +26,10 @@ export const PHASE4_CURATED_LIST_ADD_PROCEDURE =
   "curatedRoleList.addRolesToCuratedList";
 export const PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE =
   "candidateUser.getCandidateNotificationSettings";
+// This is a store-owned source-generation observation, not a Paraform RPC.
+// No producer is implemented in this dark module.
+export const PHASE4_CANDIDATE_IDENTITY_PROCEDURE =
+  "raydar.sourceGeneration.getCandidateIdentity";
 
 export const PHASE4_CURATED_LIST_ADD_TYPE = "candidate";
 export const PHASE4_CURATED_LIST_ADD_SOURCE = "ADD_TO_ROLES";
@@ -33,6 +37,7 @@ export const PHASE4_ROLE_ADDED_NOTIFICATION_TYPE =
   "CURATED_LIST_ROLE_ADDED";
 
 export const PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS = 5 * 60_000;
+export const PHASE4_OBSERVATION_PROOF_MAX_AGE_MS = 15 * 60_000;
 export const PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS = 48 * 60 * 60_000;
 export const PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX =
   CURATED_ADD_ATTEMPT_LIMIT_MAX;
@@ -62,9 +67,14 @@ const SAFE_TOKEN_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/u;
 const MAX_CURATED_ROLE_IDS = 250;
 const MATCH_PROOF = Symbol("phase4-match-proof");
 const READBACK_PROOF = Symbol("phase4-readback-proof");
+const IDENTITY_PROOF = Symbol("phase4-identity-proof");
 const NOTIFICATION_PROOF = Symbol("phase4-notification-proof");
 const WRITE_PLAN = Symbol("phase4-write-plan");
 const WRITE_AUTHORIZATION = Symbol("phase4-write-authorization");
+const AUTHORIZED_REQUEST = Symbol("phase4-authorized-request");
+const MUTATION_OUTCOME = Symbol("phase4-mutation-outcome");
+const REPLAN_REQUIREMENT = Symbol("phase4-replan-requirement");
+const GLOBAL_WRITE_AUTHORITY = Symbol("phase4-global-write-authority");
 
 const CAPTURE_TOP_LEVEL_KEYS = Object.freeze([
   "addContract",
@@ -74,12 +84,28 @@ const CAPTURE_TOP_LEVEL_KEYS = Object.freeze([
   "cleanup",
   "contractVersion",
   "emailSilence",
+  "evidenceDigests",
+  "implementationDigest",
   "notificationContract",
   "observedThroughAt",
   "readbackContract",
   "semanticDigest",
   "status",
   "version",
+]);
+const CAPTURE_EVIDENCE_DIGEST_KEYS = Object.freeze([
+  "addResponse",
+  "cleanup",
+  "duplicateAfterReadback",
+  "duplicateBeforeReadback",
+  "duplicateMutationOutcome",
+  "identityBinding",
+  "implicitCreateAfterReadback",
+  "implicitCreateBeforeReadback",
+  "implicitCreateMutationOutcome",
+  "mailboxSilence",
+  "notificationAfter",
+  "notificationBefore",
 ]);
 const CAPTURE_ADD_CONTRACT_KEYS = Object.freeze([
   "inputKeys",
@@ -129,6 +155,9 @@ const OBSERVATION_KEYS = Object.freeze([
   "procedure",
   "response",
   "responseDigest",
+  "scopeDigest",
+  "sourceCasRevision",
+  "sourceGenerationDigest",
   "version",
 ]);
 
@@ -143,6 +172,7 @@ export const PHASE4_CURATED_LIST_CAPTURE_ATTESTATION = Object.freeze({
 });
 
 export const PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST = null;
+export const PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST = null;
 
 function frozenArray(value) {
   return Object.freeze([...value]);
@@ -251,6 +281,56 @@ function strictPositiveInteger(value, field) {
   return value;
 }
 
+function exactScopeContext({
+  scopeDigest,
+  sourceGenerationDigest,
+  sourceCasRevision,
+  trustedNow,
+} = {}) {
+  const exactTrustedNow = canonicalIso(trustedNow);
+  if (
+    !lowercaseDigest(scopeDigest)
+    || !lowercaseDigest(sourceGenerationDigest)
+    || !Number.isSafeInteger(sourceCasRevision)
+    || sourceCasRevision < 1
+    || !exactTrustedNow
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow: exactTrustedNow,
+  });
+}
+
+function sameScope(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.scopeDigest === right.scopeDigest
+    && left.sourceGenerationDigest === right.sourceGenerationDigest
+    && left.sourceCasRevision === right.sourceCasRevision
+  );
+}
+
+function observationFreshAt(observedAt, trustedNow, maxAgeMs) {
+  const observed = canonicalIso(observedAt);
+  const now = canonicalIso(trustedNow);
+  if (!observed || !now) return false;
+  const ageMs = Date.parse(now) - Date.parse(observed);
+  return ageMs >= 0 && ageMs <= maxAgeMs;
+}
+
+function proofScopeFields(context) {
+  return {
+    scopeDigest: context?.scopeDigest || null,
+    sourceGenerationDigest: context?.sourceGenerationDigest || null,
+    sourceCasRevision: context?.sourceCasRevision || null,
+  };
+}
+
 function invalidMatchProof(errorCode) {
   return Object.freeze({
     [MATCH_PROOF]: true,
@@ -268,6 +348,9 @@ function invalidMatchProof(errorCode) {
     recommendedCount: 0,
     possibleCount: 0,
     targetCount: 0,
+    scopeDigest: null,
+    sourceGenerationDigest: null,
+    sourceCasRevision: null,
   });
 }
 
@@ -287,6 +370,26 @@ function invalidReadbackProof(errorCode) {
     listId: null,
     roleIds: Object.freeze([]),
     roleCount: 0,
+    scopeDigest: null,
+    sourceGenerationDigest: null,
+    sourceCasRevision: null,
+  });
+}
+
+function invalidIdentityProof(errorCode) {
+  return Object.freeze({
+    [IDENTITY_PROOF]: true,
+    valid: false,
+    authoritative: false,
+    complete: false,
+    errorCode,
+    observedAt: null,
+    responseDigest: null,
+    candidateId: null,
+    candidateUserId: null,
+    scopeDigest: null,
+    sourceGenerationDigest: null,
+    sourceCasRevision: null,
   });
 }
 
@@ -303,6 +406,9 @@ function invalidNotificationProof(errorCode) {
     candidateUserId: null,
     notificationTypes: Object.freeze([]),
     roleAddedNotificationEnabled: null,
+    scopeDigest: null,
+    sourceGenerationDigest: null,
+    sourceCasRevision: null,
   });
 }
 
@@ -313,17 +419,99 @@ function expectedCaptureResponseKeys(value) {
   );
 }
 
-function canonicalJsonValue(value) {
+function canonicalJsonValue(value, { omitSemanticDigest = false } = {}) {
   if (Array.isArray(value)) {
-    return value.map((item) => canonicalJsonValue(item));
+    return value.map((item) => canonicalJsonValue(
+      item,
+      { omitSemanticDigest },
+    ));
   }
   const record = plainRecord(value);
   if (!record) return value;
   return Object.fromEntries(
     Object.keys(record)
       .sort()
-      .filter((key) => key !== "semanticDigest")
-      .map((key) => [key, canonicalJsonValue(record[key])]),
+      .filter((key) => !(omitSemanticDigest && key === "semanticDigest"))
+      .map((key) => [
+        key,
+        canonicalJsonValue(record[key], { omitSemanticDigest }),
+      ]),
+  );
+}
+
+function canonicalDigest(value, options) {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalJsonValue(value, options)))
+    .digest("hex");
+}
+
+function canonicalObservationResponse(procedure, response) {
+  if (procedure === PHASE4_MATCH_READ_PROCEDURE) {
+    const record = plainRecord(response);
+    return record
+      ? {
+        roles: Array.isArray(record.roles)
+          ? record.roles.map((role) => {
+            const item = plainRecord(role);
+            return item
+              ? {
+                endorsed: item.endorsed,
+                roleId: item.roleId,
+                suggested: item.suggested,
+              }
+              : null;
+          })
+          : record.roles,
+        status: record.status,
+      }
+      : response;
+  }
+  if (procedure === PHASE4_CURATED_LIST_READ_PROCEDURE) {
+    if (response === null) return null;
+    const record = plainRecord(response);
+    return record
+      ? {
+        candidate_id: record.candidate_id,
+        candidate_user_id: record.candidate_user_id,
+        id: record.id,
+        roles: Array.isArray(record.roles)
+          ? record.roles.map((role) => {
+            const item = plainRecord(role);
+            return item ? { id: item.id } : null;
+          })
+          : record.roles,
+      }
+      : response;
+  }
+  if (procedure === PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE) {
+    const record = plainRecord(response);
+    return record
+      ? { notification_types: record.notification_types }
+      : response;
+  }
+  if (procedure === PHASE4_CANDIDATE_IDENTITY_PROCEDURE) {
+    const record = plainRecord(response);
+    return record
+      ? {
+        candidate_id: record.candidate_id,
+        candidate_user_id: record.candidate_user_id,
+      }
+      : response;
+  }
+  return response;
+}
+
+/**
+ * Compute the procedure-specific canonical digest used by source observations.
+ * Match display fields (including score) are deliberately outside the semantic
+ * contract and are never read.
+ */
+export function phase4CurationObservationResponseDigest(
+  procedure,
+  response,
+) {
+  return canonicalDigest(
+    canonicalObservationResponse(procedure, response),
   );
 }
 
@@ -335,9 +523,7 @@ export function phase4CuratedListCaptureSemanticDigest(value) {
   if (!plainRecord(value)) {
     throw new TypeError("capture attestation must be an object");
   }
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalJsonValue(value)))
-    .digest("hex");
+  return canonicalDigest(value, { omitSemanticDigest: true });
 }
 
 /**
@@ -347,11 +533,22 @@ export function phase4CuratedListCaptureSemanticDigest(value) {
  */
 export function validatePhase4CuratedListCaptureAttestation(
   value,
-  { expectedSemanticDigest = null } = {},
+  {
+    expectedSemanticDigest = null,
+    expectedImplementationDigest = null,
+    trustedNow = null,
+  } = {},
 ) {
   const reasons = [];
+  const trustedNowIso = canonicalIso(trustedNow);
   if (!lowercaseDigest(expectedSemanticDigest)) {
     reasons.push("capture_attestation_unpinned");
+  }
+  if (!lowercaseDigest(expectedImplementationDigest)) {
+    reasons.push("capture_implementation_unpinned");
+  }
+  if (!trustedNowIso) {
+    reasons.push("capture_trusted_time_invalid");
   }
   if (!hasExactKeys(value, CAPTURE_TOP_LEVEL_KEYS)) {
     reasons.push("capture_attestation_shape_invalid");
@@ -372,12 +569,36 @@ export function validatePhase4CuratedListCaptureAttestation(
     ) {
       reasons.push("capture_attestation_digest_invalid");
     }
+    if (
+      !lowercaseDigest(value.implementationDigest)
+      || value.implementationDigest !== expectedImplementationDigest
+    ) {
+      reasons.push("capture_implementation_digest_invalid");
+    }
+    if (
+      !hasExactKeys(
+        value.evidenceDigests,
+        CAPTURE_EVIDENCE_DIGEST_KEYS,
+      )
+      || CAPTURE_EVIDENCE_DIGEST_KEYS.some(
+        (key) => !lowercaseDigest(value.evidenceDigests?.[key]),
+      )
+    ) {
+      reasons.push("capture_evidence_digests_invalid");
+    }
     const capturedAt = canonicalIso(value.capturedAt);
     const observedThroughAt = canonicalIso(value.observedThroughAt);
     if (
       !capturedAt
       || !observedThroughAt
       || Date.parse(observedThroughAt) < Date.parse(capturedAt)
+      || (
+        trustedNowIso
+        && (
+          Date.parse(capturedAt) > Date.parse(trustedNowIso)
+          || Date.parse(observedThroughAt) > Date.parse(trustedNowIso)
+        )
+      )
     ) {
       reasons.push("capture_attestation_time_invalid");
     }
@@ -463,7 +684,7 @@ export function validatePhase4CuratedListCaptureAttestation(
         capturedAt
         && observedThroughAt
         && Date.parse(observedThroughAt) - Date.parse(capturedAt)
-          < PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS
+          !== value.emailSilence.observedForMs
       )
     ) {
       reasons.push("capture_email_silence_invalid");
@@ -495,12 +716,17 @@ export function validatePhase4CuratedListCaptureAttestation(
   });
 }
 
-export function currentPhase4CuratedListCaptureDecision() {
+export function currentPhase4CuratedListCaptureDecision({
+  trustedNow = new Date().toISOString(),
+} = {}) {
   return validatePhase4CuratedListCaptureAttestation(
     PHASE4_CURATED_LIST_CAPTURE_ATTESTATION,
     {
       expectedSemanticDigest:
         PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST,
+      expectedImplementationDigest:
+        PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST,
+      trustedNow,
     },
   );
 }
@@ -508,9 +734,10 @@ export function currentPhase4CuratedListCaptureDecision() {
 /**
  * Collapse the expected add response into the only reconciliation states the
  * policy accepts. Transport failure and any response-shape drift are both
- * unknown: neither can authorize an original-set retry.
+ * unknown. This pure classifier is intentionally unbranded: its result can be
+ * inspected and capture-tested, but cannot be passed to reconciliation.
  */
-export function phase4CuratedListMutationOutcome({
+export function classifyPhase4CuratedListAddResponse({
   responseReceived,
   response = null,
 } = {}) {
@@ -522,7 +749,23 @@ export function phase4CuratedListMutationOutcome({
       rejected: false,
       externalWriteMayHaveLanded: true,
       curatedRoleListId: null,
+      responseDigest: null,
       errorCode: "mutation_response_unknown",
+    });
+  }
+  let responseDigest;
+  try {
+    responseDigest = canonicalDigest(response);
+  } catch {
+    return Object.freeze({
+      outcome: "unknown",
+      responseContractValid: false,
+      accepted: false,
+      rejected: false,
+      externalWriteMayHaveLanded: true,
+      curatedRoleListId: null,
+      responseDigest: null,
+      errorCode: "mutation_response_shape_invalid",
     });
   }
   const record = plainRecord(response);
@@ -534,6 +777,7 @@ export function phase4CuratedListMutationOutcome({
       rejected: false,
       externalWriteMayHaveLanded: true,
       curatedRoleListId: null,
+      responseDigest,
       errorCode: "mutation_response_shape_invalid",
     });
   }
@@ -578,6 +822,7 @@ export function phase4CuratedListMutationOutcome({
       rejected: false,
       externalWriteMayHaveLanded: true,
       curatedRoleListId: null,
+      responseDigest,
       errorCode: "mutation_response_shape_invalid",
     });
   }
@@ -588,8 +833,131 @@ export function phase4CuratedListMutationOutcome({
     rejected: !record.success,
     externalWriteMayHaveLanded: false,
     curatedRoleListId: record.success ? listId : null,
+    responseDigest,
     errorCode: record.success ? null : "mutation_rejected",
   });
+}
+
+/**
+ * Bind a pure add-response classification to the exact authorized request and
+ * trusted observation time. Only this private-brand result can be reconciled.
+ */
+export function phase4CuratedListMutationOutcome({
+  request,
+  responseReceived,
+  response = null,
+  observedAt,
+  trustedNow,
+} = {}) {
+  const observedAtIso = canonicalIso(observedAt);
+  const context = exactScopeContext({
+    ...proofScopeFields(request),
+    trustedNow,
+  });
+  const expectedRequestDigest = request?.[AUTHORIZED_REQUEST] === true
+    ? canonicalDigest({
+      contractVersion: request.contractVersion,
+      ...proofScopeFields(request),
+      planSemanticDigest: request.planSemanticDigest,
+      captureSemanticDigest: request.captureSemanticDigest,
+      captureImplementationDigest:
+        request.captureImplementationDigest,
+      executionAt: request.executionAt,
+      procedure: request.procedure,
+      method: request.method,
+      input: request.input,
+    })
+    : null;
+  if (
+    request?.[AUTHORIZED_REQUEST] !== true
+    || !context
+    || request.contractVersion !== PHASE4_CURATION_CONTRACT_VERSION
+    || request.requestDigest !== expectedRequestDigest
+    || !observedAtIso
+    || !observationFreshAt(
+      observedAtIso,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+    || Date.parse(observedAtIso) < Date.parse(request.executionAt)
+  ) {
+    throw new TypeError(
+      "mutation outcome requires the exact branded request and trusted time",
+    );
+  }
+  const classification = classifyPhase4CuratedListAddResponse({
+    responseReceived,
+    response,
+  });
+  const base = {
+    [MUTATION_OUTCOME]: true,
+    ...proofScopeFields(request),
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    request,
+    requestDigest: request.requestDigest,
+    observedAt: observedAtIso,
+  };
+  if (
+    classification.accepted
+    && request.plan.existingListId
+    && classification.curatedRoleListId !== request.plan.existingListId
+  ) {
+    return Object.freeze({
+      ...base,
+      outcome: "unknown",
+      responseContractValid: false,
+      accepted: false,
+      rejected: false,
+      externalWriteMayHaveLanded: true,
+      curatedRoleListId: null,
+      responseDigest: classification.responseDigest,
+      errorCode: "mutation_list_identity_mismatch",
+    });
+  }
+  return Object.freeze({
+    ...base,
+    ...classification,
+  });
+}
+
+function observationContractError(
+  observation,
+  context,
+  expectedProcedure,
+  expectedInputKeys,
+) {
+  if (!context) return "expected_context_invalid";
+  if (!hasExactKeys(observation, OBSERVATION_KEYS)) {
+    return "observation_shape_invalid";
+  }
+  if (
+    observation.version !== PHASE4_CURATION_OBSERVATION_VERSION
+    || observation.procedure !== expectedProcedure
+    || observation.authoritative !== true
+    || observation.complete !== true
+    || !hasExactKeys(observation.input, expectedInputKeys)
+    || !sameScope(observation, context)
+    || !observationFreshAt(
+      observation.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+    || !lowercaseDigest(observation.responseDigest)
+  ) {
+    return "observation_contract_invalid";
+  }
+  let responseDigest;
+  try {
+    responseDigest = phase4CurationObservationResponseDigest(
+      expectedProcedure,
+      observation.response,
+    );
+  } catch {
+    return "response_digest_invalid";
+  }
+  return responseDigest === observation.responseDigest
+    ? null
+    : "response_digest_invalid";
 }
 
 /**
@@ -599,31 +967,41 @@ export function phase4CuratedListMutationOutcome({
  */
 export function normalizePhase4RankedMatchObservation(
   observation,
-  { candidateId, recruiterUserId } = {},
+  {
+    candidateId,
+    recruiterUserId,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  } = {},
 ) {
   const expectedCandidateId = boundedId(candidateId);
   const expectedRecruiterUserId = boundedId(recruiterUserId);
+  const context = exactScopeContext({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  });
   if (!expectedCandidateId || !expectedRecruiterUserId) {
     return invalidMatchProof("expected_identity_invalid");
   }
-  if (!hasExactKeys(observation, OBSERVATION_KEYS)) {
-    return invalidMatchProof("observation_shape_invalid");
-  }
-  if (
-    observation.version !== PHASE4_CURATION_OBSERVATION_VERSION
-    || observation.procedure !== PHASE4_MATCH_READ_PROCEDURE
-    || observation.authoritative !== true
-    || observation.complete !== true
-    || !canonicalIso(observation.observedAt)
-    || !lowercaseDigest(observation.responseDigest)
-    || !hasExactKeys(observation.input, [
+  const contractError = observationContractError(
+    observation,
+    context,
+    PHASE4_MATCH_READ_PROCEDURE,
+    [
       "candidate_id",
       "recruiter_user_id",
-    ])
+    ],
+  );
+  if (
+    contractError
     || observation.input.candidate_id !== expectedCandidateId
     || observation.input.recruiter_user_id !== expectedRecruiterUserId
   ) {
-    return invalidMatchProof("observation_contract_invalid");
+    return invalidMatchProof(contractError || "observation_contract_invalid");
   }
   const response = plainRecord(observation.response);
   if (
@@ -679,6 +1057,7 @@ export function normalizePhase4RankedMatchObservation(
     recommendedCount: recommendedRoleIds.length,
     possibleCount: possibleRoleIds.length,
     targetCount: targetRoleIds.length,
+    ...proofScopeFields(context),
   });
 }
 
@@ -690,30 +1069,39 @@ export function normalizePhase4RankedMatchObservation(
  */
 export function normalizePhase4CuratedListReadback(
   observation,
-  { candidateId, candidateUserId } = {},
+  {
+    candidateId,
+    candidateUserId,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  } = {},
 ) {
   const expectedCandidateId = boundedId(candidateId);
   const expectedCandidateUserId = boundedId(candidateUserId);
+  const context = exactScopeContext({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  });
   if (!expectedCandidateId || !expectedCandidateUserId) {
     return invalidReadbackProof("expected_identity_invalid");
   }
-  if (!hasExactKeys(observation, OBSERVATION_KEYS)) {
-    return invalidReadbackProof("observation_shape_invalid");
-  }
+  const contractError = observationContractError(
+    observation,
+    context,
+    PHASE4_CURATED_LIST_READ_PROCEDURE,
+    PHASE4_CURATED_LIST_READ_INPUT_KEYS,
+  );
   if (
-    observation.version !== PHASE4_CURATION_OBSERVATION_VERSION
-    || observation.procedure !== PHASE4_CURATED_LIST_READ_PROCEDURE
-    || observation.authoritative !== true
-    || observation.complete !== true
-    || !canonicalIso(observation.observedAt)
-    || !lowercaseDigest(observation.responseDigest)
-    || !hasExactKeys(
-      observation.input,
-      PHASE4_CURATED_LIST_READ_INPUT_KEYS,
-    )
+    contractError
     || observation.input.candidate_id !== expectedCandidateId
   ) {
-    return invalidReadbackProof("observation_contract_invalid");
+    return invalidReadbackProof(
+      contractError || "observation_contract_invalid",
+    );
   }
 
   if (observation.response === null) {
@@ -726,12 +1114,16 @@ export function normalizePhase4CuratedListReadback(
       observedAt: observation.observedAt,
       responseDigest: observation.responseDigest,
       candidateId: expectedCandidateId,
-      candidateUserId: expectedCandidateUserId,
+      // A null candidate-scoped Paraform response cannot establish the
+      // candidate-user identifier. Planning the implicit-create path therefore
+      // requires a separately branded source-generation identity proof.
+      candidateUserId: null,
       exists: false,
       implicitCreateRequired: true,
       listId: null,
       roleIds: Object.freeze([]),
       roleCount: 0,
+      ...proofScopeFields(context),
     });
   }
 
@@ -777,6 +1169,70 @@ export function normalizePhase4CuratedListReadback(
     listId: response.id,
     roleIds: frozenArray(roleIds),
     roleCount: roleIds.length,
+    ...proofScopeFields(context),
+  });
+}
+
+/**
+ * Bind the two Paraform candidate identifiers to the exact source generation.
+ * A future store adapter must produce this authoritative observation. It is
+ * mandatory before a null readback may be interpreted as implicit creation.
+ */
+export function normalizePhase4CandidateIdentityObservation(
+  observation,
+  {
+    candidateId,
+    candidateUserId,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  } = {},
+) {
+  const expectedCandidateId = boundedId(candidateId);
+  const expectedCandidateUserId = boundedId(candidateUserId);
+  const context = exactScopeContext({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  });
+  if (!expectedCandidateId || !expectedCandidateUserId) {
+    return invalidIdentityProof("expected_identity_invalid");
+  }
+  const contractError = observationContractError(
+    observation,
+    context,
+    PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
+    ["candidate_id"],
+  );
+  if (
+    contractError
+    || observation.input.candidate_id !== expectedCandidateId
+  ) {
+    return invalidIdentityProof(
+      contractError || "observation_contract_invalid",
+    );
+  }
+  const response = plainRecord(observation.response);
+  if (
+    !hasExactKeys(response, ["candidate_id", "candidate_user_id"])
+    || response.candidate_id !== expectedCandidateId
+    || response.candidate_user_id !== expectedCandidateUserId
+  ) {
+    return invalidIdentityProof("response_identity_invalid");
+  }
+  return Object.freeze({
+    [IDENTITY_PROOF]: true,
+    valid: true,
+    authoritative: true,
+    complete: true,
+    errorCode: null,
+    observedAt: observation.observedAt,
+    responseDigest: observation.responseDigest,
+    candidateId: expectedCandidateId,
+    candidateUserId: expectedCandidateUserId,
+    ...proofScopeFields(context),
   });
 }
 
@@ -787,32 +1243,45 @@ export function normalizePhase4CuratedListReadback(
  */
 export function normalizePhase4NotificationSafetyProof(
   observation,
-  { candidateUserId, decisionAt } = {},
+  {
+    candidateUserId,
+    decisionAt,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  } = {},
 ) {
   const expectedCandidateUserId = boundedId(candidateUserId);
   const decisionAtIso = canonicalIso(decisionAt);
-  if (!expectedCandidateUserId || !decisionAtIso) {
+  const context = exactScopeContext({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  });
+  if (
+    !expectedCandidateUserId
+    || !decisionAtIso
+    || !context
+    || decisionAtIso !== context.trustedNow
+  ) {
     return invalidNotificationProof("expected_context_invalid");
   }
-  if (!hasExactKeys(observation, OBSERVATION_KEYS)) {
-    return invalidNotificationProof("observation_shape_invalid");
-  }
-  const observedAt = canonicalIso(observation.observedAt);
+  const contractError = observationContractError(
+    observation,
+    context,
+    PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE,
+    PHASE4_NOTIFICATION_SETTINGS_INPUT_KEYS,
+  );
+  const observedAt = canonicalIso(observation?.observedAt);
   if (
-    observation.version !== PHASE4_CURATION_OBSERVATION_VERSION
-    || observation.procedure
-      !== PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE
-    || observation.authoritative !== true
-    || observation.complete !== true
-    || !observedAt
-    || !lowercaseDigest(observation.responseDigest)
-    || !hasExactKeys(
-      observation.input,
-      PHASE4_NOTIFICATION_SETTINGS_INPUT_KEYS,
-    )
+    contractError
     || observation.input.candidate_user_id !== expectedCandidateUserId
   ) {
-    return invalidNotificationProof("observation_contract_invalid");
+    return invalidNotificationProof(
+      contractError || "observation_contract_invalid",
+    );
   }
   const ageMs = Date.parse(decisionAtIso) - Date.parse(observedAt);
   if (
@@ -851,6 +1320,7 @@ export function normalizePhase4NotificationSafetyProof(
     candidateUserId: expectedCandidateUserId,
     notificationTypes: frozenArray(notificationTypes),
     roleAddedNotificationEnabled,
+    ...proofScopeFields(context),
   });
 }
 
@@ -861,13 +1331,26 @@ export function normalizePhase4NotificationSafetyProof(
  */
 export function planPhase4CuratedListWrite({
   scopeDigest,
+  sourceGenerationDigest,
+  sourceCasRevision,
+  trustedNow,
   candidateId,
   candidateUserId,
   matchProof,
   preReadback,
+  identityProof = null,
+  replanRequirement = null,
 } = {}) {
-  if (!lowercaseDigest(scopeDigest)) {
-    throw new TypeError("scopeDigest must be a lowercase sha256 digest");
+  const context = exactScopeContext({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  });
+  if (!context) {
+    throw new TypeError(
+      "scope and source generation context must be exact and current",
+    );
   }
   const exactCandidateId = boundedId(candidateId);
   const exactCandidateUserId = boundedId(candidateUserId);
@@ -878,6 +1361,7 @@ export function planPhase4CuratedListWrite({
     matchProof?.[MATCH_PROOF] !== true
     || matchProof.valid !== true
     || matchProof.candidateId !== exactCandidateId
+    || !sameScope(matchProof, context)
   ) {
     throw new TypeError("matchProof must be an exact candidate match proof");
   }
@@ -885,11 +1369,110 @@ export function planPhase4CuratedListWrite({
     preReadback?.[READBACK_PROOF] !== true
     || preReadback.valid !== true
     || preReadback.candidateId !== exactCandidateId
-    || preReadback.candidateUserId !== exactCandidateUserId
+    || !sameScope(preReadback, context)
+    || (
+      preReadback.exists === true
+      && preReadback.candidateUserId !== exactCandidateUserId
+    )
+    || (
+      preReadback.exists === false
+      && preReadback.candidateUserId !== null
+    )
   ) {
     throw new TypeError(
       "preReadback must be an exact candidate Curated List proof",
     );
+  }
+  if (
+    Date.parse(matchProof.observedAt) > Date.parse(preReadback.observedAt)
+    || !observationFreshAt(
+      matchProof.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+    || !observationFreshAt(
+      preReadback.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+  ) {
+    throw new TypeError("match/readback proof ordering is invalid");
+  }
+  if (preReadback.exists === false) {
+    if (
+      identityProof?.[IDENTITY_PROOF] !== true
+      || identityProof.valid !== true
+      || identityProof.candidateId !== exactCandidateId
+      || identityProof.candidateUserId !== exactCandidateUserId
+      || !sameScope(identityProof, context)
+      || Date.parse(identityProof.observedAt)
+        > Date.parse(preReadback.observedAt)
+      || !observationFreshAt(
+        identityProof.observedAt,
+        context.trustedNow,
+        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+      )
+    ) {
+      throw new TypeError(
+        "null readback requires an authoritative same-scope identity proof",
+      );
+    }
+  } else if (
+    identityProof !== null
+    && (
+      identityProof?.[IDENTITY_PROOF] !== true
+      || identityProof.valid !== true
+      || identityProof.candidateId !== exactCandidateId
+      || identityProof.candidateUserId !== exactCandidateUserId
+      || !sameScope(identityProof, context)
+    )
+  ) {
+    throw new TypeError("identityProof is invalid");
+  }
+  if (
+    replanRequirement !== null
+    && (
+      replanRequirement?.[REPLAN_REQUIREMENT] !== true
+      || !sameScope(replanRequirement, context)
+      || replanRequirement.candidateId !== exactCandidateId
+      || replanRequirement.candidateUserId !== exactCandidateUserId
+      || replanRequirement.postReadbackDigest
+        !== preReadback.responseDigest
+      || !observationFreshAt(
+        replanRequirement.issuedAt,
+        context.trustedNow,
+        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+      )
+      || !Number.isSafeInteger(
+        replanRequirement.completedAttemptCount,
+      )
+      || !Number.isSafeInteger(replanRequirement.maxAttempts)
+      || replanRequirement.completedAttemptCount < 1
+      || replanRequirement.completedAttemptCount
+        >= replanRequirement.maxAttempts
+      || replanRequirement.requirementDigest !== canonicalDigest({
+        contractVersion: replanRequirement.contractVersion,
+        ...proofScopeFields(replanRequirement),
+        candidateId: replanRequirement.candidateId,
+        candidateUserId: replanRequirement.candidateUserId,
+        priorPlanSemanticDigest:
+          replanRequirement.priorPlanSemanticDigest,
+        mutationRequestDigest:
+          replanRequirement.mutationRequestDigest,
+        mutationResponseDigest:
+          replanRequirement.mutationResponseDigest,
+        postReadbackDigest:
+          replanRequirement.postReadbackDigest,
+        targetRoleIds: replanRequirement.targetRoleIds,
+        missingRoleIds: replanRequirement.missingRoleIds,
+        completedAttemptCount:
+          replanRequirement.completedAttemptCount,
+        maxAttempts: replanRequirement.maxAttempts,
+        issuedAt: replanRequirement.issuedAt,
+      })
+    )
+  ) {
+    throw new TypeError("replanRequirement is invalid");
   }
   const policyPlan = planCuratedAdds({
     scopeDigest,
@@ -899,6 +1482,23 @@ export function planPhase4CuratedListWrite({
   });
   if (policyPlan.tierOverlapRoleIds.length !== 0) {
     throw new TypeError("tier proof must be mutually exclusive");
+  }
+  if (
+    replanRequirement !== null
+    && (
+      !sameStringArray(
+        replanRequirement.targetRoleIds,
+        policyPlan.targetRoleIds,
+      )
+      || !sameStringArray(
+        replanRequirement.missingRoleIds,
+        policyPlan.missingRoleIds,
+      )
+    )
+  ) {
+    throw new TypeError(
+      "replanRequirement does not match the fresh missing-only plan",
+    );
   }
   const plannedInput = policyPlan.missingCount === 0
     ? null
@@ -910,14 +1510,33 @@ export function planPhase4CuratedListWrite({
       source: PHASE4_CURATED_LIST_ADD_SOURCE,
     });
 
+  const semanticFields = {
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    ...proofScopeFields(context),
+    candidateId: exactCandidateId,
+    candidateUserId: exactCandidateUserId,
+    identityResponseDigest: identityProof?.responseDigest || null,
+    matchResponseDigest: matchProof.responseDigest,
+    preReadbackResponseDigest: preReadback.responseDigest,
+    replanRequirementDigest:
+      replanRequirement?.requirementDigest || null,
+    plannedAt: context.trustedNow,
+    plannedInput,
+  };
+  const planSemanticDigest = canonicalDigest(semanticFields);
   return Object.freeze({
     [WRITE_PLAN]: true,
-    scopeDigest,
+    ...proofScopeFields(context),
     candidateId: exactCandidateId,
     candidateUserId: exactCandidateUserId,
     matchProof,
     preReadback,
+    identityProof,
+    replanRequirement,
     policyPlan,
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    plannedAt: context.trustedNow,
+    planSemanticDigest,
     captureAttestationVersion:
       PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
     implicitCreateExpected: preReadback.exists === false,
@@ -940,14 +1559,43 @@ export function planPhase4CuratedListWrite({
 export function phase4CuratedListWriteAuthorization({
   plan,
   notificationProof,
-  decisionAt,
+  trustedNow,
+  globalWriteAuthority = null,
 } = {}) {
   const reasons = [];
-  const decisionAtIso = canonicalIso(decisionAt);
+  const decisionAtIso = canonicalIso(trustedNow);
   const validPlan = plan?.[WRITE_PLAN] === true;
-  const captureDecision = currentPhase4CuratedListCaptureDecision();
+  const captureDecision = currentPhase4CuratedListCaptureDecision({
+    trustedNow: decisionAtIso,
+  });
   if (!validPlan) reasons.push("write_plan_invalid");
   if (!decisionAtIso) reasons.push("decision_time_invalid");
+  if (
+    validPlan
+    && (
+      !decisionAtIso
+      || !observationFreshAt(
+        plan.plannedAt,
+        decisionAtIso,
+        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+      )
+    )
+  ) {
+    reasons.push("write_plan_stale");
+  }
+  if (
+    globalWriteAuthority?.[GLOBAL_WRITE_AUTHORITY] !== true
+    || !validPlan
+    || !sameScope(globalWriteAuthority, plan)
+    || globalWriteAuthority.planSemanticDigest
+      !== plan.planSemanticDigest
+    || globalWriteAuthority.contractVersion
+      !== PHASE4_CURATION_CONTRACT_VERSION
+  ) {
+    // No producer for this private brand exists until the store-backed
+    // compare-and-set authority is implemented and reviewed.
+    reasons.push("global_write_authority_unavailable");
+  }
   if (!captureDecision.valid) {
     reasons.push(...captureDecision.reasons);
   }
@@ -959,6 +1607,7 @@ export function phase4CuratedListWriteAuthorization({
     || notificationProof.valid !== true
     || !validPlan
     || notificationProof.candidateUserId !== plan.candidateUserId
+    || !sameScope(notificationProof, plan)
   ) {
     reasons.push("notification_proof_invalid");
   } else {
@@ -974,6 +1623,12 @@ export function phase4CuratedListWriteAuthorization({
       ) {
         reasons.push("notification_proof_stale");
       }
+      if (
+        Date.parse(notificationProof.observedAt)
+        < Date.parse(plan.plannedAt)
+      ) {
+        reasons.push("notification_proof_precedes_plan");
+      }
     }
   }
   const uniqueReasons = [...new Set(reasons)];
@@ -983,6 +1638,13 @@ export function phase4CuratedListWriteAuthorization({
       [WRITE_AUTHORIZATION]: true,
       allowed: true,
       plan,
+      ...proofScopeFields(plan),
+      contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+      planSemanticDigest: plan.planSemanticDigest,
+      captureSemanticDigest:
+        PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST,
+      captureImplementationDigest:
+        PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST,
       captureAttestationVersion:
         PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
       decisionAt: decisionAtIso,
@@ -1011,24 +1673,71 @@ export function buildAuthorizedPhase4CuratedListAddRequest({
   plan,
   authorization,
   executionAt,
+  scopeDigest,
+  sourceGenerationDigest,
+  sourceCasRevision,
+  trustedNow,
 } = {}) {
   const executionAtIso = canonicalIso(executionAt);
+  const context = exactScopeContext({
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  });
   if (
     plan?.[WRITE_PLAN] !== true
     || authorization?.[WRITE_AUTHORIZATION] !== true
     || authorization.allowed !== true
     || authorization.plan !== plan
+    || authorization.planSemanticDigest !== plan.planSemanticDigest
+    || authorization.contractVersion
+      !== PHASE4_CURATION_CONTRACT_VERSION
+    || authorization.captureSemanticDigest
+      !== PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST
+    || authorization.captureImplementationDigest
+      !== PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST
+    || !sameScope(authorization, plan)
+    || !context
+    || !sameScope(context, plan)
     || !plan.plannedInput
     || !executionAtIso
+    || executionAtIso !== context.trustedNow
     || Date.parse(executionAtIso) < Date.parse(authorization.decisionAt)
     || Date.parse(executionAtIso) > Date.parse(authorization.expiresAt)
   ) {
     throw new Error("PHASE4_CURATED_LIST_WRITE_NOT_AUTHORIZED");
   }
-  return Object.freeze({
+  const input = Object.freeze({
+    ...plan.plannedInput,
+    role_ids: frozenArray(plan.plannedInput.role_ids),
+  });
+  const requestDigest = canonicalDigest({
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    ...proofScopeFields(context),
+    planSemanticDigest: plan.planSemanticDigest,
+    captureSemanticDigest: authorization.captureSemanticDigest,
+    captureImplementationDigest:
+      authorization.captureImplementationDigest,
+    executionAt: executionAtIso,
     procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
     method: "mutation",
-    input: plan.plannedInput,
+    input,
+  });
+  return Object.freeze({
+    [AUTHORIZED_REQUEST]: true,
+    ...proofScopeFields(context),
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    plan,
+    planSemanticDigest: plan.planSemanticDigest,
+    captureSemanticDigest: authorization.captureSemanticDigest,
+    captureImplementationDigest:
+      authorization.captureImplementationDigest,
+    executionAt: executionAtIso,
+    requestDigest,
+    procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
+    method: "mutation",
+    input,
   });
 }
 
@@ -1041,23 +1750,42 @@ export function reconcilePhase4CuratedListWrite({
   plan,
   mutationOutcome,
   postReadback = null,
-  mutationAttemptedAt,
   attemptCount,
   maxAttempts = PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX,
+  trustedNow,
 } = {}) {
   if (plan?.[WRITE_PLAN] !== true || plan.noMutationRequired) {
     throw new TypeError("plan must require a Curated List mutation");
   }
   strictPositiveInteger(attemptCount, "attemptCount");
   strictPositiveInteger(maxAttempts, "maxAttempts");
-  const mutationAttemptedAtIso = canonicalIso(mutationAttemptedAt);
+  const context = exactScopeContext({
+    ...proofScopeFields(plan),
+    trustedNow,
+  });
   if (
-    !mutationAttemptedAtIso
-    || Date.parse(mutationAttemptedAtIso)
+    !context
+    || mutationOutcome?.[MUTATION_OUTCOME] !== true
+    || mutationOutcome.request?.[AUTHORIZED_REQUEST] !== true
+    || mutationOutcome.request.plan !== plan
+    || mutationOutcome.requestDigest
+      !== mutationOutcome.request.requestDigest
+    || mutationOutcome.contractVersion
+      !== PHASE4_CURATION_CONTRACT_VERSION
+    || !sameScope(mutationOutcome, plan)
+    || !sameScope(mutationOutcome.request, plan)
+    || !observationFreshAt(
+      mutationOutcome.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+    || Date.parse(mutationOutcome.request.executionAt)
       < Date.parse(plan.preReadback.observedAt)
+    || Date.parse(mutationOutcome.observedAt)
+      < Date.parse(mutationOutcome.request.executionAt)
   ) {
     throw new TypeError(
-      "mutationAttemptedAt must be at or after the pre-write readback",
+      "mutationOutcome must be the exact branded same-scope attempt outcome",
     );
   }
   if (maxAttempts > PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX) {
@@ -1065,39 +1793,76 @@ export function reconcilePhase4CuratedListWrite({
       `maxAttempts cannot exceed ${PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX}`,
     );
   }
+  if (attemptCount > maxAttempts) {
+    throw new RangeError("attemptCount cannot exceed maxAttempts");
+  }
 
   const readbackValid = (
     postReadback?.[READBACK_PROOF] === true
     && postReadback.valid === true
     && postReadback.candidateId === plan.candidateId
     && postReadback.candidateUserId === plan.candidateUserId
+    && postReadback.exists === true
+    && sameScope(postReadback, plan)
+    && observationFreshAt(
+      postReadback.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
     && Date.parse(postReadback.observedAt)
-      >= Date.parse(mutationAttemptedAtIso)
+      >= Date.parse(mutationOutcome.observedAt)
+    && (
+      !plan.existingListId
+      || postReadback.listId === plan.existingListId
+    )
+    && (
+      !mutationOutcome.curatedRoleListId
+      || postReadback.listId === mutationOutcome.curatedRoleListId
+    )
   );
   const policyDecision = curatedWriteReconciliationDecision({
     plan: plan.policyPlan,
-    mutationOutcome,
+    mutationOutcome: mutationOutcome.outcome,
     readbackState: readbackValid ? "authoritative" : "not_run",
     curatedRoleIds: readbackValid ? postReadback.roleIds : [],
     attemptCount,
     maxAttempts,
   });
-  const nextPlannedInput = policyDecision.action === "plan_missing_only"
-    ? Object.freeze({
-      type: PHASE4_CURATED_LIST_ADD_TYPE,
-      candidate_id: plan.candidateId,
-      candidate_user_id: plan.candidateUserId,
-      role_ids: frozenArray(policyDecision.missingRoleIds),
-      source: PHASE4_CURATED_LIST_ADD_SOURCE,
-    })
-    : null;
+  const replanRequirement =
+    policyDecision.action === "plan_missing_only"
+      ? (() => {
+        const fields = {
+          contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+          ...proofScopeFields(context),
+          candidateId: plan.candidateId,
+          candidateUserId: plan.candidateUserId,
+          priorPlanSemanticDigest: plan.planSemanticDigest,
+          mutationRequestDigest: mutationOutcome.requestDigest,
+          mutationResponseDigest: mutationOutcome.responseDigest,
+          postReadbackDigest: postReadback.responseDigest,
+          targetRoleIds: frozenArray(policyDecision.targetRoleIds),
+          missingRoleIds: frozenArray(policyDecision.missingRoleIds),
+          completedAttemptCount: attemptCount,
+          maxAttempts,
+          issuedAt: context.trustedNow,
+        };
+        return Object.freeze({
+          [REPLAN_REQUIREMENT]: true,
+          ...fields,
+          requirementDigest: canonicalDigest(fields),
+        });
+      })()
+      : null;
   const implicitCreateObserved = Boolean(
     readbackValid
     && plan.preReadback.exists === false
-    && postReadback.exists === true,
+    && postReadback.exists === true
+    && postReadback.listId === mutationOutcome.curatedRoleListId
   );
 
   return Object.freeze({
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    ...proofScopeFields(context),
     action: policyDecision.action,
     readbackOnly: policyDecision.readbackOnly,
     readbackValid,
@@ -1109,56 +1874,104 @@ export function reconcilePhase4CuratedListWrite({
     attemptCount: policyDecision.attemptCount,
     maxAttempts: policyDecision.maxAttempts,
     attemptsRemaining: policyDecision.attemptsRemaining,
-    mutationAttemptedAt: mutationAttemptedAtIso,
+    mutationRequestDigest: mutationOutcome.requestDigest,
+    mutationResponseDigest: mutationOutcome.responseDigest,
+    mutationCuratedRoleListId:
+      mutationOutcome.curatedRoleListId,
     missingRoleIds: frozenArray(policyDecision.missingRoleIds),
     missingCount: policyDecision.missingCount,
     verifiedCount: policyDecision.verifiedCount,
-    nextPlannedInput,
+    replanRequired: replanRequirement !== null,
+    replanRequirement,
     implicitCreateExpected: plan.implicitCreateExpected,
     implicitCreateObserved,
   });
 }
 
+function duplicateFailure(reason) {
+  return Object.freeze({
+    verified: false,
+    reason,
+    listIdentityStable: false,
+    roleSetStable: false,
+    targetsPresent: false,
+    duplicateRoleCount: 0,
+  });
+}
+
 /**
  * Prove that the deliberate capture re-add did not duplicate or replace list
- * membership. This is capture evidence only and never authorizes a mutation.
+ * membership. The proof is deliberately unreachable until the store-backed
+ * authority can mint an authorized request: two unchanged readbacks alone are
+ * not evidence that a duplicate mutation was actually attempted.
  */
 export function phase4DuplicateReaddReadbackDecision({
   firstReadback,
+  authorizedRequest,
+  mutationOutcome,
   duplicateReadback,
-  duplicateAttemptedAt,
   targetRoleIds,
+  trustedNow,
 } = {}) {
-  const duplicateAttemptedAtIso = canonicalIso(duplicateAttemptedAt);
   let targets;
   try {
     targets = strictUniqueIds(targetRoleIds, "targetRoleIds");
   } catch {
-    return Object.freeze({
-      verified: false,
-      reason: "target_roles_invalid",
-    });
+    return duplicateFailure("target_roles_invalid");
   }
+  if (targets.length === 0) {
+    return duplicateFailure("target_roles_empty");
+  }
+  const context = exactScopeContext({
+    ...proofScopeFields(firstReadback),
+    trustedNow,
+  });
   if (
-    firstReadback?.[READBACK_PROOF] !== true
+    !context
+    || firstReadback?.[READBACK_PROOF] !== true
     || firstReadback.valid !== true
     || firstReadback.exists !== true
     || duplicateReadback?.[READBACK_PROOF] !== true
     || duplicateReadback.valid !== true
     || duplicateReadback.exists !== true
-    || !duplicateAttemptedAtIso
-    || firstReadback.candidateId !== duplicateReadback.candidateId
-    || firstReadback.candidateUserId !== duplicateReadback.candidateUserId
+    || authorizedRequest?.[AUTHORIZED_REQUEST] !== true
+    || mutationOutcome?.[MUTATION_OUTCOME] !== true
+    || mutationOutcome.request !== authorizedRequest
+    || mutationOutcome.requestDigest !== authorizedRequest.requestDigest
+    || mutationOutcome.outcome !== "accepted"
+    || mutationOutcome.responseContractValid !== true
+    || mutationOutcome.curatedRoleListId !== firstReadback.listId
+    || !sameScope(firstReadback, context)
+    || !sameScope(authorizedRequest, context)
+    || !sameScope(mutationOutcome, context)
+    || !sameScope(duplicateReadback, context)
+    || firstReadback.candidateId
+      !== authorizedRequest.plan.candidateId
+    || firstReadback.candidateUserId
+      !== authorizedRequest.plan.candidateUserId
+    || duplicateReadback.candidateId !== firstReadback.candidateId
+    || duplicateReadback.candidateUserId
+      !== firstReadback.candidateUserId
     || firstReadback.listId !== duplicateReadback.listId
-    || Date.parse(duplicateAttemptedAtIso)
+    || !sameStringArray(authorizedRequest.input.role_ids, targets)
+    || Date.parse(authorizedRequest.executionAt)
       < Date.parse(firstReadback.observedAt)
+    || Date.parse(mutationOutcome.observedAt)
+      < Date.parse(authorizedRequest.executionAt)
     || Date.parse(duplicateReadback.observedAt)
-      < Date.parse(duplicateAttemptedAtIso)
+      < Date.parse(mutationOutcome.observedAt)
+    || !observationFreshAt(
+      firstReadback.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+    || !observationFreshAt(
+      duplicateReadback.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
   ) {
-    return Object.freeze({
-      verified: false,
-      reason: "readback_scope_invalid",
-    });
+    return duplicateFailure("duplicate_evidence_chain_invalid");
   }
   const first = new Set(firstReadback.roleIds);
   const duplicate = new Set(duplicateReadback.roleIds);
@@ -1172,7 +1985,7 @@ export function phase4DuplicateReaddReadbackDecision({
     reason: roleSetStable && targetsPresent
       ? null
       : "duplicate_readd_changed_role_set",
-    listIdentityStable: firstReadback.listId === duplicateReadback.listId,
+    listIdentityStable: true,
     roleSetStable,
     targetsPresent,
     duplicateRoleCount: duplicateReadback.roleCount,
@@ -1186,13 +1999,31 @@ export function phase4DuplicateReaddReadbackDecision({
 export function exactPhase4PostAddCuratedMatchCount({
   matchProof,
   postReadback,
+  trustedNow,
 } = {}) {
+  const context = exactScopeContext({
+    ...proofScopeFields(matchProof),
+    trustedNow,
+  });
   if (
-    matchProof?.[MATCH_PROOF] !== true
+    !context
+    || matchProof?.[MATCH_PROOF] !== true
     || matchProof.valid !== true
     || postReadback?.[READBACK_PROOF] !== true
     || postReadback.valid !== true
+    || postReadback.exists !== true
     || postReadback.candidateId !== matchProof.candidateId
+    || !sameScope(postReadback, matchProof)
+    || !observationFreshAt(
+      matchProof.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
+    || !observationFreshAt(
+      postReadback.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
     || Date.parse(postReadback.observedAt)
       < Date.parse(matchProof.observedAt)
   ) {
@@ -1237,7 +2068,10 @@ export function phase4CurationContractSummary() {
     captureAttestationVersion:
       PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
     capturePinned: capture.valid,
-    mutationAuthorizationAvailable: capture.valid,
+    // The source-store compare-and-set authority has intentionally not been
+    // implemented. A future pinned capture alone must not open the write path.
+    mutationAuthorizationAvailable: false,
+    globalWriteAuthorityMinterAvailable: false,
     notificationFenceRequired: true,
     roleAddedNotificationType:
       PHASE4_ROLE_ADDED_NOTIFICATION_TYPE,

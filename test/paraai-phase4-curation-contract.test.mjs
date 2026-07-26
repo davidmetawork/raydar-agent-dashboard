@@ -5,11 +5,11 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import {
+  PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
   PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS,
   PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
   PHASE4_CURATION_CONTRACT_VERSION,
   PHASE4_CURATION_OBSERVATION_VERSION,
-  PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX,
   PHASE4_CURATED_LIST_ADD_INPUT_KEYS,
   PHASE4_CURATED_LIST_ADD_PROCEDURE,
   PHASE4_CURATED_LIST_ADD_RESPONSE_KEYS,
@@ -21,14 +21,20 @@ import {
   PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
   PHASE4_NOTIFICATION_SETTINGS_INPUT_KEYS,
   PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE,
+  PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+  PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST,
+  PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST,
   PHASE4_ROLE_ADDED_NOTIFICATION_TYPE,
   buildAuthorizedPhase4CuratedListAddRequest,
+  classifyPhase4CuratedListAddResponse,
   currentPhase4CuratedListCaptureDecision,
   exactPhase4PostAddCuratedMatchCount,
+  normalizePhase4CandidateIdentityObservation,
   normalizePhase4CuratedListReadback,
   normalizePhase4NotificationSafetyProof,
   normalizePhase4RankedMatchObservation,
   phase4CurationContractSummary,
+  phase4CurationObservationResponseDigest,
   phase4CuratedListCaptureSemanticDigest,
   phase4CuratedListMutationOutcome,
   phase4CuratedListWriteAuthorization,
@@ -44,24 +50,42 @@ const CANDIDATE_USER_ID = "candidate-user-contract-a";
 const OTHER_CANDIDATE_USER_ID = "candidate-user-contract-b";
 const RECRUITER_USER_ID = "recruiter-contract-a";
 const SCOPE_DIGEST = "a".repeat(64);
-const RESPONSE_DIGEST = "b".repeat(64);
-const SECOND_RESPONSE_DIGEST = "c".repeat(64);
+const OTHER_SCOPE_DIGEST = "b".repeat(64);
+const SOURCE_GENERATION_DIGEST = "c".repeat(64);
+const OTHER_SOURCE_GENERATION_DIGEST = "d".repeat(64);
+const IMPLEMENTATION_DIGEST = "e".repeat(64);
+const SOURCE_CAS_REVISION = 17;
 const MATCH_AT = "2026-07-26T00:00:00.000Z";
+const IDENTITY_AT = "2026-07-26T00:00:30.000Z";
 const PRE_READ_AT = "2026-07-26T00:01:00.000Z";
-const MUTATION_AT = "2026-07-26T00:02:00.000Z";
-const POST_READ_AT = "2026-07-26T00:03:00.000Z";
-const DUPLICATE_AT = "2026-07-26T00:04:00.000Z";
-const DUPLICATE_READ_AT = "2026-07-26T00:05:00.000Z";
+const PLAN_AT = "2026-07-26T00:02:00.000Z";
+const NOTIFICATION_AT = "2026-07-26T00:02:30.000Z";
+const AUTH_AT = "2026-07-26T00:03:00.000Z";
+const MUTATION_AT = "2026-07-26T00:04:00.000Z";
+const POST_READ_AT = "2026-07-26T00:05:00.000Z";
+const COUNT_AT = "2026-07-26T00:06:00.000Z";
+const CAPTURED_AT = "2026-07-26T00:00:00.000Z";
+const CAPTURE_OBSERVED_THROUGH_AT = "2026-07-28T00:00:00.000Z";
+
+const CONTEXT = Object.freeze({
+  scopeDigest: SCOPE_DIGEST,
+  sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+  sourceCasRevision: SOURCE_CAS_REVISION,
+});
 
 function observation({
   procedure,
   input,
   response,
   observedAt = MATCH_AT,
-  responseDigest = RESPONSE_DIGEST,
+  responseDigest,
   authoritative = true,
   complete = true,
   version = PHASE4_CURATION_OBSERVATION_VERSION,
+  scopeDigest = SCOPE_DIGEST,
+  sourceGenerationDigest = SOURCE_GENERATION_DIGEST,
+  sourceCasRevision = SOURCE_CAS_REVISION,
+  extra = {},
 } = {}) {
   return {
     version,
@@ -69,9 +93,15 @@ function observation({
     input,
     response,
     observedAt,
-    responseDigest,
+    responseDigest: responseDigest === undefined
+      ? phase4CurationObservationResponseDigest(procedure, response)
+      : responseDigest,
     authoritative,
     complete,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    ...extra,
   };
 }
 
@@ -93,6 +123,7 @@ function rankedObservation({
     },
   ],
   status = "ranked",
+  observedAt = MATCH_AT,
   ...overrides
 } = {}) {
   return observation({
@@ -102,18 +133,30 @@ function rankedObservation({
       recruiter_user_id: recruiterUserId,
     },
     response: { status, roles },
+    observedAt,
     ...overrides,
   });
 }
 
-function rankedProof(options = {}) {
-  const candidateId = options.candidateId || CANDIDATE_ID;
-  const recruiterUserId =
-    options.recruiterUserId || RECRUITER_USER_ID;
-  return normalizePhase4RankedMatchObservation(
-    rankedObservation(options),
-    { candidateId, recruiterUserId },
-  );
+function rankedProof({
+  candidateId = CANDIDATE_ID,
+  recruiterUserId = RECRUITER_USER_ID,
+  trustedNow = PLAN_AT,
+  ...options
+} = {}) {
+  const exactObservation = rankedObservation({
+    candidateId,
+    recruiterUserId,
+    ...options,
+  });
+  return normalizePhase4RankedMatchObservation(exactObservation, {
+    candidateId,
+    recruiterUserId,
+    scopeDigest: exactObservation.scopeDigest,
+    sourceGenerationDigest: exactObservation.sourceGenerationDigest,
+    sourceCasRevision: exactObservation.sourceCasRevision,
+    trustedNow,
+  });
 }
 
 function curatedListResponse({
@@ -121,14 +164,12 @@ function curatedListResponse({
   candidateUserId = CANDIDATE_USER_ID,
   listId = "curated-list-contract-a",
   roleIds = [],
-  extra = {},
 } = {}) {
   return {
     id: listId,
     candidate_id: candidateId,
     candidate_user_id: candidateUserId,
     roles: roleIds.map((id) => ({ id })),
-    ...extra,
   };
 }
 
@@ -139,7 +180,6 @@ function readbackObservation({
   listId = "curated-list-contract-a",
   roleIds = [],
   observedAt = PRE_READ_AT,
-  responseDigest = RESPONSE_DIGEST,
   response,
   ...overrides
 } = {}) {
@@ -158,25 +198,74 @@ function readbackObservation({
     input: { candidate_id: candidateId },
     response: exactResponse,
     observedAt,
-    responseDigest,
     ...overrides,
   });
 }
 
-function readbackProof(options = {}) {
-  const candidateId = options.candidateId || CANDIDATE_ID;
-  const candidateUserId =
-    options.candidateUserId || CANDIDATE_USER_ID;
-  return normalizePhase4CuratedListReadback(
-    readbackObservation(options),
-    { candidateId, candidateUserId },
-  );
+function readbackProof({
+  candidateId = CANDIDATE_ID,
+  candidateUserId = CANDIDATE_USER_ID,
+  trustedNow = PLAN_AT,
+  ...options
+} = {}) {
+  const exactObservation = readbackObservation({
+    candidateId,
+    candidateUserId,
+    ...options,
+  });
+  return normalizePhase4CuratedListReadback(exactObservation, {
+    candidateId,
+    candidateUserId,
+    scopeDigest: exactObservation.scopeDigest,
+    sourceGenerationDigest: exactObservation.sourceGenerationDigest,
+    sourceCasRevision: exactObservation.sourceCasRevision,
+    trustedNow,
+  });
+}
+
+function identityObservation({
+  candidateId = CANDIDATE_ID,
+  candidateUserId = CANDIDATE_USER_ID,
+  observedAt = IDENTITY_AT,
+  ...overrides
+} = {}) {
+  return observation({
+    procedure: PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
+    input: { candidate_id: candidateId },
+    response: {
+      candidate_id: candidateId,
+      candidate_user_id: candidateUserId,
+    },
+    observedAt,
+    ...overrides,
+  });
+}
+
+function identityProof({
+  candidateId = CANDIDATE_ID,
+  candidateUserId = CANDIDATE_USER_ID,
+  trustedNow = PLAN_AT,
+  ...options
+} = {}) {
+  const exactObservation = identityObservation({
+    candidateId,
+    candidateUserId,
+    ...options,
+  });
+  return normalizePhase4CandidateIdentityObservation(exactObservation, {
+    candidateId,
+    candidateUserId,
+    scopeDigest: exactObservation.scopeDigest,
+    sourceGenerationDigest: exactObservation.sourceGenerationDigest,
+    sourceCasRevision: exactObservation.sourceCasRevision,
+    trustedNow,
+  });
 }
 
 function notificationObservation({
   candidateUserId = CANDIDATE_USER_ID,
   notificationTypes = [],
-  observedAt = MUTATION_AT,
+  observedAt = NOTIFICATION_AT,
   response,
   ...overrides
 } = {}) {
@@ -187,20 +276,27 @@ function notificationObservation({
       ? { notification_types: notificationTypes }
       : response,
     observedAt,
-    responseDigest: SECOND_RESPONSE_DIGEST,
     ...overrides,
   });
 }
 
 function notificationProof({
-  decisionAt = POST_READ_AT,
   candidateUserId = CANDIDATE_USER_ID,
+  trustedNow = AUTH_AT,
   ...options
 } = {}) {
-  return normalizePhase4NotificationSafetyProof(
-    notificationObservation({ candidateUserId, ...options }),
-    { candidateUserId, decisionAt },
-  );
+  const exactObservation = notificationObservation({
+    candidateUserId,
+    ...options,
+  });
+  return normalizePhase4NotificationSafetyProof(exactObservation, {
+    candidateUserId,
+    decisionAt: trustedNow,
+    scopeDigest: exactObservation.scopeDigest,
+    sourceGenerationDigest: exactObservation.sourceGenerationDigest,
+    sourceCasRevision: exactObservation.sourceCasRevision,
+    trustedNow,
+  });
 }
 
 function curationPlan({
@@ -209,23 +305,43 @@ function curationPlan({
   preExists = true,
   candidateId = CANDIDATE_ID,
   candidateUserId = CANDIDATE_USER_ID,
+  scopeDigest = SCOPE_DIGEST,
+  sourceGenerationDigest = SOURCE_GENERATION_DIGEST,
+  sourceCasRevision = SOURCE_CAS_REVISION,
+  trustedNow = PLAN_AT,
 } = {}) {
-  const matchProof = rankedProof({
+  const proofOptions = {
     candidateId,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+  };
+  const matchProof = rankedProof({
+    ...proofOptions,
     roles: matchRoles,
   });
   const preReadback = readbackProof({
-    candidateId,
+    ...proofOptions,
     candidateUserId,
     exists: preExists,
     roleIds: existingRoleIds,
   });
   return planPhase4CuratedListWrite({
-    scopeDigest: SCOPE_DIGEST,
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
     candidateId,
     candidateUserId,
     matchProof,
     preReadback,
+    identityProof: preExists
+      ? null
+      : identityProof({
+        ...proofOptions,
+        candidateUserId,
+      }),
   });
 }
 
@@ -235,18 +351,29 @@ function captureAttestationBase() {
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
     status: "verified",
     semanticDigest: null,
+    implementationDigest: IMPLEMENTATION_DIGEST,
+    evidenceDigests: {
+      addResponse: "0".repeat(64),
+      cleanup: "1".repeat(64),
+      duplicateAfterReadback: "2".repeat(64),
+      duplicateBeforeReadback: "3".repeat(64),
+      duplicateMutationOutcome: "4".repeat(64),
+      identityBinding: "5".repeat(64),
+      implicitCreateAfterReadback: "6".repeat(64),
+      implicitCreateBeforeReadback: "7".repeat(64),
+      implicitCreateMutationOutcome: "8".repeat(64),
+      mailboxSilence: "9".repeat(64),
+      notificationAfter: "a".repeat(64),
+      notificationBefore: "b".repeat(64),
+    },
     captureSource: "authenticated_paraform_ui",
-    capturedAt: "2026-07-26T00:00:00.000Z",
-    observedThroughAt: "2026-07-28T00:00:00.000Z",
+    capturedAt: CAPTURED_AT,
+    observedThroughAt: CAPTURE_OBSERVED_THROUGH_AT,
     addContract: {
       procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
       method: "mutation",
       inputKeys: [...PHASE4_CURATED_LIST_ADD_INPUT_KEYS],
-      responseKeys: [
-        "curated_role_list_id",
-        "message",
-        "success",
-      ],
+      responseKeys: [...PHASE4_CURATED_LIST_ADD_RESPONSE_KEYS],
       typeValue: PHASE4_CURATED_LIST_ADD_TYPE,
       sourceValue: PHASE4_CURATED_LIST_ADD_SOURCE,
     },
@@ -292,37 +419,95 @@ function sealCapture(value = captureAttestationBase()) {
   return capture;
 }
 
-test("capture attestation is semantic-digest bound and production stays dark", () => {
+test("completed capture validation binds evidence, implementation, and time", () => {
   const capture = sealCapture();
-  assert.match(capture.semanticDigest, /^[a-f0-9]{64}$/u);
-  assert.deepEqual(
+  const decision = validatePhase4CuratedListCaptureAttestation(capture, {
+    expectedSemanticDigest: capture.semanticDigest,
+    expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+    trustedNow: CAPTURE_OBSERVED_THROUGH_AT,
+  });
+  assert.deepEqual(decision, {
+    valid: true,
+    reasons: [],
+    version: PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+  });
+
+  for (const mutate of [
+    (value) => {
+      value.evidenceDigests.mailboxSilence = "f".repeat(64);
+    },
+    (value) => {
+      value.implementationDigest = "f".repeat(64);
+    },
+    (value) => {
+      value.emailSilence.observedForMs++;
+    },
+  ]) {
+    const drifted = structuredClone(capture);
+    mutate(drifted);
+    assert.equal(
+      validatePhase4CuratedListCaptureAttestation(drifted, {
+        expectedSemanticDigest: capture.semanticDigest,
+        expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+        trustedNow: CAPTURE_OBSERVED_THROUGH_AT,
+      }).valid,
+      false,
+    );
+  }
+});
+
+test("capture validation rejects caller pins, future windows, and loose evidence", () => {
+  const capture = sealCapture();
+  assert.equal(
     validatePhase4CuratedListCaptureAttestation(capture, {
       expectedSemanticDigest: capture.semanticDigest,
-    }),
-    {
-      valid: true,
-      reasons: [],
-      version: PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
-      contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
-    },
-  );
-
-  const drifted = structuredClone(capture);
-  drifted.behavior.readbackLatencyMs++;
-  const driftDecision = validatePhase4CuratedListCaptureAttestation(
-    drifted,
-    { expectedSemanticDigest: capture.semanticDigest },
-  );
-  assert.equal(driftDecision.valid, false);
-  assert.equal(
-    driftDecision.reasons.includes("capture_attestation_digest_invalid"),
+      expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+      trustedNow: "2026-07-27T23:59:59.999Z",
+    }).reasons.includes("capture_attestation_time_invalid"),
     true,
   );
+  assert.equal(
+    validatePhase4CuratedListCaptureAttestation(capture, {
+      expectedSemanticDigest: capture.semanticDigest,
+      expectedImplementationDigest: "f".repeat(64),
+      trustedNow: CAPTURE_OBSERVED_THROUGH_AT,
+    }).reasons.includes("capture_implementation_digest_invalid"),
+    true,
+  );
+  const missingEvidence = structuredClone(capture);
+  delete missingEvidence.evidenceDigests.cleanup;
+  missingEvidence.semanticDigest =
+    phase4CuratedListCaptureSemanticDigest(missingEvidence);
+  assert.equal(
+    validatePhase4CuratedListCaptureAttestation(missingEvidence, {
+      expectedSemanticDigest: missingEvidence.semanticDigest,
+      expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+      trustedNow: CAPTURE_OBSERVED_THROUGH_AT,
+    }).reasons.includes("capture_evidence_digests_invalid"),
+    true,
+  );
+  assert.equal(
+    validatePhase4CuratedListCaptureAttestation(capture, {
+      trustedNow: CAPTURE_OBSERVED_THROUGH_AT,
+    }).valid,
+    false,
+  );
+});
 
-  const current = currentPhase4CuratedListCaptureDecision();
+test("production capture and implementation stay unpinned and writes stay dark", () => {
+  assert.equal(PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST, null);
+  assert.equal(PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST, null);
+  const current = currentPhase4CuratedListCaptureDecision({
+    trustedNow: AUTH_AT,
+  });
   assert.equal(current.valid, false);
   assert.equal(
     current.reasons.includes("capture_attestation_unpinned"),
+    true,
+  );
+  assert.equal(
+    current.reasons.includes("capture_implementation_unpinned"),
     true,
   );
   assert.deepEqual(phase4CurationContractSummary(), {
@@ -331,267 +516,49 @@ test("capture attestation is semantic-digest bound and production stays dark", (
       PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
     capturePinned: false,
     mutationAuthorizationAvailable: false,
+    globalWriteAuthorityMinterAvailable: false,
     notificationFenceRequired: true,
     roleAddedNotificationType: PHASE4_ROLE_ADDED_NOTIFICATION_TYPE,
   });
 });
 
-test("capture attestation rejects contract, behavior, email, and cleanup drift", () => {
-  const cases = [
-    {
-      reason: "capture_attestation_shape_invalid",
-      mutate: (value) => {
-        value.unreviewed = true;
-      },
-    },
-    {
-      reason: "capture_attestation_identity_invalid",
-      mutate: (value) => {
-        value.status = "almost_verified";
-      },
-    },
-    {
-      reason: "capture_attestation_time_invalid",
-      mutate: (value) => {
-        value.observedThroughAt = "2026-07-25T23:59:59.000Z";
-      },
-    },
-    {
-      reason: "capture_add_contract_invalid",
-      mutate: (value) => {
-        value.addContract.sourceValue = "CALLER_SUPPLIED_SOURCE";
-      },
-    },
-    {
-      reason: "capture_add_contract_invalid",
-      mutate: (value) => {
-        value.addContract.inputKeys.reverse();
-      },
-    },
-    {
-      reason: "capture_readback_contract_invalid",
-      mutate: (value) => {
-        value.readbackContract.procedure =
-          "curatedRoleList.getCuratedRoleIds";
-      },
-    },
-    {
-      reason: "capture_notification_contract_invalid",
-      mutate: (value) => {
-        value.notificationContract.notificationType =
-          "SOME_OTHER_NOTIFICATION";
-      },
-    },
-    {
-      reason: "capture_behavior_invalid",
-      mutate: (value) => {
-        value.behavior.implicitCreateObserved = false;
-      },
-    },
-    {
-      reason: "capture_behavior_invalid",
-      mutate: (value) => {
-        value.behavior.duplicateDidNotDuplicate = false;
-      },
-    },
-    {
-      reason: "capture_email_silence_invalid",
-      mutate: (value) => {
-        value.emailSilence.observedForMs =
-          PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS - 1;
-      },
-    },
-    {
-      reason: "capture_email_silence_invalid",
-      mutate: (value) => {
-        value.emailSilence.candidateFacingEmailCount = 1;
-      },
-    },
-    {
-      reason: "capture_email_silence_invalid",
-      mutate: (value) => {
-        value.emailSilence.controlledRecipient = false;
-      },
-    },
-    {
-      reason: "capture_cleanup_invalid",
-      mutate: (value) => {
-        value.cleanup.roleSetRestored = false;
-      },
-    },
-  ];
-
-  for (const { reason, mutate } of cases) {
-    const value = captureAttestationBase();
-    mutate(value);
-    const sealed = sealCapture(value);
-    const decision = validatePhase4CuratedListCaptureAttestation(
-      sealed,
-      { expectedSemanticDigest: sealed.semanticDigest },
-    );
-    assert.equal(decision.valid, false, reason);
-    assert.equal(decision.reasons.includes(reason), true, reason);
-  }
-
-  const valid = sealCapture();
-  assert.equal(
-    validatePhase4CuratedListCaptureAttestation(valid).reasons.includes(
-      "capture_attestation_unpinned",
-    ),
-    true,
-  );
-  assert.equal(
-    validatePhase4CuratedListCaptureAttestation(valid, {
-      expectedSemanticDigest: "A".repeat(64),
-    }).valid,
-    false,
-  );
-});
-
-test("ranked match proof unions exact tier flags and never reads score", () => {
+test("ranked match proof uses exact XOR tiers and never reads score", () => {
   let scoreReads = 0;
-  const scoreGuardedRecommended = Object.defineProperty(
-    {
-      roleId: "role-rec",
-      endorsed: true,
-      suggested: false,
-      rank: 4,
+  const role = Object.defineProperty({
+    roleId: "role-endorsed",
+    endorsed: true,
+    suggested: false,
+  }, "score", {
+    enumerable: true,
+    get() {
+      scoreReads++;
+      throw new Error("score must never be read");
     },
-    "score",
+  });
+  const proof = rankedProof({ roles: [
+    role,
     {
-      enumerable: true,
-      get() {
-        scoreReads++;
-        throw new Error("score must never be read");
-      },
-    },
-  );
-  const scoreGuardedPossible = Object.defineProperty(
-    {
-      roleId: "role-poss",
+      roleId: "role-suggested",
       endorsed: false,
       suggested: true,
-      rank: 0,
+      score: 0.999,
     },
-    "score",
-    {
-      enumerable: true,
-      get() {
-        scoreReads++;
-        throw new Error("score must never be read");
-      },
-    },
-  );
-  const proof = rankedProof({
-    roles: [scoreGuardedRecommended, scoreGuardedPossible],
-  });
-
+  ] });
   assert.equal(proof.valid, true);
-  assert.deepEqual(proof.recommendedRoleIds, ["role-rec"]);
-  assert.deepEqual(proof.possibleRoleIds, ["role-poss"]);
-  assert.deepEqual(proof.targetRoleIds, ["role-rec", "role-poss"]);
-  assert.equal(proof.targetCount, 2);
-  assert.equal(scoreReads, 0);
-  assert.equal(Object.isFrozen(proof), true);
-  assert.equal(Object.isFrozen(proof.targetRoleIds), true);
-});
-
-test("add response classifier accepts only the captured response contract", () => {
-  assert.deepEqual(PHASE4_CURATED_LIST_ADD_RESPONSE_KEYS, [
-    "curated_role_list_id",
-    "message",
-    "success",
+  assert.deepEqual(proof.recommendedRoleIds, ["role-endorsed"]);
+  assert.deepEqual(proof.possibleRoleIds, ["role-suggested"]);
+  assert.deepEqual(proof.targetRoleIds, [
+    "role-endorsed",
+    "role-suggested",
   ]);
-  assert.deepEqual(phase4CuratedListMutationOutcome({
-    responseReceived: true,
-    response: {
-      success: true,
-      message: "Roles added",
-      curated_role_list_id: "curated-list-contract-a",
-    },
-  }), {
-    outcome: "accepted",
-    responseContractValid: true,
-    accepted: true,
-    rejected: false,
-    externalWriteMayHaveLanded: false,
-    curatedRoleListId: "curated-list-contract-a",
-    errorCode: null,
-  });
-  assert.deepEqual(phase4CuratedListMutationOutcome({
-    responseReceived: true,
-    response: {
-      success: false,
-      message: "Rejected",
-    },
-  }), {
-    outcome: "rejected",
-    responseContractValid: true,
-    accepted: false,
-    rejected: true,
-    externalWriteMayHaveLanded: false,
-    curatedRoleListId: null,
-    errorCode: "mutation_rejected",
-  });
+  assert.equal(scoreReads, 0);
 });
 
-test("transport uncertainty and add-response drift always classify unknown", () => {
-  const unknowns = [
-    {
-      responseReceived: false,
-      response: {
-        success: true,
-        curated_role_list_id: "untrusted-after-timeout",
-      },
-    },
-    {
-      responseReceived: true,
-      response: {
-        success: true,
-      },
-    },
-    {
-      responseReceived: true,
-      response: {
-        success: false,
-        curated_role_list_id: "contradictory-list-id",
-      },
-    },
-    {
-      responseReceived: true,
-      response: {
-        success: true,
-        curated_role_list_id: "curated-list-contract-a",
-        unexpected: true,
-      },
-    },
-    {
-      responseReceived: true,
-      response: {
-        success: "true",
-        curated_role_list_id: "curated-list-contract-a",
-      },
-    },
-    {
-      responseReceived: true,
-      response: null,
-    },
-  ];
-  for (const input of unknowns) {
-    const decision = phase4CuratedListMutationOutcome(input);
-    assert.equal(decision.outcome, "unknown");
-    assert.equal(decision.responseContractValid, false);
-    assert.equal(decision.externalWriteMayHaveLanded, true);
-    assert.equal(decision.curatedRoleListId, null);
-  }
-});
-
-test("ranked match proof rejects ambiguous tiers, malformed ids, and loose envelopes", () => {
+test("ranked proof rejects tier ambiguity and response-digest substitution", () => {
   for (const role of [
     { roleId: "role-a", endorsed: true, suggested: true },
     { roleId: "role-a", endorsed: false, suggested: false },
     { roleId: "role-a", endorsed: 1, suggested: false },
-    { roleId: "role a", endorsed: true, suggested: false },
   ]) {
     assert.equal(rankedProof({ roles: [role] }).valid, false);
   }
@@ -601,111 +568,123 @@ test("ranked match proof rejects ambiguous tiers, malformed ids, and loose envel
       { roleId: "role-a", endorsed: false, suggested: true },
     ],
   }).errorCode, "role_id_duplicate");
-  assert.equal(rankedProof({ status: "RANKED" }).valid, false);
-  assert.equal(rankedProof({ status: "pending" }).valid, false);
-
-  const extraTopLevel = rankedObservation();
-  extraTopLevel.response.total = 2;
-  assert.equal(
-    normalizePhase4RankedMatchObservation(extraTopLevel, {
-      candidateId: CANDIDATE_ID,
-      recruiterUserId: RECRUITER_USER_ID,
-    }).valid,
-    false,
-  );
-  const looseInput = rankedObservation();
-  looseInput.input.limit = 10;
-  assert.equal(
-    normalizePhase4RankedMatchObservation(looseInput, {
-      candidateId: CANDIDATE_ID,
-      recruiterUserId: RECRUITER_USER_ID,
-    }).valid,
-    false,
-  );
-  assert.equal(
-    normalizePhase4RankedMatchObservation(rankedObservation(), {
-      candidateId: OTHER_CANDIDATE_ID,
-      recruiterUserId: RECRUITER_USER_ID,
-    }).valid,
-    false,
-  );
+  assert.equal(rankedProof({
+    responseDigest: "f".repeat(64),
+  }).errorCode, "response_digest_invalid");
+  assert.equal(rankedProof({
+    extra: { callerLimit: 1 },
+  }).errorCode, "observation_shape_invalid");
 });
 
-test("candidate-scoped readback models null as implicit creation", () => {
+test("proofs are bound to scope, source generation, CAS, and freshness", () => {
+  const exact = rankedObservation();
+  for (const expected of [
+    {
+      ...CONTEXT,
+      scopeDigest: OTHER_SCOPE_DIGEST,
+      trustedNow: PLAN_AT,
+    },
+    {
+      ...CONTEXT,
+      sourceGenerationDigest: OTHER_SOURCE_GENERATION_DIGEST,
+      trustedNow: PLAN_AT,
+    },
+    {
+      ...CONTEXT,
+      sourceCasRevision: SOURCE_CAS_REVISION + 1,
+      trustedNow: PLAN_AT,
+    },
+    {
+      ...CONTEXT,
+      trustedNow: new Date(
+        Date.parse(MATCH_AT) + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS + 1,
+      ).toISOString(),
+    },
+  ]) {
+    assert.equal(normalizePhase4RankedMatchObservation(exact, {
+      candidateId: CANDIDATE_ID,
+      recruiterUserId: RECRUITER_USER_ID,
+      ...expected,
+    }).valid, false);
+  }
+});
+
+test("present readback binds both identities and canonical response digest", () => {
+  const proof = readbackProof({
+    roleIds: ["prior-role", "target-role"],
+  });
+  assert.equal(proof.valid, true);
+  assert.equal(proof.exists, true);
+  assert.equal(proof.candidateUserId, CANDIDATE_USER_ID);
+  assert.deepEqual(proof.roleIds, ["prior-role", "target-role"]);
+
+  assert.equal(readbackProof({
+    response: curatedListResponse({
+      candidateId: OTHER_CANDIDATE_ID,
+    }),
+  }).valid, false);
+  assert.equal(readbackProof({
+    response: curatedListResponse({
+      candidateUserId: OTHER_CANDIDATE_USER_ID,
+    }),
+  }).valid, false);
+  assert.equal(readbackProof({
+    roleIds: ["duplicate", "duplicate"],
+  }).valid, false);
+  assert.equal(readbackProof({
+    responseDigest: "f".repeat(64),
+  }).errorCode, "response_digest_invalid");
+});
+
+test("null readback cannot assert candidate-user identity", () => {
   const absent = readbackProof({ exists: false });
   assert.equal(absent.valid, true);
   assert.equal(absent.exists, false);
+  assert.equal(absent.candidateId, CANDIDATE_ID);
+  assert.equal(absent.candidateUserId, null);
   assert.equal(absent.implicitCreateRequired, true);
-  assert.equal(absent.listId, null);
-  assert.deepEqual(absent.roleIds, []);
 
-  const present = readbackProof({
-    roleIds: ["prior-role", "target-role"],
-    response: curatedListResponse({
-      roleIds: ["prior-role", "target-role"],
-      extra: { harmless_display_field: "ignored" },
+  const matchProof = rankedProof();
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof,
+    preReadback: absent,
+  }), /identity proof/u);
+});
+
+test("implicit-create planning requires authoritative identity binding", () => {
+  const plan = curationPlan({ preExists: false });
+  assert.equal(plan.implicitCreateExpected, true);
+  assert.equal(plan.identityProof.valid, true);
+  assert.equal(plan.identityProof.candidateUserId, CANDIDATE_USER_ID);
+
+  const absent = readbackProof({ exists: false });
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof(),
+    preReadback: absent,
+    identityProof: identityProof({
+      candidateUserId: OTHER_CANDIDATE_USER_ID,
     }),
-  });
-  assert.equal(present.valid, true);
-  assert.equal(present.exists, true);
-  assert.equal(present.implicitCreateRequired, false);
-  assert.deepEqual(present.roleIds, ["prior-role", "target-role"]);
-  assert.equal(present.roleCount, 2);
-});
-
-test("candidate-scoped readback fails closed on scope and role ambiguity", () => {
-  const invalidResponses = [
-    curatedListResponse({ candidateId: OTHER_CANDIDATE_ID }),
-    curatedListResponse({ candidateUserId: OTHER_CANDIDATE_USER_ID }),
-    {
-      id: "curated-list-contract-a",
-      candidate_id: CANDIDATE_ID,
-      candidate_user_id: CANDIDATE_USER_ID,
-      roles: [{ roleId: "wrong-role-key" }],
-    },
-    curatedListResponse({ roleIds: ["duplicate-role", "duplicate-role"] }),
-  ];
-  for (const response of invalidResponses) {
-    assert.equal(readbackProof({ response }).valid, false);
-  }
-
-  const agencyWideProcedure = readbackObservation();
-  agencyWideProcedure.procedure = "curatedRoleList.getCuratedRoleIds";
-  assert.equal(
-    normalizePhase4CuratedListReadback(agencyWideProcedure, {
-      candidateId: CANDIDATE_ID,
-      candidateUserId: CANDIDATE_USER_ID,
-    }).valid,
-    false,
-  );
-  const looseInput = readbackObservation();
-  looseInput.input.candidate_user_id = CANDIDATE_USER_ID;
-  assert.equal(
-    normalizePhase4CuratedListReadback(looseInput, {
-      candidateId: CANDIDATE_ID,
-      candidateUserId: CANDIDATE_USER_ID,
-    }).valid,
-    false,
-  );
-  assert.equal(readbackProof({
-    responseDigest: "not-a-digest",
-  }).valid, false);
-  assert.equal(readbackProof({
-    observedAt: "2026-07-26 00:01:00Z",
+  }), /identity proof/u);
+  assert.equal(identityProof({
+    responseDigest: "f".repeat(64),
   }).valid, false);
 });
 
-test("notification proof is fresh, candidate-bound, and fail-closed", () => {
+test("notification proof is fresh, source-bound, and fail-closed", () => {
   const safe = notificationProof();
   assert.equal(safe.valid, true);
   assert.equal(safe.safe, true);
-  assert.equal(safe.roleAddedNotificationEnabled, false);
 
   const enabled = notificationProof({
-    notificationTypes: [
-      "SOME_OTHER_NOTIFICATION",
-      PHASE4_ROLE_ADDED_NOTIFICATION_TYPE,
-    ],
+    notificationTypes: [PHASE4_ROLE_ADDED_NOTIFICATION_TYPE],
   });
   assert.equal(enabled.valid, true);
   assert.equal(enabled.safe, false);
@@ -714,67 +693,38 @@ test("notification proof is fresh, candidate-bound, and fail-closed", () => {
     "candidate_role_added_email_enabled",
   );
 
-  const boundaryObservedAt = new Date(
-    Date.parse(POST_READ_AT) - PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
+  const boundary = new Date(
+    Date.parse(AUTH_AT) - PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
   ).toISOString();
+  assert.equal(notificationProof({ observedAt: boundary }).safe, true);
   assert.equal(notificationProof({
-    observedAt: boundaryObservedAt,
-  }).safe, true);
-  assert.equal(notificationProof({
-    observedAt: new Date(
-      Date.parse(boundaryObservedAt) - 1,
-    ).toISOString(),
+    observedAt: new Date(Date.parse(boundary) - 1).toISOString(),
   }).valid, false);
   assert.equal(notificationProof({
-    observedAt: new Date(Date.parse(POST_READ_AT) + 1).toISOString(),
+    responseDigest: "f".repeat(64),
   }).valid, false);
-});
+  assert.equal(notificationProof({
+    sourceCasRevision: SOURCE_CAS_REVISION + 1,
+  }).valid, true);
 
-test("notification proof rejects missing, malformed, stale, and cross-user state", () => {
-  assert.equal(notificationProof({
-    response: {},
-  }).valid, false);
-  assert.equal(notificationProof({
-    response: { notification_types: null },
-  }).valid, false);
-  assert.equal(notificationProof({
-    notificationTypes: ["DUPLICATE", "DUPLICATE"],
-  }).valid, false);
-  assert.equal(notificationProof({
-    notificationTypes: ["lowercase-is-not-an-enum"],
-  }).valid, false);
-
-  const crossUser = notificationObservation({
-    candidateUserId: OTHER_CANDIDATE_USER_ID,
+  const crossCasObservation = notificationObservation({
+    sourceCasRevision: SOURCE_CAS_REVISION + 1,
   });
-  assert.equal(
-    normalizePhase4NotificationSafetyProof(crossUser, {
+  assert.equal(normalizePhase4NotificationSafetyProof(
+    crossCasObservation,
+    {
+      ...CONTEXT,
       candidateUserId: CANDIDATE_USER_ID,
-      decisionAt: POST_READ_AT,
-    }).valid,
-    false,
-  );
-  const incomplete = notificationObservation({ complete: false });
-  assert.equal(
-    normalizePhase4NotificationSafetyProof(incomplete, {
-      candidateUserId: CANDIDATE_USER_ID,
-      decisionAt: POST_READ_AT,
-    }).valid,
-    false,
-  );
-  const looseInput = notificationObservation();
-  looseInput.input.limit = 1;
-  assert.equal(
-    normalizePhase4NotificationSafetyProof(looseInput, {
-      candidateUserId: CANDIDATE_USER_ID,
-      decisionAt: POST_READ_AT,
-    }).valid,
-    false,
-  );
+      decisionAt: AUTH_AT,
+      trustedNow: AUTH_AT,
+    },
+  ).valid, false);
 });
 
-test("write plan uses the exact missing-only add envelope for both tiers", () => {
-  const plan = curationPlan({ existingRoleIds: ["role-possible"] });
+test("write plan is exact, missing-only, scope-bound, and ordered", () => {
+  const plan = curationPlan({
+    existingRoleIds: ["role-possible", "unrelated-role"],
+  });
   assert.equal(plan.noMutationRequired, false);
   assert.deepEqual(plan.missingRoleIds, ["role-recommended"]);
   assert.deepEqual(plan.plannedInput, {
@@ -788,396 +738,280 @@ test("write plan uses the exact missing-only add envelope for both tiers", () =>
     Object.keys(plan.plannedInput).sort(),
     [...PHASE4_CURATED_LIST_ADD_INPUT_KEYS].sort(),
   );
-  assert.equal(Object.isFrozen(plan), true);
-  assert.equal(Object.isFrozen(plan.plannedInput), true);
-  assert.equal(Object.isFrozen(plan.plannedInput.role_ids), true);
-
-  const implicitCreate = curationPlan({ preExists: false });
-  assert.equal(implicitCreate.implicitCreateExpected, true);
-  assert.equal(implicitCreate.listExistedBefore, false);
-  assert.deepEqual(
-    implicitCreate.plannedInput.role_ids,
-    ["role-recommended", "role-possible"],
-  );
+  assert.equal(plan.scopeDigest, SCOPE_DIGEST);
+  assert.equal(plan.sourceGenerationDigest, SOURCE_GENERATION_DIGEST);
+  assert.equal(plan.sourceCasRevision, SOURCE_CAS_REVISION);
+  assert.match(plan.planSemanticDigest, /^[a-f0-9]{64}$/u);
 
   const alreadyComplete = curationPlan({
-    existingRoleIds: ["role-recommended", "role-possible", "unrelated"],
+    existingRoleIds: [
+      "role-recommended",
+      "role-possible",
+      "unrelated-role",
+    ],
   });
   assert.equal(alreadyComplete.noMutationRequired, true);
-  assert.equal(alreadyComplete.missingCount, 0);
   assert.equal(alreadyComplete.plannedInput, null);
+
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof({ observedAt: PRE_READ_AT }),
+    preReadback: readbackProof({ observedAt: MATCH_AT }),
+  }), /ordering/u);
 });
 
-test("write planning rejects proof substitution and invalid scope", () => {
+test("write planning rejects proof replay across scope, generation, and CAS", () => {
   const matchProof = rankedProof();
   const preReadback = readbackProof();
-  assert.throws(
-    () => planPhase4CuratedListWrite({
-      scopeDigest: "A".repeat(64),
+  for (const context of [
+    { ...CONTEXT, scopeDigest: OTHER_SCOPE_DIGEST },
+    {
+      ...CONTEXT,
+      sourceGenerationDigest: OTHER_SOURCE_GENERATION_DIGEST,
+    },
+    { ...CONTEXT, sourceCasRevision: SOURCE_CAS_REVISION + 1 },
+  ]) {
+    assert.throws(() => planPhase4CuratedListWrite({
+      ...context,
+      trustedNow: PLAN_AT,
       candidateId: CANDIDATE_ID,
       candidateUserId: CANDIDATE_USER_ID,
       matchProof,
       preReadback,
-    }),
-    /scopeDigest/,
-  );
-  assert.throws(
-    () => planPhase4CuratedListWrite({
-      scopeDigest: SCOPE_DIGEST,
-      candidateId: OTHER_CANDIDATE_ID,
-      candidateUserId: CANDIDATE_USER_ID,
-      matchProof,
-      preReadback,
-    }),
-    /matchProof/,
-  );
-  assert.throws(
-    () => planPhase4CuratedListWrite({
-      scopeDigest: SCOPE_DIGEST,
-      candidateId: CANDIDATE_ID,
-      candidateUserId: OTHER_CANDIDATE_USER_ID,
-      matchProof,
-      preReadback,
-    }),
-    /preReadback/,
-  );
+    }), /proof/u);
+  }
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: "2026-07-26T00:20:00.000Z",
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof,
+    preReadback,
+  }), /ordering/u);
 });
 
-test("unpinned capture prevents authorization and request fabrication", () => {
+test("unpinned capture and absent authority independently deny writes", () => {
   const plan = curationPlan();
-  const safeNotification = notificationProof();
   const decision = phase4CuratedListWriteAuthorization({
     plan,
-    notificationProof: safeNotification,
-    decisionAt: POST_READ_AT,
+    notificationProof: notificationProof(),
+    trustedNow: AUTH_AT,
   });
   assert.equal(decision.allowed, false);
   assert.equal(decision.authorization, null);
-  assert.equal(decision.captureAttestationValid, false);
   assert.equal(decision.notificationSafe, true);
+  assert.equal(
+    decision.reasons.includes("global_write_authority_unavailable"),
+    true,
+  );
   assert.equal(
     decision.reasons.includes("capture_attestation_unpinned"),
     true,
   );
-
-  assert.throws(
-    () => buildAuthorizedPhase4CuratedListAddRequest({
-      plan,
-      authorization: {
-        allowed: true,
-        plan,
-        decisionAt: POST_READ_AT,
-        expiresAt: DUPLICATE_READ_AT,
-      },
-      executionAt: DUPLICATE_AT,
-    }),
-    /PHASE4_CURATED_LIST_WRITE_NOT_AUTHORIZED/,
-  );
-  assert.throws(
-    () => buildAuthorizedPhase4CuratedListAddRequest({
-      plan,
-      authorization: null,
-      executionAt: DUPLICATE_AT,
-    }),
-    /PHASE4_CURATED_LIST_WRITE_NOT_AUTHORIZED/,
-  );
-});
-
-test("enabled or stale notification state adds an independent write fence", () => {
-  const plan = curationPlan();
-  const enabledDecision = phase4CuratedListWriteAuthorization({
-    plan,
-    notificationProof: notificationProof({
-      notificationTypes: [PHASE4_ROLE_ADDED_NOTIFICATION_TYPE],
-    }),
-    decisionAt: POST_READ_AT,
-  });
-  assert.equal(enabledDecision.allowed, false);
   assert.equal(
-    enabledDecision.reasons.includes(
-      "candidate_role_added_email_enabled",
-    ),
+    decision.reasons.includes("capture_implementation_unpinned"),
     true,
   );
 
-  const onceFresh = normalizePhase4NotificationSafetyProof(
-    notificationObservation({
-      observedAt: MUTATION_AT,
+  assert.throws(() => buildAuthorizedPhase4CuratedListAddRequest({
+    plan,
+    authorization: {
+      allowed: true,
+      plan,
+      planSemanticDigest: plan.planSemanticDigest,
+    },
+    executionAt: MUTATION_AT,
+    ...CONTEXT,
+    trustedNow: MUTATION_AT,
+  }), /NOT_AUTHORIZED/u);
+});
+
+test("mutation outcomes require the exact private authorized-request brand", () => {
+  assert.throws(() => phase4CuratedListMutationOutcome({
+    request: {
+      procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
+      method: "mutation",
+      input: curationPlan().plannedInput,
+    },
+    responseReceived: true,
+    response: {
+      success: true,
+      curated_role_list_id: "curated-list-contract-a",
+    },
+    observedAt: POST_READ_AT,
+    trustedNow: POST_READ_AT,
+  }), /exact branded request/u);
+  assert.throws(() => phase4CuratedListMutationOutcome({
+    responseReceived: false,
+    observedAt: POST_READ_AT,
+    trustedNow: POST_READ_AT,
+  }), /exact branded request/u);
+});
+
+test("pure add-response classification is strict and never grants authority", () => {
+  assert.deepEqual(classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: {
+      success: true,
+      message: "Roles added",
+      curated_role_list_id: "curated-list-contract-a",
+    },
+  }), {
+    outcome: "accepted",
+    responseContractValid: true,
+    accepted: true,
+    rejected: false,
+    externalWriteMayHaveLanded: false,
+    curatedRoleListId: "curated-list-contract-a",
+    responseDigest: phase4CurationObservationResponseDigest(
+      "unrecognized-procedure",
+      {
+        success: true,
+        message: "Roles added",
+        curated_role_list_id: "curated-list-contract-a",
+      },
+    ),
+    errorCode: null,
+  });
+  assert.equal(classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: {
+      success: false,
+      message: "Rejected",
+    },
+  }).outcome, "rejected");
+  for (const input of [
+    { responseReceived: false },
+    {
+      responseReceived: true,
+      response: { success: true },
+    },
+    {
+      responseReceived: true,
+      response: {
+        success: false,
+        curated_role_list_id: "contradictory-list",
+      },
+    },
+    {
+      responseReceived: true,
+      response: {
+        success: true,
+        curated_role_list_id: "curated-list-contract-a",
+        extra: true,
+      },
+    },
+  ]) {
+    const classified = classifyPhase4CuratedListAddResponse(input);
+    assert.equal(classified.outcome, "unknown");
+    assert.equal(classified.externalWriteMayHaveLanded, true);
+    assert.equal(classified.curatedRoleListId, null);
+  }
+  const cyclic = {
+    success: true,
+    curated_role_list_id: "curated-list-contract-a",
+  };
+  cyclic.self = cyclic;
+  assert.equal(classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: cyclic,
+  }).outcome, "unknown");
+});
+
+test("reconciliation rejects naked outcome strings and executable retry input", async () => {
+  const plan = curationPlan();
+  for (const mutationOutcome of [
+    "unknown",
+    "accepted",
+    classifyPhase4CuratedListAddResponse({
+      responseReceived: true,
+      response: {
+        success: true,
+        curated_role_list_id: "curated-list-contract-a",
+      },
+    }),
+    classifyPhase4CuratedListAddResponse({
+      responseReceived: false,
     }),
     {
-      candidateUserId: CANDIDATE_USER_ID,
-      decisionAt: POST_READ_AT,
+      outcome: "unknown",
+      externalWriteMayHaveLanded: true,
     },
-  );
-  const lateDecisionAt = new Date(
-    Date.parse(MUTATION_AT)
-      + PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS
-      + 1,
-  ).toISOString();
-  const staleDecision = phase4CuratedListWriteAuthorization({
-    plan,
-    notificationProof: onceFresh,
-    decisionAt: lateDecisionAt,
-  });
-  assert.equal(staleDecision.allowed, false);
-  assert.equal(
-    staleDecision.reasons.includes("notification_proof_stale"),
-    true,
-  );
-});
-
-test("unknown write outcome performs readback only until authoritative evidence", () => {
-  const plan = curationPlan();
-  const withoutReadback = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "unknown",
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(withoutReadback.action, "readback_only");
-  assert.equal(withoutReadback.readbackOnly, true);
-  assert.equal(withoutReadback.externalWriteMayHaveLanded, true);
-  assert.equal(withoutReadback.retryOriginalSetAllowed, false);
-  assert.equal(withoutReadback.nextPlannedInput, null);
-
-  const staleReadback = readbackProof({
-    roleIds: ["role-recommended", "role-possible"],
-    observedAt: PRE_READ_AT,
-  });
-  const staleDecision = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "unknown",
-    postReadback: staleReadback,
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(staleDecision.readbackValid, false);
-  assert.equal(staleDecision.action, "readback_only");
-});
-
-test("authoritative reconciliation verifies full state or plans only missing roles", () => {
-  const plan = curationPlan();
-  const fullReadback = readbackProof({
-    roleIds: [
-      "role-recommended",
-      "role-possible",
-      "unrelated-prior-role",
-    ],
-    observedAt: POST_READ_AT,
-    responseDigest: SECOND_RESPONSE_DIGEST,
-  });
-  const verified = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "accepted",
-    postReadback: fullReadback,
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(verified.action, "verified");
-  assert.equal(verified.enrollmentBlocked, false);
-  assert.equal(verified.verifiedCount, 2);
-  assert.equal(verified.nextPlannedInput, null);
-
-  const partialReadback = readbackProof({
-    roleIds: ["role-recommended", "unrelated-prior-role"],
-    observedAt: POST_READ_AT,
-    responseDigest: SECOND_RESPONSE_DIGEST,
-  });
-  const partial = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "unknown",
-    postReadback: partialReadback,
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(partial.action, "plan_missing_only");
-  assert.equal(partial.missingOnlyPlanAllowed, true);
-  assert.equal(partial.retryOriginalSetAllowed, false);
-  assert.deepEqual(partial.missingRoleIds, ["role-possible"]);
-  assert.deepEqual(partial.nextPlannedInput, {
-    type: PHASE4_CURATED_LIST_ADD_TYPE,
-    candidate_id: CANDIDATE_ID,
-    candidate_user_id: CANDIDATE_USER_ID,
-    role_ids: ["role-possible"],
-    source: PHASE4_CURATED_LIST_ADD_SOURCE,
-  });
-});
-
-test("partial exhaustion and rejection block rather than understating count", () => {
-  const plan = curationPlan();
-  const partialReadback = readbackProof({
-    roleIds: ["role-recommended"],
-    observedAt: POST_READ_AT,
-    responseDigest: SECOND_RESPONSE_DIGEST,
-  });
-  const exhausted = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "unknown",
-    postReadback: partialReadback,
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 3,
-    maxAttempts: 3,
-  });
-  assert.equal(exhausted.action, "review_exhausted");
-  assert.equal(exhausted.enrollmentBlocked, true);
-  assert.equal(exhausted.nextPlannedInput, null);
-  assert.equal(exhausted.attemptsRemaining, 0);
-
-  const rejected = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "rejected",
-    postReadback: partialReadback,
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(rejected.action, "review");
-  assert.equal(rejected.enrollmentBlocked, true);
-  assert.equal(rejected.nextPlannedInput, null);
-
-  assert.throws(
-    () => reconcilePhase4CuratedListWrite({
+  ]) {
+    assert.throws(() => reconcilePhase4CuratedListWrite({
       plan,
-      mutationOutcome: "unknown",
-      mutationAttemptedAt: MATCH_AT,
+      mutationOutcome,
+      postReadback: readbackProof({
+        roleIds: ["role-recommended"],
+        observedAt: POST_READ_AT,
+        trustedNow: COUNT_AT,
+      }),
       attemptCount: 1,
       maxAttempts: 3,
-    }),
-    /mutationAttemptedAt/,
-  );
-  assert.throws(
-    () => reconcilePhase4CuratedListWrite({
-      plan,
-      mutationOutcome: "unknown",
-      mutationAttemptedAt: MUTATION_AT,
-      attemptCount: 1,
-      maxAttempts: PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX + 1,
-    }),
-    /cannot exceed/,
-  );
+      trustedNow: COUNT_AT,
+    }), /exact branded/u);
+  }
+
+  const modulePath = fileURLToPath(new URL(
+    "../api/paraai/_lib/phase4-curation-contract.mjs",
+    import.meta.url,
+  ));
+  const source = await readFile(modulePath, "utf8");
+  assert.doesNotMatch(source, /\bnextPlannedInput\b/u);
+  assert.match(source, /\breplanRequirement\b/u);
 });
 
-test("null-to-object reconciliation records implicit creation only after the write", () => {
-  const plan = curationPlan({ preExists: false });
-  const createdReadback = readbackProof({
-    roleIds: ["role-recommended", "role-possible"],
-    observedAt: POST_READ_AT,
-    responseDigest: SECOND_RESPONSE_DIGEST,
-  });
-  const created = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "accepted",
-    postReadback: createdReadback,
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(created.action, "verified");
-  assert.equal(created.implicitCreateExpected, true);
-  assert.equal(created.implicitCreateObserved, true);
-
-  const stillAbsent = reconcilePhase4CuratedListWrite({
-    plan,
-    mutationOutcome: "unknown",
-    postReadback: readbackProof({
-      exists: false,
-      observedAt: POST_READ_AT,
-      responseDigest: SECOND_RESPONSE_DIGEST,
-    }),
-    mutationAttemptedAt: MUTATION_AT,
-    attemptCount: 1,
-    maxAttempts: 3,
-  });
-  assert.equal(stillAbsent.implicitCreateObserved, false);
-  assert.equal(stillAbsent.action, "plan_missing_only");
-});
-
-test("duplicate re-add proof requires stable list identity and role set", () => {
+test("duplicate proof rejects empty targets and unchanged-readback fiction", () => {
   const first = readbackProof({
-    roleIds: ["role-recommended", "role-possible", "unrelated"],
+    roleIds: ["role-recommended"],
     observedAt: POST_READ_AT,
+    trustedNow: COUNT_AT,
   });
   const duplicate = readbackProof({
-    roleIds: ["unrelated", "role-possible", "role-recommended"],
-    observedAt: DUPLICATE_READ_AT,
-    responseDigest: SECOND_RESPONSE_DIGEST,
+    roleIds: ["role-recommended"],
+    observedAt: COUNT_AT,
+    trustedNow: COUNT_AT,
   });
-  const verified = phase4DuplicateReaddReadbackDecision({
+  assert.equal(phase4DuplicateReaddReadbackDecision({
     firstReadback: first,
     duplicateReadback: duplicate,
-    duplicateAttemptedAt: DUPLICATE_AT,
-    targetRoleIds: ["role-recommended", "role-possible"],
-  });
-  assert.equal(verified.verified, true);
-  assert.equal(verified.roleSetStable, true);
-  assert.equal(verified.listIdentityStable, true);
-  assert.equal(verified.targetsPresent, true);
-
-  const changed = phase4DuplicateReaddReadbackDecision({
+    targetRoleIds: [],
+    trustedNow: COUNT_AT,
+  }).reason, "target_roles_empty");
+  const unchangedReads = phase4DuplicateReaddReadbackDecision({
     firstReadback: first,
-    duplicateReadback: readbackProof({
-      roleIds: [
-        "role-recommended",
-        "role-possible",
-        "unrelated",
-        "duplicated-role",
-      ],
-      observedAt: DUPLICATE_READ_AT,
-    }),
-    duplicateAttemptedAt: DUPLICATE_AT,
-    targetRoleIds: ["role-recommended", "role-possible"],
+    authorizedRequest: {
+      procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
+      method: "mutation",
+      input: {
+        candidate_id: CANDIDATE_ID,
+        candidate_user_id: CANDIDATE_USER_ID,
+        role_ids: ["role-recommended"],
+        type: PHASE4_CURATED_LIST_ADD_TYPE,
+        source: PHASE4_CURATED_LIST_ADD_SOURCE,
+      },
+    },
+    mutationOutcome: {
+      outcome: "accepted",
+      curatedRoleListId: "curated-list-contract-a",
+    },
+    duplicateReadback: duplicate,
+    targetRoleIds: ["role-recommended"],
+    trustedNow: COUNT_AT,
   });
-  assert.equal(changed.verified, false);
-  assert.equal(changed.roleSetStable, false);
+  assert.equal(unchangedReads.verified, false);
+  assert.equal(
+    unchangedReads.reason,
+    "duplicate_evidence_chain_invalid",
+  );
 });
 
-test("duplicate re-add proof rejects stale, cross-list, and cross-candidate evidence", () => {
-  const first = readbackProof({
-    roleIds: ["role-recommended"],
-    observedAt: POST_READ_AT,
-  });
-  const differentList = readbackProof({
-    listId: "curated-list-contract-b",
-    roleIds: ["role-recommended"],
-    observedAt: DUPLICATE_READ_AT,
-  });
-  assert.equal(phase4DuplicateReaddReadbackDecision({
-    firstReadback: first,
-    duplicateReadback: differentList,
-    duplicateAttemptedAt: DUPLICATE_AT,
-    targetRoleIds: ["role-recommended"],
-  }).verified, false);
-
-  const crossCandidate = readbackProof({
-    candidateId: OTHER_CANDIDATE_ID,
-    candidateUserId: OTHER_CANDIDATE_USER_ID,
-    roleIds: ["role-recommended"],
-    observedAt: DUPLICATE_READ_AT,
-  });
-  assert.equal(phase4DuplicateReaddReadbackDecision({
-    firstReadback: first,
-    duplicateReadback: crossCandidate,
-    duplicateAttemptedAt: DUPLICATE_AT,
-    targetRoleIds: ["role-recommended"],
-  }).verified, false);
-
-  assert.equal(phase4DuplicateReaddReadbackDecision({
-    firstReadback: first,
-    duplicateReadback: readbackProof({
-      roleIds: ["role-recommended"],
-      observedAt: DUPLICATE_AT,
-    }),
-    duplicateAttemptedAt: DUPLICATE_READ_AT,
-    targetRoleIds: ["role-recommended"],
-  }).verified, false);
-});
-
-test("exact post-add count includes prior target roles and excludes unrelated roles", () => {
+test("exact post-add count excludes unrelated roles and preserves tier semantics", () => {
   const matchProof = rankedProof({
+    trustedNow: COUNT_AT,
     roles: [
       {
         roleId: "recommended-prior",
@@ -1197,6 +1031,8 @@ test("exact post-add count includes prior target roles and excludes unrelated ro
     ],
   });
   const postReadback = readbackProof({
+    trustedNow: COUNT_AT,
+    observedAt: POST_READ_AT,
     roleIds: [
       "unrelated-one",
       "possible-prior",
@@ -1204,59 +1040,55 @@ test("exact post-add count includes prior target roles and excludes unrelated ro
       "possible-new",
       "unrelated-two",
     ],
-    observedAt: POST_READ_AT,
   });
   const count = exactPhase4PostAddCuratedMatchCount({
     matchProof,
     postReadback,
+    trustedNow: COUNT_AT,
   });
   assert.equal(count.complete, true);
-  assert.equal(count.enrollmentBlocked, false);
   assert.equal(count.recommendedCount, 1);
   assert.equal(count.possibleCount, 2);
   assert.equal(count.matchCount, 3);
-  assert.equal(count.expectedMatchCount, 3);
-  assert.equal(count.listRoleCount, 5);
   assert.equal(count.unrelatedRoleCount, 2);
-  assert.deepEqual(count.missingTargetRoleIds, []);
 });
 
-test("exact post-add count blocks partial, stale, and cross-candidate evidence", () => {
-  const matchProof = rankedProof();
+test("post-add count rejects partial completion and cross-scope replay", () => {
+  const matchProof = rankedProof({ trustedNow: COUNT_AT });
   const partial = exactPhase4PostAddCuratedMatchCount({
     matchProof,
     postReadback: readbackProof({
-      roleIds: ["role-recommended", "unrelated"],
+      trustedNow: COUNT_AT,
       observedAt: POST_READ_AT,
+      roleIds: ["role-recommended", "unrelated"],
     }),
+    trustedNow: COUNT_AT,
   });
   assert.equal(partial.complete, false);
   assert.equal(partial.enrollmentBlocked, true);
-  assert.equal(partial.matchCount, 1);
   assert.deepEqual(partial.missingTargetRoleIds, ["role-possible"]);
 
-  assert.throws(
-    () => exactPhase4PostAddCuratedMatchCount({
-      matchProof,
-      postReadback: readbackProof({
-        roleIds: ["role-recommended", "role-possible"],
-        observedAt: "2026-07-25T23:59:59.999Z",
-      }),
+  assert.throws(() => exactPhase4PostAddCuratedMatchCount({
+    matchProof,
+    postReadback: readbackProof({
+      trustedNow: COUNT_AT,
+      observedAt: POST_READ_AT,
+      roleIds: ["role-recommended", "role-possible"],
+      scopeDigest: OTHER_SCOPE_DIGEST,
     }),
-    /exact match/,
-  );
-  assert.throws(
-    () => exactPhase4PostAddCuratedMatchCount({
-      matchProof,
-      postReadback: readbackProof({
-        candidateId: OTHER_CANDIDATE_ID,
-        candidateUserId: OTHER_CANDIDATE_USER_ID,
-        roleIds: ["role-recommended", "role-possible"],
-        observedAt: POST_READ_AT,
-      }),
+    trustedNow: COUNT_AT,
+  }), /exact match/u);
+  assert.throws(() => exactPhase4PostAddCuratedMatchCount({
+    matchProof,
+    postReadback: readbackProof({
+      trustedNow: COUNT_AT,
+      observedAt: POST_READ_AT,
+      roleIds: ["role-recommended", "role-possible"],
     }),
-    /exact match/,
-  );
+    trustedNow: new Date(
+      Date.parse(MATCH_AT) + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS + 1,
+    ).toISOString(),
+  }), /exact match/u);
 });
 
 async function productionModuleFiles(directory) {
@@ -1273,7 +1105,7 @@ async function productionModuleFiles(directory) {
   return files;
 }
 
-test("Phase 4 contract remains dark and has no production caller or side effect", async () => {
+test("Phase 4 curation stays dark with no caller, I/O, or authority minter", async () => {
   const modulePath = fileURLToPath(new URL(
     "../api/paraai/_lib/phase4-curation-contract.mjs",
     import.meta.url,
@@ -1289,6 +1121,11 @@ test("Phase 4 contract remains dark and has no production caller or side effect"
   assert.doesNotMatch(
     source,
     /from\s+["'][^"']*(?:pipeline|store|queue|client)\.mjs["']/u,
+  );
+  assert.equal(
+    (source.match(/GLOBAL_WRITE_AUTHORITY/g) || []).length,
+    2,
+    "private authority must have only its declaration and verifier",
   );
 
   const productionFiles = await productionModuleFiles(apiDirectory);
