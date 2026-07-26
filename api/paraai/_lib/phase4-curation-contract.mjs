@@ -6,6 +6,7 @@
 // capture attestation is pinned in this file.
 
 import { createHash } from "node:crypto";
+import { types as nodeTypes } from "node:util";
 
 import {
   CURATED_ADD_ATTEMPT_LIMIT_MAX,
@@ -65,16 +66,27 @@ const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,256}$/u;
 const SAFE_TOKEN_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/u;
 const MAX_CURATED_ROLE_IDS = 250;
-const MATCH_PROOF = Symbol("phase4-match-proof");
-const READBACK_PROOF = Symbol("phase4-readback-proof");
-const IDENTITY_PROOF = Symbol("phase4-identity-proof");
-const NOTIFICATION_PROOF = Symbol("phase4-notification-proof");
-const WRITE_PLAN = Symbol("phase4-write-plan");
-const WRITE_AUTHORIZATION = Symbol("phase4-write-authorization");
-const AUTHORIZED_REQUEST = Symbol("phase4-authorized-request");
-const MUTATION_OUTCOME = Symbol("phase4-mutation-outcome");
-const REPLAN_REQUIREMENT = Symbol("phase4-replan-requirement");
-const GLOBAL_WRITE_AUTHORITY = Symbol("phase4-global-write-authority");
+// Security provenance is deliberately non-reflective. A symbol/property brand
+// can be forged by a Proxy get trap or copied from an invalid object. These
+// closure-owned registries accept only the exact object minted here, and all
+// downstream decisions consume the immutable private record rather than the
+// caller-visible object.
+const matchProofRegistry = new WeakMap();
+const readbackProofRegistry = new WeakMap();
+const identityProofRegistry = new WeakMap();
+const notificationProofRegistry = new WeakMap();
+const writePlanRegistry = new WeakMap();
+const writeAuthorizationRegistry = new WeakMap();
+const authorizedRequestRegistry = new WeakMap();
+const mutationOutcomeRegistry = new WeakMap();
+const replanRequirementRegistry = new WeakMap();
+const globalWriteAuthorityRegistry = new WeakMap();
+const captureEvidenceVerificationRegistry = new WeakMap();
+const consumedReplanRequirements = new WeakSet();
+const consumedGlobalWriteAuthorities = new WeakSet();
+const consumedWriteAuthorizations = new WeakSet();
+const completedAuthorizedRequests = new WeakSet();
+const reconciledMutationOutcomes = new WeakSet();
 
 const CAPTURE_TOP_LEVEL_KEYS = Object.freeze([
   "addContract",
@@ -174,12 +186,159 @@ export const PHASE4_CURATED_LIST_CAPTURE_ATTESTATION = Object.freeze({
 export const PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST = null;
 export const PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST = null;
 
+function isObject(value) {
+  return value !== null && typeof value === "object";
+}
+
+function rejectProxy(value, field = "value") {
+  if (isObject(value) && nodeTypes.isProxy(value)) {
+    throw new TypeError(`${field} must not be a Proxy`);
+  }
+}
+
+function ownDataDescriptors(value, field) {
+  rejectProxy(value, field);
+  if (!isObject(value)) {
+    throw new TypeError(`${field} must be an object`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.getOwnPropertySymbols(descriptors).length !== 0) {
+    throw new TypeError(`${field} must not contain symbol properties`);
+  }
+  return descriptors;
+}
+
+function snapshotPlainData(value, field = "value", seen = new WeakSet()) {
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || typeof value === "undefined"
+    || (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return value;
+  }
+  if (!isObject(value)) {
+    throw new TypeError(`${field} must contain only plain JSON data`);
+  }
+  rejectProxy(value, field);
+  if (seen.has(value)) {
+    throw new TypeError(`${field} must not be cyclic`);
+  }
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        throw new TypeError(`${field} must be a plain array`);
+      }
+      const descriptors = ownDataDescriptors(value, field);
+      const lengthDescriptor = descriptors.length;
+      if (
+        !lengthDescriptor
+        || !Object.hasOwn(lengthDescriptor, "value")
+        || !Number.isSafeInteger(lengthDescriptor.value)
+        || lengthDescriptor.value < 0
+      ) {
+        throw new TypeError(`${field} has an invalid length`);
+      }
+      const allowedKeys = new Set(["length"]);
+      const result = [];
+      for (let index = 0; index < lengthDescriptor.value; index++) {
+        const key = String(index);
+        allowedKeys.add(key);
+        const descriptor = descriptors[key];
+        if (
+          !descriptor
+          || !Object.hasOwn(descriptor, "value")
+          || descriptor.enumerable !== true
+        ) {
+          throw new TypeError(`${field} must be a dense data array`);
+        }
+        result.push(snapshotPlainData(
+          descriptor.value,
+          `${field}[${index}]`,
+          seen,
+        ));
+      }
+      if (
+        Object.keys(descriptors).some((key) => !allowedKeys.has(key))
+      ) {
+        throw new TypeError(`${field} must not have extra properties`);
+      }
+      return Object.freeze(result);
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError(`${field} must be a plain object`);
+    }
+    const descriptors = ownDataDescriptors(value, field);
+    const result = Object.create(null);
+    for (const key of Object.keys(descriptors)) {
+      const descriptor = descriptors[key];
+      if (
+        !Object.hasOwn(descriptor, "value")
+        || descriptor.enumerable !== true
+      ) {
+        throw new TypeError(`${field}.${key} must be a data property`);
+      }
+      result[key] = snapshotPlainData(
+        descriptor.value,
+        `${field}.${key}`,
+        seen,
+      );
+    }
+    return Object.freeze(result);
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function shallowArgumentSnapshot(value, keys, field = "arguments") {
+  if (value === undefined) return Object.freeze({});
+  rejectProxy(value, field);
+  const record = plainRecord(value);
+  if (!record) {
+    throw new TypeError(`${field} must be a plain object`);
+  }
+  const descriptors = ownDataDescriptors(record, field);
+  const snapshot = {};
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!descriptor) continue;
+    if (
+      !Object.hasOwn(descriptor, "value")
+      || descriptor.enumerable !== true
+    ) {
+      throw new TypeError(`${field}.${key} must be a data property`);
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
+}
+
+function registeredData(registry, value) {
+  if (!isObject(value) || nodeTypes.isProxy(value)) return null;
+  return registry.get(value) || null;
+}
+
+function registerArtifact(registry, publicValue, privateValue) {
+  const artifact = Object.freeze(publicValue);
+  registry.set(artifact, Object.freeze(privateValue));
+  return artifact;
+}
+
 function frozenArray(value) {
   return Object.freeze([...value]);
 }
 
 function plainRecord(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || nodeTypes.isProxy(value)
+  ) return null;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null
     ? value
@@ -225,17 +384,23 @@ function lowercaseDigest(value) {
 }
 
 function strictUniqueIds(value, field) {
-  if (!Array.isArray(value)) {
+  let snapshot;
+  try {
+    snapshot = snapshotPlainData(value, field);
+  } catch {
+    throw new TypeError(`${field} must be a plain data array`);
+  }
+  if (!Array.isArray(snapshot)) {
     throw new TypeError(`${field} must be an array`);
   }
-  if (value.length > MAX_CURATED_ROLE_IDS) {
+  if (snapshot.length > MAX_CURATED_ROLE_IDS) {
     throw new RangeError(
       `${field} cannot exceed ${MAX_CURATED_ROLE_IDS} entries`,
     );
   }
   const ids = [];
   const seen = new Set();
-  for (const raw of value) {
+  for (const raw of snapshot) {
     const id = boundedId(raw);
     if (!id) {
       throw new TypeError(`${field} must contain only safe bounded ids`);
@@ -250,14 +415,22 @@ function strictUniqueIds(value, field) {
 }
 
 function strictNotificationTypes(value) {
-  if (!Array.isArray(value) || value.length > 250) {
+  let snapshot;
+  try {
+    snapshot = snapshotPlainData(value, "notification_types");
+  } catch {
+    throw new TypeError(
+      "notification_types must be a bounded plain data array",
+    );
+  }
+  if (!Array.isArray(snapshot) || snapshot.length > 250) {
     throw new TypeError(
       "notification_types must be a bounded array",
     );
   }
   const types = [];
   const seen = new Set();
-  for (const raw of value) {
+  for (const raw of snapshot) {
     if (typeof raw !== "string" || !SAFE_TOKEN_PATTERN.test(raw)) {
       throw new TypeError(
         "notification_types must contain only safe enum tokens",
@@ -333,7 +506,6 @@ function proofScopeFields(context) {
 
 function invalidMatchProof(errorCode) {
   return Object.freeze({
-    [MATCH_PROOF]: true,
     valid: false,
     authoritative: false,
     complete: false,
@@ -356,7 +528,6 @@ function invalidMatchProof(errorCode) {
 
 function invalidReadbackProof(errorCode) {
   return Object.freeze({
-    [READBACK_PROOF]: true,
     valid: false,
     authoritative: false,
     complete: false,
@@ -378,7 +549,6 @@ function invalidReadbackProof(errorCode) {
 
 function invalidIdentityProof(errorCode) {
   return Object.freeze({
-    [IDENTITY_PROOF]: true,
     valid: false,
     authoritative: false,
     complete: false,
@@ -395,7 +565,6 @@ function invalidIdentityProof(errorCode) {
 
 function invalidNotificationProof(errorCode) {
   return Object.freeze({
-    [NOTIFICATION_PROOF]: true,
     valid: false,
     authoritative: false,
     complete: false,
@@ -445,60 +614,226 @@ function canonicalDigest(value, options) {
     .digest("hex");
 }
 
-function canonicalObservationResponse(procedure, response) {
+function selectedDataValues(
+  value,
+  keys,
+  {
+    field = "value",
+    exact = false,
+    optional = [],
+  } = {},
+) {
+  rejectProxy(value, field);
+  const record = plainRecord(value);
+  if (!record) {
+    throw new TypeError(`${field} must be a plain object`);
+  }
+  const descriptors = ownDataDescriptors(record, field);
+  const optionalKeys = new Set(optional);
+  if (
+    exact
+    && (
+      Object.keys(descriptors).length !== keys.length
+      || keys.some((key) => !Object.hasOwn(descriptors, key))
+    )
+  ) {
+    throw new TypeError(`${field} has an invalid shape`);
+  }
+  const result = {};
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!descriptor) {
+      if (optionalKeys.has(key)) continue;
+      throw new TypeError(`${field}.${key} is required`);
+    }
+    if (
+      !Object.hasOwn(descriptor, "value")
+      || descriptor.enumerable !== true
+    ) {
+      throw new TypeError(`${field}.${key} must be a data property`);
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function denseArrayDataValues(value, field) {
+  rejectProxy(value, field);
+  if (
+    !Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Array.prototype
+  ) {
+    throw new TypeError(`${field} must be a plain array`);
+  }
+  const descriptors = ownDataDescriptors(value, field);
+  const length = descriptors.length?.value;
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new TypeError(`${field} has an invalid length`);
+  }
+  const allowedKeys = new Set(["length"]);
+  const result = [];
+  for (let index = 0; index < length; index++) {
+    const key = String(index);
+    allowedKeys.add(key);
+    const descriptor = descriptors[key];
+    if (
+      !descriptor
+      || !Object.hasOwn(descriptor, "value")
+      || descriptor.enumerable !== true
+    ) {
+      throw new TypeError(`${field} must be a dense data array`);
+    }
+    result.push(descriptor.value);
+  }
+  if (Object.keys(descriptors).some((key) => !allowedKeys.has(key))) {
+    throw new TypeError(`${field} must not have extra properties`);
+  }
+  return result;
+}
+
+function snapshotObservationResponse(procedure, response) {
   if (procedure === PHASE4_MATCH_READ_PROCEDURE) {
-    const record = plainRecord(response);
-    return record
-      ? {
-        roles: Array.isArray(record.roles)
-          ? record.roles.map((role) => {
-            const item = plainRecord(role);
-            return item
-              ? {
-                endorsed: item.endorsed,
-                roleId: item.roleId,
-                suggested: item.suggested,
-              }
-              : null;
-          })
-          : record.roles,
-        status: record.status,
-      }
-      : response;
+    const raw = selectedDataValues(response, ["roles", "status"], {
+      field: "match response",
+      exact: true,
+    });
+    const roles = denseArrayDataValues(raw.roles, "match response.roles")
+      .map((role, index) => {
+        const item = selectedDataValues(
+          role,
+          ["endorsed", "roleId", "suggested"],
+          { field: `match response.roles[${index}]` },
+        );
+        return Object.freeze({
+          endorsed: snapshotPlainData(
+            item.endorsed,
+            `match response.roles[${index}].endorsed`,
+          ),
+          roleId: snapshotPlainData(
+            item.roleId,
+            `match response.roles[${index}].roleId`,
+          ),
+          suggested: snapshotPlainData(
+            item.suggested,
+            `match response.roles[${index}].suggested`,
+          ),
+        });
+      });
+    return Object.freeze({
+      roles: Object.freeze(roles),
+      status: snapshotPlainData(raw.status, "match response.status"),
+    });
   }
   if (procedure === PHASE4_CURATED_LIST_READ_PROCEDURE) {
     if (response === null) return null;
-    const record = plainRecord(response);
-    return record
-      ? {
-        candidate_id: record.candidate_id,
-        candidate_user_id: record.candidate_user_id,
-        id: record.id,
-        roles: Array.isArray(record.roles)
-          ? record.roles.map((role) => {
-            const item = plainRecord(role);
-            return item ? { id: item.id } : null;
-          })
-          : record.roles,
-      }
-      : response;
+    const raw = selectedDataValues(
+      response,
+      ["candidate_id", "candidate_user_id", "id", "roles"],
+      { field: "Curated List response" },
+    );
+    const roles = denseArrayDataValues(
+      raw.roles,
+      "Curated List response.roles",
+    ).map((role, index) => {
+      const item = selectedDataValues(role, ["id"], {
+        field: `Curated List response.roles[${index}]`,
+      });
+      return Object.freeze({
+        id: snapshotPlainData(
+          item.id,
+          `Curated List response.roles[${index}].id`,
+        ),
+      });
+    });
+    return Object.freeze({
+      candidate_id: snapshotPlainData(
+        raw.candidate_id,
+        "Curated List response.candidate_id",
+      ),
+      candidate_user_id: snapshotPlainData(
+        raw.candidate_user_id,
+        "Curated List response.candidate_user_id",
+      ),
+      id: snapshotPlainData(raw.id, "Curated List response.id"),
+      roles: Object.freeze(roles),
+    });
   }
   if (procedure === PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE) {
-    const record = plainRecord(response);
-    return record
-      ? { notification_types: record.notification_types }
-      : response;
+    const raw = selectedDataValues(response, ["notification_types"], {
+      field: "notification response",
+    });
+    return Object.freeze({
+      notification_types: snapshotPlainData(
+        raw.notification_types,
+        "notification response.notification_types",
+      ),
+    });
   }
   if (procedure === PHASE4_CANDIDATE_IDENTITY_PROCEDURE) {
-    const record = plainRecord(response);
-    return record
-      ? {
-        candidate_id: record.candidate_id,
-        candidate_user_id: record.candidate_user_id,
-      }
-      : response;
+    const raw = selectedDataValues(
+      response,
+      ["candidate_id", "candidate_user_id"],
+      { field: "identity response", exact: true },
+    );
+    return Object.freeze({
+      candidate_id: snapshotPlainData(
+        raw.candidate_id,
+        "identity response.candidate_id",
+      ),
+      candidate_user_id: snapshotPlainData(
+        raw.candidate_user_id,
+        "identity response.candidate_user_id",
+      ),
+    });
   }
-  return response;
+  return snapshotPlainData(response, "response");
+}
+
+function snapshotObservation(observation, expectedProcedure) {
+  const raw = selectedDataValues(observation, OBSERVATION_KEYS, {
+    field: "observation",
+    exact: true,
+  });
+  return Object.freeze({
+    version: snapshotPlainData(raw.version, "observation.version"),
+    procedure: snapshotPlainData(
+      raw.procedure,
+      "observation.procedure",
+    ),
+    input: snapshotPlainData(raw.input, "observation.input"),
+    response: snapshotObservationResponse(
+      expectedProcedure,
+      raw.response,
+    ),
+    observedAt: snapshotPlainData(
+      raw.observedAt,
+      "observation.observedAt",
+    ),
+    responseDigest: snapshotPlainData(
+      raw.responseDigest,
+      "observation.responseDigest",
+    ),
+    authoritative: snapshotPlainData(
+      raw.authoritative,
+      "observation.authoritative",
+    ),
+    complete: snapshotPlainData(
+      raw.complete,
+      "observation.complete",
+    ),
+    scopeDigest: snapshotPlainData(
+      raw.scopeDigest,
+      "observation.scopeDigest",
+    ),
+    sourceGenerationDigest: snapshotPlainData(
+      raw.sourceGenerationDigest,
+      "observation.sourceGenerationDigest",
+    ),
+    sourceCasRevision: snapshotPlainData(
+      raw.sourceCasRevision,
+      "observation.sourceCasRevision",
+    ),
+  });
 }
 
 /**
@@ -510,9 +845,7 @@ export function phase4CurationObservationResponseDigest(
   procedure,
   response,
 ) {
-  return canonicalDigest(
-    canonicalObservationResponse(procedure, response),
-  );
+  return canonicalDigest(snapshotObservationResponse(procedure, response));
 }
 
 /**
@@ -520,10 +853,11 @@ export function phase4CurationObservationResponseDigest(
  * order is irrelevant; array order remains part of the captured contract.
  */
 export function phase4CuratedListCaptureSemanticDigest(value) {
-  if (!plainRecord(value)) {
+  const snapshot = snapshotPlainData(value, "capture attestation");
+  if (!plainRecord(snapshot)) {
     throw new TypeError("capture attestation must be an object");
   }
-  return canonicalDigest(value, { omitSemanticDigest: true });
+  return canonicalDigest(snapshot, { omitSemanticDigest: true });
 }
 
 /**
@@ -532,7 +866,7 @@ export function phase4CuratedListCaptureSemanticDigest(value) {
  * authorization uses only the code-owned pinned attestation below.
  */
 export function validatePhase4CuratedListCaptureAttestation(
-  value,
+  rawValue,
   {
     expectedSemanticDigest = null,
     expectedImplementationDigest = null,
@@ -540,6 +874,16 @@ export function validatePhase4CuratedListCaptureAttestation(
   } = {},
 ) {
   const reasons = [];
+  let value = null;
+  try {
+    const snapshot = snapshotPlainData(
+      rawValue,
+      "capture attestation",
+    );
+    value = plainRecord(snapshot) ? snapshot : null;
+  } catch {
+    value = null;
+  }
   const trustedNowIso = canonicalIso(trustedNow);
   if (!lowercaseDigest(expectedSemanticDigest)) {
     reasons.push("capture_attestation_unpinned");
@@ -565,7 +909,7 @@ export function validatePhase4CuratedListCaptureAttestation(
       !lowercaseDigest(value.semanticDigest)
       || value.semanticDigest !== expectedSemanticDigest
       || value.semanticDigest
-        !== phase4CuratedListCaptureSemanticDigest(value)
+        !== canonicalDigest(value, { omitSemanticDigest: true })
     ) {
       reasons.push("capture_attestation_digest_invalid");
     }
@@ -737,25 +1081,14 @@ export function currentPhase4CuratedListCaptureDecision({
  * unknown. This pure classifier is intentionally unbranded: its result can be
  * inspected and capture-tested, but cannot be passed to reconciliation.
  */
-export function classifyPhase4CuratedListAddResponse({
-  responseReceived,
-  response = null,
-} = {}) {
-  if (responseReceived !== true) {
-    return Object.freeze({
-      outcome: "unknown",
-      responseContractValid: false,
-      accepted: false,
-      rejected: false,
-      externalWriteMayHaveLanded: true,
-      curatedRoleListId: null,
-      responseDigest: null,
-      errorCode: "mutation_response_unknown",
-    });
-  }
-  let responseDigest;
+export function classifyPhase4CuratedListAddResponse(rawArguments = {}) {
+  let args;
   try {
-    responseDigest = canonicalDigest(response);
+    args = shallowArgumentSnapshot(
+      rawArguments,
+      ["responseReceived", "response"],
+      "add-response arguments",
+    );
   } catch {
     return Object.freeze({
       outcome: "unknown",
@@ -768,7 +1101,43 @@ export function classifyPhase4CuratedListAddResponse({
       errorCode: "mutation_response_shape_invalid",
     });
   }
-  const record = plainRecord(response);
+  const responseReceived = args.responseReceived;
+  const response = Object.hasOwn(args, "response")
+    ? args.response
+    : null;
+  if (responseReceived !== true) {
+    return Object.freeze({
+      outcome: "unknown",
+      responseContractValid: false,
+      accepted: false,
+      rejected: false,
+      externalWriteMayHaveLanded: true,
+      curatedRoleListId: null,
+      responseDigest: null,
+      errorCode: "mutation_response_unknown",
+    });
+  }
+  let responseSnapshot;
+  let responseDigest;
+  try {
+    responseSnapshot = snapshotPlainData(
+      response,
+      "Curated List add response",
+    );
+    responseDigest = canonicalDigest(responseSnapshot);
+  } catch {
+    return Object.freeze({
+      outcome: "unknown",
+      responseContractValid: false,
+      accepted: false,
+      rejected: false,
+      externalWriteMayHaveLanded: true,
+      curatedRoleListId: null,
+      responseDigest: null,
+      errorCode: "mutation_response_shape_invalid",
+    });
+  }
+  const record = plainRecord(responseSnapshot);
   if (!record) {
     return Object.freeze({
       outcome: "unknown",
@@ -840,69 +1209,92 @@ export function classifyPhase4CuratedListAddResponse({
 
 /**
  * Bind a pure add-response classification to the exact authorized request and
- * trusted observation time. Only this private-brand result can be reconciled.
+ * trusted observation time. Only the exact registered result can be
+ * reconciled.
  */
-export function phase4CuratedListMutationOutcome({
-  request,
-  responseReceived,
-  response = null,
-  observedAt,
-  trustedNow,
-} = {}) {
-  const observedAtIso = canonicalIso(observedAt);
+export function phase4CuratedListMutationOutcome(rawArguments = {}) {
+  let args;
+  try {
+    args = shallowArgumentSnapshot(
+      rawArguments,
+      [
+        "request",
+        "responseReceived",
+        "response",
+        "observedAt",
+        "trustedNow",
+      ],
+      "mutation-outcome arguments",
+    );
+  } catch {
+    throw new TypeError(
+      "mutation outcome requires the exact registered request and trusted time",
+    );
+  }
+  const request = args.request;
+  const requestData = registeredData(
+    authorizedRequestRegistry,
+    request,
+  );
   const context = exactScopeContext({
-    ...proofScopeFields(request),
-    trustedNow,
+    ...proofScopeFields(requestData),
+    trustedNow: args.trustedNow,
   });
-  const expectedRequestDigest = request?.[AUTHORIZED_REQUEST] === true
-    ? canonicalDigest({
-      contractVersion: request.contractVersion,
-      ...proofScopeFields(request),
-      planSemanticDigest: request.planSemanticDigest,
-      captureSemanticDigest: request.captureSemanticDigest,
-      captureImplementationDigest:
-        request.captureImplementationDigest,
-      executionAt: request.executionAt,
-      procedure: request.procedure,
-      method: request.method,
-      input: request.input,
-    })
-    : null;
+  const observedAtIso = canonicalIso(args.observedAt);
   if (
-    request?.[AUTHORIZED_REQUEST] !== true
+    !requestData
     || !context
-    || request.contractVersion !== PHASE4_CURATION_CONTRACT_VERSION
-    || request.requestDigest !== expectedRequestDigest
+    || completedAuthorizedRequests.has(request)
+    || requestData.contractVersion
+      !== PHASE4_CURATION_CONTRACT_VERSION
+    || requestData.requestDigest
+      !== canonicalDigest({
+        contractVersion: requestData.contractVersion,
+        ...proofScopeFields(requestData),
+        planSemanticDigest: requestData.planSemanticDigest,
+        attemptNumber: requestData.attemptNumber,
+        maxAttempts: requestData.maxAttempts,
+        captureSemanticDigest: requestData.captureSemanticDigest,
+        captureImplementationDigest:
+          requestData.captureImplementationDigest,
+        executionAt: requestData.executionAt,
+        procedure: requestData.procedure,
+        method: requestData.method,
+        input: requestData.input,
+      })
     || !observedAtIso
     || !observationFreshAt(
       observedAtIso,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
-    || Date.parse(observedAtIso) < Date.parse(request.executionAt)
+    || Date.parse(observedAtIso) < Date.parse(requestData.executionAt)
+    || Date.parse(context.trustedNow)
+      > Date.parse(requestData.authorityExpiresAt)
   ) {
     throw new TypeError(
-      "mutation outcome requires the exact branded request and trusted time",
+      "mutation outcome requires the exact registered request and trusted time",
     );
   }
   const classification = classifyPhase4CuratedListAddResponse({
-    responseReceived,
-    response,
+    responseReceived: args.responseReceived,
+    response: Object.hasOwn(args, "response") ? args.response : null,
   });
+  completedAuthorizedRequests.add(request);
+  const planData = requestData.planData;
   const base = {
-    [MUTATION_OUTCOME]: true,
-    ...proofScopeFields(request),
+    ...proofScopeFields(requestData),
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
     request,
-    requestDigest: request.requestDigest,
+    requestDigest: requestData.requestDigest,
     observedAt: observedAtIso,
   };
   if (
     classification.accepted
-    && request.plan.existingListId
-    && classification.curatedRoleListId !== request.plan.existingListId
+    && planData.existingListId
+    && classification.curatedRoleListId !== planData.existingListId
   ) {
-    return Object.freeze({
+    const fields = {
       ...base,
       outcome: "unknown",
       responseContractValid: false,
@@ -912,12 +1304,30 @@ export function phase4CuratedListMutationOutcome({
       curatedRoleListId: null,
       responseDigest: classification.responseDigest,
       errorCode: "mutation_list_identity_mismatch",
-    });
+    };
+    return registerArtifact(
+      mutationOutcomeRegistry,
+      { ...fields },
+      {
+        ...fields,
+        requestData,
+        planData,
+      },
+    );
   }
-  return Object.freeze({
+  const fields = {
     ...base,
     ...classification,
-  });
+  };
+  return registerArtifact(
+    mutationOutcomeRegistry,
+    { ...fields },
+    {
+      ...fields,
+      requestData,
+      planData,
+    },
+  );
 }
 
 function observationContractError(
@@ -987,6 +1397,14 @@ export function normalizePhase4RankedMatchObservation(
   if (!expectedCandidateId || !expectedRecruiterUserId) {
     return invalidMatchProof("expected_identity_invalid");
   }
+  try {
+    observation = snapshotObservation(
+      observation,
+      PHASE4_MATCH_READ_PROCEDURE,
+    );
+  } catch {
+    return invalidMatchProof("observation_shape_invalid");
+  }
   const contractError = observationContractError(
     observation,
     context,
@@ -1041,8 +1459,7 @@ export function normalizePhase4RankedMatchObservation(
     else possibleRoleIds.push(roleId);
   }
 
-  return Object.freeze({
-    [MATCH_PROOF]: true,
+  const fields = {
     valid: true,
     authoritative: true,
     complete: true,
@@ -1058,7 +1475,12 @@ export function normalizePhase4RankedMatchObservation(
     possibleCount: possibleRoleIds.length,
     targetCount: targetRoleIds.length,
     ...proofScopeFields(context),
-  });
+  };
+  return registerArtifact(
+    matchProofRegistry,
+    { ...fields },
+    { ...fields },
+  );
 }
 
 /**
@@ -1089,6 +1511,14 @@ export function normalizePhase4CuratedListReadback(
   if (!expectedCandidateId || !expectedCandidateUserId) {
     return invalidReadbackProof("expected_identity_invalid");
   }
+  try {
+    observation = snapshotObservation(
+      observation,
+      PHASE4_CURATED_LIST_READ_PROCEDURE,
+    );
+  } catch {
+    return invalidReadbackProof("observation_shape_invalid");
+  }
   const contractError = observationContractError(
     observation,
     context,
@@ -1105,8 +1535,7 @@ export function normalizePhase4CuratedListReadback(
   }
 
   if (observation.response === null) {
-    return Object.freeze({
-      [READBACK_PROOF]: true,
+    const fields = {
       valid: true,
       authoritative: true,
       complete: true,
@@ -1116,7 +1545,7 @@ export function normalizePhase4CuratedListReadback(
       candidateId: expectedCandidateId,
       // A null candidate-scoped Paraform response cannot establish the
       // candidate-user identifier. Planning the implicit-create path therefore
-      // requires a separately branded source-generation identity proof.
+      // requires a separately registered source-generation identity proof.
       candidateUserId: null,
       exists: false,
       implicitCreateRequired: true,
@@ -1124,7 +1553,12 @@ export function normalizePhase4CuratedListReadback(
       roleIds: Object.freeze([]),
       roleCount: 0,
       ...proofScopeFields(context),
-    });
+    };
+    return registerArtifact(
+      readbackProofRegistry,
+      { ...fields },
+      { ...fields },
+    );
   }
 
   const response = plainRecord(observation.response);
@@ -1154,8 +1588,7 @@ export function normalizePhase4CuratedListReadback(
     return invalidReadbackProof("response_roles_invalid");
   }
 
-  return Object.freeze({
-    [READBACK_PROOF]: true,
+  const fields = {
     valid: true,
     authoritative: true,
     complete: true,
@@ -1170,7 +1603,12 @@ export function normalizePhase4CuratedListReadback(
     roleIds: frozenArray(roleIds),
     roleCount: roleIds.length,
     ...proofScopeFields(context),
-  });
+  };
+  return registerArtifact(
+    readbackProofRegistry,
+    { ...fields },
+    { ...fields },
+  );
 }
 
 /**
@@ -1200,6 +1638,14 @@ export function normalizePhase4CandidateIdentityObservation(
   if (!expectedCandidateId || !expectedCandidateUserId) {
     return invalidIdentityProof("expected_identity_invalid");
   }
+  try {
+    observation = snapshotObservation(
+      observation,
+      PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
+    );
+  } catch {
+    return invalidIdentityProof("observation_shape_invalid");
+  }
   const contractError = observationContractError(
     observation,
     context,
@@ -1222,8 +1668,7 @@ export function normalizePhase4CandidateIdentityObservation(
   ) {
     return invalidIdentityProof("response_identity_invalid");
   }
-  return Object.freeze({
-    [IDENTITY_PROOF]: true,
+  const fields = {
     valid: true,
     authoritative: true,
     complete: true,
@@ -1233,7 +1678,12 @@ export function normalizePhase4CandidateIdentityObservation(
     candidateId: expectedCandidateId,
     candidateUserId: expectedCandidateUserId,
     ...proofScopeFields(context),
-  });
+  };
+  return registerArtifact(
+    identityProofRegistry,
+    { ...fields },
+    { ...fields },
+  );
 }
 
 /**
@@ -1267,6 +1717,14 @@ export function normalizePhase4NotificationSafetyProof(
     || decisionAtIso !== context.trustedNow
   ) {
     return invalidNotificationProof("expected_context_invalid");
+  }
+  try {
+    observation = snapshotObservation(
+      observation,
+      PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE,
+    );
+  } catch {
+    return invalidNotificationProof("observation_shape_invalid");
   }
   const contractError = observationContractError(
     observation,
@@ -1306,8 +1764,7 @@ export function normalizePhase4NotificationSafetyProof(
     PHASE4_ROLE_ADDED_NOTIFICATION_TYPE,
   );
 
-  return Object.freeze({
-    [NOTIFICATION_PROOF]: true,
+  const fields = {
     valid: true,
     authoritative: true,
     complete: true,
@@ -1321,7 +1778,12 @@ export function normalizePhase4NotificationSafetyProof(
     notificationTypes: frozenArray(notificationTypes),
     roleAddedNotificationEnabled,
     ...proofScopeFields(context),
-  });
+  };
+  return registerArtifact(
+    notificationProofRegistry,
+    { ...fields },
+    { ...fields },
+  );
 }
 
 /**
@@ -1329,18 +1791,43 @@ export function normalizePhase4NotificationSafetyProof(
  * not a mutation authorization; the code-owned capture attestation remains
  * unpinned and no authorized request can currently be created.
  */
-export function planPhase4CuratedListWrite({
-  scopeDigest,
-  sourceGenerationDigest,
-  sourceCasRevision,
-  trustedNow,
-  candidateId,
-  candidateUserId,
-  matchProof,
-  preReadback,
-  identityProof = null,
-  replanRequirement = null,
-} = {}) {
+export function planPhase4CuratedListWrite(rawArguments = {}) {
+  const args = shallowArgumentSnapshot(
+    rawArguments,
+    [
+      "scopeDigest",
+      "sourceGenerationDigest",
+      "sourceCasRevision",
+      "trustedNow",
+      "candidateId",
+      "candidateUserId",
+      "matchProof",
+      "preReadback",
+      "identityProof",
+      "replanRequirement",
+      "maxAttempts",
+    ],
+    "write-plan arguments",
+  );
+  const {
+    scopeDigest,
+    sourceGenerationDigest,
+    sourceCasRevision,
+    trustedNow,
+    candidateId,
+    candidateUserId,
+    matchProof,
+    preReadback,
+  } = args;
+  const identityProof = Object.hasOwn(args, "identityProof")
+    ? args.identityProof
+    : null;
+  const replanRequirement = Object.hasOwn(args, "replanRequirement")
+    ? args.replanRequirement
+    : null;
+  const requestedMaxAttempts = Object.hasOwn(args, "maxAttempts")
+    ? args.maxAttempts
+    : PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX;
   const context = exactScopeContext({
     scopeDigest,
     sourceGenerationDigest,
@@ -1357,26 +1844,51 @@ export function planPhase4CuratedListWrite({
   if (!exactCandidateId || !exactCandidateUserId) {
     throw new TypeError("candidate identities must be safe bounded ids");
   }
+  const matchData = registeredData(matchProofRegistry, matchProof);
+  const readbackData = registeredData(
+    readbackProofRegistry,
+    preReadback,
+  );
+  const identityData = registeredData(
+    identityProofRegistry,
+    identityProof,
+  );
+  const replanData = registeredData(
+    replanRequirementRegistry,
+    replanRequirement,
+  );
   if (
-    matchProof?.[MATCH_PROOF] !== true
-    || matchProof.valid !== true
-    || matchProof.candidateId !== exactCandidateId
-    || !sameScope(matchProof, context)
+    replanRequirement === null
+    && (
+      !Number.isSafeInteger(requestedMaxAttempts)
+      || requestedMaxAttempts < 1
+      || requestedMaxAttempts > PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX
+    )
+  ) {
+    throw new RangeError(
+      `maxAttempts must be between 1 and ${PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX}`,
+    );
+  }
+  if (
+    !matchData
+    || matchData.valid !== true
+    || matchData.candidateId !== exactCandidateId
+    || !sameScope(matchData, context)
   ) {
     throw new TypeError("matchProof must be an exact candidate match proof");
   }
   if (
-    preReadback?.[READBACK_PROOF] !== true
-    || preReadback.valid !== true
-    || preReadback.candidateId !== exactCandidateId
-    || !sameScope(preReadback, context)
+    !readbackData
+    || readbackData.valid !== true
+    || readbackData.candidateId !== exactCandidateId
+    || !sameScope(readbackData, context)
     || (
-      preReadback.exists === true
-      && preReadback.candidateUserId !== exactCandidateUserId
+      readbackData.exists === true
+      && readbackData.candidateUserId !== exactCandidateUserId
     )
     || (
-      preReadback.exists === false
-      && preReadback.candidateUserId !== null
+      readbackData.exists === false
+      && readbackData.candidateUserId !== null
     )
   ) {
     throw new TypeError(
@@ -1384,31 +1896,31 @@ export function planPhase4CuratedListWrite({
     );
   }
   if (
-    Date.parse(matchProof.observedAt) > Date.parse(preReadback.observedAt)
+    Date.parse(matchData.observedAt) > Date.parse(readbackData.observedAt)
     || !observationFreshAt(
-      matchProof.observedAt,
+      matchData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
     || !observationFreshAt(
-      preReadback.observedAt,
+      readbackData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
   ) {
     throw new TypeError("match/readback proof ordering is invalid");
   }
-  if (preReadback.exists === false) {
+  if (readbackData.exists === false) {
     if (
-      identityProof?.[IDENTITY_PROOF] !== true
-      || identityProof.valid !== true
-      || identityProof.candidateId !== exactCandidateId
-      || identityProof.candidateUserId !== exactCandidateUserId
-      || !sameScope(identityProof, context)
-      || Date.parse(identityProof.observedAt)
-        > Date.parse(preReadback.observedAt)
+      !identityData
+      || identityData.valid !== true
+      || identityData.candidateId !== exactCandidateId
+      || identityData.candidateUserId !== exactCandidateUserId
+      || !sameScope(identityData, context)
+      || Date.parse(identityData.observedAt)
+        > Date.parse(readbackData.observedAt)
       || !observationFreshAt(
-        identityProof.observedAt,
+        identityData.observedAt,
         context.trustedNow,
         PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
       )
@@ -1420,11 +1932,11 @@ export function planPhase4CuratedListWrite({
   } else if (
     identityProof !== null
     && (
-      identityProof?.[IDENTITY_PROOF] !== true
-      || identityProof.valid !== true
-      || identityProof.candidateId !== exactCandidateId
-      || identityProof.candidateUserId !== exactCandidateUserId
-      || !sameScope(identityProof, context)
+      !identityData
+      || identityData.valid !== true
+      || identityData.candidateId !== exactCandidateId
+      || identityData.candidateUserId !== exactCandidateUserId
+      || !sameScope(identityData, context)
     )
   ) {
     throw new TypeError("identityProof is invalid");
@@ -1432,43 +1944,69 @@ export function planPhase4CuratedListWrite({
   if (
     replanRequirement !== null
     && (
-      replanRequirement?.[REPLAN_REQUIREMENT] !== true
-      || !sameScope(replanRequirement, context)
-      || replanRequirement.candidateId !== exactCandidateId
-      || replanRequirement.candidateUserId !== exactCandidateUserId
-      || replanRequirement.postReadbackDigest
-        !== preReadback.responseDigest
+      !replanData
+      || consumedReplanRequirements.has(replanRequirement)
+      || !sameScope(replanData, context)
+      || replanData.candidateId !== exactCandidateId
+      || replanData.candidateUserId !== exactCandidateUserId
+      || replanData.postReadback !== preReadback
+      || replanData.postReadbackData !== readbackData
+      || replanData.postReadbackDigest
+        !== readbackData.responseDigest
+      || registeredData(
+        writePlanRegistry,
+        replanData.priorPlan,
+      ) !== replanData.priorPlanData
+      || registeredData(
+        authorizedRequestRegistry,
+        replanData.priorRequest,
+      ) !== replanData.priorRequestData
+      || registeredData(
+        mutationOutcomeRegistry,
+        replanData.priorOutcome,
+      ) !== replanData.priorOutcomeData
+      || replanData.priorRequestData.planData
+        !== replanData.priorPlanData
+      || replanData.priorOutcomeData.requestData
+        !== replanData.priorRequestData
       || !observationFreshAt(
-        replanRequirement.issuedAt,
+        replanData.issuedAt,
         context.trustedNow,
         PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
       )
-      || !Number.isSafeInteger(
-        replanRequirement.completedAttemptCount,
+      || !Number.isSafeInteger(replanData.completedAttemptCount)
+      || !Number.isSafeInteger(replanData.nextAttemptNumber)
+      || !Number.isSafeInteger(replanData.maxAttempts)
+      || replanData.completedAttemptCount < 1
+      || replanData.nextAttemptNumber
+        !== replanData.completedAttemptCount + 1
+      || replanData.nextAttemptNumber > replanData.maxAttempts
+      || replanData.maxAttempts
+        > PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX
+      || (
+        Object.hasOwn(args, "maxAttempts")
+        && requestedMaxAttempts !== replanData.maxAttempts
       )
-      || !Number.isSafeInteger(replanRequirement.maxAttempts)
-      || replanRequirement.completedAttemptCount < 1
-      || replanRequirement.completedAttemptCount
-        >= replanRequirement.maxAttempts
-      || replanRequirement.requirementDigest !== canonicalDigest({
-        contractVersion: replanRequirement.contractVersion,
-        ...proofScopeFields(replanRequirement),
-        candidateId: replanRequirement.candidateId,
-        candidateUserId: replanRequirement.candidateUserId,
+      || replanData.requirementDigest !== canonicalDigest({
+        contractVersion: replanData.contractVersion,
+        ...proofScopeFields(replanData),
+        candidateId: replanData.candidateId,
+        candidateUserId: replanData.candidateUserId,
         priorPlanSemanticDigest:
-          replanRequirement.priorPlanSemanticDigest,
+          replanData.priorPlanSemanticDigest,
         mutationRequestDigest:
-          replanRequirement.mutationRequestDigest,
+          replanData.mutationRequestDigest,
         mutationResponseDigest:
-          replanRequirement.mutationResponseDigest,
+          replanData.mutationResponseDigest,
         postReadbackDigest:
-          replanRequirement.postReadbackDigest,
-        targetRoleIds: replanRequirement.targetRoleIds,
-        missingRoleIds: replanRequirement.missingRoleIds,
+          replanData.postReadbackDigest,
+        targetRoleIds: replanData.targetRoleIds,
+        missingRoleIds: replanData.missingRoleIds,
         completedAttemptCount:
-          replanRequirement.completedAttemptCount,
-        maxAttempts: replanRequirement.maxAttempts,
-        issuedAt: replanRequirement.issuedAt,
+          replanData.completedAttemptCount,
+        nextAttemptNumber: replanData.nextAttemptNumber,
+        maxAttempts: replanData.maxAttempts,
+        issuedAt: replanData.issuedAt,
       })
     )
   ) {
@@ -1476,9 +2014,9 @@ export function planPhase4CuratedListWrite({
   }
   const policyPlan = planCuratedAdds({
     scopeDigest,
-    recommendedRoleIds: matchProof.recommendedRoleIds,
-    possibleRoleIds: matchProof.possibleRoleIds,
-    curatedRoleIds: preReadback.roleIds,
+    recommendedRoleIds: matchData.recommendedRoleIds,
+    possibleRoleIds: matchData.possibleRoleIds,
+    curatedRoleIds: readbackData.roleIds,
   });
   if (policyPlan.tierOverlapRoleIds.length !== 0) {
     throw new TypeError("tier proof must be mutually exclusive");
@@ -1487,11 +2025,11 @@ export function planPhase4CuratedListWrite({
     replanRequirement !== null
     && (
       !sameStringArray(
-        replanRequirement.targetRoleIds,
+        replanData.targetRoleIds,
         policyPlan.targetRoleIds,
       )
       || !sameStringArray(
-        replanRequirement.missingRoleIds,
+        replanData.missingRoleIds,
         policyPlan.missingRoleIds,
       )
     )
@@ -1515,17 +2053,18 @@ export function planPhase4CuratedListWrite({
     ...proofScopeFields(context),
     candidateId: exactCandidateId,
     candidateUserId: exactCandidateUserId,
-    identityResponseDigest: identityProof?.responseDigest || null,
-    matchResponseDigest: matchProof.responseDigest,
-    preReadbackResponseDigest: preReadback.responseDigest,
+    identityResponseDigest: identityData?.responseDigest || null,
+    matchResponseDigest: matchData.responseDigest,
+    preReadbackResponseDigest: readbackData.responseDigest,
     replanRequirementDigest:
-      replanRequirement?.requirementDigest || null,
+      replanData?.requirementDigest || null,
+    attemptNumber: replanData?.nextAttemptNumber || 1,
+    maxAttempts: replanData?.maxAttempts || requestedMaxAttempts,
     plannedAt: context.trustedNow,
     plannedInput,
   };
   const planSemanticDigest = canonicalDigest(semanticFields);
-  return Object.freeze({
-    [WRITE_PLAN]: true,
+  const fields = {
     ...proofScopeFields(context),
     candidateId: exactCandidateId,
     candidateUserId: exactCandidateUserId,
@@ -1539,16 +2078,103 @@ export function planPhase4CuratedListWrite({
     planSemanticDigest,
     captureAttestationVersion:
       PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
-    implicitCreateExpected: preReadback.exists === false,
-    listExistedBefore: preReadback.exists === true,
-    existingListId: preReadback.listId,
+    implicitCreateExpected: readbackData.exists === false,
+    listExistedBefore: readbackData.exists === true,
+    existingListId: readbackData.listId,
+    attemptNumber: semanticFields.attemptNumber,
+    maxAttempts: semanticFields.maxAttempts,
     plannedInput,
     missingRoleIds: frozenArray(policyPlan.missingRoleIds),
     missingCount: policyPlan.missingCount,
     targetRoleIds: frozenArray(policyPlan.targetRoleIds),
     targetCount: policyPlan.targetCount,
     noMutationRequired: policyPlan.missingCount === 0,
+  };
+  const artifact = registerArtifact(
+    writePlanRegistry,
+    { ...fields },
+    {
+      ...fields,
+      matchData,
+      readbackData,
+      identityData,
+      replanData,
+    },
+  );
+  if (replanRequirement !== null) {
+    consumedReplanRequirements.add(replanRequirement);
+  }
+  return artifact;
+}
+
+function expectedWritePlanSemanticDigest(planData) {
+  return canonicalDigest({
+    contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    ...proofScopeFields(planData),
+    candidateId: planData.candidateId,
+    candidateUserId: planData.candidateUserId,
+    identityResponseDigest:
+      planData.identityData?.responseDigest || null,
+    matchResponseDigest: planData.matchData.responseDigest,
+    preReadbackResponseDigest: planData.readbackData.responseDigest,
+    replanRequirementDigest:
+      planData.replanData?.requirementDigest || null,
+    attemptNumber: planData.attemptNumber,
+    maxAttempts: planData.maxAttempts,
+    plannedAt: planData.plannedAt,
+    plannedInput: planData.plannedInput,
   });
+}
+
+function privateWritePlanLineageValid(plan, planData) {
+  if (
+    !planData
+    || registeredData(writePlanRegistry, plan) !== planData
+    || registeredData(
+      matchProofRegistry,
+      planData.matchProof,
+    ) !== planData.matchData
+    || registeredData(
+      readbackProofRegistry,
+      planData.preReadback,
+    ) !== planData.readbackData
+    || (
+      planData.identityProof === null
+        ? planData.identityData !== null
+        : registeredData(
+          identityProofRegistry,
+          planData.identityProof,
+        ) !== planData.identityData
+    )
+    || planData.contractVersion !== PHASE4_CURATION_CONTRACT_VERSION
+    || planData.planSemanticDigest
+      !== expectedWritePlanSemanticDigest(planData)
+  ) {
+    return false;
+  }
+  if (planData.replanRequirement === null) {
+    return (
+      planData.replanData === null
+      && planData.attemptNumber === 1
+      && Number.isSafeInteger(planData.maxAttempts)
+      && planData.maxAttempts >= 1
+      && planData.maxAttempts
+        <= PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX
+    );
+  }
+  const requirementData = registeredData(
+    replanRequirementRegistry,
+    planData.replanRequirement,
+  );
+  return Boolean(
+    requirementData
+    && requirementData === planData.replanData
+    && planData.attemptNumber === requirementData.nextAttemptNumber
+    && planData.maxAttempts === requirementData.maxAttempts
+    && requirementData.nextAttemptNumber
+      === requirementData.completedAttemptCount + 1
+    && requirementData.postReadback === planData.preReadback
+  );
 }
 
 /**
@@ -1556,15 +2182,42 @@ export function planPhase4CuratedListWrite({
  * attestation is still unpinned, this function cannot currently return an
  * authorization token even when the candidate notification proof is safe.
  */
-export function phase4CuratedListWriteAuthorization({
-  plan,
-  notificationProof,
-  trustedNow,
-  globalWriteAuthority = null,
-} = {}) {
+export function phase4CuratedListWriteAuthorization(rawArguments = {}) {
+  let args;
+  try {
+    args = shallowArgumentSnapshot(
+      rawArguments,
+      [
+        "plan",
+        "notificationProof",
+        "trustedNow",
+        "globalWriteAuthority",
+      ],
+      "write-authorization arguments",
+    );
+  } catch {
+    args = Object.freeze({});
+  }
+  const plan = args.plan;
+  const notificationProof = args.notificationProof;
+  const globalWriteAuthority = Object.hasOwn(
+    args,
+    "globalWriteAuthority",
+  )
+    ? args.globalWriteAuthority
+    : null;
+  const planData = registeredData(writePlanRegistry, plan);
+  const notificationData = registeredData(
+    notificationProofRegistry,
+    notificationProof,
+  );
+  const authorityData = registeredData(
+    globalWriteAuthorityRegistry,
+    globalWriteAuthority,
+  );
   const reasons = [];
-  const decisionAtIso = canonicalIso(trustedNow);
-  const validPlan = plan?.[WRITE_PLAN] === true;
+  const decisionAtIso = canonicalIso(args.trustedNow);
+  const validPlan = privateWritePlanLineageValid(plan, planData);
   const captureDecision = currentPhase4CuratedListCaptureDecision({
     trustedNow: decisionAtIso,
   });
@@ -1575,7 +2228,7 @@ export function phase4CuratedListWriteAuthorization({
     && (
       !decisionAtIso
       || !observationFreshAt(
-        plan.plannedAt,
+        planData.plannedAt,
         decisionAtIso,
         PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
       )
@@ -1583,40 +2236,83 @@ export function phase4CuratedListWriteAuthorization({
   ) {
     reasons.push("write_plan_stale");
   }
+  const captureVerification = authorityData
+    ? authorityData.captureEvidenceVerification
+    : null;
+  const captureVerificationData = registeredData(
+    captureEvidenceVerificationRegistry,
+    captureVerification,
+  );
   if (
-    globalWriteAuthority?.[GLOBAL_WRITE_AUTHORITY] !== true
+    !authorityData
+    || consumedGlobalWriteAuthorities.has(globalWriteAuthority)
     || !validPlan
-    || !sameScope(globalWriteAuthority, plan)
-    || globalWriteAuthority.planSemanticDigest
-      !== plan.planSemanticDigest
-    || globalWriteAuthority.contractVersion
+    || authorityData.plan !== plan
+    || authorityData.planData !== planData
+    || !sameScope(authorityData, planData)
+    || authorityData.planSemanticDigest
+      !== planData.planSemanticDigest
+    || authorityData.contractVersion
       !== PHASE4_CURATION_CONTRACT_VERSION
+    || authorityData.sourceCasRevision !== planData?.sourceCasRevision
+    || authorityData.attemptNumber !== planData?.attemptNumber
+    || authorityData.maxAttempts !== planData?.maxAttempts
   ) {
-    // No producer for this private brand exists until the store-backed
-    // compare-and-set authority is implemented and reviewed.
+    // No producer exists until a store-backed, single-use compare-and-set
+    // authority is implemented and reviewed.
     reasons.push("global_write_authority_unavailable");
+  }
+  if (
+    !authorityData
+    || !decisionAtIso
+    || authorityData.serverTrustedNow !== decisionAtIso
+    || canonicalIso(authorityData.issuedAt) === null
+    || canonicalIso(authorityData.expiresAt) === null
+    || Date.parse(decisionAtIso) < Date.parse(authorityData.issuedAt)
+    || Date.parse(decisionAtIso) > Date.parse(authorityData.expiresAt)
+  ) {
+    reasons.push("server_time_authority_unavailable");
+  }
+  if (
+    !captureVerificationData
+    || captureVerificationData.evidenceRecomputed !== true
+    || captureVerificationData.implementationDerivedFromBuild !== true
+    || captureVerificationData.contractVersion
+      !== PHASE4_CURATION_CONTRACT_VERSION
+    || !lowercaseDigest(
+      captureVerificationData.captureSemanticDigest,
+    )
+    || !lowercaseDigest(
+      captureVerificationData.implementationDigest,
+    )
+    || captureVerificationData.captureSemanticDigest
+      !== PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST
+    || captureVerificationData.implementationDigest
+      !== PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST
+  ) {
+    reasons.push("capture_evidence_verification_unavailable");
   }
   if (!captureDecision.valid) {
     reasons.push(...captureDecision.reasons);
   }
-  if (validPlan && plan.noMutationRequired) {
+  if (validPlan && planData.noMutationRequired) {
     reasons.push("no_mutation_required");
   }
   if (
-    notificationProof?.[NOTIFICATION_PROOF] !== true
-    || notificationProof.valid !== true
+    !notificationData
+    || notificationData.valid !== true
     || !validPlan
-    || notificationProof.candidateUserId !== plan.candidateUserId
-    || !sameScope(notificationProof, plan)
+    || notificationData.candidateUserId !== planData.candidateUserId
+    || !sameScope(notificationData, planData)
   ) {
     reasons.push("notification_proof_invalid");
   } else {
-    if (notificationProof.safe !== true) {
+    if (notificationData.safe !== true) {
       reasons.push("candidate_role_added_email_enabled");
     }
     if (decisionAtIso) {
       const ageMs =
-        Date.parse(decisionAtIso) - Date.parse(notificationProof.observedAt);
+        Date.parse(decisionAtIso) - Date.parse(notificationData.observedAt);
       if (
         ageMs < 0
         || ageMs > PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS
@@ -1624,8 +2320,8 @@ export function phase4CuratedListWriteAuthorization({
         reasons.push("notification_proof_stale");
       }
       if (
-        Date.parse(notificationProof.observedAt)
-        < Date.parse(plan.plannedAt)
+        Date.parse(notificationData.observedAt)
+        < Date.parse(planData.plannedAt)
       ) {
         reasons.push("notification_proof_precedes_plan");
       }
@@ -1634,27 +2330,46 @@ export function phase4CuratedListWriteAuthorization({
   const uniqueReasons = [...new Set(reasons)];
   const allowed = uniqueReasons.length === 0;
   const authorization = allowed
-    ? Object.freeze({
-      [WRITE_AUTHORIZATION]: true,
-      allowed: true,
-      plan,
-      ...proofScopeFields(plan),
-      contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
-      planSemanticDigest: plan.planSemanticDigest,
-      captureSemanticDigest:
-        PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST,
-      captureImplementationDigest:
-        PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST,
-      captureAttestationVersion:
-        PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
-      decisionAt: decisionAtIso,
-      notificationObservedAt: notificationProof.observedAt,
-      notificationResponseDigest: notificationProof.responseDigest,
-      expiresAt: new Date(
-        Date.parse(notificationProof.observedAt)
-          + PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
-      ).toISOString(),
-    })
+    ? (() => {
+      const fields = {
+        allowed: true,
+        plan,
+        ...proofScopeFields(planData),
+        contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+        planSemanticDigest: planData.planSemanticDigest,
+        attemptNumber: planData.attemptNumber,
+        maxAttempts: planData.maxAttempts,
+        captureSemanticDigest:
+          captureVerificationData.captureSemanticDigest,
+        captureImplementationDigest:
+          captureVerificationData.implementationDigest,
+        captureAttestationVersion:
+          PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
+        decisionAt: decisionAtIso,
+        notificationObservedAt: notificationData.observedAt,
+        notificationResponseDigest: notificationData.responseDigest,
+        expiresAt: new Date(
+          Math.min(
+            Date.parse(notificationData.observedAt)
+              + PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
+            Date.parse(authorityData.expiresAt),
+          ),
+        ).toISOString(),
+      };
+      return registerArtifact(
+        writeAuthorizationRegistry,
+        { ...fields },
+        {
+          ...fields,
+          planData,
+          notificationData,
+          globalWriteAuthority,
+          authorityData,
+          captureVerification,
+          captureVerificationData,
+        },
+      );
+    })()
     : null;
 
   return Object.freeze({
@@ -1662,83 +2377,170 @@ export function phase4CuratedListWriteAuthorization({
     reasons: frozenArray(uniqueReasons),
     captureAttestationValid: captureDecision.valid,
     notificationSafe:
-      notificationProof?.[NOTIFICATION_PROOF] === true
-      && notificationProof.valid === true
-      && notificationProof.safe === true,
+      notificationData?.valid === true
+      && notificationData.safe === true,
     authorization,
   });
 }
 
-export function buildAuthorizedPhase4CuratedListAddRequest({
-  plan,
-  authorization,
-  executionAt,
-  scopeDigest,
-  sourceGenerationDigest,
-  sourceCasRevision,
-  trustedNow,
-} = {}) {
-  const executionAtIso = canonicalIso(executionAt);
+export function buildAuthorizedPhase4CuratedListAddRequest(
+  rawArguments = {},
+) {
+  let args;
+  try {
+    args = shallowArgumentSnapshot(
+      rawArguments,
+      [
+        "plan",
+        "authorization",
+        "executionAt",
+        "scopeDigest",
+        "sourceGenerationDigest",
+        "sourceCasRevision",
+        "trustedNow",
+      ],
+      "authorized-request arguments",
+    );
+  } catch {
+    throw new Error("PHASE4_CURATED_LIST_WRITE_NOT_AUTHORIZED");
+  }
+  const plan = args.plan;
+  const authorization = args.authorization;
+  const planData = registeredData(writePlanRegistry, plan);
+  const authorizationData = registeredData(
+    writeAuthorizationRegistry,
+    authorization,
+  );
+  const executionAtIso = canonicalIso(args.executionAt);
   const context = exactScopeContext({
-    scopeDigest,
-    sourceGenerationDigest,
-    sourceCasRevision,
-    trustedNow,
+    scopeDigest: args.scopeDigest,
+    sourceGenerationDigest: args.sourceGenerationDigest,
+    sourceCasRevision: args.sourceCasRevision,
+    trustedNow: args.trustedNow,
+  });
+  const authority = authorizationData?.globalWriteAuthority || null;
+  const authorityData = registeredData(
+    globalWriteAuthorityRegistry,
+    authority,
+  );
+  const captureVerification =
+    authorizationData?.captureVerification || null;
+  const captureVerificationData = registeredData(
+    captureEvidenceVerificationRegistry,
+    captureVerification,
+  );
+  const captureDecision = currentPhase4CuratedListCaptureDecision({
+    trustedNow: executionAtIso,
   });
   if (
-    plan?.[WRITE_PLAN] !== true
-    || authorization?.[WRITE_AUTHORIZATION] !== true
-    || authorization.allowed !== true
-    || authorization.plan !== plan
-    || authorization.planSemanticDigest !== plan.planSemanticDigest
-    || authorization.contractVersion
+    !privateWritePlanLineageValid(plan, planData)
+    || !authorizationData
+    || consumedWriteAuthorizations.has(authorization)
+    || authorizationData.allowed !== true
+    || authorizationData.plan !== plan
+    || authorizationData.planData !== planData
+    || authorizationData.planSemanticDigest
+      !== planData.planSemanticDigest
+    || authorizationData.attemptNumber !== planData.attemptNumber
+    || authorizationData.maxAttempts !== planData.maxAttempts
+    || authorizationData.contractVersion
       !== PHASE4_CURATION_CONTRACT_VERSION
-    || authorization.captureSemanticDigest
+    || !lowercaseDigest(authorizationData.captureSemanticDigest)
+    || !lowercaseDigest(
+      authorizationData.captureImplementationDigest,
+    )
+    || authorizationData.captureSemanticDigest
       !== PHASE4_PINNED_CAPTURE_ATTESTATION_DIGEST
-    || authorization.captureImplementationDigest
+    || authorizationData.captureImplementationDigest
       !== PHASE4_PINNED_CURATION_IMPLEMENTATION_DIGEST
-    || !sameScope(authorization, plan)
+    || !captureDecision.valid
+    || !captureVerificationData
+    || captureVerificationData
+      !== authorizationData.captureVerificationData
+    || captureVerificationData.evidenceRecomputed !== true
+    || captureVerificationData.implementationDerivedFromBuild !== true
+    || captureVerificationData.captureSemanticDigest
+      !== authorizationData.captureSemanticDigest
+    || captureVerificationData.implementationDigest
+      !== authorizationData.captureImplementationDigest
+    || !authorityData
+    || authorityData !== authorizationData.authorityData
+    || consumedGlobalWriteAuthorities.has(authority)
+    || authorityData.plan !== plan
+    || authorityData.planData !== planData
+    || authorityData.planSemanticDigest
+      !== planData.planSemanticDigest
+    || authorityData.sourceCasRevision !== planData.sourceCasRevision
+    || authorityData.attemptNumber !== planData.attemptNumber
+    || authorityData.maxAttempts !== planData.maxAttempts
+    || authorityData.serverTrustedNow !== executionAtIso
+    || executionAtIso !== authorizationData.decisionAt
+    || !sameScope(authorizationData, planData)
+    || !sameScope(authorityData, planData)
     || !context
-    || !sameScope(context, plan)
-    || !plan.plannedInput
+    || !sameScope(context, planData)
+    || !planData.plannedInput
     || !executionAtIso
     || executionAtIso !== context.trustedNow
-    || Date.parse(executionAtIso) < Date.parse(authorization.decisionAt)
-    || Date.parse(executionAtIso) > Date.parse(authorization.expiresAt)
+    || Date.parse(executionAtIso)
+      > Date.parse(authorizationData.expiresAt)
+    || Date.parse(executionAtIso) < Date.parse(authorityData.issuedAt)
+    || Date.parse(executionAtIso) > Date.parse(authorityData.expiresAt)
   ) {
     throw new Error("PHASE4_CURATED_LIST_WRITE_NOT_AUTHORIZED");
   }
   const input = Object.freeze({
-    ...plan.plannedInput,
-    role_ids: frozenArray(plan.plannedInput.role_ids),
+    ...planData.plannedInput,
+    role_ids: frozenArray(planData.plannedInput.role_ids),
   });
   const requestDigest = canonicalDigest({
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
     ...proofScopeFields(context),
-    planSemanticDigest: plan.planSemanticDigest,
-    captureSemanticDigest: authorization.captureSemanticDigest,
+    planSemanticDigest: planData.planSemanticDigest,
+    attemptNumber: planData.attemptNumber,
+    maxAttempts: planData.maxAttempts,
+    captureSemanticDigest: authorizationData.captureSemanticDigest,
     captureImplementationDigest:
-      authorization.captureImplementationDigest,
+      authorizationData.captureImplementationDigest,
     executionAt: executionAtIso,
     procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
     method: "mutation",
     input,
   });
-  return Object.freeze({
-    [AUTHORIZED_REQUEST]: true,
+  const fields = {
     ...proofScopeFields(context),
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
     plan,
-    planSemanticDigest: plan.planSemanticDigest,
-    captureSemanticDigest: authorization.captureSemanticDigest,
+    planSemanticDigest: planData.planSemanticDigest,
+    attemptNumber: planData.attemptNumber,
+    maxAttempts: planData.maxAttempts,
+    captureSemanticDigest: authorizationData.captureSemanticDigest,
     captureImplementationDigest:
-      authorization.captureImplementationDigest,
+      authorizationData.captureImplementationDigest,
     executionAt: executionAtIso,
     requestDigest,
     procedure: PHASE4_CURATED_LIST_ADD_PROCEDURE,
     method: "mutation",
     input,
-  });
+  };
+  const request = registerArtifact(
+    authorizedRequestRegistry,
+    { ...fields },
+    {
+      ...fields,
+      planData,
+      authorization,
+      authorizationData,
+      authority,
+      authorityData,
+      captureVerification,
+      captureVerificationData,
+      authorityExpiresAt: authorityData.expiresAt,
+    },
+  );
+  consumedWriteAuthorizations.add(authorization);
+  consumedGlobalWriteAuthorities.add(authority);
+  return request;
 }
 
 /**
@@ -1746,46 +2548,79 @@ export function buildAuthorizedPhase4CuratedListAddRequest({
  * readback-only. An authoritative partial readback can plan only the exact
  * missing subset, and exhaustion blocks enrollment.
  */
-export function reconcilePhase4CuratedListWrite({
-  plan,
-  mutationOutcome,
-  postReadback = null,
-  attemptCount,
-  maxAttempts = PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX,
-  trustedNow,
-} = {}) {
-  if (plan?.[WRITE_PLAN] !== true || plan.noMutationRequired) {
+export function reconcilePhase4CuratedListWrite(rawArguments = {}) {
+  const args = shallowArgumentSnapshot(
+    rawArguments,
+    [
+      "plan",
+      "mutationOutcome",
+      "postReadback",
+      "attemptCount",
+      "maxAttempts",
+      "trustedNow",
+    ],
+    "reconciliation arguments",
+  );
+  const plan = args.plan;
+  const mutationOutcome = args.mutationOutcome;
+  const postReadback = Object.hasOwn(args, "postReadback")
+    ? args.postReadback
+    : null;
+  const attemptCount = args.attemptCount;
+  const maxAttempts = Object.hasOwn(args, "maxAttempts")
+    ? args.maxAttempts
+    : PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX;
+  const planData = registeredData(writePlanRegistry, plan);
+  const outcomeData = registeredData(
+    mutationOutcomeRegistry,
+    mutationOutcome,
+  );
+  const request = outcomeData?.request || null;
+  const requestData = registeredData(
+    authorizedRequestRegistry,
+    request,
+  );
+  const postReadbackData = registeredData(
+    readbackProofRegistry,
+    postReadback,
+  );
+  if (
+    !privateWritePlanLineageValid(plan, planData)
+    || planData.noMutationRequired
+  ) {
     throw new TypeError("plan must require a Curated List mutation");
   }
   strictPositiveInteger(attemptCount, "attemptCount");
   strictPositiveInteger(maxAttempts, "maxAttempts");
   const context = exactScopeContext({
-    ...proofScopeFields(plan),
-    trustedNow,
+    ...proofScopeFields(planData),
+    trustedNow: args.trustedNow,
   });
   if (
     !context
-    || mutationOutcome?.[MUTATION_OUTCOME] !== true
-    || mutationOutcome.request?.[AUTHORIZED_REQUEST] !== true
-    || mutationOutcome.request.plan !== plan
-    || mutationOutcome.requestDigest
-      !== mutationOutcome.request.requestDigest
-    || mutationOutcome.contractVersion
+    || !outcomeData
+    || !requestData
+    || reconciledMutationOutcomes.has(mutationOutcome)
+    || outcomeData.requestData !== requestData
+    || requestData.plan !== plan
+    || requestData.planData !== planData
+    || outcomeData.requestDigest !== requestData.requestDigest
+    || outcomeData.contractVersion
       !== PHASE4_CURATION_CONTRACT_VERSION
-    || !sameScope(mutationOutcome, plan)
-    || !sameScope(mutationOutcome.request, plan)
+    || !sameScope(outcomeData, planData)
+    || !sameScope(requestData, planData)
     || !observationFreshAt(
-      mutationOutcome.observedAt,
+      outcomeData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
-    || Date.parse(mutationOutcome.request.executionAt)
-      < Date.parse(plan.preReadback.observedAt)
-    || Date.parse(mutationOutcome.observedAt)
-      < Date.parse(mutationOutcome.request.executionAt)
+    || Date.parse(requestData.executionAt)
+      < Date.parse(planData.readbackData.observedAt)
+    || Date.parse(outcomeData.observedAt)
+      < Date.parse(requestData.executionAt)
   ) {
     throw new TypeError(
-      "mutationOutcome must be the exact branded same-scope attempt outcome",
+      "mutationOutcome must be the exact registered same-scope attempt outcome",
     );
   }
   if (maxAttempts > PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX) {
@@ -1796,35 +2631,45 @@ export function reconcilePhase4CuratedListWrite({
   if (attemptCount > maxAttempts) {
     throw new RangeError("attemptCount cannot exceed maxAttempts");
   }
+  if (
+    attemptCount !== planData.attemptNumber
+    || (
+      planData.maxAttempts !== null
+      && maxAttempts !== planData.maxAttempts
+    )
+  ) {
+    throw new RangeError(
+      "attemptCount and maxAttempts must strictly advance the plan lineage",
+    );
+  }
 
   const readbackValid = (
-    postReadback?.[READBACK_PROOF] === true
-    && postReadback.valid === true
-    && postReadback.candidateId === plan.candidateId
-    && postReadback.candidateUserId === plan.candidateUserId
-    && postReadback.exists === true
-    && sameScope(postReadback, plan)
+    postReadbackData?.valid === true
+    && postReadbackData.candidateId === planData.candidateId
+    && postReadbackData.candidateUserId === planData.candidateUserId
+    && postReadbackData.exists === true
+    && sameScope(postReadbackData, planData)
     && observationFreshAt(
-      postReadback.observedAt,
+      postReadbackData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
-    && Date.parse(postReadback.observedAt)
-      >= Date.parse(mutationOutcome.observedAt)
+    && Date.parse(postReadbackData.observedAt)
+      >= Date.parse(outcomeData.observedAt)
     && (
-      !plan.existingListId
-      || postReadback.listId === plan.existingListId
+      !planData.existingListId
+      || postReadbackData.listId === planData.existingListId
     )
     && (
-      !mutationOutcome.curatedRoleListId
-      || postReadback.listId === mutationOutcome.curatedRoleListId
+      !outcomeData.curatedRoleListId
+      || postReadbackData.listId === outcomeData.curatedRoleListId
     )
   );
   const policyDecision = curatedWriteReconciliationDecision({
-    plan: plan.policyPlan,
-    mutationOutcome: mutationOutcome.outcome,
+    plan: planData.policyPlan,
+    mutationOutcome: outcomeData.outcome,
     readbackState: readbackValid ? "authoritative" : "not_run",
-    curatedRoleIds: readbackValid ? postReadback.roleIds : [],
+    curatedRoleIds: readbackValid ? postReadbackData.roleIds : [],
     attemptCount,
     maxAttempts,
   });
@@ -1834,31 +2679,49 @@ export function reconcilePhase4CuratedListWrite({
         const fields = {
           contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
           ...proofScopeFields(context),
-          candidateId: plan.candidateId,
-          candidateUserId: plan.candidateUserId,
-          priorPlanSemanticDigest: plan.planSemanticDigest,
-          mutationRequestDigest: mutationOutcome.requestDigest,
-          mutationResponseDigest: mutationOutcome.responseDigest,
-          postReadbackDigest: postReadback.responseDigest,
+          candidateId: planData.candidateId,
+          candidateUserId: planData.candidateUserId,
+          priorPlanSemanticDigest: planData.planSemanticDigest,
+          mutationRequestDigest: outcomeData.requestDigest,
+          mutationResponseDigest: outcomeData.responseDigest,
+          postReadbackDigest: postReadbackData.responseDigest,
           targetRoleIds: frozenArray(policyDecision.targetRoleIds),
           missingRoleIds: frozenArray(policyDecision.missingRoleIds),
           completedAttemptCount: attemptCount,
+          nextAttemptNumber: attemptCount + 1,
           maxAttempts,
           issuedAt: context.trustedNow,
         };
-        return Object.freeze({
-          [REPLAN_REQUIREMENT]: true,
+        const publicFields = {
           ...fields,
           requirementDigest: canonicalDigest(fields),
-        });
+        };
+        return registerArtifact(
+          replanRequirementRegistry,
+          { ...publicFields },
+          {
+            ...publicFields,
+            priorPlan: plan,
+            priorPlanData: planData,
+            priorRequest: request,
+            priorRequestData: requestData,
+            priorOutcome: mutationOutcome,
+            priorOutcomeData: outcomeData,
+            postReadback,
+            postReadbackData,
+          },
+        );
       })()
       : null;
   const implicitCreateObserved = Boolean(
     readbackValid
-    && plan.preReadback.exists === false
-    && postReadback.exists === true
-    && postReadback.listId === mutationOutcome.curatedRoleListId
+    && planData.readbackData.exists === false
+    && postReadbackData.exists === true
+    && postReadbackData.listId === outcomeData.curatedRoleListId
   );
+  if (!policyDecision.readbackOnly) {
+    reconciledMutationOutcomes.add(mutationOutcome);
+  }
 
   return Object.freeze({
     contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
@@ -1874,16 +2737,16 @@ export function reconcilePhase4CuratedListWrite({
     attemptCount: policyDecision.attemptCount,
     maxAttempts: policyDecision.maxAttempts,
     attemptsRemaining: policyDecision.attemptsRemaining,
-    mutationRequestDigest: mutationOutcome.requestDigest,
-    mutationResponseDigest: mutationOutcome.responseDigest,
+    mutationRequestDigest: outcomeData.requestDigest,
+    mutationResponseDigest: outcomeData.responseDigest,
     mutationCuratedRoleListId:
-      mutationOutcome.curatedRoleListId,
+      outcomeData.curatedRoleListId,
     missingRoleIds: frozenArray(policyDecision.missingRoleIds),
     missingCount: policyDecision.missingCount,
     verifiedCount: policyDecision.verifiedCount,
     replanRequired: replanRequirement !== null,
     replanRequirement,
-    implicitCreateExpected: plan.implicitCreateExpected,
+    implicitCreateExpected: planData.implicitCreateExpected,
     implicitCreateObserved,
   });
 }
@@ -1905,14 +2768,32 @@ function duplicateFailure(reason) {
  * authority can mint an authorized request: two unchanged readbacks alone are
  * not evidence that a duplicate mutation was actually attempted.
  */
-export function phase4DuplicateReaddReadbackDecision({
-  firstReadback,
-  authorizedRequest,
-  mutationOutcome,
-  duplicateReadback,
-  targetRoleIds,
-  trustedNow,
-} = {}) {
+export function phase4DuplicateReaddReadbackDecision(rawArguments = {}) {
+  let args;
+  try {
+    args = shallowArgumentSnapshot(
+      rawArguments,
+      [
+        "firstReadback",
+        "authorizedRequest",
+        "mutationOutcome",
+        "duplicateReadback",
+        "targetRoleIds",
+        "trustedNow",
+      ],
+      "duplicate-readback arguments",
+    );
+  } catch {
+    return duplicateFailure("duplicate_evidence_chain_invalid");
+  }
+  const {
+    firstReadback,
+    authorizedRequest,
+    mutationOutcome,
+    duplicateReadback,
+    targetRoleIds,
+    trustedNow,
+  } = args;
   let targets;
   try {
     targets = strictUniqueIds(targetRoleIds, "targetRoleIds");
@@ -1922,59 +2803,74 @@ export function phase4DuplicateReaddReadbackDecision({
   if (targets.length === 0) {
     return duplicateFailure("target_roles_empty");
   }
+  const firstData = registeredData(
+    readbackProofRegistry,
+    firstReadback,
+  );
+  const requestData = registeredData(
+    authorizedRequestRegistry,
+    authorizedRequest,
+  );
+  const outcomeData = registeredData(
+    mutationOutcomeRegistry,
+    mutationOutcome,
+  );
+  const duplicateData = registeredData(
+    readbackProofRegistry,
+    duplicateReadback,
+  );
   const context = exactScopeContext({
-    ...proofScopeFields(firstReadback),
+    ...proofScopeFields(firstData),
     trustedNow,
   });
   if (
     !context
-    || firstReadback?.[READBACK_PROOF] !== true
-    || firstReadback.valid !== true
-    || firstReadback.exists !== true
-    || duplicateReadback?.[READBACK_PROOF] !== true
-    || duplicateReadback.valid !== true
-    || duplicateReadback.exists !== true
-    || authorizedRequest?.[AUTHORIZED_REQUEST] !== true
-    || mutationOutcome?.[MUTATION_OUTCOME] !== true
-    || mutationOutcome.request !== authorizedRequest
-    || mutationOutcome.requestDigest !== authorizedRequest.requestDigest
-    || mutationOutcome.outcome !== "accepted"
-    || mutationOutcome.responseContractValid !== true
-    || mutationOutcome.curatedRoleListId !== firstReadback.listId
-    || !sameScope(firstReadback, context)
-    || !sameScope(authorizedRequest, context)
-    || !sameScope(mutationOutcome, context)
-    || !sameScope(duplicateReadback, context)
-    || firstReadback.candidateId
-      !== authorizedRequest.plan.candidateId
-    || firstReadback.candidateUserId
-      !== authorizedRequest.plan.candidateUserId
-    || duplicateReadback.candidateId !== firstReadback.candidateId
-    || duplicateReadback.candidateUserId
-      !== firstReadback.candidateUserId
-    || firstReadback.listId !== duplicateReadback.listId
-    || !sameStringArray(authorizedRequest.input.role_ids, targets)
-    || Date.parse(authorizedRequest.executionAt)
-      < Date.parse(firstReadback.observedAt)
-    || Date.parse(mutationOutcome.observedAt)
-      < Date.parse(authorizedRequest.executionAt)
-    || Date.parse(duplicateReadback.observedAt)
-      < Date.parse(mutationOutcome.observedAt)
+    || firstData?.valid !== true
+    || firstData.exists !== true
+    || duplicateData?.valid !== true
+    || duplicateData.exists !== true
+    || !requestData
+    || !outcomeData
+    || outcomeData.request !== authorizedRequest
+    || outcomeData.requestData !== requestData
+    || outcomeData.requestDigest !== requestData.requestDigest
+    || outcomeData.outcome !== "accepted"
+    || outcomeData.responseContractValid !== true
+    || outcomeData.curatedRoleListId !== firstData.listId
+    || !sameScope(firstData, context)
+    || !sameScope(requestData, context)
+    || !sameScope(outcomeData, context)
+    || !sameScope(duplicateData, context)
+    || firstData.candidateId
+      !== requestData.planData.candidateId
+    || firstData.candidateUserId
+      !== requestData.planData.candidateUserId
+    || duplicateData.candidateId !== firstData.candidateId
+    || duplicateData.candidateUserId
+      !== firstData.candidateUserId
+    || firstData.listId !== duplicateData.listId
+    || !sameStringArray(requestData.input.role_ids, targets)
+    || Date.parse(requestData.executionAt)
+      < Date.parse(firstData.observedAt)
+    || Date.parse(outcomeData.observedAt)
+      < Date.parse(requestData.executionAt)
+    || Date.parse(duplicateData.observedAt)
+      < Date.parse(outcomeData.observedAt)
     || !observationFreshAt(
-      firstReadback.observedAt,
+      firstData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
     || !observationFreshAt(
-      duplicateReadback.observedAt,
+      duplicateData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
   ) {
     return duplicateFailure("duplicate_evidence_chain_invalid");
   }
-  const first = new Set(firstReadback.roleIds);
-  const duplicate = new Set(duplicateReadback.roleIds);
+  const first = new Set(firstData.roleIds);
+  const duplicate = new Set(duplicateData.roleIds);
   const roleSetStable = (
     first.size === duplicate.size
     && [...first].every((id) => duplicate.has(id))
@@ -1988,7 +2884,7 @@ export function phase4DuplicateReaddReadbackDecision({
     listIdentityStable: true,
     roleSetStable,
     targetsPresent,
-    duplicateRoleCount: duplicateReadback.roleCount,
+    duplicateRoleCount: duplicateData.roleCount,
   });
 }
 
@@ -1996,52 +2892,59 @@ export function phase4DuplicateReaddReadbackDecision({
  * Count only authoritative Recommended/Possible roles present in the post-add
  * list. Unrelated list roles never inflate the sequence-driving count.
  */
-export function exactPhase4PostAddCuratedMatchCount({
-  matchProof,
-  postReadback,
-  trustedNow,
-} = {}) {
+export function exactPhase4PostAddCuratedMatchCount(rawArguments = {}) {
+  const args = shallowArgumentSnapshot(
+    rawArguments,
+    ["matchProof", "postReadback", "trustedNow"],
+    "post-add count arguments",
+  );
+  const matchData = registeredData(
+    matchProofRegistry,
+    args.matchProof,
+  );
+  const readbackData = registeredData(
+    readbackProofRegistry,
+    args.postReadback,
+  );
   const context = exactScopeContext({
-    ...proofScopeFields(matchProof),
-    trustedNow,
+    ...proofScopeFields(matchData),
+    trustedNow: args.trustedNow,
   });
   if (
     !context
-    || matchProof?.[MATCH_PROOF] !== true
-    || matchProof.valid !== true
-    || postReadback?.[READBACK_PROOF] !== true
-    || postReadback.valid !== true
-    || postReadback.exists !== true
-    || postReadback.candidateId !== matchProof.candidateId
-    || !sameScope(postReadback, matchProof)
+    || matchData?.valid !== true
+    || readbackData?.valid !== true
+    || readbackData.exists !== true
+    || readbackData.candidateId !== matchData.candidateId
+    || !sameScope(readbackData, matchData)
     || !observationFreshAt(
-      matchProof.observedAt,
+      matchData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
     || !observationFreshAt(
-      postReadback.observedAt,
+      readbackData.observedAt,
       context.trustedNow,
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
-    || Date.parse(postReadback.observedAt)
-      < Date.parse(matchProof.observedAt)
+    || Date.parse(readbackData.observedAt)
+      < Date.parse(matchData.observedAt)
   ) {
     throw new TypeError(
       "exact match and candidate Curated List proofs are required",
     );
   }
-  const present = new Set(postReadback.roleIds);
-  const recommendedRoleIds = matchProof.recommendedRoleIds
+  const present = new Set(readbackData.roleIds);
+  const recommendedRoleIds = matchData.recommendedRoleIds
     .filter((id) => present.has(id));
-  const possibleRoleIds = matchProof.possibleRoleIds
+  const possibleRoleIds = matchData.possibleRoleIds
     .filter((id) => present.has(id));
-  const presentTargetRoleIds = matchProof.targetRoleIds
+  const presentTargetRoleIds = matchData.targetRoleIds
     .filter((id) => present.has(id));
-  const missingTargetRoleIds = matchProof.targetRoleIds
+  const missingTargetRoleIds = matchData.targetRoleIds
     .filter((id) => !present.has(id));
-  const targetSet = new Set(matchProof.targetRoleIds);
-  const unrelatedRoleCount = postReadback.roleIds
+  const targetSet = new Set(matchData.targetRoleIds);
+  const unrelatedRoleCount = readbackData.roleIds
     .filter((id) => !targetSet.has(id)).length;
 
   return Object.freeze({
@@ -2055,8 +2958,8 @@ export function exactPhase4PostAddCuratedMatchCount({
     recommendedCount: recommendedRoleIds.length,
     possibleCount: possibleRoleIds.length,
     matchCount: presentTargetRoleIds.length,
-    expectedMatchCount: matchProof.targetCount,
-    listRoleCount: postReadback.roleCount,
+    expectedMatchCount: matchData.targetCount,
+    listRoleCount: readbackData.roleCount,
     unrelatedRoleCount,
   });
 }
