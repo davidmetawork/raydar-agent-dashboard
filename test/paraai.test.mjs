@@ -493,6 +493,27 @@ test("Phase 3 health readiness includes runner, Slack, and durable queue", async
   assert.match(readiness, /phase3ShadowExecutionEnabled\(auto, \{ now \}\)/);
 });
 
+test("Phase 4 health verifies all five live sequences by ID without exposing IDs", async () => {
+  const source = await readFile(
+    new URL("../api/paraai/health.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /outcomeSequenceHealthDecision\(\{/);
+  assert.match(source, /health\.sequenceHealth\.healthy/);
+  assert.doesNotMatch(
+    source,
+    /New Matches - Added to Para AI \(one role\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /health\.sequences\s*=\s*required\.map/,
+  );
+  assert.doesNotMatch(
+    source,
+    /sequenceHealth\.(?:missingIds|disabledIds|nameDriftIds)/,
+  );
+});
+
 test("Vercel config exposes one Para AI page and grouped API duration", async () => {
   const config = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
   assert.deepEqual(config.rewrites.find((row) => row.source === "/paraai"), { source: "/paraai", destination: "/paraai.html" });
