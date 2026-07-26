@@ -11,8 +11,12 @@ import {
   createRecallReferenceHeadCollector,
 } from "../api/paraai/_lib/source-recall-reference-collector.mjs";
 import {
+  SOURCE_RECALL_REFERENCE_ATOMIC_COMMIT_BUDGET_MS,
   SOURCE_RECALL_REFERENCE_CLAIM_LEASE_MS,
+  SOURCE_RECALL_REFERENCE_CLAIM_PREPARATION_MARGIN_MS,
+  SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS,
   SOURCE_RECALL_REFERENCE_MAX_COLLECTION_AGE_MS,
+  SOURCE_RECALL_REFERENCE_MAX_PAGES,
   SOURCE_RECALL_REFERENCE_MIN_PAGE_RETENTION_MS,
   SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS,
   SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS,
@@ -189,7 +193,10 @@ function memoryPersistence({
         requiredPageSet,
         requiredPageSetDigest,
         notAfterMs,
+        notBeforeMs,
       } = input;
+      assert.equal(Number.isSafeInteger(notBeforeMs), true);
+      assert.ok(notBeforeMs <= nowMs);
       events.push({
         kind: "cas",
         nowMs,
@@ -267,7 +274,14 @@ function memoryPersistence({
           || candidate.expiresAtMs - nowMs
             < required.minimumRemainingTtlMs
         ) {
-          throw new Error("atomic page-set verification failed");
+          return {
+            headReceipt: null,
+            pageReceipt: null,
+            pageSetReceipt: null,
+            status: "proof_failed",
+            raw: runs.get(key),
+            redisNowMs: nowMs,
+          };
         }
       }
       runs.set(key, nextRaw);
@@ -539,6 +553,30 @@ test("two exhaustive passes seal one unpinnable digest-only head and TTL-bound e
     "recall-reference-head-dark-v1",
   );
   assert.equal(SOURCE_RECALL_REFERENCE_REQUIRED_PASSES, 2);
+  assert.equal(SOURCE_RECALL_REFERENCE_CLAIM_LEASE_MS, 150_000);
+  assert.equal(
+    SOURCE_RECALL_REFERENCE_CLAIM_PREPARATION_MARGIN_MS,
+    60_000,
+  );
+  assert.equal(
+    SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS,
+    60_000,
+  );
+  assert.equal(
+    SOURCE_RECALL_REFERENCE_ATOMIC_COMMIT_BUDGET_MS,
+    15_000,
+  );
+  assert.ok(
+    SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS
+      > SOURCE_RECALL_REFERENCE_ATOMIC_COMMIT_BUDGET_MS,
+  );
+  assert.ok(
+    SOURCE_RECALL_REFERENCE_CLAIM_LEASE_MS
+      > SOURCE_RECALL_REFERENCE_CLAIM_PREPARATION_MARGIN_MS
+        + SOURCE_RECALL_PAGE_TIMEOUT_MS
+        + SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS
+        + SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS,
+  );
   assert.equal(
     SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS,
     24 * 60 * 60 * 1_000,
@@ -687,7 +725,7 @@ test("two exhaustive passes seal one unpinnable digest-only head and TTL-bound e
     harness.events.filter(
       (event) => event.kind === "read_page",
     ).length,
-    11,
+    0,
   );
   const sealingCas = harness.events.find(
     (event) => event.kind === "cas" && event.hasHead,
@@ -719,6 +757,62 @@ test("two exhaustive passes seal one unpinnable digest-only head and TTL-bound e
     );
     assert.equal(event.nextRecord.revision, index + 1);
   }
+});
+
+test("the 200-page ceiling seals through bounded atomic receipts with zero private page rereads", async () => {
+  const { harness, store, work } = await initialized();
+  const pages = Array.from(
+    { length: SOURCE_RECALL_REFERENCE_MAX_PAGES },
+    (_, index) => {
+      const pageNumber = index + 1;
+      return page({
+        nextCursor: pageNumber
+          < SOURCE_RECALL_REFERENCE_MAX_PAGES
+          ? cursor(pageNumber + 1)
+          : null,
+      });
+    },
+  );
+  let last;
+  for (
+    let passNumber = 1;
+    passNumber <= SOURCE_RECALL_REFERENCE_REQUIRED_PASSES;
+    passNumber += 1
+  ) {
+    for (const selectedPage of pages) {
+      const claim = await store.claimRecallReferencePage(work);
+      last = await store.checkpointRecallReferencePage(
+        claim,
+        selectedPage,
+      );
+    }
+  }
+  assert.equal(last.snapshot.record.status, "sealed_unpinnable");
+  assert.equal(
+    last.snapshot.record.passes[1].pageCount,
+    SOURCE_RECALL_REFERENCE_MAX_PAGES,
+  );
+  assert.equal(
+    harness.events.filter(
+      (event) => event.kind === "read_page",
+    ).length,
+    0,
+  );
+  const sealingCas = harness.events.find(
+    (event) => event.kind === "cas" && event.hasHead,
+  );
+  assert.equal(
+    sealingCas.requiredPageCount,
+    SOURCE_RECALL_REFERENCE_MAX_PAGES,
+  );
+  const atomicProofs = harness.events.filter(
+    (event) => event.kind === "verify_artifact_set",
+  );
+  assert.equal(atomicProofs.length, 1);
+  assert.equal(
+    atomicProofs[0].requiredPageCount,
+    SOURCE_RECALL_REFERENCE_MAX_PAGES,
+  );
 });
 
 test("initial durable creation must be stamped by Redis TIME", async () => {
@@ -1157,7 +1251,7 @@ test("persistence envelopes reject proxy, accessor, symbol, extra-key, and inval
   });
 });
 
-test("CAS receipts, raw-page readback, complete page-set retention, and head clock all fail closed", async (t) => {
+test("CAS receipts, receipt-only private pages, complete page-set retention, and head clock all fail closed", async (t) => {
   await t.test("page receipt binds raw digest and exact TTL", async () => {
     const harness = memoryPersistence();
     const original = harness.persistence.compareAndSet;
@@ -1185,23 +1279,23 @@ test("CAS receipts, raw-page readback, complete page-set retention, and head clo
     );
   });
 
-  await t.test("page readback is byte exact", async () => {
+  await t.test("page publication needs no private raw reread", async () => {
     const harness = memoryPersistence();
-    const original = harness.persistence.readPage;
-    harness.persistence.readPage = async (input) => {
-      const result = await original(input);
-      return result.raw === null
-        ? result
-        : { ...result, raw: `${result.raw} ` };
+    harness.persistence.readPage = async () => {
+      throw new Error("private raw reread is forbidden");
     };
     const { store, work } = await initialized(harness);
     const claim = await store.claimRecallReferencePage(work);
-    await assert.rejects(
-      () => store.checkpointRecallReferencePage(claim, page()),
-      (error) => expectStoreCode(
-        error,
-        "SOURCE_RECALL_REFERENCE_PAGE_READBACK_FAILED",
+    const result = await store.checkpointRecallReferencePage(
+      claim,
+      page(),
+    );
+    assert.equal(result.snapshot.record.passes[0].pageCount, 1);
+    assert.equal(
+      harness.events.some(
+        (event) => event.kind === "read_page",
       ),
+      false,
     );
   });
 
@@ -1233,7 +1327,7 @@ test("CAS receipts, raw-page readback, complete page-set retention, and head clo
       ),
       (error) => expectStoreCode(
         error,
-        "SOURCE_RECALL_REFERENCE_PAGE_READBACK_FAILED",
+        "SOURCE_RECALL_REFERENCE_PERSISTENCE_FAILED",
       ),
     );
     assert.equal(harness.heads.size, 0);
@@ -1266,7 +1360,7 @@ test("CAS receipts, raw-page readback, complete page-set retention, and head clo
       ),
       (error) => expectStoreCode(
         error,
-        "SOURCE_RECALL_REFERENCE_PAGE_READBACK_FAILED",
+        "SOURCE_RECALL_REFERENCE_PERSISTENCE_FAILED",
       ),
     );
     assert.equal(harness.heads.size, 0);
@@ -1390,18 +1484,14 @@ test("sealed replay re-proves every artifact and never trusts terminal state bli
 
   await t.test("atomic replay proof rejects pages that did not coexist with the minimum retention", async () => {
     const harness = memoryPersistence();
-    const original = harness.persistence.readPage;
-    let advanceAfterFirstRead = false;
-    harness.persistence.readPage = async (input) => {
-      const result = await original(input);
-      if (
-        advanceAfterFirstRead
-        && input.key.endsWith(":2:1")
-      ) {
-        advanceAfterFirstRead = false;
+    const original = harness.persistence.verifyArtifactSet;
+    let advanceBeforeAtomicProof = false;
+    harness.persistence.verifyArtifactSet = async (input) => {
+      if (advanceBeforeAtomicProof) {
+        advanceBeforeAtomicProof = false;
         harness.advance(2);
       }
-      return result;
+      return original(input);
     };
     const { store, work } = await initialized(harness);
     const results = [
@@ -1428,7 +1518,7 @@ test("sealed replay re-proves every artifact and never trusts terminal state bli
       - SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS
       - 1,
     );
-    advanceAfterFirstRead = true;
+    advanceBeforeAtomicProof = true;
     claim = await store.claimRecallReferencePage(work);
     assert.equal(claim.outcome, "invalidated");
     assert.equal(claim.aggregate.status, "invalidated");
@@ -1746,6 +1836,10 @@ test("atomic deadlines prevent delayed claims and checkpoints from causing unsaf
         SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS,
         1_000,
       );
+      assert.equal(
+        SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS,
+        60_000,
+      );
       assert.equal(SOURCE_RECALL_PAGE_TIMEOUT_MS, 20_000);
       const { store, work } = await initialized();
       let issuedDeadline = null;
@@ -1783,7 +1877,8 @@ test("atomic deadlines prevent delayed claims and checkpoints from causing unsaf
         1_000
           + SOURCE_RECALL_REFERENCE_CLAIM_LEASE_MS
           - SOURCE_RECALL_PAGE_TIMEOUT_MS
-          - SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS,
+          - SOURCE_RECALL_REFERENCE_PROVIDER_HANDOFF_MARGIN_MS
+          - SOURCE_RECALL_REFERENCE_CHECKPOINT_COMMIT_MARGIN_MS,
       );
       assert.equal(reads, 0);
       const settled =
@@ -1861,6 +1956,40 @@ test("atomic deadlines prevent delayed claims and checkpoints from causing unsaf
     const settled = await store.claimRecallReferencePage(work);
     assert.equal(settled.outcome, "invalidated");
     assert.equal(settled.aggregate.headSealed, false);
+  });
+
+  await t.test("checkpoint completion-budget exhaustion is a controlled pre-deadline refusal", async () => {
+    const harness = memoryPersistence();
+    const original = harness.persistence.compareAndSet;
+    let exhaustPageBudget = false;
+    harness.persistence.compareAndSet = async (input) => {
+      if (exhaustPageBudget && input.pageRaw !== null) {
+        exhaustPageBudget = false;
+        return {
+          headReceipt: null,
+          pageReceipt: null,
+          pageSetReceipt: null,
+          status: "deadline_exceeded",
+          raw: input.expectedRaw,
+          redisNowMs:
+            input.notAfterMs
+            - SOURCE_RECALL_REFERENCE_ATOMIC_COMMIT_BUDGET_MS,
+        };
+      }
+      return original(input);
+    };
+    const { store, work } = await initialized(harness);
+    const claim = await store.claimRecallReferencePage(work);
+    exhaustPageBudget = true;
+    await assert.rejects(
+      () => store.checkpointRecallReferencePage(claim, page()),
+      (error) => expectStoreCode(
+        error,
+        "SOURCE_RECALL_REFERENCE_CAS_DEADLINE_EXCEEDED",
+      ),
+    );
+    assert.equal(harness.pages.size, 0);
+    assert.equal(harness.heads.size, 0);
   });
 
   await t.test("nonconforming late stored checkpoint can never publish its quarantined artifacts", async () => {
