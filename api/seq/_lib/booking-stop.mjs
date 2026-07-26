@@ -290,7 +290,10 @@ export async function calendlyBookingIndex({
 // So: retry a 401 with backoff, and only believe it is a real expiry after the
 // retries are exhausted. isSessionActuallyExpired() then confirms serially before
 // anyone shouts about the cookie.
-const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500];
+// Paraform's throttle can persist for tens of seconds under sustained load, so
+// the ladder has to outlast it. Cheap: these delays only run when we are already
+// being refused, and giving up costs a missed pause.
+const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 
 /**
  * Run a Paraform call, treating 401 as a THROTTLE until proven otherwise.
@@ -482,7 +485,7 @@ export function decideLead({ lead, seq, booking, relStatus, now = Date.now() }) 
  * time would re-read a 211-lead membership 150 times (~750 page requests) and
  * reintroduce exactly the runtime blowup that killed the predecessor.
  */
-export async function applyDecisions(decisions, { concurrency = 3 } = {}) {
+export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
   const out = { paused: 0, pauseErrors: [], throttled: 0 };
   if (!decisions.length) return out;
 
@@ -559,7 +562,7 @@ export async function runBookingSweep({
   concurrency = 8,
   // Paraform 401s under burst (see cachedRelationshipStatus). 4 is the measured
   // comfortable ceiling for this proc; do not raise it without re-measuring.
-  profileConcurrency = Number(process.env.BOOKING_STOP_PROFILE_CONCURRENCY || 4),
+  profileConcurrency = Number(process.env.BOOKING_STOP_PROFILE_CONCURRENCY || 3),
   calendlyBackDays = Number(process.env.BOOKING_STOP_BACK_DAYS || 7),
   onDecision = null,
 } = {}) {
@@ -613,7 +616,8 @@ export async function runBookingSweep({
       perSeq.push({ seq, leads: read.leads });
     }
   };
-  await Promise.all(Array.from({ length: 4 }, memWorker));
+  // Membership is the burstiest leg (overlapping windows, ~8 calls a sequence).
+  await Promise.all(Array.from({ length: Number(process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2) }, memWorker));
 
   const active = [];
   for (const { seq, leads } of perSeq) {
