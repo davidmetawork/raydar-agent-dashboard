@@ -6,7 +6,6 @@ import path from "node:path";
 
 import {
   PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
-  PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS,
   PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
   PHASE4_CURATION_CONTRACT_VERSION,
   PHASE4_CURATION_OBSERVATION_VERSION,
@@ -403,7 +402,8 @@ function captureAttestationBase() {
       controlledRecipient: true,
       notificationTypeDisabled: true,
       candidateFacingEmailCount: 0,
-      observedForMs: PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS,
+      observedForMs:
+        Date.parse(CAPTURE_OBSERVED_THROUGH_AT) - Date.parse(CAPTURED_AT),
     },
     cleanup: {
       roleSetRestored: true,
@@ -411,6 +411,22 @@ function captureAttestationBase() {
       disposableEmptyListResidualRecorded: false,
     },
   };
+}
+
+function minimalRev4CaptureAttestation() {
+  const capture = captureAttestationBase();
+  capture.capturedAt = "2026-07-26T00:00:00.000Z";
+  capture.observedThroughAt = "2026-07-26T00:00:01.250Z";
+  capture.emailSilence = {
+    candidateFacingEmailCount: 0,
+    observedForMs: 1_250,
+  };
+  delete capture.cleanup;
+  delete capture.notificationContract;
+  delete capture.evidenceDigests.cleanup;
+  delete capture.evidenceDigests.notificationAfter;
+  delete capture.evidenceDigests.notificationBefore;
+  return capture;
 }
 
 function sealCapture(value = captureAttestationBase()) {
@@ -602,6 +618,73 @@ test("completed capture validation binds evidence, implementation, and time", ()
   }
 });
 
+test("minimal rev4 capture requires zero observed candidate email", () => {
+  const minimalCapture = sealCapture(minimalRev4CaptureAttestation());
+  assert.deepEqual(
+    validatePhase4CuratedListCaptureAttestation(minimalCapture, {
+      expectedSemanticDigest: minimalCapture.semanticDigest,
+      expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+      trustedNow: minimalCapture.observedThroughAt,
+    }),
+    {
+      valid: true,
+      reasons: [],
+      version: PHASE4_CURATION_CAPTURE_ATTESTATION_VERSION,
+      contractVersion: PHASE4_CURATION_CONTRACT_VERSION,
+    },
+  );
+
+  const advisoryEvidence = captureAttestationBase();
+  advisoryEvidence.emailSilence.controlledRecipient = false;
+  advisoryEvidence.emailSilence.notificationTypeDisabled = false;
+  advisoryEvidence.cleanup.roleSetRestored = false;
+  advisoryEvidence.cleanup.notificationSettingsUnchanged = false;
+  const advisoryCapture = sealCapture(advisoryEvidence);
+  assert.equal(
+    validatePhase4CuratedListCaptureAttestation(advisoryCapture, {
+      expectedSemanticDigest: advisoryCapture.semanticDigest,
+      expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+      trustedNow: advisoryCapture.observedThroughAt,
+    }).valid,
+    true,
+  );
+
+  for (const candidateFacingEmailCount of [1, 2]) {
+    const observedEmail = minimalRev4CaptureAttestation();
+    observedEmail.emailSilence.candidateFacingEmailCount =
+      candidateFacingEmailCount;
+    const capture = sealCapture(observedEmail);
+    const decision = validatePhase4CuratedListCaptureAttestation(
+      capture,
+      {
+        expectedSemanticDigest: capture.semanticDigest,
+        expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+        trustedNow: capture.observedThroughAt,
+      },
+    );
+    assert.equal(decision.valid, false);
+    assert.equal(
+      decision.reasons.includes("capture_email_silence_invalid"),
+      true,
+    );
+  }
+
+  const inconsistentDuration = minimalRev4CaptureAttestation();
+  inconsistentDuration.emailSilence.observedForMs++;
+  const inconsistentCapture = sealCapture(inconsistentDuration);
+  assert.equal(
+    validatePhase4CuratedListCaptureAttestation(
+      inconsistentCapture,
+      {
+        expectedSemanticDigest: inconsistentCapture.semanticDigest,
+        expectedImplementationDigest: IMPLEMENTATION_DIGEST,
+        trustedNow: inconsistentCapture.observedThroughAt,
+      },
+    ).reasons.includes("capture_email_silence_invalid"),
+    true,
+  );
+});
+
 test("capture validation rejects caller pins, future windows, and loose evidence", () => {
   const capture = sealCapture();
   assert.equal(
@@ -621,7 +704,7 @@ test("capture validation rejects caller pins, future windows, and loose evidence
     true,
   );
   const missingEvidence = structuredClone(capture);
-  delete missingEvidence.evidenceDigests.cleanup;
+  delete missingEvidence.evidenceDigests.addResponse;
   missingEvidence.semanticDigest =
     phase4CuratedListCaptureSemanticDigest(missingEvidence);
   assert.equal(

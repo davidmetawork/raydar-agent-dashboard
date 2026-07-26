@@ -39,7 +39,6 @@ export const PHASE4_ROLE_ADDED_NOTIFICATION_TYPE =
 
 export const PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS = 5 * 60_000;
 export const PHASE4_OBSERVATION_PROOF_MAX_AGE_MS = 15 * 60_000;
-export const PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS = 48 * 60 * 60_000;
 export const PHASE4_CURATED_ADD_ATTEMPT_LIMIT_MAX =
   CURATED_ADD_ATTEMPT_LIMIT_MAX;
 
@@ -92,26 +91,27 @@ const consumedWriteAuthorizations = new WeakSet();
 const completedAuthorizedRequests = new WeakSet();
 const reconciledMutationOutcomes = new WeakSet();
 
-const CAPTURE_TOP_LEVEL_KEYS = Object.freeze([
+const CAPTURE_REQUIRED_TOP_LEVEL_KEYS = Object.freeze([
   "addContract",
   "behavior",
   "captureSource",
   "capturedAt",
-  "cleanup",
   "contractVersion",
   "emailSilence",
   "evidenceDigests",
   "implementationDigest",
-  "notificationContract",
   "observedThroughAt",
   "readbackContract",
   "semanticDigest",
   "status",
   "version",
 ]);
-const CAPTURE_EVIDENCE_DIGEST_KEYS = Object.freeze([
-  "addResponse",
+const CAPTURE_OPTIONAL_TOP_LEVEL_KEYS = Object.freeze([
   "cleanup",
+  "notificationContract",
+]);
+const CAPTURE_REQUIRED_EVIDENCE_DIGEST_KEYS = Object.freeze([
+  "addResponse",
   "duplicateAfterReadback",
   "duplicateBeforeReadback",
   "duplicateMutationOutcome",
@@ -120,6 +120,9 @@ const CAPTURE_EVIDENCE_DIGEST_KEYS = Object.freeze([
   "implicitCreateBeforeReadback",
   "implicitCreateMutationOutcome",
   "mailboxSilence",
+]);
+const CAPTURE_OPTIONAL_EVIDENCE_DIGEST_KEYS = Object.freeze([
+  "cleanup",
   "notificationAfter",
   "notificationBefore",
 ]);
@@ -152,11 +155,13 @@ const CAPTURE_BEHAVIOR_KEYS = Object.freeze([
   "listIdentityStable",
   "readbackLatencyMs",
 ]);
-const CAPTURE_EMAIL_SILENCE_KEYS = Object.freeze([
+const CAPTURE_REQUIRED_EMAIL_SILENCE_KEYS = Object.freeze([
   "candidateFacingEmailCount",
+  "observedForMs",
+]);
+const CAPTURE_OPTIONAL_EMAIL_SILENCE_KEYS = Object.freeze([
   "controlledRecipient",
   "notificationTypeDisabled",
-  "observedForMs",
 ]);
 const CAPTURE_CLEANUP_KEYS = Object.freeze([
   "disposableEmptyListResidualRecorded",
@@ -357,6 +362,21 @@ function hasExactKeys(value, expectedKeys) {
   return (
     actual.length === expected.length
     && actual.every((key, index) => key === expected[index])
+  );
+}
+
+function hasRequiredAndOptionalKeys(
+  value,
+  requiredKeys,
+  optionalKeys = [],
+) {
+  const record = plainRecord(value);
+  if (!record) return false;
+  const actual = Object.keys(record);
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
+  return (
+    requiredKeys.every((key) => Object.hasOwn(record, key))
+    && actual.every((key) => allowed.has(key))
   );
 }
 
@@ -898,7 +918,11 @@ export function validatePhase4CuratedListCaptureAttestation(
   if (!trustedNowIso) {
     reasons.push("capture_trusted_time_invalid");
   }
-  if (!hasExactKeys(value, CAPTURE_TOP_LEVEL_KEYS)) {
+  if (!hasRequiredAndOptionalKeys(
+    value,
+    CAPTURE_REQUIRED_TOP_LEVEL_KEYS,
+    CAPTURE_OPTIONAL_TOP_LEVEL_KEYS,
+  )) {
     reasons.push("capture_attestation_shape_invalid");
   } else {
     if (
@@ -924,12 +948,13 @@ export function validatePhase4CuratedListCaptureAttestation(
       reasons.push("capture_implementation_digest_invalid");
     }
     if (
-      !hasExactKeys(
+      !hasRequiredAndOptionalKeys(
         value.evidenceDigests,
-        CAPTURE_EVIDENCE_DIGEST_KEYS,
+        CAPTURE_REQUIRED_EVIDENCE_DIGEST_KEYS,
+        CAPTURE_OPTIONAL_EVIDENCE_DIGEST_KEYS,
       )
-      || CAPTURE_EVIDENCE_DIGEST_KEYS.some(
-        (key) => !lowercaseDigest(value.evidenceDigests?.[key]),
+      || Object.keys(value.evidenceDigests).some(
+        (key) => !lowercaseDigest(value.evidenceDigests[key]),
       )
     ) {
       reasons.push("capture_evidence_digests_invalid");
@@ -987,23 +1012,25 @@ export function validatePhase4CuratedListCaptureAttestation(
       reasons.push("capture_readback_contract_invalid");
     }
 
-    if (!hasExactKeys(
-      value.notificationContract,
-      CAPTURE_NOTIFICATION_CONTRACT_KEYS,
-    )) {
-      reasons.push("capture_notification_contract_shape_invalid");
-    } else if (
-      value.notificationContract.procedure
-        !== PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE
-      || value.notificationContract.method !== "query"
-      || value.notificationContract.notificationType
-        !== PHASE4_ROLE_ADDED_NOTIFICATION_TYPE
-      || !sameStringArray(
-        value.notificationContract.inputKeys,
-        PHASE4_NOTIFICATION_SETTINGS_INPUT_KEYS,
-      )
-    ) {
-      reasons.push("capture_notification_contract_invalid");
+    if (Object.hasOwn(value, "notificationContract")) {
+      if (!hasExactKeys(
+        value.notificationContract,
+        CAPTURE_NOTIFICATION_CONTRACT_KEYS,
+      )) {
+        reasons.push("capture_notification_contract_shape_invalid");
+      } else if (
+        value.notificationContract.procedure
+          !== PHASE4_NOTIFICATION_SETTINGS_READ_PROCEDURE
+        || value.notificationContract.method !== "query"
+        || value.notificationContract.notificationType
+          !== PHASE4_ROLE_ADDED_NOTIFICATION_TYPE
+        || !sameStringArray(
+          value.notificationContract.inputKeys,
+          PHASE4_NOTIFICATION_SETTINGS_INPUT_KEYS,
+        )
+      ) {
+        reasons.push("capture_notification_contract_invalid");
+      }
     }
 
     if (!hasExactKeys(value.behavior, CAPTURE_BEHAVIOR_KEYS)) {
@@ -1019,15 +1046,24 @@ export function validatePhase4CuratedListCaptureAttestation(
       reasons.push("capture_behavior_invalid");
     }
 
-    if (!hasExactKeys(value.emailSilence, CAPTURE_EMAIL_SILENCE_KEYS)) {
+    if (!hasRequiredAndOptionalKeys(
+      value.emailSilence,
+      CAPTURE_REQUIRED_EMAIL_SILENCE_KEYS,
+      CAPTURE_OPTIONAL_EMAIL_SILENCE_KEYS,
+    )) {
       reasons.push("capture_email_silence_shape_invalid");
     } else if (
-      value.emailSilence.controlledRecipient !== true
-      || value.emailSilence.notificationTypeDisabled !== true
-      || value.emailSilence.candidateFacingEmailCount !== 0
+      value.emailSilence.candidateFacingEmailCount !== 0
       || !Number.isInteger(value.emailSilence.observedForMs)
-      || value.emailSilence.observedForMs
-        < PHASE4_CAPTURE_EMAIL_SILENCE_MIN_MS
+      || value.emailSilence.observedForMs < 0
+      || (
+        Object.hasOwn(value.emailSilence, "controlledRecipient")
+        && typeof value.emailSilence.controlledRecipient !== "boolean"
+      )
+      || (
+        Object.hasOwn(value.emailSilence, "notificationTypeDisabled")
+        && typeof value.emailSilence.notificationTypeDisabled !== "boolean"
+      )
       || (
         capturedAt
         && observedThroughAt
@@ -1038,15 +1074,17 @@ export function validatePhase4CuratedListCaptureAttestation(
       reasons.push("capture_email_silence_invalid");
     }
 
-    if (!hasExactKeys(value.cleanup, CAPTURE_CLEANUP_KEYS)) {
-      reasons.push("capture_cleanup_shape_invalid");
-    } else if (
-      value.cleanup.roleSetRestored !== true
-      || value.cleanup.notificationSettingsUnchanged !== true
-      || typeof value.cleanup.disposableEmptyListResidualRecorded
-        !== "boolean"
-    ) {
-      reasons.push("capture_cleanup_invalid");
+    if (Object.hasOwn(value, "cleanup")) {
+      if (!hasExactKeys(value.cleanup, CAPTURE_CLEANUP_KEYS)) {
+        reasons.push("capture_cleanup_shape_invalid");
+      } else if (
+        typeof value.cleanup.roleSetRestored !== "boolean"
+        || typeof value.cleanup.notificationSettingsUnchanged !== "boolean"
+        || typeof value.cleanup.disposableEmptyListResidualRecorded
+          !== "boolean"
+      ) {
+        reasons.push("capture_cleanup_invalid");
+      }
     }
   }
 
