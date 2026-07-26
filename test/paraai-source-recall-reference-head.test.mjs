@@ -62,6 +62,10 @@ function rawDigest(raw) {
   return createHash("sha256").update(raw).digest("hex");
 }
 
+function nativeRawDigest(raw) {
+  return createHash("sha1").update(raw).digest("hex");
+}
+
 function semanticDigest(namespace, value) {
   return createHash("sha256")
     .update(namespace)
@@ -269,6 +273,8 @@ function memoryPersistence({
         if (
           !candidate
           || rawDigest(candidate.raw) !== required.rawDigest
+          || nativeRawDigest(candidate.raw)
+            !== required.nativeByteProofDigest
           || candidate.expiresAtMs
             !== required.expectedExpiresAtMs
           || candidate.expiresAtMs - nowMs
@@ -333,7 +339,7 @@ function memoryPersistence({
       };
     },
     async readPage({ key }) {
-      events.push({ kind: "read_page", nowMs });
+      events.push({ kind: "read_page", key, nowMs });
       const stored = pages.get(key);
       if (!stored || stored.expiresAtMs <= nowMs) {
         return {
@@ -397,6 +403,8 @@ function memoryPersistence({
           return (
             !candidate
             || rawDigest(candidate.raw) !== required.rawDigest
+            || nativeRawDigest(candidate.raw)
+              !== required.nativeByteProofDigest
             || candidate.expiresAtMs
               !== required.expectedExpiresAtMs
             || candidate.expiresAtMs - nowMs
@@ -519,6 +527,31 @@ async function initialized(harness = memoryPersistence()) {
   });
   const ensured = await store.ensureRecallReferenceRun(context());
   return { harness, store, ...ensured };
+}
+
+async function sealedReferenceRun({
+  harness = memoryPersistence(),
+  passPages = [page({ references: [reference()] })],
+} = {}) {
+  const initializedRun = await initialized(harness);
+  let checkpoint = null;
+  for (
+    let passNumber = 1;
+    passNumber <= SOURCE_RECALL_REFERENCE_REQUIRED_PASSES;
+    passNumber += 1
+  ) {
+    for (const selectedPage of passPages) {
+      const claim = await initializedRun.store
+        .claimRecallReferencePage(initializedRun.work);
+      checkpoint = await initializedRun.store
+        .checkpointRecallReferencePage(claim, selectedPage);
+    }
+  }
+  assert.equal(
+    checkpoint.snapshot.record.status,
+    "sealed_unpinnable",
+  );
+  return { ...initializedRun, checkpoint };
 }
 
 function aggregate(overrides = {}) {
@@ -738,11 +771,8 @@ test("two exhaustive passes seal one unpinnable digest-only head and TTL-bound e
   assert.equal(harness.pages.size, 0);
   assert.equal(harness.heads.size, 1);
   assert.equal(
-    Object.prototype.hasOwnProperty.call(
-      store,
-      "readRecallReferencePage",
-    ),
-    false,
+    typeof store.readRecallReferencePage,
+    "function",
   );
 
   const casEvents = harness.events.filter(
@@ -757,6 +787,349 @@ test("two exhaustive passes seal one unpinnable digest-only head and TTL-bound e
     );
     assert.equal(event.nextRecord.revision, index + 1);
   }
+});
+
+test("the server-private pass-two reader re-proves the full artifact and returns one exact non-renewed page", async () => {
+  const { harness, store, work } = await sealedReferenceRun();
+  const retained = [...harness.pages.entries()]
+    .find(([key]) => key.endsWith(":2:1"));
+  const originalExpiresAtMs = retained[1].expiresAtMs;
+  const eventStart = harness.events.length;
+  const casCount = harness.events.filter(
+    (event) => event.kind === "cas",
+  ).length;
+  const result = await store.readRecallReferencePage(
+    Object.freeze({
+      workKeyDigest: work.workKeyDigest,
+      pageNumber: 1,
+    }),
+  );
+
+  assert.deepEqual(
+    harness.events.slice(eventStart).map((event) => event.kind),
+    [
+      "read_run",
+      "read_head",
+      "verify_artifact_set",
+      "read_page",
+    ],
+  );
+  assert.equal(
+    harness.events.at(-1).key,
+    retained[0],
+  );
+  assert.deepEqual(
+    Object.keys(result).sort(),
+    [
+      "pageKeyDigest",
+      "pageNativeByteProofDigest",
+      "pageRecordDigest",
+      "recallReferenceHeadEpochDigest",
+      "recallReferenceHeadRecordDigest",
+      "recallReferenceHeadRevisionDigest",
+      "record",
+      "redisNowMs",
+      "remainingTtlMs",
+    ].sort(),
+  );
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.record), true);
+  assert.equal(Object.isFrozen(result.record.references), true);
+  assert.equal(
+    Object.isFrozen(result.record.references[0].candidate),
+    true,
+  );
+  assert.equal(result.record.passNumber, 2);
+  assert.equal(result.record.pageNumber, 1);
+  assert.equal(
+    result.record.pageExpiresAtMs,
+    originalExpiresAtMs,
+  );
+  assert.equal(
+    result.remainingTtlMs,
+    originalExpiresAtMs - result.redisNowMs,
+  );
+  assert.equal(result.record.referenceCount, 1);
+  assert.deepEqual(result.record.references, [reference()]);
+  assert.equal(
+    result.pageRecordDigest,
+    rawDigest(retained[1].raw),
+  );
+  assert.equal(
+    result.pageNativeByteProofDigest,
+    nativeRawDigest(retained[1].raw),
+  );
+  assert.equal(
+    result.pageKeyDigest,
+    semanticDigest(
+      "phase4-recall-reference-persistence-key-v1",
+      retained[0],
+    ),
+  );
+
+  harness.advance(1_000);
+  const replay = await store.readRecallReferencePage(
+    Object.freeze({
+      workKeyDigest: work.workKeyDigest,
+      pageNumber: 1,
+    }),
+  );
+  assert.equal(
+    replay.record.pageExpiresAtMs,
+    originalExpiresAtMs,
+  );
+  assert.equal(
+    replay.remainingTtlMs,
+    result.remainingTtlMs - 1_000,
+  );
+  assert.equal(
+    harness.pages.get(retained[0]).expiresAtMs,
+    originalExpiresAtMs,
+  );
+  assert.equal(
+    harness.events.filter(
+      (event) => event.kind === "cas",
+    ).length,
+    casCount,
+  );
+});
+
+test("the private page reader accepts only an exact frozen opaque selector", async (t) => {
+  const { harness, store, work } = await sealedReferenceRun();
+  const symbolInput = {
+    workKeyDigest: work.workKeyDigest,
+    pageNumber: 1,
+  };
+  symbolInput[Symbol("private")] = "forbidden";
+  Object.freeze(symbolInput);
+  const accessorInput = {
+    pageNumber: 1,
+  };
+  Object.defineProperty(accessorInput, "workKeyDigest", {
+    enumerable: true,
+    get() {
+      return work.workKeyDigest;
+    },
+  });
+  Object.freeze(accessorInput);
+  const invalid = [
+    {
+      name: "unfrozen",
+      input: {
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: 1,
+      },
+    },
+    {
+      name: "extra key",
+      input: Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: 1,
+        cursor: null,
+      }),
+    },
+    {
+      name: "missing key",
+      input: Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+      }),
+    },
+    {
+      name: "zero page",
+      input: Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: 0,
+      }),
+    },
+    {
+      name: "page above the fixed ceiling",
+      input: Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: SOURCE_RECALL_REFERENCE_MAX_PAGES + 1,
+      }),
+    },
+    {
+      name: "invalid work digest",
+      input: Object.freeze({
+        workKeyDigest: "caller-selected",
+        pageNumber: 1,
+      }),
+    },
+    { name: "symbol", input: symbolInput },
+    { name: "accessor", input: accessorInput },
+  ];
+  for (const { name, input } of invalid) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        () => store.readRecallReferencePage(input),
+        (error) => expectStoreCode(
+          error,
+          "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INPUT_INVALID",
+        ),
+      );
+    });
+  }
+  const pageReadsBefore = harness.events.filter(
+    (event) => event.kind === "read_page",
+  ).length;
+  await assert.rejects(
+    () => store.readRecallReferencePage(Object.freeze({
+      workKeyDigest: work.workKeyDigest,
+      pageNumber: 2,
+    })),
+    (error) => expectStoreCode(
+      error,
+      "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_NOT_AVAILABLE",
+    ),
+  );
+  assert.equal(
+    harness.events.filter(
+      (event) => event.kind === "read_page",
+    ).length,
+    pageReadsBefore,
+  );
+  assert.equal(
+    JSON.parse([...harness.runs.values()][0]).status,
+    "sealed_unpinnable",
+  );
+});
+
+test("the private page reader proves every retained pass-two page before reading the selected page", async () => {
+  const passPages = [
+    page({
+      nextCursor: cursor(2),
+      references: [reference()],
+    }),
+    page({
+      references: [reference({
+        id: "bot-synthetic-b",
+        joinAt: "2026-07-25T22:00:00.000Z",
+        email: "synthetic.second@example.invalid",
+      })],
+    }),
+  ];
+  const { harness, store, work } = await sealedReferenceRun({
+    passPages,
+  });
+  const nonSelectedPage = [...harness.pages.keys()]
+    .find((key) => key.endsWith(":2:2"));
+  harness.pages.delete(nonSelectedPage);
+  const eventStart = harness.events.length;
+  await assert.rejects(
+    () => store.readRecallReferencePage(Object.freeze({
+      workKeyDigest: work.workKeyDigest,
+      pageNumber: 1,
+    })),
+    (error) => expectStoreCode(
+      error,
+      "SOURCE_RECALL_REFERENCE_SEALED_ARTIFACTS_INVALID",
+    ),
+  );
+  const events = harness.events.slice(eventStart);
+  assert.equal(
+    events.some((event) => event.kind === "verify_artifact_set"),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.kind === "read_page"),
+    false,
+  );
+  assert.equal(
+    JSON.parse([...harness.runs.values()][0]).status,
+    "invalidated",
+  );
+});
+
+test("the private page reader rejects post-proof byte, expiry, and retention drift", async (t) => {
+  await t.test("same-length raw mutation", async () => {
+    const harness = memoryPersistence();
+    const original = harness.persistence.readPage;
+    let mutate = false;
+    harness.persistence.readPage = async (input) => {
+      const result = await original(input);
+      return !mutate
+        ? result
+        : {
+          ...result,
+          raw: result.raw.replace(
+            "Synthetic Person",
+            "Synthetic Persom",
+          ),
+        };
+    };
+    const { store, work } = await sealedReferenceRun({ harness });
+    mutate = true;
+    await assert.rejects(
+      () => store.readRecallReferencePage(Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: 1,
+      })),
+      (error) => expectStoreCode(
+        error,
+        "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID",
+      ),
+    );
+    assert.equal(
+      JSON.parse([...harness.runs.values()][0]).status,
+      "invalidated",
+    );
+  });
+
+  await t.test("reported remaining TTL cannot move expiry", async () => {
+    const harness = memoryPersistence();
+    const original = harness.persistence.readPage;
+    let mutate = false;
+    harness.persistence.readPage = async (input) => {
+      const result = await original(input);
+      return !mutate
+        ? result
+        : {
+          ...result,
+          remainingTtlMs: result.remainingTtlMs + 1,
+        };
+    };
+    const { store, work } = await sealedReferenceRun({ harness });
+    mutate = true;
+    await assert.rejects(
+      () => store.readRecallReferencePage(Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: 1,
+      })),
+      (error) => expectStoreCode(
+        error,
+        "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID",
+      ),
+    );
+  });
+
+  await t.test("retention consumed after full proof fails before return", async () => {
+    const harness = memoryPersistence();
+    const original = harness.persistence.readPage;
+    let consumeAfterProof = false;
+    harness.persistence.readPage = async (input) => {
+      if (consumeAfterProof) harness.advance(1);
+      return original(input);
+    };
+    const { store, work } = await sealedReferenceRun({ harness });
+    const retained = [...harness.pages.entries()]
+      .find(([key]) => key.endsWith(":2:1"))[1];
+    harness.advance(
+      retained.expiresAtMs
+        - harness.now()
+        - SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS,
+    );
+    consumeAfterProof = true;
+    await assert.rejects(
+      () => store.readRecallReferencePage(Object.freeze({
+        workKeyDigest: work.workKeyDigest,
+        pageNumber: 1,
+      })),
+      (error) => expectStoreCode(
+        error,
+        "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID",
+      ),
+    );
+  });
 });
 
 test("the 200-page ceiling seals through bounded atomic receipts with zero private page rereads", async () => {
@@ -2326,7 +2699,7 @@ test("collection age and aggregate settlement lattices fail closed", async (t) =
   });
 });
 
-test("interfaces and imports remain hard-dark with no inferred point authority or caller-selected page read", async () => {
+test("interfaces and imports remain hard-dark with no inferred point authority or public page read", async () => {
   assert.throws(
     () => createSourceRecallReferencePersistenceProtocol(),
     (error) => expectStoreCode(
@@ -2373,6 +2746,19 @@ test("interfaces and imports remain hard-dark with no inferred point authority o
   assert.throws(
     () => createRecallReferenceHeadCollector({
       protocol: missingMethod,
+    }),
+    (error) => expectCollectorCode(
+      error,
+      "SOURCE_RECALL_REFERENCE_PROTOCOL_INTERFACE_INVALID",
+    ),
+  );
+  const {
+    readRecallReferencePage: _missingPrivateReader,
+    ...missingPrivateReader
+  } = protocol;
+  assert.throws(
+    () => createRecallReferenceHeadCollector({
+      protocol: missingPrivateReader,
     }),
     (error) => expectCollectorCode(
       error,
@@ -2430,6 +2816,6 @@ test("interfaces and imports remain hard-dark with no inferred point authority o
   assert.equal(storeSource.includes("fetch("), false);
   assert.equal(
     storeSource.includes("readRecallReferencePage"),
-    false,
+    true,
   );
 });

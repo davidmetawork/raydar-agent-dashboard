@@ -154,6 +154,30 @@ const CONTEXT_KEYS = Object.freeze([
   "runNonceDigest",
 ]);
 const WORK_KEYS = Object.freeze(["workKeyDigest"]);
+const PRIVATE_PAGE_READ_KEYS = Object.freeze([
+  "pageNumber",
+  "workKeyDigest",
+]);
+const PRIVATE_PAGE_RECORD_KEYS = Object.freeze([
+  "clientVersion",
+  "contractPinsDigest",
+  "cursor",
+  "decisionBoundaryAtMs",
+  "kind",
+  "nextCursor",
+  "pageExpiresAtMs",
+  "pageNumber",
+  "pageSemanticDigest",
+  "passNumber",
+  "policyVersion",
+  "referenceCount",
+  "references",
+  "runNonceDigest",
+  "scannedCount",
+  "source",
+  "version",
+  "workKeyDigest",
+]);
 const FACTORY_KEYS = Object.freeze(["persistence"]);
 const CLAIM_KEYS = Object.freeze([
   "boundaryAt",
@@ -241,6 +265,11 @@ const ENSURE_RESULT_KEYS = Object.freeze([
 const READ_RESULT_KEYS = Object.freeze([
   "raw",
   "redisNowMs",
+]);
+const PRIVATE_PAGE_READ_RESULT_KEYS = Object.freeze([
+  "raw",
+  "redisNowMs",
+  "remainingTtlMs",
 ]);
 const CAS_RESULT_KEYS = Object.freeze([
   "headReceipt",
@@ -575,6 +604,23 @@ function canonicalWork(value) {
   if (!Object.isFrozen(value)) fail(code);
   return deepFreeze({
     workKeyDigest: digest(work.workKeyDigest, code),
+  });
+}
+
+function canonicalPrivatePageRead(value) {
+  const code = "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INPUT_INVALID";
+  const input = exactRecord(value, PRIVATE_PAGE_READ_KEYS, code);
+  if (
+    !Object.isFrozen(value)
+    || !Number.isSafeInteger(input.pageNumber)
+    || input.pageNumber < 1
+    || input.pageNumber > SOURCE_RECALL_REFERENCE_MAX_PAGES
+  ) {
+    fail(code);
+  }
+  return deepFreeze({
+    workKeyDigest: digest(input.workKeyDigest, code),
+    pageNumber: input.pageNumber,
   });
 }
 
@@ -1505,6 +1551,165 @@ function pageEvidence(value, run, claim, nowMs) {
     manifest,
     pageRaw,
   };
+}
+
+function canonicalPrivateReferencePage(
+  value,
+  run,
+  expectedManifest,
+) {
+  const code = "SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID";
+  const page = exactRecord(
+    value,
+    PRIVATE_PAGE_RECORD_KEYS,
+    code,
+  );
+  const pass = run.passes[1];
+  const pageIndex = expectedManifest.pageNumber - 1;
+  const boundaryAt = canonicalBoundaryFromMs(
+    run.decisionBoundaryAtMs,
+    code,
+  );
+  const expectedCursor = pageIndex === 0
+    ? null
+    : pass.seenCursors[pageIndex - 1];
+  const expectedNextCursor = pageIndex + 1 < pass.pageCount
+    ? pass.seenCursors[pageIndex]
+    : pass.nextCursor;
+  const normalizedCursor = canonicalRecallCursor(
+    page.cursor,
+    boundaryAt,
+    code,
+  );
+  const normalizedNextCursor = canonicalRecallCursor(
+    page.nextCursor,
+    boundaryAt,
+    code,
+  );
+  const scannedCount = nonNegativeInteger(
+    page.scannedCount,
+    code,
+  );
+  const referenceCount = nonNegativeInteger(
+    page.referenceCount,
+    code,
+  );
+  const rawReferences = denseArraySnapshot(
+    page.references,
+    code,
+  );
+  if (
+    page.version !== SOURCE_RECALL_REFERENCE_RECORD_VERSION
+    || page.policyVersion
+      !== SOURCE_RECALL_REFERENCE_PERSISTENCE_PROTOCOL_VERSION
+    || page.kind !== "recall_private_reference_page_dark"
+    || page.source !== SOURCE
+    || page.clientVersion !== SOURCE_RECALL_PAGE_CLIENT_VERSION
+    || page.workKeyDigest !== run.workKeyDigest
+    || page.runNonceDigest !== run.runNonceDigest
+    || page.decisionBoundaryAtMs !== run.decisionBoundaryAtMs
+    || page.contractPinsDigest !== run.contractPinsDigest
+    || page.passNumber !== 2
+    || page.pageNumber !== expectedManifest.pageNumber
+    || positiveInteger(page.pageExpiresAtMs, code)
+      !== expectedManifest.pageExpiresAtMs
+    || normalizedCursor !== expectedCursor
+    || normalizedNextCursor !== expectedNextCursor
+    || scannedCount > SOURCE_RECALL_PAGE_SIZE
+    || referenceCount !== rawReferences.length
+    || referenceCount > scannedCount
+  ) {
+    fail(code);
+  }
+  digest(page.workKeyDigest, code);
+  digest(page.runNonceDigest, code);
+  digest(page.contractPinsDigest, code);
+  const references = rawReferences.map(
+    (reference) => normalizedReference(reference, boundaryAt),
+  );
+  let priorJoinAt = null;
+  const referenceIds = new Set();
+  for (const reference of references) {
+    if (
+      referenceIds.has(reference.id)
+      || (
+        priorJoinAt !== null
+        && reference.joinAt > priorJoinAt
+      )
+    ) {
+      fail(code);
+    }
+    referenceIds.add(reference.id);
+    priorJoinAt = reference.joinAt;
+  }
+  const referenceCommitments = references.map((reference) => ({
+    referenceIdDigest: semanticDigest(
+      "phase4-recall-reference-id-v1",
+      reference.id,
+    ),
+    referenceDigest: semanticDigest(
+      "phase4-recall-private-reference-v1",
+      reference,
+    ),
+  }));
+  const cursorDigest = semanticDigest(
+    "phase4-recall-reference-cursor-v1",
+    normalizedCursor,
+  );
+  const nextCursorDigest = semanticDigest(
+    "phase4-recall-reference-cursor-v1",
+    normalizedNextCursor,
+  );
+  const firstJoinAt = references[0]?.joinAt ?? null;
+  const lastJoinAt = references.at(-1)?.joinAt ?? null;
+  const pageSemanticDigest = semanticDigest(
+    "phase4-recall-reference-page-semantic-v1",
+    {
+      boundaryAt,
+      pageNumber: page.pageNumber,
+      cursorDigest,
+      nextCursorDigest,
+      scannedCount,
+      referenceCommitments,
+      firstJoinAt,
+      lastJoinAt,
+      exhausted: normalizedNextCursor === null,
+    },
+  );
+  if (
+    digest(page.pageSemanticDigest, code) !== pageSemanticDigest
+    || expectedManifest.cursorDigest !== cursorDigest
+    || expectedManifest.nextCursorDigest !== nextCursorDigest
+    || expectedManifest.pageSemanticDigest !== pageSemanticDigest
+    || expectedManifest.scannedCount !== scannedCount
+    || expectedManifest.referenceCount !== referenceCount
+    || expectedManifest.firstJoinAt !== firstJoinAt
+    || expectedManifest.lastJoinAt !== lastJoinAt
+    || canonicalJson(expectedManifest.referenceCommitments)
+      !== canonicalJson(referenceCommitments)
+  ) {
+    fail(code);
+  }
+  return deepFreeze({
+    version: page.version,
+    policyVersion: page.policyVersion,
+    kind: page.kind,
+    source: page.source,
+    clientVersion: page.clientVersion,
+    workKeyDigest: page.workKeyDigest,
+    runNonceDigest: page.runNonceDigest,
+    decisionBoundaryAtMs: page.decisionBoundaryAtMs,
+    contractPinsDigest: page.contractPinsDigest,
+    passNumber: page.passNumber,
+    pageNumber: page.pageNumber,
+    pageExpiresAtMs: page.pageExpiresAtMs,
+    cursor: normalizedCursor,
+    nextCursor: normalizedNextCursor,
+    scannedCount,
+    referenceCount,
+    references,
+    pageSemanticDigest,
+  });
 }
 
 function passDigests(pass) {
@@ -2842,11 +3047,111 @@ export function createSourceRecallReferencePersistenceProtocol(options) {
     });
   }
 
+  // This is a server-private bridge from the sealed reference artifact to
+  // store-owned point-read work construction. It accepts no raw key, pass,
+  // cursor, reference, digest, TTL, or force input. The complete sealed
+  // pass-two artifact is re-proved before the one selected private page is
+  // read, and that read cannot renew its original absolute expiry.
+  async function readRecallReferencePage(input) {
+    const selected = canonicalPrivatePageRead(input);
+    const work = deepFreeze({
+      workKeyDigest: selected.workKeyDigest,
+    });
+    const snapshot = await readRun(work);
+    if (
+      snapshot.record.status !== "sealed_unpinnable"
+      || snapshot.record.headRecordDigest === null
+    ) {
+      fail("SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_NOT_AVAILABLE");
+    }
+    let verified;
+    try {
+      verified = await verifySealedReferenceArtifacts(snapshot);
+    } catch {
+      await invalidateUnverifiedSealedRun(work);
+      fail("SOURCE_RECALL_REFERENCE_SEALED_ARTIFACTS_INVALID");
+    }
+    const expectedManifest = snapshot.record.passes[1]
+      .pageManifests[selected.pageNumber - 1];
+    const expectedHeadManifest =
+      verified.head.pageManifests[selected.pageNumber - 1];
+    if (
+      !expectedManifest
+      || !expectedHeadManifest
+      || canonicalJson(digestOnlyPageManifest(expectedManifest))
+        !== canonicalJson(expectedHeadManifest)
+    ) {
+      fail("SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_NOT_AVAILABLE");
+    }
+    const pageKey = pageKeyFor(
+      selected.workKeyDigest,
+      2,
+      selected.pageNumber,
+    );
+    try {
+      const result = persistenceResult(
+        await durable.readPage({ key: pageKey }),
+        PRIVATE_PAGE_READ_RESULT_KEYS,
+      );
+      if (
+        typeof result.raw !== "string"
+        || result.raw.length === 0
+        || result.redisNowMs < verified.verifiedAtMs
+        || !Number.isSafeInteger(result.remainingTtlMs)
+        || result.remainingTtlMs
+          < SOURCE_RECALL_REFERENCE_MIN_SEALED_RETENTION_MS
+        || expectedManifest.pageExpiresAtMs
+          - result.redisNowMs !== result.remainingTtlMs
+      ) {
+        fail("SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID");
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(result.raw);
+      } catch {
+        fail("SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID");
+      }
+      const record = canonicalPrivateReferencePage(
+        parsed,
+        snapshot.record,
+        expectedManifest,
+      );
+      if (
+        canonicalJson(record) !== result.raw
+        || rawDigest(result.raw)
+          !== expectedManifest.pageRecordDigest
+        || createHash("sha1").update(result.raw).digest("hex")
+          !== expectedManifest.pageNativeByteProofDigest
+      ) {
+        fail("SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID");
+      }
+      return deepFreeze({
+        record,
+        pageKeyDigest: persistenceKeyDigest(pageKey),
+        pageRecordDigest: expectedManifest.pageRecordDigest,
+        pageNativeByteProofDigest:
+          expectedManifest.pageNativeByteProofDigest,
+        recallReferenceHeadEpochDigest:
+          verified.head.recallReferenceHeadEpochDigest,
+        recallReferenceHeadRevisionDigest:
+          verified.head.recallReferenceHeadRevisionDigest,
+        recallReferenceHeadRecordDigest:
+          verified.recallReferenceHeadRecordDigest,
+        redisNowMs: result.redisNowMs,
+        remainingTtlMs: result.remainingTtlMs,
+      });
+    } catch {
+      await invalidateUnverifiedSealedRun(work);
+      fail("SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_INVALID");
+    }
+  }
+
   return deepFreeze({
     claimRecallReferencePage,
     checkpointRecallReferencePage,
     ensureRecallReferenceRun,
     readRecallReferenceHead,
+    readRecallReferencePage,
     recallReferenceAggregateStatus,
     recordRecallReferencePageFailure,
   });

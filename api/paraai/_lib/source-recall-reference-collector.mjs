@@ -28,6 +28,7 @@ const PROTOCOL_KEYS = Object.freeze([
   "checkpointRecallReferencePage",
   "ensureRecallReferenceRun",
   "readRecallReferenceHead",
+  "readRecallReferencePage",
   "recallReferenceAggregateStatus",
   "recordRecallReferencePageFailure",
 ]);
