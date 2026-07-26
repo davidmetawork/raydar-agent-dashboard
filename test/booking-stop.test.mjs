@@ -19,7 +19,7 @@ import {
   SWEEP_STALE_AFTER_MS,
 } from "../api/seq/_lib/booking-stop.mjs";
 import { campaignLeads } from "../api/seq/_lib/core.mjs";
-import { withThrottleRetry } from "../api/seq/_lib/booking-stop.mjs";
+import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/booking-stop.mjs";
 import { completeCampaignLeads } from "../api/seq/_lib/booking-stop.mjs";
 
 const SECRET = "test-signing-key";
@@ -277,6 +277,27 @@ test("a persistent 401 still surfaces as AUTH_EXPIRED once retries are spent", a
     () => withThrottleRetry(async () => { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }),
     (e) => e.code === "AUTH_EXPIRED"
   );
+});
+
+test("expiry is only declared after several spaced probes all refuse", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  // Throttled: the first probe 401s, a later one succeeds -> NOT expired.
+  globalThis.fetch = async () => (++calls === 1
+    ? new Response("{}", { status: 401 })
+    : new Response(JSON.stringify({ result: { data: { json: [] } } }), { status: 200, headers: { "content-type": "application/json" } }));
+  try {
+    assert.equal(await isSessionActuallyExpired(), false, "a throttle must not be reported as an expiry");
+    assert.ok(calls >= 2, "must probe more than once");
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("a session that refuses every probe is reported expired", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("{}", { status: 401 });
+  try {
+    assert.equal(await isSessionActuallyExpired({ probes: 2 }), true);
+  } finally { globalThis.fetch = realFetch; }
 });
 
 test("a non-auth error is not retried", async () => {

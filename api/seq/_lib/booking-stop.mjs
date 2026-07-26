@@ -309,14 +309,22 @@ export async function withThrottleRetry(fn, { onThrottle = null } = {}) {
   }
 }
 
-export async function isSessionActuallyExpired() {
-  // One cheap SERIAL read. A throttled session answers this fine; a dead one 401s.
-  try {
-    await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1);
-    return false;
-  } catch (e) {
-    return e?.code === "AUTH_EXPIRED";
+export async function isSessionActuallyExpired({ probes = 3 } = {}) {
+  // A cheap read, retried with growing backoff. One probe is NOT enough: it is
+  // issued while sibling workers still have requests in flight, so it competes
+  // in the very burst it is trying to rule out — that produced a false
+  // "expired" verdict against a session /api/seq/health showed as live. Only a
+  // session that refuses several spaced-out probes is really gone.
+  for (let i = 0; i < probes; i++) {
+    try {
+      await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1);
+      return false;
+    } catch (e) {
+      if (e?.code !== "AUTH_EXPIRED") return false; // a different fault is not an expiry
+      await sleep(1500 * (i + 1) + Math.floor(Math.random() * 600));
+    }
   }
+  return true;
 }
 
 export async function cachedRelationshipStatus(cuId, { ttlSeconds = 6 * 3600, force = false, onThrottle = null } = {}) {
