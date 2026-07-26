@@ -120,7 +120,12 @@ export const K = {
   paused: (ccuId) => `seqguard:paused:${ccuId}`,
   cancel: (uri) => `seqguard:cancel:${hash(uri)}`,
   invitees: (uri) => `seqguard:inv:${hash(uri)}`,
-  profile: (cuId) => `seqguard:prof:${cuId}`,
+  // VERSIONED. A TTL is fixed at write time, so shortening it does nothing for
+  // entries already written — after the 6h -> 30min change, stale CONTACTED
+  // values would have kept masking real bookings for up to six more hours.
+  // Bumping the version orphans them instantly. Bump again on any change that
+  // alters what is cached or how long it may safely live.
+  profile: (cuId) => `seqguard:prof2:${cuId}`,
   alert: (key) => `seqguard:alert:${key}`,
   rotor: "seqguard:rotor",
 };
