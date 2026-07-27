@@ -50,7 +50,11 @@ test("conflicting outcome memberships complete review without inventing a dropdo
     { candidateUserId: "candidate-a", status: "not_added", added: false, ambiguous: false },
   ], memberships);
 
-  assert.equal(status.status, "added");
+  // Outcome membership records what happened after Para AI. It completes the
+  // review, but it must never promote a candidate Paraform has no submission
+  // for — hand-enrolled leads would otherwise read as Added.
+  assert.equal(status.status, "not_added");
+  assert.equal(status.added, false);
   assert.equal(status.outcomeComplete, true);
   assert.equal(status.verifiedOutcome, null);
   assert.equal(status.outcomeConflict, true);
