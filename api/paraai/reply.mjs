@@ -13,7 +13,9 @@ import {
   replyConfig,
   replyHealth,
   runReplyTick,
+  runReplyBackfill,
   planReplyAction,
+  executeAction,
 } from "./_lib/reply.mjs";
 import {
   listReplyRecords,
@@ -31,13 +33,20 @@ import {
   reEnableCandidate,
   expiresAtMs,
 } from "./_lib/reply-actions.mjs";
+import { listJobs } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
-const ACTIONS = new Set(["pass", "off-market", "re-enable", "dismiss", "tick"]);
+const ACTIONS = new Set(["submit", "pass", "off-market", "re-enable", "dismiss", "tick", "backfill"]);
 // Actions that mutate Paraform. "dismiss" only clears the Raydar-side card.
-const WRITE_ACTIONS = new Set(["pass", "off-market", "re-enable"]);
-const CONFIRM_WORDS = { pass: "PASS", "off-market": "OFF-MARKET", "re-enable": "RE-ENABLE" };
+const WRITE_ACTIONS = new Set(["submit", "pass", "off-market", "re-enable"]);
+const CONFIRM_WORDS = {
+  submit: "SUBMIT",
+  pass: "PASS",
+  "off-market": "OFF-MARKET",
+  "re-enable": "RE-ENABLE",
+};
+const BACKFILL_CONFIRMATION = "BACKFILL ALL REPLIES";
 
 function equalSecret(left, right) {
   const a = Buffer.from(String(left || ""));
@@ -102,6 +111,17 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, result });
     }
 
+    // The backfill is a supervised, explicitly confirmed operation. It walks the
+    // whole outreach history past the arming pin and freezes what it writes, so
+    // it is deliberately not something the worker can trigger on its own.
+    if (action === "backfill") {
+      if (String(body.confirmation || "").trim() !== BACKFILL_CONFIRMATION) {
+        return res.status(400).json({ ok: false, error: "confirmation_required", detail: BACKFILL_CONFIRMATION });
+      }
+      const result = await runReplyBackfill({ limit: body.limit });
+      return res.status(200).json({ ok: true, result });
+    }
+
     const replyId = String(body.replyId || "").trim();
     if (!replyId) return res.status(400).json({ ok: false, error: "replyId_required" });
 
@@ -151,6 +171,42 @@ export default async function handler(req, res) {
           record.revision,
         );
         return res.status(200).json({ ok: true, record: publicRecord(saved), detail: "no pending requests remain" });
+      }
+
+      if (action === "submit") {
+        const jobs = await listJobs(300).catch(() => []);
+        const plan = await planReplyAction(record, { requests, jobs, config: replyConfig() });
+        if (plan.action !== "submit") {
+          return res.status(409).json({
+            ok: false,
+            error: "not_submittable",
+            detail: `the live plan for this reply is ${plan.action} (${plan.reason})`,
+          });
+        }
+        const requested = Array.isArray(body.requestIds) && body.requestIds.length
+          ? plan.requestIds.filter((id) => body.requestIds.includes(id))
+          : plan.requestIds;
+        if (!requested.length) {
+          return res.status(409).json({
+            ok: false,
+            error: "requests_no_longer_pending",
+            detail: "the selected requests are no longer submittable; refresh the card",
+          });
+        }
+        const results = await executeAction(record, { ...plan, requestIds: requested }, {
+          requests, jobs, config: replyConfig(), force: true,
+        });
+        const failed = results.filter((row) => ["blocked", "unverified", "error", "missing"].includes(row.outcome));
+        const saved = await saveReplyRecord(
+          {
+            ...record,
+            status: failed.length ? "needs_review" : "actioned",
+            resolution: failed.length ? "operator_submit_incomplete" : "submitted_by_operator",
+            results,
+          },
+          record.revision,
+        );
+        return res.status(200).json({ ok: true, record: publicRecord(saved), results });
       }
 
       if (action === "re-enable") {
