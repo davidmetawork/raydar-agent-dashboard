@@ -12,12 +12,10 @@ import {
   getSubmissionIntent,
   hashSubmissionPayload,
   hashedCandidateClaimKey,
-  normalizeFailureRecord,
   rescheduleAutoJob,
   stableStringify,
   startSubmissionAttempt,
   submissionOutcomeTransition,
-  transition,
 } from "../api/paraai/_lib/store.mjs";
 
 const candidateUserId = "candidate-user-private-123";
@@ -48,80 +46,22 @@ test("submission payload hashes are stable across object key order", () => {
   assert.match(hashSubmissionPayload(left), /^[a-f0-9]{64}$/);
 });
 
-test("automation failures normalize to bounded structured records", () => {
-  const failure = normalizeFailureRecord({
-    code: "AUTH_EXPIRED",
-    message: `  vendor session\nexpired ${"x".repeat(400)}  `,
-    step: "candidate_profile_read",
-  });
-  assert.equal(failure.code, "AUTH_EXPIRED");
-  assert.equal(failure.step, "candidate_profile_read");
-  assert.equal(failure.message.startsWith("vendor session expired"), true);
-  assert.equal(failure.message.length, 300);
-  assert.deepEqual(normalizeFailureRecord({}), {
-    code: "AUTO_PROCESS_FAILED",
-    message: "AUTO_PROCESS_FAILED",
-    step: "process",
-  });
-  assert.equal(normalizeFailureRecord(null), null);
-  assert.equal(normalizeFailureRecord("AUTH_EXPIRED"), null);
-});
-
-test("job transitions append structured failures without leaking journal controls", () => {
-  const job = {
-    id: jobId,
-    state: "extracting",
-    journal: [{ state: "extracting", at: "2026-07-16T20:00:00.000Z" }],
-  };
-  const next = transition(job, "error", {
-    error: { code: "PREPARE_FAILED" },
-    journalDetail: "preparation failed",
-    journalFailure: {
-      code: "PREPARE_FAILED",
-      message: "Candidate profile read failed",
-      step: "prepare",
-    },
-  });
-  assert.equal(next.journalDetail, undefined);
-  assert.equal(next.journalFailure, undefined);
-  assert.deepEqual(next.error, { code: "PREPARE_FAILED" });
-  assert.deepEqual(
-    {
-      state: next.journal.at(-1).state,
-      detail: next.journal.at(-1).detail,
-      code: next.journal.at(-1).code,
-      message: next.journal.at(-1).message,
-      step: next.journal.at(-1).step,
-    },
-    {
-      state: "error",
-      detail: "preparation failed",
-      code: "PREPARE_FAILED",
-      message: "Candidate profile read failed",
-      step: "prepare",
-    },
-  );
-});
-
 test("job creation writes the job and index in one atomic Lua operation", async () => {
   const calls = [];
   const job = { id: jobId, state: "detected", createdAt: "2026-07-16T20:00:00.000Z" };
   const result = await createJob(job, {
     kvImpl: async (command) => {
       calls.push(command);
-      return [1, command[6]];
+      return [1, command[5]];
     },
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], "EVAL");
   assert.match(calls[0][1], /redis\.call\('SET'/);
   assert.match(calls[0][1], /redis\.call\('ZADD'/);
-  assert.equal(calls[0][2], 3);
+  assert.equal(calls[0][2], 2);
   assert.equal(calls[0][3], `paraai:job:${jobId}`);
   assert.equal(calls[0][4], "paraai:index");
-  assert.equal(calls[0][5], "paraai:resume-waiting");
-  assert.match(calls[0][1], /redis\.call\('SADD', KEYS\[3\]/);
-  assert.match(calls[0][1], /redis\.call\('SREM', KEYS\[3\]/);
   assert.equal(result.id, jobId);
   assert.equal(result.revision, 0);
 });
@@ -160,7 +100,6 @@ test("auto enqueue deduplicates hashed webhook events and preserves the effectiv
   assert.equal(Number(commands[0][12]), 180 * 24 * 60 * 60);
   assert.match(commands[0][1], /due < tonumber\(current\)/);
   assert.match(commands[0][1], /old\.source == 'authorized_backfill'/);
-  assert.match(commands[0][1], /old\.lastFailure then next\.lastFailure = old\.lastFailure/);
 });
 
 test("due jobs receive fenced leases and remain scheduled at lease expiry", async () => {
@@ -173,8 +112,8 @@ test("due jobs receive fenced leases and remain scheduled at lease expiry", asyn
     kvImpl: async (command) => {
       commands.push(command);
       return [
-        jobId, "worker-a:token:1:generation-a", "35000", "recall:transcript.done", "generation-a", "2", "2026-07-24T12:46:30.000Z",
-        "bot_87654321", "worker-a:token:2:generation-b", "35000", "authorized_backfill", "generation-b", "0", "",
+        jobId, "worker-a:token:1:generation-a", "35000", "recall:transcript.done", "generation-a", "2",
+        "bot_87654321", "worker-a:token:2:generation-b", "35000", "authorized_backfill", "generation-b", "0",
       ];
     },
   });
@@ -186,7 +125,6 @@ test("due jobs receive fenced leases and remain scheduled at lease expiry", asyn
       source: "recall:transcript.done",
       generation: "generation-a",
       attempts: 2,
-      callEndedAt: "2026-07-24T12:46:30.000Z",
     },
     {
       botId: "bot_87654321",
@@ -195,7 +133,6 @@ test("due jobs receive fenced leases and remain scheduled at lease expiry", asyn
       source: "authorized_backfill",
       generation: "generation-b",
       attempts: 0,
-      callEndedAt: null,
     },
   ]);
   assert.match(commands[0][1], /redis\.call\('SET', leaseKey, token, 'PX'/);
@@ -223,28 +160,6 @@ test("only the current lease owner can complete or reschedule an auto job", asyn
     now: 1_000,
   }, { kvImpl: async () => 1 });
   assert.deepEqual(result, { rescheduled: true, superseded: false, dueAt: 61_000 });
-  const failureCommands = [];
-  await rescheduleAutoJob(jobId, {
-    leaseToken: "lease-a",
-    generation: "generation-a",
-    delayMs: 60_000,
-    failure: {
-      code: "PREPARE_FAILED",
-      message: `candidate profile read failed ${"x".repeat(400)}`,
-      step: "prepare",
-    },
-    now: 1_000,
-  }, {
-    kvImpl: async (command) => {
-      failureCommands.push(command);
-      return 1;
-    },
-  });
-  const failureMeta = JSON.parse(failureCommands[0][10]);
-  assert.deepEqual(Object.keys(failureMeta.lastFailure).sort(), ["code", "message", "step"]);
-  assert.equal(failureMeta.lastFailure.code, "PREPARE_FAILED");
-  assert.equal(failureMeta.lastFailure.step, "prepare");
-  assert.equal(failureMeta.lastFailure.message.length, 300);
   const sourcePreserving = [];
   await rescheduleAutoJob(jobId, {
     leaseToken: "lease-a",
@@ -259,7 +174,6 @@ test("only the current lease owner can complete or reschedule an auto job", asyn
   });
   assert.match(sourcePreserving[0][1], /next\.source = old\.source/);
   assert.match(sourcePreserving[0][1], /next\.generation = old\.generation/);
-  assert.match(sourcePreserving[0][1], /old\.lastFailure and not next\.lastFailure/);
   assert.match(sourcePreserving[0][1], /currentGeneration ~= ARGV\[6\]/);
   assert.deepEqual(
     await rescheduleAutoJob(jobId, {

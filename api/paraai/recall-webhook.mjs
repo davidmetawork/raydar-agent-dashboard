@@ -46,25 +46,17 @@ export async function handleRecallWebhook(request, {
     return json({ ok: true, ignored: true }, 202);
   }
   if (!hasStore()) return json({ ok: false, error: "state_store_not_configured" }, 503);
-  const automation = getAutomationConfig();
-  const receiptAt = Number.isFinite(Number(verified.timestamp))
-    ? Number(verified.timestamp) * 1000
-    : Date.now();
-  const waitMinutes = Number.isFinite(Number(automation.resumeWaitMinutes))
-    ? Math.max(0, Number(automation.resumeWaitMinutes))
-    : 60;
   let queued;
   try {
     queued = await enqueue(event.botId, {
       source: `recall:${event.event}`,
       eventId: verified.id,
-      dueAt: receiptAt + waitMinutes * 60_000,
-      callEndedAt: new Date(receiptAt).toISOString(),
+      dueAt: Date.now(),
     });
   } catch {
     return json({ ok: false, error: "queue_unavailable" }, 503);
   }
-  const paused = !automationExecutionEnabled(automation);
+  const paused = !automationExecutionEnabled(getAutomationConfig());
   return json({
     ok: true,
     queued: queued.enqueued,

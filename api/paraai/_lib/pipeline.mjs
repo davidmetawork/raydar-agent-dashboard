@@ -38,29 +38,6 @@ import {
 } from "./core.mjs";
 import { FUNDING_ROUNDS, PARAAI_LOCATIONS, WORKPLACE_TYPES, extraNote, extractPreferences, normalizeExtraction } from "./extract.mjs";
 import {
-  HUMAN_CALL_SOFT_REVIEW_CODE,
-  HUMAN_CALL_SOFT_REVIEW_MESSAGE,
-  fetchHumanCall,
-  humanCallReadiness,
-  isHumanCallJob,
-  callIdFromHumanJob,
-  persistedHumanCallMetadata,
-} from "./human-call.mjs";
-import {
-  HUMAN_INTRO_PAYLOAD_CONFLICT_CODE,
-  HUMAN_INTRO_PAYLOAD_CONFLICT_MESSAGE,
-  HUMAN_INTRO_RESUME_AMBIGUOUS_CODE,
-  HUMAN_INTRO_RESUME_AMBIGUOUS_MESSAGE,
-  HUMAN_INTRO_RESUME_REVIEW_CODE,
-  HUMAN_INTRO_RESUME_REVIEW_MESSAGE,
-  humanIntroCallFromJob,
-  isHumanIntroJob,
-  persistedHumanIntroMetadata,
-} from "./human-intro.mjs";
-import {
-  resumeWaitPlanFromEnv,
-} from "./resume-wait.mjs";
-import {
   claimSubmissionIntent,
   createJob,
   finishSubmissionAttempt,
@@ -71,11 +48,10 @@ import {
   startSubmissionAttempt,
   transition,
 } from "./store.mjs";
-import { jobReviewReasons, reviewActionFor } from "./review.mjs";
 
 export const STATES = new Set([
   "detected", "resolving_identity", "needs_identity_review", "extracting",
-  "ready_to_submit", "waiting_for_resume", "submit_intent", "submitting", "submission_unknown",
+  "ready_to_submit", "submit_intent", "submitting", "submission_unknown",
   "awaiting_approval", "awaiting_matches", "ready_to_enroll",
   "needs_review", "ensuring_email", "enrolling", "verifying", "enrolled",
   "no_email", "error",
@@ -86,18 +62,6 @@ const MATCH_TIMEOUT_SECONDS = Number(process.env.PARAAI_MATCH_TIMEOUT_SECONDS ||
 const BOT_ID = /^[A-Za-z0-9_-]{8,100}$/;
 export const PARAAI_SALARY_CAP = 200_000;
 export const PARAAI_SALARY_ROUTING_BUFFER = 10_000;
-const configuredSalaryDefault = Number(process.env.PARAAI_SALARY_DEFAULT_MIN || 120_000);
-export const PARAAI_SALARY_DEFAULT_MIN = Number.isFinite(configuredSalaryDefault) && configuredSalaryDefault >= 0
-  ? configuredSalaryDefault
-  : 120_000;
-export const PARAAI_STAGE_ORDER = Object.freeze([
-  "PRE_SEED", "SEED", "SERIES_A", "SERIES_B", "SERIES_C", "SERIES_D_PLUS", "UNKNOWN",
-]);
-export const PARAAI_NA_LOCATIONS = Object.freeze([
-  "new_york", "san_francisco", "south_bay_area", "los_angeles", "boston", "seattle",
-  "texas", "chicago", "washington_dc", "denver", "florida", "minnesota", "sacramento",
-  "canada",
-]);
 export const VISA_SPONSORSHIP = new Set(["Available", "Not available"]);
 
 function stateError(message, code, job = null) {
@@ -121,218 +85,16 @@ export function targetSequenceName(matchCount) {
 }
 
 const array = (value) => Array.isArray(value) ? value : [];
-const values = (value) => Array.isArray(value) ? value : value == null || value === "" ? [] : [value];
 const uniqueAllowed = (value, allowed, transform = (item) => item) => [...new Set(array(value).map(transform).filter((item) => allowed.has(item)))];
-const unique = (value) => [...new Set(value)];
-const US_LOCATION_IDS = new Set(PARAAI_NA_LOCATIONS.filter((location) => location !== "canada"));
-
-function normalizedPlace(value) {
-  return String(value || "")
-    .normalize("NFKD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
 const locationAliases = new Map([
-  ["new york", ["new_york"]], ["new york city", ["new_york"]], ["nyc", ["new_york"]],
-  ["new jersey", ["new_york"]], ["nj", ["new_york"]],
-  ["san francisco", ["san_francisco"]], ["sf", ["san_francisco"]],
-  ["south bay", ["south_bay_area"]], ["south bay area", ["south_bay_area"]],
-  ["san jose", ["south_bay_area"]], ["bay area", ["south_bay_area", "san_francisco"]],
-  ["silicon valley", ["south_bay_area", "san_francisco"]],
-  ["los angeles", ["los_angeles"]], ["la", ["los_angeles"]],
-  ["boston", ["boston"]], ["seattle", ["seattle"]], ["texas", ["texas"]],
-  ["chicago", ["chicago"]], ["washington dc", ["washington_dc"]],
-  ["washington d c", ["washington_dc"]], ["dc", ["washington_dc"]],
-  ["d c", ["washington_dc"]], ["district of columbia", ["washington_dc"]],
-  ["denver", ["denver"]], ["florida", ["florida"]], ["minnesota", ["minnesota"]],
-  ["sacramento", ["sacramento"]],
-  ["canada", ["canada"]], ["toronto", ["canada"]], ["vancouver", ["canada"]],
-  ["montreal", ["canada"]],
-  ["united kingdom", ["uk"]], ["uk", ["uk"]], ["london", ["uk"]],
-  ["manchester", ["uk"]], ["edinburgh", ["uk"]],
-  ["south korea", ["korea"]], ["korea", ["korea"]], ["seoul", ["korea"]],
-  ["india", ["india"]], ["bengaluru", ["india"]], ["bangalore", ["india"]],
-  ["mumbai", ["india"]], ["delhi", ["india"]], ["hyderabad", ["india"]],
-  ["australia", ["australia"]], ["sydney", ["australia"]], ["melbourne", ["australia"]],
-  ["europe", ["europe"]], ["european union", ["europe"]], ["eu", ["europe"]],
-  ["germany", ["europe"]], ["france", ["europe"]], ["netherlands", ["europe"]],
-  ["ireland", ["europe"]], ["spain", ["europe"]], ["portugal", ["europe"]],
-  ["italy", ["europe"]], ["sweden", ["europe"]], ["switzerland", ["europe"]],
-  ["berlin", ["europe"]], ["paris", ["europe"]], ["amsterdam", ["europe"]],
-  ["dublin", ["europe"]], ["madrid", ["europe"]], ["barcelona", ["europe"]],
-  ["lisbon", ["europe"]], ["stockholm", ["europe"]], ["munich", ["europe"]],
-  ["latin america", ["latam"]], ["latam", ["latam"]], ["south america", ["latam"]],
-  ["brazil", ["latam"]], ["mexico", ["latam"]], ["argentina", ["latam"]],
-  ["colombia", ["latam"]], ["chile", ["latam"]], ["peru", ["latam"]],
-  ["sao paulo", ["latam"]], ["mexico city", ["latam"]], ["buenos aires", ["latam"]],
-  ["bogota", ["latam"]], ["lima", ["latam"]],
-  ["asia", ["asia"]], ["pakistan", ["asia"]], ["japan", ["asia"]], ["china", ["asia"]],
-  ["taiwan", ["asia"]], ["philippines", ["asia"]], ["thailand", ["asia"]],
-  ["vietnam", ["asia"]], ["indonesia", ["asia"]], ["malaysia", ["asia"]],
-  ["united arab emirates", ["asia"]], ["uae", ["asia"]],
-  ["lahore", ["asia"]], ["karachi", ["asia"]], ["dubai", ["asia"]],
-  ["singapore", ["asia"]], ["tokyo", ["asia"]], ["hong kong", ["asia"]],
-  ["taipei", ["asia"]], ["manila", ["asia"]], ["bangkok", ["asia"]],
-  ...[...PARAAI_LOCATIONS].map((value) => [value.replaceAll("_", " "), [value]]),
+  ["new york", "new_york"], ["new york city", "new_york"], ["nyc", "new_york"], ["new jersey", "new_york"], ["nj", "new_york"],
+  ["san francisco", "san_francisco"], ["sf", "san_francisco"], ["south bay area", "south_bay_area"],
+  ["los angeles", "los_angeles"], ["la", "los_angeles"], ["washington dc", "washington_dc"], ["washington d.c.", "washington_dc"],
+  ...[...PARAAI_LOCATIONS].map((value) => [value.replaceAll("_", " "), value]),
 ]);
 
-const US_STATE_NAMES = /\b(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming)\b/;
-const US_UNMAPPED_CITIES = /\b(?:atlanta|nashville|portland|austin|miami|philadelphia|phoenix|san diego|charlotte|raleigh|durham|pittsburgh|detroit|cleveland|columbus|cincinnati|indianapolis|kansas city|st louis|new orleans|salt lake city|las vegas|honolulu|boise|baltimore|milwaukee|omaha)\b/;
-const US_COUNTRY = /\b(?:united states(?: of america)?|usa|u s a|us|u s|america)\b/;
-const US_STATE_CODE = /(?:,\s*|^|\s)(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)(?:\s*$|,)/i;
-const COUNTRY_REGION_CODES = new Map([
-  ["ca", "canada"], ["can", "canada"],
-  ["gb", "uk"], ["gbr", "uk"],
-  ["au", "australia"], ["aus", "australia"],
-  ["in", "india"], ["ind", "india"],
-  ["kr", "korea"], ["kor", "korea"],
-  ...["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "is", "ie", "it", "lv", "lt", "lu", "mt", "nl", "no", "pl", "pt", "ro", "sk", "si", "es", "se", "ch", "ua"].map((code) => [code, "europe"]),
-  ...["mx", "br", "ar", "bo", "cl", "co", "cr", "cu", "do", "ec", "sv", "gt", "ht", "hn", "jm", "ni", "pa", "py", "pe", "pr", "uy", "ve"].map((code) => [code, "latam"]),
-  ...["cn", "jp", "pk", "bd", "bt", "bn", "kh", "hk", "id", "kz", "kg", "la", "my", "mn", "mm", "np", "ph", "sg", "lk", "tw", "tj", "th", "tm", "uz", "vn", "ae", "il", "sa", "qa"].map((code) => [code, "asia"]),
-]);
-const EUROPE_COUNTRIES = /\b(?:albania|andorra|austria|belarus|belgium|bosnia(?: and herzegovina)?|bulgaria|croatia|cyprus|czech(?:ia| republic)|denmark|estonia|finland|france|germany|greece|hungary|iceland|ireland|italy|kosovo|latvia|liechtenstein|lithuania|luxembourg|malta|moldova|monaco|montenegro|netherlands|north macedonia|norway|poland|portugal|romania|san marino|serbia|slovakia|slovenia|spain|sweden|switzerland|ukraine|vatican)\b/;
-const LATAM_COUNTRIES = /\b(?:mexico|argentina|bolivia|brazil|chile|colombia|costa rica|cuba|dominican republic|ecuador|el salvador|guatemala|haiti|honduras|jamaica|nicaragua|panama|paraguay|peru|puerto rico|uruguay|venezuela)\b/;
-const ASIA_COUNTRIES = /\b(?:afghanistan|armenia|azerbaijan|bahrain|bangladesh|bhutan|brunei|cambodia|china|georgia|hong kong|indonesia|iran|iraq|israel|japan|jordan|kazakhstan|kuwait|kyrgyzstan|laos|lebanon|malaysia|maldives|mongolia|myanmar|nepal|oman|pakistan|philippines|qatar|saudi arabia|singapore|sri lanka|taiwan|tajikistan|thailand|timor leste|turkey|turkmenistan|united arab emirates|uzbekistan|vietnam)\b/;
-
-function countryRegion(value) {
-  const place = normalizedPlace(value);
-  if (!place) return [];
-  const code = COUNTRY_REGION_CODES.get(place);
-  if (code) return [code];
-  if (/\b(?:canada)\b/.test(place)) return ["canada"];
-  if (/\b(?:united kingdom|great britain|england|scotland|wales|northern ireland)\b/.test(place)) return ["uk"];
-  if (/\b(?:australia|new zealand)\b/.test(place)) return ["australia"];
-  if (/\b(?:india)\b/.test(place)) return ["india"];
-  if (/\b(?:south korea|republic of korea)\b/.test(place)) return ["korea"];
-  if (EUROPE_COUNTRIES.test(place)) return ["europe"];
-  if (LATAM_COUNTRIES.test(place)) return ["latam"];
-  if (ASIA_COUNTRIES.test(place)) return ["asia"];
-  return [];
-}
-
-function isUSGeography(location, country = "") {
-  const place = normalizedPlace(location);
-  const countryValue = normalizedPlace(country);
-  if (US_COUNTRY.test(countryValue)) return true;
-  if (/\b(?:canada|mexico|united kingdom|uk|india|australia|korea)\b/.test(countryValue)) return false;
-  if (US_STATE_CODE.test(String(location || ""))) return true;
-  if (US_STATE_NAMES.test(place) || US_UNMAPPED_CITIES.test(place)) return true;
-  for (const [alias, mapped] of locationAliases) {
-    if (place === alias && mapped.some((item) => US_LOCATION_IDS.has(item))) return true;
-  }
-  return US_COUNTRY.test(place);
-}
-
-function mappedLocations(value, country = "") {
-  const raw = String(value || "").trim();
-  if (!raw) return [];
-  const direct = raw.toLowerCase();
-  if (PARAAI_LOCATIONS.has(direct)) return [direct];
-  const place = normalizedPlace(raw);
-  const exact = locationAliases.get(place);
-  if (exact) return [...exact];
-
-  const embeddedAliases = [
-    [/\b(?:bay area|silicon valley)\b/, ["south_bay_area", "san_francisco"]],
-    [/\bsan francisco\b/, ["san_francisco"]],
-    [/\b(?:south bay|san jose)\b/, ["south_bay_area"]],
-    [/^(?:new york(?: city)?|nyc)\b|\b(?:new york city|nyc|new jersey)\b/, ["new_york"]],
-    [/\blos angeles\b/, ["los_angeles"]],
-    [/\bboston\b/, ["boston"]],
-    [/\bseattle\b/, ["seattle"]],
-    [/\bchicago\b/, ["chicago"]],
-    [/\b(?:washington d c|washington dc|district of columbia)\b/, ["washington_dc"]],
-    [/\bdenver\b/, ["denver"]],
-    [/\bsacramento\b/, ["sacramento"]],
-  ];
-  for (const [pattern, result] of embeddedAliases) {
-    if (pattern.test(place)) return result;
-  }
-  for (const [alias, result] of locationAliases) {
-    if (result.some((location) => US_LOCATION_IDS.has(location))) continue;
-    if (alias.length > 3 && new RegExp(`\\b${alias.replaceAll(" ", "\\s+")}\\b`).test(place)) return [...result];
-  }
-  if (isUSGeography(raw, country)) return [...PARAAI_NA_LOCATIONS];
-
-  const countryMapped = locationAliases.get(normalizedPlace(country));
-  if (countryMapped?.length) return [...countryMapped];
-  return countryRegion(country || raw);
-}
-
-function mapLocationValues(value, country = "") {
-  return unique(values(value).flatMap((item) => mappedLocations(item, country)));
-}
-
-const GEOGRAPHY_LOCATION_KEYS = new Set([
-  "location", "currentlocation", "currentcity", "locationname", "city", "residence", "basedin",
-]);
-const GEOGRAPHY_COUNTRY_KEYS = new Set([
-  "country", "currentcountry", "countryname", "countrycode", "countryiso",
-]);
-
-function geographyText(value) {
-  if (typeof value === "string" || typeof value === "number") return String(value).trim();
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
-  return String(value.label || value.name || value.city || value.value || "").trim();
-}
-
-function findGeographyField(value, keys, depth = 0, seen = new Set()) {
-  if (!value || typeof value !== "object" || depth > 5 || seen.has(value)) return "";
-  seen.add(value);
-  for (const [key, item] of Object.entries(value)) {
-    const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
-    if (!keys.has(normalizedKey)) continue;
-    const found = geographyText(item);
-    if (found) return found;
-  }
-  const preferred = ["candidate", "candidate_user", "candidateUser", "profile", "item", "data", "byId"];
-  for (const key of preferred) {
-    const found = findGeographyField(value[key], keys, depth + 1, seen);
-    if (found) return found;
-  }
-  for (const item of Object.values(value)) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const found = findGeographyField(item, keys, depth + 1, seen);
-    if (found) return found;
-  }
-  return "";
-}
-
-function resolveRoutingGeography(context = {}) {
-  const currentLocation = String(context.currentLocation || context.current_location || "").trim()
-    || findGeographyField(context, GEOGRAPHY_LOCATION_KEYS);
-  const country = String(context.country || context.currentCountry || context.country_code || "").trim()
-    || findGeographyField(context, GEOGRAPHY_COUNTRY_KEYS);
-  return { currentLocation, country };
-}
-
-export function buildPreferenceRoutingInput(native = null, context = {}) {
-  const geography = resolveRoutingGeography(context);
-  const strings = (value) => values(value)
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-  const salary = native?.salary_min == null
-    || native.salary_min === ""
-    || !Number.isFinite(Number(native.salary_min))
-    ? null
-    : Number(native.salary_min);
-  return {
-    native: {
-      workplace: strings(native?.workplace),
-      last_funding_round: strings(native?.last_funding_round),
-      locations: strings(native?.locations),
-      salary_min: salary,
-      visa: strings(native?.visa),
-    },
-    context: {
-      currentLocation: geography.currentLocation,
-      country: geography.country,
-    },
-  };
+function legacyLocations(value) {
+  return [...new Set(array(value).map((item) => locationAliases.get(String(item || "").trim().toLowerCase())).filter(Boolean))];
 }
 
 function visaFromExtraction(sponsorship = {}) {
@@ -342,8 +104,23 @@ function visaFromExtraction(sponsorship = {}) {
   return [];
 }
 
+function hasUnmappedRelocationRestriction(scope, excludedLocations) {
+  const value = String(scope || "");
+  if (/\b(only|would not relocate|wouldn't relocate|cannot relocate|can't relocate|not willing to relocate|not open to relocat)\b/i.test(value)) {
+    return true;
+  }
+  return /\b(except|excluding|exclude)\b/i.test(value) && excludedLocations.size === 0;
+}
+
 function isHardSalaryFloor(compensation = {}) {
-  return compensation.baseMinIsHardFloor === true;
+  if (compensation.baseMinIsHardFloor === true) return true;
+  if (compensation.baseMinIsHardFloor === false) return false;
+  const evidence = `${compensation.baseMinEvidence || ""} ${compensation.notes || ""}`;
+  if (/\b(not (?:a )?hard minimum|not (?:my )?minimum|flexible|target|ideally|around|roughly|approximately)\b/i.test(evidence)) {
+    return false;
+  }
+  return /\b(hard minimum|no lower than|won't go below|wont go below|will not go below|minimum(?: base| salary| compensation)? is|salary floor|base floor)\b/i
+    .test(evidence);
 }
 
 function hasLegacyStartupOpenness(extracted = {}) {
@@ -376,320 +153,93 @@ export function normalizeParaAIPreferences(value = {}) {
   return preferences;
 }
 
-export function buildPreferenceRouting(extracted, native = null, context = {}) {
+export function buildPreferenceRouting(extracted, native = null) {
   const normalized = normalizeExtraction(extracted);
-  const geography = resolveRoutingGeography(context);
-  const currentLocations = mapLocationValues(geography.currentLocation, geography.country);
-
-  const explicitWorkplaces = uniqueAllowed(
-    normalized.workplaceTypes,
-    WORKPLACE_TYPES,
-    (item) => String(item || "").toUpperCase(),
-  );
-  const excludedWorkplaces = new Set(uniqueAllowed(
-    normalized.excludedWorkplaceTypes,
-    WORKPLACE_TYPES,
-    (item) => String(item || "").toUpperCase(),
-  ));
-  const nativeWorkplaces = uniqueAllowed(
-    values(native?.workplace),
-    WORKPLACE_TYPES,
-    (item) => String(item || "").toUpperCase(),
-  );
-  const workplaceText = [
-    normalized.searchActivity,
-    ...normalized.roleTypes,
-  ].filter(Boolean).join(" ");
-  const remoteOnly = (
-    explicitWorkplaces.includes("REMOTE") &&
-    excludedWorkplaces.has("HYBRID") &&
-    excludedWorkplaces.has("ON_SITE")
-  ) || /\b(?:remote[\s-]*only|only remote|fully remote only|w(?:ill|ould) not go into (?:an? )?office|won['’]?t go into (?:an? )?office|no office)\b/i.test(workplaceText);
-  const workplaceFlexible = /\b(?:flexible|open|agnostic)\b[^.]{0,45}\b(?:workplace|work model|remote|hybrid|on[\s-]*site|office)\b|\b(?:workplace|work model)\b[^.]{0,45}\b(?:flexible|open|agnostic)\b/i.test(workplaceText);
-  let workplaceSource;
-  let workplaceRule;
-  let workplaceBase;
-  if (remoteOnly) {
-    workplaceBase = ["REMOTE"];
-    workplaceSource = "screening_call";
-    workplaceRule = "workplace_remote_only";
-  } else if (explicitWorkplaces.includes("ON_SITE")) {
-    workplaceBase = [...WORKPLACE_TYPES];
-    workplaceSource = "ladder_expansion";
-    workplaceRule = "workplace_all_three_onsite";
-  } else if (explicitWorkplaces.includes("HYBRID")) {
-    workplaceBase = [...WORKPLACE_TYPES];
-    workplaceSource = "ladder_expansion";
-    workplaceRule = "workplace_all_three_hybrid";
-  } else if (workplaceFlexible) {
-    workplaceBase = [...WORKPLACE_TYPES];
-    workplaceSource = "ladder_expansion";
-    workplaceRule = "workplace_all_three_flexible";
-  } else if (explicitWorkplaces.length || excludedWorkplaces.size) {
-    workplaceBase = [...WORKPLACE_TYPES];
-    workplaceSource = "ladder_expansion";
-    workplaceRule = "workplace_all_three_mentioned";
-  } else if (nativeWorkplaces.length) {
-    workplaceBase = nativeWorkplaces;
-    workplaceSource = "paraform_profile";
-    workplaceRule = "workplace_profile";
-  } else {
-    workplaceBase = [...WORKPLACE_TYPES];
-    workplaceSource = "select_all_default";
-    workplaceRule = "select_all_unknown";
-  }
-  const workplaces = workplaceBase.filter((value) => !excludedWorkplaces.has(value));
-
-  const explicitStages = uniqueAllowed(
-    normalized.companyStages,
-    FUNDING_ROUNDS,
-    (item) => String(item || "").toUpperCase(),
-  );
-  const nativeStages = uniqueAllowed(
-    values(native?.last_funding_round),
-    FUNDING_ROUNDS,
-    (item) => String(item || "").toUpperCase(),
-  );
-  const excludedStages = new Set(normalized.excludedCompanyStages || []);
-  const stageText = [
-    normalized.startupOpennessEvidence,
-    normalized.searchActivity,
-    ...normalized.companyHeadcounts,
-  ].filter(Boolean).join(" ");
-  const broadStageOpenness = normalized.openToStartups === true ||
-    hasLegacyStartupOpenness(normalized) ||
-    /\b(?:any|all|every)\b[^.]{0,30}\b(?:company |startup )?(?:size|stage|funding stage)s?\b|\b(?:stage|size)[\s-]*agnostic\b|\bflexible\b[^.]{0,35}\b(?:company stage|funding stage|stage|size)s?\b|\b(?:flexible|worked)\b[^.]{0,45}\b(?:all |any |across )?(?:company |startup )?sizes?\b/i.test(stageText);
-  const fuzzyStages = [];
-  if (/\bgrowth[\s-]*stage\b|\bgrowth\b[^.]{0,20}\bcompan(?:y|ies)\b/i.test(stageText)) fuzzyStages.push("SERIES_B");
-  if (/\bpublic(?:ly traded)? compan(?:y|ies)\b|\bpublicly traded\b|\bipo\b/i.test(stageText)) fuzzyStages.push("SERIES_D_PLUS");
-  const callStageSignals = unique([...explicitStages, ...fuzzyStages]);
-  const routedStageSignals = callStageSignals.length ? callStageSignals : nativeStages;
-  let stageBase;
-  let companyStageSource;
-  let companyStageRule;
-  if (broadStageOpenness) {
-    stageBase = [...PARAAI_STAGE_ORDER];
-    companyStageSource = "ladder_expansion";
-    companyStageRule = "stage_select_all_broad";
-  } else if (routedStageSignals.length) {
-    const lowestIndex = Math.min(...routedStageSignals.map((stage) => PARAAI_STAGE_ORDER.indexOf(stage)));
-    stageBase = PARAAI_STAGE_ORDER.slice(Math.max(0, lowestIndex - 2));
-    companyStageSource = callStageSignals.length ? "ladder_expansion" : "paraform_profile";
-    companyStageRule = "stage_ladder_minus2";
-  } else {
-    stageBase = [...PARAAI_STAGE_ORDER];
-    companyStageSource = "select_all_default";
-    companyStageRule = "select_all_unknown";
-  }
-  const companyStages = stageBase.filter((stage) => !excludedStages.has(stage));
-
-  const structuredLocations = uniqueAllowed(
-    normalized.paraformLocations,
-    PARAAI_LOCATIONS,
-    (item) => String(item || "").toLowerCase(),
-  );
-  const freeTextLocations = mapLocationValues(normalized.locations);
-  const statedLocations = unique([...structuredLocations, ...freeTextLocations]);
-  const nativeLocations = mapLocationValues(native?.locations);
+  const nativeLocations = uniqueAllowed(native?.locations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
+  const structuredLocations = uniqueAllowed(normalized.paraformLocations, PARAAI_LOCATIONS, (item) => String(item || "").toLowerCase());
+  const legacyMappedLocations = legacyLocations(normalized.locations);
+  const relocationScope = String(normalized.relocation?.scope || "").trim();
+  const relocationEvidence = String(normalized.relocation?.evidence || "").trim();
   const excludedLocations = new Set(normalized.excludedParaformLocations || []);
-  const relocationText = `${normalized.relocation.scope || ""} ${normalized.relocation.evidence || ""}`.trim();
-  const explicitlyRefusesRelocation = normalized.relocation.open === false &&
-    /\b(?:will not|would not|won['’]?t|wouldn['’]?t|cannot|can['’]?t|not willing to|not open to|refuse to|no)\b[^.]{0,55}\b(?:relocat\w*|moving|move)\b|\b(?:relocat\w*|moving|move)\b[^.]{0,45}\b(?:not|no|never|off the table)\b/i.test(relocationText);
-  const internationalCurrentLocation = currentLocations.length > 0 &&
-    !isUSGeography(geography.currentLocation, geography.country);
-  const internationalTarget = structuredLocations.some((location) => !US_LOCATION_IDS.has(location)) ||
-    normalized.locations.some((location) => (
-      !isUSGeography(location) &&
-      mappedLocations(location).some((mapped) => !US_LOCATION_IDS.has(mapped))
-    ));
-  const internationalOpenness = /\b(?:anywhere(?: in the world)?|worldwide|global(?:ly)?|international(?:ly)?|overseas)\b/i.test(relocationText) ||
-    internationalTarget;
-  const openToUSRemote = internationalCurrentLocation &&
-    /\b(?:us|u\.?s\.?|united states|american)\b[^.]{0,40}\bremote\b|\bremote\b[^.]{0,40}\b(?:us|u\.?s\.?|united states|american)\b/i
-      .test(`${relocationText} ${normalized.locations.join(" ")}`);
-  const hasLocationDiscussion = statedLocations.length > 0 ||
-    normalized.locations.length > 0 ||
-    normalized.relocation.open === true ||
-    explicitlyRefusesRelocation ||
-    Boolean(relocationText) ||
-    excludedLocations.size > 0;
-  let locationBase;
-  let locationSource;
-  let locationRule;
-  let locationReviewNote = null;
-  if (explicitlyRefusesRelocation) {
-    if (statedLocations.length || currentLocations.length) {
-      locationBase = unique([...statedLocations, ...currentLocations]);
-      locationSource = "screening_call";
-      locationRule = "location_relocation_refusal";
-    } else {
-      locationBase = [...PARAAI_LOCATIONS];
-      locationSource = "select_all_default";
-      locationRule = "select_all_default";
-      locationReviewNote = "Relocation refused, but current geography is unknown; all locations selected for review.";
-    }
-  } else if (openToUSRemote) {
-    locationBase = unique([...PARAAI_NA_LOCATIONS, ...currentLocations, ...statedLocations]);
-    locationSource = "relocation_expansion";
-    locationRule = "location_us_remote_plus_home";
-  } else if (internationalOpenness) {
-    locationBase = [...PARAAI_LOCATIONS];
-    locationSource = "relocation_expansion";
-    locationRule = "location_all_21";
-  } else if (normalized.relocation.open === true) {
-    locationBase = unique([...PARAAI_NA_LOCATIONS, ...statedLocations]);
-    locationSource = "relocation_expansion";
-    locationRule = "location_na_set";
-  } else if (statedLocations.length) {
-    locationBase = statedLocations;
-    locationSource = "screening_call";
-    locationRule = "location_stated";
-  } else if (!hasLocationDiscussion && nativeLocations.length) {
-    locationBase = nativeLocations;
-    locationSource = "paraform_profile";
-    locationRule = "location_profile";
-  } else {
-    locationBase = [...PARAAI_LOCATIONS];
-    locationSource = "select_all_default";
-    locationRule = "select_all_unknown";
-  }
-  const locations = unique([...locationBase, ...currentLocations])
-    .filter((location) => !excludedLocations.has(location));
+  const expandsLocations = (
+    normalized.relocation?.open === true &&
+    !hasUnmappedRelocationRestriction(`${relocationScope} ${relocationEvidence}`, excludedLocations)
+  );
+  const allowedLocations = (value) => value.filter((location) => !excludedLocations.has(location));
+  const locations = expandsLocations
+    ? allowedLocations([...PARAAI_LOCATIONS])
+    : structuredLocations.length
+      ? allowedLocations(structuredLocations)
+      : nativeLocations.length
+        ? allowedLocations(nativeLocations)
+        : allowedLocations(legacyMappedLocations);
 
   const statedBaseMin = normalized.compensation.baseMin;
-  const nativeBaseMin = native?.salary_min != null &&
-    native?.salary_min !== "" &&
-    Number.isFinite(Number(native.salary_min)) &&
-    Number(native.salary_min) >= 0
+  const nativeBaseMin = native?.salary_min != null && native?.salary_min !== "" && Number.isFinite(Number(native.salary_min))
     ? Number(native.salary_min)
     : null;
-  let salarySource;
-  let salaryRule;
-  let salaryBase;
-  if (statedBaseMin != null) {
-    salaryBase = statedBaseMin;
-    salarySource = "screening_call";
-    salaryRule = "salary_stated";
-  } else if (nativeBaseMin != null) {
-    salaryBase = nativeBaseMin;
-    salarySource = "paraform_profile";
-    salaryRule = "salary_profile";
-  } else {
-    salaryBase = PARAAI_SALARY_DEFAULT_MIN;
-    salarySource = "default_120k";
-    salaryRule = "salary_default_120k";
-  }
   const salaryWasWidened = statedBaseMin != null && isHardSalaryFloor(normalized.compensation);
-  if (salaryWasWidened) {
-    salaryBase = Math.max(0, salaryBase - PARAAI_SALARY_ROUTING_BUFFER);
-    salaryRule = "salary_hard_floor_minus_10k";
-  }
-  const salaryMin = Math.min(salaryBase, PARAAI_SALARY_CAP);
-  const salaryWasCapped = salaryBase > PARAAI_SALARY_CAP;
+  const unboundedSalaryMin = statedBaseMin != null
+    ? Math.max(0, statedBaseMin - (salaryWasWidened ? PARAAI_SALARY_ROUTING_BUFFER : 0))
+    : nativeBaseMin;
+  const salaryMin = unboundedSalaryMin == null ? null : Math.min(unboundedSalaryMin, PARAAI_SALARY_CAP);
 
-  const candidateOte = normalized.compensation.ote;
-  const ote = candidateOte == null ? null : Math.max(candidateOte, salaryMin);
+  const nativeOte = native?.ote != null && native?.ote !== "" && Number.isFinite(Number(native.ote))
+    ? Number(native.ote)
+    : null;
+  const ote = normalized.compensation.ote ?? nativeOte;
 
-  const explicitVisa = visaFromExtraction(normalized.sponsorship);
-  const nativeVisa = uniqueAllowed(
-    values(native?.visa),
-    VISA_SPONSORSHIP,
-    (item) => String(item || ""),
+  const explicitStages = uniqueAllowed(normalized.companyStages, FUNDING_ROUNDS, (item) => String(item || "").toUpperCase());
+  const excludedStages = new Set(normalized.excludedCompanyStages || []);
+  const nativeStages = uniqueAllowed(native?.last_funding_round, FUNDING_ROUNDS, (item) => String(item || "").toUpperCase());
+  const allowedStages = (value) => value.filter((stage) => !excludedStages.has(stage));
+  const startupOpen = normalized.openToStartups === true || (
+    normalized.openToStartups == null &&
+    hasLegacyStartupOpenness(normalized)
   );
-  const workAuthorizationText = `${normalized.sponsorship.kind || ""} ${normalized.sponsorship.statuses.join(" ")}`;
-  const hasUSWorkAuthorizationContext = /\b(?:authorized to work|work authori[sz]ation|citizen|green card|permanent resident)\b[^.]{0,45}\b(?:us|u\.?s\.?|united states|america)\b|\b(?:us|u\.?s\.?|united states|american)\b[^.]{0,45}\b(?:work authori[sz]ation|citizen|green card|permanent resident)\b/i
-    .test(workAuthorizationText);
-  const usBased = isUSGeography(geography.currentLocation, geography.country) || hasUSWorkAuthorizationContext;
-  let sponsorship;
-  let visaSource;
-  let visaRule;
-  let sponsorshipReviewReason = null;
-  if (explicitVisa.length) {
-    sponsorship = explicitVisa;
-    visaSource = "screening_call";
-    visaRule = "visa_explicit";
-  } else if (nativeVisa.length) {
-    sponsorship = nativeVisa;
-    visaSource = "paraform_profile";
-    visaRule = "visa_profile";
-  } else if (usBased) {
-    sponsorship = ["Not available"];
-    visaSource = "visa_default_us";
-    visaRule = "visa_default_us";
-  } else {
-    sponsorship = [];
-    visaSource = "unknown_international";
-    visaRule = "visa_unknown_international";
-    sponsorshipReviewReason = "sponsorship unknown for international candidate";
-  }
+  const expandsCompanyStages = startupOpen;
+  const companyStages = expandsCompanyStages
+    ? allowedStages([...FUNDING_ROUNDS])
+    : explicitStages.length
+      ? allowedStages(explicitStages)
+      : allowedStages(nativeStages);
 
   const preferences = normalizeParaAIPreferences({
     locations,
-    workplaceTypes: workplaces,
+    workplaceTypes: normalized.workplaceTypes.length ? normalized.workplaceTypes : native?.workplace,
     idealFundingRounds: companyStages,
-    requiresSponsorship: sponsorship,
+    requiresSponsorship: visaFromExtraction(normalized.sponsorship).length ? visaFromExtraction(normalized.sponsorship) : native?.visa,
     salaryMin,
     ...(ote != null ? { ote } : {}),
   });
-  const provenance = {
-    workplaceTypes: {
-      stated: [...explicitWorkplaces],
-      routed: [...preferences.workplaceTypes],
-      rule: workplaceRule,
-      excluded: [...excludedWorkplaces],
-    },
-    idealFundingRounds: {
-      stated: [...explicitStages],
-      routed: [...preferences.idealFundingRounds],
-      rule: companyStageRule,
-      excluded: [...excludedStages],
-    },
-    locations: {
-      stated: [...statedLocations],
-      routed: [...preferences.locations],
-      rule: locationRule,
-      excluded: [...excludedLocations],
-      current: [...currentLocations],
-    },
-    salaryMin: {
-      stated: statedBaseMin,
-      routed: preferences.salaryMin,
-      rule: salaryRule,
-      currency: normalized.compensation.currency,
-    },
-    requiresSponsorship: {
-      stated: [...explicitVisa],
-      routed: [...preferences.requiresSponsorship],
-      rule: visaRule,
-    },
-  };
   return {
     preferences,
     policy: {
-      preferenceRouting: provenance,
-      provenance,
-      workplaceSource,
-      locationSource,
-      locationsExpanded: preferences.locations.length > statedLocations.length,
-      locationReviewNote,
-      companyStageSource,
-      companyStagesExpanded: preferences.idealFundingRounds.length > explicitStages.length,
+      locationSource: expandsLocations
+        ? "relocation_expansion"
+        : structuredLocations.length
+          ? "screening_call"
+          : nativeLocations.length
+            ? "paraform_profile"
+            : "legacy_mapping",
+      locationsExpanded: expandsLocations,
+      companyStageSource: expandsCompanyStages
+        ? "startup_expansion"
+        : explicitStages.length
+          ? "screening_call"
+          : "paraform_profile",
+      companyStagesExpanded: expandsCompanyStages,
       candidateStatedBaseMin: statedBaseMin,
-      candidateStatedBaseCurrency: normalized.compensation.currency,
-      routedSalaryMin: preferences.salaryMin,
-      salarySource,
+      routedSalaryMin: preferences.salaryMin ?? null,
       salaryRoutingBuffer: salaryWasWidened ? PARAAI_SALARY_ROUTING_BUFFER : 0,
       salaryWasWidened,
-      salaryWasCapped,
-      visaSource,
-      sponsorshipReviewReason,
-      reviewNotes: [locationReviewNote, sponsorshipReviewReason].filter(Boolean),
+      salaryWasCapped: unboundedSalaryMin != null && unboundedSalaryMin > PARAAI_SALARY_CAP,
     },
   };
 }
 
-export function buildPreferences(extracted, native = null, context = {}) {
-  return buildPreferenceRouting(extracted, native, context).preferences;
+export function buildPreferences(extracted, native = null) {
+  return buildPreferenceRouting(extracted, native).preferences;
 }
 
 export function missingRequiredPreferences(preferences = {}) {
@@ -729,7 +279,6 @@ function candidateFromCall(call) {
   return {
     fullName: String(source.fullName || source.name || "").trim(),
     firstName: String(source.firstName || "").trim(),
-    email: normalizeEmail(source.email),
     linkedin: normLinkedin(source.linkedin),
     phone: String(source.phone || "").trim(),
     scheduledStart: source.scheduledStart || null,
@@ -737,66 +286,13 @@ function candidateFromCall(call) {
   };
 }
 
-function persistedCallEndedAt(call, existingValue = null) {
-  const existing = Date.parse(String(existingValue || ""));
-  if (Number.isFinite(existing)) return new Date(existing).toISOString();
-  const explicit = Date.parse(String(call?.endedAt || ""));
-  if (Number.isFinite(explicit)) return new Date(explicit).toISOString();
-  const joined = Date.parse(String(call?.joinAt || ""));
-  const durationSeconds = Number(call?.durationSecs);
-  if (Number.isFinite(joined) && Number.isFinite(durationSeconds) && durationSeconds >= 0) {
-    return new Date(joined + durationSeconds * 1000).toISOString();
-  }
-  return null;
-}
-
-function persistedBookingCreatedAt(
-  call,
-  {
-    existingAt = null,
-    existingSource = null,
-  } = {},
-) {
-  const existing = Date.parse(String(existingAt || ""));
-  if (Number.isFinite(existing) && String(existingSource || "").trim()) {
-    return {
-      bookingCreatedAt: new Date(existing).toISOString(),
-      bookingCreatedAtSource: String(existingSource).slice(0, 80),
-    };
-  }
-  const candidates = [
-    [
-      String(call?.bookingCreatedAtSource || "booking_created_at"),
-      call?.bookingCreatedAt ?? call?.booking_created_at,
-    ],
-    ["event_created_at", call?.eventCreatedAt ?? call?.event_created_at],
-    ["source_created_at", call?.createdAt ?? call?.created_at],
-    [
-      "source_created_at",
-      call?.source?.createdAt ?? call?.source?.created_at,
-    ],
-    ["source_created_at", call?.bot?.createdAt ?? call?.bot?.created_at],
-  ]
-    .map(([source, value]) => [
-      String(source || "").replace(/[^a-z0-9_:-]/giu, "_").slice(0, 80),
-      Date.parse(String(value || "")),
-    ])
-    .filter(([source, parsed]) => source && Number.isFinite(parsed))
-    .sort((left, right) => left[1] - right[1]);
-  if (!candidates.length) {
-    return { bookingCreatedAt: null, bookingCreatedAtSource: null };
-  }
-  return {
-    bookingCreatedAt: new Date(candidates[0][1]).toISOString(),
-    bookingCreatedAtSource: candidates[0][0],
-  };
-}
-
 export function scoreSelectedIdentity(candidate, crmItem) {
   const score = scoreIdentity(candidate, crmItem);
+  const exactName = normName(candidate?.fullName) && normName(candidate?.fullName) === normName(crmItem?.name);
+  const strong = score.signals.some((signal) => ["linkedin", "phone", "scheduled_time"].includes(signal));
   return {
-    signals: score.signals,
-    ok: score.ok,
+    signals: ["human_selected_id", ...score.signals],
+    ok: Boolean(exactName || strong),
   };
 }
 
@@ -809,246 +305,60 @@ function newJournal(state, detail = null) {
   return [{ state, at, ...(detail ? { detail } : {}) }];
 }
 
-function hardProfileReviewReasons({
-  submission = {},
-  preferences = {},
-  payloadConflict = null,
-  resumeLinkDisposition = "none",
-} = {}) {
-  const reasons = [];
-  const add = (code, message) => reasons.push({
-    code,
-    message,
-    soft: false,
-  });
-  if (!String(submission.name || "").trim()) {
-    add("candidate_name_missing", "Candidate name is required");
-  }
-  if (!normalizeEmail(submission.email)) {
-    add("candidate_email_missing", "A deliverable candidate email is required");
-  }
-  if (!normLinkedin(submission.linkedinUrl)) {
-    add("candidate_linkedin_missing", "A canonical candidate LinkedIn profile is required");
-  }
-  if (payloadConflict) {
-    add(
-      HUMAN_INTRO_PAYLOAD_CONFLICT_CODE,
-      HUMAN_INTRO_PAYLOAD_CONFLICT_MESSAGE,
-    );
-  }
-  if (resumeLinkDisposition === "received_review") {
-    add(
-      HUMAN_INTRO_RESUME_REVIEW_CODE,
-      HUMAN_INTRO_RESUME_REVIEW_MESSAGE,
-    );
-  } else if (resumeLinkDisposition === "ambiguous") {
-    add(
-      HUMAN_INTRO_RESUME_AMBIGUOUS_CODE,
-      HUMAN_INTRO_RESUME_AMBIGUOUS_MESSAGE,
-    );
-  }
-  for (const missing of missingRequiredPreferences(preferences)) {
-    add(
-      missing === "visa sponsorship"
-        ? "sponsorship_unknown"
-        : `routing_${missing.replace(/[^a-z0-9]+/giu, "_")}_missing`,
-      missing === "visa sponsorship"
-        ? "Sponsorship eligibility requires human review"
-        : `Required routing is incomplete: ${missing}`,
-    );
-  }
-  return reasons;
-}
-
-export function humanProfileReviewDecision(
-  readiness = null,
-  context = null,
-) {
-  if (readiness?.profileOnly !== true) {
-    return {
-      state: "ready_to_submit",
-      reviewReason: null,
-      reviewReasons: [],
-    };
-  }
-  const softReview = {
-    state: "needs_review",
-    reviewReason: HUMAN_CALL_SOFT_REVIEW_CODE,
-    reviewReasons: [{
-      code: HUMAN_CALL_SOFT_REVIEW_CODE,
-      message: HUMAN_CALL_SOFT_REVIEW_MESSAGE,
-      soft: true,
-    }],
-  };
-  if (!context) return softReview;
-  const hardReasons = hardProfileReviewReasons(context);
-  const artifactReview = hardReasons.find((reason) => [
-    HUMAN_INTRO_RESUME_REVIEW_CODE,
-    HUMAN_INTRO_RESUME_AMBIGUOUS_CODE,
-  ].includes(reason.code));
-  return {
-    ...softReview,
-    state: artifactReview
-      ? "needs_review"
-      : String(context?.submission?.resumeUri || "").trim()
-      ? "needs_review"
-      : "waiting_for_resume",
-    reviewReason: artifactReview?.code || softReview.reviewReason,
-    reviewReasons: [
-      ...softReview.reviewReasons,
-      ...hardReasons,
-    ],
-  };
-}
-
-export async function prepareJob({
-  botId,
-  candidateUserId = "",
-  force = false,
-  strictReads = false,
-  callRecord = null,
-} = {}) {
+export async function prepareJob({ botId, candidateUserId = "", force = false, strictReads = false } = {}) {
   const id = String(botId || "").trim();
-  if (!BOT_ID.test(id)) throw stateError("valid call job id required", "INVALID_BOT_ID");
-  const paraformHumanCall = isHumanCallJob(id);
-  const humanIntro = isHumanIntroJob(id);
-  const humanCall = paraformHumanCall || humanIntro;
+  if (!BOT_ID.test(id)) throw stateError("valid Recall bot id required", "INVALID_BOT_ID");
   const existing = await getJob(id);
   if (existing && !force && !["error", "needs_identity_review"].includes(existing.state)) return existing;
 
-  const call = callRecord || (
-    humanIntro
-      ? humanIntroCallFromJob(existing)
-      : paraformHumanCall
-      ? await fetchHumanCall(callIdFromHumanJob(id))
-      : await fetchCall(id)
-  );
+  const call = await fetchCall(id);
   const candidate = candidateFromCall(call);
-  const callEndedAt = persistedCallEndedAt(call, existing?.callEndedAt);
-  const booking = persistedBookingCreatedAt(call, {
-    existingAt: existing?.bookingCreatedAt,
-    existingSource: existing?.bookingCreatedAtSource,
-  });
-  const humanReadiness = humanCall ? humanCallReadiness(call) : null;
-  const successful = humanCall
-    ? humanReadiness.ready
-    : isSuccessfulCall(call);
-  const humanCallMeta = humanIntro
-    ? {
-        ...persistedHumanIntroMetadata(call),
-        ...(existing?.humanCallMeta?.payloadConflict ? {
-          payloadConflict: existing.humanCallMeta.payloadConflict,
-        } : {}),
-      }
-    : paraformHumanCall
-      ? persistedHumanCallMetadata(call)
-      : null;
-  const callTypeFields = {
-    humanCall,
-    humanIntro,
-    callType: humanCall ? "human" : "agent",
-    callTypeAt: callEndedAt || call.joinAt || null,
-    ...booking,
-    ...(humanIntro ? {
-      bookingSourceId: humanCallMeta?.sourceId || null,
-      resumeLinkDisposition:
-        humanCallMeta?.resumeLinkDisposition || "none",
-      resumeReceipt: humanCallMeta?.resumeReceipt || null,
-    } : {}),
-    ...(humanCall ? { humanCallMeta } : {}),
-  };
-  const callSourceVerified = humanCall
-    ? humanCallMeta?.provenanceVerified === true
-    : call?.source?.isScreener === true;
-  const screeningCallLink = humanCall
-    ? String(call?.screeningCallLink || "").trim()
-    : callLink(id);
-  if (!candidate.fullName || !successful) {
+  if (!candidate.fullName || !isSuccessfulCall(call)) {
     const base = existing || {
       id, state: "detected", createdAt: new Date().toISOString(), revision: 0,
-      journal: newJournal("detected"), candidate, callLink: screeningCallLink,
+      journal: newJournal("detected"), candidate, callLink: callLink(id),
       callStartedAt: call.joinAt || null,
-      callEndedAt,
-      callSourceVerified,
-      ...callTypeFields,
+      callSourceVerified: call?.source?.isScreener === true,
     };
     if (!existing) await createJob(base);
     const current = existing || await getJob(id);
-    return fail(
-      current,
-      humanCall ? "HUMAN_CALL_NOT_READY" : "NOT_SUCCESSFUL_SCREEN",
-      humanCall
-        ? humanReadiness?.reason || "Paraform human call is not ready"
-        : "Only successful screening calls can enter Para AI",
-    );
+    return fail(current, "NOT_SUCCESSFUL_SCREEN", "Only successful screening calls can enter Para AI");
   }
 
   let job;
   if (existing) {
     job = await saveJob(transition(existing, "resolving_identity", {
-      candidate, callLink: screeningCallLink, error: null, journalDetail: "manual re-prepare",
+      candidate, callLink: callLink(id), error: null, journalDetail: "manual re-prepare",
       callStartedAt: call.joinAt || existing.callStartedAt || null,
-      callEndedAt,
-      callSourceVerified,
-      ...callTypeFields,
+      callSourceVerified: call?.source?.isScreener === true,
     }), existing.revision);
   } else {
     job = await createJob({
       id,
       state: "resolving_identity",
       candidate,
-      callLink: screeningCallLink,
+      callLink: callLink(id),
       callStartedAt: call.joinAt || null,
-      callEndedAt,
-      callSourceVerified,
-      ...callTypeFields,
+      callSourceVerified: call?.source?.isScreener === true,
       createdAt: new Date().toISOString(),
       journal: [...newJournal("detected"), ...newJournal("resolving_identity")],
     });
   }
 
   try {
-    const linkedCandidateUserId = String(
-      candidateUserId || (humanCall ? call?.candidateUserId : "") || "",
-    ).trim();
-    const manuallySelectedIdentity = Boolean(String(candidateUserId || "").trim());
-    let crmItem = linkedCandidateUserId
-      ? await findCrmCandidate(linkedCandidateUserId)
-      : null;
-    let identityScore = linkedCandidateUserId && crmItem
-      ? manuallySelectedIdentity
-        ? scoreSelectedIdentity(candidate, crmItem)
-        : scoreIdentity(candidate, crmItem)
-      : null;
+    let crmItem = candidateUserId ? await findCrmCandidate(candidateUserId) : null;
+    let identityScore = candidateUserId && crmItem ? scoreSelectedIdentity(candidate, crmItem) : null;
     let ambiguous = false;
-    if (linkedCandidateUserId && !crmItem) {
+    if (candidateUserId && !crmItem) {
       return saveJob(transition(job, "needs_identity_review", {
-        identity: {
-          candidateUserId: null,
-          signals: [],
-          ambiguous: false,
-          reason: manuallySelectedIdentity
-            ? "selected candidate user ID was not found"
-            : "linked booking candidate user ID was not found",
-        },
-        journalDetail: manuallySelectedIdentity
-          ? "selected identity not found"
-          : "linked booking identity not found",
+        identity: { candidateUserId: null, signals: [], ambiguous: false, reason: "selected candidate user ID was not found" },
+        journalDetail: "selected identity not found",
       }), job.revision);
     }
-    if (linkedCandidateUserId && crmItem && !identityScore.ok) {
+    if (candidateUserId && crmItem && !identityScore.ok) {
       return saveJob(transition(job, "needs_identity_review", {
-        identity: {
-          candidateUserId: null,
-          signals: identityScore.signals,
-          ambiguous: false,
-          reason: manuallySelectedIdentity
-            ? "selected Paraform candidate does not match this call"
-            : "linked booking candidate does not meet the multi-signal identity bar",
-        },
-        journalDetail: manuallySelectedIdentity
-          ? "selected identity mismatched call"
-          : "linked booking identity failed multi-signal verification",
+        identity: { candidateUserId: null, signals: identityScore.signals, ambiguous: false, reason: "selected Paraform candidate does not match this call" },
+        journalDetail: "selected identity mismatched call",
       }), job.revision);
     }
     if (!crmItem) {
@@ -1071,18 +381,10 @@ export async function prepareJob({
         candidateId: crmItem.candidate_id || null,
         signals: identityScore?.signals || [],
         ambiguous: false,
-        ...(manuallySelectedIdentity ? { humanSelected: true } : {}),
       },
     }), job.revision);
 
-    const extraction = humanReadiness?.profileOnly
-      ? {
-          extracted: normalizeExtraction({}),
-          provider: "paraform_profile_defaults",
-          model: null,
-          usage: null,
-        }
-      : await extractPreferences(call.transcript || []);
+    const extraction = await extractPreferences(call.transcript || []);
     const reads = [
       getResume(crmItem.id),
       candidateDetails(crmItem.id, { strict: strictReads }),
@@ -1106,88 +408,34 @@ export async function prepareJob({
     }
     const resumeUri = findResumeUri(resume);
     const contact = resumeUri ? await resumeContact(resumeUri).catch(() => null) : null;
-    const email = candidate.email
-      || firstEmail(crmItem)
-      || firstEmail(details)
-      || firstEmail(contact);
+    const email = firstEmail(crmItem) || firstEmail(details) || firstEmail(contact);
     const linkedin = candidate.linkedin || normLinkedin(contact?.linkedinUrl || crmItem?.linkedin_user);
     const extracted = extraction.extracted;
-    const routing = buildPreferenceRouting(extracted, nativePreferences, {
-      crmItem,
-      details,
-      profileInfo,
-    });
-    const routingInput = buildPreferenceRoutingInput(nativePreferences, {
-      crmItem,
-      details,
-      profileInfo,
-    });
+    const routing = buildPreferenceRouting(extracted, nativePreferences);
     const reviewPreferences = routing.preferences;
     const statedBaseMin = extracted.compensation?.baseMin ?? null;
-    const submission = {
-      name: candidate.fullName || contact?.name || crmItem.name || "",
-      email,
-      linkedinUrl: linkedin,
-      resumeUri,
-      resumeStatus: resumeUri ? "on_file" : "missing",
-      screeningCallLink,
-    };
-    const profileReview = humanProfileReviewDecision(humanReadiness, {
-      submission,
-      preferences: reviewPreferences,
-      payloadConflict: humanCallMeta?.payloadConflict || null,
-      resumeLinkDisposition:
-        humanCallMeta?.resumeLinkDisposition || "none",
-    });
-    const nextState = profileReview.state;
-    const reviewReasons = profileReview.reviewReasons;
-    const waitingForResume = nextState === "waiting_for_resume";
-    const resumeWait = waitingForResume
-      ? resumeWaitPlanFromEnv({
-          source: humanIntro ? "calendar_human_intro" : "human_call",
-          anchorAt: callEndedAt,
-        })
-      : null;
-    return saveJob(transition(job, nextState, {
+    return saveJob(transition(job, "ready_to_submit", {
       candidate: { ...candidate, fullName: candidate.fullName || contact?.name || crmItem.name },
       identity: { ...job.identity, candidateUserId: crmItem.id, candidateId: crmItem.candidate_id || job.identity?.candidateId || null },
-      submission,
+      submission: {
+        name: candidate.fullName || contact?.name || crmItem.name || "",
+        email,
+        linkedinUrl: linkedin,
+        resumeUri,
+        resumeStatus: resumeUri ? "on_file" : "missing",
+        screeningCallLink: callLink(id),
+      },
       extracted,
       reviewPreferences,
       reviewPolicy: {
         salaryCap: PARAAI_SALARY_CAP,
         candidateStatedBaseMin: statedBaseMin,
         candidateStatedBaseMax: extracted.compensation?.baseMax ?? null,
-        preferenceRoutingInput: routingInput,
-        ...(humanReadiness?.profileOnly ? {
-          humanIntroWithoutTranscript: true,
-        } : {}),
         ...routing.policy,
       },
-      extraNote: extraNote(extracted, routing.policy.preferenceRouting),
+      extraNote: extraNote(extracted),
       extraction: { provider: extraction.provider, model: extraction.model, usage: extraction.usage, at: new Date().toISOString() },
-      ...(humanReadiness?.profileOnly ? {
-        reviewReason: profileReview.reviewReason,
-        reviewReasons,
-        automation: {
-          ...(job.automation || {}),
-          status: waitingForResume
-            ? "waiting_for_resume"
-            : "needs_review",
-          reasons: reviewReasons.map((reason) => reason.message),
-          evaluatedAt: new Date().toISOString(),
-          ...(waitingForResume ? {
-            resumeWait,
-            resumeWaitSweepEligible: false,
-          } : {}),
-        },
-      } : {}),
       error: null,
-      ...(humanReadiness?.profileOnly ? {
-        journalDetail: waitingForResume
-          ? "profile/default routing prepared; waiting for resume"
-          : "profile/default routing prepared for human review",
-      } : {}),
     }), job.revision);
   } catch (error) {
     if (error?.job) throw error;
@@ -1195,71 +443,13 @@ export async function prepareJob({
   }
 }
 
-export async function reroutePreparedJob(job) {
-  if (job?.state !== "ready_to_submit") {
-    throw stateError("job is not ready for preference rerouting", "INVALID_STATE", job);
-  }
-  if (!job?.extracted || !job?.identity?.candidateUserId) {
-    throw stateError("stored extraction and resolved identity are required for rerouting", "REROUTE_INPUT_REQUIRED", job);
-  }
-  const candidateUserId = job.identity.candidateUserId;
-  const [crmItem, details, nativePreferences, profileInfo] = await Promise.all([
-    findCrmCandidate(candidateUserId),
-    candidateDetails(candidateUserId, { strict: true }),
-    candidatePreferences(candidateUserId, { strict: true }),
-    candidateProfileInfo(candidateUserId),
-  ]);
-  if (!crmItem) {
-    throw stateError("candidate identity no longer resolves in CRM", "IDENTITY_STALE", job);
-  }
-  if (isArchiveImportCandidate(crmItem, details, profileInfo)) {
-    return fail(
-      job,
-      "ARCHIVE_IMPORT_EXCLUDED",
-      "Historical archive imports are excluded from Para AI automation",
-    );
-  }
-  const routing = buildPreferenceRouting(job.extracted, nativePreferences, {
-    crmItem,
-    details,
-    profileInfo,
-  });
-  const routingInput = buildPreferenceRoutingInput(nativePreferences, {
-    crmItem,
-    details,
-    profileInfo,
-  });
-  return saveJob(transition(job, "ready_to_submit", {
-    reviewPreferences: routing.preferences,
-    reviewPolicy: {
-      ...(job.reviewPolicy || {}),
-      salaryCap: PARAAI_SALARY_CAP,
-      candidateStatedBaseMin: job.extracted?.compensation?.baseMin ?? null,
-      candidateStatedBaseMax: job.extracted?.compensation?.baseMax ?? null,
-      preferenceRoutingInput: routingInput,
-      ...routing.policy,
-    },
-    extraNote: extraNote(job.extracted, routing.policy.preferenceRouting),
-    automation: {
-      ...(job.automation || {}),
-      preferenceRerouteRequired: false,
-      preferenceRoutedAt: new Date().toISOString(),
-    },
-    error: null,
-    journalDetail: "stored extraction rerouted under the Phase 1 policy",
-  }), job.revision);
-}
-
 function mergeEdits(job, body = {}) {
   const extracted = normalizeExtraction(body.extracted || job.extracted || {});
-  const reviewPreferences = normalizeParaAIPreferences(
-    body.preferences || job.reviewPreferences || buildPreferences(extracted),
-  );
   return {
     ...job,
     extracted,
-    reviewPreferences,
-    extraNote: extraNote(extracted, job.reviewPolicy?.preferenceRouting),
+    reviewPreferences: normalizeParaAIPreferences(body.preferences || job.reviewPreferences || buildPreferences(extracted)),
+    extraNote: extraNote(extracted),
     submission: {
       ...(job.submission || {}),
       ...(body.name != null ? { name: String(body.name).trim() } : {}),
@@ -1289,110 +479,6 @@ async function applyResumeUpload(job, body) {
       name: job.submission?.name || String(uploaded.contact?.name || "").trim(),
     },
   };
-}
-
-export async function applyLadderAndSubmit(job, {
-  approvalSource = "human_ladder_review",
-} = {}) {
-  const reasons = jobReviewReasons(job);
-  const action = reviewActionFor(job, reasons);
-  if (!action.allowed) {
-    throw stateError(
-      "Apply ladder and submit is available only when every review reason is soft and ladder-resolvable",
-      "LADDER_ACTION_NOT_ALLOWED",
-      job,
-    );
-  }
-  const routedPreferences = normalizeParaAIPreferences(job.reviewPreferences || {});
-  const missing = missingRequiredPreferences(routedPreferences);
-  if (missing.length) {
-    throw stateError(
-      `Stored ladder output is incomplete: ${missing.join(", ")}`,
-      "LADDER_OUTPUT_INCOMPLETE",
-      job,
-    );
-  }
-  const ready = transition(job, "ready_to_submit", {
-    reviewPreferences: routedPreferences,
-    reviewReason: null,
-    reviewReasons: [],
-    reviewAction: {
-      allowed: false,
-      appliedAt: new Date().toISOString(),
-      reasons: action.reasons,
-    },
-    automation: {
-      ...(job.automation || {}),
-      status: "ladder_approved",
-      reasons: [],
-      evaluatedAt: new Date().toISOString(),
-    },
-    journalDetail: "soft review reasons accepted; stored ladder applied",
-  });
-  return submitJob(ready, {
-    confirmation: `SUBMIT ${ready.id}`,
-    marketConfirmed: true,
-    approvalSource,
-  });
-}
-
-export function existingTalentNetworkTransition(job, {
-  approvalSource = "talent_network_readback",
-  checkedAt = new Date().toISOString(),
-} = {}) {
-  return transition(job, "awaiting_matches", {
-    submissionApprovalCheckedAt: checkedAt,
-    submitReadbackVerified: true,
-    externalWriteMayHaveLanded: false,
-    submitApprovalSource: String(approvalSource || "talent_network_readback").slice(0, 80),
-    matchLegStartedAt: job.matchLegStartedAt || checkedAt,
-    matchCount: null,
-    error: null,
-    journalDetail: "Talent Network membership already visible; submission write skipped",
-  });
-}
-
-export async function advanceExistingTalentNetworkJob(job, {
-  approvalSource = "talent_network_readback",
-} = {}) {
-  if (!["ready_to_submit", "waiting_for_resume"].includes(job?.state)) {
-    throw stateError("job is not ready for a pre-claim Talent Network read", "INVALID_STATE", job);
-  }
-  const candidateUserId = job.identity?.candidateUserId;
-  if (!candidateUserId) {
-    throw stateError("candidate identity is missing", "IDENTITY_REQUIRED", job);
-  }
-  const [intent, freshCrm, details, profileInfo] = await Promise.all([
-    getSubmissionIntent(candidateUserId),
-    findCrmCandidate(candidateUserId),
-    candidateDetails(candidateUserId, { strict: true }),
-    candidateProfileInfo(candidateUserId),
-  ]);
-  if (!freshCrm) {
-    throw stateError("candidate identity no longer resolves in CRM", "IDENTITY_STALE", job);
-  }
-  if (isArchiveImportCandidate(freshCrm, details, profileInfo)) {
-    return fail(
-      job,
-      "ARCHIVE_IMPORT_EXCLUDED",
-      "Historical archive imports are excluded from Para AI automation",
-    );
-  }
-  if (candidateAlreadySubmitted(freshCrm) || candidateAlreadySubmitted(details)) {
-    const checkedAt = new Date().toISOString();
-    return saveJob(existingTalentNetworkTransition(job, {
-      approvalSource,
-      checkedAt,
-    }), job.revision);
-  }
-  if (intent) {
-    throw stateError(
-      "A submission is already claimed for this candidate. Wait for read-only Talent Network reconciliation.",
-      intent.attemptStartedAt ? "SUBMISSION_ATTEMPT_ALREADY_STARTED" : "SUBMISSION_ALREADY_CLAIMED",
-      job,
-    );
-  }
-  return job;
 }
 
 async function submissionIsVisible(candidateUserId) {
@@ -1425,13 +511,6 @@ export async function submitJob(job, body = {}) {
   if (config.dryRun) throw stateError("PARAAI_DRY_RUN must be explicitly false", "DRY_RUN", job);
   if (!config.submissionOriginPinned) throw stateError("Phase 0 must pin PARAAI_SUBMISSION_ORIGIN", "PHASE0_ORIGIN_REQUIRED", job);
   if (INTERNAL_NAMES.has(normName(job.candidate?.fullName))) throw stateError("internal-name skip list", "INTERNAL_CANDIDATE", job);
-
-  if (job.state === "ready_to_submit") {
-    job = await advanceExistingTalentNetworkJob(job, {
-      approvalSource: body.approvalSource || "preclaim_readback",
-    });
-    if (job.state === "awaiting_matches" || job.state === "error") return job;
-  }
 
   let edited = mergeEdits(job, body);
   const preferences = edited.reviewPreferences;
@@ -1469,6 +548,9 @@ export async function submitJob(job, body = {}) {
       "ARCHIVE_IMPORT_EXCLUDED",
       "Historical archive imports are excluded from Para AI automation",
     );
+  }
+  if (candidateAlreadySubmitted(freshCrm) || candidateAlreadySubmitted(details)) {
+    return fail(job, "ALREADY_SUBMITTED", "Candidate is already in the Para AI talent network");
   }
   if (hasFutureScheduledStep(details)) return fail(job, "FUTURE_NEXT_STEP", "Candidate has a future scheduled next step");
   const membership = await targetMembership(candidateUserId);
@@ -1600,7 +682,6 @@ export async function reconcileSubmittedJob(job) {
       submissionApprovalCheckedAt: checkedAt,
       submitReadbackVerified: true,
       externalWriteMayHaveLanded: false,
-      matchLegStartedAt: job.matchLegStartedAt || checkedAt,
       matchCount: null,
       error: null,
       journalDetail: "Paraform submission verified",

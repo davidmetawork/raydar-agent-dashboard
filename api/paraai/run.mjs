@@ -1,35 +1,10 @@
 import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
-import {
-  applyLadderAndSubmit,
-  enrollJob,
-  loadJob,
-  prepareJob,
-  reconcileSubmittedJob,
-  refreshMatches,
-  submitJob,
-} from "./_lib/pipeline.mjs";
-import {
-  humanIntroResumeQueueOptions,
-} from "./_lib/human-intro.mjs";
-import {
-  acquireJobLock,
-  enqueueAutoJob,
-  releaseJobLock,
-  storeConfigured,
-  takeAlertSlot,
-} from "./_lib/store.mjs";
+import { enrollJob, loadJob, prepareJob, reconcileSubmittedJob, refreshMatches, submitJob } from "./_lib/pipeline.mjs";
+import { acquireJobLock, releaseJobLock, storeConfigured, takeAlertSlot } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
-const ACTIONS = new Set([
-  "prepare",
-  "submit",
-  "apply-ladder-submit",
-  "reconcile-submit",
-  "refresh-matches",
-  "enroll",
-  "no-match-enroll",
-]);
+const ACTIONS = new Set(["prepare", "submit", "reconcile-submit", "refresh-matches", "enroll", "no-match-enroll"]);
 const ALERT_CODES = new Set([
   "AUTH_EXPIRED", "SUBMIT_WRITE_FAILED", "SUBMIT_WRITE_UNKNOWN", "SUBMIT_NOT_VISIBLE", "ENROLL_WRITE_FAILED",
   "ENROLL_NOT_VISIBLE", "GLOBAL_EMAIL_NOT_VISIBLE", "LEAD_EMAIL_NOT_VISIBLE",
@@ -83,19 +58,12 @@ export default async function handler(req, res) {
     let job;
     if (action === "prepare") {
       job = await prepareJob({ botId: jobId, candidateUserId: body.candidateUserId, force: body.force === true });
-      if (job?.humanIntro === true && job?.state === "waiting_for_resume") {
-        await enqueueAutoJob(
-          job.id,
-          humanIntroResumeQueueOptions(job),
-        );
-      }
     } else {
       job = await loadJob(jobId);
       if (body.expectedRevision != null && Number(body.expectedRevision) !== Number(job.revision)) {
         return res.status(409).json({ ok: false, error: "revision_conflict", job });
       }
       if (action === "submit") job = await submitJob(job, body);
-      if (action === "apply-ladder-submit") job = await applyLadderAndSubmit(job);
       if (action === "reconcile-submit") job = await reconcileSubmittedJob(job);
       if (action === "refresh-matches") job = await refreshMatches(job);
       if (action === "enroll") job = await enrollJob(job, body);
