@@ -1,4 +1,4 @@
-// Pure, hard-dark projector for one already verified stable Recall/Calls
+// No-I/O, hard-dark projector for one already verified stable Recall/Calls
 // classifier pair.
 //
 // Its only input is an opaque one-shot capability issued by the classifier
@@ -6,6 +6,11 @@
 // classifier bindings needed by a future durable manifest while deliberately
 // excluding signed bodies, source records, references, identity, and every
 // release/write authority.
+//
+// A separate one-shot projector-to-store handoff starts from that same
+// upstream capability and carries private provenance directly. A returned
+// evidence envelope, its digest, or any reconstructed clone can never mint
+// store provenance.
 
 import { createHash } from "node:crypto";
 
@@ -19,6 +24,8 @@ export const SOURCE_RECALL_SUCCESS_EVIDENCE_VERSION =
   "recall-success-evidence-dark-v1";
 export const SOURCE_RECALL_SUCCESS_EVIDENCE_DIGEST_DOMAIN =
   "phase4-recall-success-evidence-v1";
+export const SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_HANDOFF_VERSION =
+  "recall-classified-manifest-evidence-handoff-dark-v1";
 
 const DIGEST = /^[a-f0-9]{64}$/u;
 const COMPLETE_CLASSIFICATIONS = new Set([
@@ -66,6 +73,8 @@ const SHARED_CAPSULE_FIELDS = Object.freeze([
   "vapiEvidenceDigest",
   "version",
 ]);
+const issuedClassifiedManifestEvidenceCapabilities =
+  new WeakMap();
 
 export class SourceRecallSuccessEvidenceProjectorError
   extends Error {
@@ -248,20 +257,21 @@ function stableProvenance(value) {
   return { first, second, selection, requests, proofs, capsules };
 }
 
-export function projectSourceRecallSuccessEvidence(
+function consumeStablePairCapability(
   capability,
 ) {
-  let privatePair;
   try {
-    privatePair =
-      consumeSourceRecallSuccessEvidenceCapability(
-        capability,
-      );
+    return consumeSourceRecallSuccessEvidenceCapability(
+      capability,
+    );
   } catch {
     fail(
       "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
     );
   }
+}
+
+function projectStablePair(privatePair) {
   const {
     first,
     second,
@@ -433,4 +443,78 @@ export function projectSourceRecallSuccessEvidence(
       classificationMaterial,
     ),
   });
+}
+
+export function projectSourceRecallSuccessEvidence(
+  capability,
+) {
+  return projectStablePair(
+    consumeStablePairCapability(capability),
+  );
+}
+
+export function projectSourceRecallClassifiedManifestEvidenceCapability(
+  capability,
+) {
+  const privatePair =
+    consumeStablePairCapability(capability);
+  const evidence = projectStablePair(privatePair);
+  const code =
+    "SOURCE_RECALL_SUCCESS_EVIDENCE_STABLE_PAIR_INVALID";
+  const upstreamIssuedFromRedisAtMs = exactTimestampMs(
+    privatePair.selection.issuedFromRedisAtMs,
+    code,
+  );
+  const upstreamNotAfterMs = exactTimestampMs(
+    privatePair.selection.notAfterMs,
+    code,
+  );
+  if (upstreamIssuedFromRedisAtMs >= upstreamNotAfterMs) {
+    fail(code);
+  }
+  const storeCapability = Object.freeze({});
+  issuedClassifiedManifestEvidenceCapabilities.set(
+    storeCapability,
+    deepFreeze({
+      version:
+        SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_HANDOFF_VERSION,
+      evidence,
+      settlementStatus:
+        evidence.classificationProofComplete
+          ? "terminal"
+          : "unsettled",
+      signedResponses: [
+        privatePair.first.response,
+        privatePair.second.response,
+      ],
+      upstreamIssuedFromRedisAtMs,
+      upstreamNotAfterMs,
+    }),
+  );
+  return storeCapability;
+}
+
+export function consumeSourceRecallClassifiedManifestEvidenceCapability(
+  capability,
+) {
+  const code =
+    "SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_CAPABILITY_INVALID";
+  if (
+    capability === null
+    || typeof capability !== "object"
+    || !issuedClassifiedManifestEvidenceCapabilities.has(
+      capability,
+    )
+    || !Object.isFrozen(capability)
+  ) {
+    fail(code);
+  }
+  const provenance =
+    issuedClassifiedManifestEvidenceCapabilities.get(
+      capability,
+    );
+  issuedClassifiedManifestEvidenceCapabilities.delete(
+    capability,
+  );
+  return provenance;
 }
