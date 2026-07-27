@@ -11,6 +11,8 @@ import {
   pendingBackfillRequests,
   processMatchRequest,
   readSubmissionRequestHistory,
+  releaseHeldOutreach,
+  reviewHeldOutreach,
   runOutreachTick,
 } from "./_lib/outreach.mjs";
 import {
@@ -120,6 +122,29 @@ export default async function handler(req, res) {
         ok: true,
         action,
         requests: pendingBackfillRequests(history, states),
+      });
+    }
+    if (action === "review-held") {
+      // Read-only: re-judges every request parked by the old block-on-any-reply
+      // rule and reports what would send. Never delivers email.
+      return res.status(200).json({
+        ok: true,
+        action,
+        ...(await reviewHeldOutreach({ limit: Number(body.limit || 50) })),
+      });
+    }
+    if (action === "release-held") {
+      if (body.confirmation !== "RELEASE HELD REPLIES") {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      return res.status(200).json({
+        ok: true,
+        action,
+        ...(await releaseHeldOutreach({ config, limit: Number(body.limit || 5) })),
       });
     }
     if (action === "discover-request-contact") {

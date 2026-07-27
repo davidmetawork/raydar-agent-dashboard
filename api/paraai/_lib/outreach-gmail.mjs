@@ -158,6 +158,52 @@ function payloadContent(payload) {
   return [own, ...(payload.parts || []).map(payloadContent)].filter(Boolean).join("\n");
 }
 
+export function messageText(message) {
+  return payloadContent(message?.payload);
+}
+
+// Mail servers announce a permanent failure in a small, stable vocabulary: a
+// daemon sender, an RFC 3463 5.x.x enhanced status, or an explicit failed
+// recipient. A 4.x.x status is a TEMPORARY failure the server will retry on its
+// own, so it must never latch a durable stop.
+const BOUNCE_SENDER = /(mailer-?daemon|postmaster|mail delivery (subsystem|system)|delivery status notification)/i;
+const PERMANENT_FAILURE = /(\b5\.\d\.\d\b|\b55\d\b|permanent(ly)? (failed|failure)|address not found|user unknown|no such (user|address)|recipient .{0,40}(does not exist|not found)|mailbox (unavailable|does not exist))/i;
+const TEMPORARY_FAILURE = /(\b4\.\d\.\d\b|temporar|will retry|try again later|delayed|deferred|out of office|automatic reply)/i;
+
+export function isHardBounce(message) {
+  const labels = message?.labelIds || [];
+  if (labels.includes("DRAFT") || labels.includes("SENT")) return false;
+  const from = String(headerValue(message, "From") || "");
+  const subject = String(headerValue(message, "Subject") || "");
+  const failedRecipients = String(headerValue(message, "X-Failed-Recipients") || "");
+  const contentType = String(headerValue(message, "Content-Type") || "");
+  const looksLikeReport = Boolean(
+    BOUNCE_SENDER.test(from) ||
+    BOUNCE_SENDER.test(subject) ||
+    failedRecipients ||
+    /report-type=delivery-status/i.test(contentType),
+  );
+  if (!looksLikeReport) return false;
+  const body = `${subject}\n${failedRecipients}\n${messageText(message)}`;
+  // A delayed-delivery warning names the same recipient as a real bounce, so a
+  // permanent code alone is not enough — the report must not also be a retry.
+  if (!PERMANENT_FAILURE.test(body)) return false;
+  if (TEMPORARY_FAILURE.test(body) && !/\b5\.\d\.\d\b|\b55\d\b/.test(body)) return false;
+  return true;
+}
+
+export function hardBounceAfter(thread, afterMs) {
+  const cutoff = Number(afterMs) || 0;
+  const hit = (thread?.messages || []).find((message) => (
+    Number(message?.internalDate || 0) > cutoff && isHardBounce(message)
+  ));
+  if (!hit) return null;
+  return {
+    at: new Date(Number(hit.internalDate || 0) || Date.now()).toISOString(),
+    subject: String(headerValue(hit, "Subject") || "").slice(0, 180),
+  };
+}
+
 export function threadDigestAnchorStatus(thread, digestUrl) {
   const exactUrl = clean(digestUrl);
   if (!exactUrl) return "missing";
@@ -232,17 +278,23 @@ export function headerAddresses(message, name = "From") {
 // Deliberately fails SAFE: an auto-responder or bounce also counts as a reply
 // and pauses the ladder. Over-stopping costs one un-sent nudge; under-stopping
 // emails someone who already said no.
-export function candidateRepliedAfter(thread, mailbox, afterMs) {
+export function inboundMessagesAfter(thread, mailbox, afterMs) {
   const ours = canonicalAddress(mailbox);
   const cutoff = Number(afterMs) || 0;
-  return (thread?.messages || []).some((message) => {
+  return (thread?.messages || []).filter((message) => {
     const labels = message?.labelIds || [];
     if (labels.includes("DRAFT") || labels.includes("SENT")) return false;
     if (Number(message?.internalDate || 0) <= cutoff) return false;
     const from = headerAddresses(message, "From");
     if (!from.length) return false;
     return !from.some((address) => address === ours);
-  });
+  }).sort(
+    (left, right) => Number(left?.internalDate || 0) - Number(right?.internalDate || 0),
+  );
+}
+
+export function candidateRepliedAfter(thread, mailbox, afterMs) {
+  return inboundMessagesAfter(thread, mailbox, afterMs).length > 0;
 }
 
 // The conversation anchor for the reply window: the first message we delivered.

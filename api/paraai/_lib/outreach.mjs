@@ -12,6 +12,7 @@ import {
   roleShareUrl,
 } from "./outreach-copy.mjs";
 import {
+  canonicalAddress,
   candidateRepliedAfter,
   createReviewDraft,
   deliverMessage,
@@ -21,11 +22,26 @@ import {
   getSignatureHtml,
   getThread,
   gmailConfigured,
+  hardBounceAfter,
+  inboundMessagesAfter,
   outreachMailbox,
   probeGmail,
   threadDigestAnchorStatus,
   threadReplyContext,
 } from "./outreach-gmail.mjs";
+import {
+  activeOffMarketHold,
+  classifyInboundIntent,
+  intentGateDisabled,
+  intentMessagesFromThread,
+  INTENT_DO_NOT_CONTACT,
+  INTENT_OFF_MARKET,
+  INTENT_OPEN,
+  lapsedOffMarketHold,
+  newestInternalDate,
+  offMarketHold,
+  OFF_MARKET_HOLD_DAYS,
+} from "./outreach-intent.mjs";
 import { discoverCandidateContact } from "./outreach-contact.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import {
@@ -49,8 +65,19 @@ import {
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 const EXCEPTION_RETRY_MS = 5 * 60 * 1000;
-// Exception codes that a later tick may legitimately retry on its own.
-const RECOVERABLE_EXCEPTION_CODES = new Set(["OUTREACH_NO_EMAIL"]);
+// Exception codes that a later tick may legitimately retry on its own. A bounced
+// address behaves exactly like a missing one: the moment David fixes it in
+// Paraform the request becomes sendable again, so it self-heals.
+const RECOVERABLE_EXCEPTION_CODES = new Set(["OUTREACH_NO_EMAIL", "OUTREACH_EMAIL_BOUNCED"]);
+// Codes that park a request for a human and must never re-enter the tick on
+// their own. OUTREACH_CANDIDATE_REPLIED is the retired 2026-07-26 code, kept here
+// so pre-existing held records stay parked until the release action re-judges
+// them under the intent rule.
+const HUMAN_HELD_EXCEPTION_CODES = new Set([
+  "OUTREACH_CANDIDATE_REPLIED",
+  "OUTREACH_CANDIDATE_OFF_MARKET",
+  "OUTREACH_CANDIDATE_DO_NOT_CONTACT",
+]);
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -167,14 +194,14 @@ export function eligibleNewRequests(
       .map((row) => clean(row?.requestId))
       .filter(Boolean),
   );
-  // A candidate-replied hold is a human decision, not a transient failure. Without
-  // this the request stays pending and unreached forever, so every tick would
+  // An off-market hold is a human decision, not a transient failure. Without this
+  // the request stays pending and unreached forever, so every tick would
   // re-process it, re-throw, and burn a batch slot — starving real work.
   const humanHeld = new Set(
     (exceptions || [])
       .filter((row) => (
         row?.status === "open" &&
-        clean(row?.code) === "OUTREACH_CANDIDATE_REPLIED"
+        HUMAN_HELD_EXCEPTION_CODES.has(clean(row?.code))
       ))
       .map((row) => clean(row?.requestId))
       .filter(Boolean),
@@ -467,6 +494,105 @@ async function saveUncertainOutbox(state, actionKey, messageId, error) {
   return saveOutreachState(uncertain, state.revision).catch(() => uncertain);
 }
 
+// Read a candidate's conversation and decide what it authorizes, WITHOUT writing
+// anything. The send path and the held-backlog review share this so a reported
+// verdict and an acted-on verdict can never disagree.
+export async function assessOutreachThread({
+  state,
+  config = outreachConfig(),
+  threadImpl = getThread,
+  classifyImpl = classifyInboundIntent,
+} = {}) {
+  if (!state?.threadId) return { checked: false };
+  const thread = await threadImpl(config.mailbox, state.threadId).catch(() => null);
+  if (!thread) return { checked: false };
+  const anchor = finiteDate(state.firstOutboundAt)
+    ?? firstDeliveredInternalDate(thread)
+    ?? 0;
+  const bounce = hardBounceAfter(thread, anchor);
+  const inbound = inboundMessagesAfter(thread, config.mailbox, anchor);
+  const newestInboundMs = newestInternalDate(inbound);
+  const result = {
+    checked: true,
+    replied: inbound.length > 0,
+    bounce,
+    newestInboundMs,
+    verdict: null,
+    intent: null,
+    hold: null,
+  };
+  // An undeliverable address settles the question before intent matters.
+  if (bounce || !inbound.length) return result;
+  // Never re-judge messages already judged: same answer, no repeat model spend.
+  if (Number(state.intentCheckedThrough || 0) >= newestInboundMs) {
+    result.verdict = state.intentVerdict || null;
+    result.hold = activeOffMarketHold(state);
+    result.cached = true;
+    return result;
+  }
+  const intent = await classifyImpl(intentMessagesFromThread(inbound));
+  result.intent = intent;
+  result.verdict = intent.verdict;
+  result.hold = offMarketHold({
+    verdict: intent.verdict,
+    // Anchor the six months at what the candidate SAID, not at when we read it,
+    // so an old decline surfaced late does not restart the clock.
+    detectedAt: new Date(newestInboundMs || Date.now()).toISOString(),
+    reason: intent.reason,
+    source: intent.source,
+    model: intent.model || null,
+  });
+  return result;
+}
+
+// Turn an assessment into the exact state change it justifies. Shared by the send
+// path and the backlog review so that what David is shown and what the worker
+// later acts on are produced by one piece of code.
+export function assessmentPatch(assessment, {
+  requestId = null,
+  address = null,
+  repliedAt = null,
+  stoppedReason = null,
+} = {}) {
+  if (!assessment?.checked) return { patch: {}, event: null };
+  const patch = {};
+  let event = "intent_checked";
+  if (assessment.replied) {
+    // Written whenever anyone wrote back: this is what keeps a previously engaged
+    // candidate off the nudge ladder even when the new role is cleared to send.
+    // An existing timestamp is never overwritten — the first reply is the anchor.
+    patch.repliedAt = repliedAt || new Date().toISOString();
+    patch.stoppedReason = stoppedReason || "candidate_replied";
+    patch.followup = null;
+    event = "reply_cleared_for_new_role";
+  }
+  if (assessment.newestInboundMs) {
+    patch.intentCheckedThrough = assessment.newestInboundMs;
+    patch.intentVerdict = assessment.verdict;
+  }
+  if (assessment.bounce) {
+    patch.bounce = {
+      ...assessment.bounce,
+      address: address || null,
+      detectedAt: new Date().toISOString(),
+    };
+    event = "match_blocked_on_bounce";
+  } else if (assessment.hold) {
+    patch.offMarket = { ...assessment.hold, requestId };
+    event = "match_blocked_off_market";
+  }
+  return { patch, event };
+}
+
+export function assessmentBlockCode(assessment) {
+  if (assessment?.bounce) return "OUTREACH_EMAIL_BOUNCED";
+  if (assessment?.hold?.verdict === INTENT_DO_NOT_CONTACT) {
+    return "OUTREACH_CANDIDATE_DO_NOT_CONTACT";
+  }
+  if (assessment?.hold?.verdict === INTENT_OFF_MARKET) return "OUTREACH_CANDIDATE_OFF_MARKET";
+  return null;
+}
+
 export async function processMatchRequest(
   request,
   history,
@@ -511,40 +637,111 @@ export async function processMatchRequest(
     const existingMatch = state.matches?.[request.id];
     if (existingMatch?.sentAt) return { action: "existing", state, request, match: existingMatch };
 
-    // INCIDENT 2026-07-26: the match path used to be entirely reply-blind, so a
-    // candidate who had written "I already accepted an offer" still received the
-    // next role's match email — threaded as a direct reply to their own decline —
-    // plus a freshly re-armed follow-up ladder. A recorded reply now blocks the
-    // AUTOMATIC send and routes the request to the human exception queue. The
-    // explicitly confirmed operator send (mode "send-request") is the override.
-    const blockAfterReply = () => {
-      const error = new Error("candidate has replied; automatic match send is blocked");
-      error.code = "OUTREACH_CANDIDATE_REPLIED";
+    // INCIDENT 2026-07-26 → REVISED 2026-07-28. The 07-26 fix made ANY inbound
+    // message a permanent block on every future match. It was right about nudges
+    // and wrong about new roles: a candidate who wrote "not this one, thanks" is
+    // exactly who a brand-new role should reach. A reply still kills the nudge
+    // ladder (see planDeliveredMatch), but the SEND is blocked only by an explicit
+    // off-market statement, an explicit stop-contacting request, or a hard bounce.
+    // PARAAI_OUTREACH_INTENT_DISABLED restores the 07-26 block-on-any-reply rule.
+    const blockFor = (code, message, detail = null) => {
+      const error = new Error(message);
+      error.code = code;
       error.candidateName = state.candidateName;
+      error.detail = detail;
       return error;
     };
-    if (mode === "send" && !allowAfterReply && (state.repliedAt || state.stoppedReason)) {
-      throw blockAfterReply();
+    const legacyReplyGate = intentGateDisabled();
+    const gated = mode === "send" && !allowAfterReply;
+
+    // A bounce recorded against an address we no longer use is stale: the whole
+    // point of surfacing it was to get the address fixed in Paraform.
+    if (state.bounce && contact.email && state.bounce.address &&
+        canonicalAddress(state.bounce.address) !== canonicalAddress(contact.email)) {
+      state = await saveOutreachState(appendOutreachJournal({
+        ...state,
+        bounce: null,
+      }, "bounce_cleared_on_new_address", { requestId: request.id }), state.revision)
+        .catch(() => ({ ...state, bounce: null }));
     }
-    // Every candidate who declined BEFORE this shipped has no stored reply flag —
-    // their ladder had already finished, so the follow-up gate will never run
-    // again to record one. Without a live read the guard above would be inert for
-    // exactly the people it most needs to protect, so consult the thread itself
-    // and latch the result for next time.
-    if (mode === "send" && !allowAfterReply && state.threadId) {
-      const priorThread = await getThread(config.mailbox, state.threadId).catch(() => null);
-      const priorAnchor = finiteDate(state.firstOutboundAt)
-        ?? firstDeliveredInternalDate(priorThread)
-        ?? 0;
-      if (priorThread && candidateRepliedAfter(priorThread, config.mailbox, priorAnchor)) {
+
+    if (gated) {
+      const hold = activeOffMarketHold(state);
+      if (hold) {
+        throw blockFor(
+          hold.verdict === INTENT_DO_NOT_CONTACT
+            ? "OUTREACH_CANDIDATE_DO_NOT_CONTACT"
+            : "OUTREACH_CANDIDATE_OFF_MARKET",
+          "candidate is on an outreach hold; automatic match send is blocked",
+          hold,
+        );
+      }
+      if (state.bounce) {
+        throw blockFor(
+          "OUTREACH_EMAIL_BOUNCED",
+          "candidate email hard-bounced; automatic match send is blocked",
+          state.bounce,
+        );
+      }
+      if (legacyReplyGate && (state.repliedAt || state.stoppedReason)) {
+        throw blockFor(
+          "OUTREACH_CANDIDATE_REPLIED",
+          "candidate has replied; automatic match send is blocked (intent gate disabled)",
+        );
+      }
+      // A six-month hold that has run out resumes sending — but never silently.
+      const lapsed = lapsedOffMarketHold(state);
+      if (lapsed) {
         state = await saveOutreachState(appendOutreachJournal({
           ...state,
-          followup: null,
-          stoppedReason: state.stoppedReason || "candidate_replied",
-          repliedAt: state.repliedAt || new Date().toISOString(),
-        }, "match_blocked_after_reply", { requestId: request.id }), state.revision)
+          offMarket: { ...lapsed, lapseNotifiedAt: new Date().toISOString() },
+        }, "off_market_hold_lapsed", { requestId: request.id }), state.revision)
           .catch(() => state);
-        throw blockAfterReply();
+        await notifySlack(
+          `⏰ Para AI outreach: ${displayName(state.candidateName) || "a candidate"}'s off-market hold has lapsed after ${OFF_MARKET_HOLD_DAYS} days. New roles auto-send again, starting with ${clean(request.roleName) || "this role"} @ ${clean(request.companyName) || "this company"}.`,
+        ).catch(() => false);
+      }
+    }
+
+    // Live thread read. Candidates who replied BEFORE any of this shipped carry no
+    // stored flag — their ladder had already finished, so the follow-up gate will
+    // never run again to record one. Reading the thread here is what makes the
+    // guard real for exactly the people it most needs to protect.
+    if (gated && state.threadId) {
+      const assessment = await assessOutreachThread({ state, config });
+      if (assessment.checked) {
+        const { patch, event } = assessmentPatch(assessment, {
+          requestId: request.id,
+          address: state.candidateEmail || contact.email || null,
+          repliedAt: state.repliedAt,
+          stoppedReason: state.stoppedReason,
+        });
+        if (Object.keys(patch).length) {
+          state = await saveOutreachState(
+            appendOutreachJournal({ ...state, ...patch }, event, {
+              requestId: request.id,
+              verdict: assessment.verdict || null,
+              intentSource: assessment.intent?.source || null,
+            }),
+            state.revision,
+          ).catch(() => ({ ...state, ...patch }));
+        }
+        const blockCode = assessmentBlockCode(assessment);
+        if (blockCode) {
+          throw blockFor(
+            blockCode,
+            blockCode === "OUTREACH_EMAIL_BOUNCED"
+              ? "candidate email hard-bounced; automatic match send is blocked"
+              : "candidate is on an outreach hold; automatic match send is blocked",
+            assessment.bounce ? patch.bounce : assessment.hold,
+          );
+        }
+        if (assessment.replied && legacyReplyGate) {
+          throw blockFor(
+            "OUTREACH_CANDIDATE_REPLIED",
+            "candidate has replied; automatic match send is blocked (intent gate disabled)",
+          );
+        }
       }
     }
 
@@ -902,6 +1099,35 @@ export function missingEmailAlertCopy(request, discovery = {}) {
   };
 }
 
+const HELD_ALERT_CODES = new Set([
+  "OUTREACH_CANDIDATE_REPLIED",
+  "OUTREACH_CANDIDATE_OFF_MARKET",
+  "OUTREACH_CANDIDATE_DO_NOT_CONTACT",
+  "OUTREACH_EMAIL_BOUNCED",
+]);
+
+// Slack only carries the verdict and the role, never the candidate's own words.
+export function heldAlertCopy(code, request, error = null) {
+  const candidate = displayName(error?.candidateName || request?.candidateName) || "a candidate";
+  const role = clean(request?.roleName) || "Unknown role";
+  const company = clean(request?.companyName) || "Unknown company";
+  const match = `${role} @ ${company}`;
+  if (code === "OUTREACH_EMAIL_BOUNCED") {
+    return `📮 Para AI outreach bounced: email to ${candidate} is undeliverable, so ${match} was NOT sent. Fix the address on their Paraform profile and the worker retries automatically.`;
+  }
+  if (code === "OUTREACH_CANDIDATE_DO_NOT_CONTACT") {
+    return `🛑 Para AI outreach stopped: ${candidate} asked us to stop emailing, so ${match} was NOT sent — and no future role will be until you clear the hold.`;
+  }
+  if (code === "OUTREACH_CANDIDATE_OFF_MARKET") {
+    const until = clean(error?.detail?.expiresAt).slice(0, 10);
+    const window = until
+      ? ` The hold lifts automatically on ${until}.`
+      : ` The hold lifts automatically after ${OFF_MARKET_HOLD_DAYS} days.`;
+    return `🛑 Para AI outreach held: ${candidate} said they are off the market, so ${match} was NOT sent.${window} Send it anyway from the Para AI tab if you disagree.`;
+  }
+  return `✋ Para AI outreach held: ${candidate} has already replied, so the ${match} match was NOT auto-sent. Review the thread and send manually if it still makes sense.`;
+}
+
 export async function handleOutreachFailure(
   error,
   request,
@@ -914,24 +1140,21 @@ export async function handleOutreachFailure(
     "AUTH_EXPIRED",
     "OUTREACH_NO_EMAIL",
     "OUTREACH_CANDIDATE_REPLIED",
+    "OUTREACH_CANDIDATE_OFF_MARKET",
+    "OUTREACH_CANDIDATE_DO_NOT_CONTACT",
+    "OUTREACH_EMAIL_BOUNCED",
     "OUTREACH_THREAD_NOT_FOUND",
     "OUTREACH_DIGEST_NOT_VISIBLE",
     "GMAIL_SEND_UNKNOWN",
     "GMAIL_AUTH_FAILED",
   ]).has(code)) return;
-  // A blocked post-reply match is a human decision, not a system fault: record it
-  // durably and alert once, exactly like the missing-email path. Never silent.
-  if (code === "OUTREACH_CANDIDATE_REPLIED" && request?.id) {
+  // A blocked match is a human decision, not a system fault: record it durably and
+  // alert once, exactly like the missing-email path. Never silent.
+  if (HELD_ALERT_CODES.has(code) && request?.id) {
     const record = await recordOutreachException({ request, code, discovery: null });
     const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
     if (!alertClaimed) return record;
-    const candidate = displayName(error?.candidateName || request?.candidateName)
-      || "a candidate";
-    const role = clean(request?.roleName) || "Unknown role";
-    const company = clean(request?.companyName) || "Unknown company";
-    await notifySlack(
-      `✋ Para AI outreach held: ${candidate} has already replied, so the ${role} @ ${company} match was NOT auto-sent. Review the thread and send manually if it still makes sense.`,
-    ).catch(() => false);
+    await notifySlack(heldAlertCopy(code, request, error)).catch(() => false);
     return record;
   }
   if (code === "OUTREACH_NO_EMAIL" && request?.id) {
@@ -1036,6 +1259,131 @@ export async function runOutreachTick({
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});
   }
+}
+
+// THE 2026-07-26 BACKLOG. Every request parked by the old block-on-any-reply rule
+// is re-judged under the intent rule. This reports and latches verdicts; it never
+// sends. releaseHeldOutreach does the sending, and only after this has run.
+export async function reviewHeldOutreach({
+  config = outreachConfig(),
+  limit = 50,
+  assessImpl = assessOutreachThread,
+} = {}) {
+  const [history, exceptions] = await Promise.all([
+    readSubmissionRequestHistory(),
+    listOutreachExceptions(500),
+  ]);
+  const held = (exceptions || [])
+    .filter((row) => row?.status === "open" && HUMAN_HELD_EXCEPTION_CODES.has(clean(row?.code)))
+    .slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
+  const rows = [];
+  for (const record of held) {
+    const requestId = clean(record.requestId);
+    const request = (history || []).find((row) => row.id === requestId) || null;
+    const row = {
+      requestId,
+      candidateName: clean(record.candidateName || request?.candidateName),
+      roleName: clean(record.roleName || request?.roleName),
+      companyName: clean(record.companyName || request?.companyName),
+      heldCode: clean(record.code),
+      heldSince: clean(record.firstSeenAt) || null,
+      verdict: null,
+      reason: null,
+      source: null,
+      wouldSend: false,
+      blockedBy: null,
+    };
+    if (!request) {
+      // Withdrawn, filled, or already reached out elsewhere — nothing to release.
+      row.blockedBy = "REQUEST_NO_LONGER_PENDING";
+      rows.push(row);
+      continue;
+    }
+    const candidateUserId = clean(record.candidateUserId || request.candidateUserId);
+    const state = candidateUserId
+      ? await getOutreachState(candidateUserId).catch(() => null)
+      : null;
+    if (!state?.threadId) {
+      row.verdict = INTENT_OPEN;
+      row.reason = "no candidate conversation on record";
+      row.source = "no_thread";
+      row.wouldSend = true;
+      rows.push(row);
+      continue;
+    }
+    let assessment;
+    try {
+      assessment = await assessImpl({ state, config });
+    } catch (error) {
+      row.blockedBy = clean(error?.code || "OUTREACH_ASSESS_FAILED");
+      rows.push(row);
+      continue;
+    }
+    row.verdict = assessment.verdict || INTENT_OPEN;
+    row.reason = clean(assessment.intent?.reason) || null;
+    row.source = clean(assessment.intent?.source) || (assessment.cached ? "cached" : null);
+    row.blockedBy = assessmentBlockCode(assessment);
+    row.wouldSend = !row.blockedBy;
+    // Latch what we just learned so the send path agrees with this report.
+    const { patch, event } = assessmentPatch(assessment, {
+      requestId,
+      address: state.candidateEmail || null,
+      repliedAt: state.repliedAt,
+      stoppedReason: state.stoppedReason,
+    });
+    if (Object.keys(patch).length) {
+      await saveOutreachState(
+        appendOutreachJournal({ ...state, ...patch }, event, {
+          requestId,
+          verdict: assessment.verdict || null,
+          review: "held_backlog",
+        }),
+        state.revision,
+      ).catch(() => null);
+    }
+    rows.push(row);
+  }
+  return {
+    reviewed: rows.length,
+    sendable: rows.filter((row) => row.wouldSend).length,
+    held: rows.filter((row) => row.blockedBy).length,
+    rows,
+  };
+}
+
+export async function releaseHeldOutreach({
+  config = outreachConfig(),
+  limit = 5,
+} = {}) {
+  const review = await reviewHeldOutreach({ config, limit: 200 });
+  const batch = review.rows
+    .filter((row) => row.wouldSend)
+    .slice(0, Math.max(1, Math.min(10, Number(limit) || 5)));
+  const history = await readSubmissionRequestHistory();
+  const results = [];
+  for (const row of batch) {
+    const request = history.find((item) => item.id === row.requestId);
+    if (!request) {
+      results.push({ ...row, action: "skipped", code: "REQUEST_NO_LONGER_PENDING" });
+      continue;
+    }
+    try {
+      // allowAfterReply stays FALSE on purpose: the normal gate runs, so an
+      // off-market verdict recorded between review and release still blocks.
+      const result = await processMatchRequest(request, history, { mode: "send", config });
+      results.push({ ...row, action: result.action });
+    } catch (error) {
+      await handleOutreachFailure(error, request, { config }).catch(() => {});
+      results.push({ ...row, action: "error", code: clean(error?.code || "OUTREACH_FAILED") });
+    }
+  }
+  return {
+    reviewed: review.reviewed,
+    sendable: review.sendable,
+    processed: results.filter((result) => result.action === "sent").length,
+    remaining: Math.max(0, review.sendable - batch.length),
+    results,
+  };
 }
 
 export async function discoverOutreachRequestContact(
