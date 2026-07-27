@@ -1882,6 +1882,7 @@ test("the exact v2 consumer closure has no production importer or release integr
     "source-recall-classifier-capsule-client.mjs",
     "source-recall-classifier-capsule-capability.mjs",
     "source-recall-classifier-capsule-runtime.mjs",
+    "source-recall-success-evidence-projector.mjs",
   ];
   const moduleUrls = names.map((name) => new URL(
     `../api/paraai/_lib/${name}`,
@@ -1907,6 +1908,13 @@ test("the exact v2 consumer closure has no production importer or release integr
         "./source-recall-classifier-capsule-verifier.mjs",
         "node:crypto",
         "node:util",
+      ],
+    ],
+    [
+      names[5],
+      [
+        "./source-recall-classifier-capsule-runtime.mjs",
+        "node:crypto",
       ],
     ],
   ]);

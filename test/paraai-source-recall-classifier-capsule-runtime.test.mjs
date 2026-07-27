@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  sign,
+} from "node:crypto";
 import {
   readdir,
   readFile,
@@ -18,19 +22,41 @@ import {
 } from "../api/paraai/_lib/source-recall-classifier-capsule-capability.mjs";
 import {
   SOURCE_RECALL_CLASSIFIER_CAPSULE_CLIENT_VERSION,
+  SOURCE_RECALL_CLASSIFIER_CAPSULE_SECRET_ENV,
+  SOURCE_RECALL_CLASSIFIER_CAPSULE_URL,
 } from "../api/paraai/_lib/source-recall-classifier-capsule-client.mjs";
 import {
+  SOURCE_RECALL_CLASSIFIER_CAPSULE_RECEIPT_VERSION,
   SOURCE_RECALL_CLASSIFIER_CAPSULE_REQUEST_VERSION,
   SOURCE_RECALL_CLASSIFIER_CAPSULE_RESPONSE_VERSION,
   SOURCE_RECALL_CLASSIFIER_CAPSULE_VERSION,
   SOURCE_RECALL_CLASSIFIER_POINT_PROOF_VERSION,
   prepareSourceRecallClassifierCapsuleRequest,
+  sourceRecallClassifierCapsuleContextDigest,
+  sourceRecallClassifierCapsuleDigest,
+  sourceRecallClassifierCapsuleReceiptSignatureBase,
+  sourceRecallClassifierCapsuleReservationId,
+  sourceRecallClassifierEndedAtDigest,
+  sourceRecallClassifierOutputDigest,
 } from "../api/paraai/_lib/source-recall-classifier-capsule-protocol.mjs";
+import {
+  SOURCE_RECALL_CLASSIFIER_CAPSULE_KEY_ID_DOMAIN,
+  SOURCE_RECALL_CLASSIFIER_CAPSULE_PIN_ENVS,
+  SOURCE_RECALL_CLASSIFIER_CAPSULE_PUBLIC_KEY_ENV,
+} from "../api/paraai/_lib/source-recall-classifier-capsule-verifier.mjs";
 import {
   SOURCE_RECALL_CLASSIFIER_CAPSULE_RUNTIME_VERSION,
   SourceRecallClassifierCapsuleRuntimeError,
   consumeStableRecallClassifierCapsule,
+  issueSourceRecallSuccessEvidenceCapability,
 } from "../api/paraai/_lib/source-recall-classifier-capsule-runtime.mjs";
+import {
+  SOURCE_RECALL_SUCCESS_EVIDENCE_DIGEST_DOMAIN,
+  SOURCE_RECALL_SUCCESS_EVIDENCE_PROJECTOR_VERSION,
+  SOURCE_RECALL_SUCCESS_EVIDENCE_VERSION,
+  SourceRecallSuccessEvidenceProjectorError,
+  projectSourceRecallSuccessEvidence,
+} from "../api/paraai/_lib/source-recall-success-evidence-projector.mjs";
 import {
   createSourceRecallPointObservationStore,
 } from "../api/paraai/_lib/source-recall-point-observation-store.mjs";
@@ -45,6 +71,42 @@ import {
 const HOUR = 60 * 60 * 1_000;
 const BOUNDARY = "2026-07-26T01:00:00.000Z";
 const BOUNDARY_MS = Date.parse(BOUNDARY);
+const PRODUCTION_TEST_SECRET =
+  "runtime-production-path-test-secret-0123456789";
+const PRODUCTION_TEST_PUBLIC_KEY_BASE64 =
+  "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+const PRODUCTION_TEST_PRIVATE_KEY = createPrivateKey({
+  key: Buffer.from(
+    "302e020100300506032b657004220420"
+      + "9d61b19deffd5a60ba844af492ec2cc444"
+      + "49c5697b326919703bac031cae7f60",
+    "hex",
+  ),
+  format: "der",
+  type: "pkcs8",
+});
+const PRODUCTION_TEST_KEY_ID = createHash("sha256")
+  .update(
+    `${SOURCE_RECALL_CLASSIFIER_CAPSULE_KEY_ID_DOMAIN}\0`,
+    "utf8",
+  )
+  .update(
+    Buffer.from(
+      PRODUCTION_TEST_PUBLIC_KEY_BASE64,
+      "base64",
+    ),
+  )
+  .digest("hex");
+const PRODUCTION_TEST_PINS = Object.freeze({
+  classifierArtifactDigest:
+    "1".repeat(64),
+  classifierDeploymentDigest:
+    "2".repeat(64),
+  classifierRuntimeConfigDigest:
+    "3".repeat(64),
+  classifierPolicyDigest:
+    "4".repeat(64),
+});
 const REFERENCE = Object.freeze({
   id: "synthetic-runtime-bot",
   joinAt: "2026-07-26T00:30:00.000Z",
@@ -391,6 +453,19 @@ function expectRuntimeCode(code) {
   };
 }
 
+function expectProjectorCode(code) {
+  return (error) => {
+    assert.equal(
+      error instanceof
+        SourceRecallSuccessEvidenceProjectorError,
+      true,
+    );
+    assert.equal(error.code, code);
+    assert.equal(error.message, code);
+    return true;
+  };
+}
+
 function runtimeDependencies(
   nowMs,
   readImpl,
@@ -525,6 +600,220 @@ function verifiedResult(
     authorityAvailable: false,
     ...overrides,
   });
+}
+
+async function stableClassifierPair(
+  snapshot,
+  {
+    classification = "success",
+    mutate,
+  } = {},
+) {
+  const nowMs = snapshot.redisNowMs + 1;
+  let ordinal = 0;
+  return consumeStableRecallClassifierCapsule(
+    issueSourceRecallClassifierCapsuleCapability(snapshot),
+    runtimeDependencies(nowMs, async (request) => {
+      ordinal += 1;
+      let value = verifiedResult(request, {
+        classification,
+        verifiedAtMs: nowMs + ordinal,
+      });
+      if (mutate) {
+        value = clone(value);
+        mutate(value, request);
+        value = deepFreeze(value);
+      }
+      return value;
+    }),
+  );
+}
+
+function signedProductionResponse(
+  requestValue,
+  {
+    callEndedAt =
+      "2026-07-26T00:59:00.000Z",
+    classification = "success",
+  } = {},
+) {
+  const request =
+    prepareSourceRecallClassifierCapsuleRequest(
+      requestValue,
+    );
+  const output = classificationOutput(classification);
+  const callEndedAtBasis = callEndedAt === null
+    ? "unavailable"
+    : "recording_completed_at";
+  const capsule = {
+    version: SOURCE_RECALL_CLASSIFIER_CAPSULE_VERSION,
+    source: "recall",
+    pointBindingDigest: request.pointBindingDigest,
+    pointProofDigest: request.pointProofDigest,
+    pointResponseDigest:
+      digest(
+        `production-point-response-${request.pointReadNumber}`,
+      ),
+    decisionBoundaryDigest:
+      request.pointProof.decisionBoundaryDigest,
+    callEndedAt,
+    callEndedAtBasis,
+    callEndedAtDigest:
+      sourceRecallClassifierEndedAtDigest({
+        sourceRecordDigest:
+          request.pointProof.sourceRecordDigest,
+        callEndedAt,
+        callEndedAtBasis,
+      }),
+    ...PRODUCTION_TEST_PINS,
+    classifierInputDigest:
+      digest(
+        `production-classifier-input-${request.pointReadNumber}`,
+      ),
+    transcriptEvidenceDigest:
+      digest("production-transcript-evidence"),
+    presenceEvidenceDigest:
+      digest("production-presence-evidence"),
+    vapiEvidenceDigest:
+      digest("production-vapi-evidence"),
+    mediaEvidenceDigest:
+      digest("production-media-evidence"),
+    vapiAssociationStatus: "not_used",
+    ...output,
+    classifierOutputDigest:
+      sourceRecallClassifierOutputDigest({
+        vapiAssociationStatus: "not_used",
+        ...output,
+      }),
+    classifiedAtMs:
+      request.pointProof.pointCompletedAtMs + 10,
+  };
+  const contextDigest =
+    sourceRecallClassifierCapsuleContextDigest(
+      request,
+      PRODUCTION_TEST_PINS,
+    );
+  const reservationId =
+    sourceRecallClassifierCapsuleReservationId(
+      request,
+      contextDigest,
+    );
+  const unsignedReceipt = {
+    version:
+      SOURCE_RECALL_CLASSIFIER_CAPSULE_RECEIPT_VERSION,
+    keyId: PRODUCTION_TEST_KEY_ID,
+    reservationId,
+    contextDigest,
+    readNumber: request.pointReadNumber,
+    requestDigest: request.requestDigest,
+    pointResponseDigest: capsule.pointResponseDigest,
+    capsuleDigest:
+      sourceRecallClassifierCapsuleDigest(
+        capsule,
+        request,
+      ),
+    issuedAtMs: capsule.classifiedAtMs + 10,
+    expiresAtMs: capsule.classifiedAtMs + HOUR,
+  };
+  const receipt = {
+    ...unsignedReceipt,
+    signature: sign(
+      null,
+      Buffer.from(
+        sourceRecallClassifierCapsuleReceiptSignatureBase(
+          unsignedReceipt,
+        ),
+        "utf8",
+      ),
+      PRODUCTION_TEST_PRIVATE_KEY,
+    ).toString("base64url"),
+  };
+  return JSON.stringify({
+    version:
+      SOURCE_RECALL_CLASSIFIER_CAPSULE_RESPONSE_VERSION,
+    reservationId,
+    contextDigest,
+    readNumber: request.pointReadNumber,
+    requestDigest: request.requestDigest,
+    capsule,
+    receipt,
+  });
+}
+
+async function productionClassifierPair(
+  snapshot,
+  options = {},
+) {
+  const {
+    clockOffsetMs = 1_000,
+    ...responseOptions
+  } = options;
+  const environmentValues = {
+    [SOURCE_RECALL_CLASSIFIER_CAPSULE_SECRET_ENV]:
+      PRODUCTION_TEST_SECRET,
+    [SOURCE_RECALL_CLASSIFIER_CAPSULE_PUBLIC_KEY_ENV]:
+      PRODUCTION_TEST_PUBLIC_KEY_BASE64,
+  };
+  for (const [key, environmentName] of Object.entries(
+    SOURCE_RECALL_CLASSIFIER_CAPSULE_PIN_ENVS,
+  )) {
+    environmentValues[environmentName] =
+      PRODUCTION_TEST_PINS[key];
+  }
+  const savedEnvironment = new Map(
+    Object.keys(environmentValues).map(
+      (key) => [key, process.env[key]],
+    ),
+  );
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  let nowMs = snapshot.redisNowMs + clockOffsetMs;
+  try {
+    for (const [key, value] of Object.entries(
+      environmentValues,
+    )) {
+      process.env[key] = value;
+    }
+    Date.now = () => {
+      nowMs += 1;
+      return nowMs;
+    };
+    globalThis.fetch = async (url, request) => {
+      assert.equal(url, SOURCE_RECALL_CLASSIFIER_CAPSULE_URL);
+      assert.equal(request.method, "POST");
+      const requestValue = JSON.parse(request.body);
+      return new Response(
+        signedProductionResponse(
+          requestValue,
+          responseOptions,
+        ),
+        {
+          status: 200,
+          headers: {
+            "cache-control": "no-store",
+            "content-type":
+              "application/json; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          },
+        },
+      );
+    };
+    return await consumeStableRecallClassifierCapsule(
+      issueSourceRecallClassifierCapsuleCapability(
+        snapshot,
+      ),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+    for (const [key, value] of savedEnvironment) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 function assertHardDark(result) {
@@ -911,6 +1200,417 @@ test("a signed unavailable pair never becomes success evidence or authority", as
   assert.equal(result.sourceFactsAvailable, false);
   assert.equal(result.authorityAvailable, false);
   assertHardDark(result);
+});
+
+test("only an exact stable runtime result can issue one opaque, unforgeable, one-shot evidence capability", async (t) => {
+  const { snapshot } = await stableHarness();
+  const injectedResult =
+    await stableClassifierPair(snapshot);
+  assert.equal(injectedResult.pairStatus, "stable");
+  assert.throws(
+    () => issueSourceRecallSuccessEvidenceCapability(
+      injectedResult,
+    ),
+    expectRuntimeCode(
+      "SOURCE_RECALL_SUCCESS_EVIDENCE_RUNTIME_RESULT_INVALID",
+    ),
+  );
+  const result =
+    await productionClassifierPair(snapshot);
+
+  for (const forged of [
+    clone(result),
+    deepFreeze(clone(result)),
+    Object.freeze({}),
+    null,
+  ]) {
+    assert.throws(
+      () => issueSourceRecallSuccessEvidenceCapability(
+        forged,
+      ),
+      expectRuntimeCode(
+        "SOURCE_RECALL_SUCCESS_EVIDENCE_RUNTIME_RESULT_INVALID",
+      ),
+    );
+  }
+
+  const capability =
+    issueSourceRecallSuccessEvidenceCapability(result);
+  assert.equal(Object.isFrozen(capability), true);
+  assert.deepEqual(Object.keys(capability), []);
+  assert.equal(JSON.stringify(capability), "{}");
+  assert.throws(
+    () => issueSourceRecallSuccessEvidenceCapability(
+      result,
+    ),
+    expectRuntimeCode(
+      "SOURCE_RECALL_SUCCESS_EVIDENCE_RUNTIME_RESULT_INVALID",
+    ),
+  );
+  assert.throws(
+    () => projectSourceRecallSuccessEvidence(
+      Object.freeze({}),
+    ),
+    expectProjectorCode(
+      "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+
+  const evidence =
+    projectSourceRecallSuccessEvidence(capability);
+  assert.equal(evidence.classificationProofComplete, true);
+  assert.throws(
+    () => projectSourceRecallSuccessEvidence(capability),
+    expectProjectorCode(
+      "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+
+  await t.test("conflict cannot issue", async () => {
+    const conflict = await stableClassifierPair(
+      snapshot,
+      {
+        mutate(value, request) {
+          if (request.pointReadNumber === 2) {
+            value.response.capsule.classification =
+              "failure";
+          }
+        },
+      },
+    );
+    assert.equal(conflict.pairStatus, "conflict");
+    assert.throws(
+      () => issueSourceRecallSuccessEvidenceCapability(
+        conflict,
+      ),
+      expectRuntimeCode(
+        "SOURCE_RECALL_SUCCESS_EVIDENCE_RUNTIME_RESULT_INVALID",
+      ),
+    );
+  });
+
+  await t.test("unresolved cannot issue", async () => {
+    const nowMs = snapshot.redisNowMs + 1;
+    const unresolved =
+      await consumeStableRecallClassifierCapsule(
+        issueSourceRecallClassifierCapsuleCapability(
+          snapshot,
+        ),
+        runtimeDependencies(nowMs, async () => {
+          throw new Error("private transport detail");
+        }),
+      );
+    assert.equal(unresolved.pairStatus, "unresolved");
+    assert.throws(
+      () => issueSourceRecallSuccessEvidenceCapability(
+        unresolved,
+      ),
+      expectRuntimeCode(
+        "SOURCE_RECALL_SUCCESS_EVIDENCE_RUNTIME_RESULT_INVALID",
+      ),
+    );
+  });
+});
+
+test("the projector emits one deterministic digest-only binding for the exact source point and signed pair", async () => {
+  const { snapshot } = await stableHarness();
+  const firstPair =
+    await productionClassifierPair(snapshot, {
+      clockOffsetMs: 1_000,
+    });
+  const secondPair =
+    await productionClassifierPair(snapshot, {
+      clockOffsetMs: 2_000,
+    });
+  const first = projectSourceRecallSuccessEvidence(
+    issueSourceRecallSuccessEvidenceCapability(firstPair),
+  );
+  const second = projectSourceRecallSuccessEvidence(
+    issueSourceRecallSuccessEvidenceCapability(secondPair),
+  );
+
+  assert.equal(
+    SOURCE_RECALL_SUCCESS_EVIDENCE_PROJECTOR_VERSION,
+    "recall-success-evidence-projector-dark-v1",
+  );
+  assert.equal(
+    SOURCE_RECALL_SUCCESS_EVIDENCE_VERSION,
+    "recall-success-evidence-dark-v1",
+  );
+  assert.deepEqual(Object.keys(first), [
+    "version",
+    "projectorVersion",
+    "status",
+    "source",
+    "classificationProofComplete",
+    "decisionBoundaryAt",
+    "decisionBoundaryDigest",
+    "workKeyDigest",
+    "contractPinsDigest",
+    "workItemDigest",
+    "resolutionDigest",
+    "pointEvidenceDigest",
+    "sourceNormalizedInputDigest",
+    "sourceRecordDigest",
+    "sourceRecordRevisionDigest",
+    "sourceReferenceDigest",
+    "sourceProvenanceDigest",
+    "sourceStatusAtBoundaryDigest",
+    "classification",
+    "classificationBasis",
+    "callsVerdict",
+    "callEndedAt",
+    "callEndedAtBasis",
+    "callEndedAtDigest",
+    "classifierCapsuleVersion",
+    "classifierArtifactDigest",
+    "classifierDeploymentDigest",
+    "classifierRuntimeConfigDigest",
+    "classifierPolicyDigest",
+    "classifierOutputDigest",
+    "transcriptEvidenceDigest",
+    "presenceEvidenceDigest",
+    "vapiEvidenceDigest",
+    "mediaEvidenceDigest",
+    "vapiAssociationStatus",
+    "keyId",
+    "requestDigests",
+    "responseDigests",
+    "receiptDigests",
+    "pointProofDigests",
+    "pointBindingDigests",
+    "pointResponseDigests",
+    "classifierInputDigests",
+    "pointTransportReceiptDigests",
+    "pointCompletedAtMs",
+    "classifiedAtMs",
+    "classifierVerifiedAtMs",
+    "signatureVerifiedAtProjection",
+    "standaloneSignatureReverificationAvailable",
+    "signedResponseRetentionAvailable",
+    "durableAttestationAvailable",
+    "operational",
+    "globalReferenceSetCoverageAvailable",
+    "sourceFactsAvailable",
+    "successClassificationAvailable",
+    "candidateIdentityResolutionAvailable",
+    "q37TransitionAvailable",
+    "pinnable",
+    "authorityAvailable",
+    "curationAvailable",
+    "enrollmentAvailable",
+    "outreachAvailable",
+    "candidateFacingWriteAvailable",
+    "classificationEvidenceDigest",
+  ]);
+  assert.notDeepEqual(
+    first.classifierVerifiedAtMs,
+    second.classifierVerifiedAtMs,
+  );
+  const firstSemanticEvidence = clone(first);
+  const secondSemanticEvidence = clone(second);
+  delete firstSemanticEvidence.classifierVerifiedAtMs;
+  delete secondSemanticEvidence.classifierVerifiedAtMs;
+  assert.deepEqual(
+    firstSemanticEvidence,
+    secondSemanticEvidence,
+  );
+  assert.equal(
+    first.classificationEvidenceDigest,
+    second.classificationEvidenceDigest,
+  );
+  assert.equal(
+    first.status,
+    "verified_complete_recall_classification_evidence_dark",
+  );
+  assert.equal(first.source, "recall");
+  assert.equal(first.classification, "success");
+  assert.equal(first.classificationProofComplete, true);
+  assert.equal(first.decisionBoundaryAt, BOUNDARY);
+  assert.equal(
+    first.workKeyDigest,
+    snapshot.record.workKeyDigest,
+  );
+  assert.equal(
+    first.contractPinsDigest,
+    snapshot.record.contractPinsDigest,
+  );
+  assert.equal(
+    first.workItemDigest,
+    snapshot.record.workItemDigest,
+  );
+  assert.equal(
+    first.resolutionDigest,
+    snapshot.record.resolutionDigest,
+  );
+  const pointEvidence =
+    snapshot.record.readOne.evidence;
+  for (const field of [
+    "decisionBoundaryDigest",
+    "sourceNormalizedInputDigest",
+    "sourceRecordDigest",
+    "sourceRecordRevisionDigest",
+    "sourceReferenceDigest",
+    "sourceProvenanceDigest",
+    "sourceStatusAtBoundaryDigest",
+  ]) {
+    assert.equal(first[field], pointEvidence[field], field);
+  }
+  assert.equal(
+    first.pointEvidenceDigest,
+    semanticDigest(
+      SOURCE_RECALL_CLASSIFIER_CAPSULE_POINT_EVIDENCE_DIGEST_DOMAIN,
+      pointEvidence,
+    ),
+  );
+  assert.deepEqual(
+    first.responseDigests,
+    firstPair.responseDigests,
+  );
+  assert.deepEqual(
+    first.receiptDigests,
+    firstPair.receiptDigests,
+  );
+  assert.deepEqual(
+    first.pointResponseDigests,
+    firstPair.signedResponses.map(
+      (response) =>
+        response.capsule.pointResponseDigest,
+    ),
+  );
+  assert.deepEqual(
+    first.classifierInputDigests,
+    firstPair.signedResponses.map(
+      (response) =>
+        response.capsule.classifierInputDigest,
+    ),
+  );
+  assert.notEqual(
+    first.classifierInputDigests[0],
+    first.classifierInputDigests[1],
+  );
+  assert.notEqual(
+    first.pointTransportReceiptDigests[0],
+    first.pointTransportReceiptDigests[1],
+  );
+  assert.equal(first.signatureVerifiedAtProjection, true);
+  assert.equal(
+    first.standaloneSignatureReverificationAvailable,
+    false,
+  );
+  assert.equal(
+    first.signedResponseRetentionAvailable,
+    false,
+  );
+  assert.equal(first.durableAttestationAvailable, false);
+
+  const unsigned = clone(first);
+  delete unsigned.classificationEvidenceDigest;
+  delete unsigned.classifierVerifiedAtMs;
+  assert.equal(
+    first.classificationEvidenceDigest,
+    semanticDigest(
+      SOURCE_RECALL_SUCCESS_EVIDENCE_DIGEST_DOMAIN,
+      unsigned,
+    ),
+  );
+  const serialized = JSON.stringify(first);
+  for (const privateValue of [
+    REFERENCE.id,
+    REFERENCE.metadataSource,
+    REFERENCE.candidate.fullName,
+    REFERENCE.candidate.email,
+    REFERENCE.candidate.linkedin,
+    REFERENCE.candidate.paraformEventId,
+  ]) {
+    assert.equal(serialized.includes(privateValue), false);
+  }
+  assert.doesNotMatch(serialized, /https?:\/\//u);
+  assert.doesNotMatch(
+    serialized,
+    /"(?:candidate|contextDigest|email|linkedin|paraformEventId|rawBody|reservationId|signedResponses)"\s*:/u,
+  );
+  assertHardDark(first);
+});
+
+test("failure is complete, unavailable stays incomplete, and a terminal classification without ended-at fails closed", async (t) => {
+  const { snapshot } = await stableHarness();
+
+  for (const classification of ["success", "failure"]) {
+    await t.test(classification, async () => {
+      const pair = await productionClassifierPair(
+        snapshot,
+        { classification },
+      );
+      const evidence =
+        projectSourceRecallSuccessEvidence(
+          issueSourceRecallSuccessEvidenceCapability(
+            pair,
+          ),
+        );
+      assert.equal(
+        evidence.classification,
+        classification,
+      );
+      assert.equal(
+        evidence.classificationProofComplete,
+        true,
+      );
+      assert.equal(
+        evidence.status,
+        "verified_complete_recall_classification_evidence_dark",
+      );
+      assert.notEqual(evidence.callEndedAt, null);
+      assertHardDark(evidence);
+    });
+  }
+
+  await t.test("unavailable", async () => {
+    const pair = await productionClassifierPair(
+      snapshot,
+      { classification: "unavailable" },
+    );
+    const evidence =
+      projectSourceRecallSuccessEvidence(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      );
+    assert.equal(evidence.classification, "unavailable");
+    assert.equal(
+      evidence.classificationProofComplete,
+      false,
+    );
+    assert.equal(
+      evidence.status,
+      "verified_unavailable_recall_classification_evidence_dark",
+    );
+    assertHardDark(evidence);
+  });
+
+  for (const classification of ["success", "failure"]) {
+    await t.test(
+      `${classification} without ended-at`,
+      async () => {
+        const pair = await productionClassifierPair(
+          snapshot,
+          {
+            classification,
+            callEndedAt: null,
+          },
+        );
+        assert.equal(pair.pairStatus, "stable");
+        assert.throws(
+          () => projectSourceRecallSuccessEvidence(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+          expectProjectorCode(
+            "SOURCE_RECALL_SUCCESS_EVIDENCE_ENDED_AT_REQUIRED",
+          ),
+        );
+      },
+    );
+  }
 });
 
 test("non-stable, stale, and tampered store snapshots fail before client transport", async (t) => {
@@ -1412,6 +2112,40 @@ test("pair-level signed-field or key mismatch is observable conflict, never a cl
     );
     assertHardDark(result);
   });
+
+  await t.test("classifier input reuse", async () => {
+    const { snapshot } = await stableHarness();
+    const nowMs = snapshot.redisNowMs + 1;
+    let firstClassifierInputDigest;
+    let ordinal = 0;
+    const result =
+      await consumeStableRecallClassifierCapsule(
+        issueSourceRecallClassifierCapsuleCapability(
+          snapshot,
+        ),
+        runtimeDependencies(nowMs, async (request) => {
+          ordinal += 1;
+          const value = clone(verifiedResult(request, {
+            verifiedAtMs: nowMs + ordinal,
+          }));
+          if (request.pointReadNumber === 1) {
+            firstClassifierInputDigest =
+              value.response.capsule
+                .classifierInputDigest;
+          } else {
+            value.response.capsule.classifierInputDigest =
+              firstClassifierInputDigest;
+          }
+          return deepFreeze(value);
+        }),
+      );
+    assert.equal(result.pairStatus, "conflict");
+    assert.equal(
+      result.classificationCandidate,
+      "unavailable",
+    );
+    assertHardDark(result);
+  });
 });
 
 async function productionFiles(directory) {
@@ -1433,7 +2167,7 @@ async function productionFiles(directory) {
   return files;
 }
 
-test("the capability/runtime import closure is hard-dark with zero production importers", async () => {
+test("the capability/runtime/projector import closure is hard-dark with no production caller", async () => {
   const libraryRoot = new URL(
     "../api/paraai/_lib/",
     import.meta.url,
@@ -1446,13 +2180,26 @@ test("the capability/runtime import closure is hard-dark with zero production im
     "source-recall-classifier-capsule-runtime.mjs",
     libraryRoot,
   );
-  const [capabilitySource, runtimeSource] =
+  const projectorUrl = new URL(
+    "source-recall-success-evidence-projector.mjs",
+    libraryRoot,
+  );
+  const [
+    capabilitySource,
+    runtimeSource,
+    projectorSource,
+  ] =
     await Promise.all([
       readFile(capabilityUrl, "utf8"),
       readFile(runtimeUrl, "utf8"),
+      readFile(projectorUrl, "utf8"),
     ]);
 
-  for (const source of [capabilitySource, runtimeSource]) {
+  for (const source of [
+    capabilitySource,
+    runtimeSource,
+    projectorSource,
+  ]) {
     assert.doesNotMatch(source, /\bconsole\./u);
     assert.doesNotMatch(source, /\bfetch\s*\(/u);
     assert.doesNotMatch(source, /process\.env/u);
@@ -1486,21 +2233,42 @@ test("the capability/runtime import closure is hard-dark with zero production im
       "source-recall-classifier-capsule-verifier.mjs",
     ],
   );
+  assert.deepEqual(
+    [...projectorSource.matchAll(
+      /from "\.\/([^"]+)"/gu,
+    )].map((match) => match[1]).sort(),
+    [
+      "source-recall-classifier-capsule-runtime.mjs",
+    ],
+  );
 
   const files = await productionFiles(
     new URL("../api/paraai/", import.meta.url),
   );
   const runtimeImporters = [];
+  const projectorImporters = [];
   for (const file of files) {
-    if (file.href === runtimeUrl.href) continue;
     const source = await readFile(file, "utf8");
     if (
+      file.href !== runtimeUrl.href
+      &&
       source.includes(
         "source-recall-classifier-capsule-runtime",
       )
     ) {
       runtimeImporters.push(file.pathname);
     }
+    if (
+      file.href !== projectorUrl.href
+      && source.includes(
+        "source-recall-success-evidence-projector",
+      )
+    ) {
+      projectorImporters.push(file.pathname);
+    }
   }
-  assert.deepEqual(runtimeImporters, []);
+  assert.deepEqual(runtimeImporters, [
+    projectorUrl.pathname,
+  ]);
+  assert.deepEqual(projectorImporters, []);
 });

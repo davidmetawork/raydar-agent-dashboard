@@ -47,6 +47,8 @@ const VERIFIED_RESULT_KEYS = Object.freeze([
   "authorityAvailable",
 ]);
 const DIGEST = /^[a-f0-9]{64}$/u;
+const stableRuntimeResults = new WeakMap();
+const issuedSuccessEvidenceCapabilities = new WeakMap();
 
 export class SourceRecallClassifierCapsuleRuntimeError
   extends Error {
@@ -130,6 +132,7 @@ function dependencies(value) {
     return Object.freeze({
       clientConfiguredImpl:
         sourceRecallClassifierCapsuleClientConfigured,
+      evidenceEligible: true,
       nowImpl: () => Date.now(),
       readPrivateRecallClassifierCapsuleImpl:
         readPrivateRecallClassifierCapsule,
@@ -142,7 +145,10 @@ function dependencies(value) {
   for (const key of DEPENDENCY_KEYS) {
     if (typeof raw[key] !== "function") fail(code);
   }
-  return Object.freeze({ ...raw });
+  return Object.freeze({
+    ...raw,
+    evidenceEligible: false,
+  });
 }
 
 function exactNowMs(value) {
@@ -266,16 +272,23 @@ function stablePair(first, second, selection) {
       !== second.response.reservationId
     && first.response.readNumber === 1
     && second.response.readNumber === 2
+    && firstCapsule.classifierInputDigest
+      !== secondCapsule.classifierInputDigest
     && stableFields.every(
       (key) => firstCapsule[key] === secondCapsule[key],
     )
   );
 }
 
-function pairResult(first, second, selection) {
+function pairResult(
+  first,
+  second,
+  selection,
+  evidenceEligible,
+) {
   const isStable = stablePair(first, second, selection);
   const capsule = first.response.capsule;
-  return deepFreeze({
+  const result = deepFreeze({
     version:
       SOURCE_RECALL_CLASSIFIER_CAPSULE_RUNTIME_VERSION,
     clientVersion:
@@ -321,6 +334,13 @@ function pairResult(first, second, selection) {
     outreachAvailable: false,
     candidateFacingWriteAvailable: false,
   });
+  if (isStable && evidenceEligible) {
+    stableRuntimeResults.set(
+      result,
+      deepFreeze({ first, second, selection }),
+    );
+  }
+  return result;
 }
 
 function unresolvedPairResult(
@@ -370,12 +390,58 @@ function unresolvedPairResult(
   });
 }
 
+export function issueSourceRecallSuccessEvidenceCapability(
+  runtimeResult,
+) {
+  const code =
+    "SOURCE_RECALL_SUCCESS_EVIDENCE_RUNTIME_RESULT_INVALID";
+  if (
+    runtimeResult === null
+    || typeof runtimeResult !== "object"
+    || nodeTypes.isProxy(runtimeResult)
+    || !Object.isFrozen(runtimeResult)
+    || !stableRuntimeResults.has(runtimeResult)
+  ) {
+    fail(code);
+  }
+  const stablePairProvenance =
+    stableRuntimeResults.get(runtimeResult);
+  stableRuntimeResults.delete(runtimeResult);
+  const capability = Object.freeze({});
+  issuedSuccessEvidenceCapabilities.set(
+    capability,
+    stablePairProvenance,
+  );
+  return capability;
+}
+
+export function consumeSourceRecallSuccessEvidenceCapability(
+  capability,
+) {
+  const code =
+    "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID";
+  if (
+    capability === null
+    || typeof capability !== "object"
+    || nodeTypes.isProxy(capability)
+    || !Object.isFrozen(capability)
+    || !issuedSuccessEvidenceCapabilities.has(capability)
+  ) {
+    fail(code);
+  }
+  const stablePairProvenance =
+    issuedSuccessEvidenceCapabilities.get(capability);
+  issuedSuccessEvidenceCapabilities.delete(capability);
+  return stablePairProvenance;
+}
+
 export async function consumeStableRecallClassifierCapsule(
   capability,
   testDependencies,
 ) {
   const {
     clientConfiguredImpl,
+    evidenceEligible,
     nowImpl,
     readPrivateRecallClassifierCapsuleImpl,
   } = dependencies(testDependencies);
@@ -461,5 +527,6 @@ export async function consumeStableRecallClassifierCapsule(
     verifiedReads[0],
     verifiedReads[1],
     selection,
+    evidenceEligible,
   );
 }

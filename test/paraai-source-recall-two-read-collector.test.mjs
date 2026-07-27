@@ -1374,6 +1374,12 @@ test("the slice remains private and absent from every production importer", asyn
     ],
     [
       "source-recall-classifier-capsule-runtime.mjs",
+      [
+        "source-recall-success-evidence-projector.mjs",
+      ],
+    ],
+    [
+      "source-recall-success-evidence-projector.mjs",
       [],
     ],
   ]);
