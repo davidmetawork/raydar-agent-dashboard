@@ -497,11 +497,11 @@ test("manifest reads reject a digest that does not attest the stored ID order", 
 
 test("planning requires a live attach proof and exactly ten distinct resume-ready candidates", async () => {
   const nine = tenEligibleJobs("bot_short").slice(0, 9);
-  assert.equal(phase2LiveAttachProof(attachProofJob()), true);
+  assert.equal(phase2LiveAttachProof(attachProofJob(), { now: NOW }), true);
   assert.equal(phase2LiveAttachProof({
     ...attachProofJob(),
     submitAttemptStartedAt: null,
-  }), false);
+  }, { now: NOW }), false);
   assert.equal(phase2LiveAttachProof(attachProofJob(), {
     now: Date.parse("2026-07-26T12:00:01.000Z"),
   }), false);
