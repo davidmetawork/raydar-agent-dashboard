@@ -174,9 +174,13 @@ async function prepareSubmission(request, record, job, { fetchImpl = fetch } = {
   return { form, payload, generated, call, blocked: blocked.length ? blocked : null };
 }
 
-async function executeAction(record, plan, { requests, jobs, config, fetchImpl = fetch }) {
+export async function executeAction(record, plan, { requests, jobs, config, fetchImpl = fetch, force = false }) {
   const results = [];
   const byId = new Map(requests.map((request) => [request.id, request]));
+  // force is the operator path: a human clicked the card, so the per-action
+  // automation gates do not apply. The endpoint still demands the master switch
+  // and a confirmation string before it ever gets here.
+  const mayWrite = (action) => force || replyActionEnabled(action, config);
 
   if (plan.action === "submit") {
     for (const requestId of plan.requestIds) {
@@ -189,7 +193,7 @@ async function executeAction(record, plan, { requests, jobs, config, fetchImpl =
         results.push({ requestId, outcome: "blocked", blocked: prepared.blocked });
         continue;
       }
-      if (!replyActionEnabled("yes", config)) {
+      if (!mayWrite("yes")) {
         results.push({ requestId, outcome: "shadow", payload: redactPayload(prepared.payload) });
         continue;
       }
@@ -209,14 +213,14 @@ async function executeAction(record, plan, { requests, jobs, config, fetchImpl =
     for (const requestId of plan.requestIds) {
       const request = byId.get(requestId);
       if (!request) { results.push({ requestId, outcome: "missing" }); continue; }
-      if (!replyActionEnabled(plan.action === "off_market" ? "off_market" : "no", config)) {
+      if (!mayWrite(plan.action === "off_market" ? "off_market" : "no")) {
         results.push({ requestId, outcome: "shadow", reason: passReasonText(reasonKey) });
         continue;
       }
       const outcome = await performPass(request, reasonKey);
       results.push({ requestId, outcome: outcome.verified ? "dismissed" : "unverified" });
     }
-    if (plan.action === "off_market" && replyActionEnabled("off_market", config)) {
+    if (plan.action === "off_market" && mayWrite("off_market")) {
       const offMarket = await performOffMarket(record.candidateUserId);
       results.push({ requestId: null, outcome: "off_market", verified: offMarket.verified });
     }
@@ -256,6 +260,48 @@ export async function runReplyTick({ config = replyConfig(), now = Date.now(), f
   const pollToken = await acquireReplyPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!pollToken) return { enabled: true, processed: 0, reason: "poll_not_due" };
   try {
+    return await scanReplies({ config, now, fetchImpl, mode: "organic", limit: config.batchSize });
+  } finally {
+    await releaseReplyPollSlot(pollToken).catch(() => {});
+  }
+}
+
+// THE BACKFILL. Same read/classify/plan path as the organic tick, with three
+// differences that follow the Para AI backfill freeze rule:
+//   1. it ignores the arming pin, because catching up on history is the point;
+//   2. every record it writes is tagged backfillOnly and re-anchored at batch
+//      entry, so the organic tick can never race it later; and
+//   3. it is capped per run and only ever runs from an explicit, confirmed
+//      operator call, never from the worker.
+// Write authority is unchanged: with the gates shut this classifies and plans
+// without writing, which is exactly the shadow dataset to review before arming.
+export async function runReplyBackfill({
+  config = replyConfig(),
+  now = Date.now(),
+  fetchImpl = fetch,
+  limit = Number(process.env.PARAAI_REPLY_BACKFILL_LIMIT) || 25,
+} = {}) {
+  if (!replyDetectionEnabled(config)) {
+    return { enabled: false, processed: 0, reason: "reply_gates_closed" };
+  }
+  const pollToken = await acquireReplyPollSlot({ ttlSeconds: Math.max(120, config.pollLockSeconds) });
+  if (!pollToken) return { enabled: true, processed: 0, reason: "poll_not_due" };
+  try {
+    return await scanReplies({
+      config,
+      now,
+      fetchImpl,
+      mode: "backfill",
+      limit: Math.max(1, Math.min(200, Number(limit) || 25)),
+      ignoreArmingPin: true,
+    });
+  } finally {
+    await releaseReplyPollSlot(pollToken).catch(() => {});
+  }
+}
+
+async function scanReplies({ config, now, fetchImpl, mode, limit, ignoreArmingPin = false }) {
+  {
     const [states, requests, jobs] = await Promise.all([
       listOutreachStates(),
       readSubmissionRequests(),
@@ -263,29 +309,37 @@ export async function runReplyTick({ config = replyConfig(), now = Date.now(), f
     ]);
     const results = [];
     let processed = 0;
+    let scanned = 0;
+    let skippedNoPending = 0;
+    let skippedNoReply = 0;
+    let skippedMachine = 0;
+    let skippedSeen = 0;
 
     for (const state of states) {
-      if (processed >= config.batchSize) break;
+      if (processed >= limit) break;
       if (!state?.threadId || !state?.candidateUserId) continue;
+      scanned += 1;
       const pending = pendingRequestsFor(state.candidateUserId, requests);
-      if (!pending.length) continue;
+      if (!pending.length) { skippedNoPending += 1; continue; }
 
       const thread = await getThread(config.mailbox, state.threadId).catch(() => null);
       if (!thread) continue;
       const anchor = finiteDate(state.firstOutboundAt) ?? firstDeliveredInternalDate(thread) ?? 0;
       const replies = candidateReplyMessages(thread, config.mailbox, anchor);
-      if (!replies.length) continue;
+      if (!replies.length) { skippedNoReply += 1; continue; }
 
       const latest = replies[replies.length - 1];
       // The arming pin applies to the REPLY, so first arming cannot action a
-      // backlog of older replies.
-      if (config.notBeforeMs != null && latest.internalDate < config.notBeforeMs) continue;
+      // backlog of older replies. The backfill is the sanctioned way past it.
+      if (!ignoreArmingPin && config.notBeforeMs != null && latest.internalDate < config.notBeforeMs) continue;
 
       const replyId = replyIdFor(state.candidateUserId, latest.id);
-      if (await readReplyRecord(replyId)) continue;
+      // A record already exists, which includes every backfillOnly record: that
+      // is the freeze rule, and it is why the two lanes can never double-action.
+      if (await readReplyRecord(replyId)) { skippedSeen += 1; continue; }
 
       const body = stripQuotedReply(latest.body);
-      if (isMachineReply(latest.message, body)) continue;
+      if (isMachineReply(latest.message, body)) { skippedMachine += 1; continue; }
 
       const lock = await acquireReplyLock(replyId);
       if (!lock) continue;
@@ -300,6 +354,11 @@ export async function runReplyTick({ config = replyConfig(), now = Date.now(), f
           receivedAt: new Date(latest.internalDate).toISOString(),
           body,
           status: "classified",
+          source: mode,
+          backfillOnly: mode === "backfill",
+          // Backfilled clocks anchor at batch entry, never at the original
+          // (possibly weeks-old) reply time.
+          anchorAt: new Date(mode === "backfill" ? now : latest.internalDate).toISOString(),
         };
         const { signals, summary, model, provider } = await extractReplySignals(body, { fetchImpl });
         const decision = classifyReply(signals, { pendingRequests: pending });
@@ -329,7 +388,13 @@ export async function runReplyTick({ config = replyConfig(), now = Date.now(), f
           if (failed.length && !record.shadow) await alertReview(record, { ...plan, reason: failed[0].code || failed[0].outcome });
         }
         await saveReplyRecord(record, record.revision);
-        results.push({ replyId, intent: record.decision.intent, action: plan.action, status: record.status });
+        results.push({
+          replyId,
+          intent: record.decision.intent,
+          action: plan.action,
+          status: record.status,
+          shadow: record.shadow === true,
+        });
       } catch (error) {
         results.push({
           replyId,
@@ -347,9 +412,21 @@ export async function runReplyTick({ config = replyConfig(), now = Date.now(), f
         await releaseReplyLock(replyId, lock).catch(() => {});
       }
     }
-    return { enabled: true, processed, results };
-  } finally {
-    await releaseReplyPollSlot(pollToken).catch(() => {});
+    return {
+      enabled: true,
+      mode,
+      processed,
+      limit,
+      more: processed >= limit,
+      scanned,
+      skipped: {
+        noPendingRequest: skippedNoPending,
+        noReply: skippedNoReply,
+        machineMail: skippedMachine,
+        alreadyRecorded: skippedSeen,
+      },
+      results,
+    };
   }
 }
 

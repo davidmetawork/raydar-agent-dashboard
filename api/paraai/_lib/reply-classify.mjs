@@ -17,6 +17,8 @@
 //     one" is a pass, never off-market.
 //   - Anything else is uncertain and goes to review.
 
+import { isHardBounce } from "./outreach-gmail.mjs";
+
 const MACHINE_SUBJECT = /^\s*(out of office|automatic reply|auto[- ]?reply|autoreply|undeliverable|delivery status notification|mail delivery|returned mail|delivery has failed)/i;
 const MACHINE_HEADERS = ["auto-submitted", "x-autoreply", "x-autorespond", "precedence"];
 const MACHINE_SENDERS = /^(mailer-daemon|postmaster|no-?reply|noreply|donotreply|do-not-reply|bounces?)@/i;
@@ -46,7 +48,16 @@ export function stripQuotedReply(body) {
 // auto-responder is not a human decision, and queueing it would make the review
 // lane noise. It still counts as a reply for the OUTREACH ladder stop, which is
 // deliberately a separate, looser test in outreach-gmail.mjs.
-export function isMachineReply(message, bodyText = "") {
+//
+// Hard bounces are delegated to isHardBounce, which already distinguishes a
+// permanent 5.x.x failure from a temporary 4.x.x retry. Duplicating that here
+// would let the two definitions drift.
+export function isMachineReply(message, bodyText = "", { isHardBounceImpl = isHardBounce } = {}) {
+  if (isHardBounceImpl(message)) return true;
+  return isAutoResponder(message, bodyText);
+}
+
+function isAutoResponder(message, bodyText = "") {
   const subject = text(headerOf(message, "Subject"));
   if (MACHINE_SUBJECT.test(subject)) return true;
   const headers = (message?.payload?.headers || []).map((header) => String(header?.name || "").toLowerCase());
