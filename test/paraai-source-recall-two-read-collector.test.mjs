@@ -10,6 +10,7 @@ import {
   SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS,
   SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION,
   SourceRecallPointObservationStoreError,
+  createSourceRecallPointObservationManifestPointInterface,
   createSourceRecallPointObservationPersistenceAdapter,
   createSourceRecallPointObservationStore,
 } from "../api/paraai/_lib/source-recall-point-observation-store.mjs";
@@ -406,7 +407,7 @@ test("one verified private reference becomes one opaque hard-dark work", async (
     await preparedHarness();
   assert.equal(
     SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION,
-    "recall-point-observation-store-dark-v1",
+    "recall-point-observation-store-dark-v2",
   );
   assert.equal(snapshot.record.status, "awaiting_read_1");
   assert.equal(snapshot.record.expectedReference.id, REFERENCE.id);
@@ -439,6 +440,70 @@ test("one verified private reference becomes one opaque hard-dark work", async (
       .length,
     1,
   );
+});
+
+test("the public point store exposes no manifest selector and opaque caller tokens cannot select work", async () => {
+  const startedAt = BOUNDARY_MS + HOUR;
+  const secondReference = {
+    id: "recall-manifest-second-bot",
+    joinAt: "2026-07-26T00:20:00.000Z",
+    metadataSource: "paraform-auto",
+    candidate: {
+      fullName: "Second Private Candidate",
+      email: "second-private@example.invalid",
+      linkedin: "https://example.invalid/second-private",
+      paraformEventId: "second-private-event",
+    },
+  };
+  const baseline = verifiedPage(startedAt);
+  const page = deepFreeze({
+    ...baseline,
+    record: {
+      ...baseline.record,
+      pageNumber: 2,
+      cursor: "server-private-cursor",
+      referenceCount: 2,
+      scannedCount: 2,
+      references: [REFERENCE, secondReference],
+    },
+  });
+  const fake = fakePersistence(startedAt);
+  const store = createSourceRecallPointObservationStore({
+    persistence: fake.persistence,
+  });
+  assert.deepEqual(Object.keys(store).sort(), [
+    "checkpointRecallPointObservationRead",
+    "claimRecallPointObservationRead",
+    "prepareRecallPointObservationWork",
+    "readRecallPointObservationWork",
+    "recallPointObservationAggregateStatus",
+    "recordRecallPointObservationUnresolved",
+  ]);
+  const manifestPoint =
+    createSourceRecallPointObservationManifestPointInterface({
+      persistence: fake.persistence,
+    });
+  assert.deepEqual(Object.keys(manifestPoint).sort(), [
+    "manifestEntries",
+    "prepareManifestSelection",
+    "readManifestSelection",
+  ]);
+  const indexed = manifestPoint.manifestEntries(page);
+  assert.equal(indexed.pageNumber, 2);
+  assert.equal(indexed.entries.length, 2);
+  assert.notEqual(
+    indexed.entries[0].workKeyDigest,
+    indexed.entries[1].workKeyDigest,
+  );
+  await assert.rejects(
+    manifestPoint.prepareManifestSelection(
+      Object.freeze({}),
+    ),
+    expectStoreCode(
+      "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_CAPABILITY_INVALID",
+    ),
+  );
+  assert.equal(fake.calls.length, 0);
 });
 
 test("two exact reads use distinct durable reservations and settle stable", async () => {
@@ -1271,16 +1336,31 @@ test("the slice remains private and absent from every production importer", asyn
   );
   const expectedImporters = new Map([
     [
+      "source-recall-point-observation-manifest-runtime.mjs",
+      [],
+    ],
+    [
+      "source-recall-point-observation-manifest-store.mjs",
+      [
+        "source-recall-point-observation-manifest-runtime.mjs",
+        "source-recall-point-observation-store.mjs",
+      ],
+    ],
+    [
       "source-recall-point-observation-runtime.mjs",
       [],
     ],
     [
       "source-recall-two-read-collector.mjs",
-      ["source-recall-point-observation-runtime.mjs"],
+      [
+        "source-recall-point-observation-manifest-runtime.mjs",
+        "source-recall-point-observation-runtime.mjs",
+      ],
     ],
     [
       "source-recall-point-observation-store.mjs",
       [
+        "source-recall-point-observation-manifest-store.mjs",
         "source-recall-point-observation-runtime.mjs",
         "source-recall-two-read-collector.mjs",
       ],
