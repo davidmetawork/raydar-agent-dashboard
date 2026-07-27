@@ -297,6 +297,32 @@ export function candidateRepliedAfter(thread, mailbox, afterMs) {
   return inboundMessagesAfter(thread, mailbox, afterMs).length > 0;
 }
 
+// The individual inbound messages behind candidateRepliedAfter, with their text
+// decoded. candidateRepliedAfter answers "did anyone reply"; the reply
+// classifier needs to read what they actually wrote, so this returns the
+// messages themselves under exactly the same not-us rule.
+export function candidateReplyMessages(thread, mailbox, afterMs) {
+  const ours = canonicalAddress(mailbox);
+  const cutoff = Number(afterMs) || 0;
+  return (thread?.messages || [])
+    .filter((message) => {
+      const labels = message?.labelIds || [];
+      if (labels.includes("DRAFT") || labels.includes("SENT")) return false;
+      if (Number(message?.internalDate || 0) <= cutoff) return false;
+      const from = headerAddresses(message, "From");
+      return from.length > 0 && !from.some((address) => address === ours);
+    })
+    .map((message) => ({
+      id: String(message?.id || ""),
+      internalDate: Number(message?.internalDate || 0),
+      from: headerAddresses(message, "From")[0] || null,
+      subject: headerValue(message, "Subject") || null,
+      body: payloadContent(message?.payload),
+      message,
+    }))
+    .sort((left, right) => left.internalDate - right.internalDate);
+}
+
 // The conversation anchor for the reply window: the first message we delivered.
 // Used instead of "our most recent send" so that talking over a reply can never
 // hide it.
