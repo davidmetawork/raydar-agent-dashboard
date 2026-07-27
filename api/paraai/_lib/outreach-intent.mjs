@@ -186,7 +186,13 @@ export async function classifyIntentWithModel(messages, {
       }],
       tool_choice: { type: "tool", name: "record_reply_intent" },
     }),
-    signal: AbortSignal.timeout(30_000),
+    // BUDGET: the tick runs up to batchSize candidates inside a 120s function.
+    // Two attempts per candidate at 10s caps classification at ~20s each, so a
+    // full default batch of three cannot starve the Gmail and Paraform work that
+    // follows. Judging a few short emails takes a couple of seconds; this ceiling
+    // only ever bites when Anthropic is hanging, which is exactly when falling
+    // through to the phrase floor beats blocking the whole tick.
+    signal: AbortSignal.timeout(10_000),
   });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
