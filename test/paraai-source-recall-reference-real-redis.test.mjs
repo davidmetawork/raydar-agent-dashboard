@@ -301,7 +301,7 @@ realRedisTest(
         const pointPersistence = observationAdapter();
         const firstTime = await pointPersistence.time();
         const pointKey = (
-          "paraai:phase4:recall-point-observation:v1:work:"
+          "paraai:phase4:recall-point-observation:v2:work:"
           + "d".repeat(64)
         );
         const pointExpiry =
@@ -392,6 +392,53 @@ realRedisTest(
           "PEXPIRETIME",
           pointKey,
         ]), pointExpiry);
+      },
+    );
+
+    await t.test(
+      "manifest head and page shards share exact non-renewed Redis CAS semantics",
+      async () => {
+        const persistence = observationAdapter();
+        const firstTime = await persistence.time();
+        const expiry =
+          firstTime.redisNowMs + 5 * 60 * 1_000;
+        const keys = [
+          (
+            "paraai:phase4:recall-point-observation-manifest:"
+            + `v1:run:${"e".repeat(64)}`
+          ),
+          (
+            "paraai:phase4:recall-point-observation-manifest:"
+            + `v1:page:${"e".repeat(64)}:200`
+          ),
+        ];
+        for (const [index, key] of keys.entries()) {
+          const initialRaw = `{"revision":${index}}`;
+          const nextRaw = `{"revision":${index + 1}}`;
+          const created = await persistence.ensure({
+            key,
+            proposedRaw: initialRaw,
+            expiresAtMs: expiry,
+          });
+          assert.equal(created.status, "created");
+          assert.equal(
+            await redisCommand(["PEXPIRETIME", key]),
+            expiry,
+          );
+          const stored = await persistence.compareAndSet({
+            key,
+            expectedRaw: initialRaw,
+            nextRaw,
+            expiresAtMs: expiry,
+            notAfterMs: expiry,
+          });
+          assert.equal(stored.status, "stored");
+          assert.equal(stored.raw, nextRaw);
+          assert.equal(
+            await redisCommand(["PEXPIRETIME", key]),
+            expiry,
+          );
+        }
       },
     );
 

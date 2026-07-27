@@ -1422,6 +1422,7 @@ test("the adapter has only the exact hard-dark runtime importer and remains abse
     }
   }
   assert.deepEqual(adapterImporters.sort(), [
+    "source-recall-point-observation-manifest-runtime.mjs",
     "source-recall-point-observation-runtime.mjs",
   ]);
   assert.deepEqual(credentialReaders.sort(), [

@@ -30,6 +30,7 @@ import {
 } from "./source-recall-point-client.mjs";
 import {
   SOURCE_RECALL_PAGE_CLIENT_VERSION,
+  SOURCE_RECALL_PAGE_SIZE,
 } from "./source-recall-page-client.mjs";
 import {
   SOURCE_RECALL_REFERENCE_PERSISTENCE_PROTOCOL_VERSION,
@@ -40,8 +41,8 @@ import {
 } from "./source-watermark.mjs";
 
 export const SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION =
-  "recall-point-observation-store-dark-v1";
-export const SOURCE_RECALL_POINT_OBSERVATION_RECORD_VERSION = 1;
+  "recall-point-observation-store-dark-v2";
+export const SOURCE_RECALL_POINT_OBSERVATION_RECORD_VERSION = 2;
 export const SOURCE_RECALL_POINT_OBSERVATION_CLAIM_LEASE_MS =
   150_000;
 export const SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS =
@@ -51,10 +52,28 @@ export const SOURCE_RECALL_POINT_OBSERVATION_READ_MIN_BUDGET_MS =
 
 const SOURCE = "recall";
 const WORK_PREFIX =
-  "paraai:phase4:recall-point-observation:v1:work:";
+  "paraai:phase4:recall-point-observation:v2:work:";
+const MANIFEST_RUN_PREFIX =
+  "paraai:phase4:recall-point-observation-manifest:v1:run:";
+const MANIFEST_PAGE_PREFIX =
+  "paraai:phase4:recall-point-observation-manifest:v1:page:";
 const WORK_KEY = new RegExp(
   `^${WORK_PREFIX.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`
     + "([a-f0-9]{64})$",
+  "u",
+);
+const MANIFEST_RUN_KEY = new RegExp(
+  `^${MANIFEST_RUN_PREFIX.replace(
+    /[.*+?^${}()|[\]\\]/gu,
+    "\\$&",
+  )}([a-f0-9]{64})$`,
+  "u",
+);
+const MANIFEST_PAGE_KEY = new RegExp(
+  `^${MANIFEST_PAGE_PREFIX.replace(
+    /[.*+?^${}()|[\]\\]/gu,
+    "\\$&",
+  )}([a-f0-9]{64}):([1-9][0-9]{0,2})$`,
   "u",
 );
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -115,6 +134,8 @@ const RECORD_KEYS = Object.freeze([
   "referenceHeadEpochDigest",
   "referenceHeadRecordDigest",
   "referenceHeadRevisionDigest",
+  "referenceOrdinal",
+  "referencePageNumber",
   "referencePageKeyDigest",
   "referencePageNativeByteProofDigest",
   "referencePageRecordDigest",
@@ -209,6 +230,33 @@ const PRIVATE_PAGE_KEYS = Object.freeze([
   "workKeyDigest",
 ]);
 const CLAIM_INPUT_KEYS = Object.freeze(["workKeyDigest"]);
+const MANIFEST_SELECTION_KEYS = Object.freeze([
+  "expiresAtMs",
+  "verifiedPage",
+  "workKeyDigest",
+]);
+const MANIFEST_READ_SELECTION_KEYS = Object.freeze([
+  "workKeyDigest",
+]);
+const POINT_WORK_BINDING_KEYS = Object.freeze([
+  "contextDigest",
+  "contractPinsDigest",
+  "decisionBoundaryAtMs",
+  "expectedReference",
+  "expiresAtMs",
+  "referenceHeadEpochDigest",
+  "referenceHeadRecordDigest",
+  "referenceHeadRevisionDigest",
+  "referenceOrdinal",
+  "referencePageKeyDigest",
+  "referencePageNativeByteProofDigest",
+  "referencePageNumber",
+  "referencePageRecordDigest",
+  "referencePageSemanticDigest",
+  "runNonceDigest",
+  "workItemDigest",
+  "workKeyDigest",
+]);
 const CLAIM_RESULT_KEYS = Object.freeze([
   "claimNonceDigest",
   "contextDigest",
@@ -240,6 +288,9 @@ const ADAPTER_OPTION_KEYS = new Set([
   "token",
   "url",
 ]);
+const ALL_MANIFEST_REFERENCES = Symbol(
+  "allRecallPointObservationManifestReferences",
+);
 
 export class SourceRecallPointObservationStoreError extends Error {
   constructor(code) {
@@ -672,6 +723,15 @@ function validateObservationRecord(value) {
       raw.referenceHeadRecordDigest,
       code,
     ),
+    referenceOrdinal: safeInteger(
+      raw.referenceOrdinal,
+      code,
+    ),
+    referencePageNumber: safeInteger(
+      raw.referencePageNumber,
+      code,
+      1,
+    ),
     referencePageKeyDigest: exactDigest(
       raw.referencePageKeyDigest,
       code,
@@ -699,7 +759,9 @@ function validateObservationRecord(value) {
   };
   canonicalBoundaryFromMs(record.decisionBoundaryAtMs, code);
   if (
-    record.createdAtMs
+    record.referenceOrdinal >= SOURCE_RECALL_PAGE_SIZE
+    || record.referencePageNumber > 200
+    || record.createdAtMs
       > Number.MAX_SAFE_INTEGER
         - SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS
     || record.decisionBoundaryAtMs > record.createdAtMs
@@ -939,15 +1001,16 @@ function validateObservationRecord(value) {
       record.referencePageNativeByteProofDigest,
     referencePageSemanticDigest:
       record.referencePageSemanticDigest,
-    referenceOrdinal: 0,
+    referencePageNumber: record.referencePageNumber,
+    referenceOrdinal: record.referenceOrdinal,
     expectedReference: record.expectedReference,
   };
   const expectedWorkItemDigest = semanticDigest(
-    "phase4-recall-point-observation-work-item-v1",
+    "phase4-recall-point-observation-work-item-v2",
     workItemMaterial,
   );
   const expectedWorkKeyDigest = semanticDigest(
-    "phase4-recall-point-observation-work-key-v1",
+    "phase4-recall-point-observation-work-key-v2",
     {
       policyVersion:
         SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION,
@@ -955,7 +1018,7 @@ function validateObservationRecord(value) {
     },
   );
   const expectedContextDigest = semanticDigest(
-    "phase4-recall-point-observation-context-v1",
+    "phase4-recall-point-observation-context-v2",
     {
       policyVersion:
         SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION,
@@ -1253,7 +1316,17 @@ function redisTimeFromResult(result, secondsIndex, code) {
 }
 
 function adapterKey(value, code) {
-  if (typeof value !== "string" || !WORK_KEY.test(value)) {
+  if (typeof value !== "string") {
+    fail(code);
+  }
+  if (WORK_KEY.test(value) || MANIFEST_RUN_KEY.test(value)) {
+    return value;
+  }
+  const manifestPage = MANIFEST_PAGE_KEY.exec(value);
+  if (
+    manifestPage === null
+    || Number(manifestPage[2]) > 200
+  ) {
     fail(code);
   }
   return value;
@@ -1732,9 +1805,23 @@ function persistenceInterface(value) {
   return Object.freeze(persistence);
 }
 
-function verifiedPrivatePage(value) {
+function verifiedPrivatePage(value, referenceOrdinal = null) {
   const code =
     "SOURCE_RECALL_POINT_OBSERVATION_VERIFIED_PAGE_INVALID";
+  const allReferences =
+    referenceOrdinal === ALL_MANIFEST_REFERENCES;
+  const manifestSelection = referenceOrdinal !== null;
+  if (
+    manifestSelection
+    && !allReferences
+    && (
+      !Number.isSafeInteger(referenceOrdinal)
+      || referenceOrdinal < 0
+      || referenceOrdinal >= SOURCE_RECALL_PAGE_SIZE
+    )
+  ) {
+    fail(code);
+  }
   const verified = exactRecord(
     value,
     VERIFIED_PAGE_KEYS,
@@ -1755,8 +1842,24 @@ function verifiedPrivatePage(value) {
     || page.source !== SOURCE
     || page.clientVersion !== SOURCE_RECALL_PAGE_CLIENT_VERSION
     || page.passNumber !== 2
-    || page.pageNumber !== 1
-    || page.cursor !== null
+  ) {
+    fail(code);
+  }
+  const pageNumber = safeInteger(page.pageNumber, code, 1);
+  if (
+    pageNumber > 200
+    || (
+      !manifestSelection
+      && (pageNumber !== 1 || page.cursor !== null)
+    )
+    || !(
+      page.cursor === null
+      || (
+        typeof page.cursor === "string"
+        && page.cursor.length <= 8_192
+        && page.cursor.trim() === page.cursor
+      )
+    )
   ) {
     fail(code);
   }
@@ -1768,7 +1871,13 @@ function verifiedPrivatePage(value) {
     page.scannedCount,
     code,
   );
-  if (scannedCount < referenceCount) fail(code);
+  if (
+    scannedCount < referenceCount
+    || scannedCount > SOURCE_RECALL_PAGE_SIZE
+    || referenceCount > SOURCE_RECALL_PAGE_SIZE
+  ) {
+    fail(code);
+  }
   const references = denseArraySnapshot(
     page.references,
     code,
@@ -1823,12 +1932,25 @@ function verifiedPrivatePage(value) {
       code,
     );
   });
-  if (canonicalReferences.length === 0) {
+  const selectedOrdinal = allReferences
+    ? null
+    : manifestSelection
+    ? referenceOrdinal
+    : 0;
+  if (
+    !allReferences
+    && (
+      canonicalReferences.length === 0
+      || selectedOrdinal >= canonicalReferences.length
+    )
+  ) {
     fail(
       "SOURCE_RECALL_POINT_OBSERVATION_REFERENCE_UNAVAILABLE",
     );
   }
-  const selectedReference = canonicalReferences[0];
+  const selectedReference = allReferences
+    ? null
+    : canonicalReferences[selectedOrdinal];
   const redisNowMs = safeInteger(
     verified.redisNowMs,
     code,
@@ -1843,14 +1965,16 @@ function verifiedPrivatePage(value) {
     code,
     1,
   );
+  const creationBudgetAvailable =
+    remainingTtlMs
+      > SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS
+        + SOURCE_RECALL_POINT_OBSERVATION_CLAIM_LEASE_MS;
   if (
     decisionBoundaryAtMs > redisNowMs
     || pageExpiresAtMs - redisNowMs !== remainingTtlMs
     || remainingTtlMs
       > SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS
-    || remainingTtlMs
-      <= SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS
-        + SOURCE_RECALL_POINT_OBSERVATION_CLAIM_LEASE_MS
+    || (!manifestSelection && !creationBudgetAvailable)
   ) {
     fail(code);
   }
@@ -1889,13 +2013,39 @@ function verifiedPrivatePage(value) {
       page.pageSemanticDigest,
       code,
     ),
+    referenceOrdinal: selectedOrdinal,
+    referencePageNumber: pageNumber,
+    referenceCount,
+    references: allReferences
+      ? canonicalReferences
+      : null,
+    scannedCount,
     selectedReference,
     pageExpiresAtMs,
     verifiedAtMs: redisNowMs,
   });
 }
 
-function initialRecord(page, createdAtMs) {
+function selectedManifestReference(page, referenceOrdinal) {
+  if (
+    page.references === null
+    || !Number.isSafeInteger(referenceOrdinal)
+    || referenceOrdinal < 0
+    || referenceOrdinal >= page.references.length
+  ) {
+    fail(
+      "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_SELECTION_INVALID",
+    );
+  }
+  return deepFreeze({
+    ...page,
+    referenceOrdinal,
+    references: null,
+    selectedReference: page.references[referenceOrdinal],
+  });
+}
+
+function pointWorkIdentity(page) {
   const workItemMaterial = {
     runNonceDigest: page.runNonceDigest,
     decisionBoundaryAtMs: page.decisionBoundaryAtMs,
@@ -1913,23 +2063,84 @@ function initialRecord(page, createdAtMs) {
       page.referencePageNativeByteProofDigest,
     referencePageSemanticDigest:
       page.referencePageSemanticDigest,
-    referenceOrdinal: 0,
+    referencePageNumber: page.referencePageNumber,
+    referenceOrdinal: page.referenceOrdinal,
     expectedReference: page.selectedReference,
   };
   const workItemDigest = semanticDigest(
-    "phase4-recall-point-observation-work-item-v1",
+    "phase4-recall-point-observation-work-item-v2",
     workItemMaterial,
   );
   const workKeyDigest = semanticDigest(
-    "phase4-recall-point-observation-work-key-v1",
+    "phase4-recall-point-observation-work-key-v2",
     {
       policyVersion:
         SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION,
       workItemDigest,
     },
   );
+  return deepFreeze({
+    workItemDigest,
+    workKeyDigest,
+  });
+}
+
+function manifestEntriesFromVerifiedPage(verifiedPage) {
+  const page = verifiedPrivatePage(
+    verifiedPage,
+    ALL_MANIFEST_REFERENCES,
+  );
+  const entries = page.references.map((reference, ordinal) => {
+    const selected = selectedManifestReference(page, ordinal);
+    const identity = pointWorkIdentity(selected);
+    return deepFreeze({
+      referenceIdDigest: semanticDigest(
+        "phase4-recall-reference-id-v1",
+        reference.id,
+      ),
+      referenceDigest: semanticDigest(
+        "phase4-recall-private-reference-v1",
+        reference,
+      ),
+      workItemDigest: identity.workItemDigest,
+      workKeyDigest: identity.workKeyDigest,
+    });
+  });
+  return deepFreeze({
+    contractPinsDigest: page.contractPinsDigest,
+    decisionBoundaryAtMs: page.decisionBoundaryAtMs,
+    entries,
+    pageExpiresAtMs: page.pageExpiresAtMs,
+    pageKeyDigest: page.referencePageKeyDigest,
+    pageNativeByteProofDigest:
+      page.referencePageNativeByteProofDigest,
+    pageNumber: page.referencePageNumber,
+    pageRecordDigest: page.referencePageRecordDigest,
+    pageSemanticDigest: page.referencePageSemanticDigest,
+    recallReferenceHeadEpochDigest:
+      page.referenceHeadEpochDigest,
+    recallReferenceHeadRecordDigest:
+      page.referenceHeadRecordDigest,
+    recallReferenceHeadRevisionDigest:
+      page.referenceHeadRevisionDigest,
+    referenceCount: entries.length,
+    runNonceDigest: page.runNonceDigest,
+    scannedCount: page.scannedCount,
+    verifiedAtMs: page.verifiedAtMs,
+  });
+}
+
+function initialRecord(
+  page,
+  createdAtMs,
+  manifestExpiresAtMs = null,
+) {
+  const {
+    workItemDigest,
+    workKeyDigest,
+  } = pointWorkIdentity(page);
   const contextDigest = semanticDigest(
-    "phase4-recall-point-observation-context-v1",
+    "phase4-recall-point-observation-context-v2",
     {
       policyVersion:
         SOURCE_RECALL_POINT_OBSERVATION_STORE_VERSION,
@@ -1951,6 +2162,7 @@ function initialRecord(page, createdAtMs) {
   );
   const expiresAtMs = Math.min(
     page.pageExpiresAtMs,
+    manifestExpiresAtMs ?? Number.MAX_SAFE_INTEGER,
     createdAtMs
       + SOURCE_RECALL_REFERENCE_PRIVATE_PAGE_TTL_MS,
   );
@@ -1974,6 +2186,8 @@ function initialRecord(page, createdAtMs) {
       page.referenceHeadRevisionDigest,
     referenceHeadRecordDigest:
       page.referenceHeadRecordDigest,
+    referencePageNumber: page.referencePageNumber,
+    referenceOrdinal: page.referenceOrdinal,
     referencePageKeyDigest: page.referencePageKeyDigest,
     referencePageRecordDigest:
       page.referencePageRecordDigest,
@@ -2000,6 +2214,19 @@ function initialRecord(page, createdAtMs) {
     pinnable: false,
     authorityAvailable: false,
   });
+}
+
+function assertExactPointWorkBinding(snapshot, expected) {
+  if (
+    POINT_WORK_BINDING_KEYS.some((key) => (
+      canonicalJson(snapshot.record[key])
+        !== canonicalJson(expected[key])
+    ))
+  ) {
+    fail(
+      "SOURCE_RECALL_POINT_OBSERVATION_WORK_BINDING_MISMATCH",
+    );
+  }
 }
 
 function terminalized(record, reason, nowMs) {
@@ -2075,7 +2302,7 @@ function timeResult(result) {
   return safeInteger(value.redisNowMs, code);
 }
 
-export function createSourceRecallPointObservationStore(options) {
+function createSourceRecallPointObservationStoreCore(options) {
   const code =
     "SOURCE_RECALL_POINT_OBSERVATION_STORE_OPTIONS_INVALID";
   const normalized = exactRecord(
@@ -2148,11 +2375,44 @@ export function createSourceRecallPointObservationStore(options) {
     );
   }
 
-  async function prepareRecallPointObservationWork(verifiedPage) {
-    const page = verifiedPrivatePage(verifiedPage);
+  async function prepareSelectedRecallPointObservationWork(
+    page,
+    manifestExpiresAtMs = null,
+  ) {
+    const {
+      workKeyDigest,
+    } = pointWorkIdentity(page);
+    const existingResult = readResult(
+      await persistence.read({
+        key: `${WORK_PREFIX}${workKeyDigest}`,
+      }),
+      "SOURCE_RECALL_POINT_OBSERVATION_PERSISTENCE_RESULT_INVALID",
+    );
+    if (existingResult.raw !== null) {
+      const existing = parseSnapshot(
+        existingResult.raw,
+        existingResult.redisNowMs,
+        existingResult.expiresAtMs,
+      );
+      const expected = initialRecord(
+        page,
+        existing.record.createdAtMs,
+        manifestExpiresAtMs,
+      );
+      assertExactPointWorkBinding(existing, expected);
+      return existing;
+    }
     const createdAtMs = timeResult(await persistence.time());
     if (
       createdAtMs < page.verifiedAtMs
+      || (
+        manifestExpiresAtMs !== null
+        && (
+          !Number.isSafeInteger(manifestExpiresAtMs)
+          || manifestExpiresAtMs > page.pageExpiresAtMs
+          || manifestExpiresAtMs <= createdAtMs
+        )
+      )
       || page.pageExpiresAtMs - createdAtMs
         <= SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS
           + SOURCE_RECALL_POINT_OBSERVATION_CLAIM_LEASE_MS
@@ -2161,7 +2421,20 @@ export function createSourceRecallPointObservationStore(options) {
         "SOURCE_RECALL_POINT_OBSERVATION_REFERENCE_EXPIRED",
       );
     }
-    const proposed = initialRecord(page, createdAtMs);
+    const proposed = initialRecord(
+      page,
+      createdAtMs,
+      manifestExpiresAtMs,
+    );
+    if (
+      proposed.expiresAtMs - createdAtMs
+        <= SOURCE_RECALL_POINT_OBSERVATION_MAX_INTERVAL_MS
+          + SOURCE_RECALL_POINT_OBSERVATION_CLAIM_LEASE_MS
+    ) {
+      fail(
+        "SOURCE_RECALL_POINT_OBSERVATION_REFERENCE_EXPIRED",
+      );
+    }
     const proposedRaw = canonicalJson(proposed);
     const result = observationSnapshotResult(
       await persistence.ensure({
@@ -2184,21 +2457,122 @@ export function createSourceRecallPointObservationStore(options) {
       result.redisNowMs,
       result.expiresAtMs,
     );
-    if (
-      snapshot.record.workKeyDigest !== proposed.workKeyDigest
-      || snapshot.record.workItemDigest !== proposed.workItemDigest
-      || snapshot.record.contextDigest !== proposed.contextDigest
-      || snapshot.record.referenceHeadRecordDigest
-        !== proposed.referenceHeadRecordDigest
-      || snapshot.record.referencePageRecordDigest
-        !== proposed.referencePageRecordDigest
-      || snapshot.record.expiresAtMs !== proposed.expiresAtMs
-    ) {
+    assertExactPointWorkBinding(
+      snapshot,
+      initialRecord(
+        page,
+        snapshot.record.createdAtMs,
+        manifestExpiresAtMs,
+      ),
+    );
+    return snapshot;
+  }
+
+  async function prepareRecallPointObservationWork(verifiedPage) {
+    return prepareSelectedRecallPointObservationWork(
+      verifiedPrivatePage(verifiedPage),
+    );
+  }
+
+  function manifestEntries(verifiedPage) {
+    return manifestEntriesFromVerifiedPage(verifiedPage);
+  }
+
+  async function prepareManifestSelection(capability) {
+    const code =
+      "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_CAPABILITY_INVALID";
+    let consumed;
+    try {
+      const {
+        consumeRecallPointObservationManifestPrepareCapability,
+      } = await import(
+        "./source-recall-point-observation-manifest-store.mjs"
+      );
+      consumed =
+        consumeRecallPointObservationManifestPrepareCapability(
+          capability,
+        );
+    } catch {
+      fail(code);
+    }
+    const selectedInput = exactRecord(
+      consumed,
+      MANIFEST_SELECTION_KEYS,
+      code,
+    );
+    if (!Object.isFrozen(consumed)) fail(code);
+    const selectedWork = deepFreeze({
+      expiresAtMs: safeInteger(
+        selectedInput.expiresAtMs,
+        code,
+        1,
+      ),
+      workKeyDigest: exactDigest(
+        selectedInput.workKeyDigest,
+        code,
+      ),
+    });
+    const manifest =
+      manifestEntriesFromVerifiedPage(
+        selectedInput.verifiedPage,
+      );
+    const matchingOrdinals = manifest.entries.flatMap(
+      (entry, ordinal) => (
+        entry.workKeyDigest === selectedWork.workKeyDigest
+          ? [ordinal]
+          : []
+      ),
+    );
+    if (matchingOrdinals.length !== 1) {
       fail(
-        "SOURCE_RECALL_POINT_OBSERVATION_WORK_BINDING_MISMATCH",
+        "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_SELECTION_INVALID",
       );
     }
-    return snapshot;
+    const page = verifiedPrivatePage(
+      selectedInput.verifiedPage,
+      matchingOrdinals[0],
+    );
+    const identity = pointWorkIdentity(page);
+    if (identity.workKeyDigest !== selectedWork.workKeyDigest) {
+      fail(
+        "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_SELECTION_INVALID",
+      );
+    }
+    return prepareSelectedRecallPointObservationWork(
+      page,
+      selectedWork.expiresAtMs,
+    );
+  }
+
+  async function readManifestSelection(capability) {
+    const code =
+      "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_CAPABILITY_INVALID";
+    let consumed;
+    try {
+      const {
+        consumeRecallPointObservationManifestReadCapability,
+      } = await import(
+        "./source-recall-point-observation-manifest-store.mjs"
+      );
+      consumed =
+        consumeRecallPointObservationManifestReadCapability(
+          capability,
+        );
+    } catch {
+      fail(code);
+    }
+    const selectedInput = exactRecord(
+      consumed,
+      MANIFEST_READ_SELECTION_KEYS,
+      code,
+    );
+    if (!Object.isFrozen(consumed)) fail(code);
+    return readSnapshot(deepFreeze({
+      workKeyDigest: exactDigest(
+        selectedInput.workKeyDigest,
+        code,
+      ),
+    }));
   }
 
   function completeClaim(record) {
@@ -2581,10 +2955,46 @@ export function createSourceRecallPointObservationStore(options) {
   return deepFreeze({
     checkpointRecallPointObservationRead,
     claimRecallPointObservationRead,
+    manifestEntries,
+    prepareManifestSelection,
     prepareRecallPointObservationWork,
+    readManifestSelection,
     readRecallPointObservationWork,
     recallPointObservationAggregateStatus,
     recordRecallPointObservationUnresolved,
+  });
+}
+
+export function createSourceRecallPointObservationStore(options) {
+  const store = createSourceRecallPointObservationStoreCore(
+    options,
+  );
+  return deepFreeze({
+    checkpointRecallPointObservationRead:
+      store.checkpointRecallPointObservationRead,
+    claimRecallPointObservationRead:
+      store.claimRecallPointObservationRead,
+    prepareRecallPointObservationWork:
+      store.prepareRecallPointObservationWork,
+    readRecallPointObservationWork:
+      store.readRecallPointObservationWork,
+    recallPointObservationAggregateStatus:
+      store.recallPointObservationAggregateStatus,
+    recordRecallPointObservationUnresolved:
+      store.recordRecallPointObservationUnresolved,
+  });
+}
+
+export function createSourceRecallPointObservationManifestPointInterface(
+  options,
+) {
+  const store = createSourceRecallPointObservationStoreCore(
+    options,
+  );
+  return deepFreeze({
+    manifestEntries: store.manifestEntries,
+    prepareManifestSelection: store.prepareManifestSelection,
+    readManifestSelection: store.readManifestSelection,
   });
 }
 

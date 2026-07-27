@@ -9,9 +9,17 @@ import {
 const NOW_MS = Date.parse("2026-07-27T00:00:00.000Z");
 const EXPIRES_AT_MS = NOW_MS + 60 * 60 * 1_000;
 const KEY =
-  `paraai:phase4:recall-point-observation:v1:work:${
+  `paraai:phase4:recall-point-observation:v2:work:${
     "a".repeat(64)
   }`;
+const MANIFEST_RUN_KEY =
+  `paraai:phase4:recall-point-observation-manifest:v1:run:${
+    "b".repeat(64)
+  }`;
+const MANIFEST_PAGE_KEY =
+  `paraai:phase4:recall-point-observation-manifest:v1:page:${
+    "b".repeat(64)
+  }:200`;
 const URL = "https://unit-test.invalid";
 const TOKEN = "unit-test-token";
 
@@ -430,4 +438,41 @@ test("configuration and persistence inputs fail before transport", async () => {
     ),
   );
   assert.equal(calls, 0);
+});
+
+test("the shared adapter admits only exact bounded manifest namespaces", async () => {
+  const commands = [];
+  const adapter = adapterFor(async (url, options) => {
+    commands.push(JSON.parse(options.body));
+    return response([
+      null,
+      ...redisParts(),
+      -2,
+    ]);
+  });
+  for (const key of [MANIFEST_RUN_KEY, MANIFEST_PAGE_KEY]) {
+    assert.deepEqual(await adapter.read({ key }), {
+      raw: null,
+      redisNowMs: NOW_MS,
+      expiresAtMs: -2,
+    });
+  }
+  assert.deepEqual(
+    commands.map((command) => command[3]),
+    [MANIFEST_RUN_KEY, MANIFEST_PAGE_KEY],
+  );
+  for (const key of [
+    MANIFEST_PAGE_KEY.replace(/:200$/u, ":201"),
+    MANIFEST_PAGE_KEY.replace(/:200$/u, ":0"),
+    MANIFEST_PAGE_KEY.replace(/:200$/u, ":01"),
+    MANIFEST_RUN_KEY.replace(/:run:/u, ":head:"),
+  ]) {
+    await assert.rejects(
+      adapter.read({ key }),
+      expectCode(
+        "SOURCE_RECALL_POINT_OBSERVATION_PERSISTENCE_INPUT_INVALID",
+      ),
+    );
+  }
+  assert.equal(commands.length, 2);
 });
