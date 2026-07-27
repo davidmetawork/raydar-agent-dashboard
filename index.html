@@ -385,6 +385,8 @@
             <option value="all">All Para AI</option>
             <option value="not_added">Not Added</option>
             <option value="added">Added</option>
+            <option value="no_match">No match</option>
+            <option value="ambiguous">Ambiguous</option>
           </select>
           <select id="cd-foutcome" onchange="cdFilters.outcome=this.value;renderRoster()">
             <option value="all">All outcomes</option>
@@ -1463,22 +1465,33 @@
     const CD_STATUS_CLS = { success:"good", no_show:"yellow", bad:"bad", upcoming:"blue", held:"warn", live:"good cd-pulse", quiet:"muted", other:"muted" };
     const cdStatusPill = (status) =>
       `<span class="pill ${CD_STATUS_CLS[cdStatusKey(status)]}"><span class="d"></span>${cdEsc(String(status||"—").trim()||"—")}</span>`;
-    const cdParaAIKey = (row) => row?.paraAIStatus==="added" ? "added" : row?.paraAIStatus==="not_added" ? "not_added" : "unknown";
+    // Four distinct display states. "No match" and "Ambiguous" used to render
+    // as Not Added, which drew an unresolved identity as a confident no.
+    const CD_PARAAI_KEYS = new Set(["added","not_added","ambiguous","no_match"]);
+    const cdParaAIKey = (row) => CD_PARAAI_KEYS.has(row?.paraAIStatus) ? row.paraAIStatus : "checking";
+    const CD_PARAAI_PILL = {
+      added:     { cls:"good",   label:"Added" },
+      not_added: { cls:"yellow", label:"Not Added" },
+      ambiguous: { cls:"muted",  label:"Ambiguous" },
+      no_match:  { cls:"muted",  label:"No match" },
+      checking:  { cls:"muted",  label:"Checking…" },
+    };
     const cdEffectiveOutcome = (row) => String(row?.outcome||row?.verifiedOutcome||"").trim();
     function cdParaAIPill(row){
-      const key=cdParaAIKey(row), added=key==="added";
-      const title=row?.paraAIAmbiguous
-        ? "Multiple Paraform candidates share this name, so Added is not assumed."
-        : key==="unknown"
+      const key=cdParaAIKey(row);
+      const title=key==="ambiguous"
+        ? "Multiple Paraform candidates share this name, so membership cannot be resolved."
+        : key==="no_match"
+          ? "No Paraform candidate record matched this name, so membership is unknown."
+        : key==="checking"
           ? "Checking Paraform Talent Network membership."
-        : added
-          ? row?.paraAISource==="outcome_sequence"
-            ? "Exact candidate-ID membership in a reviewed outcome sequence confirms this candidate was added to Para AI."
-            : row?.paraAISource==="local_confirmed"
-            ? "A read-back-verified Para AI submission confirms Talent Network membership."
-            : "Paraform confirms this candidate is in the Para AI Talent Network."
-          : "Paraform does not currently confirm Talent Network membership.";
-      return `<span class="pill cd-paraai ${added?"good":key==="unknown"?"muted":"yellow"}" title="${cdEsc(title)}"><span class="d"></span>${added?"Added":key==="unknown"?"Checking…":"Not Added"}</span>`;
+        : key==="added"
+          ? row?.paraAISource==="local_confirmed"
+            ? "A Paraform-accepted Para AI submission from this system confirms Talent Network membership."
+            : "Paraform records a Talent Network submission for this candidate."
+          : "Paraform records no Talent Network submission for this candidate.";
+      const pill=CD_PARAAI_PILL[key];
+      return `<span class="pill cd-paraai ${pill.cls}" title="${cdEsc(title)}"><span class="d"></span>${pill.label}</span>`;
     }
 
     // Match Queue is candidate-level, not call-level. For repeat callers only
@@ -1628,8 +1641,9 @@
     }
 
     // Read-only, vendor-derived Talent Network status. Added is shown only
-    // when Paraform (or a locally read-back-confirmed submission) proves it.
-    // Missing and ambiguous identities deliberately remain Not Added.
+    // when Paraform records a submission (or this system's own submission was
+    // accepted by Paraform). Missing and ambiguous identities get their own
+    // pill rather than borrowing Not Added.
     function cdApplyOutcomeRecords(outcomes){
       const byId=new Map((Array.isArray(outcomes)?outcomes:[])
         .filter(item=>item?.candidateUserId)
@@ -1641,11 +1655,8 @@
         row.outcomeComplete=hit?.outcomeComplete===true;
         row.verifiedOutcome=hit?.verifiedOutcome||null;
         row.outcomeConflict=hit?.outcomeConflict===true;
-        if(hit){
-          const alreadyAdded=row.paraAIStatus==="added";
-          row.paraAIStatus="added";
-          if(!alreadyAdded) row.paraAISource="outcome_sequence";
-        }
+        // Outcome membership records what happened AFTER Para AI; it is not
+        // evidence of Talent Network membership and must never set Added.
       }
     }
 
@@ -1702,7 +1713,11 @@
         }
         for(const row of rosterRows){
           const hit=byName.get(cdNormName(row.candidate));
-          row.paraAIStatus=hit?.status==="added" && hit?.ambiguous!==true ? "added" : "not_added";
+          row.paraAIStatus=!hit
+            ? "no_match"
+            : hit.ambiguous===true
+              ? "ambiguous"
+              : hit.status==="added" ? "added" : "not_added";
           row.paraAIAmbiguous=hit?.ambiguous===true;
           row.paraAICandidateUserId=hit?.ambiguous===true ? null : (hit?.candidateUserId||null);
           row.paraAISource=hit?.source||null;

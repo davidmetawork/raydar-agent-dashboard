@@ -1,7 +1,6 @@
 import {
   AGENCY_ID,
   RECRUITER_ID,
-  candidateAlreadySubmitted,
   trpcGet,
 } from "../../paraai/_lib/core.mjs";
 
@@ -9,21 +8,39 @@ export const STATUS_CACHE_TTL_MS = 5 * 60 * 1000;
 export const DEFAULT_CRM_PAGE_SIZE = 1000;
 export const DEFAULT_MAX_CRM_PAGES = 25;
 
-const CONFIRMED_JOB_STATES = new Set([
+// States a job can ONLY reach after the one allowed Paraform mutation was
+// accepted. `needs_review` and `no_email` are deliberately absent: both are
+// also reachable in the pre-submission human-review lane, and treating them
+// as confirmation turned 21 never-submitted candidates green on 2026-07-27.
+// A genuinely submitted job that later parks in either state still qualifies
+// through `submitAcceptedAt`, which survives every later transition.
+const POST_SUBMIT_JOB_STATES = new Set([
+  "awaiting_approval",
   "awaiting_matches",
   "ready_to_enroll",
-  "needs_review",
   "ensuring_email",
   "enrolling",
   "verifying",
   "enrolled",
-  "no_email",
 ]);
 
 const text = (value) => String(value || "").trim().replace(/\s+/g, " ");
 
 export function normalizeCandidateName(value) {
   return text(value).normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+// Paraform's own marker for a Talent Network submission, and the only CRM
+// field that proves one. `matching_pool_status` describes the marketplace
+// matching pool, not membership — its real enum values are AUTO_/RECRUITER_
+// prefixed, so the shared predicate's bare "OFF_MARKET" exclusion never
+// matched and off-market people read as submitted — and
+// `has_application_submission_ever` only means the person once applied to some
+// role. Verified 2026-07-27 across 14,771 recruiter-scoped rows: every
+// read-back-verified submission carries this timestamp, and it never coexists
+// with `matching_pool_status: INELIGIBLE`.
+export function talentNetworkSubmitted(row) {
+  return Boolean(row?.talent_network_submitted_at || row?.talentNetworkSubmittedAt);
 }
 
 export function localConfirmedMembership(job) {
@@ -33,8 +50,11 @@ export function localConfirmedMembership(job) {
 
   const readbackVerified = job?.submitReadbackVerified === true;
   const vendorAlreadySubmitted = job?.error?.code === "ALREADY_SUBMITTED";
-  const reconciledState = CONFIRMED_JOB_STATES.has(String(job?.state || ""));
-  if (!readbackVerified && !vendorAlreadySubmitted && !reconciledState) {
+  // Written only when Paraform returned success for the mutation; an uncertain
+  // write (`submission_unknown`) never sets it.
+  const vendorAccepted = Boolean(text(job?.submitAcceptedAt));
+  const postSubmitState = POST_SUBMIT_JOB_STATES.has(String(job?.state || ""));
+  if (!readbackVerified && !vendorAlreadySubmitted && !vendorAccepted && !postSubmitState) {
     return null;
   }
   return {
@@ -78,7 +98,7 @@ export function buildParaAIStatusIndex(
   rows = [],
   {
     confirmedMemberships = [],
-    membershipPredicate = candidateAlreadySubmitted,
+    membershipPredicate = talentNetworkSubmitted,
   } = {},
 ) {
   const byId = new Map();

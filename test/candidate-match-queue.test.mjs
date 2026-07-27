@@ -44,7 +44,7 @@ test("Para AI status endpoint joins exact-ID outcome membership onto CRM status"
     corsImpl: () => false,
     requireAuthImpl: async () => true,
     loadSnapshot: async () => ({
-      rows: [{ id: "candidate-a", name: "Candidate A" }],
+      rows: [{ id: "candidate-a", name: "Candidate A", talent_network_submitted_at: "2026-07-16T00:00:00.000Z" }],
       complete: true,
       generatedAt: "2026-07-17T00:00:00.000Z",
       cached: false,
@@ -78,7 +78,7 @@ test("Para AI status endpoint joins exact-ID outcome membership onto CRM status"
     label: "Added",
     added: true,
     ambiguous: false,
-    source: "outcome_sequence",
+    source: "paraform_crm",
     acquisitionSource: null,
     acquisitionSourceEvidence: null,
     outcomeComplete: true,

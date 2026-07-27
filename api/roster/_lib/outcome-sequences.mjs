@@ -119,12 +119,11 @@ export function applyOutcomeMemberships(statuses = [], membershipIndex = new Map
     }
     return {
       ...status,
-      // These five sequences are downstream of Talent Network review. Exact
-      // candidate-ID membership is therefore also authoritative Added proof.
-      status: "added",
-      label: "Added",
-      added: true,
-      source: status.status === "added" ? status.source : "outcome_sequence",
+      // Membership in these five sequences records an OUTCOME, not Talent
+      // Network membership. Candidates can be enrolled by hand and never
+      // submitted — 17 members were in exactly that state on 2026-07-27 — so
+      // Added stays owned by the authoritative submission read and is never
+      // inferred here.
       outcomeComplete: true,
       verifiedOutcome: membership.verifiedOutcome,
       outcomeConflict: membership.outcomeConflict,
