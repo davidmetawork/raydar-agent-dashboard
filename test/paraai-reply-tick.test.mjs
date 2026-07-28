@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  executeAction,
   findJobForCandidate,
   planReplyAction,
+  replanReplyRecord,
   replyActionEnabled,
   replyConfig,
   replyDetectionEnabled,
@@ -46,7 +48,11 @@ const record = (decision) => ({
   decision: { conditions: [], targetRequestIds: ["req-1"], ...decision },
 });
 
-const job = { id: "bot-1", candidateUserId: "cu-1" };
+// THE REAL PERSISTED SHAPE. This fixture used to be { id, candidateUserId },
+// which no stored job has ever looked like — the candidate id lives under
+// identity. That fabrication is why the planner's broken lookup shipped green and
+// then sent every definitive yes to review in production. Keep it nested.
+const job = { id: "bot-1", identity: { candidateUserId: "cu-1" }, successfulCallVerified: true };
 
 // FAIL CLOSED BY ABSENCE. An unset dry-run flag is a dry run, so a machine that
 // simply never received the variable cannot start writing.
@@ -152,7 +158,7 @@ test("a yes with a screening call plans a submit for the targeted request", asyn
     record({ intent: "yes", confidence: "definitive" }),
     {
       requests: [pendingRequest(), pendingRequest({ id: "req-2", candidateUserId: "cu-2" })],
-      jobs: [{ id: "bot-9", candidateUserId: "cu-2" }, job],
+      jobs: [{ id: "bot-9", identity: { candidateUserId: "cu-2" } }, job],
       config: armed(),
     },
   );
@@ -272,4 +278,102 @@ test("a yes whose candidate has an identity-keyed job plans a submit, not a revi
   assert.equal(plan.action, "submit");
   assert.equal(plan.reason, "definitive_yes");
   assert.deepEqual(plan.requestIds, ["req_1"]);
+});
+
+// ------------------------------------------------- job preference and re-plan
+
+// Prefer the job that actually completed, but never drop a candidate merely
+// because an older record predates the flag.
+test("a verified successful call wins over a newer unverified job", () => {
+  const jobs = [
+    { id: "bot-new", identity: { candidateUserId: "cu-1" }, state: "needs_identity_review" },
+    { id: "bot-old", identity: { candidateUserId: "cu-1" }, successfulCallVerified: true },
+  ];
+  assert.equal(findJobForCandidate(jobs, "cu-1")?.id, "bot-old");
+});
+
+test("a match with no verified flag anywhere still resolves to the newest", () => {
+  const jobs = [
+    { id: "bot-new", identity: { candidateUserId: "cu-1" } },
+    { id: "bot-old", identity: { candidateUserId: "cu-1" } },
+  ];
+  assert.equal(findJobForCandidate(jobs, "cu-1")?.id, "bot-new");
+});
+
+// job.candidate holds contact details; a job that only has those must not be
+// claimed for the candidate.
+test("a job whose candidate block carries no id does not match", () => {
+  const jobs = [{ id: "bot-7", candidate: { fullName: "Amy Chen" }, identity: { candidateUserId: "cu-9" } }];
+  assert.equal(findJobForCandidate(jobs, "cu-1"), null);
+});
+
+// The pass path checks write authority BEFORE it touches the network, so these
+// assertions prove the gate without mocking Paraform: if dryRunOnly ever stopped
+// pinning the gate shut, the call would attempt a real dismissal.
+test("dryRunOnly pins the gate shut even with every automation gate armed", async () => {
+  const results = await executeAction(
+    record({ intent: "no" }),
+    { action: "pass", reason: "not_interested", requestIds: ["req-1"] },
+    { requests: [pendingRequest()], jobs: [job], config: armed(), dryRunOnly: true },
+  );
+  assert.equal(results.length, 1);
+  assert.equal(results[0].outcome, "shadow");
+});
+
+test("dryRunOnly outranks the operator force flag", async () => {
+  const results = await executeAction(
+    record({ intent: "no" }),
+    { action: "pass", reason: "not_interested", requestIds: ["req-1"] },
+    { requests: [pendingRequest()], jobs: [job], config: armed(), force: true, dryRunOnly: true },
+  );
+  assert.equal(results[0].outcome, "shadow");
+});
+
+test("a re-plan records a would-do and marks itself as one", async () => {
+  const next = await replanReplyRecord(
+    { ...record({ intent: "no" }), status: "needs_review" },
+    { requests: [pendingRequest()], jobs: [job], config: armed() },
+  );
+  assert.equal(next.status, "shadow_planned");
+  assert.equal(next.replanDryRun, true);
+  assert.ok(next.replannedAt);
+  assert.equal(next.plan.action, "pass");
+  assert.equal(next.results[0].outcome, "shadow");
+});
+
+// A submit re-plan deliberately still reads Paraform and generates answers,
+// because that IS the would-do payload. With Paraform unreachable the
+// preparation must surface as a recorded error and park the record back in
+// review, never as a silent success.
+test("a re-plan lifts a stuck no_screening_call_record into a submit plan", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("no network in tests"); };
+  try {
+    const stuck = {
+      ...record({ intent: "yes", confidence: "definitive" }),
+      status: "needs_review",
+      plan: { action: "review", reason: "no_screening_call_record", requestIds: ["req-1"] },
+    };
+    const next = await replanReplyRecord(stuck, {
+      requests: [pendingRequest()],
+      jobs: [job],
+      config: armed({ submitApproved: false }),
+    });
+    assert.equal(next.plan.action, "submit");
+    assert.equal(next.plan.jobId, "bot-1");
+    assert.equal(next.replanDryRun, true);
+    assert.equal(next.status, "needs_review");
+    assert.equal(next.results[0].outcome, "error");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a re-plan with nothing pending settles to no_action and writes nothing", async () => {
+  const next = await replanReplyRecord(
+    { ...record({ intent: "yes" }), status: "needs_review" },
+    { requests: [pendingRequest({ state: "DISMISSED" })], jobs: [job], config: armed() },
+  );
+  assert.equal(next.status, "no_action");
+  assert.deepEqual(next.results, []);
 });

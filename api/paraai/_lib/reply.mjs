@@ -112,24 +112,39 @@ const replyIdFor = (candidateUserId, messageId) => `${candidateUserId}:${message
 
 // A candidate's screening job, used to source transcript-grounded answers.
 //
-// The job record carries the resolved id at identity.candidateUserId. The other
-// paths are kept as fallbacks for older records, but identity is the one that
-// actually matches: reading only the top-level field silently found nothing and
-// sent every yes to review as no_screening_call_record (caught by the first
-// backfill on 2026-07-28, where 0 of 241 identified jobs matched).
+// The job record carries the resolved id at identity.candidateUserId. Reading
+// only the top-level field silently found nothing and sent every yes to review as
+// no_screening_call_record; the first backfill on 2026-07-28 made the scale of it
+// plain, with 0 of 241 identified jobs matching.
+//
+// identity is the path that actually matches, and it is provably the right
+// namespace: findCrmCandidate asserts the CRM row it returns really is the
+// candidate_user_id it queried and throws CRM_POINT_LOOKUP_ID_MISMATCH otherwise,
+// so a job's identity id and a submission request's candidate.candidate_user_id
+// are the same thing. The rest are kept only so an older or hand-built record
+// still resolves.
+function jobCandidateIds(job) {
+  return [
+    job?.identity?.candidateUserId,
+    job?.candidateUserId,
+    job?.candidate?.candidateUserId,
+    job?.candidate?.candidate_user_id,
+    job?.submission?.candidateUserId,
+  ];
+}
+
 export function findJobForCandidate(jobs, candidateUserId) {
   const wanted = text(candidateUserId);
   if (!wanted) return null;
-  return jobs.find((job) => {
-    const ids = [
-      job?.identity?.candidateUserId,
-      job?.candidateUserId,
-      job?.candidate?.candidateUserId,
-      job?.candidate?.candidate_user_id,
-      job?.submission?.candidateUserId,
-    ];
-    return ids.some((id) => text(id) && text(id) === wanted);
-  }) || null;
+  const matches = jobs.filter(
+    (job) => jobCandidateIds(job).some((id) => text(id) && text(id) === wanted),
+  );
+  if (!matches.length) return null;
+  // listJobs is newest-first. Prefer a job whose screening call actually
+  // completed, so a later needs_identity_review or errored record cannot shadow
+  // the one that carries the transcript. Fall back to newest rather than
+  // requiring the flag, so an older record that predates it is never dropped.
+  return matches.find((job) => job.successfulCallVerified === true) || matches[0];
 }
 
 export async function planReplyAction(record, { requests, jobs, config }) {
@@ -188,13 +203,17 @@ export async function prepareSubmission(request, record, job, { fetchImpl = fetc
   return { form, payload, generated, call, blocked: blocked.length ? blocked : null };
 }
 
-export async function executeAction(record, plan, { requests, jobs, config, fetchImpl = fetch, force = false }) {
+export async function executeAction(record, plan, { requests, jobs, config, fetchImpl = fetch, force = false, dryRunOnly = false }) {
   const results = [];
   const byId = new Map(requests.map((request) => [request.id, request]));
   // force is the operator path: a human clicked the card, so the per-action
   // automation gates do not apply. The endpoint still demands the master switch
   // and a confirmation string before it ever gets here.
-  const mayWrite = (action) => force || replyActionEnabled(action, config);
+  //
+  // dryRunOnly outranks both, and is not a gate that can be argued with: it pins
+  // every write shut regardless of config or force, so the re-plan path stays a
+  // pure would-do even after the write gates are armed.
+  const mayWrite = (action) => (dryRunOnly ? false : (force || replyActionEnabled(action, config)));
 
   if (plan.action === "submit") {
     for (const requestId of plan.requestIds) {
@@ -253,6 +272,54 @@ function redactPayload(payload) {
     answers: (payload?.question_answers || []).length,
     phone_screened: payload?.phone_screened === true,
   };
+}
+
+// Re-plan an already-classified reply against live Paraform state, without
+// writing anything.
+//
+// The freeze rule (a reply is classified exactly once, and a record's existence
+// is what stops the tick re-touching it) is correct when the classifier was
+// right. It is a trap when the PLANNER was wrong: the records are stuck holding a
+// stale plan and neither the tick nor the backfill will revisit them. Re-planning
+// in place is the way out, and it deliberately reuses the classification already
+// on the record — the candidate's words have not changed, only our reading of
+// which screening job belongs to them.
+//
+// This never writes to Paraform. dryRunOnly pins the gates shut inside
+// executeAction, so a submit plan produces the redacted would-do payload that
+// belongs in the shadow dataset and nothing else.
+export async function replanReplyRecord(record, { requests, jobs, config = replyConfig(), fetchImpl = fetch } = {}) {
+  const plan = await planReplyAction(record, { requests, jobs, config });
+  const next = {
+    ...record,
+    plan,
+    replannedAt: new Date().toISOString(),
+    // Load-bearing marker: a re-planned record is a would-do by construction, so
+    // it must never be mistaken for an executed one when reading the dataset.
+    replanDryRun: true,
+  };
+  // shadow keeps its meaning — the live gate state — rather than being forced to
+  // true here, so the record still tells the truth about how the lane is armed.
+  next.shadow = !replyActionEnabled(
+    plan.action === "submit" ? "yes" : plan.action === "pass" ? "no" : plan.action,
+    config,
+  );
+  if (plan.action === "review" || plan.action === "none") {
+    next.status = plan.action === "none" ? "no_action" : "needs_review";
+    next.results = [];
+    return next;
+  }
+  const results = await executeAction(next, plan, { requests, jobs, config, fetchImpl, dryRunOnly: true })
+    .catch((error) => [{
+      requestId: null,
+      outcome: "error",
+      code: error?.code || "REPLY_REPLAN_FAILED",
+      message: text(error?.message).slice(0, 240),
+    }]);
+  next.results = results;
+  const failed = results.filter((row) => row.outcome === "error" || row.outcome === "blocked");
+  next.status = failed.length ? "needs_review" : "shadow_planned";
+  return next;
 }
 
 async function alertReview(record, plan) {

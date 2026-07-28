@@ -18,6 +18,7 @@ import {
   executeAction,
   prepareSubmission,
   findJobForCandidate,
+  replanReplyRecord,
 } from "./_lib/reply.mjs";
 import {
   listReplyRecords,
@@ -39,8 +40,12 @@ import { listJobs } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
-const ACTIONS = new Set(["submit", "preview", "pass", "off-market", "re-enable", "dismiss", "tick", "backfill"]);
-// Actions that mutate Paraform. "dismiss" only clears the Raydar-side card.
+const ACTIONS = new Set([
+  "submit", "preview", "pass", "off-market", "re-enable", "dismiss", "tick", "backfill",
+  "replan", "replan-all",
+]);
+// Actions that mutate Paraform. "dismiss" only clears the Raydar-side card;
+// "preview" and the two replan actions are read-only by construction.
 const WRITE_ACTIONS = new Set(["submit", "pass", "off-market", "re-enable"]);
 const CONFIRM_WORDS = {
   submit: "SUBMIT",
@@ -49,6 +54,10 @@ const CONFIRM_WORDS = {
   "re-enable": "RE-ENABLE",
 };
 const BACKFILL_CONFIRMATION = "BACKFILL ALL REPLIES";
+const REPLAN_CONFIRMATION = "REPLAN ALL REVIEWS";
+// Stuck records only. A record that was already actioned or dismissed is a
+// decision, not a plan, and re-planning it would quietly resurrect a closed card.
+const REPLANNABLE = new Set(["needs_review", "shadow_planned", "no_action"]);
 
 function equalSecret(left, right) {
   const a = Buffer.from(String(left || ""));
@@ -124,6 +133,76 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, result });
     }
 
+    // Batch re-plan of the stuck review queue. Read-only against Paraform, but it
+    // does spend real form reads and answer generation per record, so it is
+    // confirmed and capped like the backfill rather than being a bare button.
+    if (action === "replan-all") {
+      if (String(body.confirmation || "").trim() !== REPLAN_CONFIRMATION) {
+        return res.status(400).json({ ok: false, error: "confirmation_required", detail: REPLAN_CONFIRMATION });
+      }
+      const cap = Math.max(1, Math.min(50, Number(body.limit) || 10));
+      // A submit re-plan spends two Paraform reads and an answer generation per
+      // record, and a Paraform hiccup adds 1.5s of client backoff on top. The
+      // function ceiling is 120s, so the batch stops on a wall clock and REPORTS
+      // the remainder rather than being killed mid-record with no account of it.
+      const deadline = Date.now() + 90_000;
+      const [requests, jobs, records] = await Promise.all([
+        readSubmissionRequests(),
+        listJobs(300),
+        listReplyRecords(200),
+      ]);
+      const eligible = records.filter((row) => REPLANNABLE.has(row?.status));
+      const stuck = eligible.slice(0, cap);
+      const results = [];
+      let stoppedEarly = false;
+      for (const stale of stuck) {
+        if (Date.now() > deadline) { stoppedEarly = true; break; }
+        const lock = await acquireReplyLock(stale.replyId);
+        if (!lock) { results.push({ replyId: stale.replyId, outcome: "busy" }); continue; }
+        try {
+          // Re-read under the lock: listReplyRecords is a snapshot, and the
+          // revision we save against has to be the current one.
+          const current = await readReplyRecord(stale.replyId);
+          if (!current || !REPLANNABLE.has(current.status)) {
+            results.push({ replyId: stale.replyId, outcome: "skipped" });
+            continue;
+          }
+          const next = await replanReplyRecord(current, { requests, jobs, config: replyConfig() });
+          const saved = await saveReplyRecord(next, current.revision);
+          results.push({
+            replyId: stale.replyId,
+            outcome: "replanned",
+            action: saved.plan?.action || null,
+            reason: saved.plan?.reason || null,
+            status: saved.status,
+          });
+        } catch (error) {
+          results.push({
+            replyId: stale.replyId,
+            outcome: "error",
+            code: String(error?.code || "REPLY_REPLAN_FAILED"),
+          });
+        } finally {
+          await releaseReplyLock(stale.replyId, lock).catch(() => {});
+        }
+      }
+      const attempted = results.length;
+      return res.status(200).json({
+        ok: true,
+        result: {
+          scanned: records.length,
+          eligible: eligible.length,
+          cap,
+          attempted,
+          stoppedEarly,
+          // What is still stuck after this run, so the operator knows to run again
+          // instead of reading a partial pass as "the queue is clear".
+          remaining: Math.max(0, eligible.length - attempted),
+          results,
+        },
+      });
+    }
+
     const replyId = String(body.replyId || "").trim();
     if (!replyId) return res.status(400).json({ ok: false, error: "replyId_required" });
 
@@ -160,6 +239,23 @@ export default async function handler(req, res) {
     try {
       if (action === "dismiss") {
         const next = { ...record, status: "dismissed", dismissedAt: new Date().toISOString() };
+        const saved = await saveReplyRecord(next, record.revision);
+        return res.status(200).json({ ok: true, record: publicRecord(saved) });
+      }
+
+      // Single-card re-plan: recompute this record's plan against live state and
+      // record the would-do. No Paraform write, so no confirmation string; the
+      // replyId plus the revision check is the friction.
+      if (action === "replan") {
+        if (!REPLANNABLE.has(record.status)) {
+          return res.status(409).json({
+            ok: false,
+            error: "not_replannable",
+            detail: `status is ${record.status}; only ${[...REPLANNABLE].join(", ")} can be re-planned`,
+          });
+        }
+        const [requests, jobs] = await Promise.all([readSubmissionRequests(), listJobs(300)]);
+        const next = await replanReplyRecord(record, { requests, jobs, config: replyConfig() });
         const saved = await saveReplyRecord(next, record.revision);
         return res.status(200).json({ ok: true, record: publicRecord(saved) });
       }
@@ -323,6 +419,9 @@ export function publicRecord(record) {
     plan: record.plan || null,
     results: record.results || null,
     resolution: record.resolution || null,
+    // So the card can say "this is a re-planned would-do", not an execution.
+    replannedAt: record.replannedAt || null,
+    replanDryRun: record.replanDryRun === true,
     threadId: record.threadId,
   };
 }
