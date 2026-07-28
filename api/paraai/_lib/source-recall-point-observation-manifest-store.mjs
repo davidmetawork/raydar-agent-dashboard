@@ -38,6 +38,8 @@ export const SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_RECORD_VERSION = 1;
 export const SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_PAGE_VERSION = 1;
 export const SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_CLAIM_LEASE_MS =
   SOURCE_RECALL_POINT_OBSERVATION_CLAIM_LEASE_MS;
+export const SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_VERSION =
+  "recall-classified-manifest-seed-dark-v1";
 
 const SOURCE = "recall";
 const MAX_PAGES = 200;
@@ -263,6 +265,8 @@ const FACTORY_KEYS = Object.freeze([
   "pointObservation",
 ]);
 const issuedPointSelections = new WeakMap();
+const completedManifestSelections = new WeakMap();
+const issuedClassifiedManifestSeeds = new WeakMap();
 
 export class SourceRecallPointObservationManifestStoreError
   extends Error {
@@ -330,6 +334,25 @@ export function consumeRecallPointObservationManifestReadCapability(
     capability,
     "read",
   );
+}
+
+export function consumeSourceRecallClassifiedManifestSeedCapability(
+  capability,
+) {
+  const code =
+    "SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_CAPABILITY_INVALID";
+  if (
+    capability === null
+    || typeof capability !== "object"
+    || nodeTypes.isProxy(capability)
+    || !Object.isFrozen(capability)
+    || !issuedClassifiedManifestSeeds.has(capability)
+  ) {
+    fail(code);
+  }
+  const seed = issuedClassifiedManifestSeeds.get(capability);
+  issuedClassifiedManifestSeeds.delete(capability);
+  return seed;
 }
 
 function sameKeys(actual, expected) {
@@ -1833,6 +1856,7 @@ export function createSourceRecallPointObservationManifestStore(
     selected.pointObservation,
   );
   const issuedClaims = new WeakMap();
+  const storeIdentity = Object.freeze({});
 
   async function readRun(work) {
     const selectedWork = runWork(work);
@@ -2394,7 +2418,10 @@ export function createSourceRecallPointObservationManifestStore(
         "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_COMPLETE_PROOF_INVALID",
       );
     }
-    return completeProofDigest;
+    return deepFreeze({
+      completeProofDigest,
+      pages,
+    });
   }
 
   async function sealCompleteProof(snapshot) {
@@ -2408,7 +2435,7 @@ export function createSourceRecallPointObservationManifestStore(
         "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_DURABLE_STATE_INVALID",
       );
     }
-    const completeProofDigest =
+    const { completeProofDigest } =
       await verifyCompleteManifest(run);
     const nextValue = clone(run);
     nextValue.status = "observed_complete_dark";
@@ -2434,11 +2461,23 @@ export function createSourceRecallPointObservationManifestStore(
     return aggregateFor(run);
   }
 
+  // storeIdentity is deliberately closed over, never a parameter: it is the
+  // only cross-instance guard on the module-level completion WeakMap, so a
+  // call site that forgot to pass it would record an undefined identity and
+  // silently make a valid-looking completion unable to mint a seed.
   function terminalClaim(run) {
-    return deepFreeze({
+    const completion = deepFreeze({
       aggregate: aggregateFor(run),
       status: "complete",
     });
+    completedManifestSelections.set(
+      completion,
+      deepFreeze({
+        manifestKeyDigest: run.manifestKeyDigest,
+        storeIdentity,
+      }),
+    );
+    return completion;
   }
 
   function inProgressClaim(run) {
@@ -3027,11 +3066,143 @@ export function createSourceRecallPointObservationManifestStore(
     return snapshot;
   }
 
+  async function issueSourceRecallClassifiedManifestSeed(
+    completion,
+  ) {
+    const code =
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETION_INVALID";
+    if (
+      completion === null
+      || typeof completion !== "object"
+      || nodeTypes.isProxy(completion)
+      || !Object.isFrozen(completion)
+      || !completedManifestSelections.has(completion)
+    ) {
+      fail(code);
+    }
+    const selectedCompletion =
+      completedManifestSelections.get(completion);
+    completedManifestSelections.delete(completion);
+    if (
+      selectedCompletion.storeIdentity !== storeIdentity
+    ) {
+      fail(code);
+    }
+    const work = deepFreeze({
+      manifestKeyDigest:
+        selectedCompletion.manifestKeyDigest,
+    });
+    const snapshot = await readRun(work);
+    const run = snapshot.record;
+    if (
+      run.status !== "observed_complete_dark"
+      || run.activeClaim !== null
+      || run.referenceManifestCoverageComplete !== true
+      || run.globalReferenceSetCoverageAvailable !== true
+      || run.referencesSettled !== run.referenceCount
+      || run.referencesStable !== run.referenceCount
+      || run.referencesConflict !== 0
+      || run.referencesUnresolved !== 0
+      || run.settledReadsCompleted
+        !== run.referenceCount * 2
+      || run.completeProofDigest === null
+      || run.indexedManifestDigest === null
+    ) {
+      fail(
+        "SOURCE_RECALL_CLASSIFIED_MANIFEST_COVERAGE_INCOMPLETE",
+      );
+    }
+    const verified = await verifyCompleteManifest(run);
+    const current = await readRun(work);
+    const verifiedAtMs = Math.max(
+      snapshot.redisNowMs,
+      ...verified.pages.map((page) => page.redisNowMs),
+    );
+    if (
+      current.raw !== snapshot.raw
+      || current.redisNowMs < verifiedAtMs
+      || current.redisNowMs >= run.expiresAtMs
+      || verified.completeProofDigest
+        !== run.completeProofDigest
+    ) {
+      fail(
+        "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETE_PROOF_INVALID",
+      );
+    }
+    const members = verified.pages.flatMap(
+      (page) => page.record.entries.map(
+        (entry, referenceOrdinal) => deepFreeze({
+          pageNumber: page.record.pageNumber,
+          referenceOrdinal,
+          referenceDigest: entry.referenceDigest,
+          referenceIdDigest: entry.referenceIdDigest,
+          workKeyDigest: entry.workKeyDigest,
+          workItemDigest: entry.workItemDigest,
+          resolutionDigest: entry.resolutionDigest,
+          outcome: entry.outcome,
+          readsCompleted: entry.readsCompleted,
+        }),
+      ),
+    );
+    if (
+      members.length !== run.referenceCount
+      || members.some(
+        (member) =>
+          member.outcome !== "stable"
+          || member.readsCompleted !== 2
+          || member.resolutionDigest === null,
+      )
+    ) {
+      fail(
+        "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETE_PROOF_INVALID",
+      );
+    }
+    const capability = Object.freeze({});
+    issuedClassifiedManifestSeeds.set(
+      capability,
+      deepFreeze({
+        version:
+          SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_VERSION,
+        issuedFromRedisAtMs: current.redisNowMs,
+        notAfterMs: run.expiresAtMs,
+        manifestKeyDigest: run.manifestKeyDigest,
+        workKeyDigest: run.workKeyDigest,
+        contractPinsDigest: run.contractPinsDigest,
+        decisionBoundaryAtMs: run.decisionBoundaryAtMs,
+        recallReferenceHeadEpochDigest:
+          run.recallReferenceHeadEpochDigest,
+        recallReferenceHeadRevisionDigest:
+          run.recallReferenceHeadRevisionDigest,
+        recallReferenceHeadRecordDigest:
+          run.recallReferenceHeadRecordDigest,
+        referenceManifestDigest:
+          run.referenceManifestDigest,
+        stablePassSemanticDigest:
+          run.stablePassSemanticDigest,
+        headPageSetDigest: run.headPageSetDigest,
+        indexedManifestDigest: run.indexedManifestDigest,
+        completeProofDigest: run.completeProofDigest,
+        pageCount: run.pageCount,
+        scannedCount: run.scannedCount,
+        referenceCount: run.referenceCount,
+        settledReadsCompleted:
+          run.settledReadsCompleted,
+        memberSetDigest: semanticDigest(
+          "phase4-recall-classified-manifest-members-v1",
+          members,
+        ),
+        members,
+      }),
+    );
+    return capability;
+  }
+
   return deepFreeze({
     checkpointRecallPointObservationManifestPage,
     checkpointRecallPointObservationManifestWork,
     claimRecallPointObservationManifestStep,
     ensureRecallPointObservationManifest,
+    issueSourceRecallClassifiedManifestSeed,
     prepareRecallPointObservationManifestSelection,
     readRecallPointObservationManifest,
   });
@@ -3101,4 +3272,11 @@ export function checkpointRecallPointObservationManifestWork(
 export function readRecallPointObservationManifest(work) {
   return productionStore()
     .readRecallPointObservationManifest(work);
+}
+
+export function issueSourceRecallClassifiedManifestSeed(
+  completion,
+) {
+  return productionStore()
+    .issueSourceRecallClassifiedManifestSeed(completion);
 }
