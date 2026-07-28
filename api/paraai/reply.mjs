@@ -16,6 +16,8 @@ import {
   runReplyBackfill,
   planReplyAction,
   executeAction,
+  prepareSubmission,
+  findJobForCandidate,
 } from "./_lib/reply.mjs";
 import {
   listReplyRecords,
@@ -37,7 +39,7 @@ import { listJobs } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
 
-const ACTIONS = new Set(["submit", "pass", "off-market", "re-enable", "dismiss", "tick", "backfill"]);
+const ACTIONS = new Set(["submit", "preview", "pass", "off-market", "re-enable", "dismiss", "tick", "backfill"]);
 // Actions that mutate Paraform. "dismiss" only clears the Raydar-side card.
 const WRITE_ACTIONS = new Set(["submit", "pass", "off-market", "re-enable"]);
 const CONFIRM_WORDS = {
@@ -173,16 +175,47 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, record: publicRecord(saved), detail: "no pending requests remain" });
       }
 
+      // Preview prepares the real payload and runs Paraform's own blocking
+      // rules against it without claiming or writing anything, so the prose that
+      // would reach a hiring manager can be read first.
+      if (action === "preview") {
+        if (record.decision?.intent !== "yes") {
+          return res.status(409).json({ ok: false, error: "not_a_yes", detail: `intent is ${record.decision?.intent}` });
+        }
+        const jobs = await listJobs(300).catch(() => []);
+        const job = findJobForCandidate(jobs, record.candidateUserId);
+        const target = pending.find((request) => (record.plan?.requestIds || []).includes(request.id)) || pending[0];
+        const prepared = await prepareSubmission(target, record, job, {});
+        return res.status(200).json({
+          ok: true,
+          requestId: target.id,
+          role: target.roleName,
+          company: target.companyName,
+          groundedInCall: Boolean(job),
+          skip: prepared.skip || null,
+          blocked: prepared.blocked || null,
+          answers: prepared.generated || null,
+        });
+      }
+
       if (action === "submit") {
         const jobs = await listJobs(300).catch(() => []);
         const plan = await planReplyAction(record, { requests, jobs, config: replyConfig() });
-        if (plan.action !== "submit") {
+        // A yes with no screening call is not part of the AUTOMATIC lane, but it
+        // is exactly the soft review card a human is meant to clear in one
+        // click, so the operator path accepts it and submits the targeted
+        // requests from profile and role data alone.
+        const softYes = plan.action === "review"
+          && record.decision?.intent === "yes"
+          && plan.reason === "no_screening_call_record";
+        if (plan.action !== "submit" && !softYes) {
           return res.status(409).json({
             ok: false,
             error: "not_submittable",
             detail: `the live plan for this reply is ${plan.action} (${plan.reason})`,
           });
         }
+        if (softYes) plan.action = "submit";
         const requested = Array.isArray(body.requestIds) && body.requestIds.length
           ? plan.requestIds.filter((id) => body.requestIds.includes(id))
           : plan.requestIds;

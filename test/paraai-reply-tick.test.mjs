@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  findJobForCandidate,
   planReplyAction,
   replyActionEnabled,
   replyConfig,
@@ -225,4 +226,50 @@ test("off market plans against every pending request for the candidate", async (
     },
   );
   assert.deepEqual(plan, { action: "off_market", reason: "off_market", requestIds: ["req-1", "req-2"] });
+});
+
+// REGRESSION (2026-07-28): findJobForCandidate read only the top-level
+// job.candidateUserId, but the pipeline stores the resolved id at
+// job.identity.candidateUserId. The lookup therefore matched nothing, and every
+// definitive yes was filed as no_screening_call_record instead of submitting.
+// The first backfill made it visible: 0 of 241 identified jobs matched.
+test("the screening job is found by its resolved identity id", () => {
+  const jobs = [{ id: "bot_a", identity: { candidateUserId: "cand_1" } }];
+  assert.equal(findJobForCandidate(jobs, "cand_1")?.id, "bot_a");
+});
+
+test("older job record shapes still resolve through the fallback paths", () => {
+  const shapes = [
+    { id: "legacy_top", candidateUserId: "cand_2" },
+    { id: "legacy_candidate", candidate: { candidateUserId: "cand_2" } },
+    { id: "legacy_snake", candidate: { candidate_user_id: "cand_2" } },
+    { id: "legacy_submission", submission: { candidateUserId: "cand_2" } },
+  ];
+  for (const job of shapes) {
+    assert.equal(findJobForCandidate([job], "cand_2")?.id, job.id, `failed for ${job.id}`);
+  }
+});
+
+test("a candidate with no screening job resolves to null rather than a wrong job", () => {
+  const jobs = [{ id: "bot_a", identity: { candidateUserId: "cand_1" } }];
+  assert.equal(findJobForCandidate(jobs, "cand_other"), null);
+});
+
+test("an empty candidate id never matches a job that is missing the field", () => {
+  const jobs = [{ id: "bot_blank" }, { id: "bot_a", identity: { candidateUserId: "cand_1" } }];
+  assert.equal(findJobForCandidate(jobs, ""), null);
+  assert.equal(findJobForCandidate(jobs, null), null);
+});
+
+test("a yes whose candidate has an identity-keyed job plans a submit, not a review", async () => {
+  const record = {
+    candidateUserId: "cand_1",
+    decision: { intent: "yes", targetRequestIds: ["req_1"], conditions: [] },
+  };
+  const requests = [{ id: "req_1", candidateUserId: "cand_1", state: "PENDING", roleName: "FDE", companyName: "Openlayer" }];
+  const jobs = [{ id: "bot_a", identity: { candidateUserId: "cand_1" } }];
+  const plan = await planReplyAction(record, { requests, jobs, config: {} });
+  assert.equal(plan.action, "submit");
+  assert.equal(plan.reason, "definitive_yes");
+  assert.deepEqual(plan.requestIds, ["req_1"]);
 });

@@ -111,10 +111,24 @@ export function replyActionEnabled(action, config = replyConfig()) {
 const replyIdFor = (candidateUserId, messageId) => `${candidateUserId}:${messageId}`;
 
 // A candidate's screening job, used to source transcript-grounded answers.
-function findJobForCandidate(jobs, candidateUserId) {
+//
+// The job record carries the resolved id at identity.candidateUserId. The other
+// paths are kept as fallbacks for older records, but identity is the one that
+// actually matches: reading only the top-level field silently found nothing and
+// sent every yes to review as no_screening_call_record (caught by the first
+// backfill on 2026-07-28, where 0 of 241 identified jobs matched).
+export function findJobForCandidate(jobs, candidateUserId) {
+  const wanted = text(candidateUserId);
+  if (!wanted) return null;
   return jobs.find((job) => {
-    const ids = [job?.candidateUserId, job?.candidate?.candidateUserId, job?.submission?.candidateUserId];
-    return ids.some((id) => text(id) && text(id) === text(candidateUserId));
+    const ids = [
+      job?.identity?.candidateUserId,
+      job?.candidateUserId,
+      job?.candidate?.candidateUserId,
+      job?.candidate?.candidate_user_id,
+      job?.submission?.candidateUserId,
+    ];
+    return ids.some((id) => text(id) && text(id) === wanted);
   }) || null;
 }
 
@@ -141,7 +155,7 @@ export async function planReplyAction(record, { requests, jobs, config }) {
   return { action: "submit", reason: "definitive_yes", requestIds: targets.map((r) => r.id), jobId: job.id || job.botId || null };
 }
 
-async function prepareSubmission(request, record, job, { fetchImpl = fetch } = {}) {
+export async function prepareSubmission(request, record, job, { fetchImpl = fetch } = {}) {
   const form = await readQuickSubmitForm(request.id);
   if (form?.eligibility?.status === "alreadySubmitted") {
     return { skip: "already_submitted", form };
