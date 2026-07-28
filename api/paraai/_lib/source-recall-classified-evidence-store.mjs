@@ -47,6 +47,8 @@ export const SOURCE_RECALL_CLASSIFIED_EVIDENCE_STORE_VERSION =
 export const SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_VERSION = 1;
 export const SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_VERSION =
   "recall-classified-evidence-hmac-sha256-v1";
+const SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_ID_DOMAIN =
+  "recall-classified-evidence-seal-key-id-v1";
 export const SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_ENV =
   "PARAAI_SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_SECRET";
 
@@ -85,6 +87,7 @@ const RECORD_KEYS = Object.freeze([
   "q37TransitionAvailable",
   "recordSeal",
   "referenceManifestCoverageComplete",
+  "sealKeyId",
   "sealVersion",
   "settlementStatus",
   "signedResponseRetentionAvailable",
@@ -498,6 +501,34 @@ export function sourceRecallClassifiedEvidenceStoreConfigured() {
   } catch {
     return false;
   }
+}
+
+// Non-secret identifier for the seal key, persisted inside the sealed record.
+// It is a one-way digest of the secret under its own domain, never the secret
+// itself, and it grants no authority: every path that reaches it still fails
+// closed.
+//
+// What SEAL_KEY_MISMATCH actually means: "this record's sealKeyId field is not
+// the configured secret's". That covers a genuine rotation, corruption of that
+// one field, and tampering that CHOOSES to look like a rotation — anyone who
+// can write the record can also write any sealKeyId they like, and the field is
+// compared before the seal. So it is a triage hint, never evidence that a
+// rejection was benign. Distinguishing a real rotation needs something an
+// attacker cannot rewrite, such as explicitly re-verifying the seal under the
+// previous secret during a known rotation window; that belongs with whatever
+// introduces a second key, and does not exist yet.
+//
+// Added while the record version is 1 and no record exists, because
+// RECORD_KEYS is an exact allow-list — adding it later needs a version bump and
+// a read-compatibility path.
+function sealKeyIdDigest(secret) {
+  return createHash("sha256")
+    .update(
+      `${SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_ID_DOMAIN}\0`,
+      "utf8",
+    )
+    .update(secret, "utf8")
+    .digest("hex");
 }
 
 function recordSeal(unsignedRecord, secret) {
@@ -989,7 +1020,7 @@ function manifestMemberFor(seed, evidence) {
   return selected[0];
 }
 
-function unsignedRecord(seed, member, provenance) {
+function unsignedRecord(seed, member, provenance, secret) {
   const { evidence } = provenance;
   return {
     version:
@@ -1034,6 +1065,7 @@ function unsignedRecord(seed, member, provenance) {
     ),
     sealVersion:
       SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_VERSION,
+    sealKeyId: sealKeyIdDigest(secret),
     signedResponseRetentionAvailable: true,
     durableProvenanceSealAvailable: true,
     standaloneSignatureReverificationAvailable: false,
@@ -1059,6 +1091,7 @@ function proposedRecord(seed, member, provenance, secret) {
     seed,
     member,
     provenance,
+    secret,
   );
   return deepFreeze({
     ...unsigned,
@@ -1075,6 +1108,19 @@ function canonicalRecord(value, secret) {
       (key) => [key, record[key]],
     ),
   );
+  // A malformed sealKeyId is a malformed record, not a key mismatch: this must
+  // stay ahead of the comparison so the mismatch code cannot be reached by a
+  // value that is not even a digest.
+  exactDigest(record.sealKeyId, code);
+  // Triage hint only, and still fail-closed — see sealKeyIdDigest. Matching
+  // this id grants nothing; the seal is verified below regardless.
+  if (
+    record.sealKeyId !== sealKeyIdDigest(secret)
+  ) {
+    fail(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_MISMATCH",
+    );
+  }
   if (
     record.version
       !== SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_VERSION
@@ -1265,10 +1311,15 @@ function parseRecord(
   if (
     canonicalJson(record) !== raw
     || expiresAtMs !== record.expiresAtMs
+    // These two floors are read from the RETAINED record, not the proposal, so
+    // they refuse a durable value claiming to have been observed later than the
+    // instant this store linearized against — a foreign or corrupted record, or
+    // one written by a racing invocation whose upstream reads were newer. A
+    // proposal can legitimately carry lower floors than the record it converges
+    // onto (a slow invocation losing the race and arriving afterwards), so the
+    // proposal-side checks above do not subsume these.
     || redisNowMs < record.upstreamIssuedFromRedisAtMs
     || redisNowMs < record.manifestIssuedFromRedisAtMs
-    || redisNowMs
-      < Math.max(...record.evidence.classifierVerifiedAtMs)
     || redisNowMs >= record.expiresAtMs
   ) {
     fail(code);
@@ -1276,11 +1327,38 @@ function parseRecord(
   return record;
 }
 
+// Convergence after a lost response compares the retained record with a
+// freshly derived proposal.
+//
+// The rule is narrow on purpose: exclude the instants at which this attempt
+// happened to observe things, compare everything else verbatim. Three such
+// instants exist — the manifest reproof clock, the point-observation read
+// clock, and the local verifier clock — and a retry that re-reads its upstream
+// state instead of reusing an in-memory snapshot will legitimately differ in
+// all three. They describe the observation, not what was observed. recordSeal
+// is dropped with them because it is a function of them.
+//
+// Everything else is compared as-is, which is what makes the comparison
+// meaningful: the retention key itself is derived from manifestKeyDigest and
+// workKeyDigest, so a different manifest or a different observation run cannot
+// even collide onto this key, and within one run the record's own bounds and
+// digests still have to match exactly.
+//
+// The consequence worth knowing: some compared fields are minted by the
+// private classifier rather than read from a durable record. Cross-invocation
+// convergence therefore requires that service to return a byte-identical
+// signed response when the same request is replayed. That is a property of the
+// producer, asserted here as a requirement rather than proven by this module.
+// If it ever fails to hold, the effect is a fail-closed conflict, never a
+// wrong adoption — genuinely different terminal evidence must conflict, and
+// does.
 function semanticallySameRecord(first, second) {
   const withoutVerifierClock = (record) => {
     const {
       manifestIssuedFromRedisAtMs:
         _manifestIssuedFromRedisAtMs,
+      upstreamIssuedFromRedisAtMs:
+        _upstreamIssuedFromRedisAtMs,
       recordSeal: _recordSeal,
       ...retained
     } = record;
@@ -1396,6 +1474,23 @@ export function createSourceRecallClassifiedEvidenceStore(
         "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_TOO_LARGE",
       );
     }
+    // Only Redis-derived clocks may be compared against the
+    // classified-evidence Redis TIME. evidence.classifierVerifiedAtMs is the
+    // verifying host's local Date.now(); the classifier runtime already
+    // bounds it below by the point-observation read clock, so the two
+    // Redis-derived instants below are the correct linearization floor.
+    // Folding the local clock in would let ordinary host skew reject valid
+    // in-window evidence and burn both one-shot capabilities on every attempt.
+    const transitionIssuedAtMs = Math.max(
+      proposed.manifestIssuedFromRedisAtMs,
+      proposed.upstreamIssuedFromRedisAtMs,
+    );
+    // Known diagnosability gap, left as it is on the base commit: when
+    // transitionIssuedAtMs is already at or past transitionNotAfterMs the
+    // adapter rejects locally without a Redis round trip, and the catch below
+    // reports that as PERSISTENCE_FAILED rather than EXPIRED — so a deadline
+    // that has permanently passed reads like a retryable outage. Deferred to
+    // the production-topology slice, which owns the operational error taxonomy.
     let result;
     try {
       result = persistenceResult(
@@ -1406,11 +1501,7 @@ export function createSourceRecallClassifiedEvidenceStore(
           ),
           proposedRaw,
           expiresAtMs: proposed.expiresAtMs,
-          issuedAtMs: Math.max(
-            proposed.manifestIssuedFromRedisAtMs,
-            proposed.upstreamIssuedFromRedisAtMs,
-            ...proposed.evidence.classifierVerifiedAtMs,
-          ),
+          issuedAtMs: transitionIssuedAtMs,
           notAfterMs: proposed.transitionNotAfterMs,
         }),
       );
@@ -1430,10 +1521,6 @@ export function createSourceRecallClassifiedEvidenceStore(
         < proposed.upstreamIssuedFromRedisAtMs
       || result.redisNowMs
         < proposed.manifestIssuedFromRedisAtMs
-      || result.redisNowMs
-        < Math.max(
-          ...proposed.evidence.classifierVerifiedAtMs,
-        )
       || result.redisNowMs
         >= proposed.transitionNotAfterMs
     ) {

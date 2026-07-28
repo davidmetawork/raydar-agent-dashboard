@@ -1953,12 +1953,11 @@ test("one complete manifest seed and one signed-evidence handoff retain exactly 
       "proposedRaw",
     ],
   );
-  assert.equal(
-    persistence.calls[0].issuedAtMs,
-    Math.max(
-      pair.verifiedAtMs,
-      harness.snapshot.redisNowMs,
-    ),
+  // The transition floor is Redis-derived only. This fixture's local verifier
+  // clock runs ahead of both Redis instants, so folding it in would show up
+  // here as an issuedAtMs at or above pair.verifiedAtMs.
+  assert.ok(
+    persistence.calls[0].issuedAtMs < pair.verifiedAtMs,
   );
   assert.equal(
     persistence.calls[0].notAfterMs,
@@ -1980,6 +1979,65 @@ test("one complete manifest seed and one signed-evidence handoff retain exactly 
   );
   assert.equal(durable.signedResponses.length, 2);
   assert.equal(durable.recordSeal.length, 64);
+  // Exactly the two Redis-derived observation clocks bound the transition;
+  // the local verifier clock is retained as evidence but never compared
+  // against the classified-evidence Redis TIME.
+  assert.equal(
+    persistence.calls[0].issuedAtMs,
+    Math.max(
+      durable.manifestIssuedFromRedisAtMs,
+      durable.upstreamIssuedFromRedisAtMs,
+    ),
+  );
+  assert.ok(
+    Math.max(...durable.evidence.classifierVerifiedAtMs)
+      > persistence.calls[0].issuedAtMs,
+  );
+  // A non-secret seal-key identifier is persisted inside the sealed body so a
+  // rotation is distinguishable from tampering.
+  assert.match(durable.sealKeyId, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    raw.includes(
+      "classified-evidence-test-seal-secret-0123456789",
+    ),
+    false,
+  );
+  // The public aggregate's exact shape is pinned, so a later change cannot
+  // add or flip a claim without a test noticing.
+  assert.deepEqual(
+    Object.keys(retained).sort(),
+    [
+      "authorityAvailable",
+      "candidateFacingWriteAvailable",
+      "candidateIdentityResolutionAvailable",
+      "classification",
+      "classificationEvidenceDigest",
+      "classificationProofComplete",
+      "created",
+      "curationAvailable",
+      "durableAttestationAvailable",
+      "durableProvenanceSealAvailable",
+      "enrollmentAvailable",
+      "expiresAtMs",
+      "globalReferenceSetCoverageAvailable",
+      "operational",
+      "outreachAvailable",
+      "pinnable",
+      "q37TransitionAvailable",
+      "referenceManifestCoverageComplete",
+      "retainedAtRedisMs",
+      "signedResponseRetentionAvailable",
+      "sourceFactsAvailable",
+      "standaloneSignatureReverificationAvailable",
+      "status",
+      "successClassificationAvailable",
+      "workKeyDigest",
+    ],
+  );
+  assert.equal(
+    retained.standaloneSignatureReverificationAvailable,
+    false,
+  );
   assert.equal(
     durable.evidence.classificationEvidenceDigest,
     retained.classificationEvidenceDigest,
@@ -2103,8 +2161,12 @@ test("classified retention enforces the trusted transition clock at regression, 
   );
   const cases = [
     [
-      "before latest verifier clock",
-      (input) => input.pair.verifiedAtMs - 1,
+      // A Redis clock behind the Redis-derived floor is a genuine clock
+      // regression and must still be refused. upstreamIssuedFromRedisAtMs is
+      // harness.snapshot.redisNowMs, so this sits one millisecond under the
+      // floor without moving the deadline.
+      "before the Redis-derived transition floor",
+      () => harness.snapshot.redisNowMs - 1,
     ],
     [
       "at deadline",
@@ -2253,6 +2315,7 @@ test("classified retention converges after a lost response and rejects changed e
   });
 
   await t.test("wrong seal key cannot adopt retained bytes", async () => {
+    const beforeRaw = [...fake.values.values()][0];
     const pair = await productionClassifierPair(
       harness.snapshot,
       { clockOffsetMs: 4_000 },
@@ -2274,9 +2337,137 @@ test("classified retention converges after a lost response and rejects changed e
         ),
       ),
       expectClassifiedStoreCode(
-        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_MISMATCH",
       ),
     );
+    // A rotated key is fail-closed in both directions: the retained record is
+    // not adopted, and the wrong secret does not get to overwrite or re-seal
+    // the bytes the original secret wrote.
+    assert.equal(fake.values.size, 1);
+    assert.equal([...fake.values.values()][0], beforeRaw);
+  });
+
+  // The seal-key check short-circuits ahead of the HMAC compare, so this case
+  // exists to keep the HMAC itself pinned: same secret, so the key id matches
+  // and the comparison is actually reached, but the sealed body has been
+  // edited. Deleting the seal comparison must fail this test.
+  // The tampered field is deliberately one that semanticallySameRecord STRIPS.
+  // For every field it compares, a forged value is caught twice over and this
+  // test would still pass with the seal deleted. The three stripped instants —
+  // the manifest reproof clock, the point-observation read clock, and the local
+  // verifier clock — are the only fields where the seal is the sole defence, so
+  // they are the only ones that actually pin it. Forging one downward is what a
+  // foreign or corrupted durable value would look like.
+  await t.test("a stripped observation clock edited under the correct seal key still fails the HMAC", async () => {
+    const key = [...fake.values.keys()][0];
+    const original = fake.values.get(key);
+    const tampered = JSON.parse(original);
+    tampered.upstreamIssuedFromRedisAtMs -= 5_000;
+    const tamperedRaw = JSON.stringify(tampered);
+    assert.notEqual(tamperedRaw, original);
+    // Only a value changed, so key order — and therefore canonical form — is
+    // untouched. Without this the test could silently degrade into pinning
+    // parseRecord's round-trip check instead of the seal.
+    assert.deepEqual(
+      Object.keys(JSON.parse(tamperedRaw)),
+      Object.keys(JSON.parse(original)),
+    );
+    fake.values.set(key, tamperedRaw);
+    try {
+      const pair = await productionClassifierPair(
+        harness.snapshot,
+        { clockOffsetMs: 5_000 },
+      );
+      fake.setNow(pair.verifiedAtMs + 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+        ),
+      );
+    } finally {
+      // Restore even on failure: later subtests share this fake.
+      fake.values.set(key, original);
+    }
+  });
+
+  // SEAL_KEY_MISMATCH is a triage hint, not evidence of a benign rotation:
+  // anyone who can rewrite the record can also choose that code. Pinned so the
+  // comment on sealKeyIdDigest cannot drift back into claiming otherwise.
+  await t.test("a tamperer can choose the seal-key-mismatch code, and is still refused", async () => {
+    const key = [...fake.values.keys()][0];
+    const original = fake.values.get(key);
+    const tampered = JSON.parse(original);
+    tampered.upstreamIssuedFromRedisAtMs -= 5_000;
+    tampered.sealKeyId = `${"0".repeat(63)}1`;
+    fake.values.set(key, JSON.stringify(tampered));
+    try {
+      const pair = await productionClassifierPair(
+        harness.snapshot,
+        { clockOffsetMs: 7_000 },
+      );
+      fake.setNow(pair.verifiedAtMs + 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_MISMATCH",
+        ),
+      );
+    } finally {
+      fake.values.set(key, original);
+    }
+  });
+
+  // A malformed sealKeyId is a malformed record, not a key mismatch. This pins
+  // the exactDigest guard that keeps the two apart.
+  await t.test("a non-digest seal key id is a malformed record, not a key mismatch", async () => {
+    const key = [...fake.values.keys()][0];
+    const original = fake.values.get(key);
+    const tampered = JSON.parse(original);
+    tampered.sealKeyId = "not-a-digest";
+    fake.values.set(key, JSON.stringify(tampered));
+    try {
+      const pair = await productionClassifierPair(
+        harness.snapshot,
+        { clockOffsetMs: 8_000 },
+      );
+      fake.setNow(pair.verifiedAtMs + 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+        ),
+      );
+    } finally {
+      fake.values.set(key, original);
+    }
   });
 
   await t.test("a complete but different point proof is not membership", async () => {
@@ -3346,3 +3537,450 @@ test("the capability/runtime/projector import closure is hard-dark with no produ
     ).pathname,
   ]);
 });
+
+test("classified retention converges from a fresh invocation whose upstream read clock has advanced", async (t) => {
+  const harness = await stableHarness();
+  const fake = fakeClassifiedPersistence(
+    harness.snapshot.redisNowMs + 10_000,
+  );
+  const sealSecret =
+    "classified-evidence-test-seal-secret-0123456789";
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: fake.persistence,
+    sealSecret,
+  });
+  const firstPair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 1_000 },
+  );
+  fake.setNow(firstPair.verifiedAtMs + 1);
+  fake.setMode("throw_after_store_once");
+  await assert.rejects(
+    store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          firstPair,
+        ),
+      ),
+    ),
+    expectClassifiedStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_FAILED",
+    ),
+  );
+  assert.equal(fake.values.size, 1);
+
+  // The retrying invocation cannot reuse the original in-memory snapshot: the
+  // process that held it is gone. It re-reads the point observation, which
+  // necessarily yields a later Redis read clock. That clock is an observation
+  // instant, not evidence, so convergence must still succeed.
+  harness.fake.setNow(harness.snapshot.redisNowMs + 4_000);
+  const refreshed =
+    await harness.store.readRecallPointObservationWork(
+      harness.work,
+    );
+  assert.equal(refreshed.record.status, "stable");
+  assert.ok(
+    refreshed.redisNowMs > harness.snapshot.redisNowMs,
+  );
+  const retryPair = await productionClassifierPair(
+    refreshed,
+    { clockOffsetMs: 1_000 },
+  );
+  fake.setNow(retryPair.verifiedAtMs + 1);
+  const recovered =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness({
+        ...harness,
+        snapshot: refreshed,
+      }),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          retryPair,
+        ),
+      ),
+    );
+  assert.equal(recovered.created, false);
+  assert.equal(recovered.status, "retained_terminal_dark");
+  assert.equal(recovered.classification, "success");
+  // Convergence adopts the originally stored bytes; it never rewrites or
+  // renews them.
+  assert.equal(fake.values.size, 1);
+  const durable = JSON.parse(
+    [...fake.values.values()][0],
+  );
+  assert.equal(
+    durable.upstreamIssuedFromRedisAtMs,
+    harness.snapshot.redisNowMs,
+  );
+
+  await t.test("a different stable point still conflicts", async () => {
+    const otherHarness = await stableHarness(
+      pointRaw({
+        status_changes: [{
+          code: "done",
+          created_at:
+            "2026-07-26T00:58:00.000000000Z",
+        }],
+      }),
+    );
+    const otherPair = await productionClassifierPair(
+      otherHarness.snapshot,
+      { clockOffsetMs: 1_000 },
+    );
+    fake.setNow(otherPair.verifiedAtMs + 1);
+    await assert.rejects(
+      store.retainSourceRecallClassifiedEvidence(
+        await classifiedManifestSeedForStableHarness(
+          otherHarness,
+        ),
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            otherPair,
+          ),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_BINDING_MISMATCH",
+      ),
+    );
+    assert.equal(fake.values.size, 1);
+  });
+});
+
+test("a fast local verifier clock cannot expire an in-window classified retention", async () => {
+  const harness = await stableHarness();
+  // The verifying host's wall clock runs 4s ahead of the store's Redis, the
+  // ordinary NTP-skew case. Only Redis-derived instants may gate the
+  // transition, so this must retain rather than burn both capabilities.
+  const pair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 4_000 },
+  );
+  // Redis is one millisecond behind the latest local verify instant: exactly
+  // the case a previous revision rejected as expired.
+  const redisNowMs = pair.verifiedAtMs - 1;
+  assert.ok(redisNowMs > harness.snapshot.redisNowMs);
+  const fake = fakeClassifiedPersistence(redisNowMs);
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: fake.persistence,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  assert.equal(retained.created, true);
+  assert.equal(retained.status, "retained_terminal_dark");
+  assert.ok(
+    Math.max(
+      ...JSON.parse([...fake.values.values()][0])
+        .evidence.classifierVerifiedAtMs,
+    ) > retained.retainedAtRedisMs,
+  );
+  assertHardDark(retained);
+});
+
+// The classified store keeps its own floor comparisons against the instant the
+// persistence layer reports, rather than trusting the adapter to have enforced
+// them. The two floors are the point-observation read clock and the manifest
+// reproof clock, which come from a DIFFERENT Redis deployment than this store's,
+// so they can genuinely diverge in production. Every default fixture collapses
+// them onto the same millisecond, which would let either comparison mask the
+// other; advancing the manifest clock separates them so the manifest floor is
+// driven on its own.
+test("the store refuses a persistence layer that reports a Redis clock below either floor", async (t) => {
+  const harness = await stableHarness();
+  const upstreamFloorMs = harness.snapshot.redisNowMs;
+  const manifestFloorMs = upstreamFloorMs + 3_000;
+  harness.fake.setNow(manifestFloorMs);
+  const fake = fakeClassifiedPersistence(upstreamFloorMs);
+  let reportedRedisNowMs = upstreamFloorMs;
+  const lying = Object.freeze({
+    async retain(input) {
+      const result = await fake.persistence.retain(input);
+      return {
+        ...result,
+        redisNowMs: reportedRedisNowMs,
+      };
+    },
+  });
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: lying,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const attempt = async (reportedMs) => {
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+      { clockOffsetMs: 6_000 },
+    );
+    fake.setNow(pair.verifiedAtMs + 1);
+    reportedRedisNowMs = reportedMs;
+    return store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  };
+
+  // The transition itself is allowed to succeed — the Lua writes the record —
+  // and the store then refuses to trust the instant it was told. So these
+  // cases assert the refusal, not the absence of a write.
+  // Below BOTH floors, so either comparison refuses it. The point-observation
+  // floor is driven on its own by the companion test further down.
+  await t.test("below both floors is refused", async () => {
+    await assert.rejects(
+      attempt(upstreamFloorMs - 1),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+      ),
+    );
+  });
+
+  // Above the read floor but below the manifest floor: only the manifest
+  // comparison can refuse this, so it is driven independently of the other.
+  await t.test("below the manifest reproof floor alone", async () => {
+    await assert.rejects(
+      attempt(manifestFloorMs - 1),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+      ),
+    );
+  });
+
+  // Exactly at the higher floor. The comparisons are strict `<`, so this is
+  // the first accepted instant; it pins the boundary against drifting to `<=`.
+  // A record already exists from the refused attempts above, so this converges
+  // onto it rather than creating one — which is itself the correct outcome.
+  await t.test("exactly at the higher floor is accepted", async () => {
+    const retained = await attempt(manifestFloorMs);
+    assert.equal(retained.status, "retained_terminal_dark");
+    assert.equal(retained.created, false);
+    assert.equal(retained.retainedAtRedisMs, manifestFloorMs);
+    assert.equal(fake.values.size, 1);
+    // Manifest clock is the higher of the two here, so the transition floor
+    // must be it. Collapsing the composition to the read clock alone would
+    // show up as upstreamFloorMs.
+    assert.equal(
+      fake.calls.at(-1).issuedAtMs,
+      manifestFloorMs,
+    );
+    assertHardDark(retained);
+  });
+});
+
+// Companion to the test above, with the two floors in the opposite order. The
+// manifest seed is minted first and the point observation is re-read after, so
+// the read clock ends up ABOVE the manifest clock and the point-observation
+// comparison becomes the binding one. In production the two clocks come from
+// different Redis deployments and either ordering is possible, so both
+// comparisons have to be driven on their own.
+test("the store refuses a reported clock below the point-observation floor when it is the higher of the two", async () => {
+  const harness = await stableHarness();
+  const manifestFloorMs = harness.snapshot.redisNowMs;
+  harness.fake.setNow(manifestFloorMs);
+  const seed =
+    await classifiedManifestSeedForStableHarness(harness);
+  const upstreamFloorMs = manifestFloorMs + 3_000;
+  harness.fake.setNow(upstreamFloorMs);
+  const refreshed =
+    await harness.store.readRecallPointObservationWork(
+      harness.work,
+    );
+  assert.equal(refreshed.redisNowMs, upstreamFloorMs);
+  const pair = await productionClassifierPair(refreshed, {
+    clockOffsetMs: 6_000,
+  });
+  const fake = fakeClassifiedPersistence(
+    pair.verifiedAtMs + 1,
+  );
+  // Between the manifest floor and the read floor: only the
+  // point-observation comparison can refuse this.
+  let reportedRedisNowMs = upstreamFloorMs - 1;
+  const lying = Object.freeze({
+    async retain(input) {
+      const result = await fake.persistence.retain(input);
+      return {
+        ...result,
+        redisNowMs: reportedRedisNowMs,
+      };
+    },
+  });
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: lying,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  await assert.rejects(
+    store.retainSourceRecallClassifiedEvidence(
+      seed,
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    ),
+    expectClassifiedStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+    ),
+  );
+  // With the read clock the higher of the two, the transition floor must be
+  // that clock. If the composition collapsed to the manifest clock alone this
+  // would be manifestFloorMs instead.
+  assert.equal(
+    fake.calls.at(-1).issuedAtMs,
+    upstreamFloorMs,
+  );
+
+  // Exactly at the read floor is the first accepted instant: the comparison is
+  // a strict `<`, and drifting it to `<=` would refuse a retention whose
+  // classified-Redis instant lands on the read clock — the common case when
+  // the two deployments are in step.
+  reportedRedisNowMs = upstreamFloorMs;
+  const boundaryPair = await productionClassifierPair(
+    refreshed,
+    { clockOffsetMs: 6_000 },
+  );
+  fake.setNow(boundaryPair.verifiedAtMs + 1);
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness({
+        ...harness,
+        snapshot: refreshed,
+      }),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          boundaryPair,
+        ),
+      ),
+    );
+  assert.equal(retained.status, "retained_terminal_dark");
+  assert.equal(retained.retainedAtRedisMs, upstreamFloorMs);
+  assertHardDark(retained);
+});
+
+// parseRecord re-checks the RETAINED record's two observation floors against
+// the instant the persistence layer reports. That is a different question from
+// the proposal-side floors above: a slow invocation can legitimately arrive
+// with floors below those of the record it converges onto, having lost a race
+// to a faster invocation whose upstream reads were newer. What must never
+// happen is adopting a record observed later than the instant this store
+// linearized against. Each ordering isolates one of the two comparisons.
+const retainedFloorHarness = async (
+  manifestOffsetMs,
+  upstreamOffsetMs,
+) => {
+  const harness = await stableHarness();
+  const baseMs = harness.snapshot.redisNowMs;
+  // Minted first and held: the losing invocation's capabilities, floors at +0.
+  const earlySeed =
+    await classifiedManifestSeedForStableHarness(harness);
+  const earlyPair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 500 },
+  );
+  const mintLate = async () => {
+    harness.fake.setNow(baseMs + manifestOffsetMs);
+    const lateSeed =
+      await classifiedManifestSeedForStableHarness(harness);
+    harness.fake.setNow(baseMs + upstreamOffsetMs);
+    const refreshed =
+      await harness.store.readRecallPointObservationWork(
+        harness.work,
+      );
+    const latePair = await productionClassifierPair(
+      refreshed,
+      { clockOffsetMs: 500 },
+    );
+    return { lateSeed, latePair };
+  };
+  return { harness, baseMs, earlySeed, earlyPair, mintLate };
+};
+
+for (
+  const [name, manifestOffsetMs, upstreamOffsetMs] of [
+    [
+      "point-observation read floor",
+      3_000,
+      6_000,
+    ],
+    [
+      "manifest reproof floor",
+      6_000,
+      3_000,
+    ],
+  ]
+) {
+  test(`a retained record observed after the reported instant is refused by its ${name}`, async () => {
+    const ctx = await retainedFloorHarness(
+      manifestOffsetMs,
+      upstreamOffsetMs,
+    );
+    const { lateSeed, latePair } = await ctx.mintLate();
+    // Above both retained floors, so the creating transition is accepted on
+    // its own merits and only the converging read is under test.
+    const highMs = ctx.baseMs
+      + Math.max(manifestOffsetMs, upstreamOffsetMs)
+      + 1_000;
+    const fake = fakeClassifiedPersistence(highMs);
+    let reportedRedisNowMs = highMs;
+    const reporting = Object.freeze({
+      async retain(input) {
+        const result = await fake.persistence.retain(input);
+        return {
+          ...result,
+          redisNowMs: reportedRedisNowMs,
+        };
+      },
+    });
+    const store =
+      createSourceRecallClassifiedEvidenceStore({
+        persistence: reporting,
+        sealSecret:
+          "classified-evidence-test-seal-secret-0123456789",
+      });
+    const created =
+      await store.retainSourceRecallClassifiedEvidence(
+        lateSeed,
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            latePair,
+          ),
+        ),
+      );
+    assert.equal(created.created, true);
+    const durable = JSON.parse(
+      [...fake.values.values()][0],
+    );
+    assert.equal(
+      durable.manifestIssuedFromRedisAtMs,
+      ctx.baseMs + manifestOffsetMs,
+    );
+    assert.equal(
+      durable.upstreamIssuedFromRedisAtMs,
+      ctx.baseMs + upstreamOffsetMs,
+    );
+
+    // The losing invocation now converges, while the persistence layer reports
+    // an instant BETWEEN the retained record's two floors. Only the higher
+    // floor can refuse it, so exactly one comparison is exercised.
+    reportedRedisNowMs = ctx.baseMs + 4_500;
+    await assert.rejects(
+      store.retainSourceRecallClassifiedEvidence(
+        ctx.earlySeed,
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            ctx.earlyPair,
+          ),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+      ),
+    );
+  });
+}

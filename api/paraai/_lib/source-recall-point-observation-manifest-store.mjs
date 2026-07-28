@@ -2461,7 +2461,11 @@ export function createSourceRecallPointObservationManifestStore(
     return aggregateFor(run);
   }
 
-  function terminalClaim(run, storeIdentity) {
+  // storeIdentity is deliberately closed over, never a parameter: it is the
+  // only cross-instance guard on the module-level completion WeakMap, so a
+  // call site that forgot to pass it would record an undefined identity and
+  // silently make a valid-looking completion unable to mint a seed.
+  function terminalClaim(run) {
     const completion = deepFreeze({
       aggregate: aggregateFor(run),
       status: "complete",
@@ -2593,15 +2597,12 @@ export function createSourceRecallPointObservationManifestStore(
       const run = snapshot.record;
       if (run.status === "observed_complete_dark") {
         await verifyCompleteManifest(run);
-        return terminalClaim(run, storeIdentity);
+        return terminalClaim(run);
       }
       if (run.status === "verifying_complete") {
         try {
           snapshot = await sealCompleteProof(snapshot);
-          return terminalClaim(
-            snapshot.record,
-            storeIdentity,
-          );
+          return terminalClaim(snapshot.record);
         } catch (error) {
           const current =
             await recoverClaimLoopRunTransition(
@@ -2614,10 +2615,7 @@ export function createSourceRecallPointObservationManifestStore(
               === "observed_complete_dark"
           ) {
             await verifyCompleteManifest(current.record);
-            return terminalClaim(
-              current.record,
-              storeIdentity,
-            );
+            return terminalClaim(current.record);
           }
           snapshot = current;
           continue;
