@@ -25,6 +25,7 @@ import {
 } from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import { replyHealth, runReplyTick } from "./_lib/reply.mjs";
+import { expiredHealth, runExpiredTick } from "./_lib/expired.mjs";
 import {
   runPhase4SourceCaptureTick,
 } from "./_lib/source-capture-coordinator.mjs";
@@ -404,6 +405,7 @@ export default async function handler(req, res) {
         queue: await getAutoQueueStats(),
         outreach: await outreachHealth(),
         reply: await replyHealth(),
+        expired: await expiredHealth(),
       });
     }
     if (mode === "enqueue") {
@@ -585,6 +587,29 @@ export default async function handler(req, res) {
         ).catch(() => {});
       }
     }
+    // ORDER IS A CONTRACT: expired-match actioning runs AFTER reply actioning,
+    // never before. A candidate can answer on day 6 and the request expire on
+    // day 7, and whichever lane runs first takes the shared per-request claim.
+    // The reply lane must get that classification pass, because a request its
+    // candidate answered has a truthful outcome that "Candidate didn't get
+    // back" would contradict in front of a hiring manager. Isolated the same
+    // way: a Paraform failure here must never stop direct submission.
+    // Covered by test/paraai-expired-worker-order.test.mjs.
+    let expired = null;
+    let expiredError = null;
+    try {
+      expired = await runExpiredTick();
+    } catch (error) {
+      expiredError = {
+        error: String(error?.code || "expired_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+      if (await takeAlertSlot("expired-worker-failed", 3600).catch(() => false)) {
+        await notifySlack(
+          `🚨 Para AI expired-match actioning failed (${expiredError.error}). Direct-submit, outreach and reply processing continued.`,
+        ).catch(() => {});
+      }
+    }
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -609,6 +634,7 @@ export default async function handler(req, res) {
         || resumeSweepError
         || outreachError
         || replyError
+        || expiredError
         || remainderError
         || remainder?.ok === false
         || phase3ReleaseError
@@ -624,6 +650,8 @@ export default async function handler(req, res) {
       outreachError,
       reply,
       replyError,
+      expired,
+      expiredError,
       tick,
       remainder,
       remainderError,
