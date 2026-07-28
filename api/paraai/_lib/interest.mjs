@@ -1,5 +1,12 @@
 import { trpcGet, trpcPost, normalizeEmail } from "./core.mjs";
 import {
+  buildMime,
+  deliverMessage,
+  deterministicMessageId,
+  gmailConfigured,
+  outreachMailbox,
+} from "./outreach-gmail.mjs";
+import {
   OUTCOME_SEQUENCE_RULES,
 } from "../../roster/_lib/outcome-sequences.mjs";
 import { buildInterestConfirmation, firstNameFor, COPY_VARIANT } from "./interest-copy.mjs";
@@ -270,6 +277,31 @@ export async function stopFollowUps({ candidate, apply, sequenceIds = curatedLis
 /* ------------------------------------------------------------------- email */
 
 /**
+ * The real Gmail mailer, sending as David through the delegated service
+ * account. Kept as a factory so tests and dry runs pass their own.
+ *
+ * The Message-ID is deterministic per (candidate, batch): a rebuilt job that
+ * replays this send reconciles against the already-delivered message instead of
+ * sending a second copy.
+ */
+export function gmailMailer({ mailbox = outreachMailbox() } = {}) {
+  return async ({ to, subject, text, html, candidate }) => {
+    const actionKey = `interest:${candidate.candidateUserId}:${candidate.batchId || subject}`;
+    const messageId = deterministicMessageId(actionKey);
+    const mime = buildMime({
+      from: `David Phillips <${mailbox}>`,
+      to,
+      subject,
+      messageId,
+      bodyText: text,
+      bodyHtml: html,
+    });
+    const delivered = await deliverMessage({ mailbox, message: { ...mime, messageId } });
+    return { messageId, delivery: delivered?.delivery || null, id: delivered?.id || null };
+  };
+}
+
+/**
  * Confirmation email as David. Claim-before-send: the outbox claim is taken
  * before Gmail is called, so a crash mid-send can never produce a second copy.
  *
@@ -293,7 +325,7 @@ export async function sendConfirmation({ candidate, roleCount, batchId, apply, m
   if (!won && !existing) { out.skipped = "claim_lost"; return out; }
 
   if (!mailer) { out.skipped = "mailer_unavailable"; return out; }
-  const delivered = await mailer({ to: email, ...message, candidate });
+  const delivered = await mailer({ to: email, ...message, candidate: { ...candidate, batchId } });
   await confirmEmail(candidate.candidateUserId, batchId, { messageId: delivered?.messageId || null });
   out.sent = true;
   out.messageId = delivered?.messageId || null;
@@ -432,7 +464,10 @@ export async function interestStatus() {
 
 /* -------------------------------------------------------------------- tick */
 
-export async function runInterestTick({ config = interestConfig(), mailer = null, now = Date.now() } = {}) {
+export async function runInterestTick({ config = interestConfig(), mailer = undefined, now = Date.now() } = {}) {
+  // Default to the real sender when Gmail is configured; callers (tests, dry
+  // runs) can inject their own or pass null to force a no-send.
+  const send = mailer === undefined ? (gmailConfigured() ? gmailMailer() : null) : mailer;
   const result = {
     ran: false,
     reason: null,
@@ -505,7 +540,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = null
           roleCount: bankable.length,
           batchId: job.batchId,
           apply: config.writesEnabled && config.emailArmed,
-          mailer,
+          mailer: send,
         });
       }
       job = await saveJob(appendJournal({ ...job, emailed: email, stage: "done" }, "emailed", {

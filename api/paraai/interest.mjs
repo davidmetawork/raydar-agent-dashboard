@@ -66,7 +66,9 @@ export default async function handler(req, res) {
 
     if (req.method === "POST") {
       if (action === "tick") {
-        const result = await runInterestTick({ mailer: null });
+        // No mailer override: the tick resolves the delegated Gmail sender
+        // itself, and the email gate still governs whether it is ever called.
+        const result = await runInterestTick();
         return res.status(200).json(result);
       }
       if (action === "sweep") {
