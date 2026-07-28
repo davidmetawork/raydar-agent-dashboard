@@ -1839,3 +1839,59 @@ test("ensure re-proves a complete manifest before returning retained coverage", 
     ),
   );
 });
+
+// completedManifestSelections is a module-level WeakMap, so the recorded store
+// identity is the only thing stopping one store instance from spending a
+// completion minted by another over the same persistence. Without this test the
+// guard can be deleted with a fully green suite.
+test("a completion minted by one store instance cannot mint a seed from another", async () => {
+  const harness = await indexedHarness([[reference(41)]]);
+  const claim =
+    await harness.store
+      .claimRecallPointObservationManifestStep(
+        harness.work,
+      );
+  const page = harness.source.pages[0].verifiedPage;
+  const pointWork =
+    await harness.store
+      .prepareRecallPointObservationManifestSelection(
+        claim,
+        page,
+      );
+  harness.points.terminal(page, pointWork, "stable");
+  await harness.store
+    .checkpointRecallPointObservationManifestWork(claim);
+  const complete =
+    await harness.store
+      .claimRecallPointObservationManifestStep(
+        harness.work,
+      );
+  assert.equal(complete.status, "complete");
+
+  const foreign =
+    createSourceRecallPointObservationManifestStore({
+      persistence: harness.fake.persistence,
+      pointObservation: harness.points.pointObservation,
+    });
+  await assert.rejects(
+    foreign.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETION_INVALID",
+    ),
+  );
+
+  // The completion is one-shot in the same sense as every other capability
+  // here: it is consumed by the attempt, not by the attempt succeeding. So the
+  // refused foreign attempt spends it, and even its own store cannot reuse it.
+  // Recovery is a fresh claim, never a replay.
+  await assert.rejects(
+    harness.store.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETION_INVALID",
+    ),
+  );
+});

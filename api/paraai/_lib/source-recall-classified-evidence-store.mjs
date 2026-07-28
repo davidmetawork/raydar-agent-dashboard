@@ -1,8 +1,11 @@
 // Private, hard-dark retention for one verified Recall classification pair.
 //
-// The only write input is the projector's opaque one-shot capability. The
-// store owns the key, exact record, keyed provenance seal, absolute expiry,
-// and atomic persistence transition. Its persistence adapter must linearize
+// The only write inputs are two opaque one-shot capabilities: the manifest
+// store's classified-manifest seed, which supplies the member set, half the
+// retention key, and one expiry bound; and the projector's signed-evidence
+// handoff. Both are burned on every attempt, successful or not. The store owns
+// the key, exact record, keyed provenance seal, absolute expiry, and atomic
+// persistence transition. Its persistence adapter must linearize
 // with Redis TIME and can never renew the upstream point-observation deadline.
 //
 // This is the per-point retention boundary for a future classified manifest.
@@ -1313,10 +1316,13 @@ function parseRecord(
     || expiresAtMs !== record.expiresAtMs
     // These two floors are read from the RETAINED record, not the proposal, so
     // they refuse a durable value claiming to have been observed later than the
-    // instant this store linearized against — a foreign or corrupted record, or
-    // one written by a racing invocation whose upstream reads were newer. A
-    // proposal can legitimately carry lower floors than the record it converges
-    // onto (a slow invocation losing the race and arriving afterwards), so the
+    // instant this store linearized against. A racing invocation cannot produce
+    // that: RETAIN_LUA refuses to write when Redis TIME is below max(both
+    // floors), so anything this store legitimately wrote has floors at or below
+    // its own write instant. The real causes are a foreign, corrupted, or
+    // independently sealed durable value, a persistence layer that under-reports
+    // Redis TIME, and a backwards Redis clock step. A proposal can legitimately
+    // carry lower floors than the record it converges onto, so the
     // proposal-side checks above do not subsume these.
     || redisNowMs < record.upstreamIssuedFromRedisAtMs
     || redisNowMs < record.manifestIssuedFromRedisAtMs

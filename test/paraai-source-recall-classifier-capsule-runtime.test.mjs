@@ -1993,8 +1993,10 @@ test("one complete manifest seed and one signed-evidence handoff retain exactly 
     Math.max(...durable.evidence.classifierVerifiedAtMs)
       > persistence.calls[0].issuedAtMs,
   );
-  // A non-secret seal-key identifier is persisted inside the sealed body so a
-  // rotation is distinguishable from tampering.
+  // A non-secret seal-key identifier is persisted inside the sealed body as a
+  // triage hint only. Anyone who can rewrite the record can also choose it, so
+  // it is never evidence that a rejection was benign — see sealKeyIdDigest and
+  // the tamperer-chooses-the-code subtest below.
   assert.match(durable.sealKeyId, /^[a-f0-9]{64}$/u);
   assert.equal(
     raw.includes(
@@ -2366,8 +2368,9 @@ test("classified retention converges after a lost response and rejects changed e
     const tamperedRaw = JSON.stringify(tampered);
     assert.notEqual(tamperedRaw, original);
     // Only a value changed, so key order — and therefore canonical form — is
-    // untouched. Without this the test could silently degrade into pinning
-    // parseRecord's round-trip check instead of the seal.
+    // untouched. The seal is verified inside canonicalRecord BEFORE parseRecord
+    // compares the round trip, so this subtest pins the HMAC unconditionally;
+    // the assertion is drift protection for future edits to the fixture.
     assert.deepEqual(
       Object.keys(JSON.parse(tamperedRaw)),
       Object.keys(JSON.parse(original)),
@@ -3650,8 +3653,9 @@ test("classified retention converges from a fresh invocation whose upstream read
 
 test("a fast local verifier clock cannot expire an in-window classified retention", async () => {
   const harness = await stableHarness();
-  // The verifying host's wall clock runs 4s ahead of the store's Redis, the
-  // ordinary NTP-skew case. Only Redis-derived instants may gate the
+  // The verifying host's wall clock runs 4s ahead of the POINT-OBSERVATION
+  // Redis, the ordinary NTP-skew case. The classified store's own Redis is set
+  // one millisecond behind the local clock just below. Only Redis-derived instants may gate the
   // transition, so this must retain rather than burn both capabilities.
   const pair = await productionClassifierPair(
     harness.snapshot,
