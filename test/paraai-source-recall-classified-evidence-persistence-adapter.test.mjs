@@ -25,6 +25,7 @@ const NOW_MS = Date.parse("2026-07-27T00:00:00.000Z");
 const ISSUED_AT_MS = NOW_MS - 1_000;
 const NOT_AFTER_MS = NOW_MS + 60_000;
 const EXPIRES_AT_MS = NOW_MS + 120_000;
+const OBSERVED_EXPIRES_AT_MS = EXPIRES_AT_MS - 980;
 const ADAPTER_URL =
   "https://classified-kv.example.invalid";
 const TOKEN =
@@ -93,11 +94,11 @@ function input(overrides = {}) {
   };
 }
 
-test("the adapter issues one exact Redis-TIME SET-NX-PXAT transition in its dedicated namespace", async () => {
+test("the adapter issues one conservative Redis-TIME SET-NX-PXAT transition in its dedicated namespace", async () => {
   const observations = {};
   const [seconds, microseconds] = redisTime();
   const adapter = adapterFor(
-    [1, "{}", seconds, microseconds, EXPIRES_AT_MS],
+    [1, "{}", seconds, microseconds, OBSERVED_EXPIRES_AT_MS],
     observations,
   );
   const result = await adapter.retain(input());
@@ -105,7 +106,7 @@ test("the adapter issues one exact Redis-TIME SET-NX-PXAT transition in its dedi
     status: "created",
     raw: "{}",
     redisNowMs: NOW_MS,
-    expiresAtMs: EXPIRES_AT_MS,
+    expiresAtMs: OBSERVED_EXPIRES_AT_MS,
   });
   assert.equal(
     SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_ADAPTER_VERSION,
@@ -132,40 +133,51 @@ test("the adapter issues one exact Redis-TIME SET-NX-PXAT transition in its dedi
   assert.equal(command[5], String(ISSUED_AT_MS));
   assert.equal(command[6], String(NOT_AFTER_MS));
   assert.equal(command[7], String(EXPIRES_AT_MS));
+  assert.equal(command[8], "1000");
   assert.match(command[1], /redis\.call\('TIME'\)/u);
   assert.match(command[1], /nowMs < issuedAtMs/u);
   assert.match(command[1], /nowMs >= notAfterMs/u);
   assert.match(command[1], /notAfterMs > expiresAtMs/u);
   assert.match(
     command[1],
+    /storageExpiresAtMs = expiresAtMs[\s\S]*- expirySafetyMarginMs/u,
+  );
+  assert.match(
+    command[1],
     /'SET',[\s\S]*'NX',[\s\S]*'PXAT'/u,
   );
   assert.match(command[1], /redis\.call\('PEXPIRETIME'/u);
   assert.doesNotMatch(command[1], /\bPEXPIRE\b/u);
-  assert.doesNotMatch(command[1], /\bDEL\b/u);
+  assert.match(command[1], /redis\.call\('DEL'/u);
 });
 
-test("created, existing, and exact expiry outcomes retain the Redis linearization time", async (t) => {
+test("created, existing, and conservatively early expiry outcomes retain the Redis linearization time", async (t) => {
   const [seconds, microseconds] = redisTime();
   for (const [name, raw, expected] of [
     [
       "created",
-      [1, "{}", seconds, microseconds, EXPIRES_AT_MS],
+      [1, "{}", seconds, microseconds, OBSERVED_EXPIRES_AT_MS],
       {
         status: "created",
         raw: "{}",
         redisNowMs: NOW_MS,
-        expiresAtMs: EXPIRES_AT_MS,
+        expiresAtMs: OBSERVED_EXPIRES_AT_MS,
       },
     ],
     [
       "existing",
-      [0, "{\"retained\":true}", seconds, microseconds, EXPIRES_AT_MS],
+      [
+        0,
+        "{\"retained\":true}",
+        seconds,
+        microseconds,
+        OBSERVED_EXPIRES_AT_MS,
+      ],
       {
         status: "existing",
         raw: "{\"retained\":true}",
         redisNowMs: NOW_MS,
-        expiresAtMs: EXPIRES_AT_MS,
+        expiresAtMs: OBSERVED_EXPIRES_AT_MS,
       },
     ],
     [
@@ -183,6 +195,29 @@ test("created, existing, and exact expiry outcomes retain the Redis linearizatio
       assert.deepEqual(
         await adapterFor(raw).retain(input()),
         expected,
+      );
+    });
+  }
+});
+
+test("provider expiry observations must remain live and at or below the logical deadline", async (t) => {
+  const [seconds, microseconds] = redisTime();
+  for (const [name, observedExpiresAtMs] of [
+    ["later than the logical deadline", EXPIRES_AT_MS + 1],
+    ["already expired at Redis TIME", NOW_MS],
+  ]) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        adapterFor([
+          1,
+          "{}",
+          seconds,
+          microseconds,
+          observedExpiresAtMs,
+        ]).retain(input()),
+        expectCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_RESULT_INVALID",
+        ),
       );
     });
   }

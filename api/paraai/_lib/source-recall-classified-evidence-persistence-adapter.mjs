@@ -1,9 +1,9 @@
 // Dedicated Redis REST adapter for hard-dark Recall classified evidence.
 //
-// One Lua transition owns Redis TIME, clock-regression rejection, exact
-// absolute expiry, SET NX, and lost-response recovery. It has a disjoint
-// namespace and configuration from the reference and point-observation
-// stores. There is no generic KV fallback.
+// One Lua transition owns Redis TIME, clock-regression rejection,
+// conservative absolute expiry, SET NX, and lost-response recovery. It has a
+// disjoint namespace and configuration from the reference and
+// point-observation stores. There is no generic KV fallback.
 
 import {
   TextDecoder,
@@ -23,6 +23,13 @@ SOURCE_RECALL_CLASSIFIED_EVIDENCE_KV_REST_API_TOKEN_ENV =
 const REQUEST_TIMEOUT_MS = 8_000;
 const RECORD_MAX_BYTES = 256 * 1_024;
 const WIRE_MAX_BYTES = 384 * 1_024;
+// Managed Redis deployments can evaluate TIME and absolute expiry on nodes
+// whose clocks differ by a few milliseconds. Expire the physical key one
+// second before the signed logical deadline, then require the provider's
+// observed PEXPIRETIME to remain at or below that logical deadline. This
+// preserves the upstream upper bound without treating harmless early expiry
+// as record corruption.
+const EXPIRY_SAFETY_MARGIN_MS = 1_000;
 const KEY = /^paraai:phase4:recall-classified-evidence:v1:work:[a-f0-9]{64}$/u;
 const OPTION_KEYS = new Set([
   "fetchImpl",
@@ -318,17 +325,26 @@ const RETAIN_LUA = `
   local issuedAtMs = tonumber(ARGV[2])
   local notAfterMs = tonumber(ARGV[3])
   local expiresAtMs = tonumber(ARGV[4])
+  local expirySafetyMarginMs = tonumber(ARGV[5])
+  local storageExpiresAtMs = expiresAtMs
+    and expirySafetyMarginMs
+    and expiresAtMs - expirySafetyMarginMs
   if not issuedAtMs
     or issuedAtMs ~= math.floor(issuedAtMs)
     or not notAfterMs
     or notAfterMs ~= math.floor(notAfterMs)
     or not expiresAtMs
     or expiresAtMs ~= math.floor(expiresAtMs)
+    or not expirySafetyMarginMs
+    or expirySafetyMarginMs ~= math.floor(expirySafetyMarginMs)
+    or expirySafetyMarginMs <= 0
+    or not storageExpiresAtMs
+    or storageExpiresAtMs ~= math.floor(storageExpiresAtMs)
     or issuedAtMs >= notAfterMs
     or notAfterMs > expiresAtMs
     or nowMs < issuedAtMs
     or nowMs >= notAfterMs
-    or nowMs >= expiresAtMs then
+    or nowMs >= storageExpiresAtMs then
     return {2, false, redisTime[1], redisTime[2], -2}
   end
   local current = redis.call('GET', KEYS[1])
@@ -347,7 +363,7 @@ const RETAIN_LUA = `
     ARGV[1],
     'NX',
     'PXAT',
-    tostring(expiresAtMs)
+    tostring(storageExpiresAtMs)
   )
   if not stored then
     current = redis.call('GET', KEYS[1])
@@ -359,12 +375,19 @@ const RETAIN_LUA = `
       redis.call('PEXPIRETIME', KEYS[1])
     }
   end
+  local observedExpiresAtMs =
+    redis.call('PEXPIRETIME', KEYS[1])
+  if observedExpiresAtMs <= nowMs
+    or observedExpiresAtMs > expiresAtMs then
+    redis.call('DEL', KEYS[1])
+    return {2, false, redisTime[1], redisTime[2], -2}
+  end
   return {
     1,
     ARGV[1],
     redisTime[1],
     redisTime[2],
-    redis.call('PEXPIRETIME', KEYS[1])
+    observedExpiresAtMs
   }
 `;
 
@@ -514,6 +537,7 @@ export function createSourceRecallClassifiedEvidencePersistenceAdapter(
         String(issuedAtMs),
         String(notAfterMs),
         String(expiresAtMs),
+        String(EXPIRY_SAFETY_MARGIN_MS),
       ]);
       if (
         !Array.isArray(result)
@@ -544,6 +568,22 @@ export function createSourceRecallClassifiedEvidencePersistenceAdapter(
         );
       }
       const statusCode = result[0];
+      const observedRedisNowMs = redisNowMs(
+        result,
+        2,
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_RESULT_INVALID",
+      );
+      if (
+        statusCode !== 2
+        && (
+          result[4] <= observedRedisNowMs
+          || result[4] > expiresAtMs
+        )
+      ) {
+        fail(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_RESULT_INVALID",
+        );
+      }
       return deepFreeze({
         status: statusCode === 1
           ? "created"
@@ -553,11 +593,7 @@ export function createSourceRecallClassifiedEvidencePersistenceAdapter(
         raw: typeof result[1] === "string"
           ? result[1]
           : null,
-        redisNowMs: redisNowMs(
-          result,
-          2,
-          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_RESULT_INVALID",
-        ),
+        redisNowMs: observedRedisNowMs,
         expiresAtMs: result[4],
       });
     },

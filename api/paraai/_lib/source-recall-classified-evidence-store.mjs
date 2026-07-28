@@ -6,7 +6,8 @@
 // handoff. Both are burned on every attempt, successful or not. The store owns
 // the key, exact record, keyed provenance seal, absolute expiry, and atomic
 // persistence transition. Its persistence adapter must linearize
-// with Redis TIME and can never renew the upstream point-observation deadline.
+// with Redis TIME and can never renew or exceed the upstream
+// point-observation deadline.
 //
 // This is the per-point retention boundary for a future classified manifest.
 // It does not claim complete reference coverage, source facts, identity,
@@ -1313,7 +1314,11 @@ function parseRecord(
   const record = canonicalRecord(parsed, secret);
   if (
     canonicalJson(record) !== raw
-    || expiresAtMs !== record.expiresAtMs
+    // The physical key may expire conservatively before the logical signed
+    // deadline. It may never outlive that deadline, and it must still exist at
+    // the Redis instant returned by the same atomic transition.
+    || expiresAtMs > record.expiresAtMs
+    || expiresAtMs <= redisNowMs
     // These two floors are read from the RETAINED record, not the proposal, so
     // they refuse a durable value claiming to have been observed later than the
     // instant this store linearized against. A racing invocation cannot produce
@@ -1326,7 +1331,6 @@ function parseRecord(
     // proposal-side checks above do not subsume these.
     || redisNowMs < record.upstreamIssuedFromRedisAtMs
     || redisNowMs < record.manifestIssuedFromRedisAtMs
-    || redisNowMs >= record.expiresAtMs
   ) {
     fail(code);
   }
@@ -1533,7 +1537,8 @@ export function createSourceRecallClassifiedEvidenceStore(
       fail("SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED");
     }
     if (
-      result.expiresAtMs !== proposed.expiresAtMs
+      result.expiresAtMs > proposed.expiresAtMs
+      || result.expiresAtMs <= result.redisNowMs
       || result.raw === null
     ) {
       fail(

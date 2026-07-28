@@ -429,7 +429,10 @@ function fakePersistence(startMs) {
   };
 }
 
-function fakeClassifiedPersistence(startMs) {
+function fakeClassifiedPersistence(
+  startMs,
+  physicalExpiryOffsetMs = 0,
+) {
   let nowMs = startMs;
   let mode = "normal";
   const values = new Map();
@@ -465,8 +468,10 @@ function fakeClassifiedPersistence(startMs) {
           expiresAtMs: expiries.get(input.key),
         };
       }
+      const physicalExpiresAtMs =
+        input.expiresAtMs + physicalExpiryOffsetMs;
       values.set(input.key, input.proposedRaw);
-      expiries.set(input.key, input.expiresAtMs);
+      expiries.set(input.key, physicalExpiresAtMs);
       if (mode === "throw_after_store_once") {
         mode = "normal";
         throw new Error("private lost persistence response");
@@ -475,7 +480,7 @@ function fakeClassifiedPersistence(startMs) {
         status: "created",
         raw: input.proposedRaw,
         redisNowMs: nowMs,
-        expiresAtMs: input.expiresAtMs,
+        expiresAtMs: physicalExpiresAtMs,
       };
     },
   });
@@ -2135,6 +2140,42 @@ test("one complete manifest seed and one signed-evidence handoff retain exactly 
     );
     assertHardDark(result);
   });
+});
+
+test("classified retention accepts conservative physical expiry while preserving the logical upstream deadline", async () => {
+  const harness = await stableHarness();
+  const pair = await productionClassifierPair(
+    harness.snapshot,
+  );
+  const physicalExpiryOffsetMs = -1_000;
+  const persistence = fakeClassifiedPersistence(
+    pair.verifiedAtMs + 1,
+    physicalExpiryOffsetMs,
+  );
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: persistence.persistence,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  const physicalExpiresAtMs =
+    [...persistence.expiries.values()][0];
+  assert.equal(
+    physicalExpiresAtMs,
+    harness.snapshot.record.expiresAtMs
+      + physicalExpiryOffsetMs,
+  );
+  assert.equal(
+    retained.expiresAtMs,
+    harness.snapshot.record.expiresAtMs,
+  );
+  assert.ok(physicalExpiresAtMs < retained.expiresAtMs);
 });
 
 test("classified retention enforces the trusted transition clock at regression, equality, and expiry and burns both capabilities", async (t) => {
