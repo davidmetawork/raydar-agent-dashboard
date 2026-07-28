@@ -1400,7 +1400,10 @@ function aggregateFor(record, result) {
       record.classificationEvidenceDigest,
     workKeyDigest: record.workKeyDigest,
     retainedAtRedisMs: result.redisNowMs,
-    expiresAtMs: record.expiresAtMs,
+    // Expose the observed physical retention deadline. The sealed record keeps
+    // the upstream logical deadline, but callers must not assume the key
+    // remains available through the final safety-margin interval.
+    expiresAtMs: result.expiresAtMs,
     signedResponseRetentionAvailable: true,
     durableProvenanceSealAvailable: true,
     standaloneSignatureReverificationAvailable: false,

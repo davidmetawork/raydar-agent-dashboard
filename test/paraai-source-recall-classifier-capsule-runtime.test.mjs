@@ -2173,9 +2173,15 @@ test("classified retention accepts conservative physical expiry while preserving
   );
   assert.equal(
     retained.expiresAtMs,
+    physicalExpiresAtMs,
+  );
+  const durable =
+    JSON.parse([...persistence.values.values()][0]);
+  assert.equal(
+    durable.expiresAtMs,
     harness.snapshot.record.expiresAtMs,
   );
-  assert.ok(physicalExpiresAtMs < retained.expiresAtMs);
+  assert.ok(retained.expiresAtMs < durable.expiresAtMs);
 });
 
 test("classified retention enforces the trusted transition clock at regression, equality, and expiry and burns both capabilities", async (t) => {
