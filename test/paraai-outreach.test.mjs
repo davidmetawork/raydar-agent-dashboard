@@ -16,9 +16,23 @@ import {
   candidateRepliedAfter,
   deterministicMessageId,
   firstDeliveredInternalDate,
+  hardBounceAfter,
+  isHardBounce,
   threadDigestAnchorStatus,
   threadReplyContext,
 } from "../api/paraai/_lib/outreach-gmail.mjs";
+import {
+  activeOffMarketHold,
+  classifyByPhrase,
+  classifyInboundIntent,
+  INTENT_DO_NOT_CONTACT,
+  INTENT_OFF_MARKET,
+  INTENT_OPEN,
+  lapsedOffMarketHold,
+  offMarketHold,
+  OFF_MARKET_HOLD_DAYS,
+  stripQuotedText,
+} from "../api/paraai/_lib/outreach-intent.mjs";
 import {
   calendarCandidateEvidence,
   discoverCandidateContact,
@@ -27,7 +41,11 @@ import {
   resolveContactEvidence,
 } from "../api/paraai/_lib/outreach-contact.mjs";
 import {
+  assessOutreachThread,
+  assessmentBlockCode,
+  assessmentPatch,
   eligibleNewRequests,
+  heldAlertCopy,
   missingEmailAlertCopy,
   normalizeSubmissionRequest,
   OUTREACH_INCIDENT_HALT,
@@ -322,7 +340,7 @@ test("only an exact digest URL in the first delivered email anchors future repli
     messages: [{
       internalDate: "3000",
       labelIds: ["DRAFT"],
-      payload: bodyPayload(`Dhruva's Interview Requests (${digestUrl})`),
+      payload: bodyPayload(`Avery's Interview Requests (${digestUrl})`),
     }],
   };
   assert.equal(threadDigestAnchorStatus(newDraftThread, digestUrl), "draft");
@@ -332,7 +350,7 @@ test("only an exact digest URL in the first delivered email anchors future repli
     messages: [
       {
         internalDate: "4000",
-        payload: bodyPayload(`<a href="${digestUrl}">Dhruva's Interview Requests</a>`, "text/html"),
+        payload: bodyPayload(`<a href="${digestUrl}">Avery's Interview Requests</a>`, "text/html"),
       },
       {
         internalDate: "5000",
@@ -517,7 +535,7 @@ test("request normalization and ordinal count all Para AI requests for one candi
     candidate: {
       id: "candidate-db",
       candidate_user_id: "candidate-user",
-      name: "Dhruva Narayan",
+      name: "Avery Stone",
     },
     role: { id: "role-first", name: "Founding Engineer", company: { name: "CaroHQ" } },
   });
@@ -529,7 +547,7 @@ test("request normalization and ordinal count all Para AI requests for one candi
     candidate: {
       id: "candidate-db",
       candidate_user_id: "candidate-user",
-      name: "Dhruva Narayan",
+      name: "Avery Stone",
     },
     role: { id: "role-second", name: "Software Engineer", company: { name: "Reform" } },
   });
@@ -637,7 +655,7 @@ test("new match supersedes the old follow-up and owns one new two-day follow-up"
   };
   const sentAt = "2026-07-18T12:00:00.000Z";
   const copy = additionalMatchCopy({
-    firstName: "Dhruva",
+    firstName: "Avery",
     ordinal: 2,
     variationSeed: request.id,
     ...role,
@@ -717,4 +735,356 @@ test("all three live-send gates and a pinned cutoff are required", () => {
     outreachExecutionEnabled({ ...open, storeConfigured: true }),
     !OUTREACH_INCIDENT_HALT,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 2026-07-28: reply INTENT replaces reply PRESENCE as the new-role send gate.
+// A reply still stops the nudge ladder; only an explicit off-market statement,
+// an explicit stop-contacting request, or a hard bounce blocks a new role.
+// ---------------------------------------------------------------------------
+
+const inbound = (text, { at = "2000", from = "Avery <avery@example.com>", subject = "Re: 1st Round" } = {}) => ({
+  internalDate: at,
+  payload: {
+    ...bodyPayload(text),
+    headers: [
+      { name: "From", value: from },
+      { name: "Subject", value: subject },
+    ],
+  },
+});
+const ourMessage = (at = "1000") => ({
+  internalDate: at,
+  labelIds: ["SENT"],
+  payload: {
+    ...bodyPayload("Here is the role"),
+    headers: [
+      { name: "From", value: "David Phillips <david@raydar.xyz>" },
+      { name: "Subject", value: "1st Round - Interview Request @ Rama 🎉" },
+    ],
+  },
+});
+
+test("only an explicit market-level exit reads as off the market", () => {
+  // David's calibration, 2026-07-28. The first two hold; the rest send.
+  for (const text of [
+    "Hey David, I actually just accepted another offer, best of luck filling the role!",
+    "I signed an offer last week.",
+    "Thanks, but I'm not looking right now.",
+    "I'm happy where I am at the moment.",
+    "I've taken myself off the market for now.",
+    "I just started a new role in May.",
+  ]) {
+    assert.equal(classifyByPhrase(text), INTENT_OFF_MARKET, text);
+  }
+  for (const text of [
+    "Not interested in this particular role, but keep me posted.",
+    "This one isn't for me — too early stage.",
+    "I'm in final stages somewhere else, but still open.",
+    "Can we talk next week?",
+    "I am out of office until Monday with limited access to email.",
+    "What does the comp band look like?",
+  ]) {
+    assert.equal(classifyByPhrase(text), null, text);
+  }
+  for (const text of [
+    "Please stop emailing me.",
+    "Remove me from your list.",
+    "unsubscribe",
+    "Do not contact me again.",
+  ]) {
+    assert.equal(classifyByPhrase(text), INTENT_DO_NOT_CONTACT, text);
+  }
+});
+
+test("quoted text is stripped so we never classify our own copy as the candidate's", () => {
+  // Our email is quoted under every reply and is full of role language. Judging
+  // it would let our own words decide whether the candidate is off the market.
+  const raw = [
+    "Not interested in this one, thanks.",
+    "",
+    "On Mon, Jul 27, 2026 at 9:30 AM David Phillips <david@raydar.xyz> wrote:",
+    "> I just accepted another offer on your behalf and you are off the market",
+  ].join("\n");
+  const stripped = stripQuotedText(raw);
+  assert.equal(stripped, "Not interested in this one, thanks.");
+  assert.equal(classifyByPhrase(stripped), null);
+  // Without the strip, the quoted block would have tripped the off-market rule.
+  assert.equal(classifyByPhrase(raw), INTENT_OFF_MARKET);
+});
+
+test("an explicit stop-contacting request never spends a model call", async () => {
+  let calls = 0;
+  const result = await classifyInboundIntent(
+    [{ at: "2026-07-27T00:00:00.000Z", text: "Please stop emailing me." }],
+    {
+      fetchImpl: async () => { calls += 1; throw new Error("must not be called"); },
+      env: { ANTHROPIC_API_KEY: "key" },
+    },
+  );
+  assert.equal(result.verdict, INTENT_DO_NOT_CONTACT);
+  assert.equal(result.source, "phrase");
+  assert.equal(calls, 0);
+});
+
+test("the model decides the soft cases, and its verdict is what sticks", async () => {
+  const modelFetch = (verdict) => async () => ({
+    ok: true,
+    json: async () => ({
+      model: "claude-fable-5",
+      content: [{
+        type: "tool_use",
+        name: "record_reply_intent",
+        input: { verdict, reason: "stated wording" },
+      }],
+    }),
+  });
+  const open = await classifyInboundIntent(
+    [{ at: "2026-07-27T00:00:00.000Z", text: "Not for me, but send me the next one." }],
+    { fetchImpl: modelFetch(INTENT_OPEN), env: { ANTHROPIC_API_KEY: "key" } },
+  );
+  assert.equal(open.verdict, INTENT_OPEN);
+  assert.equal(open.source, "model");
+
+  const off = await classifyInboundIntent(
+    [{ at: "2026-07-27T00:00:00.000Z", text: "I'm out of the running, sorry." }],
+    { fetchImpl: modelFetch(INTENT_OFF_MARKET), env: { ANTHROPIC_API_KEY: "key" } },
+  );
+  assert.equal(off.verdict, INTENT_OFF_MARKET);
+});
+
+test("a dead model retries once, falls back to phrases, then defaults to send", async () => {
+  let calls = 0;
+  const dead = async () => { calls += 1; return { ok: false, json: async () => ({}) }; };
+
+  const ambiguous = await classifyInboundIntent(
+    [{ at: "2026-07-27T00:00:00.000Z", text: "Hmm, let me think about it." }],
+    { fetchImpl: dead, env: { ANTHROPIC_API_KEY: "key" } },
+  );
+  assert.equal(calls, 2, "retries exactly once before falling back");
+  assert.equal(ambiguous.verdict, INTENT_OPEN, "default is send");
+  assert.equal(ambiguous.source, "phrase_fallback");
+
+  calls = 0;
+  const explicit = await classifyInboundIntent(
+    [{ at: "2026-07-27T00:00:00.000Z", text: "I just accepted another offer." }],
+    { fetchImpl: dead, env: { ANTHROPIC_API_KEY: "key" } },
+  );
+  assert.equal(explicit.verdict, INTENT_OFF_MARKET, "phrases still catch the clear case");
+
+  // No API key at all: do not burn a retry on a call that cannot succeed.
+  calls = 0;
+  const unconfigured = await classifyInboundIntent(
+    [{ at: "2026-07-27T00:00:00.000Z", text: "Sounds interesting." }],
+    { fetchImpl: dead, env: {} },
+  );
+  assert.equal(calls, 0);
+  assert.equal(unconfigured.verdict, INTENT_OPEN);
+});
+
+test("an off-market hold expires after six months; do-not-contact never does", () => {
+  const detectedAt = "2026-07-27T00:00:00.000Z";
+  const off = offMarketHold({ verdict: INTENT_OFF_MARKET, detectedAt });
+  assert.equal(OFF_MARKET_HOLD_DAYS, 183);
+  assert.equal(
+    off.expiresAt,
+    new Date(Date.parse(detectedAt) + 183 * 24 * 60 * 60 * 1000).toISOString(),
+  );
+  const stop = offMarketHold({ verdict: INTENT_DO_NOT_CONTACT, detectedAt });
+  assert.equal(stop.expiresAt, null);
+  assert.equal(offMarketHold({ verdict: INTENT_OPEN, detectedAt }), null);
+
+  const dayBefore = Date.parse(off.expiresAt) - 1;
+  const dayAfter = Date.parse(off.expiresAt) + 1;
+  assert.ok(activeOffMarketHold({ offMarket: off }, dayBefore));
+  assert.equal(activeOffMarketHold({ offMarket: off }, dayAfter), null);
+  // A stop-contacting hold outlives any window.
+  assert.ok(activeOffMarketHold({ offMarket: stop }, dayAfter + 1e12));
+
+  // The lapse is announced exactly once.
+  assert.ok(lapsedOffMarketHold({ offMarket: off }, dayAfter));
+  assert.equal(lapsedOffMarketHold({ offMarket: off }, dayBefore), null);
+  assert.equal(
+    lapsedOffMarketHold({ offMarket: { ...off, lapseNotifiedAt: "2027-01-27T00:00:00.000Z" } }, dayAfter),
+    null,
+  );
+});
+
+test("only a permanent delivery failure counts as a bounce", () => {
+  const report = (text, extra = {}) => ({
+    internalDate: "3000",
+    payload: {
+      ...bodyPayload(text),
+      headers: [
+        { name: "From", value: "Mail Delivery Subsystem <mailer-daemon@googlemail.com>" },
+        { name: "Subject", value: "Delivery Status Notification (Failure)" },
+        ...(extra.headers || []),
+      ],
+    },
+  });
+  assert.equal(
+    isHardBounce(report("550 5.1.1 The email account that you tried to reach does not exist.")),
+    true,
+  );
+  // A temporary failure is retried by the sending server; latching a stop on it
+  // would silently drop a candidate whose mailbox was merely full for an hour.
+  assert.equal(isHardBounce(report("4.2.2 The recipient's mailbox is over quota, will retry")), false);
+  // An out-of-office is not a delivery report at all.
+  assert.equal(
+    isHardBounce(inbound("I am out of office until Monday", { subject: "Automatic reply" })),
+    false,
+  );
+  // A real reply from the candidate is never a bounce.
+  assert.equal(isHardBounce(inbound("Not interested in this one")), false);
+
+  const thread = { messages: [ourMessage("1000"), report("550 5.1.1 user unknown")] };
+  assert.ok(hardBounceAfter(thread, 500));
+  assert.equal(hardBounceAfter(thread, 5000), null, "respects the conversation anchor");
+});
+
+test("a role-level decline clears a new role; an accepted offer holds it", async () => {
+  const config = { mailbox: "david@raydar.xyz" };
+  const state = { threadId: "t1", firstOutboundAt: "1970-01-01T00:00:01.000Z" };
+  const threadOf = (text) => async () => ({
+    id: "t1",
+    messages: [ourMessage("1000"), inbound(text, { at: "2000" })],
+  });
+
+  const declined = await assessOutreachThread({
+    state,
+    config,
+    threadImpl: threadOf("Not interested in this particular role, thanks."),
+    classifyImpl: async () => ({ verdict: INTENT_OPEN, reason: "role-level no", source: "model" }),
+  });
+  assert.equal(declined.replied, true, "a reply is still recorded");
+  assert.equal(declined.hold, null, "but it does not block the new role");
+  assert.equal(assessmentBlockCode(declined), null);
+
+  const offMarket = await assessOutreachThread({
+    state,
+    config,
+    threadImpl: threadOf("I just accepted another offer, best of luck!"),
+    classifyImpl: async () => ({ verdict: INTENT_OFF_MARKET, reason: "accepted an offer", source: "model" }),
+  });
+  assert.equal(offMarket.hold.verdict, INTENT_OFF_MARKET);
+  assert.equal(assessmentBlockCode(offMarket), "OUTREACH_CANDIDATE_OFF_MARKET");
+  // The six months run from what the candidate said, not from when we read it.
+  assert.equal(offMarket.hold.detectedAt, new Date(2000).toISOString());
+
+  const bounced = await assessOutreachThread({
+    state,
+    config,
+    threadImpl: async () => ({
+      id: "t1",
+      messages: [ourMessage("1000"), {
+        internalDate: "2000",
+        payload: {
+          ...bodyPayload("550 5.1.1 address not found"),
+          headers: [
+            { name: "From", value: "mailer-daemon@googlemail.com" },
+            { name: "Subject", value: "Delivery Status Notification (Failure)" },
+          ],
+        },
+      }],
+    }),
+    classifyImpl: async () => { throw new Error("must not classify a bounce"); },
+  });
+  assert.equal(assessmentBlockCode(bounced), "OUTREACH_EMAIL_BOUNCED");
+});
+
+test("an already-judged conversation is never re-classified", async () => {
+  let classified = 0;
+  const assessment = await assessOutreachThread({
+    state: {
+      threadId: "t1",
+      firstOutboundAt: "1970-01-01T00:00:01.000Z",
+      intentCheckedThrough: 2000,
+      intentVerdict: INTENT_OPEN,
+    },
+    config: { mailbox: "david@raydar.xyz" },
+    threadImpl: async () => ({ id: "t1", messages: [ourMessage("1000"), inbound("Not for me", { at: "2000" })] }),
+    classifyImpl: async () => { classified += 1; return { verdict: INTENT_OPEN }; },
+  });
+  assert.equal(classified, 0, "no repeat model spend on the same messages");
+  assert.equal(assessment.cached, true);
+  assert.equal(assessment.verdict, INTENT_OPEN);
+});
+
+test("a cleared reply sends the role but never re-arms the nudge ladder", () => {
+  // The 07-26 incident was two follow-ups after a decline. Even now that the new
+  // role sends, the ladder must stay dead for anyone who has ever written back.
+  const { patch, event } = assessmentPatch(
+    { checked: true, replied: true, newestInboundMs: 2000, verdict: INTENT_OPEN, hold: null, bounce: null },
+    { requestId: "req-9" },
+  );
+  assert.equal(event, "reply_cleared_for_new_role");
+  assert.equal(patch.followup, null);
+  assert.ok(patch.repliedAt);
+  assert.equal(patch.intentVerdict, INTENT_OPEN);
+  assert.equal(patch.offMarket, undefined);
+
+  const planned = planDeliveredMatch(
+    { ...patch, candidateUserId: "c1", matches: {}, outbox: {}, journal: [] },
+    {
+      request: { id: "req-9", roleId: "role-9", roleName: "Founding Engineer", companyName: "Rama" },
+      ordinal: 2,
+      roleUrl: "https://www.paraform.com/share/rama/role-9",
+      digest: { digestId: "d1", digestUrl: "https://www.paraform.com/digest/d1" },
+      copy: { subject: "Interview Request", variant: "additional_exact" },
+      sent: { id: "m2", threadId: "t1" },
+      sentAt: "2026-07-28T10:00:00.000Z",
+      messageId: "<y@raydar.xyz>",
+    },
+  );
+  assert.equal(planned.followup, null, "no re-armed ladder after any prior reply");
+  assert.ok(planned.matches["req-9"], "the new role is still delivered and recorded");
+
+  // An existing reply timestamp is the anchor and is never overwritten.
+  const later = assessmentPatch(
+    { checked: true, replied: true, newestInboundMs: 3000, verdict: INTENT_OPEN },
+    { repliedAt: "2026-07-01T00:00:00.000Z" },
+  );
+  assert.equal(later.patch.repliedAt, "2026-07-01T00:00:00.000Z");
+});
+
+test("held requests stay parked until reviewed, and bounces self-heal", () => {
+  const history = [
+    { id: "req-held", status: "pending", reachedOut: false, createdAtMs: 2_000_000, candidateUserId: "c1", roleId: "r1", roleName: "Engineer" },
+    { id: "req-bounced", status: "pending", reachedOut: false, createdAtMs: 2_000_000, candidateUserId: "c2", roleId: "r2", roleName: "Engineer" },
+  ];
+  const config = { notBeforeMs: 1_000_000 };
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+  // The retired 07-26 code must keep parking its backlog: those requests are
+  // released by the explicit review/release action, never by a passing tick.
+  const legacyHeld = eligibleNewRequests(history, config, [], [
+    { status: "open", code: "OUTREACH_CANDIDATE_REPLIED", requestId: "req-held", lastSeenAt: stale },
+    { status: "open", code: "OUTREACH_EMAIL_BOUNCED", requestId: "req-bounced", lastSeenAt: stale },
+  ]);
+  assert.deepEqual(legacyHeld.map((row) => row.id), ["req-bounced"]);
+
+  // An off-market hold parks its request the same way.
+  const offMarketHeld = eligibleNewRequests(history, config, [], [
+    { status: "open", code: "OUTREACH_CANDIDATE_OFF_MARKET", requestId: "req-held", lastSeenAt: stale },
+    { status: "open", code: "OUTREACH_CANDIDATE_DO_NOT_CONTACT", requestId: "req-bounced", lastSeenAt: stale },
+  ]);
+  assert.deepEqual(offMarketHeld.map((row) => row.id), []);
+});
+
+test("hold alerts name the verdict and the remedy, never the candidate's words", () => {
+  const request = { id: "req-1", candidateName: "Avery Stone", roleName: "Founding Engineer", companyName: "Rama" };
+  const offMarket = heldAlertCopy("OUTREACH_CANDIDATE_OFF_MARKET", request, {
+    detail: { expiresAt: "2027-01-26T00:00:00.000Z" },
+  });
+  assert.match(offMarket, /off the market/);
+  assert.match(offMarket, /Founding Engineer @ Rama/);
+  assert.match(offMarket, /lifts automatically on 2027-01-26/);
+
+  const stop = heldAlertCopy("OUTREACH_CANDIDATE_DO_NOT_CONTACT", request);
+  assert.match(stop, /stop emailing/);
+  assert.match(stop, /no future role/);
+
+  const bounced = heldAlertCopy("OUTREACH_EMAIL_BOUNCED", request);
+  assert.match(bounced, /undeliverable/);
+  assert.match(bounced, /retries automatically/);
 });

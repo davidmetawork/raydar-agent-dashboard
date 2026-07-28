@@ -24,6 +24,7 @@ import {
   PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
 } from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
+import { replyHealth, runReplyTick } from "./_lib/reply.mjs";
 import {
   runPhase4SourceCaptureTick,
 } from "./_lib/source-capture-coordinator.mjs";
@@ -402,6 +403,7 @@ export default async function handler(req, res) {
         config: automationConfig(),
         queue: await getAutoQueueStats(),
         outreach: await outreachHealth(),
+        reply: await replyHealth(),
       });
     }
     if (mode === "enqueue") {
@@ -566,6 +568,23 @@ export default async function handler(req, res) {
         ).catch(() => {});
       }
     }
+    // Reply actioning runs after outreach and is isolated the same way: a
+    // classifier or Paraform failure here must never stop direct submission.
+    let reply = null;
+    let replyError = null;
+    try {
+      reply = await runReplyTick();
+    } catch (error) {
+      replyError = {
+        error: String(error?.code || "reply_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+      if (await takeAlertSlot("reply-worker-failed", 3600).catch(() => false)) {
+        await notifySlack(
+          `🚨 Para AI reply actioning failed (${replyError.error}). Direct-submit and outreach processing continued.`,
+        ).catch(() => {});
+      }
+    }
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -589,6 +608,7 @@ export default async function handler(req, res) {
         recoveryError
         || resumeSweepError
         || outreachError
+        || replyError
         || remainderError
         || remainder?.ok === false
         || phase3ReleaseError
@@ -602,6 +622,8 @@ export default async function handler(req, res) {
       resumeSweepError,
       outreach,
       outreachError,
+      reply,
+      replyError,
       tick,
       remainder,
       remainderError,
