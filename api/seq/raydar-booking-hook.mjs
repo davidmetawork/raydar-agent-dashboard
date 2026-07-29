@@ -12,6 +12,8 @@ import {
   kvSet,
   kvSetNx,
   pauseForBooking,
+  raydarPauseCanaryIdentityFingerprint,
+  raydarWebhookSecretFingerprint,
   shouldAlert,
 } from "./_lib/booking-stop.mjs";
 import {
@@ -43,6 +45,8 @@ async function durableWrite(write, key, value, ttlSeconds) {
 export async function handleRaydarBookingWebhook(request, {
   enabled = raydarSchedulerBookingStopEnabled(),
   secret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
+  pauseCanaryFingerprint =
+    process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
   apply = process.env.BOOKING_STOP_APPLY !== "0",
   hasParaformCookie = hasCookie,
   storeConfigured = kvConfigured,
@@ -177,6 +181,47 @@ export async function handleRaydarBookingWebhook(request, {
   }
 
   try {
+    const proof = {
+      schema: "raydar-booking-webhook-proof-v1",
+      verifiedAt: new Date(nowMs).toISOString(),
+      secretFingerprint: raydarWebhookSecretFingerprint(secret),
+      apply: Boolean(apply),
+      deferred: Boolean(outcome.deferred),
+      matched: outcome.decisions.length,
+      paused: outcome.paused,
+    };
+    await durableWrite(
+      write,
+      K.raydarWebhookProof,
+      proof,
+      EVENT_TTL_SECONDS,
+    );
+    // Keep the last end-to-end pause proof independently from routine
+    // unmatched bookings. A later valid webhook with zero active sequence
+    // matches proves transport, but it must not erase the controlled canary
+    // evidence needed for cutover.
+    const eventCanaryFingerprint = raydarPauseCanaryIdentityFingerprint({
+      secret,
+      email: event.candidate.email,
+    });
+    if (
+      proof.apply
+      && !proof.deferred
+      && proof.matched >= 1
+      && proof.paused >= 1
+      && /^[a-f0-9]{64}$/u.test(String(pauseCanaryFingerprint || ""))
+      && eventCanaryFingerprint === pauseCanaryFingerprint
+    ) {
+      await durableWrite(
+        write,
+        K.raydarPauseCanaryProof,
+        {
+          ...proof,
+          canaryFingerprint: eventCanaryFingerprint,
+        },
+        EVENT_TTL_SECONDS,
+      );
+    }
     await durableWrite(write, eventKey, {
       state: "done",
       receivedAt: new Date(nowMs).toISOString(),

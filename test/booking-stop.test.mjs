@@ -10,7 +10,10 @@ import { createHmac } from "node:crypto";
 import { verifyCalendlyWebhook, parseSignatureHeader, calendlyWebhookEvent } from "../api/seq/_lib/calendly-webhook.mjs";
 import { handleCalendlyWebhook } from "../api/seq/calendly-hook.mjs";
 import {
+  campaignHasCandidateSchedulingLink,
+  calendlyBookingIndex,
   DEFAULT_SEQ_KEYS,
+  discoverBookingStopSequences,
   isNudgeSequence,
   leadAddresses,
   decideLead,
@@ -254,7 +257,7 @@ test("address-set matching finds a candidate who booked from a different mailbox
   assert.equal(normEmail("  Personal@GMAIL.com "), "personal@gmail.com");
 });
 
-test("sequence family matching covers every role variant, OLD, and the followups", () => {
+test("sequence family matching retains every role variant, OLD, and the followups", () => {
   const covered = [
     "No Scheduled Call - Raydar - 1st Round Interview",
     "No Scheduled Call - Raydar - 1st Round Interview - Product Designer",
@@ -265,11 +268,64 @@ test("sequence family matching covers every role variant, OLD, and the followups
     "(2+) Agent Call Follow Up - Curated List",
   ];
   for (const name of covered) assert.ok(isNudgeSequence({ name }), `${name} must be covered`);
-  // Client sourcing outreach and Para AI match notifications are deliberately out.
+  // Names alone do not guess that client sourcing and match notifications are
+  // booking sequences; content discovery covers any that carry a link.
   for (const name of ["Firecrawl - In-House Counsel", "(1) New Matches - Added to Para AI"]) {
     assert.equal(isNudgeSequence({ name }), false, `${name} must NOT be covered`);
   }
   assert.ok(DEFAULT_SEQ_KEYS.length >= 7);
+});
+
+test("content discovery covers every enabled link-bearing sequence and controlled disabled nudges", async () => {
+  const sequences = [
+    { id: "sourcing", name: "Firecrawl - In-House Counsel", enabled: true },
+    { id: "plain", name: "Plain Outreach", enabled: true },
+    { id: "disabled-link", name: "Disabled Sourcing", enabled: false },
+    {
+      id: "canary",
+      name: "No Scheduled Call - Raydar - 1st Round Interview - Canary",
+      enabled: false,
+    },
+  ];
+  const campaigns = new Map([
+    ["sourcing", {
+      steps: [{
+        subject: "",
+        body: '<a href="https://book.raydar.xyz/human">Book</a>',
+      }],
+    }],
+    ["plain", { steps: [{ subject: "", body: "No scheduling link" }] }],
+    ["disabled-link", {
+      steps: [{
+        subject: "",
+        body: "https://www.paraform.com/cal/raydar/15min",
+      }],
+    }],
+    ["canary", { steps: [{ subject: "", body: "Controlled canary" }] }],
+  ]);
+
+  assert.equal(
+    campaignHasCandidateSchedulingLink(campaigns.get("sourcing")),
+    true,
+  );
+  const scope = await discoverBookingStopSequences({
+    listSequences: async () => sequences,
+    readCampaign: async (id) => campaigns.get(id),
+    concurrency: 2,
+    minimumCatalogCount: 1,
+  });
+  assert.equal(scope.complete, true);
+  assert.equal(scope.schema, "raydar-booking-stop-scope-v2");
+  assert.match(scope.scopeDigest, /^[a-f0-9]{64}$/u);
+  assert.equal(scope.catalogSequences, 4);
+  assert.equal(scope.scannedSequences, 4);
+  assert.equal(scope.linkSequences, 2);
+  assert.equal(scope.enabledLinkSequences, 1);
+  assert.equal(scope.coveredEnabledLinkSequences, 1);
+  assert.deepEqual(
+    scope.sequences.map((sequence) => sequence.id).sort(),
+    ["canary", "sourcing"],
+  );
 });
 
 // Paraform answers 401 to a burst on a perfectly healthy session (measured:
@@ -393,6 +449,96 @@ test("payload normalisation pulls the fields the decision needs", () => {
   assert.equal(e.eventUri, "ev");
 });
 
+test("Calendly index rejects malformed or cross-origin pagination", async () => {
+  const realFetch = globalThis.fetch;
+  let mode = "missing-pagination";
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.endsWith("/users/me")) {
+      return Response.json({
+        resource: {
+          current_organization:
+            "https://api.calendly.com/organizations/test",
+        },
+      });
+    }
+    if (mode === "missing-pagination") {
+      return Response.json({ collection: [] });
+    }
+    return Response.json({
+      collection: [],
+      pagination: { next_page: "https://attacker.example/next" },
+    });
+  };
+  try {
+    await assert.rejects(
+      () => calendlyBookingIndex({ useCache: false }),
+      (error) => error?.code === "CALENDLY_RESPONSE_INVALID",
+    );
+    mode = "cross-origin";
+    await assert.rejects(
+      () => calendlyBookingIndex({ useCache: false }),
+      (error) => error?.code === "CALENDLY_RESPONSE_INVALID",
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("Calendly index reports an incomplete invitee pagination window", async () => {
+  const realFetch = globalThis.fetch;
+  const now = Date.parse("2026-07-29T12:00:00.000Z");
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.endsWith("/users/me")) {
+      return Response.json({
+        resource: {
+          current_organization:
+            "https://api.calendly.com/organizations/test",
+        },
+      });
+    }
+    if (value.includes("/invitees")) {
+      return Response.json({
+        collection: [{
+          email: "candidate@example.com",
+          created_at: "2026-07-29T10:00:00.000Z",
+          status: "active",
+        }],
+        pagination: {
+          next_page:
+            "https://api.calendly.com/scheduled_events/event-1/invitees?count=100&page_token=next",
+        },
+      });
+    }
+    const status = new URL(value).searchParams.get("status");
+    return Response.json({
+      collection: status === "active"
+        ? [{
+            uri:
+              "https://api.calendly.com/scheduled_events/event-1",
+            status: "active",
+            updated_at: "2026-07-29T10:00:00.000Z",
+            start_time: "2026-07-30T10:00:00.000Z",
+          }]
+        : [],
+      pagination: { next_page: null },
+    });
+  };
+  try {
+    const index = await calendlyBookingIndex({
+      useCache: false,
+      now,
+      inviteePageLimit: 1,
+    });
+    assert.equal(index.truncated, true);
+    assert.equal(index.events, 1);
+    assert.equal(index.index.has("candidate@example.com"), true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Liveness. Two n8n runs (2026-07-10, 07-11) returned activeLeads:0 and were
 // recorded as SUCCESSES. A zero-lead pass is a broken read, not an empty pipeline.
@@ -412,13 +558,145 @@ test("a sweep that sees zero active leads FAILS instead of reporting success", a
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    const r = await runBookingSweep({ apply: false });
+    const r = await runBookingSweep({
+      apply: false,
+      sequenceScopeLoader: async () => ({
+        schema: "raydar-booking-stop-scope-v2",
+        scopeDigest: "a".repeat(64),
+        catalogFloor: 1,
+        sequences: [],
+        catalogSequences: 1,
+        scannedSequences: 1,
+        linkSequences: 1,
+        enabledLinkSequences: 1,
+        coveredEnabledLinkSequences: 1,
+        complete: true,
+      }),
+    });
     assert.equal(r.ok, false, "must not report ok");
     assert.equal(r.error, "zero_active_leads");
     assert.equal(r.paused, 0);
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("an incomplete covered-sequence membership read fails before index publication", async () => {
+  const result = await runBookingSweep({
+    apply: false,
+    calendlyIndexLoader: async () => ({
+      index: new Map(),
+      events: 0,
+      cacheHits: 0,
+      truncated: false,
+    }),
+    raydarEnabled: false,
+    sequenceScopeLoader: async () => ({
+      schema: "raydar-booking-stop-scope-v2",
+      scopeDigest: "b".repeat(64),
+      catalogFloor: 1,
+      sequences: [{ id: "covered", name: "Covered", enabled: true }],
+      catalogSequences: 1,
+      scannedSequences: 1,
+      linkSequences: 1,
+      enabledLinkSequences: 1,
+      coveredEnabledLinkSequences: 1,
+      complete: true,
+    }),
+    membershipLoader: async () => ({
+      complete: false,
+      unique: 1,
+      totalCount: 2,
+      shortfall: 1,
+      apiCalls: 2,
+      leads: [{ ccu_id: "partial" }],
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "incomplete_membership");
+  assert.equal(result.incompleteReads.length, 1);
+  assert.equal(result.indexedEmails, 0);
+});
+
+function completeSingleLeadSweepOptions(calendlyIndexLoader) {
+  return {
+    apply: true,
+    profileBudget: 0,
+    calendlyIndexLoader,
+    raydarEnabled: false,
+    sequenceScopeLoader: async () => ({
+      schema: "raydar-booking-stop-scope-v2",
+      scopeDigest: "c".repeat(64),
+      catalogFloor: 1,
+      sequences: [{ id: "covered", name: "Covered", enabled: true }],
+      catalogSequences: 1,
+      scannedSequences: 1,
+      linkSequences: 1,
+      enabledLinkSequences: 1,
+      coveredEnabledLinkSequences: 1,
+      complete: true,
+    }),
+    membershipLoader: async () => ({
+      complete: true,
+      unique: 1,
+      totalCount: 1,
+      shortfall: 0,
+      apiCalls: 1,
+      leads: [{
+        ccu_id: "ccu-covered",
+        cu_id: "cu-covered",
+        name: "Candidate",
+        to_use_email: "candidate@example.com",
+        created_at: "2026-07-29T08:00:00.000Z",
+        is_paused: false,
+        is_archived: false,
+      }],
+    }),
+    leadIndexPublisher: async () => "OK",
+  };
+}
+
+test("a truncated Calendly source can never produce a green sweep", async () => {
+  const result = await runBookingSweep(
+    completeSingleLeadSweepOptions(async () => ({
+      index: new Map(),
+      events: 100,
+      cacheHits: 0,
+      truncated: true,
+    })),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "calendly_index_incomplete");
+});
+
+test("an applying sweep with a pause readback error is never healthy", async () => {
+  const options = completeSingleLeadSweepOptions(async () => ({
+    index: new Map([[
+      "candidate@example.com",
+      {
+        bookedAt: Date.parse("2026-07-29T10:00:00.000Z"),
+        startsAt: "2026-07-30T10:00:00.000Z",
+        eventName: "Human Call",
+        status: "active",
+      },
+    ]]),
+    events: 1,
+    cacheHits: 0,
+    truncated: false,
+  }));
+  options.decisionApplier = async () => ({
+    paused: 0,
+    pausedCcuIds: [],
+    pauseErrors: [{
+      sequence: "Covered",
+      reason: "still_active_after_pause",
+    }],
+  });
+  const result = await runBookingSweep(options);
+  assert.equal(result.decisions.length, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "pause_incomplete");
+  assert.equal(result.pauseErrors.length, 1);
 });
 
 test("profile checks rotate so the tail is never permanently blind", async () => {

@@ -7,6 +7,8 @@ const DEFAULT_BASE_URL = "https://book.raydar.xyz";
 const DEFAULT_LOOKBACK_DAYS = 180;
 const MAX_PAGES = 100;
 const MAX_PAGE_BYTES = 2_000_000;
+const MAX_INDEX_AGE_MS = 5 * 60_000;
+const MAX_INDEX_FUTURE_SKEW_MS = 5 * 60_000;
 const INDEX_FIELDS = new Set([
   "schema",
   "items",
@@ -102,6 +104,7 @@ export async function fetchRaydarBookingIndex({
   let cursor = null;
   let pages = 0;
   let generatedAt = null;
+  let generatedAtMs = null;
 
   while (true) {
     if (pages >= maxPages) throw indexError("RAYDAR_BOOKING_INDEX_TRUNCATED");
@@ -143,11 +146,26 @@ export async function fetchRaydarBookingIndex({
       throw indexError("RAYDAR_BOOKING_INDEX_INCOMPLETE");
     }
     if (!Array.isArray(body.items)
+      || body.items.length > limit
       || !Object.hasOwn(body, "nextCursor")
       || !validTimestamp(body.generatedAt)) {
       throw indexError("RAYDAR_BOOKING_INDEX_RESPONSE_INVALID");
     }
+    const pageGeneratedAtMs = Date.parse(body.generatedAt);
+    if (
+      now - pageGeneratedAtMs > MAX_INDEX_AGE_MS
+      || pageGeneratedAtMs > now + MAX_INDEX_FUTURE_SKEW_MS
+    ) {
+      throw indexError("RAYDAR_BOOKING_INDEX_TIME_INVALID");
+    }
+    if (
+      generatedAtMs != null
+      && pageGeneratedAtMs < generatedAtMs
+    ) {
+      throw indexError("RAYDAR_BOOKING_INDEX_TIME_REGRESSION");
+    }
     generatedAt = body.generatedAt;
+    generatedAtMs = pageGeneratedAtMs;
 
     for (const rawBooking of body.items) {
       const booking = normalizeRaydarBookingIndexItem(rawBooking);

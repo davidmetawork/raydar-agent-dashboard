@@ -12,8 +12,11 @@ import {
   fetchRaydarBookingIndex,
 } from "../api/seq/_lib/raydar-booking-index.mjs";
 import {
+  K,
   bookedSetWithSources,
   decideLead,
+  raydarPauseCanaryIdentityFingerprint,
+  raydarWebhookProofStatus,
 } from "../api/seq/_lib/booking-stop.mjs";
 import {
   handleRaydarBookingWebhook,
@@ -21,6 +24,10 @@ import {
 
 const SECRET = "raydar-booking-test-secret-that-is-long-enough";
 const NOW_MS = Date.parse("2026-07-29T18:00:00.000Z");
+const CANARY_FINGERPRINT = raydarPauseCanaryIdentityFingerprint({
+  secret: SECRET,
+  email: "candidate@example.com",
+});
 
 function booking(overrides = {}) {
   return {
@@ -80,6 +87,7 @@ function handlerDeps(overrides = {}) {
   return {
     enabled: true,
     secret: SECRET,
+    pauseCanaryFingerprint: CANARY_FINGERPRINT,
     apply: true,
     hasParaformCookie: () => true,
     storeConfigured: () => true,
@@ -202,6 +210,158 @@ test("confirmed native events use the native pause source and return counts only
   assert.equal(seen.source, "raydar_scheduler");
   assert.equal(seen.email, "candidate@example.com");
   assert.equal(JSON.stringify(payload).includes("candidate@example.com"), false);
+});
+
+test("confirmed webhook persists a secret-bound, PII-free success proof", async () => {
+  const writes = [];
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(booking()),
+    handlerDeps({
+      pause: async () => ({
+        decisions: [{ candidate: "must-not-be-persisted" }],
+        paused: 1,
+        pauseErrors: [],
+        deferred: false,
+      }),
+      write: async (key, value) => {
+        writes.push({ key, value });
+        return "OK";
+      },
+    }),
+  );
+  assert.equal(response.status, 202);
+  const proof = writes.find((entry) => entry.key === K.raydarWebhookProof)?.value;
+  assert.equal(proof?.schema, "raydar-booking-webhook-proof-v1");
+  assert.equal(proof?.apply, true);
+  assert.equal(proof?.deferred, false);
+  assert.equal(proof?.matched, 1);
+  assert.equal(proof?.paused, 1);
+  const canaryProof = writes.find((entry) =>
+    entry.key === K.raydarPauseCanaryProof)?.value;
+  assert.deepEqual(canaryProof, {
+    ...proof,
+    canaryFingerprint: CANARY_FINGERPRINT,
+  });
+  assert.equal(JSON.stringify(proof).includes("candidate@example.com"), false);
+  assert.equal(JSON.stringify(proof).includes("must-not-be-persisted"), false);
+  const verifiedStatus = await raydarWebhookProofStatus({
+    read: async (key) =>
+      key === K.raydarPauseCanaryProof ? canaryProof : proof,
+    secret: SECRET,
+    canaryFingerprint: CANARY_FINGERPRINT,
+    now: NOW_MS,
+  });
+  assert.equal(verifiedStatus.verified, true);
+  assert.equal(verifiedStatus.pauseCanaryVerified, true);
+  assert.equal(
+    (await raydarWebhookProofStatus({
+      read: async (key) =>
+        key === K.raydarPauseCanaryProof ? canaryProof : proof,
+      secret: `${SECRET}-rotated`,
+      canaryFingerprint: CANARY_FINGERPRINT,
+      now: NOW_MS,
+    })).verified,
+    false,
+  );
+});
+
+test("transport-only webhook proof cannot masquerade as a pause canary", async () => {
+  const writes = [];
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(booking({ eventId: "bevt_transport_only" })),
+    handlerDeps({
+      write: async (key, value) => {
+        writes.push({ key, value });
+        return "OK";
+      },
+    }),
+  );
+  assert.equal(response.status, 202);
+  const proof = writes.find((entry) =>
+    entry.key === K.raydarWebhookProof)?.value;
+  const status = await raydarWebhookProofStatus({
+    read: async (key) => key === K.raydarWebhookProof ? proof : null,
+    secret: SECRET,
+    canaryFingerprint: CANARY_FINGERPRINT,
+    now: NOW_MS,
+  });
+  assert.equal(status.verified, true);
+  assert.equal(status.matched, 0);
+  assert.equal(status.paused, 0);
+  assert.equal(status.pauseCanaryVerified, false);
+});
+
+test("a real non-canary candidate pause cannot mint the controlled canary proof", async () => {
+  const writes = [];
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(booking({
+      eventId: "bevt_non_canary_pause",
+      candidate: {
+        email: "someone-else@example.com",
+        name: "Someone Else",
+      },
+    })),
+    handlerDeps({
+      pause: async () => ({
+        decisions: [{}],
+        paused: 1,
+        pauseErrors: [],
+        deferred: false,
+      }),
+      write: async (key, value) => {
+        writes.push({ key, value });
+        return "OK";
+      },
+    }),
+  );
+  assert.equal(response.status, 202);
+  assert.equal(
+    writes.some((entry) => entry.key === K.raydarPauseCanaryProof),
+    false,
+  );
+});
+
+test("an unmatched webhook updates transport proof without erasing pause canary readiness", async () => {
+  const store = new Map();
+  const write = async (key, value) => {
+    store.set(key, structuredClone(value));
+    return "OK";
+  };
+  const first = await handleRaydarBookingWebhook(
+    signedRequest(booking({ eventId: "bevt_canary_first" })),
+    handlerDeps({
+      write,
+      pause: async () => ({
+        decisions: [{}],
+        paused: 1,
+        pauseErrors: [],
+        deferred: false,
+      }),
+    }),
+  );
+  assert.equal(first.status, 202);
+
+  const second = await handleRaydarBookingWebhook(
+    signedRequest(booking({
+      eventId: "bevt_unmatched_later",
+      bookingId: "bk_unmatched_later",
+    })),
+    handlerDeps({ write }),
+  );
+  assert.equal(second.status, 202);
+
+  const status = await raydarWebhookProofStatus({
+    read: async (key) => store.get(key) || null,
+    secret: SECRET,
+    canaryFingerprint: CANARY_FINGERPRINT,
+    now: NOW_MS,
+  });
+  assert.equal(status.verified, true);
+  assert.equal(status.latestMatched, 0);
+  assert.equal(status.latestPaused, 0);
+  assert.equal(status.pauseCanaryVerified, true);
+  assert.equal(status.matched, 1);
+  assert.equal(status.paused, 1);
 });
 
 test("rescheduled-away webhook is terminal history and never calls pause", async () => {
@@ -392,6 +552,48 @@ test("an incomplete native index throws instead of becoming an empty index", asy
       now: NOW_MS,
     }),
     (error) => error.code === "RAYDAR_BOOKING_INDEX_INCOMPLETE",
+  );
+});
+
+test("native index rejects stale, future, and regressing page snapshots", async () => {
+  for (const generatedAt of [
+    "2026-07-29T17:54:59.999Z",
+    "2026-07-29T18:05:00.001Z",
+  ]) {
+    await assert.rejects(
+      () => fetchRaydarBookingIndex({
+        fetchImpl: async () => Response.json({
+          schema: "raydar-booking-index-v1",
+          items: [],
+          nextCursor: null,
+          complete: true,
+          generatedAt,
+        }),
+        baseUrl: "https://book.raydar.xyz",
+        readKey: "private-read-key",
+        now: NOW_MS,
+      }),
+      (error) => error.code === "RAYDAR_BOOKING_INDEX_TIME_INVALID",
+    );
+  }
+
+  let page = 0;
+  await assert.rejects(
+    () => fetchRaydarBookingIndex({
+      fetchImpl: async () => Response.json({
+        schema: "raydar-booking-index-v1",
+        items: [],
+        nextCursor: page++ === 0 ? "page_2" : null,
+        complete: true,
+        generatedAt: page === 1
+          ? "2026-07-29T18:00:00.000Z"
+          : "2026-07-29T17:59:59.999Z",
+      }),
+      baseUrl: "https://book.raydar.xyz",
+      readKey: "private-read-key",
+      now: NOW_MS,
+    }),
+    (error) => error.code === "RAYDAR_BOOKING_INDEX_TIME_REGRESSION",
   );
 });
 

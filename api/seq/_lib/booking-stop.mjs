@@ -35,7 +35,7 @@
 // candidate who already booked. That asymmetry is why this ships enforcing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import {
   trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
   // These three moved into core.mjs so the launcher's dedup and
@@ -47,17 +47,56 @@ import {
   raydarSchedulerBookingStopEnabled,
   raydarSchedulerIndexConfigured,
 } from "./raydar-booking-index.mjs";
+import {
+  hasCandidateSchedulingLink,
+} from "./scheduling-links.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
+
+export const BOOKING_STOP_SCOPE_SCHEMA = "raydar-booking-stop-scope-v2";
+export const BOOKING_STOP_LEAD_INDEX_SCHEMA = "raydar-booking-lead-index-v2";
+export const BOOKING_STOP_ATTEMPT_SCHEMA = "raydar-booking-stop-attempt-v2";
+export const BOOKING_STOP_REVIEWED_CATALOG_FLOOR = 75;
+
+export function bookingStopScopeDigest(entries, {
+  catalogFloor = BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
+} = {}) {
+  const normalized = (entries || [])
+    .map((entry) => ({
+      id: String(entry?.id || ""),
+      enabled: Boolean(entry?.enabled),
+      linkBearing: Boolean(entry?.linkBearing),
+      nudgeBearing: Boolean(entry?.nudgeBearing),
+      selected: Boolean(entry?.selected),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (
+    !normalized.length
+    || !Number.isInteger(catalogFloor)
+    || catalogFloor < 1
+    || normalized.some((entry) => !entry.id)
+    || new Set(normalized.map((entry) => entry.id)).size !== normalized.length
+  ) {
+    return null;
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({
+      schema: BOOKING_STOP_SCOPE_SCHEMA,
+      catalogFloor,
+      entries: normalized,
+    }))
+    .digest("hex");
+}
 
 // ---------- which sequences are "please book a call" nudges ----------
 // Substring keys, matched with .includes() so every launcher-created
 // "... - <Role>" variant, the renamed OLD bucket, and future roles are covered
 // with zero config (the same matching the n8n guardian used, extended).
 //
-// Deliberately NOT covered: client/role-specific sourcing outreach ("Firecrawl -
-// In-House Counsel") and the Para AI match-notification sequences. Those are a
-// different message with a different intent; pausing them on an intro-call
-// booking would stop legitimate work. Widening is an env change, not a code one.
+// These stable families remain in scope even when disabled so a controlled,
+// no-send canary can prove the pause path. In addition, the sweep discovers
+// every sequence containing a candidate-facing scheduling URL. That content
+// scope is what covers sourcing/client-role outreach and future copied
+// sequences without relying on fragile names.
 export const DEFAULT_SEQ_KEYS = [
   "No Scheduled Call - Raydar - 1st Round Interview", // + every "- <Role>" variant, base, and "OLD ..."
   "Audio Failed - Agent Call", // lifecycle followup
@@ -77,6 +116,13 @@ export function seqKeys() {
 export function isNudgeSequence(seq, keys = seqKeys()) {
   const name = String(seq?.name || "");
   return keys.some((k) => name.includes(k));
+}
+
+export function campaignHasCandidateSchedulingLink(campaign) {
+  if (!Array.isArray(campaign?.steps)) return false;
+  return campaign.steps.some((step) =>
+    ["subject", "body"].some((field) =>
+      hasCandidateSchedulingLink(step?.[field])));
 }
 
 // ---------- tiny KV (Upstash REST), namespace seqguard:* ----------
@@ -120,13 +166,42 @@ export const kvSet = (key, value, ttlSeconds) =>
 export const kvSetNx = (key, value, ttlSeconds) =>
   kv(["SET", key, JSON.stringify(value), "EX", String(ttlSeconds), "NX"], { throwOnTransport: true });
 
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, stableJson(value[key])]),
+  );
+}
+
+async function durableKvSetAndReadback(key, value, ttlSeconds) {
+  const written = await kvSet(key, value, ttlSeconds);
+  if (written !== "OK" && written !== true) {
+    const error = new Error("KV_CORRECTNESS_WRITE_FAILED");
+    error.code = "KV_CORRECTNESS_WRITE_FAILED";
+    throw error;
+  }
+  const readback = await kvGet(key);
+  if (
+    JSON.stringify(stableJson(readback))
+    !== JSON.stringify(stableJson(value))
+  ) {
+    const error = new Error("KV_CORRECTNESS_READBACK_FAILED");
+    error.code = "KV_CORRECTNESS_READBACK_FAILED";
+    throw error;
+  }
+}
+
 export const K = {
   lastSweep: "seqguard:lastsweep",
+  lastAttempt: "seqguard:lastattempt:v2",
   leadIndex: "seqguard:leadindex",
   deferred: (email) => `seqguard:deferred:${hash(email)}`,
   event: (uri) => `seqguard:event:${hash(uri)}`,
   raydarEvent: (eventId) => `seqguard:raydar-event:${secureKeyFragment(eventId)}`,
   raydarCancel: (bookingId) => `seqguard:raydar-cancel:${secureKeyFragment(bookingId)}`,
+  raydarWebhookProof: "seqguard:raydar-webhook-proof:v1",
+  raydarPauseCanaryProof: "seqguard:raydar-pause-canary-proof:v1",
   paused: (ccuId) => `seqguard:paused:${ccuId}`,
   cancel: (uri) => `seqguard:cancel:${hash(uri)}`,
   invitees: (uri) => `seqguard:inv:${hash(uri)}`,
@@ -139,6 +214,119 @@ export const K = {
   alert: (key) => `seqguard:alert:${key}`,
   rotor: "seqguard:rotor",
 };
+
+export const RAYDAR_WEBHOOK_PROOF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function raydarWebhookSecretFingerprint(
+  secret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
+) {
+  const value = String(secret || "");
+  if (value.length < 32) return null;
+  return createHash("sha256")
+    .update(`raydar-booking-webhook-secret-v1\0${value}`)
+    .digest("base64url")
+    .slice(0, 24);
+}
+
+export function raydarPauseCanaryIdentityFingerprint({
+  secret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
+  email,
+} = {}) {
+  const secretValue = String(secret || "");
+  const emailValue = String(email || "").trim().toLowerCase();
+  if (secretValue.length < 32 || !emailValue.includes("@")) return null;
+  return createHmac("sha256", secretValue)
+    .update(`raydar-booking-pause-canary-v1\0${emailValue}`)
+    .digest("hex");
+}
+
+export async function raydarWebhookProofStatus({
+  read = kvGet,
+  secret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
+  canaryFingerprint =
+    process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
+  now = Date.now(),
+} = {}) {
+  const [proof, pauseCanaryProof] = await Promise.all([
+    read(K.raydarWebhookProof),
+    read(K.raydarPauseCanaryProof),
+  ]);
+  const expectedFingerprint = raydarWebhookSecretFingerprint(secret);
+  const inspect = (value) => {
+    const verifiedAtMs = Date.parse(String(value?.verifiedAt || ""));
+    const ageMs = Number.isFinite(verifiedAtMs)
+      ? Math.max(0, Number(now) - verifiedAtMs)
+      : null;
+    const shapeValid = (
+      value?.schema === "raydar-booking-webhook-proof-v1"
+      && Number.isFinite(verifiedAtMs)
+      && Number.isInteger(value?.matched)
+      && value.matched >= 0
+      && Number.isInteger(value?.paused)
+      && value.paused >= 0
+      && typeof value?.apply === "boolean"
+      && typeof value?.deferred === "boolean"
+    );
+    const secretMatches = Boolean(
+      shapeValid
+      && expectedFingerprint
+      && value.secretFingerprint === expectedFingerprint
+    );
+    const fresh = Boolean(
+      secretMatches
+      && ageMs != null
+      && ageMs <= RAYDAR_WEBHOOK_PROOF_MAX_AGE_MS
+      && verifiedAtMs <= Number(now) + 5 * 60_000
+    );
+    return {
+      value,
+      shapeValid,
+      secretMatches,
+      fresh,
+      verifiedAtMs,
+      ageMs,
+    };
+  };
+  const latest = inspect(proof);
+  const canary = inspect(pauseCanaryProof);
+  const canaryConfigMatches = Boolean(
+    /^[a-f0-9]{64}$/u.test(String(canaryFingerprint || ""))
+    && pauseCanaryProof?.canaryFingerprint === canaryFingerprint
+  );
+  const pauseCanaryVerified = Boolean(
+    canary.fresh
+    && canaryConfigMatches
+    && pauseCanaryProof.apply === true
+    && pauseCanaryProof.deferred === false
+    && pauseCanaryProof.matched >= 1
+    && pauseCanaryProof.paused >= 1
+  );
+  return {
+    verified: latest.fresh,
+    pauseCanaryVerified,
+    canaryConfigured:
+      /^[a-f0-9]{64}$/u.test(String(canaryFingerprint || "")),
+    canaryConfigMatches,
+    secretMatches: canary.secretMatches,
+    fresh: canary.fresh,
+    lastAt: Number.isFinite(canary.verifiedAtMs)
+      ? new Date(canary.verifiedAtMs).toISOString()
+      : null,
+    ageMs: canary.ageMs,
+    apply: canary.shapeValid ? pauseCanaryProof.apply : false,
+    deferred: canary.shapeValid ? pauseCanaryProof.deferred : true,
+    matched: canary.shapeValid ? pauseCanaryProof.matched : 0,
+    paused: canary.shapeValid ? pauseCanaryProof.paused : 0,
+    latestLastAt: Number.isFinite(latest.verifiedAtMs)
+      ? new Date(latest.verifiedAtMs).toISOString()
+      : null,
+    latestAgeMs: latest.ageMs,
+    latestApply: latest.shapeValid ? proof.apply : false,
+    latestDeferred: latest.shapeValid ? proof.deferred : true,
+    latestMatched: latest.shapeValid ? proof.matched : 0,
+    latestPaused: latest.shapeValid ? proof.paused : 0,
+  };
+}
 
 function hash(value) {
   // Short stable key fragment; avoids putting raw URIs (and therefore ids) in key
@@ -170,10 +358,112 @@ const calToken = () =>
   process.env.CALENDLY_API_TOKEN || process.env.CALENDLY_TOKEN || process.env.CALENDLY_API || "";
 export const calendlyConfigured = () => Boolean(calToken());
 
+function calendlyDataError(code = "CALENDLY_RESPONSE_INVALID") {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function calendlyApiUrl(pathOrUrl) {
+  if (typeof pathOrUrl !== "string" || !pathOrUrl) {
+    throw calendlyDataError();
+  }
+  let parsed;
+  try {
+    parsed = new URL(pathOrUrl, CAL_BASE);
+  } catch {
+    throw calendlyDataError();
+  }
+  if (
+    parsed.origin !== CAL_BASE
+    || parsed.username
+    || parsed.password
+    || parsed.hash
+  ) {
+    throw calendlyDataError();
+  }
+  return parsed.toString();
+}
+
+function calendlyPage(value, limit) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || !Array.isArray(value.collection)
+    || value.collection.length > limit
+    || !value.pagination
+    || typeof value.pagination !== "object"
+    || Array.isArray(value.pagination)
+    || !Object.hasOwn(value.pagination, "next_page")
+    || (
+      value.pagination.next_page !== null
+      && (
+        typeof value.pagination.next_page !== "string"
+        || !value.pagination.next_page
+      )
+    )
+  ) {
+    throw calendlyDataError();
+  }
+  return {
+    collection: value.collection,
+    next: value.pagination.next_page === null
+      ? null
+      : calendlyApiUrl(value.pagination.next_page),
+  };
+}
+
+function calendlyTimestamp(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function calendlyEvent(value, expectedStatus) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || value.status !== expectedStatus
+    || !calendlyTimestamp(value.updated_at)
+    || !calendlyTimestamp(value.start_time)
+  ) {
+    throw calendlyDataError();
+  }
+  const uri = calendlyApiUrl(value.uri);
+  const parsedUri = new URL(uri);
+  if (
+    parsedUri.search
+    || !parsedUri.pathname.startsWith("/scheduled_events/")
+  ) {
+    throw calendlyDataError();
+  }
+  return { ...value, uri };
+}
+
+function calendlyInvitee(value) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || typeof value.email !== "string"
+    || !normEmail(value.email).includes("@")
+    || !calendlyTimestamp(value.created_at)
+    || typeof value.status !== "string"
+    || !value.status
+  ) {
+    throw calendlyDataError();
+  }
+  return {
+    email: normEmail(value.email),
+    created_at: value.created_at,
+    status: value.status,
+  };
+}
+
 /** Calendly rate-limits with 429 + Retry-After. Honour it rather than burning
  *  retries — a wide backfill window fans out hundreds of invitee reads. */
 export async function calendlyGet(pathOrUrl, tries = 6) {
-  const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${CAL_BASE}${pathOrUrl}`;
+  const url = calendlyApiUrl(pathOrUrl);
   for (let a = 0; a < tries; a++) {
     try {
       const r = await fetch(url, {
@@ -222,10 +512,31 @@ export async function calendlyBookingIndex({
   concurrency = 4,
   useCache = true,
   now = Date.now(),
+  eventPageLimit = 100,
+  inviteePageLimit = 20,
 } = {}) {
+  if (
+    !Number.isInteger(concurrency)
+    || concurrency < 1
+    || concurrency > 8
+    || !Number.isInteger(eventPageLimit)
+    || eventPageLimit < 1
+    || eventPageLimit > 100
+    || !Number.isInteger(inviteePageLimit)
+    || inviteePageLimit < 1
+    || inviteePageLimit > 20
+  ) {
+    throw calendlyDataError("CALENDLY_INDEX_CONFIG_INVALID");
+  }
   const me = await calendlyGet("/users/me");
-  const org = me?.resource?.current_organization;
-  if (!org) throw new Error("calendly: no organization on token");
+  const org = calendlyApiUrl(me?.resource?.current_organization);
+  const parsedOrg = new URL(org);
+  if (
+    parsedOrg.search
+    || !parsedOrg.pathname.startsWith("/organizations/")
+  ) {
+    throw calendlyDataError();
+  }
 
   const minStart = new Date(now - backDays * 864e5).toISOString();
   const maxStart = new Date(now + forwardDays * 864e5).toISOString();
@@ -244,12 +555,16 @@ export async function calendlyBookingIndex({
     let next = `${CAL_BASE}/scheduled_events?${qs}`;
     // Bounded high, and if we ever hit it we SAY so — a silent cap reads as
     // "covered everything" when it didn't.
-    for (let page = 0; next && page < 100; page++) {
-      const d = await calendlyGet(next);
-      events.push(...(d?.collection || []));
-      next = d?.pagination?.next_page || null;
-      if (next && page === 99) truncated = true;
+    let page = 0;
+    while (next && page < eventPageLimit) {
+      const d = calendlyPage(await calendlyGet(next), 100);
+      events.push(
+        ...d.collection.map((event) => calendlyEvent(event, status)),
+      );
+      next = d.next;
+      page++;
     }
+    if (next) truncated = true;
   }
 
   const index = new Map();
@@ -262,26 +577,39 @@ export async function calendlyBookingIndex({
       if (useCache) {
         const cached = await kvGet(K.invitees(ev.uri));
         // Cache is keyed by event uri + updated_at so a reschedule busts it.
-        if (cached && cached.updatedAt === ev.updated_at) {
-          invitees = cached.invitees;
+        if (
+          cached
+          && cached.updatedAt === ev.updated_at
+          && cached.complete === true
+        ) {
+          if (!Array.isArray(cached.invitees)) {
+            throw calendlyDataError("CALENDLY_CACHE_INVALID");
+          }
+          invitees = cached.invitees.map(calendlyInvitee);
           cacheHits++;
         }
       }
       if (!invitees) {
         invitees = [];
         let next = `${ev.uri}/invitees?count=100`;
-        for (let p = 0; next && p < 20; p++) {
-          const d = await calendlyGet(next);
+        let page = 0;
+        while (next && page < inviteePageLimit) {
+          const d = calendlyPage(await calendlyGet(next), 100);
           invitees.push(
-            ...(d?.collection || []).map((v) => ({
-              email: normEmail(v.email),
-              created_at: v.created_at,
-              status: v.status,
-            }))
+            ...d.collection.map(calendlyInvitee),
           );
-          next = d?.pagination?.next_page || null;
+          next = d.next;
+          page++;
         }
-        if (useCache) await kvSet(K.invitees(ev.uri), { updatedAt: ev.updated_at, invitees }, 30 * 24 * 3600);
+        if (next) {
+          truncated = true;
+        } else if (useCache) {
+          await kvSet(K.invitees(ev.uri), {
+            updatedAt: ev.updated_at,
+            invitees,
+            complete: true,
+          }, 30 * 24 * 3600);
+        }
       }
       for (const v of invitees) {
         if (!v.email) continue;
@@ -430,7 +758,12 @@ export function decideLead({ lead, seq, booking, relStatus, now = Date.now() }) 
  * reintroduce exactly the runtime blowup that killed the predecessor.
  */
 export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
-  const out = { paused: 0, pauseErrors: [], throttled: 0 };
+  const out = {
+    paused: 0,
+    pausedCcuIds: [],
+    pauseErrors: [],
+    throttled: 0,
+  };
   if (!decisions.length) return out;
 
   const attempted = [];
@@ -478,6 +811,7 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
       if (!row) { out.pauseErrors.push({ sequence: d.sequence, reason: "lead_not_found_on_readback" }); continue; }
       if (!row.is_paused) { out.pauseErrors.push({ sequence: d.sequence, reason: "still_active_after_pause" }); continue; }
       out.paused++;
+      out.pausedCcuIds.push(d.ccuId);
       await kvSet(K.paused(d.ccuId), {
         at: new Date().toISOString(),
         sequence: d.sequence,
@@ -491,9 +825,113 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
 }
 
 // ---------- the sweep ----------
+export async function discoverBookingStopSequences({
+  listSequences = async () =>
+    withThrottleRetry(() =>
+      trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1)),
+  readCampaign = async (id) =>
+    withThrottleRetry(() =>
+      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1)),
+  concurrency = Number(process.env.BOOKING_STOP_SCOPE_CONCURRENCY || 2),
+  minimumCatalogCount = Number(
+    process.env.BOOKING_STOP_SCOPE_CATALOG_FLOOR
+      || BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
+  ),
+} = {}) {
+  const all = await listSequences();
+  if (
+    !Array.isArray(all)
+    || !Number.isInteger(minimumCatalogCount)
+    || minimumCatalogCount < 1
+    || all.length < minimumCatalogCount
+    || !Number.isInteger(concurrency)
+    || concurrency < 1
+    || concurrency > 4
+  ) {
+    const error = new Error("BOOKING_STOP_SEQUENCE_CATALOG_INVALID");
+    error.code = "BOOKING_STOP_SEQUENCE_CATALOG_INVALID";
+    throw error;
+  }
+  const seen = new Set();
+  for (const sequence of all) {
+    if (
+      !sequence
+      || typeof sequence !== "object"
+      || typeof sequence.id !== "string"
+      || !sequence.id
+      || seen.has(sequence.id)
+    ) {
+      const error = new Error("BOOKING_STOP_SEQUENCE_CATALOG_INVALID");
+      error.code = "BOOKING_STOP_SEQUENCE_CATALOG_INVALID";
+      throw error;
+    }
+    seen.add(sequence.id);
+  }
+
+  const inspected = new Map();
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < all.length) {
+      const sequence = all[cursor++];
+      const campaign = await readCampaign(sequence.id);
+      if (
+        !campaign
+        || typeof campaign !== "object"
+        || !Array.isArray(campaign.steps)
+      ) {
+        const error = new Error("BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID");
+        error.code = "BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID";
+        throw error;
+      }
+      inspected.set(
+        sequence.id,
+        campaignHasCandidateSchedulingLink(campaign),
+      );
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  if (inspected.size !== all.length) {
+    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
+    throw error;
+  }
+
+  const linkSequences = all.filter((sequence) => inspected.get(sequence.id));
+  const enabledLinkSequences = linkSequences.filter((sequence) =>
+    Boolean(sequence.enabled));
+  const sequences = all.filter((sequence) =>
+    isNudgeSequence(sequence)
+    || (Boolean(sequence.enabled) && inspected.get(sequence.id)));
+  const scopeDigest = bookingStopScopeDigest(all.map((sequence) => ({
+    id: sequence.id,
+    enabled: sequence.enabled,
+    linkBearing: inspected.get(sequence.id),
+    nudgeBearing: isNudgeSequence(sequence),
+    selected: sequences.some((selected) => selected.id === sequence.id),
+  })), { catalogFloor: minimumCatalogCount });
+  if (!scopeDigest) {
+    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
+    throw error;
+  }
+  return {
+    schema: BOOKING_STOP_SCOPE_SCHEMA,
+    scopeDigest,
+    catalogFloor: minimumCatalogCount,
+    sequences,
+    catalogSequences: all.length,
+    scannedSequences: inspected.size,
+    linkSequences: linkSequences.length,
+    enabledLinkSequences: enabledLinkSequences.length,
+    coveredEnabledLinkSequences: enabledLinkSequences.length,
+    complete: true,
+  };
+}
+
+// Compatibility wrapper for older imports. The implementation is no longer
+// name-only despite the historical function name.
 export async function loadNudgeSequences() {
-  const all = (await withThrottleRetry(() => trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1))) || [];
-  return all.filter((s) => isNudgeSequence(s));
+  return (await discoverBookingStopSequences()).sequences;
 }
 
 /**
@@ -510,9 +948,14 @@ export async function runBookingSweep({
   // comfortable ceiling for this proc; do not raise it without re-measuring.
   profileConcurrency = Number(process.env.BOOKING_STOP_PROFILE_CONCURRENCY || 3),
   calendlyBackDays = Number(process.env.BOOKING_STOP_BACK_DAYS || 7),
+  calendlyIndexLoader = calendlyBookingIndex,
   raydarEnabled = raydarSchedulerBookingStopEnabled(),
   raydarConfigured = raydarSchedulerIndexConfigured(),
   raydarIndexLoader = fetchRaydarBookingIndex,
+  sequenceScopeLoader = discoverBookingStopSequences,
+  membershipLoader = completeCampaignLeads,
+  decisionApplier = applyDecisions,
+  leadIndexPublisher = durableKvSetAndReadback,
   onDecision = null,
 } = {}) {
   const startedAt = Date.now();
@@ -520,6 +963,15 @@ export async function runBookingSweep({
     ok: false,
     apply,
     sequences: 0,
+    scopeSchema: null,
+    scopeDigest: null,
+    scopeCatalogFloor: null,
+    sequenceCatalogCount: 0,
+    sequenceScopeScanned: 0,
+    linkSequences: 0,
+    enabledLinkSequences: 0,
+    coveredEnabledLinkSequences: 0,
+    linkScopeComplete: false,
     activeLeads: 0,
     calendlyEvents: 0,
     calendlyCacheHits: 0,
@@ -544,11 +996,12 @@ export async function runBookingSweep({
     membershipApiCalls: 0,
     decisions: [],
     paused: 0,
+    pausedCcuIds: [],
     pauseErrors: [],
     durationMs: 0,
   };
 
-  const cal = await calendlyBookingIndex({ now, backDays: calendlyBackDays });
+  const cal = await calendlyIndexLoader({ now, backDays: calendlyBackDays });
   result.calendlyEvents = cal.events;
   result.calendlyCacheHits = cal.cacheHits;
   result.calendlyTruncated = cal.truncated;
@@ -573,8 +1026,36 @@ export async function runBookingSweep({
     }
   }
 
-  const seqs = await loadNudgeSequences();
+  const scope = await sequenceScopeLoader();
+  if (
+    scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
+    || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
+    || !Number.isInteger(scope?.catalogFloor)
+    || scope.catalogFloor < 1
+    || scope?.complete !== true
+    || !Array.isArray(scope?.sequences)
+    || !Number.isInteger(scope?.catalogSequences)
+    || scope.catalogSequences < 1
+    || scope.scannedSequences !== scope.catalogSequences
+    || !Number.isInteger(scope?.enabledLinkSequences)
+    || !Number.isInteger(scope?.coveredEnabledLinkSequences)
+    || scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences
+  ) {
+    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
+    throw error;
+  }
+  const seqs = scope.sequences;
+  result.scopeSchema = scope.schema;
+  result.scopeDigest = scope.scopeDigest;
+  result.scopeCatalogFloor = scope.catalogFloor;
   result.sequences = seqs.length;
+  result.sequenceCatalogCount = scope.catalogSequences;
+  result.sequenceScopeScanned = scope.scannedSequences;
+  result.linkSequences = scope.linkSequences;
+  result.enabledLinkSequences = scope.enabledLinkSequences;
+  result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
+  result.linkScopeComplete = true;
 
   // strict:true so an incomplete membership read THROWS rather than silently
   // reconciling as "everyone left" — the failure mode that makes a broken sweep
@@ -586,7 +1067,7 @@ export async function runBookingSweep({
   const memWorker = async () => {
     while (m < seqs.length) {
       const seq = seqs[m++];
-      const read = await completeCampaignLeads(seq.id);
+      const read = await membershipLoader(seq.id);
       if (!read.complete) {
         result.incompleteReads.push({ sequence: seq.name, got: read.unique, expected: read.totalCount, shortfall: read.shortfall });
       }
@@ -596,6 +1077,12 @@ export async function runBookingSweep({
   };
   // Membership is the burstiest leg (overlapping windows, ~8 calls a sequence).
   await Promise.all(Array.from({ length: Number(process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2) }, memWorker));
+  if (result.incompleteReads.length) {
+    result.ok = false;
+    result.error = "incomplete_membership";
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
 
   const active = [];
   for (const { seq, leads } of perSeq) {
@@ -691,8 +1178,9 @@ export async function runBookingSweep({
 
   // Apply
   if (apply && result.decisions.length) {
-    const applied = await applyDecisions(result.decisions);
+    const applied = await decisionApplier(result.decisions);
     result.paused = applied.paused;
+    result.pausedCcuIds = applied.pausedCcuIds;
     result.pauseErrors.push(...applied.pauseErrors);
   }
   if (onDecision) for (const d of result.decisions) await onDecision(d);
@@ -700,16 +1188,31 @@ export async function runBookingSweep({
   // Publish the index the webhook reads. Only active, unpaused leads: a paused
   // lead needs no second pause, and the webhook must not resurrect stale rows.
   const byEmail = {};
+  const pausedThisPass = new Set(result.pausedCcuIds || []);
   for (const { seq, lead } of active) {
+    if (pausedThisPass.has(lead.ccu_id)) continue;
     for (const addr of leadAddresses(lead, null)) {
       (byEmail[addr] ||= []).push({ s: seq.id, sn: seq.name, ccu: lead.ccu_id, cu: lead.cu_id, n: lead.name || null, t: lead.created_at });
     }
   }
   result.indexedEmails = Object.keys(byEmail).length;
-  await kvSet(K.leadIndex, { builtAt: new Date().toISOString(), byEmail }, 6 * 3600);
+  await leadIndexPublisher(K.leadIndex, {
+    schema: BOOKING_STOP_LEAD_INDEX_SCHEMA,
+    scopeSchema: result.scopeSchema,
+    scopeDigest: result.scopeDigest,
+    scopeCatalogFloor: result.scopeCatalogFloor,
+    builtAt: new Date().toISOString(),
+    byEmail,
+  }, 6 * 3600);
 
-  result.ok = !result.raydarError;
+  result.ok = !result.calendlyTruncated
+    && !result.raydarError
+    && result.pauseErrors.length === 0;
   if (result.raydarError) result.error = "raydar_index_incomplete";
+  else if (result.calendlyTruncated) {
+    result.error = "calendly_index_incomplete";
+  }
+  else if (result.pauseErrors.length) result.error = "pause_incomplete";
   result.durationMs = Date.now() - startedAt;
   return result;
 }
@@ -741,14 +1244,31 @@ export async function pauseForBooking({
   const out = { decisions: [], paused: 0, pauseErrors: [], deferred: false, indexAgeMs: null };
   if (!target || !Number.isFinite(at)) return out;
 
-  const idx = await kvGet(K.leadIndex);
+  const [idx, lastSweep] = await Promise.all([
+    kvGet(K.leadIndex),
+    kvGet(K.lastSweep),
+  ]);
   const builtAt = idx?.builtAt ? Date.parse(idx.builtAt) : null;
   out.indexAgeMs = builtAt ? Date.now() - builtAt : null;
-  const usable = idx?.byEmail && builtAt && out.indexAgeMs < LEAD_INDEX_MAX_AGE_MS;
+  const usable = (
+    idx?.schema === BOOKING_STOP_LEAD_INDEX_SCHEMA
+    && idx?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && /^[a-f0-9]{64}$/u.test(String(idx?.scopeDigest || ""))
+    && lastSweep?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && lastSweep?.scopeDigest === idx.scopeDigest
+    && lastSweep?.linkScopeComplete === true
+    && idx?.byEmail
+    && builtAt
+    && out.indexAgeMs < LEAD_INDEX_MAX_AGE_MS
+  );
 
   if (!usable) {
     out.deferred = true;
-    await kvSet(K.deferred(target), { at: new Date().toISOString(), bookedAt: new Date(at).toISOString(), reason: idx ? "index_stale" : "index_missing" }, 7 * 24 * 3600);
+    await kvSet(K.deferred(target), {
+      at: new Date().toISOString(),
+      bookedAt: new Date(at).toISOString(),
+      reason: idx ? "index_stale_or_scope_mismatch" : "index_missing",
+    }, 7 * 24 * 3600);
     return out;
   }
 
@@ -861,28 +1381,155 @@ export const SWEEP_STALE_AFTER_MS = Number(process.env.BOOKING_STOP_STALE_MS || 
 /** The single most important check here: it is what was missing when the n8n
  *  guardian died silently for nine days. */
 export async function sweepStaleness(now = Date.now()) {
-  const last = await kvGet(K.lastSweep);
-  if (!last?.at) return { stale: true, lastAt: null, ageMs: null };
+  const [last, attempt, leadIndex] = await Promise.all([
+    kvGet(K.lastSweep),
+    kvGet(K.lastAttempt),
+    kvGet(K.leadIndex),
+  ]);
+  const attemptAtMs = Date.parse(String(attempt?.at || ""));
+  const attemptAgeMs = Number.isFinite(attemptAtMs)
+    ? Math.max(0, now - attemptAtMs)
+    : null;
+  const attemptBase = {
+    latestAttemptAt: Number.isFinite(attemptAtMs)
+      ? new Date(attemptAtMs).toISOString()
+      : null,
+    latestAttemptAgeMs: attemptAgeMs,
+    latestAttemptStatus:
+      attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
+        ? attempt.status
+        : null,
+    latestAttemptError:
+      attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
+        ? attempt.error
+        : null,
+  };
+  const leadIndexAtMs = Date.parse(String(leadIndex?.builtAt || ""));
+  const leadIndexAgeMs = Number.isFinite(leadIndexAtMs)
+    ? Math.max(0, now - leadIndexAtMs)
+    : null;
+  if (!last?.at) {
+    return {
+      stale: true,
+      lastAt: null,
+      ageMs: null,
+      calendlyComplete: false,
+      ...attemptBase,
+      latestAttemptCurrent: false,
+      leadIndexAt: Number.isFinite(leadIndexAtMs)
+        ? new Date(leadIndexAtMs).toISOString()
+        : null,
+      leadIndexAgeMs,
+      leadIndexCurrent: false,
+    };
+  }
   const ageMs = now - Date.parse(last.at);
+  const latestAttemptCurrent = Boolean(
+    attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
+    && attempt.status === "success"
+    && attempt.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && attempt.scopeDigest === last.scopeDigest
+    && attemptAtMs >= Date.parse(last.at)
+  );
+  const leadIndexCurrent = Boolean(
+    leadIndex?.schema === BOOKING_STOP_LEAD_INDEX_SCHEMA
+    && leadIndex.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && leadIndex.scopeDigest === last.scopeDigest
+    && leadIndexAgeMs != null
+    && leadIndexAgeMs <= LEAD_INDEX_MAX_AGE_MS
+  );
   return {
     stale: ageMs > SWEEP_STALE_AFTER_MS,
     lastAt: last.at,
     ageMs,
     activeLeads: last.activeLeads ?? null,
+    calendlyComplete: last.calendlyComplete === true,
     raydarEnabled: Boolean(last.raydarEnabled),
     raydarComplete: Boolean(last.raydarComplete),
     raydarBookings: last.raydarBookings ?? null,
+    sequenceCatalogCount: last.sequenceCatalogCount ?? null,
+    sequenceScopeScanned: last.sequenceScopeScanned ?? null,
+    linkSequences: last.linkSequences ?? null,
+    enabledLinkSequences: last.enabledLinkSequences ?? null,
+    coveredEnabledLinkSequences: last.coveredEnabledLinkSequences ?? null,
+    scopeSchema: last.scopeSchema ?? null,
+    scopeDigest: last.scopeDigest ?? null,
+    scopeCatalogFloor: last.scopeCatalogFloor ?? null,
+    linkScopeComplete: Boolean(
+      last.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+      && /^[a-f0-9]{64}$/u.test(String(last.scopeDigest || ""))
+      && last.linkScopeComplete
+    ),
+    ...attemptBase,
+    latestAttemptCurrent,
+    leadIndexAt: Number.isFinite(leadIndexAtMs)
+      ? new Date(leadIndexAtMs).toISOString()
+      : null,
+    leadIndexAgeMs,
+    leadIndexCurrent,
   };
 }
 
-export async function recordSuccessfulSweep(result, now = Date.now()) {
-  await kvSet(K.lastSweep, {
+export async function recordSweepAttempt({
+  status,
+  result = null,
+  error = null,
+}, now = Date.now()) {
+  if (!["failure", "running", "success"].includes(status)) {
+    const invalid = new Error("BOOKING_STOP_ATTEMPT_INVALID");
+    invalid.code = "BOOKING_STOP_ATTEMPT_INVALID";
+    throw invalid;
+  }
+  const payload = {
+    schema: BOOKING_STOP_ATTEMPT_SCHEMA,
     at: new Date(now).toISOString(),
+    status,
+    error: status === "failure"
+      ? String(error || result?.error || "unknown").slice(0, 80)
+      : null,
+    scopeSchema: result?.scopeSchema || null,
+    scopeDigest: /^[a-f0-9]{64}$/u.test(String(result?.scopeDigest || ""))
+      ? result.scopeDigest
+      : null,
+  };
+  await durableKvSetAndReadback(K.lastAttempt, payload, 6 * 3600);
+}
+
+export async function recordSuccessfulSweep(result, now = Date.now()) {
+  if (
+    result?.ok !== true
+    || result?.calendlyTruncated !== false
+    || (result?.pauseErrors?.length || 0) !== 0
+    || result?.scopeSchema !== BOOKING_STOP_SCOPE_SCHEMA
+    || !/^[a-f0-9]{64}$/u.test(String(result?.scopeDigest || ""))
+    || !Number.isInteger(result?.scopeCatalogFloor)
+    || result.scopeCatalogFloor < 1
+    || result?.sequenceCatalogCount < result.scopeCatalogFloor
+    || result?.linkScopeComplete !== true
+    || result?.sequenceScopeScanned !== result?.sequenceCatalogCount
+    || result?.coveredEnabledLinkSequences !== result?.enabledLinkSequences
+  ) {
+    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
+    throw error;
+  }
+  await durableKvSetAndReadback(K.lastSweep, {
+    at: new Date(now).toISOString(),
+    scopeSchema: result.scopeSchema,
+    scopeDigest: result.scopeDigest,
+    scopeCatalogFloor: result.scopeCatalogFloor,
     activeLeads: result.activeLeads,
     paused: result.paused,
     durationMs: result.durationMs,
+    calendlyComplete: true,
     raydarEnabled: Boolean(result.raydarEnabled),
     raydarComplete: Boolean(result.raydarComplete),
     raydarBookings: result.raydarBookings ?? 0,
-  });
+    sequenceCatalogCount: result.sequenceCatalogCount ?? 0,
+    sequenceScopeScanned: result.sequenceScopeScanned ?? 0,
+    linkSequences: result.linkSequences ?? 0,
+    enabledLinkSequences: result.enabledLinkSequences ?? 0,
+    coveredEnabledLinkSequences: result.coveredEnabledLinkSequences ?? 0,
+    linkScopeComplete: Boolean(result.linkScopeComplete),
+  }, 6 * 3600);
 }

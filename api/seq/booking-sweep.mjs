@@ -19,6 +19,7 @@
 import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
 import {
   runBookingSweep,
+  recordSweepAttempt,
   recordSuccessfulSweep,
   sweepStaleness,
   shouldAlert,
@@ -51,12 +52,24 @@ export default async function handler(req, res) {
   // Preconditions are alerts, not silent no-ops: an unconfigured control is
   // indistinguishable from a working one until someone gets a bad email.
   if (!hasCookie()) {
+    if (apply) {
+      await recordSweepAttempt({
+        status: "failure",
+        error: "no_cookie",
+      }).catch(() => {});
+    }
     if (await shouldAlert("no-cookie")) {
       await notifySlack(":rotating_light: Booking sweep cannot run — PARAFORM_COOKIE is not configured. Booked candidates are receiving sequence nudges.").catch(() => {});
     }
     return res.status(200).json({ ok: false, error: "no_cookie" });
   }
   if (!calendlyConfigured()) {
+    if (apply) {
+      await recordSweepAttempt({
+        status: "failure",
+        error: "no_calendly_token",
+      }).catch(() => {});
+    }
     if (await shouldAlert("no-calendly")) {
       await notifySlack(":rotating_light: Booking sweep cannot run — no Calendly token configured. Calendly bookings will not stop sequence nudges.").catch(() => {});
     }
@@ -72,7 +85,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    if (apply) await recordSweepAttempt({ status: "running" });
     const result = await runBookingSweep({ apply });
+    if (apply && !result.ok) {
+      await recordSweepAttempt({
+        status: "failure",
+        result,
+      });
+    }
 
     // A pass that sees zero active leads is a FAILURE, not a clean run. Two
     // "successful" n8n runs (2026-07-10/11) returned activeLeads:0 because a
@@ -81,6 +101,12 @@ export default async function handler(req, res) {
     if (!result.ok && result.error === "zero_active_leads") {
       if (await shouldAlert("zero-leads")) {
         await notifySlack(":rotating_light: Booking sweep read ZERO active leads across every sequence — that is a broken membership read, not an empty pipeline. Not recording this pass as successful.").catch(() => {});
+      }
+      return res.status(200).json({ ...result, staleness });
+    }
+    if (!result.ok && result.error === "incomplete_membership") {
+      if (await shouldAlert("incomplete-membership", 3600)) {
+        await notifySlack(":rotating_light: Booking sweep could not prove complete membership for every covered scheduling-link sequence. No partial lead index was published and the pass was not recorded healthy.").catch(() => {});
       }
       return res.status(200).json({ ...result, staleness });
     }
@@ -106,13 +132,22 @@ export default async function handler(req, res) {
       await notifySlack(`:pause_button: Booking stop paused ${result.paused} booked candidate(s):\n${lines.join("\n")}`).catch(() => {});
     }
 
-    if (result.ok && apply) await recordSuccessfulSweep(result);
+    if (result.ok && apply) {
+      await recordSuccessfulSweep(result);
+      await recordSweepAttempt({ status: "success", result });
+    }
 
     // Never return candidate detail in an HTTP response — counts only.
     return res.status(200).json({
       ok: result.ok,
       apply,
       sequences: result.sequences,
+      sequenceCatalogCount: result.sequenceCatalogCount,
+      sequenceScopeScanned: result.sequenceScopeScanned,
+      linkSequences: result.linkSequences,
+      enabledLinkSequences: result.enabledLinkSequences,
+      coveredEnabledLinkSequences: result.coveredEnabledLinkSequences,
+      linkScopeComplete: result.linkScopeComplete,
       activeLeads: result.activeLeads,
       calendlyEvents: result.calendlyEvents,
       calendlyCacheHits: result.calendlyCacheHits,
@@ -135,6 +170,12 @@ export default async function handler(req, res) {
       ranAt: new Date().toISOString(),
     });
   } catch (e) {
+    if (apply) {
+      await recordSweepAttempt({
+        status: "failure",
+        error: String(e?.code || e?.message || "error"),
+      }).catch(() => {});
+    }
     // Never report (or alert) an expiry on the strength of one 401: Paraform
     // answers 401 to bursts. Confirm with spaced probes first, or a busy pass
     // cries wolf about the cookie and the real alarm stops being believed.
