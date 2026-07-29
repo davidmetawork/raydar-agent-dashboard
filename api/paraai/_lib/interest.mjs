@@ -10,6 +10,7 @@ import {
   OUTCOME_SEQUENCE_RULES,
 } from "../../roster/_lib/outcome-sequences.mjs";
 import { buildInterestConfirmation, firstNameFor, COPY_VARIANT } from "./interest-copy.mjs";
+import { runSubmissionEvidencePreflight } from "./interest-preflight.mjs";
 import {
   storeConfigured,
   getSnapshot,
@@ -126,11 +127,15 @@ export async function readSubmissionCredits(now = new Date()) {
   d.setUTCHours(16, 0, 0, 0);
   const data = await trpcGet("roleSlots.getMySingleSubmissionData", { weekStart: d.toISOString() });
   if (!data) return null;
+  const usedThisWeek = Number(data.recentSingleSubmissionsThisWeekCount || 0);
+  const allowance = Number(data.previousAllowance || 0);
+  const earnedBack = Number(data.earnedBackThisWeekCount || 0);
   return {
     weekStart: d.toISOString(),
-    usedThisWeek: Number(data.recentSingleSubmissionsThisWeekCount || 0),
-    allowance: Number(data.previousAllowance || 0),
-    earnedBack: Number(data.earnedBackThisWeekCount || 0),
+    usedThisWeek,
+    allowance,
+    earnedBack,
+    available: Math.max(0, allowance + earnedBack - usedThisWeek),
     interviewed: Number(data.interviewedCount || 0),
     total: Number(data.totalSingleSubmissions || 0),
   };
@@ -338,27 +343,69 @@ export async function sendConfirmation({ candidate, roleCount, batchId, apply, m
  * Pre-flight. Everything that would make Paraform reject the submit, checked
  * before we spend the single attempt (and the credit).
  *
- * Per David's 2026-07-28 decision there is NO fit gate here: interest alone
- * qualifies. These checks are structural blockers only.
+ * "Err looser" governs scorecard marking, not whether to submit. Step 0
+ * therefore combines structural blockers with evidence-backed hold signals
+ * before a credit or permanent claim is spent.
  */
-export async function preflightSubmission({ candidate, roleId, credits }) {
+export async function preflightSubmission({
+  candidate,
+  roleId,
+  credits,
+  trpcGetImpl = trpcGet,
+  now = Date.now(),
+}) {
   const blockers = [];
   if (!candidate.candidateUserId) blockers.push("missing_candidate_user_id");
   if (!candidate.candidateId) blockers.push("missing_candidate_id");
   if (!normalizeEmail(candidate.email || "")) blockers.push("no_deliverable_email");
   if (!firstNameFor(candidate.name)) blockers.push("unusable_name");
-  if (credits && credits.allowance > 0 && credits.usedThisWeek >= credits.allowance) {
+  if (!credits) blockers.push("credits_unavailable");
+  const creditCapacity = credits
+    ? Number(credits.allowance || 0) + Number(credits.earnedBack || 0)
+    : 0;
+  if (credits && (
+    ("available" in credits && Number(credits.available) <= 0)
+    || (!("available" in credits) && (
+      creditCapacity <= 0
+      || Number(credits.usedThisWeek || 0) >= creditCapacity
+    ))
+  )) {
     blockers.push("credits_exhausted");
   }
   let prefs = null;
   try {
-    prefs = await trpcGet("candidateUserPreference.hasUserInputPreferences", {
+    prefs = await trpcGetImpl("candidateUserPreference.hasUserInputPreferences", {
       candidate_user_id: candidate.candidateUserId,
       required_fields: [],
     });
     if (prefs && prefs.hasAllRequired === false) blockers.push("preferences_incomplete");
-  } catch { /* preferences read is advisory; a failure is not a blocker */ }
-  return { ok: blockers.length === 0, blockers, prefs };
+  } catch {
+    blockers.push("preferences_read_failed");
+  }
+
+  let evidence = {
+    ok: false,
+    blockers: ["evidence_preflight_unavailable"],
+    signals: {},
+    risks: [],
+  };
+  if (candidate.candidateUserId && candidate.candidateId && roleId) {
+    evidence = await runSubmissionEvidencePreflight({
+      candidate,
+      roleId,
+      trpcGetImpl,
+      now,
+    });
+    blockers.push(...evidence.blockers);
+  }
+  const uniqueBlockers = [...new Set(blockers)];
+  return {
+    ok: uniqueBlockers.length === 0,
+    blockers: uniqueBlockers,
+    prefs,
+    signals: evidence.signals,
+    risks: evidence.risks,
+  };
 }
 
 /**
@@ -369,7 +416,14 @@ export async function preflightSubmission({ candidate, roleId, credits }) {
  * the prepare call and refuses to fire a submit whose shape it has not seen.
  * The P3 canary settles it and the recorded shape unlocks the rest.
  */
-export async function submitToRole({ candidate, roleId, apply, credits = null }) {
+export async function submitToRole({
+  candidate,
+  roleId,
+  apply,
+  credits = null,
+  trpcGetImpl = trpcGet,
+  now = Date.now(),
+}) {
   const outcome = {
     roleId,
     stage: "claimed",
@@ -380,10 +434,25 @@ export async function submitToRole({ candidate, roleId, apply, credits = null })
     error: null,
   };
 
-  const pre = await preflightSubmission({ candidate, roleId, credits });
+  const pre = await preflightSubmission({
+    candidate,
+    roleId,
+    credits,
+    trpcGetImpl,
+    now,
+  });
+  outcome.preflight = {
+    signals: pre.signals || {},
+    risks: pre.risks || [],
+  };
   if (!pre.ok) {
     outcome.stage = "blocked";
     outcome.blockers = pre.blockers;
+    return outcome;
+  }
+
+  if (!apply) {
+    outcome.stage = "would_submit";
     return outcome;
   }
 
@@ -392,11 +461,6 @@ export async function submitToRole({ candidate, roleId, apply, credits = null })
     const prior = await getSubmissionClaim(candidate.candidateUserId, roleId);
     outcome.stage = "already_claimed";
     outcome.priorOutcome = prior?.outcome || null;
-    return outcome;
-  }
-
-  if (!apply) {
-    outcome.stage = "would_submit";
     return outcome;
   }
 
