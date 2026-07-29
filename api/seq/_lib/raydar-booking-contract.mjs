@@ -22,6 +22,7 @@ const EVENT_FIELDS = new Set([
   "startsAt",
   "endsAt",
   "bookedAt",
+  "sourceAttribution",
   "status",
   "supersedesBookingId",
 ]);
@@ -32,6 +33,7 @@ const INDEX_ITEM_FIELDS = new Set([
   "startsAt",
   "endsAt",
   "bookedAt",
+  "sourceAttribution",
   "status",
   "supersedesBookingId",
 ]);
@@ -92,6 +94,22 @@ function candidateName(value) {
   return name;
 }
 
+function sourceAttribution(value) {
+  // v1 originally shipped without attribution. Accept the missing key during
+  // the consumer-first deployment overlap, while still rejecting every
+  // malformed value when the producer supplies it.
+  if (value == null) return null;
+  const source = requiredString(
+    value,
+    "RAYDAR_BOOKING_SOURCE_ATTRIBUTION_INVALID",
+    { max: 64 },
+  );
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(source)) {
+    throw contractError("RAYDAR_BOOKING_SOURCE_ATTRIBUTION_INVALID");
+  }
+  return source;
+}
+
 /**
  * Validate and project the complete v1 booking event. Unknown keys fail closed:
  * this feed controls candidate-facing sequence suppression, so schema drift must
@@ -129,6 +147,9 @@ export function normalizeRaydarBookingEvent(value) {
   const startsAt = timestamp(value.startsAt, "RAYDAR_BOOKING_START_INVALID");
   const endsAt = timestamp(value.endsAt, "RAYDAR_BOOKING_END_INVALID");
   const bookedAt = timestamp(value.bookedAt, "RAYDAR_BOOKING_BOOKED_AT_INVALID");
+  const selectedSourceAttribution = sourceAttribution(
+    value.sourceAttribution,
+  );
   if (endsAt.milliseconds <= startsAt.milliseconds) {
     throw contractError("RAYDAR_BOOKING_RANGE_INVALID");
   }
@@ -148,6 +169,7 @@ export function normalizeRaydarBookingEvent(value) {
     endsAtMs: endsAt.milliseconds,
     bookedAt: bookedAt.raw,
     bookedAtMs: bookedAt.milliseconds,
+    sourceAttribution: selectedSourceAttribution,
     effectiveBookedAtMs: event === "booking.rescheduled"
       ? Math.max(bookedAt.milliseconds, occurredAt.milliseconds)
       : bookedAt.milliseconds,
@@ -186,6 +208,9 @@ export function normalizeRaydarBookingIndexItem(value) {
   const startsAt = timestamp(value.startsAt, "RAYDAR_BOOKING_START_INVALID");
   const endsAt = timestamp(value.endsAt, "RAYDAR_BOOKING_END_INVALID");
   const bookedAt = timestamp(value.bookedAt, "RAYDAR_BOOKING_BOOKED_AT_INVALID");
+  const selectedSourceAttribution = sourceAttribution(
+    value.sourceAttribution,
+  );
   if (endsAt.milliseconds <= startsAt.milliseconds) {
     throw contractError("RAYDAR_BOOKING_RANGE_INVALID");
   }
@@ -200,6 +225,7 @@ export function normalizeRaydarBookingIndexItem(value) {
     endsAtMs: endsAt.milliseconds,
     bookedAt: bookedAt.raw,
     bookedAtMs: bookedAt.milliseconds,
+    sourceAttribution: selectedSourceAttribution,
     status: value.status,
     supersedesBookingId,
   };
