@@ -256,14 +256,21 @@ export function buildSubmissionSourceBundle({
   const candidateSourceTexts = [
     JSON.stringify(modelInput.candidate),
     JSON.stringify(modelInput.preferences),
-    JSON.stringify(modelInput.ai_calibration),
     candidateSpeech,
+  ].map(clean).filter(Boolean);
+  const contextualSourceTexts = [
+    JSON.stringify(modelInput.ai_calibration),
   ].map(clean).filter(Boolean);
   return {
     modelInput,
-    sourceTexts: [...roleSourceTexts, ...candidateSourceTexts],
+    sourceTexts: [
+      ...roleSourceTexts,
+      ...candidateSourceTexts,
+      ...contextualSourceTexts,
+    ],
     roleSourceTexts,
     candidateSourceTexts,
+    contextualSourceTexts,
     requirements,
     questions,
   };
