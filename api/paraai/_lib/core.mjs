@@ -635,17 +635,38 @@ export async function resolveSequence(name, sequences = null) {
   return rows.find((row) => row?.name === name) || null;
 }
 
-export async function campaignLeadsAll(campaignId) {
-  const first = await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId });
+export async function campaignLeadsAll(
+  campaignId,
+  { trpcGetImpl = trpcGet } = {},
+) {
+  const first = await trpcGetImpl(
+    "campaigns.getCampaignLeads",
+    { campaign_id: campaignId },
+  );
   const leads = [...(first?.leads || [])];
-  const total = Math.min(Number(first?.totalCount ?? leads.length), 10_000);
-  const pageSize = leads.length || 50;
-  for (let cursor = pageSize; cursor < total; cursor += pageSize) {
-    const page = (await trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor }))?.leads || [];
+  const total = Number(first?.totalCount ?? leads.length);
+  if (
+    !Number.isSafeInteger(total)
+    || total < leads.length
+    || total > 10_000
+  ) {
+    throw new Error(
+      `incomplete campaign membership read: ${leads.length}/${String(first?.totalCount ?? "invalid")}`,
+    );
+  }
+  for (
+    let cursor = leads.length;
+    cursor < total;
+    cursor = leads.length
+  ) {
+    const page = (await trpcGetImpl(
+      "campaigns.getCampaignLeads",
+      { campaign_id: campaignId, cursor },
+    ))?.leads || [];
     if (!page.length) throw new Error(`incomplete campaign membership read: ${leads.length}/${total}`);
     leads.push(...page);
   }
-  if (leads.length < total) throw new Error(`incomplete campaign membership read: ${leads.length}/${total}`);
+  if (leads.length !== total) throw new Error(`incomplete campaign membership read: ${leads.length}/${total}`);
   return leads;
 }
 
