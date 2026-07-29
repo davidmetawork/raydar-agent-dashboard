@@ -18,6 +18,7 @@ import {
   runPhase3ShadowReleaseTick,
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
+import { runAuthProbeTick } from "./_lib/auth-probe.mjs";
 import { notifySlack } from "./_lib/core.mjs";
 import {
   PHASE3_AGGREGATE_ALERT_KEY,
@@ -507,6 +508,15 @@ export default async function handler(req, res) {
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
+    // OBSERVE-ONLY Paraform auth circuit probe (phase 1). It rides every
+    // */5 tick BEFORE the lane cycle so a full AUTH_EXPIRED outage — the
+    // exact condition it detects — cannot starve it behind a throwing tick,
+    // its reads are time-capped so a hung Paraform call cannot eat the
+    // worker budget, and it never throws into the cycle. Deliberately
+    // absent from this response: the worker/monitor wiring is frozen, the
+    // flag is read via GET /api/ops/paraform-auth, and no lane holds on it
+    // yet. Covered by test/paraform-auth-breaker.test.mjs.
+    try { await runAuthProbeTick(); } catch { /* observe-only */ }
     const automation = automationConfig();
     const {
       resumeSweep,
