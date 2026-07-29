@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   createHash,
+  createHmac,
   createPrivateKey,
   sign,
 } from "node:crypto";
@@ -66,6 +67,11 @@ import {
   SourceRecallClassifiedEvidenceStoreError,
   createSourceRecallClassifiedEvidenceStore,
 } from "../api/paraai/_lib/source-recall-classified-evidence-store.mjs";
+import {
+  SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_SHARD_SIZE,
+  SourceRecallClassifiedEvidenceManifestStoreError,
+  createSourceRecallClassifiedEvidenceManifestStore,
+} from "../api/paraai/_lib/source-recall-classified-evidence-manifest-store.mjs";
 import {
   createSourceRecallPointObservationManifestStore,
 } from "../api/paraai/_lib/source-recall-point-observation-manifest-store.mjs";
@@ -197,18 +203,31 @@ function semanticDigest(domain, value) {
     .digest("hex");
 }
 
-function verifiedHead(nowMs) {
+function verifiedHead(
+  nowMs,
+  references = [REFERENCE],
+) {
   const pageExpiresAtMs = nowMs + 20 * HOUR;
-  const referenceCommitment = {
-    referenceIdDigest: semanticDigest(
-      "phase4-recall-reference-id-v1",
-      REFERENCE.id,
-    ),
-    referenceDigest: semanticDigest(
-      "phase4-recall-private-reference-v1",
-      REFERENCE,
-    ),
-  };
+  const referenceCommitments = references.map(
+    (reference) => ({
+      referenceIdDigest: semanticDigest(
+        "phase4-recall-reference-id-v1",
+        reference.id,
+      ),
+      referenceDigest: semanticDigest(
+        "phase4-recall-private-reference-v1",
+        reference,
+      ),
+    }),
+  ).sort(
+    (left, right) =>
+      left.referenceIdDigest.localeCompare(
+        right.referenceIdDigest,
+      )
+      || left.referenceDigest.localeCompare(
+        right.referenceDigest,
+      ),
+  );
   const record = {
     version: 1,
     policyVersion: "recall-reference-head-dark-v1",
@@ -221,11 +240,11 @@ function verifiedHead(nowMs) {
     contractPinsDigest: digest("page-pins"),
     passCount: 2,
     pageCount: 1,
-    scannedCount: 1,
-    referenceCount: 1,
+    scannedCount: references.length,
+    referenceCount: references.length,
     referenceManifestDigest: semanticDigest(
       "phase4-recall-reference-manifest-v1",
-      [referenceCommitment],
+      referenceCommitments,
     ),
     stablePassSemanticDigest: digest("stable-pass"),
     pageManifests: [{
@@ -236,8 +255,8 @@ function verifiedHead(nowMs) {
       pageNumber: 1,
       pageRecordDigest: digest("page-record"),
       pageSemanticDigest: digest("page-semantic"),
-      referenceCount: 1,
-      scannedCount: 1,
+      referenceCount: references.length,
+      scannedCount: references.length,
     }],
     recallReferenceHeadEpochDigest: digest("head-epoch"),
     recallReferenceHeadRevisionDigest:
@@ -269,8 +288,11 @@ function verifiedHead(nowMs) {
   });
 }
 
-function verifiedPage(nowMs) {
-  const head = verifiedHead(nowMs);
+function verifiedPage(
+  nowMs,
+  references = [REFERENCE],
+) {
+  const head = verifiedHead(nowMs, references);
   return deepFreeze({
     record: {
       version: 1,
@@ -288,9 +310,9 @@ function verifiedPage(nowMs) {
       nextCursor: null,
       pageExpiresAtMs: nowMs + 20 * HOUR,
       pageSemanticDigest: digest("page-semantic"),
-      scannedCount: 1,
-      referenceCount: 1,
-      references: [REFERENCE],
+      scannedCount: references.length,
+      referenceCount: references.length,
+      references,
     },
     pageKeyDigest: digest("page-key"),
     pageRecordDigest: digest("page-record"),
@@ -305,18 +327,21 @@ function verifiedPage(nowMs) {
   });
 }
 
-function pointRaw(overrides = {}) {
+function pointRaw(
+  overrides = {},
+  reference = REFERENCE,
+) {
   return deepFreeze({
-    id: REFERENCE.id,
+    id: reference.id,
     bot_name: "Raydar Screener",
     join_at: "2026-07-26T00:30:00.000000000Z",
     metadata: {
-      source: REFERENCE.metadataSource,
-      candidate_full_name: REFERENCE.candidate.fullName,
-      candidate_email: REFERENCE.candidate.email,
-      candidate_linkedin: REFERENCE.candidate.linkedin,
+      source: reference.metadataSource,
+      candidate_full_name: reference.candidate.fullName,
+      candidate_email: reference.candidate.email,
+      candidate_linkedin: reference.candidate.linkedin,
       paraform_event_id:
-        REFERENCE.candidate.paraformEventId,
+        reference.candidate.paraformEventId,
     },
     status_changes: [
       {
@@ -438,7 +463,139 @@ function fakeClassifiedPersistence(
   const values = new Map();
   const expiries = new Map();
   const calls = [];
+  const readKeys = [];
+  const readManyKeys = [];
   const persistence = Object.freeze({
+    async initializeManifest(input) {
+      if (
+        nowMs < input.issuedAtMs
+        || nowMs >= input.notAfterMs
+        || nowMs >= input.expiresAtMs
+      ) {
+        return {
+          status: "expired",
+          raw: null,
+          redisNowMs: nowMs,
+          expiresAtMs: -2,
+        };
+      }
+      const indexKey = input.index.key;
+      if (values.has(indexKey)) {
+        return {
+          status: "existing",
+          raw: values.get(indexKey),
+          redisNowMs: nowMs,
+          expiresAtMs: expiries.get(indexKey),
+        };
+      }
+      if (
+        input.shards.some(
+          (shard) => values.has(shard.key),
+        )
+      ) {
+        return {
+          status: "conflict",
+          raw: null,
+          redisNowMs: nowMs,
+          expiresAtMs: -2,
+        };
+      }
+      const physicalExpiresAtMs =
+        input.expiresAtMs + physicalExpiryOffsetMs;
+      for (const shard of input.shards) {
+        values.set(shard.key, shard.proposedRaw);
+        expiries.set(shard.key, physicalExpiresAtMs);
+      }
+      values.set(indexKey, input.index.proposedRaw);
+      expiries.set(indexKey, physicalExpiresAtMs);
+      return {
+        status: "created",
+        raw: input.index.proposedRaw,
+        redisNowMs: nowMs,
+        expiresAtMs: physicalExpiresAtMs,
+      };
+    },
+    async read(input) {
+      readKeys.push(input.key);
+      if (
+        !values.has(input.key)
+        || nowMs >= expiries.get(input.key)
+      ) {
+        values.delete(input.key);
+        expiries.delete(input.key);
+        return {
+          raw: null,
+          redisNowMs: nowMs,
+          expiresAtMs: -2,
+        };
+      }
+      return {
+        raw: values.get(input.key),
+        redisNowMs: nowMs,
+        expiresAtMs: expiries.get(input.key),
+      };
+    },
+    async readMany(input) {
+      readManyKeys.push([...input.keys]);
+      return {
+        redisNowMs: nowMs,
+        records: input.keys.map((key) => ({
+          key,
+          raw: (
+            values.has(key)
+            && nowMs < expiries.get(key)
+          )
+            ? values.get(key)
+            : null,
+          expiresAtMs: (
+            values.has(key)
+            && nowMs < expiries.get(key)
+          )
+            ? expiries.get(key)
+            : -2,
+        })),
+      };
+    },
+    async compareAndSet(input) {
+      const current = values.get(input.key);
+      const expiresAtMs = expiries.get(input.key);
+      if (current !== input.expectedRaw) {
+        return {
+          status: "conflict",
+          raw: current ?? null,
+          redisNowMs: nowMs,
+          expiresAtMs: expiresAtMs ?? -2,
+        };
+      }
+      if (
+        nowMs >= input.notAfterMs
+        || nowMs >= input.expiresAtMs
+        || nowMs >= input.nextExpiresAtMs
+        || input.nextExpiresAtMs > input.expiresAtMs
+        || expiresAtMs !== input.expiresAtMs
+      ) {
+        return {
+          status: "expired",
+          raw: current,
+          redisNowMs: nowMs,
+          expiresAtMs: expiresAtMs ?? -2,
+        };
+      }
+      values.set(input.key, input.nextRaw);
+      expiries.set(input.key, input.nextExpiresAtMs);
+      if (mode === "throw_after_compare_and_set_once") {
+        mode = "normal";
+        throw new Error(
+          "private lost compare-and-set response",
+        );
+      }
+      return {
+        status: "stored",
+        raw: input.nextRaw,
+        redisNowMs: nowMs,
+        expiresAtMs: input.nextExpiresAtMs,
+      };
+    },
     async retain(input) {
       calls.push(input);
       if (
@@ -488,6 +645,8 @@ function fakeClassifiedPersistence(
     calls,
     expiries,
     persistence,
+    readKeys,
+    readManyKeys,
     values,
     setMode(value) {
       mode = value;
@@ -660,6 +819,118 @@ async function classifiedManifestSeedForStableHarness(
   );
 }
 
+function syntheticReferences(count) {
+  return deepFreeze(Array.from(
+    { length: count },
+    (_, index) => ({
+      id: `synthetic-runtime-bot-${index}`,
+      joinAt: "2026-07-26T00:30:00.000Z",
+      metadataSource: "paraform-auto",
+      candidate: {
+        fullName: `Synthetic Candidate ${index}`,
+        email: `synthetic-${index}@example.invalid`,
+        linkedin:
+          `https://example.invalid/synthetic-${index}`,
+        paraformEventId: `synthetic-event-${index}`,
+      },
+    }),
+  ));
+}
+
+async function multiMemberStableManifestHarness(
+  memberCount,
+) {
+  const references = syntheticReferences(memberCount);
+  const startedAtMs = BOUNDARY_MS + HOUR;
+  const fake = fakePersistence(startedAtMs);
+  const pointStore =
+    createSourceRecallPointObservationStore({
+      persistence: fake.persistence,
+    });
+  const pointObservation =
+    createSourceRecallPointObservationManifestPointInterface({
+      persistence: fake.persistence,
+    });
+  const manifestStore =
+    createSourceRecallPointObservationManifestStore({
+      persistence: fake.persistence,
+      pointObservation,
+    });
+  const head = verifiedHead(startedAtMs, references);
+  const basePage = verifiedPage(
+    startedAtMs,
+    references,
+  );
+  const ensured =
+    await manifestStore.ensureRecallPointObservationManifest(
+      head,
+    );
+  const work = deepFreeze({
+    manifestKeyDigest: ensured.record.manifestKeyDigest,
+  });
+  const pageClaim =
+    await manifestStore.claimRecallPointObservationManifestStep(
+      work,
+    );
+  assert.equal(pageClaim.status, "page_required");
+  await manifestStore
+    .checkpointRecallPointObservationManifestPage(
+      pageClaim,
+      basePage,
+    );
+  const snapshots = [];
+  while (true) {
+    const claim =
+      await manifestStore
+        .claimRecallPointObservationManifestStep(work);
+    if (claim.status === "complete") {
+      assert.equal(snapshots.length, memberCount);
+      return {
+        completion: claim,
+        fake,
+        manifestStore,
+        snapshots,
+        work,
+      };
+    }
+    assert.equal(claim.status, "observation_required");
+    const prepared =
+      await manifestStore
+        .prepareRecallPointObservationManifestSelection(
+          claim,
+          basePage,
+        );
+    const pointWork = deepFreeze({
+      workKeyDigest: prepared.workKeyDigest,
+    });
+    for (let readNumber = 1; readNumber <= 2; readNumber += 1) {
+      const readClaim =
+        await pointStore.claimRecallPointObservationRead(
+          pointWork,
+        );
+      assert.equal(readClaim.readNumber, readNumber);
+      fake.advance(1_000);
+      await pointStore.checkpointRecallPointObservationRead(
+        readClaim,
+        await observationForClaim(
+          readClaim,
+          pointRaw({}, readClaim.expectedReference),
+        ),
+      );
+    }
+    const snapshot =
+      await pointStore.readRecallPointObservationWork(
+        pointWork,
+      );
+    assert.equal(snapshot.record.status, "stable");
+    snapshots.push(snapshot);
+    await manifestStore
+      .checkpointRecallPointObservationManifestWork(
+        claim,
+      );
+  }
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -708,6 +979,19 @@ function expectClassifiedStoreCode(code) {
     assert.equal(
       error instanceof
         SourceRecallClassifiedEvidenceStoreError,
+      true,
+    );
+    assert.equal(error.code, code);
+    assert.equal(error.message, code);
+    return true;
+  };
+}
+
+function expectClassifiedManifestStoreCode(code) {
+  return (error) => {
+    assert.equal(
+      error instanceof
+        SourceRecallClassifiedEvidenceManifestStoreError,
       true,
     );
     assert.equal(error.code, code);
@@ -2139,6 +2423,498 @@ test("one complete manifest seed and one signed-evidence handoff retain exactly 
       false,
     );
     assertHardDark(result);
+  });
+});
+
+test("one seed initializes bounded sealed shards and a full retained-shard reproof completes only the hard-dark Recall manifest", async () => {
+  const harness = await stableHarness();
+  const pair = await productionClassifierPair(
+    harness.snapshot,
+  );
+  const fake = fakeClassifiedPersistence(
+    pair.verifiedAtMs + 1,
+  );
+  const secret =
+    "classified-evidence-test-seal-secret-0123456789";
+  const leafStore =
+    createSourceRecallClassifiedEvidenceStore({
+      persistence: fake.persistence,
+      sealSecret: secret,
+    });
+  const leaf = await leafStore
+    .retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(
+        harness,
+      ),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  assert.equal(
+    leaf.referenceManifestCoverageComplete,
+    false,
+  );
+  assert.equal(leaf.durableAttestationAvailable, false);
+
+  const manifestStore =
+    createSourceRecallClassifiedEvidenceManifestStore({
+      persistence: fake.persistence,
+      sealSecret: secret,
+    });
+  const manifestCapability =
+    await classifiedManifestSeedForStableHarness(
+      harness,
+    );
+  const initialized = await manifestStore
+    .initializeSourceRecallClassifiedEvidenceManifest(
+      manifestCapability,
+    );
+  await assert.rejects(
+    manifestStore
+      .initializeSourceRecallClassifiedEvidenceManifest(
+        manifestCapability,
+      ),
+    expectClassifiedManifestStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_CAPABILITY_INVALID",
+    ),
+  );
+  assert.equal(
+    SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_SHARD_SIZE,
+    20,
+  );
+  assert.equal(
+    initialized.status,
+    "classified_manifest_assembling_dark",
+  );
+  assert.equal(initialized.memberCount, 1);
+  assert.equal(initialized.shardCount, 1);
+  assert.equal(initialized.completedShards, 0);
+  assert.equal(
+    initialized.referenceManifestCoverageComplete,
+    false,
+  );
+  assert.equal(
+    initialized.durableAttestationAvailable,
+    false,
+  );
+
+  fake.setMode("throw_after_compare_and_set_once");
+  await assert.rejects(
+    manifestStore
+      .advanceSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      ),
+    /private lost compare-and-set response/u,
+  );
+  fake.setMode("throw_after_compare_and_set_once");
+  await assert.rejects(
+    manifestStore
+      .advanceSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      ),
+    /private lost compare-and-set response/u,
+  );
+  const completed = await manifestStore
+    .advanceSourceRecallClassifiedEvidenceManifest(
+      initialized.work,
+    );
+  assert.equal(
+    completed.status,
+    "classified_manifest_complete_dark",
+  );
+  assert.equal(completed.completedShards, 1);
+  assert.equal(completed.terminalSuccessCount, 1);
+  assert.equal(completed.terminalFailureCount, 0);
+  assert.equal(
+    fake.readKeys.some(
+      (key) =>
+        key.includes(
+          ":recall-classified-evidence:v1:work:",
+        ),
+    ),
+    true,
+  );
+  assert.equal(
+    fake.readManyKeys.flat().every(
+      (key) =>
+        key.includes(":manifest:{")
+        && key.includes(":shard:"),
+    ),
+    true,
+  );
+  assert.match(completed.manifestDigest, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    completed.referenceManifestCoverageComplete,
+    true,
+  );
+  assert.equal(
+    completed.durableAttestationAvailable,
+    true,
+  );
+  assert.equal(
+    completed.globalReferenceSetCoverageAvailable,
+    true,
+  );
+  assert.equal(completed.sourceFactsAvailable, true);
+  assert.equal(
+    completed.successClassificationAvailable,
+    true,
+  );
+  assert.equal(
+    completed.expiresAtMs,
+    leaf.expiresAtMs - 1_000,
+  );
+  for (const field of [
+    "authorityAvailable",
+    "candidateFacingWriteAvailable",
+    "candidateIdentityResolutionAvailable",
+    "curationAvailable",
+    "enrollmentAvailable",
+    "operational",
+    "outreachAvailable",
+    "pinnable",
+    "q37TransitionAvailable",
+  ]) {
+    assert.equal(completed[field], false, field);
+  }
+
+  const reread = await manifestStore
+    .readSourceRecallClassifiedEvidenceManifest(
+      initialized.work,
+    );
+  assert.deepEqual(reread, completed);
+  const converged = await manifestStore
+    .initializeSourceRecallClassifiedEvidenceManifest(
+      await classifiedManifestSeedForStableHarness(
+        harness,
+      ),
+    );
+  assert.equal(
+    converged.status,
+    "classified_manifest_complete_dark",
+  );
+  assert.equal(
+    converged.manifestDigest,
+    completed.manifestDigest,
+  );
+  await assert.rejects(
+    manifestStore
+      .readSourceRecallClassifiedEvidenceManifest(
+        new Proxy(initialized.work, {}),
+      ),
+    expectClassifiedManifestStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_WORK_INVALID",
+    ),
+  );
+  assert.equal(
+    JSON.stringify(completed).includes(
+      REFERENCE.candidate.fullName,
+    ),
+    false,
+  );
+
+  const indexKey = [...fake.values.keys()].find(
+    (key) =>
+      key.includes(":manifest:")
+      && !key.includes(":shard:"),
+  );
+  const originalIndexRaw = fake.values.get(indexKey);
+  const falseRoot = JSON.parse(originalIndexRaw);
+  falseRoot.completeRootDigest = "f".repeat(64);
+  const {
+    recordSeal: _recordSeal,
+    ...falseRootUnsigned
+  } = falseRoot;
+  falseRoot.recordSeal = createHmac("sha256", secret)
+    .update(`${falseRoot.sealVersion}\0`, "utf8")
+    .update(canonicalJson(falseRootUnsigned), "utf8")
+    .digest("hex");
+  fake.values.set(indexKey, canonicalJson(falseRoot));
+  await assert.rejects(
+    manifestStore
+      .readSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      ),
+    expectClassifiedManifestStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_ROOT_INVALID",
+    ),
+  );
+  fake.values.set(indexKey, originalIndexRaw);
+
+  const falseMemberIndex = JSON.parse(originalIndexRaw);
+  falseMemberIndex.memberIndexDigest = "e".repeat(64);
+  const {
+    recordSeal: _memberIndexRecordSeal,
+    ...falseMemberIndexUnsigned
+  } = falseMemberIndex;
+  falseMemberIndex.recordSeal =
+    createHmac("sha256", secret)
+      .update(
+        `${falseMemberIndex.sealVersion}\0`,
+        "utf8",
+      )
+      .update(
+        canonicalJson(falseMemberIndexUnsigned),
+        "utf8",
+      )
+      .digest("hex");
+  fake.values.set(
+    indexKey,
+    canonicalJson(falseMemberIndex),
+  );
+  await assert.rejects(
+    manifestStore
+      .readSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      ),
+    expectClassifiedManifestStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_COVERAGE_INCOMPLETE",
+    ),
+  );
+  fake.values.set(indexKey, originalIndexRaw);
+
+  const shardKey = [...fake.values.keys()].find(
+    (key) => key.includes(":shard:"),
+  );
+  const originalShardRaw = fake.values.get(shardKey);
+  const wrongSealShard = JSON.parse(originalShardRaw);
+  wrongSealShard.recordSeal = "f".repeat(64);
+  fake.values.set(
+    shardKey,
+    canonicalJson(wrongSealShard),
+  );
+  await assert.rejects(
+    manifestStore
+      .readSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      ),
+    expectClassifiedManifestStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_SHARD_INVALID",
+    ),
+  );
+  fake.values.set(shardKey, originalShardRaw);
+
+  const tampered = JSON.parse(
+    fake.values.get(shardKey),
+  );
+  tampered.terminalSuccessCount = 0;
+  fake.values.set(shardKey, JSON.stringify(tampered));
+  await assert.rejects(
+    manifestStore
+      .readSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      ),
+    expectClassifiedManifestStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_SHARD_INVALID",
+    ),
+  );
+});
+
+test("twenty-one retained members advance through two bounded shards before full-manifest completion", async () => {
+  const sourceHarness =
+    await multiMemberStableManifestHarness(21);
+  let completion = sourceHarness.completion;
+  async function freshSeed() {
+    const selected = completion
+      ?? await sourceHarness.manifestStore
+        .claimRecallPointObservationManifestStep(
+          sourceHarness.work,
+        );
+    completion = null;
+    assert.equal(selected.status, "complete");
+    return sourceHarness.manifestStore
+      .issueSourceRecallClassifiedManifestSeed(selected);
+  }
+
+  const fake = fakeClassifiedPersistence(
+    sourceHarness.fake.nowMs + 1_000,
+  );
+  const secret =
+    "classified-evidence-test-seal-secret-0123456789";
+  const leafStore =
+    createSourceRecallClassifiedEvidenceStore({
+      persistence: fake.persistence,
+      sealSecret: secret,
+    });
+  for (
+    let index = 0;
+    index < sourceHarness.snapshots.length;
+    index += 1
+  ) {
+    const pair = await productionClassifierPair(
+      sourceHarness.snapshots[index],
+      {
+        classification:
+          index % 2 === 0 ? "success" : "failure",
+      },
+    );
+    await leafStore.retainSourceRecallClassifiedEvidence(
+      await freshSeed(),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  }
+
+  const manifestStore =
+    createSourceRecallClassifiedEvidenceManifestStore({
+      persistence: fake.persistence,
+      sealSecret: secret,
+    });
+  const initialized =
+    await manifestStore
+      .initializeSourceRecallClassifiedEvidenceManifest(
+        await freshSeed(),
+      );
+  assert.equal(initialized.memberCount, 21);
+  assert.equal(initialized.shardCount, 2);
+
+  const first =
+    await manifestStore
+      .advanceSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      );
+  assert.equal(
+    first.status,
+    "classified_manifest_assembling_dark",
+  );
+  assert.equal(first.completedShards, 1);
+  assert.equal(first.nextShardNumber, 1);
+  assert.equal(first.terminalSuccessCount, 10);
+  assert.equal(first.terminalFailureCount, 10);
+  assert.equal(
+    first.referenceManifestCoverageComplete,
+    false,
+  );
+
+  const completed =
+    await manifestStore
+      .advanceSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      );
+  assert.equal(
+    completed.status,
+    "classified_manifest_complete_dark",
+  );
+  assert.equal(completed.completedShards, 2);
+  assert.equal(completed.terminalSuccessCount, 11);
+  assert.equal(completed.terminalFailureCount, 10);
+  assert.equal(
+    completed.referenceManifestCoverageComplete,
+    true,
+  );
+  assert.equal(
+    completed.globalReferenceSetCoverageAvailable,
+    true,
+  );
+  assert.equal(completed.authorityAvailable, false);
+  assert.equal(
+    completed.candidateFacingWriteAvailable,
+    false,
+  );
+  assert.equal(
+    fake.readKeys.filter(
+      (key) =>
+        key.includes(
+          ":recall-classified-evidence:v1:work:",
+        ),
+    ).length,
+    21,
+  );
+  assert.equal(
+    fake.readManyKeys.flat().every(
+      (key) =>
+        key.includes(":manifest:{")
+        && key.includes(":shard:"),
+    ),
+    true,
+  );
+});
+
+test("a missing or signed-unavailable retained member keeps the full classified manifest incomplete without advancing its shard", async (t) => {
+  await t.test("missing retained member", async () => {
+    const harness = await stableHarness();
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+    );
+    const fake = fakeClassifiedPersistence(
+      pair.verifiedAtMs + 1,
+    );
+    const store =
+      createSourceRecallClassifiedEvidenceManifestStore({
+        persistence: fake.persistence,
+        sealSecret:
+          "classified-evidence-test-seal-secret-0123456789",
+      });
+    const initialized = await store
+      .initializeSourceRecallClassifiedEvidenceManifest(
+        await classifiedManifestSeedForStableHarness(
+          harness,
+        ),
+      );
+    const waiting = await store
+      .advanceSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      );
+    assert.equal(
+      waiting.status,
+      "classified_manifest_awaiting_members_dark",
+    );
+    assert.equal(waiting.awaitingMembers, 1);
+    assert.equal(waiting.completedShards, 0);
+    assert.equal(
+      waiting.referenceManifestCoverageComplete,
+      false,
+    );
+  });
+
+  await t.test("signed unavailable member", async () => {
+    const harness = await stableHarness();
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+      { classification: "unavailable" },
+    );
+    const fake = fakeClassifiedPersistence(
+      pair.verifiedAtMs + 1,
+    );
+    const secret =
+      "classified-evidence-test-seal-secret-0123456789";
+    await createSourceRecallClassifiedEvidenceStore({
+      persistence: fake.persistence,
+      sealSecret: secret,
+    }).retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(
+        harness,
+      ),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+    const store =
+      createSourceRecallClassifiedEvidenceManifestStore({
+        persistence: fake.persistence,
+        sealSecret: secret,
+      });
+    const initialized = await store
+      .initializeSourceRecallClassifiedEvidenceManifest(
+        await classifiedManifestSeedForStableHarness(
+          harness,
+        ),
+      );
+    const unsettled = await store
+      .advanceSourceRecallClassifiedEvidenceManifest(
+        initialized.work,
+      );
+    assert.equal(
+      unsettled.status,
+      "classified_manifest_unsettled_members_dark",
+    );
+    assert.equal(unsettled.unsettledMembers, 1);
+    assert.equal(unsettled.completedShards, 0);
+    assert.equal(
+      unsettled.durableAttestationAvailable,
+      false,
+    );
   });
 });
 

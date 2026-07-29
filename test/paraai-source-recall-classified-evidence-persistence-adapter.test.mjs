@@ -21,6 +21,11 @@ import {
 const KEY =
   "paraai:phase4:recall-classified-evidence:v1:work:"
   + "a".repeat(64);
+const MANIFEST_KEY =
+  "paraai:phase4:recall-classified-evidence:v1:manifest:{"
+  + "b".repeat(64)
+  + "}:index";
+const SHARD_KEY = `${MANIFEST_KEY}:shard:0`;
 const NOW_MS = Date.parse("2026-07-27T00:00:00.000Z");
 const ISSUED_AT_MS = NOW_MS - 1_000;
 const NOT_AFTER_MS = NOW_MS + 60_000;
@@ -149,6 +154,229 @@ test("the adapter issues one conservative Redis-TIME SET-NX-PXAT transition in i
   assert.match(command[1], /redis\.call\('PEXPIRETIME'/u);
   assert.doesNotMatch(command[1], /\bPEXPIRE\b/u);
   assert.match(command[1], /redis\.call\('DEL'/u);
+});
+
+test("manifest initialization atomically writes one index plus bounded shards, and read/read-many/CAS stay in the same dedicated namespace", async () => {
+  const [seconds, microseconds] = redisTime();
+  const initializationObservations = {};
+  const initialized = await adapterFor(
+    [
+      1,
+      "{\"index\":true}",
+      seconds,
+      microseconds,
+      OBSERVED_EXPIRES_AT_MS,
+    ],
+    initializationObservations,
+  ).initializeManifest({
+    index: {
+      key: MANIFEST_KEY,
+      proposedRaw: "{\"index\":true}",
+    },
+    shards: [{
+      key: SHARD_KEY,
+      proposedRaw: "{\"shard\":true}",
+    }],
+    issuedAtMs: ISSUED_AT_MS,
+    notAfterMs: NOT_AFTER_MS,
+    expiresAtMs: EXPIRES_AT_MS,
+  });
+  assert.deepEqual(initialized, {
+    status: "created",
+    raw: "{\"index\":true}",
+    redisNowMs: NOW_MS,
+    expiresAtMs: OBSERVED_EXPIRES_AT_MS,
+  });
+  const initializeCommand = JSON.parse(
+    initializationObservations.request.body,
+  );
+  assert.equal(initializeCommand[0], "EVAL");
+  assert.equal(initializeCommand[2], 2);
+  assert.equal(initializeCommand[3], MANIFEST_KEY);
+  assert.equal(initializeCommand[4], SHARD_KEY);
+  assert.equal(
+    initializeCommand[3].match(/\{([^}]+)\}/u)[1],
+    initializeCommand[4].match(/\{([^}]+)\}/u)[1],
+  );
+  assert.equal(initializeCommand[5], "{\"index\":true}");
+  assert.equal(initializeCommand[6], String(ISSUED_AT_MS));
+  assert.equal(initializeCommand[7], String(NOT_AFTER_MS));
+  assert.equal(initializeCommand[8], String(EXPIRES_AT_MS));
+  assert.equal(initializeCommand[9], "1000");
+  assert.equal(initializeCommand[10], "{\"shard\":true}");
+  assert.match(
+    initializeCommand[1],
+    /for keyIndex = 2, #KEYS/u,
+  );
+  assert.match(
+    initializeCommand[1],
+    /ARGV\[keyIndex \+ 4\]/u,
+  );
+  assert.match(
+    initializeCommand[1],
+    /redis\.pcall\(\s*'SET'[\s\S]*'NX'[\s\S]*'PXAT'/u,
+  );
+  assert.match(
+    initializeCommand[1],
+    /for rollbackIndex = 2,[\s\S]*redis\.pcall\('DEL'/u,
+  );
+
+  assert.deepEqual(
+    await adapterFor([
+      "{\"index\":true}",
+      seconds,
+      microseconds,
+      OBSERVED_EXPIRES_AT_MS,
+    ]).read({ key: MANIFEST_KEY }),
+    {
+      raw: "{\"index\":true}",
+      redisNowMs: NOW_MS,
+      expiresAtMs: OBSERVED_EXPIRES_AT_MS,
+    },
+  );
+  assert.deepEqual(
+    await adapterFor([
+      seconds,
+      microseconds,
+      "{\"index\":true}",
+      OBSERVED_EXPIRES_AT_MS,
+      null,
+      -2,
+    ]).readMany({
+      keys: [MANIFEST_KEY, SHARD_KEY],
+    }),
+    {
+      redisNowMs: NOW_MS,
+      records: [
+        {
+          key: MANIFEST_KEY,
+          raw: "{\"index\":true}",
+          expiresAtMs: OBSERVED_EXPIRES_AT_MS,
+        },
+        {
+          key: SHARD_KEY,
+          raw: null,
+          expiresAtMs: -2,
+        },
+      ],
+    },
+  );
+  const casObservations = {};
+  const nextPhysicalExpiryMs =
+    OBSERVED_EXPIRES_AT_MS - 1_000;
+  assert.deepEqual(
+    await adapterFor([
+      1,
+      "{\"next\":true}",
+      seconds,
+      microseconds,
+      nextPhysicalExpiryMs,
+    ], casObservations).compareAndSet({
+      key: MANIFEST_KEY,
+      expectedRaw: "{\"index\":true}",
+      nextRaw: "{\"next\":true}",
+      expiresAtMs: OBSERVED_EXPIRES_AT_MS,
+      nextExpiresAtMs: nextPhysicalExpiryMs,
+      notAfterMs: EXPIRES_AT_MS,
+    }),
+    {
+      status: "stored",
+      raw: "{\"next\":true}",
+      redisNowMs: NOW_MS,
+      expiresAtMs: nextPhysicalExpiryMs,
+    },
+  );
+  const casCommand = JSON.parse(
+    casObservations.request.body,
+  );
+  assert.equal(casCommand[6], String(OBSERVED_EXPIRES_AT_MS));
+  assert.equal(casCommand[7], String(nextPhysicalExpiryMs));
+  assert.equal(casCommand[8], String(EXPIRES_AT_MS));
+  assert.match(
+    casCommand[1],
+    /nextExpiry > expectedExpiry/u,
+  );
+  assert.match(
+    casCommand[1],
+    /'PXAT',[\s\S]*tostring\(nextExpiry\)/u,
+  );
+  assert.match(
+    casCommand[1],
+    /observedExpiresAtMs > nextExpiry/u,
+  );
+});
+
+test("manifest multi-key commands reject cross-slot and leaf-key combinations before transport", async () => {
+  let calls = 0;
+  const adapter =
+    createSourceRecallClassifiedEvidencePersistenceAdapter({
+      url: ADAPTER_URL,
+      token: TOKEN,
+      signalFactory: () => undefined,
+      async fetchImpl() {
+        calls += 1;
+        throw new Error("transport must remain unused");
+      },
+    });
+  const otherShardKey =
+    "paraai:phase4:recall-classified-evidence:v1:manifest:{"
+    + "c".repeat(64)
+    + "}:index:shard:0";
+  await assert.rejects(
+    adapter.initializeManifest({
+      index: {
+        key: MANIFEST_KEY,
+        proposedRaw: "{\"index\":true}",
+      },
+      shards: [{
+        key: otherShardKey,
+        proposedRaw: "{\"shard\":true}",
+      }],
+      issuedAtMs: ISSUED_AT_MS,
+      notAfterMs: NOT_AFTER_MS,
+      expiresAtMs: EXPIRES_AT_MS,
+    }),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_INPUT_INVALID",
+    ),
+  );
+  for (const keys of [
+    [SHARD_KEY, otherShardKey],
+    [SHARD_KEY, KEY],
+  ]) {
+    await assert.rejects(
+      adapter.readMany({ keys }),
+      expectCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_INPUT_INVALID",
+      ),
+    );
+  }
+  assert.equal(calls, 0);
+});
+
+test("CAS rejects provider-observed renewal beyond the requested physical expiry", async () => {
+  const [seconds, microseconds] = redisTime();
+  const nextPhysicalExpiryMs =
+    OBSERVED_EXPIRES_AT_MS - 1_000;
+  await assert.rejects(
+    adapterFor([
+      1,
+      "{\"next\":true}",
+      seconds,
+      microseconds,
+      nextPhysicalExpiryMs + 1,
+    ]).compareAndSet({
+      key: MANIFEST_KEY,
+      expectedRaw: "{\"index\":true}",
+      nextRaw: "{\"next\":true}",
+      expiresAtMs: OBSERVED_EXPIRES_AT_MS,
+      nextExpiresAtMs: nextPhysicalExpiryMs,
+      notAfterMs: EXPIRES_AT_MS,
+    }),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_RESULT_INVALID",
+    ),
+  );
 });
 
 test("created, existing, and conservatively early expiry outcomes retain the Redis linearization time", async (t) => {
@@ -498,7 +726,7 @@ async function productionFiles(directory) {
   return files;
 }
 
-test("the classified adapter/store closure has one private importer and no route, worker, gate, or authority integration", async () => {
+test("the classified leaf and full-manifest closure have only private importers and no route, worker, gate, or authority integration", async () => {
   const root = new URL(
     "../api/paraai/_lib/",
     import.meta.url,
@@ -571,7 +799,16 @@ test("the classified adapter/store closure has one private importer and no route
     }
   }
   assert.deepEqual(adapterImporters, [
+    new URL(
+      "source-recall-classified-evidence-manifest-store.mjs",
+      root,
+    ).pathname,
     storeUrl.pathname,
   ]);
-  assert.deepEqual(storeImporters, []);
+  assert.deepEqual(storeImporters, [
+    new URL(
+      "source-recall-classified-evidence-manifest-store.mjs",
+      root,
+    ).pathname,
+  ]);
 });
