@@ -1479,10 +1479,45 @@ test("recovery leaves an unreadable replacement unauthorized and selects the nex
         return job;
       },
     }),
-    { code: "AUTH_EXPIRED" },
+    {
+      code:
+        "RESUME_ONLY_BACKFILL_RECOVERY_AUTH_EXPIRED",
+    },
   );
   assert.equal(
     await authBlocked.store.getRecovery(),
+    null,
+  );
+
+  const snapshotBlocked = await recoveryFixture();
+  await assert.rejects(
+    () => planResumeOnlyBackfillRecovery({
+      now: NOW + 60_000,
+      store: snapshotBlocked.store,
+      lockImpl: async (operation) => operation(),
+      getJobImpl: async (id) => (
+        snapshotBlocked.jobs.get(id) || null
+      ),
+      getResumeImpl: async () => ({
+        resumeUri: "s3://private/current.pdf",
+      }),
+      terminalPreflightImpl:
+        resumeOnlyBackfillTerminalPreflight,
+      targetMembershipSnapshotImpl: async () => {
+        throw new Error("opaque vendor snapshot failure");
+      },
+      config: {
+        strictScreenerSource: true,
+      },
+      advanceExistingImpl: async (job) => job,
+    }),
+    {
+      code:
+        "RESUME_ONLY_BACKFILL_RECOVERY_TARGET_SNAPSHOT_FAILED",
+    },
+  );
+  assert.equal(
+    await snapshotBlocked.store.getRecovery(),
     null,
   );
 });

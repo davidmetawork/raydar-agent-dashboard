@@ -866,6 +866,8 @@ export default async function handler(req, res) {
         "RESUME_ONLY_BACKFILL_TIMESTAMP_INVALID",
       ]).has(code)
         ? 400
+        : code === "RESUME_ONLY_BACKFILL_RECOVERY_AUTH_EXPIRED"
+          ? 503
         : new Set([
             "RESUME_ONLY_BACKFILL_BUSY",
             "RESUME_ONLY_BACKFILL_CANARY_NOT_VERIFIED",
