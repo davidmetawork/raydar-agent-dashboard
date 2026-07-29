@@ -1,0 +1,1134 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+import {
+  resumeOnlyBackfillMissingResumeTransition,
+} from "../api/paraai/_lib/auto.mjs";
+import {
+  buildPreferenceRouting,
+  buildPreferenceRoutingInput,
+  buildSubmissionPayload,
+} from "../api/paraai/_lib/pipeline.mjs";
+import {
+  hashSubmissionPayload,
+} from "../api/paraai/_lib/store.mjs";
+import {
+  armResumeOnlyBackfillRemainder,
+  commitResumeOnlyBackfillFirstTen,
+  confidentHumanBackfillCall,
+  confidentHumanBackfillReference,
+  exactHumanBackfillNamesMatch,
+  matchHumanBackfillRosterRow,
+  mechanicalCanaryStatus,
+  readHumanBackfillPage,
+  readHumanSuccessRoster,
+  resumeOnlyBackfillPreparationDecision,
+  resumeOnlyBackfillReleaseCapacity,
+  runResumeOnlyBackfillReleaseTick,
+  runResumeOnlyBackfillPlanTick,
+  verifyResumeOnlyBackfillFirstTen,
+} from "../api/paraai/_lib/resume-only-backfill.mjs";
+
+const NOW = Date.parse("2026-07-29T18:00:00.000Z");
+const CALL_AT = "2026-07-01T18:00:00.000Z";
+
+function candidateHash(candidateUserId) {
+  return createHash("sha256")
+    .update("paraai-resume-only-backfill-candidate-v1")
+    .update("\0")
+    .update(candidateUserId)
+    .digest("hex");
+}
+
+function memoryStore() {
+  let control = null;
+  const entries = new Map();
+  const pending = new Set();
+  return {
+    async getControl() {
+      return control && structuredClone(control);
+    },
+    async setControl(value) {
+      control = structuredClone(value);
+      return structuredClone(control);
+    },
+    async addEntry(value) {
+      if (entries.has(value.id)) return false;
+      entries.set(value.id, structuredClone(value));
+      pending.add(value.id);
+      return true;
+    },
+    async getEntry(id) {
+      const value = entries.get(id);
+      return value && structuredClone(value);
+    },
+    async setEntry(value) {
+      entries.set(value.id, structuredClone(value));
+      return structuredClone(value);
+    },
+    async removePending(id) {
+      pending.delete(id);
+    },
+    async pendingIds(limit = 1) {
+      return [...pending]
+        .sort((left, right) => (
+          entries.get(left).callAt.localeCompare(
+            entries.get(right).callAt,
+          )
+          || left.localeCompare(right)
+        ))
+        .slice(0, limit);
+    },
+    async entries() {
+      return [...entries.values()].map((value) => (
+        structuredClone(value)
+      ));
+    },
+  };
+}
+
+function completePreferences() {
+  const input = buildPreferenceRoutingInput(null, {
+    country: "United States",
+  });
+  const routing = buildPreferenceRouting(
+    { roleTypes: ["sales"] },
+    input.native,
+    input.context,
+  );
+  return { input, routing };
+}
+
+function readyJob(id, index = 0) {
+  const { input, routing } = completePreferences();
+  return {
+    id,
+    revision: 0,
+    state: "ready_to_submit",
+    callSourceVerified: true,
+    callEndedAt: CALL_AT,
+    successfulCallVerified: true,
+    extracted: { roleTypes: ["sales"] },
+    identity: {
+      candidateUserId: `candidate-user-${index}`,
+      candidateId: `candidate-${index}`,
+      signals: ["linkedin", "scheduled_time"],
+      ambiguous: false,
+    },
+    submission: {
+      name: `Private Candidate ${index}`,
+      email: `private.${index}@example.test`,
+      linkedinUrl:
+        `https://www.linkedin.com/in/private-candidate-${index}`,
+      resumeUri: `s3://private/resume-${index}.pdf`,
+      screeningCallLink: `https://calls.example.test/${id}`,
+    },
+    reviewPreferences: routing.preferences,
+    reviewPolicy: {
+      ...routing.policy,
+      preferenceRoutingInput: input,
+    },
+    automation: {
+      mode: "backfill_only",
+      stepFailures: {},
+    },
+    journal: [],
+    createdAt: CALL_AT,
+    updatedAt: CALL_AT,
+  };
+}
+
+function agentCall(id) {
+  return {
+    botId: id,
+    source: { isScreener: true },
+    joinAt: CALL_AT,
+    endedAt: "2026-07-01T18:20:00.000Z",
+    verdict: {
+      verdict: "success",
+      userChars: 500,
+      speechDensity: 0.8,
+    },
+    media: { hasTranscript: true },
+    transcript: [
+      { role: "agent", text: "Tell me about your work." },
+      {
+        role: "candidate",
+        text: "I have led enterprise sales teams for several years.",
+      },
+      {
+        role: "candidate",
+        text: "I am now looking for another growth-stage company.",
+      },
+    ],
+  };
+}
+
+test("human discovery is restricted to transcript-backed phone transports", () => {
+  const phone = {
+    id: "human-call-1",
+    event_scheduled_at: CALL_AT,
+    meeting_platform: "PHONE/TWILIO",
+    has_transcript: true,
+  };
+  assert.equal(confidentHumanBackfillReference(phone), true);
+  assert.equal(confidentHumanBackfillReference({
+    ...phone,
+    meeting_platform: "GOOGLE_MEET",
+  }), false);
+  assert.equal(confidentHumanBackfillReference({
+    ...phone,
+    has_transcript: undefined,
+  }), true);
+
+  const call = {
+    humanCall: true,
+    humanPopulation: "phone_screen",
+    platform: "PHONE",
+    transcriptPresent: true,
+    substance: {
+      substantive: true,
+      speakers: 2,
+      quieterSpeakerChars: 800,
+    },
+    candidate: { fullName: "Private Candidate" },
+  };
+  assert.equal(confidentHumanBackfillCall(call), true);
+  assert.equal(confidentHumanBackfillCall({
+    ...call,
+    platform: "GOOGLE_MEET",
+  }), false);
+  assert.equal(confidentHumanBackfillCall({
+    ...call,
+    substance: { ...call.substance, substantive: false },
+  }), false);
+});
+
+test("human source requires the fresh complete roster and an exact one-to-one name/time join", async () => {
+  const rosterBody = {
+    ok: true,
+    generatedAt: new Date(NOW).toISOString(),
+    count: 2,
+    degraded: {
+      status: false,
+      history: false,
+      calendar: false,
+    },
+    calendarFeed: {
+      complete: true,
+      degraded: false,
+      stale: false,
+    },
+    rows: [{
+      key: "private-human-row-1",
+      candidate: "Anne-Marie O'Brien",
+      callType: "Human",
+      status: "Success",
+      startedAt: CALL_AT,
+    }, {
+      key: "private-agent-row-1",
+      candidate: "Private Agent",
+      callType: "Agent",
+      status: "Success",
+      startedAt: CALL_AT,
+    }],
+  };
+  let rosterUrl = null;
+  const rows = await readHumanSuccessRoster({
+    boundaryAt: new Date(NOW).toISOString(),
+    cutoffAt: new Date(
+      NOW - 45 * 24 * 60 * 60_000,
+    ).toISOString(),
+    now: NOW,
+    fetchImpl: async (url) => {
+      rosterUrl = new URL(url);
+      return new Response(
+        JSON.stringify(rosterBody),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    },
+  });
+  assert.equal(
+    rosterUrl.searchParams.has("resumeChaseGuard"),
+    true,
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, "Anne-Marie O'Brien");
+  assert.match(rows[0].rosterHash, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    exactHumanBackfillNamesMatch(
+      "Anne-Marie O'Brien",
+      "Anne Marie OBrien",
+    ),
+    false,
+    "joined hyphenated first names must not match a different tokenization",
+  );
+  assert.equal(
+    exactHumanBackfillNamesMatch(
+      "Anne-Marie O'Brien",
+      "Anne-Marie OBrien",
+    ),
+    true,
+  );
+
+  const meeting = {
+    id: "private-human-call-1",
+    event_scheduled_at: CALL_AT,
+    meeting_platform: "PHONE",
+    candidate_user: {
+      candidate: {
+        name: "Anne-Marie OBrien",
+      },
+    },
+  };
+  assert.equal(
+    matchHumanBackfillRosterRow(meeting, rows)?.rosterHash,
+    rows[0].rosterHash,
+  );
+  assert.equal(
+    matchHumanBackfillRosterRow(meeting, [
+      ...rows,
+      { ...rows[0], rosterHash: "c".repeat(64) },
+    ]),
+    null,
+    "more than one roster claim must fail closed",
+  );
+
+  await assert.rejects(
+    () => readHumanSuccessRoster({
+      boundaryAt: new Date(NOW).toISOString(),
+      cutoffAt: new Date(
+        NOW - 45 * 24 * 60 * 60_000,
+      ).toISOString(),
+      now: NOW,
+      fetchImpl: async () => new Response(JSON.stringify({
+        ...rosterBody,
+        degraded: {
+          ...rosterBody.degraded,
+          calendar: true,
+        },
+      }), { status: 200 }),
+    }),
+    { code: "RESUME_ONLY_BACKFILL_ROSTER_INVALID" },
+  );
+  await assert.rejects(
+    () => readHumanSuccessRoster({
+      boundaryAt: new Date(NOW).toISOString(),
+      cutoffAt: new Date(
+        NOW - 45 * 24 * 60 * 60_000,
+      ).toISOString(),
+      now: NOW,
+      fetchImpl: async () => new Response(JSON.stringify({
+        ...rosterBody,
+        calendarFeed: {
+          ...rosterBody.calendarFeed,
+          complete: false,
+        },
+      }), { status: 200 }),
+    }),
+    { code: "RESUME_ONLY_BACKFILL_ROSTER_INVALID" },
+  );
+});
+
+test("agency-wide human page is server-selected and validates cursor continuity", async () => {
+  let captured = null;
+  const page = await readHumanBackfillPage({
+    cursor: 50,
+    trpcGetImpl: async (proc, input) => {
+      captured = { proc, input };
+      return {
+        items: Array.from({ length: 2 }, (_, index) => ({
+          id: `human-${index}`,
+        })),
+        next_cursor: 52,
+      };
+    },
+  });
+  assert.equal(
+    captured.proc,
+    "candidateUserMeeting.getMeetingsForRecruiter",
+  );
+  assert.equal(captured.input.include_agency_calls, true);
+  assert.equal(captured.input.has_transcript, true);
+  assert.equal(
+    Object.hasOwn(captured.input, "owner_filter"),
+    false,
+  );
+  assert.equal(page.nextCursor, 52);
+  await assert.rejects(
+    () => readHumanBackfillPage({
+      cursor: 50,
+      trpcGetImpl: async () => ({
+        items: [{ id: "human-1" }],
+        next_cursor: 99,
+      }),
+    }),
+    { code: "RESUME_ONLY_BACKFILL_HUMAN_PAGE_INVALID" },
+  );
+});
+
+test("plan freezes 45 days, prepares server-selected calls, and returns aggregates only", async () => {
+  const store = memoryStore();
+  const jobs = new Map();
+  const ids = Array.from(
+    { length: 11 },
+    (_, index) => `bot_resume_only_${String(index).padStart(2, "0")}`,
+  );
+  const status = await runResumeOnlyBackfillPlanTick({
+    now: NOW,
+    store,
+    lockImpl: async (operation) => operation(),
+    readRecallPageImpl: async ({ boundaryAt, cursor, seenCursors }) => {
+      assert.equal(boundaryAt, new Date(NOW).toISOString());
+      assert.equal(cursor, null);
+      assert.deepEqual(seenCursors, []);
+      return {
+        exhausted: true,
+        nextCursor: null,
+        scanned: ids.length,
+        references: ids.map((id, index) => ({
+          id,
+          joinAt: new Date(
+            Date.parse(CALL_AT) + index * 1_000,
+          ).toISOString(),
+        })),
+      };
+    },
+    readHumanPageImpl: async () => ({
+      items: [],
+      nextCursor: null,
+      exhausted: true,
+    }),
+    readHumanRosterImpl: async () => [],
+    fetchAgentCall: async (id) => agentCall(id),
+    getJobImpl: async (id) => jobs.get(id) || null,
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/resume.pdf",
+    }),
+    prepareJobImpl: async ({ botId }) => {
+      const index = ids.indexOf(botId);
+      const job = readyJob(
+        botId,
+        index === 1 ? 0 : index,
+      );
+      jobs.set(botId, job);
+      return job;
+    },
+    advanceExistingImpl: async (job) => job,
+    queueStatsImpl: async () => ({
+      queued: 0,
+      due: 0,
+      leased: 0,
+    }),
+    config: {
+      strictScreenerSource: true,
+    },
+    budgetMs: 1_000,
+  });
+  assert.equal(status.status, "planned");
+  assert.equal(status.windowDays, 45);
+  assert.equal(status.sources.discovered, 11);
+  assert.equal(status.cohort.eligible, 11);
+  assert.equal(status.canary.selected, 10);
+  const storedControl = await store.getControl();
+  assert.equal(storedControl.canary.ids.includes(ids[0]), true);
+  assert.equal(
+    storedControl.canary.ids.includes(ids[1]),
+    false,
+    "the first ten must contain ten distinct candidates",
+  );
+  const serialized = JSON.stringify(status);
+  for (const id of ids) {
+    assert.equal(serialized.includes(id), false);
+  }
+  assert.equal(serialized.includes("candidate-user-"), false);
+  assert.equal(serialized.includes("@example.test"), false);
+});
+
+test("transient preparation failures leave the server-selected row pending for retry", async () => {
+  const store = memoryStore();
+  const id = "bot_retry_only_01";
+  let failures = 1;
+  let prepared = null;
+  const common = {
+    now: NOW,
+    store,
+    lockImpl: async (operation) => operation(),
+    readRecallPageImpl: async () => ({
+      exhausted: true,
+      nextCursor: null,
+      scanned: 1,
+      references: [{ id, joinAt: CALL_AT }],
+    }),
+    readHumanPageImpl: async () => ({
+      items: [],
+      nextCursor: null,
+      exhausted: true,
+    }),
+    readHumanRosterImpl: async () => [],
+    fetchAgentCall: async () => {
+      if (failures-- > 0) {
+        const error = new Error("temporary source failure");
+        error.code = "HTTP_503";
+        throw error;
+      }
+      return agentCall(id);
+    },
+    getJobImpl: async () => prepared,
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/resume.pdf",
+    }),
+    prepareJobImpl: async () => {
+      prepared = readyJob(id, 1);
+      return prepared;
+    },
+    advanceExistingImpl: async (job) => job,
+    queueStatsImpl: async () => ({
+      queued: 0,
+      due: 0,
+      leased: 0,
+    }),
+    config: {
+      strictScreenerSource: true,
+    },
+    budgetMs: 1_000,
+  };
+  await assert.rejects(
+    () => runResumeOnlyBackfillPlanTick(common),
+    { code: "RESUME_ONLY_BACKFILL_PREPARATION_RETRY" },
+  );
+  assert.deepEqual(await store.pendingIds(10), [id]);
+  const retried = await runResumeOnlyBackfillPlanTick(common);
+  assert.equal(retried.status, "insufficient");
+  assert.equal(retried.cohort.eligible, 1);
+  assert.equal(retried.cohort.excluded, 0);
+});
+
+test("planning preserves in-flight, submitted, technical, and resume-wait jobs", () => {
+  const ready = readyJob("bot_preserve_ready", 1);
+  assert.deepEqual(
+    resumeOnlyBackfillPreparationDecision(ready),
+    {
+      prepare: true,
+      force: false,
+      reason: null,
+    },
+  );
+  assert.equal(
+    resumeOnlyBackfillPreparationDecision({
+      ...ready,
+      state: "submitting",
+    }).reason,
+    "submission_in_flight",
+  );
+  assert.equal(
+    resumeOnlyBackfillPreparationDecision({
+      ...ready,
+      state: "awaiting_matches",
+    }).reason,
+    "already_submitted",
+  );
+  assert.equal(
+    resumeOnlyBackfillPreparationDecision({
+      ...ready,
+      state: "waiting_for_resume",
+      automation: {
+        ...ready.automation,
+        resumeWait: {
+          source: "authorized_backfill",
+        },
+      },
+    }).reason,
+    "resume_wait_active",
+  );
+  assert.equal(
+    resumeOnlyBackfillPreparationDecision({
+      ...ready,
+      automation: {
+        ...ready.automation,
+        lastFailure: {
+          code: "AUTH_EXPIRED",
+        },
+      },
+    }).reason,
+    "technical_review",
+  );
+  assert.equal(
+    resumeOnlyBackfillPreparationDecision({
+      ...ready,
+      submitAttemptStartedAt: CALL_AT,
+    }).reason,
+    "already_submitted",
+  );
+});
+
+test("release capacity never crosses the durable queue ceilings", () => {
+  assert.equal(
+    resumeOnlyBackfillReleaseCapacity({
+      queued: 0,
+      due: 0,
+      leased: 0,
+    }),
+    5,
+  );
+  assert.equal(
+    resumeOnlyBackfillReleaseCapacity({
+      queued: 199,
+      due: 9,
+      leased: 4,
+    }),
+    1,
+  );
+  assert.equal(
+    resumeOnlyBackfillReleaseCapacity({
+      queued: 10,
+      due: 10,
+      leased: 0,
+    }),
+    0,
+  );
+  assert.equal(
+    resumeOnlyBackfillReleaseCapacity({
+      queued: 10,
+      due: 0,
+      leased: 5,
+    }),
+    0,
+  );
+  assert.throws(
+    () => resumeOnlyBackfillReleaseCapacity({
+      queued: undefined,
+      due: 0,
+      leased: 0,
+    }),
+    { code: "RESUME_ONLY_BACKFILL_QUEUE_INVALID" },
+  );
+});
+
+test("first-ten commit rechecks resumes and sets a no-chase authorization fence", async () => {
+  const store = memoryStore();
+  const jobs = new Map();
+  const ids = Array.from(
+    { length: 10 },
+    (_, index) => `bot_commit_only_${String(index).padStart(2, "0")}`,
+  );
+  const manifest = "a".repeat(64);
+  await store.setControl({
+    version: 1,
+    status: "planned",
+    boundaryAt: new Date(NOW).toISOString(),
+    cutoffAt: new Date(
+      NOW - 45 * 24 * 60 * 60_000,
+    ).toISOString(),
+    recall: {
+      cursor: null,
+      seenCursors: [],
+      exhausted: true,
+      scanned: 10,
+      discovered: 10,
+    },
+    human: {
+      cursor: 0,
+      exhausted: true,
+      scanned: 0,
+      discovered: 0,
+    },
+    preparation: {
+      attempted: 10,
+      eligible: 10,
+      excluded: 0,
+    },
+    createdAt: new Date(NOW).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+    manifestDigest: manifest,
+    canary: {
+      status: "planned",
+      ids,
+      committedAt: null,
+      verifiedAt: null,
+    },
+    release: {
+      status: "not_armed",
+      authorized: 0,
+      excluded: 0,
+      batchOrdinal: 0,
+      armedAt: null,
+      completedAt: null,
+    },
+  });
+  for (const [index, id] of ids.entries()) {
+    const job = readyJob(id, index);
+    jobs.set(id, job);
+    await store.addEntry({
+      version: 1,
+      id,
+      source: "agent",
+      callAt: CALL_AT,
+      status: "eligible",
+      candidateHash: null,
+      reason: null,
+      authorizedAt: null,
+    });
+    const entry = await store.getEntry(id);
+    await store.setEntry({
+      ...entry,
+      candidateHash: candidateHash(
+        job.identity.candidateUserId,
+      ),
+    });
+  }
+  const enqueued = [];
+  const status = await commitResumeOnlyBackfillFirstTen({
+    now: NOW,
+    store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => jobs.get(id) || null,
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    saveJobImpl: async (job, expectedRevision) => {
+      assert.equal(expectedRevision, jobs.get(job.id).revision);
+      const saved = {
+        ...job,
+        revision: expectedRevision + 1,
+      };
+      jobs.set(job.id, saved);
+      return saved;
+    },
+    enqueueImpl: async (id, options) => {
+      enqueued.push({ id, options });
+      return { enqueued: true, duplicate: false };
+    },
+    queueStatsImpl: async () => ({
+      queued: 10,
+      due: 10,
+      leased: 0,
+    }),
+  });
+  assert.equal(status.status, "canary_running");
+  assert.equal(status.committed, 10);
+  assert.equal(enqueued.length, 10);
+  for (const job of jobs.values()) {
+    assert.equal(job.automation.mode, "authorized_backfill");
+    assert.equal(job.automation.resumeOnlySubmit, true);
+    assert.equal(
+      job.automation.resumeOnlyManifestDigest,
+      manifest,
+    );
+    assert.equal(job.automation.resumeOnlyCohort, "canary");
+    assert.equal(job.automation.resumeWait, null);
+    assert.equal(
+      job.automation.preferenceRerouteRequired,
+      true,
+    );
+  }
+  assert.equal(
+    enqueued.every(({ options }) => (
+      options.source === "authorized_backfill"
+    )),
+    true,
+  );
+});
+
+function verifiedCanaryJob(id, index, manifest) {
+  const base = readyJob(id, index);
+  const batchAt = "2026-07-29T18:00:00.000Z";
+  const prepared = {
+    ...base,
+    state: "awaiting_matches",
+    automation: {
+      ...base.automation,
+      mode: "authorized_backfill",
+      backfillBatchEntryAt: batchAt,
+      resumeOnlySubmit: true,
+      resumeOnlyManifestDigest: manifest,
+      resumeOnlyCohort: "canary",
+      resumeWait: null,
+      preferenceRerouteRequired: false,
+      preferenceRoutedAt: "2026-07-29T18:01:00.000Z",
+      stepFailures: {},
+    },
+    submitAttemptStartedAt: "2026-07-29T18:02:00.000Z",
+    submitAcceptedAt: "2026-07-29T18:03:00.000Z",
+    submissionApprovalCheckedAt: "2026-07-29T18:04:00.000Z",
+    matchLegStartedAt: "2026-07-29T18:04:00.000Z",
+    submitReadbackVerified: true,
+    error: null,
+    journal: [{
+      at: "2026-07-29T18:04:00.000Z",
+      detail: "Paraform submission verified",
+    }],
+  };
+  return {
+    ...prepared,
+    submitPayloadHash: hashSubmissionPayload(
+      buildSubmissionPayload(prepared),
+    ),
+  };
+}
+
+test("mechanical first-ten verification requires ten real submissions and every resume-only fence", async () => {
+  const ids = Array.from(
+    { length: 10 },
+    (_, index) => `bot_verified_only_${String(index).padStart(2, "0")}`,
+  );
+  const manifest = "b".repeat(64);
+  const jobs = new Map(ids.map((id, index) => [
+    id,
+    verifiedCanaryJob(id, index, manifest),
+  ]));
+  const entries = ids.map((id, index) => ({
+    version: 1,
+    id,
+    source: "agent",
+    callAt: CALL_AT,
+    status: "authorized",
+    candidateHash: String(index).padStart(64, "a"),
+    reason: null,
+    authorizedAt: "2026-07-29T18:00:00.000Z",
+  }));
+  const control = {
+    status: "canary_running",
+    manifestDigest: manifest,
+    canary: {
+      status: "running",
+      ids,
+    },
+  };
+  const verified = await mechanicalCanaryStatus(
+    control,
+    entries,
+    {
+      getJobImpl: async (id) => jobs.get(id),
+    },
+  );
+  assert.equal(verified.verified, true);
+  assert.equal(verified.talentNetworkVisible, 10);
+  assert.equal(verified.preexistingVisible, 0);
+
+  jobs.get(ids[0]).automation.resumeWait = {
+    source: "authorized_backfill",
+  };
+  const chaseable = await mechanicalCanaryStatus(
+    control,
+    entries,
+    {
+      getJobImpl: async (id) => jobs.get(id),
+    },
+  );
+  assert.equal(chaseable.resumeOnlyFenceIntact, false);
+  assert.equal(chaseable.verified, false);
+
+  jobs.set(ids[0], {
+    ...verifiedCanaryJob(ids[0], 0, manifest),
+    journal: [{
+      detail:
+        "Talent Network membership already visible; submission write skipped",
+    }, {
+      detail: "Paraform submission verified",
+    }],
+  });
+  const preexisting = await mechanicalCanaryStatus(
+    control,
+    entries,
+    {
+      getJobImpl: async (id) => jobs.get(id),
+    },
+  );
+  assert.equal(preexisting.preexistingVisible, 1);
+  assert.equal(preexisting.verified, false);
+});
+
+test("the remainder cannot arm before verification and releases only after the ten-write gate", async () => {
+  const store = memoryStore();
+  const ids = Array.from(
+    { length: 10 },
+    (_, index) => `bot_release_canary_${String(index).padStart(2, "0")}`,
+  );
+  const remainderId = "bot_release_remainder_01";
+  const missingResumeId = "bot_release_remainder_02";
+  const manifest = "d".repeat(64);
+  const jobs = new Map(ids.map((id, index) => [
+    id,
+    verifiedCanaryJob(id, index, manifest),
+  ]));
+  jobs.set(remainderId, readyJob(remainderId, 20));
+  jobs.set(
+    missingResumeId,
+    readyJob(missingResumeId, 21),
+  );
+  await store.setControl({
+    version: 1,
+    status: "canary_running",
+    boundaryAt: new Date(NOW).toISOString(),
+    cutoffAt: new Date(
+      NOW - 45 * 24 * 60 * 60_000,
+    ).toISOString(),
+    recall: {
+      cursor: null,
+      seenCursors: [],
+      exhausted: true,
+      scanned: 12,
+      discovered: 12,
+    },
+    human: {
+      cursor: 0,
+      exhausted: true,
+      scanned: 0,
+      discovered: 0,
+      rosterSuccessful: 0,
+    },
+    preparation: {
+      attempted: 12,
+      eligible: 12,
+      excluded: 0,
+    },
+    createdAt: new Date(NOW).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+    manifestDigest: manifest,
+    canary: {
+      status: "running",
+      ids,
+      committedAt: new Date(NOW).toISOString(),
+      verifiedAt: null,
+    },
+    release: {
+      status: "not_armed",
+      authorized: 0,
+      excluded: 0,
+      batchOrdinal: 0,
+      armedAt: null,
+      completedAt: null,
+    },
+  });
+  for (const [index, id] of ids.entries()) {
+    await store.addEntry({
+      version: 1,
+      id,
+      source: "agent",
+      callAt: CALL_AT,
+      status: "authorized",
+      candidateHash: candidateHash(`candidate-user-${index}`),
+      reason: null,
+      authorizedAt: new Date(NOW).toISOString(),
+    });
+  }
+  await store.addEntry({
+    version: 1,
+    id: remainderId,
+    source: "agent",
+    callAt: CALL_AT,
+    status: "eligible",
+    candidateHash: candidateHash("candidate-user-20"),
+    reason: null,
+    authorizedAt: null,
+  });
+  await store.addEntry({
+    version: 1,
+    id: missingResumeId,
+    source: "agent",
+    callAt: CALL_AT,
+    status: "eligible",
+    candidateHash: candidateHash("candidate-user-21"),
+    reason: null,
+    authorizedAt: null,
+  });
+  const common = {
+    store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => jobs.get(id) || null,
+    queueStatsImpl: async () => ({
+      queued: 0,
+      due: 0,
+      leased: 0,
+    }),
+  };
+  const unverifiedControl = await store.getControl();
+  await store.setControl({
+    ...unverifiedControl,
+    status: "canary_verified",
+    canary: {
+      ...unverifiedControl.canary,
+      status: "verified",
+    },
+  });
+  jobs.get(ids[0]).automation.resumeWait = {
+    source: "authorized_backfill",
+  };
+  await assert.rejects(
+    () => armResumeOnlyBackfillRemainder(common),
+    { code: "RESUME_ONLY_BACKFILL_CANARY_NOT_VERIFIED" },
+  );
+  jobs.set(
+    ids[0],
+    verifiedCanaryJob(ids[0], 0, manifest),
+  );
+  await store.setControl(unverifiedControl);
+  await assert.rejects(
+    () => armResumeOnlyBackfillRemainder(common),
+    { code: "RESUME_ONLY_BACKFILL_CANARY_NOT_VERIFIED" },
+  );
+  const verified = await verifyResumeOnlyBackfillFirstTen(common);
+  assert.equal(verified.verificationRecorded, true);
+  const armed = await armResumeOnlyBackfillRemainder({
+    ...common,
+    now: NOW,
+  });
+  assert.equal(armed.status, "running");
+
+  const enqueued = [];
+  const released = await runResumeOnlyBackfillReleaseTick({
+    ...common,
+    now: NOW,
+    getResumeImpl: async (candidateUserId) => (
+      candidateUserId === "candidate-user-21"
+        ? {}
+        : {
+            resumeUri: "s3://private/current.pdf",
+          }
+    ),
+    saveJobImpl: async (job, expectedRevision) => {
+      assert.equal(expectedRevision, jobs.get(job.id).revision);
+      const saved = {
+        ...job,
+        revision: expectedRevision + 1,
+      };
+      jobs.set(job.id, saved);
+      return saved;
+    },
+    enqueueImpl: async (id, options) => {
+      enqueued.push({ id, options });
+      return {
+        enqueued: true,
+        duplicate: false,
+      };
+    },
+  });
+  assert.deepEqual(released.batch, {
+    attempted: 2,
+    authorized: 1,
+    excluded: 1,
+  });
+  assert.deepEqual(
+    enqueued.map(({ id }) => id),
+    [remainderId],
+  );
+  assert.equal(
+    enqueued[0].options.source,
+    "authorized_backfill",
+  );
+  const complete = await runResumeOnlyBackfillReleaseTick({
+    ...common,
+    now: NOW,
+  });
+  assert.equal(complete.status, "complete");
+});
+
+test("a disappearing resume stops in review without creating a chase plan", async () => {
+  const job = readyJob("bot_resume_disappeared", 1);
+  const stopped = resumeOnlyBackfillMissingResumeTransition({
+    ...job,
+    automation: {
+      ...job.automation,
+      mode: "authorized_backfill",
+      resumeOnlySubmit: true,
+      resumeWait: null,
+    },
+  }, {
+    now: NOW,
+  });
+  assert.equal(stopped.state, "needs_review");
+  assert.equal(
+    stopped.reviewReason,
+    "resume_only_backfill_resume_missing",
+  );
+  assert.equal(stopped.automation.resumeWait, null);
+  assert.equal(
+    stopped.automation.resumeWaitSweepEligible,
+    false,
+  );
+  assert.match(
+    stopped.journal.at(-1).detail,
+    /stopped without resume chase/u,
+  );
+  const source = await readFile(
+    new URL("../api/paraai/_lib/auto.mjs", import.meta.url),
+    "utf8",
+  );
+  const missingResume = source.indexOf(
+    "if (!resume.resumeUri)",
+  );
+  const noChaseFence = source.indexOf(
+    "if (resumeOnlySubmit)",
+    missingResume,
+  );
+  const legacyResumeWait = source.indexOf(
+    "if (config.resumeWaitEnabled)",
+    missingResume,
+  );
+  assert.ok(missingResume >= 0);
+  assert.ok(noChaseFence > missingResume);
+  assert.ok(legacyResumeWait > noChaseFence);
+  assert.match(
+    source.slice(noChaseFence, legacyResumeWait),
+    /resumeOnlyBackfillMissingResumeTransition/u,
+  );
+});
+
+test("worker exposes only no-parameter controlled modes", async () => {
+  const source = await readFile(
+    new URL("../api/paraai/worker.mjs", import.meta.url),
+    "utf8",
+  );
+  for (const mode of [
+    "resume-only-backfill-plan",
+    "resume-only-backfill-commit-first-ten",
+    "resume-only-backfill-verify-first-ten",
+    "resume-only-backfill-arm",
+    "resume-only-backfill-tick",
+    "resume-only-backfill-status",
+  ]) {
+    assert.match(source, new RegExp(`"${mode}"`, "u"));
+  }
+  assert.match(
+    source,
+    /\["resume-only-backfill-plan", new Set\(\["mode"\]\)\]/u,
+  );
+  assert.match(
+    source,
+    /\["resume-only-backfill-arm", new Set\(\["mode"\]\)\]/u,
+  );
+  assert.match(
+    source,
+    /caller_parameters_forbidden/u,
+  );
+  assert.match(
+    source,
+    /Object\.keys\(query\)\.some\(\(field\) => field !== "mode"\)/u,
+  );
+  const controller = await readFile(
+    new URL(
+      "../api/paraai/_lib/resume-only-backfill.mjs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const discoveryAdmission = controller.slice(
+    controller.indexOf("async addEntry(entry)"),
+    controller.indexOf("async getEntry(id)"),
+  );
+  assert.match(discoveryAdmission, /HEXISTS/u);
+  assert.match(discoveryAdmission, /redis\.call\('HSET'/u);
+  assert.match(discoveryAdmission, /redis\.call\('ZADD'/u);
+  assert.match(
+    controller,
+    /rosterHash: entry\.rosterHash \|\| null/u,
+  );
+});
