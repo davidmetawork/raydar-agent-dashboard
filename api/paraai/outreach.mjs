@@ -4,6 +4,7 @@ import { cors, requireAuth } from "./_lib/core.mjs";
 import {
   discoverOutreachRequestContact,
   draftOutreachRequest,
+  expiredNoDigestOverrideEligible,
   handleOutreachFailure,
   outreachConfig,
   outreachExecutionEnabled,
@@ -112,6 +113,43 @@ export default async function handler(req, res) {
         throw error;
       }
       return res.status(200).json({ ok: true, action: result.action, requestId });
+    }
+    if (action === "send-expired-without-digest") {
+      const requestId = String(body.requestId || "").trim();
+      if (body.confirmation !== `SEND EXPIRED WITHOUT DIGEST ${requestId}`) {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      const history = await readSubmissionRequestHistory();
+      const request = history.find((row) => row.id === requestId);
+      if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
+      if (!expiredNoDigestOverrideEligible(request)) {
+        return res.status(409).json({ ok: false, error: "request_not_expired" });
+      }
+      let result;
+      try {
+        // Human-only recovery for a request that expired before its first email.
+        // It deliberately skips the now-impossible digest mutation, opens a new
+        // Gmail thread, and keeps all outbox/reply/follow-up safeguards.
+        result = await processMatchRequest(request, history, {
+          mode: "send",
+          config,
+          allowAfterReply: true,
+          allowWithoutDigest: true,
+        });
+      } catch (error) {
+        await handleOutreachFailure(error, request, { config }).catch(() => {});
+        throw error;
+      }
+      return res.status(200).json({
+        ok: true,
+        action: result.action,
+        requestId,
+        deliveryMode: "expired_without_digest",
+      });
     }
     if (action === "inspect-pending") {
       const [history, states] = await Promise.all([
