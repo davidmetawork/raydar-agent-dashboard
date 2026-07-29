@@ -6,10 +6,14 @@ import {
   claimSubmission,
   claimSubmissionAttempt,
   getSubmissionClaim,
+  listInterestHandoffRecords,
   listPendingJobs,
+  projectInterestHandoff,
+  recordInterestHandoff,
   recordSubmissionOutcome,
   recordSubmissionPrepared,
   releaseLock,
+  resolveInterestHandoff,
   saveJob,
   startSubmissionAttempt,
 } from "../api/paraai/_lib/interest-store.mjs";
@@ -186,7 +190,7 @@ test("unknown can reconcile to verified but cannot be rewritten as accepted", as
 function inMemoryQueueKv() {
   const values = new Map();
   const sets = new Map();
-  return async (args) => {
+  const kvImpl = async (args) => {
     const [command, key, ...rest] = args;
     if (command === "GET") return values.get(key) ?? null;
     if (command === "SET") {
@@ -204,6 +208,7 @@ function inMemoryQueueKv() {
       return sets.get(key)?.delete(rest[0]) ? 1 : 0;
     }
     if (command === "SMEMBERS") return [...(sets.get(key) || [])];
+    if (command === "DEL") return values.delete(key) ? 1 : 0;
     if (command === "EVAL") {
       const lockKey = args[3];
       const token = args[4];
@@ -213,6 +218,9 @@ function inMemoryQueueKv() {
     }
     throw new Error(`unexpected queue command ${command}`);
   };
+  kvImpl.values = values;
+  kvImpl.sets = sets;
+  return kvImpl;
 }
 
 test("pending jobs survive the sweep boundary and leave the queue at either terminal stage", async () => {
@@ -233,6 +241,109 @@ test("pending jobs survive the sweep boundary and leave the queue at either term
   assert.deepEqual(await listPendingJobs(10, { kvImpl }), []);
   await saveJob({ ...pending, stage: "awaiting_human_submission" }, { kvImpl });
   assert.deepEqual(await listPendingJobs(10, { kvImpl }), []);
+});
+
+test("terminal handoffs are minimal, batch-addressed, and independently resolvable", async () => {
+  const kvImpl = inMemoryQueueKv();
+  const shared = {
+    candidateUserId: "candidate-1",
+    candidateId: "candidate-record-1",
+    stage: "email_complete",
+    stopped: { paused: 1, alreadyPaused: 2, vendorPayload: "do-not-copy" },
+    emailed: {
+      sent: true,
+      messageId: "private-provider-id",
+      recipient: "private@example.com",
+    },
+    rolloutPhase: "human_handoff",
+    transcript: "private transcript",
+    generatedDraft: "private candidate prose",
+  };
+  await recordInterestHandoff("candidate-1", {
+    ...shared,
+    batchId: "batch-1",
+    roles: ["role-1"],
+    submissions: [{
+      roleId: "role-1",
+      stage: "would_submit",
+      blockers: ["preferences_incomplete", "AUTH_EXPIRED", "private@example.com"],
+      draft: "do-not-copy",
+    }],
+  }, ["human_submission_required", "private prose"], { kvImpl });
+  await recordInterestHandoff("candidate-1", {
+    ...shared,
+    batchId: "batch-2",
+    roles: ["role-2"],
+    submissions: [{
+      roleId: "role-2",
+      stage: "would_submit",
+      blockers: [],
+    }],
+  }, ["human_submission_required"], { kvImpl });
+
+  const records = await listInterestHandoffRecords(10, { kvImpl });
+  assert.deepEqual(
+    records.map((record) => record.batchId).sort(),
+    ["batch-1", "batch-2"],
+  );
+  const first = records.find((record) => record.batchId === "batch-1");
+  assert.deepEqual(
+    first.submissions[0].blockers,
+    ["preferences_incomplete", "auth_expired"],
+  );
+  assert.deepEqual(first.reasons, ["human_submission_required"]);
+  const durableJson = [...kvImpl.values.values()].join("\n");
+  assert.doesNotMatch(durableJson, /private@example\.com|private transcript|candidate prose|provider-id|do-not-copy/);
+  const handoffMembers = [...(kvImpl.sets.get("paraai:interest:handoff:index") || [])];
+  assert.equal(handoffMembers.length, 2);
+  assert.ok(handoffMembers.every((member) => /^[a-f0-9]{64}:[a-f0-9]{64}$/u.test(member)));
+
+  const immutable = await recordInterestHandoff("candidate-1", {
+    ...shared,
+    batchId: "batch-1",
+    roles: ["role-should-not-overwrite"],
+    submissions: [],
+  }, ["shadow_would_submit"], { kvImpl });
+  assert.deepEqual(immutable.roles, ["role-1"]);
+  assert.deepEqual(immutable.reasons, ["human_submission_required"]);
+
+  assert.equal(
+    await resolveInterestHandoff("candidate-1", "batch-1", { kvImpl }),
+    true,
+  );
+  assert.equal(
+    await resolveInterestHandoff("candidate-1", "batch-1", { kvImpl }),
+    false,
+  );
+  assert.deepEqual(
+    (await listInterestHandoffRecords(10, { kvImpl }))
+      .map((record) => record.batchId),
+    ["batch-2"],
+  );
+  const afterResolve = await recordInterestHandoff("candidate-1", {
+    ...shared,
+    batchId: "batch-1",
+    roles: ["role-should-not-resurrect"],
+    submissions: [],
+  }, ["human_submission_required"], { kvImpl });
+  assert.equal(afterResolve.state, "resolved");
+  assert.deepEqual(
+    (await listInterestHandoffRecords(10, { kvImpl }))
+      .map((record) => record.batchId),
+    ["batch-2"],
+  );
+});
+
+test("handoff projection rejects missing batches and strips free-form reason text", () => {
+  assert.throws(
+    () => projectInterestHandoff("candidate-1", {}, []),
+    /batchId required/,
+  );
+  const projected = projectInterestHandoff("candidate-1", {
+    batchId: "batch-1",
+    roles: ["role-1"],
+  }, ["shadow_would_submit", "contains private prose"]);
+  assert.deepEqual(projected.reasons, ["shadow_would_submit"]);
 });
 
 test("lock release is an atomic token check", async () => {

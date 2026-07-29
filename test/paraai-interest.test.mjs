@@ -11,12 +11,15 @@ import {
 import {
   interestConfig,
   interestEmailPlan,
+  interestJobAcceptsMoreRoles,
+  interestJobDefersNewRoles,
   interestJobExecutionConfig,
   interestJobRolloutPhase,
   interestRolloutPhase,
   interestStopCanProceed,
   interestSweepComplete,
   interestSweepWindow,
+  interestTerminalHandoffReasons,
   interestWorkerMaySubmit,
   INTEREST_ROLLOUT_PHASE,
   listInterestHandoffs,
@@ -64,6 +67,46 @@ test("multiple roles in one batch are all detected", () => {
     { r1: "APPLIED_TO_ROLE", r2: "APPLIED_TO_ROLE", r3: "PENDING" },
   );
   assert.deepEqual(d.newlyInterested.sort(), ["r1", "r2"]);
+});
+
+test("a terminal batch is immutable and a later organic transition needs a new batch", () => {
+  assert.equal(interestJobAcceptsMoreRoles(null), false);
+  assert.equal(interestJobAcceptsMoreRoles({ stage: "detected" }), true);
+  assert.equal(interestJobAcceptsMoreRoles({ stage: "email_complete" }), false);
+  assert.equal(interestJobDefersNewRoles({ stage: "email_complete" }), true);
+  assert.equal(interestJobDefersNewRoles({ stage: "evaluated" }), false);
+  assert.equal(interestJobAcceptsMoreRoles({ stage: "done" }), false);
+  assert.equal(
+    interestJobAcceptsMoreRoles({ stage: "awaiting_human_submission" }),
+    false,
+  );
+  assert.deepEqual(
+    interestTerminalHandoffReasons({
+      stage: "done",
+      submissions: [{ stage: "would_submit" }],
+    }),
+    ["shadow_would_submit"],
+  );
+  assert.deepEqual(
+    interestTerminalHandoffReasons({ stage: "awaiting_human_submission" }),
+    ["human_submission_required"],
+  );
+  assert.deepEqual(
+    interestTerminalHandoffReasons({
+      stage: "done",
+      submissions: [{ stage: "blocked" }],
+    }),
+    [],
+  );
+});
+
+test("a deferred state write keeps a sweep window pinned for retry", () => {
+  assert.equal(interestSweepComplete({
+    populationSize: 50,
+    candidatesRead: 50,
+    readErrors: 0,
+    stateDeferrals: 1,
+  }), false);
 });
 
 test("a population sweep is healthy only when every candidate read succeeds", () => {
@@ -434,6 +477,7 @@ test("the worker can never make the final candidate submission", () => {
 
 test("handoff feed hydrates identity transiently and never exposes email", async () => {
   const handoffs = await listInterestHandoffs({
+    listHandoffsImpl: async () => [],
     listReviewsImpl: async () => [{
       candidateUserId: "candidate-user-1",
       reasons: ["human_submission_required"],
@@ -479,6 +523,111 @@ test("handoff feed hydrates identity transiently and never exposes email", async
   assert.equal(handoffs[0].roles[0].title, "Founding Engineer");
   assert.equal("email" in handoffs[0], false);
   assert.match(handoffs[0].candidateHref, /candidate-user-1/);
+});
+
+test("two archived batches for one candidate remain independently visible", async () => {
+  let candidateReads = 0;
+  const handoffs = await listInterestHandoffs({
+    listHandoffsImpl: async () => [
+      {
+        candidateUserId: "candidate-user-1",
+        candidateId: "candidate-1",
+        batchId: "batch-1",
+        mode: "shadow_observation",
+        reasons: ["shadow_would_submit"],
+        roles: ["role-1"],
+        submissions: [{ roleId: "role-1", stage: "would_submit", blockers: [] }],
+        stopped: { paused: 0 },
+        emailed: { sent: false, skipped: "dry_run" },
+        updatedAt: "2026-07-29T18:00:00Z",
+      },
+      {
+        candidateUserId: "candidate-user-1",
+        candidateId: "candidate-1",
+        batchId: "batch-2",
+        mode: "human_submission_required",
+        reasons: ["human_submission_required"],
+        roles: ["role-2"],
+        submissions: [{ roleId: "role-2", stage: "would_submit", blockers: [] }],
+        stopped: { paused: 1 },
+        emailed: { sent: true },
+        updatedAt: "2026-07-29T19:00:00Z",
+      },
+    ],
+    listReviewsImpl: async () => [],
+    trpcGetImpl: async (proc, input) => {
+      if (proc === "candidateUser.getCandidateUserById") {
+        candidateReads++;
+        return {
+          candidate: {
+            id: "candidate-1",
+            name: "Taylor Example",
+            email: "private@example.com",
+          },
+        };
+      }
+      if (proc === "role.getRoleByIdSimple") {
+        return {
+          id: input.role_id,
+          title: input.role_id === "role-1" ? "Role One" : "Role Two",
+        };
+      }
+      throw new Error(`unexpected procedure ${proc}`);
+    },
+  });
+  assert.equal(handoffs.length, 2);
+  assert.deepEqual(
+    handoffs.map((handoff) => handoff.batchId),
+    ["batch-2", "batch-1"],
+  );
+  assert.equal(candidateReads, 1);
+  assert.equal(handoffs[0].mode, "human_submission_required");
+  assert.equal(handoffs[1].mode, "shadow_observation");
+  assert.equal("email" in handoffs[0], false);
+});
+
+test("an archive suppresses only its matching legacy batch", async () => {
+  const handoffs = await listInterestHandoffs({
+    listHandoffsImpl: async () => [{
+      candidateUserId: "candidate-user-1",
+      candidateId: "candidate-1",
+      batchId: "batch-1",
+      mode: "shadow_observation",
+      reasons: ["shadow_would_submit"],
+      roles: ["role-1"],
+      submissions: [],
+    }],
+    listReviewsImpl: async () => [
+      {
+        candidateUserId: "candidate-user-1",
+        batchId: "batch-1",
+        reasons: ["shadow_would_submit"],
+      },
+      {
+        candidateUserId: "candidate-user-1",
+        batchId: "batch-2",
+        reasons: ["human_submission_required"],
+      },
+    ],
+    getJobImpl: async () => ({
+      candidateUserId: "candidate-user-1",
+      candidateId: "candidate-1",
+      batchId: "batch-2",
+      roles: ["role-2"],
+      submissions: [],
+    }),
+    trpcGetImpl: async (proc, input) => {
+      if (proc === "candidateUser.getCandidateUserById") {
+        return { candidate: { id: "candidate-1", name: "Taylor Example" } };
+      }
+      return { id: input.role_id, title: input.role_id };
+    },
+  });
+  assert.equal(handoffs.length, 2);
+  assert.deepEqual(
+    handoffs.map((handoff) => handoff.roles[0].roleId).sort(),
+    ["role-1", "role-2"],
+  );
 });
 
 test("submit preflight pins Paraform's five required candidate preference fields", () => {

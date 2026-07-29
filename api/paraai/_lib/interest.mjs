@@ -41,6 +41,8 @@ import {
   releaseLock,
   recordReview,
   listReviews,
+  recordInterestHandoff,
+  listInterestHandoffRecords,
   recordSweep,
   getSweepState,
   appendJournal,
@@ -194,6 +196,32 @@ export function interestJobExecutionConfig(config = {}, job = {}) {
   };
 }
 
+export function interestJobAcceptsMoreRoles(job = {}) {
+  return Boolean(
+    job
+    && ![
+      "done",
+      "awaiting_human_submission",
+      "email_complete",
+    ].includes(String(job.stage || "")),
+  );
+}
+
+export function interestJobDefersNewRoles(job = {}) {
+  return String(job?.stage || "") === "email_complete";
+}
+
+export function interestTerminalHandoffReasons(job = {}) {
+  if (job?.stage === "awaiting_human_submission") {
+    return ["human_submission_required"];
+  }
+  const bankable = (Array.isArray(job?.submissions) ? job.submissions : [])
+    .some((submission) => ["would_submit", "verified"].includes(submission?.stage));
+  return job?.stage === "done" && bankable
+    ? ["shadow_would_submit"]
+    : [];
+}
+
 export function interestEmailPlan({
   config,
   paraformOwnsConfirmation = false,
@@ -302,6 +330,7 @@ export function interestSweepComplete({
   populationSize,
   candidatesRead,
   readErrors,
+  stateDeferrals = 0,
 }) {
   const population = Number(populationSize);
   const read = Number(candidatesRead);
@@ -309,7 +338,8 @@ export function interestSweepComplete({
     && population > 0
     && Number.isSafeInteger(read)
     && read === population
-    && Number(readErrors) === 0;
+    && Number(readErrors) === 0
+    && Number(stateDeferrals) === 0;
 }
 
 export function interestSweepWindow({
@@ -351,6 +381,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     detected: [],
     declined: 0,
     skippedBeforeCutoff: 0,
+    stateDeferrals: 0,
     durationMs: 0,
   };
 
@@ -393,36 +424,72 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     }
 
     result.declined += diff.declined.length;
+    let snapshotDeferred = false;
 
     if (diff.newlyInterested.length) {
       // Forward-only: nothing before the pinned cutoff is ever acted on.
       if (config.notBefore && now < config.notBefore) {
         result.skippedBeforeCutoff += diff.newlyInterested.length;
       } else {
-        const existing = await getJob(candidate.candidateUserId);
-        if (existing && existing.stage !== "done") {
-          const added = diff.newlyInterested.filter(
-            (roleId) => !(Array.isArray(existing.roles) ? existing.roles : []).includes(roleId),
-          );
-          await saveJob(appendJournal({
-            ...existing,
-            // Never let a retry or a later role addition inherit newer gates.
-            // Legacy jobs without the field fail closed to shadow.
-            rolloutPhase: interestJobRolloutPhase(existing),
-            candidateId: existing.candidateId || candidate.candidateId,
-            roles: [...new Set([...(existing.roles || []), ...diff.newlyInterested])],
-          }, "more_interest", { added: added.length }));
+        // The worker and every detection writer share this candidate lease.
+        // Without it, a crash-recovery save could overwrite a newly appended
+        // role after the snapshot had already advanced.
+        const token = await acquireLock(candidate.candidateUserId);
+        if (!token) {
+          snapshotDeferred = true;
+          result.stateDeferrals++;
         } else {
-          await createJob(candidate.candidateUserId, {
-            candidateId: candidate.candidateId,
-            roles: diff.newlyInterested,
-            rolloutPhase: interestRolloutPhase(config),
-          });
+          try {
+            const existing = await getJob(candidate.candidateUserId);
+            // email_complete is the durable boundary immediately after an
+            // email attempt but before the terminal handoff record. Do not
+            // reuse that outbox batch, replace the unfinished job, or advance
+            // the snapshot. The transition will be retried after archival.
+            if (interestJobDefersNewRoles(existing)) {
+              snapshotDeferred = true;
+              result.stateDeferrals++;
+            } else if (interestJobAcceptsMoreRoles(existing)) {
+              const added = diff.newlyInterested.filter(
+                (roleId) => !(Array.isArray(existing.roles) ? existing.roles : []).includes(roleId),
+              );
+              await saveJob(appendJournal({
+                ...existing,
+                // Never let a retry or a later role addition inherit newer gates.
+                // Legacy jobs without the field fail closed to shadow.
+                rolloutPhase: interestJobRolloutPhase(existing),
+                candidateId: existing.candidateId || candidate.candidateId,
+                roles: [...new Set([...(existing.roles || []), ...diff.newlyInterested])],
+              }, "more_interest", { added: added.length }));
+            } else {
+              // v1 kept one processing slot per candidate. Preserve a legacy
+              // terminal observation before replacing that slot with a fresh,
+              // independently idempotent organic-transition batch.
+              const terminalReasons = interestTerminalHandoffReasons(existing);
+              if (terminalReasons.length) {
+                await recordInterestHandoff(
+                  candidate.candidateUserId,
+                  existing,
+                  terminalReasons,
+                );
+              }
+              await createJob(candidate.candidateUserId, {
+                candidateId: candidate.candidateId,
+                roles: diff.newlyInterested,
+                rolloutPhase: interestRolloutPhase(config),
+              });
+            }
+          } finally {
+            await releaseLock(candidate.candidateUserId, token);
+          }
         }
-        result.detected.push({ candidate, roleIds: diff.newlyInterested, statuses });
+        if (!snapshotDeferred) {
+          result.detected.push({ candidate, roleIds: diff.newlyInterested, statuses });
+        }
       }
     }
-    await putSnapshot(candidate.candidateUserId, statuses);
+    if (!snapshotDeferred) {
+      await putSnapshot(candidate.candidateUserId, statuses);
+    }
   }
 
   // A batch advances only if every row read successfully. Successfully read
@@ -433,6 +500,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     populationSize: batch.length,
     candidatesRead: result.candidatesRead,
     readErrors: result.readErrors,
+    stateDeferrals: result.stateDeferrals,
   });
   const priorAdvanced = window.continuing
     ? Math.max(0, Number(priorSweep?.cycleCandidatesRead) || 0)
@@ -446,10 +514,15 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
   const priorAttemptErrors = window.continuing
     ? Math.max(0, Number(priorSweep?.cycleAttemptReadErrors) || 0)
     : 0;
+  const priorStateDeferrals = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleAttemptStateDeferrals) || 0)
+    : 0;
   result.cycleCandidatesRead = priorAdvanced + (batchComplete ? batch.length : 0);
   result.cycleSeeded = priorSeeded + result.seeded;
   result.cycleDetected = priorDetected + result.detected.length;
   result.cycleAttemptReadErrors = priorAttemptErrors + result.readErrors;
+  result.cycleAttemptStateDeferrals =
+    priorStateDeferrals + result.stateDeferrals;
   result.cycleComplete = batchComplete
     && window.end === population.length;
   result.nextCursor = result.cycleComplete
@@ -476,8 +549,10 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     cycleSeeded: result.cycleSeeded,
     cycleDetected: result.cycleDetected,
     cycleAttemptReadErrors: result.cycleAttemptReadErrors,
+    cycleAttemptStateDeferrals: result.cycleAttemptStateDeferrals,
     candidatesRead: result.candidatesRead,
     readErrors: result.readErrors,
+    stateDeferrals: result.stateDeferrals,
     seeded: result.seeded,
     detected: result.detected.length,
     durationMs: result.durationMs,
@@ -842,34 +917,78 @@ function handoffRoleCompany(role) {
  */
 export async function listInterestHandoffs({
   trpcGetImpl = trpcGet,
+  listHandoffsImpl = listInterestHandoffRecords,
   listReviewsImpl = listReviews,
   getJobImpl = getJob,
 } = {}) {
+  const archived = await listHandoffsImpl();
+  const archivedCandidates = new Set(
+    archived.map((record) => record?.candidateUserId).filter(Boolean),
+  );
+  const archivedBatches = new Set(
+    archived
+      .filter((record) => record?.candidateUserId && record?.batchId)
+      .map((record) => `${record.candidateUserId}\0${record.batchId}`),
+  );
   const reviews = (await listReviewsImpl()).filter((review) => (
     Array.isArray(review?.reasons)
     && review.reasons.some((reason) => HUMAN_HANDOFF_REASONS.has(reason))
+    && (
+      review?.batchId
+        ? !archivedBatches.has(`${review.candidateUserId}\0${review.batchId}`)
+        : !archivedCandidates.has(review.candidateUserId)
+    )
   ));
-  const handoffs = [];
+  const sources = archived.map((record) => ({
+    review: record,
+    job: record,
+    batchId: record.batchId,
+    legacy: false,
+  }));
   for (const review of reviews) {
     const job = await getJobImpl(review.candidateUserId);
-    if (!job) continue;
-    const candidate = await hydrateSubmissionCandidate({
-      candidateUserId: review.candidateUserId,
-      candidateId: job.candidateId || null,
-    }, trpcGetImpl);
+    if (job) {
+      sources.push({
+        review,
+        job,
+        batchId: null,
+        legacy: true,
+      });
+    }
+  }
+  const handoffs = [];
+  const candidateCache = new Map();
+  const roleCache = new Map();
+  for (const source of sources) {
+    const { review, job } = source;
+    if (!candidateCache.has(review.candidateUserId)) {
+      candidateCache.set(
+        review.candidateUserId,
+        hydrateSubmissionCandidate({
+          candidateUserId: review.candidateUserId,
+          candidateId: job.candidateId || null,
+        }, trpcGetImpl),
+      );
+    }
+    const candidate = await candidateCache.get(review.candidateUserId);
     const submissionByRole = new Map(
       (Array.isArray(job.submissions) ? job.submissions : [])
         .map((submission) => [submission?.roleId, submission]),
     );
     const roles = [];
     for (const roleId of Array.isArray(job.roles) ? job.roles : []) {
-      let role = null;
-      try {
-        role = await trpcGetImpl(
-          "role.getRoleByIdSimple",
-          { role_id: roleId, id: roleId },
+      if (!roleCache.has(roleId)) {
+        roleCache.set(
+          roleId,
+          Promise.resolve()
+            .then(() => trpcGetImpl(
+              "role.getRoleByIdSimple",
+              { role_id: roleId, id: roleId },
+            ))
+            .catch(() => null),
         );
-      } catch {}
+      }
+      const role = await roleCache.get(roleId);
       const submission = submissionByRole.get(roleId) || null;
       roles.push({
         roleId,
@@ -883,12 +1002,16 @@ export async function listInterestHandoffs({
     }
     handoffs.push({
       candidateUserId: review.candidateUserId,
+      batchId: source.batchId,
+      legacy: source.legacy,
       candidateName: candidate?.name || "Candidate",
       candidateHref:
         `https://www.paraform.com/candidates?id=${encodeURIComponent(review.candidateUserId)}`,
-      mode: review.reasons.includes("human_submission_required")
-        ? "human_submission_required"
-        : "shadow_observation",
+      mode: review.mode || (
+        review.reasons.includes("human_submission_required")
+          ? "human_submission_required"
+          : "shadow_observation"
+      ),
       reasons: review.reasons,
       roles,
       stopped: job.stopped || null,
@@ -1280,6 +1403,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
             seeded: sweep.seeded,
             detected: sweep.detected.length,
             readErrors: sweep.readErrors,
+            stateDeferrals: sweep.stateDeferrals,
           };
         } else {
           result.sweep = { skipped: "not_due" };
@@ -1422,7 +1546,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
           });
         }
       }
-      job = await saveJob(appendJournal({ ...job, emailed: email, stage: "done" }, "emailed", {
+      job = await saveJob(appendJournal({ ...job, emailed: email, stage: "email_complete" }, "emailed", {
         sent: email.sent, skipped: email.skipped || null,
       }));
 
@@ -1443,19 +1567,35 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         ...submissions.filter((s) => s.stage === "contract_unconfirmed").map(() => "submit_contract_unconfirmed"),
         ...(stop.errors.length ? ["stop_errors"] : []),
       ];
-      if (reviewReasons.length) {
+      const handoffReason = reviewReasons.find(
+        (reason) => HUMAN_HANDOFF_REASONS.has(reason),
+      );
+      if (handoffReason) {
+        await recordInterestHandoff(
+          candidate.candidateUserId,
+          job,
+          reviewReasons,
+        );
+      } else if (reviewReasons.length) {
         await recordReview(candidate.candidateUserId, reviewReasons, {
           roles: job.roles,
           batchId: job.batchId,
         });
-        result.reviews++;
       }
-      if (reviewReasons.includes("human_submission_required")) {
+      if (reviewReasons.length) result.reviews++;
+      if (handoffReason === "human_submission_required") {
         job = await saveJob(appendJournal({
           ...job,
           stage: "awaiting_human_submission",
         }, "human_submission_handoff", {
           roles: bankable.length,
+        }));
+      } else {
+        job = await saveJob(appendJournal({
+          ...job,
+          stage: "done",
+        }, "terminal", {
+          handoff: handoffReason || null,
         }));
       }
 
