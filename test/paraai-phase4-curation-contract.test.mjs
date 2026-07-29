@@ -221,15 +221,24 @@ function readbackProof({
 function identityObservation({
   candidateId = CANDIDATE_ID,
   candidateUserId = CANDIDATE_USER_ID,
+  responseCandidateId,
+  responseCandidateUserId,
   observedAt = IDENTITY_AT,
   ...overrides
 } = {}) {
   return observation({
     procedure: PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
     input: { candidate_id: candidateId },
+    // The response must be settable independently of the input, or a test
+    // cannot reach the response binding at all: the input assertion would
+    // reject first and the test would pass for the wrong reason.
     response: {
-      candidate_id: candidateId,
-      candidate_user_id: candidateUserId,
+      candidate_id: responseCandidateId === undefined
+        ? candidateId
+        : responseCandidateId,
+      candidate_user_id: responseCandidateUserId === undefined
+        ? candidateUserId
+        : responseCandidateUserId,
     },
     observedAt,
     ...overrides,
@@ -250,12 +259,10 @@ function identityProof({
   ...options
 } = {}) {
   const exactObservation = identityObservation({
-    candidateId: observedCandidateId === undefined
-      ? candidateId
-      : observedCandidateId,
-    candidateUserId: observedCandidateUserId === undefined
-      ? candidateUserId
-      : observedCandidateUserId,
+    candidateId,
+    candidateUserId,
+    responseCandidateId: observedCandidateId,
+    responseCandidateUserId: observedCandidateUserId,
     ...options,
   });
   return normalizePhase4CandidateIdentityObservation(exactObservation, {
