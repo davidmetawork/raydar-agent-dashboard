@@ -50,8 +50,8 @@ import {
   expiredUnsentCopy,
   expiryEscalationCopy,
   expiryEscalationRung,
-  reportExpiredUnsentRequests,
   requestExpiresAtMs,
+  sweepStaleOutreachExceptions,
   SUBMISSION_REQUEST_EXPIRY_DAYS,
   heldAlertCopy,
   missingEmailAlertCopy,
@@ -865,23 +865,28 @@ test("the expiry clock is seven days and escalation rungs fire tightest-first", 
 // REGRESSION (incident 2026-07-29): a blocked request left the queue in silence the
 // moment Paraform flipped it out of `pending`. One candidate's request expired
 // unsent and the only trace was a days-old unread alert.
-test("an expired unsent request alarms once and closes its exception", async () => {
+test("a lost match alarms once, and an exception never outlives its request", async () => {
   const history = [
     { id: "request-expired", status: "expired", candidateName: "Dan Example", roleName: "Staff Engineer", companyName: "TubeScience" },
     { id: "request-live", status: "pending", candidateName: "Live Candidate", roleName: "PM", companyName: "Example Co" },
     { id: "request-delivered", status: "expired", candidateName: "Sent Already", roleName: "AE", companyName: "Example Co" },
+    { id: "request-submitted", status: "submitted", candidateName: "Held But Submitted", roleName: "Founding Engineer", companyName: "Rama" },
+    { id: "request-dismissed", status: "dismissed", candidateName: "Passed", roleName: "SDR", companyName: "Example Co" },
   ];
   const exceptions = [
     { requestId: "request-expired", status: "open", code: "OUTREACH_NO_EMAIL", candidateName: "Dan Example" },
     { requestId: "request-live", status: "open", code: "OUTREACH_NO_EMAIL" },
     { requestId: "request-delivered", status: "open", code: "OUTREACH_NO_EMAIL" },
+    { requestId: "request-submitted", status: "open", code: "OUTREACH_CANDIDATE_REPLIED" },
+    { requestId: "request-dismissed", status: "open", code: "OUTREACH_CANDIDATE_REPLIED" },
     { requestId: "request-gone", status: "open", code: "OUTREACH_NO_EMAIL" },
+    { requestId: "request-expired", status: "resolved", code: "OUTREACH_NO_EMAIL" },
   ];
   const states = [{ matches: { "request-delivered": { sentAt: "2026-07-28T00:00:00.000Z" } } }];
   const claims = [];
   const notices = [];
   const resolved = [];
-  const reported = await reportExpiredUnsentRequests({
+  const sweep = await sweepStaleOutreachExceptions({
     history,
     states,
     exceptions,
@@ -889,23 +894,35 @@ test("an expired unsent request alarms once and closes its exception", async () 
     notifyImpl: async (text) => { notices.push(text); return true; },
     resolveImpl: async (id, options) => { resolved.push([id, options.resolution]); return null; },
   });
-  // Only the expired-and-never-delivered one: a pending request is not lost, a
-  // delivered one was not missed, and an absent one is ambiguous, not confirmed.
-  assert.deepEqual(reported, ["request-expired"]);
+  // Loud only for the one that cost a placement: asked for, never emailed, expired.
+  assert.deepEqual(sweep.expiredUnsent, ["request-expired"]);
   assert.deepEqual(claims, ["request-expired:expired-unsent"]);
-  assert.deepEqual(resolved, [["request-expired", "expired_unsent"]]);
   assert.match(notices[0], /EXPIRED UNSENT/);
   assert.match(notices[0], /Dan Example/);
-  // Second pass: the claim is already held, so no duplicate alarm.
-  const again = await reportExpiredUnsentRequests({
+  assert.equal(notices.length, 1, "resolved-elsewhere exceptions must never page a human");
+  // Silent for everything already answered another way. A pending request is still
+  // real work and an absent one is ambiguous, so neither is touched.
+  assert.deepEqual(sweep.closed, [
+    { requestId: "request-delivered", status: "expired" },
+    { requestId: "request-submitted", status: "submitted" },
+    { requestId: "request-dismissed", status: "dismissed" },
+  ]);
+  assert.deepEqual(resolved, [
+    ["request-expired", "expired_unsent"],
+    ["request-delivered", "no_longer_pending_expired"],
+    ["request-submitted", "no_longer_pending_submitted"],
+    ["request-dismissed", "no_longer_pending_dismissed"],
+  ]);
+  // Second pass: the alarm claim is held, so the lost match is not re-announced.
+  const again = await sweepStaleOutreachExceptions({
     history,
     states,
-    exceptions,
+    exceptions: exceptions.filter((row) => row.requestId === "request-expired"),
     claimImpl: async () => false,
     notifyImpl: async () => { throw new Error("must not alert twice"); },
     resolveImpl: async () => { throw new Error("must not resolve twice"); },
   });
-  assert.deepEqual(again, []);
+  assert.deepEqual(again, { expiredUnsent: [], closed: [] });
   assert.match(expiredUnsentCopy(history[0]), /never emailed/);
 });
 
