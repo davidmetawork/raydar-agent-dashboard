@@ -10,6 +10,10 @@ export const HUMAN_INTRO_SOURCE =
   "google_calendar_calendly_role_chat";
 export const HUMAN_INTRO_PARSER_VERSION =
   "calendly-role-chat-v1";
+export const RAYDAR_HUMAN_INTRO_SOURCE =
+  "raydar_scheduler_human_call";
+export const RAYDAR_HUMAN_INTRO_PARSER_VERSION =
+  "raydar-booking-record-v1";
 export const HUMAN_INTRO_QUEUE_SOURCE =
   "calendar_human_intro_resume_wait";
 export const HUMAN_INTRO_PAYLOAD_CONFLICT_CODE =
@@ -66,6 +70,26 @@ const PAYLOAD_KEYS = Object.freeze([
   "source",
   "sourceId",
 ].sort());
+const HUMAN_INTRO_PROVENANCE = Object.freeze([
+  Object.freeze({
+    source: HUMAN_INTRO_SOURCE,
+    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    resumeReceiptSource: "calendar_resume_link",
+    bookingCreatedAtSource: "calendar_booking_created_at",
+    title: "Calendly Role Chat",
+    owner: "David Phillips",
+    platform: "GOOGLE_CALENDAR_CALENDLY",
+  }),
+  Object.freeze({
+    source: RAYDAR_HUMAN_INTRO_SOURCE,
+    parserVersion: RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+    resumeReceiptSource: "raydar_scheduler_upload",
+    bookingCreatedAtSource: "raydar_scheduler_booking_created_at",
+    title: "Raydar Human Call",
+    owner: "Raydar",
+    platform: "PHONE",
+  }),
+]);
 
 function codedError(code, message = code) {
   const error = new Error(message);
@@ -105,7 +129,14 @@ function candidateName(value) {
   return selected;
 }
 
-function normalizeResumeReceipt(value, disposition) {
+export function humanIntroProvenance(source, parserVersion) {
+  const match = HUMAN_INTRO_PROVENANCE.find((entry) =>
+    entry.source === source && entry.parserVersion === parserVersion);
+  if (!match) throw codedError("HUMAN_INTRO_PROVENANCE_INVALID");
+  return match;
+}
+
+function normalizeResumeReceipt(value, disposition, provenance) {
   if (!RESUME_LINK_DISPOSITIONS.has(disposition)) {
     throw codedError("HUMAN_INTRO_RESUME_DISPOSITION_INVALID");
   }
@@ -121,7 +152,7 @@ function normalizeResumeReceipt(value, disposition) {
     || Array.isArray(value)
     || JSON.stringify(Object.keys(value).sort())
       !== JSON.stringify(RESUME_RECEIPT_KEYS)
-    || value.source !== "calendar_resume_link"
+    || value.source !== provenance.resumeReceiptSource
     || !RESUME_RECEIPT_STATUSES.has(value.status)
     || value.status !== disposition
     || !ARTIFACT_SHA256.test(String(value.artifactSha256 || ""))
@@ -130,7 +161,7 @@ function normalizeResumeReceipt(value, disposition) {
     throw codedError("HUMAN_INTRO_RESUME_RECEIPT_INVALID");
   }
   return Object.freeze({
-    source: "calendar_resume_link",
+    source: provenance.resumeReceiptSource,
     status: value.status,
     artifactSha256: value.artifactSha256,
     mimeType: value.mimeType,
@@ -196,10 +227,12 @@ export function normalizeHumanIntroPayload(value) {
     throw codedError("HUMAN_INTRO_PAYLOAD_INVALID");
   }
   const sourceId = humanIntroSourceId(value.sourceId);
+  const provenance = humanIntroProvenance(
+    value.source,
+    value.parserVersion,
+  );
   if (
-    value.source !== HUMAN_INTRO_SOURCE
-    || value.parserVersion !== HUMAN_INTRO_PARSER_VERSION
-    || String(value.eventId || "").trim() !== humanIntroEventId(sourceId)
+    String(value.eventId || "").trim() !== humanIntroEventId(sourceId)
   ) {
     throw codedError("HUMAN_INTRO_PROVENANCE_INVALID");
   }
@@ -239,10 +272,20 @@ export function normalizeHumanIntroPayload(value) {
   const resumeReceipt = normalizeResumeReceipt(
     value.resumeReceipt,
     resumeLinkDisposition,
+    provenance,
   );
+  if (
+    provenance.source === RAYDAR_HUMAN_INTRO_SOURCE
+    && (
+      resumeLinkDisposition !== "received"
+      || resumeReceipt?.source !== "raydar_scheduler_upload"
+    )
+  ) {
+    throw codedError("HUMAN_INTRO_RESUME_RECEIPT_INVALID");
+  }
   return Object.freeze({
-    source: HUMAN_INTRO_SOURCE,
-    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    source: provenance.source,
+    parserVersion: provenance.parserVersion,
     sourceId,
     eventId: humanIntroEventId(sourceId),
     bookingCreatedAt,
@@ -264,6 +307,10 @@ export function humanIntroPayloadDigest(value) {
 
 export function humanIntroCallRecord(value) {
   const payload = normalizeHumanIntroPayload(value);
+  const provenance = humanIntroProvenance(
+    payload.source,
+    payload.parserVersion,
+  );
   const payloadDigest = digestNormalizedHumanIntroPayload(payload);
   return {
     id: payload.sourceId,
@@ -278,7 +325,7 @@ export function humanIntroCallRecord(value) {
     resumeLinkDisposition: payload.resumeLinkDisposition,
     resumeReceipt: payload.resumeReceipt,
     bookingCreatedAt: payload.bookingCreatedAt,
-    bookingCreatedAtSource: "calendar_booking_created_at",
+    bookingCreatedAtSource: provenance.bookingCreatedAtSource,
     candidateUserId: "",
     candidate: {
       fullName: payload.candidateName,
@@ -299,9 +346,9 @@ export function humanIntroCallRecord(value) {
       louderSpeakerChars: 0,
       substantive: false,
     },
-    title: "Calendly Role Chat",
-    owner: "David Phillips",
-    platform: "GOOGLE_CALENDAR_CALENDLY",
+    title: provenance.title,
+    owner: provenance.owner,
+    platform: provenance.platform,
     joinAt: payload.scheduledStart,
     endedAt: payload.scheduledEnd,
     screeningCallLink: "",
@@ -310,6 +357,10 @@ export function humanIntroCallRecord(value) {
 
 export function persistedHumanIntroMetadata(call) {
   const sourceId = humanIntroSourceId(call?.humanIntroSourceId);
+  const provenance = humanIntroProvenance(
+    call?.humanIntroSource,
+    call?.humanIntroParserVersion,
+  );
   const expectedPayload = normalizeHumanIntroPayload({
     source: call?.humanIntroSource,
     parserVersion: call?.humanIntroParserVersion,
@@ -330,9 +381,11 @@ export function persistedHumanIntroMetadata(call) {
     || call?.humanCall !== true
     || call?.humanPopulation !== "role_chat"
     || call?.humanIntroEventId !== humanIntroEventId(sourceId)
-    || call?.humanIntroSource !== HUMAN_INTRO_SOURCE
-    || call?.humanIntroParserVersion !== HUMAN_INTRO_PARSER_VERSION
     || call?.humanIntroPayloadDigest !== payloadDigest
+    || call?.bookingCreatedAtSource !== provenance.bookingCreatedAtSource
+    || call?.title !== provenance.title
+    || call?.owner !== provenance.owner
+    || call?.platform !== provenance.platform
     || call?.transcriptPresent !== false
   ) {
     throw codedError("HUMAN_INTRO_PROVENANCE_INVALID");
@@ -342,15 +395,15 @@ export function persistedHumanIntroMetadata(call) {
     manualOnly: true,
     sourceId,
     intakeEventId: call.humanIntroEventId,
-    source: HUMAN_INTRO_SOURCE,
-    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    source: provenance.source,
+    parserVersion: provenance.parserVersion,
     payloadDigest,
     bookingCreatedAt: expectedPayload.bookingCreatedAt,
-    bookingCreatedAtSource: "calendar_booking_created_at",
+    bookingCreatedAtSource: provenance.bookingCreatedAtSource,
     resumeLinkDisposition: expectedPayload.resumeLinkDisposition,
     resumeReceipt: expectedPayload.resumeReceipt,
     population: "role_chat",
-    platform: "GOOGLE_CALENDAR_CALENDLY",
+    platform: provenance.platform,
     transcriptPresent: false,
     profileOnly: true,
     provenanceVerified: true,
@@ -370,20 +423,25 @@ export function humanIntroCallFromJob(job) {
   }
   const sourceId = sourceIdFromHumanIntroJob(job.id);
   const metadata = job?.humanCallMeta;
+  const provenance = humanIntroProvenance(
+    metadata?.source,
+    metadata?.parserVersion,
+  );
   if (
     metadata?.calendarIntro !== true
     || metadata?.manualOnly !== true
     || metadata?.provenanceVerified !== true
     || metadata?.sourceId !== sourceId
-    || metadata?.source !== HUMAN_INTRO_SOURCE
-    || metadata?.parserVersion !== HUMAN_INTRO_PARSER_VERSION
+    || metadata?.bookingCreatedAtSource
+      !== provenance.bookingCreatedAtSource
+    || metadata?.platform !== provenance.platform
     || !/^[a-f0-9]{64}$/u.test(String(metadata?.payloadDigest || ""))
   ) {
     throw codedError("HUMAN_INTRO_RECORD_REQUIRED");
   }
   const call = humanIntroCallRecord({
-    source: HUMAN_INTRO_SOURCE,
-    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    source: provenance.source,
+    parserVersion: provenance.parserVersion,
     sourceId,
     eventId: humanIntroEventId(sourceId),
     bookingCreatedAt: metadata.bookingCreatedAt,

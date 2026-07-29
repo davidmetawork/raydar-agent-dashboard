@@ -6,6 +6,8 @@ import test from "node:test";
 import {
   HUMAN_INTRO_PARSER_VERSION,
   HUMAN_INTRO_SOURCE,
+  RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+  RAYDAR_HUMAN_INTRO_SOURCE,
   humanIntroCallRecord,
   humanIntroEventId,
   humanIntroJobId,
@@ -247,6 +249,39 @@ test("the isolated projector stays in parity with the Human Intro intake helpers
       humanIntroPayloadDigest(selectedPayload),
     );
   }
+});
+
+test("native scheduler Human intake projects the exact phone and upload provenance", () => {
+  const selectedPayload = payload({
+    source: RAYDAR_HUMAN_INTRO_SOURCE,
+    parserVersion: RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+    resumeReceipt: {
+      source: "raydar_scheduler_upload",
+      status: "received",
+      artifactSha256: ARTIFACT_SHA256,
+      mimeType: "application/pdf",
+    },
+  });
+  const projection = normalizeHumanIntroSourcePointJob(
+    durableJobFromPayload(selectedPayload),
+    options(),
+  );
+  assert.equal(
+    projection.intakeSource,
+    RAYDAR_HUMAN_INTRO_SOURCE,
+  );
+  assert.equal(
+    projection.parserVersion,
+    RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+  );
+  assert.equal(
+    projection.resumeReceipt.source,
+    "raydar_scheduler_upload",
+  );
+  assert.equal(
+    projection.payloadDigest,
+    humanIntroPayloadDigest(selectedPayload),
+  );
 });
 
 test("job, source, event, payload, and candidate bindings fail closed", () => {

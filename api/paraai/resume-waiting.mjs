@@ -19,6 +19,7 @@ import {
   HUMAN_INTRO_RESUME_AMBIGUOUS_MESSAGE,
   HUMAN_INTRO_RESUME_REVIEW_CODE,
   HUMAN_INTRO_RESUME_REVIEW_MESSAGE,
+  humanIntroProvenance,
 } from "./_lib/human-intro.mjs";
 import {
   RESUME_RECEIVED_REVIEW_CODE,
@@ -87,11 +88,28 @@ function resumeLinkDisposition(job) {
 function resumeReceipt(job) {
   const disposition = resumeLinkDisposition(job);
   const receipt = job?.resumeReceipt || job?.humanCallMeta?.resumeReceipt;
+  let expectedSource = "calendar_resume_link";
+  if (
+    job?.humanIntro === true
+    && (
+      job?.humanCallMeta?.source
+      || job?.humanCallMeta?.parserVersion
+    )
+  ) {
+    try {
+      expectedSource = humanIntroProvenance(
+        job?.humanCallMeta?.source,
+        job?.humanCallMeta?.parserVersion,
+      ).resumeReceiptSource;
+    } catch {
+      return null;
+    }
+  }
   if (
     !receipt
     || typeof receipt !== "object"
     || Array.isArray(receipt)
-    || receipt.source !== "calendar_resume_link"
+    || receipt.source !== expectedSource
     || !["received", "received_review"].includes(receipt.status)
     || receipt.status !== disposition
     || !/^[a-f0-9]{64}$/u.test(String(receipt.artifactSha256 || ""))
@@ -105,7 +123,7 @@ function resumeReceipt(job) {
     return null;
   }
   return {
-    source: "calendar_resume_link",
+    source: expectedSource,
     status: receipt.status,
     artifactSha256: receipt.artifactSha256,
     mimeType: receipt.mimeType,

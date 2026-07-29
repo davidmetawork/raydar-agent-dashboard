@@ -22,6 +22,22 @@ const HUMAN_INTRO_SOURCE =
   "google_calendar_calendly_role_chat";
 const HUMAN_INTRO_PARSER_VERSION =
   "calendly-role-chat-v1";
+const HUMAN_INTRO_PROVENANCE = Object.freeze([
+  Object.freeze({
+    source: HUMAN_INTRO_SOURCE,
+    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    resumeReceiptSource: "calendar_resume_link",
+    bookingCreatedAtSource: "calendar_booking_created_at",
+    platform: "GOOGLE_CALENDAR_CALENDLY",
+  }),
+  Object.freeze({
+    source: "raydar_scheduler_human_call",
+    parserVersion: "raydar-booking-record-v1",
+    resumeReceiptSource: "raydar_scheduler_upload",
+    bookingCreatedAtSource: "raydar_scheduler_booking_created_at",
+    platform: "PHONE",
+  }),
+]);
 const JOB_ID = /^hi-[a-f0-9]{64}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
@@ -106,6 +122,15 @@ export class SourceHumanIntroPointCollectorError extends Error {
 
 function fail(code) {
   throw new SourceHumanIntroPointCollectorError(code);
+}
+
+function humanIntroProvenance(source, parserVersion) {
+  const provenance = HUMAN_INTRO_PROVENANCE.find((entry) =>
+    entry.source === source && entry.parserVersion === parserVersion);
+  if (!provenance) {
+    fail("SOURCE_HUMAN_INTRO_POINT_PROVENANCE_INVALID");
+  }
+  return provenance;
 }
 
 function plainRecordSnapshot(value, code) {
@@ -351,7 +376,8 @@ function resumeReceiptSnapshot(value) {
     ),
   };
   if (
-    normalized.source !== "calendar_resume_link"
+    !HUMAN_INTRO_PROVENANCE.some((entry) =>
+      entry.resumeReceiptSource === normalized.source)
     || !RESUME_RECEIPT_STATUSES.has(normalized.status)
     || !RESUME_RECEIPT_MIME_TYPES.has(
       normalized.mimeType,
@@ -529,11 +555,15 @@ function metadataSnapshot(value) {
     "received",
     "received_review",
   ].includes(normalized.resumeLinkDisposition);
+  const provenance = humanIntroProvenance(
+    normalized.source,
+    normalized.parserVersion,
+  );
   if (
     normalized.calendarIntro !== true
     || normalized.manualOnly !== true
     || normalized.bookingCreatedAtSource
-      !== "calendar_booking_created_at"
+      !== provenance.bookingCreatedAtSource
     || !RESUME_LINK_DISPOSITIONS.has(
       normalized.resumeLinkDisposition,
     )
@@ -543,9 +573,18 @@ function metadataSnapshot(value) {
       && normalized.resumeReceipt.status
         !== normalized.resumeLinkDisposition
     )
+    || (
+      normalized.resumeReceipt !== null
+      && normalized.resumeReceipt.source
+        !== provenance.resumeReceiptSource
+    )
+    || (
+      provenance.source === "raydar_scheduler_human_call"
+      && normalized.resumeLinkDisposition !== "received"
+    )
     || normalized.population !== "role_chat"
     || normalized.platform
-      !== "GOOGLE_CALENDAR_CALENDLY"
+      !== provenance.platform
     || normalized.transcriptPresent !== false
     || normalized.profileOnly !== true
     || normalized.provenanceVerified !== true
@@ -675,12 +714,10 @@ export function normalizeHumanIntroSourcePointJob(
   ) {
     fail("SOURCE_HUMAN_INTRO_POINT_EVENT_ID_MISMATCH");
   }
-  if (
-    metadata.source !== HUMAN_INTRO_SOURCE
-    || metadata.parserVersion !== HUMAN_INTRO_PARSER_VERSION
-  ) {
-    fail("SOURCE_HUMAN_INTRO_POINT_PROVENANCE_INVALID");
-  }
+  const provenance = humanIntroProvenance(
+    metadata.source,
+    metadata.parserVersion,
+  );
   const durationMs =
     Date.parse(scheduledEnd) - Date.parse(scheduledStart);
   if (
@@ -756,8 +793,8 @@ export function normalizeHumanIntroSourcePointJob(
   return deepFreeze({
     version: SOURCE_HUMAN_INTRO_POINT_COLLECTOR_VERSION,
     source: SOURCE,
-    intakeSource: HUMAN_INTRO_SOURCE,
-    parserVersion: HUMAN_INTRO_PARSER_VERSION,
+    intakeSource: provenance.source,
+    parserVersion: provenance.parserVersion,
     jobId,
     sourceId,
     intakeEventId: metadata.intakeEventId,

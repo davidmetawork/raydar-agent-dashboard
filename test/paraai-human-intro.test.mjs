@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   HUMAN_INTRO_PARSER_VERSION,
   HUMAN_INTRO_SOURCE,
+  RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+  RAYDAR_HUMAN_INTRO_SOURCE,
   humanIntroCallFromJob,
   humanIntroCallRecord,
   humanIntroEventId,
@@ -68,6 +70,21 @@ function receiptPayload(status = "received") {
         ? "application/pdf"
         : "application/rtf",
     },
+  });
+}
+
+function nativePayload(overrides = {}) {
+  return payload({
+    source: RAYDAR_HUMAN_INTRO_SOURCE,
+    parserVersion: RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+    resumeLinkDisposition: "received",
+    resumeReceipt: {
+      source: "raydar_scheduler_upload",
+      status: "received",
+      artifactSha256: ARTIFACT_SHA256,
+      mimeType: "application/pdf",
+    },
+    ...overrides,
   });
 }
 
@@ -273,6 +290,93 @@ test("signed Role Chat payload normalizes to profile-only manual provenance with
       Object.fromEntries(Object.entries(payload()).reverse()),
     ),
     metadata.payloadDigest,
+  );
+});
+
+test("signed scheduler Human payload remains phone-only, assignment-free, and exact-provenance", async () => {
+  const selected = nativePayload();
+  const normalized = normalizeHumanIntroPayload(selected);
+  const call = humanIntroCallRecord(normalized);
+  const metadata = persistedHumanIntroMetadata(call);
+  assert.equal(call.humanPopulation, "role_chat");
+  assert.equal(call.platform, "PHONE");
+  assert.equal(call.owner, "Raydar");
+  assert.equal(call.title, "Raydar Human Call");
+  assert.equal(call.transcriptPresent, false);
+  assert.equal(
+    metadata.bookingCreatedAtSource,
+    "raydar_scheduler_booking_created_at",
+  );
+  assert.equal(metadata.source, RAYDAR_HUMAN_INTRO_SOURCE);
+  assert.equal(
+    metadata.parserVersion,
+    RAYDAR_HUMAN_INTRO_PARSER_VERSION,
+  );
+  assert.deepEqual(metadata.resumeReceipt, {
+    source: "raydar_scheduler_upload",
+    status: "received",
+    artifactSha256: ARTIFACT_SHA256,
+    mimeType: "application/pdf",
+  });
+  assert.equal(JSON.stringify(call).includes("Vanessa"), false);
+  assert.equal(JSON.stringify(call).includes("Alzen"), false);
+
+  const nativeJob = preparedJob({
+    candidate: call.candidate,
+    callStartedAt: call.joinAt,
+    callEndedAt: call.endedAt,
+    resumeLinkDisposition: call.resumeLinkDisposition,
+    resumeReceipt: call.resumeReceipt,
+    humanCallMeta: metadata,
+  });
+  const rebuilt = humanIntroCallFromJob(nativeJob);
+  assert.equal(rebuilt.platform, "PHONE");
+  assert.equal(rebuilt.owner, "Raydar");
+
+  const response = await handleHumanIntroCompleted(
+    signedRequest(selected),
+    {
+      secret: SECRET,
+      enabled: true,
+      hasStore: () => true,
+      load: async () => null,
+      acquire: async () => "native-lock",
+      release: async () => {},
+      prepare: async ({ callRecord }) => {
+        assert.equal(callRecord.platform, "PHONE");
+        assert.equal(callRecord.owner, "Raydar");
+        return nativeJob;
+      },
+      enqueue: async () =>
+        assert.fail("resume-ready native intake must not enqueue"),
+      now: () => NOW,
+    },
+  );
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    jobId: JOB_ID,
+    state: "needs_review",
+    prepared: true,
+    duplicate: false,
+    recovered: false,
+  });
+
+  assert.throws(
+    () => normalizeHumanIntroPayload(nativePayload({
+      resumeReceipt: {
+        ...selected.resumeReceipt,
+        source: "calendar_resume_link",
+      },
+    })),
+    /HUMAN_INTRO_RESUME_RECEIPT_INVALID/u,
+  );
+  assert.throws(
+    () => normalizeHumanIntroPayload(nativePayload({
+      resumeLinkDisposition: "none",
+      resumeReceipt: null,
+    })),
+    /HUMAN_INTRO_RESUME_RECEIPT_INVALID/u,
   );
 });
 

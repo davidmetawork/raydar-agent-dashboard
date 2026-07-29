@@ -1,11 +1,10 @@
 import {
-  HUMAN_INTRO_PARSER_VERSION,
   HUMAN_INTRO_PAYLOAD_CONFLICT_CODE,
   HUMAN_INTRO_PAYLOAD_CONFLICT_MESSAGE,
-  HUMAN_INTRO_SOURCE,
   humanIntroCallRecord,
   humanIntroJobId,
   humanIntroPayloadDigest,
+  humanIntroProvenance,
   humanIntroResumeQueueOptions,
   normalizeHumanIntroPayload,
 } from "./_lib/human-intro.mjs";
@@ -59,18 +58,30 @@ export function humanIntroSignalEnabled(env = process.env) {
   );
 }
 
-function matchingJob(job, sourceId) {
+function matchingJob(job, payload) {
+  let provenance;
+  try {
+    provenance = humanIntroProvenance(
+      payload?.source,
+      payload?.parserVersion,
+    );
+  } catch {
+    return false;
+  }
   return Boolean(
     job
-    && job.id === humanIntroJobId(sourceId)
+    && job.id === humanIntroJobId(payload.sourceId)
     && job.humanCall === true
     && job.humanIntro === true
     && job.callType === "human"
     && job.humanCallMeta?.calendarIntro === true
     && job.humanCallMeta?.manualOnly === true
-    && job.humanCallMeta?.sourceId === sourceId
-    && job.humanCallMeta?.source === HUMAN_INTRO_SOURCE
-    && job.humanCallMeta?.parserVersion === HUMAN_INTRO_PARSER_VERSION
+    && job.humanCallMeta?.sourceId === payload.sourceId
+    && job.humanCallMeta?.source === provenance.source
+    && job.humanCallMeta?.parserVersion === provenance.parserVersion
+    && job.humanCallMeta?.bookingCreatedAtSource
+      === provenance.bookingCreatedAtSource
+    && job.humanCallMeta?.platform === provenance.platform
     && job.humanCallMeta?.provenanceVerified === true
     && !Object.hasOwn(job.humanCallMeta, "paraformCallId")
   );
@@ -211,7 +222,7 @@ export async function handleHumanIntroCompleted(request, {
       return json({ ok: false, error: "job_busy" }, 503);
     }
     const existing = await load(jobId);
-    if (existing && !matchingJob(existing, payload.sourceId)) {
+    if (existing && !matchingJob(existing, payload)) {
       return json({ ok: false, error: "job_id_conflict" }, 409);
     }
     if (existing && !matchingPayload(existing, payload)) {
@@ -250,7 +261,7 @@ export async function handleHumanIntroCompleted(request, {
       force: Boolean(existing),
     });
     if (
-      !matchingJob(job, payload.sourceId)
+      !matchingJob(job, payload)
       || !matchingPayload(job, payload)
       || !preparedHumanIntro(job)
     ) {
