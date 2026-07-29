@@ -44,6 +44,7 @@ function booking(overrides = {}) {
     startsAt: "2026-07-30T18:00:00.000Z",
     endsAt: "2026-07-30T18:15:00.000Z",
     bookedAt: "2026-07-29T17:59:00.000Z",
+    sourceAttribution: null,
     status: "confirmed",
     supersedesBookingId: null,
     ...overrides,
@@ -59,6 +60,7 @@ function indexBooking(overrides = {}) {
     startsAt: event.startsAt,
     endsAt: event.endsAt,
     bookedAt: event.bookedAt,
+    sourceAttribution: event.sourceAttribution,
     status: event.status,
     supersedesBookingId: event.supersedesBookingId,
   };
@@ -156,8 +158,21 @@ test("native booking signature rejects stale, uppercase, and body-mismatched eve
 test("native event schema is exact and event/status pairs cannot drift", () => {
   const normalized = normalizeRaydarBookingEvent(booking());
   assert.equal(normalized.candidate.email, "candidate@example.com");
+  assert.equal(normalized.sourceAttribution, null);
   assert.equal(normalized.effectiveBookedAtMs, Date.parse("2026-07-29T17:59:00.000Z"));
 
+  assert.equal(
+    normalizeRaydarBookingEvent(
+      booking({ sourceAttribution: "paraform_sequence_agent" }),
+    ).sourceAttribution,
+    "paraform_sequence_agent",
+  );
+  const legacyShape = booking();
+  delete legacyShape.sourceAttribution;
+  assert.equal(
+    normalizeRaydarBookingEvent(legacyShape).sourceAttribution,
+    null,
+  );
   assert.throws(
     () => normalizeRaydarBookingEvent({ ...booking(), privateAssignee: "hidden" }),
     (error) => error.code === "RAYDAR_BOOKING_EVENT_INVALID",
@@ -173,11 +188,27 @@ test("native event schema is exact and event/status pairs cannot drift", () => {
     }),
     (error) => error.code === "RAYDAR_BOOKING_EMAIL_INVALID",
   );
+  for (const sourceAttribution of [
+    "",
+    " LinkedIn_InMail ",
+    "candidate@example.com",
+    "x".repeat(65),
+  ]) {
+    const value = booking({ sourceAttribution });
+    assert.throws(
+      () => normalizeRaydarBookingEvent(value),
+      (error) =>
+        error.code === "RAYDAR_BOOKING_SOURCE_ATTRIBUTION_INVALID",
+    );
+  }
 });
 
 test("native index item accepts only the pinned current-booking summary", () => {
-  const normalized = normalizeRaydarBookingIndexItem(indexBooking());
+  const normalized = normalizeRaydarBookingIndexItem(indexBooking({
+    sourceAttribution: "linkedin_inmail",
+  }));
   assert.equal(normalized.bookingId, "bk_test_001");
+  assert.equal(normalized.sourceAttribution, "linkedin_inmail");
   assert.equal(normalized.bookedAtMs, Date.parse("2026-07-29T17:59:00.000Z"));
 
   assert.throws(
@@ -194,6 +225,35 @@ test("native index item accepts only the pinned current-booking summary", () => 
     }),
     (error) => error.code === "RAYDAR_BOOKING_STATUS_INVALID",
   );
+  assert.throws(
+    () => normalizeRaydarBookingIndexItem({
+      ...indexBooking(),
+      sourceAttribution: "candidate@example.com",
+    }),
+    (error) =>
+      error.code === "RAYDAR_BOOKING_SOURCE_ATTRIBUTION_INVALID",
+  );
+});
+
+test("signed scheduler event with source attribution reaches the native pause path", async () => {
+  const body = booking({ sourceAttribution: "paraform_sequence_agent" });
+  let seen = null;
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(body),
+    handlerDeps({
+      pause: async (args) => {
+        seen = args;
+        return {
+          decisions: [],
+          paused: 0,
+          pauseErrors: [],
+          deferred: false,
+        };
+      },
+    }),
+  );
+  assert.equal(response.status, 202);
+  assert.equal(seen?.email, "candidate@example.com");
 });
 
 test("confirmed native events use the native pause source and return counts only", async () => {
