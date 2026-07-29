@@ -177,6 +177,48 @@ async function calendarEvidence(
   return calendarCandidateEvidence(body?.items || [], candidateName, mailbox);
 }
 
+// INCIDENT 2026-07-29. Discovery needs BOTH halves, so the calendar read is a
+// hard dependency of the send path for any candidate Paraform has no email for.
+// For nine days the service account had no `calendar.readonly` domain-wide grant
+// and the project's Calendar API was disabled, every corroboration was therefore
+// impossible, and health reported the recovery path green the whole time. This
+// probe is what makes that state observable instead of silent.
+export async function probeCalendarAccess(
+  mailbox,
+  {
+    fetchImpl = fetch,
+    tokenImpl = delegatedGoogleAccessToken,
+  } = {},
+) {
+  try {
+    const token = await tokenImpl(mailbox, {
+      scopes: [GOOGLE_CALENDAR_READONLY_SCOPE],
+      fetchImpl,
+    });
+    const response = await fetchImpl(
+      `${CALENDAR_BASE}/calendars/primary/events?maxResults=1&singleEvents=true`,
+      {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+    if (response.ok) return { ok: true, code: null };
+    const body = await response.json().catch(() => null);
+    return {
+      ok: false,
+      code: response.status === 403
+        ? "GOOGLE_CALENDAR_SCOPE_MISSING"
+        : "GOOGLE_CALENDAR_REQUEST_FAILED",
+      detail: clean(body?.error?.message).slice(0, 180) || null,
+    };
+  } catch (error) {
+    const code = error?.code === "GMAIL_AUTH_FAILED"
+      ? "GOOGLE_CALENDAR_SCOPE_MISSING"
+      : clean(error?.code) || "GOOGLE_CALENDAR_CONTACT_LOOKUP_FAILED";
+    return { ok: false, code, detail: clean(error?.message).slice(0, 180) || null };
+  }
+}
+
 export async function discoverCandidateContact(
   {
     candidateName,
