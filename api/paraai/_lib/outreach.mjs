@@ -42,7 +42,7 @@ import {
   offMarketHold,
   OFF_MARKET_HOLD_DAYS,
 } from "./outreach-intent.mjs";
-import { discoverCandidateContact } from "./outreach-contact.mjs";
+import { discoverCandidateContact, probeCalendarAccess } from "./outreach-contact.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import {
   acquireOutreachLock,
@@ -50,10 +50,12 @@ import {
   appendOutreachJournal,
   claimOutreachExceptionAlert,
   createOutreachState,
+  getContactCapability,
   getOutreachState,
   listOutreachExceptions,
   listOutreachStates,
   probeOutreachStore,
+  recordContactCapability,
   recordOutreachException,
   releaseOutreachLock,
   releaseOutreachExceptionAlert,
@@ -65,6 +67,16 @@ import {
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 const EXCEPTION_RETRY_MS = 5 * 60 * 1000;
+// Paraform expires a submission request seven days after `created_at`
+// (SUBMISSION_REQUEST_CONFIG, captured 2026-07-28). A blocked request is racing
+// this clock, so the deadline has to be a first-class number here rather than
+// something a human is expected to work out from the board.
+export const SUBMISSION_REQUEST_EXPIRY_DAYS = 7;
+const HOUR_MS = 60 * 60 * 1000;
+// Escalation rungs, in hours before expiry. One alert per rung per request, so a
+// blocked request gets louder as it dies instead of repeating the same daily line.
+const EXPIRY_ESCALATION_HOURS = [48, 12];
+const EXPIRY_ALERT_TTL_SECONDS = 30 * 24 * 60 * 60;
 // Exception codes that a later tick may legitimately retry on its own. A bounced
 // address behaves exactly like a missing one: the moment David fixes it in
 // Paraform the request becomes sendable again, so it self-heals.
@@ -201,6 +213,7 @@ export function eligibleNewRequests(
   config = outreachConfig(),
   states = [],
   exceptions = [],
+  { now = Date.now() } = {},
 ) {
   const delivered = new Set();
   for (const state of states || []) {
@@ -208,19 +221,33 @@ export function eligibleNewRequests(
       if (record?.sentAt) delivered.add(requestId);
     }
   }
+  const recoverable = (exceptions || []).filter((row) => (
+    row?.status === "open" && RECOVERABLE_EXCEPTION_CODES.has(clean(row?.code))
+  ));
+  const retryDue = (row) => (
+    finiteDate(row?.lastSeenAt) == null ||
+    finiteDate(row?.lastSeenAt) <= now - EXCEPTION_RETRY_MS
+  );
   const retryAuthorized = new Set(
-    (exceptions || [])
-      .filter((row) => (
-        row?.status === "open" &&
-        // Only a recoverable exception may re-enter the queue. A missing email
-        // becomes sendable the moment David adds it; a candidate-replied hold
-        // never does.
-        RECOVERABLE_EXCEPTION_CODES.has(clean(row?.code)) &&
-        (
-          finiteDate(row?.lastSeenAt) == null ||
-          finiteDate(row?.lastSeenAt) <= Date.now() - EXCEPTION_RETRY_MS
-        )
-      ))
+    recoverable
+      // Only a recoverable exception may re-enter the queue. A missing email
+      // becomes sendable the moment David adds it; a candidate-replied hold
+      // never does.
+      .filter(retryDue)
+      .map((row) => clean(row?.requestId))
+      .filter(Boolean),
+  );
+  // INCIDENT 2026-07-29. The retry interval above used to be reachable only
+  // through `retryAuthorized`, i.e. only for a request whose Paraform reached-out
+  // marker was already set. A still-unreached request satisfied the plain
+  // eligibility test on its own, so a known-blocked request was re-attempted on
+  // EVERY tick: one live case logged 1,361 attempts in 9h39m (one per ~26s), each
+  // burning a Gmail search, up to twenty thread reads, a Calendar query, and one
+  // of only three batch slots. Three such requests at once would have starved
+  // every new request. The interval now applies to both admission paths.
+  const retryThrottled = new Set(
+    recoverable
+      .filter((row) => !retryDue(row))
       .map((row) => clean(row?.requestId))
       .filter(Boolean),
   );
@@ -241,6 +268,7 @@ export function eligibleNewRequests(
     // GUARDRAIL: never outreach a protected recruiter's role (e.g. Kyra's).
     !protectedRecruiterForRoleTitle(request.roleName) &&
     !humanHeld.has(request.id) &&
+    !retryThrottled.has(request.id) &&
     (
       retryAuthorized.has(request.id) ||
       (
@@ -302,6 +330,15 @@ async function candidateContact(request, config) {
     candidateName: name,
     mailbox: config.mailbox,
   });
+  // Every discovery call already knows whether both halves are usable. Latch it so
+  // health can stop guessing (2026-07-29 incident).
+  await recordContactCapability({
+    calendarOk: !discovery.calendarError,
+    calendarCode: discovery.calendarError || null,
+    gmailOk: !discovery.gmailError,
+    gmailCode: discovery.gmailError || null,
+    source: "discovery",
+  }).catch(() => null);
   if (discovery.email) {
     return {
       name,
@@ -1265,13 +1302,33 @@ function htmlEscape(value) {
   );
 }
 
+// INCIDENT 2026-07-29. This alert used to describe only the outcome ("not
+// corroborated by both Gmail and Calendar") and always prescribe the same fix
+// ("add the email in Paraform"). For nine days the real fault was that the
+// Calendar half could not run at all — the exception record carried
+// `calendarError` the whole time and the alert never said it — so four days of
+// daily alerts pointed at a Paraform field that no edit would have unblocked.
+// A lookup that CANNOT run and a lookup that ran and found nothing need different
+// human actions, so they now read differently.
 export function missingEmailAlertCopy(request, discovery = {}) {
   const suggestions = Array.isArray(discovery?.suggestedEmails)
     ? discovery.suggestedEmails.filter(Boolean)
     : [];
+  const gmailError = clean(discovery?.gmailError) || null;
+  const calendarError = clean(discovery?.calendarError) || null;
+  const brokenHalves = [
+    gmailError ? `Gmail lookup FAILED (${gmailError})` : null,
+    calendarError ? `Calendar lookup FAILED (${calendarError})` : null,
+  ].filter(Boolean);
   const suggestionText = suggestions.length
     ? `Google lookup found: ${suggestions.join(", ")}. This was not corroborated by both Gmail and Calendar, so no email was sent.`
     : "Gmail and Google Calendar did not produce one corroborated address.";
+  const faultText = brokenHalves.length
+    ? `${brokenHalves.join(" and ")} — corroboration was impossible, so this is a SYSTEM fault and no Paraform edit will clear it. Fix the Google access first.`
+    : null;
+  const remedy = brokenHalves.length
+    ? "Once Google access is restored the worker retries automatically; adding the email in Paraform also unblocks it immediately."
+    : "Add the correct email to the candidate's Paraform profile. The worker will retry automatically after the address is available.";
   const candidate = displayName(request?.candidateName) || "Unknown candidate";
   const role = clean(request?.roleName) || "Unknown role";
   const company = clean(request?.companyName) || "Unknown company";
@@ -1279,7 +1336,8 @@ export function missingEmailAlertCopy(request, discovery = {}) {
     `Para AI outreach is blocked for ${candidate}.`,
     `${role} @ ${company}`,
     suggestionText,
-    "Add the correct email to the candidate's Paraform profile. The worker will retry automatically after the address is available.",
+    ...(faultText ? [faultText] : []),
+    remedy,
   ];
   return {
     subject: `Action needed: missing email for ${candidate}`,
@@ -1287,8 +1345,89 @@ export function missingEmailAlertCopy(request, discovery = {}) {
     html: lines
       .map((line) => `<div>${htmlEscape(line)}</div>`)
       .join("\n<div><br></div>\n"),
-    slack: `🚨 Para AI outreach blocked: ${candidate} has no deliverable email for ${role} @ ${company}. ${suggestionText} Add the correct email in Paraform; the worker will retry automatically.`,
+    slack: [
+      `🚨 Para AI outreach blocked: ${candidate} has no deliverable email for ${role} @ ${company}.`,
+      suggestionText,
+      faultText,
+      brokenHalves.length
+        ? "Restore the Google access; adding the email in Paraform also unblocks it immediately."
+        : "Add the correct email in Paraform; the worker will retry automatically.",
+    ].filter(Boolean).join(" "),
   };
+}
+
+export function requestExpiresAtMs(request) {
+  const created = request?.createdAtMs ?? finiteDate(request?.createdAt);
+  return created == null
+    ? null
+    : created + SUBMISSION_REQUEST_EXPIRY_DAYS * 24 * HOUR_MS;
+}
+
+// The rung a request has just crossed, or null when it is not near the deadline.
+// Rungs are ordered tightest-first so a request that jumps two rungs (a long tick
+// gap, or a first failure discovered late) reports the more urgent one.
+export function expiryEscalationRung(request, { now = Date.now() } = {}) {
+  const expiresAt = requestExpiresAtMs(request);
+  if (expiresAt == null) return null;
+  const hoursLeft = (expiresAt - now) / HOUR_MS;
+  if (hoursLeft <= 0) return null;
+  for (const rung of [...EXPIRY_ESCALATION_HOURS].sort((left, right) => left - right)) {
+    if (hoursLeft <= rung) return { rung, hoursLeft };
+  }
+  return null;
+}
+
+export function expiryEscalationCopy(request, code, { rung, hoursLeft }) {
+  const candidate = displayName(request?.candidateName) || "a candidate";
+  const role = clean(request?.roleName) || "Unknown role";
+  const company = clean(request?.companyName) || "Unknown company";
+  const hours = Math.max(1, Math.round(hoursLeft));
+  return `⏳ Para AI outreach DEADLINE: ${candidate} has still not been emailed about ${role} @ ${company}, and the hiring manager's request expires in ~${hours}h (Paraform kills it ${SUBMISSION_REQUEST_EXPIRY_DAYS} days after the request). Blocked by ${clean(code) || "an exception"}. After expiry the match is dead and it counts toward the three expired matches that pause new Para AI matches.${rung <= 12 ? " This is the last warning." : ""}`;
+}
+
+export function expiredUnsentCopy(request) {
+  const candidate = displayName(request?.candidateName) || "a candidate";
+  const role = clean(request?.roleName) || "Unknown role";
+  const company = clean(request?.companyName) || "Unknown company";
+  return `💀 Para AI outreach EXPIRED UNSENT: ${candidate} was never emailed about ${role} @ ${company} and the hiring manager's request has now expired. Nothing will retry it. Recover it by hand with the expired-request override if the role is still worth pursuing.`;
+}
+
+// A blocked request used to leave the queue in silence the moment Paraform flipped
+// it out of `pending`, so the only trace of a lost match was an unread alert from
+// days earlier. This runs at the end of every tick, alerts once per request, and
+// closes the exception so the ledger stops showing it as open work.
+export async function reportExpiredUnsentRequests({
+  history,
+  states = [],
+  exceptions = [],
+  claimImpl = claimOutreachExceptionAlert,
+  notifyImpl = notifySlack,
+  resolveImpl = resolveOutreachException,
+} = {}) {
+  const delivered = new Set();
+  for (const state of states || []) {
+    for (const [requestId, record] of Object.entries(state?.matches || {})) {
+      if (record?.sentAt) delivered.add(requestId);
+    }
+  }
+  const open = (exceptions || []).filter((row) => row?.status === "open");
+  const reported = [];
+  for (const row of open) {
+    const requestId = clean(row?.requestId);
+    if (!requestId || delivered.has(requestId)) continue;
+    const request = (history || []).find((item) => item.id === requestId);
+    // Absent from history is ambiguous (withdrawn, filled, out of window), so only
+    // Paraform's own expired status counts as a confirmed lost match.
+    if (!request || lower(request.status) !== "expired") continue;
+    const claimed = await claimImpl(`${requestId}:expired-unsent`, {
+      ttlSeconds: EXPIRY_ALERT_TTL_SECONDS,
+    }).catch(() => false);
+    if (!claimed) continue;
+    await notifyImpl(expiredUnsentCopy({ ...request, candidateName: row.candidateName || request.candidateName })).catch(() => false);
+    await resolveImpl(requestId, { resolution: "expired_unsent" }).catch(() => null);
+    reported.push(requestId);
+  }
+  return reported;
 }
 
 const HELD_ALERT_CODES = new Set([
@@ -1320,11 +1459,35 @@ export function heldAlertCopy(code, request, error = null) {
   return `✋ Para AI outreach held: ${candidate} has already replied, so the ${match} match was NOT auto-sent. Review the thread and send manually if it still makes sense.`;
 }
 
+// One extra, louder line per escalation rung, on top of the daily alert. The daily
+// alert answers "something is blocked"; this answers "and it dies in N hours",
+// which is the fact that actually forces a decision. Claimed per rung with a
+// 30-day TTL, so it fires at most once each and never becomes noise.
+async function escalateNearExpiry(request, code, { now = Date.now() } = {}) {
+  if (!request?.id) return null;
+  const escalation = expiryEscalationRung(request, { now });
+  if (!escalation) return null;
+  const claimed = await claimOutreachExceptionAlert(
+    `${request.id}:expiry-${escalation.rung}`,
+    { ttlSeconds: EXPIRY_ALERT_TTL_SECONDS },
+  ).catch(() => false);
+  if (!claimed) return null;
+  const notified = await notifySlack(
+    expiryEscalationCopy(request, code, escalation),
+  ).catch(() => false);
+  if (!notified) {
+    await releaseOutreachExceptionAlert(`${request.id}:expiry-${escalation.rung}`)
+      .catch(() => {});
+  }
+  return { ...escalation, notified };
+}
+
 export async function handleOutreachFailure(
   error,
   request,
   {
     config = outreachConfig(),
+    now = Date.now(),
   } = {},
 ) {
   const code = clean(error?.code || "OUTREACH_FAILED");
@@ -1344,10 +1507,11 @@ export async function handleOutreachFailure(
   // alert once, exactly like the missing-email path. Never silent.
   if (HELD_ALERT_CODES.has(code) && request?.id) {
     const record = await recordOutreachException({ request, code, discovery: null });
+    const escalation = await escalateNearExpiry(request, code, { now });
     const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
-    if (!alertClaimed) return record;
+    if (!alertClaimed) return { ...record, escalation };
     await notifySlack(heldAlertCopy(code, request, error)).catch(() => false);
-    return record;
+    return { ...record, escalation };
   }
   if (code === "OUTREACH_NO_EMAIL" && request?.id) {
     const record = await recordOutreachException({
@@ -1355,6 +1519,7 @@ export async function handleOutreachFailure(
       code,
       discovery: error?.discovery || null,
     });
+    const escalation = await escalateNearExpiry(request, code, { now });
     const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
     if (!alertClaimed) return record;
     const copy = missingEmailAlertCopy(request, error?.discovery);
@@ -1378,7 +1543,7 @@ export async function handleOutreachFailure(
     if (!notified) {
       await releaseOutreachExceptionAlert(request.id).catch(() => {});
     }
-    return { ...record, notified };
+    return { ...record, notified, escalation };
   }
   await notifySlack(
     `🚨 Para AI outreach: ${code} for ${request?.id || "scheduled follow-up"}. No duplicate email will be attempted; review the outreach ledger.`,
@@ -1411,13 +1576,14 @@ export async function runOutreachTick({
       config,
       states,
       exceptions,
+      { now },
     ).slice(0, config.batchSize)) {
       candidatesWithNewMatch.add(request.candidateUserId);
       try {
         const result = await processMatchRequest(request, history, { mode: "send", config });
         results.push({ action: result.action, requestId: request.id });
       } catch (error) {
-        await handleOutreachFailure(error, request, { config }).catch(() => {});
+        await handleOutreachFailure(error, request, { config, now }).catch(() => {});
         results.push({ action: "error", requestId: request.id, code: clean(error?.code || "OUTREACH_FAILED") });
       }
     }
@@ -1443,10 +1609,19 @@ export async function runOutreachTick({
         }
       }
     }
+    // A lost match must never be quieter than a blocked one. Anything still open
+    // whose Paraform request has expired unsent gets one loud line and is closed
+    // out of the ledger (2026-07-29 incident).
+    const expiredUnsent = await reportExpiredUnsentRequests({
+      history,
+      states,
+      exceptions,
+    }).catch(() => []);
     return {
       enabled: true,
       processed: results.filter((result) => result.action === "sent").length,
       results,
+      expiredUnsent,
     };
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});
@@ -1459,14 +1634,20 @@ export async function runOutreachTick({
 export async function reviewHeldOutreach({
   config = outreachConfig(),
   limit = 50,
+  requestId: onlyRequestId = null,
   assessImpl = assessOutreachThread,
 } = {}) {
   const [history, exceptions] = await Promise.all([
     readSubmissionRequestHistory(),
     listOutreachExceptions(500),
   ]);
+  const target = clean(onlyRequestId) || null;
   const held = (exceptions || [])
-    .filter((row) => row?.status === "open" && HUMAN_HELD_EXCEPTION_CODES.has(clean(row?.code)))
+    .filter((row) => (
+      row?.status === "open" &&
+      HUMAN_HELD_EXCEPTION_CODES.has(clean(row?.code)) &&
+      (!target || clean(row?.requestId) === target)
+    ))
     .slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
   const rows = [];
   for (const record of held) {
@@ -1491,6 +1672,19 @@ export async function reviewHeldOutreach({
       rows.push(row);
       continue;
     }
+    // Presence in the history is NOT the same as still being open: the history
+    // carries submitted, dismissed, and expired rows too. Without this check a
+    // release would email an interview request for a role the candidate has
+    // already been submitted to — one of the two held records on 2026-07-29 was
+    // exactly that shape.
+    if (!REQUEST_STATUSES.has(request.status)) {
+      row.requestStatus = request.status;
+      row.blockedBy = "REQUEST_NO_LONGER_PENDING";
+      rows.push(row);
+      continue;
+    }
+    row.requestStatus = request.status;
+    row.expiresAt = new Date(requestExpiresAtMs(request)).toISOString();
     const candidateUserId = clean(record.candidateUserId || request.candidateUserId);
     const state = candidateUserId
       ? await getOutreachState(candidateUserId).catch(() => null)
@@ -1546,8 +1740,9 @@ export async function reviewHeldOutreach({
 export async function releaseHeldOutreach({
   config = outreachConfig(),
   limit = 5,
+  requestId = null,
 } = {}) {
-  const review = await reviewHeldOutreach({ config, limit: 200 });
+  const review = await reviewHeldOutreach({ config, limit: 200, requestId });
   const batch = review.rows
     .filter((row) => row.wouldSend)
     .slice(0, Math.max(1, Math.min(10, Number(limit) || 5)));
@@ -1555,7 +1750,7 @@ export async function releaseHeldOutreach({
   const results = [];
   for (const row of batch) {
     const request = history.find((item) => item.id === row.requestId);
-    if (!request) {
+    if (!request || !REQUEST_STATUSES.has(request.status)) {
       results.push({ ...row, action: "skipped", code: "REQUEST_NO_LONGER_PENDING" });
       continue;
     }
@@ -1620,6 +1815,16 @@ export async function outreachHealth({
   config = outreachConfig(),
   probe = false,
 } = {}) {
+  // INCIDENT 2026-07-29. `contactRecoveryConfigured` was literally
+  // `config.gmailConfigured`, so it reported the recovery path green for nine days
+  // while the Calendar half of the corroboration could not run at all and every
+  // candidate without a Paraform email was silently unsendable. It now requires
+  // BOTH halves: the Gmail configuration flag AND a calendar observation that is
+  // not known-broken. The observation is written by the discovery path itself and
+  // refreshed by an explicit probe, so this can no longer be true by assumption.
+  const capability = config.storeConfigured
+    ? await getContactCapability().catch(() => null)
+    : null;
   const result = {
     approved: config.approved,
     dryRun: config.dryRun,
@@ -1629,10 +1834,41 @@ export async function outreachHealth({
     storeConfigured: config.storeConfigured,
     mailbox: config.mailbox,
     executionReady: outreachExecutionEnabled(config),
-    contactRecoveryConfigured: config.gmailConfigured,
+    // Three-state on purpose: false when Gmail is not configured, null when the
+    // calendar half has not been observed yet, and only true on evidence. The old
+    // field could only ever be true, which is exactly how it lied.
+    contactRecoveryConfigured: config.gmailConfigured
+      ? (capability ? capability.calendarOk === true : null)
+      : false,
+    contactRecovery: {
+      gmailConfigured: config.gmailConfigured,
+      calendarOk: capability ? capability.calendarOk === true : null,
+      calendarCode: capability?.calendarCode || null,
+      observedAt: capability?.observedAt || null,
+      observedBy: capability?.source || null,
+    },
     gmail: probe && config.gmailConfigured ? "checking" : null,
     store: probe && config.storeConfigured ? "checking" : null,
   };
+  if (probe && config.gmailConfigured) {
+    const calendar = await probeCalendarAccess(config.mailbox);
+    result.contactRecovery = {
+      ...result.contactRecovery,
+      calendarOk: calendar.ok,
+      calendarCode: calendar.code || null,
+      calendarDetail: calendar.detail || null,
+      observedAt: new Date().toISOString(),
+      observedBy: "probe",
+    };
+    result.contactRecoveryConfigured = config.gmailConfigured && calendar.ok;
+    if (config.storeConfigured) {
+      await recordContactCapability({
+        calendarOk: calendar.ok,
+        calendarCode: calendar.code || null,
+        source: "probe",
+      }).catch(() => null);
+    }
+  }
   if (probe && config.gmailConfigured) {
     try {
       result.gmail = (await probeGmail(config.mailbox)).ok ? "live" : "wrong_mailbox";

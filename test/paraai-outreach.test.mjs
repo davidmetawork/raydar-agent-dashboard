@@ -38,6 +38,7 @@ import {
   discoverCandidateContact,
   gmailCandidateEvidence,
   normalizeContactName,
+  probeCalendarAccess,
   resolveContactEvidence,
 } from "../api/paraai/_lib/outreach-contact.mjs";
 import {
@@ -46,6 +47,12 @@ import {
   assessmentPatch,
   eligibleNewRequests,
   expiredNoDigestOverrideEligible,
+  expiredUnsentCopy,
+  expiryEscalationCopy,
+  expiryEscalationRung,
+  reportExpiredUnsentRequests,
+  requestExpiresAtMs,
+  SUBMISSION_REQUEST_EXPIRY_DAYS,
   heldAlertCopy,
   missingEmailAlertCopy,
   normalizeExternalDeliveryEvidence,
@@ -60,7 +67,9 @@ import {
 } from "../api/paraai/_lib/outreach.mjs";
 import {
   claimOutreachExceptionAlert,
+  getContactCapability,
   probeOutreachStore,
+  recordContactCapability,
   recordOutreachException,
 } from "../api/paraai/_lib/outreach-store.mjs";
 
@@ -512,6 +521,119 @@ test("missing-email alert tells the operator what to fix without authorizing a s
   assert.match(copy.text, /Add the correct email to the candidate's Paraform profile/);
 });
 
+// REGRESSION (incident 2026-07-29): the alert always prescribed "add the email in
+// Paraform", including for four days when the real fault was that the Calendar half
+// of the corroboration could not run at all. The exception record carried
+// `calendarError` the whole time and the alert never said it.
+test("missing-email alert names the failing half instead of blaming Paraform", () => {
+  const request = {
+    candidateName: "Matthew Example",
+    roleName: "Founding GTM",
+    companyName: "ClaimSorted",
+  };
+  const broken = missingEmailAlertCopy(request, {
+    suggestedEmails: ["candidate@example.com"],
+    gmailError: null,
+    calendarError: "GOOGLE_CALENDAR_SCOPE_MISSING",
+  });
+  assert.match(broken.slack, /Calendar lookup FAILED \(GOOGLE_CALENDAR_SCOPE_MISSING\)/);
+  assert.match(broken.slack, /SYSTEM fault/);
+  assert.match(broken.slack, /no Paraform edit will clear it/);
+  // The old prescription must NOT be the headline remedy when Google is broken.
+  assert.doesNotMatch(broken.text, /^Add the correct email/m);
+  assert.match(broken.text, /Once Google access is restored/);
+  // Both halves down reads as both halves down.
+  const bothDown = missingEmailAlertCopy(request, {
+    gmailError: "GMAIL_AUTH_FAILED",
+    calendarError: "GOOGLE_CALENDAR_SCOPE_MISSING",
+  });
+  assert.match(bothDown.slack, /Gmail lookup FAILED \(GMAIL_AUTH_FAILED\) and Calendar lookup FAILED/);
+  // A healthy lookup that simply found nothing keeps the original instruction.
+  const healthy = missingEmailAlertCopy(request, {
+    suggestedEmails: ["candidate@example.com"],
+    gmailError: null,
+    calendarError: null,
+  });
+  assert.doesNotMatch(healthy.slack, /FAILED/);
+  assert.match(healthy.slack, /Add the correct email in Paraform/);
+});
+
+// REGRESSION (incident 2026-07-29): health reported `contactRecoveryConfigured:
+// true` for nine days while the Calendar half of contact discovery could not run,
+// because the field was literally an alias for the Gmail configuration flag. The
+// discovery path always knew the truth; now it writes it down.
+test("the contact-capability observation records which Google half works", async () => {
+  const writes = [];
+  const record = await recordContactCapability({
+    calendarOk: false,
+    calendarCode: "GOOGLE_CALENDAR_SCOPE_MISSING",
+    gmailOk: true,
+    source: "discovery",
+  }, {
+    kvImpl: async (command) => { writes.push(command); return "OK"; },
+  });
+  assert.equal(record.calendarOk, false);
+  assert.equal(record.calendarCode, "GOOGLE_CALENDAR_SCOPE_MISSING");
+  assert.equal(record.gmailOk, true);
+  assert.equal(writes[0][0], "SET");
+  assert.equal(writes[0][1], "paraai:outreach:contact-capability");
+  assert.equal(writes[0][3], "EX");
+  assert.equal(JSON.parse(writes[0][2]).calendarOk, false);
+
+  const stored = await getContactCapability({
+    kvImpl: async () => JSON.stringify({ version: 1, calendarOk: true, observedAt: "2026-07-29T15:00:00.000Z" }),
+  });
+  assert.equal(stored.calendarOk, true);
+  assert.equal(await getContactCapability({ kvImpl: async () => null }), null);
+
+  const ok = await recordContactCapability({ calendarOk: true }, {
+    kvImpl: async () => "OK",
+  });
+  assert.equal(ok.calendarOk, true);
+  assert.equal(ok.calendarCode, null);
+  assert.equal(ok.gmailOk, null);
+});
+
+test("the calendar probe reports a missing scope as a missing scope", async () => {
+  const token = async () => "token";
+  // The exact production shape on 2026-07-28: the API itself was disabled project-wide.
+  const forbidden = await probeCalendarAccess("david@raydar.xyz", {
+    tokenImpl: token,
+    fetchImpl: async () => ({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { message: "Calendar API has not been used in project 98752102484" } }),
+    }),
+  });
+  assert.equal(forbidden.ok, false);
+  assert.equal(forbidden.code, "GOOGLE_CALENDAR_SCOPE_MISSING");
+  assert.match(forbidden.detail, /has not been used/);
+
+  // No domain-wide delegation for the scope: the token request itself is refused.
+  const unauthorized = await probeCalendarAccess("david@raydar.xyz", {
+    tokenImpl: async () => {
+      const error = new Error("unauthorized_client");
+      error.code = "GMAIL_AUTH_FAILED";
+      throw error;
+    },
+  });
+  assert.equal(unauthorized.ok, false);
+  assert.equal(unauthorized.code, "GOOGLE_CALENDAR_SCOPE_MISSING");
+
+  const broken = await probeCalendarAccess("david@raydar.xyz", {
+    tokenImpl: token,
+    fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
+  });
+  assert.equal(broken.code, "GOOGLE_CALENDAR_REQUEST_FAILED");
+
+  const live = await probeCalendarAccess("david@raydar.xyz", {
+    tokenImpl: token,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ items: [] }) }),
+  });
+  assert.equal(live.ok, true);
+  assert.equal(live.code, null);
+});
+
 test("missing-email exceptions are durable and notification claims are deduplicated", async () => {
   const commands = [];
   const request = {
@@ -636,6 +758,155 @@ test("eligibility requires pending, unreached, post-cutoff, and not already deli
     }]),
     [],
   );
+});
+
+// REGRESSION (incident 2026-07-29): the five-minute retry interval was reachable
+// only through `retryAuthorized`, i.e. only once Paraform's reached-out marker was
+// set. An un-reached request satisfied plain eligibility on its own, so a
+// known-blocked request was re-attempted every tick — 1,361 attempts in 9h39m in
+// production, each burning a Gmail search, a Calendar query, and one of three batch
+// slots.
+test("a recoverable exception throttles retries even while the request is unreached", () => {
+  const now = Date.parse("2026-07-29T12:00:00.000Z");
+  const config = { notBeforeMs: Date.parse("2026-07-18T00:00:00.000Z") };
+  const request = {
+    id: "request-no-email",
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-24T17:16:00.000Z"),
+  };
+  const exception = (lastSeenAt) => [{
+    requestId: request.id,
+    status: "open",
+    code: "OUTREACH_NO_EMAIL",
+    lastSeenAt,
+  }];
+  // Attempted 26 seconds ago: inside the interval, so it must NOT re-enter.
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], exception("2026-07-29T11:59:34.000Z"), { now }),
+    [],
+  );
+  // Attempted six minutes ago: due again.
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], exception("2026-07-29T11:54:00.000Z"), { now }),
+    [request],
+  );
+  // No exception yet — the very first attempt is never throttled.
+  assert.deepEqual(eligibleNewRequests([request], config, [], [], { now }), [request]);
+  // A throttled request must not block the queue behind it: the next request still
+  // runs in the same tick.
+  const other = { ...request, id: "request-other", createdAtMs: now - 60_000 };
+  assert.deepEqual(
+    eligibleNewRequests(
+      [request, other],
+      config,
+      [],
+      exception("2026-07-29T11:59:34.000Z"),
+      { now },
+    ),
+    [other],
+  );
+  // A resolved exception carries no throttle.
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], [{
+      requestId: request.id,
+      status: "resolved",
+      code: "OUTREACH_NO_EMAIL",
+      lastSeenAt: "2026-07-29T11:59:34.000Z",
+    }], { now }),
+    [request],
+  );
+});
+
+test("the expiry clock is seven days and escalation rungs fire tightest-first", () => {
+  assert.equal(SUBMISSION_REQUEST_EXPIRY_DAYS, 7);
+  const request = {
+    id: "request-expiring",
+    candidateName: "Candidate Name",
+    roleName: "Founding GTM",
+    companyName: "ClaimSorted",
+    createdAtMs: Date.parse("2026-07-24T17:16:00.000Z"),
+  };
+  assert.equal(
+    new Date(requestExpiresAtMs(request)).toISOString(),
+    "2026-07-31T17:16:00.000Z",
+  );
+  assert.equal(requestExpiresAtMs({}), null);
+  // Six days out: not near the deadline, no escalation.
+  assert.equal(
+    expiryEscalationRung(request, { now: Date.parse("2026-07-25T17:16:00.000Z") }),
+    null,
+  );
+  assert.equal(
+    expiryEscalationRung(request, { now: Date.parse("2026-07-30T00:00:00.000Z") }).rung,
+    48,
+  );
+  // Inside the tightest rung, the tightest rung wins.
+  assert.equal(
+    expiryEscalationRung(request, { now: Date.parse("2026-07-31T09:00:00.000Z") }).rung,
+    12,
+  );
+  // Already expired: the deadline warning is pointless, the expired-unsent alarm owns it.
+  assert.equal(
+    expiryEscalationRung(request, { now: Date.parse("2026-08-01T00:00:00.000Z") }),
+    null,
+  );
+  const copy = expiryEscalationCopy(
+    request,
+    "OUTREACH_NO_EMAIL",
+    expiryEscalationRung(request, { now: Date.parse("2026-07-31T09:00:00.000Z") }),
+  );
+  assert.match(copy, /expires in ~8h/);
+  assert.match(copy, /OUTREACH_NO_EMAIL/);
+  assert.match(copy, /last warning/i);
+  assert.match(copy, /pause new Para AI matches/);
+});
+
+// REGRESSION (incident 2026-07-29): a blocked request left the queue in silence the
+// moment Paraform flipped it out of `pending`. One candidate's request expired
+// unsent and the only trace was a days-old unread alert.
+test("an expired unsent request alarms once and closes its exception", async () => {
+  const history = [
+    { id: "request-expired", status: "expired", candidateName: "Dan Example", roleName: "Staff Engineer", companyName: "TubeScience" },
+    { id: "request-live", status: "pending", candidateName: "Live Candidate", roleName: "PM", companyName: "Example Co" },
+    { id: "request-delivered", status: "expired", candidateName: "Sent Already", roleName: "AE", companyName: "Example Co" },
+  ];
+  const exceptions = [
+    { requestId: "request-expired", status: "open", code: "OUTREACH_NO_EMAIL", candidateName: "Dan Example" },
+    { requestId: "request-live", status: "open", code: "OUTREACH_NO_EMAIL" },
+    { requestId: "request-delivered", status: "open", code: "OUTREACH_NO_EMAIL" },
+    { requestId: "request-gone", status: "open", code: "OUTREACH_NO_EMAIL" },
+  ];
+  const states = [{ matches: { "request-delivered": { sentAt: "2026-07-28T00:00:00.000Z" } } }];
+  const claims = [];
+  const notices = [];
+  const resolved = [];
+  const reported = await reportExpiredUnsentRequests({
+    history,
+    states,
+    exceptions,
+    claimImpl: async (key) => { claims.push(key); return true; },
+    notifyImpl: async (text) => { notices.push(text); return true; },
+    resolveImpl: async (id, options) => { resolved.push([id, options.resolution]); return null; },
+  });
+  // Only the expired-and-never-delivered one: a pending request is not lost, a
+  // delivered one was not missed, and an absent one is ambiguous, not confirmed.
+  assert.deepEqual(reported, ["request-expired"]);
+  assert.deepEqual(claims, ["request-expired:expired-unsent"]);
+  assert.deepEqual(resolved, [["request-expired", "expired_unsent"]]);
+  assert.match(notices[0], /EXPIRED UNSENT/);
+  assert.match(notices[0], /Dan Example/);
+  // Second pass: the claim is already held, so no duplicate alarm.
+  const again = await reportExpiredUnsentRequests({
+    history,
+    states,
+    exceptions,
+    claimImpl: async () => false,
+    notifyImpl: async () => { throw new Error("must not alert twice"); },
+    resolveImpl: async () => { throw new Error("must not resolve twice"); },
+  });
+  assert.deepEqual(again, []);
+  assert.match(expiredUnsentCopy(history[0]), /never emailed/);
 });
 
 test("manual backfill ignores the rollout cutoff and reached-out checkbox", () => {

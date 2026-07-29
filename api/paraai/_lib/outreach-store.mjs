@@ -291,6 +291,46 @@ export async function listOutreachExceptions(
     .filter((row) => row && (includeResolved || row.status === "open"));
 }
 
+// The contact-discovery path learns whether the Calendar half of the corroboration
+// is usable every time it runs, and before 2026-07-29 it threw that knowledge away
+// while health reported green. Single writer: the discovery call site in
+// outreach.mjs (plus the explicit health probe).
+const CONTACT_CAPABILITY_KEY = "paraai:outreach:contact-capability";
+const CONTACT_CAPABILITY_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+export async function recordContactCapability(
+  {
+    calendarOk,
+    calendarCode = null,
+    gmailOk = null,
+    gmailCode = null,
+    source = "discovery",
+  },
+  { kvImpl = kv } = {},
+) {
+  const record = {
+    version: 1,
+    calendarOk: calendarOk === true,
+    calendarCode: calendarCode ? String(calendarCode) : null,
+    gmailOk: gmailOk == null ? null : gmailOk === true,
+    gmailCode: gmailCode ? String(gmailCode) : null,
+    source: String(source),
+    observedAt: new Date().toISOString(),
+  };
+  await kvImpl([
+    "SET",
+    CONTACT_CAPABILITY_KEY,
+    JSON.stringify(record),
+    "EX",
+    CONTACT_CAPABILITY_TTL_SECONDS,
+  ]);
+  return record;
+}
+
+export async function getContactCapability({ kvImpl = kv } = {}) {
+  return parse(await kvImpl(["GET", CONTACT_CAPABILITY_KEY]), null);
+}
+
 export async function claimOutreachExceptionAlert(
   requestId,
   {

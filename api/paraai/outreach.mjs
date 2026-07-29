@@ -199,7 +199,10 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         action,
-        ...(await reviewHeldOutreach({ limit: Number(body.limit || 50) })),
+        ...(await reviewHeldOutreach({
+          limit: Number(body.limit || 50),
+          requestId: String(body.requestId || "").trim() || null,
+        })),
       });
     }
     if (action === "release-held") {
@@ -213,7 +216,14 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         action,
-        ...(await releaseHeldOutreach({ config, limit: Number(body.limit || 5) })),
+        // requestId narrows the release to one held record. Without it the action
+        // releases every sendable held request, which is rarely what an operator
+        // working a single candidate means.
+        ...(await releaseHeldOutreach({
+          config,
+          limit: Number(body.limit || 5),
+          requestId: String(body.requestId || "").trim() || null,
+        })),
       });
     }
     if (action === "discover-request-contact") {
