@@ -249,6 +249,7 @@ function recoveryManifestDigest(record) {
       version: record.version,
       revision: record.revision,
       baseManifestDigest: record.baseManifestDigest,
+      skippedUnreadable: record.skippedUnreadable,
       active: record.active.map((entry) => ({
         id: entry.id,
         role: entry.role,
@@ -790,6 +791,8 @@ function validRecovery(value) {
     && RECOVERY_STATUSES.has(value.status)
     && DIGEST.test(String(value.baseManifestDigest || ""))
     && DIGEST.test(String(value.manifestDigest || ""))
+    && Number.isSafeInteger(value.skippedUnreadable)
+    && value.skippedUnreadable >= 0
     && active.length === RESUME_ONLY_BACKFILL_FIRST_TEN
     && active.every(validRecoveryMember)
     && terminal.length >= 1
@@ -1915,6 +1918,7 @@ function recoveryPublicStatus(recovery) {
       retry: 0,
       replacements: 0,
       terminal: 0,
+      skippedUnreadable: 0,
       manifestBound: false,
       committed: false,
       verified: false,
@@ -1931,6 +1935,7 @@ function recoveryPublicStatus(recovery) {
     retry: countRole("retry"),
     replacements: countRole("replacement"),
     terminal: recovery.terminal.length,
+    skippedUnreadable: recovery.skippedUnreadable,
     manifestBound:
       recoveryManifestDigest(recovery)
         === recovery.manifestDigest,
@@ -1970,6 +1975,15 @@ function entryCandidateMatchesJob(entry, job) {
       "paraai-resume-only-backfill-candidate-v1",
       candidateUserId,
     ) === entry.candidateHash
+  );
+}
+
+function recoveryReplacementReadMustAbort(error) {
+  const code = String(error?.code || "").trim();
+  return Boolean(
+    code === "AUTH_EXPIRED"
+    || code === "STATE_STORE_REQUEST_FAILED"
+    || /^RESUME_ONLY_BACKFILL_[A-Z0-9_]+$/u.test(code)
   );
 }
 
@@ -2168,6 +2182,7 @@ export async function planResumeOnlyBackfillRecovery({
     const active = [];
     const terminal = [];
     const seenCandidates = new Set();
+    let skippedUnreadable = 0;
 
     for (const id of control.canary.ids) {
       const entry = entryMap.get(id);
@@ -2258,15 +2273,29 @@ export async function planResumeOnlyBackfillRecovery({
       ) {
         continue;
       }
-      const checked = await advanceExistingImpl(job, {
-        approvalSource:
-          "authorized_backfill_resume_only_recovery_plan",
-      });
+      let checked;
+      try {
+        checked = await advanceExistingImpl(job, {
+          approvalSource:
+            "authorized_backfill_resume_only_recovery_plan",
+        });
+      } catch (error) {
+        if (recoveryReplacementReadMustAbort(error)) throw error;
+        skippedUnreadable += 1;
+        continue;
+      }
       if (checked?.state !== "ready_to_submit") {
         await excludeEntry(entry, "already_submitted", store);
         continue;
       }
-      const preflight = await runTerminalPreflight(checked);
+      let preflight;
+      try {
+        preflight = await runTerminalPreflight(checked);
+      } catch (error) {
+        if (recoveryReplacementReadMustAbort(error)) throw error;
+        skippedUnreadable += 1;
+        continue;
+      }
       if (!preflight?.eligible) {
         await excludeEntry(
           entry,
@@ -2275,9 +2304,16 @@ export async function planResumeOnlyBackfillRecovery({
         );
         continue;
       }
-      const resume = await getResumeImpl(
-        checked.identity.candidateUserId,
-      );
+      let resume;
+      try {
+        resume = await getResumeImpl(
+          checked.identity.candidateUserId,
+        );
+      } catch (error) {
+        if (recoveryReplacementReadMustAbort(error)) throw error;
+        skippedUnreadable += 1;
+        continue;
+      }
       const eligibility = autoEligibility(checked, config);
       if (!findResumeUri(resume) || !eligibility.eligible) {
         await excludeEntry(
@@ -2314,6 +2350,7 @@ export async function planResumeOnlyBackfillRecovery({
       status: "planned",
       baseManifestDigest: control.manifestDigest,
       manifestDigest: "",
+      skippedUnreadable,
       active,
       terminal,
       plannedAt,
