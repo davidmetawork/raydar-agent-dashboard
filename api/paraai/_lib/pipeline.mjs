@@ -1779,7 +1779,7 @@ export async function reconcileSubmittedJob(
     }
     return saveAwaitingMatchesImpl(transition(job, "awaiting_matches", {
       submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,
-      submitAcceptedAt: job.submitAcceptedAt || job.submitClaimedAt || checkedAt,
+      submitAcceptedAt: job.submitAcceptedAt || checkedAt,
       submissionApprovalCheckedAt: checkedAt,
       submitReadbackVerified: true,
       externalWriteMayHaveLanded: false,
@@ -1826,10 +1826,17 @@ const VERIFIED_SUBMISSION_FAILURE_STEPS = new Set([
   "submit_reconciliation",
 ]);
 
-function verifiedSubmissionFailure(failure) {
+export function isVerifiedSubmissionFailure(
+  failure,
+  {
+    defaultStep = "",
+  } = {},
+) {
   return Boolean(
     failure
-    && VERIFIED_SUBMISSION_FAILURE_STEPS.has(String(failure.step || ""))
+    && VERIFIED_SUBMISSION_FAILURE_STEPS.has(
+      String(failure.step || defaultStep),
+    )
     && VERIFIED_SUBMISSION_FAILURE_CODES.has(String(failure.code || "")),
   );
 }
@@ -1838,7 +1845,7 @@ export function clearVerifiedSubmissionFailures(job) {
   const automation = job?.automation || {};
   const stepFailures = Object.fromEntries(
     Object.entries(automation.stepFailures || {})
-      .filter(([step, failure]) => !verifiedSubmissionFailure({
+      .filter(([step, failure]) => !isVerifiedSubmissionFailure({
         ...failure,
         step,
       })),
@@ -1846,7 +1853,7 @@ export function clearVerifiedSubmissionFailures(job) {
   return {
     ...automation,
     stepFailures,
-    lastFailure: verifiedSubmissionFailure(automation.lastFailure)
+    lastFailure: isVerifiedSubmissionFailure(automation.lastFailure)
       ? null
       : automation.lastFailure,
   };

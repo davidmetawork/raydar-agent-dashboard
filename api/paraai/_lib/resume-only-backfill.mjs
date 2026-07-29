@@ -42,6 +42,8 @@ import {
 } from "./human-call.mjs";
 import {
   advanceExistingTalentNetworkJob,
+  clearVerifiedSubmissionFailures,
+  isVerifiedSubmissionFailure,
   prepareJob,
 } from "./pipeline.mjs";
 import {
@@ -2549,6 +2551,103 @@ async function validateRecoveryTerminal(
   }
 }
 
+function recoverySubmissionReadbackVerified(job) {
+  const attemptAt = Date.parse(
+    String(job?.submitAttemptStartedAt || ""),
+  );
+  const approvalAt = Date.parse(
+    String(job?.submissionApprovalCheckedAt || ""),
+  );
+  const matchLegAt = Date.parse(
+    String(job?.matchLegStartedAt || ""),
+  );
+  return Boolean(
+    job?.state === "awaiting_matches"
+    && job?.submitReadbackVerified === true
+    && Number.isFinite(attemptAt)
+    && Number.isFinite(approvalAt)
+    && Number.isFinite(matchLegAt)
+    && approvalAt >= attemptAt
+    && matchLegAt >= approvalAt
+    && (job?.journal || []).some(
+      (entry) => entry?.detail === "Paraform submission verified",
+    )
+    && !(job?.journal || []).some(
+      (entry) => entry?.detail
+        === "Talent Network membership already visible; submission write skipped",
+    )
+  );
+}
+
+async function reconcileRunningRecoverySubmissionProofs({
+  recovery,
+  store,
+  getJobImpl,
+  saveJobImpl,
+}) {
+  const entryMap = new Map(
+    (await store.entries()).map((entry) => [entry.id, entry]),
+  );
+  let reconciled = 0;
+  for (const record of recovery.active) {
+    const job = await getJobImpl(record.id);
+    const entry = entryMap.get(record.id);
+    if (
+      !job
+      || !entry
+      || entry.status !== "authorized"
+      || entry.candidateHash !== record.candidateHash
+      || !entryCandidateMatchesJob(entry, job)
+      || !recoveryStampMatches(job, recovery)
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+      );
+    }
+    if (!recoverySubmissionReadbackVerified(job)) continue;
+    const automation = clearVerifiedSubmissionFailures(job);
+    const clearedStepFailure = Object.keys(
+      automation.stepFailures || {},
+    ).length !== Object.keys(
+      job?.automation?.stepFailures || {},
+    ).length;
+    const clearedLastFailure = Boolean(
+      job?.automation?.lastFailure
+      && automation.lastFailure == null,
+    );
+    const clearedError = isVerifiedSubmissionFailure(
+      job.error,
+      { defaultStep: "submit" },
+    );
+    const attemptAt = Date.parse(job.submitAttemptStartedAt);
+    const acceptedAt = Date.parse(
+      String(job.submitAcceptedAt || ""),
+    );
+    const repairedAcceptedAt = (
+      !Number.isFinite(acceptedAt)
+      || acceptedAt < attemptAt
+    )
+      ? job.submissionApprovalCheckedAt
+      : job.submitAcceptedAt;
+    if (
+      !clearedStepFailure
+      && !clearedLastFailure
+      && !clearedError
+      && repairedAcceptedAt === job.submitAcceptedAt
+    ) continue;
+    const next = transition(job, job.state, {
+      submitAcceptedAt: repairedAcceptedAt,
+      automation,
+      error: clearedError ? null : job.error,
+      journalDetail:
+        "verified recovery submission proof normalized without another write",
+    });
+    await saveJobImpl(next, job.revision);
+    reconciled += 1;
+  }
+  return reconciled;
+}
+
 export async function commitResumeOnlyBackfillRecovery({
   now = Date.now(),
   store = resumeOnlyBackfillRedisStore,
@@ -2595,7 +2694,16 @@ export async function commitResumeOnlyBackfillRecovery({
       );
     }
     if (recovery.status === "running") {
-      return recoveryPublicStatus(recovery);
+      return {
+        ...recoveryPublicStatus(recovery),
+        reconciledVisibleSubmissions:
+          await reconcileRunningRecoverySubmissionProofs({
+            recovery,
+            store,
+            getJobImpl,
+            saveJobImpl,
+          }),
+      };
     }
     const runTerminalPreflight =
       await bindResumeOnlyBackfillTerminalPreflight(
