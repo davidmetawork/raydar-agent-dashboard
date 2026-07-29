@@ -898,6 +898,23 @@ function candidateFromCall(call) {
   };
 }
 
+export function raydarSchedulerBookingSourceId(call) {
+  if (
+    call?.source?.isScreener !== true
+    || !/^raydar-scheduler(?:-guardian)?$/u.test(
+      String(call?.source?.metadataSource || "").trim().toLowerCase(),
+    )
+  ) {
+    return null;
+  }
+  const bookingId = String(
+    call?.candidate?.raydarBookingId || "",
+  ).trim();
+  return /^bk_[1-9A-HJ-NP-Za-km-z]{22}$/u.test(bookingId)
+    ? bookingId
+    : null;
+}
+
 function persistedCallEndedAt(call, existingValue = null) {
   const existing = Date.parse(String(existingValue || ""));
   if (Number.isFinite(existing)) return new Date(existing).toISOString();
@@ -1104,12 +1121,18 @@ export async function prepareJob({
     : paraformHumanCall
       ? persistedHumanCallMetadata(call)
       : null;
+  const schedulerBookingSourceId = humanCall
+    ? null
+    : raydarSchedulerBookingSourceId(call);
   const callTypeFields = {
     humanCall,
     humanIntro,
     callType: humanCall ? "human" : "agent",
     callTypeAt: callEndedAt || call.joinAt || null,
     ...booking,
+    ...(schedulerBookingSourceId ? {
+      bookingSourceId: schedulerBookingSourceId,
+    } : {}),
     ...(humanIntro ? {
       bookingSourceId: humanCallMeta?.sourceId || null,
       resumeLinkDisposition:

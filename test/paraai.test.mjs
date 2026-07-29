@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 import { candidateAlreadySubmitted, candidateProfileInfo, clearCookieCache, fetchCall, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { PARAAI_LOCATIONS, extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
-import { PARAAI_SALARY_CAP, STATES, buildPreferences, existingTalentNetworkTransition, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { PARAAI_SALARY_CAP, STATES, buildPreferences, existingTalentNetworkTransition, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, raydarSchedulerBookingSourceId, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 import { reclaimableLegacyJobLock } from "../api/paraai/_lib/store.mjs";
 
@@ -104,6 +104,39 @@ test("automatic call reads bypass the Calls API verdict cache", async () => {
   assert.equal(request.options.headers.pragma, "no-cache");
   assert.equal(request.options.cache, "no-store");
   assert.equal(result.botId, "bot_12345678");
+});
+
+test("native Agent call provenance keeps only an exact authenticated scheduler booking id", () => {
+  const bookingId = "bk_123456789ABCDEFGHJKLMN";
+  const exact = {
+    source: {
+      isScreener: true,
+      metadataSource: "raydar-scheduler",
+    },
+    candidate: { raydarBookingId: bookingId },
+  };
+  assert.equal(raydarSchedulerBookingSourceId(exact), bookingId);
+  assert.equal(
+    raydarSchedulerBookingSourceId({
+      ...exact,
+      source: { ...exact.source, isScreener: false },
+    }),
+    null,
+  );
+  assert.equal(
+    raydarSchedulerBookingSourceId({
+      ...exact,
+      source: { ...exact.source, metadataSource: "paraform-auto" },
+    }),
+    null,
+  );
+  assert.equal(
+    raydarSchedulerBookingSourceId({
+      ...exact,
+      candidate: { raydarBookingId: "bk_invalid" },
+    }),
+    null,
+  );
 });
 
 test("email normalization rejects Paraform relay addresses", () => {
