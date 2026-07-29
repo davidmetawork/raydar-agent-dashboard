@@ -117,11 +117,15 @@ export async function handleRaydarBookingWebhook(request, {
     return json({ ok: false, error: "store_unavailable" }, 503);
   }
 
-  if (event.event === "booking.cancelled") {
+  if (
+    event.event === "booking.cancelled"
+    || event.event === "booking.rescheduled"
+  ) {
     try {
       await durableWrite(write, K.raydarCancel(event.bookingId), {
         at: event.occurredAt,
         callType: event.callType,
+        event: event.event,
       }, EVENT_TTL_SECONDS);
       await durableWrite(write, eventKey, {
         state: "done",
@@ -132,7 +136,10 @@ export async function handleRaydarBookingWebhook(request, {
     } catch {
       return json({ ok: false, error: "store_unavailable" }, 503);
     }
-    if (await alertAllowed(`raydar-cancel:${event.bookingId}`, 3600)) {
+    if (
+      event.event === "booking.cancelled"
+      && await alertAllowed(`raydar-cancel:${event.bookingId}`, 3600)
+    ) {
       await alert(":calendar: Raydar booking cancelled — a paused sequence lead may need resuming. Sequences are never auto-resumed.").catch(() => {});
     }
     return json({ ok: true, event: event.event, recorded: true }, 202);

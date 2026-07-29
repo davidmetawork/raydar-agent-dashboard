@@ -174,9 +174,20 @@ export async function fetchRaydarBookingIndex({
   const index = new Map();
   let active = 0;
   let cancelled = 0;
+  let rescheduled = 0;
   for (const { booking } of byBookingId.values()) {
     if (booking.status === "cancelled") {
       cancelled++;
+      continue;
+    }
+    // A rescheduled row is the immutable, superseded booking—not the
+    // replacement. The scheduler emits a separate confirmed row for the new
+    // booking, carrying supersedesBookingId back to this history record. If the
+    // old row is allowed into the active email index, a rescheduled-away call
+    // can keep blocking a future enrollment even when the replacement is
+    // cancelled or falls outside the consumer's intended state transition.
+    if (booking.status === "rescheduled") {
+      rescheduled++;
       continue;
     }
     active++;
@@ -201,6 +212,7 @@ export async function fetchRaydarBookingIndex({
     bookings: byBookingId.size,
     active,
     cancelled,
+    rescheduled,
     pages,
     complete: true,
     createdAfter: after,

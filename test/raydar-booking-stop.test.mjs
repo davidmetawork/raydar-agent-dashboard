@@ -204,7 +204,7 @@ test("confirmed native events use the native pause source and return counts only
   assert.equal(JSON.stringify(payload).includes("candidate@example.com"), false);
 });
 
-test("reschedule occurrence is the effective new-booking timestamp", async () => {
+test("rescheduled-away webhook is terminal history and never calls pause", async () => {
   const event = booking({
     event: "booking.rescheduled",
     eventId: "bevt_test_reschedule",
@@ -213,17 +213,28 @@ test("reschedule occurrence is the effective new-booking timestamp", async () =>
     status: "rescheduled",
     supersedesBookingId: "bk_test_old",
   });
-  let seen = null;
-  await handleRaydarBookingWebhook(
+  let pauseCalls = 0;
+  const writes = [];
+  const response = await handleRaydarBookingWebhook(
     signedRequest(event),
     handlerDeps({
-      pause: async (args) => {
-        seen = args;
-        return { decisions: [], paused: 0, pauseErrors: [], deferred: false };
+      pause: async () => { pauseCalls++; },
+      write: async (key, value) => {
+        writes.push({ key, value });
+        return "OK";
       },
     }),
   );
-  assert.equal(seen.bookedAt, "2026-07-29T17:59:30.000Z");
+  const payload = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(payload.event, "booking.rescheduled");
+  assert.equal(payload.recorded, true);
+  assert.equal(pauseCalls, 0);
+  assert.equal(
+    writes.some((entry) => entry.value.event === "booking.rescheduled"),
+    true,
+  );
+  assert.equal(writes.some((entry) => entry.value.state === "done"), true);
 });
 
 test("cancellation is recorded but never auto-unpauses or calls pause", async () => {
@@ -315,12 +326,17 @@ test("native webhook does not settle a partially failed pause", async () => {
   assert.equal(settlementWrites, 0);
 });
 
-test("native index paginates completely, authenticates, and excludes cancellations", async () => {
+test("native index paginates completely, authenticates, and excludes terminal rows", async () => {
   const active = indexBooking();
   const cancelled = indexBooking({
     bookingId: "bk_test_002",
     candidate: { email: "cancelled@example.com", name: null },
     status: "cancelled",
+  });
+  const rescheduled = indexBooking({
+    bookingId: "bk_test_003",
+    candidate: { email: "rescheduled@example.com", name: null },
+    status: "rescheduled",
   });
   const requests = [];
   const fetchImpl = async (url, options) => {
@@ -329,7 +345,7 @@ test("native index paginates completely, authenticates, and excludes cancellatio
     const body = cursor
       ? {
         schema: "raydar-booking-index-v1",
-        items: [cancelled],
+        items: [cancelled, rescheduled],
         nextCursor: null,
         complete: true,
         generatedAt: "2026-07-29T18:00:00.000Z",
@@ -353,8 +369,10 @@ test("native index paginates completely, authenticates, and excludes cancellatio
   assert.equal(result.complete, true);
   assert.equal(result.active, 1);
   assert.equal(result.cancelled, 1);
+  assert.equal(result.rescheduled, 1);
   assert.ok(result.index.has("candidate@example.com"));
   assert.equal(result.index.has("cancelled@example.com"), false);
+  assert.equal(result.index.has("rescheduled@example.com"), false);
   assert.equal(requests[0].options.headers.authorization, "Bearer private-read-key");
   assert.equal(new URL(requests[0].url).searchParams.get("limit"), "100");
 });
