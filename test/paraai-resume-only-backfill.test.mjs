@@ -1648,6 +1648,142 @@ test("a partial recovery enqueue resumes from the manifest-bound committing stat
   assert.equal(resumed.duplicate, 4);
 });
 
+test("running recovery normalizes only exact positive submission readback", async () => {
+  const fixture = await recoveryFixture();
+  const common = {
+    now: NOW + 60_000,
+    store: fixture.store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => fixture.jobs.get(id),
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    advanceExistingImpl: async (job) => job,
+    terminalPreflightImpl: fixture.terminalPreflightImpl,
+    config: { strictScreenerSource: true },
+    saveJobImpl: async (job, expectedRevision) => {
+      assert.equal(
+        expectedRevision,
+        fixture.jobs.get(job.id).revision,
+      );
+      const saved = {
+        ...job,
+        revision: expectedRevision + 1,
+      };
+      fixture.jobs.set(job.id, saved);
+      return saved;
+    },
+  };
+  await planResumeOnlyBackfillRecovery(common);
+  await commitResumeOnlyBackfillRecovery({
+    ...common,
+    enqueueImpl: async () => ({
+      enqueued: true,
+      duplicate: false,
+    }),
+  });
+  const recovery = await fixture.store.getRecovery();
+  const repairedId = fixture.originalIds[9];
+  const current = fixture.jobs.get(repairedId);
+  const submitClaimedAt = "2026-07-29T18:01:00.000Z";
+  const submitAttemptStartedAt =
+    "2026-07-29T18:02:00.000Z";
+  const submissionApprovalCheckedAt =
+    "2026-07-29T18:04:00.000Z";
+  const awaitingMatches = {
+    ...current,
+    state: "awaiting_matches",
+    automation: {
+      ...current.automation,
+      preferenceRerouteRequired: false,
+      preferenceRoutedAt: "2026-07-29T18:01:30.000Z",
+      lastFailure: {
+        step: "submit",
+        code: "SUBMIT_WRITE_UNKNOWN",
+        message: "write result unknown",
+      },
+      stepFailures: {
+        submit: {
+          count: 1,
+          code: "SUBMIT_WRITE_UNKNOWN",
+          message: "write result unknown",
+        },
+      },
+    },
+    submitClaimedAt,
+    submitAttemptStartedAt,
+    submitAcceptedAt: submitClaimedAt,
+    submissionApprovalCheckedAt,
+    matchLegStartedAt: submissionApprovalCheckedAt,
+    submitReadbackVerified: true,
+    error: {
+      code: "SUBMIT_WRITE_UNKNOWN",
+      detail: "write result unknown",
+    },
+    journal: [{
+      at: submissionApprovalCheckedAt,
+      detail: "Paraform submission verified",
+    }],
+  };
+  fixture.jobs.set(repairedId, {
+    ...awaitingMatches,
+    submitPayloadHash: hashSubmissionPayload(
+      buildSubmissionPayload(awaitingMatches),
+    ),
+  });
+
+  const pendingId = fixture.replacementIds[0];
+  const pending = fixture.jobs.get(pendingId);
+  fixture.jobs.set(pendingId, {
+    ...pending,
+    automation: {
+      ...pending.automation,
+      lastFailure: {
+        step: "submit",
+        code: "SUBMIT_WRITE_UNKNOWN",
+        message: "must remain without readback proof",
+      },
+      stepFailures: {
+        submit: {
+          count: 1,
+          code: "SUBMIT_WRITE_UNKNOWN",
+          message: "must remain without readback proof",
+        },
+      },
+    },
+  });
+
+  const normalized = await commitResumeOnlyBackfillRecovery({
+    ...common,
+    enqueueImpl: async () => {
+      assert.fail("running recovery must not enqueue again");
+    },
+  });
+  assert.equal(normalized.status, "running");
+  assert.equal(normalized.reconciledVisibleSubmissions, 1);
+  const repaired = fixture.jobs.get(repairedId);
+  assert.equal(
+    repaired.submitAcceptedAt,
+    submissionApprovalCheckedAt,
+  );
+  assert.equal(repaired.error, null);
+  assert.equal(repaired.automation.lastFailure, null);
+  assert.deepEqual(repaired.automation.stepFailures, {});
+  assert.equal(
+    repaired.automation.resumeOnlyRecoveryManifestDigest,
+    recovery.manifestDigest,
+  );
+  assert.notEqual(
+    fixture.jobs.get(pendingId).automation.lastFailure,
+    null,
+  );
+
+  const replayed = await commitResumeOnlyBackfillRecovery({
+    ...common,
+  });
+  assert.equal(replayed.reconciledVisibleSubmissions, 0);
+});
+
 test("mechanical first-ten verification requires ten real submissions and every resume-only fence", async () => {
   const ids = Array.from(
     { length: 10 },

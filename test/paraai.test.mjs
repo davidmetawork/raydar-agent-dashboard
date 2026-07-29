@@ -491,6 +491,8 @@ test("only positive submission readback clears verified submission failures", as
     identity: {
       candidateUserId: "candidate-user-1",
     },
+    submitClaimedAt: "2026-07-29T17:59:00.000Z",
+    submitAttemptStartedAt: "2026-07-29T18:00:00.000Z",
     automation: {
       lastFailure: failure,
       stepFailures: {
@@ -513,6 +515,12 @@ test("only positive submission readback clears verified submission failures", as
     getSubmissionIntentImpl: async () => null,
   });
   assert.equal(visible.state, "awaiting_matches");
+  assert.equal(
+    Date.parse(visible.submitAcceptedAt)
+      >= Date.parse(job.submitAttemptStartedAt),
+    true,
+  );
+  assert.notEqual(visible.submitAcceptedAt, job.submitClaimedAt);
   assert.equal(visible.automation.lastFailure, null);
   assert.deepEqual(visible.automation.stepFailures, {});
 
