@@ -521,6 +521,10 @@ export async function stopFollowUps({
   return out;
 }
 
+export function interestStopCanProceed(stop) {
+  return Array.isArray(stop?.errors) && stop.errors.length === 0;
+}
+
 /* ------------------------------------------------------------------- email */
 
 /**
@@ -1148,7 +1152,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       job = await saveJob(appendJournal({ ...job, stopped: stop, stage: "stopped" }, "stopped", {
         paused: stop.paused, attempted: stop.attempted,
       }));
-      if (stop.errors.length) {
+      if (!interestStopCanProceed(stop)) {
         const reviewReasons = ["stop_errors"];
         await recordReview(candidate.candidateUserId, reviewReasons, {
           roles: job.roles,

@@ -588,6 +588,22 @@ test("explicit on-site workplace preference satisfies Paraform's on-site answer"
   assert.equal(result.payload.relocation, true);
 });
 
+test("native no-visa authorization maps to Paraform false", () => {
+  const result = buildSingleSubmissionPayload({
+    candidate: contractCandidate,
+    candidateToApprovedRole: contractCandidateToRole,
+    userRoleApproval: contractApproval,
+    role: contractRole,
+    preferences: {
+      ...contractPreferences,
+      visa_authorization: "NO_VISA_AUTHORIZATION_NEEDED",
+    },
+    draft: contractDraft,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.payload.visa_sponsorship, false);
+});
+
 test("duplicate response flags are deterministic blockers", () => {
   assert.deepEqual(duplicateSubmissionBlockers({
     linkedin_user_role: true,
@@ -667,6 +683,8 @@ function capturedExecutorHarness({
   duplicate = {},
   preparedId = "candidate-role-1",
   postError = null,
+  creditsExhausted = false,
+  snippetRequired = false,
 } = {}) {
   let ledgerReads = 0;
   let companyReads = 0;
@@ -691,13 +709,16 @@ function capturedExecutorHarness({
         candidate_application_confirm_email: true,
         require_review_by_paraform: false,
         disable_submissions: false,
+        screening_call_snippet_required: snippetRequired,
         submission_attachment_requirements: { minimum_attachments: null },
       };
     }
     if (proc === "roleSlots.getMySingleSubmissionData") {
       ledgerReads += 1;
       return {
-        recentSingleSubmissionsThisWeekCount: ledgerReads === 1 ? 2 : 3,
+        recentSingleSubmissionsThisWeekCount: creditsExhausted
+          ? 10
+          : ledgerReads === 1 ? 2 : 3,
         previousAllowance: 10,
         latestSingleSubmissions: ledgerReads === 1 ? [] : [{
           application_id: "application-1",
@@ -829,4 +850,36 @@ test("captured executor blocks duplicates and prepared-row mismatches before POS
   assert.equal(mismatchResult.mutationAttempted, false);
   assert.ok(mismatchResult.blockers.includes("submission_prepared_context_mismatch"));
   assert.equal(mismatchHarness.applicationPosts(), 0);
+});
+
+test("captured executor rechecks credits and snippet requirements before POST", async () => {
+  const exhaustedHarness = capturedExecutorHarness({ creditsExhausted: true });
+  const exhausted = await executeCapturedSingleSubmission({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    candidateToApprovedRoleId: "candidate-role-1",
+    submissionDraft: contractDraft,
+    trpcGetImpl: exhaustedHarness.trpcGetImpl,
+    trpcPostImpl: exhaustedHarness.trpcPostImpl,
+    restImpl: exhaustedHarness.restImpl,
+    sleepImpl: async () => {},
+  });
+  assert.equal(exhausted.mutationAttempted, false);
+  assert.ok(exhausted.blockers.includes("credits_exhausted"));
+  assert.equal(exhaustedHarness.applicationPosts(), 0);
+
+  const snippetHarness = capturedExecutorHarness({ snippetRequired: true });
+  const snippet = await executeCapturedSingleSubmission({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    candidateToApprovedRoleId: "candidate-role-1",
+    submissionDraft: contractDraft,
+    trpcGetImpl: snippetHarness.trpcGetImpl,
+    trpcPostImpl: snippetHarness.trpcPostImpl,
+    restImpl: snippetHarness.restImpl,
+    sleepImpl: async () => {},
+  });
+  assert.equal(snippet.mutationAttempted, false);
+  assert.ok(snippet.blockers.includes("submission_screening_call_snippet_required"));
+  assert.equal(snippetHarness.applicationPosts(), 0);
 });

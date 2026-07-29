@@ -11,6 +11,7 @@ import {
 import {
   interestConfig,
   interestEmailPlan,
+  interestStopCanProceed,
   interestSweepComplete,
   interestSweepWindow,
   INTEREST_STATUS,
@@ -355,4 +356,13 @@ test("stop follow-ups ignores fuzzy search rows and verifies the exact lead", as
   assert.deepEqual(writes, ["lead-exact"]);
   assert.deepEqual(result.verified, ["sequence-1"]);
   assert.deepEqual(result.errors, []);
+});
+
+test("any stop error closes the submit and email boundary", () => {
+  assert.equal(interestStopCanProceed({ errors: [] }), true);
+  assert.equal(
+    interestStopCanProceed({ errors: ["sequence-1:stop_readback_unverified"] }),
+    false,
+  );
+  assert.equal(interestStopCanProceed(null), false);
 });
