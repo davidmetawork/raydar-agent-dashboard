@@ -26,6 +26,31 @@ import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/boo
 import { completeCampaignLeads, cronAuth } from "../api/seq/_lib/core.mjs";
 
 const SECRET = "test-signing-key";
+const SNAPSHOT_GENERATION = "1".repeat(32);
+const SNAPSHOT_MANIFEST_HASH = "2".repeat(64);
+
+const snapshotCurrent = () => ({
+  schema: "raydar-booking-membership-current-v1",
+  snapshotSchema: "raydar-booking-membership-snapshot-v1",
+  complete: true,
+  generation: SNAPSHOT_GENERATION,
+  manifestHash: SNAPSHOT_MANIFEST_HASH,
+});
+
+const membershipSnapshot = (perSequence) => ({
+  ok: true,
+  complete: true,
+  schema: "raydar-booking-membership-snapshot-v1",
+  generation: SNAPSHOT_GENERATION,
+  manifestHash: SNAPSHOT_MANIFEST_HASH,
+  // Keep the synthetic snapshot safely behind the run's captured clock.
+  // A helper-created timestamp even one millisecond later is correctly
+  // rejected as a future publication by the production freshness fence.
+  oldestFetchedAt: new Date(Date.now() - 1_000).toISOString(),
+  ageMs: 1_000,
+  current: snapshotCurrent(),
+  perSequence,
+});
 
 function signed(body, { secret = SECRET, at = Date.now() } = {}) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
@@ -572,6 +597,8 @@ test("a sweep that sees zero active leads FAILS instead of reporting success", a
         coveredEnabledLinkSequences: 1,
         complete: true,
       }),
+      membershipSnapshotLoader: async () => membershipSnapshot([]),
+      membershipCurrentLoader: async () => snapshotCurrent(),
     });
     assert.equal(r.ok, false, "must not report ok");
     assert.equal(r.error, "zero_active_leads");
@@ -581,7 +608,7 @@ test("a sweep that sees zero active leads FAILS instead of reporting success", a
   }
 });
 
-test("an incomplete covered-sequence membership read fails before index publication", async () => {
+test("an unavailable membership snapshot fails before any index publication", async () => {
   const result = await runBookingSweep({
     apply: false,
     calendlyIndexLoader: async () => ({
@@ -603,18 +630,15 @@ test("an incomplete covered-sequence membership read fails before index publicat
       coveredEnabledLinkSequences: 1,
       complete: true,
     }),
-    membershipLoader: async () => ({
+    membershipSnapshotLoader: async () => ({
+      ok: false,
       complete: false,
-      unique: 1,
-      totalCount: 2,
-      shortfall: 1,
-      apiCalls: 2,
-      leads: [{ ccu_id: "partial" }],
+      error: "membership_snapshot_unavailable",
+      detail: "shard_missing_or_invalid",
     }),
   });
   assert.equal(result.ok, false);
-  assert.equal(result.error, "incomplete_membership");
-  assert.equal(result.incompleteReads.length, 1);
+  assert.equal(result.error, "membership_snapshot_unavailable");
   assert.equal(result.indexedEmails, 0);
 });
 
@@ -636,12 +660,8 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
       coveredEnabledLinkSequences: 1,
       complete: true,
     }),
-    membershipLoader: async () => ({
-      complete: true,
-      unique: 1,
-      totalCount: 1,
-      shortfall: 0,
-      apiCalls: 1,
+    membershipSnapshotLoader: async () => membershipSnapshot([{
+      seq: { id: "covered", name: "Covered", enabled: true },
       leads: [{
         ccu_id: "ccu-covered",
         cu_id: "cu-covered",
@@ -651,8 +671,8 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
         is_paused: false,
         is_archived: false,
       }],
-    }),
-    leadIndexPublisher: async () => "OK",
+    }]),
+    membershipCurrentLoader: async () => snapshotCurrent(),
   };
 }
 
