@@ -1392,11 +1392,15 @@ export function expiredUnsentCopy(request) {
   return `💀 Para AI outreach EXPIRED UNSENT: ${candidate} was never emailed about ${role} @ ${company} and the hiring manager's request has now expired. Nothing will retry it. Recover it by hand with the expired-request override if the role is still worth pursuing.`;
 }
 
-// A blocked request used to leave the queue in silence the moment Paraform flipped
-// it out of `pending`, so the only trace of a lost match was an unread alert from
-// days earlier. This runs at the end of every tick, alerts once per request, and
-// closes the exception so the ledger stops showing it as open work.
-export async function reportExpiredUnsentRequests({
+// An exception outlives the work it describes. A blocked request used to leave the
+// queue in silence the moment Paraform flipped it out of `pending`, so the only
+// trace of a lost match was an unread alert from days earlier — and an exception
+// whose request was answered some other way (submitted by hand, dismissed) stayed
+// open forever, because only a successful send ever resolved one. This runs at the
+// end of every tick and splits those two cases the way the alerting rule requires:
+// a lost match is loud exactly once, and everything else closes silently, because
+// self-healing must never page a human.
+export async function sweepStaleOutreachExceptions({
   history,
   states = [],
   exceptions = [],
@@ -1411,23 +1415,42 @@ export async function reportExpiredUnsentRequests({
     }
   }
   const open = (exceptions || []).filter((row) => row?.status === "open");
-  const reported = [];
+  const expiredUnsent = [];
+  const closed = [];
   for (const row of open) {
     const requestId = clean(row?.requestId);
-    if (!requestId || delivered.has(requestId)) continue;
+    if (!requestId) continue;
     const request = (history || []).find((item) => item.id === requestId);
-    // Absent from history is ambiguous (withdrawn, filled, out of window), so only
-    // Paraform's own expired status counts as a confirmed lost match.
-    if (!request || lower(request.status) !== "expired") continue;
-    const claimed = await claimImpl(`${requestId}:expired-unsent`, {
-      ttlSeconds: EXPIRY_ALERT_TTL_SECONDS,
-    }).catch(() => false);
-    if (!claimed) continue;
-    await notifyImpl(expiredUnsentCopy({ ...request, candidateName: row.candidateName || request.candidateName })).catch(() => false);
-    await resolveImpl(requestId, { resolution: "expired_unsent" }).catch(() => null);
-    reported.push(requestId);
+    // Absent from the history is ambiguous — withdrawn, filled, or simply outside
+    // what the endpoint returned — so it is never grounds for closing anything.
+    if (!request) continue;
+    const status = lower(request.status);
+    // Still pending means still real work: leave it alone.
+    if (REQUEST_STATUSES.has(status)) continue;
+    if (status === "expired" && !delivered.has(requestId)) {
+      // The one case that costs a placement: the hiring manager asked, the
+      // candidate was never emailed, and the window has closed.
+      const claimed = await claimImpl(`${requestId}:expired-unsent`, {
+        ttlSeconds: EXPIRY_ALERT_TTL_SECONDS,
+      }).catch(() => false);
+      if (!claimed) continue;
+      await notifyImpl(expiredUnsentCopy({
+        ...request,
+        candidateName: row.candidateName || request.candidateName,
+      })).catch(() => false);
+      await resolveImpl(requestId, { resolution: "expired_unsent" }).catch(() => null);
+      expiredUnsent.push(requestId);
+      continue;
+    }
+    // Submitted, dismissed, or expired after we had already emailed them: the
+    // request was resolved elsewhere, so the exception is stale bookkeeping, not
+    // news. Close it quietly.
+    await resolveImpl(requestId, {
+      resolution: `no_longer_pending_${status || "unknown"}`,
+    }).catch(() => null);
+    closed.push({ requestId, status: status || "unknown" });
   }
-  return reported;
+  return { expiredUnsent, closed };
 }
 
 const HELD_ALERT_CODES = new Set([
@@ -1609,19 +1632,19 @@ export async function runOutreachTick({
         }
       }
     }
-    // A lost match must never be quieter than a blocked one. Anything still open
-    // whose Paraform request has expired unsent gets one loud line and is closed
-    // out of the ledger (2026-07-29 incident).
-    const expiredUnsent = await reportExpiredUnsentRequests({
+    // A lost match must never be quieter than a blocked one, and an exception must
+    // not outlive its request (2026-07-29 incident).
+    const sweep = await sweepStaleOutreachExceptions({
       history,
       states,
       exceptions,
-    }).catch(() => []);
+    }).catch(() => ({ expiredUnsent: [], closed: [] }));
     return {
       enabled: true,
       processed: results.filter((result) => result.action === "sent").length,
       results,
-      expiredUnsent,
+      expiredUnsent: sweep.expiredUnsent,
+      closedStaleExceptions: sweep.closed,
     };
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});
