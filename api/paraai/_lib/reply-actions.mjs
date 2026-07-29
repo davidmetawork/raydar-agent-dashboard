@@ -9,7 +9,17 @@ import { trpcGet, trpcPost } from "./core.mjs";
 import { claimRequestAction, readRequestClaim } from "./reply-store.mjs";
 
 export const MAX_SALARY_BAND_SPREAD = Number(process.env.PARAAI_REPLY_MAX_SALARY_SPREAD || 50_000);
-export const EXPIRY_DAYS = Number(process.env.PARAAI_REPLY_EXPIRY_DAYS || 10);
+
+// SUBMISSION_REQUEST_CONFIG.EXPIRATION_DAYS, read out of the Paraform client
+// bundle on 2026-07-28: exactly 7. The previous value of 10 was inferred from a
+// single "3 days left" sighting and was three days long.
+//
+// Nothing here gates a write on this number — Paraform flips a row's state to
+// EXPIRED server-side and pendingRequestsFor keys off that — so it is used for
+// forecasting and pacing only.
+export const EXPIRY_DAYS = Number(
+  process.env.PARAAI_EXPIRY_DAYS || process.env.PARAAI_REPLY_EXPIRY_DAYS || 7,
+);
 
 const text = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 const stripHtml = (value) => text(String(value ?? "").replace(/<[^>]*>/g, " "));
