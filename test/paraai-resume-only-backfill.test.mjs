@@ -15,18 +15,26 @@ import {
   hashSubmissionPayload,
 } from "../api/paraai/_lib/store.mjs";
 import {
+  campaignLeadsAll,
+} from "../api/paraai/_lib/core.mjs";
+import {
   armResumeOnlyBackfillRemainder,
+  commitResumeOnlyBackfillRecovery,
   commitResumeOnlyBackfillFirstTen,
   confidentHumanBackfillCall,
   confidentHumanBackfillReference,
   exactHumanBackfillNamesMatch,
   matchHumanBackfillRosterRow,
   mechanicalCanaryStatus,
+  mechanicalRecoveryCanaryStatus,
+  planResumeOnlyBackfillRecovery,
   readHumanBackfillPage,
   readHumanSuccessRoster,
+  readResumeOnlyBackfillTargetMembershipSnapshot,
   resumeOnlyBackfillDiagnostics,
   resumeOnlyBackfillPreparationDecision,
   resumeOnlyBackfillReleaseCapacity,
+  resumeOnlyBackfillTerminalPreflight,
   runResumeOnlyBackfillReleaseTick,
   runResumeOnlyBackfillPlanTick,
   verifyResumeOnlyBackfillFirstTen,
@@ -45,6 +53,7 @@ function candidateHash(candidateUserId) {
 
 function memoryStore() {
   let control = null;
+  let recovery = null;
   const entries = new Map();
   const pending = new Set();
   return {
@@ -54,6 +63,18 @@ function memoryStore() {
     async setControl(value) {
       control = structuredClone(value);
       return structuredClone(control);
+    },
+    async getRecovery() {
+      return recovery && structuredClone(recovery);
+    },
+    async createRecovery(value) {
+      if (recovery) return false;
+      recovery = structuredClone(value);
+      return true;
+    },
+    async setRecovery(value) {
+      recovery = structuredClone(value);
+      return structuredClone(recovery);
     },
     async addEntry(value) {
       if (entries.has(value.id)) return false;
@@ -423,6 +444,10 @@ test("plan freezes 45 days, prepares server-selected calls, and returns aggregat
       return job;
     },
     advanceExistingImpl: async (job) => job,
+    terminalPreflightImpl: async () => ({
+      eligible: true,
+      code: null,
+    }),
     queueStatsImpl: async () => ({
       queued: 0,
       due: 0,
@@ -491,6 +516,10 @@ test("transient preparation failures leave the server-selected row pending for r
       return prepared;
     },
     advanceExistingImpl: async (job) => job,
+    terminalPreflightImpl: async () => ({
+      eligible: true,
+      code: null,
+    }),
     queueStatsImpl: async () => ({
       queued: 0,
       due: 0,
@@ -568,6 +597,195 @@ test("planning preserves in-flight, submitted, technical, and resume-wait jobs",
     }).reason,
     "already_submitted",
   );
+});
+
+test("terminal preflight exhausts all target sequences and fails closed before authorization", async () => {
+  const job = readyJob("bot_preflight_only", 1);
+  const targets = ["one", "multiple", "none"].map((id) => ({
+    sequence: { id: `sequence-${id}` },
+  }));
+  const run = (overrides = {}) => (
+    resumeOnlyBackfillTerminalPreflight(job, {
+      candidateDetailsImpl: async () => (
+        overrides.details || { byId: {}, profile: {} }
+      ),
+      targetMembershipImpl: async () => ({
+        targets: overrides.targets || targets,
+        memberships: overrides.memberships || [],
+      }),
+    })
+  );
+  assert.deepEqual(await run(), {
+    eligible: true,
+    code: null,
+  });
+  assert.deepEqual(await run({
+    memberships: [{
+      sequence: targets[0].sequence,
+      lead: { has_replied: true },
+    }],
+  }), {
+    eligible: false,
+    code: "HAS_REPLIED",
+  });
+  assert.deepEqual(await run({
+    memberships: [{
+      sequence: targets[1].sequence,
+      lead: { has_replied: false },
+    }],
+  }), {
+    eligible: false,
+    code: "ALREADY_ENROLLED",
+  });
+  assert.deepEqual(await run({
+    details: {
+      byId: {
+        next_step_at: "2099-01-01T00:00:00.000Z",
+      },
+    },
+  }), {
+    eligible: false,
+    code: "FUTURE_NEXT_STEP",
+  });
+  await assert.rejects(
+    () => run({ targets: targets.slice(0, 2) }),
+    {
+      code: "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    },
+  );
+});
+
+test("one exhaustive target snapshot is shared across every recovery preflight", async () => {
+  const sequences = [
+    {
+      id: "sequence-one",
+      name: "New Matches - Added to Para AI (one role)",
+    },
+    {
+      id: "sequence-multiple",
+      name: "New Matches - Added to Para AI (multiple)",
+    },
+    {
+      id: "sequence-none",
+      name: "No Matches - Added to Para AI",
+    },
+  ];
+  const reads = [];
+  const snapshot =
+    await readResumeOnlyBackfillTargetMembershipSnapshot({
+      listSequencesImpl: async () => sequences,
+      campaignLeadsAllImpl: async (sequenceId) => {
+        reads.push(sequenceId);
+        if (sequenceId === "sequence-one") {
+          return [{
+            cu_id: "candidate-user-1",
+            has_replied: true,
+          }];
+        }
+        if (sequenceId === "sequence-multiple") {
+          return [{
+            cu_id: "candidate-user-2",
+            has_replied: false,
+          }];
+        }
+        return [];
+      },
+    });
+  assert.deepEqual(reads, [
+    "sequence-one",
+    "sequence-multiple",
+    "sequence-none",
+  ]);
+  assert.equal(snapshot.byCandidate.size, 2);
+  assert.deepEqual(
+    await resumeOnlyBackfillTerminalPreflight(
+      readyJob("bot_snapshot_only", 1),
+      {
+        candidateDetailsImpl: async () => ({
+          byId: {},
+          profile: {},
+        }),
+        targetMembershipSnapshot: snapshot,
+      },
+    ),
+    {
+      eligible: false,
+      code: "HAS_REPLIED",
+    },
+  );
+  await assert.rejects(
+    () => readResumeOnlyBackfillTargetMembershipSnapshot({
+      listSequencesImpl: async () => sequences,
+      campaignLeadsAllImpl: async (sequenceId) => (
+        sequenceId === "sequence-one"
+          ? [
+              { cu_id: "candidate-user-1" },
+              { cu_id: "candidate-user-1" },
+            ]
+          : []
+      ),
+    }),
+    {
+      code: "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    },
+  );
+});
+
+test("campaign membership cannot truncate at a cap or accept page overlap", async () => {
+  await assert.rejects(
+    () => campaignLeadsAll("sequence-one", {
+      trpcGetImpl: async () => ({
+        leads: [],
+        totalCount: 10_001,
+      }),
+    }),
+    /incomplete campaign membership read/u,
+  );
+  let calls = 0;
+  await assert.rejects(
+    () => campaignLeadsAll("sequence-one", {
+      trpcGetImpl: async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              leads: [{ cu_id: "candidate-1" }],
+              totalCount: 2,
+            }
+          : {
+              leads: [
+                { cu_id: "candidate-1" },
+                { cu_id: "candidate-2" },
+              ],
+            };
+      },
+    }),
+    /incomplete campaign membership read/u,
+  );
+  const cursors = [];
+  const complete = await campaignLeadsAll("sequence-one", {
+    trpcGetImpl: async (_procedure, input) => {
+      cursors.push(input.cursor ?? null);
+      if (input.cursor == null) {
+        return {
+          leads: [
+            { cu_id: "candidate-1" },
+            { cu_id: "candidate-2" },
+          ],
+          totalCount: 5,
+        };
+      }
+      return input.cursor === 2
+        ? { leads: [{ cu_id: "candidate-3" }] }
+        : {
+            leads: [
+              { cu_id: "candidate-4" },
+              { cu_id: "candidate-5" },
+            ],
+          };
+    },
+  });
+  assert.equal(complete.length, 5);
+  assert.deepEqual(cursors, [null, 2, 3]);
 });
 
 test("release capacity never crosses the durable queue ceilings", () => {
@@ -707,6 +925,10 @@ test("first-ten commit rechecks resumes and sets a no-chase authorization fence"
       enqueued.push({ id, options });
       return { enqueued: true, duplicate: false };
     },
+    terminalPreflightImpl: async () => ({
+      eligible: true,
+      code: null,
+    }),
     queueStatsImpl: async () => ({
       queued: 10,
       due: 10,
@@ -774,6 +996,507 @@ function verifiedCanaryJob(id, index, manifest) {
     ),
   };
 }
+
+async function recoveryFixture() {
+  const store = memoryStore();
+  const manifest = "e".repeat(64);
+  const originalIds = Array.from(
+    { length: 10 },
+    (_, index) => `bot_recovery_original_${String(index).padStart(2, "0")}`,
+  );
+  const replacementIds = Array.from(
+    { length: 3 },
+    (_, index) => `bot_recovery_replace_${String(index).padStart(2, "0")}`,
+  );
+  const jobs = new Map();
+  await store.setControl({
+    version: 1,
+    status: "canary_running",
+    boundaryAt: new Date(NOW).toISOString(),
+    cutoffAt: new Date(
+      NOW - 45 * 24 * 60 * 60_000,
+    ).toISOString(),
+    recall: {
+      cursor: null,
+      seenCursors: [],
+      exhausted: true,
+      scanned: 13,
+      discovered: 13,
+    },
+    human: {
+      cursor: 0,
+      exhausted: true,
+      scanned: 0,
+      discovered: 0,
+      rosterSuccessful: 0,
+    },
+    preparation: {
+      attempted: 13,
+      eligible: 3,
+      excluded: 0,
+    },
+    createdAt: new Date(NOW).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+    manifestDigest: manifest,
+    canary: {
+      status: "running",
+      ids: originalIds,
+      committedAt: new Date(NOW).toISOString(),
+      verifiedAt: null,
+    },
+    release: {
+      status: "not_armed",
+      authorized: 0,
+      excluded: 0,
+      batchOrdinal: 0,
+      armedAt: null,
+      completedAt: null,
+    },
+  });
+  for (const [index, id] of originalIds.entries()) {
+    let job;
+    if (index < 6) {
+      job = verifiedCanaryJob(id, index, manifest);
+      if (index < 3) {
+        job = {
+          ...job,
+          error: {
+            code: "AUTH_EXPIRED",
+            detail: "stale pre-success auth marker",
+          },
+          automation: {
+            ...job.automation,
+            lastFailure: {
+              code: "AUTH_EXPIRED",
+              step: "submission_read",
+            },
+          },
+        };
+      }
+    } else {
+      job = {
+        ...readyJob(id, index),
+        automation: {
+          ...readyJob(id, index).automation,
+          mode: "authorized_backfill",
+          backfillBatchEntryAt: new Date(NOW).toISOString(),
+          resumeOnlySubmit: true,
+          resumeOnlyManifestDigest: manifest,
+          resumeOnlyCohort: "canary",
+          resumeWait: null,
+        },
+      };
+      if (index < 9) {
+        job = {
+          ...job,
+          state: "error",
+          error: {
+            code: index === 6
+              ? "HAS_REPLIED"
+              : "ALREADY_ENROLLED",
+          },
+        };
+      }
+    }
+    jobs.set(id, job);
+    await store.addEntry({
+      version: 1,
+      id,
+      source: "agent",
+      callAt: new Date(
+        Date.parse(CALL_AT) + index * 1_000,
+      ).toISOString(),
+      status: "authorized",
+      candidateHash: candidateHash(
+        job.identity.candidateUserId,
+      ),
+      reason: null,
+      authorizedAt: new Date(NOW).toISOString(),
+    });
+  }
+  for (const [index, id] of replacementIds.entries()) {
+    const job = readyJob(id, index + 20);
+    jobs.set(id, job);
+    await store.addEntry({
+      version: 1,
+      id,
+      source: "agent",
+      callAt: new Date(
+        Date.parse(CALL_AT) + (index + 20) * 1_000,
+      ).toISOString(),
+      status: "eligible",
+      candidateHash: candidateHash(
+        job.identity.candidateUserId,
+      ),
+      reason: null,
+      authorizedAt: null,
+    });
+  }
+  const terminalPreflightImpl = async (job) => {
+    const code = String(job?.error?.code || "");
+    return ["HAS_REPLIED", "ALREADY_ENROLLED"].includes(code)
+      ? { eligible: false, code }
+      : { eligible: true, code: null };
+  };
+  return {
+    store,
+    manifest,
+    originalIds,
+    replacementIds,
+    jobs,
+    terminalPreflightImpl,
+  };
+}
+
+test("manifest recovery carries verified writes and replaces only proved pre-attempt terminals", async () => {
+  const fixture = await recoveryFixture();
+  const {
+    store,
+    manifest,
+    originalIds,
+    replacementIds,
+    jobs,
+    terminalPreflightImpl,
+  } = fixture;
+  const common = {
+    now: NOW + 60_000,
+    store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => jobs.get(id) || null,
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    terminalPreflightImpl,
+    config: {
+      strictScreenerSource: true,
+    },
+  };
+  const planned = await planResumeOnlyBackfillRecovery({
+    ...common,
+    advanceExistingImpl: async (job) => job,
+  });
+  assert.deepEqual(planned, {
+    status: "planned",
+    revision: 1,
+    selected: 10,
+    carried: 6,
+    retry: 1,
+    replacements: 3,
+    terminal: 3,
+    manifestBound: true,
+    committed: false,
+    verified: false,
+  });
+  const privateRecovery = await store.getRecovery();
+  assert.deepEqual(
+    privateRecovery.active.map((entry) => entry.role),
+    [
+      "carried",
+      "carried",
+      "carried",
+      "carried",
+      "carried",
+      "carried",
+      "retry",
+      "replacement",
+      "replacement",
+      "replacement",
+    ],
+  );
+  assert.deepEqual(
+    privateRecovery.terminal.map((entry) => entry.code),
+    ["HAS_REPLIED", "ALREADY_ENROLLED", "ALREADY_ENROLLED"],
+  );
+  const serializedPlan = JSON.stringify(planned);
+  for (const id of [...originalIds, ...replacementIds]) {
+    assert.equal(serializedPlan.includes(id), false);
+  }
+
+  const enqueued = [];
+  const committed = await commitResumeOnlyBackfillRecovery({
+    ...common,
+    saveJobImpl: async (job, expectedRevision) => {
+      assert.equal(expectedRevision, jobs.get(job.id).revision);
+      const saved = {
+        ...job,
+        revision: expectedRevision + 1,
+      };
+      jobs.set(job.id, saved);
+      return saved;
+    },
+    enqueueImpl: async (id, options) => {
+      enqueued.push({ id, options });
+      return { enqueued: true, duplicate: false };
+    },
+  });
+  assert.equal(committed.status, "running");
+  assert.equal(committed.carriedCommitted, 6);
+  assert.equal(committed.queued, 4);
+  assert.deepEqual(
+    enqueued.map(({ id }) => id),
+    [originalIds[9], ...replacementIds],
+  );
+  assert.equal(
+    enqueued.every(({ options }) => (
+      options.source === "authorized_backfill"
+      && options.eventId.includes(
+        privateRecovery.manifestDigest,
+      )
+    )),
+    true,
+  );
+  for (const record of privateRecovery.active) {
+    const job = jobs.get(record.id);
+    assert.equal(
+      job.automation.resumeOnlyRecoveryManifestDigest,
+      privateRecovery.manifestDigest,
+    );
+    assert.equal(
+      job.automation.resumeOnlyCohort,
+      "canary_recovery",
+    );
+  }
+  for (const id of originalIds.slice(0, 6)) {
+    assert.equal(jobs.get(id).error, null);
+    assert.equal(jobs.get(id).automation.lastFailure, null);
+  }
+  for (const id of originalIds.slice(6, 9)) {
+    assert.equal(jobs.get(id).state, "error");
+    assert.equal(
+      jobs.get(id).automation.resumeOnlyRecoveryManifestDigest,
+      undefined,
+    );
+  }
+
+  for (const record of privateRecovery.active) {
+    if (record.role === "carried") continue;
+    const current = jobs.get(record.id);
+    let successful = {
+      ...current,
+      state: "awaiting_matches",
+      revision: current.revision,
+      automation: {
+        ...current.automation,
+        preferenceRerouteRequired: false,
+        preferenceRoutedAt: "2026-07-29T18:01:00.000Z",
+        resumeOnlyRecoveryManifestDigest:
+          privateRecovery.manifestDigest,
+        resumeOnlyCohort: "canary_recovery",
+      },
+      submitAttemptStartedAt: "2026-07-29T18:02:00.000Z",
+      submitAcceptedAt: "2026-07-29T18:03:00.000Z",
+      submissionApprovalCheckedAt:
+        "2026-07-29T18:04:00.000Z",
+      matchLegStartedAt: "2026-07-29T18:04:00.000Z",
+      submitReadbackVerified: true,
+      error: null,
+      journal: [{
+        at: "2026-07-29T18:04:00.000Z",
+        detail: "Paraform submission verified",
+      }],
+    };
+    successful = {
+      ...successful,
+      submitPayloadHash: hashSubmissionPayload(
+        buildSubmissionPayload(successful),
+      ),
+    };
+    jobs.set(record.id, successful);
+  }
+  const recoveryMechanical = await mechanicalRecoveryCanaryStatus(
+    await store.getControl(),
+    await store.getRecovery(),
+    await store.entries(),
+    {
+      getJobImpl: async (id) => jobs.get(id),
+    },
+  );
+  assert.equal(
+    recoveryMechanical.verified,
+    true,
+    JSON.stringify(recoveryMechanical),
+  );
+  assert.equal(recoveryMechanical.talentNetworkVisible, 10);
+  assert.equal(recoveryMechanical.errors, 0);
+  const recoveryRecord = await store.getRecovery();
+  const stampedId = recoveryRecord.active[0].id;
+  const correctlyStamped = jobs.get(stampedId);
+  jobs.set(stampedId, {
+    ...correctlyStamped,
+    automation: {
+      ...correctlyStamped.automation,
+      resumeOnlyRecoveryManifestDigest: "f".repeat(64),
+    },
+  });
+  assert.equal(
+    (await mechanicalRecoveryCanaryStatus(
+      await store.getControl(),
+      recoveryRecord,
+      await store.entries(),
+      { getJobImpl: async (id) => jobs.get(id) },
+    )).verified,
+    false,
+  );
+  jobs.set(stampedId, correctlyStamped);
+  const tamperedRecovery = structuredClone(recoveryRecord);
+  tamperedRecovery.active[0].role = "retry";
+  assert.equal(
+    (await mechanicalRecoveryCanaryStatus(
+      await store.getControl(),
+      tamperedRecovery,
+      await store.entries(),
+      { getJobImpl: async (id) => jobs.get(id) },
+    )).verified,
+    false,
+  );
+
+  const verified = await verifyResumeOnlyBackfillFirstTen({
+    ...common,
+    queueStatsImpl: async () => ({
+      queued: 0,
+      due: 0,
+      leased: 0,
+    }),
+  });
+  assert.equal(verified.verificationRecorded, true);
+  assert.equal((await store.getRecovery()).status, "verified");
+  const armed = await armResumeOnlyBackfillRemainder({
+    ...common,
+    queueStatsImpl: async () => ({
+      queued: 0,
+      due: 0,
+      leased: 0,
+    }),
+  });
+  assert.equal(armed.status, "running");
+  assert.equal(armed.recovery.verified, true);
+});
+
+test("recovery refuses uncertain submissions and revalidates every terminal before writes", async () => {
+  const uncertain = await recoveryFixture();
+  uncertain.jobs.set(uncertain.originalIds[9], {
+    ...uncertain.jobs.get(uncertain.originalIds[9]),
+    state: "submitting",
+    submitAttemptStartedAt: "2026-07-29T18:02:00.000Z",
+  });
+  await assert.rejects(
+    () => planResumeOnlyBackfillRecovery({
+      now: NOW + 60_000,
+      store: uncertain.store,
+      lockImpl: async (operation) => operation(),
+      getJobImpl: async (id) => uncertain.jobs.get(id),
+      getResumeImpl: async () => ({
+        resumeUri: "s3://private/current.pdf",
+      }),
+      advanceExistingImpl: async (job) => job,
+      terminalPreflightImpl:
+        uncertain.terminalPreflightImpl,
+      config: { strictScreenerSource: true },
+    }),
+    {
+      code: "RESUME_ONLY_BACKFILL_RECOVERY_REVIEW_REQUIRED",
+    },
+  );
+  assert.equal(await uncertain.store.getRecovery(), null);
+
+  const changed = await recoveryFixture();
+  const common = {
+    now: NOW + 60_000,
+    store: changed.store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => changed.jobs.get(id),
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    advanceExistingImpl: async (job) => job,
+    terminalPreflightImpl: changed.terminalPreflightImpl,
+    config: { strictScreenerSource: true },
+  };
+  await planResumeOnlyBackfillRecovery(common);
+  let saves = 0;
+  let enqueues = 0;
+  await assert.rejects(
+    () => commitResumeOnlyBackfillRecovery({
+      ...common,
+      terminalPreflightImpl: async () => ({
+        eligible: true,
+        code: null,
+      }),
+      saveJobImpl: async () => {
+        saves += 1;
+      },
+      enqueueImpl: async () => {
+        enqueues += 1;
+      },
+    }),
+    {
+      code:
+        "RESUME_ONLY_BACKFILL_RECOVERY_CLASSIFICATION_CHANGED",
+    },
+  );
+  assert.equal(saves, 0);
+  assert.equal(enqueues, 0);
+  assert.equal((await changed.store.getRecovery()).status, "planned");
+});
+
+test("a partial recovery enqueue resumes from the manifest-bound committing state", async () => {
+  const fixture = await recoveryFixture();
+  const common = {
+    now: NOW + 60_000,
+    store: fixture.store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => fixture.jobs.get(id),
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    advanceExistingImpl: async (job) => job,
+    terminalPreflightImpl: fixture.terminalPreflightImpl,
+    config: { strictScreenerSource: true },
+    saveJobImpl: async (job, expectedRevision) => {
+      assert.equal(
+        expectedRevision,
+        fixture.jobs.get(job.id).revision,
+      );
+      const saved = {
+        ...job,
+        revision: expectedRevision + 1,
+      };
+      fixture.jobs.set(job.id, saved);
+      return saved;
+    },
+  };
+  await planResumeOnlyBackfillRecovery(common);
+  let attempts = 0;
+  await assert.rejects(
+    () => commitResumeOnlyBackfillRecovery({
+      ...common,
+      enqueueImpl: async () => {
+        attempts += 1;
+        return attempts < 3
+          ? { enqueued: true, duplicate: false }
+          : { enqueued: false, duplicate: false };
+      },
+    }),
+    {
+      code: "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+    },
+  );
+  assert.equal(attempts, 3);
+  assert.equal(
+    (await fixture.store.getRecovery()).status,
+    "committing",
+  );
+  const resumed = await commitResumeOnlyBackfillRecovery({
+    ...common,
+    enqueueImpl: async () => ({
+      enqueued: false,
+      duplicate: true,
+    }),
+  });
+  assert.equal(resumed.status, "running");
+  assert.equal(resumed.queued, 0);
+  assert.equal(resumed.duplicate, 4);
+});
 
 test("mechanical first-ten verification requires ten real submissions and every resume-only fence", async () => {
   const ids = Array.from(
@@ -1051,6 +1774,10 @@ test("the remainder cannot arm before verification and releases only after the t
       due: 0,
       leased: 0,
     }),
+    terminalPreflightImpl: async () => ({
+      eligible: true,
+      code: null,
+    }),
   };
   const unverifiedControl = await store.getControl();
   await store.setControl({
@@ -1197,6 +1924,9 @@ test("worker exposes only no-parameter controlled modes", async () => {
     "resume-only-backfill-tick",
     "resume-only-backfill-status",
     "resume-only-backfill-diagnostics",
+    "resume-only-backfill-recovery-plan",
+    "resume-only-backfill-recovery-commit",
+    "resume-only-backfill-recovery-status",
   ]) {
     assert.match(source, new RegExp(`"${mode}"`, "u"));
   }
@@ -1207,6 +1937,10 @@ test("worker exposes only no-parameter controlled modes", async () => {
   assert.match(
     source,
     /\["resume-only-backfill-arm", new Set\(\["mode"\]\)\]/u,
+  );
+  assert.match(
+    source,
+    /\["resume-only-backfill-recovery-plan", new Set\(\["mode"\]\)\]/u,
   );
   assert.match(
     source,

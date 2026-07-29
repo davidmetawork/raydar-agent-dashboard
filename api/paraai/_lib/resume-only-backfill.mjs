@@ -15,9 +15,15 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  SEQUENCE_NAMES,
+  campaignLeadsAll,
+  candidateDetails,
   fetchCall,
   findResumeUri,
   getResume,
+  hasFutureScheduledStep,
+  listSequences,
+  targetMembership,
   trpcGet,
 } from "./core.mjs";
 import {
@@ -57,6 +63,7 @@ export const RESUME_ONLY_BACKFILL_PLAN_BUDGET_MS = 65_000;
 const CONTROL_KEY = "paraai:resume-only-backfill:v1";
 const ENTRIES_KEY = "paraai:resume-only-backfill:v1:entries";
 const PENDING_KEY = "paraai:resume-only-backfill:v1:pending";
+const RECOVERY_KEY = "paraai:resume-only-backfill:v1:recovery";
 const LOCK_KEY = "paraai:resume-only-backfill:v1:lock";
 const LOCK_MS = 115_000;
 const HUMAN_PAGE_SIZE = 50;
@@ -94,6 +101,17 @@ const ENTRY_STATUSES = new Set([
   "eligible",
   "authorized",
   "excluded",
+]);
+const RECOVERY_STATUSES = new Set([
+  "planned",
+  "committing",
+  "running",
+  "verified",
+]);
+const RECOVERY_ROLES = new Set([
+  "carried",
+  "retry",
+  "replacement",
 ]);
 const TERMINAL_VISIBLE_STATES = new Set([
   "awaiting_matches",
@@ -220,6 +238,29 @@ function manifestDigest(control, entries) {
     cutoffAt: control.cutoffAt,
     entries: rows,
   }));
+}
+
+function recoveryManifestDigest(record) {
+  return sha(
+    "paraai-resume-only-backfill-recovery-manifest-v1",
+    JSON.stringify({
+      version: record.version,
+      revision: record.revision,
+      baseManifestDigest: record.baseManifestDigest,
+      active: record.active.map((entry) => ({
+        id: entry.id,
+        role: entry.role,
+        candidateHash: entry.candidateHash,
+        expectedRevision: entry.expectedRevision,
+      })),
+      terminal: record.terminal.map((entry) => ({
+        id: entry.id,
+        code: entry.code,
+        candidateHash: entry.candidateHash,
+        expectedRevision: entry.expectedRevision,
+      })),
+    }),
+  );
 }
 
 function safeReason(value) {
@@ -425,6 +466,159 @@ export function resumeOnlyBackfillPreparationDecision(job) {
   };
 }
 
+export async function resumeOnlyBackfillTerminalPreflight(
+  job,
+  {
+    candidateDetailsImpl = candidateDetails,
+    targetMembershipImpl = targetMembership,
+    targetMembershipSnapshot = null,
+  } = {},
+) {
+  const candidateUserId = String(
+    job?.identity?.candidateUserId || "",
+  ).trim();
+  if (!candidateUserId) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_PREFLIGHT_IDENTITY_REQUIRED",
+    );
+  }
+  const [details, membership] = await Promise.all([
+    candidateDetailsImpl(candidateUserId, { strict: true }),
+    targetMembershipSnapshot == null
+      ? targetMembershipImpl(candidateUserId)
+      : Promise.resolve({
+          targets: targetMembershipSnapshot.targets,
+          memberships:
+            targetMembershipSnapshot.byCandidate.get(
+              candidateUserId,
+            ) || [],
+        }),
+  ]);
+  const targets = Array.isArray(membership?.targets)
+    ? membership.targets
+    : [];
+  const targetIds = targets.map((target) => (
+    String(target?.sequence?.id || "").trim()
+  ));
+  const memberships = Array.isArray(membership?.memberships)
+    ? membership.memberships
+    : null;
+  if (
+    !details
+    || targets.length !== 3
+    || targetIds.some((id) => !id)
+    || new Set(targetIds).size !== 3
+    || memberships == null
+    || memberships.some((row) => (
+      !targetIds.includes(String(row?.sequence?.id || "").trim())
+      || !row?.lead
+    ))
+  ) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    );
+  }
+  if (hasFutureScheduledStep(details)) {
+    return {
+      eligible: false,
+      code: "FUTURE_NEXT_STEP",
+    };
+  }
+  if (
+    memberships.some(({ lead }) => lead?.has_replied === true)
+  ) {
+    return {
+      eligible: false,
+      code: "HAS_REPLIED",
+    };
+  }
+  if (memberships.length) {
+    return {
+      eligible: false,
+      code: "ALREADY_ENROLLED",
+    };
+  }
+  return {
+    eligible: true,
+    code: null,
+  };
+}
+
+export async function readResumeOnlyBackfillTargetMembershipSnapshot({
+  listSequencesImpl = listSequences,
+  campaignLeadsAllImpl = campaignLeadsAll,
+} = {}) {
+  const sequences = await listSequencesImpl();
+  if (!Array.isArray(sequences)) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    );
+  }
+  const targets = Object.values(SEQUENCE_NAMES).map((name) => ({
+    name,
+    sequence: sequences.find((row) => row?.name === name) || null,
+  }));
+  const ids = targets.map((target) => (
+    String(target?.sequence?.id || "").trim()
+  ));
+  if (
+    targets.length !== 3
+    || ids.some((id) => !id)
+    || new Set(ids).size !== 3
+  ) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    );
+  }
+  const byCandidate = new Map();
+  for (const target of targets) {
+    const leads = await campaignLeadsAllImpl(target.sequence.id);
+    if (!Array.isArray(leads)) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+      );
+    }
+    const seen = new Set();
+    for (const lead of leads) {
+      const candidateUserId = String(lead?.cu_id || "").trim();
+      if (!candidateUserId || seen.has(candidateUserId)) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+        );
+      }
+      seen.add(candidateUserId);
+      const memberships = byCandidate.get(candidateUserId) || [];
+      memberships.push({
+        sequence: target.sequence,
+        lead: {
+          has_replied: lead?.has_replied === true,
+        },
+      });
+      byCandidate.set(candidateUserId, memberships);
+    }
+  }
+  return {
+    targets,
+    byCandidate,
+  };
+}
+
+async function bindResumeOnlyBackfillTerminalPreflight(
+  terminalPreflightImpl,
+  targetMembershipSnapshotImpl,
+) {
+  if (
+    terminalPreflightImpl
+      !== resumeOnlyBackfillTerminalPreflight
+  ) {
+    return terminalPreflightImpl;
+  }
+  const snapshot = await targetMembershipSnapshotImpl();
+  return (job) => terminalPreflightImpl(job, {
+    targetMembershipSnapshot: snapshot,
+  });
+}
+
 function validControl(value) {
   const boundaryMs = Date.parse(String(value?.boundaryAt || ""));
   const cutoffMs = Date.parse(String(value?.cutoffAt || ""));
@@ -533,6 +727,100 @@ function validEntry(value) {
   );
 }
 
+function validRecoveryMember(value) {
+  return Boolean(
+    value
+    && JOB_ID.test(String(value.id || ""))
+    && RECOVERY_ROLES.has(String(value.role || ""))
+    && DIGEST.test(String(value.candidateHash || ""))
+    && Number.isSafeInteger(Number(value.expectedRevision))
+    && Number(value.expectedRevision) >= 0
+  );
+}
+
+function validRecoveryTerminal(value) {
+  return Boolean(
+    value
+    && JOB_ID.test(String(value.id || ""))
+    && RECOVERY_TERMINAL_PREATTEMPT_CODES.has(
+      String(value.code || ""),
+    )
+    && DIGEST.test(String(value.candidateHash || ""))
+    && Number.isSafeInteger(Number(value.expectedRevision))
+    && Number(value.expectedRevision) >= 0
+  );
+}
+
+function validRecovery(value) {
+  const active = Array.isArray(value?.active) ? value.active : [];
+  const terminal = Array.isArray(value?.terminal)
+    ? value.terminal
+    : [];
+  const activeIds = active.map((entry) => entry.id);
+  const activeCandidates = active.map(
+    (entry) => entry.candidateHash,
+  );
+  const terminalIds = terminal.map((entry) => entry.id);
+  const terminalCandidates = terminal.map(
+    (entry) => entry.candidateHash,
+  );
+  return Boolean(
+    value
+    && value.version === 1
+    && value.revision === 1
+    && RECOVERY_STATUSES.has(value.status)
+    && DIGEST.test(String(value.baseManifestDigest || ""))
+    && DIGEST.test(String(value.manifestDigest || ""))
+    && active.length === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && active.every(validRecoveryMember)
+    && terminal.length >= 1
+    && terminal.length < RESUME_ONLY_BACKFILL_FIRST_TEN
+    && terminal.every(validRecoveryTerminal)
+    && new Set(activeIds).size === activeIds.length
+    && new Set(activeCandidates).size === activeCandidates.length
+    && new Set(terminalIds).size === terminalIds.length
+    && terminalIds.every((id) => !activeIds.includes(id))
+    && new Set(terminalCandidates).size
+      === terminalCandidates.length
+    && terminalCandidates.every(
+      (hash) => !activeCandidates.includes(hash),
+    )
+    && active.filter((entry) => entry.role === "carried").length
+      >= 1
+    && active.filter(
+      (entry) => entry.role === "replacement",
+    ).length === terminal.length
+    && active.filter((entry) => (
+      entry.role === "carried" || entry.role === "retry"
+    )).length + terminal.length
+      === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && Number.isFinite(Date.parse(String(value.plannedAt || "")))
+    && (
+      value.committedAt == null
+      || Number.isFinite(Date.parse(String(value.committedAt)))
+    )
+    && (
+      value.verifiedAt == null
+      || Number.isFinite(Date.parse(String(value.verifiedAt)))
+    )
+    && (
+      ["planned", "committing"].includes(value.status)
+        ? value.committedAt == null && value.verifiedAt == null
+        : Number.isFinite(
+            Date.parse(String(value.committedAt || "")),
+          )
+    )
+    && (
+      value.status === "verified"
+        ? Number.isFinite(
+            Date.parse(String(value.verifiedAt || "")),
+          )
+        : value.verifiedAt == null
+    )
+    && recoveryManifestDigest(value) === value.manifestDigest
+  );
+}
+
 function parseRecord(raw, validator, code) {
   let value;
   try {
@@ -562,6 +850,37 @@ export const resumeOnlyBackfillRedisStore = Object.freeze({
     }
     await kv(["SET", CONTROL_KEY, JSON.stringify(control)]);
     return control;
+  },
+
+  async getRecovery() {
+    const raw = await kv(["GET", RECOVERY_KEY]);
+    return raw == null
+      ? null
+      : parseRecord(
+          raw,
+          validRecovery,
+          "RESUME_ONLY_BACKFILL_RECOVERY_INVALID",
+        );
+  },
+
+  async createRecovery(recovery) {
+    if (!validRecovery(recovery)) {
+      throw codedError("RESUME_ONLY_BACKFILL_RECOVERY_INVALID");
+    }
+    return await kv([
+      "SET",
+      RECOVERY_KEY,
+      JSON.stringify(recovery),
+      "NX",
+    ]) === "OK";
+  },
+
+  async setRecovery(recovery) {
+    if (!validRecovery(recovery)) {
+      throw codedError("RESUME_ONLY_BACKFILL_RECOVERY_INVALID");
+    }
+    await kv(["SET", RECOVERY_KEY, JSON.stringify(recovery)]);
+    return recovery;
   },
 
   async addEntry(entry) {
@@ -1236,6 +1555,7 @@ async function selectFirstTen(
   {
     getJobImpl,
     advanceExistingImpl,
+    terminalPreflightImpl,
   },
 ) {
   const selected = [];
@@ -1268,6 +1588,15 @@ async function selectFirstTen(
       });
       if (checked?.state !== "ready_to_submit") {
         await excludeEntry(entry, "already_submitted", store);
+        continue;
+      }
+      const preflight = await terminalPreflightImpl(checked);
+      if (!preflight?.eligible) {
+        await excludeEntry(
+          entry,
+          preflight?.code || "terminal_preflight",
+          store,
+        );
         continue;
       }
       seenCandidates.add(entry.candidateHash);
@@ -1407,11 +1736,15 @@ async function publicStatus(control, store, {
     };
   }
   const entries = await store.entries();
-  const canary = await mechanicalCanaryStatus(
+  const canary = await activeMechanicalCanaryStatus(
     control,
     entries,
+    store,
     { getJobImpl },
   );
+  const recovery = typeof store?.getRecovery === "function"
+    ? await store.getRecovery()
+    : null;
   return {
     ok: !["paused", "insufficient"].includes(control.status),
     status: control.status,
@@ -1429,6 +1762,7 @@ async function publicStatus(control, store, {
     },
     cohort: entryCounts(entries),
     canary,
+    recovery: recoveryPublicStatus(recovery),
     release: {
       status: control.release.status,
       authorized: Number(control.release.authorized) || 0,
@@ -1552,6 +1886,799 @@ export async function mechanicalCanaryStatus(
   return result;
 }
 
+function recoveryPublicStatus(recovery) {
+  if (!recovery) {
+    return {
+      status: "not_planned",
+      revision: 0,
+      selected: 0,
+      carried: 0,
+      retry: 0,
+      replacements: 0,
+      terminal: 0,
+      manifestBound: false,
+      committed: false,
+      verified: false,
+    };
+  }
+  const countRole = (role) => recovery.active.filter(
+    (entry) => entry.role === role,
+  ).length;
+  return {
+    status: recovery.status,
+    revision: recovery.revision,
+    selected: recovery.active.length,
+    carried: countRole("carried"),
+    retry: countRole("retry"),
+    replacements: countRole("replacement"),
+    terminal: recovery.terminal.length,
+    manifestBound:
+      recoveryManifestDigest(recovery)
+        === recovery.manifestDigest,
+    committed: recovery.committedAt != null,
+    verified: recovery.status === "verified",
+  };
+}
+
+function acceptedVisibleRecoveryProof(job, baseManifestDigest) {
+  if (!job) return false;
+  const projected = {
+    ...job,
+    automation: {
+      ...(job.automation || {}),
+      canaryManifestDigest: baseManifestDigest,
+    },
+  };
+  const verification = phase2CanaryJobVerification(
+    projected,
+    baseManifestDigest,
+  );
+  return Boolean(
+    verification.submitAccepted
+    && verification.talentNetworkVisible
+    && !verification.preexistingVisible
+  );
+}
+
+function entryCandidateMatchesJob(entry, job) {
+  const candidateUserId = String(
+    job?.identity?.candidateUserId || "",
+  ).trim();
+  return Boolean(
+    candidateUserId
+    && DIGEST.test(String(entry?.candidateHash || ""))
+    && sha(
+      "paraai-resume-only-backfill-candidate-v1",
+      candidateUserId,
+    ) === entry.candidateHash
+  );
+}
+
+export async function mechanicalRecoveryCanaryStatus(
+  control,
+  recovery,
+  entries,
+  {
+    getJobImpl = getJob,
+  } = {},
+) {
+  if (
+    !validRecovery(recovery)
+    || recovery.baseManifestDigest !== control?.manifestDigest
+    || recovery.terminal.some(
+      (entry) => !control?.canary?.ids?.includes(entry.id),
+    )
+    || recovery.active.some((entry) => (
+      entry.role === "replacement"
+        ? control?.canary?.ids?.includes(entry.id)
+        : !control?.canary?.ids?.includes(entry.id)
+    ))
+  ) {
+    return {
+      ...emptyCanaryStatus(),
+      status: recovery?.status || "not_planned",
+      selected: Array.isArray(recovery?.active)
+        ? recovery.active.length
+        : 0,
+    };
+  }
+  const entryMap = new Map(
+    (Array.isArray(entries) ? entries : [])
+      .map((entry) => [entry.id, entry]),
+  );
+  const jobs = await Promise.all(
+    recovery.active.map((entry) => getJobImpl(entry.id)),
+  );
+  const checks = jobs.map((job, index) => {
+    const recoveryEntry = recovery.active[index];
+    const entry = entryMap.get(recoveryEntry.id);
+    const projected = job
+      ? {
+          ...job,
+          automation: {
+            ...(job.automation || {}),
+            canaryManifestDigest:
+              recovery.baseManifestDigest,
+          },
+        }
+      : null;
+    const base = phase2CanaryJobVerification(
+      projected,
+      recovery.baseManifestDigest,
+    );
+    const resumeOnlyFence = Boolean(
+      job
+      && entry?.status === "authorized"
+      && entry.candidateHash === recoveryEntry.candidateHash
+      && job?.automation?.mode === "authorized_backfill"
+      && job?.automation?.resumeOnlySubmit === true
+      && job?.automation?.resumeOnlyManifestDigest
+        === recovery.baseManifestDigest
+      && job?.automation?.resumeOnlyRecoveryManifestDigest
+        === recovery.manifestDigest
+      && job?.automation?.resumeOnlyCohort
+        === "canary_recovery"
+      && job?.automation?.resumeWait == null
+      && entryCandidateMatchesJob(entry, job)
+    );
+    return {
+      ...base,
+      authorized: base.authorized && resumeOnlyFence,
+      resumeOnlyFence,
+    };
+  });
+  const count = (field) => checks.filter((row) => row[field]).length;
+  const result = {
+    status: recovery.status,
+    selected: recovery.active.length,
+    authorized: count("authorized"),
+    preferencesRouted: count("preferencesRouted"),
+    payloadHashVerified: count("payloadHashVerified"),
+    submitAttemptStarted: count("submitAttemptStarted"),
+    submitAccepted: count("submitAccepted"),
+    talentNetworkVisible: count("talentNetworkVisible"),
+    preexistingVisible: count("preexistingVisible"),
+    waitingForResume: count("waitingForResume"),
+    needsReview: count("needsReview"),
+    errors: count("error"),
+    missing: count("missing"),
+    resumeOnlyFenceIntact:
+      count("resumeOnlyFence")
+        === RESUME_ONLY_BACKFILL_FIRST_TEN,
+  };
+  result.verified = Boolean(
+    result.selected === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.authorized === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.preferencesRouted === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.payloadHashVerified === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.submitAttemptStarted === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.submitAccepted === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.talentNetworkVisible
+      === RESUME_ONLY_BACKFILL_FIRST_TEN
+    && result.preexistingVisible === 0
+    && result.waitingForResume === 0
+    && result.needsReview === 0
+    && result.errors === 0
+    && result.missing === 0
+    && result.resumeOnlyFenceIntact
+  );
+  return result;
+}
+
+async function activeMechanicalCanaryStatus(
+  control,
+  entries,
+  store,
+  dependencies,
+) {
+  const recovery = typeof store?.getRecovery === "function"
+    ? await store.getRecovery()
+    : null;
+  if (
+    recovery
+    && ["running", "verified"].includes(recovery.status)
+  ) {
+    return mechanicalRecoveryCanaryStatus(
+      control,
+      recovery,
+      entries,
+      dependencies,
+    );
+  }
+  return mechanicalCanaryStatus(
+    control,
+    entries,
+    dependencies,
+  );
+}
+
+function recoveryMember(entry, job, role) {
+  if (
+    !entryCandidateMatchesJob(entry, job)
+    || !Number.isSafeInteger(Number(job?.revision))
+  ) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_INVALID",
+    );
+  }
+  return {
+    id: entry.id,
+    role,
+    candidateHash: entry.candidateHash,
+    expectedRevision: Number(job.revision),
+  };
+}
+
+export async function planResumeOnlyBackfillRecovery({
+  now = Date.now(),
+  store = resumeOnlyBackfillRedisStore,
+  lockImpl = withResumeOnlyBackfillLock,
+  getJobImpl = getJob,
+  getResumeImpl = getResume,
+  advanceExistingImpl = advanceExistingTalentNetworkJob,
+  terminalPreflightImpl = resumeOnlyBackfillTerminalPreflight,
+  targetMembershipSnapshotImpl =
+    readResumeOnlyBackfillTargetMembershipSnapshot,
+  config = automationConfig(),
+} = {}) {
+  return lockImpl(async () => {
+    const control = await store.getControl();
+    if (
+      !control
+      || control.status !== "canary_running"
+      || control.canary.status !== "running"
+      || control.release.status !== "not_armed"
+      || control.release.authorized !== 0
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_NOT_ALLOWED",
+      );
+    }
+    const existing = await store.getRecovery();
+    if (existing) return recoveryPublicStatus(existing);
+    const runTerminalPreflight =
+      await bindResumeOnlyBackfillTerminalPreflight(
+        terminalPreflightImpl,
+        targetMembershipSnapshotImpl,
+      );
+    const allEntries = await store.entries();
+    const entryMap = new Map(
+      allEntries.map((entry) => [entry.id, entry]),
+    );
+    const originalIds = new Set(control.canary.ids);
+    const active = [];
+    const terminal = [];
+    const seenCandidates = new Set();
+
+    for (const id of control.canary.ids) {
+      const entry = entryMap.get(id);
+      const job = await getJobImpl(id);
+      if (
+        !entry
+        || entry.status !== "authorized"
+        || !entryCandidateMatchesJob(entry, job)
+        || seenCandidates.has(entry.candidateHash)
+      ) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_INVALID",
+        );
+      }
+      seenCandidates.add(entry.candidateHash);
+      const classification = canaryRecoveryClassification(
+        job,
+        control.manifestDigest,
+      );
+      if (classification === "accepted_visible") {
+        active.push(recoveryMember(entry, job, "carried"));
+        continue;
+      }
+      if (classification === "pre_attempt_terminal") {
+        const code = String(canaryDiagnosticCode(job));
+        const preflight = await runTerminalPreflight(job);
+        if (
+          submissionLifecycleStarted(job)
+          || preflight?.eligible !== false
+          || preflight?.code !== code
+        ) {
+          throw codedError(
+            "RESUME_ONLY_BACKFILL_RECOVERY_CLASSIFICATION_CHANGED",
+          );
+        }
+        const snapshot = recoveryMember(entry, job, "retry");
+        terminal.push({
+          id: snapshot.id,
+          code,
+          candidateHash: snapshot.candidateHash,
+          expectedRevision: snapshot.expectedRevision,
+        });
+        continue;
+      }
+      if (
+        classification === "pending_pre_attempt"
+        && job?.state === "ready_to_submit"
+        && !submissionLifecycleStarted(job)
+        && !jobHasTechnicalFailure(job)
+      ) {
+        const preflight = await runTerminalPreflight(job);
+        const resume = await getResumeImpl(
+          job.identity.candidateUserId,
+        );
+        const eligibility = autoEligibility(job, config);
+        if (
+          preflight?.eligible === true
+          && findResumeUri(resume)
+          && eligibility.eligible
+        ) {
+          active.push(recoveryMember(entry, job, "retry"));
+          continue;
+        }
+      }
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_REVIEW_REQUIRED",
+      );
+    }
+
+    for (const entry of [...allEntries].sort((left, right) => (
+      left.callAt.localeCompare(right.callAt)
+      || left.id.localeCompare(right.id)
+    ))) {
+      if (active.length >= RESUME_ONLY_BACKFILL_FIRST_TEN) break;
+      if (
+        entry.status !== "eligible"
+        || originalIds.has(entry.id)
+        || seenCandidates.has(entry.candidateHash)
+      ) {
+        continue;
+      }
+      const job = await getJobImpl(entry.id);
+      if (
+        job?.state !== "ready_to_submit"
+        || jobHasTechnicalFailure(job)
+        || submissionLifecycleStarted(job)
+        || !entryCandidateMatchesJob(entry, job)
+      ) {
+        continue;
+      }
+      const checked = await advanceExistingImpl(job, {
+        approvalSource:
+          "authorized_backfill_resume_only_recovery_plan",
+      });
+      if (checked?.state !== "ready_to_submit") {
+        await excludeEntry(entry, "already_submitted", store);
+        continue;
+      }
+      const preflight = await runTerminalPreflight(checked);
+      if (!preflight?.eligible) {
+        await excludeEntry(
+          entry,
+          preflight?.code || "terminal_preflight",
+          store,
+        );
+        continue;
+      }
+      const resume = await getResumeImpl(
+        checked.identity.candidateUserId,
+      );
+      const eligibility = autoEligibility(checked, config);
+      if (!findResumeUri(resume) || !eligibility.eligible) {
+        await excludeEntry(
+          entry,
+          !findResumeUri(resume)
+            ? "resume_missing_at_recovery"
+            : "job_changed",
+          store,
+        );
+        continue;
+      }
+      seenCandidates.add(entry.candidateHash);
+      active.push(recoveryMember(
+        entry,
+        checked,
+        "replacement",
+      ));
+    }
+
+    if (
+      active.length !== RESUME_ONLY_BACKFILL_FIRST_TEN
+      || terminal.length < 1
+      || active.filter((entry) => entry.role === "carried").length
+        < 1
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_INSUFFICIENT",
+      );
+    }
+    const plannedAt = iso(now);
+    const proposed = {
+      version: 1,
+      revision: 1,
+      status: "planned",
+      baseManifestDigest: control.manifestDigest,
+      manifestDigest: "",
+      active,
+      terminal,
+      plannedAt,
+      committedAt: null,
+      verifiedAt: null,
+    };
+    proposed.manifestDigest = recoveryManifestDigest(proposed);
+    if (!await store.createRecovery(proposed)) {
+      const raced = await store.getRecovery();
+      if (!raced) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_RECOVERY_CREATE_FAILED",
+        );
+      }
+      return recoveryPublicStatus(raced);
+    }
+    return recoveryPublicStatus(proposed);
+  });
+}
+
+function recoveryStampMatches(job, recovery) {
+  return Boolean(
+    job?.automation?.mode === "authorized_backfill"
+    && job?.automation?.resumeOnlySubmit === true
+    && job?.automation?.resumeOnlyManifestDigest
+      === recovery.baseManifestDigest
+    && job?.automation?.resumeOnlyRecoveryManifestDigest
+      === recovery.manifestDigest
+    && job?.automation?.resumeOnlyCohort
+      === "canary_recovery"
+    && job?.automation?.resumeWait == null
+  );
+}
+
+async function validateRecoveryTerminal(
+  record,
+  entry,
+  job,
+  terminalPreflightImpl,
+) {
+  if (
+    entry?.status !== "authorized"
+    || entry?.candidateHash !== record.candidateHash
+    || !entryCandidateMatchesJob(entry, job)
+    || submissionLifecycleStarted(job)
+    || canaryDiagnosticCode(job) !== record.code
+  ) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_RECOVERY_CLASSIFICATION_CHANGED",
+    );
+  }
+  const preflight = await terminalPreflightImpl(job);
+  if (
+    preflight?.eligible !== false
+    || preflight?.code !== record.code
+  ) {
+    throw codedError(
+      "RESUME_ONLY_BACKFILL_RECOVERY_CLASSIFICATION_CHANGED",
+    );
+  }
+}
+
+export async function commitResumeOnlyBackfillRecovery({
+  now = Date.now(),
+  store = resumeOnlyBackfillRedisStore,
+  lockImpl = withResumeOnlyBackfillLock,
+  getJobImpl = getJob,
+  getResumeImpl = getResume,
+  saveJobImpl = saveJob,
+  enqueueImpl = enqueueAutoJob,
+  terminalPreflightImpl = resumeOnlyBackfillTerminalPreflight,
+  targetMembershipSnapshotImpl =
+    readResumeOnlyBackfillTargetMembershipSnapshot,
+  config = automationConfig(),
+} = {}) {
+  return lockImpl(async () => {
+    const control = await store.getControl();
+    let recovery = await store.getRecovery();
+    if (
+      !control
+      || !recovery
+      || recovery.baseManifestDigest !== control.manifestDigest
+      || !["planned", "committing", "running"].includes(
+        recovery.status,
+      )
+      || control.release.status !== "not_armed"
+      || control.release.authorized !== 0
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_NOT_ALLOWED",
+      );
+    }
+    const originalIds = new Set(control.canary.ids);
+    if (
+      recovery.terminal.some(
+        (entry) => !originalIds.has(entry.id),
+      )
+      || recovery.active.some((entry) => (
+        entry.role === "replacement"
+          ? originalIds.has(entry.id)
+          : !originalIds.has(entry.id)
+      ))
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_INVALID",
+      );
+    }
+    if (recovery.status === "running") {
+      return recoveryPublicStatus(recovery);
+    }
+    const runTerminalPreflight =
+      await bindResumeOnlyBackfillTerminalPreflight(
+        terminalPreflightImpl,
+        targetMembershipSnapshotImpl,
+      );
+    const entryMap = new Map(
+      (await store.entries()).map((entry) => [entry.id, entry]),
+    );
+    const jobs = new Map();
+    for (const record of [
+      ...recovery.active,
+      ...recovery.terminal,
+    ]) {
+      const job = await getJobImpl(record.id);
+      const entry = entryMap.get(record.id);
+      if (
+        !job
+        || !entry
+        || entry.candidateHash !== record.candidateHash
+        || !entryCandidateMatchesJob(entry, job)
+      ) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_CHANGED",
+        );
+      }
+      jobs.set(record.id, job);
+    }
+    for (const record of recovery.terminal) {
+      await validateRecoveryTerminal(
+        record,
+        entryMap.get(record.id),
+        jobs.get(record.id),
+        runTerminalPreflight,
+      );
+    }
+    if (recovery.status === "planned") {
+      for (const record of recovery.active) {
+        const job = jobs.get(record.id);
+        const entry = entryMap.get(record.id);
+        const stamped = recoveryStampMatches(job, recovery);
+        if (record.role === "carried") {
+          if (
+            entry.status !== "authorized"
+            || !acceptedVisibleRecoveryProof(
+              job,
+              recovery.baseManifestDigest,
+            )
+            || !["NONE", "AUTH_EXPIRED"].includes(
+              canaryDiagnosticCode(job),
+            )
+            || Object.keys(
+              job?.automation?.stepFailures || {},
+            ).length
+          ) {
+            throw codedError(
+              "RESUME_ONLY_BACKFILL_RECOVERY_CARRY_INVALID",
+            );
+          }
+          continue;
+        }
+        if (
+          stamped
+          && acceptedVisibleRecoveryProof(
+            job,
+            recovery.baseManifestDigest,
+          )
+        ) {
+          continue;
+        }
+        if (
+          !stamped
+          && Number(job.revision) !== record.expectedRevision
+        ) {
+          throw codedError(
+            "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_CHANGED",
+          );
+        }
+        if (
+          job.state !== "ready_to_submit"
+          || submissionLifecycleStarted(job)
+          || jobHasTechnicalFailure(job)
+          || (
+            record.role === "retry"
+            && entry.status !== "authorized"
+          )
+          || (
+            record.role === "replacement"
+            && !["eligible", "authorized"].includes(entry.status)
+          )
+        ) {
+          throw codedError(
+            "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_CHANGED",
+          );
+        }
+        const preflight = await runTerminalPreflight(job);
+        const resume = await getResumeImpl(
+          job.identity.candidateUserId,
+        );
+        if (
+          preflight?.eligible !== true
+          || !findResumeUri(resume)
+          || !autoEligibility(job, config).eligible
+        ) {
+          throw codedError(
+            "RESUME_ONLY_BACKFILL_RECOVERY_PREFLIGHT_CHANGED",
+          );
+        }
+      }
+
+      for (const record of recovery.active) {
+        let job = await getJobImpl(record.id);
+        const entry = await store.getEntry(record.id);
+        if (record.role === "carried") {
+          if (
+            !recoveryStampMatches(job, recovery)
+            || job.error
+            || job?.automation?.lastFailure
+          ) {
+            const next = transition(job, job.state, {
+              automation: {
+                ...(job.automation || {}),
+                lastFailure: null,
+                stepFailures: {},
+                resumeOnlyRecoveryManifestDigest:
+                  recovery.manifestDigest,
+                resumeOnlyCohort: "canary_recovery",
+              },
+              error: null,
+              journalDetail:
+                "verified canary submission carried into recovery manifest",
+            });
+            await saveJobImpl(next, job.revision);
+          }
+          continue;
+        }
+        if (recoveryStampMatches(job, recovery)) continue;
+        const resume = await getResumeImpl(
+          job.identity.candidateUserId,
+        );
+        const resumeUri = findResumeUri(resume);
+        if (!resumeUri) {
+          throw codedError(
+            "RESUME_ONLY_BACKFILL_RECOVERY_PREFLIGHT_CHANGED",
+          );
+        }
+        const batchEntryAt = String(
+          job?.automation?.backfillBatchEntryAt || iso(now),
+        );
+        const next = transition(job, "ready_to_submit", {
+          submission: {
+            ...(job.submission || {}),
+            resumeUri,
+            resumeStatus: "on_file",
+          },
+          automation: {
+            ...(job.automation || {}),
+            mode: "authorized_backfill",
+            status: "prepared",
+            reasons: [],
+            freezeReason: null,
+            backfillBatchEntryAt: batchEntryAt,
+            resumeOnlySubmit: true,
+            resumeOnlyManifestDigest:
+              recovery.baseManifestDigest,
+            resumeOnlyRecoveryManifestDigest:
+              recovery.manifestDigest,
+            resumeOnlyCohort: "canary_recovery",
+            preferenceRerouteRequired: true,
+            resumeWait: null,
+          },
+          reviewReason: null,
+          reviewReasons: [],
+          error: null,
+          journalDetail:
+            "resume-only recovery manifest staged before queue admission",
+        });
+        await saveJobImpl(next, job.revision);
+        await store.setEntry({
+          ...entry,
+          status: "authorized",
+          reason: null,
+          authorizedAt: entry.authorizedAt || batchEntryAt,
+        });
+      }
+      recovery = {
+        ...recovery,
+        status: "committing",
+      };
+      await store.setRecovery(recovery);
+    } else {
+      for (const record of recovery.active) {
+        const job = jobs.get(record.id);
+        const entry = entryMap.get(record.id);
+        if (
+          entry.status !== "authorized"
+          || !recoveryStampMatches(job, recovery)
+          || (
+            record.role === "carried"
+            && !acceptedVisibleRecoveryProof(
+              job,
+              recovery.baseManifestDigest,
+            )
+          )
+        ) {
+          throw codedError(
+            "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+          );
+        }
+      }
+    }
+
+    let queued = 0;
+    let duplicate = 0;
+    for (const record of recovery.active) {
+      if (record.role === "carried") continue;
+      const job = await getJobImpl(record.id);
+      const result = await enqueueImpl(record.id, {
+        source: "authorized_backfill",
+        eventId:
+          `resume-only:${recovery.manifestDigest}:${record.id}`,
+        dueAt: now,
+        callEndedAt: job?.callEndedAt
+          || entryMap.get(record.id)?.callAt,
+        now,
+      });
+      if (
+        result?.enqueued !== true
+        && result?.duplicate !== true
+      ) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+        );
+      }
+      queued += result.enqueued === true ? 1 : 0;
+      duplicate += result.duplicate === true ? 1 : 0;
+    }
+    recovery = {
+      ...recovery,
+      status: "running",
+      committedAt: recovery.committedAt || iso(now),
+    };
+    await store.setRecovery(recovery);
+    return {
+      ...recoveryPublicStatus(recovery),
+      carriedCommitted: recovery.active.filter(
+        (entry) => entry.role === "carried",
+      ).length,
+      queued,
+      duplicate,
+    };
+  });
+}
+
+export async function resumeOnlyBackfillRecoveryStatus({
+  store = resumeOnlyBackfillRedisStore,
+  getJobImpl = getJob,
+} = {}) {
+  const control = await store.getControl();
+  const recovery = await store.getRecovery();
+  const entries = await store.entries();
+  return {
+    ok: true,
+    ...recoveryPublicStatus(recovery),
+    canary: recovery
+      ? await mechanicalRecoveryCanaryStatus(
+          control,
+          recovery,
+          entries,
+          { getJobImpl },
+        )
+      : emptyCanaryStatus(),
+  };
+}
+
 export async function resumeOnlyBackfillDiagnostics({
   store = resumeOnlyBackfillRedisStore,
   getJobImpl = getJob,
@@ -1571,6 +2698,9 @@ export async function resumeOnlyBackfillDiagnostics({
   const ids = Array.isArray(control?.canary?.ids)
     ? control.canary.ids
     : [];
+  const recovery = typeof store?.getRecovery === "function"
+    ? await store.getRecovery()
+    : null;
   const jobs = await Promise.all(ids.map((id) => getJobImpl(id)));
   const failureSteps = jobs.flatMap((job) => (
     Object.entries(job?.automation?.stepFailures || {})
@@ -1598,6 +2728,7 @@ export async function resumeOnlyBackfillDiagnostics({
         control.manifestDigest,
       )),
     ),
+    recovery: recoveryPublicStatus(recovery),
   };
 }
 
@@ -1614,6 +2745,9 @@ export async function runResumeOnlyBackfillPlanTick({
   getResumeImpl = getResume,
   prepareJobImpl = prepareJob,
   advanceExistingImpl = advanceExistingTalentNetworkJob,
+  terminalPreflightImpl = resumeOnlyBackfillTerminalPreflight,
+  targetMembershipSnapshotImpl =
+    readResumeOnlyBackfillTargetMembershipSnapshot,
   queueStatsImpl = getAutoQueueStats,
   config = automationConfig(),
   budgetMs = RESUME_ONLY_BACKFILL_PLAN_BUDGET_MS,
@@ -1675,9 +2809,15 @@ export async function runResumeOnlyBackfillPlanTick({
       && control.human.exhausted
       && !pending
     ) {
+      const runTerminalPreflight =
+        await bindResumeOnlyBackfillTerminalPreflight(
+          terminalPreflightImpl,
+          targetMembershipSnapshotImpl,
+        );
       control = await finishPlan(control, store, {
         getJobImpl,
         advanceExistingImpl,
+        terminalPreflightImpl: runTerminalPreflight,
       });
       await store.setControl(control);
     } else {
@@ -1711,6 +2851,8 @@ async function authorizeEntry(
     getResumeImpl,
     saveJobImpl,
     enqueueImpl,
+    terminalPreflightImpl,
+    recoveryManifestDigest = null,
     now,
     config,
   },
@@ -1724,6 +2866,11 @@ async function authorizeEntry(
     job?.automation?.resumeOnlySubmit === true
     && job?.automation?.resumeOnlyManifestDigest
       === control.manifestDigest
+    && (
+      recoveryManifestDigest == null
+      || job?.automation?.resumeOnlyRecoveryManifestDigest
+        === recoveryManifestDigest
+    )
   );
   if (stamped && entry.status === "authorized") {
     return {
@@ -1785,11 +2932,25 @@ async function authorizeEntry(
     await excludeEntry(entry, "resume_missing_at_release", store);
     return { authorized: false, excluded: true };
   }
+  const preflight = await terminalPreflightImpl(job);
+  if (!preflight?.eligible) {
+    if (entry.status === "authorized") {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_PREFLIGHT_CHANGED",
+      );
+    }
+    await excludeEntry(
+      entry,
+      preflight?.code || "terminal_preflight",
+      store,
+    );
+    return { authorized: false, excluded: true };
+  }
   if (stamped) {
     const queued = await enqueueImpl(entry.id, {
       source: "authorized_backfill",
       eventId:
-        `resume-only:${control.manifestDigest}:${entry.id}`,
+        `resume-only:${recoveryManifestDigest || control.manifestDigest}:${entry.id}`,
       dueAt: now,
       callEndedAt: job.callEndedAt || entry.callAt,
       now,
@@ -1822,6 +2983,12 @@ async function authorizeEntry(
       backfillBatchEntryAt: batchEntryAt,
       resumeOnlySubmit: true,
       resumeOnlyManifestDigest: control.manifestDigest,
+      ...(recoveryManifestDigest == null
+        ? {}
+        : {
+            resumeOnlyRecoveryManifestDigest:
+              recoveryManifestDigest,
+          }),
       resumeOnlyCohort: cohort,
       preferenceRerouteRequired: true,
       resumeWait: null,
@@ -1836,7 +3003,7 @@ async function authorizeEntry(
   const queued = await enqueueImpl(entry.id, {
     source: "authorized_backfill",
     eventId:
-      `resume-only:${control.manifestDigest}:${entry.id}`,
+      `resume-only:${recoveryManifestDigest || control.manifestDigest}:${entry.id}`,
     dueAt: now,
     callEndedAt: job.callEndedAt || entry.callAt,
     now,
@@ -1861,6 +3028,9 @@ export async function commitResumeOnlyBackfillFirstTen({
   getResumeImpl = getResume,
   saveJobImpl = saveJob,
   enqueueImpl = enqueueAutoJob,
+  terminalPreflightImpl = resumeOnlyBackfillTerminalPreflight,
+  targetMembershipSnapshotImpl =
+    readResumeOnlyBackfillTargetMembershipSnapshot,
   queueStatsImpl = getAutoQueueStats,
   config = automationConfig(),
 } = {}) {
@@ -1882,6 +3052,11 @@ export async function commitResumeOnlyBackfillFirstTen({
     ) {
       throw codedError("RESUME_ONLY_BACKFILL_PLAN_INVALID");
     }
+    const runTerminalPreflight =
+      await bindResumeOnlyBackfillTerminalPreflight(
+        terminalPreflightImpl,
+        targetMembershipSnapshotImpl,
+      );
     let authorized = 0;
     let excluded = 0;
     for (const id of control.canary.ids) {
@@ -1899,6 +3074,7 @@ export async function commitResumeOnlyBackfillFirstTen({
           getResumeImpl,
           saveJobImpl,
           enqueueImpl,
+          terminalPreflightImpl: runTerminalPreflight,
           now,
           config,
         },
@@ -1942,9 +3118,13 @@ export async function verifyResumeOnlyBackfillFirstTen({
       throw codedError("RESUME_ONLY_BACKFILL_PLAN_REQUIRED");
     }
     const entries = await store.entries();
-    const mechanical = await mechanicalCanaryStatus(
+    let recovery = typeof store?.getRecovery === "function"
+      ? await store.getRecovery()
+      : null;
+    const mechanical = await activeMechanicalCanaryStatus(
       control,
       entries,
+      store,
       { getJobImpl },
     );
     if (!mechanical.verified) {
@@ -1958,16 +3138,36 @@ export async function verifyResumeOnlyBackfillFirstTen({
         verificationRecorded: false,
       };
     }
-    control = {
-      ...control,
-      status: "canary_verified",
-      updatedAt: new Date().toISOString(),
-      canary: {
-        ...control.canary,
+    const verifiedAt = new Date().toISOString();
+    if (recovery) {
+      if (!["running", "verified"].includes(recovery.status)) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_RECOVERY_NOT_COMMITTED",
+        );
+      }
+      recovery = {
+        ...recovery,
         status: "verified",
-        verifiedAt: new Date().toISOString(),
-      },
-    };
+        verifiedAt: recovery.verifiedAt || verifiedAt,
+      };
+      await store.setRecovery(recovery);
+      control = {
+        ...control,
+        status: "canary_verified",
+        updatedAt: verifiedAt,
+      };
+    } else {
+      control = {
+        ...control,
+        status: "canary_verified",
+        updatedAt: verifiedAt,
+        canary: {
+          ...control.canary,
+          status: "verified",
+          verifiedAt,
+        },
+      };
+    }
     await store.setControl(control);
     return {
       ...await publicStatus(control, store, {
@@ -1992,14 +3192,22 @@ export async function armResumeOnlyBackfillRemainder({
       throw codedError("RESUME_ONLY_BACKFILL_PLAN_REQUIRED");
     }
     const entries = await store.entries();
-    const mechanical = await mechanicalCanaryStatus(
+    const recovery = typeof store?.getRecovery === "function"
+      ? await store.getRecovery()
+      : null;
+    const mechanical = await activeMechanicalCanaryStatus(
       control,
       entries,
+      store,
       { getJobImpl },
     );
     if (
       control.status !== "canary_verified"
-      || control.canary.status !== "verified"
+      || (
+        recovery
+          ? recovery.status !== "verified"
+          : control.canary.status !== "verified"
+      )
       || !mechanical.verified
     ) {
       throw codedError(
@@ -2054,6 +3262,9 @@ export async function runResumeOnlyBackfillReleaseTick({
   getResumeImpl = getResume,
   saveJobImpl = saveJob,
   enqueueImpl = enqueueAutoJob,
+  terminalPreflightImpl = resumeOnlyBackfillTerminalPreflight,
+  targetMembershipSnapshotImpl =
+    readResumeOnlyBackfillTargetMembershipSnapshot,
   queueStatsImpl = getAutoQueueStats,
   config = automationConfig(),
 } = {}) {
@@ -2076,7 +3287,18 @@ export async function runResumeOnlyBackfillReleaseTick({
         throttled: true,
       };
     }
-    const canaryIds = new Set(control.canary.ids);
+    const recovery = typeof store?.getRecovery === "function"
+      ? await store.getRecovery()
+      : null;
+    const canaryIds = new Set([
+      ...control.canary.ids,
+      ...(recovery?.active || []).map((entry) => entry.id),
+    ]);
+    const runTerminalPreflight =
+      await bindResumeOnlyBackfillTerminalPreflight(
+        terminalPreflightImpl,
+        targetMembershipSnapshotImpl,
+      );
     const candidates = (await store.entries())
       .filter((entry) => (
         entry.status === "eligible"
@@ -2117,6 +3339,7 @@ export async function runResumeOnlyBackfillReleaseTick({
           getResumeImpl,
           saveJobImpl,
           enqueueImpl,
+          terminalPreflightImpl: runTerminalPreflight,
           now,
           config,
         },

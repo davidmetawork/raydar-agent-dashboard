@@ -33,8 +33,11 @@ import {
 } from "./_lib/source-capture-coordinator.mjs";
 import {
   armResumeOnlyBackfillRemainder,
+  commitResumeOnlyBackfillRecovery,
   commitResumeOnlyBackfillFirstTen,
+  planResumeOnlyBackfillRecovery,
   resumeOnlyBackfillDiagnostics,
+  resumeOnlyBackfillRecoveryStatus,
   resumeOnlyBackfillStatus,
   runResumeOnlyBackfillPlanTick,
   runResumeOnlyBackfillReleaseTick,
@@ -354,6 +357,9 @@ export default async function handler(req, res) {
     "resume-only-backfill-tick",
     "resume-only-backfill-status",
     "resume-only-backfill-diagnostics",
+    "resume-only-backfill-recovery-plan",
+    "resume-only-backfill-recovery-commit",
+    "resume-only-backfill-recovery-status",
   ]);
   if (
     canaryModes.has(mode)
@@ -411,6 +417,9 @@ export default async function handler(req, res) {
       ["resume-only-backfill-tick", new Set(["mode"])],
       ["resume-only-backfill-status", new Set(["mode"])],
       ["resume-only-backfill-diagnostics", new Set(["mode"])],
+      ["resume-only-backfill-recovery-plan", new Set(["mode"])],
+      ["resume-only-backfill-recovery-commit", new Set(["mode"])],
+      ["resume-only-backfill-recovery-status", new Set(["mode"])],
     ]).get(mode);
     if (
       allowedFields
@@ -617,6 +626,21 @@ export default async function handler(req, res) {
     if (mode === "resume-only-backfill-diagnostics") {
       return res.status(200).json(
         await resumeOnlyBackfillDiagnostics(),
+      );
+    }
+    if (mode === "resume-only-backfill-recovery-plan") {
+      return res.status(200).json(
+        await planResumeOnlyBackfillRecovery(),
+      );
+    }
+    if (mode === "resume-only-backfill-recovery-commit") {
+      return res.status(200).json(
+        await commitResumeOnlyBackfillRecovery(),
+      );
+    }
+    if (mode === "resume-only-backfill-recovery-status") {
+      return res.status(200).json(
+        await resumeOnlyBackfillRecoveryStatus(),
       );
     }
     if (!new Set(["tick", "recover"]).has(mode)) {
@@ -849,6 +873,18 @@ export default async function handler(req, res) {
             "RESUME_ONLY_BACKFILL_ENTRY_INVALID",
             "RESUME_ONLY_BACKFILL_PLAN_INVALID",
             "RESUME_ONLY_BACKFILL_PLAN_REQUIRED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_CARRY_INVALID",
+            "RESUME_ONLY_BACKFILL_RECOVERY_CLASSIFICATION_CHANGED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_CREATE_FAILED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_INSUFFICIENT",
+            "RESUME_ONLY_BACKFILL_RECOVERY_INVALID",
+            "RESUME_ONLY_BACKFILL_RECOVERY_NOT_ALLOWED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_NOT_COMMITTED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_PREFLIGHT_CHANGED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_REVIEW_REQUIRED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_CHANGED",
+            "RESUME_ONLY_BACKFILL_RECOVERY_SNAPSHOT_INVALID",
           ]).has(code)
           ? 409
           : 500;
