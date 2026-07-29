@@ -1791,6 +1791,17 @@ test("canary diagnostics aggregate recovery classes without exposing private row
           ids,
         },
       }),
+      getRecovery: async () => ({
+        status: "running",
+        revision: 1,
+        active: ids.map((id, index) => ({
+          id,
+          role: index < 6 ? "carried" : "replacement",
+        })),
+        terminal: [{ code: "HAS_REPLIED" }],
+        skippedUnreadable: 0,
+        manifestDigest: "f".repeat(64),
+      }),
     },
     getJobImpl: async (id) => jobs.get(id),
   });
@@ -1814,6 +1825,14 @@ test("canary diagnostics aggregate recovery classes without exposing private row
     other_other: 1,
     submission_read_auth_expired: 1,
   });
+  assert.deepEqual(
+    diagnostic.activeRecovery.classifications,
+    diagnostic.classifications,
+  );
+  assert.deepEqual(
+    diagnostic.activeRecovery.errorCodes,
+    diagnostic.errorCodes,
+  );
   const serialized = JSON.stringify(diagnostic);
   assert.equal(serialized.includes("bot_diagnostic"), false);
   assert.equal(serialized.includes("candidate-user"), false);
