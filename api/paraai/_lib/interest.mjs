@@ -825,8 +825,12 @@ export async function submitToRole({
       roleId,
       candidateUserId: candidate.candidateUserId,
       linkedinUser: candidate.linkedinUser || candidate.linkedin_user,
-      anonymizeCandidates: prepareContext?.anonymizeCandidates ?? true,
-      roleDiscoverySource: prepareContext?.roleDiscoverySource,
+      // The curated-list lane owns both values. Keep the production default
+      // identical to the captured prepared-submit path rather than inheriting
+      // an unrelated role-page default.
+      anonymizeCandidates: prepareContext?.anonymizeCandidates ?? false,
+      roleDiscoverySource:
+        prepareContext?.roleDiscoverySource ?? "CURATED_LIST",
       fromRoleRecommendation: prepareContext?.fromRoleRecommendation,
     });
   } catch {

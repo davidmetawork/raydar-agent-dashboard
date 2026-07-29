@@ -251,7 +251,7 @@ test("candidate-only transcript enters the model source bundle", () => {
     candidate: { name: "Taylor Example" },
     candidateProfile: { headline: "Product Lead at Northstar" },
     preferences: {},
-    calibration: {},
+    calibration: { reasoning: "AI-only assertion" },
     meetings: [{
       event_scheduled_at: "2026-07-29T00:00:00Z",
       recording_transcript: [
@@ -264,6 +264,8 @@ test("candidate-only transcript enters the model source bundle", () => {
   assert.doesNotMatch(bundle.modelInput.candidate_only_screening_speech, /TestForge AI/);
   assert.doesNotMatch(bundle.candidateSourceTexts.join("\n"), /TestForge AI/);
   assert.match(bundle.roleSourceTexts.join("\n"), /Healthcare domain/);
+  assert.doesNotMatch(bundle.candidateSourceTexts.join("\n"), /AI-only assertion/);
+  assert.match(bundle.contextualSourceTexts.join("\n"), /AI-only assertion/);
 });
 
 test("the model and verifier share the same bounded candidate transcript", () => {

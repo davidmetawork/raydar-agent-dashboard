@@ -601,6 +601,45 @@ test("captured adapter gets one fenced attempt and only verified readback succee
   );
 });
 
+test("the production submit path pins curated-list prepare routing by default", async () => {
+  const result = await submitToRole({
+    candidate: { ...candidate, linkedinUser: "taylor-example" },
+    roleId: "role-1",
+    apply: true,
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl: passingTrpcRead,
+    trpcPostImpl: async (proc, input) => {
+      assert.equal(proc, "roleSlots.prepareForSingleSubmission");
+      assert.equal(input.anonymize_candidates, false);
+      assert.equal(input.role_discovery_source, "CURATED_LIST");
+      return {
+        success: true,
+        candidate_to_approved_role_id: "candidate-role-1",
+      };
+    },
+    submissionDraftBuilder: async () => ({
+      ok: true,
+      blockers: [],
+      draft: { greatFitReason: "grounded draft" },
+      signals: { nonGreenMarks: 0 },
+    }),
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
+    finalSubmitImpl: async () => ({ verified: true, signals: {} }),
+    submissionStore: {
+      claimSubmission: async () => ({
+        status: "claimed",
+        claim: { attemptId: "attempt-1" },
+      }),
+      getSubmissionClaim: async () => null,
+      startSubmissionAttempt: async () => ({ status: "started" }),
+      recordSubmissionPrepared: async () => ({ status: "prepared" }),
+      recordSubmissionOutcome: async () => ({ status: "recorded" }),
+    },
+    now: NOW,
+  });
+  assert.equal(result.stage, "verified");
+});
+
 test("an uncertain final mutation is permanently reads-only and never retried", async () => {
   let finalCalls = 0;
   const outcomes = [];
