@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 import { cors, hasCookie, paraformHealth } from "./_lib/core.mjs";
 import {
   raydarWebhookProofStatus,
@@ -7,6 +9,53 @@ import {
   raydarSchedulerBookingStopEnabled,
   raydarSchedulerIndexConfigured,
 } from "./_lib/raydar-booking-index.mjs";
+
+const HEALTH_READ_KEY_PATTERN = /^\S{32,}$/u;
+const CONTRACT_REVISION_PATTERN = /^[a-f0-9]{40}$/iu;
+
+/**
+ * The scheduler may bind cutover evidence to this exact deployed dashboard
+ * revision. The public health response stays unchanged: proof fields are
+ * returned only when both the private bearer and Vercel's immutable Git SHA
+ * validate. Every other state fails closed to the existing redacted shape.
+ */
+export function authenticatedSchedulerHealthFields(
+  req,
+  env = process.env,
+) {
+  if (req?.method !== "GET") return {};
+
+  const key = env?.SCHEDULER_DASHBOARD_HEALTH_READ_KEY;
+  const revision = env?.VERCEL_GIT_COMMIT_SHA;
+  const provided = req?.headers?.authorization;
+  if (
+    typeof key !== "string"
+    || !HEALTH_READ_KEY_PATTERN.test(key)
+    || typeof provided !== "string"
+  ) {
+    return {};
+  }
+
+  const actual = Buffer.from(provided, "utf8");
+  const expected = Buffer.from(`Bearer ${key}`, "utf8");
+  if (
+    actual.length !== expected.length
+    || !timingSafeEqual(actual, expected)
+  ) {
+    return {};
+  }
+  if (
+    typeof revision !== "string"
+    || !CONTRACT_REVISION_PATTERN.test(revision)
+  ) {
+    return {};
+  }
+
+  return {
+    authenticated: true,
+    contractRevision: revision.toLowerCase(),
+  };
+}
 
 export default async function handler(req, res) {
   if (cors(req, res)) return; // health is open so the page can show status
@@ -76,6 +125,7 @@ export default async function handler(req, res) {
           ? null
           : Math.round(s.leadIndexAgeMs / 60000),
         leadIndexCurrent: s.leadIndexCurrent ?? false,
+        ...authenticatedSchedulerHealthFields(req),
       },
     };
   } catch { bookingStop = { error: "unavailable" }; }
