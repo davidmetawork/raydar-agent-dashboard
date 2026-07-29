@@ -18,15 +18,26 @@ import {
   runPhase3ShadowReleaseTick,
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
+import { runAuthProbeTick } from "./_lib/auth-probe.mjs";
 import { notifySlack } from "./_lib/core.mjs";
 import {
   PHASE3_AGGREGATE_ALERT_KEY,
   PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
 } from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
+import { replyHealth, runReplyTick } from "./_lib/reply.mjs";
+import { expiredHealth, runExpiredTick } from "./_lib/expired.mjs";
 import {
   runPhase4SourceCaptureTick,
 } from "./_lib/source-capture-coordinator.mjs";
+import {
+  armResumeOnlyBackfillRemainder,
+  commitResumeOnlyBackfillFirstTen,
+  resumeOnlyBackfillStatus,
+  runResumeOnlyBackfillPlanTick,
+  runResumeOnlyBackfillReleaseTick,
+  verifyResumeOnlyBackfillFirstTen,
+} from "./_lib/resume-only-backfill.mjs";
 import {
   getAutoQueueStats,
   recordPhase3ShadowAggregateAuditResult,
@@ -199,6 +210,7 @@ export async function runAutomationCycle({
   sweepImpl = sweepPhase1ResumeWaitCards,
   tickImpl = runAutoTick,
   remainderImpl = null,
+  resumeOnlyBackfillImpl = null,
   phase3ReleaseImpl = null,
   phase3StatusImpl = null,
 } = {}) {
@@ -228,6 +240,26 @@ export async function runAutomationCycle({
         error: /^PHASE2_REMAINDER_[A-Z0-9_]+$/u.test(code)
           ? code.toLowerCase()
           : "phase2_remainder_failed",
+      };
+    }
+  }
+  let resumeOnlyBackfill = null;
+  let resumeOnlyBackfillError = null;
+  if (
+    typeof resumeOnlyBackfillImpl === "function"
+    || storeConfigured()
+  ) {
+    try {
+      resumeOnlyBackfill = await (
+        resumeOnlyBackfillImpl
+        || runResumeOnlyBackfillReleaseTick
+      )();
+    } catch (error) {
+      const code = String(error?.code || "");
+      resumeOnlyBackfillError = {
+        error: /^RESUME_ONLY_BACKFILL_[A-Z0-9_]+$/u.test(code)
+          ? code.toLowerCase()
+          : "resume_only_backfill_failed",
       };
     }
   }
@@ -271,6 +303,8 @@ export async function runAutomationCycle({
     tick,
     remainder,
     remainderError,
+    resumeOnlyBackfill,
+    resumeOnlyBackfillError,
     phase3Release,
     phase3ReleaseError,
     phase3Status,
@@ -285,6 +319,9 @@ export default async function handler(req, res) {
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
   const body = requestBody(req);
+  const query = req?.query && typeof req.query === "object"
+    ? req.query
+    : {};
   const requestedMode = body.mode
     ?? (req.method === "GET" ? "recover" : "tick");
   const mode = typeof requestedMode === "string"
@@ -307,11 +344,20 @@ export default async function handler(req, res) {
   const phase4SourceModes = new Set([
     "phase4-source-capture-tick",
   ]);
+  const resumeOnlyBackfillModes = new Set([
+    "resume-only-backfill-plan",
+    "resume-only-backfill-commit-first-ten",
+    "resume-only-backfill-verify-first-ten",
+    "resume-only-backfill-arm",
+    "resume-only-backfill-tick",
+    "resume-only-backfill-status",
+  ]);
   if (
     canaryModes.has(mode)
     || remainderModes.has(mode)
     || phase3Modes.has(mode)
     || phase4SourceModes.has(mode)
+    || resumeOnlyBackfillModes.has(mode)
   ) {
     if (!runnerAuthorized(req)) {
       return res.status(401).json({ ok: false, error: "runner_key_required" });
@@ -349,12 +395,33 @@ export default async function handler(req, res) {
         "phase4-source-capture-tick",
         new Set(["mode"]),
       ],
+      ["resume-only-backfill-plan", new Set(["mode"])],
+      [
+        "resume-only-backfill-commit-first-ten",
+        new Set(["mode"]),
+      ],
+      [
+        "resume-only-backfill-verify-first-ten",
+        new Set(["mode"]),
+      ],
+      ["resume-only-backfill-arm", new Set(["mode"])],
+      ["resume-only-backfill-tick", new Set(["mode"])],
+      ["resume-only-backfill-status", new Set(["mode"])],
     ]).get(mode);
     if (
       allowedFields
       && Object.keys(body).some(
         (field) => !allowedFields.has(field),
       )
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "caller_parameters_forbidden",
+      });
+    }
+    if (
+      resumeOnlyBackfillModes.has(mode)
+      && Object.keys(query).some((field) => field !== "mode")
     ) {
       return res.status(400).json({
         ok: false,
@@ -394,6 +461,16 @@ export default async function handler(req, res) {
         error: "phase4_source_capture_POST_only",
       });
     }
+    if (
+      resumeOnlyBackfillModes.has(mode)
+      && mode !== "resume-only-backfill-status"
+      && req.method !== "POST"
+    ) {
+      return res.status(405).json({
+        ok: false,
+        error: "resume_only_backfill_mutation_POST_only",
+      });
+    }
   }
   try {
     if (mode === "status") {
@@ -402,6 +479,8 @@ export default async function handler(req, res) {
         config: automationConfig(),
         queue: await getAutoQueueStats(),
         outreach: await outreachHealth(),
+        reply: await replyHealth(),
+        expired: await expiredHealth(),
       });
     }
     if (mode === "enqueue") {
@@ -500,9 +579,48 @@ export default async function handler(req, res) {
         await runPhase4SourceCaptureTick({ mode }),
       );
     }
+    if (mode === "resume-only-backfill-plan") {
+      return res.status(200).json(
+        await runResumeOnlyBackfillPlanTick(),
+      );
+    }
+    if (mode === "resume-only-backfill-commit-first-ten") {
+      return res.status(200).json(
+        await commitResumeOnlyBackfillFirstTen(),
+      );
+    }
+    if (mode === "resume-only-backfill-verify-first-ten") {
+      return res.status(200).json(
+        await verifyResumeOnlyBackfillFirstTen(),
+      );
+    }
+    if (mode === "resume-only-backfill-arm") {
+      return res.status(200).json(
+        await armResumeOnlyBackfillRemainder(),
+      );
+    }
+    if (mode === "resume-only-backfill-tick") {
+      return res.status(200).json(
+        await runResumeOnlyBackfillReleaseTick(),
+      );
+    }
+    if (mode === "resume-only-backfill-status") {
+      return res.status(200).json(
+        await resumeOnlyBackfillStatus(),
+      );
+    }
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
+    // OBSERVE-ONLY Paraform auth circuit probe (phase 1). It rides every
+    // */5 tick BEFORE the lane cycle so a full AUTH_EXPIRED outage — the
+    // exact condition it detects — cannot starve it behind a throwing tick,
+    // its reads are time-capped so a hung Paraform call cannot eat the
+    // worker budget, and it never throws into the cycle. Deliberately
+    // absent from this response: the worker/monitor wiring is frozen, the
+    // flag is read via GET /api/ops/paraform-auth, and no lane holds on it
+    // yet. Covered by test/paraform-auth-breaker.test.mjs.
+    try { await runAuthProbeTick(); } catch { /* observe-only */ }
     const automation = automationConfig();
     const {
       resumeSweep,
@@ -510,6 +628,8 @@ export default async function handler(req, res) {
       tick,
       remainder,
       remainderError,
+      resumeOnlyBackfill,
+      resumeOnlyBackfillError,
       phase3Release,
       phase3ReleaseError,
       phase3Status,
@@ -535,6 +655,23 @@ export default async function handler(req, res) {
     ) {
       await notifySlack(
         `🚨 Para AI Phase 2 remainder controller requires review (${remainderIssue}). Normal queue processing continued.`,
+      ).catch(() => {});
+    }
+    const resumeOnlyBackfillIssue =
+      resumeOnlyBackfillError?.error || (
+        resumeOnlyBackfill?.ok === false
+          ? resumeOnlyBackfill.status
+          : null
+      );
+    if (
+      resumeOnlyBackfillIssue
+      && await takeAlertSlot(
+        "resume-only-backfill-controller-degraded",
+        3600,
+      ).catch(() => false)
+    ) {
+      await notifySlack(
+        `🚨 Para AI resume-only backfill controller requires review (${resumeOnlyBackfillIssue}). Normal queue processing continued; no resume chase was opened.`,
       ).catch(() => {});
     }
     const phase3ReleaseIssue = phase3ReleaseError?.error || (
@@ -566,6 +703,46 @@ export default async function handler(req, res) {
         ).catch(() => {});
       }
     }
+    // Reply actioning runs after outreach and is isolated the same way: a
+    // classifier or Paraform failure here must never stop direct submission.
+    let reply = null;
+    let replyError = null;
+    try {
+      reply = await runReplyTick();
+    } catch (error) {
+      replyError = {
+        error: String(error?.code || "reply_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+      if (await takeAlertSlot("reply-worker-failed", 3600).catch(() => false)) {
+        await notifySlack(
+          `🚨 Para AI reply actioning failed (${replyError.error}). Direct-submit and outreach processing continued.`,
+        ).catch(() => {});
+      }
+    }
+    // ORDER IS A CONTRACT: expired-match actioning runs AFTER reply actioning,
+    // never before. A candidate can answer on day 6 and the request expire on
+    // day 7, and whichever lane runs first takes the shared per-request claim.
+    // The reply lane must get that classification pass, because a request its
+    // candidate answered has a truthful outcome that "Candidate didn't get
+    // back" would contradict in front of a hiring manager. Isolated the same
+    // way: a Paraform failure here must never stop direct submission.
+    // Covered by test/paraai-expired-worker-order.test.mjs.
+    let expired = null;
+    let expiredError = null;
+    try {
+      expired = await runExpiredTick();
+    } catch (error) {
+      expiredError = {
+        error: String(error?.code || "expired_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+      if (await takeAlertSlot("expired-worker-failed", 3600).catch(() => false)) {
+        await notifySlack(
+          `🚨 Para AI expired-match actioning failed (${expiredError.error}). Direct-submit, outreach and reply processing continued.`,
+        ).catch(() => {});
+      }
+    }
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -589,8 +766,12 @@ export default async function handler(req, res) {
         recoveryError
         || resumeSweepError
         || outreachError
+        || replyError
+        || expiredError
         || remainderError
         || remainder?.ok === false
+        || resumeOnlyBackfillError
+        || resumeOnlyBackfill?.ok === false
         || phase3ReleaseError
         || phase3Release?.ok === false
         || phase3StatusError
@@ -602,9 +783,15 @@ export default async function handler(req, res) {
       resumeSweepError,
       outreach,
       outreachError,
+      reply,
+      replyError,
+      expired,
+      expiredError,
       tick,
       remainder,
       remainderError,
+      resumeOnlyBackfill,
+      resumeOnlyBackfillError,
       phase3Release,
       phase3ReleaseError,
       phase3Status,
@@ -612,6 +799,32 @@ export default async function handler(req, res) {
       queue: await getAutoQueueStats(),
     });
   } catch (error) {
+    if (resumeOnlyBackfillModes.has(mode)) {
+      const code = String(error?.code || "");
+      const safeCode =
+        /^RESUME_ONLY_BACKFILL_[A-Z0-9_]+$/u.test(code)
+          ? code.toLowerCase()
+          : "resume_only_backfill_failed";
+      const status = new Set([
+        "RESUME_ONLY_BACKFILL_HUMAN_CURSOR_INVALID",
+        "RESUME_ONLY_BACKFILL_TIMESTAMP_INVALID",
+      ]).has(code)
+        ? 400
+        : new Set([
+            "RESUME_ONLY_BACKFILL_BUSY",
+            "RESUME_ONLY_BACKFILL_CANARY_NOT_VERIFIED",
+            "RESUME_ONLY_BACKFILL_CONTROL_INVALID",
+            "RESUME_ONLY_BACKFILL_ENTRY_INVALID",
+            "RESUME_ONLY_BACKFILL_PLAN_INVALID",
+            "RESUME_ONLY_BACKFILL_PLAN_REQUIRED",
+          ]).has(code)
+          ? 409
+          : 500;
+      return res.status(status).json({
+        ok: false,
+        error: safeCode,
+      });
+    }
     if (phase4SourceModes.has(mode)) {
       return res.status(500).json({
         ok: false,

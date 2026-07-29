@@ -5,9 +5,11 @@ import {
 import test from "node:test";
 
 import {
+  SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_VERSION,
   SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_STORE_VERSION,
   SourceRecallPointObservationManifestStoreError,
   consumeRecallPointObservationManifestReadCapability,
+  consumeSourceRecallClassifiedManifestSeedCapability,
   createSourceRecallPointObservationManifestStore,
 } from "../api/paraai/_lib/source-recall-point-observation-manifest-store.mjs";
 import * as manifestStoreModule from "../api/paraai/_lib/source-recall-point-observation-manifest-store.mjs";
@@ -595,6 +597,7 @@ test("all pages seal before one server-selected observation advances per step", 
       "checkpointRecallPointObservationManifestWork",
       "claimRecallPointObservationManifestStep",
       "ensureRecallPointObservationManifest",
+      "issueSourceRecallClassifiedManifestSeed",
       "prepareRecallPointObservationManifestSelection",
       "readRecallPointObservationManifest",
     ],
@@ -720,6 +723,70 @@ test("all pages seal before one server-selected observation advances per step", 
   assert.doesNotMatch(
     JSON.stringify(complete.aggregate),
     /Private Candidate|example\.invalid|manifest-test-bot/u,
+  );
+  const seedCapability =
+    await harness.store
+      .issueSourceRecallClassifiedManifestSeed(
+        complete,
+      );
+  assert.equal(Object.isFrozen(seedCapability), true);
+  assert.deepEqual(Object.keys(seedCapability), []);
+  assert.equal(JSON.stringify(seedCapability), "{}");
+  assert.throws(
+    () =>
+      consumeSourceRecallClassifiedManifestSeedCapability(
+        structuredClone(seedCapability),
+      ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_CAPABILITY_INVALID",
+    ),
+  );
+  const seed =
+    consumeSourceRecallClassifiedManifestSeedCapability(
+      seedCapability,
+    );
+  assert.equal(
+    seed.version,
+    SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_VERSION,
+  );
+  assert.equal(seed.referenceCount, 3);
+  assert.equal(seed.members.length, 3);
+  assert.equal(seed.settledReadsCompleted, 6);
+  assert.equal(
+    seed.members.every(
+      (member) =>
+        member.outcome === "stable"
+        && member.readsCompleted === 2
+        && typeof member.resolutionDigest === "string",
+    ),
+    true,
+  );
+  assert.equal(
+    seed.issuedFromRedisAtMs < seed.notAfterMs,
+    true,
+  );
+  assert.equal(Object.isFrozen(seed), true);
+  assert.equal(Object.isFrozen(seed.members), true);
+  assert.doesNotMatch(
+    JSON.stringify(seed),
+    /Private Candidate|example\.invalid|manifest-test-bot/u,
+  );
+  assert.throws(
+    () =>
+      consumeSourceRecallClassifiedManifestSeedCapability(
+        seedCapability,
+      ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_SEED_CAPABILITY_INVALID",
+    ),
+  );
+  await assert.rejects(
+    harness.store.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETION_INVALID",
+    ),
   );
 });
 
@@ -899,6 +966,14 @@ test("terminal conflict completes exact coverage but keeps global coverage false
     false,
   );
   assert.equal(complete.aggregate.referencesConflict, 1);
+  await assert.rejects(
+    harness.store.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COVERAGE_INCOMPLETE",
+    ),
+  );
 });
 
 test("terminal unresolved completes manifest coverage but keeps global coverage false", async () => {
@@ -950,6 +1025,14 @@ test("terminal unresolved completes manifest coverage but keeps global coverage 
   assert.equal(
     complete.aggregate.globalReferenceSetCoverageAvailable,
     false,
+  );
+  await assert.rejects(
+    harness.store.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COVERAGE_INCOMPLETE",
+    ),
   );
 });
 
@@ -1753,6 +1836,62 @@ test("ensure re-proves a complete manifest before returning retained coverage", 
     ),
     expectCode(
       "SOURCE_RECALL_POINT_OBSERVATION_MANIFEST_PAGE_NOT_FOUND",
+    ),
+  );
+});
+
+// completedManifestSelections is a module-level WeakMap, so the recorded store
+// identity is the only thing stopping one store instance from spending a
+// completion minted by another over the same persistence. Without this test the
+// guard can be deleted with a fully green suite.
+test("a completion minted by one store instance cannot mint a seed from another", async () => {
+  const harness = await indexedHarness([[reference(41)]]);
+  const claim =
+    await harness.store
+      .claimRecallPointObservationManifestStep(
+        harness.work,
+      );
+  const page = harness.source.pages[0].verifiedPage;
+  const pointWork =
+    await harness.store
+      .prepareRecallPointObservationManifestSelection(
+        claim,
+        page,
+      );
+  harness.points.terminal(page, pointWork, "stable");
+  await harness.store
+    .checkpointRecallPointObservationManifestWork(claim);
+  const complete =
+    await harness.store
+      .claimRecallPointObservationManifestStep(
+        harness.work,
+      );
+  assert.equal(complete.status, "complete");
+
+  const foreign =
+    createSourceRecallPointObservationManifestStore({
+      persistence: harness.fake.persistence,
+      pointObservation: harness.points.pointObservation,
+    });
+  await assert.rejects(
+    foreign.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETION_INVALID",
+    ),
+  );
+
+  // The completion is one-shot in the same sense as every other capability
+  // here: it is consumed by the attempt, not by the attempt succeeding. So the
+  // refused foreign attempt spends it, and even its own store cannot reuse it.
+  // Recovery is a fresh claim, never a replay.
+  await assert.rejects(
+    harness.store.issueSourceRecallClassifiedManifestSeed(
+      complete,
+    ),
+    expectCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_COMPLETION_INVALID",
     ),
   );
 });

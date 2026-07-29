@@ -660,6 +660,41 @@ export function backfillReviewDecision(job) {
   return { eligible: true, reason: null, reasons };
 }
 
+export function resumeOnlyBackfillMissingResumeTransition(
+  job,
+  {
+    now = Date.now(),
+    reason = "resume_missing_before_submit",
+  } = {},
+) {
+  const at = new Date(Number(now)).toISOString();
+  const message =
+    "Resume-only backfill stopped before submission because no resume is on file";
+  return transition(job, "needs_review", {
+    reviewReason: "resume_only_backfill_resume_missing",
+    reviewReasons: mergeReviewReasons(
+      job,
+      reviewReason(
+        "resume_only_backfill_resume_missing",
+        message,
+      ),
+    ),
+    automation: {
+      ...(job?.automation || {}),
+      status: "needs_review",
+      reasons: [message],
+      evaluatedAt: at,
+      resumeOnlyStoppedAt: at,
+      resumeOnlyStopReason: String(reason || "").slice(0, 100),
+      resumeWait: null,
+      resumeWaitSweepEligible: false,
+    },
+    error: null,
+    journalDetail:
+      "resume-only authorized backfill stopped without resume chase",
+  });
+}
+
 export function ensureResumeWaitPlan(
   job,
   config = automationConfig(),
@@ -2164,6 +2199,8 @@ async function processAutoJobInner(
   job ||= await getJobImpl(id);
   let verifiedResumeUri = "";
   humanIntake = humanIntake || job?.humanCall === true;
+  const resumeOnlySubmit =
+    job?.automation?.resumeOnlySubmit === true;
   if (
     job?.automation?.mode === "authorized_backfill" ||
     job?.automation?.resumeWait?.source === "authorized_backfill"
@@ -2334,6 +2371,30 @@ async function processAutoJobInner(
       journalDetail: "automation needs review",
     }), job.revision);
     return { action: "complete", state: job.state, detail: "identity needs review" };
+  }
+
+  if (
+    resumeOnlySubmit
+    && (
+      job.state === "waiting_for_resume"
+      || job?.automation?.resumeWait != null
+    )
+  ) {
+    job = await saveJobImpl(
+      resumeOnlyBackfillMissingResumeTransition(job, {
+        now: typeof now === "function" ? now() : now,
+        reason: "resume_wait_fence_violation",
+      }),
+      job.revision,
+    );
+    return {
+      action: "complete",
+      state: job.state,
+      detail:
+        "resume-only backfill stopped without resume chase",
+      step: "resume_read",
+      job,
+    };
   }
 
   if (
@@ -2688,6 +2749,22 @@ async function processAutoJobInner(
       await stopResumeChase(job, "resume_detected", runStep);
     }
     if (!resume.resumeUri) {
+      if (resumeOnlySubmit) {
+        job = await saveJobImpl(
+          resumeOnlyBackfillMissingResumeTransition(job, {
+            now: typeof now === "function" ? now() : now,
+          }),
+          job.revision,
+        );
+        return {
+          action: "complete",
+          state: job.state,
+          detail:
+            "resume-only backfill stopped without resume chase",
+          step: "resume_read",
+          job,
+        };
+      }
       if (config.resumeWaitEnabled) {
         const wait = ensureResumeWaitPlan(job, config, { queueSource });
         const checked = resumeWaitMissingTransition(job, config, {

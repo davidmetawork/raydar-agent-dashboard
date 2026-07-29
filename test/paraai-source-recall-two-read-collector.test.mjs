@@ -1342,6 +1342,7 @@ test("the slice remains private and absent from every production importer", asyn
     [
       "source-recall-point-observation-manifest-store.mjs",
       [
+        "source-recall-classified-evidence-store.mjs",
         "source-recall-point-observation-manifest-runtime.mjs",
         "source-recall-point-observation-store.mjs",
       ],
@@ -1380,7 +1381,9 @@ test("the slice remains private and absent from every production importer", asyn
     ],
     [
       "source-recall-success-evidence-projector.mjs",
-      [],
+      [
+        "source-recall-classified-evidence-store.mjs",
+      ],
     ],
   ]);
   for (const [target, expected] of expectedImporters) {

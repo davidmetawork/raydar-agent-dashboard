@@ -45,8 +45,10 @@ import {
   assessmentBlockCode,
   assessmentPatch,
   eligibleNewRequests,
+  expiredNoDigestOverrideEligible,
   heldAlertCopy,
   missingEmailAlertCopy,
+  normalizeExternalDeliveryEvidence,
   normalizeSubmissionRequest,
   OUTREACH_INCIDENT_HALT,
   outreachConfig,
@@ -90,6 +92,37 @@ test("first-match copy preserves the approved wording and links", () => {
   assert.match(copy.html, /<a href="https:\/\/www\.paraform\.com\/digest\/digest-12345678">Amy's Interview Requests<\/a>/);
   assert.doesNotMatch(copy.html, />https:\/\/www\.paraform\.com\/digest\//);
   assert.equal(digestLinkLabel("Amy"), "Amy's Interview Requests");
+});
+
+test("expired first-match override keeps the role link and omits unavailable digest language", () => {
+  const copy = initialMatchCopy({
+    firstName: "Dan",
+    roleName: "Senior / Staff Software Engineer",
+    companyName: "TubeScience",
+    roleUrl: "https://www.paraform.com/share/tubescience/role-1",
+    digestUrl: null,
+  });
+  assert.equal(copy.variant, "initial_expired_no_digest");
+  assert.match(copy.text, /Senior \/ Staff Software Engineer @ TubeScience/);
+  assert.match(copy.text, /https:\/\/www\.paraform\.com\/share\/tubescience\/role-1/);
+  assert.doesNotMatch(copy.text, /digest|all interview requests|one place/i);
+  assert.doesNotMatch(copy.html, /paraform\.com\/digest|Interview Requests/);
+});
+
+test("expired later-match override omits the digest reminder", () => {
+  for (const ordinal of [2, 3]) {
+    const copy = additionalMatchCopy({
+      firstName: "Dan",
+      ordinal,
+      variationSeed: `request-${ordinal}`,
+      ...role,
+      digestUrl: null,
+    });
+    assert.match(copy.variant, /expired_no_digest$/);
+    assert.match(copy.text, /Software Engineer @ Reform/);
+    assert.doesNotMatch(copy.text, /digest|all of these requests|one place/i);
+    assert.doesNotMatch(copy.html, /paraform\.com\/digest|Interview Requests/);
+  }
 });
 
 test("HTML copy renders a literal blank Gmail line between every content block", () => {
@@ -675,6 +708,71 @@ test("new match supersedes the old follow-up and owns one new two-day follow-up"
   assert.equal(next.followup.remaining, 1);
   assert.equal(next.followup.dueAt, "2026-07-20T12:00:00.000Z");
   assert.equal(next.journal.at(-1).supersededFollowupFor, "request-first");
+});
+
+test("expired no-digest delivery stays durable and schedules the normal first-match ladder", () => {
+  const request = {
+    id: "request-expired",
+    roleId: "role-expired",
+    roleName: "Senior / Staff Software Engineer",
+    companyName: "TubeScience",
+  };
+  const next = planDeliveredMatch({
+    candidateUserId: "candidate-user",
+    revision: 1,
+    matches: {},
+    outbox: {},
+    journal: [],
+  }, {
+    request,
+    ordinal: 1,
+    roleUrl: "https://www.paraform.com/share/tubescience/role-expired",
+    digest: null,
+    copy: { subject: "1st Round", variant: "initial_expired_no_digest" },
+    sent: { id: "gmail-message", threadId: "gmail-thread" },
+    sentAt: "2026-07-29T12:00:00.000Z",
+    messageId: deterministicMessageId(`match:${request.id}`),
+    deliveryMode: "expired_without_digest",
+  });
+  assert.equal(next.matches[request.id].digestId, null);
+  assert.equal(next.matches[request.id].digestOmitted, true);
+  assert.equal(next.matches[request.id].deliveryMode, "expired_without_digest");
+  assert.equal(next.outbox[`match:${request.id}`].status, "delivered");
+  assert.equal(next.outbox[`match:${request.id}`].deliveryMode, "expired_without_digest");
+  assert.equal(next.followup.ownerMatchId, request.id);
+  assert.equal(next.followup.remaining, 2);
+  assert.equal(next.followup.dueAt, "2026-07-31T12:00:00.000Z");
+  assert.equal(next.journal.at(-1).deliveryMode, "expired_without_digest");
+});
+
+test("no-digest override is eligible only for an expired request", () => {
+  assert.equal(expiredNoDigestOverrideEligible({ status: "expired" }), true);
+  assert.equal(expiredNoDigestOverrideEligible({ status: "EXPIRED" }), true);
+  assert.equal(expiredNoDigestOverrideEligible({ status: "pending" }), false);
+  assert.equal(expiredNoDigestOverrideEligible(null), false);
+});
+
+test("external delivery evidence accepts exact recent Gmail IDs and rejects stale or malformed input", () => {
+  const now = Date.parse("2026-07-29T14:05:00.000Z");
+  assert.deepEqual(normalizeExternalDeliveryEvidence({
+    gmailMessageId: "19fae2fd111d04e1",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-29T14:03:00.000Z",
+  }, now), {
+    gmailMessageId: "19fae2fd111d04e1",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-29T14:03:00.000Z",
+  });
+  assert.throws(() => normalizeExternalDeliveryEvidence({
+    gmailMessageId: "not-a-gmail-id",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-29T14:03:00.000Z",
+  }, now), { code: "OUTREACH_EXTERNAL_DELIVERY_INVALID" });
+  assert.throws(() => normalizeExternalDeliveryEvidence({
+    gmailMessageId: "19fae2fd111d04e1",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-27T14:03:00.000Z",
+  }, now), { code: "OUTREACH_EXTERNAL_DELIVERY_INVALID" });
 });
 
 test("first-match follow-up two is scheduled two days after follow-up one actually sends", () => {

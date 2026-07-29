@@ -159,22 +159,19 @@ function rankedProof({
   });
 }
 
+// The real candidate-scoped response carries only the list id and roles[].id.
+// It echoes neither candidate identity, so the fixture must not either.
 function curatedListResponse({
-  candidateId = CANDIDATE_ID,
-  candidateUserId = CANDIDATE_USER_ID,
   listId = "curated-list-contract-a",
   roleIds = [],
 } = {}) {
   return {
     id: listId,
-    candidate_id: candidateId,
-    candidate_user_id: candidateUserId,
     roles: roleIds.map((id) => ({ id })),
   };
 }
 
 function readbackObservation({
-  candidateId = CANDIDATE_ID,
   candidateUserId = CANDIDATE_USER_ID,
   exists = true,
   listId = "curated-list-contract-a",
@@ -187,15 +184,14 @@ function readbackObservation({
     ? response
     : exists
       ? curatedListResponse({
-        candidateId,
-        candidateUserId,
         listId,
         roleIds,
       })
       : null;
   return observation({
     procedure: PHASE4_CURATED_LIST_READ_PROCEDURE,
-    input: { candidate_id: candidateId },
+    // Despite the key name, this input carries the candidate-USER id.
+    input: { candidate_id: candidateUserId },
     response: exactResponse,
     observedAt,
     ...overrides,
@@ -209,7 +205,6 @@ function readbackProof({
   ...options
 } = {}) {
   const exactObservation = readbackObservation({
-    candidateId,
     candidateUserId,
     ...options,
   });
@@ -226,30 +221,48 @@ function readbackProof({
 function identityObservation({
   candidateId = CANDIDATE_ID,
   candidateUserId = CANDIDATE_USER_ID,
+  responseCandidateId,
+  responseCandidateUserId,
   observedAt = IDENTITY_AT,
   ...overrides
 } = {}) {
   return observation({
     procedure: PHASE4_CANDIDATE_IDENTITY_PROCEDURE,
     input: { candidate_id: candidateId },
+    // The response must be settable independently of the input, or a test
+    // cannot reach the response binding at all: the input assertion would
+    // reject first and the test would pass for the wrong reason.
     response: {
-      candidate_id: candidateId,
-      candidate_user_id: candidateUserId,
+      candidate_id: responseCandidateId === undefined
+        ? candidateId
+        : responseCandidateId,
+      candidate_user_id: responseCandidateUserId === undefined
+        ? candidateUserId
+        : responseCandidateUserId,
     },
     observedAt,
     ...overrides,
   });
 }
 
+// observedCandidateId / observedCandidateUserId are what the observation
+// actually carries; candidateId / candidateUserId are what the caller asserts.
+// They default to the same values, but they must be separable — this proof is
+// the ONLY place the two candidate identifiers are tied together on every
+// write path, so a test that can't make them disagree can't pin that tie.
 function identityProof({
   candidateId = CANDIDATE_ID,
   candidateUserId = CANDIDATE_USER_ID,
+  observedCandidateId,
+  observedCandidateUserId,
   trustedNow = PLAN_AT,
   ...options
 } = {}) {
   const exactObservation = identityObservation({
     candidateId,
     candidateUserId,
+    responseCandidateId: observedCandidateId,
+    responseCandidateUserId: observedCandidateUserId,
     ...options,
   });
   return normalizePhase4CandidateIdentityObservation(exactObservation, {
@@ -336,12 +349,12 @@ function curationPlan({
     candidateUserId,
     matchProof,
     preReadback,
-    identityProof: preExists
-      ? null
-      : identityProof({
-        ...proofOptions,
-        candidateUserId,
-      }),
+    // Required on BOTH branches: a present list binds only the candidate-user
+    // id, so nothing else proves the two identifiers are one person.
+    identityProof: identityProof({
+      ...proofOptions,
+      candidateUserId,
+    }),
   });
 }
 
@@ -837,7 +850,7 @@ test("proofs are bound to scope, source generation, CAS, and freshness", () => {
   }
 });
 
-test("present readback binds both identities and canonical response digest", () => {
+test("present readback binds the subject through its input, never the response", () => {
   const proof = readbackProof({
     roleIds: ["prior-role", "target-role"],
   });
@@ -846,16 +859,33 @@ test("present readback binds both identities and canonical response digest", () 
   assert.equal(proof.candidateUserId, CANDIDATE_USER_ID);
   assert.deepEqual(proof.roleIds, ["prior-role", "target-role"]);
 
+  // The subject is proved by the read INPUT carrying the candidate-user id.
+  // Supplying the domain candidate id is the exact mistake the capture caught:
+  // Paraform answers null even when a list exists, which would look like "no
+  // list" and drive a spurious implicit create.
   assert.equal(readbackProof({
-    response: curatedListResponse({
-      candidateId: OTHER_CANDIDATE_ID,
-    }),
+    input: { candidate_id: CANDIDATE_ID },
   }).valid, false);
   assert.equal(readbackProof({
-    response: curatedListResponse({
-      candidateUserId: OTHER_CANDIDATE_USER_ID,
-    }),
+    input: { candidate_id: OTHER_CANDIDATE_USER_ID },
   }).valid, false);
+
+  // The response echoes neither identity, so it cannot bind. Proof that the
+  // response is genuinely not the binding surface: even a response carrying a
+  // WRONG identity still validates, because those fields are never read. The
+  // input assertion above is what protects the subject.
+  const strayIdentity = readbackProof({
+    response: {
+      id: "curated-list-contract-a",
+      candidate_id: OTHER_CANDIDATE_ID,
+      candidate_user_id: OTHER_CANDIDATE_USER_ID,
+      roles: [],
+    },
+  });
+  assert.equal(strayIdentity.valid, true);
+  assert.equal(strayIdentity.candidateId, CANDIDATE_ID);
+  assert.equal(strayIdentity.candidateUserId, CANDIDATE_USER_ID);
+
   assert.equal(readbackProof({
     roleIds: ["duplicate", "duplicate"],
   }).valid, false);
@@ -864,12 +894,14 @@ test("present readback binds both identities and canonical response digest", () 
   }).errorCode, "response_digest_invalid");
 });
 
-test("null readback cannot assert candidate-user identity", () => {
+test("null readback keeps the read subject but still needs an identity proof", () => {
   const absent = readbackProof({ exists: false });
   assert.equal(absent.valid, true);
   assert.equal(absent.exists, false);
+  // The domain candidate id is an echo; the candidate-user id is the one the
+  // read actually asked about, so the plan can check whose absence this is.
   assert.equal(absent.candidateId, CANDIDATE_ID);
-  assert.equal(absent.candidateUserId, null);
+  assert.equal(absent.candidateUserId, CANDIDATE_USER_ID);
   assert.equal(absent.implicitCreateRequired, true);
 
   const matchProof = rankedProof();
@@ -1580,13 +1612,18 @@ test("mutation outcomes require the exact registered authorized request", () => 
 });
 
 test("pure add-response classification is strict and never grants authority", () => {
+  // A successful add must carry the exact captured six-key shape.
+  const acceptedResponse = {
+    already_in_list_count: 0,
+    curated_role_list_id: "curated-list-contract-a",
+    message: "Roles added",
+    newly_added_count: 1,
+    success: true,
+    total_requested: 1,
+  };
   assert.deepEqual(classifyPhase4CuratedListAddResponse({
     responseReceived: true,
-    response: {
-      success: true,
-      message: "Roles added",
-      curated_role_list_id: "curated-list-contract-a",
-    },
+    response: { ...acceptedResponse },
   }), {
     outcome: "accepted",
     responseContractValid: true,
@@ -1596,14 +1633,23 @@ test("pure add-response classification is strict and never grants authority", ()
     curatedRoleListId: "curated-list-contract-a",
     responseDigest: phase4CurationObservationResponseDigest(
       "unrecognized-procedure",
-      {
-        success: true,
-        message: "Roles added",
-        curated_role_list_id: "curated-list-contract-a",
-      },
+      { ...acceptedResponse },
     ),
     errorCode: null,
   });
+  // Dropping any captured key is vendor drift, not a normal accepted add.
+  for (const missing of Object.keys(acceptedResponse)) {
+    const partial = { ...acceptedResponse };
+    delete partial[missing];
+    assert.equal(
+      classifyPhase4CuratedListAddResponse({
+        responseReceived: true,
+        response: partial,
+      }).responseContractValid,
+      false,
+      `dropping ${missing} must not classify as accepted`,
+    );
+  }
   assert.equal(classifyPhase4CuratedListAddResponse({
     responseReceived: true,
     response: {
@@ -1734,6 +1780,18 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
       },
     );
   };
+  const normalizeIdentity = ({ trustedNow }) => {
+    const exactObservation = identityObservation({});
+    return contract.normalizePhase4CandidateIdentityObservation(
+      exactObservation,
+      {
+        candidateId: CANDIDATE_ID,
+        candidateUserId: CANDIDATE_USER_ID,
+        ...CONTEXT,
+        trustedNow,
+      },
+    );
+  };
   const normalizeNotification = ({ observedAt, trustedNow }) => {
     const exactObservation = notificationObservation({ observedAt });
     return contract.normalizePhase4NotificationSafetyProof(
@@ -1798,6 +1856,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: initialReadback,
+    identityProof: normalizeIdentity({ trustedNow: PLAN_AT }),
     maxAttempts: 3,
   });
   assert.equal(firstPlan.attemptNumber, 1);
@@ -1809,6 +1868,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: initialReadback,
+    identityProof: normalizeIdentity({ trustedNow: PLAN_AT }),
     maxAttempts: 3,
   });
   const parallelAuthorization = authorizationDecision({
@@ -1879,6 +1939,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: firstPartialReadback,
+    identityProof: normalizeIdentity({ trustedNow: COUNT_AT }),
     maxAttempts: 3,
   }), /active write lineage cannot mint a fresh root/u);
   const firstReconciliation =
@@ -1960,6 +2021,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
       candidateUserId: CANDIDATE_USER_ID,
       matchProof: replacementMatchProof,
       preReadback: firstPartialReadback,
+    identityProof: normalizeIdentity({ trustedNow: COUNT_AT }),
       replanRequirement: firstReconciliation.replanRequirement,
     }), /replanRequirement is invalid/u);
   }
@@ -1974,6 +2036,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
       candidateUserId: CANDIDATE_USER_ID,
       matchProof: omittedMatchProof,
       preReadback: firstPartialReadback,
+    identityProof: normalizeIdentity({ trustedNow: COUNT_AT }),
       maxAttempts: 3,
     }), /exact next replanRequirement/u);
   }
@@ -1996,6 +2059,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: firstPartialReadback,
+    identityProof: normalizeIdentity({ trustedNow: COUNT_AT }),
     replanRequirement: firstReconciliation.replanRequirement,
   });
   assert.equal(secondPlan.attemptNumber, 2);
@@ -2008,6 +2072,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: firstPartialReadback,
+    identityProof: normalizeIdentity({ trustedNow: COUNT_AT }),
     replanRequirement: firstReconciliation.replanRequirement,
   }), /replanRequirement is invalid/u);
   assert.throws(() => contract.planPhase4CuratedListWrite({
@@ -2017,6 +2082,7 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: firstPartialReadback,
+    identityProof: normalizeIdentity({ trustedNow: COUNT_AT }),
     replanRequirement: {
       ...firstReconciliation.replanRequirement,
     },
@@ -2084,6 +2150,9 @@ test("retry lineage advances exactly once and cannot reset attempts", async () =
     candidateUserId: CANDIDATE_USER_ID,
     matchProof,
     preReadback: secondPartialReadback,
+    identityProof: normalizeIdentity({
+      trustedNow: "2026-07-26T00:10:00.000Z",
+    }),
     replanRequirement: secondReconciliation.replanRequirement,
   });
   assert.equal(thirdPlan.attemptNumber, 3);
@@ -2170,6 +2239,7 @@ test("exact post-add count excludes unrelated roles and preserves tier semantics
   const count = exactPhase4PostAddCuratedMatchCount({
     matchProof,
     postReadback,
+    identityProof: identityProof({ trustedNow: COUNT_AT }),
     trustedNow: COUNT_AT,
   });
   assert.equal(count.complete, true);
@@ -2188,6 +2258,7 @@ test("post-add count rejects partial completion and cross-scope replay", () => {
       observedAt: POST_READ_AT,
       roleIds: ["role-recommended", "unrelated"],
     }),
+    identityProof: identityProof({ trustedNow: COUNT_AT }),
     trustedNow: COUNT_AT,
   });
   assert.equal(partial.complete, false);
@@ -2202,6 +2273,7 @@ test("post-add count rejects partial completion and cross-scope replay", () => {
       roleIds: ["role-recommended", "role-possible"],
       scopeDigest: OTHER_SCOPE_DIGEST,
     }),
+    identityProof: identityProof({ trustedNow: COUNT_AT }),
     trustedNow: COUNT_AT,
   }), /exact match/u);
   assert.throws(() => exactPhase4PostAddCuratedMatchCount({
@@ -2211,6 +2283,7 @@ test("post-add count rejects partial completion and cross-scope replay", () => {
       observedAt: POST_READ_AT,
       roleIds: ["role-recommended", "role-possible"],
     }),
+    identityProof: identityProof({ trustedNow: COUNT_AT }),
     trustedNow: new Date(
       Date.parse(MATCH_AT) + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS + 1,
     ).toISOString(),
@@ -2268,4 +2341,496 @@ test("Phase 4 curation stays dark with no caller, I/O, or authority minter", asy
       `${file} must not call the dark Phase 4 module`,
     );
   }
+});
+
+// The captured add response has six keys. The allowlist is exact-membership,
+// so a short allowlist rejects a real response as mutation_response_shape_invalid
+// and reports outcome "unknown" with externalWriteMayHaveLanded — turning every
+// successful add into an uncertain write. See
+// docs/PARAAI-CAPTURE-2026-07-26.md §18 in the main Raydar repo.
+test("the exact six-key add response is accepted, first add and idempotent re-add", () => {
+  // Pin the membership itself: widening the allowlist silently disables the
+  // drift detection that is its only job.
+  assert.deepEqual([...PHASE4_CURATED_LIST_ADD_RESPONSE_KEYS], [
+    "already_in_list_count",
+    "curated_role_list_id",
+    "message",
+    "newly_added_count",
+    "success",
+    "total_requested",
+  ]);
+
+  const firstAdd = classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: {
+      already_in_list_count: 0,
+      curated_role_list_id: "curated-list-contract-a",
+      message: "ok",
+      newly_added_count: 1,
+      success: true,
+      total_requested: 1,
+    },
+  });
+  assert.equal(firstAdd.responseContractValid, true);
+  assert.equal(firstAdd.accepted, true);
+  assert.equal(firstAdd.outcome, "accepted");
+  assert.equal(
+    firstAdd.curatedRoleListId,
+    "curated-list-contract-a",
+  );
+
+  // The duplicate branch: same list id, nothing newly added, one already there.
+  const reAdd = classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: {
+      already_in_list_count: 1,
+      curated_role_list_id: "curated-list-contract-a",
+      message: "ok",
+      newly_added_count: 0,
+      success: true,
+      total_requested: 1,
+    },
+  });
+  assert.equal(reAdd.responseContractValid, true);
+  assert.equal(reAdd.accepted, true);
+  assert.equal(
+    reAdd.curatedRoleListId,
+    "curated-list-contract-a",
+  );
+
+  // A key outside the captured set is still refused.
+  assert.equal(classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: {
+      already_in_list_count: 0,
+      curated_role_list_id: "curated-list-contract-a",
+      message: "ok",
+      newly_added_count: 1,
+      success: true,
+      total_requested: 1,
+      unexpected_key: 1,
+    },
+  }).responseContractValid, false);
+});
+
+// The Curated List read binds only the candidate-USER id, through its input,
+// and its response carries no identity at all. So on BOTH branches the only
+// thing tying the domain candidate id to that candidate-user id is the
+// source-owned identity proof. Without it a plan can pair one candidate's
+// matched roles with another candidate's existing list and write them there.
+test("a present list without an identity proof cannot be planned", () => {
+  const proofOptions = {
+    scopeDigest: SCOPE_DIGEST,
+    sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+    sourceCasRevision: SOURCE_CAS_REVISION,
+    trustedNow: PLAN_AT,
+  };
+  const planWith = (identity, { candidateUserId = CANDIDATE_USER_ID } = {}) =>
+    planPhase4CuratedListWrite({
+      ...CONTEXT,
+      trustedNow: PLAN_AT,
+      candidateId: CANDIDATE_ID,
+      candidateUserId,
+      matchProof: rankedProof({
+        ...proofOptions,
+        candidateId: CANDIDATE_ID,
+        roles: [{
+          roleId: "target-role",
+          endorsed: true,
+          suggested: false,
+          score: 0.82,
+          rank: 0,
+        }],
+      }),
+      preReadback: readbackProof({
+        ...proofOptions,
+        candidateId: CANDIDATE_ID,
+        candidateUserId,
+        exists: true,
+        roleIds: [],
+      }),
+      identityProof: identity,
+    });
+
+  assert.throws(
+    () => planWith(null),
+    /present Curated List requires an authoritative same-scope identity proof/u,
+  );
+
+  // With the proof, the same plan is fine.
+  const ok = planWith(identityProof({
+    ...proofOptions,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+  }));
+  assert.deepEqual(ok.plannedInput.role_ids, ["target-role"]);
+
+  // The cross-candidate case: candidate A's identity proof cannot authorise a
+  // plan whose Curated List readback belongs to a different candidate-user.
+  // This is the write that would have put A's matched roles into B's list.
+  assert.throws(
+    () => planWith(
+      identityProof({
+        ...proofOptions,
+        candidateId: CANDIDATE_ID,
+        candidateUserId: CANDIDATE_USER_ID,
+      }),
+      { candidateUserId: OTHER_CANDIDATE_USER_ID },
+    ),
+    /identity/u,
+  );
+});
+
+// Every consumer of a Curated List readback must re-prove the subject. The
+// readback binds only the candidate-USER id, through its read input; the
+// domain candidate id it carries is an unverifiable echo of the caller's
+// argument. A faithfully normalized proof can therefore describe a different
+// person's list, and no forgery is needed to produce one.
+test("consumers reject a readback whose observed subject is not the match subject", () => {
+  const proofOptions = {
+    scopeDigest: SCOPE_DIGEST,
+    sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+    sourceCasRevision: SOURCE_CAS_REVISION,
+  };
+  const matchProof = rankedProof({
+    ...proofOptions,
+    trustedNow: COUNT_AT,
+  });
+  // Truthful proof of a DIFFERENT candidate-user's list that happens to
+  // contain the same role ids.
+  const foreignReadback = readbackProof({
+    ...proofOptions,
+    trustedNow: COUNT_AT,
+    observedAt: POST_READ_AT,
+    candidateUserId: OTHER_CANDIDATE_USER_ID,
+    roleIds: ["role-recommended", "role-possible"],
+  });
+  assert.equal(foreignReadback.valid, true);
+
+  assert.throws(() => exactPhase4PostAddCuratedMatchCount({
+    matchProof,
+    postReadback: foreignReadback,
+    identityProof: identityProof({
+      ...proofOptions,
+      trustedNow: COUNT_AT,
+    }),
+    trustedNow: COUNT_AT,
+  }), /exact match/u);
+
+  // The same readback cannot be planned against either.
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof({ ...proofOptions }),
+    preReadback: foreignReadback,
+    identityProof: identityProof({ ...proofOptions }),
+  }), /Curated List proof|identity/u);
+});
+
+// The identity proof is the only thing tying the bound candidate-user id to
+// the unbound domain candidate id, so every dimension of it has to be pinned:
+// which candidate it names, which scope it was minted in, when it was observed
+// relative to the readback, and whether it is still fresh. Each of these
+// survived deletion until this test existed.
+test("the identity proof is pinned on subject, scope, ordering and freshness", () => {
+  const proofOptions = {
+    scopeDigest: SCOPE_DIGEST,
+    sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+    sourceCasRevision: SOURCE_CAS_REVISION,
+  };
+  const planWith = (identity) => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof({ ...proofOptions }),
+    preReadback: readbackProof({ ...proofOptions, exists: true }),
+    identityProof: identity,
+  });
+
+  // Names a different domain candidate: this is the round-1 defect's shape.
+  assert.throws(() => planWith(identityProof({
+    ...proofOptions,
+    candidateId: OTHER_CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+  })), /identity/u);
+
+  // Minted under another scope, i.e. replayed.
+  assert.throws(() => planWith(identityProof({
+    ...proofOptions,
+    scopeDigest: OTHER_SCOPE_DIGEST,
+  })), /identity|scope/u);
+
+  // Observed AFTER the readback it is supposed to qualify, but still before
+  // trustedNow and still fresh, so only the ordering rule can reject it.
+  assert.throws(() => planWith(identityProof({
+    ...proofOptions,
+    observedAt: "2026-07-26T00:01:30.000Z",
+  })), /identity/u);
+
+  // Stale beyond the observation window. The identity observation is minted
+  // BEFORE the match read so a trustedNow that ages it leaves the match and
+  // readback proofs comfortably inside the window — otherwise the match
+  // freshness check throws first and this assertion proves nothing.
+  const EARLY_IDENTITY_AT = "2026-07-25T23:59:00.000Z";
+  const IDENTITY_STALE_AT = new Date(
+    Date.parse(EARLY_IDENTITY_AT) + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS + 1,
+  ).toISOString();
+  assert.ok(
+    Date.parse(IDENTITY_STALE_AT) - Date.parse(MATCH_AT)
+      < PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+  );
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: IDENTITY_STALE_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof({
+      ...proofOptions,
+      trustedNow: IDENTITY_STALE_AT,
+    }),
+    preReadback: readbackProof({
+      ...proofOptions,
+      exists: true,
+      trustedNow: IDENTITY_STALE_AT,
+    }),
+    // Minted while fresh; it is the PLAN's clock that ages it.
+    identityProof: identityProof({
+      ...proofOptions,
+      observedAt: EARLY_IDENTITY_AT,
+      trustedNow: EARLY_IDENTITY_AT,
+    }),
+  }), /present Curated List requires an authoritative same-scope identity proof/u);
+
+  // The readback's own claimed candidate must match the plan's. Both sides are
+  // caller-supplied, so this is a consistency assertion rather than a subject
+  // binding — but an inconsistent pair must still not plan.
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof({ ...proofOptions }),
+    preReadback: readbackProof({
+      ...proofOptions,
+      candidateId: OTHER_CANDIDATE_ID,
+      exists: true,
+    }),
+    identityProof: identityProof({ ...proofOptions }),
+  }), /preReadback must be an exact candidate Curated List proof/u);
+
+  // The readback must itself be in scope. Only the preReadback varies here, so
+  // the match and identity proofs cannot be what rejects it.
+  for (const drift of [
+    { scopeDigest: OTHER_SCOPE_DIGEST },
+    { sourceCasRevision: SOURCE_CAS_REVISION + 1 },
+  ]) {
+    assert.throws(() => planPhase4CuratedListWrite({
+      ...CONTEXT,
+      trustedNow: PLAN_AT,
+      candidateId: CANDIDATE_ID,
+      candidateUserId: CANDIDATE_USER_ID,
+      matchProof: rankedProof({ ...proofOptions }),
+      preReadback: readbackProof({
+        ...proofOptions,
+        ...drift,
+        exists: true,
+      }),
+      identityProof: identityProof({ ...proofOptions }),
+    }), /preReadback must be an exact candidate Curated List proof/u);
+  }
+});
+
+test("the post-add count pins the identity proof on subject, scope and freshness", () => {
+  const proofOptions = {
+    scopeDigest: SCOPE_DIGEST,
+    sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+    sourceCasRevision: SOURCE_CAS_REVISION,
+  };
+  const countWith = (identity, trustedNow = COUNT_AT) =>
+    exactPhase4PostAddCuratedMatchCount({
+      matchProof: rankedProof({ ...proofOptions, trustedNow: COUNT_AT }),
+      postReadback: readbackProof({
+        ...proofOptions,
+        trustedNow: COUNT_AT,
+        observedAt: POST_READ_AT,
+        roleIds: ["role-recommended", "role-possible"],
+      }),
+      identityProof: identity,
+      trustedNow,
+    });
+
+  // A proof binding a DIFFERENT domain candidate to this candidate-user would
+  // score this candidate's ranked roles against someone else's list.
+  assert.throws(() => countWith(identityProof({
+    ...proofOptions,
+    candidateId: OTHER_CANDIDATE_ID,
+    trustedNow: COUNT_AT,
+  })), /exact match/u);
+
+  assert.throws(() => countWith(identityProof({
+    ...proofOptions,
+    scopeDigest: OTHER_SCOPE_DIGEST,
+    trustedNow: COUNT_AT,
+  })), /exact match/u);
+
+  // Stale identity binding while the other two proofs are still fresh. The
+  // identity observation is minted before the match read so ageing it does not
+  // also age the match proof — otherwise the match freshness check throws
+  // first and the identity clause is never reached.
+  const EARLY_IDENTITY_AT = "2026-07-25T23:59:00.000Z";
+  const IDENTITY_STALE_AT = new Date(
+    Date.parse(EARLY_IDENTITY_AT) + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS + 1,
+  ).toISOString();
+  assert.ok(
+    Date.parse(IDENTITY_STALE_AT) - Date.parse(POST_READ_AT)
+      < PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+  );
+  assert.throws(() => countWith(
+    // Minted while fresh; it is the COUNT's clock that ages it.
+    identityProof({
+      ...proofOptions,
+      observedAt: EARLY_IDENTITY_AT,
+      trustedNow: EARLY_IDENTITY_AT,
+    }),
+    IDENTITY_STALE_AT,
+  ), /exact match and candidate Curated List proofs are required/u);
+
+  // The argument is newly required, so its absence and an unregistered proof
+  // must both give the contract rejection rather than a TypeError crash.
+  assert.throws(
+    () => countWith(undefined),
+    /exact match and candidate Curated List proofs are required/u,
+  );
+  assert.throws(
+    () => countWith(Object.freeze({ valid: true })),
+    /exact match and candidate Curated List proofs are required/u,
+  );
+});
+
+test("add-response membership and message validation are behavioural, not just arity", () => {
+  // The failure shape is unpinned by the capture and keeps membership-only
+  // rules, so an unknown key there must stay UNKNOWN rather than a definite
+  // rejection — the safe direction for a write that may have landed.
+  assert.equal(classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: { success: false, vendor_error_code: "X" },
+  }).outcome, "unknown");
+
+  // A renamed key inside an otherwise six-key success response.
+  assert.equal(classifyPhase4CuratedListAddResponse({
+    responseReceived: true,
+    response: {
+      already_in_list_count: 0,
+      curated_role_list_id: "curated-list-contract-a",
+      message: "ok",
+      newly_added: 1,
+      success: true,
+      total_requested: 1,
+    },
+  }).responseContractValid, false);
+
+  // `message` is mandatory on success now, so its value validation matters.
+  // Note the three count keys are admitted but NOT value-checked: nothing
+  // reads them (idempotency evidence comes from the duplicate readback's
+  // role-set comparison) and they only reach the fixed-length responseDigest,
+  // so this pins message's own bounds rather than the whole payload's.
+  for (const message of [12345, "x".repeat(513)]) {
+    assert.equal(classifyPhase4CuratedListAddResponse({
+      responseReceived: true,
+      response: {
+        already_in_list_count: 0,
+        curated_role_list_id: "curated-list-contract-a",
+        message,
+        newly_added_count: 1,
+        success: true,
+        total_requested: 1,
+      },
+    }).responseContractValid, false);
+  }
+});
+
+// After the readback stopped carrying either candidate identity, the identity
+// observation's own response is the single place the domain candidate id and
+// the candidate-user id are proved to belong to one person. Everything
+// downstream reads the caller's asserted pair, so if this binding were ever
+// dropped a subject-mixing observation would flow all the way to a plan.
+test("the identity observation binds its own response to the asserted pair", () => {
+  const proofOptions = {
+    scopeDigest: SCOPE_DIGEST,
+    sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+    sourceCasRevision: SOURCE_CAS_REVISION,
+  };
+
+  // Response names a different candidate-user than the caller asserts.
+  const mixedUser = identityProof({
+    ...proofOptions,
+    observedCandidateUserId: OTHER_CANDIDATE_USER_ID,
+  });
+  assert.equal(mixedUser.valid, false);
+  assert.equal(mixedUser.errorCode, "response_identity_invalid");
+
+  // Response names a different domain candidate than the caller asserts.
+  const mixedCandidate = identityProof({
+    ...proofOptions,
+    observedCandidateId: OTHER_CANDIDATE_ID,
+  });
+  assert.equal(mixedCandidate.valid, false);
+
+  // And an invalid proof cannot be planned with.
+  assert.throws(() => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof: rankedProof({ ...proofOptions }),
+    preReadback: readbackProof({ ...proofOptions, exists: true }),
+    identityProof: mixedUser,
+  }), /identity/u);
+});
+
+// The mirror of the readback and identity cross-subject tests, for the third
+// proof. The match proof's candidateId is bound to the ranked read's input, so
+// this is the clause that stops another candidate's ranked roles being planned
+// into this candidate's Curated List.
+test("a match proof for another candidate cannot be planned into this candidate's list", () => {
+  const proofOptions = {
+    scopeDigest: SCOPE_DIGEST,
+    sourceGenerationDigest: SOURCE_GENERATION_DIGEST,
+    sourceCasRevision: SOURCE_CAS_REVISION,
+  };
+  const planWithMatch = (matchProof) => planPhase4CuratedListWrite({
+    ...CONTEXT,
+    trustedNow: PLAN_AT,
+    candidateId: CANDIDATE_ID,
+    candidateUserId: CANDIDATE_USER_ID,
+    matchProof,
+    preReadback: readbackProof({ ...proofOptions, exists: true }),
+    identityProof: identityProof({ ...proofOptions }),
+  });
+
+  assert.throws(
+    () => planWithMatch(rankedProof({
+      ...proofOptions,
+      candidateId: OTHER_CANDIDATE_ID,
+    })),
+    /matchProof must be an exact candidate match proof/u,
+  );
+
+  // Same subject, different scope: replay from another source generation.
+  assert.throws(
+    () => planWithMatch(rankedProof({
+      ...proofOptions,
+      scopeDigest: OTHER_SCOPE_DIGEST,
+    })),
+    /matchProof must be an exact candidate match proof/u,
+  );
+
+  // Control: the correct match proof still plans.
+  assert.deepEqual(
+    planWithMatch(rankedProof({ ...proofOptions })).plannedInput.role_ids,
+    ["role-recommended", "role-possible"],
+  );
 });

@@ -34,6 +34,8 @@ import {
   prepareSourceRecallClassifierCapsuleRequest,
   sourceRecallClassifierCapsuleContextDigest,
   sourceRecallClassifierCapsuleDigest,
+  sourceRecallClassifierCapsuleReceiptDigest,
+  sourceRecallClassifierCapsuleResponseDigest,
   sourceRecallClassifierCapsuleReceiptSignatureBase,
   sourceRecallClassifierCapsuleReservationId,
   sourceRecallClassifierEndedAtDigest,
@@ -51,13 +53,24 @@ import {
   issueSourceRecallSuccessEvidenceCapability,
 } from "../api/paraai/_lib/source-recall-classifier-capsule-runtime.mjs";
 import {
+  SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_HANDOFF_VERSION,
   SOURCE_RECALL_SUCCESS_EVIDENCE_DIGEST_DOMAIN,
   SOURCE_RECALL_SUCCESS_EVIDENCE_PROJECTOR_VERSION,
   SOURCE_RECALL_SUCCESS_EVIDENCE_VERSION,
   SourceRecallSuccessEvidenceProjectorError,
+  consumeSourceRecallClassifiedManifestEvidenceCapability,
+  projectSourceRecallClassifiedManifestEvidenceCapability,
   projectSourceRecallSuccessEvidence,
 } from "../api/paraai/_lib/source-recall-success-evidence-projector.mjs";
 import {
+  SourceRecallClassifiedEvidenceStoreError,
+  createSourceRecallClassifiedEvidenceStore,
+} from "../api/paraai/_lib/source-recall-classified-evidence-store.mjs";
+import {
+  createSourceRecallPointObservationManifestStore,
+} from "../api/paraai/_lib/source-recall-point-observation-manifest-store.mjs";
+import {
+  createSourceRecallPointObservationManifestPointInterface,
   createSourceRecallPointObservationStore,
 } from "../api/paraai/_lib/source-recall-point-observation-store.mjs";
 import {
@@ -184,7 +197,80 @@ function semanticDigest(domain, value) {
     .digest("hex");
 }
 
+function verifiedHead(nowMs) {
+  const pageExpiresAtMs = nowMs + 20 * HOUR;
+  const referenceCommitment = {
+    referenceIdDigest: semanticDigest(
+      "phase4-recall-reference-id-v1",
+      REFERENCE.id,
+    ),
+    referenceDigest: semanticDigest(
+      "phase4-recall-private-reference-v1",
+      REFERENCE,
+    ),
+  };
+  const record = {
+    version: 1,
+    policyVersion: "recall-reference-head-dark-v1",
+    kind: "recall_reference_artifact_head_dark",
+    source: "recall",
+    clientVersion: "recall-private-page-client-v1",
+    workKeyDigest: digest("page-work"),
+    runNonceDigest: digest("page-run"),
+    decisionBoundaryAtMs: BOUNDARY_MS,
+    contractPinsDigest: digest("page-pins"),
+    passCount: 2,
+    pageCount: 1,
+    scannedCount: 1,
+    referenceCount: 1,
+    referenceManifestDigest: semanticDigest(
+      "phase4-recall-reference-manifest-v1",
+      [referenceCommitment],
+    ),
+    stablePassSemanticDigest: digest("stable-pass"),
+    pageManifests: [{
+      cursorDigest: digest("page-cursor-null"),
+      nextCursorDigest: digest("page-next-cursor-null"),
+      pageExpiresAtMs,
+      pageNativeByteProofDigest: "7".repeat(40),
+      pageNumber: 1,
+      pageRecordDigest: digest("page-record"),
+      pageSemanticDigest: digest("page-semantic"),
+      referenceCount: 1,
+      scannedCount: 1,
+    }],
+    recallReferenceHeadEpochDigest: digest("head-epoch"),
+    recallReferenceHeadRevisionDigest:
+      digest("head-revision"),
+    sealedAtMs: nowMs,
+    pointReadAvailable: false,
+    sourceFactsAvailable: false,
+    successClassificationAvailable: false,
+    candidateIdentityResolutionAvailable: false,
+    pinnable: false,
+    authorityAvailable: false,
+  };
+  const raw = canonicalJson(record);
+  return deepFreeze({
+    raw,
+    record,
+    recallReferenceHeadEpochDigest:
+      record.recallReferenceHeadEpochDigest,
+    recallReferenceHeadRevisionDigest:
+      record.recallReferenceHeadRevisionDigest,
+    recallReferenceHeadRecordDigest: createHash("sha256")
+      .update(raw, "utf8")
+      .digest("hex"),
+    redisNowMs: nowMs,
+    pointReadAvailable: false,
+    sourceFactsAvailable: false,
+    pinnable: false,
+    authorityAvailable: false,
+  });
+}
+
 function verifiedPage(nowMs) {
+  const head = verifiedHead(nowMs);
   return deepFreeze({
     record: {
       version: 1,
@@ -212,7 +298,8 @@ function verifiedPage(nowMs) {
     recallReferenceHeadEpochDigest: digest("head-epoch"),
     recallReferenceHeadRevisionDigest:
       digest("head-revision"),
-    recallReferenceHeadRecordDigest: digest("head-record"),
+    recallReferenceHeadRecordDigest:
+      head.recallReferenceHeadRecordDigest,
     redisNowMs: nowMs,
     remainingTtlMs: 20 * HOUR,
   });
@@ -330,11 +417,83 @@ function fakePersistence(startMs) {
   return {
     persistence,
     values,
+    get nowMs() {
+      return nowMs;
+    },
     advance(deltaMs) {
       nowMs += deltaMs;
     },
     setNow(nextNowMs) {
       nowMs = nextNowMs;
+    },
+  };
+}
+
+function fakeClassifiedPersistence(
+  startMs,
+  physicalExpiryOffsetMs = 0,
+) {
+  let nowMs = startMs;
+  let mode = "normal";
+  const values = new Map();
+  const expiries = new Map();
+  const calls = [];
+  const persistence = Object.freeze({
+    async retain(input) {
+      calls.push(input);
+      if (
+        nowMs < input.issuedAtMs
+        || nowMs >= input.notAfterMs
+        || nowMs >= input.expiresAtMs
+      ) {
+        return {
+          status: "expired",
+          raw: null,
+          redisNowMs: nowMs,
+          expiresAtMs: -2,
+        };
+      }
+      if (
+        values.has(input.key)
+        && nowMs >= expiries.get(input.key)
+      ) {
+        values.delete(input.key);
+        expiries.delete(input.key);
+      }
+      if (values.has(input.key)) {
+        return {
+          status: "existing",
+          raw: values.get(input.key),
+          redisNowMs: nowMs,
+          expiresAtMs: expiries.get(input.key),
+        };
+      }
+      const physicalExpiresAtMs =
+        input.expiresAtMs + physicalExpiryOffsetMs;
+      values.set(input.key, input.proposedRaw);
+      expiries.set(input.key, physicalExpiresAtMs);
+      if (mode === "throw_after_store_once") {
+        mode = "normal";
+        throw new Error("private lost persistence response");
+      }
+      return {
+        status: "created",
+        raw: input.proposedRaw,
+        redisNowMs: nowMs,
+        expiresAtMs: physicalExpiresAtMs,
+      };
+    },
+  });
+  return {
+    calls,
+    expiries,
+    persistence,
+    values,
+    setMode(value) {
+      mode = value;
+    },
+    setNow(value) {
+      nowMs = value;
     },
   };
 }
@@ -411,16 +570,94 @@ async function checkpointNext(
   return claim;
 }
 
-async function stableHarness() {
+async function stableHarness(raw = pointRaw()) {
   const harness = await preparedHarness();
-  await checkpointNext(harness);
-  await checkpointNext(harness);
+  await checkpointNext(harness, raw);
+  await checkpointNext(harness, raw);
   const snapshot =
     await harness.store.readRecallPointObservationWork(
       harness.work,
     );
   assert.equal(snapshot.record.status, "stable");
   return { ...harness, snapshot };
+}
+
+async function classifiedManifestSeedForStableHarness(
+  harness,
+) {
+  const pointObservation =
+    createSourceRecallPointObservationManifestPointInterface({
+      persistence: harness.fake.persistence,
+    });
+  const store =
+    createSourceRecallPointObservationManifestStore({
+      persistence: harness.fake.persistence,
+      pointObservation,
+    });
+  const head = verifiedHead(BOUNDARY_MS + HOUR);
+  const basePage = verifiedPage(BOUNDARY_MS + HOUR);
+  const page = deepFreeze({
+    ...basePage,
+    redisNowMs: harness.fake.nowMs,
+    remainingTtlMs:
+      basePage.record.pageExpiresAtMs
+        - harness.fake.nowMs,
+  });
+  const ensured =
+    await store.ensureRecallPointObservationManifest(
+      head,
+    );
+  const work = deepFreeze({
+    manifestKeyDigest: ensured.record.manifestKeyDigest,
+  });
+  const pageClaim =
+    await store.claimRecallPointObservationManifestStep(
+      work,
+    );
+  if (pageClaim.status === "complete") {
+    return store.issueSourceRecallClassifiedManifestSeed(
+      pageClaim,
+    );
+  }
+  assert.equal(pageClaim.status, "page_required");
+  await store.checkpointRecallPointObservationManifestPage(
+    pageClaim,
+    page,
+  );
+  const observationClaim =
+    await store.claimRecallPointObservationManifestStep(
+      work,
+    );
+  assert.equal(
+    observationClaim.status,
+    "observation_required",
+  );
+  const prepared =
+    await store.prepareRecallPointObservationManifestSelection(
+      observationClaim,
+      page,
+    );
+  assert.equal(
+    prepared.workKeyDigest,
+    harness.snapshot.record.workKeyDigest,
+  );
+  const checkpoint =
+    await store.checkpointRecallPointObservationManifestWork(
+      observationClaim,
+    );
+  assert.equal(checkpoint.status, "verifying_complete");
+  const completion =
+    await store.claimRecallPointObservationManifestStep(
+      work,
+    );
+  assert.equal(completion.status, "complete");
+  assert.equal(
+    completion.aggregate.globalReferenceSetCoverageAvailable,
+    true,
+  );
+  return store.issueSourceRecallClassifiedManifestSeed(
+    completion,
+  );
 }
 
 function clone(value) {
@@ -458,6 +695,19 @@ function expectProjectorCode(code) {
     assert.equal(
       error instanceof
         SourceRecallSuccessEvidenceProjectorError,
+      true,
+    );
+    assert.equal(error.code, code);
+    assert.equal(error.message, code);
+    return true;
+  };
+}
+
+function expectClassifiedStoreCode(code) {
+  return (error) => {
+    assert.equal(
+      error instanceof
+        SourceRecallClassifiedEvidenceStoreError,
       true,
     );
     assert.equal(error.code, code);
@@ -1312,7 +1562,1008 @@ test("only an exact stable runtime result can issue one opaque, unforgeable, one
   });
 });
 
-test("the projector emits one deterministic digest-only binding for the exact source point and signed pair", async () => {
+test("the projector-to-store handoff starts only from verified runtime provenance and is one-shot across purposes", async (t) => {
+  const { snapshot } = await stableHarness();
+  assert.equal(
+    SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_HANDOFF_VERSION,
+    "recall-classified-manifest-evidence-handoff-dark-v1",
+  );
+
+  const publicPair =
+    await productionClassifierPair(snapshot);
+  const publicEvidence =
+    projectSourceRecallSuccessEvidence(
+      issueSourceRecallSuccessEvidenceCapability(publicPair),
+    );
+  for (const forged of [
+    publicEvidence,
+    clone(publicEvidence),
+    deepFreeze(clone(publicEvidence)),
+    structuredClone(publicEvidence),
+    Object.freeze({
+      classificationEvidenceDigest:
+        publicEvidence.classificationEvidenceDigest,
+    }),
+    Object.freeze({}),
+    new Proxy(Object.freeze({}), {}),
+    null,
+  ]) {
+    assert.throws(
+      () =>
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          forged,
+        ),
+      expectProjectorCode(
+        "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
+      ),
+    );
+    assert.throws(
+      () =>
+        consumeSourceRecallClassifiedManifestEvidenceCapability(
+          forged,
+        ),
+      expectProjectorCode(
+        "SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_CAPABILITY_INVALID",
+      ),
+    );
+  }
+
+  const crossPurposePair =
+    await productionClassifierPair(snapshot);
+  const upstreamCapability =
+    issueSourceRecallSuccessEvidenceCapability(
+      crossPurposePair,
+    );
+  assert.throws(
+    () =>
+      consumeSourceRecallClassifiedManifestEvidenceCapability(
+        upstreamCapability,
+      ),
+    expectProjectorCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+  const storeCapability =
+    projectSourceRecallClassifiedManifestEvidenceCapability(
+      upstreamCapability,
+    );
+  assert.equal(Object.isFrozen(storeCapability), true);
+  assert.deepEqual(Object.keys(storeCapability), []);
+  assert.equal(JSON.stringify(storeCapability), "{}");
+  assert.throws(
+    () => projectSourceRecallSuccessEvidence(
+      storeCapability,
+    ),
+    expectProjectorCode(
+      "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+  assert.throws(
+    () =>
+      consumeSourceRecallClassifiedManifestEvidenceCapability(
+        Object.freeze({ ...storeCapability }),
+      ),
+    expectProjectorCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+  assert.throws(
+    () =>
+      consumeSourceRecallClassifiedManifestEvidenceCapability(
+        structuredClone(storeCapability),
+      ),
+    expectProjectorCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+  for (const retry of [
+    () =>
+      projectSourceRecallSuccessEvidence(
+        upstreamCapability,
+      ),
+    () =>
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        upstreamCapability,
+      ),
+  ]) {
+    assert.throws(
+      retry,
+      expectProjectorCode(
+        "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
+      ),
+    );
+  }
+
+  const retained =
+    consumeSourceRecallClassifiedManifestEvidenceCapability(
+      storeCapability,
+    );
+  assert.equal(Object.isFrozen(retained), true);
+  assertDeepFrozen(retained);
+  assert.deepEqual(Object.keys(retained), [
+    "version",
+    "evidence",
+    "settlementStatus",
+    "signedResponses",
+    "upstreamIssuedFromRedisAtMs",
+    "upstreamNotAfterMs",
+  ]);
+  assert.equal(
+    retained.version,
+    SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_HANDOFF_VERSION,
+  );
+  assert.equal(retained.settlementStatus, "terminal");
+  assert.equal(retained.evidence.classification, "success");
+  assert.equal(
+    retained.evidence.classificationEvidenceDigest,
+    publicEvidence.classificationEvidenceDigest,
+  );
+  assert.deepEqual(
+    retained.signedResponses,
+    crossPurposePair.signedResponses,
+  );
+  assert.deepEqual(
+    retained.signedResponses.map(
+      (response) => Object.keys(response),
+    ),
+    Array.from({ length: 2 }, () => [
+      "version",
+      "reservationId",
+      "contextDigest",
+      "readNumber",
+      "requestDigest",
+      "capsule",
+      "receipt",
+    ]),
+  );
+  assert.deepEqual(
+    retained.signedResponses.map(
+      (response) => Object.keys(response.capsule),
+    ),
+    Array.from({ length: 2 }, () => [
+      "version",
+      "source",
+      "pointBindingDigest",
+      "pointProofDigest",
+      "pointResponseDigest",
+      "decisionBoundaryDigest",
+      "callEndedAt",
+      "callEndedAtBasis",
+      "callEndedAtDigest",
+      "classifierArtifactDigest",
+      "classifierDeploymentDigest",
+      "classifierRuntimeConfigDigest",
+      "classifierPolicyDigest",
+      "classifierInputDigest",
+      "transcriptEvidenceDigest",
+      "presenceEvidenceDigest",
+      "vapiEvidenceDigest",
+      "mediaEvidenceDigest",
+      "vapiAssociationStatus",
+      "callsVerdict",
+      "classification",
+      "classificationBasis",
+      "classifierOutputDigest",
+      "classifiedAtMs",
+    ]),
+  );
+  assert.deepEqual(
+    retained.signedResponses.map(
+      (response) => Object.keys(response.receipt),
+    ),
+    Array.from({ length: 2 }, () => [
+      "version",
+      "keyId",
+      "reservationId",
+      "contextDigest",
+      "readNumber",
+      "requestDigest",
+      "pointResponseDigest",
+      "capsuleDigest",
+      "issuedAtMs",
+      "expiresAtMs",
+      "signature",
+    ]),
+  );
+  for (const [index, response] of
+    retained.signedResponses.entries()) {
+    assert.equal(response.readNumber, index + 1);
+    assert.equal(response.receipt.readNumber, index + 1);
+    assert.equal(
+      response.requestDigest,
+      retained.evidence.requestDigests[index],
+    );
+    assert.equal(
+      response.capsule.pointProofDigest,
+      retained.evidence.pointProofDigests[index],
+    );
+    assert.equal(
+      response.capsule.pointBindingDigest,
+      retained.evidence.pointBindingDigests[index],
+    );
+    assert.equal(
+      response.capsule.pointResponseDigest,
+      retained.evidence.pointResponseDigests[index],
+    );
+    assert.equal(
+      response.capsule.classifierInputDigest,
+      retained.evidence.classifierInputDigests[index],
+    );
+    assert.equal(
+      sourceRecallClassifierCapsuleResponseDigest(
+        JSON.stringify(response),
+      ),
+      retained.evidence.responseDigests[index],
+    );
+    assert.equal(
+      sourceRecallClassifierCapsuleReceiptDigest(
+        response.receipt,
+      ),
+      retained.evidence.receiptDigests[index],
+    );
+  }
+  const retainedSerialized = JSON.stringify(retained);
+  for (const privateValue of [
+    REFERENCE.id,
+    REFERENCE.metadataSource,
+    REFERENCE.candidate.fullName,
+    REFERENCE.candidate.email,
+    REFERENCE.candidate.linkedin,
+    REFERENCE.candidate.paraformEventId,
+  ]) {
+    assert.equal(
+      retainedSerialized.includes(privateValue),
+      false,
+    );
+  }
+  assert.doesNotMatch(retainedSerialized, /https?:\/\//u);
+  assert.doesNotMatch(
+    retainedSerialized,
+    /"(?:candidate|email|linkedin|paraformEventId|rawBody|responseBody|transcript)"\s*:/u,
+  );
+  assert.equal(
+    retained.upstreamIssuedFromRedisAtMs,
+    snapshot.redisNowMs,
+  );
+  assert.equal(
+    retained.upstreamNotAfterMs,
+    snapshot.record.expiresAtMs,
+  );
+  assert.equal(
+    retained.upstreamIssuedFromRedisAtMs
+      < retained.upstreamNotAfterMs,
+    true,
+  );
+  assert.throws(
+    () =>
+      consumeSourceRecallClassifiedManifestEvidenceCapability(
+        storeCapability,
+      ),
+    expectProjectorCode(
+      "SOURCE_RECALL_CLASSIFIED_MANIFEST_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+
+  const consumedPublicPair =
+    await productionClassifierPair(snapshot);
+  const consumedPublicCapability =
+    issueSourceRecallSuccessEvidenceCapability(
+      consumedPublicPair,
+    );
+  projectSourceRecallSuccessEvidence(
+    consumedPublicCapability,
+  );
+  assert.throws(
+    () =>
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        consumedPublicCapability,
+      ),
+    expectProjectorCode(
+      "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+
+  for (const classification of [
+    "success",
+    "failure",
+    "unavailable",
+  ]) {
+    await t.test(classification, async () => {
+      const pair = await productionClassifierPair(
+        snapshot,
+        { classification },
+      );
+      const capability =
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(pair),
+        );
+      const value =
+        consumeSourceRecallClassifiedManifestEvidenceCapability(
+          capability,
+        );
+      assert.equal(
+        value.evidence.classification,
+        classification,
+      );
+      assert.equal(
+        value.settlementStatus,
+        classification === "unavailable"
+          ? "unsettled"
+          : "terminal",
+      );
+      assert.equal(
+        value.evidence.classificationProofComplete,
+        classification !== "unavailable",
+      );
+      assertHardDark(value.evidence);
+    });
+  }
+});
+
+test("one complete manifest seed and one signed-evidence handoff retain exactly one sealed member before the non-renewable deadline", async (t) => {
+  const harness = await stableHarness();
+  const pair = await productionClassifierPair(
+    harness.snapshot,
+  );
+  const persistence = fakeClassifiedPersistence(
+    pair.verifiedAtMs + 1,
+  );
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: persistence.persistence,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const manifestCapability =
+    await classifiedManifestSeedForStableHarness(
+      harness,
+    );
+  const evidenceCapability =
+    projectSourceRecallClassifiedManifestEvidenceCapability(
+      issueSourceRecallSuccessEvidenceCapability(pair),
+    );
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      manifestCapability,
+      evidenceCapability,
+    );
+  assert.equal(retained.status, "retained_terminal_dark");
+  assert.equal(retained.created, true);
+  assert.equal(retained.classification, "success");
+  assert.equal(
+    retained.classificationProofComplete,
+    true,
+  );
+  assert.equal(
+    retained.signedResponseRetentionAvailable,
+    true,
+  );
+  assert.equal(
+    retained.durableProvenanceSealAvailable,
+    true,
+  );
+  assert.equal(
+    retained.referenceManifestCoverageComplete,
+    false,
+  );
+  assert.equal(retained.durableAttestationAvailable, false);
+  assertHardDark(retained);
+  assert.equal(persistence.calls.length, 1);
+  assert.deepEqual(
+    Object.keys(persistence.calls[0]).sort(),
+    [
+      "expiresAtMs",
+      "issuedAtMs",
+      "key",
+      "notAfterMs",
+      "proposedRaw",
+    ],
+  );
+  // The transition floor is Redis-derived only. This fixture's local verifier
+  // clock runs ahead of both Redis instants, so folding it in would show up
+  // here as an issuedAtMs at or above pair.verifiedAtMs.
+  assert.ok(
+    persistence.calls[0].issuedAtMs < pair.verifiedAtMs,
+  );
+  assert.equal(
+    persistence.calls[0].notAfterMs,
+    Math.min(
+      ...pair.signedResponses.map(
+        (response) => response.receipt.expiresAtMs,
+      ),
+    ),
+  );
+  assert.equal(
+    persistence.calls[0].expiresAtMs,
+    harness.snapshot.record.expiresAtMs,
+  );
+  const raw = [...persistence.values.values()][0];
+  const durable = JSON.parse(raw);
+  assert.equal(
+    durable.kind,
+    "recall_classified_evidence_dark",
+  );
+  assert.equal(durable.signedResponses.length, 2);
+  assert.equal(durable.recordSeal.length, 64);
+  // Exactly the two Redis-derived observation clocks bound the transition;
+  // the local verifier clock is retained as evidence but never compared
+  // against the classified-evidence Redis TIME.
+  assert.equal(
+    persistence.calls[0].issuedAtMs,
+    Math.max(
+      durable.manifestIssuedFromRedisAtMs,
+      durable.upstreamIssuedFromRedisAtMs,
+    ),
+  );
+  assert.ok(
+    Math.max(...durable.evidence.classifierVerifiedAtMs)
+      > persistence.calls[0].issuedAtMs,
+  );
+  // A non-secret seal-key identifier is persisted inside the sealed body as a
+  // triage hint only. Anyone who can rewrite the record can also choose it, so
+  // it is never evidence that a rejection was benign — see sealKeyIdDigest and
+  // the tamperer-chooses-the-code subtest below.
+  assert.match(durable.sealKeyId, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    raw.includes(
+      "classified-evidence-test-seal-secret-0123456789",
+    ),
+    false,
+  );
+  // The public aggregate's exact shape is pinned, so a later change cannot
+  // add or flip a claim without a test noticing.
+  assert.deepEqual(
+    Object.keys(retained).sort(),
+    [
+      "authorityAvailable",
+      "candidateFacingWriteAvailable",
+      "candidateIdentityResolutionAvailable",
+      "classification",
+      "classificationEvidenceDigest",
+      "classificationProofComplete",
+      "created",
+      "curationAvailable",
+      "durableAttestationAvailable",
+      "durableProvenanceSealAvailable",
+      "enrollmentAvailable",
+      "expiresAtMs",
+      "globalReferenceSetCoverageAvailable",
+      "operational",
+      "outreachAvailable",
+      "pinnable",
+      "q37TransitionAvailable",
+      "referenceManifestCoverageComplete",
+      "retainedAtRedisMs",
+      "signedResponseRetentionAvailable",
+      "sourceFactsAvailable",
+      "standaloneSignatureReverificationAvailable",
+      "status",
+      "successClassificationAvailable",
+      "workKeyDigest",
+    ],
+  );
+  assert.equal(
+    retained.standaloneSignatureReverificationAvailable,
+    false,
+  );
+  assert.equal(
+    durable.evidence.classificationEvidenceDigest,
+    retained.classificationEvidenceDigest,
+  );
+  assert.equal(
+    durable.manifestCompleteProofDigest.length,
+    64,
+  );
+  assert.equal(
+    durable.manifestMemberSetDigest.length,
+    64,
+  );
+  assert.equal(
+    durable.memberReferenceDigest.length,
+    64,
+  );
+  assert.equal(
+    durable.memberReferenceIdDigest.length,
+    64,
+  );
+  assert.equal(
+    Buffer.byteLength(raw, "utf8") < 256 * 1_024,
+    true,
+  );
+  for (const privateValue of [
+    REFERENCE.id,
+    REFERENCE.metadataSource,
+    REFERENCE.candidate.fullName,
+    REFERENCE.candidate.email,
+    REFERENCE.candidate.linkedin,
+    REFERENCE.candidate.paraformEventId,
+  ]) {
+    assert.equal(raw.includes(privateValue), false);
+  }
+  assert.doesNotMatch(raw, /https?:\/\//u);
+  assert.doesNotMatch(
+    raw,
+    /"(?:candidate|email|linkedin|paraformEventId|rawBody|responseBody|transcript)"\s*:/u,
+  );
+  assert.equal(
+    Object.hasOwn(retained, "signedResponses"),
+    false,
+  );
+  await assert.rejects(
+    store.retainSourceRecallClassifiedEvidence(
+      manifestCapability,
+      evidenceCapability,
+    ),
+    expectClassifiedStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_CAPABILITY_INVALID",
+    ),
+  );
+  assert.equal(persistence.calls.length, 1);
+
+  await t.test("unavailable remains retained but unsettled", async () => {
+    const unavailablePair =
+      await productionClassifierPair(
+        harness.snapshot,
+        { classification: "unavailable" },
+      );
+    const unavailablePersistence =
+      fakeClassifiedPersistence(
+        unavailablePair.verifiedAtMs + 1,
+      );
+    const unavailableStore =
+      createSourceRecallClassifiedEvidenceStore({
+        persistence:
+          unavailablePersistence.persistence,
+        sealSecret:
+          "classified-evidence-test-seal-secret-0123456789",
+      });
+    const result =
+      await unavailableStore
+        .retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              unavailablePair,
+            ),
+          ),
+        );
+    assert.equal(result.status, "retained_unsettled_dark");
+    assert.equal(result.classification, "unavailable");
+    assert.equal(
+      result.classificationProofComplete,
+      false,
+    );
+    assert.equal(
+      result.referenceManifestCoverageComplete,
+      false,
+    );
+    assertHardDark(result);
+  });
+});
+
+test("classified retention accepts conservative physical expiry while preserving the logical upstream deadline", async () => {
+  const harness = await stableHarness();
+  const pair = await productionClassifierPair(
+    harness.snapshot,
+  );
+  const physicalExpiryOffsetMs = -1_000;
+  const persistence = fakeClassifiedPersistence(
+    pair.verifiedAtMs + 1,
+    physicalExpiryOffsetMs,
+  );
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: persistence.persistence,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  const physicalExpiresAtMs =
+    [...persistence.expiries.values()][0];
+  assert.equal(
+    physicalExpiresAtMs,
+    harness.snapshot.record.expiresAtMs
+      + physicalExpiryOffsetMs,
+  );
+  assert.equal(
+    retained.expiresAtMs,
+    physicalExpiresAtMs,
+  );
+  const durable =
+    JSON.parse([...persistence.values.values()][0]);
+  assert.equal(
+    durable.expiresAtMs,
+    harness.snapshot.record.expiresAtMs,
+  );
+  assert.ok(retained.expiresAtMs < durable.expiresAtMs);
+});
+
+test("classified retention enforces the trusted transition clock at regression, equality, and expiry and burns both capabilities", async (t) => {
+  const harness = await stableHarness();
+  const makeInputs = async (clockOffsetMs = 1_000) => {
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+      { clockOffsetMs },
+    );
+    return {
+      pair,
+      manifestCapability:
+        await classifiedManifestSeedForStableHarness(
+          harness,
+        ),
+      evidenceCapability:
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(pair),
+        ),
+    };
+  };
+  const transitionDeadline = (input) => Math.min(
+    ...input.pair.signedResponses.map(
+      (response) => response.receipt.expiresAtMs,
+    ),
+  );
+  const cases = [
+    [
+      // A Redis clock behind the Redis-derived floor is a genuine clock
+      // regression and must still be refused. upstreamIssuedFromRedisAtMs is
+      // harness.snapshot.redisNowMs, so this sits one millisecond under the
+      // floor without moving the deadline.
+      "before the Redis-derived transition floor",
+      () => harness.snapshot.redisNowMs - 1,
+    ],
+    [
+      "at deadline",
+      transitionDeadline,
+    ],
+    [
+      "after deadline",
+      (input) => transitionDeadline(input) + 1,
+    ],
+  ];
+  for (const [name, selectedNow] of cases) {
+    await t.test(name, async () => {
+      const input = await makeInputs();
+      const fake = fakeClassifiedPersistence(
+        selectedNow(input),
+      );
+      const store =
+        createSourceRecallClassifiedEvidenceStore({
+          persistence: fake.persistence,
+          sealSecret:
+            "classified-evidence-test-seal-secret-0123456789",
+        });
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          input.manifestCapability,
+          input.evidenceCapability,
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+        ),
+      );
+      assert.equal(fake.calls.length, 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          input.manifestCapability,
+          input.evidenceCapability,
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_CAPABILITY_INVALID",
+        ),
+      );
+      assert.equal(fake.calls.length, 1);
+    });
+  }
+
+  await t.test("immediately before deadline", async () => {
+    const input = await makeInputs();
+    const fake = fakeClassifiedPersistence(
+      transitionDeadline(input) - 1,
+    );
+    const store = createSourceRecallClassifiedEvidenceStore({
+      persistence: fake.persistence,
+      sealSecret:
+        "classified-evidence-test-seal-secret-0123456789",
+    });
+    const result =
+      await store.retainSourceRecallClassifiedEvidence(
+        input.manifestCapability,
+        input.evidenceCapability,
+      );
+    assert.equal(result.status, "retained_terminal_dark");
+    assert.equal(
+      result.retainedAtRedisMs,
+      transitionDeadline(input) - 1,
+    );
+    assert.equal(
+      result.expiresAtMs,
+      harness.snapshot.record.expiresAtMs,
+    );
+  });
+});
+
+test("classified retention converges after a lost response and rejects changed evidence, wrong seals, and non-members without another selector", async (t) => {
+  const harness = await stableHarness();
+  const fake = fakeClassifiedPersistence(
+    harness.snapshot.redisNowMs + 10_000,
+  );
+  const sealSecret =
+    "classified-evidence-test-seal-secret-0123456789";
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: fake.persistence,
+    sealSecret,
+  });
+  const firstPair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 1_000 },
+  );
+  fake.setNow(firstPair.verifiedAtMs + 1);
+  fake.setMode("throw_after_store_once");
+  await assert.rejects(
+    store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          firstPair,
+        ),
+      ),
+    ),
+    expectClassifiedStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_FAILED",
+    ),
+  );
+  assert.equal(fake.values.size, 1);
+
+  const retryPair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 2_000 },
+  );
+  fake.setNow(retryPair.verifiedAtMs + 1);
+  const recovered =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          retryPair,
+        ),
+      ),
+    );
+  assert.equal(recovered.created, false);
+  assert.equal(recovered.status, "retained_terminal_dark");
+
+  await t.test("changed terminal evidence conflicts", async () => {
+    const changedPair = await productionClassifierPair(
+      harness.snapshot,
+      {
+        classification: "failure",
+        clockOffsetMs: 3_000,
+      },
+    );
+    fake.setNow(changedPair.verifiedAtMs + 1);
+    await assert.rejects(
+      store.retainSourceRecallClassifiedEvidence(
+        await classifiedManifestSeedForStableHarness(
+          harness,
+        ),
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            changedPair,
+          ),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_BINDING_MISMATCH",
+      ),
+    );
+  });
+
+  await t.test("wrong seal key cannot adopt retained bytes", async () => {
+    const beforeRaw = [...fake.values.values()][0];
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+      { clockOffsetMs: 4_000 },
+    );
+    fake.setNow(pair.verifiedAtMs + 1);
+    const wrongStore =
+      createSourceRecallClassifiedEvidenceStore({
+        persistence: fake.persistence,
+        sealSecret:
+          "different-classified-store-seal-secret-9876543210",
+      });
+    await assert.rejects(
+      wrongStore.retainSourceRecallClassifiedEvidence(
+        await classifiedManifestSeedForStableHarness(
+          harness,
+        ),
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(pair),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_MISMATCH",
+      ),
+    );
+    // A rotated key is fail-closed in both directions: the retained record is
+    // not adopted, and the wrong secret does not get to overwrite or re-seal
+    // the bytes the original secret wrote.
+    assert.equal(fake.values.size, 1);
+    assert.equal([...fake.values.values()][0], beforeRaw);
+  });
+
+  // The seal-key check short-circuits ahead of the HMAC compare, so this case
+  // exists to keep the HMAC itself pinned: same secret, so the key id matches
+  // and the comparison is actually reached, but the sealed body has been
+  // edited. Deleting the seal comparison must fail this test.
+  // The tampered field is deliberately one that semanticallySameRecord STRIPS.
+  // For every field it compares, a forged value is caught twice over and this
+  // test would still pass with the seal deleted. The three stripped instants —
+  // the manifest reproof clock, the point-observation read clock, and the local
+  // verifier clock — are the only fields where the seal is the sole defence, so
+  // they are the only ones that actually pin it. Forging one downward is what a
+  // foreign or corrupted durable value would look like.
+  await t.test("a stripped observation clock edited under the correct seal key still fails the HMAC", async () => {
+    const key = [...fake.values.keys()][0];
+    const original = fake.values.get(key);
+    const tampered = JSON.parse(original);
+    tampered.upstreamIssuedFromRedisAtMs -= 5_000;
+    const tamperedRaw = JSON.stringify(tampered);
+    assert.notEqual(tamperedRaw, original);
+    // Only a value changed, so key order — and therefore canonical form — is
+    // untouched. The seal is verified inside canonicalRecord BEFORE parseRecord
+    // compares the round trip, so this subtest pins the HMAC unconditionally;
+    // the assertion is drift protection for future edits to the fixture.
+    assert.deepEqual(
+      Object.keys(JSON.parse(tamperedRaw)),
+      Object.keys(JSON.parse(original)),
+    );
+    fake.values.set(key, tamperedRaw);
+    try {
+      const pair = await productionClassifierPair(
+        harness.snapshot,
+        { clockOffsetMs: 5_000 },
+      );
+      fake.setNow(pair.verifiedAtMs + 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+        ),
+      );
+    } finally {
+      // Restore even on failure: later subtests share this fake.
+      fake.values.set(key, original);
+    }
+  });
+
+  // SEAL_KEY_MISMATCH is a triage hint, not evidence of a benign rotation:
+  // anyone who can rewrite the record can also choose that code. Pinned so the
+  // comment on sealKeyIdDigest cannot drift back into claiming otherwise.
+  await t.test("a tamperer can choose the seal-key-mismatch code, and is still refused", async () => {
+    const key = [...fake.values.keys()][0];
+    const original = fake.values.get(key);
+    const tampered = JSON.parse(original);
+    tampered.upstreamIssuedFromRedisAtMs -= 5_000;
+    tampered.sealKeyId = `${"0".repeat(63)}1`;
+    fake.values.set(key, JSON.stringify(tampered));
+    try {
+      const pair = await productionClassifierPair(
+        harness.snapshot,
+        { clockOffsetMs: 7_000 },
+      );
+      fake.setNow(pair.verifiedAtMs + 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_SEAL_KEY_MISMATCH",
+        ),
+      );
+    } finally {
+      fake.values.set(key, original);
+    }
+  });
+
+  // A malformed sealKeyId is a malformed record, not a key mismatch. This pins
+  // the exactDigest guard that keeps the two apart.
+  await t.test("a non-digest seal key id is a malformed record, not a key mismatch", async () => {
+    const key = [...fake.values.keys()][0];
+    const original = fake.values.get(key);
+    const tampered = JSON.parse(original);
+    tampered.sealKeyId = "not-a-digest";
+    fake.values.set(key, JSON.stringify(tampered));
+    try {
+      const pair = await productionClassifierPair(
+        harness.snapshot,
+        { clockOffsetMs: 8_000 },
+      );
+      fake.setNow(pair.verifiedAtMs + 1);
+      await assert.rejects(
+        store.retainSourceRecallClassifiedEvidence(
+          await classifiedManifestSeedForStableHarness(
+            harness,
+          ),
+          projectSourceRecallClassifiedManifestEvidenceCapability(
+            issueSourceRecallSuccessEvidenceCapability(
+              pair,
+            ),
+          ),
+        ),
+        expectClassifiedStoreCode(
+          "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+        ),
+      );
+    } finally {
+      fake.values.set(key, original);
+    }
+  });
+
+  await t.test("a complete but different point proof is not membership", async () => {
+    const changedHarness = await stableHarness(
+      pointRaw({
+        status_changes: [{
+          code: "done",
+          created_at:
+            "2026-07-26T00:58:00.000000000Z",
+        }],
+      }),
+    );
+    assert.notEqual(
+      changedHarness.snapshot.record.resolutionDigest,
+      harness.snapshot.record.resolutionDigest,
+    );
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+      { clockOffsetMs: 5_000 },
+    );
+    const isolated = fakeClassifiedPersistence(
+      pair.verifiedAtMs + 1,
+    );
+    const isolatedStore =
+      createSourceRecallClassifiedEvidenceStore({
+        persistence: isolated.persistence,
+        sealSecret,
+      });
+    await assert.rejects(
+      isolatedStore.retainSourceRecallClassifiedEvidence(
+        await classifiedManifestSeedForStableHarness(
+          changedHarness,
+        ),
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(pair),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_MEMBERSHIP_MISMATCH",
+      ),
+    );
+    assert.equal(isolated.calls.length, 0);
+  });
+});
+
+test("the projector emits one deterministic body-free binding for the exact source point and signed pair", async () => {
   const { snapshot } = await stableHarness();
   const firstPair =
     await productionClassifierPair(snapshot, {
@@ -1328,6 +2579,30 @@ test("the projector emits one deterministic digest-only binding for the exact so
   const second = projectSourceRecallSuccessEvidence(
     issueSourceRecallSuccessEvidenceCapability(secondPair),
   );
+  const firstHandoffPair =
+    await productionClassifierPair(snapshot, {
+      clockOffsetMs: 3_000,
+    });
+  const secondHandoffPair =
+    await productionClassifierPair(snapshot, {
+      clockOffsetMs: 4_000,
+    });
+  const firstHandoff =
+    consumeSourceRecallClassifiedManifestEvidenceCapability(
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          firstHandoffPair,
+        ),
+      ),
+    );
+  const secondHandoff =
+    consumeSourceRecallClassifiedManifestEvidenceCapability(
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          secondHandoffPair,
+        ),
+      ),
+    );
 
   assert.equal(
     SOURCE_RECALL_SUCCESS_EVIDENCE_PROJECTOR_VERSION,
@@ -1418,6 +2693,30 @@ test("the projector emits one deterministic digest-only binding for the exact so
   assert.equal(
     first.classificationEvidenceDigest,
     second.classificationEvidenceDigest,
+  );
+  assert.equal(
+    firstHandoff.evidence.classificationEvidenceDigest,
+    secondHandoff.evidence.classificationEvidenceDigest,
+  );
+  assert.equal(
+    firstHandoff.settlementStatus,
+    secondHandoff.settlementStatus,
+  );
+  assert.deepEqual(
+    firstHandoff.signedResponses,
+    secondHandoff.signedResponses,
+  );
+  assert.equal(
+    firstHandoff.upstreamIssuedFromRedisAtMs,
+    secondHandoff.upstreamIssuedFromRedisAtMs,
+  );
+  assert.equal(
+    firstHandoff.upstreamNotAfterMs,
+    secondHandoff.upstreamNotAfterMs,
+  );
+  assert.notDeepEqual(
+    firstHandoff.evidence.classifierVerifiedAtMs,
+    secondHandoff.evidence.classifierVerifiedAtMs,
   );
   assert.equal(
     first.status,
@@ -1598,14 +2897,25 @@ test("failure is complete, unavailable stays incomplete, and a terminal classifi
           },
         );
         assert.equal(pair.pairStatus, "stable");
+        const capability =
+          issueSourceRecallSuccessEvidenceCapability(
+            pair,
+          );
         assert.throws(
           () => projectSourceRecallSuccessEvidence(
-            issueSourceRecallSuccessEvidenceCapability(
-              pair,
-            ),
+            capability,
           ),
           expectProjectorCode(
             "SOURCE_RECALL_SUCCESS_EVIDENCE_ENDED_AT_REQUIRED",
+          ),
+        );
+        assert.throws(
+          () =>
+            projectSourceRecallClassifiedManifestEvidenceCapability(
+              capability,
+            ),
+          expectProjectorCode(
+            "SOURCE_RECALL_SUCCESS_EVIDENCE_CAPABILITY_INVALID",
           ),
         );
       },
@@ -2270,5 +3580,458 @@ test("the capability/runtime/projector import closure is hard-dark with no produ
   assert.deepEqual(runtimeImporters, [
     projectorUrl.pathname,
   ]);
-  assert.deepEqual(projectorImporters, []);
+  assert.deepEqual(projectorImporters, [
+    new URL(
+      "source-recall-classified-evidence-store.mjs",
+      libraryRoot,
+    ).pathname,
+  ]);
 });
+
+test("classified retention converges from a fresh invocation whose upstream read clock has advanced", async (t) => {
+  const harness = await stableHarness();
+  const fake = fakeClassifiedPersistence(
+    harness.snapshot.redisNowMs + 10_000,
+  );
+  const sealSecret =
+    "classified-evidence-test-seal-secret-0123456789";
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: fake.persistence,
+    sealSecret,
+  });
+  const firstPair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 1_000 },
+  );
+  fake.setNow(firstPair.verifiedAtMs + 1);
+  fake.setMode("throw_after_store_once");
+  await assert.rejects(
+    store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          firstPair,
+        ),
+      ),
+    ),
+    expectClassifiedStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_FAILED",
+    ),
+  );
+  assert.equal(fake.values.size, 1);
+
+  // The retrying invocation cannot reuse the original in-memory snapshot: the
+  // process that held it is gone. It re-reads the point observation, which
+  // necessarily yields a later Redis read clock. That clock is an observation
+  // instant, not evidence, so convergence must still succeed.
+  harness.fake.setNow(harness.snapshot.redisNowMs + 4_000);
+  const refreshed =
+    await harness.store.readRecallPointObservationWork(
+      harness.work,
+    );
+  assert.equal(refreshed.record.status, "stable");
+  assert.ok(
+    refreshed.redisNowMs > harness.snapshot.redisNowMs,
+  );
+  const retryPair = await productionClassifierPair(
+    refreshed,
+    { clockOffsetMs: 1_000 },
+  );
+  fake.setNow(retryPair.verifiedAtMs + 1);
+  const recovered =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness({
+        ...harness,
+        snapshot: refreshed,
+      }),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          retryPair,
+        ),
+      ),
+    );
+  assert.equal(recovered.created, false);
+  assert.equal(recovered.status, "retained_terminal_dark");
+  assert.equal(recovered.classification, "success");
+  // Convergence adopts the originally stored bytes; it never rewrites or
+  // renews them.
+  assert.equal(fake.values.size, 1);
+  const durable = JSON.parse(
+    [...fake.values.values()][0],
+  );
+  assert.equal(
+    durable.upstreamIssuedFromRedisAtMs,
+    harness.snapshot.redisNowMs,
+  );
+
+  await t.test("a different stable point still conflicts", async () => {
+    const otherHarness = await stableHarness(
+      pointRaw({
+        status_changes: [{
+          code: "done",
+          created_at:
+            "2026-07-26T00:58:00.000000000Z",
+        }],
+      }),
+    );
+    const otherPair = await productionClassifierPair(
+      otherHarness.snapshot,
+      { clockOffsetMs: 1_000 },
+    );
+    fake.setNow(otherPair.verifiedAtMs + 1);
+    await assert.rejects(
+      store.retainSourceRecallClassifiedEvidence(
+        await classifiedManifestSeedForStableHarness(
+          otherHarness,
+        ),
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            otherPair,
+          ),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_BINDING_MISMATCH",
+      ),
+    );
+    assert.equal(fake.values.size, 1);
+  });
+});
+
+test("a fast local verifier clock cannot expire an in-window classified retention", async () => {
+  const harness = await stableHarness();
+  // The verifying host's wall clock runs 4s ahead of the POINT-OBSERVATION
+  // Redis, the ordinary NTP-skew case. The classified store's own Redis is set
+  // one millisecond behind the local clock just below. Only Redis-derived instants may gate the
+  // transition, so this must retain rather than burn both capabilities.
+  const pair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 4_000 },
+  );
+  // Redis is one millisecond behind the latest local verify instant: exactly
+  // the case a previous revision rejected as expired.
+  const redisNowMs = pair.verifiedAtMs - 1;
+  assert.ok(redisNowMs > harness.snapshot.redisNowMs);
+  const fake = fakeClassifiedPersistence(redisNowMs);
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: fake.persistence,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  assert.equal(retained.created, true);
+  assert.equal(retained.status, "retained_terminal_dark");
+  assert.ok(
+    Math.max(
+      ...JSON.parse([...fake.values.values()][0])
+        .evidence.classifierVerifiedAtMs,
+    ) > retained.retainedAtRedisMs,
+  );
+  assertHardDark(retained);
+});
+
+// The classified store keeps its own floor comparisons against the instant the
+// persistence layer reports, rather than trusting the adapter to have enforced
+// them. The two floors are the point-observation read clock and the manifest
+// reproof clock, which come from a DIFFERENT Redis deployment than this store's,
+// so they can genuinely diverge in production. Every default fixture collapses
+// them onto the same millisecond, which would let either comparison mask the
+// other; advancing the manifest clock separates them so the manifest floor is
+// driven on its own.
+test("the store refuses a persistence layer that reports a Redis clock below either floor", async (t) => {
+  const harness = await stableHarness();
+  const upstreamFloorMs = harness.snapshot.redisNowMs;
+  const manifestFloorMs = upstreamFloorMs + 3_000;
+  harness.fake.setNow(manifestFloorMs);
+  const fake = fakeClassifiedPersistence(upstreamFloorMs);
+  let reportedRedisNowMs = upstreamFloorMs;
+  const lying = Object.freeze({
+    async retain(input) {
+      const result = await fake.persistence.retain(input);
+      return {
+        ...result,
+        redisNowMs: reportedRedisNowMs,
+      };
+    },
+  });
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: lying,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  const attempt = async (reportedMs) => {
+    const pair = await productionClassifierPair(
+      harness.snapshot,
+      { clockOffsetMs: 6_000 },
+    );
+    fake.setNow(pair.verifiedAtMs + 1);
+    reportedRedisNowMs = reportedMs;
+    return store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness(harness),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    );
+  };
+
+  // The transition itself is allowed to succeed — the Lua writes the record —
+  // and the store then refuses to trust the instant it was told. So these
+  // cases assert the refusal, not the absence of a write.
+  // Below BOTH floors, so either comparison refuses it. The point-observation
+  // floor is driven on its own by the companion test further down.
+  await t.test("below both floors is refused", async () => {
+    await assert.rejects(
+      attempt(upstreamFloorMs - 1),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+      ),
+    );
+  });
+
+  // Above the read floor but below the manifest floor: only the manifest
+  // comparison can refuse this, so it is driven independently of the other.
+  await t.test("below the manifest reproof floor alone", async () => {
+    await assert.rejects(
+      attempt(manifestFloorMs - 1),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+      ),
+    );
+  });
+
+  // Exactly at the higher floor. The comparisons are strict `<`, so this is
+  // the first accepted instant; it pins the boundary against drifting to `<=`.
+  // A record already exists from the refused attempts above, so this converges
+  // onto it rather than creating one — which is itself the correct outcome.
+  await t.test("exactly at the higher floor is accepted", async () => {
+    const retained = await attempt(manifestFloorMs);
+    assert.equal(retained.status, "retained_terminal_dark");
+    assert.equal(retained.created, false);
+    assert.equal(retained.retainedAtRedisMs, manifestFloorMs);
+    assert.equal(fake.values.size, 1);
+    // Manifest clock is the higher of the two here, so the transition floor
+    // must be it. Collapsing the composition to the read clock alone would
+    // show up as upstreamFloorMs.
+    assert.equal(
+      fake.calls.at(-1).issuedAtMs,
+      manifestFloorMs,
+    );
+    assertHardDark(retained);
+  });
+});
+
+// Companion to the test above, with the two floors in the opposite order. The
+// manifest seed is minted first and the point observation is re-read after, so
+// the read clock ends up ABOVE the manifest clock and the point-observation
+// comparison becomes the binding one. In production the two clocks come from
+// different Redis deployments and either ordering is possible, so both
+// comparisons have to be driven on their own.
+test("the store refuses a reported clock below the point-observation floor when it is the higher of the two", async () => {
+  const harness = await stableHarness();
+  const manifestFloorMs = harness.snapshot.redisNowMs;
+  harness.fake.setNow(manifestFloorMs);
+  const seed =
+    await classifiedManifestSeedForStableHarness(harness);
+  const upstreamFloorMs = manifestFloorMs + 3_000;
+  harness.fake.setNow(upstreamFloorMs);
+  const refreshed =
+    await harness.store.readRecallPointObservationWork(
+      harness.work,
+    );
+  assert.equal(refreshed.redisNowMs, upstreamFloorMs);
+  const pair = await productionClassifierPair(refreshed, {
+    clockOffsetMs: 6_000,
+  });
+  const fake = fakeClassifiedPersistence(
+    pair.verifiedAtMs + 1,
+  );
+  // Between the manifest floor and the read floor: only the
+  // point-observation comparison can refuse this.
+  let reportedRedisNowMs = upstreamFloorMs - 1;
+  const lying = Object.freeze({
+    async retain(input) {
+      const result = await fake.persistence.retain(input);
+      return {
+        ...result,
+        redisNowMs: reportedRedisNowMs,
+      };
+    },
+  });
+  const store = createSourceRecallClassifiedEvidenceStore({
+    persistence: lying,
+    sealSecret:
+      "classified-evidence-test-seal-secret-0123456789",
+  });
+  await assert.rejects(
+    store.retainSourceRecallClassifiedEvidence(
+      seed,
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(pair),
+      ),
+    ),
+    expectClassifiedStoreCode(
+      "SOURCE_RECALL_CLASSIFIED_EVIDENCE_EXPIRED",
+    ),
+  );
+  // With the read clock the higher of the two, the transition floor must be
+  // that clock. If the composition collapsed to the manifest clock alone this
+  // would be manifestFloorMs instead.
+  assert.equal(
+    fake.calls.at(-1).issuedAtMs,
+    upstreamFloorMs,
+  );
+
+  // Exactly at the read floor is the first accepted instant: the comparison is
+  // a strict `<`, and drifting it to `<=` would refuse a retention whose
+  // classified-Redis instant lands on the read clock — the common case when
+  // the two deployments are in step.
+  reportedRedisNowMs = upstreamFloorMs;
+  const boundaryPair = await productionClassifierPair(
+    refreshed,
+    { clockOffsetMs: 6_000 },
+  );
+  fake.setNow(boundaryPair.verifiedAtMs + 1);
+  const retained =
+    await store.retainSourceRecallClassifiedEvidence(
+      await classifiedManifestSeedForStableHarness({
+        ...harness,
+        snapshot: refreshed,
+      }),
+      projectSourceRecallClassifiedManifestEvidenceCapability(
+        issueSourceRecallSuccessEvidenceCapability(
+          boundaryPair,
+        ),
+      ),
+    );
+  assert.equal(retained.status, "retained_terminal_dark");
+  assert.equal(retained.retainedAtRedisMs, upstreamFloorMs);
+  assertHardDark(retained);
+});
+
+// parseRecord re-checks the RETAINED record's two observation floors against
+// the instant the persistence layer reports. That is a different question from
+// the proposal-side floors above: a slow invocation can legitimately arrive
+// with floors below those of the record it converges onto, having lost a race
+// to a faster invocation whose upstream reads were newer. What must never
+// happen is adopting a record observed later than the instant this store
+// linearized against. Each ordering isolates one of the two comparisons.
+const retainedFloorHarness = async (
+  manifestOffsetMs,
+  upstreamOffsetMs,
+) => {
+  const harness = await stableHarness();
+  const baseMs = harness.snapshot.redisNowMs;
+  // Minted first and held: the losing invocation's capabilities, floors at +0.
+  const earlySeed =
+    await classifiedManifestSeedForStableHarness(harness);
+  const earlyPair = await productionClassifierPair(
+    harness.snapshot,
+    { clockOffsetMs: 500 },
+  );
+  const mintLate = async () => {
+    harness.fake.setNow(baseMs + manifestOffsetMs);
+    const lateSeed =
+      await classifiedManifestSeedForStableHarness(harness);
+    harness.fake.setNow(baseMs + upstreamOffsetMs);
+    const refreshed =
+      await harness.store.readRecallPointObservationWork(
+        harness.work,
+      );
+    const latePair = await productionClassifierPair(
+      refreshed,
+      { clockOffsetMs: 500 },
+    );
+    return { lateSeed, latePair };
+  };
+  return { harness, baseMs, earlySeed, earlyPair, mintLate };
+};
+
+for (
+  const [name, manifestOffsetMs, upstreamOffsetMs] of [
+    [
+      "point-observation read floor",
+      3_000,
+      6_000,
+    ],
+    [
+      "manifest reproof floor",
+      6_000,
+      3_000,
+    ],
+  ]
+) {
+  test(`a retained record observed after the reported instant is refused by its ${name}`, async () => {
+    const ctx = await retainedFloorHarness(
+      manifestOffsetMs,
+      upstreamOffsetMs,
+    );
+    const { lateSeed, latePair } = await ctx.mintLate();
+    // Above both retained floors, so the creating transition is accepted on
+    // its own merits and only the converging read is under test.
+    const highMs = ctx.baseMs
+      + Math.max(manifestOffsetMs, upstreamOffsetMs)
+      + 1_000;
+    const fake = fakeClassifiedPersistence(highMs);
+    let reportedRedisNowMs = highMs;
+    const reporting = Object.freeze({
+      async retain(input) {
+        const result = await fake.persistence.retain(input);
+        return {
+          ...result,
+          redisNowMs: reportedRedisNowMs,
+        };
+      },
+    });
+    const store =
+      createSourceRecallClassifiedEvidenceStore({
+        persistence: reporting,
+        sealSecret:
+          "classified-evidence-test-seal-secret-0123456789",
+      });
+    const created =
+      await store.retainSourceRecallClassifiedEvidence(
+        lateSeed,
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            latePair,
+          ),
+        ),
+      );
+    assert.equal(created.created, true);
+    const durable = JSON.parse(
+      [...fake.values.values()][0],
+    );
+    assert.equal(
+      durable.manifestIssuedFromRedisAtMs,
+      ctx.baseMs + manifestOffsetMs,
+    );
+    assert.equal(
+      durable.upstreamIssuedFromRedisAtMs,
+      ctx.baseMs + upstreamOffsetMs,
+    );
+
+    // The losing invocation now converges, while the persistence layer reports
+    // an instant BETWEEN the retained record's two floors. Only the higher
+    // floor can refuse it, so exactly one comparison is exercised.
+    reportedRedisNowMs = ctx.baseMs + 4_500;
+    await assert.rejects(
+      store.retainSourceRecallClassifiedEvidence(
+        ctx.earlySeed,
+        projectSourceRecallClassifiedManifestEvidenceCapability(
+          issueSourceRecallSuccessEvidenceCapability(
+            ctx.earlyPair,
+          ),
+        ),
+      ),
+      expectClassifiedStoreCode(
+        "SOURCE_RECALL_CLASSIFIED_EVIDENCE_RECORD_INVALID",
+      ),
+    );
+  });
+}
