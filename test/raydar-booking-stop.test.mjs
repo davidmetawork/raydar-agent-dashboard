@@ -12,6 +12,9 @@ import {
   fetchRaydarBookingIndex,
 } from "../api/seq/_lib/raydar-booking-index.mjs";
 import {
+  campaignLeadBySearch,
+} from "../api/seq/_lib/core.mjs";
+import {
   K,
   bookedSetWithSources,
   decideLead,
@@ -702,4 +705,86 @@ test("enroll-time gate fails closed on an incomplete native index", async () => 
     }),
     (error) => error.code === "RAYDAR_BOOKING_INDEX_INCOMPLETE",
   );
+});
+
+test("enroll-time native gate fails closed when candidate profile transport fails", async () => {
+  await assert.rejects(
+    () => bookedSetWithSources(["cu-1"], {
+      calendlyEnabled: false,
+      raydarEnabled: true,
+      raydarConfigured: true,
+      raydarIndexLoader: async () => ({
+        complete: true,
+        index: new Map(),
+      }),
+      profileLoader: async () => {
+        throw new Error("sensitive upstream detail");
+      },
+    }),
+    (error) => (
+      error.code === "RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE"
+      && error.message === "RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE"
+    ),
+  );
+});
+
+test("enroll-time native gate fails closed when candidate profile is null", async () => {
+  await assert.rejects(
+    () => bookedSetWithSources(["cu-1"], {
+      calendlyEnabled: false,
+      raydarEnabled: true,
+      raydarConfigured: true,
+      raydarIndexLoader: async () => ({
+        complete: true,
+        index: new Map(),
+      }),
+      profileLoader: async () => null,
+    }),
+    (error) => error.code === "RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE",
+  );
+});
+
+test("legacy Calendly-only enrollment preserves best-effort profile reads", async () => {
+  const booked = await bookedSetWithSources(["cu-1"], {
+    calendlyEnabled: true,
+    calendlyIndexLoader: async () => ({
+      complete: true,
+      index: new Map(),
+    }),
+    raydarEnabled: false,
+    profileLoader: async () => {
+      throw new Error("legacy source unavailable");
+    },
+  });
+  assert.deepEqual([...booked], []);
+});
+
+test("pause readback selects the exact ccu_id instead of a fuzzy wrong-first row", async () => {
+  const exact = await campaignLeadBySearch(
+    "seq-1",
+    "candidate@example.com",
+    {
+      expectedCcuId: "ccu-target",
+      reader: async () => ({
+        leads: [
+          { ccu_id: "ccu-other", is_paused: true },
+          { ccu_id: "ccu-target", is_paused: false },
+        ],
+      }),
+    },
+  );
+  assert.equal(exact.ccu_id, "ccu-target");
+  assert.equal(exact.is_paused, false);
+
+  const missing = await campaignLeadBySearch(
+    "seq-1",
+    "candidate@example.com",
+    {
+      expectedCcuId: "ccu-missing",
+      reader: async () => ({
+        leads: [{ ccu_id: "ccu-other", is_paused: true }],
+      }),
+    },
+  );
+  assert.equal(missing, null);
 });

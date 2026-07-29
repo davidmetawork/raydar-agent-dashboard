@@ -552,11 +552,20 @@ export async function campaignLeads(campaignId, { strict = false } = {}) {
  * shortfall made 31 successful pauses report "readback_unavailable" and left one
  * lead looking like it had vanished when it was simply never returned.
  */
-export async function campaignLeadBySearch(campaignId, term) {
+export async function campaignLeadBySearch(campaignId, term, {
+  expectedCcuId = null,
+  reader = trpcGet,
+} = {}) {
   if (!term) return null;
   const r = await withThrottleRetry(() =>
-    trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, search: String(term) }, 1));
-  return (r?.leads || [])[0] || null;
+    reader("campaigns.getCampaignLeads", {
+      campaign_id: campaignId,
+      search: String(term),
+    }, 1));
+  const leads = Array.isArray(r?.leads) ? r.leads : [];
+  if (expectedCcuId == null) return leads[0] || null;
+  const target = String(expectedCcuId);
+  return leads.find((lead) => String(lead?.ccu_id || "") === target) || null;
 }
 
 

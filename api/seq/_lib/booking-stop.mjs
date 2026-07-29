@@ -802,7 +802,22 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
     while (k < attempted.length) {
       const d = attempted[k++];
       let row = null;
-      try { row = await campaignLeadBySearch(d.sequenceId, d.email || d.name); }
+      // Name search is not identity proof: names need not be unique, and
+      // Paraform returns fuzzy results. Require the candidate's address as the
+      // search oracle and bind the returned row to the exact ccu_id that was
+      // mutated. A different already-paused row must never certify this write.
+      if (!d.email) {
+        out.pauseErrors.push({
+          sequence: d.sequence,
+          reason: "exact_readback_identity_unavailable",
+        });
+        continue;
+      }
+      try {
+        row = await campaignLeadBySearch(d.sequenceId, d.email, {
+          expectedCcuId: d.ccuId,
+        });
+      }
       catch (e) {
         if (e.code === "AUTH_EXPIRED" && (await isSessionActuallyExpired())) throw e;
         out.pauseErrors.push({ sequence: d.sequence, reason: "readback_unavailable" });
@@ -1352,8 +1367,31 @@ export async function bookedSetWithSources(candidateUserIds, {
   const worker = async () => {
     while (i < ids.length) {
       const id = ids[i++];
-      const prof = await profileLoader(id).catch(() => null);
-      if (!prof) continue;
+      let prof = null;
+      try {
+        prof = await profileLoader(id);
+      } catch {
+        if (raydarEnabled) {
+          const error = new Error("RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE");
+          error.code = "RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE";
+          throw error;
+        }
+        // The legacy Calendly-only gate intentionally remains best-effort.
+        continue;
+      }
+      if (
+        !prof
+        || typeof prof !== "object"
+        || Array.isArray(prof)
+        || !Array.isArray(prof.emails)
+      ) {
+        if (raydarEnabled) {
+          const error = new Error("RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE");
+          error.code = "RAYDAR_CANDIDATE_PROFILE_UNAVAILABLE";
+          throw error;
+        }
+        continue;
+      }
       if (prof.status && BOOKED_STATUSES.has(prof.status)) { booked.add(id); continue; }
       for (const e of prof.emails || []) {
         for (const source of [cal, raydar]) {
