@@ -204,6 +204,44 @@ test("confirmed native events use the native pause source and return counts only
   assert.equal(JSON.stringify(payload).includes("candidate@example.com"), false);
 });
 
+test("verified webhook invokes the independently gated internal notification", async () => {
+  let notified = null;
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(booking()),
+    handlerDeps({
+      notifyBooking: async (selected) => {
+        notified = selected;
+        return { ok: true, status: "sent" };
+      },
+    }),
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(payload.notification, "sent");
+  assert.equal(notified.eventId, "bevt_test_001");
+  assert.equal(JSON.stringify(payload).includes("candidate@example.com"), false);
+});
+
+test("definitive notification failure leaves webhook retryable", async () => {
+  const writes = [];
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(booking()),
+    handlerDeps({
+      write: async (...args) => {
+        writes.push(args);
+        return "OK";
+      },
+      notifyBooking: async () => ({ ok: false, status: "failed" }),
+    }),
+  );
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "notification_failed");
+  assert.equal(
+    writes.some(([, value]) => value?.state === "done"),
+    false,
+  );
+});
+
 test("reschedule occurrence is the effective new-booking timestamp", async () => {
   const event = booking({
     event: "booking.rescheduled",

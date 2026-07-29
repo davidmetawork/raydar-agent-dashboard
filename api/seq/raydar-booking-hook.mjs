@@ -21,6 +21,9 @@ import {
 import {
   raydarSchedulerBookingStopEnabled,
 } from "./_lib/raydar-booking-index.mjs";
+import {
+  notifyRaydarBookingEvent,
+} from "./_lib/raydar-booking-notification.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 
 export const config = { maxDuration: 60 };
@@ -52,6 +55,7 @@ export async function handleRaydarBookingWebhook(request, {
   pause = pauseForBooking,
   alert = notifySlack,
   alertAllowed = shouldAlert,
+  notifyBooking = notifyRaydarBookingEvent,
   nowMs = Date.now(),
 } = {}) {
   if (request.method !== "POST") return json({ ok: false, error: "POST_only" }, 405);
@@ -117,7 +121,28 @@ export async function handleRaydarBookingWebhook(request, {
     return json({ ok: false, error: "store_unavailable" }, 503);
   }
 
+  const notify = async () => notifyBooking(event, {
+    env: process.env,
+    nowMs,
+    claim,
+    read: readClaim,
+    write,
+    send: alert,
+  });
+
   if (event.event === "booking.cancelled") {
+    let notification;
+    try {
+      notification = await notify();
+    } catch {
+      return json({
+        ok: false,
+        error: "notification_unavailable",
+      }, 503);
+    }
+    if (!notification.ok) {
+      return json({ ok: false, error: "notification_failed" }, 503);
+    }
     try {
       await durableWrite(write, K.raydarCancel(event.bookingId), {
         at: event.occurredAt,
@@ -132,10 +157,18 @@ export async function handleRaydarBookingWebhook(request, {
     } catch {
       return json({ ok: false, error: "store_unavailable" }, 503);
     }
-    if (await alertAllowed(`raydar-cancel:${event.bookingId}`, 3600)) {
+    if (
+      ["disabled", "dry-run"].includes(notification.status)
+      && await alertAllowed(`raydar-cancel:${event.bookingId}`, 3600)
+    ) {
       await alert(":calendar: Raydar booking cancelled — a paused sequence lead may need resuming. Sequences are never auto-resumed.").catch(() => {});
     }
-    return json({ ok: true, event: event.event, recorded: true }, 202);
+    return json({
+      ok: true,
+      event: event.event,
+      recorded: true,
+      notification: notification.status,
+    }, 202);
   }
 
   let outcome;
@@ -169,6 +202,19 @@ export async function handleRaydarBookingWebhook(request, {
     }, 503);
   }
 
+  let notification;
+  try {
+    notification = await notify();
+  } catch {
+    return json({
+      ok: false,
+      error: "notification_unavailable",
+    }, 503);
+  }
+  if (!notification.ok) {
+    return json({ ok: false, error: "notification_failed" }, 503);
+  }
+
   try {
     await durableWrite(write, eventKey, {
       state: "done",
@@ -193,6 +239,7 @@ export async function handleRaydarBookingWebhook(request, {
     paused: outcome.paused,
     deferred: Boolean(outcome.deferred),
     pauseErrors: outcome.pauseErrors.length,
+    notification: notification.status,
   }, 202);
 }
 
