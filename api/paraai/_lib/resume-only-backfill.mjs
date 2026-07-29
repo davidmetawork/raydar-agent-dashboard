@@ -2871,6 +2871,35 @@ export async function resumeOnlyBackfillRecoveryStatus({
   };
 }
 
+function aggregateCanaryDiagnostics(jobs, manifestDigest) {
+  const failureSteps = jobs.flatMap((job) => (
+    Object.entries(job?.automation?.stepFailures || {})
+      .map(([step, failure]) => (
+        `${publicCanaryDiagnosticStep(step)}:${safeReason(
+          publicCanaryDiagnosticCode(failure?.code),
+        )}`
+      ))
+  ));
+  return {
+    selected: jobs.length,
+    states: aggregateDiagnosticTokens(
+      jobs.map((job) => (
+        publicCanaryDiagnosticState(job?.state)
+      )),
+    ),
+    errorCodes: aggregateDiagnosticTokens(
+      jobs.map(canaryDiagnosticCode),
+    ),
+    failureSteps: aggregateDiagnosticTokens(failureSteps),
+    classifications: aggregateDiagnosticTokens(
+      jobs.map((job) => canaryRecoveryClassification(
+        job,
+        manifestDigest,
+      )),
+    ),
+  };
+}
+
 export async function resumeOnlyBackfillDiagnostics({
   store = resumeOnlyBackfillRedisStore,
   getJobImpl = getJob,
@@ -2894,33 +2923,25 @@ export async function resumeOnlyBackfillDiagnostics({
     ? await store.getRecovery()
     : null;
   const jobs = await Promise.all(ids.map((id) => getJobImpl(id)));
-  const failureSteps = jobs.flatMap((job) => (
-    Object.entries(job?.automation?.stepFailures || {})
-      .map(([step, failure]) => (
-        `${publicCanaryDiagnosticStep(step)}:${safeReason(
-          publicCanaryDiagnosticCode(failure?.code),
-        )}`
-      ))
-  ));
+  const canaryDiagnostics = aggregateCanaryDiagnostics(
+    jobs,
+    control.manifestDigest,
+  );
+  const recoveryJobs = recovery
+    ? await Promise.all(
+        recovery.active.map((entry) => getJobImpl(entry.id)),
+      )
+    : [];
   return {
     ok: true,
     status: control.status,
     canaryStatus: control.canary.status,
-    selected: ids.length,
-    states: aggregateDiagnosticTokens(
-      jobs.map((job) => publicCanaryDiagnosticState(job?.state)),
-    ),
-    errorCodes: aggregateDiagnosticTokens(
-      jobs.map(canaryDiagnosticCode),
-    ),
-    failureSteps: aggregateDiagnosticTokens(failureSteps),
-    classifications: aggregateDiagnosticTokens(
-      jobs.map((job) => canaryRecoveryClassification(
-        job,
-        control.manifestDigest,
-      )),
-    ),
+    ...canaryDiagnostics,
     recovery: recoveryPublicStatus(recovery),
+    activeRecovery: aggregateCanaryDiagnostics(
+      recoveryJobs,
+      control.manifestDigest,
+    ),
   };
 }
 
