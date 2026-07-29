@@ -11,10 +11,14 @@ import {
 import {
   interestConfig,
   interestEmailPlan,
+  interestJobExecutionConfig,
+  interestJobRolloutPhase,
+  interestRolloutPhase,
   interestStopCanProceed,
   interestSweepComplete,
   interestSweepWindow,
   interestWorkerMaySubmit,
+  INTEREST_ROLLOUT_PHASE,
   listInterestHandoffs,
   INTEREST_STATUS,
   REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
@@ -310,6 +314,118 @@ test("all writes require a configured release time that has actually passed", ()
     interestConfig(pinned, Date.parse("2026-08-02T00:00:00Z")).writesEnabled,
     true,
   );
+});
+
+test("a job is bound to the rollout phase present at detection", () => {
+  const at = Date.parse("2026-07-29T01:00:00Z");
+  const base = {
+    PARAAI_INTEREST_ENABLED: "1",
+    PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-07-29T00:00:00Z",
+  };
+  assert.equal(
+    interestRolloutPhase(interestConfig(base, at)),
+    INTEREST_ROLLOUT_PHASE.SHADOW,
+  );
+  assert.equal(
+    interestRolloutPhase(interestConfig({
+      ...base,
+      PARAAI_INTEREST_STOP_APPROVED: "1",
+    }, at)),
+    INTEREST_ROLLOUT_PHASE.STOP,
+  );
+  assert.equal(
+    interestRolloutPhase(interestConfig({
+      ...base,
+      PARAAI_INTEREST_STOP_APPROVED: "1",
+      PARAAI_INTEREST_EMAIL_APPROVED: "1",
+    }, at)),
+    INTEREST_ROLLOUT_PHASE.EMAIL_CANARY,
+  );
+  assert.equal(
+    interestRolloutPhase(interestConfig({
+      ...base,
+      PARAAI_INTEREST_STOP_APPROVED: "1",
+      PARAAI_INTEREST_EMAIL_APPROVED: "1",
+      PARAAI_INTEREST_SUBMIT_APPROVED: "1",
+    }, at)),
+    INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF,
+  );
+});
+
+test("later gates can never upgrade an earlier or legacy pending job", () => {
+  const fullyArmed = interestConfig({
+    PARAAI_INTEREST_ENABLED: "1",
+    PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-07-29T00:00:00Z",
+    PARAAI_INTEREST_STOP_APPROVED: "1",
+    PARAAI_INTEREST_EMAIL_APPROVED: "1",
+    PARAAI_INTEREST_SUBMIT_APPROVED: "1",
+    PARAAI_INTEREST_EMAIL_CANARY_TO: "david@example.com",
+  }, Date.parse("2026-07-29T01:00:00Z"));
+
+  for (const legacy of [{}, { rolloutPhase: "unknown" }]) {
+    assert.equal(
+      interestJobRolloutPhase(legacy),
+      INTEREST_ROLLOUT_PHASE.SHADOW,
+    );
+    const capped = interestJobExecutionConfig(fullyArmed, legacy);
+    assert.equal(capped.writesEnabled, false);
+    assert.equal(capped.stopArmed, false);
+    assert.equal(capped.emailArmed, false);
+    assert.equal(capped.submitArmed, false);
+  }
+
+  const stopOnly = interestJobExecutionConfig(fullyArmed, {
+    rolloutPhase: INTEREST_ROLLOUT_PHASE.STOP,
+  });
+  assert.equal(stopOnly.writesEnabled, true);
+  assert.equal(stopOnly.stopArmed, true);
+  assert.equal(stopOnly.emailArmed, false);
+  assert.equal(stopOnly.submitArmed, false);
+  assert.deepEqual(interestEmailPlan({ config: stopOnly }), {
+    send: true,
+    skipped: null,
+    apply: false,
+    canaryTo: null,
+  });
+
+  const emailOnly = interestJobExecutionConfig(fullyArmed, {
+    rolloutPhase: INTEREST_ROLLOUT_PHASE.EMAIL_CANARY,
+  });
+  assert.equal(emailOnly.stopArmed, true);
+  assert.equal(emailOnly.emailArmed, true);
+  assert.equal(emailOnly.submitArmed, false);
+  assert.deepEqual(interestEmailPlan({ config: emailOnly }), {
+    send: true,
+    skipped: null,
+    apply: true,
+    canaryTo: "david@example.com",
+  });
+
+  const handoff = interestJobExecutionConfig(fullyArmed, {
+    rolloutPhase: INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF,
+  });
+  assert.equal(handoff.stopArmed, true);
+  assert.equal(handoff.emailArmed, true);
+  assert.equal(handoff.submitArmed, true);
+  assert.equal(interestEmailPlan({ config: handoff }).canaryTo, null);
+});
+
+test("closing a gate still removes a phase-bound job capability", () => {
+  const currentStopOnly = interestConfig({
+    PARAAI_INTEREST_ENABLED: "1",
+    PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-07-29T00:00:00Z",
+    PARAAI_INTEREST_STOP_APPROVED: "1",
+  }, Date.parse("2026-07-29T01:00:00Z"));
+  const capped = interestJobExecutionConfig(currentStopOnly, {
+    rolloutPhase: INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF,
+  });
+  assert.equal(capped.writesEnabled, true);
+  assert.equal(capped.stopArmed, true);
+  assert.equal(capped.emailArmed, false);
+  assert.equal(capped.submitArmed, false);
 });
 
 test("the worker can never make the final candidate submission", () => {
