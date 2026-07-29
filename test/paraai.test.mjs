@@ -555,6 +555,9 @@ test("Para AI HTML inline JavaScript parses", async () => {
   assert.match(html, /expectedRevision:latest\.revision/);
   assert.match(html, /action:'reconcile-submit'/);
   assert.match(html, /Match shadow/);
+  assert.match(html, /record\.mode==="manual_review"/);
+  assert.match(html, /Inspect the blocked transition/);
+  assert.match(html, /This lane took no candidate-facing action/);
   assert.match(html, /Recommended fit/);
   assert.match(html, /Possible fit/);
   assert.match(html, /worker-owned/);
