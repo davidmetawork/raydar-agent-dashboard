@@ -116,6 +116,69 @@ const TERMINAL_PREPARATION_CODES = new Set([
   "INVALID_BOT_ID",
   "NOT_SUCCESSFUL_SCREEN",
 ]);
+const RECOVERY_TERMINAL_PREATTEMPT_CODES = new Set([
+  "ALREADY_ENROLLED",
+  "ARCHIVE_IMPORT_EXCLUDED",
+  "FUTURE_NEXT_STEP",
+  "HAS_REPLIED",
+  "INTERNAL_CANDIDATE",
+]);
+const RECOVERY_RETRYABLE_PREATTEMPT_CODES = new Set([
+  "AUTH_EXPIRED",
+  "JOB_BUSY",
+  "PREPARE_FAILED",
+  "REVISION_CONFLICT",
+]);
+const PUBLIC_CANARY_DIAGNOSTIC_CODES = new Set([
+  ...RECOVERY_TERMINAL_PREATTEMPT_CODES,
+  ...RECOVERY_RETRYABLE_PREATTEMPT_CODES,
+  "ALREADY_SUBMITTED",
+  "AUTO_PROCESS_FAILED",
+  "CALL_END_TIMESTAMP_MISSING",
+  "DIRECT_SUBMIT_QUOTA_REACHED",
+  "IDENTITY_STALE",
+  "PREFERENCES_REQUIRED",
+  "RESUME_MISSING",
+  "SUBMISSION_ALREADY_CLAIMED",
+  "SUBMISSION_ATTEMPT_ALREADY_STARTED",
+  "SUBMISSION_FIELDS_REQUIRED",
+  "SUBMIT_NOT_VISIBLE",
+  "SUBMIT_STILL_UNCONFIRMED",
+  "SUBMIT_WRITE_FAILED",
+  "SUBMIT_WRITE_UNKNOWN",
+]);
+const PUBLIC_CANARY_DIAGNOSTIC_STATES = new Set([
+  "awaiting_approval",
+  "awaiting_matches",
+  "detected",
+  "enrolled",
+  "enrolling",
+  "ensuring_email",
+  "error",
+  "extracting",
+  "needs_identity_review",
+  "needs_review",
+  "no_email",
+  "ready_to_enroll",
+  "ready_to_submit",
+  "resolving_identity",
+  "submission_unknown",
+  "submit_intent",
+  "submitting",
+  "verifying",
+  "waiting_for_resume",
+]);
+const PUBLIC_CANARY_DIAGNOSTIC_STEPS = new Set([
+  "call_read",
+  "human_call_read",
+  "prepare",
+  "process",
+  "reroute",
+  "resume_read",
+  "submission_read",
+  "submit",
+  "submit_reconciliation",
+]);
 
 function codedError(code, message = code) {
   const error = new Error(message);
@@ -187,6 +250,104 @@ function submissionLifecycleStarted(job) {
     || job?.submissionApprovalCheckedAt
     || job?.matchLegStartedAt,
   );
+}
+
+function aggregateDiagnosticTokens(values) {
+  const counts = new Map();
+  for (const value of values) {
+    const token = safeReason(value || "none");
+    counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  return Object.fromEntries(
+    [...counts.entries()].sort(([left], [right]) => (
+      left.localeCompare(right)
+    )),
+  );
+}
+
+function publicCanaryDiagnosticCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  if (!code) return "NONE";
+  return PUBLIC_CANARY_DIAGNOSTIC_CODES.has(code)
+    ? code
+    : "OTHER";
+}
+
+function publicCanaryDiagnosticState(value) {
+  const state = String(value || "").trim().toLowerCase();
+  if (!state) return "missing";
+  return PUBLIC_CANARY_DIAGNOSTIC_STATES.has(state)
+    ? state
+    : "other";
+}
+
+function publicCanaryDiagnosticStep(value) {
+  const step = String(value || "").trim().toLowerCase();
+  return PUBLIC_CANARY_DIAGNOSTIC_STEPS.has(step)
+    ? step
+    : "other";
+}
+
+function canaryDiagnosticCode(job) {
+  const direct = String(job?.error?.code || "").trim();
+  if (direct) return publicCanaryDiagnosticCode(direct);
+  const last = String(
+    job?.automation?.lastFailure?.code || "",
+  ).trim();
+  if (last) return publicCanaryDiagnosticCode(last);
+  const step = Object.values(
+    job?.automation?.stepFailures || {},
+  ).find((failure) => String(failure?.code || "").trim());
+  return publicCanaryDiagnosticCode(step?.code);
+}
+
+function canaryRecoveryClassification(job, manifestDigest) {
+  if (!job) return "missing";
+  const projected = {
+    ...job,
+    automation: {
+      ...(job.automation || {}),
+      canaryManifestDigest: manifestDigest,
+    },
+  };
+  const verification = phase2CanaryJobVerification(
+    projected,
+    manifestDigest,
+  );
+  if (
+    verification.submitAccepted
+    && verification.talentNetworkVisible
+    && !verification.preexistingVisible
+  ) {
+    return "accepted_visible";
+  }
+  if (verification.preexistingVisible) {
+    return "preexisting_visible";
+  }
+  if (
+    job.submitAttemptStartedAt
+    || job.submitAcceptedAt
+    || job.submittedAt
+    || job.externalWriteMayHaveLanded === true
+  ) {
+    return "uncertain_submission";
+  }
+  const code = String(canaryDiagnosticCode(job)).toUpperCase();
+  if (RECOVERY_TERMINAL_PREATTEMPT_CODES.has(code)) {
+    return "pre_attempt_terminal";
+  }
+  if (RECOVERY_RETRYABLE_PREATTEMPT_CODES.has(code)) {
+    return "retryable_pre_attempt_read";
+  }
+  if (
+    job.state === "error"
+    || job.error
+    || job?.automation?.lastFailure
+    || Object.keys(job?.automation?.stepFailures || {}).length
+  ) {
+    return "unclassified_pre_attempt_error";
+  }
+  return "pending_pre_attempt";
 }
 
 export function resumeOnlyBackfillPreparationDecision(job) {
@@ -1389,6 +1550,55 @@ export async function mechanicalCanaryStatus(
     && result.resumeOnlyFenceIntact
   );
   return result;
+}
+
+export async function resumeOnlyBackfillDiagnostics({
+  store = resumeOnlyBackfillRedisStore,
+  getJobImpl = getJob,
+} = {}) {
+  const control = await store.getControl();
+  if (!control) {
+    return {
+      ok: true,
+      status: "not_planned",
+      selected: 0,
+      states: {},
+      errorCodes: {},
+      failureSteps: {},
+      classifications: {},
+    };
+  }
+  const ids = Array.isArray(control?.canary?.ids)
+    ? control.canary.ids
+    : [];
+  const jobs = await Promise.all(ids.map((id) => getJobImpl(id)));
+  const failureSteps = jobs.flatMap((job) => (
+    Object.entries(job?.automation?.stepFailures || {})
+      .map(([step, failure]) => (
+        `${publicCanaryDiagnosticStep(step)}:${safeReason(
+          publicCanaryDiagnosticCode(failure?.code),
+        )}`
+      ))
+  ));
+  return {
+    ok: true,
+    status: control.status,
+    canaryStatus: control.canary.status,
+    selected: ids.length,
+    states: aggregateDiagnosticTokens(
+      jobs.map((job) => publicCanaryDiagnosticState(job?.state)),
+    ),
+    errorCodes: aggregateDiagnosticTokens(
+      jobs.map(canaryDiagnosticCode),
+    ),
+    failureSteps: aggregateDiagnosticTokens(failureSteps),
+    classifications: aggregateDiagnosticTokens(
+      jobs.map((job) => canaryRecoveryClassification(
+        job,
+        control.manifestDigest,
+      )),
+    ),
+  };
 }
 
 export async function runResumeOnlyBackfillPlanTick({

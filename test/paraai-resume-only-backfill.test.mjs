@@ -24,6 +24,7 @@ import {
   mechanicalCanaryStatus,
   readHumanBackfillPage,
   readHumanSuccessRoster,
+  resumeOnlyBackfillDiagnostics,
   resumeOnlyBackfillPreparationDecision,
   resumeOnlyBackfillReleaseCapacity,
   runResumeOnlyBackfillReleaseTick,
@@ -846,6 +847,107 @@ test("mechanical first-ten verification requires ten real submissions and every 
   assert.equal(preexisting.verified, false);
 });
 
+test("canary diagnostics aggregate recovery classes without exposing private rows", async () => {
+  const ids = Array.from(
+    { length: 10 },
+    (_, index) => `bot_diagnostic_${String(index).padStart(2, "0")}`,
+  );
+  const manifest = "c".repeat(64);
+  const jobs = new Map(ids.map((id, index) => [
+    id,
+    index < 3
+      ? verifiedCanaryJob(id, index, manifest)
+      : {
+          ...readyJob(id, index),
+          state: index < 5 ? "error" : "ready_to_submit",
+          ...(index < 5
+            ? {
+                error: {
+                  code: index === 3
+                    ? "HAS_REPLIED"
+                    : "ALREADY_ENROLLED",
+                },
+              }
+            : {}),
+          ...(index === 5
+            ? {
+                error: { code: "AUTH_EXPIRED" },
+                automation: {
+                  ...readyJob(id, index).automation,
+                  lastFailure: {
+                    code: "AUTH_EXPIRED",
+                    step: "submission_read",
+                  },
+                  stepFailures: {
+                    submission_read: {
+                      code: "AUTH_EXPIRED",
+                      count: 1,
+                    },
+                    candidate_private_step: {
+                      code: "CANDIDATE_PRIVATE_CODE",
+                      count: 1,
+                    },
+                  },
+                },
+              }
+            : {}),
+          ...(index === 6
+            ? {
+                state: "submitting",
+                submitAttemptStartedAt:
+                  "2026-07-29T18:02:00.000Z",
+              }
+            : {}),
+          ...(index === 7
+            ? {
+                state: "error",
+                error: {
+                  code: "CANDIDATE_PRIVATE_ABC",
+                },
+              }
+            : {}),
+        },
+  ]));
+  const diagnostic = await resumeOnlyBackfillDiagnostics({
+    store: {
+      getControl: async () => ({
+        status: "canary_running",
+        manifestDigest: manifest,
+        canary: {
+          status: "running",
+          ids,
+        },
+      }),
+    },
+    getJobImpl: async (id) => jobs.get(id),
+  });
+  assert.equal(diagnostic.selected, 10);
+  assert.deepEqual(diagnostic.classifications, {
+    accepted_visible: 3,
+    pending_pre_attempt: 2,
+    pre_attempt_terminal: 2,
+    retryable_pre_attempt_read: 1,
+    unclassified_pre_attempt_error: 1,
+    uncertain_submission: 1,
+  });
+  assert.deepEqual(diagnostic.errorCodes, {
+    already_enrolled: 1,
+    auth_expired: 1,
+    has_replied: 1,
+    none: 6,
+    other: 1,
+  });
+  assert.deepEqual(diagnostic.failureSteps, {
+    other_other: 1,
+    submission_read_auth_expired: 1,
+  });
+  const serialized = JSON.stringify(diagnostic);
+  assert.equal(serialized.includes("bot_diagnostic"), false);
+  assert.equal(serialized.includes("candidate-user"), false);
+  assert.equal(serialized.includes("@example.test"), false);
+  assert.equal(serialized.includes("candidate_private"), false);
+});
+
 test("the remainder cannot arm before verification and releases only after the ten-write gate", async () => {
   const store = memoryStore();
   const ids = Array.from(
@@ -1094,6 +1196,7 @@ test("worker exposes only no-parameter controlled modes", async () => {
     "resume-only-backfill-arm",
     "resume-only-backfill-tick",
     "resume-only-backfill-status",
+    "resume-only-backfill-diagnostics",
   ]) {
     assert.match(source, new RegExp(`"${mode}"`, "u"));
   }

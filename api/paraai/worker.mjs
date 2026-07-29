@@ -34,6 +34,7 @@ import {
 import {
   armResumeOnlyBackfillRemainder,
   commitResumeOnlyBackfillFirstTen,
+  resumeOnlyBackfillDiagnostics,
   resumeOnlyBackfillStatus,
   runResumeOnlyBackfillPlanTick,
   runResumeOnlyBackfillReleaseTick,
@@ -352,6 +353,7 @@ export default async function handler(req, res) {
     "resume-only-backfill-arm",
     "resume-only-backfill-tick",
     "resume-only-backfill-status",
+    "resume-only-backfill-diagnostics",
   ]);
   if (
     canaryModes.has(mode)
@@ -408,6 +410,7 @@ export default async function handler(req, res) {
       ["resume-only-backfill-arm", new Set(["mode"])],
       ["resume-only-backfill-tick", new Set(["mode"])],
       ["resume-only-backfill-status", new Set(["mode"])],
+      ["resume-only-backfill-diagnostics", new Set(["mode"])],
     ]).get(mode);
     if (
       allowedFields
@@ -609,6 +612,11 @@ export default async function handler(req, res) {
     if (mode === "resume-only-backfill-status") {
       return res.status(200).json(
         await resumeOnlyBackfillStatus(),
+      );
+    }
+    if (mode === "resume-only-backfill-diagnostics") {
+      return res.status(200).json(
+        await resumeOnlyBackfillDiagnostics(),
       );
     }
     if (!new Set(["tick", "recover"]).has(mode)) {
