@@ -1012,6 +1012,37 @@ function verifiedCanaryJob(id, index, manifest) {
   };
 }
 
+function verifiedRecoveryJob(job) {
+  const successful = {
+    ...job,
+    state: "awaiting_matches",
+    automation: {
+      ...job.automation,
+      preferenceRerouteRequired: false,
+      preferenceRoutedAt: "2026-07-29T18:01:30.000Z",
+      stepFailures: {},
+      lastFailure: null,
+    },
+    submitAttemptStartedAt: "2026-07-29T18:02:00.000Z",
+    submitAcceptedAt: "2026-07-29T18:03:00.000Z",
+    submissionApprovalCheckedAt:
+      "2026-07-29T18:04:00.000Z",
+    matchLegStartedAt: "2026-07-29T18:04:00.000Z",
+    submitReadbackVerified: true,
+    error: null,
+    journal: [{
+      at: "2026-07-29T18:04:00.000Z",
+      detail: "Paraform submission verified",
+    }],
+  };
+  return {
+    ...successful,
+    submitPayloadHash: hashSubmissionPayload(
+      buildSubmissionPayload(successful),
+    ),
+  };
+}
+
 async function recoveryFixture() {
   const store = memoryStore();
   const manifest = "e".repeat(64);
@@ -1752,6 +1783,12 @@ test("running recovery normalizes only exact positive submission readback", asyn
       },
     },
   });
+  for (const id of fixture.replacementIds.slice(1)) {
+    fixture.jobs.set(
+      id,
+      verifiedRecoveryJob(fixture.jobs.get(id)),
+    );
+  }
 
   const normalized = await commitResumeOnlyBackfillRecovery({
     ...common,
@@ -1780,8 +1817,124 @@ test("running recovery normalizes only exact positive submission readback", asyn
 
   const replayed = await commitResumeOnlyBackfillRecovery({
     ...common,
+    enqueueImpl: async () => {
+      assert.fail("settled recovery must not enqueue again");
+    },
   });
   assert.equal(replayed.reconciledVisibleSubmissions, 0);
+  assert.equal(replayed.redueQueued, 0);
+});
+
+test("running recovery reroutes and re-dues only manifest pending jobs", async () => {
+  const fixture = await recoveryFixture();
+  const common = {
+    now: NOW + 60_000,
+    store: fixture.store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => fixture.jobs.get(id),
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    advanceExistingImpl: async (job) => job,
+    terminalPreflightImpl: fixture.terminalPreflightImpl,
+    config: { strictScreenerSource: true },
+    saveJobImpl: async (job, expectedRevision) => {
+      assert.equal(
+        expectedRevision,
+        fixture.jobs.get(job.id).revision,
+      );
+      const saved = {
+        ...job,
+        revision: expectedRevision + 1,
+      };
+      fixture.jobs.set(job.id, saved);
+      return saved;
+    },
+  };
+  await planResumeOnlyBackfillRecovery(common);
+  await commitResumeOnlyBackfillRecovery({
+    ...common,
+    enqueueImpl: async () => ({
+      enqueued: true,
+      duplicate: false,
+    }),
+  });
+  const recovery = await fixture.store.getRecovery();
+  const pending = recovery.active.find(
+    (entry) => entry.role === "retry",
+  );
+  for (const record of recovery.active) {
+    if (record.role === "carried" || record.id === pending.id) {
+      continue;
+    }
+    fixture.jobs.set(
+      record.id,
+      verifiedRecoveryJob(fixture.jobs.get(record.id)),
+    );
+  }
+  const eventIds = new Set();
+  const redue = await commitResumeOnlyBackfillRecovery({
+    ...common,
+    reroutePreparedImpl: async (job) => {
+      assert.equal(job.id, pending.id);
+      assert.equal(
+        job.automation.preferenceRerouteRequired,
+        true,
+      );
+      const saved = {
+        ...job,
+        revision: job.revision + 1,
+        automation: {
+          ...job.automation,
+          preferenceRerouteRequired: false,
+          preferenceRoutedAt:
+            "2026-07-29T18:05:00.000Z",
+        },
+      };
+      fixture.jobs.set(job.id, saved);
+      return saved;
+    },
+    enqueueImpl: async (id, options) => {
+      assert.equal(id, pending.id);
+      assert.equal(options.source, "authorized_backfill");
+      assert.equal(
+        options.eventId.includes(recovery.manifestDigest),
+        true,
+      );
+      const duplicate = eventIds.has(options.eventId);
+      eventIds.add(options.eventId);
+      return {
+        enqueued: !duplicate,
+        duplicate,
+      };
+    },
+  });
+  assert.equal(redue.reconciledVisibleSubmissions, 0);
+  assert.equal(redue.reroutedPending, 1);
+  assert.equal(redue.redueQueued, 1);
+  assert.equal(redue.redueDuplicate, 0);
+  assert.equal(
+    fixture.jobs.get(pending.id).submitAttemptStartedAt,
+    undefined,
+  );
+
+  const replayed = await commitResumeOnlyBackfillRecovery({
+    ...common,
+    reroutePreparedImpl: async () => {
+      assert.fail("reroute must be idempotent after success");
+    },
+    enqueueImpl: async (_id, options) => {
+      const duplicate = eventIds.has(options.eventId);
+      eventIds.add(options.eventId);
+      return {
+        enqueued: !duplicate,
+        duplicate,
+      };
+    },
+  });
+  assert.equal(replayed.reroutedPending, 0);
+  assert.equal(replayed.redueQueued, 0);
+  assert.equal(replayed.redueDuplicate, 1);
 });
 
 test("mechanical first-ten verification requires ten real submissions and every resume-only fence", async () => {
