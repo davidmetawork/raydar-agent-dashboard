@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 import { candidateAlreadySubmitted, candidateProfileInfo, clearCookieCache, fetchCall, findIdentity, normLinkedin, normalizeEmail, paraAIConfig, resumeContact, scoreIdentity, uploadResume } from "../api/paraai/_lib/core.mjs";
 import { PARAAI_LOCATIONS, extractPreferences, extraNote, normalizeExtraction } from "../api/paraai/_lib/extract.mjs";
-import { PARAAI_SALARY_CAP, STATES, buildPreferences, existingTalentNetworkTransition, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
+import { PARAAI_SALARY_CAP, STATES, buildPreferences, clearVerifiedSubmissionFailures, existingTalentNetworkTransition, matchCountFromResponse, missingRequiredPreferences, normalizeParaAIPreferences, reconcileSubmittedJob, scoreSelectedIdentity, submitJob, targetSequenceName } from "../api/paraai/_lib/pipeline.mjs";
 import { resolveCandidateCall, searchCandidates, selectedCallMatch } from "../api/paraai/_lib/search.mjs";
 import { reclaimableLegacyJobLock } from "../api/paraai/_lib/store.mjs";
 
@@ -431,6 +431,99 @@ test("match result parser supports pinned response candidates without guessing p
 test("match count selects the exact target sequence", () => {
   assert.equal(targetSequenceName(1), "New Matches - Added to Para AI (one role)");
   assert.equal(targetSequenceName(2), "New Matches - Added to Para AI (multiple)");
+});
+
+test("verified submission readback clears only stale submission failures", () => {
+  const automation = clearVerifiedSubmissionFailures({
+    automation: {
+      lastFailure: {
+        step: "submit",
+        code: "SUBMIT_WRITE_UNKNOWN",
+        message: "write result unknown",
+      },
+      stepFailures: {
+        submit: {
+          count: 1,
+          code: "SUBMIT_WRITE_UNKNOWN",
+          message: "write result unknown",
+        },
+        submit_reconciliation: {
+          count: 1,
+          code: "SUBMIT_STILL_UNCONFIRMED",
+          message: "readback not visible",
+        },
+        match_read: {
+          count: 2,
+          code: "MATCH_READ_FAILED",
+          message: "unrelated failure",
+        },
+      },
+    },
+  });
+  assert.equal(automation.lastFailure, null);
+  assert.deepEqual(Object.keys(automation.stepFailures), ["match_read"]);
+  assert.equal(automation.stepFailures.match_read.count, 2);
+
+  const unrelated = {
+    step: "match_read",
+    code: "MATCH_READ_FAILED",
+    message: "unrelated failure",
+  };
+  const preserved = clearVerifiedSubmissionFailures({
+    automation: {
+      lastFailure: unrelated,
+      stepFailures: {},
+    },
+  });
+  assert.deepEqual(preserved.lastFailure, unrelated);
+});
+
+test("only positive submission readback clears verified submission failures", async () => {
+  const failure = {
+    step: "submit",
+    code: "SUBMIT_WRITE_UNKNOWN",
+    message: "write result unknown",
+  };
+  const job = {
+    id: "bot_12345678",
+    state: "submission_unknown",
+    revision: 4,
+    identity: {
+      candidateUserId: "candidate-user-1",
+    },
+    automation: {
+      lastFailure: failure,
+      stepFailures: {
+        submit: {
+          count: 1,
+          code: failure.code,
+          message: failure.message,
+        },
+      },
+    },
+    journal: [],
+  };
+  const save = async (next, revision) => {
+    assert.equal(revision, job.revision);
+    return next;
+  };
+  const visible = await reconcileSubmittedJob(job, {
+    saveAwaitingMatchesImpl: save,
+    submissionIsVisibleImpl: async () => true,
+    getSubmissionIntentImpl: async () => null,
+  });
+  assert.equal(visible.state, "awaiting_matches");
+  assert.equal(visible.automation.lastFailure, null);
+  assert.deepEqual(visible.automation.stepFailures, {});
+
+  const unconfirmed = await reconcileSubmittedJob(job, {
+    savePendingImpl: save,
+    submissionIsVisibleImpl: async () => false,
+  });
+  assert.equal(unconfirmed.state, "submission_unknown");
+  assert.equal(unconfirmed.error.code, "SUBMIT_STILL_UNCONFIRMED");
+  assert.deepEqual(unconfirmed.automation.lastFailure, failure);
+  assert.equal(unconfirmed.automation.stepFailures.submit.count, 1);
 });
 
 test("Para AI HTML inline JavaScript parses", async () => {

@@ -1748,6 +1748,10 @@ export async function reconcileSubmittedJob(
   job,
   {
     saveAwaitingMatchesImpl = saveJob,
+    savePendingImpl = saveJob,
+    submissionIsVisibleImpl = submissionIsVisible,
+    getSubmissionIntentImpl = getSubmissionIntent,
+    finishSubmissionAttemptImpl = finishSubmissionAttempt,
   } = {},
 ) {
   const legacyAccepted = job?.state === "error" && job?.error?.code === "SUBMIT_NOT_VISIBLE";
@@ -1761,11 +1765,11 @@ export async function reconcileSubmittedJob(
   const candidateUserId = job.identity?.candidateUserId;
   if (!candidateUserId) throw stateError("candidate identity is missing", "IDENTITY_REQUIRED", job);
   const checkedAt = new Date().toISOString();
-  const visible = await submissionIsVisible(candidateUserId);
+  const visible = await submissionIsVisibleImpl(candidateUserId);
   if (visible) {
-    const intent = await getSubmissionIntent(candidateUserId).catch(() => null);
+    const intent = await getSubmissionIntentImpl(candidateUserId).catch(() => null);
     if (intent?.attemptId && intent?.jobId === job.id) {
-      await finishSubmissionAttempt({
+      await finishSubmissionAttemptImpl({
         candidateUserId,
         jobId: job.id,
         attemptId: intent.attemptId,
@@ -1781,12 +1785,13 @@ export async function reconcileSubmittedJob(
       externalWriteMayHaveLanded: false,
       matchLegStartedAt: job.matchLegStartedAt || checkedAt,
       matchCount: null,
+      automation: clearVerifiedSubmissionFailures(job),
       error: null,
       journalDetail: "Paraform submission verified",
     }), job.revision);
   }
   if (uncertainWrite) {
-    return saveJob(transition(job, "submission_unknown", {
+    return savePendingImpl(transition(job, "submission_unknown", {
       submissionApprovalCheckedAt: checkedAt,
       submitReadbackVerified: false,
       externalWriteMayHaveLanded: true,
@@ -1798,7 +1803,7 @@ export async function reconcileSubmittedJob(
       journalDetail: "uncertain submit remains unconfirmed; read-only retry scheduled",
     }), job.revision);
   }
-  return saveJob(transition(job, "awaiting_approval", {
+  return savePendingImpl(transition(job, "awaiting_approval", {
     submittedAt: job.submittedAt || job.submitClaimedAt || checkedAt,
     submitAcceptedAt: job.submitAcceptedAt || job.submitClaimedAt || checkedAt,
     submissionApprovalCheckedAt: checkedAt,
@@ -1807,6 +1812,44 @@ export async function reconcileSubmittedJob(
     error: null,
     journalDetail: "Paraform approval still pending",
   }), job.revision);
+}
+
+const VERIFIED_SUBMISSION_FAILURE_CODES = new Set([
+  "SUBMIT_NOT_VISIBLE",
+  "SUBMIT_STILL_UNCONFIRMED",
+  "SUBMIT_WRITE_FAILED",
+  "SUBMIT_WRITE_UNKNOWN",
+]);
+
+const VERIFIED_SUBMISSION_FAILURE_STEPS = new Set([
+  "submit",
+  "submit_reconciliation",
+]);
+
+function verifiedSubmissionFailure(failure) {
+  return Boolean(
+    failure
+    && VERIFIED_SUBMISSION_FAILURE_STEPS.has(String(failure.step || ""))
+    && VERIFIED_SUBMISSION_FAILURE_CODES.has(String(failure.code || "")),
+  );
+}
+
+export function clearVerifiedSubmissionFailures(job) {
+  const automation = job?.automation || {};
+  const stepFailures = Object.fromEntries(
+    Object.entries(automation.stepFailures || {})
+      .filter(([step, failure]) => !verifiedSubmissionFailure({
+        ...failure,
+        step,
+      })),
+  );
+  return {
+    ...automation,
+    stepFailures,
+    lastFailure: verifiedSubmissionFailure(automation.lastFailure)
+      ? null
+      : automation.lastFailure,
+  };
 }
 
 // candidateMatching.getRankedRolesForCandidate takes the DOMAIN candidate id
