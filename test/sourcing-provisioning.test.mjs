@@ -10,9 +10,14 @@ import {
   FIRST_NAME_TOKEN,
   FOLLOWUP_ONE_HTML,
   FOLLOWUP_TWO_HTML,
+  LEGACY_HUMAN_SCHEDULING_URL,
+  PROVISIONING_NATIVE_LINK_FLAG,
+  provisioningHumanSchedulingUrl,
+  provisioningUsesNativeSchedulingLinks,
   selectOutreachAccounts,
 } from "../api/sourcing/_lib/provisioning.mjs";
 import { buildSequenceContext } from "../api/sourcing/_lib/model.mjs";
+import { HUMAN_SCHEDULING_URL } from "../api/seq/_lib/scheduling-links.mjs";
 import { provisionRoleAssets } from "../api/sourcing/_lib/provision.mjs";
 
 const context = {
@@ -58,6 +63,92 @@ test("live inbox discovery keeps approved Raydar aliases and excludes the primar
     { id: "a-5", email: "david@unapproved.example" },
   ]);
   assert.deepEqual(selected.map((item) => item.email), ["david@heyraydar.com", "davidp@runraydar.com"]);
+});
+
+test("new provisioning preserves the legacy link unless the exact cutover flag is true", () => {
+  const cases = [
+    [{}, false, LEGACY_HUMAN_SCHEDULING_URL],
+    [{ [PROVISIONING_NATIVE_LINK_FLAG]: "" }, false, LEGACY_HUMAN_SCHEDULING_URL],
+    [{ [PROVISIONING_NATIVE_LINK_FLAG]: "false" }, false, LEGACY_HUMAN_SCHEDULING_URL],
+    [{ [PROVISIONING_NATIVE_LINK_FLAG]: "TRUE" }, false, LEGACY_HUMAN_SCHEDULING_URL],
+    [{ [PROVISIONING_NATIVE_LINK_FLAG]: " true " }, false, LEGACY_HUMAN_SCHEDULING_URL],
+    [{ [PROVISIONING_NATIVE_LINK_FLAG]: "unexpected" }, false, LEGACY_HUMAN_SCHEDULING_URL],
+    [{ [PROVISIONING_NATIVE_LINK_FLAG]: "true" }, true, HUMAN_SCHEDULING_URL],
+  ];
+  for (const [env, enabled, expectedUrl] of cases) {
+    assert.equal(provisioningUsesNativeSchedulingLinks(env), enabled);
+    assert.equal(provisioningHumanSchedulingUrl(env), expectedUrl);
+  }
+});
+
+test("sequence rendering and audit are bound to the same explicit link mode", () => {
+  const legacyEnv = {};
+  const nativeEnv = { [PROVISIONING_NATIVE_LINK_FLAG]: "true" };
+  const legacy = buildSequenceSteps(context, sections, {
+    idFactory: () => crypto.randomUUID(),
+    env: legacyEnv,
+  });
+  const native = buildSequenceSteps(context, sections, {
+    idFactory: () => crypto.randomUUID(),
+    env: nativeEnv,
+  });
+  assert.equal(
+    legacy.steps[0].body.includes(
+      `Interested? Grab time here: ${LEGACY_HUMAN_SCHEDULING_URL}`,
+    ),
+    true,
+  );
+  assert.equal(legacy.steps[0].body.includes(HUMAN_SCHEDULING_URL), false);
+  assert.equal(
+    native.steps[0].body.includes(
+      `Interested? Book a Human Call with Raydar here: ${HUMAN_SCHEDULING_URL}`,
+    ),
+    true,
+  );
+  assert.equal(
+    native.steps[0].body.includes(LEGACY_HUMAN_SCHEDULING_URL),
+    false,
+  );
+
+  const campaign = (steps) => ({
+    name: "222place - Chief of Staff",
+    project_id: "project-222",
+    role_id: null,
+    auto_add_project_candidates: false,
+    enabled: false,
+    has_sent_emails: false,
+    timezone: "America/Los_Angeles",
+    time_start: "09:00",
+    time_end: "18:00",
+    daily_limit: 20,
+    include_signature: false,
+    enable_tracking: true,
+    prioritize_existing_candidates: false,
+    days_to_send: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    start_date: "2026-07-16T19:00:00.000Z",
+    campaign_to_accounts: [{
+      account: { email: "david@heyraydar.com" },
+    }],
+    steps,
+  });
+  const audit = (steps, env) => auditSequence(campaign(steps), {
+    name: "222place - Chief of Staff",
+    projectId: "project-222",
+    company: "222place",
+    expectedEmails: ["david@heyraydar.com"],
+    expectedSteps: steps,
+    env,
+  });
+  assert.deepEqual(audit(legacy.steps, legacyEnv).dangers, []);
+  assert.deepEqual(audit(native.steps, nativeEnv).dangers, []);
+  assert.match(
+    audit(native.steps, legacyEnv).dangers.join(" "),
+    /explicit cutover mode/u,
+  );
+  assert.match(
+    audit(legacy.steps, nativeEnv).dangers.join(" "),
+    /explicit cutover mode/u,
+  );
 });
 
 test("fresh sequence follows the locked subject, merge-chip, and follow-up contract", () => {

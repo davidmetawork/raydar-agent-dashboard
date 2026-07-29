@@ -1,7 +1,7 @@
 import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet } from "./_lib/core.mjs";
-// Same Calendly-aware check enroll uses, so the preview cannot promise to enrol
-// someone enroll will skip.
-import { bookedSetWithCalendly as bookedSet } from "./_lib/booking-stop.mjs";
+// Same external-booking-aware check enroll uses, so the preview cannot promise
+// to enrol someone enroll will skip.
+import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
 
 export const config = { maxDuration: 120 }; // full-membership scan can take ~10-30s
 

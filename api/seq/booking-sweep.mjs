@@ -1,24 +1,25 @@
-// BOOKING SWEEP — hourly reconciliation backstop behind the Calendly webhook.
+// BOOKING SWEEP — hourly reconciliation behind native + legacy webhook paths.
 //
-// The webhook (calendly-hook.mjs) is the fast path. This is what makes the
-// system self-healing, and it exists for three reasons the webhook cannot cover:
+// The webhook routes are the fast paths. This is what makes the system
+// self-healing, and it exists for three reasons webhooks cannot cover:
 //   1. webhook deliveries can be dropped or arrive during a deploy;
-//   2. a webhook only knows the address the candidate typed into Calendly — the
-//      sweep also reads the candidate's Paraform profile addresses, which is how
-//      it catches the people who book from a different mailbox than we email;
+//   2. a webhook only knows the address the candidate typed while booking — the
+//      sweep also reads Paraform profile addresses, catching people who book
+//      from a different mailbox than the one we email;
 //   3. the Paraform "Book Time" path sets relationship_status = SCHEDULED_CALL
 //      and emits no webhook at all.
 //
 // It is deliberately a SEPARATE function from guardian.mjs (the protected-recruiter
 // guardian). That guardian enforces a hard "never message this recruiter's
-// candidates" invariant and must never be able to fail because a Calendly call
-// timed out. Separate files, separate crons, separate failure boundaries.
+// candidates" invariant and must never be able to fail because a booking-source
+// call timed out. Separate files, separate crons, separate failure boundaries.
 //
 // FAIL LOUDLY. The predecessor to this system died for nine days in silence.
 // Everything below that alerts is there because of a specific way that happened.
 import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
 import {
   runBookingSweep,
+  recordSweepAttempt,
   recordSuccessfulSweep,
   sweepStaleness,
   shouldAlert,
@@ -51,12 +52,24 @@ export default async function handler(req, res) {
   // Preconditions are alerts, not silent no-ops: an unconfigured control is
   // indistinguishable from a working one until someone gets a bad email.
   if (!hasCookie()) {
+    if (apply) {
+      await recordSweepAttempt({
+        status: "failure",
+        error: "no_cookie",
+      }).catch(() => {});
+    }
     if (await shouldAlert("no-cookie")) {
       await notifySlack(":rotating_light: Booking sweep cannot run — PARAFORM_COOKIE is not configured. Booked candidates are receiving sequence nudges.").catch(() => {});
     }
     return res.status(200).json({ ok: false, error: "no_cookie" });
   }
   if (!calendlyConfigured()) {
+    if (apply) {
+      await recordSweepAttempt({
+        status: "failure",
+        error: "no_calendly_token",
+      }).catch(() => {});
+    }
     if (await shouldAlert("no-calendly")) {
       await notifySlack(":rotating_light: Booking sweep cannot run — no Calendly token configured. Calendly bookings will not stop sequence nudges.").catch(() => {});
     }
@@ -72,7 +85,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    if (apply) await recordSweepAttempt({ status: "running" });
     const result = await runBookingSweep({ apply });
+    if (apply && !result.ok) {
+      await recordSweepAttempt({
+        status: "failure",
+        result,
+      });
+    }
 
     // A pass that sees zero active leads is a FAILURE, not a clean run. Two
     // "successful" n8n runs (2026-07-10/11) returned activeLeads:0 because a
@@ -84,9 +104,19 @@ export default async function handler(req, res) {
       }
       return res.status(200).json({ ...result, staleness });
     }
+    if (!result.ok && result.error === "incomplete_membership") {
+      if (await shouldAlert("incomplete-membership", 3600)) {
+        await notifySlack(":rotating_light: Booking sweep could not prove complete membership for every covered scheduling-link sequence. No partial lead index was published and the pass was not recorded healthy.").catch(() => {});
+      }
+      return res.status(200).json({ ...result, staleness });
+    }
 
     if (result.calendlyTruncated && (await shouldAlert("calendly-truncated"))) {
       await notifySlack(":warning: Booking sweep hit the Calendly pagination ceiling — some bookings may not have been read this pass.").catch(() => {});
+    }
+
+    if (result.raydarError && (await shouldAlert("raydar-booking-index", 3600))) {
+      await notifySlack(":rotating_light: Booking sweep could not prove a complete Raydar scheduler booking index. The pass is unhealthy and native bookings may not stop sequence mail until the source recovers.").catch(() => {});
     }
 
     if (apply && result.pauseErrors.length && (await shouldAlert("pause-errors", 3600))) {
@@ -102,17 +132,33 @@ export default async function handler(req, res) {
       await notifySlack(`:pause_button: Booking stop paused ${result.paused} booked candidate(s):\n${lines.join("\n")}`).catch(() => {});
     }
 
-    if (result.ok && apply) await recordSuccessfulSweep(result);
+    if (result.ok && apply) {
+      await recordSuccessfulSweep(result);
+      await recordSweepAttempt({ status: "success", result });
+    }
 
     // Never return candidate detail in an HTTP response — counts only.
     return res.status(200).json({
       ok: result.ok,
       apply,
       sequences: result.sequences,
+      sequenceCatalogCount: result.sequenceCatalogCount,
+      sequenceScopeScanned: result.sequenceScopeScanned,
+      linkSequences: result.linkSequences,
+      enabledLinkSequences: result.enabledLinkSequences,
+      coveredEnabledLinkSequences: result.coveredEnabledLinkSequences,
+      linkScopeComplete: result.linkScopeComplete,
       activeLeads: result.activeLeads,
       calendlyEvents: result.calendlyEvents,
       calendlyCacheHits: result.calendlyCacheHits,
       calendlyTruncated: result.calendlyTruncated,
+      raydarEnabled: result.raydarEnabled,
+      raydarConfigured: result.raydarConfigured,
+      raydarItems: result.raydarItems,
+      raydarBookings: result.raydarBookings,
+      raydarPages: result.raydarPages,
+      raydarComplete: result.raydarComplete,
+      raydarError: result.raydarError,
       profilesRead: result.profilesRead,
       profileCoverage: result.profileCoverage,
       profileRotor: `${result.profileRotorFrom}/${result.profileRotorOf}`,
@@ -124,6 +170,12 @@ export default async function handler(req, res) {
       ranAt: new Date().toISOString(),
     });
   } catch (e) {
+    if (apply) {
+      await recordSweepAttempt({
+        status: "failure",
+        error: String(e?.code || e?.message || "error"),
+      }).catch(() => {});
+    }
     // Never report (or alert) an expiry on the strength of one 401: Paraform
     // answers 401 to bursts. Confirm with spaced probes first, or a busy pass
     // cries wolf about the cookie and the real alarm stops being believed.

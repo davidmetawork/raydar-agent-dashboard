@@ -7,6 +7,11 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { sessionConfig, sessionFromRequest, verifyGoogleCredential } from "../../auth/_lib/session.mjs";
+import {
+  AGENT_SCHEDULING_URL,
+  HUMAN_SCHEDULING_URL,
+  rewriteLegacySchedulingLinks,
+} from "./scheduling-links.mjs";
 
 export const BASE = "https://www.paraform.com/api";
 const COOKIE = process.env.PARAFORM_COOKIE || "";          // browser session cookie value
@@ -18,9 +23,9 @@ export const CONFIG = {
   MATCH_PROJECT_ID: process.env.MATCH_PROJECT_ID || "cmqvf861b00040aksj38cyiwp", // "LinkedIn Job Applicants"
   RECRUITER_ID: process.env.RECRUITER_ID || "clskvclu80066l60fhutn6kks",
   AGENCY_ID: process.env.AGENCY_ID || "cltyq2743004fl20fnop2ep02",
-  CALENDLY: {
-    david: "https://calendly.com/raydar-xyz",
-    noah: "https://calendly.com/noah-raydar/new-role-chat?back=1",
+  SCHEDULER: {
+    agent: AGENT_SCHEDULING_URL,
+    human: HUMAN_SCHEDULING_URL,
   },
 };
 
@@ -338,11 +343,10 @@ export async function ensureRoleSequence(title, sendAs, seqCache) {
 
   const full = await trpcGet("campaigns.getCampaign", { campaign_id: newId });
   let steps = (full?.steps || []).map((s) => ({ ...s, attachments: Array.isArray(s.attachments) ? s.attachments : [] }));
-  const calendly = CONFIG.CALENDLY[sendAs] || CONFIG.CALENDLY.david;
   steps = steps.map((s) => {
-    const swap = (t) => (t || "")
-      .split(CONFIG.TOKEN).join(title)
-      .split(CONFIG.CALENDLY.david).join(calendly); // per-sender Calendly swap
+    const swap = (t) => rewriteLegacySchedulingLinks(
+      (t || "").split(CONFIG.TOKEN).join(title),
+    ).value;
     return { ...s, subject: swap(s.subject), body: swap(s.body) };
   });
   await trpcPost("campaigns.updateSequenceSteps", { campaign_id: newId, steps });
@@ -548,11 +552,20 @@ export async function campaignLeads(campaignId, { strict = false } = {}) {
  * shortfall made 31 successful pauses report "readback_unavailable" and left one
  * lead looking like it had vanished when it was simply never returned.
  */
-export async function campaignLeadBySearch(campaignId, term) {
+export async function campaignLeadBySearch(campaignId, term, {
+  expectedCcuId = null,
+  reader = trpcGet,
+} = {}) {
   if (!term) return null;
   const r = await withThrottleRetry(() =>
-    trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, search: String(term) }, 1));
-  return (r?.leads || [])[0] || null;
+    reader("campaigns.getCampaignLeads", {
+      campaign_id: campaignId,
+      search: String(term),
+    }, 1));
+  const leads = Array.isArray(r?.leads) ? r.leads : [];
+  if (expectedCcuId == null) return leads[0] || null;
+  const target = String(expectedCcuId);
+  return leads.find((lead) => String(lead?.ccu_id || "") === target) || null;
 }
 
 

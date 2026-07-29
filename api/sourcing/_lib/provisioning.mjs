@@ -1,5 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { stripHtml } from "./model.mjs";
+import { HUMAN_SCHEDULING_URL } from "../../seq/_lib/scheduling-links.mjs";
+export const LEGACY_HUMAN_SCHEDULING_URL = "calendly.com/raydar-xyz";
+export const PROVISIONING_NATIVE_LINK_FLAG =
+  "SCHEDULER_PROVISIONING_NATIVE_LINKS_ENABLED";
+
+export function provisioningUsesNativeSchedulingLinks(env = process.env) {
+  return String(env?.[PROVISIONING_NATIVE_LINK_FLAG] ?? "") === "true";
+}
+
+export function provisioningHumanSchedulingUrl(env = process.env) {
+  return provisioningUsesNativeSchedulingLinks(env)
+    ? HUMAN_SCHEDULING_URL
+    : LEGACY_HUMAN_SCHEDULING_URL;
+}
 
 const text = (value) => String(value ?? "").trim();
 const norm = (value) => text(value).toLowerCase().replace(/[–—]/g, "-").replace(/\s+/g, " ");
@@ -137,7 +151,9 @@ function replaceFirstNameWithToken(body) {
   return body;
 }
 
-export function buildIntroEmail(context = {}, sections = {}) {
+export function buildIntroEmail(context = {}, sections = {}, {
+  env = process.env,
+} = {}) {
   if (context.inmail?.subject && context.inmail?.bodyHtml) {
     const body = replaceFirstNameWithToken(text(context.inmail.bodyHtml));
     if (!body.includes('data-value="Candidate First Name"')) throw new Error("existing LinkedIn InMail needs a recognized first-name token before it can be copied verbatim");
@@ -172,13 +188,17 @@ export function buildIntroEmail(context = {}, sections = {}) {
     if (!stack) throw new Error("engineering outreach requires a verified Stack line");
     rows.push("<p></p>", `<p>Stack: ${stack.replace(/^Stack:\s*/i, "")}</p>`);
   }
+  const nativeSchedulingLinks = provisioningUsesNativeSchedulingLinks(env);
+  const schedulingUrl = provisioningHumanSchedulingUrl(env);
   rows.push(
     "<p></p>",
     `<p><strong>Comp: ${lower}-${upper} Base + Competitive Equity &amp; Benefits</strong></p>`,
     "<p></p>",
     `<p><strong>See JD here</strong>: <a target="_blank" rel="noopener noreferrer" class="text-blue-500 underline" href="${escapeHtml(shareUrl)}">${escapeHtml(shareUrl)}</a></p>`,
     "<p></p>",
-    "<p>Interested? Grab time here: calendly.com/raydar-xyz</p>",
+    nativeSchedulingLinks
+      ? `<p>Interested? Book a Human Call with Raydar here: ${schedulingUrl}</p>`
+      : `<p>Interested? Grab time here: ${schedulingUrl}</p>`,
     "<p></p>",
     "<p>Best,</p>",
   );
@@ -189,8 +209,11 @@ export function buildIntroEmail(context = {}, sections = {}) {
   return { subject: buildSequenceSubject(context), body, source: "fresh-draft", words };
 }
 
-export function buildSequenceSteps(context, sections, { idFactory = randomUUID } = {}) {
-  const intro = buildIntroEmail(context, sections);
+export function buildSequenceSteps(context, sections, {
+  idFactory = randomUUID,
+  env = process.env,
+} = {}) {
+  const intro = buildIntroEmail(context, sections, { env });
   const base = { attachments: [], step_kind: "EMAIL", task_type: null, task_due_days: null, weight: 1 };
   return {
     intro,
@@ -212,7 +235,15 @@ function campaignEmails(campaign) {
   return (campaign?.campaign_to_accounts || []).map((item) => text(item?.account?.email).toLowerCase()).filter(Boolean).sort();
 }
 
-export function auditSequence(campaign, { name, projectId, company, expectedEmails = [], expectedSteps = null, startDate = null } = {}) {
+export function auditSequence(campaign, {
+  name,
+  projectId,
+  company,
+  expectedEmails = [],
+  expectedSteps = null,
+  startDate = null,
+  env = process.env,
+} = {}) {
   const warnings = [];
   const dangers = [];
   const steps = [...(campaign?.steps || [])].sort((a, b) => Number(a.step_number) - Number(b.step_number));
@@ -244,7 +275,23 @@ export function auditSequence(campaign, { name, projectId, company, expectedEmai
   if (!introBody.includes('data-value="Candidate First Name"')) warnings.push("intro does not use the Candidate First Name merge chip");
   if (introBody.includes("—") || introSubject.includes("—")) warnings.push("intro contains an em dash");
   if (company && norm(introSubject).includes(norm(company))) warnings.push("intro subject contains the company name");
-  for (const required of ["<strong>Comp:", "<strong>See JD here</strong>", "calendly.com/raydar-xyz"]) if (!introBody.includes(required)) warnings.push(`intro is missing ${stripHtml(required)}`);
+  const nativeSchedulingLinks = provisioningUsesNativeSchedulingLinks(env);
+  const expectedSchedulingUrl = provisioningHumanSchedulingUrl(env);
+  const forbiddenSchedulingUrl = nativeSchedulingLinks
+    ? LEGACY_HUMAN_SCHEDULING_URL
+    : HUMAN_SCHEDULING_URL;
+  for (const required of [
+    "<strong>Comp:",
+    "<strong>See JD here</strong>",
+    expectedSchedulingUrl,
+  ]) {
+    if (!introBody.includes(required)) {
+      warnings.push(`intro is missing ${stripHtml(required)}`);
+    }
+  }
+  if (introBody.includes(forbiddenSchedulingUrl)) {
+    dangers.push("intro scheduling link does not match the explicit cutover mode");
+  }
   if (expectedSteps) {
     for (let index = 0; index < 3; index++) {
       if (steps[index]?.subject !== expectedSteps[index]?.subject || steps[index]?.body !== expectedSteps[index]?.body || Number(steps[index]?.wait_time) !== Number(expectedSteps[index]?.wait_time)) {
@@ -255,7 +302,7 @@ export function auditSequence(campaign, { name, projectId, company, expectedEmai
   return { warnings: [...new Set(warnings)], dangers: [...new Set(dangers)], accountCount: actualEmails.length, emails: actualEmails };
 }
 
-const compositionPrompt = `You write only factual cold-sourcing outreach copy from a Paraform role brief. Return three inline-HTML fragments. Allowed markup is <strong>...</strong> only. Never use an em dash. Never fabricate or resolve conflicts yourself: structured fields in the supplied context win. The final renderer inserts the company name and links, compensation, JD, Calendly, greeting, and signoff, so do not include those. openingHtml is the phrase after "I'm working with [Company]," and must not repeat the company name. tractionHtml is one short traction, funding, customer, growth, or investor paragraph and may be empty only if no verified traction exists. rolePitchHtml is two or three concise sentences about the role, team, location/work model, and distinctive ownership. Bold only key numbers and high-signal phrases. Target 65-115 total words across the three fragments. For engineering roles, stack is a verified comma-separated stack; otherwise it must be empty.`;
+const compositionPrompt = `You write only factual cold-sourcing outreach copy from a Paraform role brief. Return three inline-HTML fragments. Allowed markup is <strong>...</strong> only. Never use an em dash. Never fabricate or resolve conflicts yourself: structured fields in the supplied context win. The final renderer inserts the company name and links, compensation, JD, Raydar Human Call scheduling link, greeting, and signoff, so do not include those. openingHtml is the phrase after "I'm working with [Company]," and must not repeat the company name. tractionHtml is one short traction, funding, customer, growth, or investor paragraph and may be empty only if no verified traction exists. rolePitchHtml is two or three concise sentences about the role, team, location/work model, and distinctive ownership. Bold only key numbers and high-signal phrases. Target 65-115 total words across the three fragments. For engineering roles, stack is a verified comma-separated stack; otherwise it must be empty.`;
 
 const compositionSchema = {
   type: "object",
