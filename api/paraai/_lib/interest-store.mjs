@@ -10,10 +10,12 @@ const INDEX_KEY = "paraai:interest:index";
 const JOB_INDEX_KEY = "paraai:interest:job:index";
 const SWEEP_KEY = "paraai:interest:sweep";
 const REVIEW_INDEX_KEY = "paraai:interest:review:index";
+const HANDOFF_INDEX_KEY = "paraai:interest:handoff:index";
 const SNAP_TTL_SECONDS = 730 * 24 * 60 * 60;
 const JOB_TTL_SECONDS = 180 * 24 * 60 * 60;
 const LOCK_TTL_SECONDS = 150;
 const REVIEW_TTL_SECONDS = 730 * 24 * 60 * 60;
+const HANDOFF_TTL_SECONDS = 730 * 24 * 60 * 60;
 const TERMINAL_JOB_STAGES = new Set(["done", "awaiting_human_submission"]);
 
 const KV_URL = String(
@@ -102,6 +104,21 @@ const snapKey = (cuid) => `paraai:interest:snap:${interestCandidateHash(cuid)}`;
 const jobKey = (cuid) => `paraai:interest:job:${interestCandidateHash(cuid)}`;
 const lockKey = (cuid) => `paraai:interest:lock:${interestCandidateHash(cuid)}`;
 const reviewKey = (cuid) => `paraai:interest:review:${interestCandidateHash(cuid)}`;
+const handoffBatchHash = (batchId) => {
+  const value = String(batchId || "").trim();
+  if (!value || value.length > 200) throw new Error("batchId required");
+  return createHash("sha256")
+    .update("paraai-interest-handoff-batch")
+    .update("\0")
+    .update(value)
+    .digest("hex");
+};
+const handoffIndexMember = (cuid, batchId) =>
+  `${interestCandidateHash(cuid)}:${handoffBatchHash(batchId)}`;
+const handoffKeyFromMember = (member) =>
+  `paraai:interest:handoff:${String(member || "")}`;
+const handoffKey = (cuid, batchId) =>
+  handoffKeyFromMember(handoffIndexMember(cuid, batchId));
 
 // Submission claims are per (candidate, role) and PERMANENT. They are never
 // released: a claim means "this lane has committed to submitting this candidate
@@ -215,6 +232,171 @@ export async function listPendingJobs(limit = 100, { kvImpl = kv } = {}) {
     else await kvImpl(["SREM", JOB_INDEX_KEY, hash]);
   }
   return out;
+}
+
+/* ----------------------------------------------------------------- handoff */
+
+const boundedStrings = (values, limit = 100) => [...new Set(
+  (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean),
+)].slice(0, limit);
+const boundedReasonCodes = (values, limit = 100) => [...new Set(
+  boundedStrings(values, limit)
+    .map((value) => value.toLowerCase())
+    .filter((value) => /^[a-z][a-z0-9._:-]{0,127}$/u.test(value)),
+)];
+
+/**
+ * Minimal durable terminal record. It preserves one organic transition after
+ * the per-candidate processing slot is replaced, without copying candidate
+ * contact data, transcript evidence, generated prose, or provider payloads.
+ */
+export function projectInterestHandoff(candidateUserId, job = {}, reasons = []) {
+  const batchId = String(job?.batchId || "").trim();
+  handoffBatchHash(batchId);
+  const submissions = (Array.isArray(job?.submissions) ? job.submissions : [])
+    .map((submission) => ({
+      roleId: String(submission?.roleId || "").trim(),
+      stage: String(submission?.stage || "").trim() || null,
+      blockers: boundedReasonCodes(submission?.blockers, 50),
+    }))
+    .filter((submission) => submission.roleId)
+    .slice(0, 100);
+  const selectedReasons = boundedReasonCodes(reasons, 100);
+  const human = selectedReasons.includes("human_submission_required");
+  return {
+    version: 1,
+    state: "open",
+    candidateUserId: String(candidateUserId || "").trim(),
+    candidateId: String(job?.candidateId || "").trim() || null,
+    batchId,
+    mode: human ? "human_submission_required" : "shadow_observation",
+    reasons: selectedReasons,
+    roles: boundedStrings(job?.roles, 100),
+    submissions,
+    stopped: {
+      paused: Math.max(0, Number(job?.stopped?.paused) || 0),
+      alreadyPaused: Math.max(0, Number(job?.stopped?.alreadyPaused) || 0),
+    },
+    emailed: {
+      sent: job?.emailed?.sent === true,
+      skipped: String(job?.emailed?.skipped || "").trim() || null,
+      canary: job?.emailed?.canary === true,
+    },
+    rolloutPhase: String(job?.rolloutPhase || "").trim() || null,
+    createdAt: job?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function recordInterestHandoff(
+  candidateUserId,
+  job,
+  reasons,
+  { kvImpl = kv } = {},
+) {
+  const projected = projectInterestHandoff(candidateUserId, job, reasons);
+  if (!projected.candidateUserId) throw new Error("candidateUserId required");
+  const key = handoffKey(projected.candidateUserId, projected.batchId);
+  const created = await kvImpl([
+    "SET",
+    key,
+    JSON.stringify(projected),
+    "NX",
+    "EX",
+    HANDOFF_TTL_SECONDS,
+  ]);
+  const stored = created === "OK" || created === true
+    ? projected
+    : parse(await kvImpl(["GET", key]), null);
+  if (
+    !stored
+    || stored.candidateUserId !== projected.candidateUserId
+    || stored.batchId !== projected.batchId
+    || ![undefined, "open", "resolved"].includes(stored.state)
+  ) {
+    const error = new Error("interest handoff archive conflict");
+    error.code = "INTEREST_HANDOFF_CONFLICT";
+    throw error;
+  }
+  // Resolution is a permanent tombstone. A stale worker may retry after the
+  // human has cleared a card, but can never resurrect that exact batch.
+  if (stored.state === "resolved") return stored;
+  await kvImpl([
+    "SADD",
+    HANDOFF_INDEX_KEY,
+    handoffIndexMember(projected.candidateUserId, projected.batchId),
+  ]);
+  return stored;
+}
+
+export async function listInterestHandoffRecords(
+  limit = 200,
+  { kvImpl = kv } = {},
+) {
+  const members = (await kvImpl(["SMEMBERS", HANDOFF_INDEX_KEY])) || [];
+  const out = [];
+  for (const member of members) {
+    if (!/^[a-f0-9]{64}:[a-f0-9]{64}$/u.test(String(member || ""))) {
+      await kvImpl(["SREM", HANDOFF_INDEX_KEY, member]);
+      continue;
+    }
+    const record = parse(
+      await kvImpl(["GET", handoffKeyFromMember(member)]),
+      null,
+    );
+    if (
+      record?.candidateUserId
+      && record?.batchId
+      && [undefined, "open"].includes(record.state)
+    ) {
+      out.push(record);
+    } else {
+      await kvImpl(["SREM", HANDOFF_INDEX_KEY, member]);
+    }
+  }
+  return out
+    .sort((left, right) => (
+      (Date.parse(right?.updatedAt || "") || 0)
+      - (Date.parse(left?.updatedAt || "") || 0)
+    ))
+    .slice(0, Math.max(1, Number(limit) || 200));
+}
+
+export async function resolveInterestHandoff(
+  candidateUserId,
+  batchId,
+  { kvImpl = kv } = {},
+) {
+  const member = handoffIndexMember(candidateUserId, batchId);
+  const key = handoffKeyFromMember(member);
+  const prior = parse(await kvImpl(["GET", key]), null);
+  if (
+    !prior
+    || prior.candidateUserId !== String(candidateUserId || "").trim()
+    || prior.batchId !== String(batchId || "").trim()
+    || prior.state === "resolved"
+  ) {
+    await kvImpl(["SREM", HANDOFF_INDEX_KEY, member]);
+    return false;
+  }
+  const tombstone = {
+    version: 1,
+    state: "resolved",
+    candidateUserId: prior.candidateUserId,
+    batchId: prior.batchId,
+    resolvedAt: new Date().toISOString(),
+  };
+  await kvImpl([
+    "SET",
+    key,
+    JSON.stringify(tombstone),
+    "EX",
+    HANDOFF_TTL_SECONDS,
+  ]);
+  await kvImpl(["SREM", HANDOFF_INDEX_KEY, member]);
+  return true;
 }
 
 /* ------------------------------------------------------------------- claims */

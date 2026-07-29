@@ -12,5 +12,7 @@ test("Para AI UI exposes a David-only curated-interest handoff queue", () => {
   assert.match(html, /action=handoffs/);
   assert.match(html, /This dashboard cannot submit on your behalf/);
   assert.match(html, /Open in Paraform/);
-  assert.match(html, /confirmation:"RESOLVE "\+candidateUserId/);
+  assert.match(html, /data-interest-batch/);
+  assert.match(html, /candidateUserId\+\(batchId\?" "\+batchId:""\)/);
+  assert.match(html, /item\.batchId\|\|""\)==="?\(batchId\|\|""\)/);
 });

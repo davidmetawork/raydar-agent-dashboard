@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import handler, { humanApproverMatches } from "../api/paraai/interest.mjs";
+import handler, {
+  humanApproverMatches,
+  interestResolveConfirmation,
+} from "../api/paraai/interest.mjs";
 
 test("human handoff access fails closed and is pinned to David's exact identity", () => {
   assert.equal(humanApproverMatches("david@raydar.xyz", {}), false);
@@ -35,4 +38,15 @@ test("an automation bearer cannot read the human handoff feed", async () => {
     if (prior === undefined) delete process.env.PARAAI_AUTOMATION_RUNNER_KEY;
     else process.env.PARAAI_AUTOMATION_RUNNER_KEY = prior;
   }
+});
+
+test("archived handoff resolution is bound to the exact candidate and batch", () => {
+  assert.equal(
+    interestResolveConfirmation("candidate-1", "batch-1"),
+    "RESOLVE candidate-1 batch-1",
+  );
+  assert.equal(
+    interestResolveConfirmation("candidate-1"),
+    "RESOLVE candidate-1",
+  );
 });

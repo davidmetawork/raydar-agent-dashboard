@@ -9,7 +9,13 @@ import {
   readSubmissionCredits,
   listInterestHandoffs,
 } from "./_lib/interest.mjs";
-import { listReviews, resolveReview, probeInterestStore, storeConfigured } from "./_lib/interest-store.mjs";
+import {
+  listReviews,
+  resolveReview,
+  resolveInterestHandoff,
+  probeInterestStore,
+  storeConfigured,
+} from "./_lib/interest-store.mjs";
 
 // Curated-list interest lane endpoint.
 //   GET  ?action=status      gates, last sweep, staleness
@@ -84,6 +90,12 @@ export function humanApproverMatches(email, env = process.env) {
   );
 }
 
+export function interestResolveConfirmation(candidateUserId, batchId = "") {
+  const candidate = String(candidateUserId || "").trim();
+  const batch = String(batchId || "").trim();
+  return `RESOLVE ${candidate}${batch ? ` ${batch}` : ""}`;
+}
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   const action = String(req.query?.action || "status").toLowerCase();
@@ -144,19 +156,38 @@ export default async function handler(req, res) {
           seeded: result.seeded,
           detected: result.detected.length,
           readErrors: result.readErrors,
+          stateDeferrals: result.stateDeferrals,
           durationMs: result.durationMs,
         });
       }
       if (action === "resolve") {
         const candidateUserId = String(req.body?.candidateUserId || "").trim();
         if (!candidateUserId) return res.status(400).json({ error: "candidateUserId required" });
-        if (req.body?.confirmation !== `RESOLVE ${candidateUserId}`) {
+        const batchId = String(req.body?.batchId || "").trim();
+        if (batchId.length > 200) {
+          return res.status(400).json({ error: "batchId invalid" });
+        }
+        if (
+          req.body?.confirmation
+          !== interestResolveConfirmation(candidateUserId, batchId)
+        ) {
           return res.status(400).json({
             ok: false,
             error: "confirmation_required",
           });
         }
-        await resolveReview(candidateUserId);
+        let resolved = true;
+        if (batchId) {
+          resolved = await resolveInterestHandoff(candidateUserId, batchId);
+        } else {
+          await resolveReview(candidateUserId);
+        }
+        if (!resolved) {
+          return res.status(404).json({
+            ok: false,
+            error: "handoff_not_found",
+          });
+        }
         return res.status(200).json({ ok: true, resolved: true });
       }
       return res.status(400).json({ error: "unknown action" });
