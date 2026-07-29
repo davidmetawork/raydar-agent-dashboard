@@ -7,16 +7,18 @@ import {
   runInterestTick,
   sweepInterest,
   readSubmissionCredits,
+  listInterestHandoffs,
 } from "./_lib/interest.mjs";
 import { listReviews, resolveReview, probeInterestStore, storeConfigured } from "./_lib/interest-store.mjs";
 
 // Curated-list interest lane endpoint.
 //   GET  ?action=status      gates, last sweep, staleness
 //   GET  ?action=reviews     open review cards
+//   GET  ?action=handoffs    David-only curated-interest handoffs
 //   GET  ?action=credits     weekly single-submission position
 //   POST ?action=tick        one sweep + process (the Fly worker calls this)
 //   POST ?action=sweep       detection only, never writes
-//   POST ?action=resolve     clear a review card
+//   POST ?action=resolve     David-only clear of a handled review card
 //
 // Plan: docs/PLAN-CURATED-INTEREST-TO-SUBMISSION-2026-07-28.md
 
@@ -39,11 +41,56 @@ async function authorized(req, res) {
   return requireAuth(req, res);
 }
 
+function isAutomationBearer(req) {
+  const bearer = String(req.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+  return Boolean(
+    bearer
+    && [process.env.PARAAI_AUTOMATION_RUNNER_KEY, process.env.CRON_SECRET]
+      .filter(Boolean)
+      .some((secret) => equalSecret(bearer, secret)),
+  );
+}
+
+async function humanAuthorized(req, res) {
+  if (isAutomationBearer(req)) {
+    res.status(403).json({ ok: false, error: "human_auth_required" });
+    return false;
+  }
+  if (!(await requireAuth(req, res))) return false;
+  const approver = String(
+    process.env.PARAAI_INTEREST_HUMAN_APPROVER_EMAIL || "",
+  ).trim().toLowerCase();
+  if (!approver) {
+    res.status(503).json({
+      ok: false,
+      error: "human_approver_not_configured",
+    });
+    return false;
+  }
+  if (!humanApproverMatches(req.authedEmail)) {
+    res.status(403).json({ ok: false, error: "human_approver_required" });
+    return false;
+  }
+  return true;
+}
+
+export function humanApproverMatches(email, env = process.env) {
+  const approver = String(
+    env.PARAAI_INTEREST_HUMAN_APPROVER_EMAIL || "",
+  ).trim().toLowerCase();
+  return Boolean(
+    approver
+    && String(email || "").trim().toLowerCase() === approver,
+  );
+}
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
-  if (!(await authorized(req, res))) return;
-
   const action = String(req.query?.action || "status").toLowerCase();
+  const humanOnly = action === "handoffs" || action === "resolve";
+  if (humanOnly) {
+    if (!(await humanAuthorized(req, res))) return;
+  } else if (!(await authorized(req, res))) return;
 
   try {
     if (req.method === "GET") {
@@ -53,10 +100,21 @@ export default async function handler(req, res) {
         if (storeConfigured()) {
           storeProbe = await probeInterestStore().then(() => ({ ok: true })).catch((e) => ({ ok: false, code: e.code }));
         }
-        return res.status(200).json({ ...status, storeProbe });
+        return res.status(200).json({ ok: true, ...status, storeProbe });
       }
       if (action === "reviews") {
         return res.status(200).json({ reviews: await listReviews() });
+      }
+      if (action === "handoffs") {
+        const [status, handoffs] = await Promise.all([
+          interestStatus(),
+          listInterestHandoffs(),
+        ]);
+        return res.status(200).json({
+          ok: true,
+          status,
+          handoffs,
+        });
       }
       if (action === "credits") {
         return res.status(200).json({ credits: await readSubmissionCredits() });
@@ -92,8 +150,14 @@ export default async function handler(req, res) {
       if (action === "resolve") {
         const candidateUserId = String(req.body?.candidateUserId || "").trim();
         if (!candidateUserId) return res.status(400).json({ error: "candidateUserId required" });
+        if (req.body?.confirmation !== `RESOLVE ${candidateUserId}`) {
+          return res.status(400).json({
+            ok: false,
+            error: "confirmation_required",
+          });
+        }
         await resolveReview(candidateUserId);
-        return res.status(200).json({ resolved: true });
+        return res.status(200).json({ ok: true, resolved: true });
       }
       return res.status(400).json({ error: "unknown action" });
     }
