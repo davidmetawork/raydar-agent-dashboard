@@ -60,7 +60,8 @@ export function initialMatchCopy({
   const first = clean(firstName) || "there";
   const roleLabel = `${clean(roleName)} @ ${clean(companyName)}`;
   const digestLabel = digestLinkLabel(first);
-  const text = [
+  const hasDigest = Boolean(clean(digestUrl));
+  const textLines = [
     `Hey ${first},`,
     "",
     "Hope you are doing well!",
@@ -68,23 +69,32 @@ export function initialMatchCopy({
     `I wanted to check in and see if you would be interested in this ${roleLabel} (${clean(roleUrl)})`,
     "",
     "I shared a redacted version of your resume with the Founder and the team would love to chat if you are interested.",
-    "",
-    `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${digestLabel} (${clean(digestUrl)})`,
-    "",
-    "Let me know!",
-    "",
-    "Thanks,",
-  ].join("\n");
-  const html = paragraphHtml([
+  ];
+  if (hasDigest) {
+    textLines.push(
+      "",
+      `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${digestLabel} (${clean(digestUrl)})`,
+    );
+  }
+  textLines.push("", "Let me know!", "", "Thanks,");
+  const htmlLines = [
     `Hey ${escapeHtml(first)},`,
     "Hope you are doing well!",
     `I wanted to check in and see if you would be interested in this ${anchor(roleLabel, roleUrl)}`,
     "I shared a redacted version of your resume with the Founder and the team would love to chat if you are interested.",
-    `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${anchor(digestLabel, digestUrl)}`,
-    "Let me know!",
-    "Thanks,",
-  ]);
-  return { subject: initialSubject(companyName), text, html, variant: "initial_exact" };
+  ];
+  if (hasDigest) {
+    htmlLines.push(
+      `I may get more interest on your profile from other clients soon and will add all interview requests you get here: ${anchor(digestLabel, digestUrl)}`,
+    );
+  }
+  htmlLines.push("Let me know!", "Thanks,");
+  return {
+    subject: initialSubject(companyName),
+    text: textLines.join("\n"),
+    html: paragraphHtml(htmlLines),
+    variant: hasDigest ? "initial_exact" : "initial_expired_no_digest",
+  };
 }
 
 const LATER_MATCH_VARIANTS = Object.freeze([
@@ -126,8 +136,9 @@ export function additionalMatchCopy({
   const first = clean(firstName) || "there";
   const roleLabel = `${clean(roleName)} @ ${clean(companyName)}`;
   const digestLabel = digestLinkLabel(first);
+  const hasDigest = Boolean(clean(digestUrl));
   if (Number(ordinal) === 2) {
-    const text = [
+    const textLines = [
       `Hey ${first},`,
       "",
       `You just got a new interview request for the ${roleLabel} (${clean(roleUrl)})`,
@@ -135,29 +146,37 @@ export function additionalMatchCopy({
       "The founders think you would be a very strong match!",
       "",
       "Open to connecting with the team to discuss?",
-      "",
-      `Reminder that I am adding all of these requests in one place for you to review: ${digestLabel} (${clean(digestUrl)})`,
-      "",
-      "Let me know!",
-      "",
-      "Thanks,",
-      "David",
-    ].join("\n");
-    const html = paragraphHtml([
+    ];
+    if (hasDigest) {
+      textLines.push(
+        "",
+        `Reminder that I am adding all of these requests in one place for you to review: ${digestLabel} (${clean(digestUrl)})`,
+      );
+    }
+    textLines.push("", "Let me know!", "", "Thanks,", "David");
+    const htmlLines = [
       `Hey ${escapeHtml(first)},`,
       `You just got a new interview request for the ${anchor(roleLabel, roleUrl)}`,
       "The founders think you would be a very strong match!",
       "Open to connecting with the team to discuss?",
-      `Reminder that I am adding all of these requests in one place for you to review: ${anchor(digestLabel, digestUrl)}`,
-      "Let me know!",
-      "Thanks,<br>David",
-    ]);
-    return { subject: null, text, html, variant: "second_exact" };
+    ];
+    if (hasDigest) {
+      htmlLines.push(
+        `Reminder that I am adding all of these requests in one place for you to review: ${anchor(digestLabel, digestUrl)}`,
+      );
+    }
+    htmlLines.push("Let me know!", "Thanks,<br>David");
+    return {
+      subject: null,
+      text: textLines.join("\n"),
+      html: paragraphHtml(htmlLines),
+      variant: hasDigest ? "second_exact" : "second_expired_no_digest",
+    };
   }
 
   const index = variantIndex(variationSeed || `${ordinal}:${roleLabel}`, LATER_MATCH_VARIANTS.length);
   const variant = LATER_MATCH_VARIANTS[index];
-  const text = [
+  const textLines = [
     `Hey ${first},`,
     "",
     `${variant.opening(roleLabel)} (${clean(roleUrl)})`,
@@ -165,24 +184,27 @@ export function additionalMatchCopy({
     variant.fit,
     "",
     variant.ask,
-    "",
-    `${variant.reminder} ${digestLabel} (${clean(digestUrl)})`,
-    "",
-    "Let me know!",
-    "",
-    "Thanks,",
-    "David",
-  ].join("\n");
-  const html = paragraphHtml([
+  ];
+  if (hasDigest) {
+    textLines.push("", `${variant.reminder} ${digestLabel} (${clean(digestUrl)})`);
+  }
+  textLines.push("", "Let me know!", "", "Thanks,", "David");
+  const htmlLines = [
     `Hey ${escapeHtml(first)},`,
     variant.opening(anchor(roleLabel, roleUrl)),
     variant.fit,
     variant.ask,
-    `${variant.reminder} ${anchor(digestLabel, digestUrl)}`,
-    "Let me know!",
-    "Thanks,<br>David",
-  ]);
-  return { subject: null, text, html, variant: `later_${index + 1}` };
+  ];
+  if (hasDigest) {
+    htmlLines.push(`${variant.reminder} ${anchor(digestLabel, digestUrl)}`);
+  }
+  htmlLines.push("Let me know!", "Thanks,<br>David");
+  return {
+    subject: null,
+    text: textLines.join("\n"),
+    html: paragraphHtml(htmlLines),
+    variant: hasDigest ? `later_${index + 1}` : `later_${index + 1}_expired_no_digest`,
+  };
 }
 
 const ADDITIONAL_FOLLOWUP_VARIANTS = Object.freeze([

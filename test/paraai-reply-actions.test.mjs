@@ -182,7 +182,10 @@ test("an unknown pass reason key falls back to not interested", () => {
   assert.equal(passReasonText("off_market"), "Candidate is no longer looking for a new role.");
 });
 
-test("only this candidate's pending rows are actionable and they expire ten days after creation", async () => {
+// Seven days, not ten: SUBMISSION_REQUEST_CONFIG.EXPIRATION_DAYS was read out
+// of the Paraform client bundle on 2026-07-28. The old figure was inferred from
+// a single "3 days left" sighting and ran three days long.
+test("only this candidate's pending rows are actionable and they expire seven days after creation", async () => {
   const requests = await withParaform({
     "submissionRequest.getRecruiterSubmissionRequestHistory": () => [
       requestRow(),
@@ -195,7 +198,7 @@ test("only this candidate's pending rows are actionable and they expire ten days
   assert.deepEqual(pending.map((request) => request.id), ["req-1"]);
   assert.equal(
     new Date(expiresAtMs(pending[0])).toISOString(),
-    "2026-07-30T12:00:00.000Z",
+    "2026-07-27T12:00:00.000Z",
   );
 });
 
