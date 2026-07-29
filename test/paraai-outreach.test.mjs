@@ -48,6 +48,7 @@ import {
   expiredNoDigestOverrideEligible,
   heldAlertCopy,
   missingEmailAlertCopy,
+  normalizeExternalDeliveryEvidence,
   normalizeSubmissionRequest,
   OUTREACH_INCIDENT_HALT,
   outreachConfig,
@@ -749,6 +750,29 @@ test("no-digest override is eligible only for an expired request", () => {
   assert.equal(expiredNoDigestOverrideEligible({ status: "EXPIRED" }), true);
   assert.equal(expiredNoDigestOverrideEligible({ status: "pending" }), false);
   assert.equal(expiredNoDigestOverrideEligible(null), false);
+});
+
+test("external delivery evidence accepts exact recent Gmail IDs and rejects stale or malformed input", () => {
+  const now = Date.parse("2026-07-29T14:05:00.000Z");
+  assert.deepEqual(normalizeExternalDeliveryEvidence({
+    gmailMessageId: "19fae2fd111d04e1",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-29T14:03:00.000Z",
+  }, now), {
+    gmailMessageId: "19fae2fd111d04e1",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-29T14:03:00.000Z",
+  });
+  assert.throws(() => normalizeExternalDeliveryEvidence({
+    gmailMessageId: "not-a-gmail-id",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-29T14:03:00.000Z",
+  }, now), { code: "OUTREACH_EXTERNAL_DELIVERY_INVALID" });
+  assert.throws(() => normalizeExternalDeliveryEvidence({
+    gmailMessageId: "19fae2fd111d04e1",
+    threadId: "19fae2f5a3c3e8c5",
+    sentAt: "2026-07-27T14:03:00.000Z",
+  }, now), { code: "OUTREACH_EXTERNAL_DELIVERY_INVALID" });
 });
 
 test("first-match follow-up two is scheduled two days after follow-up one actually sends", () => {

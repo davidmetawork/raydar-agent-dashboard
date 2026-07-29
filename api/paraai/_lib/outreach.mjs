@@ -148,6 +148,32 @@ export function expiredNoDigestOverrideEligible(request) {
   return lower(request?.status) === "expired";
 }
 
+export function normalizeExternalDeliveryEvidence(evidence, now = Date.now()) {
+  const gmailMessageId = clean(evidence?.gmailMessageId);
+  const threadId = clean(evidence?.threadId);
+  const sentAtMs = finiteDate(evidence?.sentAt);
+  const validGmailId = (value) => /^[a-f0-9]{16,32}$/i.test(value);
+  if (!validGmailId(gmailMessageId) || !validGmailId(threadId)) {
+    const error = new Error("exact Gmail message and thread IDs are required");
+    error.code = "OUTREACH_EXTERNAL_DELIVERY_INVALID";
+    throw error;
+  }
+  if (
+    sentAtMs == null ||
+    sentAtMs > now + 5 * 60_000 ||
+    sentAtMs < now - 24 * 60 * 60_000
+  ) {
+    const error = new Error("external delivery time must be within the last 24 hours");
+    error.code = "OUTREACH_EXTERNAL_DELIVERY_INVALID";
+    throw error;
+  }
+  return {
+    gmailMessageId,
+    threadId,
+    sentAt: new Date(sentAtMs).toISOString(),
+  };
+}
+
 export async function readSubmissionRequestHistory() {
   const result = await trpcGet("submissionRequest.getRecruiterSubmissionRequestHistory", {
     agencyView: false,
@@ -944,6 +970,121 @@ export async function processMatchRequest(
       }
     }
     return { action: "sent", request, ordinal, digest, roleUrl, copy, sent, state };
+  } finally {
+    await releaseOutreachLock(request.candidateUserId, lockToken).catch(() => {});
+  }
+}
+
+export async function recordExpiredExternalDelivery(
+  request,
+  history,
+  evidence,
+  { config = outreachConfig() } = {},
+) {
+  if (!expiredNoDigestOverrideEligible(request)) {
+    const error = new Error("external no-digest delivery is restricted to an expired request");
+    error.code = "OUTREACH_REQUEST_NOT_EXPIRED";
+    throw error;
+  }
+  const verified = normalizeExternalDeliveryEvidence(evidence);
+  const lockToken = await acquireOutreachLock(request.candidateUserId);
+  if (!lockToken) {
+    const error = new Error("candidate outreach is already being processed");
+    error.code = "OUTREACH_BUSY";
+    throw error;
+  }
+  try {
+    const contact = await candidateContact(request, config);
+    let state = await getOutreachState(request.candidateUserId);
+    if (!state) {
+      state = await createOutreachState(request.candidateUserId, {
+        candidateName: contact.name || request.candidateName,
+        candidateEmail: contact.email,
+        candidateEmailSource: contact.source,
+      });
+    }
+    const existingMatch = state.matches?.[request.id];
+    if (existingMatch?.sentAt) {
+      if (
+        existingMatch.gmailMessageId === verified.gmailMessageId &&
+        state.threadId === verified.threadId
+      ) {
+        return { action: "existing", state, request, match: existingMatch };
+      }
+      const error = new Error("request already has a different delivered message");
+      error.code = "OUTREACH_EXTERNAL_DELIVERY_CONFLICT";
+      throw error;
+    }
+    const actionKey = `match:${request.id}`;
+    if (state.outbox?.[actionKey]) {
+      const error = new Error("request already has an outbox record");
+      error.code = "OUTREACH_EXTERNAL_DELIVERY_CONFLICT";
+      throw error;
+    }
+
+    const ordinal = requestOrdinal(request, history);
+    const roleUrl = roleShareUrl(request);
+    request = { ...request, candidateEmail: contact.email };
+    const copy = copyForMatch({
+      request,
+      ordinal,
+      contact,
+      digest: null,
+      roleUrl,
+    });
+    const messageId = deterministicMessageId(actionKey);
+    let next = planDeliveredMatch({
+      ...state,
+      candidateName: contact.name || request.candidateName,
+      candidateEmail: contact.email,
+      candidateEmailSource: contact.source,
+    }, {
+      request,
+      ordinal,
+      roleUrl,
+      digest: null,
+      copy,
+      sent: {
+        id: verified.gmailMessageId,
+        threadId: verified.threadId,
+      },
+      sentAt: verified.sentAt,
+      messageId,
+      deliveryMode: "expired_without_digest",
+    });
+    next = appendOutreachJournal({
+      ...next,
+      matches: {
+        ...next.matches,
+        [request.id]: {
+          ...next.matches[request.id],
+          deliverySource: "gmail_ui_verified",
+          ...(request.reachedOut ? { reachedOutVerifiedAt: new Date().toISOString() } : {}),
+        },
+      },
+      outbox: {
+        ...next.outbox,
+        [actionKey]: {
+          ...next.outbox[actionKey],
+          deliverySource: "gmail_ui_verified",
+        },
+      },
+    }, "external_delivery_recorded", {
+      requestId: request.id,
+      deliveryMode: "expired_without_digest",
+    });
+    if (request.reachedOut) {
+      next = appendOutreachJournal(
+        next,
+        "paraform_reached_out_already_visible",
+        { requestId: request.id },
+      );
+    }
+    state = await saveOutreachState(next, state.revision);
+    await resolveOutreachException(request.id, {
+      resolution: "external_delivery_recorded",
+    }).catch(() => {});
+    return { action: "recorded", state, request, ordinal, roleUrl, copy };
   } finally {
     await releaseOutreachLock(request.candidateUserId, lockToken).catch(() => {});
   }

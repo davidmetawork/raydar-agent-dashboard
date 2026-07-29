@@ -12,6 +12,7 @@ import {
   pendingBackfillRequests,
   processMatchRequest,
   readSubmissionRequestHistory,
+  recordExpiredExternalDelivery,
   releaseHeldOutreach,
   reviewHeldOutreach,
   runOutreachTick,
@@ -149,6 +150,36 @@ export default async function handler(req, res) {
         action: result.action,
         requestId,
         deliveryMode: "expired_without_digest",
+      });
+    }
+    if (action === "record-expired-external-delivery") {
+      const requestId = String(body.requestId || "").trim();
+      const gmailMessageId = String(body.gmailMessageId || "").trim();
+      if (body.confirmation !== `RECORD EXPIRED DELIVERY ${requestId} ${gmailMessageId}`) {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      const history = await readSubmissionRequestHistory();
+      const request = history.find((row) => row.id === requestId);
+      if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
+      const result = await recordExpiredExternalDelivery(request, history, {
+        gmailMessageId,
+        threadId: body.threadId,
+        sentAt: body.sentAt,
+      }, { config });
+      return res.status(200).json({
+        ok: true,
+        action: result.action,
+        requestId,
+        deliveryMode: "expired_without_digest",
+        followup: result.state?.followup ? {
+          number: result.state.followup.number,
+          remaining: result.state.followup.remaining,
+          dueAt: result.state.followup.dueAt,
+        } : null,
       });
     }
     if (action === "inspect-pending") {
