@@ -282,6 +282,13 @@ const FACTORY_KEYS = Object.freeze([
   "sealSecret",
 ]);
 const PERSISTENCE_METHODS = Object.freeze(["retain"]);
+const PERSISTENCE_ALLOWED_METHODS = new Set([
+  "compareAndSet",
+  "initializeManifest",
+  "read",
+  "readMany",
+  "retain",
+]);
 const MANIFEST_SEED_KEYS = Object.freeze([
   "completeProofDigest",
   "contractPinsDigest",
@@ -894,6 +901,15 @@ function canonicalManifestSeed(value) {
   });
 }
 
+// Validation only. This does not consume or mint a capability and therefore
+// grants no provenance or authority by itself. The full-manifest store calls
+// it only after consuming the module-private point-manifest seed.
+export function canonicalizeSourceRecallClassifiedManifestSeed(
+  value,
+) {
+  return canonicalManifestSeed(value);
+}
+
 function canonicalProvenance(value) {
   const code =
     "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PROVENANCE_INVALID";
@@ -971,20 +987,36 @@ function canonicalProvenance(value) {
 function persistenceInterface(value) {
   const code =
     "SOURCE_RECALL_CLASSIFIED_EVIDENCE_PERSISTENCE_INVALID";
-  const persistence = exactRecord(
-    value,
-    PERSISTENCE_METHODS,
-    code,
-  );
+  const persistence = plainRecordSnapshot(value, code);
+  if (
+    Object.keys(persistence).some(
+      (key) => !PERSISTENCE_ALLOWED_METHODS.has(key),
+    )
+  ) {
+    fail(code);
+  }
   for (const method of PERSISTENCE_METHODS) {
     if (typeof persistence[method] !== "function") {
       fail(code);
     }
   }
-  return Object.freeze(persistence);
+  return Object.freeze({
+    retain: persistence.retain,
+  });
 }
 
-function retentionKey(manifestKeyDigest, workKeyDigest) {
+export function sourceRecallClassifiedEvidenceRetentionKey(
+  manifestKeyDigest,
+  workKeyDigest,
+) {
+  exactDigest(
+    manifestKeyDigest,
+    "SOURCE_RECALL_CLASSIFIED_EVIDENCE_KEY_INVALID",
+  );
+  exactDigest(
+    workKeyDigest,
+    "SOURCE_RECALL_CLASSIFIED_EVIDENCE_KEY_INVALID",
+  );
   return `${KEY_PREFIX}${semanticDigest(
     "phase4-recall-classified-evidence-work-v1",
     {
@@ -994,6 +1026,196 @@ function retentionKey(manifestKeyDigest, workKeyDigest) {
       workKeyDigest,
     },
   )}`;
+}
+
+const MANIFEST_MEMBER_EXPECTATION_KEYS = Object.freeze([
+  "completeProofDigest",
+  "contractPinsDigest",
+  "decisionBoundaryAtMs",
+  "manifestKeyDigest",
+  "member",
+  "memberSetDigest",
+  "notAfterMs",
+  "referenceManifestDigest",
+]);
+
+export function verifySourceRecallClassifiedEvidenceRecordAgainstMember(
+  value,
+) {
+  const code =
+    "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_MEMBER_INVALID";
+  const selected = exactRecord(
+    value,
+    [
+      "expected",
+      "expiresAtMs",
+      "raw",
+      "redisNowMs",
+      "sealSecret",
+    ],
+    code,
+  );
+  const expected = exactRecord(
+    selected.expected,
+    MANIFEST_MEMBER_EXPECTATION_KEYS,
+    code,
+  );
+  const member = exactRecord(
+    expected.member,
+    MANIFEST_MEMBER_KEYS,
+    code,
+  );
+  for (const field of [
+    "completeProofDigest",
+    "contractPinsDigest",
+    "manifestKeyDigest",
+    "memberSetDigest",
+    "referenceManifestDigest",
+  ]) {
+    exactDigest(expected[field], code);
+  }
+  for (const field of [
+    "referenceDigest",
+    "referenceIdDigest",
+    "resolutionDigest",
+    "workItemDigest",
+    "workKeyDigest",
+  ]) {
+    exactDigest(member[field], code);
+  }
+  exactSafeTimestamp(expected.decisionBoundaryAtMs, code);
+  exactSafeTimestamp(expected.notAfterMs, code);
+  exactSafeTimestamp(member.pageNumber, code);
+  exactNonnegativeInteger(member.referenceOrdinal, code);
+  if (
+    member.outcome !== "stable"
+    || member.readsCompleted !== 2
+  ) {
+    fail(code);
+  }
+  const secret = sealSecret(selected.sealSecret);
+  const redisNowMs = exactSafeTimestamp(
+    selected.redisNowMs,
+    code,
+  );
+  const expiresAtMs = exactSafeTimestamp(
+    selected.expiresAtMs,
+    code,
+  );
+  const record = parseRecord(
+    selected.raw,
+    redisNowMs,
+    expiresAtMs,
+    secret,
+  );
+  if (
+    record.evidence.contractPinsDigest
+      !== expected.contractPinsDigest
+    || record.evidence.decisionBoundaryAt
+      !== new Date(
+        expected.decisionBoundaryAtMs,
+      ).toISOString()
+    || record.manifestKeyDigest
+      !== expected.manifestKeyDigest
+    || record.manifestCompleteProofDigest
+      !== expected.completeProofDigest
+    || record.manifestMemberSetDigest
+      !== expected.memberSetDigest
+    || record.manifestReferenceManifestDigest
+      !== expected.referenceManifestDigest
+    || record.manifestNotAfterMs !== expected.notAfterMs
+    || record.memberPageNumber !== member.pageNumber
+    || record.memberReferenceOrdinal
+      !== member.referenceOrdinal
+    || record.memberReferenceDigest
+      !== member.referenceDigest
+    || record.memberReferenceIdDigest
+      !== member.referenceIdDigest
+    || record.workItemDigest !== member.workItemDigest
+    || record.workKeyDigest !== member.workKeyDigest
+  ) {
+    fail(code);
+  }
+  return deepFreeze({
+    version: 1,
+    classification: record.evidence.classification,
+    classificationEvidenceDigest:
+      record.classificationEvidenceDigest,
+    classificationProofComplete:
+      record.evidence.classificationProofComplete,
+    logicalExpiresAtMs: record.expiresAtMs,
+    memberPageNumber: member.pageNumber,
+    memberReferenceDigest: member.referenceDigest,
+    memberReferenceIdDigest: member.referenceIdDigest,
+    memberReferenceOrdinal: member.referenceOrdinal,
+    observedExpiresAtMs: expiresAtMs,
+    recordDigest: semanticDigest(
+      "phase4-recall-classified-evidence-retained-record-v1",
+      selected.raw,
+    ),
+    recordSeal: record.recordSeal,
+    sealKeyId: record.sealKeyId,
+    settlementStatus: record.settlementStatus,
+    workItemDigest: record.workItemDigest,
+    workKeyDigest: record.workKeyDigest,
+  });
+}
+
+export function verifySourceRecallClassifiedEvidenceManifestMemberRecord(
+  value,
+) {
+  const code =
+    "SOURCE_RECALL_CLASSIFIED_EVIDENCE_MANIFEST_MEMBER_INVALID";
+  const selected = exactRecord(
+    value,
+    [
+      "expiresAtMs",
+      "raw",
+      "redisNowMs",
+      "sealSecret",
+      "seed",
+    ],
+    code,
+  );
+  const seed = canonicalManifestSeed(selected.seed);
+  const preliminary = parseRecord(
+    selected.raw,
+    exactSafeTimestamp(selected.redisNowMs, code),
+    exactSafeTimestamp(selected.expiresAtMs, code),
+    sealSecret(selected.sealSecret),
+  );
+  const member = manifestMemberFor(
+    seed,
+    preliminary.evidence,
+  );
+  const proof =
+    verifySourceRecallClassifiedEvidenceRecordAgainstMember({
+      expected: {
+        completeProofDigest: seed.completeProofDigest,
+        contractPinsDigest: seed.contractPinsDigest,
+        decisionBoundaryAtMs: seed.decisionBoundaryAtMs,
+        manifestKeyDigest: seed.manifestKeyDigest,
+        member,
+        memberSetDigest: seed.memberSetDigest,
+        notAfterMs: seed.notAfterMs,
+        referenceManifestDigest:
+          seed.referenceManifestDigest,
+      },
+      expiresAtMs: selected.expiresAtMs,
+      raw: selected.raw,
+      redisNowMs: selected.redisNowMs,
+      sealSecret: selected.sealSecret,
+    });
+  if (
+    proof.settlementStatus !== "terminal"
+    || proof.classificationProofComplete !== true
+    || !["success", "failure"].includes(
+      proof.classification,
+    )
+  ) {
+    fail(code);
+  }
+  return proof;
 }
 
 function manifestMemberFor(seed, evidence) {
@@ -1508,7 +1730,7 @@ export function createSourceRecallClassifiedEvidenceStore(
     try {
       result = persistenceResult(
         await persistence.retain({
-          key: retentionKey(
+          key: sourceRecallClassifiedEvidenceRetentionKey(
             proposed.manifestKeyDigest,
             proposed.workKeyDigest,
           ),
