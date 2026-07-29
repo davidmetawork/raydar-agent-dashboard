@@ -94,9 +94,13 @@ test("a terminal batch is immutable and a later organic transition needs a new b
   assert.deepEqual(
     interestTerminalHandoffReasons({
       stage: "done",
-      submissions: [{ stage: "blocked" }],
+      submissions: [{
+        stage: "blocked",
+        blockers: ["credits_exhausted"],
+      }],
+      emailed: { skipped: "no_bankable_role" },
     }),
-    [],
+    ["credits_exhausted", "no_bankable_role"],
   );
 });
 
@@ -523,6 +527,55 @@ test("handoff feed hydrates identity transiently and never exposes email", async
   assert.equal(handoffs[0].roles[0].title, "Founding Engineer");
   assert.equal("email" in handoffs[0], false);
   assert.match(handoffs[0].candidateHref, /candidate-user-1/);
+});
+
+test("legacy non-bankable reviews are visible as David-only manual review items", async () => {
+  const handoffs = await listInterestHandoffs({
+    listHandoffsImpl: async () => [],
+    listReviewsImpl: async () => [{
+      candidateUserId: "candidate-user-1",
+      batchId: "batch-blocked-1",
+      reasons: ["credits_exhausted", "no_bankable_role"],
+      createdAt: "2026-07-29T22:51:54Z",
+      updatedAt: "2026-07-29T22:51:54Z",
+    }],
+    getJobImpl: async () => ({
+      candidateUserId: "candidate-user-1",
+      candidateId: "candidate-1",
+      batchId: "batch-blocked-1",
+      roles: ["role-1"],
+      submissions: [{
+        roleId: "role-1",
+        stage: "blocked",
+        blockers: ["credits_exhausted"],
+      }],
+      stopped: { paused: 0 },
+      emailed: { sent: false, skipped: "no_bankable_role" },
+    }),
+    trpcGetImpl: async (proc, input) => {
+      if (proc === "candidateUser.getCandidateUserById") {
+        return {
+          candidate: {
+            id: "candidate-1",
+            name: "Taylor Example",
+            email: "private@example.com",
+          },
+        };
+      }
+      if (proc === "role.getRoleByIdSimple") {
+        return { id: input.role_id, title: "Role One" };
+      }
+      throw new Error(`unexpected procedure ${proc}`);
+    },
+  });
+  assert.equal(handoffs.length, 1);
+  assert.equal(handoffs[0].mode, "manual_review");
+  assert.equal(handoffs[0].batchId, null);
+  assert.deepEqual(
+    handoffs[0].reasons,
+    ["credits_exhausted", "no_bankable_role"],
+  );
+  assert.equal("email" in handoffs[0], false);
 });
 
 test("two archived batches for one candidate remain independently visible", async () => {

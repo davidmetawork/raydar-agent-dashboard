@@ -344,6 +344,22 @@ test("handoff projection rejects missing batches and strips free-form reason tex
     roles: ["role-1"],
   }, ["shadow_would_submit", "contains private prose"]);
   assert.deepEqual(projected.reasons, ["shadow_would_submit"]);
+  assert.equal(projected.mode, "shadow_observation");
+
+  const blocked = projectInterestHandoff("candidate-1", {
+    batchId: "batch-2",
+    roles: ["role-2"],
+    submissions: [{
+      roleId: "role-2",
+      stage: "blocked",
+      blockers: ["credits_exhausted"],
+    }],
+  }, ["credits_exhausted", "no_bankable_role"]);
+  assert.equal(blocked.mode, "manual_review");
+  assert.deepEqual(
+    blocked.reasons,
+    ["credits_exhausted", "no_bankable_role"],
+  );
 });
 
 test("lock release is an atomic token check", async () => {

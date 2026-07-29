@@ -212,14 +212,33 @@ export function interestJobDefersNewRoles(job = {}) {
 }
 
 export function interestTerminalHandoffReasons(job = {}) {
-  if (job?.stage === "awaiting_human_submission") {
-    return ["human_submission_required"];
-  }
-  const bankable = (Array.isArray(job?.submissions) ? job.submissions : [])
+  if (!["done", "awaiting_human_submission"].includes(job?.stage)) return [];
+  const submissions = Array.isArray(job?.submissions) ? job.submissions : [];
+  const bankable = submissions
     .some((submission) => ["would_submit", "verified"].includes(submission?.stage));
-  return job?.stage === "done" && bankable
-    ? ["shadow_would_submit"]
-    : [];
+  const emailSkipped = String(job?.emailed?.skipped || "").trim();
+  return [...new Set([
+    ...(Array.isArray(job?.reviewReasons) ? job.reviewReasons : []),
+    ...submissions.flatMap((submission) => submission?.blockers || []),
+    ...(job.stage === "awaiting_human_submission"
+      ? ["human_submission_required"]
+      : bankable
+      ? [
+        "shadow_would_submit",
+      ]
+      : []),
+    ...(emailSkipped && ![
+      "dry_run",
+      "already_delivered",
+      "paraform_confirmation_owns_candidate_email",
+    ].includes(emailSkipped) ? [emailSkipped] : []),
+    ...submissions
+      .filter((submission) => submission?.stage === "contract_unconfirmed")
+      .map(() => "submit_contract_unconfirmed"),
+    ...(Array.isArray(job?.stopped?.errors) && job.stopped.errors.length
+      ? ["stop_errors"]
+      : []),
+  ].map((reason) => String(reason || "").trim()).filter(Boolean))];
 }
 
 export function interestEmailPlan({
@@ -932,7 +951,7 @@ export async function listInterestHandoffs({
   );
   const reviews = (await listReviewsImpl()).filter((review) => (
     Array.isArray(review?.reasons)
-    && review.reasons.some((reason) => HUMAN_HANDOFF_REASONS.has(reason))
+    && review.reasons.length > 0
     && (
       review?.batchId
         ? !archivedBatches.has(`${review.candidateUserId}\0${review.batchId}`)
@@ -1010,7 +1029,9 @@ export async function listInterestHandoffs({
       mode: review.mode || (
         review.reasons.includes("human_submission_required")
           ? "human_submission_required"
-          : "shadow_observation"
+          : review.reasons.includes("shadow_would_submit")
+            ? "shadow_observation"
+            : "manual_review"
       ),
       reasons: review.reasons,
       roles,
@@ -1447,13 +1468,15 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       const jobConfig = interestJobExecutionConfig(config, job);
       if (!candidate?.candidateUserId || !candidate?.candidateId) {
         const reviewReasons = ["candidate_identity_unavailable"];
-        await recordReview(pendingJob.candidateUserId, reviewReasons, {
-          roles: job.roles,
-          batchId: job.batchId,
-        });
+        await recordInterestHandoff(
+          pendingJob.candidateUserId,
+          job,
+          reviewReasons,
+        );
         await saveJob(appendJournal({
           ...job,
           stage: "done",
+          reviewReasons,
         }, "identity_unavailable"));
         result.reviews++;
         result.processed.push({
@@ -1484,6 +1507,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         await saveJob(appendJournal({
           ...job,
           stage: "stop_blocked",
+          reviewReasons,
         }, "stop_blocked", {
           errors: stop.errors.length,
         }));
@@ -1570,23 +1594,19 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       const handoffReason = reviewReasons.find(
         (reason) => HUMAN_HANDOFF_REASONS.has(reason),
       );
-      if (handoffReason) {
+      if (reviewReasons.length) {
         await recordInterestHandoff(
           candidate.candidateUserId,
           job,
           reviewReasons,
         );
-      } else if (reviewReasons.length) {
-        await recordReview(candidate.candidateUserId, reviewReasons, {
-          roles: job.roles,
-          batchId: job.batchId,
-        });
       }
       if (reviewReasons.length) result.reviews++;
       if (handoffReason === "human_submission_required") {
         job = await saveJob(appendJournal({
           ...job,
           stage: "awaiting_human_submission",
+          reviewReasons,
         }, "human_submission_handoff", {
           roles: bankable.length,
         }));
@@ -1594,6 +1614,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         job = await saveJob(appendJournal({
           ...job,
           stage: "done",
+          reviewReasons,
         }, "terminal", {
           handoff: handoffReason || null,
         }));

@@ -265,13 +265,18 @@ export function projectInterestHandoff(candidateUserId, job = {}, reasons = []) 
     .slice(0, 100);
   const selectedReasons = boundedReasonCodes(reasons, 100);
   const human = selectedReasons.includes("human_submission_required");
+  const shadow = selectedReasons.includes("shadow_would_submit");
   return {
     version: 1,
     state: "open",
     candidateUserId: String(candidateUserId || "").trim(),
     candidateId: String(job?.candidateId || "").trim() || null,
     batchId,
-    mode: human ? "human_submission_required" : "shadow_observation",
+    mode: human
+      ? "human_submission_required"
+      : shadow
+        ? "shadow_observation"
+        : "manual_review",
     reasons: selectedReasons,
     roles: boundedStrings(job?.roles, 100),
     submissions,
