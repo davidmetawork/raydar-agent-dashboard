@@ -45,6 +45,7 @@ import {
   clearVerifiedSubmissionFailures,
   isVerifiedSubmissionFailure,
   prepareJob,
+  reroutePreparedJob,
 } from "./pipeline.mjs";
 import {
   enqueueAutoJob,
@@ -2648,6 +2649,87 @@ async function reconcileRunningRecoverySubmissionProofs({
   return reconciled;
 }
 
+async function redueRunningRecoveryPendingJobs({
+  recovery,
+  store,
+  getJobImpl,
+  reroutePreparedImpl,
+  enqueueImpl,
+  now,
+}) {
+  const entryMap = new Map(
+    (await store.entries()).map((entry) => [entry.id, entry]),
+  );
+  let rerouted = 0;
+  let queued = 0;
+  let duplicate = 0;
+  for (const record of recovery.active) {
+    let job = await getJobImpl(record.id);
+    const entry = entryMap.get(record.id);
+    if (
+      !job
+      || !entry
+      || entry.status !== "authorized"
+      || entry.candidateHash !== record.candidateHash
+      || !entryCandidateMatchesJob(entry, job)
+      || !recoveryStampMatches(job, recovery)
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+      );
+    }
+    if (job.state !== "ready_to_submit") continue;
+    if (submissionLifecycleStarted(job)) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+      );
+    }
+    if (jobHasTechnicalFailure(job)) continue;
+    if (job?.automation?.preferenceRerouteRequired === true) {
+      job = await reroutePreparedImpl(job);
+      if (
+        job?.state !== "ready_to_submit"
+        || submissionLifecycleStarted(job)
+        || jobHasTechnicalFailure(job)
+        || job?.automation?.preferenceRerouteRequired === true
+        || !recoveryStampMatches(job, recovery)
+      ) {
+        throw codedError(
+          "RESUME_ONLY_BACKFILL_RECOVERY_PREFLIGHT_CHANGED",
+        );
+      }
+      rerouted += 1;
+    }
+    const result = await enqueueImpl(record.id, {
+      source: "authorized_backfill",
+      eventId: [
+        "resume-only-recovery-redue-v1",
+        recovery.manifestDigest,
+        record.id,
+        String(job.revision),
+      ].join(":"),
+      dueAt: now,
+      callEndedAt: job.callEndedAt || entry.callAt,
+      now,
+    });
+    if (
+      result?.enqueued !== true
+      && result?.duplicate !== true
+    ) {
+      throw codedError(
+        "RESUME_ONLY_BACKFILL_RECOVERY_COMMIT_FAILED",
+      );
+    }
+    queued += result.enqueued === true ? 1 : 0;
+    duplicate += result.duplicate === true ? 1 : 0;
+  }
+  return {
+    reroutedPending: rerouted,
+    redueQueued: queued,
+    redueDuplicate: duplicate,
+  };
+}
+
 export async function commitResumeOnlyBackfillRecovery({
   now = Date.now(),
   store = resumeOnlyBackfillRedisStore,
@@ -2656,6 +2738,7 @@ export async function commitResumeOnlyBackfillRecovery({
   getResumeImpl = getResume,
   saveJobImpl = saveJob,
   enqueueImpl = enqueueAutoJob,
+  reroutePreparedImpl = reroutePreparedJob,
   terminalPreflightImpl = resumeOnlyBackfillTerminalPreflight,
   targetMembershipSnapshotImpl =
     readResumeOnlyBackfillTargetMembershipSnapshot,
@@ -2694,15 +2777,24 @@ export async function commitResumeOnlyBackfillRecovery({
       );
     }
     if (recovery.status === "running") {
+      const reconciledVisibleSubmissions =
+        await reconcileRunningRecoverySubmissionProofs({
+          recovery,
+          store,
+          getJobImpl,
+          saveJobImpl,
+        });
       return {
         ...recoveryPublicStatus(recovery),
-        reconciledVisibleSubmissions:
-          await reconcileRunningRecoverySubmissionProofs({
-            recovery,
-            store,
-            getJobImpl,
-            saveJobImpl,
-          }),
+        reconciledVisibleSubmissions,
+        ...await redueRunningRecoveryPendingJobs({
+          recovery,
+          store,
+          getJobImpl,
+          reroutePreparedImpl,
+          enqueueImpl,
+          now,
+        }),
       };
     }
     const runTerminalPreflight =
