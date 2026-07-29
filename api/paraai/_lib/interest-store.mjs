@@ -14,6 +14,7 @@ const SNAP_TTL_SECONDS = 730 * 24 * 60 * 60;
 const JOB_TTL_SECONDS = 180 * 24 * 60 * 60;
 const LOCK_TTL_SECONDS = 150;
 const REVIEW_TTL_SECONDS = 730 * 24 * 60 * 60;
+const TERMINAL_JOB_STAGES = new Set(["done", "awaiting_human_submission"]);
 
 const KV_URL = String(
   process.env.PARAAI_INTEREST_KV_REST_API_URL
@@ -177,7 +178,7 @@ export async function saveJob(job, { kvImpl = kv } = {}) {
   const next = { ...job, updatedAt: new Date().toISOString() };
   await kvImpl(["SET", jobKey(job.candidateUserId), JSON.stringify(next), "EX", JOB_TTL_SECONDS]);
   await kvImpl([
-    next.stage === "done" ? "SREM" : "SADD",
+    TERMINAL_JOB_STAGES.has(next.stage) ? "SREM" : "SADD",
     JOB_INDEX_KEY,
     interestCandidateHash(job.candidateUserId),
   ]);
@@ -210,7 +211,7 @@ export async function listPendingJobs(limit = 100, { kvImpl = kv } = {}) {
       await kvImpl(["GET", `paraai:interest:job:${hash}`]),
       null,
     );
-    if (job && job.stage !== "done") out.push(job);
+    if (job && !TERMINAL_JOB_STAGES.has(job.stage)) out.push(job);
     else await kvImpl(["SREM", JOB_INDEX_KEY, hash]);
   }
   return out;

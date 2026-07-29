@@ -215,7 +215,7 @@ function inMemoryQueueKv() {
   };
 }
 
-test("pending jobs survive the sweep boundary and leave the queue only when done", async () => {
+test("pending jobs survive the sweep boundary and leave the queue at either terminal stage", async () => {
   const kvImpl = inMemoryQueueKv();
   const pending = await saveJob({
     candidateUserId: "candidate-1",
@@ -230,6 +230,8 @@ test("pending jobs survive the sweep boundary and leave the queue only when done
     ["batch-1"],
   );
   await saveJob({ ...pending, stage: "done" }, { kvImpl });
+  assert.deepEqual(await listPendingJobs(10, { kvImpl }), []);
+  await saveJob({ ...pending, stage: "awaiting_human_submission" }, { kvImpl });
   assert.deepEqual(await listPendingJobs(10, { kvImpl }), []);
 });
 

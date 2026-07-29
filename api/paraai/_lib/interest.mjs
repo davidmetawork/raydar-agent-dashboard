@@ -40,6 +40,7 @@ import {
   acquireLock,
   releaseLock,
   recordReview,
+  listReviews,
   recordSweep,
   getSweepState,
   appendJournal,
@@ -51,8 +52,9 @@ import {
 // Plan:     docs/PLAN-CURATED-INTEREST-TO-SUBMISSION-2026-07-28.md
 //
 // SAFETY. Every write is gated and every gate defaults closed. Ordering is
-// code-enforced (email needs stop; submit needs both) so we can never promise a
-// candidate something the lane is not actually armed to do.
+// code-enforced (email needs stop; submit handoff needs both). The worker never
+// makes the final candidate submission; that employment decision stays with
+// David in Paraform.
 
 export const INTEREST_STATUS = Object.freeze({
   PENDING: "PENDING",
@@ -76,13 +78,23 @@ const uniqueReasonCodes = (...values) => [...new Set(
   values.flat().filter((value) => typeof value === "string" && value.trim()),
 )];
 
-export function interestConfig(env = process.env) {
+export function interestConfig(env = process.env, now = Date.now()) {
   const enabled = flag("PARAAI_INTEREST_ENABLED", env);
   // Dry run defaults TRUE. Only an explicit falsey value turns it off.
   const raw = String(env.PARAAI_INTEREST_DRY_RUN ?? "").trim().toLowerCase();
   const dryRun = raw === "" ? true : !["0", "false", "no", "off"].includes(raw);
   const notBeforeRaw = String(env.PARAAI_INTEREST_NOT_BEFORE || "").trim();
   const notBefore = notBeforeRaw ? Date.parse(notBeforeRaw) : NaN;
+  const releaseNotBeforeRaw = String(
+    env.PARAAI_INTEREST_RELEASE_NOT_BEFORE || "",
+  ).trim();
+  const releaseNotBefore = releaseNotBeforeRaw
+    ? Date.parse(releaseNotBeforeRaw)
+    : NaN;
+  const releaseNotBeforeConfigured =
+    Boolean(releaseNotBeforeRaw) && Number.isFinite(releaseNotBefore);
+  const releaseReady = releaseNotBeforeConfigured
+    && Number(now) >= releaseNotBefore;
 
   const stopArmed = flag("PARAAI_INTEREST_STOP_APPROVED", env);
   const emailArmedRaw = flag("PARAAI_INTEREST_EMAIL_APPROVED", env);
@@ -98,6 +110,11 @@ export function interestConfig(env = process.env) {
     dryRun,
     notBefore: Number.isFinite(notBefore) ? notBefore : null,
     notBeforeConfigured: Boolean(notBeforeRaw) && Number.isFinite(notBefore),
+    releaseNotBefore: Number.isFinite(releaseNotBefore)
+      ? releaseNotBefore
+      : null,
+    releaseNotBeforeConfigured,
+    releaseReady,
     stopArmed,
     emailArmed,
     submitArmed,
@@ -106,7 +123,9 @@ export function interestConfig(env = process.env) {
       emailArmedRaw && !stopArmed ? "EMAIL_APPROVED requires STOP_APPROVED" : null,
       submitArmedRaw && !(stopArmed && emailArmedRaw) ? "SUBMIT_APPROVED requires STOP_APPROVED and EMAIL_APPROVED" : null,
     ].filter(Boolean),
-    writesEnabled: enabled && !dryRun,
+    // A gate value alone can never enable a write. The release timestamp is a
+    // second, fail-closed pin set only after the real shadow window completes.
+    writesEnabled: enabled && !dryRun && releaseReady,
     sweepConcurrency: Math.max(1, Math.min(6, Number(env.PARAAI_INTEREST_CONCURRENCY || 4))),
     sweepBatchSize: Math.max(
       1,
@@ -147,6 +166,12 @@ export function interestEmailPlan({
     apply: config?.writesEnabled === true && config?.emailArmed === true,
     canaryTo: canaryPhase ? config.emailCanaryTo : null,
   };
+}
+
+// Final candidate submission is always a human handoff. Keep this as a named
+// invariant so an armed environment cannot silently restore worker authority.
+export function interestWorkerMaySubmit() {
+  return false;
 }
 
 /* ------------------------------------------------------------------- reads */
@@ -724,6 +749,101 @@ async function hydrateSubmissionCandidate(candidate, trpcGetImpl) {
   }
 }
 
+const HUMAN_HANDOFF_REASONS = new Set([
+  "human_submission_required",
+  "shadow_would_submit",
+]);
+
+function handoffRoleTitle(role, roleId) {
+  return String(
+    role?.title
+    || role?.name
+    || role?.job_title
+    || role?.position
+    || roleId
+    || "Role",
+  ).trim();
+}
+
+function handoffRoleCompany(role) {
+  return String(
+    role?.company?.name
+    || role?.company_name
+    || role?.companyName
+    || "",
+  ).trim() || null;
+}
+
+/**
+ * Human-only handoff feed.
+ *
+ * Candidate identity is hydrated only for the authenticated response and is
+ * never copied into the durable review card. The worker cannot consume this
+ * feed or turn a handoff into an application mutation.
+ */
+export async function listInterestHandoffs({
+  trpcGetImpl = trpcGet,
+  listReviewsImpl = listReviews,
+  getJobImpl = getJob,
+} = {}) {
+  const reviews = (await listReviewsImpl()).filter((review) => (
+    Array.isArray(review?.reasons)
+    && review.reasons.some((reason) => HUMAN_HANDOFF_REASONS.has(reason))
+  ));
+  const handoffs = [];
+  for (const review of reviews) {
+    const job = await getJobImpl(review.candidateUserId);
+    if (!job) continue;
+    const candidate = await hydrateSubmissionCandidate({
+      candidateUserId: review.candidateUserId,
+      candidateId: job.candidateId || null,
+    }, trpcGetImpl);
+    const submissionByRole = new Map(
+      (Array.isArray(job.submissions) ? job.submissions : [])
+        .map((submission) => [submission?.roleId, submission]),
+    );
+    const roles = [];
+    for (const roleId of Array.isArray(job.roles) ? job.roles : []) {
+      let role = null;
+      try {
+        role = await trpcGetImpl(
+          "role.getRoleByIdSimple",
+          { role_id: roleId, id: roleId },
+        );
+      } catch {}
+      const submission = submissionByRole.get(roleId) || null;
+      roles.push({
+        roleId,
+        title: handoffRoleTitle(role, roleId),
+        company: handoffRoleCompany(role),
+        stage: submission?.stage || null,
+        blockers: Array.isArray(submission?.blockers)
+          ? submission.blockers
+          : [],
+      });
+    }
+    handoffs.push({
+      candidateUserId: review.candidateUserId,
+      candidateName: candidate?.name || "Candidate",
+      candidateHref:
+        `https://www.paraform.com/candidates?id=${encodeURIComponent(review.candidateUserId)}`,
+      mode: review.reasons.includes("human_submission_required")
+        ? "human_submission_required"
+        : "shadow_observation",
+      reasons: review.reasons,
+      roles,
+      stopped: job.stopped || null,
+      emailed: job.emailed || null,
+      createdAt: review.createdAt || job.createdAt || null,
+      updatedAt: review.updatedAt || job.updatedAt || null,
+    });
+  }
+  return handoffs.sort((left, right) => (
+    (Date.parse(right.updatedAt || "") || 0)
+    - (Date.parse(left.updatedAt || "") || 0)
+  ));
+}
+
 /**
  * Submit one candidate to one role.
  *
@@ -1015,9 +1135,17 @@ export async function interestStatus() {
       enabled: config.enabled,
       dryRun: config.dryRun,
       notBeforeConfigured: config.notBeforeConfigured,
+      releaseNotBeforeConfigured: config.releaseNotBeforeConfigured,
+      releaseReady: config.releaseReady,
+      releaseNotBefore: config.releaseNotBefore
+        ? new Date(config.releaseNotBefore).toISOString()
+        : null,
       stopArmed: config.stopArmed,
       emailArmed: config.emailArmed,
       submitArmed: config.submitArmed,
+      automaticSubmitBlocked: true,
+      humanHandoffRequired: true,
+      writesEnabled: config.writesEnabled,
       emailCanaryConfigured: Boolean(config.emailCanaryTo),
       gateOrderViolations: config.gateOrderViolations,
     },
@@ -1180,18 +1308,20 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         continue;
       }
 
-      // 2. SUBMIT claims + pre-flight (before the email, so the promise is bankable).
+      // 2. Evaluate each submission, but never mutate Paraform from the
+      // worker. Candidate submission is an employment decision, so the final
+      // action is handed to David in Paraform.
       const submissions = [];
       for (const roleId of job.roles) {
         const credits = await readSubmissionCredits(new Date(now)).catch(() => null);
         submissions.push(await submitToRole({
           candidate,
           roleId,
-          apply: config.writesEnabled && config.submitArmed,
+          apply: interestWorkerMaySubmit(),
           credits,
         }));
       }
-      job = await saveJob(appendJournal({ ...job, submissions, stage: "submitted" }, "submitted", {
+      job = await saveJob(appendJournal({ ...job, submissions, stage: "evaluated" }, "evaluated", {
         roles: submissions.length,
       }));
 
@@ -1231,6 +1361,13 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
 
       const reviewReasons = [
         ...blockers,
+        ...(bankable.length
+          ? [
+            config.writesEnabled && config.submitArmed
+              ? "human_submission_required"
+              : "shadow_would_submit",
+          ]
+          : []),
         ...(email.skipped && ![
           "dry_run",
           "already_delivered",
@@ -1245,6 +1382,14 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
           batchId: job.batchId,
         });
         result.reviews++;
+      }
+      if (reviewReasons.includes("human_submission_required")) {
+        job = await saveJob(appendJournal({
+          ...job,
+          stage: "awaiting_human_submission",
+        }, "human_submission_handoff", {
+          roles: bankable.length,
+        }));
       }
 
       result.processed.push({

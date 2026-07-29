@@ -14,6 +14,8 @@ import {
   interestStopCanProceed,
   interestSweepComplete,
   interestSweepWindow,
+  interestWorkerMaySubmit,
+  listInterestHandoffs,
   INTEREST_STATUS,
   REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
   curatedListSequenceIds,
@@ -194,10 +196,11 @@ test("gates arm in the correct order", () => {
   const c = interestConfig({
     PARAAI_INTEREST_ENABLED: "1",
     PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-07-29T00:00:00Z",
     PARAAI_INTEREST_STOP_APPROVED: "1",
     PARAAI_INTEREST_EMAIL_APPROVED: "1",
     PARAAI_INTEREST_SUBMIT_APPROVED: "1",
-  });
+  }, Date.parse("2026-07-29T01:00:00Z"));
   assert.equal(c.stopArmed, true);
   assert.equal(c.emailArmed, true);
   assert.equal(c.submitArmed, true);
@@ -209,10 +212,11 @@ test("EMAIL-only rollout can target only the configured canary recipient", () =>
   const emailOnly = interestConfig({
     PARAAI_INTEREST_ENABLED: "1",
     PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-07-29T00:00:00Z",
     PARAAI_INTEREST_STOP_APPROVED: "1",
     PARAAI_INTEREST_EMAIL_APPROVED: "1",
     PARAAI_INTEREST_EMAIL_CANARY_TO: "david@example.com",
-  });
+  }, Date.parse("2026-07-29T01:00:00Z"));
   assert.deepEqual(interestEmailPlan({ config: emailOnly }), {
     send: true,
     skipped: null,
@@ -281,6 +285,84 @@ test("not-before must be a parseable timestamp to count as configured", () => {
   assert.equal(interestConfig({}).notBeforeConfigured, false);
   assert.equal(interestConfig({ PARAAI_INTEREST_NOT_BEFORE: "nonsense" }).notBeforeConfigured, false);
   assert.equal(interestConfig({ PARAAI_INTEREST_NOT_BEFORE: "2026-07-28T00:00:00Z" }).notBeforeConfigured, true);
+});
+
+test("all writes require a configured release time that has actually passed", () => {
+  const env = {
+    PARAAI_INTEREST_ENABLED: "1",
+    PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_STOP_APPROVED: "1",
+  };
+  assert.equal(interestConfig(env).writesEnabled, false);
+  assert.equal(interestConfig({
+    ...env,
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "nonsense",
+  }).writesEnabled, false);
+  const pinned = {
+    ...env,
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-08-02T00:00:00Z",
+  };
+  assert.equal(
+    interestConfig(pinned, Date.parse("2026-08-01T23:59:59Z")).writesEnabled,
+    false,
+  );
+  assert.equal(
+    interestConfig(pinned, Date.parse("2026-08-02T00:00:00Z")).writesEnabled,
+    true,
+  );
+});
+
+test("the worker can never make the final candidate submission", () => {
+  assert.equal(interestWorkerMaySubmit(), false);
+});
+
+test("handoff feed hydrates identity transiently and never exposes email", async () => {
+  const handoffs = await listInterestHandoffs({
+    listReviewsImpl: async () => [{
+      candidateUserId: "candidate-user-1",
+      reasons: ["human_submission_required"],
+      createdAt: "2026-07-29T18:00:00Z",
+      updatedAt: "2026-07-29T18:01:00Z",
+    }],
+    getJobImpl: async () => ({
+      candidateUserId: "candidate-user-1",
+      candidateId: "candidate-1",
+      roles: ["role-1"],
+      submissions: [{
+        roleId: "role-1",
+        stage: "would_submit",
+        blockers: [],
+      }],
+      stopped: { paused: 1 },
+      emailed: { sent: true },
+    }),
+    trpcGetImpl: async (proc) => {
+      if (proc === "candidateUser.getCandidateUserById") {
+        return {
+          candidate: {
+            id: "candidate-1",
+            name: "Taylor Example",
+            email: "private@example.com",
+            linkedin_user: "taylor-example",
+          },
+        };
+      }
+      if (proc === "role.getRoleByIdSimple") {
+        return {
+          id: "role-1",
+          title: "Founding Engineer",
+          company: { name: "Example Co" },
+        };
+      }
+      throw new Error(`unexpected procedure ${proc}`);
+    },
+  });
+  assert.equal(handoffs.length, 1);
+  assert.equal(handoffs[0].candidateName, "Taylor Example");
+  assert.equal(handoffs[0].mode, "human_submission_required");
+  assert.equal(handoffs[0].roles[0].title, "Founding Engineer");
+  assert.equal("email" in handoffs[0], false);
+  assert.match(handoffs[0].candidateHref, /candidate-user-1/);
 });
 
 test("submit preflight pins Paraform's five required candidate preference fields", () => {
