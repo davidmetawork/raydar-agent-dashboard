@@ -4,8 +4,8 @@
 // the whole point of the delay) -> ensure role sequence (TPL) or target (SEQ) ->
 // enroll the clean ones -> backfill lead emails -> delete the delay project.
 import { cors, requireAuth, hasCookie, cronAuth, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
-// Calendly-aware booked check — see enroll.mjs.
-import { bookedSetWithCalendly as bookedSet } from "./_lib/booking-stop.mjs";
+// Native-Raydar + legacy-Calendly booked check — see enroll.mjs.
+import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
 import { protectedRecruiterForRoleTitle } from "./_lib/protected.mjs";
 import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";

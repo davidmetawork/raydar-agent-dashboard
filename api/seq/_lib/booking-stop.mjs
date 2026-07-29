@@ -5,15 +5,17 @@
 // Paraform's only native sequence stop is REPLY. Booking is not a stop condition
 // and there is no setting to make it one — proven on a 211-lead sequence where
 // the ONLY pause reason present was "REPLIED" (46/46). Meanwhile step 1 of every
-// role sequence offers two booking links: the Paraform scheduler (which sets
-// relationship_status = SCHEDULED_CALL) and a Calendly link for the human call
-// (which writes NOTHING back to Paraform). A candidate who books via Calendly and
-// doesn't reply is, to Paraform, indistinguishable from someone ignoring us — so
-// the next "still on the job market?" nudge goes out on schedule.
+// role sequence historically offered two booking links: Paraform's scheduler
+// (which sets relationship_status = SCHEDULED_CALL) and Calendly for the human
+// call (which writes NOTHING back to Paraform). A candidate who booked via
+// Calendly and did not reply was, to Paraform, indistinguishable from someone
+// ignoring us — so the next "still on the job market?" nudge went out on time.
 //
-// Both links are load-bearing and both stay: Paraform's scheduler supports only
-// one calendar link per account and Raydar offers two call types. So an EXTERNAL
-// control is mandatory and permanent. This module is that control.
+// Raydar's first-party scheduler now replaces both candidate-facing links. The
+// legacy Paraform/Calendly reads remain active through the measured overlap
+// window, while the native HMAC webhook and cursor-complete booking index become
+// the permanent control. This module intentionally understands both generations
+// so cutover never creates a booking-stop gap.
 //
 // It replaces n8n workflow Ha2brYZURrfNjVNU, which was the only prior mechanism
 // and which failed for nine consecutive days (60s task-runner timeout) with no
@@ -33,12 +35,18 @@
 // candidate who already booked. That asymmetry is why this ships enforcing.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { createHash } from "node:crypto";
 import {
   trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
   // These three moved into core.mjs so the launcher's dedup and
   // enrolled-elsewhere scans get the same protection this module needed.
   withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads, campaignLeadBySearch,
 } from "./core.mjs";
+import {
+  fetchRaydarBookingIndex,
+  raydarSchedulerBookingStopEnabled,
+  raydarSchedulerIndexConfigured,
+} from "./raydar-booking-index.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
 
 // ---------- which sequences are "please book a call" nudges ----------
@@ -117,6 +125,8 @@ export const K = {
   leadIndex: "seqguard:leadindex",
   deferred: (email) => `seqguard:deferred:${hash(email)}`,
   event: (uri) => `seqguard:event:${hash(uri)}`,
+  raydarEvent: (eventId) => `seqguard:raydar-event:${secureKeyFragment(eventId)}`,
+  raydarCancel: (bookingId) => `seqguard:raydar-cancel:${secureKeyFragment(bookingId)}`,
   paused: (ccuId) => `seqguard:paused:${ccuId}`,
   cancel: (uri) => `seqguard:cancel:${hash(uri)}`,
   invitees: (uri) => `seqguard:inv:${hash(uri)}`,
@@ -137,6 +147,10 @@ function hash(value) {
   const s = String(value);
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
   return h.toString(36) + "-" + s.length;
+}
+
+function secureKeyFragment(value) {
+  return createHash("sha256").update(String(value)).digest("hex").slice(0, 32);
 }
 
 /** Alert at most once per `key` per `windowSeconds`. Returns true if the caller should alert. */
@@ -367,6 +381,8 @@ export function decideLead({ lead, seq, booking, relStatus, now = Date.now() }) 
   if (!Number.isFinite(enrolledAt)) return null;
 
   if (booking && booking.bookedAt > enrolledAt) {
+    const source = booking.source === "raydar_scheduler" ? "raydar_scheduler" : "calendly";
+    const sourceLabel = source === "raydar_scheduler" ? "raydar scheduler" : "calendly";
     return {
       ccuId: lead.ccu_id,
       cuId: lead.cu_id,
@@ -377,8 +393,8 @@ export function decideLead({ lead, seq, booking, relStatus, now = Date.now() }) 
       enrolledAt: new Date(enrolledAt).toISOString(),
       bookedAt: new Date(booking.bookedAt).toISOString(),
       startsAt: booking.startsAt,
-      source: "calendly",
-      evidence: `calendly ${booking.eventName || "event"} booked ${new Date(booking.bookedAt).toISOString()} > enrolled ${new Date(enrolledAt).toISOString()}`,
+      source,
+      evidence: `${sourceLabel} ${booking.eventName || "event"} booked ${new Date(booking.bookedAt).toISOString()} > enrolled ${new Date(enrolledAt).toISOString()}`,
     };
   }
 
@@ -494,6 +510,9 @@ export async function runBookingSweep({
   // comfortable ceiling for this proc; do not raise it without re-measuring.
   profileConcurrency = Number(process.env.BOOKING_STOP_PROFILE_CONCURRENCY || 3),
   calendlyBackDays = Number(process.env.BOOKING_STOP_BACK_DAYS || 7),
+  raydarEnabled = raydarSchedulerBookingStopEnabled(),
+  raydarConfigured = raydarSchedulerIndexConfigured(),
+  raydarIndexLoader = fetchRaydarBookingIndex,
   onDecision = null,
 } = {}) {
   const startedAt = Date.now();
@@ -505,6 +524,13 @@ export async function runBookingSweep({
     calendlyEvents: 0,
     calendlyCacheHits: 0,
     calendlyTruncated: false,
+    raydarEnabled,
+    raydarConfigured,
+    raydarItems: 0,
+    raydarBookings: 0,
+    raydarPages: 0,
+    raydarComplete: !raydarEnabled,
+    raydarError: null,
     profilesAttempted: 0,
     profilesRead: 0,
     profileFailures: 0,
@@ -526,6 +552,26 @@ export async function runBookingSweep({
   result.calendlyEvents = cal.events;
   result.calendlyCacheHits = cal.cacheHits;
   result.calendlyTruncated = cal.truncated;
+
+  let raydar = null;
+  if (raydarEnabled) {
+    if (!raydarConfigured) {
+      result.raydarError = "RAYDAR_BOOKING_INDEX_NOT_CONFIGURED";
+    } else {
+      try {
+        raydar = await raydarIndexLoader({ now });
+        if (raydar?.complete !== true || !(raydar?.index instanceof Map)) {
+          throw new Error("RAYDAR_BOOKING_INDEX_INCOMPLETE");
+        }
+        result.raydarItems = raydar.items;
+        result.raydarBookings = raydar.bookings;
+        result.raydarPages = raydar.pages;
+        result.raydarComplete = true;
+      } catch (error) {
+        result.raydarError = String(error?.code || error?.message || "RAYDAR_BOOKING_INDEX_UNAVAILABLE").slice(0, 120);
+      }
+    }
+  }
 
   const seqs = await loadNudgeSequences();
   result.sequences = seqs.length;
@@ -570,13 +616,17 @@ export async function runBookingSweep({
     return result;
   }
 
-  // Pass 1 — Calendly email match. Cheap: no extra API calls at all.
+  // Pass 1 — external booking indexes. Both are already in memory, so matching
+  // is cheap. During overlap we choose the newest booking across native Raydar
+  // and Calendly rather than allowing source order to change the decision.
   const matched = new Set();
   for (const { seq, lead } of active) {
     let booking = null;
     for (const e of leadAddresses(lead, null)) {
-      const b = cal.index.get(e);
-      if (b && (!booking || b.bookedAt > booking.bookedAt)) booking = b;
+      for (const source of [cal, raydar]) {
+        const b = source?.index?.get(e);
+        if (b && (!booking || b.bookedAt > booking.bookedAt)) booking = b;
+      }
     }
     const d = decideLead({ lead, seq, booking, relStatus: null, now });
     if (d) { result.decisions.push(d); matched.add(lead.ccu_id); }
@@ -627,8 +677,10 @@ export async function runBookingSweep({
       result.profilesRead++;
       let booking = null;
       for (const e of leadAddresses(lead, prof)) {
-        const b = cal.index.get(e);
-        if (b && (!booking || b.bookedAt > booking.bookedAt)) booking = b;
+        for (const source of [cal, raydar]) {
+          const b = source?.index?.get(e);
+          if (b && (!booking || b.bookedAt > booking.bookedAt)) booking = b;
+        }
       }
       const d = decideLead({ lead, seq, booking, relStatus: prof, now });
       if (d) result.decisions.push(d);
@@ -656,7 +708,8 @@ export async function runBookingSweep({
   result.indexedEmails = Object.keys(byEmail).length;
   await kvSet(K.leadIndex, { builtAt: new Date().toISOString(), byEmail }, 6 * 3600);
 
-  result.ok = true;
+  result.ok = !result.raydarError;
+  if (result.raydarError) result.error = "raydar_index_incomplete";
   result.durationMs = Date.now() - startedAt;
   return result;
 }
@@ -666,16 +719,23 @@ export async function runBookingSweep({
  *
  * This CANNOT walk every sequence's membership inline — measured in production,
  * that is a ~200-call read that blows the function budget and returns 504 to
- * Calendly (which then retries, making it worse). Instead the hourly sweep
+ * the provider (which then retries, making it worse). Instead the hourly sweep
  * publishes a lead index and the webhook does ONE KV read against it.
  *
  * On an index miss the work is deferred rather than dropped: the next sweep
- * re-evaluates every lead against Calendly anyway, so the candidate is still
- * caught. A miss only happens for someone enrolled within the last hour, whose
+ * re-evaluates every lead against all booking sources anyway, so the candidate
+ * is still caught. A miss only happens for someone enrolled within the last hour, whose
  * next step is days away — so the delay costs nothing, and the deferral is
  * recorded so "we deferred" can never be confused with "there was nothing to do".
  */
-export async function pauseForBooking({ email, bookedAt, startsAt = null, eventName = null, apply = true }) {
+export async function pauseForBooking({
+  email,
+  bookedAt,
+  startsAt = null,
+  eventName = null,
+  source = "calendly",
+  apply = true,
+}) {
   const target = normEmail(email);
   const at = typeof bookedAt === "number" ? bookedAt : Date.parse(bookedAt);
   const out = { decisions: [], paused: 0, pauseErrors: [], deferred: false, indexAgeMs: null };
@@ -693,7 +753,13 @@ export async function pauseForBooking({ email, bookedAt, startsAt = null, eventN
   }
 
   const entries = idx.byEmail[target] || [];
-  const booking = { bookedAt: at, startsAt, eventName, status: "active" };
+  const booking = {
+    bookedAt: at,
+    startsAt,
+    eventName,
+    status: "active",
+    source: source === "raydar_scheduler" ? "raydar_scheduler" : "calendly",
+  };
   for (const e of entries) {
     const d = decideLead({
       lead: { ccu_id: e.ccu, cu_id: e.cu, name: e.n || null, to_use_email: target, created_at: e.t, is_paused: false, is_archived: false },
@@ -713,50 +779,79 @@ export async function pauseForBooking({ email, bookedAt, startsAt = null, eventN
 
 // ---------- enroll-time gate ----------
 /**
- * Calendly-aware replacement for core.mjs `bookedSet()`.
+ * External-booking-aware replacement for core.mjs `bookedSet()`.
  *
  * The original resolves "is this candidate already booked?" purely from Paraform
  * relationship status, so it cannot see a human call booked through Calendly —
  * the same blind spot that let the nudges go out, one step earlier. Without this
  * the launcher will happily enroll someone who already has a call on the books.
  *
- * FAILS OPEN on the Calendly leg by design: a Calendly outage must not block a
- * whole cohort's enrollment. Anyone who slips through is caught by the sweep
- * within the hour, and the cost of that is one extra email — versus blocking
- * legitimate outreach entirely. The Paraform leg still fails closed as before.
+ * The legacy Calendly leg preserves its historical fail-open behavior. The
+ * first-party Raydar index does NOT: once enabled, an incomplete/error response
+ * throws and blocks enrollment. A first-party source failure must never be
+ * interpreted as evidence that a candidate did not book.
  */
-export async function bookedSetWithCalendly(candidateUserIds, { concurrency = 8, now = Date.now() } = {}) {
+export async function bookedSetWithSources(candidateUserIds, {
+  concurrency = 8,
+  now = Date.now(),
+  calendlyEnabled = calendlyConfigured(),
+  calendlyIndexLoader = calendlyBookingIndex,
+  raydarEnabled = raydarSchedulerBookingStopEnabled(),
+  raydarConfigured = raydarSchedulerIndexConfigured(),
+  raydarIndexLoader = fetchRaydarBookingIndex,
+  profileLoader = cachedRelationshipStatus,
+} = {}) {
   const ids = Array.from(new Set((candidateUserIds || []).filter(Boolean)));
   const booked = new Set();
   if (!ids.length) return booked;
 
   let cal = null;
-  if (calendlyConfigured()) {
+  if (calendlyEnabled) {
     // Narrow window: at enroll time we only care whether a call is upcoming or
     // was very recent, and this runs on a user-facing path.
-    cal = await calendlyBookingIndex({ backDays: 7, forwardDays: 120, now, concurrency })
+    cal = await calendlyIndexLoader({ backDays: 7, forwardDays: 120, now, concurrency })
       .catch(() => null); // fail open — see doc comment
+  }
+
+  let raydar = null;
+  if (raydarEnabled) {
+    if (!raydarConfigured) {
+      const error = new Error("RAYDAR_BOOKING_INDEX_NOT_CONFIGURED");
+      error.code = "RAYDAR_BOOKING_INDEX_NOT_CONFIGURED";
+      throw error;
+    }
+    raydar = await raydarIndexLoader({ now });
+    if (raydar?.complete !== true || !(raydar?.index instanceof Map)) {
+      const error = new Error("RAYDAR_BOOKING_INDEX_INCOMPLETE");
+      error.code = "RAYDAR_BOOKING_INDEX_INCOMPLETE";
+      throw error;
+    }
   }
 
   let i = 0;
   const worker = async () => {
     while (i < ids.length) {
       const id = ids[i++];
-      const prof = await cachedRelationshipStatus(id).catch(() => null);
+      const prof = await profileLoader(id).catch(() => null);
       if (!prof) continue;
       if (prof.status && BOOKED_STATUSES.has(prof.status)) { booked.add(id); continue; }
-      if (!cal) continue;
       for (const e of prof.emails || []) {
-        const hit = cal.index.get(e);
-        // Only an ACTIVE booking blocks enrollment; a cancelled one means they
-        // are back in play and should be re-engaged.
-        if (hit && hit.status === "active") { booked.add(id); break; }
+        for (const source of [cal, raydar]) {
+          const hit = source?.index?.get(e);
+          // Only an ACTIVE booking blocks enrollment; a cancelled one means they
+          // are back in play and should be re-engaged.
+          if (hit && hit.status === "active") { booked.add(id); break; }
+        }
+        if (booked.has(id)) break;
       }
     }
   };
   await Promise.all(Array.from({ length: concurrency }, worker));
   return booked;
 }
+
+// Compatibility export retained while callers and registry language transition.
+export const bookedSetWithCalendly = bookedSetWithSources;
 
 // ---------- staleness ----------
 export const LEAD_INDEX_MAX_AGE_MS = Number(process.env.BOOKING_STOP_INDEX_MAX_AGE_MS || 3 * 3600 * 1000);
@@ -769,7 +864,15 @@ export async function sweepStaleness(now = Date.now()) {
   const last = await kvGet(K.lastSweep);
   if (!last?.at) return { stale: true, lastAt: null, ageMs: null };
   const ageMs = now - Date.parse(last.at);
-  return { stale: ageMs > SWEEP_STALE_AFTER_MS, lastAt: last.at, ageMs, activeLeads: last.activeLeads ?? null };
+  return {
+    stale: ageMs > SWEEP_STALE_AFTER_MS,
+    lastAt: last.at,
+    ageMs,
+    activeLeads: last.activeLeads ?? null,
+    raydarEnabled: Boolean(last.raydarEnabled),
+    raydarComplete: Boolean(last.raydarComplete),
+    raydarBookings: last.raydarBookings ?? null,
+  };
 }
 
 export async function recordSuccessfulSweep(result, now = Date.now()) {
@@ -778,5 +881,8 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     activeLeads: result.activeLeads,
     paused: result.paused,
     durationMs: result.durationMs,
+    raydarEnabled: Boolean(result.raydarEnabled),
+    raydarComplete: Boolean(result.raydarComplete),
+    raydarBookings: result.raydarBookings ?? 0,
   });
 }

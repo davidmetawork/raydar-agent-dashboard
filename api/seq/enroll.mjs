@@ -1,7 +1,7 @@
 import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, createCandidate, addToProject, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, archiveImportSet, createDelayProject } from "./_lib/core.mjs";
-// Calendly-aware booked check: Paraform status alone cannot see a human call
-// booked through the Calendly link in our own sequence email (2026-07-26).
-import { bookedSetWithCalendly as bookedSet } from "./_lib/booking-stop.mjs";
+// External-booking-aware check: native Raydar and legacy Calendly bookings are
+// both protected during the measured overlap window.
+import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
 import { protectedRecruiterForRole } from "./_lib/protected.mjs";
 
 export const config = { maxDuration: 300 };
