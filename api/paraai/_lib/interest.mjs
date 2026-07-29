@@ -139,6 +139,61 @@ export function interestConfig(env = process.env, now = Date.now()) {
   };
 }
 
+export const INTEREST_ROLLOUT_PHASE = Object.freeze({
+  SHADOW: "shadow",
+  STOP: "stop",
+  EMAIL_CANARY: "email_canary",
+  HUMAN_HANDOFF: "human_handoff",
+});
+
+const ROLLOUT_PHASES = new Set(Object.values(INTEREST_ROLLOUT_PHASE));
+
+export function interestRolloutPhase(config = {}) {
+  if (config.writesEnabled !== true || config.stopArmed !== true) {
+    return INTEREST_ROLLOUT_PHASE.SHADOW;
+  }
+  if (config.emailArmed !== true) return INTEREST_ROLLOUT_PHASE.STOP;
+  if (config.submitArmed !== true) {
+    return INTEREST_ROLLOUT_PHASE.EMAIL_CANARY;
+  }
+  return INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF;
+}
+
+export function interestJobRolloutPhase(job = {}) {
+  const phase = String(job?.rolloutPhase || "");
+  return ROLLOUT_PHASES.has(phase)
+    ? phase
+    : INTEREST_ROLLOUT_PHASE.SHADOW;
+}
+
+/**
+ * A job may lose capabilities when an operator closes a gate, but it can never
+ * gain capabilities that were not present when its transition was detected.
+ * Missing/legacy phase metadata fails closed to shadow.
+ */
+export function interestJobExecutionConfig(config = {}, job = {}) {
+  const rolloutPhase = interestJobRolloutPhase(job);
+  const stopAllowed = [
+    INTEREST_ROLLOUT_PHASE.STOP,
+    INTEREST_ROLLOUT_PHASE.EMAIL_CANARY,
+    INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF,
+  ].includes(rolloutPhase);
+  const emailAllowed = [
+    INTEREST_ROLLOUT_PHASE.EMAIL_CANARY,
+    INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF,
+  ].includes(rolloutPhase);
+  const handoffAllowed =
+    rolloutPhase === INTEREST_ROLLOUT_PHASE.HUMAN_HANDOFF;
+  return {
+    ...config,
+    rolloutPhase,
+    writesEnabled: config.writesEnabled === true && stopAllowed,
+    stopArmed: config.stopArmed === true && stopAllowed,
+    emailArmed: config.emailArmed === true && emailAllowed,
+    submitArmed: config.submitArmed === true && handoffAllowed,
+  };
+}
+
 export function interestEmailPlan({
   config,
   paraformOwnsConfirmation = false,
@@ -351,6 +406,9 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
           );
           await saveJob(appendJournal({
             ...existing,
+            // Never let a retry or a later role addition inherit newer gates.
+            // Legacy jobs without the field fail closed to shadow.
+            rolloutPhase: interestJobRolloutPhase(existing),
             candidateId: existing.candidateId || candidate.candidateId,
             roles: [...new Set([...(existing.roles || []), ...diff.newlyInterested])],
           }, "more_interest", { added: added.length }));
@@ -358,6 +416,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
           await createJob(candidate.candidateUserId, {
             candidateId: candidate.candidateId,
             roles: diff.newlyInterested,
+            rolloutPhase: interestRolloutPhase(config),
           });
         }
         result.detected.push({ candidate, roleIds: diff.newlyInterested, statuses });
@@ -1254,6 +1313,14 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
     try {
       let job = await getJob(pendingJob.candidateUserId);
       if (!job || job.stage === "done") continue;
+      const rolloutPhase = interestJobRolloutPhase(job);
+      if (job.rolloutPhase !== rolloutPhase) {
+        job = await saveJob(appendJournal({
+          ...job,
+          rolloutPhase,
+        }, "rollout_phase_bound", { rolloutPhase }));
+      }
+      const jobConfig = interestJobExecutionConfig(config, job);
       if (!candidate?.candidateUserId || !candidate?.candidateId) {
         const reviewReasons = ["candidate_identity_unavailable"];
         await recordReview(pendingJob.candidateUserId, reviewReasons, {
@@ -1279,7 +1346,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       // 1. STOP — enforcing first, so we never email while a nudge is queued.
       const stop = await stopFollowUps({
         candidate,
-        apply: config.writesEnabled && config.stopArmed,
+        apply: jobConfig.writesEnabled && jobConfig.stopArmed,
       });
       job = await saveJob(appendJournal({ ...job, stopped: stop, stage: "stopped" }, "stopped", {
         paused: stop.paused, attempted: stop.attempted,
@@ -1339,7 +1406,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
           (submission) => submission.paraformConfirmationExpected === true,
         );
         const emailPlan = interestEmailPlan({
-          config,
+          config: jobConfig,
           paraformOwnsConfirmation,
         });
         if (!emailPlan.send) {
@@ -1363,7 +1430,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         ...blockers,
         ...(bankable.length
           ? [
-            config.writesEnabled && config.submitArmed
+            jobConfig.writesEnabled && jobConfig.submitArmed
               ? "human_submission_required"
               : "shadow_would_submit",
           ]
