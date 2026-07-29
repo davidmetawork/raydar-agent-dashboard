@@ -1308,3 +1308,91 @@ test("the Phase 3 refresh implementation contains no curation, enrollment, or PO
     /trpcPost|ready_to_enroll|curatedRoleList|enrollJob/u,
   );
 });
+
+// candidateMatching.getRankedRolesForCandidate takes the DOMAIN candidate id;
+// the candidate-user id is a different subject (capture §1). Reading a
+// different person is unsafe whatever it returns, and an empty ranked answer
+// would settle as a real zero and — once enrollment is approved — send a No
+// Matches email that dedup makes permanent. So a missing candidate id must
+// stop the read, never silently substitute the other identifier.
+test("a missing candidate id fails closed instead of falling back to the candidate-user id", async () => {
+  const reads = [];
+  const saves = [];
+  // The call proof is needed only for the positive leg: refreshMatches checks
+  // matchReadInput(job).candidate_id before the first
+  // resolveCompleteCallSnapshot("preflight") await, so the missing-identity
+  // assertions hold either way.
+  const attempt = (identity) => {
+    const job = shadowJob({ identity });
+    return refreshMatches(job, {
+      config: SHADOW_CONFIG,
+      now: Date.parse(atMinutes(5)),
+      callSnapshot: durableCallProof(job, {
+        observedAt: atMinutes(5),
+      }),
+      trpcGetImpl: async (procedure, input) => {
+        reads.push(input);
+        return { status: "ranked", roles: [] };
+      },
+      // Two-arity, like the real store.saveJob(job, expectedRevision): a save
+      // without the CAS revision throws REVISION_CONFLICT in production, so a
+      // one-arity stub would hide exactly that.
+      saveJobImpl: async (value, expectedRevision) => {
+        saves.push({ value, expectedRevision });
+        return value;
+      },
+      saveDecisionImpl: async (value) => value,
+    });
+  };
+
+  // No read happens, and the job leaves awaiting_matches: a missing domain
+  // candidate id is terminal, so parking it would strand the lane.
+  const missing = await attempt({
+    candidateUserId: "candidate-user-secret",
+  });
+  assert.equal(reads.length, 0);
+  assert.equal(missing.state, "needs_review");
+  assert.equal(
+    missing.reviewReason,
+    "phase3_domain_candidate_id_missing",
+  );
+  assert.equal(missing.error.code, "IDENTITY_REQUIRED");
+  // The save must carry the job's CAS revision, and the shadow schedule must
+  // be closed where production actually reads it, or the job is reported as an
+  // actively queued poll forever.
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].expectedRevision, 4);
+  assert.equal(missing.phase3Shadow.nextPollAt, null);
+  assert.equal(missing.phase3Shadow.complete, true);
+  // A completed shadow record with no audit evidence is read as a write-fence
+  // breach unless it is marked a technical failure, and the write counters
+  // must be carried explicitly — without either, the aggregate pages the
+  // operator that the shadow wrote something it must not. Pinned here on the
+  // PRODUCER, because the aggregate-side test builds its record by hand.
+  assert.equal(missing.phase3Shadow.technicalFailure, true);
+  assert.equal(
+    missing.phase3Shadow.technicalFailureCode,
+    "IDENTITY_REQUIRED",
+  );
+  assert.equal(missing.phase3Shadow.policyMismatch, false);
+  assert.equal(missing.phase3Shadow.candidateFacingWrites, 0);
+  assert.equal(missing.phase3Shadow.curationWrites, 0);
+  assert.equal(missing.phase3Shadow.enrollments, 0);
+
+  // An empty-string candidate id is equally not a subject.
+  const blank = await attempt({
+    candidateId: "   ",
+    candidateUserId: "candidate-user-secret",
+  });
+  assert.equal(reads.length, 0);
+  assert.equal(blank.state, "needs_review");
+
+  // Positive path: the read that does happen carries the DOMAIN candidate id,
+  // so a reintroduced fallback cannot pass the wrong subject undetected.
+  await attempt({
+    candidateId: "candidate-primary-secret",
+    candidateUserId: "candidate-user-secret",
+  });
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].candidate_id, "candidate-primary-secret");
+});

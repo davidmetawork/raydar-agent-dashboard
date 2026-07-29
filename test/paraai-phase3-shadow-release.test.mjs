@@ -1948,3 +1948,105 @@ test("aggregate streak applies one check per bucket and clean evidence reapplies
   assert.equal(changedFailure.updated, true);
   assert.equal(changedFailure.failureStreak, 1);
 });
+
+// A job that leaves the shadow lane for review with no audit evidence is read
+// as a write-fence breach unless it is marked a technical failure. Without the
+// markers the aggregate reports invalidAudits and policyMismatches, flips
+// verificationReady to false, and pages the operator with "policy_mismatch" —
+// the shadow wrote something it must not — when in fact one candidate had no
+// domain candidate id and zero writes were attempted. Asserted as a delta so
+// the property does not depend on the control cohort's own audit shape.
+test("an identity-missing review job adds no invalid audit or policy mismatch", async () => {
+  const observedAt = new Date(ANCHOR_MS + 5 * 60_000).toISOString();
+  const controls = Array.from({ length: 3 }, (_, index) => (
+    awaitingJob(`bot_identity_${String(index).padStart(3, "0")}`, {
+      identity: { candidateUserId: `candidate-identity-${index}` },
+      matchLegStartedAt: ANCHOR,
+      phase3Shadow: {
+        policyVersion: POLICY_VERSION,
+        stageEnabledAt: ANCHOR,
+        bootstrap: false,
+        observedAt,
+        observedStatus: "ranked",
+        observedStatuses: ["ranked"],
+        observedStatusKinds: ["settled"],
+        readCount: 1,
+        endorsedCount: 0,
+        suggestedCount: 0,
+        matchCount: 0,
+        settlementDecision: "zero_settled",
+        complete: true,
+        policyMismatch: false,
+        nextPollAt: null,
+        candidateFacingWrites: 0,
+        curationWrites: 0,
+        enrollments: 0,
+        ...validShadowEvidence({
+          observedAt,
+          matchCount: 0,
+          endorsedCount: 0,
+          suggestedCount: 0,
+        }),
+      },
+    })
+  ));
+  // Mirrors the fields the refreshMatches identity-missing branch writes that
+  // the aggregate reads. The producer side is pinned separately in
+  // test/paraai-phase3-shadow-runtime.test.mjs; this test covers only how the
+  // aggregate classifies such a record.
+  const identityMissing = awaitingJob("bot_identity_missing", {
+    state: "needs_review",
+    reviewReason: "phase3_domain_candidate_id_missing",
+    identity: { candidateUserId: "candidate-identity-missing" },
+    matchLegStartedAt: ANCHOR,
+    error: {
+      code: "IDENTITY_REQUIRED",
+      detail: "the domain candidate id is required for the match read",
+      at: new Date(ANCHOR_MS + 6 * 60_000).toISOString(),
+    },
+    phase3Shadow: {
+      policyVersion: POLICY_VERSION,
+      stageEnabledAt: ANCHOR,
+      bootstrap: false,
+      technicalFailure: true,
+      technicalFailureCode: "IDENTITY_REQUIRED",
+      complete: true,
+      nextPollAt: null,
+      policyMismatch: false,
+      candidateFacingWrites: 0,
+      curationWrites: 0,
+      enrollments: 0,
+    },
+  });
+
+  const statusFor = async (jobs) => phase3ShadowReleaseStatus({
+    config: shadowConfig,
+    getReleaseImpl: async () => releaseRecord([], {
+      status: "released",
+      entryStatus: "scheduled",
+      attempts: 1,
+    }),
+    getCallProofBootstrapImpl: async () => (
+      completeCallProofBootstrap(jobs.length)
+    ),
+    snapshotImpl: async () => completePhase3ShadowSnapshot(jobs),
+    queueStatsImpl: async () => ({ queued: 0, due: 0, leased: 0 }),
+    now: ANCHOR_MS + 54 * 60 * 60_000,
+  });
+
+  const before = await statusFor(controls);
+  const after = await statusFor([...controls, identityMissing]);
+
+  assert.equal(after.invalidAudits, before.invalidAudits);
+  assert.equal(after.policyMismatches, before.policyMismatches);
+  assert.equal(after.candidateFacingWrites, 0);
+  assert.equal(after.curationWrites, 0);
+  assert.equal(after.enrollments, 0);
+  // Still surfaced, as the technical failure it actually is.
+  assert.equal(
+    after.hardTechnicalFailures > before.hardTechnicalFailures,
+    true,
+  );
+  // And never counted as an outstanding poll.
+  assert.equal(after.queued, before.queued);
+});

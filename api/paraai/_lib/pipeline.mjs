@@ -1809,9 +1809,27 @@ export async function reconcileSubmittedJob(
   }), job.revision);
 }
 
+// candidateMatching.getRankedRolesForCandidate takes the DOMAIN candidate id
+// (capture §1, which also records that the two ids genuinely differ for most
+// candidates). The candidate-user id is a different subject.
+//
+// §1 originally judged the old `candidateId || candidateUserId` fallback
+// "correct-by-preference"; this supersedes that. The wrong-subject response
+// shape has NOT been observed for this procedure — what is captured is that
+// the sibling curated read answers null for the wrong id (§18). Reading a
+// different person is unsafe whatever it returns, and if it were to answer
+// `ranked` with no roles that would settle as a real zero and, once
+// enrollment is approved, send a No Matches email that dedup makes permanent.
+// So there is no fallback: a missing candidate id fails closed on the
+// IDENTITY_REQUIRED check below.
+//
+// Note the same key name means the OTHER subject elsewhere:
+// curatedRoleList.getCandidateCuratedRoleList({candidate_id}) wants the
+// candidate-USER id — capture §6 and §18
+// (docs/PARAAI-CAPTURE-2026-07-26.md in the main Raydar repo).
 function matchReadInput(job) {
   return {
-    candidate_id: job.identity?.candidateId || job.identity?.candidateUserId,
+    candidate_id: job.identity?.candidateId,
     recruiter_user_id: RECRUITER_ID,
   };
 }
@@ -2123,11 +2141,55 @@ export async function refreshMatches(
   }
   const input = matchReadInput(job);
   if (!String(input.candidate_id || "").trim()) {
-    throw stateError(
-      "candidate identity is missing",
-      "IDENTITY_REQUIRED",
-      job,
-    );
+    // identity.candidateId is nullable at its source (`crmItem.candidate_id ||
+    // null`), so this is structurally reachable; the capture observed every
+    // live subject resolving, so it has not been seen in practice. It is a
+    // terminal identity condition, not a transient fault: no retry can invent
+    // the domain candidate id, and IDENTITY_REQUIRED is classified neither
+    // retryable nor terminal, so throwing here would leave the job parked in
+    // awaiting_matches with a past-due poll and no route out. This introduces
+    // a NEW review reason for unresolved identity; the shadow schedule is
+    // closed inside phase3Shadow, which is the only place production reads it.
+    return saveJobImpl(transition(job, "needs_review", {
+      reviewReason: "phase3_domain_candidate_id_missing",
+      error: {
+        code: "IDENTITY_REQUIRED",
+        detail:
+          "the domain candidate id is required for the match read",
+        at: new Date(readStartedMs).toISOString(),
+      },
+      phase3Shadow: {
+        ...(job.phase3Shadow || {}),
+        policyVersion: PHASE3_SHADOW_POLICY_VERSION,
+        // A completed shadow record with no audit evidence is read as a
+        // write-fence breach unless it is marked a technical failure, so
+        // omitting these would page the operator with policy_mismatch — "the
+        // shadow wrote something it must not" — when the real condition is one
+        // candidate with no domain id and zero writes attempted. The write
+        // counters are carried forward explicitly rather than relying on the
+        // spread, matching every other writer of this record.
+        technicalFailure: true,
+        technicalFailureCode: "IDENTITY_REQUIRED",
+        complete: true,
+        nextPollAt: null,
+        policyMismatch:
+          job?.phase3Shadow?.policyMismatch === true,
+        candidateFacingWrites: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "candidateFacingWrites",
+        ),
+        curationWrites: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "curationWrites",
+        ),
+        enrollments: phase3ExistingWriteCounter(
+          job?.phase3Shadow,
+          "enrollments",
+        ),
+      },
+      journalDetail:
+        "Phase 3 match read requires the domain candidate id",
+    }), job.revision);
   }
 
   const resolveCompleteCallSnapshot = async (stage) => {

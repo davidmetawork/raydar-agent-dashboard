@@ -55,10 +55,34 @@ export const PHASE4_CURATED_LIST_READ_INPUT_KEYS = Object.freeze([
 export const PHASE4_NOTIFICATION_SETTINGS_INPUT_KEYS = Object.freeze([
   "candidate_user_id",
 ]);
+// The captured add response carries six keys, not three. The allowlist is
+// exact-membership (every response key must be a member), so a short list
+// rejected a real six-key response as mutation_response_shape_invalid and
+// reported outcome "unknown" with externalWriteMayHaveLanded=true — every real
+// add would have looked like a write that might or might not have landed.
+// The counts are retained only inside responseDigest and are NOT the
+// idempotency evidence: that is the duplicate readback's role-set stability
+// comparison in phase4DuplicateReaddReadbackDecision.
+// See docs/PARAAI-CAPTURE-2026-07-26.md §18 in the main Raydar repo.
 export const PHASE4_CURATED_LIST_ADD_RESPONSE_KEYS = Object.freeze([
+  "already_in_list_count",
   "curated_role_list_id",
   "message",
+  "newly_added_count",
   "success",
+  "total_requested",
+]);
+// The exact shape a SUCCESSFUL add must have. Deliberately a separate constant
+// from the membership allowlist above: if Paraform ever adds a seventh,
+// sometimes-present key, widening the allowlist to accept it must not make
+// every ordinary six-key success response fail an arity check.
+export const PHASE4_CURATED_LIST_ADD_SUCCESS_KEYS = Object.freeze([
+  "already_in_list_count",
+  "curated_role_list_id",
+  "message",
+  "newly_added_count",
+  "success",
+  "total_requested",
 ]);
 
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
@@ -750,9 +774,13 @@ function snapshotObservationResponse(procedure, response) {
   }
   if (procedure === PHASE4_CURATED_LIST_READ_PROCEDURE) {
     if (response === null) return null;
+    // The candidate-scoped response carries only the list id and roles[].id.
+    // It does NOT echo either candidate identity, so nothing here can bind the
+    // subject; that binding comes from the registered source-owned identity
+    // proof plus the input assertion. See the capture §18.
     const raw = selectedDataValues(
       response,
-      ["candidate_id", "candidate_user_id", "id", "roles"],
+      ["id", "roles"],
       { field: "Curated List response" },
     );
     const roles = denseArrayDataValues(
@@ -770,14 +798,6 @@ function snapshotObservationResponse(procedure, response) {
       });
     });
     return Object.freeze({
-      candidate_id: snapshotPlainData(
-        raw.candidate_id,
-        "Curated List response.candidate_id",
-      ),
-      candidate_user_id: snapshotPlainData(
-        raw.candidate_user_id,
-        "Curated List response.candidate_user_id",
-      ),
       id: snapshotPlainData(raw.id, "Curated List response.id"),
       roles: Object.freeze(roles),
     });
@@ -1194,9 +1214,20 @@ export function classifyPhase4CuratedListAddResponse(rawArguments = {}) {
   }
   const keys = Object.keys(record).sort();
   const allowed = new Set(PHASE4_CURATED_LIST_ADD_RESPONSE_KEYS);
+  // A successful add must match the captured shape EXACTLY. A RENAMED key was
+  // already rejected by the membership rule below; what membership alone would
+  // miss is a DROPPED key, which would still classify as a normal accepted add
+  // and nobody would re-capture. This pins all six captured keys including
+  // `message`, so the `!Object.hasOwn(record, "message")` allowance below now
+  // applies only to the failure shape — which the capture did not pin, and
+  // which therefore keeps the looser membership rule.
   const exactAllowedKeys = (
     keys.every((key) => allowed.has(key))
     && Object.hasOwn(record, "success")
+    && (
+      record.success !== true
+      || sameStringArray(keys, PHASE4_CURATED_LIST_ADD_SUCCESS_KEYS)
+    )
   );
   const messageValid = (
     !Object.hasOwn(record, "message")
@@ -1529,8 +1560,11 @@ export function normalizePhase4RankedMatchObservation(
 /**
  * Normalize a candidate-scoped Curated List query. A null response is an
  * authoritative absence and models the implicit-create path. A present list
- * must bind both the candidate and candidate-user identities and expose exact,
- * unique role ids through roles[].id.
+ * exposes exact, unique role ids through roles[].id and carries NO candidate
+ * identity of its own, so the subject is bound solely by this read's input
+ * carrying the candidate-USER id. The domain candidate id is never proved
+ * here: it must come from a registered source-owned identity proof, which
+ * planPhase4CuratedListWrite requires on both the present and absent branches.
  */
 export function normalizePhase4CuratedListReadback(
   observation,
@@ -1568,9 +1602,15 @@ export function normalizePhase4CuratedListReadback(
     PHASE4_CURATED_LIST_READ_PROCEDURE,
     PHASE4_CURATED_LIST_READ_INPUT_KEYS,
   );
+  // The read's `candidate_id` INPUT carries the candidate-USER id, despite the
+  // key name. Supplying the domain candidate id returns null even when a list
+  // exists, so asserting the wrong subject here would have made every readback
+  // look like "no list" and driven a spurious implicit create. This assertion
+  // is now the only thing proving the read asked about the right person, since
+  // the response echoes neither identity.
   if (
     contractError
-    || observation.input.candidate_id !== expectedCandidateId
+    || observation.input.candidate_id !== expectedCandidateUserId
   ) {
     return invalidReadbackProof(
       contractError || "observation_contract_invalid",
@@ -1586,10 +1626,13 @@ export function normalizePhase4CuratedListReadback(
       observedAt: observation.observedAt,
       responseDigest: observation.responseDigest,
       candidateId: expectedCandidateId,
-      // A null candidate-scoped Paraform response cannot establish the
-      // candidate-user identifier. Planning the implicit-create path therefore
-      // requires a separately registered source-generation identity proof.
-      candidateUserId: null,
+      // The null RESPONSE cannot establish that a list is absent for anyone in
+      // particular, but the read INPUT does establish WHICH candidate-user was
+      // asked about — that is asserted above. Keeping the proven subject here
+      // is what lets the plan check that the absence belongs to the candidate
+      // it is about to create a list for. The domain candidate id is still an
+      // echo and is bound only by the registered identity proof.
+      candidateUserId: expectedCandidateUserId,
       exists: false,
       implicitCreateRequired: true,
       listId: null,
@@ -1604,16 +1647,18 @@ export function normalizePhase4CuratedListReadback(
     );
   }
 
+  // The candidate-scoped response does not echo either candidate identity, so
+  // it cannot be asked to prove the subject. Requiring it to would have failed
+  // every real readback. Subject binding is the input assertion above plus the
+  // registered source-owned identity proof; the authenticated by-id REST read
+  // (curatedRoleList.findCuratedRoleListById) would supply an additional
+  // post-mutation binding, but it is NOT implemented in this repo today.
   const response = plainRecord(observation.response);
   if (
     !response
     || !Object.hasOwn(response, "id")
-    || !Object.hasOwn(response, "candidate_id")
-    || !Object.hasOwn(response, "candidate_user_id")
     || !Object.hasOwn(response, "roles")
     || boundedId(response.id) == null
-    || response.candidate_id !== expectedCandidateId
-    || response.candidate_user_id !== expectedCandidateUserId
     || !Array.isArray(response.roles)
     || response.roles.length > MAX_CURATED_ROLE_IDS
   ) {
@@ -1657,7 +1702,9 @@ export function normalizePhase4CuratedListReadback(
 /**
  * Bind the two Paraform candidate identifiers to the exact source generation.
  * A future store adapter must produce this authoritative observation. It is
- * mandatory before a null readback may be interpreted as implicit creation.
+ * mandatory before any Curated List write may be planned: the candidate-scoped
+ * read binds only the candidate-user id, so this is the only proof that the
+ * two identifiers belong to one person.
  */
 export function normalizePhase4CandidateIdentityObservation(
   observation,
@@ -1947,14 +1994,10 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
     || readbackData.valid !== true
     || readbackData.candidateId !== exactCandidateId
     || !sameScope(readbackData, context)
-    || (
-      readbackData.exists === true
-      && readbackData.candidateUserId !== exactCandidateUserId
-    )
-    || (
-      readbackData.exists === false
-      && readbackData.candidateUserId !== null
-    )
+    // One rule for both branches on purpose: the previous split let the absent
+    // branch bind more weakly than the present one, which is how a wrong
+    // subject slipped through once already.
+    || readbackData.candidateUserId !== exactCandidateUserId
   ) {
     throw new TypeError(
       "preReadback must be an exact candidate Curated List proof",
@@ -1975,43 +2018,34 @@ export function planPhase4CuratedListWrite(rawArguments = {}) {
   ) {
     throw new TypeError("match/readback proof ordering is invalid");
   }
-  if (readbackData.exists === false) {
-    if (
-      !identityData
-      || identityData.valid !== true
-      || identityData.candidateId !== exactCandidateId
-      || identityData.candidateUserId !== exactCandidateUserId
-      || !sameScope(identityData, context)
-      || Date.parse(identityData.observedAt)
-        > Date.parse(readbackData.observedAt)
-      || !observationFreshAt(
-        identityData.observedAt,
-        context.trustedNow,
-        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
-      )
-    ) {
-      throw new TypeError(
-        "null readback requires an authoritative same-scope identity proof",
-      );
-    }
-  } else if (
-    identityProof !== null
-    && (
-      !identityData
-      || identityData.valid !== true
-      || identityData.candidateId !== exactCandidateId
-      || identityData.candidateUserId !== exactCandidateUserId
-      || !sameScope(identityData, context)
-      || Date.parse(identityData.observedAt)
-        > Date.parse(readbackData.observedAt)
-      || !observationFreshAt(
-        identityData.observedAt,
-        context.trustedNow,
-        PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
-      )
+  // The identity proof is mandatory on BOTH branches, not just the null one.
+  // The Curated List read binds only the candidate-USER id, through its input;
+  // the response carries neither identity. So nothing else on either branch
+  // proves that the domain candidate id and the candidate-user id belong to
+  // the same person: readbackData.candidateUserId IS bound (to the read's
+  // input), but readbackData.candidateId is bound by nothing and is a caller
+  // echo. The identity proof is what ties the unbound domain candidate id to
+  // the bound candidate-user id. Without this, a plan could pair one
+  // candidate's matched roles with another candidate's existing list and write
+  // them there. Capture §18: a source-owned exact identity proof "remains
+  // mandatory rather than being inferred from response display fields".
+  if (
+    !identityData
+    || identityData.valid !== true
+    || identityData.candidateId !== exactCandidateId
+    || identityData.candidateUserId !== exactCandidateUserId
+    || !sameScope(identityData, context)
+    || Date.parse(identityData.observedAt)
+      > Date.parse(readbackData.observedAt)
+    || !observationFreshAt(
+      identityData.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
   ) {
-    throw new TypeError("identityProof is invalid");
+    throw new TypeError(readbackData.exists === false
+      ? "null readback requires an authoritative same-scope identity proof"
+      : "a present Curated List requires an authoritative same-scope identity proof");
   }
   const matchSemanticDigest = matchProofSemanticDigest(matchData);
   const lineageDigest = writeLineageDigest(
@@ -2275,14 +2309,15 @@ function privateWritePlanLineageValid(
       readbackProofRegistry,
       planData.preReadback,
     ) !== planData.readbackData
-    || (
-      planData.identityProof === null
-        ? planData.identityData !== null
-        : registeredData(
-          identityProofRegistry,
-          planData.identityProof,
-        ) !== planData.identityData
-    )
+    // Identity is mandatory on every plan path, so a null identityProof is not
+    // a legal plan shape — it is an invalid one. Kept fail-closed and in step
+    // with the freshness fence below so the file states ONE invariant about
+    // this field rather than two contradictory ones.
+    || planData.identityProof === null
+    || registeredData(
+      identityProofRegistry,
+      planData.identityProof,
+    ) !== planData.identityData
     || planData.contractVersion !== PHASE4_CURATION_CONTRACT_VERSION
     || !lowercaseDigest(planData.lineageDigest)
     || planData.lineageDigest !== writeLineageDigest(
@@ -2394,8 +2429,12 @@ function privateWritePlanEvidenceFreshnessAt(planData, trustedNow) {
       PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
     )
   );
+  // Identity is mandatory on every plan path now, so an identity-less plan is
+  // not "trivially fresh" — it is unplannable. Failing closed here means a
+  // future relaxation of the plan-time requirement cannot silently take this
+  // freshness fence with it.
   const identity = planData.identityProof === null
-    ? planData.identityData === null
+    ? false
     : (
       registeredData(identityProofRegistry, planData.identityProof)
         === planData.identityData
@@ -2437,12 +2476,13 @@ function writeEvidenceExpiresAt(planData, notificationData, authorityData) {
       + PHASE4_NOTIFICATION_PROOF_MAX_AGE_MS,
     Date.parse(authorityData.expiresAt),
   ];
-  if (planData.identityData !== null) {
-    expirations.push(
-      Date.parse(planData.identityData.observedAt)
-        + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
-    );
-  }
+  // Unconditional: the identity proof is always present on a registered plan,
+  // and omitting it from the minimum would extend the authorization window
+  // past the identity evidence it rests on.
+  expirations.push(
+    Date.parse(planData.identityData.observedAt)
+      + PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+  );
   return new Date(Math.min(...expirations)).toISOString();
 }
 
@@ -3287,7 +3327,7 @@ export function phase4DuplicateReaddReadbackDecision(rawArguments = {}) {
 export function exactPhase4PostAddCuratedMatchCount(rawArguments = {}) {
   const args = shallowArgumentSnapshot(
     rawArguments,
-    ["matchProof", "postReadback", "trustedNow"],
+    ["identityProof", "matchProof", "postReadback", "trustedNow"],
     "post-add count arguments",
   );
   const matchData = registeredData(
@@ -3298,6 +3338,16 @@ export function exactPhase4PostAddCuratedMatchCount(rawArguments = {}) {
     readbackProofRegistry,
     args.postReadback,
   );
+  // The match proof's candidateId is bound to the ranked read's input, but the
+  // readback's candidateId is a caller echo — only its candidateUserId is bound
+  // (to the Curated List read's input). Comparing the two candidateIds is
+  // therefore not a subject check: it would score another candidate's list as
+  // this candidate's post-add verification. The identity proof is what ties the
+  // bound domain candidate id to the bound candidate-user id.
+  const identityData = registeredData(
+    identityProofRegistry,
+    args.identityProof,
+  );
   const context = exactScopeContext({
     ...proofScopeFields(matchData),
     trustedNow: args.trustedNow,
@@ -3307,8 +3357,16 @@ export function exactPhase4PostAddCuratedMatchCount(rawArguments = {}) {
     || matchData?.valid !== true
     || readbackData?.valid !== true
     || readbackData.exists !== true
-    || readbackData.candidateId !== matchData.candidateId
+    || identityData?.valid !== true
+    || identityData.candidateId !== matchData.candidateId
+    || identityData.candidateUserId !== readbackData.candidateUserId
+    || !sameScope(identityData, matchData)
     || !sameScope(readbackData, matchData)
+    || !observationFreshAt(
+      identityData.observedAt,
+      context.trustedNow,
+      PHASE4_OBSERVATION_PROOF_MAX_AGE_MS,
+    )
     || !observationFreshAt(
       matchData.observedAt,
       context.trustedNow,
