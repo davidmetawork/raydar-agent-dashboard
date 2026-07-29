@@ -1198,6 +1198,7 @@ test("manifest recovery carries verified writes and replaces only proved pre-att
     retry: 1,
     replacements: 3,
     terminal: 3,
+    skippedUnreadable: 0,
     manifestBound: true,
     committed: false,
     verified: false,
@@ -1385,6 +1386,105 @@ test("manifest recovery carries verified writes and replaces only proved pre-att
   });
   assert.equal(armed.status, "running");
   assert.equal(armed.recovery.verified, true);
+});
+
+test("recovery leaves an unreadable replacement unauthorized and selects the next safe row", async () => {
+  const fixture = await recoveryFixture();
+  const {
+    store,
+    jobs,
+    replacementIds,
+    terminalPreflightImpl,
+  } = fixture;
+  const extraId = "bot_recovery_replace_03";
+  const extraJob = readyJob(extraId, 23);
+  jobs.set(extraId, extraJob);
+  await store.addEntry({
+    version: 1,
+    id: extraId,
+    source: "agent",
+    callAt: new Date(
+      Date.parse(CALL_AT) + 23_000,
+    ).toISOString(),
+    status: "eligible",
+    candidateHash: candidateHash(
+      extraJob.identity.candidateUserId,
+    ),
+    reason: null,
+    authorizedAt: null,
+  });
+  const planned = await planResumeOnlyBackfillRecovery({
+    now: NOW + 60_000,
+    store,
+    lockImpl: async (operation) => operation(),
+    getJobImpl: async (id) => jobs.get(id) || null,
+    getResumeImpl: async () => ({
+      resumeUri: "s3://private/current.pdf",
+    }),
+    terminalPreflightImpl,
+    config: {
+      strictScreenerSource: true,
+    },
+    advanceExistingImpl: async (job) => {
+      if (job.id === replacementIds[0]) {
+        throw new Error("candidate-specific vendor read failed");
+      }
+      return job;
+    },
+  });
+  assert.equal(planned.status, "planned");
+  assert.equal(planned.replacements, 3);
+  assert.equal(planned.skippedUnreadable, 1);
+  const privateRecovery = await store.getRecovery();
+  assert.equal(
+    privateRecovery.active.some(
+      (entry) => entry.id === replacementIds[0],
+    ),
+    false,
+  );
+  assert.equal(
+    (await store.getEntry(replacementIds[0])).status,
+    "eligible",
+  );
+  assert.equal(
+    privateRecovery.active.some(
+      (entry) => entry.id === extraId,
+    ),
+    true,
+  );
+
+  const authBlocked = await recoveryFixture();
+  await assert.rejects(
+    () => planResumeOnlyBackfillRecovery({
+      now: NOW + 60_000,
+      store: authBlocked.store,
+      lockImpl: async (operation) => operation(),
+      getJobImpl: async (id) => (
+        authBlocked.jobs.get(id) || null
+      ),
+      getResumeImpl: async () => ({
+        resumeUri: "s3://private/current.pdf",
+      }),
+      terminalPreflightImpl:
+        authBlocked.terminalPreflightImpl,
+      config: {
+        strictScreenerSource: true,
+      },
+      advanceExistingImpl: async (job) => {
+        if (job.id === authBlocked.replacementIds[0]) {
+          const error = new Error("AUTH_EXPIRED");
+          error.code = "AUTH_EXPIRED";
+          throw error;
+        }
+        return job;
+      },
+    }),
+    { code: "AUTH_EXPIRED" },
+  );
+  assert.equal(
+    await authBlocked.store.getRecovery(),
+    null,
+  );
 });
 
 test("recovery refuses uncertain submissions and revalidates every terminal before writes", async () => {
