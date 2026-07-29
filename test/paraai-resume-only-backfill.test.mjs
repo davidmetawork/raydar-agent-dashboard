@@ -18,6 +18,9 @@ import {
   campaignLeadsAll,
 } from "../api/paraai/_lib/core.mjs";
 import {
+  ALL_OUTCOME_SEQUENCE_IDS,
+} from "../api/paraai/_lib/phase3-shadow-policy.mjs";
+import {
   armResumeOnlyBackfillRemainder,
   commitResumeOnlyBackfillRecovery,
   commitResumeOnlyBackfillFirstTen,
@@ -601,8 +604,8 @@ test("planning preserves in-flight, submitted, technical, and resume-wait jobs",
 
 test("terminal preflight exhausts all target sequences and fails closed before authorization", async () => {
   const job = readyJob("bot_preflight_only", 1);
-  const targets = ["one", "multiple", "none"].map((id) => ({
-    sequence: { id: `sequence-${id}` },
+  const targets = ALL_OUTCOME_SEQUENCE_IDS.map((id) => ({
+    sequence: { id },
   }));
   const run = (overrides = {}) => (
     resumeOnlyBackfillTerminalPreflight(job, {
@@ -648,7 +651,24 @@ test("terminal preflight exhausts all target sequences and fails closed before a
     code: "FUTURE_NEXT_STEP",
   });
   await assert.rejects(
-    () => run({ targets: targets.slice(0, 2) }),
+    () => run({ targets: targets.slice(0, -1) }),
+    {
+      code: "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    },
+  );
+  await assert.rejects(
+    () => run({
+      memberships: [
+        {
+          sequence: targets[0].sequence,
+          lead: { has_replied: false },
+        },
+        {
+          sequence: targets[0].sequence,
+          lead: { has_replied: false },
+        },
+      ],
+    }),
     {
       code: "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
     },
@@ -656,33 +676,23 @@ test("terminal preflight exhausts all target sequences and fails closed before a
 });
 
 test("one exhaustive target snapshot is shared across every recovery preflight", async () => {
-  const sequences = [
-    {
-      id: "sequence-one",
-      name: "New Matches - Added to Para AI (one role)",
-    },
-    {
-      id: "sequence-multiple",
-      name: "New Matches - Added to Para AI (multiple)",
-    },
-    {
-      id: "sequence-none",
-      name: "No Matches - Added to Para AI",
-    },
-  ];
+  const sequences = ALL_OUTCOME_SEQUENCE_IDS.map((id, index) => ({
+    id,
+    name: `renamed-outcome-sequence-${index}`,
+  }));
   const reads = [];
   const snapshot =
     await readResumeOnlyBackfillTargetMembershipSnapshot({
       listSequencesImpl: async () => sequences,
       campaignLeadsAllImpl: async (sequenceId) => {
         reads.push(sequenceId);
-        if (sequenceId === "sequence-one") {
+        if (sequenceId === ALL_OUTCOME_SEQUENCE_IDS[0]) {
           return [{
             cu_id: "candidate-user-1",
             has_replied: true,
           }];
         }
-        if (sequenceId === "sequence-multiple") {
+        if (sequenceId === ALL_OUTCOME_SEQUENCE_IDS[1]) {
           return [{
             cu_id: "candidate-user-2",
             has_replied: false,
@@ -691,11 +701,7 @@ test("one exhaustive target snapshot is shared across every recovery preflight",
         return [];
       },
     });
-  assert.deepEqual(reads, [
-    "sequence-one",
-    "sequence-multiple",
-    "sequence-none",
-  ]);
+  assert.deepEqual(reads, ALL_OUTCOME_SEQUENCE_IDS);
   assert.equal(snapshot.byCandidate.size, 2);
   assert.deepEqual(
     await resumeOnlyBackfillTerminalPreflight(
@@ -717,13 +723,22 @@ test("one exhaustive target snapshot is shared across every recovery preflight",
     () => readResumeOnlyBackfillTargetMembershipSnapshot({
       listSequencesImpl: async () => sequences,
       campaignLeadsAllImpl: async (sequenceId) => (
-        sequenceId === "sequence-one"
+        sequenceId === ALL_OUTCOME_SEQUENCE_IDS[0]
           ? [
               { cu_id: "candidate-user-1" },
               { cu_id: "candidate-user-1" },
             ]
           : []
       ),
+    }),
+    {
+      code: "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
+    },
+  );
+  await assert.rejects(
+    () => readResumeOnlyBackfillTargetMembershipSnapshot({
+      listSequencesImpl: async () => sequences.slice(0, -1),
+      campaignLeadsAllImpl: async () => [],
     }),
     {
       code: "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",

@@ -15,7 +15,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
-  SEQUENCE_NAMES,
   campaignLeadsAll,
   candidateDetails,
   fetchCall,
@@ -26,6 +25,9 @@ import {
   targetMembership,
   trpcGet,
 } from "./core.mjs";
+import {
+  ALL_OUTCOME_SEQUENCE_IDS,
+} from "./phase3-shadow-policy.mjs";
 import {
   autoEligibility,
   automationCallReadiness,
@@ -503,14 +505,23 @@ export async function resumeOnlyBackfillTerminalPreflight(
   const memberships = Array.isArray(membership?.memberships)
     ? membership.memberships
     : null;
+  const membershipTargetIds = memberships?.map((row) => (
+    String(row?.sequence?.id || "").trim()
+  )) || [];
+  const expectedTargetIds = new Set(ALL_OUTCOME_SEQUENCE_IDS);
   if (
     !details
-    || targets.length !== 3
+    || targets.length !== ALL_OUTCOME_SEQUENCE_IDS.length
     || targetIds.some((id) => !id)
-    || new Set(targetIds).size !== 3
+    || new Set(targetIds).size !== ALL_OUTCOME_SEQUENCE_IDS.length
+    || targetIds.some((id) => !expectedTargetIds.has(id))
     || memberships == null
+    || new Set(membershipTargetIds).size
+      !== membershipTargetIds.length
     || memberships.some((row) => (
-      !targetIds.includes(String(row?.sequence?.id || "").trim())
+      !expectedTargetIds.has(
+        String(row?.sequence?.id || "").trim(),
+      )
       || !row?.lead
     ))
   ) {
@@ -554,17 +565,25 @@ export async function readResumeOnlyBackfillTargetMembershipSnapshot({
       "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
     );
   }
-  const targets = Object.values(SEQUENCE_NAMES).map((name) => ({
-    name,
-    sequence: sequences.find((row) => row?.name === name) || null,
-  }));
+  const targets = ALL_OUTCOME_SEQUENCE_IDS.map((id) => {
+    const matches = sequences.filter(
+      (row) => String(row?.id || "").trim() === id,
+    );
+    return {
+      id,
+      sequence: matches.length === 1 ? matches[0] : null,
+    };
+  });
   const ids = targets.map((target) => (
     String(target?.sequence?.id || "").trim()
   ));
   if (
-    targets.length !== 3
+    targets.length !== ALL_OUTCOME_SEQUENCE_IDS.length
     || ids.some((id) => !id)
-    || new Set(ids).size !== 3
+    || new Set(ids).size !== ALL_OUTCOME_SEQUENCE_IDS.length
+    || ids.some(
+      (id, index) => id !== ALL_OUTCOME_SEQUENCE_IDS[index],
+    )
   ) {
     throw codedError(
       "RESUME_ONLY_BACKFILL_PREFLIGHT_INCOMPLETE",
