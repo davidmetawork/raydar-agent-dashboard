@@ -144,6 +144,10 @@ export function normalizeSubmissionRequest(request) {
   };
 }
 
+export function expiredNoDigestOverrideEligible(request) {
+  return lower(request?.status) === "expired";
+}
+
 export async function readSubmissionRequestHistory() {
   const result = await trpcGet("submissionRequest.getRecruiterSubmissionRequestHistory", {
     agencyView: false,
@@ -322,7 +326,7 @@ function copyForMatch({ request, ordinal, contact, digest, roleUrl }) {
     roleName: request.roleName,
     companyName: request.companyName,
     roleUrl,
-    digestUrl: digest.digestUrl,
+    digestUrl: digest?.digestUrl || null,
   };
   return ordinal === 1
     ? initialMatchCopy(input)
@@ -334,6 +338,12 @@ function copyForMatch({ request, ordinal, contact, digest, roleUrl }) {
 }
 
 async function threadForMatch({ state, request, mailbox, digestUrl }) {
+  // The explicitly confirmed expired-request override has no Paraform digest.
+  // It must start a standalone Gmail conversation, never attach itself to some
+  // older outreach thread just because the candidate is the same.
+  if (!clean(digestUrl)) {
+    return { thread: null, context: null, anchorStatus: "none" };
+  }
   if (state?.threadId) {
     try {
       const thread = await getThread(mailbox, state.threadId);
@@ -388,7 +398,16 @@ function messageForMatch({
   };
 }
 
-function matchRecord({ request, ordinal, roleUrl, digest, copy, sent, sentAt }) {
+function matchRecord({
+  request,
+  ordinal,
+  roleUrl,
+  digest,
+  copy,
+  sent,
+  sentAt,
+  deliveryMode,
+}) {
   return {
     requestId: request.id,
     ordinal,
@@ -396,7 +415,9 @@ function matchRecord({ request, ordinal, roleUrl, digest, copy, sent, sentAt }) 
     roleName: request.roleName,
     companyName: request.companyName,
     roleUrl,
-    digestId: digest.digestId,
+    digestId: digest?.digestId || null,
+    digestOmitted: !digest?.digestId,
+    deliveryMode,
     sentAt,
     gmailMessageId: sent?.id || null,
     copyVariant: copy.variant,
@@ -412,6 +433,7 @@ export function planDeliveredMatch(state, {
   sent,
   sentAt,
   messageId,
+  deliveryMode = "digest",
 }) {
   const previousFollowup = state.followup;
   const remaining = ordinal === 1 ? 2 : 1;
@@ -419,8 +441,10 @@ export function planDeliveredMatch(state, {
     ...state,
     threadId: sent?.threadId || state.threadId || null,
     threadSubject: state.threadSubject || copy.subject || null,
-    digestId: digest.digestId,
-    digestUrl: digest.digestUrl,
+    ...(digest?.digestId ? {
+      digestId: digest.digestId,
+      digestUrl: digest.digestUrl,
+    } : {}),
     latestMatchId: request.id,
     lastOutboundAt: sentAt,
     // Written once: the conversation anchor the reply window is measured from.
@@ -428,7 +452,7 @@ export function planDeliveredMatch(state, {
     matches: {
       ...(state.matches || {}),
       [request.id]: matchRecord({
-        request, ordinal, roleUrl, digest, copy, sent, sentAt,
+        request, ordinal, roleUrl, digest, copy, sent, sentAt, deliveryMode,
       }),
     },
     outbox: {
@@ -440,6 +464,7 @@ export function planDeliveredMatch(state, {
         gmailMessageId: sent?.id || null,
         threadId: sent?.threadId || state.threadId || null,
         deliveredAt: sentAt,
+        deliveryMode,
       },
     },
     // A candidate who has already replied never gets a re-armed nudge ladder,
@@ -459,6 +484,7 @@ export function planDeliveredMatch(state, {
   return appendOutreachJournal(next, "match_delivered", {
     requestId: request.id,
     ordinal,
+    deliveryMode,
     ...(previousFollowup ? {
       supersededFollowupFor: previousFollowup.ownerMatchId,
     } : {}),
@@ -600,6 +626,7 @@ export async function processMatchRequest(
     mode = "send",
     config = outreachConfig(),
     allowAfterReply = false,
+    allowWithoutDigest = false,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -607,6 +634,11 @@ export async function processMatchRequest(
   if (mode === "send" && OUTREACH_INCIDENT_HALT) {
     const error = new Error("Para AI outreach sending is halted (2026-07-20 Kyra incident)");
     error.code = "OUTREACH_HALTED";
+    throw error;
+  }
+  if (allowWithoutDigest && (mode !== "send" || !expiredNoDigestOverrideEligible(request))) {
+    const error = new Error("no-digest delivery is restricted to an expired live request");
+    error.code = "OUTREACH_REQUEST_NOT_EXPIRED";
     throw error;
   }
   const lockToken = await acquireOutreachLock(request.candidateUserId);
@@ -746,7 +778,8 @@ export async function processMatchRequest(
     }
 
     const ordinal = requestOrdinal(request, history);
-    const digest = await ensureMatchDigest(request);
+    const digest = allowWithoutDigest ? null : await ensureMatchDigest(request);
+    const deliveryMode = allowWithoutDigest ? "expired_without_digest" : "digest";
     const roleUrl = roleShareUrl(request);
     request = { ...request, candidateEmail: contact.email };
     const actionKey = `match:${request.id}`;
@@ -756,7 +789,7 @@ export async function processMatchRequest(
       state,
       request,
       mailbox: config.mailbox,
-      digestUrl: digest.digestUrl,
+      digestUrl: digest?.digestUrl || null,
     });
     const replaceExistingDraft = Boolean(
       mode === "draft" &&
@@ -780,8 +813,10 @@ export async function processMatchRequest(
       || (anchorStatus === "draft" ? previousThreadId : null);
     const claimed = appendOutreachJournal({
       ...state,
-      digestId: digest.digestId,
-      digestUrl: digest.digestUrl,
+      ...(digest?.digestId ? {
+        digestId: digest.digestId,
+        digestUrl: digest.digestUrl,
+      } : {}),
       threadId: anchoredThreadId,
       threadSubject: context?.originalSubject
         || (anchorStatus === "draft" ? state.threadSubject : message.subject),
@@ -793,12 +828,14 @@ export async function processMatchRequest(
           messageId: message.messageId,
           requestId: request.id,
           claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
+          deliveryMode,
         },
       },
     }, mode === "draft" ? "review_draft_claimed" : "gmail_delivery_claimed", {
       requestId: request.id,
       ordinal,
       anchorStatus,
+      deliveryMode,
     });
     state = await saveOutreachState(claimed, state.revision);
 
@@ -868,29 +905,43 @@ export async function processMatchRequest(
       sent,
       sentAt,
       messageId: message.messageId,
+      deliveryMode,
     }), state.revision);
 
-    try {
-      await markReachedOut(request.id);
+    if (request.reachedOut) {
       state = await saveOutreachState(appendOutreachJournal({
         ...state,
         matches: {
           ...state.matches,
           [request.id]: {
             ...state.matches[request.id],
-            reachedOutMarkedAt: new Date().toISOString(),
+            reachedOutVerifiedAt: new Date().toISOString(),
           },
         },
-      }, "paraform_reached_out_verified", { requestId: request.id }), state.revision);
-    } catch (error) {
-      state = await saveOutreachState(appendOutreachJournal({
-        ...state,
-        reachedOutMarkPending: {
-          requestId: request.id,
-          errorCode: clean(error?.code || "REACHED_OUT_MARK_FAILED"),
-        },
-      }, "paraform_reached_out_pending", { requestId: request.id }), state.revision)
-        .catch(() => state);
+      }, "paraform_reached_out_already_visible", { requestId: request.id }), state.revision);
+    } else {
+      try {
+        await markReachedOut(request.id);
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          matches: {
+            ...state.matches,
+            [request.id]: {
+              ...state.matches[request.id],
+              reachedOutMarkedAt: new Date().toISOString(),
+            },
+          },
+        }, "paraform_reached_out_verified", { requestId: request.id }), state.revision);
+      } catch (error) {
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          reachedOutMarkPending: {
+            requestId: request.id,
+            errorCode: clean(error?.code || "REACHED_OUT_MARK_FAILED"),
+          },
+        }, "paraform_reached_out_pending", { requestId: request.id }), state.revision)
+          .catch(() => state);
+      }
     }
     return { action: "sent", request, ordinal, digest, roleUrl, copy, sent, state };
   } finally {
