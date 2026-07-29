@@ -27,6 +27,7 @@ import {
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import { replyHealth, runReplyTick } from "./_lib/reply.mjs";
 import { expiredHealth, runExpiredTick } from "./_lib/expired.mjs";
+import { interestStatus, runInterestTick } from "./_lib/interest.mjs";
 import {
   runPhase4SourceCaptureTick,
 } from "./_lib/source-capture-coordinator.mjs";
@@ -481,6 +482,7 @@ export default async function handler(req, res) {
         outreach: await outreachHealth(),
         reply: await replyHealth(),
         expired: await expiredHealth(),
+        interest: await interestStatus(),
       });
     }
     if (mode === "enqueue") {
@@ -743,6 +745,25 @@ export default async function handler(req, res) {
         ).catch(() => {});
       }
     }
+    // Curated-interest detection is the final normal actioning lane. Its own
+    // durable sweep lease self-paces the expensive population read, while each
+    // worker tick can still resume a previously detected submission job.
+    // Failures remain isolated from every established lane.
+    let interest = null;
+    let interestError = null;
+    try {
+      interest = await runInterestTick();
+    } catch (error) {
+      interestError = {
+        error: String(error?.code || "interest_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      };
+      if (await takeAlertSlot("interest-worker-failed", 3600).catch(() => false)) {
+        await notifySlack(
+          `🚨 Para AI curated-interest worker failed (${interestError.error}). Direct-submit, outreach, reply and expired-match processing continued.`,
+        ).catch(() => {});
+      }
+    }
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -768,6 +789,7 @@ export default async function handler(req, res) {
         || outreachError
         || replyError
         || expiredError
+        || interestError
         || remainderError
         || remainder?.ok === false
         || resumeOnlyBackfillError
@@ -787,6 +809,8 @@ export default async function handler(req, res) {
       replyError,
       expired,
       expiredError,
+      interest,
+      interestError,
       tick,
       remainder,
       remainderError,
