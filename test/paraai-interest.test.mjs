@@ -10,6 +10,7 @@ import {
 } from "../api/paraai/_lib/interest-copy.mjs";
 import {
   interestConfig,
+  interestSweepComplete,
   INTEREST_STATUS,
   REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
   curatedListSequenceIds,
@@ -52,6 +53,24 @@ test("multiple roles in one batch are all detected", () => {
     { r1: "APPLIED_TO_ROLE", r2: "APPLIED_TO_ROLE", r3: "PENDING" },
   );
   assert.deepEqual(d.newlyInterested.sort(), ["r1", "r2"]);
+});
+
+test("a population sweep is healthy only when every candidate read succeeds", () => {
+  assert.equal(interestSweepComplete({
+    populationSize: 717,
+    candidatesRead: 717,
+    readErrors: 0,
+  }), true);
+  assert.equal(interestSweepComplete({
+    populationSize: 717,
+    candidatesRead: 135,
+    readErrors: 582,
+  }), false);
+  assert.equal(interestSweepComplete({
+    populationSize: 0,
+    candidatesRead: 0,
+    readErrors: 0,
+  }), false);
 });
 
 /* ------------------------------------------------------------------- copy */
