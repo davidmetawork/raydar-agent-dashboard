@@ -132,11 +132,20 @@ export function additionalMatchCopy({
   digestUrl,
   ordinal,
   variationSeed,
+  signatureFollows = false,
 }) {
   const first = clean(firstName) || "there";
   const roleLabel = `${clean(roleName)} @ ${clean(companyName)}`;
   const digestLabel = digestLinkLabel(first);
   const hasDigest = Boolean(clean(digestUrl));
+  // When the full signature block is appended after the body it supplies the
+  // name, so the sign-off matches the initial email's bare "Thanks,".
+  const signoffText = signatureFollows
+    ? ["", "Let me know!", "", "Thanks,"]
+    : ["", "Let me know!", "", "Thanks,", "David"];
+  const signoffHtml = signatureFollows
+    ? ["Let me know!", "Thanks,"]
+    : ["Let me know!", "Thanks,<br>David"];
   if (Number(ordinal) === 2) {
     const textLines = [
       `Hey ${first},`,
@@ -153,7 +162,7 @@ export function additionalMatchCopy({
         `Reminder that I am adding all of these requests in one place for you to review: ${digestLabel} (${clean(digestUrl)})`,
       );
     }
-    textLines.push("", "Let me know!", "", "Thanks,", "David");
+    textLines.push(...signoffText);
     const htmlLines = [
       `Hey ${escapeHtml(first)},`,
       `You just got a new interview request for the ${anchor(roleLabel, roleUrl)}`,
@@ -165,7 +174,7 @@ export function additionalMatchCopy({
         `Reminder that I am adding all of these requests in one place for you to review: ${anchor(digestLabel, digestUrl)}`,
       );
     }
-    htmlLines.push("Let me know!", "Thanks,<br>David");
+    htmlLines.push(...signoffHtml);
     return {
       subject: null,
       text: textLines.join("\n"),
@@ -188,7 +197,7 @@ export function additionalMatchCopy({
   if (hasDigest) {
     textLines.push("", `${variant.reminder} ${digestLabel} (${clean(digestUrl)})`);
   }
-  textLines.push("", "Let me know!", "", "Thanks,", "David");
+  textLines.push(...signoffText);
   const htmlLines = [
     `Hey ${escapeHtml(first)},`,
     variant.opening(anchor(roleLabel, roleUrl)),
@@ -198,7 +207,7 @@ export function additionalMatchCopy({
   if (hasDigest) {
     htmlLines.push(`${variant.reminder} ${anchor(digestLabel, digestUrl)}`);
   }
-  htmlLines.push("Let me know!", "Thanks,<br>David");
+  htmlLines.push(...signoffHtml);
   return {
     subject: null,
     text: textLines.join("\n"),
