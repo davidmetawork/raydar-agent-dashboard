@@ -16,9 +16,12 @@ const source = readFileSync(
 test("the expired tick runs after the reply tick", () => {
   const reply = source.indexOf("await runReplyTick()");
   const expired = source.indexOf("await runExpiredTick()");
+  const interest = source.indexOf("await runInterestTick()");
   assert.ok(reply > 0, "expected the reply tick in the worker cycle");
   assert.ok(expired > 0, "expected the expired tick in the worker cycle");
+  assert.ok(interest > 0, "expected the curated-interest tick in the worker cycle");
   assert.ok(reply < expired, "the reply lane must classify before the expired lane can claim");
+  assert.ok(expired < interest, "curated-interest actioning must follow the established reply/expired order");
 });
 
 test("the ordering carries its rationale in the code", () => {
@@ -36,4 +39,15 @@ test("an expired-tick failure cannot stop the other lanes", () => {
 
 test("the lane's health is exposed on the status mode", () => {
   assert.match(source, /expired: await expiredHealth\(\)/);
+});
+
+test("an interest-tick failure cannot stop the other lanes", () => {
+  assert.match(source, /interest = await runInterestTick\(\);\s*\}\s*catch \(error\) \{/);
+  assert.match(source, /takeAlertSlot\("interest-worker-failed", 3600\)/);
+  assert.match(source, /\|\|\s*interestError/, "interestError must feed the degraded flag");
+  assert.match(source, /\n\s+interest,\n\s+interestError,/, "the tick result must be reported");
+});
+
+test("curated-interest health is exposed on the status mode", () => {
+  assert.match(source, /interest: await interestStatus\(\)/);
 });
