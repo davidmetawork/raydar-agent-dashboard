@@ -76,6 +76,7 @@ export default async function handler(req, res) {
         const result = await sweepInterest({ config: interestConfig() });
         return res.status(200).json({
           ok: result.ok,
+          populationSize: result.populationSize,
           candidatesRead: result.candidatesRead,
           seeded: result.seeded,
           detected: result.detected.length,

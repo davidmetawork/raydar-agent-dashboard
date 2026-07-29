@@ -181,6 +181,20 @@ async function mapWithConcurrency(items, limit, fn) {
   return out;
 }
 
+export function interestSweepComplete({
+  populationSize,
+  candidatesRead,
+  readErrors,
+}) {
+  const population = Number(populationSize);
+  const read = Number(candidatesRead);
+  return Number.isSafeInteger(population)
+    && population > 0
+    && Number.isSafeInteger(read)
+    && read === population
+    && Number(readErrors) === 0;
+}
+
 /**
  * One sweep. Reads every curated-list candidate's interest statuses, diffs
  * against the stored snapshot, and returns the candidates with NEW interest.
@@ -193,6 +207,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
   const started = Date.now();
   const result = {
     ok: false,
+    populationSize: 0,
     candidatesRead: 0,
     readErrors: 0,
     seeded: 0,
@@ -203,6 +218,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
   };
 
   const population = await listCuratedListCandidates();
+  result.populationSize = population.length;
   Object.defineProperty(result, "candidateByUserId", {
     value: new Map(population.map((candidate) => [candidate.candidateUserId, candidate])),
     enumerable: false,
@@ -254,11 +270,14 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     await putSnapshot(candidate.candidateUserId, statuses);
   }
 
-  // A pass that read nothing is a failure, not a clean run.
-  result.ok = result.candidatesRead > 0;
+  // Partial population reads are never a clean sweep. Successfully read rows
+  // can still seed/update independently, but the worker must retry the missing
+  // tail before status can report a healthy forward-only baseline.
+  result.ok = interestSweepComplete(result);
   result.durationMs = Date.now() - started;
   await recordSweep({
     ok: result.ok,
+    populationSize: result.populationSize,
     candidatesRead: result.candidatesRead,
     readErrors: result.readErrors,
     seeded: result.seeded,
@@ -748,7 +767,9 @@ export async function interestStatus() {
     },
     lastSweep: sweep,
     staleMs,
-    stale: staleMs === null ? true : staleMs > 90 * 60 * 1000,
+    stale: sweep?.ok !== true
+      || staleMs === null
+      || staleMs > 90 * 60 * 1000,
   };
 }
 
@@ -782,8 +803,11 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
   );
   const priorSweep = await getSweepState().catch(() => null);
   const priorSweepAt = Date.parse(String(priorSweep?.at || ""));
+  const retryIntervalMs = priorSweep?.ok === false
+    ? Math.min(sweepIntervalMs, 60_000)
+    : sweepIntervalMs;
   const sweepDue = !Number.isFinite(priorSweepAt)
-    || Number(now) - priorSweepAt >= sweepIntervalMs;
+    || Number(now) - priorSweepAt >= retryIntervalMs;
   if (sweepDue) {
     const sweepToken = await acquireLock("__curated_interest_sweep__", {
       ttlSeconds: Math.max(600, Math.ceil(sweepIntervalMs / 1000)),
@@ -792,13 +816,17 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       try {
         const currentSweep = await getSweepState().catch(() => null);
         const currentSweepAt = Date.parse(String(currentSweep?.at || ""));
+        const currentRetryIntervalMs = currentSweep?.ok === false
+          ? Math.min(sweepIntervalMs, 60_000)
+          : sweepIntervalMs;
         if (
           !Number.isFinite(currentSweepAt)
-          || Number(now) - currentSweepAt >= sweepIntervalMs
+          || Number(now) - currentSweepAt >= currentRetryIntervalMs
         ) {
           sweep = await sweepInterest({ config, now });
           result.sweep = {
             ok: sweep.ok,
+            populationSize: sweep.populationSize,
             candidatesRead: sweep.candidatesRead,
             seeded: sweep.seeded,
             detected: sweep.detected.length,
