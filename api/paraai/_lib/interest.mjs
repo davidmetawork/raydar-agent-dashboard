@@ -16,6 +16,7 @@ import {
   executeCapturedSingleSubmission,
   generateGroundedSubmissionDraft,
   parseSingleSubmissionPrepareResponse,
+  precheckCapturedSingleSubmissionContext,
   singleSubmissionWeekStart,
 } from "./interest-submission.mjs";
 import {
@@ -28,6 +29,7 @@ import {
   createJob,
   listPendingJobs,
   claimSubmission,
+  claimSubmissionAttempt,
   startSubmissionAttempt,
   recordSubmissionPrepared,
   recordSubmissionOutcome,
@@ -85,6 +87,7 @@ export function interestConfig(env = process.env) {
   const stopArmed = flag("PARAAI_INTEREST_STOP_APPROVED", env);
   const emailArmedRaw = flag("PARAAI_INTEREST_EMAIL_APPROVED", env);
   const submitArmedRaw = flag("PARAAI_INTEREST_SUBMIT_APPROVED", env);
+  const emailCanaryTo = normalizeEmail(env.PARAAI_INTEREST_EMAIL_CANARY_TO || "");
 
   // Code-enforced gate ordering.
   const emailArmed = emailArmedRaw && stopArmed;
@@ -98,17 +101,51 @@ export function interestConfig(env = process.env) {
     stopArmed,
     emailArmed,
     submitArmed,
+    emailCanaryTo: emailCanaryTo || null,
     gateOrderViolations: [
       emailArmedRaw && !stopArmed ? "EMAIL_APPROVED requires STOP_APPROVED" : null,
       submitArmedRaw && !(stopArmed && emailArmedRaw) ? "SUBMIT_APPROVED requires STOP_APPROVED and EMAIL_APPROVED" : null,
     ].filter(Boolean),
     writesEnabled: enabled && !dryRun,
     sweepConcurrency: Math.max(1, Math.min(6, Number(env.PARAAI_INTEREST_CONCURRENCY || 4))),
+    sweepBatchSize: Math.max(
+      1,
+      Math.min(120, Number(env.PARAAI_INTEREST_SWEEP_BATCH || 100)),
+    ),
     sweepIntervalMs: Math.max(
       60_000,
       Number(env.PARAAI_INTEREST_SWEEP_INTERVAL_MS || 15 * 60 * 1000),
     ),
     batchWindowMs: Math.max(0, Number(env.PARAAI_INTEREST_BATCH_WINDOW_MS ?? 30 * 60 * 1000)),
+  };
+}
+
+export function interestEmailPlan({
+  config,
+  paraformOwnsConfirmation = false,
+} = {}) {
+  if (paraformOwnsConfirmation) {
+    return {
+      send: false,
+      skipped: "paraform_confirmation_owns_candidate_email",
+      apply: false,
+      canaryTo: null,
+    };
+  }
+  const canaryPhase = config?.emailArmed === true && config?.submitArmed !== true;
+  if (canaryPhase && !config?.emailCanaryTo) {
+    return {
+      send: false,
+      skipped: "canary_recipient_required",
+      apply: false,
+      canaryTo: null,
+    };
+  }
+  return {
+    send: true,
+    skipped: null,
+    apply: config?.writesEnabled === true && config?.emailArmed === true,
+    canaryTo: canaryPhase ? config.emailCanaryTo : null,
   };
 }
 
@@ -195,6 +232,26 @@ export function interestSweepComplete({
     && Number(readErrors) === 0;
 }
 
+export function interestSweepWindow({
+  populationSize,
+  batchSize,
+  priorSweep,
+}) {
+  const population = Math.max(0, Number(populationSize) || 0);
+  const size = Math.max(1, Math.min(120, Number(batchSize) || 100));
+  const continuing = priorSweep?.cycleComplete === false
+    && Number(priorSweep?.populationSize) === population
+    && Number.isSafeInteger(Number(priorSweep?.nextCursor))
+    && Number(priorSweep.nextCursor) >= 0
+    && Number(priorSweep.nextCursor) < population;
+  const start = continuing ? Number(priorSweep.nextCursor) : 0;
+  return {
+    continuing,
+    start,
+    end: Math.min(population, start + size),
+  };
+}
+
 /**
  * One sweep. Reads every curated-list candidate's interest statuses, diffs
  * against the stored snapshot, and returns the candidates with NEW interest.
@@ -217,13 +274,27 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     durationMs: 0,
   };
 
-  const population = await listCuratedListCandidates();
+  const priorSweep = await getSweepState().catch(() => null);
+  const population = (await listCuratedListCandidates())
+    .sort((left, right) => String(left.candidateUserId || "")
+      .localeCompare(String(right.candidateUserId || "")));
   result.populationSize = population.length;
+  const window = interestSweepWindow({
+    populationSize: population.length,
+    batchSize: config.sweepBatchSize,
+    priorSweep,
+  });
+  const batch = population.slice(window.start, window.end);
+  result.cursorStart = window.start;
+  result.cursorEnd = window.end;
+  result.cycleStartedAt = window.continuing
+    ? priorSweep.cycleStartedAt
+    : new Date(now).toISOString();
   Object.defineProperty(result, "candidateByUserId", {
     value: new Map(population.map((candidate) => [candidate.candidateUserId, candidate])),
     enumerable: false,
   });
-  const reads = await mapWithConcurrency(population, config.sweepConcurrency, async (c) => {
+  const reads = await mapWithConcurrency(batch, config.sweepConcurrency, async (c) => {
     const statuses = await readInterestStatuses(c.candidateUserId);
     return { candidate: c, statuses };
   });
@@ -270,14 +341,57 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     await putSnapshot(candidate.candidateUserId, statuses);
   }
 
-  // Partial population reads are never a clean sweep. Successfully read rows
-  // can still seed/update independently, but the worker must retry the missing
-  // tail before status can report a healthy forward-only baseline.
-  result.ok = interestSweepComplete(result);
+  // A batch advances only if every row read successfully. Successfully read
+  // rows still seed/update independently, but a partial batch is retried from
+  // the same stable cursor. This keeps Paraform below its observed request
+  // ceiling without ever calling a partial population scan healthy.
+  const batchComplete = interestSweepComplete({
+    populationSize: batch.length,
+    candidatesRead: result.candidatesRead,
+    readErrors: result.readErrors,
+  });
+  const priorAdvanced = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleCandidatesRead) || 0)
+    : 0;
+  const priorSeeded = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleSeeded) || 0)
+    : 0;
+  const priorDetected = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleDetected) || 0)
+    : 0;
+  const priorAttemptErrors = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleAttemptReadErrors) || 0)
+    : 0;
+  result.cycleCandidatesRead = priorAdvanced + (batchComplete ? batch.length : 0);
+  result.cycleSeeded = priorSeeded + result.seeded;
+  result.cycleDetected = priorDetected + result.detected.length;
+  result.cycleAttemptReadErrors = priorAttemptErrors + result.readErrors;
+  result.cycleComplete = batchComplete
+    && window.end === population.length;
+  result.nextCursor = result.cycleComplete
+    ? 0
+    : batchComplete
+      ? window.end
+      : window.start;
+  result.ok = result.cycleComplete
+    && interestSweepComplete({
+      populationSize: population.length,
+      candidatesRead: result.cycleCandidatesRead,
+      readErrors: 0,
+    });
   result.durationMs = Date.now() - started;
   await recordSweep({
     ok: result.ok,
     populationSize: result.populationSize,
+    cursorStart: result.cursorStart,
+    cursorEnd: result.cursorEnd,
+    nextCursor: result.nextCursor,
+    cycleStartedAt: result.cycleStartedAt,
+    cycleComplete: result.cycleComplete,
+    cycleCandidatesRead: result.cycleCandidatesRead,
+    cycleSeeded: result.cycleSeeded,
+    cycleDetected: result.cycleDetected,
+    cycleAttemptReadErrors: result.cycleAttemptReadErrors,
     candidatesRead: result.candidatesRead,
     readErrors: result.readErrors,
     seeded: result.seeded,
@@ -293,50 +407,115 @@ export function curatedListSequenceIds() {
   return OUTCOME_SEQUENCE_RULES.map((r) => r.id);
 }
 
+function leadEmail(lead) {
+  return normalizeEmail(
+    lead?.to_use_email
+    || lead?.candidate_email
+    || lead?.email
+    || "",
+  );
+}
+
+async function exactSequenceLead({
+  sequenceId,
+  candidateUserId,
+  email,
+  trpcGetImpl,
+}) {
+  const searches = [...new Set([candidateUserId, email].filter(Boolean))];
+  for (const search of searches) {
+    const response = await trpcGetImpl(
+      "campaigns.getCampaignLeads",
+      { campaign_id: sequenceId, search },
+      1,
+    );
+    const leads = Array.isArray(response?.leads) ? response.leads : [];
+    const byId = leads.find(
+      (lead) => String(lead?.cu_id || lead?.candidate_user_id || "") ===
+        String(candidateUserId || ""),
+    );
+    if (byId) return byId;
+    const byEmail = leads.find(
+      (lead) => email && leadEmail(lead) === email,
+    );
+    if (byEmail) return byEmail;
+  }
+  return null;
+}
+
 /**
  * Pause every active lead for this candidate across the curated-list sequence
  * family. Pause only, never remove, never unpause: a false positive costs one
  * reversible pause, a false negative keeps nudging someone who just said yes.
  */
-export async function stopFollowUps({ candidate, apply, sequenceIds = curatedListSequenceIds() }) {
+export async function stopFollowUps({
+  candidate,
+  apply,
+  sequenceIds = curatedListSequenceIds(),
+  trpcGetImpl = trpcGet,
+  trpcPostImpl = trpcPost,
+}) {
   const email = normalizeEmail(candidate.email || "");
   const out = { attempted: 0, paused: 0, alreadyPaused: 0, notFound: 0, errors: [], verified: [] };
-  if (!email) { out.errors.push("no deliverable email"); return out; }
+  if (!candidate?.candidateUserId) {
+    out.errors.push("stop_candidate_identity_missing");
+    return out;
+  }
+  if (!email) { out.errors.push("stop_deliverable_email_missing"); return out; }
 
   for (const sequenceId of sequenceIds) {
     let lead = null;
     try {
-      const r = await trpcGet("campaigns.getCampaignLeads", { campaign_id: sequenceId, search: email }, 1);
-      lead = (r?.leads || [])[0] || null;
-    } catch (error) {
-      out.errors.push(`${sequenceId}: read failed ${String(error?.message || error).slice(0, 120)}`);
+      lead = await exactSequenceLead({
+        sequenceId,
+        candidateUserId: candidate.candidateUserId,
+        email,
+        trpcGetImpl,
+      });
+    } catch {
+      out.errors.push(`${sequenceId}:stop_read_failed`);
       continue;
     }
     if (!lead) { out.notFound++; continue; }
     if (lead.is_paused) { out.alreadyPaused++; continue; }
     if (lead.is_archived) continue;
+    if (!lead.ccu_id) {
+      out.errors.push(`${sequenceId}:stop_lead_identity_missing`);
+      continue;
+    }
 
     out.attempted++;
     if (!apply) continue;
 
     try {
-      await trpcPost("campaigns.updateCandidatePauseStatus", {
+      await trpcPostImpl("campaigns.updateCandidatePauseStatus", {
         campaign_to_candidate_user_id: lead.ccu_id,
         is_paused: true,
       }, 1);
-    } catch (error) {
-      out.errors.push(`${sequenceId}: pause failed ${String(error?.message || error).slice(0, 120)}`);
+    } catch {
+      out.errors.push(`${sequenceId}:stop_pause_failed`);
       continue;
     }
 
     // A 200 is not success. Re-read the row.
     try {
-      const check = await trpcGet("campaigns.getCampaignLeads", { campaign_id: sequenceId, search: email }, 1);
-      const after = (check?.leads || [])[0] || null;
-      if (after?.is_paused) { out.paused++; out.verified.push(sequenceId); }
-      else out.errors.push(`${sequenceId}: pause did not read back`);
-    } catch (error) {
-      out.errors.push(`${sequenceId}: readback failed ${String(error?.message || error).slice(0, 120)}`);
+      const after = await exactSequenceLead({
+        sequenceId,
+        candidateUserId: candidate.candidateUserId,
+        email,
+        trpcGetImpl,
+      });
+      if (
+        after?.ccu_id === lead.ccu_id
+        && after?.is_paused === true
+      ) {
+        out.paused++;
+        out.verified.push(sequenceId);
+      } else {
+        out.errors.push(`${sequenceId}:stop_readback_unverified`);
+      }
+    } catch {
+      out.errors.push(`${sequenceId}:stop_readback_failed`);
     }
   }
   return out;
@@ -376,26 +555,57 @@ export function gmailMailer({ mailbox = outreachMailbox() } = {}) {
  * Ordering (plan §6): this runs after the stop lands and after the submission is
  * claimed and pre-flighted, never after the submit round trip.
  */
-export async function sendConfirmation({ candidate, roleCount, batchId, apply, mailer = null }) {
+export async function sendConfirmation({
+  candidate,
+  roleCount,
+  batchId,
+  apply,
+  mailer = null,
+  canaryTo = null,
+  emailStore = { getEmailClaim, claimEmail, confirmEmail },
+}) {
   const out = { sent: false, skipped: null, messageId: null };
   const firstName = firstNameFor(candidate.name);
   if (!firstName) { out.skipped = "unusable_first_name"; return out; }
-  const email = normalizeEmail(candidate.email || "");
+  const canaryEmail = normalizeEmail(canaryTo || "");
+  const email = canaryEmail || normalizeEmail(candidate.email || "");
   if (!email) { out.skipped = "no_deliverable_email"; return out; }
+  const canary = Boolean(canaryEmail);
+  const claimCandidateUserId = canary
+    ? "__curated_interest_email_canary__"
+    : candidate.candidateUserId;
+  const claimBatchId = canary ? COPY_VARIANT : batchId;
 
-  const existing = await getEmailClaim(candidate.candidateUserId, batchId);
+  const existing = await emailStore.getEmailClaim(claimCandidateUserId, claimBatchId);
   if (existing?.deliveredAt) { out.skipped = "already_delivered"; return out; }
 
   const message = buildInterestConfirmation({ firstName, roleCount });
   if (!apply) { out.skipped = "dry_run"; out.preview = message; return out; }
 
-  const won = await claimEmail(candidate.candidateUserId, batchId, { variant: COPY_VARIANT, to: "redacted" });
-  if (!won && !existing) { out.skipped = "claim_lost"; return out; }
+  const won = await emailStore.claimEmail(claimCandidateUserId, claimBatchId, {
+    variant: COPY_VARIANT,
+    recipient: canary ? "canary" : "candidate",
+  });
+  if (!won) {
+    out.skipped = existing ? "delivery_unknown" : "claim_lost";
+    return out;
+  }
 
   if (!mailer) { out.skipped = "mailer_unavailable"; return out; }
-  const delivered = await mailer({ to: email, ...message, candidate: { ...candidate, batchId } });
-  await confirmEmail(candidate.candidateUserId, batchId, { messageId: delivered?.messageId || null });
+  const delivered = await mailer({
+    to: email,
+    ...message,
+    candidate: {
+      ...candidate,
+      candidateUserId: claimCandidateUserId,
+      batchId: claimBatchId,
+    },
+  });
+  await emailStore.confirmEmail(claimCandidateUserId, claimBatchId, {
+    messageId: delivered?.messageId || null,
+  });
   out.sent = true;
+  out.canary = canary;
   out.messageId = delivered?.messageId || null;
   return out;
 }
@@ -442,7 +652,7 @@ export async function preflightSubmission({
       candidate_user_id: candidate.candidateUserId,
       required_fields: [...REQUIRED_CANDIDATE_PREFERENCE_FIELDS],
     });
-    if (prefs && prefs.hasAllRequired === false) blockers.push("preferences_incomplete");
+    if (!prefs || prefs.hasAllRequired !== true) blockers.push("preferences_incomplete");
   } catch {
     blockers.push("preferences_read_failed");
   }
@@ -529,9 +739,11 @@ export async function submitToRole({
   restImpl = paraformRest,
   submissionDraftBuilder = generateGroundedSubmissionDraft,
   prepareContext = null,
+  contextPrecheckImpl = precheckCapturedSingleSubmissionContext,
   finalSubmitImpl = executeCapturedSingleSubmission,
   submissionStore = {
     claimSubmission,
+    claimSubmissionAttempt,
     startSubmissionAttempt,
     recordSubmissionPrepared,
     recordSubmissionOutcome,
@@ -618,12 +830,45 @@ export async function submitToRole({
     outcome.blockers = ["submit_prepare_context_unconfirmed"];
     return outcome;
   }
-  const claimResult = await submissionStore.claimSubmission(
-    candidate.candidateUserId,
-    roleId,
-    { roleId },
-  );
-  if (claimResult.status !== "claimed") {
+  let contextPrecheck = null;
+  try {
+    contextPrecheck = await contextPrecheckImpl({
+      candidate,
+      roleId,
+      trpcGetImpl,
+      trpcPostImpl,
+      restImpl,
+      now: new Date(now),
+    });
+  } catch {
+    contextPrecheck = {
+      ok: false,
+      blockers: ["submission_context_precheck_failed"],
+      signals: {},
+    };
+  }
+  outcome.contextSignals = contextPrecheck?.signals || {};
+  if (!contextPrecheck?.ok) {
+    outcome.stage = "blocked";
+    outcome.blockers = uniqueReasonCodes(contextPrecheck?.blockers);
+    if (!outcome.blockers.length) {
+      outcome.blockers = ["submission_context_precheck_failed"];
+    }
+    return outcome;
+  }
+  const claimResult = typeof submissionStore.claimSubmissionAttempt === "function"
+    ? await submissionStore.claimSubmissionAttempt(
+      candidate.candidateUserId,
+      roleId,
+      { roleId },
+    )
+    : await submissionStore.claimSubmission(
+      candidate.candidateUserId,
+      roleId,
+      { roleId },
+    );
+  const claimStartedAtomically = claimResult.status === "started";
+  if (!claimStartedAtomically && claimResult.status !== "claimed") {
     const prior = claimResult.claim
       || await submissionStore.getSubmissionClaim(candidate.candidateUserId, roleId);
     outcome.stage = "already_claimed";
@@ -631,15 +876,17 @@ export async function submitToRole({
     return outcome;
   }
   const attemptId = claimResult.claim.attemptId;
-  const started = await submissionStore.startSubmissionAttempt(
-    candidate.candidateUserId,
-    roleId,
-    attemptId,
-  );
-  if (started.status !== "started") {
-    outcome.stage = "submission_unknown";
-    outcome.error = "submission attempt was already started; readback only";
-    return outcome;
+  if (!claimStartedAtomically) {
+    const started = await submissionStore.startSubmissionAttempt(
+      candidate.candidateUserId,
+      roleId,
+      attemptId,
+    );
+    if (started.status !== "started") {
+      outcome.stage = "submission_unknown";
+      outcome.error = "submission_attempt_already_started";
+      return outcome;
+    }
   }
 
   let prepared = null;
@@ -649,9 +896,9 @@ export async function submitToRole({
       prepareInput,
       1,
     );
-  } catch (error) {
+  } catch {
     outcome.stage = "submission_unknown";
-    outcome.error = String(error?.message || error).slice(0, 300);
+    outcome.error = "submission_prepare_result_unknown";
     await submissionStore.recordSubmissionOutcome(
       candidate.candidateUserId,
       roleId,
@@ -695,9 +942,9 @@ export async function submitToRole({
       restImpl,
       now: new Date(now),
     });
-  } catch (error) {
+  } catch {
     outcome.stage = "submission_unknown";
-    outcome.error = String(error?.message || error).slice(0, 300);
+    outcome.error = "submission_final_result_unknown";
     await submissionStore.recordSubmissionOutcome(
       candidate.candidateUserId,
       roleId,
@@ -763,11 +1010,13 @@ export async function interestStatus() {
       stopArmed: config.stopArmed,
       emailArmed: config.emailArmed,
       submitArmed: config.submitArmed,
+      emailCanaryConfigured: Boolean(config.emailCanaryTo),
       gateOrderViolations: config.gateOrderViolations,
     },
     lastSweep: sweep,
     staleMs,
     stale: sweep?.ok !== true
+      || sweep?.cycleComplete !== true
       || staleMs === null
       || staleMs > 90 * 60 * 1000,
   };
@@ -803,7 +1052,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
   );
   const priorSweep = await getSweepState().catch(() => null);
   const priorSweepAt = Date.parse(String(priorSweep?.at || ""));
-  const retryIntervalMs = priorSweep?.ok === false
+  const retryIntervalMs = priorSweep?.cycleComplete !== true
     ? Math.min(sweepIntervalMs, 60_000)
     : sweepIntervalMs;
   const sweepDue = !Number.isFinite(priorSweepAt)
@@ -816,7 +1065,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       try {
         const currentSweep = await getSweepState().catch(() => null);
         const currentSweepAt = Date.parse(String(currentSweep?.at || ""));
-        const currentRetryIntervalMs = currentSweep?.ok === false
+        const currentRetryIntervalMs = currentSweep?.cycleComplete !== true
           ? Math.min(sweepIntervalMs, 60_000)
           : sweepIntervalMs;
         if (
@@ -827,6 +1076,11 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
           result.sweep = {
             ok: sweep.ok,
             populationSize: sweep.populationSize,
+            cursorStart: sweep.cursorStart,
+            cursorEnd: sweep.cursorEnd,
+            nextCursor: sweep.nextCursor,
+            cycleComplete: sweep.cycleComplete,
+            cycleCandidatesRead: sweep.cycleCandidatesRead,
             candidatesRead: sweep.candidatesRead,
             seeded: sweep.seeded,
             detected: sweep.detected.length,
@@ -845,7 +1099,6 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
     result.sweep = { skipped: "not_due" };
   }
 
-  const credits = await readSubmissionCredits().catch(() => null);
   const candidateByUserId = sweep?.candidateByUserId || new Map();
   const pendingJobs = await listPendingJobs(50);
   if (!pendingJobs.length && result.sweep?.skipped) {
@@ -895,10 +1148,34 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       job = await saveJob(appendJournal({ ...job, stopped: stop, stage: "stopped" }, "stopped", {
         paused: stop.paused, attempted: stop.attempted,
       }));
+      if (stop.errors.length) {
+        const reviewReasons = ["stop_errors"];
+        await recordReview(candidate.candidateUserId, reviewReasons, {
+          roles: job.roles,
+          batchId: job.batchId,
+        });
+        await saveJob(appendJournal({
+          ...job,
+          stage: "stop_blocked",
+        }, "stop_blocked", {
+          errors: stop.errors.length,
+        }));
+        result.reviews++;
+        result.processed.push({
+          candidateHashOnly: true,
+          roles: job.roles.length,
+          paused: stop.paused,
+          emailed: false,
+          submitStages: [],
+          reviewReasons,
+        });
+        continue;
+      }
 
       // 2. SUBMIT claims + pre-flight (before the email, so the promise is bankable).
       const submissions = [];
       for (const roleId of job.roles) {
+        const credits = await readSubmissionCredits(new Date(now)).catch(() => null);
         submissions.push(await submitToRole({
           candidate,
           roleId,
@@ -923,15 +1200,22 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         const paraformOwnsConfirmation = bankable.some(
           (submission) => submission.paraformConfirmationExpected === true,
         );
-        email = paraformOwnsConfirmation
-          ? { sent: false, skipped: "paraform_confirmation_owns_candidate_email" }
-          : await sendConfirmation({
+        const emailPlan = interestEmailPlan({
+          config,
+          paraformOwnsConfirmation,
+        });
+        if (!emailPlan.send) {
+          email = { sent: false, skipped: emailPlan.skipped };
+        } else {
+          email = await sendConfirmation({
             candidate,
             roleCount: bankable.length,
             batchId: job.batchId,
-            apply: config.writesEnabled && config.emailArmed,
+            apply: emailPlan.apply,
             mailer: send,
+            canaryTo: emailPlan.canaryTo,
           });
+        }
       }
       job = await saveJob(appendJournal({ ...job, emailed: email, stage: "done" }, "emailed", {
         sent: email.sent, skipped: email.skipped || null,

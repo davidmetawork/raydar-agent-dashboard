@@ -197,8 +197,17 @@ function roleIsExplicitlyClosed(role) {
 function tenureMonths(value) {
   if (Number.isFinite(Number(value))) return Math.max(0, Math.round(Number(value)));
   if (!value || typeof value !== "object") return null;
-  if (Number.isFinite(Number(value.months))) return Math.max(0, Math.round(Number(value.months)));
-  if (Number.isFinite(Number(value.years))) return Math.max(0, Math.round(Number(value.years) * 12));
+  const months = Number(value.months);
+  const years = Number(value.years);
+  if (Number.isFinite(months) || Number.isFinite(years)) {
+    return Math.max(
+      0,
+      Math.round(
+        (Number.isFinite(years) ? years * 12 : 0)
+        + (Number.isFinite(months) ? months : 0),
+      ),
+    );
+  }
   return null;
 }
 
@@ -270,6 +279,10 @@ function roleHasCurrentEmployerStageRestriction(roleProfile) {
 }
 
 function sponsorshipRequirement(preferences) {
+  const nativeAuthorization = clean(
+    preferences?.visa_authorization ?? preferences?.visaAuthorization,
+  ).toUpperCase();
+  if (nativeAuthorization === "NO_VISA_AUTHORIZATION_NEEDED") return false;
   const values = [
     ...list(preferences?.visa),
     ...list(preferences?.requiresSponsorship),
@@ -443,7 +456,9 @@ export function evaluateSubmissionEvidence({
     .filter((meeting) => meeting.at != null && Number(now) - meeting.at <= maxAgeMs)
     .map((meeting) => meeting.text)
     .join("\n");
-  const companyName = clean(role?.company?.name);
+  const companyName = clean(
+    role?.company?.name ?? role?.company_name ?? role?.companyName,
+  );
   const companyInterest = classifyCompanyInterest(recentTranscripts, companyName);
   if (companyInterest.contradicted) blockers.push("company_interest_contradicted");
   else if (!directInterestConfirmed && !companyInterest.confirmed) {

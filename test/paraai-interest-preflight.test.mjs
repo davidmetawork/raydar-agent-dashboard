@@ -511,6 +511,7 @@ test("captured adapter gets one fenced attempt and only verified readback succee
     apply: true,
     credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
     trpcGetImpl: passingTrpcRead,
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     trpcPostImpl: async (proc, input) => {
       prepareCalls += 1;
       assert.equal(proc, "roleSlots.prepareForSingleSubmission");
@@ -530,6 +531,7 @@ test("captured adapter gets one fenced attempt and only verified readback succee
       anonymizeCandidates: false,
       roleDiscoverySource: "CURATED_LIST",
     },
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     finalSubmitImpl: async ({ candidateToApprovedRoleId, submissionDraft }) => {
       finalCalls += 1;
       assert.equal(candidateToApprovedRoleId, "candidate-role-1");
@@ -560,6 +562,7 @@ test("an uncertain final mutation is permanently reads-only and never retried", 
     apply: true,
     credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
     trpcGetImpl: passingTrpcRead,
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     trpcPostImpl: async () => ({
       success: true,
       candidate_to_approved_role_id: "candidate-role-1",
@@ -574,6 +577,7 @@ test("an uncertain final mutation is permanently reads-only and never retried", 
       anonymizeCandidates: false,
       roleDiscoverySource: "CURATED_LIST",
     },
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     finalSubmitImpl: async () => {
       finalCalls += 1;
       throw new Error("transport timeout");

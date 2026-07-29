@@ -255,6 +255,47 @@ export async function claimSubmission(candidateUserId, roleId, detail = {}, { kv
   };
 }
 
+/**
+ * Atomically create the permanent claim and mark its sole mutation attempt as
+ * started. The executor calls this immediately before Paraform's prepare write,
+ * removing the crash window between separate claim/start operations.
+ */
+export async function claimSubmissionAttempt(
+  candidateUserId,
+  roleId,
+  detail = {},
+  { kvImpl = kv } = {},
+) {
+  const claimedAt = new Date().toISOString();
+  const claim = {
+    version: 2,
+    claimedAt,
+    attemptId: randomUUID(),
+    attemptStartedAt: claimedAt,
+    state: "attempt_started",
+    ...detail,
+  };
+  const payload = JSON.stringify(claim);
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if raw then return {0, raw} end
+    redis.call('SET', KEYS[1], ARGV[1], 'NX')
+    return {1, ARGV[1]}
+  `;
+  const result = await kvImpl([
+    "EVAL", script, 1, claimKey(candidateUserId, roleId), payload,
+  ]);
+  const code = Number(result?.[0]);
+  const stored = parse(result?.[1], null);
+  if (![0, 1].includes(code) || !stored?.attemptId) {
+    throw new Error("interest submission attempt claim failed");
+  }
+  return {
+    status: code === 1 ? "started" : "existing",
+    claim: stored,
+  };
+}
+
 export async function getSubmissionClaim(candidateUserId, roleId, { kvImpl = kv } = {}) {
   return parse(await kvImpl(["GET", claimKey(candidateUserId, roleId)]), null);
 }

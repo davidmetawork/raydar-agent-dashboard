@@ -10,10 +10,14 @@ import {
 } from "../api/paraai/_lib/interest-copy.mjs";
 import {
   interestConfig,
+  interestEmailPlan,
   interestSweepComplete,
+  interestSweepWindow,
   INTEREST_STATUS,
   REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
   curatedListSequenceIds,
+  sendConfirmation,
+  stopFollowUps,
 } from "../api/paraai/_lib/interest.mjs";
 
 /* -------------------------------------------------------------- detection */
@@ -71,6 +75,44 @@ test("a population sweep is healthy only when every candidate read succeeds", ()
     candidatesRead: 0,
     readErrors: 0,
   }), false);
+});
+
+test("interest sweeps advance through stable rate-limited population windows", () => {
+  assert.deepEqual(interestSweepWindow({
+    populationSize: 717,
+    batchSize: 100,
+    priorSweep: null,
+  }), { continuing: false, start: 0, end: 100 });
+  assert.deepEqual(interestSweepWindow({
+    populationSize: 717,
+    batchSize: 100,
+    priorSweep: {
+      populationSize: 717,
+      cycleComplete: false,
+      nextCursor: 600,
+    },
+  }), { continuing: true, start: 600, end: 700 });
+  assert.deepEqual(interestSweepWindow({
+    populationSize: 717,
+    batchSize: 100,
+    priorSweep: {
+      populationSize: 717,
+      cycleComplete: false,
+      nextCursor: 700,
+    },
+  }), { continuing: true, start: 700, end: 717 });
+});
+
+test("population drift restarts the sweep rather than trusting a stale cursor", () => {
+  assert.deepEqual(interestSweepWindow({
+    populationSize: 718,
+    batchSize: 100,
+    priorSweep: {
+      populationSize: 717,
+      cycleComplete: false,
+      nextCursor: 400,
+    },
+  }), { continuing: false, start: 0, end: 100 });
 });
 
 /* ------------------------------------------------------------------- copy */
@@ -162,6 +204,78 @@ test("gates arm in the correct order", () => {
   assert.deepEqual(c.gateOrderViolations, []);
 });
 
+test("EMAIL-only rollout can target only the configured canary recipient", () => {
+  const emailOnly = interestConfig({
+    PARAAI_INTEREST_ENABLED: "1",
+    PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_STOP_APPROVED: "1",
+    PARAAI_INTEREST_EMAIL_APPROVED: "1",
+    PARAAI_INTEREST_EMAIL_CANARY_TO: "david@example.com",
+  });
+  assert.deepEqual(interestEmailPlan({ config: emailOnly }), {
+    send: true,
+    skipped: null,
+    apply: true,
+    canaryTo: "david@example.com",
+  });
+  assert.equal(
+    interestEmailPlan({
+      config: { ...emailOnly, emailCanaryTo: null },
+    }).skipped,
+    "canary_recipient_required",
+  );
+
+  const submitArmed = {
+    ...emailOnly,
+    submitArmed: true,
+  };
+  assert.equal(interestEmailPlan({ config: submitArmed }).canaryTo, null);
+  assert.equal(
+    interestEmailPlan({
+      config: submitArmed,
+      paraformOwnsConfirmation: true,
+    }).skipped,
+    "paraform_confirmation_owns_candidate_email",
+  );
+});
+
+test("email canary uses a one-time global claim and never addresses the candidate", async () => {
+  const claims = new Map();
+  const recipients = [];
+  const emailStore = {
+    getEmailClaim: async (candidateUserId, batchId) =>
+      claims.get(`${candidateUserId}:${batchId}`) || null,
+    claimEmail: async (candidateUserId, batchId) => {
+      const key = `${candidateUserId}:${batchId}`;
+      if (claims.has(key)) return false;
+      claims.set(key, { claimedAt: "now" });
+      return true;
+    },
+    confirmEmail: async (candidateUserId, batchId, detail) => {
+      claims.set(`${candidateUserId}:${batchId}`, { deliveredAt: "now", ...detail });
+    },
+  };
+  const args = {
+    candidate: {
+      candidateUserId: "candidate-user-1",
+      name: "Taylor Example",
+      email: "candidate@example.com",
+    },
+    roleCount: 1,
+    batchId: "batch-1",
+    apply: true,
+    canaryTo: "david@example.com",
+    emailStore,
+    mailer: async ({ to }) => {
+      recipients.push(to);
+      return { messageId: "message-1" };
+    },
+  };
+  assert.equal((await sendConfirmation(args)).sent, true);
+  assert.equal((await sendConfirmation({ ...args, batchId: "batch-2" })).sent, false);
+  assert.deepEqual(recipients, ["david@example.com"]);
+});
+
 test("not-before must be a parseable timestamp to count as configured", () => {
   assert.equal(interestConfig({}).notBeforeConfigured, false);
   assert.equal(interestConfig({ PARAAI_INTEREST_NOT_BEFORE: "nonsense" }).notBeforeConfigured, false);
@@ -190,4 +304,55 @@ test("stop scope is the five pinned curated-list sequence ids", () => {
   for (const id of ids) assert.match(id, /^[a-z0-9]{20,}$/, "resolution is ID-first; names are diagnostics");
   assert.ok(ids.includes("cmqk75h7x00030bj8f5s6oaw8"));
   assert.ok(ids.includes("cmqpje4lh00040cki15nuuqc8"));
+});
+
+test("stop follow-ups ignores fuzzy search rows and verifies the exact lead", async () => {
+  let paused = false;
+  const writes = [];
+  const candidate = {
+    candidateUserId: "candidate-user-1",
+    email: "candidate@example.com",
+  };
+  const trpcGetImpl = async (_proc, input) => {
+    if (input.search === candidate.candidateUserId) {
+      return {
+        leads: [{
+          cu_id: "candidate-user-other",
+          ccu_id: "lead-other",
+          candidate_email: "candidate+other@example.com",
+          is_paused: false,
+        }],
+      };
+    }
+    return {
+      leads: [
+        {
+          cu_id: "candidate-user-other",
+          ccu_id: "lead-other",
+          candidate_email: "candidate@example.com.invalid",
+          is_paused: false,
+        },
+        {
+          cu_id: candidate.candidateUserId,
+          ccu_id: "lead-exact",
+          candidate_email: "CANDIDATE@example.com",
+          is_paused: paused,
+        },
+      ],
+    };
+  };
+  const trpcPostImpl = async (_proc, input) => {
+    writes.push(input.campaign_to_candidate_user_id);
+    paused = true;
+  };
+  const result = await stopFollowUps({
+    candidate,
+    apply: true,
+    sequenceIds: ["sequence-1"],
+    trpcGetImpl,
+    trpcPostImpl,
+  });
+  assert.deepEqual(writes, ["lead-exact"]);
+  assert.deepEqual(result.verified, ["sequence-1"]);
+  assert.deepEqual(result.errors, []);
 });

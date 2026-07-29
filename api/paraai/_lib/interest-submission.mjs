@@ -223,7 +223,7 @@ export function buildSubmissionSourceBundle({
   calibration,
   meetings,
 } = {}) {
-  const candidateSpeech = list(meetings)
+  const candidateSpeech = clean(list(meetings)
     .slice()
     .sort((left, right) => meetingTimestamp(right) - meetingTimestamp(left))
     .map((meeting) => candidateTranscriptText(
@@ -231,7 +231,7 @@ export function buildSubmissionSourceBundle({
       candidate?.name,
     ))
     .filter(Boolean)
-    .join("\n");
+    .join("\n")).slice(0, 20_000);
 
   const requirements = roleRequirements(role);
   const questions = roleQuestions(role);
@@ -248,16 +248,25 @@ export function buildSubmissionSourceBundle({
     ai_calibration: safePromptValue(calibration),
     candidate_only_screening_speech: candidateSpeech,
   };
-  const sourceTexts = [
+  const roleSourceTexts = [
     JSON.stringify(modelInput.role),
     JSON.stringify(modelInput.requirements),
     JSON.stringify(modelInput.questions),
+  ].map(clean).filter(Boolean);
+  const candidateSourceTexts = [
     JSON.stringify(modelInput.candidate),
     JSON.stringify(modelInput.preferences),
     JSON.stringify(modelInput.ai_calibration),
     candidateSpeech,
   ].map(clean).filter(Boolean);
-  return { modelInput, sourceTexts, requirements, questions };
+  return {
+    modelInput,
+    sourceTexts: [...roleSourceTexts, ...candidateSourceTexts],
+    roleSourceTexts,
+    candidateSourceTexts,
+    requirements,
+    questions,
+  };
 }
 
 function verifiedEvidence(values, normalizedCorpus) {
@@ -272,6 +281,15 @@ function verifiedEvidence(values, normalizedCorpus) {
 const GENERIC_CAPITALIZED = new Set([
   "a", "an", "and", "but", "candidate", "good", "he", "her", "his", "i",
   "plus", "she", "the", "their", "they", "this", "what", "yes",
+]);
+
+const GENERATED_GLUE = new Set([
+  "about", "able", "also", "and", "are", "because", "but", "can", "candidate",
+  "depth", "directly", "explicit", "explicitly", "experience", "fit", "for", "from",
+  "grounded", "has", "have", "include", "including", "into", "is", "isn't", "map",
+  "mandate", "match", "need", "open", "relevant", "role", "strong", "support",
+  "team", "that", "the", "their", "them", "they", "this", "to", "with", "work",
+  "working", "yes", "they're",
 ]);
 
 function unsupportedTokens(text, normalizedCorpus) {
@@ -290,13 +308,45 @@ function unsupportedTokens(text, normalizedCorpus) {
   return unique(unsupported);
 }
 
-function groundedText(item, normalizedCorpus) {
+function unsupportedClaimWords(text, evidence, normalizedRoleCorpus) {
+  const allowedCorpus = normalize(`${evidence.join(" ")} ${normalizedRoleCorpus}`);
+  return unique(
+    normalize(text)
+      .split(/\s+/)
+      .map((token) => token
+        .replace(/'s$/u, "")
+        .replace(/^[^a-z0-9+#]+|[^a-z0-9+#]+$/gu, ""))
+      .filter((token) => token.length >= 3)
+      .filter((token) => {
+        const variants = unique([
+          token,
+          token.replace(/s$/u, ""),
+          token.replace(/ing$/u, ""),
+          token.replace(/ed$/u, ""),
+          /^(?:led|leading|leadership)$/u.test(token) ? "lead" : "",
+        ]);
+        return !variants.some((variant) => (
+          GENERATED_GLUE.has(variant)
+          || allowedCorpus.includes(variant)
+        ));
+      }),
+  );
+}
+
+function groundedText(item, {
+  normalizedCandidateCorpus,
+  normalizedCombinedCorpus,
+  normalizedRoleCorpus,
+}) {
   const text = clean(item?.text ?? item);
-  const evidence = verifiedEvidence(item?.evidence, normalizedCorpus);
+  const evidence = verifiedEvidence(item?.evidence, normalizedCandidateCorpus);
   return {
     text,
     evidence,
-    grounded: Boolean(text) && evidence.length > 0 && unsupportedTokens(text, normalizedCorpus).length === 0,
+    grounded: Boolean(text)
+      && evidence.length > 0
+      && unsupportedTokens(text, normalizedCombinedCorpus).length === 0
+      && unsupportedClaimWords(text, evidence, normalizedRoleCorpus).length === 0,
   };
 }
 
@@ -324,35 +374,59 @@ export function guardSubmissionDraft({
   role,
   candidateName = "",
   sourceTexts = [],
+  candidateSourceTexts = sourceTexts,
+  roleSourceTexts = sourceTexts,
   requirements = roleRequirements(role),
   questions = roleQuestions(role),
 } = {}) {
   const blockers = [];
-  const normalizedCorpus = normalize(sourceTexts.join("\n"));
-  if (!normalizedCorpus) blockers.push("submission_evidence_missing");
+  const normalizedCandidateCorpus = normalize(candidateSourceTexts.join("\n"));
+  const normalizedRoleCorpus = normalize(roleSourceTexts.join("\n"));
+  const normalizedCombinedCorpus = normalize([
+    ...sourceTexts,
+    ...candidateSourceTexts,
+    ...roleSourceTexts,
+  ].join("\n"));
+  const groundingContext = {
+    normalizedCandidateCorpus,
+    normalizedCombinedCorpus,
+    normalizedRoleCorpus,
+  };
+  if (!normalizedCandidateCorpus) blockers.push("submission_evidence_missing");
 
   const oneLiner = clean(draft?.one_liner);
-  const oneLinerEvidence = verifiedEvidence(draft?.one_liner_evidence, normalizedCorpus);
+  const oneLinerEvidence = verifiedEvidence(
+    draft?.one_liner_evidence,
+    normalizedCandidateCorpus,
+  );
   const oneLinerGrounded = oneLinerEvidence.length > 0
-    && unsupportedTokens(oneLiner, normalizedCorpus).length === 0;
+    && unsupportedTokens(oneLiner, normalizedCombinedCorpus).length === 0
+    && unsupportedClaimWords(oneLiner, oneLinerEvidence, normalizedRoleCorpus).length === 0;
   if (
     !oneLinerGrounded
     || oneLiner.length < 20
-    || oneLiner.length > 60
+    || oneLiner.length > 50
     || containsCandidateName(oneLiner, candidateName)
   ) {
     blockers.push("one_liner_not_grounded");
   }
 
-  const pitchParts = list(draft?.pitch_sentences).map((item) => groundedText(item, normalizedCorpus));
+  const pitchParts = list(draft?.pitch_sentences)
+    .map((item) => groundedText(item, groundingContext));
   const retainedPitch = pitchParts.filter((item) => item.grounded);
   const greatFitReason = retainedPitch.map((item) => item.text).join(" ");
   const companyName = clean(role?.company?.name ?? role?.company_name ?? role?.companyName);
   const pitchHasNegative = /\b(?:no|not|never|lack\w*|gap|without|hasn['’]?t|isn['’]?t|although|however)\b/i
     .test(greatFitReason);
+  const sentenceCount = (value) => clean(value)
+    .split(/(?<=[.!?])\s+/u)
+    .filter(Boolean)
+    .length;
   if (
     pitchParts.length !== 2
     || retainedPitch.length !== 2
+    || retainedPitch.some((item) => sentenceCount(item.text) !== 1)
+    || sentenceCount(greatFitReason) !== 2
     || wordCount(greatFitReason) < 35
     || wordCount(greatFitReason) > 55
     || (companyName && !normalize(greatFitReason).includes(normalize(companyName)))
@@ -367,18 +441,23 @@ export function guardSubmissionDraft({
   );
   const attributes = requirements.map((requirement) => {
     const proposed = draftAttributes.get(requirement.id);
-    const evidence = verifiedEvidence(proposed?.evidence, normalizedCorpus);
+    const evidence = verifiedEvidence(proposed?.evidence, normalizedCandidateCorpus);
     let rating = [1, 3, 5].includes(Number(proposed?.rating)) ? Number(proposed.rating) : 3;
     if (!evidence.length) rating = 3;
     const comment = rating !== 5 && requirement.commentRequired
       ? clean(proposed?.comment).slice(0, 180)
       : "";
+    const commentGrounded = !comment || (
+      unsupportedTokens(comment, normalizedCombinedCorpus).length === 0
+      && unsupportedClaimWords(comment, evidence, normalizedRoleCorpus).length === 0
+    );
     return {
       requirementId: requirement.id,
       name: requirement.name,
       rating,
       comment,
       evidence,
+      grounded: evidence.length > 0 && commentGrounded,
     };
   });
   if (
@@ -389,6 +468,9 @@ export function guardSubmissionDraft({
     )
   ) {
     blockers.push("scorecard_requirement_mismatch");
+  }
+  if (attributes.some((item) => !item.grounded)) {
+    blockers.push("scorecard_evidence_missing");
   }
   const nonGreenMarks = attributes.filter((item) => item.rating !== 5).length;
   if (nonGreenMarks >= 3) blockers.push("generated_three_plus_non_green");
@@ -404,7 +486,7 @@ export function guardSubmissionDraft({
     .map((item) => ({
       questionId: clean(item?.question_id),
       answer: clean(item?.answer),
-      evidence: verifiedEvidence(item?.evidence, normalizedCorpus),
+      evidence: verifiedEvidence(item?.evidence, normalizedCandidateCorpus),
     }))
     .filter((item) => questionsById.has(item.questionId))
     .map((item) => ({
@@ -413,7 +495,12 @@ export function guardSubmissionDraft({
       grounded: Boolean(item.answer)
         && item.evidence.length > 0
         && item.answer.length >= Number(questionsById.get(item.questionId)?.minLength || 1)
-        && unsupportedTokens(item.answer, normalizedCorpus).length === 0,
+        && unsupportedTokens(item.answer, normalizedCombinedCorpus).length === 0
+        && unsupportedClaimWords(
+          item.answer,
+          item.evidence,
+          normalizedRoleCorpus,
+        ).length === 0,
     }));
   const answeredIds = new Set(answers.filter((item) => item.grounded).map((item) => item.questionId));
   if (questions.some((question) => question.required && !answeredIds.has(question.id))) {
@@ -421,11 +508,11 @@ export function guardSubmissionDraft({
   }
 
   const additionalInfo = list(draft?.additional_info)
-    .map((item) => groundedText(item, normalizedCorpus))
+    .map((item) => groundedText(item, groundingContext))
     .filter((item) => item.grounded)
     .map((item) => item.text);
   const jobHopper = draft?.job_hopper_explanation
-    ? groundedText(draft.job_hopper_explanation, normalizedCorpus)
+    ? groundedText(draft.job_hopper_explanation, groundingContext)
     : { text: "", evidence: [], grounded: false };
 
   return {
@@ -436,7 +523,7 @@ export function guardSubmissionDraft({
       greatFitReason,
       additionalInfo: additionalInfo.join("\n"),
       jobHopperExplanation: jobHopper.grounded ? jobHopper.text : "",
-      attributes,
+      attributes: attributes.map(({ grounded, ...item }) => item),
       questionAnswers: answers
         .filter((item) => item.grounded)
         .map(({ grounded, longEnough, ...item }) => item),
@@ -479,6 +566,10 @@ function numericValue(...values) {
 }
 
 function preferenceNeedsSponsorship(preferences) {
+  const nativeAuthorization = clean(
+    preferences?.visa_authorization ?? preferences?.visaAuthorization,
+  ).toUpperCase();
+  if (nativeAuthorization === "NO_VISA_AUTHORIZATION_NEEDED") return false;
   const body = [
     ...list(preferences?.visa),
     preferences?.visa_authorization,
@@ -900,6 +991,8 @@ export async function generateGroundedSubmissionDraft({
     role: collected.role,
     candidateName: candidate?.name,
     sourceTexts: source.sourceTexts,
+    candidateSourceTexts: source.candidateSourceTexts,
+    roleSourceTexts: source.roleSourceTexts,
     requirements: source.requirements,
     questions: source.questions,
   });
@@ -979,12 +1072,12 @@ function submissionRows(value) {
 
 /**
  * Capture a read-only before/after ledger snapshot. Only explicit identifier
- * fields are accepted; a generic `id` is intentionally not treated as an
- * application id because Paraform rows contain several unrelated ids.
+ * fields are accepted. Paraform's current recent-submission rows use top-level
+ * `id` for the application id, matching the application POST response.
  */
 export function singleSubmissionLedgerSnapshot(value) {
   const rows = submissionRows(value).map((row) => ({
-    applicationId: explicitId(row, ["application_id", "applicationId"]),
+    applicationId: explicitId(row, ["id", "application_id", "applicationId"]),
     candidateToApprovedRoleId: explicitId(row, [
       "candidate_to_approved_role_id",
       "candidateToApprovedRoleId",
@@ -999,6 +1092,14 @@ export function singleSubmissionLedgerSnapshot(value) {
     total: Number(value?.totalSingleSubmissions || 0),
     rows,
   };
+}
+
+export function singleSubmissionCreditsAvailable(value) {
+  const snapshot = singleSubmissionLedgerSnapshot(value);
+  const capacity = Number(snapshot.allowance) + Number(snapshot.earnedBack);
+  return Number.isFinite(capacity)
+    && capacity > 0
+    && Number(snapshot.usedThisWeek) < capacity;
 }
 
 function applicationFacts(value) {
@@ -1204,6 +1305,102 @@ function eligibilityBlockers(value) {
     ));
 }
 
+/**
+ * Read-only context fence used immediately before the permanent claim.
+ *
+ * The prepared candidate-role row does not exist yet, so the final executor
+ * repeats these checks after prepare and adds prepared-row/eligibility checks.
+ * This pass prevents known duplicates, disabled roles, and exhausted credits
+ * from consuming a permanent claim.
+ */
+export async function precheckCapturedSingleSubmissionContext({
+  candidate,
+  roleId,
+  trpcGetImpl,
+  trpcPostImpl,
+  restImpl = paraformRest,
+  now = new Date(),
+} = {}) {
+  if (typeof trpcGetImpl !== "function") throw new TypeError("trpcGetImpl required");
+  if (typeof trpcPostImpl !== "function") throw new TypeError("trpcPostImpl required");
+  if (typeof restImpl !== "function") throw new TypeError("restImpl required");
+  const blockers = [];
+  const linkedinUser = linkedinHandle(
+    candidate?.linkedinUser ?? candidate?.linkedin_user ?? "",
+  );
+  const email = normalizeEmail(candidate?.email || "");
+  if (!linkedinUser) blockers.push("submission_linkedin_missing");
+  if (!email) blockers.push("submission_email_missing");
+  if (blockers.length) return { ok: false, blockers, signals: {} };
+
+  const weekStart = singleSubmissionWeekStart(now);
+  const reads = await Promise.allSettled([
+    trpcGetImpl("role.getRoleByIdSimple", { role_id: roleId, id: roleId }),
+    restImpl(`/api/role/${encodeURIComponent(roleId)}/user_role_approval?simple=true`),
+    trpcGetImpl("roleSettings.getRoleSettingsForRecruiters", { role_id: roleId }),
+    trpcGetImpl("roleSlots.getMySingleSubmissionData", { weekStart }),
+    trpcPostImpl("submission.checkDuplicates", {
+      role_id: roleId,
+      email,
+      linkedin_user: linkedinUser,
+    }, 1),
+  ]);
+  const labels = [
+    "role",
+    "user_role_approval",
+    "role_settings",
+    "credit_ledger",
+    "duplicates",
+  ];
+  reads.forEach((read, index) => {
+    if (read.status === "rejected") {
+      blockers.push(`submission_context_read_failed_${labels[index]}`);
+    }
+  });
+  if (blockers.length) return { ok: false, blockers, signals: {} };
+
+  const [role, userRoleApproval, roleSettings, ledger, duplicates] =
+    reads.map((read) => read.value);
+  if (role?.id !== roleId) blockers.push("submission_role_context_mismatch");
+  if (clean(role?.status).toUpperCase() !== "ACTIVE") {
+    blockers.push("submission_role_not_active");
+  }
+  if (!userRoleApproval?.id || !userRoleApproval?.approval_type) {
+    blockers.push("user_role_approval_missing");
+  }
+  if (roleSettings?.disable_submissions === true) blockers.push("submission_role_disabled");
+  if (roleSettings?.screening_call_snippet_required === true) {
+    blockers.push("submission_screening_call_snippet_required");
+  }
+  if (!singleSubmissionCreditsAvailable(ledger)) blockers.push("credits_exhausted");
+  blockers.push(...duplicateSubmissionBlockers(duplicates));
+  if (role?.companyId) {
+    try {
+      const submitted = await trpcGetImpl(
+        "candidates.hasCandidateBeenSubmittedToCompany",
+        {
+          candidate_linkedin: linkedinUser,
+          company_id: role.companyId,
+        },
+      );
+      if (submitted === true) blockers.push("submission_duplicate_company");
+    } catch {
+      blockers.push("submission_context_read_failed_company_duplicate");
+    }
+  } else {
+    blockers.push("submission_company_id_missing");
+  }
+
+  return {
+    ok: unique(blockers).length === 0,
+    blockers: unique(blockers),
+    signals: {
+      paraformConfirmationExpected:
+        roleSettings?.candidate_application_confirm_email === true,
+    },
+  };
+}
+
 async function applicationReadback(applicationId, trpcGetImpl, sleepImpl) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -1293,7 +1490,6 @@ export async function executeCapturedSingleSubmission({
     }),
     restImpl(`/api/role/${encodeURIComponent(roleId)}/user_role_approval?simple=true`),
     trpcGetImpl("roleSettings.getRoleSettingsForRecruiters", { role_id: roleId }),
-    trpcGetImpl("roleSlots.getMySingleSubmissionData", { weekStart }),
     trpcPostImpl("submission.checkDuplicates", {
       role_id: roleId,
       email: normalizeEmail(candidate?.email || ""),
@@ -1306,7 +1502,6 @@ export async function executeCapturedSingleSubmission({
     "preferences",
     "user_role_approval",
     "role_settings",
-    "credit_ledger",
     "duplicates",
   ];
   reads.forEach((read, index) => {
@@ -1324,7 +1519,6 @@ export async function executeCapturedSingleSubmission({
     preferences,
     userRoleApproval,
     roleSettings,
-    ledgerBeforeRaw,
     duplicates,
   ] = reads.map((read) => read.value);
   const candidateToApprovedRole = submissionInfo?.candidateToApprovedRole;
@@ -1332,7 +1526,13 @@ export async function executeCapturedSingleSubmission({
     blockers.push("submission_prepared_context_mismatch");
   }
   if (role?.id !== roleId) blockers.push("submission_role_context_mismatch");
+  if (clean(role?.status).toUpperCase() !== "ACTIVE") {
+    blockers.push("submission_role_not_active");
+  }
   if (roleSettings?.disable_submissions === true) blockers.push("submission_role_disabled");
+  if (roleSettings?.screening_call_snippet_required === true) {
+    blockers.push("submission_screening_call_snippet_required");
+  }
   blockers.push(...eligibilityBlockers(submissionInfo?.eligibilityResults));
   blockers.push(...duplicateSubmissionBlockers(duplicates));
 
@@ -1362,14 +1562,25 @@ export async function executeCapturedSingleSubmission({
     preferences,
     draft: submissionDraft,
     sendConfirmationEmail: roleSettings?.candidate_application_confirm_email === true,
-    requireReviewByParaform: (
-      roleSettings?.require_review_by_paraform === true
-      || roleSettings?.require_review_all_applications === true
-    ),
+    // The current single-submit component passes this exact value as a
+    // hard-coded false even when role settings ask Paraform to review.
+    requireReviewByParaform: false,
     isJobHopper: preflightSignals?.jobHopper === true,
     attachmentRequirement: roleSettings?.submission_attachment_requirements,
   });
   blockers.push(...built.blockers);
+  let ledgerBeforeRaw = null;
+  try {
+    ledgerBeforeRaw = await trpcGetImpl(
+      "roleSlots.getMySingleSubmissionData",
+      { weekStart },
+    );
+    if (!singleSubmissionCreditsAvailable(ledgerBeforeRaw)) {
+      blockers.push("credits_exhausted");
+    }
+  } catch {
+    blockers.push("submission_context_read_failed_credit_ledger");
+  }
   if (blockers.length) {
     return {
       verified: false,
