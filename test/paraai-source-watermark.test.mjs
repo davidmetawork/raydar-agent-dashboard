@@ -914,8 +914,23 @@ test("collector versions and immutable code commitments are exact release pins",
   );
   assert.equal(
     SOURCE_WATERMARK_APPROVED_COLLECTORS.paraform_human
+      .collectorVersion,
+    "paraform-human-source-v2",
+  );
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.paraform_human
+      .artifact.mergeCommit,
+    "a3d6f65be6e78de757b6ef975911d9096454d287",
+  );
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.paraform_human
       .artifact.runtimeFileSha256,
-    "d5e1a75cb8884af409fd7750fb54ced80185c2881b48b3a2042e9b95af621c11",
+    "bbdec2f3c0bf9f3f61eabd3d00681d5b14e13c49bdb8e9e090cbcb4bd7e0b54e",
+  );
+  assert.equal(
+    SOURCE_WATERMARK_APPROVED_COLLECTORS.paraform_human
+      .artifact.focusedTestFileSha256,
+    "270af807705445ad2804fb8a469daffbdc8e406dbb525017fa42a4e1da19eeb0",
   );
   assert.equal(
     SOURCE_WATERMARK_APPROVED_COLLECTORS.aliases
