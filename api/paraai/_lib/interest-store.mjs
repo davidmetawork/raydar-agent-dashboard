@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 // Plan: docs/PLAN-CURATED-INTEREST-TO-SUBMISSION-2026-07-28.md (main repo)
 
 const INDEX_KEY = "paraai:interest:index";
+const JOB_INDEX_KEY = "paraai:interest:job:index";
 const SWEEP_KEY = "paraai:interest:sweep";
 const REVIEW_INDEX_KEY = "paraai:interest:review:index";
 const SNAP_TTL_SECONDS = 730 * 24 * 60 * 60;
@@ -175,6 +176,11 @@ export async function saveJob(job, { kvImpl = kv } = {}) {
   if (!job?.candidateUserId) throw new Error("job.candidateUserId required");
   const next = { ...job, updatedAt: new Date().toISOString() };
   await kvImpl(["SET", jobKey(job.candidateUserId), JSON.stringify(next), "EX", JOB_TTL_SECONDS]);
+  await kvImpl([
+    next.stage === "done" ? "SREM" : "SADD",
+    JOB_INDEX_KEY,
+    interestCandidateHash(job.candidateUserId),
+  ]);
   return next;
 }
 
@@ -196,32 +202,208 @@ export async function createJob(candidateUserId, seed = {}, { kvImpl = kv } = {}
   return saveJob(job, { kvImpl });
 }
 
+export async function listPendingJobs(limit = 100, { kvImpl = kv } = {}) {
+  const hashes = (await kvImpl(["SMEMBERS", JOB_INDEX_KEY])) || [];
+  const out = [];
+  for (const hash of hashes.slice(0, Math.max(1, Number(limit) || 100))) {
+    const job = parse(
+      await kvImpl(["GET", `paraai:interest:job:${hash}`]),
+      null,
+    );
+    if (job && job.stage !== "done") out.push(job);
+    else await kvImpl(["SREM", JOB_INDEX_KEY, hash]);
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------- claims */
 
 /**
- * Permanent per-(candidate, role) submission claim. Returns true only for the
- * caller that won it. NX means a second worker, or a replay of the same batch,
- * can never produce a second submission attempt.
+ * Permanent per-(candidate, role) submission claim.
+ *
+ * The stored attempt id is a fencing token. Every later state change must
+ * present it, which prevents a stale worker from overwriting the winner's
+ * outcome after losing a race. Claims are intentionally never released:
+ * once an external mutation may have started, recovery is read-only.
  */
 export async function claimSubmission(candidateUserId, roleId, detail = {}, { kvImpl = kv } = {}) {
-  const payload = JSON.stringify({
+  const claim = {
+    version: 2,
     claimedAt: new Date().toISOString(),
     attemptId: randomUUID(),
+    state: "claimed",
     ...detail,
-  });
-  const res = await kvImpl(["SET", claimKey(candidateUserId, roleId), payload, "NX"]);
-  return res === "OK" || res === true;
+  };
+  const payload = JSON.stringify(claim);
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if raw then return {0, raw} end
+    redis.call('SET', KEYS[1], ARGV[1], 'NX')
+    return {1, ARGV[1]}
+  `;
+  const result = await kvImpl([
+    "EVAL", script, 1, claimKey(candidateUserId, roleId), payload,
+  ]);
+  const code = Number(result?.[0]);
+  const stored = parse(result?.[1], null);
+  if (![0, 1].includes(code) || !stored?.attemptId) {
+    throw new Error("interest submission claim failed");
+  }
+  return {
+    status: code === 1 ? "claimed" : "existing",
+    claim: stored,
+  };
 }
 
 export async function getSubmissionClaim(candidateUserId, roleId, { kvImpl = kv } = {}) {
   return parse(await kvImpl(["GET", claimKey(candidateUserId, roleId)]), null);
 }
 
-export async function recordSubmissionOutcome(candidateUserId, roleId, outcome, { kvImpl = kv } = {}) {
-  const prior = await getSubmissionClaim(candidateUserId, roleId, { kvImpl });
-  const next = { ...(prior || {}), outcome, outcomeAt: new Date().toISOString() };
-  await kvImpl(["SET", claimKey(candidateUserId, roleId), JSON.stringify(next)]);
-  return next;
+function submissionClaimError(code, claim = null) {
+  const errors = new Map([
+    [-1, ["SUBMISSION_CLAIM_NOT_FOUND", "interest submission claim not found"]],
+    [-2, ["SUBMISSION_CLAIM_CONFLICT", "interest submission attempt does not own claim"]],
+    [-3, ["SUBMISSION_ATTEMPT_NOT_STARTED", "interest submission attempt has not started"]],
+    [-4, ["SUBMISSION_OUTCOME_CONFLICT", "interest submission outcome cannot change terminal state"]],
+  ]);
+  const [errorCode, message] = errors.get(Number(code)) || [
+    "SUBMISSION_CLAIM_UPDATE_FAILED",
+    "interest submission claim update failed",
+  ];
+  const error = new Error(message);
+  error.code = errorCode;
+  error.claim = claim;
+  return error;
+}
+
+export async function startSubmissionAttempt(
+  candidateUserId,
+  roleId,
+  attemptId,
+  { kvImpl = kv } = {},
+) {
+  const attempt = String(attemptId || "").trim();
+  if (!attempt) throw new Error("attemptId required");
+  const startedAt = new Date().toISOString();
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {-1, ''} end
+    local claim = cjson.decode(raw)
+    if claim.attemptId ~= ARGV[1] then return {-2, raw} end
+    if claim.attemptStartedAt then return {2, raw} end
+    claim.attemptStartedAt = ARGV[2]
+    claim.state = 'attempt_started'
+    local next = cjson.encode(claim)
+    redis.call('SET', KEYS[1], next)
+    return {1, next}
+  `;
+  const result = await kvImpl([
+    "EVAL", script, 1, claimKey(candidateUserId, roleId), attempt, startedAt,
+  ]);
+  const code = Number(result?.[0]);
+  const claim = parse(result?.[1], null);
+  if (code < 0 || ![1, 2].includes(code) || !claim) throw submissionClaimError(code, claim);
+  return {
+    status: code === 1 ? "started" : "already_started",
+    claim,
+  };
+}
+
+export async function recordSubmissionPrepared(
+  candidateUserId,
+  roleId,
+  attemptId,
+  candidateToApprovedRoleId,
+  { kvImpl = kv } = {},
+) {
+  const attempt = String(attemptId || "").trim();
+  const preparedId = String(candidateToApprovedRoleId || "").trim();
+  if (!attempt) throw new Error("attemptId required");
+  if (!preparedId) throw new Error("candidateToApprovedRoleId required");
+  const preparedAt = new Date().toISOString();
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {-1, ''} end
+    local claim = cjson.decode(raw)
+    if claim.attemptId ~= ARGV[1] then return {-2, raw} end
+    if not claim.attemptStartedAt then return {-3, raw} end
+    if claim.candidateToApprovedRoleId then
+      if claim.candidateToApprovedRoleId == ARGV[2] then return {2, raw} end
+      return {-4, raw}
+    end
+    if claim.outcome then return {-4, raw} end
+    claim.candidateToApprovedRoleId = ARGV[2]
+    claim.preparedAt = ARGV[3]
+    claim.state = 'prepared'
+    local next = cjson.encode(claim)
+    redis.call('SET', KEYS[1], next)
+    return {1, next}
+  `;
+  const result = await kvImpl([
+    "EVAL", script, 1, claimKey(candidateUserId, roleId),
+    attempt, preparedId, preparedAt,
+  ]);
+  const code = Number(result?.[0]);
+  const claim = parse(result?.[1], null);
+  if (code < 0 || ![1, 2].includes(code) || !claim) throw submissionClaimError(code, claim);
+  return {
+    status: code === 1 ? "prepared" : "already_prepared",
+    claim,
+  };
+}
+
+const SUBMISSION_OUTCOMES = new Set([
+  "contract_unconfirmed",
+  "submission_unknown",
+  "accepted",
+  "verified",
+]);
+
+export async function recordSubmissionOutcome(
+  candidateUserId,
+  roleId,
+  outcome,
+  { attemptId, detail = "", kvImpl = kv } = {},
+) {
+  const attempt = String(attemptId || "").trim();
+  const nextOutcome = String(outcome || "").trim();
+  if (!attempt) throw new Error("attemptId required");
+  if (!SUBMISSION_OUTCOMES.has(nextOutcome)) throw new Error("valid submission outcome required");
+  const outcomeAt = new Date().toISOString();
+  const safeDetail = String(detail || "").slice(0, 240);
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {-1, ''} end
+    local claim = cjson.decode(raw)
+    if claim.attemptId ~= ARGV[1] then return {-2, raw} end
+    if not claim.attemptStartedAt then return {-3, raw} end
+    local current = claim.outcome
+    local nextOutcome = ARGV[2]
+    if current == nextOutcome then return {2, raw} end
+    local advanced = nextOutcome == 'verified'
+      and (current == 'accepted' or current == 'submission_unknown')
+    if current and not advanced then return {-4, raw} end
+    claim.outcome = nextOutcome
+    claim.outcomeAt = ARGV[3]
+    claim.state = nextOutcome
+    if ARGV[4] ~= '' then claim.detail = ARGV[4] end
+    local next = cjson.encode(claim)
+    redis.call('SET', KEYS[1], next)
+    return {advanced and 3 or 1, next}
+  `;
+  const result = await kvImpl([
+    "EVAL", script, 1, claimKey(candidateUserId, roleId),
+    attempt, nextOutcome, outcomeAt, safeDetail,
+  ]);
+  const code = Number(result?.[0]);
+  const claim = parse(result?.[1], null);
+  if (code < 0 || ![1, 2, 3].includes(code) || !claim) {
+    throw submissionClaimError(code, claim);
+  }
+  return {
+    status: code === 1 ? "recorded" : code === 2 ? "existing" : "advanced",
+    claim,
+  };
 }
 
 /* ------------------------------------------------------------------- outbox */
@@ -252,8 +434,15 @@ export async function acquireLock(candidateUserId, { kvImpl = kv, ttlSeconds = L
 }
 
 export async function releaseLock(candidateUserId, token, { kvImpl = kv } = {}) {
-  const current = await kvImpl(["GET", lockKey(candidateUserId)]);
-  if (current && current === token) await kvImpl(["DEL", lockKey(candidateUserId)]);
+  const script = `
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+      return redis.call('DEL', KEYS[1])
+    end
+    return 0
+  `;
+  return Number(await kvImpl([
+    "EVAL", script, 1, lockKey(candidateUserId), String(token || ""),
+  ])) === 1;
 }
 
 /* ------------------------------------------------------------------- review */

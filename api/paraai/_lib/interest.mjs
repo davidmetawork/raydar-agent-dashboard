@@ -1,4 +1,4 @@
-import { trpcGet, trpcPost, normalizeEmail } from "./core.mjs";
+import { trpcGet, trpcPost, normalizeEmail, paraformRest } from "./core.mjs";
 import {
   buildMime,
   deliverMessage,
@@ -11,7 +11,13 @@ import {
 } from "../../roster/_lib/outcome-sequences.mjs";
 import { buildInterestConfirmation, firstNameFor, COPY_VARIANT } from "./interest-copy.mjs";
 import { runSubmissionEvidencePreflight } from "./interest-preflight.mjs";
-import { generateGroundedSubmissionDraft } from "./interest-submission.mjs";
+import {
+  buildSingleSubmissionPrepareInput,
+  executeCapturedSingleSubmission,
+  generateGroundedSubmissionDraft,
+  parseSingleSubmissionPrepareResponse,
+  singleSubmissionWeekStart,
+} from "./interest-submission.mjs";
 import {
   storeConfigured,
   getSnapshot,
@@ -20,7 +26,10 @@ import {
   getJob,
   saveJob,
   createJob,
+  listPendingJobs,
   claimSubmission,
+  startSubmissionAttempt,
+  recordSubmissionPrepared,
   recordSubmissionOutcome,
   getSubmissionClaim,
   claimEmail,
@@ -48,6 +57,16 @@ export const INTEREST_STATUS = Object.freeze({
   APPLIED: "APPLIED_TO_ROLE",
   NOT_INTERESTED: "NOT_INTERESTED",
 });
+
+// Current submit-form bundle constant. Passing [] makes
+// hasUserInputPreferences trivially succeed even when the profile is empty.
+export const REQUIRED_CANDIDATE_PREFERENCE_FIELDS = Object.freeze([
+  "locations",
+  "salary_min",
+  "workplace",
+  "last_funding_round",
+  "visa",
+]);
 
 const TRUE = new Set(["1", "true", "yes", "on"]);
 const flag = (name, env = process.env) => TRUE.has(String(env[name] ?? "").trim().toLowerCase());
@@ -85,6 +104,10 @@ export function interestConfig(env = process.env) {
     ].filter(Boolean),
     writesEnabled: enabled && !dryRun,
     sweepConcurrency: Math.max(1, Math.min(6, Number(env.PARAAI_INTEREST_CONCURRENCY || 4))),
+    sweepIntervalMs: Math.max(
+      60_000,
+      Number(env.PARAAI_INTEREST_SWEEP_INTERVAL_MS || 15 * 60 * 1000),
+    ),
     batchWindowMs: Math.max(0, Number(env.PARAAI_INTEREST_BATCH_WINDOW_MS ?? 30 * 60 * 1000)),
   };
 }
@@ -125,17 +148,14 @@ export async function readInterestCounts(candidateUserId) {
 
 /** Weekly single-submission credit position. */
 export async function readSubmissionCredits(now = new Date()) {
-  const d = new Date(now);
-  // Monday 09:00 PT, expressed in UTC (16:00 UTC standard time).
-  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
-  d.setUTCHours(16, 0, 0, 0);
-  const data = await trpcGet("roleSlots.getMySingleSubmissionData", { weekStart: d.toISOString() });
+  const weekStart = singleSubmissionWeekStart(now);
+  const data = await trpcGet("roleSlots.getMySingleSubmissionData", { weekStart });
   if (!data) return null;
   const usedThisWeek = Number(data.recentSingleSubmissionsThisWeekCount || 0);
   const allowance = Number(data.previousAllowance || 0);
   const earnedBack = Number(data.earnedBackThisWeekCount || 0);
   return {
-    weekStart: d.toISOString(),
+    weekStart,
     usedThisWeek,
     allowance,
     earnedBack,
@@ -183,6 +203,10 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
   };
 
   const population = await listCuratedListCandidates();
+  Object.defineProperty(result, "candidateByUserId", {
+    value: new Map(population.map((candidate) => [candidate.candidateUserId, candidate])),
+    enumerable: false,
+  });
   const reads = await mapWithConcurrency(population, config.sweepConcurrency, async (c) => {
     const statuses = await readInterestStatuses(c.candidateUserId);
     return { candidate: c, statuses };
@@ -208,6 +232,22 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
       if (config.notBefore && now < config.notBefore) {
         result.skippedBeforeCutoff += diff.newlyInterested.length;
       } else {
+        const existing = await getJob(candidate.candidateUserId);
+        if (existing && existing.stage !== "done") {
+          const added = diff.newlyInterested.filter(
+            (roleId) => !(Array.isArray(existing.roles) ? existing.roles : []).includes(roleId),
+          );
+          await saveJob(appendJournal({
+            ...existing,
+            candidateId: existing.candidateId || candidate.candidateId,
+            roles: [...new Set([...(existing.roles || []), ...diff.newlyInterested])],
+          }, "more_interest", { added: added.length }));
+        } else {
+          await createJob(candidate.candidateUserId, {
+            candidateId: candidate.candidateId,
+            roles: diff.newlyInterested,
+          });
+        }
         result.detected.push({ candidate, roleIds: diff.newlyInterested, statuses });
       }
     }
@@ -357,6 +397,7 @@ export async function preflightSubmission({
   credits,
   trpcGetImpl = trpcGet,
   now = Date.now(),
+  directInterestConfirmed = true,
 }) {
   const blockers = [];
   if (!candidate.candidateUserId) blockers.push("missing_candidate_user_id");
@@ -380,7 +421,7 @@ export async function preflightSubmission({
   try {
     prefs = await trpcGetImpl("candidateUserPreference.hasUserInputPreferences", {
       candidate_user_id: candidate.candidateUserId,
-      required_fields: [],
+      required_fields: [...REQUIRED_CANDIDATE_PREFERENCE_FIELDS],
     });
     if (prefs && prefs.hasAllRequired === false) blockers.push("preferences_incomplete");
   } catch {
@@ -399,6 +440,7 @@ export async function preflightSubmission({
       roleId,
       trpcGetImpl,
       now,
+      directInterestConfirmed,
     });
     blockers.push(...evidence.blockers);
   }
@@ -412,13 +454,51 @@ export async function preflightSubmission({
   };
 }
 
+async function hydrateSubmissionCandidate(candidate, trpcGetImpl) {
+  if (
+    candidate?.linkedinUser
+    && candidate?.candidateId
+    && candidate?.candidateUserId
+    && candidate?.name
+    && normalizeEmail(candidate?.email || "")
+  ) return candidate;
+  try {
+    const candidateUser = await trpcGetImpl("candidateUser.getCandidateUserById", {
+      candidate_user_id: candidate?.candidateUserId,
+    });
+    const profile = candidateUser?.candidate || {};
+    const email = [
+      candidate?.email,
+      ...(Array.isArray(candidateUser?.emails) ? candidateUser.emails : []),
+      profile?.email,
+    ].map((value) => normalizeEmail(
+      typeof value === "object" ? value?.email ?? value?.value ?? "" : value,
+    )).find(Boolean);
+    return {
+      ...candidate,
+      candidateId: candidate?.candidateId || profile?.id || null,
+      name: candidate?.name || profile?.name || null,
+      email: email || candidate?.email || null,
+      linkedinUser: (
+        candidate?.linkedinUser
+        || candidate?.linkedin_user
+        || profile?.linkedin_user
+        || null
+      ),
+    };
+  } catch {
+    return candidate;
+  }
+}
+
 /**
  * Submit one candidate to one role.
  *
- * The wire contract past `prepareForSingleSubmission` is UNPROVEN (capture doc
- * open item 2). Rather than guess a payload, this records the real response of
- * the prepare call and refuses to fire a submit whose shape it has not seen.
- * The P3 canary settles it and the recorded shape unlocks the rest.
+ * Both writes use current, bundle-derived contracts. The application mutation
+ * is invoked exactly once and success is recognized only after the stored
+ * application is read back with matching identities, prose, rating, and
+ * scorecard. Any transport or readback uncertainty permanently enters
+ * read-only recovery.
  */
 export async function submitToRole({
   candidate,
@@ -426,7 +506,18 @@ export async function submitToRole({
   apply,
   credits = null,
   trpcGetImpl = trpcGet,
+  trpcPostImpl = trpcPost,
+  restImpl = paraformRest,
   submissionDraftBuilder = generateGroundedSubmissionDraft,
+  prepareContext = null,
+  finalSubmitImpl = executeCapturedSingleSubmission,
+  submissionStore = {
+    claimSubmission,
+    startSubmissionAttempt,
+    recordSubmissionPrepared,
+    recordSubmissionOutcome,
+    getSubmissionClaim,
+  },
   fetchImpl = fetch,
   env = process.env,
   now = Date.now(),
@@ -440,6 +531,7 @@ export async function submitToRole({
     prepareShape: null,
     error: null,
   };
+  candidate = await hydrateSubmissionCandidate(candidate, trpcGetImpl);
 
   const pre = await preflightSubmission({
     candidate,
@@ -492,54 +584,148 @@ export async function submitToRole({
     return outcome;
   }
 
-  const won = await claimSubmission(candidate.candidateUserId, roleId, { roleId });
-  if (!won) {
-    const prior = await getSubmissionClaim(candidate.candidateUserId, roleId);
+  let prepareInput = null;
+  try {
+    prepareInput = buildSingleSubmissionPrepareInput({
+      roleId,
+      candidateUserId: candidate.candidateUserId,
+      linkedinUser: candidate.linkedinUser || candidate.linkedin_user,
+      anonymizeCandidates: prepareContext?.anonymizeCandidates ?? true,
+      roleDiscoverySource: prepareContext?.roleDiscoverySource,
+      fromRoleRecommendation: prepareContext?.fromRoleRecommendation,
+    });
+  } catch {
+    outcome.stage = "blocked";
+    outcome.blockers = ["submit_prepare_context_unconfirmed"];
+    return outcome;
+  }
+  const claimResult = await submissionStore.claimSubmission(
+    candidate.candidateUserId,
+    roleId,
+    { roleId },
+  );
+  if (claimResult.status !== "claimed") {
+    const prior = claimResult.claim
+      || await submissionStore.getSubmissionClaim(candidate.candidateUserId, roleId);
     outcome.stage = "already_claimed";
     outcome.priorOutcome = prior?.outcome || null;
+    return outcome;
+  }
+  const attemptId = claimResult.claim.attemptId;
+  const started = await submissionStore.startSubmissionAttempt(
+    candidate.candidateUserId,
+    roleId,
+    attemptId,
+  );
+  if (started.status !== "started") {
+    outcome.stage = "submission_unknown";
+    outcome.error = "submission attempt was already started; readback only";
     return outcome;
   }
 
   let prepared = null;
   try {
-    prepared = await trpcPost("roleSlots.prepareForSingleSubmission", {
-      role_id: roleId,
-      candidate_user_id: candidate.candidateUserId,
-      linkedin_user: candidate.linkedinUser || candidate.linkedin_user || "",
-    }, 1);
+    prepared = await trpcPostImpl(
+      "roleSlots.prepareForSingleSubmission",
+      prepareInput,
+      1,
+    );
   } catch (error) {
-    outcome.stage = "prepare_failed";
+    outcome.stage = "submission_unknown";
     outcome.error = String(error?.message || error).slice(0, 300);
-    await recordSubmissionOutcome(candidate.candidateUserId, roleId, outcome.stage);
+    await submissionStore.recordSubmissionOutcome(
+      candidate.candidateUserId,
+      roleId,
+      outcome.stage,
+      { attemptId, detail: "prepare mutation transport result unknown" },
+    );
     return outcome;
   }
 
-  // Record what prepare actually returned. This is the capture that unblocks
-  // the executor; it is deliberately inspected before any submit is attempted.
-  outcome.prepareShape = prepared && typeof prepared === "object"
-    ? Object.keys(prepared).slice(0, 40)
-    : typeof prepared;
-
-  const submissionRequestId = prepared?.submission_request_id
-    || prepared?.submissionRequestId
-    || prepared?.id
-    || null;
-
-  if (!submissionRequestId) {
-    // The shared-path hypothesis did not hold. Stop, record, and let a human
-    // read the recorded shape rather than inventing a payload.
+  const parsedPrepare = parseSingleSubmissionPrepareResponse(prepared);
+  outcome.prepareShape = parsedPrepare.shape;
+  if (!parsedPrepare.ok) {
     outcome.stage = "contract_unconfirmed";
-    await recordSubmissionOutcome(candidate.candidateUserId, roleId, outcome.stage);
+    await submissionStore.recordSubmissionOutcome(
+      candidate.candidateUserId,
+      roleId,
+      outcome.stage,
+      { attemptId, detail: "prepare response failed captured contract" },
+    );
     return outcome;
   }
-
+  await submissionStore.recordSubmissionPrepared(
+    candidate.candidateUserId,
+    roleId,
+    attemptId,
+    parsedPrepare.candidateToApprovedRoleId,
+  );
   outcome.stage = "prepared";
-  outcome.submissionRequestId = submissionRequestId;
-  // Deliberate no-op until the final mutation is captured. Referencing the
-  // guarded draft here makes the executor boundary explicit without persisting
-  // candidate copy in the job record.
-  void submissionDraft;
-  await recordSubmissionOutcome(candidate.candidateUserId, roleId, outcome.stage);
+  outcome.candidateToApprovedRoleId = parsedPrepare.candidateToApprovedRoleId;
+
+  let finalResult = null;
+  try {
+    finalResult = await finalSubmitImpl({
+      candidate,
+      roleId,
+      candidateToApprovedRoleId: parsedPrepare.candidateToApprovedRoleId,
+      submissionDraft,
+      preflightSignals: pre.signals || {},
+      trpcGetImpl,
+      trpcPostImpl,
+      restImpl,
+      now: new Date(now),
+    });
+  } catch (error) {
+    outcome.stage = "submission_unknown";
+    outcome.error = String(error?.message || error).slice(0, 300);
+    await submissionStore.recordSubmissionOutcome(
+      candidate.candidateUserId,
+      roleId,
+      outcome.stage,
+      { attemptId, detail: "final mutation or readback result unknown" },
+    );
+    return outcome;
+  }
+  outcome.readbackSignals = finalResult?.signals || {};
+  outcome.applicationId = finalResult?.applicationId || null;
+  outcome.paraformConfirmationExpected =
+    finalResult?.signals?.paraformConfirmationExpected === true;
+  outcome.paraformConfirmationSent =
+    finalResult?.signals?.paraformConfirmationSent === true;
+  if (finalResult?.verified !== true) {
+    outcome.stage = finalResult?.mutationAttempted === false
+      ? "contract_unconfirmed"
+      : "submission_unknown";
+    outcome.blockers = uniqueReasonCodes(finalResult?.blockers);
+    await submissionStore.recordSubmissionOutcome(
+      candidate.candidateUserId,
+      roleId,
+      outcome.stage,
+      {
+        attemptId,
+        detail: finalResult?.mutationAttempted === false
+          ? "captured submit preconditions not satisfied"
+          : "final mutation not authoritatively verified",
+      },
+    );
+    return outcome;
+  }
+  await submissionStore.recordSubmissionOutcome(
+    candidate.candidateUserId,
+    roleId,
+    "accepted",
+    { attemptId, detail: "final mutation returned" },
+  );
+  await submissionStore.recordSubmissionOutcome(
+    candidate.candidateUserId,
+    roleId,
+    "verified",
+    { attemptId, detail: "authoritative Paraform readback verified" },
+  );
+  outcome.stage = "verified";
+  outcome.submitted = true;
+  outcome.verified = true;
   return outcome;
 }
 
@@ -589,26 +775,89 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
   }
 
   result.ran = true;
-  const sweep = await sweepInterest({ config, now });
-  result.sweep = {
-    ok: sweep.ok,
-    candidatesRead: sweep.candidatesRead,
-    seeded: sweep.seeded,
-    detected: sweep.detected.length,
-    readErrors: sweep.readErrors,
-  };
+  let sweep = null;
+  const sweepIntervalMs = Math.max(
+    60_000,
+    Number(config.sweepIntervalMs) || 15 * 60 * 1000,
+  );
+  const priorSweep = await getSweepState().catch(() => null);
+  const priorSweepAt = Date.parse(String(priorSweep?.at || ""));
+  const sweepDue = !Number.isFinite(priorSweepAt)
+    || Number(now) - priorSweepAt >= sweepIntervalMs;
+  if (sweepDue) {
+    const sweepToken = await acquireLock("__curated_interest_sweep__", {
+      ttlSeconds: Math.max(600, Math.ceil(sweepIntervalMs / 1000)),
+    });
+    if (sweepToken) {
+      try {
+        const currentSweep = await getSweepState().catch(() => null);
+        const currentSweepAt = Date.parse(String(currentSweep?.at || ""));
+        if (
+          !Number.isFinite(currentSweepAt)
+          || Number(now) - currentSweepAt >= sweepIntervalMs
+        ) {
+          sweep = await sweepInterest({ config, now });
+          result.sweep = {
+            ok: sweep.ok,
+            candidatesRead: sweep.candidatesRead,
+            seeded: sweep.seeded,
+            detected: sweep.detected.length,
+            readErrors: sweep.readErrors,
+          };
+        } else {
+          result.sweep = { skipped: "not_due" };
+        }
+      } finally {
+        await releaseLock("__curated_interest_sweep__", sweepToken);
+      }
+    } else {
+      result.sweep = { skipped: "locked" };
+    }
+  } else {
+    result.sweep = { skipped: "not_due" };
+  }
 
   const credits = await readSubmissionCredits().catch(() => null);
+  const candidateByUserId = sweep?.candidateByUserId || new Map();
+  const pendingJobs = await listPendingJobs(50);
+  if (!pendingJobs.length && result.sweep?.skipped) {
+    result.reason = result.sweep.skipped;
+  }
 
-  for (const hit of sweep.detected) {
-    const { candidate, roleIds } = hit;
-    const token = await acquireLock(candidate.candidateUserId);
+  for (const pendingJob of pendingJobs) {
+    const candidate = await hydrateSubmissionCandidate(
+      candidateByUserId.get(pendingJob.candidateUserId) || {
+        candidateUserId: pendingJob.candidateUserId,
+        candidateId: pendingJob.candidateId || null,
+      },
+      trpcGet,
+    );
+    const token = await acquireLock(pendingJob.candidateUserId);
     if (!token) continue;
     try {
-      let job = await getJob(candidate.candidateUserId);
-      job = job && job.stage !== "done"
-        ? await saveJob(appendJournal({ ...job, roles: [...new Set([...(job.roles || []), ...roleIds])] }, "more_interest", { added: roleIds.length }))
-        : await createJob(candidate.candidateUserId, { roles: roleIds });
+      let job = await getJob(pendingJob.candidateUserId);
+      if (!job || job.stage === "done") continue;
+      if (!candidate?.candidateUserId || !candidate?.candidateId) {
+        const reviewReasons = ["candidate_identity_unavailable"];
+        await recordReview(pendingJob.candidateUserId, reviewReasons, {
+          roles: job.roles,
+          batchId: job.batchId,
+        });
+        await saveJob(appendJournal({
+          ...job,
+          stage: "done",
+        }, "identity_unavailable"));
+        result.reviews++;
+        result.processed.push({
+          candidateHashOnly: true,
+          roles: Array.isArray(job.roles) ? job.roles.length : 0,
+          paused: 0,
+          emailed: false,
+          submitStages: [],
+          reviewReasons,
+        });
+        continue;
+      }
 
       // 1. STOP — enforcing first, so we never email while a nudge is queued.
       const stop = await stopFollowUps({
@@ -634,20 +883,27 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
       }));
 
       const bankable = submissions.filter((s) => (
-        ["would_submit", "prepared", "submitted", "verified"].includes(s.stage)
+        ["would_submit", "verified"].includes(s.stage)
       ));
       const blockers = [...new Set(submissions.flatMap((s) => s.blockers || []))];
 
-      // 3. EMAIL — only when at least one role is actually bankable.
+      // 3. EMAIL — only when at least one role is actually bankable. Paraform
+      // normally sends its own confirmation from /api/application; when it
+      // does, suppress our Gmail copy so the candidate receives one message.
       let email = { sent: false, skipped: "no_bankable_role" };
       if (bankable.length) {
-        email = await sendConfirmation({
-          candidate,
-          roleCount: bankable.length,
-          batchId: job.batchId,
-          apply: config.writesEnabled && config.emailArmed,
-          mailer: send,
-        });
+        const paraformOwnsConfirmation = bankable.some(
+          (submission) => submission.paraformConfirmationExpected === true,
+        );
+        email = paraformOwnsConfirmation
+          ? { sent: false, skipped: "paraform_confirmation_owns_candidate_email" }
+          : await sendConfirmation({
+            candidate,
+            roleCount: bankable.length,
+            batchId: job.batchId,
+            apply: config.writesEnabled && config.emailArmed,
+            mailer: send,
+          });
       }
       job = await saveJob(appendJournal({ ...job, emailed: email, stage: "done" }, "emailed", {
         sent: email.sent, skipped: email.skipped || null,
@@ -655,7 +911,11 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
 
       const reviewReasons = [
         ...blockers,
-        ...(email.skipped && !["dry_run", "already_delivered"].includes(email.skipped) ? [email.skipped] : []),
+        ...(email.skipped && ![
+          "dry_run",
+          "already_delivered",
+          "paraform_confirmation_owns_candidate_email",
+        ].includes(email.skipped) ? [email.skipped] : []),
         ...submissions.filter((s) => s.stage === "contract_unconfirmed").map(() => "submit_contract_unconfirmed"),
         ...(stop.errors.length ? ["stop_errors"] : []),
       ];

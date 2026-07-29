@@ -7,6 +7,7 @@ import { authConfig, cors, requireAuth } from "../../seq/_lib/core.mjs";
 export { authConfig, cors, requireAuth };
 
 const PARAFORM_BASE = "https://www.paraform.com/api";
+const PARAFORM_ORIGIN = "https://www.paraform.com";
 const CAPTURED_MATCH_READ_PROC =
   "candidateMatching.getRankedRolesForCandidate";
 const TRPC_TIMEOUT_MS = Number(process.env.PARAAI_TRPC_TIMEOUT_MS || 20_000);
@@ -183,6 +184,61 @@ export async function trpcPost(proc, json = {}, tries = 3) {
       return body?.result?.data?.json;
     } catch (error) {
       if (error?.code === "AUTH_EXPIRED" || attempt === tries - 1) throw error;
+      await sleep(500 * (attempt + 1));
+    }
+  }
+}
+
+/**
+ * Authenticated Paraform REST request.
+ *
+ * The submit form's final application write is a REST POST, not tRPC. Reads
+ * may retry transient failures; writes deliberately default to one attempt so
+ * a timeout cannot blind-replay a non-idempotent application mutation.
+ */
+export async function paraformRest(
+  path,
+  {
+    method = "GET",
+    json,
+    tries = String(method).toUpperCase() === "GET" ? 3 : 1,
+    fetchImpl = fetch,
+  } = {},
+) {
+  const verb = String(method || "GET").toUpperCase();
+  const url = new URL(String(path || ""), PARAFORM_ORIGIN);
+  if (url.origin !== PARAFORM_ORIGIN || !url.pathname.startsWith("/api/")) {
+    throw new Error("PARAFORM_REST_PATH_INVALID");
+  }
+  const attempts = Math.max(1, Number(tries) || 1);
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const response = await fetchImpl(url, {
+        method: verb,
+        headers: await paraformHeaders(),
+        ...(json === undefined ? {} : { body: JSON.stringify(json) }),
+        signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (response.status === 401) throw authExpired();
+        const error = new Error(
+          body?.user_facing === true && body?.message
+            ? String(body.message)
+            : body?.message || `Paraform HTTP ${response.status}`,
+        );
+        error.code = body?.code || `HTTP_${response.status}`;
+        error.status = response.status;
+        error.responseBody = body;
+        throw error;
+      }
+      return body;
+    } catch (error) {
+      if (
+        error?.code === "AUTH_EXPIRED"
+        || verb !== "GET"
+        || attempt === attempts - 1
+      ) throw error;
       await sleep(500 * (attempt + 1));
     }
   }

@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { paraformCookieName as sequenceCookieName } from "../api/seq/_lib/core.mjs";
-import { paraformCookieName as paraAiCookieName } from "../api/paraai/_lib/core.mjs";
+import {
+  clearCookieCache,
+  paraformCookieName as paraAiCookieName,
+  paraformRest,
+} from "../api/paraai/_lib/core.mjs";
 
 const HELPERS = [
   ["sequences", sequenceCookieName],
@@ -44,5 +48,42 @@ test("dashboard Paraform clients respect allowlisted overrides and reject unknow
   } finally {
     if (previous === undefined) delete process.env.PARAFORM_SESSION_COOKIE_NAME;
     else process.env.PARAFORM_SESSION_COOKIE_NAME = previous;
+  }
+});
+
+test("Paraform REST adapter rejects foreign paths and never retries writes", async () => {
+  await assert.rejects(
+    paraformRest("https://example.com/api/application"),
+    /PARAFORM_REST_PATH_INVALID/u,
+  );
+  const previousCookie = process.env.PARAFORM_SESSION_COOKIE;
+  const previousName = process.env.PARAFORM_SESSION_COOKIE_NAME;
+  let calls = 0;
+  try {
+    process.env.PARAFORM_SESSION_COOKIE = "Fe26.2*test*seal";
+    delete process.env.PARAFORM_SESSION_COOKIE_NAME;
+    clearCookieCache();
+    await assert.rejects(
+      paraformRest("/api/application", {
+        method: "POST",
+        json: { single_submission: true },
+        tries: 5,
+        fetchImpl: async (url, options) => {
+          calls += 1;
+          assert.equal(url.href, "https://www.paraform.com/api/application");
+          assert.equal(options.method, "POST");
+          assert.match(options.headers.cookie, /^wos-session=/u);
+          throw new Error("timeout");
+        },
+      }),
+      /timeout/u,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    if (previousCookie === undefined) delete process.env.PARAFORM_SESSION_COOKIE;
+    else process.env.PARAFORM_SESSION_COOKIE = previousCookie;
+    if (previousName === undefined) delete process.env.PARAFORM_SESSION_COOKIE_NAME;
+    else process.env.PARAFORM_SESSION_COOKIE_NAME = previousName;
+    clearCookieCache();
   }
 });

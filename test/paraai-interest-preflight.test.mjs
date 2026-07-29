@@ -70,6 +70,30 @@ test("a company-specific objection overrides positive language", () => {
   assert.equal(result.confirmed, false);
 });
 
+test("the APPLIED_TO_ROLE trigger confirms intent but never overrides contradiction", () => {
+  const direct = evaluateSubmissionEvidence(greenEvidence({
+    directInterestConfirmed: true,
+    meetings: [meeting({ words: ["The", "screen", "was", "helpful"] })],
+  }));
+  assert.equal(direct.ok, true);
+  assert.equal(direct.signals.companyInterestSatisfied, true);
+  assert.equal(direct.signals.directInterestConfirmed, true);
+
+  const withoutDirect = evaluateSubmissionEvidence(greenEvidence({
+    directInterestConfirmed: false,
+    meetings: [meeting({ words: ["The", "screen", "was", "helpful"] })],
+  }));
+  assert.ok(withoutDirect.blockers.includes("company_interest_unconfirmed"));
+
+  const contradicted = evaluateSubmissionEvidence(greenEvidence({
+    directInterestConfirmed: true,
+    meetings: [meeting({
+      words: ["I", "ranked", "Acme", "Labs", "last", "because", "I'm", "not", "a", "fan"],
+    })],
+  }));
+  assert.ok(contradicted.blockers.includes("company_interest_contradicted"));
+});
+
 test("recruiter speech cannot confirm candidate company interest", () => {
   const transcript = [
     {
@@ -127,6 +151,33 @@ test("explicit workplace commitment is distinct from recruiter description", () 
     },
   }));
   assert.ok(unconfirmed.blockers.includes("onsite_commitment_unconfirmed"));
+});
+
+test("stored workplace preference satisfies logistics unless the transcript contradicts it", () => {
+  const roleWithOffice = {
+    status: "ACTIVE",
+    active_status: "Go live",
+    company: { name: "Acme Labs" },
+    workplaceType: "ON_SITE",
+    requirements: [],
+    rejection_categories: [],
+  };
+  const confirmed = evaluateSubmissionEvidence(greenEvidence({
+    role: roleWithOffice,
+    preferences: { visa: ["Not available"], workplace: ["ON_SITE"] },
+    meetings: [meeting({ words: ["I'm", "excited", "about", "Acme", "Labs"] })],
+  }));
+  assert.equal(confirmed.ok, true);
+  assert.equal(confirmed.signals.workplacePreferenceConfirmed, true);
+
+  const contradicted = evaluateSubmissionEvidence(greenEvidence({
+    role: roleWithOffice,
+    preferences: { visa: ["Not available"], workplace: ["ON_SITE"] },
+    meetings: [meeting({
+      words: ["I'm", "excited", "about", "Acme", "Labs", "but", "I", "am", "only", "considering", "fully", "remote", "roles"],
+    })],
+  }));
+  assert.ok(contradicted.blockers.includes("onsite_commitment_contradicted"));
 });
 
 test("AI BAD_FIT is the negative mark counted by the playbook correction", () => {
@@ -328,6 +379,36 @@ test("the integrated preflight requires readable credits and evidence", async ()
   assert.deepEqual(withCredits.blockers, []);
 });
 
+test("integrated preflight cannot pass an empty preference profile", async () => {
+  let requiredFields = null;
+  const trpcGetImpl = async (proc, input) => {
+    if (proc === "candidateUserPreference.hasUserInputPreferences") {
+      requiredFields = input.required_fields;
+      return {
+        hasAllRequired: false,
+        missingFields: [...input.required_fields],
+      };
+    }
+    return passingTrpcRead(proc, input);
+  };
+  const result = await preflightSubmission({
+    candidate,
+    roleId: "role-1",
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl,
+    now: NOW,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.blockers.includes("preferences_incomplete"));
+  assert.deepEqual(requiredFields, [
+    "locations",
+    "salary_min",
+    "workplace",
+    "last_funding_round",
+    "visa",
+  ]);
+});
+
 test("shadow submit records would-submit without taking a permanent claim", async () => {
   const result = await submitToRole({
     candidate,
@@ -366,4 +447,153 @@ test("lane-generated three-plus non-green marks block before a claim", async () 
   assert.equal(result.stage, "blocked");
   assert.ok(result.blockers.includes("generated_three_plus_non_green"));
   assert.equal(result.draftSignals.nonGreenMarks, 3);
+});
+
+test("apply mode fails closed before a claim when prepare routing is invalid", async () => {
+  let postCalls = 0;
+  let claimCalls = 0;
+  const result = await submitToRole({
+    candidate: { ...candidate, linkedinUser: "taylor-example" },
+    roleId: "role-1",
+    apply: true,
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl: passingTrpcRead,
+    trpcPostImpl: async () => { postCalls += 1; },
+    submissionDraftBuilder: async () => ({
+      ok: true,
+      blockers: [],
+      draft: { greatFitReason: "grounded draft" },
+      signals: { nonGreenMarks: 0 },
+    }),
+    prepareContext: {
+      anonymizeCandidates: "not-a-boolean",
+    },
+    submissionStore: {
+      claimSubmission: async () => {
+        claimCalls += 1;
+        throw new Error("must not claim");
+      },
+    },
+    now: NOW,
+  });
+  assert.equal(result.stage, "blocked");
+  assert.deepEqual(result.blockers, ["submit_prepare_context_unconfirmed"]);
+  assert.equal(postCalls, 0);
+  assert.equal(claimCalls, 0);
+});
+
+test("captured adapter gets one fenced attempt and only verified readback succeeds", async () => {
+  const calls = [];
+  const submissionStore = {
+    claimSubmission: async () => ({
+      status: "claimed",
+      claim: { attemptId: "attempt-1" },
+    }),
+    getSubmissionClaim: async () => null,
+    startSubmissionAttempt: async (...args) => {
+      calls.push(["start", ...args]);
+      return { status: "started", claim: { attemptId: "attempt-1" } };
+    },
+    recordSubmissionPrepared: async (...args) => {
+      calls.push(["prepared", ...args]);
+      return { status: "prepared" };
+    },
+    recordSubmissionOutcome: async (...args) => {
+      calls.push(["outcome", ...args]);
+      return { status: "recorded" };
+    },
+  };
+  let prepareCalls = 0;
+  let finalCalls = 0;
+  const result = await submitToRole({
+    candidate: { ...candidate, linkedinUser: "taylor-example" },
+    roleId: "role-1",
+    apply: true,
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl: passingTrpcRead,
+    trpcPostImpl: async (proc, input) => {
+      prepareCalls += 1;
+      assert.equal(proc, "roleSlots.prepareForSingleSubmission");
+      assert.equal(input.role_discovery_source, "CURATED_LIST");
+      return {
+        success: true,
+        candidate_to_approved_role_id: "candidate-role-1",
+      };
+    },
+    submissionDraftBuilder: async () => ({
+      ok: true,
+      blockers: [],
+      draft: { greatFitReason: "grounded draft" },
+      signals: { nonGreenMarks: 0 },
+    }),
+    prepareContext: {
+      anonymizeCandidates: false,
+      roleDiscoverySource: "CURATED_LIST",
+    },
+    finalSubmitImpl: async ({ candidateToApprovedRoleId, submissionDraft }) => {
+      finalCalls += 1;
+      assert.equal(candidateToApprovedRoleId, "candidate-role-1");
+      assert.equal(submissionDraft.greatFitReason, "grounded draft");
+      return { verified: true, signals: { creditDelta: 1 } };
+    },
+    submissionStore,
+    now: NOW,
+  });
+  assert.equal(prepareCalls, 1);
+  assert.equal(finalCalls, 1);
+  assert.equal(result.stage, "verified");
+  assert.equal(result.submitted, true);
+  assert.equal(result.verified, true);
+  assert.ok(calls.some((call) => call[0] === "prepared"));
+  assert.deepEqual(
+    calls.filter((call) => call[0] === "outcome").map((call) => call[3]),
+    ["accepted", "verified"],
+  );
+});
+
+test("an uncertain final mutation is permanently reads-only and never retried", async () => {
+  let finalCalls = 0;
+  const outcomes = [];
+  const result = await submitToRole({
+    candidate: { ...candidate, linkedinUser: "taylor-example" },
+    roleId: "role-1",
+    apply: true,
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl: passingTrpcRead,
+    trpcPostImpl: async () => ({
+      success: true,
+      candidate_to_approved_role_id: "candidate-role-1",
+    }),
+    submissionDraftBuilder: async () => ({
+      ok: true,
+      blockers: [],
+      draft: { greatFitReason: "grounded draft" },
+      signals: { nonGreenMarks: 0 },
+    }),
+    prepareContext: {
+      anonymizeCandidates: false,
+      roleDiscoverySource: "CURATED_LIST",
+    },
+    finalSubmitImpl: async () => {
+      finalCalls += 1;
+      throw new Error("transport timeout");
+    },
+    submissionStore: {
+      claimSubmission: async () => ({
+        status: "claimed",
+        claim: { attemptId: "attempt-1" },
+      }),
+      getSubmissionClaim: async () => null,
+      startSubmissionAttempt: async () => ({ status: "started" }),
+      recordSubmissionPrepared: async () => ({ status: "prepared" }),
+      recordSubmissionOutcome: async (_candidateUserId, _roleId, outcome) => {
+        outcomes.push(outcome);
+        return { status: "recorded" };
+      },
+    },
+    now: NOW,
+  });
+  assert.equal(finalCalls, 1);
+  assert.equal(result.stage, "submission_unknown");
+  assert.deepEqual(outcomes, ["submission_unknown"]);
 });

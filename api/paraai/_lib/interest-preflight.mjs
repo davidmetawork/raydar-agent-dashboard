@@ -315,7 +315,7 @@ function roleWorkplaceRequirement(role) {
   ].map(clean).filter(Boolean).join(" ");
   const contextual = workplace || roleText(role);
   if (
-    /\b(?:on[\s-]*site|in[\s-]*office|office[- ]based|[3-7]\s+days?.{0,18}(?:office|on[\s-]*site))\b/i
+    /\b(?:on[\s_-]*site|in[\s_-]*office|office[-_ ]based|[3-7]\s+days?.{0,18}(?:office|on[\s_-]*site))\b/i
       .test(contextual)
   ) return "ON_SITE";
   if (/\bhybrid\b/i.test(contextual)) return "HYBRID";
@@ -332,6 +332,26 @@ export function classifyWorkplaceCommitment(transcript) {
     || /\b(?:office|on[\s-]*site|hybrid|commut\w*)\b.{0,45}\b(?:works? for me|is fine|is okay|is ok|no problem)\b/i.test(body)
   );
   return { confirmed, contradicted };
+}
+
+function preferenceWorkplaceCommitment(preferences, requirement) {
+  if (!requirement) return false;
+  const values = [
+    ...list(preferences?.workplace),
+    ...list(preferences?.workplace_type),
+    ...list(preferences?.workplaceType),
+    ...list(preferences?.workplace_preferences),
+  ]
+    .map((value) => clean(value).toUpperCase().replace(/[\s-]+/g, "_"))
+    .filter(Boolean);
+  if (requirement === "ON_SITE") {
+    return values.some((value) => value === "ON_SITE" || value === "ONSITE");
+  }
+  return values.some((value) => (
+    value === "HYBRID"
+    || value === "ON_SITE"
+    || value === "ONSITE"
+  ));
 }
 
 function competingProcessSignal(insights) {
@@ -353,6 +373,7 @@ export function evaluateSubmissionEvidence({
   meetings,
   preferences,
   candidateName = "",
+  directInterestConfirmed = false,
   readErrors = [],
   now = Date.now(),
   maxTranscriptAgeDays = DEFAULT_MAX_TRANSCRIPT_AGE_DAYS,
@@ -425,13 +446,23 @@ export function evaluateSubmissionEvidence({
   const companyName = clean(role?.company?.name);
   const companyInterest = classifyCompanyInterest(recentTranscripts, companyName);
   if (companyInterest.contradicted) blockers.push("company_interest_contradicted");
-  else if (!companyInterest.confirmed) blockers.push("company_interest_unconfirmed");
+  else if (!directInterestConfirmed && !companyInterest.confirmed) {
+    blockers.push("company_interest_unconfirmed");
+  }
 
   const workplaceRequirement = roleWorkplaceRequirement(role);
   const workplaceCommitment = classifyWorkplaceCommitment(recentTranscripts);
+  const workplacePreferenceConfirmed = preferenceWorkplaceCommitment(
+    preferences,
+    workplaceRequirement,
+  );
   if (workplaceRequirement && workplaceCommitment.contradicted) {
     blockers.push("onsite_commitment_contradicted");
-  } else if (workplaceRequirement && !workplaceCommitment.confirmed) {
+  } else if (
+    workplaceRequirement
+    && !workplaceCommitment.confirmed
+    && !workplacePreferenceConfirmed
+  ) {
     blockers.push("onsite_commitment_unconfirmed");
   }
 
@@ -443,6 +474,7 @@ export function evaluateSubmissionEvidence({
       aiNegativeMarks,
       companyInterestConfirmed: companyInterest.confirmed,
       companyInterestContradicted: companyInterest.contradicted,
+      companyInterestSatisfied: companyInterest.confirmed || Boolean(directInterestConfirmed),
       companyMentioned: companyInterest.mentioned,
       competingProcess: hasCompetingProcess,
       currentEmployerStageAvailable: Boolean(currentEmployerStage),
@@ -458,8 +490,10 @@ export function evaluateSubmissionEvidence({
       sponsorshipDisallowed,
       transcriptAgeDays,
       transcriptAvailable: Boolean(latest),
-      workplaceCommitmentConfirmed: workplaceCommitment.confirmed,
+      directInterestConfirmed: Boolean(directInterestConfirmed),
+      workplaceCommitmentConfirmed: workplaceCommitment.confirmed || workplacePreferenceConfirmed,
       workplaceCommitmentContradicted: workplaceCommitment.contradicted,
+      workplacePreferenceConfirmed,
       workplaceRequirement,
     },
     risks: [...new Set(risks)],
@@ -514,12 +548,14 @@ export async function runSubmissionEvidencePreflight({
   roleId,
   trpcGetImpl,
   now = Date.now(),
+  directInterestConfirmed = false,
   maxTranscriptAgeDays = DEFAULT_MAX_TRANSCRIPT_AGE_DAYS,
 } = {}) {
   const evidence = await collectSubmissionEvidence({ candidate, roleId, trpcGetImpl });
   return evaluateSubmissionEvidence({
     ...evidence,
     candidateName: candidate?.name,
+    directInterestConfirmed,
     now,
     maxTranscriptAgeDays,
   });
