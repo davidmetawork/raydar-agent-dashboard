@@ -10,6 +10,8 @@ import {
   PROBE_READS,
   paraformAuthState,
   probeParaformAuth,
+  probeReadBudgetMs,
+  publicProbeReason,
   runAuthProbeTick,
 } from "../api/paraai/_lib/auth-probe.mjs";
 import opsHandler from "../api/ops/paraform-auth.mjs";
@@ -60,6 +62,7 @@ function fakeKv(seed = {}) {
     if (command === "SET") {
       const flags = rest.slice(1).map(String);
       if (flags.includes("NX") && store.has(key)) return null;
+      if (flags.includes("XX") && !store.has(key)) return null;
       store.set(key, rest[0]);
       return "OK";
     }
@@ -148,6 +151,51 @@ test("a hung read hits the probe budget and fails open", async () => {
   );
   assert.equal(result.healthy, null);
   assert.equal(result.reason, "PROBE_BUDGET_EXCEEDED");
+});
+
+test("a hung retry-pass read fails open, never down", async () => {
+  // Pass 1: both distinct reads 401. Pass 2: the first read hangs. The
+  // budget catch must land on healthy:null — down needs FOUR real 401s.
+  const result = await probeParaformAuth(
+    { budgetMs: 20 },
+    { trpcGetImpl: scriptedTrpc(["401", "401", "hang"]), sleepImpl: noSleep },
+  );
+  assert.equal(result.healthy, null);
+  assert.equal(result.reason, "PROBE_BUDGET_EXCEEDED");
+});
+
+test("the retry gap is inside the overall budget: a hang there fails open", async () => {
+  // No read is in flight during the retry sleep, so only the aggregate
+  // (2x per-read) budget can bound it.
+  const hangingSleep = () => new Promise(() => {});
+  const result = await probeParaformAuth(
+    { budgetMs: 20 },
+    { trpcGetImpl: scriptedTrpc(["401", "401"]), sleepImpl: hangingSleep },
+  );
+  assert.equal(result.healthy, null);
+  assert.equal(result.reason, "PROBE_BUDGET_EXCEEDED");
+});
+
+test("slow 401s cannot stack past twice the per-read budget", async () => {
+  // Each read 401s just under the per-read cap, so only the aggregate cap
+  // can stop the stack: 4 reads x 30ms crosses 2 x 50ms before pass 2 ends.
+  const slow401 = () => new Promise((_, reject) => {
+    setTimeout(() => reject(authError()), 30);
+  });
+  const result = await probeParaformAuth(
+    { budgetMs: 50 },
+    { trpcGetImpl: slow401, sleepImpl: noSleep },
+  );
+  assert.equal(result.healthy, null);
+  assert.equal(result.reason, "PROBE_BUDGET_EXCEEDED");
+});
+
+test("a malformed budget override falls back instead of disarming", () => {
+  assert.equal(probeReadBudgetMs("8s"), 8000); // NaN must not become the cap
+  assert.equal(probeReadBudgetMs(""), 8000);
+  assert.equal(probeReadBudgetMs(undefined), 8000);
+  assert.equal(probeReadBudgetMs("100"), 8000); // sub-500ms starves real reads
+  assert.equal(probeReadBudgetMs("12000"), 12000);
 });
 
 // ---------------------------------------------------------------------------
@@ -253,6 +301,99 @@ test("going green clears the flag and slots and posts the resumed message", asyn
   assert.equal(notify.messages.length, 3);
 });
 
+test("overlapping green ticks post exactly one resumed message", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  // cron + Fly land on the same episode at once: interleaved on the shared
+  // store, both can read the flag as present, but only the DEL that
+  // actually removes it claims the episode and posts.
+  const [first, second] = await Promise.all([
+    runAuthProbeTick(
+      { now: NOW + 3600_000 },
+      { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+    ),
+    runAuthProbeTick(
+      { now: NOW + 3600_000 },
+      { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+    ),
+  ]);
+  assert.equal([first, second].filter((tick) => tick.resumed).length, 1);
+  assert.equal(notify.messages.filter((text) => /resumed/.test(text)).length, 1);
+  assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
+});
+
+test("losing the open NX cannot mint a day-1 reminder seconds later", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  // The losing tick's view of the race: the winner claimed the open slot
+  // (value = openedAt) moments ago but has not armed the reminder slot yet.
+  kv.store.set(AUTH_OPEN_ALERT_KEY, new Date(NOW).toISOString());
+  const result = await runAuthProbeTick(
+    { now: NOW + 30_000 },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(result.status, "down");
+  assert.notEqual(result.reminded, true);
+  assert.equal(notify.messages.length, 0);
+  // Nothing consumed the reminder slot: the winner's arm still lands clean.
+  assert.equal(kv.store.has(AUTH_REMINDER_ALERT_KEY), false);
+});
+
+test("the reminder stays the crash fallback once the grace window passes", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  // A tick died between the open NX and the open notify two hours ago: the
+  // open slot exists, no alert ever posted, no reminder slot armed.
+  kv.store.set(AUTH_OPEN_ALERT_KEY, new Date(NOW - 2 * 3600_000).toISOString());
+  const result = await runAuthProbeTick(
+    { now: NOW },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(result.reminded, true);
+  assert.equal(notify.messages.length, 1);
+  assert.match(notify.messages[0], /still OPEN/);
+});
+
+test("down ticks keep the open slot alive: XX refresh, value preserved", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  const openedAt = kv.store.get(AUTH_OPEN_ALERT_KEY);
+  await runAuthProbeTick(
+    { now: NOW + 5 * 60_000 },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  // The 30d TTL is only a leak guard: mid-episode expiry would re-post a
+  // duplicate open alert on day 31, so every down tick re-arms it (XX: an
+  // already-expired slot is never resurrected).
+  assert.ok(kv.calls.some(
+    (call) => call[0] === "SET" && call[1] === AUTH_OPEN_ALERT_KEY
+      && call.includes("XX") && call.includes("EX")
+      && call.includes(String(30 * 24 * 60 * 60)),
+  ));
+  // The refresh must never rewrite openedAt — the reminder grace reads it.
+  assert.equal(kv.store.get(AUTH_OPEN_ALERT_KEY), openedAt);
+});
+
+test("a retry pass gone unknown fails open: no flag write, no alert", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  // Pass 1: both reads 401. Pass 2: 401 then a network failure — the real
+  // probe (scripted tRPC) must land on unknown, and the tick must not open.
+  const probeImpl = () => probeParaformAuth(
+    {},
+    { trpcGetImpl: scriptedTrpc(["401", "401", "401", "net"]), sleepImpl: noSleep },
+  );
+  const result = await runAuthProbeTick(
+    { now: NOW },
+    { probeImpl, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(result.status, "unknown");
+  assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
+  assert.equal(notify.messages.length, 0);
+});
+
 test("green with no flag is the silent steady state", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
@@ -314,16 +455,16 @@ test("a throwing Slack client is swallowed and the flag still lands", async () =
 });
 
 // ---------------------------------------------------------------------------
-// The public state shape — {down, since, lastProbe} and nothing internal.
+// The public state shape — {down, since, lastProbe, alert}, nothing internal.
 // ---------------------------------------------------------------------------
 
-test("paraformAuthState exposes down/since/lastProbe and nothing else", () => {
+test("paraformAuthState exposes down/since/lastProbe/alert and nothing else", () => {
   const state = paraformAuthState({
     flag: {
       version: 1,
       since: "2026-07-29T12:00:00.000Z",
       evidence: { code: "AUTH_EXPIRED" },
-      alert: { openedAt: "x", delivered: false },
+      alert: { openedAt: "2026-07-29T12:00:00.000Z", delivered: false },
     },
     lastProbe: { at: "2026-07-29T12:05:00.000Z", healthy: false, reason: "auth_expired" },
   });
@@ -331,11 +472,54 @@ test("paraformAuthState exposes down/since/lastProbe and nothing else", () => {
     down: true,
     since: "2026-07-29T12:00:00.000Z",
     lastProbe: { at: "2026-07-29T12:05:00.000Z", healthy: false, reason: "auth_expired" },
+    // The delivery summary is public ON PURPOSE: with no Slack token in
+    // production, this is how anyone learns the open post never landed.
+    alert: { openedAt: "2026-07-29T12:00:00.000Z", delivered: false },
   });
 });
 
 test("paraformAuthState with no flag reads as up", () => {
-  assert.deepEqual(paraformAuthState({}), { down: false, since: null, lastProbe: null });
+  assert.deepEqual(paraformAuthState({}), {
+    down: false,
+    since: null,
+    lastProbe: null,
+    alert: null,
+  });
+});
+
+test("public probe reasons are a closed enum, never raw internals", () => {
+  assert.equal(publicProbeReason("ok"), "ok");
+  assert.equal(publicProbeReason("recovered_on_retry"), "recovered_on_retry");
+  assert.equal(publicProbeReason("auth_expired"), "auth_expired");
+  assert.equal(publicProbeReason("AUTH_EXPIRED"), "auth_expired");
+  assert.equal(publicProbeReason("PROBE_BUDGET_EXCEEDED"), "probe_budget_exceeded");
+  assert.equal(publicProbeReason("fetch failed"), "network");
+  assert.equal(publicProbeReason("ECONNRESET"), "network");
+  assert.equal(publicProbeReason("UND_ERR_CONNECT_TIMEOUT"), "network");
+  assert.equal(publicProbeReason("23"), "network"); // DOMException timeout code
+  assert.equal(
+    publicProbeReason("no Paraform session cookie or n8n variable fallback configured"),
+    "no_cookie",
+  );
+  assert.equal(publicProbeReason("PARAFORM_SESSION_COOKIE not found in n8n variables"), "no_cookie");
+  assert.equal(publicProbeReason("n8n variables read failed: 502"), "store_error");
+  assert.equal(publicProbeReason("PARAFORM_SESSION_COOKIE_PARTS_INVALID"), "store_error");
+  assert.equal(publicProbeReason("HTTP_502"), "vendor_error");
+  assert.equal(publicProbeReason("INTERNAL_SERVER_ERROR"), "vendor_error");
+  // Anything unrecognized is a vendor detail the endpoint must not echo.
+  assert.equal(publicProbeReason("some internal detail with a secret"), "vendor_error");
+  assert.equal(publicProbeReason(null), null);
+});
+
+test("paraformAuthState maps raw reasons before they go public", () => {
+  const state = paraformAuthState({
+    lastProbe: {
+      at: "2026-07-29T12:05:00.000Z",
+      healthy: null,
+      reason: "n8n variables read failed: 502",
+    },
+  });
+  assert.equal(state.lastProbe.reason, "store_error");
 });
 
 // ---------------------------------------------------------------------------
@@ -369,6 +553,7 @@ test("without a store the endpoint fails OPEN: ok:false, down:false", async () =
   assert.equal(res.statusCode, 200);
   assert.equal(res.payload.ok, false);
   assert.equal(res.payload.down, false);
+  assert.equal(res.payload.alert, null);
   assert.equal(res.headers["Cache-Control"], "no-store");
 });
 

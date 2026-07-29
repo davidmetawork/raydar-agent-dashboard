@@ -39,10 +39,20 @@ const REMINDER_TTL_SECONDS = 24 * 60 * 60;
 const LAST_PROBE_TTL_SECONDS = 7 * 24 * 60 * 60;
 // Per-read cap so a hung Paraform read bounds the probe, never the worker's
 // 120s budget. The underlying fetch keeps its own (longer) AbortSignal.
-const PROBE_READ_BUDGET_MS = Number(
-  process.env.PARAFORM_AUTH_PROBE_BUDGET_MS || 8_000,
-);
+// A malformed override (e.g. "8s" → NaN) or a sub-500ms value must fall
+// back instead of silently disarming the cap.
+export function probeReadBudgetMs(
+  raw = process.env.PARAFORM_AUTH_PROBE_BUDGET_MS,
+) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 500 ? n : 8_000;
+}
+const PROBE_READ_BUDGET_MS = probeReadBudgetMs();
 const PROBE_RETRY_DELAY_MS = 500;
+// A losing tick in the open-alert race must not immediately win the daily
+// reminder slot and post "still OPEN (day 1)" seconds after the open alert;
+// within this window of the recorded openedAt the reminder is skipped.
+const REMINDER_AFTER_OPEN_GRACE_MS = 60 * 60 * 1000;
 
 // Two DISTINCT cheap reads, so a lone intermittent 401 on one proc never
 // trips the breaker. Both shapes are the proven ones already used by
@@ -119,10 +129,7 @@ async function probePass({ trpcGetImpl, budgetMs }) {
   return { outcome: "auth_failed" };
 }
 
-export async function probeParaformAuth(
-  { budgetMs = PROBE_READ_BUDGET_MS } = {},
-  { trpcGetImpl = trpcGet, sleepImpl = sleep } = {},
-) {
+async function probePasses({ trpcGetImpl, sleepImpl, budgetMs }) {
   const first = await probePass({ trpcGetImpl, budgetMs });
   if (first.outcome === "healthy") {
     return { healthy: true, reason: "ok", confirmedBy: first.confirmedBy, passes: 1 };
@@ -158,8 +165,69 @@ export async function probeParaformAuth(
   };
 }
 
+export async function probeParaformAuth(
+  { budgetMs = PROBE_READ_BUDGET_MS } = {},
+  { trpcGetImpl = trpcGet, sleepImpl = sleep } = {},
+) {
+  // The per-read cap alone still lets slow failures stack: four near-budget
+  // 401s plus the retry gap is ~4x the read budget before the lanes run.
+  // One overall cap of 2x the per-read budget bounds the whole probe (both
+  // passes AND the retry gap). Overrun proves nothing about the cookie, so
+  // it fails open exactly like a per-read timeout.
+  try {
+    return await withBudget(
+      probePasses({ trpcGetImpl, sleepImpl, budgetMs }),
+      budgetMs * 2,
+    );
+  } catch (error) {
+    return {
+      healthy: null,
+      reason: String(error?.code || error?.message || "probe_failed")
+        .slice(0, 80),
+    };
+  }
+}
+
+// The ops endpoint is a public unauthenticated read: raw internal error
+// strings (vendor bodies, cookie-store messages) must never be republished
+// verbatim. The raw reason still lands in the KV heartbeat for operators;
+// the endpoint sees only this closed enum: ok | recovered_on_retry |
+// auth_expired | probe_budget_exceeded | network | vendor_error |
+// no_cookie | store_error.
+export function publicProbeReason(raw) {
+  const reason = String(raw ?? "").trim();
+  if (!reason) return null;
+  if (reason === "ok" || reason === "recovered_on_retry") return reason;
+  if (reason === "auth_expired" || reason === "AUTH_EXPIRED") {
+    return "auth_expired";
+  }
+  if (reason === "PROBE_BUDGET_EXCEEDED") return "probe_budget_exceeded";
+  if (/no paraform session cookie|PARAFORM_SESSION_COOKIE not found/i.test(reason)) {
+    return "no_cookie";
+  }
+  if (/^n8n variables read failed|^PARAFORM_SESSION_COOKIE_|^STATE_STORE/.test(reason)) {
+    return "store_error";
+  }
+  if (
+    reason === "fetch failed" // undici TypeError, no code
+    || /^E[A-Z_]+$/.test(reason) // node socket codes (ECONNRESET, EAI_AGAIN)
+    || /^UND_ERR/.test(reason) // undici error codes
+    || /^\d+$/.test(reason) // DOMException numeric codes (timeout/abort)
+    || /timeout|abort|network/i.test(reason)
+  ) {
+    return "network";
+  }
+  // HTTP_5xx, tRPC body codes, and anything unrecognized: the vendor said
+  // something, and what it said stays out of the public response.
+  return "vendor_error";
+}
+
 // Public state shape for GET /api/ops/paraform-auth. Deliberately minimal:
-// {down, since, lastProbe} only — no cookie material, no alert internals.
+// {down, since, lastProbe, alert} — no cookie material, reasons mapped to
+// the closed enum above, and of the alert only the secrets-free delivery
+// summary. The alert summary is surfaced ON PURPOSE: Para AI production has
+// no Slack token, so the flag + endpoint ARE the alert channel and a
+// consumer must be able to see whether the open post was ever delivered.
 export function paraformAuthState({ flag = null, lastProbe = null } = {}) {
   return {
     down: Boolean(flag),
@@ -170,7 +238,13 @@ export function paraformAuthState({ flag = null, lastProbe = null } = {}) {
           healthy: typeof lastProbe.healthy === "boolean"
             ? lastProbe.healthy
             : null,
-          reason: lastProbe.reason || null,
+          reason: publicProbeReason(lastProbe.reason),
+        }
+      : null,
+    alert: flag?.alert
+      ? {
+          openedAt: flag.alert.openedAt || null,
+          delivered: flag.alert.delivered === true,
         }
       : null,
   };
@@ -202,11 +276,15 @@ export async function runAuthProbeTick(
   if (probe.healthy === true) {
     if (!existing) return { status: "healthy", down: false, resumed: false };
     // Auto-resume. Alert slots are cleared BEFORE the flag: a crash between
-    // the two can only cause a duplicate "resumed" post next tick, never a
-    // suppressed open alert on the next real outage.
+    // the two re-runs this path next tick (the flag still exists), so a
+    // suppressed open alert on the next real outage is impossible. The DEL
+    // of the flag is then the atomic claim on the episode: overlapping
+    // ticks (cron + Fly) can both read the flag as present, but only the
+    // tick whose DEL actually removes it sends the resumed post.
     await kvImpl(["DEL", AUTH_OPEN_ALERT_KEY]);
     await kvImpl(["DEL", AUTH_REMINDER_ALERT_KEY]);
-    await kvImpl(["DEL", AUTH_FLAG_KEY]);
+    const claimed = Number(await kvImpl(["DEL", AUTH_FLAG_KEY])) === 1;
+    if (!claimed) return { status: "healthy", down: false, resumed: false };
     const delivered = await notifyImpl(
       `✅ Paraform cookie healthy — resumed (auth circuit closed; was down since ${existing.since || "unknown"}). Observe-only: no lane was held by the flag.`,
     ).catch(() => false);
@@ -253,6 +331,29 @@ export async function runAuthProbeTick(
       opened: true,
       alertDelivered: delivered === true,
     };
+  }
+
+  // The open slot already exists (this tick lost the open NX, or the
+  // episode is simply ongoing). Two duties, both on the slot's value — the
+  // openedAt ISO stamp written at open:
+  // - TTL refresh (XX): the 30d TTL is only a leak guard; unrefreshed it
+  //   would expire mid-episode on day 31 and the next NX would re-post a
+  //   duplicate open alert. XX never resurrects a slot that already
+  //   expired — closing the episode is what deletes it for real.
+  // - Reminder grace: a tick that lost the open NX seconds ago must not win
+  //   the reminder NX and post "still OPEN (day 1)" right after the open
+  //   alert. Skip the reminder inside the grace window; an absent or
+  //   unparseable stamp keeps the reminder as the crash fallback (a tick
+  //   that died between the open NX and the open notify).
+  const openedAtRaw = await kvImpl(["GET", AUTH_OPEN_ALERT_KEY]);
+  if (openedAtRaw != null) {
+    await kvImpl([
+      "SET", AUTH_OPEN_ALERT_KEY, openedAtRaw, "XX", "EX", OPEN_ALERT_TTL_SECONDS,
+    ]);
+  }
+  const openedAtMs = Date.parse(String(openedAtRaw ?? ""));
+  if (Number.isFinite(openedAtMs) && now - openedAtMs < REMINDER_AFTER_OPEN_GRACE_MS) {
+    return { status: "down", down: true };
   }
 
   // At most one "still down" reminder per day, also NX-guarded.

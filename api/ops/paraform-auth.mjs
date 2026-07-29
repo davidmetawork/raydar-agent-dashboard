@@ -10,10 +10,17 @@
 //   dashboard blip would halt local BRS/chase lanes on an unrelated outage.
 //   This handler enforces its half of that contract by never answering with
 //   a 5xx a naive consumer might mistake for "hold".
+// - A consumer MUST treat down:true with lastProbe absent or older than 6
+//   hours as unknown and fail open — a stalled probe must never strand a
+//   stale flag into an indefinite hold.
 //
 // Public read by design: the response carries flag state only — no cookie
-// material, no probe internals, no secrets. The `auth:paraform:*` keys it
-// reads are written solely by the probe on the */5 worker tick.
+// material, no secrets, probe reasons mapped to a closed enum (never raw
+// internal error strings). `alert` is the secrets-free delivery summary
+// ({openedAt, delivered}): Para AI production has no Slack token, so the
+// flag + this endpoint ARE the alert channel and delivery must be visible
+// here, not assumed. The `auth:paraform:*` keys it reads are written solely
+// by the probe on the */5 worker tick.
 import {
   AUTH_FLAG_KEY,
   AUTH_LAST_PROBE_KEY,
@@ -29,7 +36,7 @@ const parse = (raw) => {
   try { return JSON.parse(raw); } catch { return null; }
 };
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { kvImpl = kv } = {}) {
   res.setHeader("Cache-Control", "no-store");
   if (req.method !== "GET") {
     return res.status(405).json({ ok: false, error: "GET_only" });
@@ -42,12 +49,13 @@ export default async function handler(req, res) {
       down: false,
       since: null,
       lastProbe: null,
+      alert: null,
     });
   }
   try {
     const [flagRaw, lastProbeRaw] = await Promise.all([
-      kv(["GET", AUTH_FLAG_KEY]),
-      kv(["GET", AUTH_LAST_PROBE_KEY]),
+      kvImpl(["GET", AUTH_FLAG_KEY]),
+      kvImpl(["GET", AUTH_LAST_PROBE_KEY]),
     ]);
     const state = paraformAuthState({
       flag: parse(flagRaw),
@@ -68,6 +76,7 @@ export default async function handler(req, res) {
       down: false,
       since: null,
       lastProbe: null,
+      alert: null,
     });
   }
 }
