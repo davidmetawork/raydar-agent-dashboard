@@ -9,6 +9,7 @@ import {
   executeCapturedSingleSubmission,
   guardSubmissionDraft,
   parseSingleSubmissionPrepareResponse,
+  precheckCapturedSingleSubmissionContext,
   roleQuestions,
   roleRequirements,
   singleSubmissionLedgerSnapshot,
@@ -41,7 +42,7 @@ function validDraft(overrides = {}) {
     one_liner_evidence: ["Product Lead at Northstar", "Led a B2B platform"],
     pitch_sentences: [
       {
-        text: "Their B2B product leadership at Northstar, including leading a platform from zero to one for enterprise customers, maps directly to Acme Labs' Product Lead mandate.",
+        text: "Their B2B product leadership at Northstar, with a platform led from zero to one and launched for enterprise customers, is a strong match for Acme Labs.",
         evidence: [
           "Product Lead at Northstar",
           "Led a B2B platform from zero to one and launched it for enterprise customers.",
@@ -71,8 +72,11 @@ function validDraft(overrides = {}) {
       {
         requirement_id: "r3",
         rating: 3,
-        comment: "Relevant platform depth; healthcare isn't explicit.",
-        evidence: ["launched it for enterprise customers"],
+        comment: "Healthcare experience isn't explicit; enterprise platform depth is relevant.",
+        evidence: [
+          "Led a B2B platform from zero to one",
+          "launched it for enterprise customers",
+        ],
       },
     ],
     question_answers: [{
@@ -82,11 +86,22 @@ function validDraft(overrides = {}) {
     }],
     additional_info: [{
       text: "Healthcare experience isn't explicit, but they have enterprise platform depth.",
-      evidence: ["launched it for enterprise customers"],
+      evidence: [
+        "Led a B2B platform from zero to one",
+        "launched it for enterprise customers",
+      ],
     }],
     ...overrides,
   };
 }
+
+const guardContext = {
+  role,
+  candidateName: "Taylor Example",
+  sourceTexts,
+  candidateSourceTexts: sourceTexts.slice(0, 2),
+  roleSourceTexts: [JSON.stringify(role), ...sourceTexts.slice(2)],
+};
 
 test("role requirements and questions preserve stable form ids", () => {
   assert.deepEqual(roleRequirements(role).map((item) => item.id), ["r1", "r2", "r3"]);
@@ -102,11 +117,9 @@ test("role requirements and questions preserve stable form ids", () => {
 test("a complete grounded draft follows the corrected playbook", () => {
   const result = guardSubmissionDraft({
     draft: validDraft(),
-    role,
-    candidateName: "Taylor Example",
-    sourceTexts,
+    ...guardContext,
   });
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.draft.overallRating, "GOOD_FIT");
   assert.equal(result.draft.rating, 3);
   assert.equal(result.draft.attributes[0].rating, 5);
@@ -126,23 +139,76 @@ test("fabricated biography is stripped and blocks a partial pitch", () => {
         },
       ],
     }),
-    role,
-    candidateName: "Taylor Example",
-    sourceTexts,
+    ...guardContext,
   });
   assert.equal(result.ok, false);
   assert.ok(result.blockers.includes("great_fit_reason_not_grounded"));
-  assert.equal(result.signals.droppedPitchSentenceCount, 1);
+  assert.equal(
+    result.signals.droppedPitchSentenceCount,
+    1,
+    JSON.stringify(result),
+  );
   assert.ok(!result.draft.greatFitReason.includes("TestForge AI"));
+});
+
+test("lowercase fabricated claims cannot borrow grounding from a citation", () => {
+  const result = guardSubmissionDraft({
+    draft: validDraft({
+      pitch_sentences: [
+        validDraft().pitch_sentences[0],
+        {
+          text: "They grew revenue dramatically and would be a strong match for Acme Labs.",
+          evidence: ["I am excited about Acme Labs"],
+        },
+      ],
+    }),
+    ...guardContext,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.blockers.includes("great_fit_reason_not_grounded"));
+  assert.doesNotMatch(result.draft.greatFitReason, /revenue dramatically/);
+});
+
+test("role text can authorize role wording but never candidate evidence", () => {
+  const draft = validDraft();
+  draft.attributes[0] = {
+    ...draft.attributes[0],
+    evidence: ["B2B product leadership"],
+  };
+  const result = guardSubmissionDraft({ draft, ...guardContext });
+  assert.equal(result.ok, false);
+  assert.ok(result.blockers.includes("scorecard_evidence_missing"));
+});
+
+test("one-liner and pitch sentence structure are exact", () => {
+  const longOneLiner = guardSubmissionDraft({
+    draft: validDraft({
+      one_liner: "Product Lead @ Northstar | B2B enterprise platform leadership",
+    }),
+    ...guardContext,
+  });
+  assert.ok(longOneLiner.blockers.includes("one_liner_not_grounded"));
+
+  const extraSentence = guardSubmissionDraft({
+    draft: validDraft({
+      pitch_sentences: [
+        {
+          ...validDraft().pitch_sentences[0],
+          text: `${validDraft().pitch_sentences[0].text} It launched.`,
+        },
+        validDraft().pitch_sentences[1],
+      ],
+    }),
+    ...guardContext,
+  });
+  assert.ok(extraSentence.blockers.includes("great_fit_reason_not_grounded"));
 });
 
 test("three generated non-green marks route to review", () => {
   const attributes = validDraft().attributes.map((item) => ({ ...item, rating: 3 }));
   const result = guardSubmissionDraft({
     draft: validDraft({ attributes }),
-    role,
-    candidateName: "Taylor Example",
-    sourceTexts,
+    ...guardContext,
   });
   assert.equal(result.ok, false);
   assert.ok(result.blockers.includes("generated_three_plus_non_green"));
@@ -152,9 +218,7 @@ test("three generated non-green marks route to review", () => {
 test("every listed requirement must have exactly one generated mark", () => {
   const result = guardSubmissionDraft({
     draft: validDraft({ attributes: validDraft().attributes.slice(0, 2) }),
-    role,
-    candidateName: "Taylor Example",
-    sourceTexts,
+    ...guardContext,
   });
   assert.equal(result.ok, false);
   assert.ok(result.blockers.includes("scorecard_requirement_mismatch"));
@@ -166,9 +230,7 @@ test("a flat miss on a required requirement cannot be papered over", () => {
   ));
   const result = guardSubmissionDraft({
     draft: validDraft({ attributes }),
-    role,
-    candidateName: "Taylor Example",
-    sourceTexts,
+    ...guardContext,
   });
   assert.equal(result.ok, false);
   assert.ok(result.blockers.includes("required_requirement_flat_miss"));
@@ -177,9 +239,7 @@ test("a flat miss on a required requirement cannot be papered over", () => {
 test("required questions must have a grounded answer", () => {
   const result = guardSubmissionDraft({
     draft: validDraft({ question_answers: [] }),
-    role,
-    candidateName: "Taylor Example",
-    sourceTexts,
+    ...guardContext,
   });
   assert.equal(result.ok, false);
   assert.ok(result.blockers.includes("required_question_unanswered"));
@@ -202,6 +262,30 @@ test("candidate-only transcript enters the model source bundle", () => {
   });
   assert.match(bundle.modelInput.candidate_only_screening_speech, /excited about Acme Labs/);
   assert.doesNotMatch(bundle.modelInput.candidate_only_screening_speech, /TestForge AI/);
+  assert.doesNotMatch(bundle.candidateSourceTexts.join("\n"), /TestForge AI/);
+  assert.match(bundle.roleSourceTexts.join("\n"), /Healthcare domain/);
+});
+
+test("the model and verifier share the same bounded candidate transcript", () => {
+  const repeated = "I am excited about Acme Labs. ".repeat(2_000);
+  const bundle = buildSubmissionSourceBundle({
+    role,
+    candidate: { name: "Taylor Example" },
+    candidateProfile: {},
+    preferences: {},
+    calibration: {},
+    meetings: [{
+      event_scheduled_at: "2026-07-29T00:00:00Z",
+      recording_transcript: [{
+        speaker: "Candidate",
+        text: repeated,
+      }],
+    }],
+  });
+  const promptTranscript = bundle.modelInput.candidate_only_screening_speech;
+  assert.equal(promptTranscript.length, 20_000);
+  assert.ok(bundle.candidateSourceTexts.includes(promptTranscript));
+  assert.ok(!bundle.candidateSourceTexts.some((text) => text.length > 20_000));
 });
 
 test("prepare input pins required fields and omits absent attribution", () => {
@@ -298,6 +382,16 @@ test("authoritative readback requires one credit and matching application identi
   assert.equal(result.signals.creditDelta, 1);
 });
 
+test("recent ledger rows treat top-level id as the application id", () => {
+  const snapshot = singleSubmissionLedgerSnapshot({
+    latestSingleSubmissions: [{
+      id: "application-current-shape",
+      candidate_to_approved_role_id: "candidate-role-1",
+    }],
+  });
+  assert.equal(snapshot.rows[0].applicationId, "application-current-shape");
+});
+
 test("readback fails closed on a 200-shaped but uncorroborated result", () => {
   const result = verifySingleSubmissionReadback({
     before: { usedThisWeek: 2, rows: [] },
@@ -321,6 +415,7 @@ test("readback fails closed on a 200-shaped but uncorroborated result", () => {
 
 const contractRole = {
   id: "role-1",
+  status: "ACTIVE",
   companyId: "company-1",
   company: { name: "Acme Labs" },
   name: "Product Lead",
@@ -493,6 +588,22 @@ test("explicit on-site workplace preference satisfies Paraform's on-site answer"
   assert.equal(result.payload.relocation, true);
 });
 
+test("native no-visa authorization maps to Paraform false", () => {
+  const result = buildSingleSubmissionPayload({
+    candidate: contractCandidate,
+    candidateToApprovedRole: contractCandidateToRole,
+    userRoleApproval: contractApproval,
+    role: contractRole,
+    preferences: {
+      ...contractPreferences,
+      visa_authorization: "NO_VISA_AUTHORIZATION_NEEDED",
+    },
+    draft: contractDraft,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.payload.visa_sponsorship, false);
+});
+
 test("duplicate response flags are deterministic blockers", () => {
   assert.deepEqual(duplicateSubmissionBlockers({
     linkedin_user_role: true,
@@ -516,10 +627,64 @@ test("weekly credit boundary is Monday 09:00 Pacific across DST", () => {
   );
 });
 
+test("read-only context precheck fences duplicates, role state, and credits before a claim", async () => {
+  const calls = [];
+  const trpcGetImpl = async (proc) => {
+    calls.push(proc);
+    if (proc === "role.getRoleByIdSimple") return contractRole;
+    if (proc === "roleSettings.getRoleSettingsForRecruiters") {
+      return {
+        disable_submissions: false,
+        screening_call_snippet_required: false,
+        candidate_application_confirm_email: true,
+      };
+    }
+    if (proc === "roleSlots.getMySingleSubmissionData") {
+      return {
+        recentSingleSubmissionsThisWeekCount: 2,
+        previousAllowance: 10,
+        earnedBackThisWeekCount: 0,
+      };
+    }
+    if (proc === "candidates.hasCandidateBeenSubmittedToCompany") return false;
+    throw new Error(`unexpected read ${proc}`);
+  };
+  const result = await precheckCapturedSingleSubmissionContext({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    trpcGetImpl,
+    trpcPostImpl: async (proc) => {
+      assert.equal(proc, "submission.checkDuplicates");
+      return {};
+    },
+    restImpl: async (path) => {
+      assert.match(path, /user_role_approval/);
+      return contractApproval;
+    },
+    now: "2026-07-29T18:00:00Z",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.signals.paraformConfirmationExpected, true);
+  assert.ok(calls.includes("candidates.hasCandidateBeenSubmittedToCompany"));
+
+  const duplicate = await precheckCapturedSingleSubmissionContext({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    trpcGetImpl,
+    trpcPostImpl: async () => ({ linkedin_user_role: true }),
+    restImpl: async () => contractApproval,
+    now: "2026-07-29T18:00:00Z",
+  });
+  assert.equal(duplicate.ok, false);
+  assert.ok(duplicate.blockers.includes("submission_duplicate_linkedin_user_role"));
+});
+
 function capturedExecutorHarness({
   duplicate = {},
   preparedId = "candidate-role-1",
   postError = null,
+  creditsExhausted = false,
+  snippetRequired = false,
 } = {}) {
   let ledgerReads = 0;
   let companyReads = 0;
@@ -544,13 +709,16 @@ function capturedExecutorHarness({
         candidate_application_confirm_email: true,
         require_review_by_paraform: false,
         disable_submissions: false,
+        screening_call_snippet_required: snippetRequired,
         submission_attachment_requirements: { minimum_attachments: null },
       };
     }
     if (proc === "roleSlots.getMySingleSubmissionData") {
       ledgerReads += 1;
       return {
-        recentSingleSubmissionsThisWeekCount: ledgerReads === 1 ? 2 : 3,
+        recentSingleSubmissionsThisWeekCount: creditsExhausted
+          ? 10
+          : ledgerReads === 1 ? 2 : 3,
         previousAllowance: 10,
         latestSingleSubmissions: ledgerReads === 1 ? [] : [{
           application_id: "application-1",
@@ -629,6 +797,7 @@ test("captured executor posts /api/application once and verifies stored payload"
   assert.equal(result.signals.paraformConfirmationSent, true);
   assert.equal(harness.applicationPosts(), 1);
   assert.equal(harness.postedPayload().single_submission, true);
+  assert.equal(harness.postedPayload().require_review_by_paraform, false);
 });
 
 test("captured executor never blind-retries an uncertain application write", async () => {
@@ -681,4 +850,36 @@ test("captured executor blocks duplicates and prepared-row mismatches before POS
   assert.equal(mismatchResult.mutationAttempted, false);
   assert.ok(mismatchResult.blockers.includes("submission_prepared_context_mismatch"));
   assert.equal(mismatchHarness.applicationPosts(), 0);
+});
+
+test("captured executor rechecks credits and snippet requirements before POST", async () => {
+  const exhaustedHarness = capturedExecutorHarness({ creditsExhausted: true });
+  const exhausted = await executeCapturedSingleSubmission({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    candidateToApprovedRoleId: "candidate-role-1",
+    submissionDraft: contractDraft,
+    trpcGetImpl: exhaustedHarness.trpcGetImpl,
+    trpcPostImpl: exhaustedHarness.trpcPostImpl,
+    restImpl: exhaustedHarness.restImpl,
+    sleepImpl: async () => {},
+  });
+  assert.equal(exhausted.mutationAttempted, false);
+  assert.ok(exhausted.blockers.includes("credits_exhausted"));
+  assert.equal(exhaustedHarness.applicationPosts(), 0);
+
+  const snippetHarness = capturedExecutorHarness({ snippetRequired: true });
+  const snippet = await executeCapturedSingleSubmission({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    candidateToApprovedRoleId: "candidate-role-1",
+    submissionDraft: contractDraft,
+    trpcGetImpl: snippetHarness.trpcGetImpl,
+    trpcPostImpl: snippetHarness.trpcPostImpl,
+    restImpl: snippetHarness.restImpl,
+    sleepImpl: async () => {},
+  });
+  assert.equal(snippet.mutationAttempted, false);
+  assert.ok(snippet.blockers.includes("submission_screening_call_snippet_required"));
+  assert.equal(snippetHarness.applicationPosts(), 0);
 });

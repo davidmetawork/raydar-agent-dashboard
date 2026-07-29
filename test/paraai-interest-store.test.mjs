@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   acquireLock,
   claimSubmission,
+  claimSubmissionAttempt,
   getSubmissionClaim,
   listPendingJobs,
   recordSubmissionOutcome,
@@ -85,6 +86,35 @@ test("submission claim is permanent and returns the original fencing token", asy
   assert.equal(second.status, "existing");
   assert.equal(second.claim.attemptId, first.claim.attemptId);
   assert.equal(second.claim.state, "claimed");
+});
+
+test("the production claim atomically starts its sole mutation attempt", async () => {
+  const kvImpl = inMemoryClaimKv();
+  const first = await claimSubmissionAttempt(
+    "candidate-1",
+    "role-1",
+    { roleId: "role-1" },
+    { kvImpl },
+  );
+  const second = await claimSubmissionAttempt(
+    "candidate-1",
+    "role-1",
+    { roleId: "role-1" },
+    { kvImpl },
+  );
+  assert.equal(first.status, "started");
+  assert.equal(first.claim.state, "attempt_started");
+  assert.ok(first.claim.attemptStartedAt);
+  assert.equal(second.status, "existing");
+  assert.equal(second.claim.attemptId, first.claim.attemptId);
+  const prepared = await recordSubmissionPrepared(
+    "candidate-1",
+    "role-1",
+    first.claim.attemptId,
+    "candidate-role-1",
+    { kvImpl },
+  );
+  assert.equal(prepared.status, "prepared");
 });
 
 test("only the claim owner can start, prepare, and record an outcome", async () => {

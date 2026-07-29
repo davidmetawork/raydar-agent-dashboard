@@ -77,6 +77,11 @@ export default async function handler(req, res) {
         return res.status(200).json({
           ok: result.ok,
           populationSize: result.populationSize,
+          cursorStart: result.cursorStart,
+          cursorEnd: result.cursorEnd,
+          nextCursor: result.nextCursor,
+          cycleComplete: result.cycleComplete,
+          cycleCandidatesRead: result.cycleCandidatesRead,
           candidatesRead: result.candidatesRead,
           seeded: result.seeded,
           detected: result.detected.length,

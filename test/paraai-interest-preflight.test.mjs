@@ -251,6 +251,18 @@ test("tenure and current-employer stage are evaluated against role avoid rules",
   assert.equal(result.signals.currentEmployerStageAvailable, true);
 });
 
+test("composite tenure objects add years and months", () => {
+  const result = evaluateSubmissionEvidence(greenEvidence({
+    experience: {
+      jobHopper: false,
+      average_tenure: { years: 2, months: 5 },
+      current_tenure: { years: 1, months: 3 },
+    },
+  }));
+  assert.equal(result.signals.averageTenureMonths, 29);
+  assert.equal(result.signals.currentTenureMonths, 15);
+});
+
 test("visa status is checked against the role's actual sponsorship text", () => {
   const conflict = evaluateSubmissionEvidence(greenEvidence({
     role: {
@@ -278,6 +290,26 @@ test("visa status is checked against the role's actual sponsorship text", () => 
     preferences: { visa: [] },
   }));
   assert.ok(unknown.blockers.includes("visa_status_unconfirmed_for_restricted_role"));
+});
+
+test("native no-visa authorization is never misclassified by the word visa", () => {
+  const result = evaluateSubmissionEvidence(greenEvidence({
+    role: {
+      status: "ACTIVE",
+      company_name: "Acme Labs",
+      visa_text: "Sponsorship is not available.",
+      requirements: [],
+      rejection_categories: [],
+    },
+    preferences: {
+      visa: [],
+      visa_authorization: "NO_VISA_AUTHORIZATION_NEEDED",
+    },
+  }));
+  assert.equal(result.signals.needsSponsorship, false);
+  assert.ok(!result.blockers.includes("visa_sponsorship_role_conflict"));
+  assert.ok(!result.blockers.includes("visa_status_unconfirmed_for_restricted_role"));
+  assert.equal(result.signals.companyInterestConfirmed, true);
 });
 
 test("competing process and closed-role signals fail closed", () => {
@@ -409,6 +441,22 @@ test("integrated preflight cannot pass an empty preference profile", async () =>
   ]);
 });
 
+test("integrated preflight fails closed when preference read returns null", async () => {
+  const trpcGetImpl = async (proc, input) => {
+    if (proc === "candidateUserPreference.hasUserInputPreferences") return null;
+    return passingTrpcRead(proc, input);
+  };
+  const result = await preflightSubmission({
+    candidate,
+    roleId: "role-1",
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl,
+    now: NOW,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.blockers.includes("preferences_incomplete"));
+});
+
 test("shadow submit records would-submit without taking a permanent claim", async () => {
   const result = await submitToRole({
     candidate,
@@ -511,6 +559,7 @@ test("captured adapter gets one fenced attempt and only verified readback succee
     apply: true,
     credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
     trpcGetImpl: passingTrpcRead,
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     trpcPostImpl: async (proc, input) => {
       prepareCalls += 1;
       assert.equal(proc, "roleSlots.prepareForSingleSubmission");
@@ -530,6 +579,7 @@ test("captured adapter gets one fenced attempt and only verified readback succee
       anonymizeCandidates: false,
       roleDiscoverySource: "CURATED_LIST",
     },
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     finalSubmitImpl: async ({ candidateToApprovedRoleId, submissionDraft }) => {
       finalCalls += 1;
       assert.equal(candidateToApprovedRoleId, "candidate-role-1");
@@ -560,6 +610,7 @@ test("an uncertain final mutation is permanently reads-only and never retried", 
     apply: true,
     credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
     trpcGetImpl: passingTrpcRead,
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     trpcPostImpl: async () => ({
       success: true,
       candidate_to_approved_role_id: "candidate-role-1",
@@ -574,6 +625,7 @@ test("an uncertain final mutation is permanently reads-only and never retried", 
       anonymizeCandidates: false,
       roleDiscoverySource: "CURATED_LIST",
     },
+    contextPrecheckImpl: async () => ({ ok: true, blockers: [], signals: {} }),
     finalSubmitImpl: async () => {
       finalCalls += 1;
       throw new Error("transport timeout");
