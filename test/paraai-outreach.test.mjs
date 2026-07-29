@@ -54,6 +54,7 @@ import {
   sweepStaleOutreachExceptions,
   SUBMISSION_REQUEST_EXPIRY_DAYS,
   heldAlertCopy,
+  messageForMatch,
   missingEmailAlertCopy,
   normalizeExternalDeliveryEvidence,
   normalizeSubmissionRequest,
@@ -116,6 +117,80 @@ test("expired first-match override keeps the role link and omits unavailable dig
   assert.match(copy.text, /https:\/\/www\.paraform\.com\/share\/tubescience\/role-1/);
   assert.doesNotMatch(copy.text, /digest|all interview requests|one place/i);
   assert.doesNotMatch(copy.html, /paraform\.com\/digest|Interview Requests/);
+});
+
+test("later-match copy drops the bare David sign-off when the signature block follows", () => {
+  for (const ordinal of [2, 3]) {
+    const signed = additionalMatchCopy({
+      firstName: "Amy",
+      ordinal,
+      variationSeed: `request-${ordinal}`,
+      ...role,
+      signatureFollows: true,
+    });
+    assert.ok(signed.text.endsWith("Thanks,"));
+    assert.match(signed.html, /<div>Thanks,<\/div>$/);
+    const unsigned = additionalMatchCopy({
+      firstName: "Amy",
+      ordinal,
+      variationSeed: `request-${ordinal}`,
+      ...role,
+    });
+    assert.ok(unsigned.text.endsWith("Thanks,\nDavid"));
+    assert.match(unsigned.html, /<div>Thanks,<br>David<\/div>$/);
+  }
+});
+
+test("a thread-starting match email carries the signature and a reply never does", () => {
+  const request = {
+    id: "req-1",
+    candidateEmail: "amy@example.com",
+    companyName: "Reform",
+  };
+  const copy = { text: "body", html: "<div>body</div>" };
+  const signatureHtml = '<div dir="ltr">David Phillips<br>Raydar</div>';
+  const fresh = messageForMatch({
+    mailbox: "david@raydar.xyz",
+    request,
+    copy,
+    context: null,
+    draftThreadId: null,
+    signatureHtml,
+  });
+  assert.equal(fresh.bodyHtml, `<div>body</div><br>\n${signatureHtml}`);
+  assert.equal(fresh.threadId, undefined);
+  const draftAnchored = messageForMatch({
+    mailbox: "david@raydar.xyz",
+    request,
+    copy,
+    context: null,
+    draftThreadId: "thread-9",
+    signatureHtml,
+  });
+  assert.equal(draftAnchored.bodyHtml, `<div>body</div><br>\n${signatureHtml}`);
+  assert.equal(draftAnchored.threadId, "thread-9");
+  const reply = messageForMatch({
+    mailbox: "david@raydar.xyz",
+    request,
+    copy,
+    context: {
+      threadId: "thread-1",
+      inReplyTo: "<m1@mail.gmail.com>",
+      references: "<m1@mail.gmail.com>",
+      replySubject: "Re: 1st Round - Interview Request @ Reform 🎉",
+    },
+    signatureHtml,
+  });
+  assert.equal(reply.bodyHtml, "<div>body</div>");
+  const noSignature = messageForMatch({
+    mailbox: "david@raydar.xyz",
+    request,
+    copy,
+    context: null,
+    draftThreadId: null,
+    signatureHtml: "",
+  });
+  assert.equal(noSignature.bodyHtml, "<div>body</div>");
 });
 
 test("expired later-match override omits the digest reminder", () => {

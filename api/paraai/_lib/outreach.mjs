@@ -383,7 +383,7 @@ export async function ensureMatchDigest(request) {
   };
 }
 
-function copyForMatch({ request, ordinal, contact, digest, roleUrl }) {
+function copyForMatch({ request, ordinal, contact, digest, roleUrl, signatureFollows }) {
   const input = {
     firstName: firstName(contact.name || request.candidateName),
     roleName: request.roleName,
@@ -397,6 +397,7 @@ function copyForMatch({ request, ordinal, contact, digest, roleUrl }) {
         ...input,
         ordinal,
         variationSeed: request.id,
+        signatureFollows,
       });
 }
 
@@ -433,10 +434,9 @@ async function threadForMatch({ state, request, mailbox, digestUrl }) {
   return { thread: null, context: null, anchorStatus: "none" };
 }
 
-function messageForMatch({
+export function messageForMatch({
   mailbox,
   request,
-  ordinal,
   copy,
   context,
   draftThreadId,
@@ -455,8 +455,10 @@ function messageForMatch({
       references: context.references,
     } : draftThreadId ? { threadId: draftThreadId } : {}),
     bodyText: copy.text,
-    bodyHtml: ordinal === 1
-      ? `${copy.html}<br>\n${signatureHtml || ""}`
+    // The full signature belongs on every email that starts a conversation
+    // and never on a reply within an existing one.
+    bodyHtml: !context && signatureHtml
+      ? `${copy.html}<br>\n${signatureHtml}`
       : copy.html,
   };
 }
@@ -859,14 +861,22 @@ export async function processMatchRequest(
       previousOutbox.draftId &&
       anchorStatus === "none"
     );
-    const copy = copyForMatch({ request, ordinal, contact, digest, roleUrl });
-    const signatureHtml = ordinal === 1
-      ? await getSignatureHtml(config.mailbox).catch(() => "")
-      : "";
+    const signatureHtml = context
+      ? ""
+      : await getSignatureHtml(config.mailbox).catch(() => "");
+    const copy = copyForMatch({
+      request,
+      ordinal,
+      contact,
+      digest,
+      roleUrl,
+      // If the signature fetch failed, keep the baked-in "David" sign-off
+      // rather than sending a thread-starting email with no name at all.
+      signatureFollows: Boolean(signatureHtml),
+    });
     const message = messageForMatch({
       mailbox: config.mailbox,
       request,
-      ordinal,
       copy,
       context,
       draftThreadId: anchorStatus === "draft" ? previousThreadId : null,
