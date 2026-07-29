@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { stripHtml } from "./model.mjs";
+import { HUMAN_SCHEDULING_URL } from "../../seq/_lib/scheduling-links.mjs";
 
 const text = (value) => String(value ?? "").trim();
 const norm = (value) => text(value).toLowerCase().replace(/[–—]/g, "-").replace(/\s+/g, " ");
@@ -178,7 +179,7 @@ export function buildIntroEmail(context = {}, sections = {}) {
     "<p></p>",
     `<p><strong>See JD here</strong>: <a target="_blank" rel="noopener noreferrer" class="text-blue-500 underline" href="${escapeHtml(shareUrl)}">${escapeHtml(shareUrl)}</a></p>`,
     "<p></p>",
-    "<p>Interested? Grab time here: calendly.com/raydar-xyz</p>",
+    `<p>Interested? Book a Human Call with Raydar here: ${HUMAN_SCHEDULING_URL}</p>`,
     "<p></p>",
     "<p>Best,</p>",
   );
@@ -244,7 +245,7 @@ export function auditSequence(campaign, { name, projectId, company, expectedEmai
   if (!introBody.includes('data-value="Candidate First Name"')) warnings.push("intro does not use the Candidate First Name merge chip");
   if (introBody.includes("—") || introSubject.includes("—")) warnings.push("intro contains an em dash");
   if (company && norm(introSubject).includes(norm(company))) warnings.push("intro subject contains the company name");
-  for (const required of ["<strong>Comp:", "<strong>See JD here</strong>", "calendly.com/raydar-xyz"]) if (!introBody.includes(required)) warnings.push(`intro is missing ${stripHtml(required)}`);
+  for (const required of ["<strong>Comp:", "<strong>See JD here</strong>", HUMAN_SCHEDULING_URL]) if (!introBody.includes(required)) warnings.push(`intro is missing ${stripHtml(required)}`);
   if (expectedSteps) {
     for (let index = 0; index < 3; index++) {
       if (steps[index]?.subject !== expectedSteps[index]?.subject || steps[index]?.body !== expectedSteps[index]?.body || Number(steps[index]?.wait_time) !== Number(expectedSteps[index]?.wait_time)) {
@@ -255,7 +256,7 @@ export function auditSequence(campaign, { name, projectId, company, expectedEmai
   return { warnings: [...new Set(warnings)], dangers: [...new Set(dangers)], accountCount: actualEmails.length, emails: actualEmails };
 }
 
-const compositionPrompt = `You write only factual cold-sourcing outreach copy from a Paraform role brief. Return three inline-HTML fragments. Allowed markup is <strong>...</strong> only. Never use an em dash. Never fabricate or resolve conflicts yourself: structured fields in the supplied context win. The final renderer inserts the company name and links, compensation, JD, Calendly, greeting, and signoff, so do not include those. openingHtml is the phrase after "I'm working with [Company]," and must not repeat the company name. tractionHtml is one short traction, funding, customer, growth, or investor paragraph and may be empty only if no verified traction exists. rolePitchHtml is two or three concise sentences about the role, team, location/work model, and distinctive ownership. Bold only key numbers and high-signal phrases. Target 65-115 total words across the three fragments. For engineering roles, stack is a verified comma-separated stack; otherwise it must be empty.`;
+const compositionPrompt = `You write only factual cold-sourcing outreach copy from a Paraform role brief. Return three inline-HTML fragments. Allowed markup is <strong>...</strong> only. Never use an em dash. Never fabricate or resolve conflicts yourself: structured fields in the supplied context win. The final renderer inserts the company name and links, compensation, JD, Raydar Human Call scheduling link, greeting, and signoff, so do not include those. openingHtml is the phrase after "I'm working with [Company]," and must not repeat the company name. tractionHtml is one short traction, funding, customer, growth, or investor paragraph and may be empty only if no verified traction exists. rolePitchHtml is two or three concise sentences about the role, team, location/work model, and distinctive ownership. Bold only key numbers and high-signal phrases. Target 65-115 total words across the three fragments. For engineering roles, stack is a verified comma-separated stack; otherwise it must be empty.`;
 
 const compositionSchema = {
   type: "object",

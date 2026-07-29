@@ -1,5 +1,9 @@
 import { cors, hasCookie, paraformHealth } from "./_lib/core.mjs";
 import { sweepStaleness } from "./_lib/booking-stop.mjs";
+import {
+  raydarSchedulerBookingStopEnabled,
+  raydarSchedulerIndexConfigured,
+} from "./_lib/raydar-booking-index.mjs";
 
 export default async function handler(req, res) {
   if (cors(req, res)) return; // health is open so the page can show status
@@ -16,6 +20,14 @@ export default async function handler(req, res) {
       ageMinutes: s.ageMs == null ? null : Math.round(s.ageMs / 60000),
       stale: s.stale,
       activeLeadsLastPass: s.activeLeads ?? null,
+      raydarScheduler: {
+        enabled: raydarSchedulerBookingStopEnabled(),
+        webhookConfigured: String(process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET || "").length >= 32,
+        indexConfigured: raydarSchedulerIndexConfigured(),
+        lastSweepEnabled: s.raydarEnabled ?? false,
+        lastSweepComplete: s.raydarComplete ?? false,
+        bookingsLastPass: s.raydarBookings ?? null,
+      },
     };
   } catch { bookingStop = { error: "unavailable" }; }
 

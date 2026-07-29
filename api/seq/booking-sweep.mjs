@@ -1,18 +1,18 @@
-// BOOKING SWEEP — hourly reconciliation backstop behind the Calendly webhook.
+// BOOKING SWEEP — hourly reconciliation behind native + legacy webhook paths.
 //
-// The webhook (calendly-hook.mjs) is the fast path. This is what makes the
-// system self-healing, and it exists for three reasons the webhook cannot cover:
+// The webhook routes are the fast paths. This is what makes the system
+// self-healing, and it exists for three reasons webhooks cannot cover:
 //   1. webhook deliveries can be dropped or arrive during a deploy;
-//   2. a webhook only knows the address the candidate typed into Calendly — the
-//      sweep also reads the candidate's Paraform profile addresses, which is how
-//      it catches the people who book from a different mailbox than we email;
+//   2. a webhook only knows the address the candidate typed while booking — the
+//      sweep also reads Paraform profile addresses, catching people who book
+//      from a different mailbox than the one we email;
 //   3. the Paraform "Book Time" path sets relationship_status = SCHEDULED_CALL
 //      and emits no webhook at all.
 //
 // It is deliberately a SEPARATE function from guardian.mjs (the protected-recruiter
 // guardian). That guardian enforces a hard "never message this recruiter's
-// candidates" invariant and must never be able to fail because a Calendly call
-// timed out. Separate files, separate crons, separate failure boundaries.
+// candidates" invariant and must never be able to fail because a booking-source
+// call timed out. Separate files, separate crons, separate failure boundaries.
 //
 // FAIL LOUDLY. The predecessor to this system died for nine days in silence.
 // Everything below that alerts is there because of a specific way that happened.
@@ -89,6 +89,10 @@ export default async function handler(req, res) {
       await notifySlack(":warning: Booking sweep hit the Calendly pagination ceiling — some bookings may not have been read this pass.").catch(() => {});
     }
 
+    if (result.raydarError && (await shouldAlert("raydar-booking-index", 3600))) {
+      await notifySlack(":rotating_light: Booking sweep could not prove a complete Raydar scheduler booking index. The pass is unhealthy and native bookings may not stop sequence mail until the source recovers.").catch(() => {});
+    }
+
     if (apply && result.pauseErrors.length && (await shouldAlert("pause-errors", 3600))) {
       await notifySlack(`:warning: Booking sweep failed to pause ${result.pauseErrors.length} booked lead(s). They are still receiving sequence email.`).catch(() => {});
     }
@@ -113,6 +117,13 @@ export default async function handler(req, res) {
       calendlyEvents: result.calendlyEvents,
       calendlyCacheHits: result.calendlyCacheHits,
       calendlyTruncated: result.calendlyTruncated,
+      raydarEnabled: result.raydarEnabled,
+      raydarConfigured: result.raydarConfigured,
+      raydarItems: result.raydarItems,
+      raydarBookings: result.raydarBookings,
+      raydarPages: result.raydarPages,
+      raydarComplete: result.raydarComplete,
+      raydarError: result.raydarError,
       profilesRead: result.profilesRead,
       profileCoverage: result.profileCoverage,
       profileRotor: `${result.profileRotorFrom}/${result.profileRotorOf}`,
