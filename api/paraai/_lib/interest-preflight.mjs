@@ -15,17 +15,112 @@ const AI_NEGATIVE = new Set(["BAD_FIT", "NO"]);
 const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 const list = (value) => Array.isArray(value) ? value : value == null ? [] : [value];
 
-function transcriptText(recordingTranscript) {
-  if (typeof recordingTranscript === "string") return clean(recordingTranscript);
+function transcriptRowText(row) {
+  if (typeof row === "string") return clean(row);
+  if (typeof row?.text === "string") return clean(row.text);
+  if (Array.isArray(row?.words)) {
+    return row.words.map((word) => clean(word?.text ?? word)).filter(Boolean).join(" ");
+  }
+  return "";
+}
+
+function transcriptSpeaker(row) {
+  if (!row || typeof row !== "object") return "";
+  return clean(
+    row.speaker
+    ?? row.speaker_name
+    ?? row.speakerName
+    ?? row.participant
+    ?? row.participant_name,
+  );
+}
+
+function transcriptRole(row) {
+  if (!row || typeof row !== "object") return "";
+  return clean(
+    row.speaker_role
+    ?? row.speakerRole
+    ?? row.participant_role
+    ?? row.participantRole
+    ?? row.role,
+  );
+}
+
+function candidateNameTokens(candidateName) {
+  return clean(candidateName)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3);
+}
+
+/**
+ * Return candidate speech only.
+ *
+ * Paraform transcripts can label speakers as "Candidate", a person name, or
+ * an opaque numeric speaker id. Numeric ids are accepted only when a row from
+ * that speaker explicitly self-identifies as the candidate. If attribution is
+ * ambiguous, this fails closed instead of treating recruiter speech as proof.
+ */
+export function candidateTranscriptText(recordingTranscript, candidateName = "") {
+  const nameTokens = candidateNameTokens(candidateName);
+  if (typeof recordingTranscript === "string") {
+    const candidateLines = recordingTranscript
+      .split(/\r?\n/)
+      .map((line) => {
+        const match = line.match(/^\s*([^:]{1,80}):\s*(.+)$/);
+        if (!match) return "";
+        const label = clean(match[1]).toLowerCase();
+        return label === "candidate"
+          || label === "interviewee"
+          || nameTokens.some((token) => label.includes(token))
+          ? clean(match[2])
+          : "";
+      })
+      .filter(Boolean);
+    return candidateLines.join("\n");
+  }
   if (!Array.isArray(recordingTranscript)) return "";
-  return recordingTranscript.map((row) => {
-    if (typeof row === "string") return row;
-    if (typeof row?.text === "string") return row.text;
-    if (Array.isArray(row?.words)) {
-      return row.words.map((word) => clean(word?.text ?? word)).filter(Boolean).join(" ");
+
+  const rows = recordingTranscript
+    .map((row) => ({
+      role: transcriptRole(row).toLowerCase(),
+      speaker: transcriptSpeaker(row),
+      text: transcriptRowText(row),
+    }))
+    .filter((row) => row.text);
+  if (!rows.length) return "";
+
+  const candidateSpeakers = new Set();
+  for (const row of rows) {
+    const speaker = row.speaker.toLowerCase();
+    if (
+      /\b(?:candidate|interviewee|applicant|talent)\b/.test(row.role)
+      || /\b(?:candidate|interviewee|applicant|talent)\b/.test(speaker)
+      || nameTokens.some((token) => speaker.includes(token))
+    ) {
+      candidateSpeakers.add(row.speaker);
+      continue;
     }
-    return "";
-  }).filter(Boolean).join("\n");
+    if (row.speaker && nameTokens.some((token) => {
+      const escaped = escapeRegExp(token);
+      return new RegExp(`\\b(?:this is|i(?:'m| am)|my name is)\\s+${escaped}\\b`, "i").test(row.text);
+    })) {
+      candidateSpeakers.add(row.speaker);
+    }
+  }
+
+  const distinctSpeakers = new Set(rows.map((row) => row.speaker).filter(Boolean));
+  if (!candidateSpeakers.size && distinctSpeakers.size === 1) {
+    candidateSpeakers.add([...distinctSpeakers][0]);
+  }
+
+  return rows
+    .filter((row) => (
+      candidateSpeakers.has(row.speaker)
+      || (!row.speaker && /\b(?:candidate|interviewee|applicant|talent)\b/.test(row.role))
+    ))
+    .map((row) => row.text)
+    .join("\n");
 }
 
 function meetingTimestamp(meeting) {
@@ -99,6 +194,146 @@ function roleIsExplicitlyClosed(role) {
   );
 }
 
+function tenureMonths(value) {
+  if (Number.isFinite(Number(value))) return Math.max(0, Math.round(Number(value)));
+  if (!value || typeof value !== "object") return null;
+  if (Number.isFinite(Number(value.months))) return Math.max(0, Math.round(Number(value.months)));
+  if (Number.isFinite(Number(value.years))) return Math.max(0, Math.round(Number(value.years) * 12));
+  return null;
+}
+
+function experienceTenureSignals(experience) {
+  const averageTenureMonths = tenureMonths(
+    experience?.average_tenure
+    ?? experience?.averageTenure
+    ?? experience?.average_tenure_months
+    ?? experience?.averageTenureMonths,
+  );
+  const currentTenureMonths = tenureMonths(
+    experience?.current_tenure
+    ?? experience?.currentTenure
+    ?? experience?.current_tenure_months
+    ?? experience?.currentTenureMonths,
+  );
+  const roleCountValue = experience?.role_count
+    ?? experience?.roleCount
+    ?? experience?.position_count
+    ?? experience?.positionCount
+    ?? experience?.experience_count
+    ?? experience?.experienceCount;
+  const roleCount = Number.isFinite(Number(roleCountValue))
+    ? Math.max(0, Math.round(Number(roleCountValue)))
+    : null;
+  const shortTenurePattern = experience?.jobHopper === true
+    || (
+      averageTenureMonths != null
+      && averageTenureMonths < 18
+      && (roleCount == null || roleCount >= 2)
+    );
+  return { averageTenureMonths, currentTenureMonths, roleCount, shortTenurePattern };
+}
+
+function currentEmployerStageSignal(experience) {
+  const stage = clean(
+    experience?.current_employer_stage
+    ?? experience?.currentEmployerStage
+    ?? experience?.current_company_stage
+    ?? experience?.currentCompanyStage
+    ?? experience?.current_employer?.stage
+    ?? experience?.currentEmployer?.stage
+    ?? experience?.current_employer?.funding_round
+    ?? experience?.currentEmployer?.fundingRound,
+  );
+  return stage || null;
+}
+
+function roleConflictsWithCurrentEmployerStage(roleProfile, currentEmployerStage) {
+  if (!currentEmployerStage) return false;
+  const stage = currentEmployerStage.toLowerCase().replace(/[_-]+/g, " ");
+  const profile = roleProfile.toLowerCase();
+  const currentIsLarge = /\b(?:public|enterprise|large|big tech|fortune)\b/.test(stage);
+  const excludesLarge = /\b(?:avoid|exclude|reject|no|not from)\b.{0,50}\b(?:public|enterprise|large compan|big tech|fortune)\b/.test(profile)
+    || /\b(?:must|required|needs?)\b.{0,35}\bstartup experience\b/.test(profile);
+  if (currentIsLarge && excludesLarge) return true;
+
+  const escapedStage = escapeRegExp(stage).replace(/\s+/g, "\\s+");
+  return new RegExp(
+    `\\b(?:avoid|exclude|reject|no|not from)\\b.{0,50}\\b${escapedStage}\\b`,
+    "i",
+  ).test(profile);
+}
+
+function roleHasCurrentEmployerStageRestriction(roleProfile) {
+  return /\b(?:avoid|exclude|reject|no|not from)\b.{0,50}\b(?:public|enterprise|large compan|big tech|fortune|series [a-f]|seed|late stage)\b/i
+    .test(roleProfile)
+    || /\b(?:must|required|needs?)\b.{0,35}\bstartup experience\b/i.test(roleProfile);
+}
+
+function sponsorshipRequirement(preferences) {
+  const values = [
+    ...list(preferences?.visa),
+    ...list(preferences?.requiresSponsorship),
+    preferences?.visa_authorization,
+    preferences?.visaAuthorization,
+  ].map(clean).filter(Boolean);
+  if (!values.length) return null;
+  const body = values.join(" ");
+  if (
+    /\b(?:not available|no visa required|citizen|green card|permanent resident|does not require|no sponsorship)\b/i
+      .test(body)
+  ) return false;
+  if (
+    /\b(?:requires? sponsorship|sponsorship required|visa transfer|h-?1b|opt|visa|available)\b/i
+      .test(body)
+  ) return true;
+  return null;
+}
+
+function roleDisallowsSponsorship(role) {
+  const body = [
+    role?.visa_text,
+    role?.visaText,
+    role?.visa_sponsorship,
+    role?.visaSponsorship,
+    role?.sponsorship,
+    roleText(role),
+  ].map(clean).filter(Boolean).join(" ");
+  return /\b(?:no|cannot|can['’]?t|unable to|does not|doesn['’]?t|will not|won['’]?t|not able to)\b.{0,35}\bsponsor\w*\b|\b(?:sponsorship|visa sponsorship)\b.{0,25}\b(?:not available|unavailable|not offered)\b|\b(?:must|need to)\b.{0,35}\b(?:authorized to work|citizen|permanent resident)\b/i
+    .test(body);
+}
+
+function roleWorkplaceRequirement(role) {
+  const workplace = [
+    role?.workplace_type,
+    role?.workplaceType,
+    role?.workplace,
+    role?.work_place_text,
+    role?.workPlaceText,
+    role?.workplaceText,
+    role?.remote_policy,
+    role?.remotePolicy,
+  ].map(clean).filter(Boolean).join(" ");
+  const contextual = workplace || roleText(role);
+  if (
+    /\b(?:on[\s-]*site|in[\s-]*office|office[- ]based|[3-7]\s+days?.{0,18}(?:office|on[\s-]*site))\b/i
+      .test(contextual)
+  ) return "ON_SITE";
+  if (/\bhybrid\b/i.test(contextual)) return "HYBRID";
+  return null;
+}
+
+export function classifyWorkplaceCommitment(transcript) {
+  const body = clean(transcript);
+  if (!body) return { confirmed: false, contradicted: false };
+  const contradicted = /\b(?:remote[\s-]*only|only remote|fully remote)\b|\b(?:won['’]?t|wouldn['’]?t|will not|cannot|can['’]?t|not willing|not open)\b.{0,55}\b(?:office|on[\s-]*site|hybrid|commut\w*)\b|\b(?:no office|office is off the table)\b/i
+    .test(body);
+  const confirmed = !contradicted && (
+    /\b(?:open|willing|comfortable|fine|okay|ok|able|happy)\b.{0,55}\b(?:office|on[\s-]*site|hybrid|commut\w*)\b/i.test(body)
+    || /\b(?:office|on[\s-]*site|hybrid|commut\w*)\b.{0,45}\b(?:works? for me|is fine|is okay|is ok|no problem)\b/i.test(body)
+  );
+  return { confirmed, contradicted };
+}
+
 function competingProcessSignal(insights) {
   const types = list(insights?.insight_type).map((value) => clean(value).toUpperCase());
   const text = list(insights?.insight_text).map(clean).join(" ");
@@ -116,6 +351,8 @@ export function evaluateSubmissionEvidence({
   insights,
   calibration,
   meetings,
+  preferences,
+  candidateName = "",
   readErrors = [],
   now = Date.now(),
   maxTranscriptAgeDays = DEFAULT_MAX_TRANSCRIPT_AGE_DAYS,
@@ -128,10 +365,32 @@ export function evaluateSubmissionEvidence({
 
   const roleProfile = roleText(role);
   const jobHopper = experience?.jobHopper === true;
+  const tenure = experienceTenureSignals(experience);
   const roleRejectsJobHopping = /\b(?:job hop|job-hop|short tenure|frequent job change|inconsistent career)\w*/i
     .test(roleProfile);
   if (jobHopper && roleRejectsJobHopping) blockers.push("job_hopper_role_conflict");
+  else if (tenure.shortTenurePattern && roleRejectsJobHopping) blockers.push("short_tenure_role_conflict");
   else if (jobHopper) risks.push("job_hopper");
+  else if (tenure.shortTenurePattern) risks.push("short_tenure_pattern");
+
+  const currentEmployerStage = currentEmployerStageSignal(experience);
+  const currentEmployerStageRestricted = roleHasCurrentEmployerStageRestriction(roleProfile);
+  const currentEmployerStageConflict = roleConflictsWithCurrentEmployerStage(
+    roleProfile,
+    currentEmployerStage,
+  );
+  if (currentEmployerStageConflict) blockers.push("current_employer_stage_role_conflict");
+  else if (currentEmployerStageRestricted && !currentEmployerStage) {
+    risks.push("current_employer_stage_unavailable");
+  }
+
+  const needsSponsorship = sponsorshipRequirement(preferences);
+  const sponsorshipDisallowed = roleDisallowsSponsorship(role);
+  if (sponsorshipDisallowed && needsSponsorship === true) {
+    blockers.push("visa_sponsorship_role_conflict");
+  } else if (sponsorshipDisallowed && needsSponsorship == null) {
+    blockers.push("visa_status_unconfirmed_for_restricted_role");
+  }
 
   const aiNegativeMarks = countAiNegativeMarks(calibration);
   if (aiNegativeMarks >= 3) blockers.push("ai_calibration_three_plus_negative");
@@ -143,7 +402,10 @@ export function evaluateSubmissionEvidence({
   const transcriptMeetings = list(meetings)
     .map((meeting) => ({
       at: meetingTimestamp(meeting),
-      text: transcriptText(meeting?.recording_transcript ?? meeting?.transcript),
+      text: candidateTranscriptText(
+        meeting?.recording_transcript ?? meeting?.transcript,
+        candidateName,
+      ),
     }))
     .filter((meeting) => meeting.text)
     .sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity));
@@ -165,6 +427,14 @@ export function evaluateSubmissionEvidence({
   if (companyInterest.contradicted) blockers.push("company_interest_contradicted");
   else if (!companyInterest.confirmed) blockers.push("company_interest_unconfirmed");
 
+  const workplaceRequirement = roleWorkplaceRequirement(role);
+  const workplaceCommitment = classifyWorkplaceCommitment(recentTranscripts);
+  if (workplaceRequirement && workplaceCommitment.contradicted) {
+    blockers.push("onsite_commitment_contradicted");
+  } else if (workplaceRequirement && !workplaceCommitment.confirmed) {
+    blockers.push("onsite_commitment_unconfirmed");
+  }
+
   return {
     ok: [...new Set(blockers)].length === 0,
     blockers: [...new Set(blockers)],
@@ -175,10 +445,22 @@ export function evaluateSubmissionEvidence({
       companyInterestContradicted: companyInterest.contradicted,
       companyMentioned: companyInterest.mentioned,
       competingProcess: hasCompetingProcess,
+      currentEmployerStageAvailable: Boolean(currentEmployerStage),
+      currentEmployerStageConflict,
+      currentEmployerStageRestricted,
       jobHopper,
       roleRejectsJobHopping,
+      shortTenurePattern: tenure.shortTenurePattern,
+      averageTenureMonths: tenure.averageTenureMonths,
+      currentTenureMonths: tenure.currentTenureMonths,
+      roleCount: tenure.roleCount,
+      needsSponsorship,
+      sponsorshipDisallowed,
       transcriptAgeDays,
       transcriptAvailable: Boolean(latest),
+      workplaceCommitmentConfirmed: workplaceCommitment.confirmed,
+      workplaceCommitmentContradicted: workplaceCommitment.contradicted,
+      workplaceRequirement,
     },
     risks: [...new Set(risks)],
   };
@@ -203,6 +485,9 @@ export async function collectSubmissionEvidence({
       candidate_id: candidate?.candidateId,
     }],
     meetings: ["candidateUserMeeting.getSelectableMeetingsForCandidateUserId", {
+      candidate_user_id: candidate?.candidateUserId,
+    }],
+    preferences: ["candidateUserPreference.getCandidateUserPrefs", {
       candidate_user_id: candidate?.candidateUserId,
     }],
   };
@@ -232,5 +517,10 @@ export async function runSubmissionEvidencePreflight({
   maxTranscriptAgeDays = DEFAULT_MAX_TRANSCRIPT_AGE_DAYS,
 } = {}) {
   const evidence = await collectSubmissionEvidence({ candidate, roleId, trpcGetImpl });
-  return evaluateSubmissionEvidence({ ...evidence, now, maxTranscriptAgeDays });
+  return evaluateSubmissionEvidence({
+    ...evidence,
+    candidateName: candidate?.name,
+    now,
+    maxTranscriptAgeDays,
+  });
 }

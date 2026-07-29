@@ -11,6 +11,7 @@ import {
 } from "../../roster/_lib/outcome-sequences.mjs";
 import { buildInterestConfirmation, firstNameFor, COPY_VARIANT } from "./interest-copy.mjs";
 import { runSubmissionEvidencePreflight } from "./interest-preflight.mjs";
+import { generateGroundedSubmissionDraft } from "./interest-submission.mjs";
 import {
   storeConfigured,
   getSnapshot,
@@ -50,6 +51,9 @@ export const INTEREST_STATUS = Object.freeze({
 
 const TRUE = new Set(["1", "true", "yes", "on"]);
 const flag = (name, env = process.env) => TRUE.has(String(env[name] ?? "").trim().toLowerCase());
+const uniqueReasonCodes = (...values) => [...new Set(
+  values.flat().filter((value) => typeof value === "string" && value.trim()),
+)];
 
 export function interestConfig(env = process.env) {
   const enabled = flag("PARAAI_INTEREST_ENABLED", env);
@@ -422,6 +426,9 @@ export async function submitToRole({
   apply,
   credits = null,
   trpcGetImpl = trpcGet,
+  submissionDraftBuilder = generateGroundedSubmissionDraft,
+  fetchImpl = fetch,
+  env = process.env,
   now = Date.now(),
 }) {
   const outcome = {
@@ -450,6 +457,35 @@ export async function submitToRole({
     outcome.blockers = pre.blockers;
     return outcome;
   }
+
+  let generated = null;
+  try {
+    generated = await submissionDraftBuilder({
+      candidate,
+      roleId,
+      trpcGetImpl,
+      fetchImpl,
+      env,
+    });
+  } catch {
+    generated = {
+      ok: false,
+      blockers: ["submission_draft_generation_failed"],
+      signals: {},
+    };
+  }
+  outcome.draftSignals = generated?.signals || {};
+  if (!generated?.ok || !generated?.draft) {
+    outcome.stage = "blocked";
+    outcome.blockers = uniqueReasonCodes(generated?.blockers);
+    if (!outcome.blockers.length) outcome.blockers = ["submission_draft_unavailable"];
+    return outcome;
+  }
+
+  // Kept local and out of durable outcome/journal records because it contains
+  // candidate prose. The captured submit adapter consumes it once the final
+  // Paraform mutation contract is known.
+  const submissionDraft = generated.draft;
 
   if (!apply) {
     outcome.stage = "would_submit";
@@ -499,6 +535,10 @@ export async function submitToRole({
 
   outcome.stage = "prepared";
   outcome.submissionRequestId = submissionRequestId;
+  // Deliberate no-op until the final mutation is captured. Referencing the
+  // guarded draft here makes the executor boundary explicit without persisting
+  // candidate copy in the job record.
+  void submissionDraft;
   await recordSubmissionOutcome(candidate.candidateUserId, roleId, outcome.stage);
   return outcome;
 }
@@ -593,7 +633,9 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
         roles: submissions.length,
       }));
 
-      const bankable = submissions.filter((s) => !["blocked", "prepare_failed"].includes(s.stage));
+      const bankable = submissions.filter((s) => (
+        ["would_submit", "prepared", "submitted", "verified"].includes(s.stage)
+      ));
       const blockers = [...new Set(submissions.flatMap((s) => s.blockers || []))];
 
       // 3. EMAIL — only when at least one role is actually bankable.

@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  candidateTranscriptText,
   classifyCompanyInterest,
+  classifyWorkplaceCommitment,
   countAiNegativeMarks,
   evaluateSubmissionEvidence,
   runSubmissionEvidencePreflight,
@@ -41,6 +43,7 @@ function greenEvidence(overrides = {}) {
         { evaluation: "MAYBE" },
       ],
     },
+    preferences: { visa: ["Not available"] },
     meetings: [meeting({ words: ["I'm", "excited", "about", "Acme", "Labs"] })],
     now: NOW,
     ...overrides,
@@ -65,6 +68,65 @@ test("a company-specific objection overrides positive language", () => {
   );
   assert.equal(result.contradicted, true);
   assert.equal(result.confirmed, false);
+});
+
+test("recruiter speech cannot confirm candidate company interest", () => {
+  const transcript = [
+    {
+      speaker: "Recruiter",
+      words: [{ text: "I'm excited about Acme Labs and think it sounds great." }],
+    },
+    {
+      speaker: "Candidate",
+      words: [{ text: "Thanks for walking me through the role." }],
+    },
+  ];
+  const candidateOnly = candidateTranscriptText(transcript, "Taylor Example");
+  assert.equal(candidateOnly, "Thanks for walking me through the role.");
+
+  const result = evaluateSubmissionEvidence(greenEvidence({
+    meetings: [{
+      event_scheduled_at: "2026-07-20T16:00:00Z",
+      recording_transcript: transcript,
+    }],
+  }));
+  assert.equal(result.ok, false);
+  assert.ok(result.blockers.includes("company_interest_unconfirmed"));
+});
+
+test("opaque speakers require candidate self-identification", () => {
+  const transcript = [
+    { speaker: "1", text: "I'm excited about Acme Labs." },
+    { speaker: "2", text: "Hi, this is Taylor. Acme Labs sounds great." },
+  ];
+  assert.equal(
+    candidateTranscriptText(transcript, "Taylor Example"),
+    "Hi, this is Taylor. Acme Labs sounds great.",
+  );
+  assert.equal(candidateTranscriptText(transcript), "");
+});
+
+test("explicit workplace commitment is distinct from recruiter description", () => {
+  assert.deepEqual(
+    classifyWorkplaceCommitment("I'm open to a hybrid schedule and commuting to the office."),
+    { confirmed: true, contradicted: false },
+  );
+  assert.deepEqual(
+    classifyWorkplaceCommitment("I am only considering fully remote roles."),
+    { confirmed: false, contradicted: true },
+  );
+
+  const unconfirmed = evaluateSubmissionEvidence(greenEvidence({
+    role: {
+      status: "ACTIVE",
+      active_status: "Go live",
+      company: { name: "Acme Labs" },
+      workplaceType: "HYBRID",
+      requirements: [],
+      rejection_categories: [],
+    },
+  }));
+  assert.ok(unconfirmed.blockers.includes("onsite_commitment_unconfirmed"));
 });
 
 test("AI BAD_FIT is the negative mark counted by the playbook correction", () => {
@@ -112,6 +174,61 @@ test("known high-risk pattern is held before a credit is spent", () => {
   assert.ok(result.blockers.includes("company_interest_unconfirmed"));
 });
 
+test("tenure and current-employer stage are evaluated against role avoid rules", () => {
+  const result = evaluateSubmissionEvidence(greenEvidence({
+    role: {
+      status: "ACTIVE",
+      active_status: "Go live",
+      company: { name: "Acme Labs" },
+      rejection_categories: [
+        "Short tenure is a rejection reason.",
+        "Must have startup experience; avoid public companies.",
+      ],
+      requirements: [],
+    },
+    experience: {
+      jobHopper: false,
+      average_tenure: { months: 14 },
+      role_count: 4,
+      current_employer_stage: "PUBLIC",
+    },
+  }));
+  assert.ok(result.blockers.includes("short_tenure_role_conflict"));
+  assert.ok(result.blockers.includes("current_employer_stage_role_conflict"));
+  assert.equal(result.signals.averageTenureMonths, 14);
+  assert.equal(result.signals.roleCount, 4);
+  assert.equal(result.signals.currentEmployerStageAvailable, true);
+});
+
+test("visa status is checked against the role's actual sponsorship text", () => {
+  const conflict = evaluateSubmissionEvidence(greenEvidence({
+    role: {
+      status: "ACTIVE",
+      active_status: "Go live",
+      company: { name: "Acme Labs" },
+      visa_text: "We cannot sponsor visas for this role.",
+      requirements: [],
+      rejection_categories: [],
+    },
+    preferences: { visa: ["Requires visa transfer"] },
+  }));
+  assert.ok(conflict.blockers.includes("visa_sponsorship_role_conflict"));
+  assert.equal(conflict.signals.needsSponsorship, true);
+
+  const unknown = evaluateSubmissionEvidence(greenEvidence({
+    role: {
+      status: "ACTIVE",
+      active_status: "Go live",
+      company: { name: "Acme Labs" },
+      visa_text: "Sponsorship is not available.",
+      requirements: [],
+      rejection_categories: [],
+    },
+    preferences: { visa: [] },
+  }));
+  assert.ok(unknown.blockers.includes("visa_status_unconfirmed_for_restricted_role"));
+});
+
 test("competing process and closed-role signals fail closed", () => {
   const result = evaluateSubmissionEvidence(greenEvidence({
     role: {
@@ -139,6 +256,7 @@ test("read failures become durable reason codes without leaking provider text", 
     if (proc === "candidates.getCandidateInsights") return null;
     if (proc === "aiCalibrations.getAiCalibration") return null;
     if (proc === "candidateUserMeeting.getSelectableMeetingsForCandidateUserId") return [];
+    if (proc === "candidateUserPreference.getCandidateUserPrefs") return { visa: [] };
     throw new Error(`unexpected ${proc}`);
   };
 
@@ -149,7 +267,7 @@ test("read failures become durable reason codes without leaking provider text", 
     now: NOW,
   });
 
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
   assert.ok(result.blockers.includes("preflight_read_failed_role"));
   assert.ok(!JSON.stringify(result).includes("candidate-specific provider detail"));
 });
@@ -174,6 +292,9 @@ function passingTrpcRead(proc) {
   }
   if (proc === "candidateUserMeeting.getSelectableMeetingsForCandidateUserId") {
     return [meeting({ words: ["I'm", "excited", "about", "Acme", "Labs"] })];
+  }
+  if (proc === "candidateUserPreference.getCandidateUserPrefs") {
+    return { visa: ["Not available"] };
   }
   throw new Error(`unexpected read ${proc}`);
 }
@@ -214,8 +335,35 @@ test("shadow submit records would-submit without taking a permanent claim", asyn
     apply: false,
     credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
     trpcGetImpl: passingTrpcRead,
+    submissionDraftBuilder: async () => ({
+      ok: true,
+      blockers: [],
+      draft: { greatFitReason: "grounded draft" },
+      signals: { nonGreenMarks: 0 },
+    }),
     now: NOW,
   });
   assert.equal(result.stage, "would_submit");
   assert.equal(result.preflight.signals.companyInterestConfirmed, true);
+  assert.equal(result.draftSignals.nonGreenMarks, 0);
+});
+
+test("lane-generated three-plus non-green marks block before a claim", async () => {
+  const result = await submitToRole({
+    candidate,
+    roleId: "role-1",
+    apply: false,
+    credits: { allowance: 10, earnedBack: 0, usedThisWeek: 2, available: 8 },
+    trpcGetImpl: passingTrpcRead,
+    submissionDraftBuilder: async () => ({
+      ok: false,
+      blockers: ["generated_three_plus_non_green"],
+      draft: { greatFitReason: "never consumed" },
+      signals: { nonGreenMarks: 3 },
+    }),
+    now: NOW,
+  });
+  assert.equal(result.stage, "blocked");
+  assert.ok(result.blockers.includes("generated_three_plus_non_green"));
+  assert.equal(result.draftSignals.nonGreenMarks, 3);
 });
