@@ -1987,6 +1987,24 @@ function recoveryReplacementReadMustAbort(error) {
   );
 }
 
+function recoveryStageError(error, fallbackCode) {
+  const code = String(error?.code || "").trim();
+  if (code === "AUTH_EXPIRED") {
+    return codedError(
+      "RESUME_ONLY_BACKFILL_RECOVERY_AUTH_EXPIRED",
+    );
+  }
+  if (code === "STATE_STORE_REQUEST_FAILED") {
+    return codedError(
+      "RESUME_ONLY_BACKFILL_RECOVERY_STATE_STORE_FAILED",
+    );
+  }
+  if (/^RESUME_ONLY_BACKFILL_[A-Z0-9_]+$/u.test(code)) {
+    return error;
+  }
+  return codedError(fallbackCode);
+}
+
 export async function mechanicalRecoveryCanaryStatus(
   control,
   recovery,
@@ -2155,7 +2173,15 @@ export async function planResumeOnlyBackfillRecovery({
   config = automationConfig(),
 } = {}) {
   return lockImpl(async () => {
-    const control = await store.getControl();
+    let control;
+    try {
+      control = await store.getControl();
+    } catch (error) {
+      throw recoveryStageError(
+        error,
+        "RESUME_ONLY_BACKFILL_RECOVERY_STATE_READ_FAILED",
+      );
+    }
     if (
       !control
       || control.status !== "canary_running"
@@ -2167,14 +2193,38 @@ export async function planResumeOnlyBackfillRecovery({
         "RESUME_ONLY_BACKFILL_RECOVERY_NOT_ALLOWED",
       );
     }
-    const existing = await store.getRecovery();
-    if (existing) return recoveryPublicStatus(existing);
-    const runTerminalPreflight =
-      await bindResumeOnlyBackfillTerminalPreflight(
-        terminalPreflightImpl,
-        targetMembershipSnapshotImpl,
+    let existing;
+    try {
+      existing = await store.getRecovery();
+    } catch (error) {
+      throw recoveryStageError(
+        error,
+        "RESUME_ONLY_BACKFILL_RECOVERY_STATE_READ_FAILED",
       );
-    const allEntries = await store.entries();
+    }
+    if (existing) return recoveryPublicStatus(existing);
+    let runTerminalPreflight;
+    try {
+      runTerminalPreflight =
+        await bindResumeOnlyBackfillTerminalPreflight(
+          terminalPreflightImpl,
+          targetMembershipSnapshotImpl,
+        );
+    } catch (error) {
+      throw recoveryStageError(
+        error,
+        "RESUME_ONLY_BACKFILL_RECOVERY_TARGET_SNAPSHOT_FAILED",
+      );
+    }
+    let allEntries;
+    try {
+      allEntries = await store.entries();
+    } catch (error) {
+      throw recoveryStageError(
+        error,
+        "RESUME_ONLY_BACKFILL_RECOVERY_STATE_READ_FAILED",
+      );
+    }
     const entryMap = new Map(
       allEntries.map((entry) => [entry.id, entry]),
     );
@@ -2186,7 +2236,15 @@ export async function planResumeOnlyBackfillRecovery({
 
     for (const id of control.canary.ids) {
       const entry = entryMap.get(id);
-      const job = await getJobImpl(id);
+      let job;
+      try {
+        job = await getJobImpl(id);
+      } catch (error) {
+        throw recoveryStageError(
+          error,
+          "RESUME_ONLY_BACKFILL_RECOVERY_ORIGINAL_STATE_READ_FAILED",
+        );
+      }
       if (
         !entry
         || entry.status !== "authorized"
@@ -2208,7 +2266,15 @@ export async function planResumeOnlyBackfillRecovery({
       }
       if (classification === "pre_attempt_terminal") {
         const code = String(canaryDiagnosticCode(job));
-        const preflight = await runTerminalPreflight(job);
+        let preflight;
+        try {
+          preflight = await runTerminalPreflight(job);
+        } catch (error) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_ORIGINAL_READ_FAILED",
+          );
+        }
         if (
           submissionLifecycleStarted(job)
           || preflight?.eligible !== false
@@ -2233,10 +2299,19 @@ export async function planResumeOnlyBackfillRecovery({
         && !submissionLifecycleStarted(job)
         && !jobHasTechnicalFailure(job)
       ) {
-        const preflight = await runTerminalPreflight(job);
-        const resume = await getResumeImpl(
-          job.identity.candidateUserId,
-        );
+        let preflight;
+        let resume;
+        try {
+          preflight = await runTerminalPreflight(job);
+          resume = await getResumeImpl(
+            job.identity.candidateUserId,
+          );
+        } catch (error) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_ORIGINAL_READ_FAILED",
+          );
+        }
         const eligibility = autoEligibility(job, config);
         if (
           preflight?.eligible === true
@@ -2264,7 +2339,15 @@ export async function planResumeOnlyBackfillRecovery({
       ) {
         continue;
       }
-      const job = await getJobImpl(entry.id);
+      let job;
+      try {
+        job = await getJobImpl(entry.id);
+      } catch (error) {
+        throw recoveryStageError(
+          error,
+          "RESUME_ONLY_BACKFILL_RECOVERY_REPLACEMENT_STATE_READ_FAILED",
+        );
+      }
       if (
         job?.state !== "ready_to_submit"
         || jobHasTechnicalFailure(job)
@@ -2280,28 +2363,52 @@ export async function planResumeOnlyBackfillRecovery({
             "authorized_backfill_resume_only_recovery_plan",
         });
       } catch (error) {
-        if (recoveryReplacementReadMustAbort(error)) throw error;
+        if (recoveryReplacementReadMustAbort(error)) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_REPLACEMENT_READ_FAILED",
+          );
+        }
         skippedUnreadable += 1;
         continue;
       }
       if (checked?.state !== "ready_to_submit") {
-        await excludeEntry(entry, "already_submitted", store);
+        try {
+          await excludeEntry(entry, "already_submitted", store);
+        } catch (error) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_ENTRY_EXCLUSION_FAILED",
+          );
+        }
         continue;
       }
       let preflight;
       try {
         preflight = await runTerminalPreflight(checked);
       } catch (error) {
-        if (recoveryReplacementReadMustAbort(error)) throw error;
+        if (recoveryReplacementReadMustAbort(error)) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_REPLACEMENT_READ_FAILED",
+          );
+        }
         skippedUnreadable += 1;
         continue;
       }
       if (!preflight?.eligible) {
-        await excludeEntry(
-          entry,
-          preflight?.code || "terminal_preflight",
-          store,
-        );
+        try {
+          await excludeEntry(
+            entry,
+            preflight?.code || "terminal_preflight",
+            store,
+          );
+        } catch (error) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_ENTRY_EXCLUSION_FAILED",
+          );
+        }
         continue;
       }
       let resume;
@@ -2310,19 +2417,31 @@ export async function planResumeOnlyBackfillRecovery({
           checked.identity.candidateUserId,
         );
       } catch (error) {
-        if (recoveryReplacementReadMustAbort(error)) throw error;
+        if (recoveryReplacementReadMustAbort(error)) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_REPLACEMENT_READ_FAILED",
+          );
+        }
         skippedUnreadable += 1;
         continue;
       }
       const eligibility = autoEligibility(checked, config);
       if (!findResumeUri(resume) || !eligibility.eligible) {
-        await excludeEntry(
-          entry,
-          !findResumeUri(resume)
-            ? "resume_missing_at_recovery"
-            : "job_changed",
-          store,
-        );
+        try {
+          await excludeEntry(
+            entry,
+            !findResumeUri(resume)
+              ? "resume_missing_at_recovery"
+              : "job_changed",
+            store,
+          );
+        } catch (error) {
+          throw recoveryStageError(
+            error,
+            "RESUME_ONLY_BACKFILL_RECOVERY_ENTRY_EXCLUSION_FAILED",
+          );
+        }
         continue;
       }
       seenCandidates.add(entry.candidateHash);
@@ -2358,8 +2477,25 @@ export async function planResumeOnlyBackfillRecovery({
       verifiedAt: null,
     };
     proposed.manifestDigest = recoveryManifestDigest(proposed);
-    if (!await store.createRecovery(proposed)) {
-      const raced = await store.getRecovery();
+    let created;
+    try {
+      created = await store.createRecovery(proposed);
+    } catch (error) {
+      throw recoveryStageError(
+        error,
+        "RESUME_ONLY_BACKFILL_RECOVERY_CREATE_FAILED",
+      );
+    }
+    if (!created) {
+      let raced;
+      try {
+        raced = await store.getRecovery();
+      } catch (error) {
+        throw recoveryStageError(
+          error,
+          "RESUME_ONLY_BACKFILL_RECOVERY_STATE_READ_FAILED",
+        );
+      }
       if (!raced) {
         throw codedError(
           "RESUME_ONLY_BACKFILL_RECOVERY_CREATE_FAILED",
