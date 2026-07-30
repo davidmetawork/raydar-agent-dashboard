@@ -14,8 +14,10 @@ import {
   SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_CONTRACT_PINS_DIGEST,
   SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_VERSION,
   SourceParaformHumanIdentityExhaustivenessError,
+  assertParaformHumanIdentityExhaustivenessProofResult,
   paraformHumanIdentityWorkItem,
   proveParaformHumanIdentityExhaustiveness,
+  validateParaformHumanIdentityExhaustivenessProof,
 } from "../api/paraai/_lib/source-paraform-human-identity-exhaustiveness.mjs";
 
 const BOUNDARY = "2026-07-26T03:00:00.000Z";
@@ -419,6 +421,67 @@ test("work-item derivation is exact, bounded, and domain separated", () => {
           instanceof SourceParaformHumanIdentityExhaustivenessError
         && error.code
           === "SOURCE_PARAFORM_HUMAN_IDENTITY_WORK_ITEM_INVALID"
+      ),
+    );
+  }
+});
+
+test("proof readback validates independently while issuance provenance rejects clones", async () => {
+  const input = await validInput();
+  const proof = proveParaformHumanIdentityExhaustiveness(
+    input,
+  );
+  assert.equal(
+    assertParaformHumanIdentityExhaustivenessProofResult(
+      proof,
+      input.run.runKeyDigest,
+    ),
+    proof,
+  );
+  const readback = validateParaformHumanIdentityExhaustivenessProof(
+    structuredClone(proof),
+  );
+  assert.deepEqual(readback, proof);
+  assert.equal(Object.isFrozen(readback), true);
+  assert.throws(
+    () => assertParaformHumanIdentityExhaustivenessProofResult(
+      structuredClone(proof),
+    ),
+    (error) => (
+      error
+        instanceof SourceParaformHumanIdentityExhaustivenessError
+      && error.code
+        === "SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_INVALID"
+    ),
+  );
+  assert.throws(
+    () => assertParaformHumanIdentityExhaustivenessProofResult(
+      proof,
+      "f".repeat(64),
+    ),
+    (error) => (
+      error
+        instanceof SourceParaformHumanIdentityExhaustivenessError
+      && error.code
+        === "SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_INVALID"
+    ),
+  );
+  for (const mutation of [
+    { proofDigest: "f".repeat(64) },
+    { workManifestCount: proof.workManifestCount + 1 },
+    { operational: true },
+    { debug: true },
+  ]) {
+    assert.throws(
+      () => validateParaformHumanIdentityExhaustivenessProof({
+        ...proof,
+        ...mutation,
+      }),
+      (error) => (
+        error
+          instanceof SourceParaformHumanIdentityExhaustivenessError
+        && error.code
+          === "SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_INVALID"
       ),
     );
   }

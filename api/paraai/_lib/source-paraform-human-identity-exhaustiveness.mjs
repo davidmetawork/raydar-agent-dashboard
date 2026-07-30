@@ -104,6 +104,40 @@ const WORK_KEYS = Object.freeze([
   "resolutionDigest",
   "terminalReason",
 ]);
+const PROOF_KEYS = Object.freeze([
+  "version",
+  "policyVersion",
+  "privatePageClientVersion",
+  "privatePageVersion",
+  "identityPointReadProcedure",
+  "boundaryAt",
+  "contractPinsDigest",
+  "passCount",
+  "pageCount",
+  "scannedCount",
+  "outsideBoundaryCount",
+  "sourceReferenceCount",
+  "humanReferenceCount",
+  "nonHumanReferenceCount",
+  "uniqueCandidateUserCount",
+  "sourcePassDigest",
+  "identityUniverseDigest",
+  "workManifestDigest",
+  "workManifestCount",
+  "identityWorkSetDigest",
+  "stablePassesProven",
+  "cursorExhaustivenessProven",
+  "workIndexEqualityProven",
+  "upstreamExhaustivenessProven",
+  "operational",
+  "pinnable",
+  "identityCollectorPinned",
+  "sourceAuthorityAvailable",
+  "activationAvailable",
+  "writeAuthorityAvailable",
+  "proofDigest",
+]);
+const ISSUED_PROOFS = new WeakMap();
 
 export class SourceParaformHumanIdentityExhaustivenessError
   extends Error {
@@ -349,6 +383,32 @@ function exactJson(left, right) {
   return canonicalJson(left) === canonicalJson(right);
 }
 
+function exactDigest(value) {
+  if (typeof value !== "string" || !DIGEST.test(value)) {
+    fail();
+  }
+  return value;
+}
+
+function nonNegativeSafeInteger(value) {
+  if (!Number.isSafeInteger(value) || value < 0) fail();
+  return value;
+}
+
+function deepFreeze(value) {
+  if (
+    value
+    && typeof value === "object"
+    && !Object.isFrozen(value)
+  ) {
+    for (const child of Object.values(value)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 function candidateUserId(value) {
   if (
     typeof value !== "string"
@@ -377,6 +437,148 @@ export function paraformHumanIdentityWorkItem(
       { candidateUserId: normalizedCandidateUserId },
     ),
   });
+}
+
+export function validateParaformHumanIdentityExhaustivenessProof(
+  value,
+) {
+  try {
+    const proof = plainRecordSnapshot(
+      safeJsonSnapshot(value),
+      PROOF_KEYS,
+    );
+    const material = {
+      version: proof.version,
+      policyVersion: proof.policyVersion,
+      privatePageClientVersion:
+        proof.privatePageClientVersion,
+      privatePageVersion: proof.privatePageVersion,
+      identityPointReadProcedure:
+        proof.identityPointReadProcedure,
+      boundaryAt: canonicalTimestamp(proof.boundaryAt),
+      contractPinsDigest:
+        exactDigest(proof.contractPinsDigest),
+      passCount: nonNegativeSafeInteger(proof.passCount),
+      pageCount: nonNegativeSafeInteger(proof.pageCount),
+      scannedCount:
+        nonNegativeSafeInteger(proof.scannedCount),
+      outsideBoundaryCount: nonNegativeSafeInteger(
+        proof.outsideBoundaryCount,
+      ),
+      sourceReferenceCount: nonNegativeSafeInteger(
+        proof.sourceReferenceCount,
+      ),
+      humanReferenceCount: nonNegativeSafeInteger(
+        proof.humanReferenceCount,
+      ),
+      nonHumanReferenceCount: nonNegativeSafeInteger(
+        proof.nonHumanReferenceCount,
+      ),
+      uniqueCandidateUserCount: nonNegativeSafeInteger(
+        proof.uniqueCandidateUserCount,
+      ),
+      sourcePassDigest:
+        exactDigest(proof.sourcePassDigest),
+      identityUniverseDigest:
+        exactDigest(proof.identityUniverseDigest),
+      workManifestDigest:
+        exactDigest(proof.workManifestDigest),
+      workManifestCount:
+        nonNegativeSafeInteger(proof.workManifestCount),
+      identityWorkSetDigest:
+        exactDigest(proof.identityWorkSetDigest),
+      stablePassesProven: proof.stablePassesProven,
+      cursorExhaustivenessProven:
+        proof.cursorExhaustivenessProven,
+      workIndexEqualityProven:
+        proof.workIndexEqualityProven,
+      upstreamExhaustivenessProven:
+        proof.upstreamExhaustivenessProven,
+      operational: proof.operational,
+      pinnable: proof.pinnable,
+      identityCollectorPinned: proof.identityCollectorPinned,
+      sourceAuthorityAvailable:
+        proof.sourceAuthorityAvailable,
+      activationAvailable: proof.activationAvailable,
+      writeAuthorityAvailable:
+        proof.writeAuthorityAvailable,
+    };
+    if (
+      material.version
+        !== SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_VERSION
+      || material.policyVersion
+        !== SOURCE_IDENTITY_ARTIFACT_STORE_POLICY_VERSION
+      || material.privatePageClientVersion
+        !== SOURCE_PARAFORM_HUMAN_PAGE_CLIENT_VERSION
+      || material.privatePageVersion
+        !== SOURCE_PARAFORM_HUMAN_PAGE_VERSION
+      || material.identityPointReadProcedure
+        !== SOURCE_IDENTITY_POINT_READ_PROCEDURE
+      || material.contractPinsDigest
+        !== SOURCE_PARAFORM_HUMAN_IDENTITY_EXHAUSTIVENESS_CONTRACT_PINS_DIGEST
+      || material.passCount
+        !== SOURCE_PARAFORM_HUMAN_IDENTITY_REQUIRED_PASS_COUNT
+      || material.pageCount < 1
+      || material.outsideBoundaryCount
+        > material.scannedCount
+      || material.sourceReferenceCount
+        > material.scannedCount
+          - material.outsideBoundaryCount
+      || material.humanReferenceCount
+          + material.nonHumanReferenceCount
+        !== material.sourceReferenceCount
+      || material.uniqueCandidateUserCount
+        > material.humanReferenceCount
+      || material.workManifestCount
+        !== material.uniqueCandidateUserCount
+      || material.stablePassesProven !== true
+      || material.cursorExhaustivenessProven !== true
+      || material.workIndexEqualityProven !== true
+      || material.upstreamExhaustivenessProven !== true
+      || material.operational !== false
+      || material.pinnable !== false
+      || material.identityCollectorPinned !== false
+      || material.sourceAuthorityAvailable !== false
+      || material.activationAvailable !== false
+      || material.writeAuthorityAvailable !== false
+      || exactDigest(proof.proofDigest)
+        !== semanticDigest(PROOF_DIGEST_DOMAIN, material)
+    ) {
+      fail();
+    }
+    return deepFreeze({
+      ...material,
+      proofDigest: proof.proofDigest,
+    });
+  } catch {
+    fail();
+  }
+}
+
+export function assertParaformHumanIdentityExhaustivenessProofResult(
+  value,
+  expectedRunKeyDigest,
+) {
+  const issuedRunKeyDigest = (
+    value
+    && typeof value === "object"
+  )
+    ? ISSUED_PROOFS.get(value)
+    : null;
+  if (
+    !issuedRunKeyDigest
+    || (
+      expectedRunKeyDigest !== undefined
+      && (
+        typeof expectedRunKeyDigest !== "string"
+        || !DIGEST.test(expectedRunKeyDigest)
+        || expectedRunKeyDigest !== issuedRunKeyDigest
+      )
+    )
+  ) {
+    fail();
+  }
+  return value;
 }
 
 const CONTRACT_PINS = Object.freeze({
@@ -661,10 +863,12 @@ function prove(value) {
     activationAvailable: false,
     writeAuthorityAvailable: false,
   };
-  return Object.freeze({
+  const result = Object.freeze({
     ...proof,
     proofDigest: semanticDigest(PROOF_DIGEST_DOMAIN, proof),
   });
+  ISSUED_PROOFS.set(result, run.runKeyDigest);
+  return result;
 }
 
 export function proveParaformHumanIdentityExhaustiveness(value) {

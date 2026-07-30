@@ -1536,8 +1536,9 @@ export async function createIdentityObservationWork(input) {
 // caller-provided work IDs, count, or manifest digest: the store freezes and
 // commits the exact sorted index it already owns. Artifact preparation is
 // impossible before this transition. This does NOT prove equality with an
-// exhaustive upstream universe; until a reviewed private source adapter binds
-// that separate proof, every artifact remains hard-dark and unpinnable.
+// exhaustive upstream universe. The separate Paraform Human runtime must
+// durably retain that equality proof before any later pin review; this
+// transition alone leaves every artifact hard-dark and unpinnable.
 export async function finalizeIdentityObservationWorkSet(input) {
   const normalized = canonicalRunInput(input);
   for (let attempt = 0; attempt < 4; attempt += 1) {
