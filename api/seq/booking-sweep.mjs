@@ -105,6 +105,15 @@ export default async function handler(req, res) {
       }
       return res.status(200).json({ ...result, staleness });
     }
+    // A pass that ran out of its own budget is the loud version of the failure
+    // that used to be silent: before this, the platform killed the function
+    // mid-flight, the attempt record stayed "running" forever, and health could
+    // not tell a dead pass from one still in progress. Someone has to act — the
+    // pass is not going to get faster on its own.
+    if (result.budgetExceeded && (await shouldAlert("sweep-budget", 3600))) {
+      await notifySlack(`:rotating_light: Booking sweep ran out of its ${Math.round(result.budgetMs / 1000)}s budget during the *${result.budgetExceededIn}* stage and stopped itself. Booked candidates may still be receiving sequence email. This does not recover on its own — the pass needs less work per run.`).catch(() => {});
+    }
+
     if (!result.ok && result.error === "incomplete_membership") {
       if (await shouldAlert("incomplete-membership", 3600)) {
         await notifySlack(":rotating_light: Booking sweep could not prove complete membership for every covered scheduling-link sequence. No partial lead index was published and the pass was not recorded healthy.").catch(() => {});
@@ -142,6 +151,9 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: result.ok,
       apply,
+      budgetMs: result.budgetMs,
+      budgetExceeded: result.budgetExceeded,
+      budgetExceededIn: result.budgetExceededIn,
       sequences: result.sequences,
       sequenceCatalogCount: result.sequenceCatalogCount,
       sequenceScopeScanned: result.sequenceScopeScanned,

@@ -661,7 +661,7 @@ const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 // still unpaused at 13:30 for exactly this reason.
 const PROFILE_TTL_SECONDS = Number(process.env.BOOKING_STOP_PROFILE_TTL_S || 1800);
 
-export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null } = {}) {
+export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null, deadline = null } = {}) {
   if (!force) {
     const cached = await kvGet(K.profile(cuId));
     if (cached) return cached;
@@ -670,7 +670,7 @@ export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_
   // workers does not retry in lockstep and a timeout is not read as a miss.
   const p = await withThrottleRetry(
     () => trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1),
-    { onThrottle, delays: AUTH_RETRY_DELAYS_MS },
+    { onThrottle, delays: AUTH_RETRY_DELAYS_MS, deadline },
   );
   if (!p) return null;
   const value = {
@@ -840,12 +840,13 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
 
 // ---------- the sweep ----------
 export async function discoverBookingStopSequences({
+  deadline = null,
   listSequences = async () =>
     withThrottleRetry(() =>
-      trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1)),
+      trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1), { deadline }),
   readCampaign = async (id) =>
     withThrottleRetry(() =>
-      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1)),
+      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1), { deadline }),
   concurrency = Number(process.env.BOOKING_STOP_SCOPE_CONCURRENCY || 2),
   minimumCatalogCount = Number(
     process.env.BOOKING_STOP_SCOPE_CATALOG_FLOOR
@@ -956,6 +957,13 @@ export async function loadNudgeSequences() {
 export async function runBookingSweep({
   apply = true,
   now = Date.now(),
+  // A SOFT budget the pass enforces on itself, well inside the 300s the
+  // platform enforces by killing us. A killed pass writes no outcome at all:
+  // its attempt record stays "running" forever and health cannot tell it from
+  // one still in flight. Observed 2026-07-30 at 975s. Stopping ourselves is the
+  // difference between a diagnosis and a mystery. The headroom is for the
+  // pause writes and the index publish, which run AFTER the budget is spent.
+  budgetMs = Number(process.env.BOOKING_STOP_BUDGET_MS || 210000),
   profileBudget = Number(process.env.BOOKING_STOP_PROFILE_BUDGET || 400),
   concurrency = 8,
   // Paraform 401s under burst (see cachedRelationshipStatus). 4 is the measured
@@ -973,9 +981,14 @@ export async function runBookingSweep({
   onDecision = null,
 } = {}) {
   const startedAt = Date.now();
+  const deadline = startedAt + budgetMs;
+  const overBudget = () => Date.now() >= deadline;
   const result = {
     ok: false,
     apply,
+    budgetMs,
+    budgetExceeded: false,
+    budgetExceededIn: null,
     sequences: 0,
     scopeSchema: null,
     scopeDigest: null,
@@ -1015,10 +1028,24 @@ export async function runBookingSweep({
     durationMs: 0,
   };
 
+  // Stopping before a leg whose output would be INCOMPLETE. A partial
+  // membership read cannot publish a lead index — the webhook reads that index,
+  // and a short one silently un-protects whoever is missing from it. Same rule
+  // the incomplete_membership path already follows.
+  const stopForBudget = (leg) => {
+    result.ok = false;
+    result.budgetExceeded = true;
+    result.budgetExceededIn = leg;
+    result.error = "budget_exceeded";
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  };
+
   const cal = await calendlyIndexLoader({ now, backDays: calendlyBackDays });
   result.calendlyEvents = cal.events;
   result.calendlyCacheHits = cal.cacheHits;
   result.calendlyTruncated = cal.truncated;
+  if (overBudget()) return stopForBudget("calendly");
 
   let raydar = null;
   if (raydarEnabled) {
@@ -1040,7 +1067,7 @@ export async function runBookingSweep({
     }
   }
 
-  const scope = await sequenceScopeLoader();
+  const scope = await sequenceScopeLoader({ deadline });
   if (
     scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
     || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
@@ -1070,6 +1097,7 @@ export async function runBookingSweep({
   result.enabledLinkSequences = scope.enabledLinkSequences;
   result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
   result.linkScopeComplete = true;
+  if (overBudget()) return stopForBudget("scope");
 
   // strict:true so an incomplete membership read THROWS rather than silently
   // reconciling as "everyone left" — the failure mode that makes a broken sweep
@@ -1078,10 +1106,12 @@ export async function runBookingSweep({
   // Bounded concurrency keeps the whole pass inside the function's 300s budget.
   const perSeq = [];
   let m = 0;
+  let membershipCutShort = false;
   const memWorker = async () => {
     while (m < seqs.length) {
+      if (overBudget()) { membershipCutShort = true; return; }
       const seq = seqs[m++];
-      const read = await membershipLoader(seq.id);
+      const read = await membershipLoader(seq.id, { deadline });
       if (!read.complete) {
         result.incompleteReads.push({ sequence: seq.name, got: read.unique, expected: read.totalCount, shortfall: read.shortfall });
       }
@@ -1091,6 +1121,9 @@ export async function runBookingSweep({
   };
   // Membership is the burstiest leg (overlapping windows, ~8 calls a sequence).
   await Promise.all(Array.from({ length: Number(process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2) }, memWorker));
+  // Membership short of the full scope means `active` is short too, so neither
+  // the decisions nor the published index would be trustworthy. Stop here.
+  if (membershipCutShort) return stopForBudget("membership");
   if (result.incompleteReads.length) {
     result.ok = false;
     result.error = "incomplete_membership";
@@ -1156,11 +1189,20 @@ export async function runBookingSweep({
   let j = 0;
   const profWorker = async () => {
     while (j < pending.length) {
+      // Unlike membership, stopping here does NOT invalidate the pass's other
+      // outputs: `active` is already complete, coverage is rotor-bounded and
+      // partial by design, and the leads matched in pass 1 still deserve their
+      // pause. So we stop reading, keep the work, and refuse to call it healthy.
+      if (overBudget()) {
+        result.budgetExceeded = true;
+        result.budgetExceededIn ||= "profiles";
+        return;
+      }
       const { seq, lead } = pending[j++];
       result.profilesAttempted++;
       let prof = null;
       try {
-        prof = await cachedRelationshipStatus(lead.cu_id, { onThrottle: () => { result.throttled++; } });
+        prof = await cachedRelationshipStatus(lead.cu_id, { onThrottle: () => { result.throttled++; }, deadline });
       } catch (e) {
         if (e.code === "AUTH_EXPIRED") {
           // Only a serially-confirmed 401 is a real expiry; otherwise it is the
@@ -1221,8 +1263,10 @@ export async function runBookingSweep({
 
   result.ok = !result.calendlyTruncated
     && !result.raydarError
+    && !result.budgetExceeded
     && result.pauseErrors.length === 0;
-  if (result.raydarError) result.error = "raydar_index_incomplete";
+  if (result.budgetExceeded) result.error = "budget_exceeded";
+  else if (result.raydarError) result.error = "raydar_index_incomplete";
   else if (result.calendlyTruncated) {
     result.error = "calendly_index_incomplete";
   }
