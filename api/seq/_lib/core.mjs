@@ -132,6 +132,9 @@ export async function trpcGet(proc, json, tries = 3) {
     try {
       const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      // A 5xx/429 body is usually HTML, so without this the failure surfaced as
+      // an opaque JSON parse error that nothing could classify as retryable.
+      if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");
       return b?.result?.data?.json;
@@ -143,6 +146,7 @@ export async function trpcPost(proc, json, tries = 3) {
     try {
       const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");
       return b?.result?.data?.json;
@@ -157,6 +161,7 @@ export async function trpcPostWithMeta(proc, json, values = {}, tries = 3) {
     try {
       const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");
       return b?.result?.data?.json;
@@ -406,13 +411,79 @@ export async function setLeadEmail(ccuId, email) {
 // "not booked". Opt in with withThrottleRetry where a miss actually matters.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 
-export async function withThrottleRetry(fn, { onThrottle = null, delays = AUTH_RETRY_DELAYS_MS } = {}) {
-  for (let attempt = 0; ; attempt++) {
+// ─── Transport faults ────────────────────────────────────────────────────────
+// The throttle ladder above only ever knew about the 401 case. Nothing retried
+// a TRANSPORT failure, and every Paraform call on the sweep path is issued with
+// `tries = 1` precisely so the inner loop stays out of the way of that ladder.
+// The result: a booking sweep is ~750 sequential round trips, each with a hard
+// 20s `AbortSignal.timeout`, and ONE slow response anywhere in the chain
+// aborted the entire hourly pass with no partial progress and no resumption.
+// Measured live 2026-07-30: the 17:37Z pass died 117.6s in — nowhere near the
+// 300s function budget — on a DOMException TimeoutError, and no pass had
+// completed for at least six hours.
+//
+// The ladder here is deliberately MUCH tighter than the auth one. A stuck
+// endpoint already costs 20s per attempt, so a long ladder would trade one lost
+// pass for a different lost pass; three quick retries recover the realistic
+// case (a single slow response) inside the budget.
+const TRANSPORT_RETRY_DELAYS_MS = [500, 1500, 4000];
+
+const TRANSIENT_TRANSPORT_CODES = new Set([
+  "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** Transient = the request never got a verdict, so repeating it is safe and is
+ *  the only way to learn anything. An application error (`trpc error`, a
+ *  contract violation) is NOT transient: retrying it just burns the budget. */
+export function isTransientTransportError(e, depth = 0) {
+  if (!e || depth > 3) return false;
+  // AbortSignal.timeout() rejects with a DOMException named TimeoutError whose
+  // legacy numeric `code` is 23 — the string that used to reach health.
+  if (e.name === "TimeoutError" || e.name === "AbortError") return true;
+  if (e.retryableTransport === true) return true;
+  if (typeof e.code === "string" && TRANSIENT_TRANSPORT_CODES.has(e.code)) return true;
+  // fetch() wraps a network fault in a TypeError and hides the reason in .cause.
+  if (isTransientTransportError(e.cause, depth + 1)) return true;
+  return false;
+}
+
+/** Marks a response status the caller should treat as "no verdict yet". */
+function transportStatusError(status) {
+  const e = new Error(`PARAFORM_HTTP_${status}`);
+  e.code = `PARAFORM_HTTP_${status}`;
+  e.status = status;
+  e.retryableTransport = true;
+  return e;
+}
+
+export async function withThrottleRetry(fn, {
+  onThrottle = null,
+  onTransient = null,
+  delays = AUTH_RETRY_DELAYS_MS,
+  transportDelays = TRANSPORT_RETRY_DELAYS_MS,
+} = {}) {
+  let throttleAttempt = 0;
+  let transportAttempt = 0;
+  for (;;) {
     try { return await fn(); }
     catch (e) {
-      if (e?.code !== "AUTH_EXPIRED" || attempt >= delays.length) throw e;
-      if (onThrottle) onThrottle();
-      await sleep(delays[attempt] + Math.floor(Math.random() * 400));
+      // Two independent budgets. A pass that is being throttled AND crossing a
+      // flaky link must not have one failure mode eat the other's retries.
+      if (e?.code === "AUTH_EXPIRED") {
+        if (throttleAttempt >= delays.length) throw e;
+        if (onThrottle) onThrottle();
+        await sleep(delays[throttleAttempt++] + Math.floor(Math.random() * 400));
+        continue;
+      }
+      if (isTransientTransportError(e)) {
+        if (transportAttempt >= transportDelays.length) throw e;
+        if (onTransient) onTransient();
+        await sleep(transportDelays[transportAttempt++] + Math.floor(Math.random() * 250));
+        continue;
+      }
+      throw e;
     }
   }
 }
