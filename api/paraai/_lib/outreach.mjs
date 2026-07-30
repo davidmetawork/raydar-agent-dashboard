@@ -106,6 +106,9 @@ const SYSTEM_HELD_EXCEPTION_CODES = new Set([
   "GMAIL_SEND_UNKNOWN",
   "GMAIL_AUTH_FAILED",
 ]);
+export const PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE =
+  "None of the selected matches are eligible for a digest. Only pending, dismissed, or expired matches can be added.";
+export const PENDING_DIGEST_UNAVAILABLE_REASON = "pending_digest_unavailable";
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -174,6 +177,38 @@ export function normalizeSubmissionRequest(request) {
 
 export function expiredNoDigestOverrideEligible(request) {
   return lower(request?.status) === "expired";
+}
+
+export function pendingNoDigestConfirmation(requestId) {
+  return `SEND PENDING WITHOUT DIGEST ${clean(requestId)}`;
+}
+
+export function pendingNoDigestOverrideEligible(
+  request,
+  vendorError,
+  status,
+  digest,
+) {
+  const requestId = clean(request?.id);
+  const candidateUserId = clean(request?.candidateUserId);
+  const roleId = clean(request?.roleId);
+  const pendingIds = Array.isArray(status?.pendingIds) ? status.pendingIds.map(clean) : [];
+  const digestableIds = Array.isArray(status?.digestableIds)
+    ? status.digestableIds.map(clean)
+    : [];
+  return Boolean(
+    requestId &&
+    candidateUserId &&
+    roleId &&
+    lower(request?.status) === "pending" &&
+    request?.reachedOut !== true &&
+    String(vendorError?.code || "") === "-32600" &&
+    clean(vendorError?.message) === PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE &&
+    pendingIds.includes(requestId) &&
+    digestableIds.includes(requestId) &&
+    !clean(digest?.digestId) &&
+    (!Array.isArray(digest?.roles) || digest.roles.length === 0),
+  );
 }
 
 export function normalizeExternalDeliveryEvidence(evidence, now = Date.now()) {
@@ -443,6 +478,58 @@ export async function ensureMatchDigest(request) {
     digestId: digest.digestId,
     digestUrl: `https://www.paraform.com/digest/${digest.digestId}`,
     roles: digest.roles || [],
+  };
+}
+
+export async function verifyPendingDigestUnavailable(
+  request,
+  {
+    ensureDigestImpl = ensureMatchDigest,
+    readStatusImpl = (candidateUserId) => trpcGet(
+      "matchDigest.getRequestIdsByStatus",
+      { candidateUserId },
+    ),
+    readDigestImpl = (candidateUserId) => trpcGet(
+      "matchDigest.getDigestForCandidate",
+      { candidateUserId },
+    ),
+  } = {},
+) {
+  let vendorError;
+  try {
+    await ensureDigestImpl(request);
+  } catch (error) {
+    vendorError = error;
+  }
+  if (!vendorError) {
+    const error = new Error("the Paraform digest is now available; use the normal send path");
+    error.code = "OUTREACH_DIGEST_NOW_AVAILABLE";
+    throw error;
+  }
+  if (
+    String(vendorError?.code || "") !== "-32600" ||
+    clean(vendorError?.message) !== PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE
+  ) {
+    throw vendorError;
+  }
+  const [status, digest] = await Promise.all([
+    readStatusImpl(request.candidateUserId),
+    readDigestImpl(request.candidateUserId),
+  ]);
+  if (!pendingNoDigestOverrideEligible(request, vendorError, status, digest)) {
+    const error = new Error(
+      "pending no-digest recovery was not re-verified against current Paraform state",
+    );
+    error.code = "OUTREACH_PENDING_NO_DIGEST_UNVERIFIED";
+    throw error;
+  }
+  return {
+    eligible: true,
+    reason: PENDING_DIGEST_UNAVAILABLE_REASON,
+    requestId: request.id,
+    pending: true,
+    digestable: true,
+    digestAbsent: true,
   };
 }
 
@@ -759,6 +846,7 @@ export async function processMatchRequest(
     config = outreachConfig(),
     allowAfterReply = false,
     allowWithoutDigest = false,
+    allowWithoutDigestReason = null,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -768,10 +856,23 @@ export async function processMatchRequest(
     error.code = "OUTREACH_HALTED";
     throw error;
   }
-  if (allowWithoutDigest && (mode !== "send" || !expiredNoDigestOverrideEligible(request))) {
-    const error = new Error("no-digest delivery is restricted to an expired live request");
-    error.code = "OUTREACH_REQUEST_NOT_EXPIRED";
-    throw error;
+  const noDigestReason = clean(allowWithoutDigestReason);
+  if (allowWithoutDigest) {
+    const expiredAllowed = expiredNoDigestOverrideEligible(request) &&
+      (!noDigestReason || noDigestReason === "expired_without_digest");
+    const pendingAllowed =
+      noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON &&
+      lower(request?.status) === "pending" &&
+      request?.reachedOut !== true;
+    if (mode !== "send" || (!expiredAllowed && !pendingAllowed)) {
+      const error = new Error(
+        "no-digest delivery requires an approved expired or re-verified pending recovery",
+      );
+      error.code = pendingAllowed
+        ? "OUTREACH_NO_DIGEST_SEND_ONLY"
+        : "OUTREACH_NO_DIGEST_OVERRIDE_INVALID";
+      throw error;
+    }
   }
   const lockToken = await acquireOutreachLock(request.candidateUserId);
   if (!lockToken) {
@@ -920,8 +1021,19 @@ export async function processMatchRequest(
 
     attemptStage = "digest_mutation";
     const ordinal = requestOrdinal(request, history);
-    const digest = allowWithoutDigest ? null : await ensureMatchDigest(request);
-    const deliveryMode = allowWithoutDigest ? "expired_without_digest" : "digest";
+    let digest = null;
+    let deliveryMode = "digest";
+    if (allowWithoutDigest) {
+      if (noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON) {
+        attemptStage = "pending_digest_reverification";
+        await verifyPendingDigestUnavailable(request);
+        deliveryMode = PENDING_DIGEST_UNAVAILABLE_REASON;
+      } else {
+        deliveryMode = "expired_without_digest";
+      }
+    } else {
+      digest = await ensureMatchDigest(request);
+    }
     const roleUrl = roleShareUrl(request);
     request = { ...request, candidateEmail: contact.email };
     const actionKey = `match:${request.id}`;
@@ -942,7 +1054,7 @@ export async function processMatchRequest(
     const signatureHtml = context
       ? ""
       : await getSignatureHtml(config.mailbox).catch(() => "");
-    const copy = copyForMatch({
+    let copy = copyForMatch({
       request,
       ordinal,
       contact,
@@ -952,6 +1064,15 @@ export async function processMatchRequest(
       // rather than sending a thread-starting email with no name at all.
       signatureFollows: Boolean(signatureHtml),
     });
+    if (deliveryMode === PENDING_DIGEST_UNAVAILABLE_REASON) {
+      copy = {
+        ...copy,
+        variant: clean(copy.variant).replace(
+          "_expired_no_digest",
+          "_pending_digest_unavailable",
+        ),
+      };
+    }
     const message = messageForMatch({
       mailbox: config.mailbox,
       request,

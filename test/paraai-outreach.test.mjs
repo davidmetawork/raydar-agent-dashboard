@@ -61,10 +61,15 @@ import {
   OUTREACH_INCIDENT_HALT,
   outreachConfig,
   outreachExecutionEnabled,
+  pendingNoDigestConfirmation,
+  pendingNoDigestOverrideEligible,
+  PENDING_DIGEST_UNAVAILABLE_REASON,
+  PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE,
   pendingBackfillRequests,
   planDeliveredFollowup,
   planDeliveredMatch,
   requestOrdinal,
+  verifyPendingDigestUnavailable,
 } from "../api/paraai/_lib/outreach.mjs";
 import {
   claimOutreachExceptionAlert,
@@ -1204,6 +1209,159 @@ test("no-digest override is eligible only for an expired request", () => {
   assert.equal(expiredNoDigestOverrideEligible({ status: "EXPIRED" }), true);
   assert.equal(expiredNoDigestOverrideEligible({ status: "pending" }), false);
   assert.equal(expiredNoDigestOverrideEligible(null), false);
+});
+
+test("pending no-digest recovery requires the exact live Paraform contradiction", () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  const vendorError = Object.assign(
+    new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+    { code: "-32600" },
+  );
+  const status = {
+    pendingIds: [request.id],
+    digestableIds: [request.id],
+  };
+  assert.equal(
+    pendingNoDigestOverrideEligible(request, vendorError, status, null),
+    true,
+  );
+  assert.equal(
+    pendingNoDigestOverrideEligible(
+      { ...request, reachedOut: true },
+      vendorError,
+      status,
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    pendingNoDigestOverrideEligible(
+      request,
+      Object.assign(new Error("different vendor response"), { code: "-32600" }),
+      status,
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    pendingNoDigestOverrideEligible(
+      request,
+      vendorError,
+      { ...status, digestableIds: [] },
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    pendingNoDigestOverrideEligible(
+      request,
+      vendorError,
+      status,
+      { digestId: "digest-now-exists", roles: [] },
+    ),
+    false,
+  );
+  assert.equal(
+    pendingNoDigestConfirmation(request.id),
+    `SEND PENDING WITHOUT DIGEST ${request.id}`,
+  );
+});
+
+test("pending no-digest verifier re-reads status and digest after the failed mutation", async () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  const calls = [];
+  const evidence = await verifyPendingDigestUnavailable(request, {
+    ensureDigestImpl: async () => {
+      calls.push("ensure");
+      throw Object.assign(
+        new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+        { code: "-32600" },
+      );
+    },
+    readStatusImpl: async () => {
+      calls.push("status");
+      return {
+        pendingIds: [request.id],
+        digestableIds: [request.id],
+      };
+    },
+    readDigestImpl: async () => {
+      calls.push("digest");
+      return null;
+    },
+  });
+  assert.deepEqual(new Set(calls), new Set(["ensure", "status", "digest"]));
+  assert.deepEqual(evidence, {
+    eligible: true,
+    reason: PENDING_DIGEST_UNAVAILABLE_REASON,
+    requestId: request.id,
+    pending: true,
+    digestable: true,
+    digestAbsent: true,
+  });
+});
+
+test("pending no-digest verifier fails closed when a digest becomes available", async () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  await assert.rejects(
+    verifyPendingDigestUnavailable(request, {
+      ensureDigestImpl: async () => ({ digestId: "digest-now-exists" }),
+    }),
+    { code: "OUTREACH_DIGEST_NOW_AVAILABLE" },
+  );
+});
+
+test("pending no-digest delivery has a distinct durable audit mode", () => {
+  const request = {
+    id: "request-pending",
+    roleId: "role-pending",
+    roleName: "Senior / Staff Software Engineer",
+    companyName: "TubeScience",
+  };
+  const next = planDeliveredMatch({
+    candidateUserId: "candidate-user",
+    revision: 1,
+    matches: {},
+    outbox: {},
+    journal: [],
+  }, {
+    request,
+    ordinal: 1,
+    roleUrl: "https://www.paraform.com/share/tubescience/role-pending",
+    digest: null,
+    copy: { subject: "1st Round", variant: "initial_pending_digest_unavailable" },
+    sent: { id: "gmail-message", threadId: "gmail-thread" },
+    sentAt: "2026-07-30T12:00:00.000Z",
+    messageId: deterministicMessageId(`match:${request.id}`),
+    deliveryMode: PENDING_DIGEST_UNAVAILABLE_REASON,
+  });
+  assert.equal(
+    next.matches[request.id].deliveryMode,
+    PENDING_DIGEST_UNAVAILABLE_REASON,
+  );
+  assert.equal(
+    next.outbox[`match:${request.id}`].deliveryMode,
+    PENDING_DIGEST_UNAVAILABLE_REASON,
+  );
+  assert.equal(next.journal.at(-1).deliveryMode, PENDING_DIGEST_UNAVAILABLE_REASON);
 });
 
 test("external delivery evidence accepts exact recent Gmail IDs and rejects stale or malformed input", () => {
