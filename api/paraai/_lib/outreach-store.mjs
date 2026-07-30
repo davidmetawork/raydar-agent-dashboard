@@ -208,6 +208,8 @@ export async function recordOutreachException(
     request,
     code = "OUTREACH_FAILED",
     discovery = null,
+    stage = null,
+    retryable = false,
   },
   {
     kvImpl = kv,
@@ -230,6 +232,8 @@ export async function recordOutreachException(
     firstSeenAt: previous?.firstSeenAt || now,
     lastSeenAt: now,
     attempts: Number(previous?.attempts || 0) + 1,
+    stage: stage ? String(stage).slice(0, 80) : null,
+    retryable: retryable === true,
     discovery: discovery ? {
       confidence: String(discovery.confidence || "unresolved"),
       gmailEmails: Array.isArray(discovery.gmailEmails) ? discovery.gmailEmails : [],
@@ -253,6 +257,7 @@ export async function resolveOutreachException(
   requestId,
   {
     resolution = "email_available",
+    onlyCodes = null,
     kvImpl = kv,
   } = {},
 ) {
@@ -260,6 +265,10 @@ export async function resolveOutreachException(
   const key = exceptionKey(requestId);
   const previous = parse(await kvImpl(["GET", key]), null);
   if (!previous || previous.status === "resolved") return previous;
+  const allowed = Array.isArray(onlyCodes)
+    ? new Set(onlyCodes.map((code) => String(code || "").trim()).filter(Boolean))
+    : null;
+  if (allowed && !allowed.has(String(previous.code || "").trim())) return previous;
   const now = new Date().toISOString();
   const record = {
     ...previous,
