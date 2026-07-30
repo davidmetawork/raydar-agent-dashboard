@@ -1164,6 +1164,10 @@ export async function processMatchRequest(
         draftId: previousOutbox.draftId || null,
         draftRfc822MessageId: previousOutbox.gmailDraftRfc822MessageId || null,
         message,
+        // A process can die after Gmail accepts the email and before Redis
+        // records delivery. A previous claim must reconcile by action marker;
+        // it must never become authorization for a second send.
+        reconcileOnly: ["claimed", "uncertain"].includes(previousOutbox.status),
       });
     } catch (error) {
       await saveUncertainOutbox(state, message.actionKey, message.messageId, error);
@@ -1479,6 +1483,7 @@ export async function processDueFollowup(
       variationSeed: `${followup.ownerMatchId}:${followup.number}`,
     });
     const actionKey = `followup:${followup.ownerMatchId}:${followup.number}`;
+    const previousOutbox = state.outbox?.[actionKey] || {};
     const message = {
       actionKey,
       from: `David Phillips <${config.mailbox}>`,
@@ -1496,10 +1501,10 @@ export async function processDueFollowup(
       outbox: {
         ...(state.outbox || {}),
         [actionKey]: {
-          ...(state.outbox?.[actionKey] || {}),
+          ...previousOutbox,
           status: "claimed",
           messageId: message.messageId,
-          claimedAt: state.outbox?.[actionKey]?.claimedAt || new Date().toISOString(),
+          claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
         },
       },
     }, "followup_claimed", {
@@ -1509,7 +1514,11 @@ export async function processDueFollowup(
     state = await saveOutreachState(claimed, state.revision);
     let sent;
     try {
-      sent = await deliverMessage({ mailbox: config.mailbox, message });
+      sent = await deliverMessage({
+        mailbox: config.mailbox,
+        message,
+        reconcileOnly: ["claimed", "uncertain"].includes(previousOutbox.status),
+      });
     } catch (error) {
       await saveUncertainOutbox(state, actionKey, message.messageId, error);
       throw error;
