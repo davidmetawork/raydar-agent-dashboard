@@ -19,6 +19,7 @@ import {
   decideLead,
   normEmail,
   runBookingSweep,
+  sweepAttemptErrorLabel,
   sweepErrorLabel,
   SWEEP_STALE_AFTER_MS,
 } from "../api/seq/_lib/booking-stop.mjs";
@@ -853,6 +854,25 @@ test("a pass that overruns during profiles still applies and publishes what it p
   assert.equal(result.error, "budget_exceeded");
   assert.equal(applied, 1, "a lead proven booked must still be paused");
   assert.equal(published, true, "complete membership may still publish its index");
+});
+
+test("health is told WHICH stage ran out of budget, not just that one did", async () => {
+  // The stage was reaching Slack and the HTTP response while /api/seq/health —
+  // the one unauthenticated surface, and the only one anyone checked while the
+  // sweep was down — got the bare code. Same way "23" hid a TimeoutError.
+  assert.equal(
+    sweepAttemptErrorLabel({ budgetExceeded: true, budgetExceededIn: "membership", error: "budget_exceeded" }),
+    "budget_exceeded:membership",
+  );
+  assert.equal(
+    sweepAttemptErrorLabel({ budgetExceeded: true, budgetExceededIn: "profiles", error: "budget_exceeded" }),
+    "budget_exceeded:profiles",
+  );
+  // Null means "no opinion" so recordSweepAttempt still falls through to
+  // result.error — every other failure keeps the label it always had.
+  assert.equal(sweepAttemptErrorLabel({ ok: false, error: "zero_active_leads" }), null);
+  assert.equal(sweepAttemptErrorLabel({ budgetExceeded: true, budgetExceededIn: null }), null);
+  assert.equal(sweepAttemptErrorLabel(null), null);
 });
 
 test("a retry that would finish after the deadline is not attempted", async () => {

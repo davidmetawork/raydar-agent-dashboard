@@ -1564,6 +1564,19 @@ export function sweepErrorLabel(e) {
   return e?.code != null ? String(e.code) : "error";
 }
 
+/** What health will actually see. `result.error` stays the stable machine code
+ *  so anything matching on it keeps working, but "budget_exceeded" alone is
+ *  useless — the whole point of stopping ourselves was to learn WHERE the time
+ *  goes, and that stage was reaching Slack and the HTTP response while health,
+ *  the one unauthenticated surface, still got nothing. Returning null leaves
+ *  recordSweepAttempt to fall through to `result.error` exactly as before. */
+export function sweepAttemptErrorLabel(result) {
+  if (result?.budgetExceeded && result?.budgetExceededIn) {
+    return `budget_exceeded:${result.budgetExceededIn}`;
+  }
+  return null;
+}
+
 export async function recordSweepAttempt({
   status,
   result = null,
