@@ -21,6 +21,7 @@ import {
   runBookingSweep,
   recordSweepAttempt,
   recordSuccessfulSweep,
+  sweepAttemptErrorLabel,
   sweepErrorLabel,
   sweepStaleness,
   shouldAlert,
@@ -92,6 +93,7 @@ export default async function handler(req, res) {
       await recordSweepAttempt({
         status: "failure",
         result,
+        error: sweepAttemptErrorLabel(result),
       });
     }
 
