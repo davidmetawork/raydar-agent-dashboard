@@ -755,6 +755,121 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Self-enforced budget (2026-07-30)
+//
+// The platform kills the function at 300s, and a killed pass writes NO outcome:
+// its attempt record stays "running" forever and health cannot tell it from one
+// still in flight. Observed at 975s. The pass now stops itself first, so the
+// failure is recorded and alerted instead of vanishing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const idleCalendly = async () => ({ index: new Map(), events: 0, cacheHits: 0, truncated: false });
+
+test("a pass that overruns during membership refuses to publish a partial index", async () => {
+  const options = completeSingleLeadSweepOptions(idleCalendly);
+  options.budgetMs = 30;
+  options.sequenceScopeLoader = async () => ({
+    schema: "raydar-booking-stop-scope-v2",
+    scopeDigest: "c".repeat(64),
+    catalogFloor: 1,
+    sequences: [
+      { id: "a", name: "A", enabled: true },
+      { id: "b", name: "B", enabled: true },
+      { id: "c", name: "C", enabled: true },
+    ],
+    catalogSequences: 3,
+    scannedSequences: 3,
+    linkSequences: 3,
+    enabledLinkSequences: 3,
+    coveredEnabledLinkSequences: 3,
+    complete: true,
+  });
+  const seen = [];
+  options.membershipLoader = async (id) => {
+    seen.push(id);
+    await new Promise((r) => setTimeout(r, 60));
+    return { complete: true, unique: 0, totalCount: 0, shortfall: 0, apiCalls: 1, leads: [] };
+  };
+  let published = false;
+  options.leadIndexPublisher = async () => { published = true; return "OK"; };
+
+  const result = await runBookingSweep(options);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "budget_exceeded");
+  assert.equal(result.budgetExceeded, true);
+  assert.equal(result.budgetExceededIn, "membership");
+  assert.ok(seen.length < 3, `must stop short of the full scope, read ${seen.length}/3`);
+  assert.equal(published, false, "a partial membership must never publish a lead index — the webhook reads it");
+});
+
+test("a pass that overruns during profiles still applies and publishes what it proved", async () => {
+  // Membership is complete here, so `active` and the index are trustworthy and
+  // the leads matched in pass 1 still deserve their pause. Only coverage is
+  // short, and coverage is rotor-bounded and partial by design anyway.
+  const options = completeSingleLeadSweepOptions(async () => ({
+    index: new Map([["candidate@example.com", {
+      bookedAt: Date.parse("2026-07-29T10:00:00.000Z"),
+      startsAt: "2026-07-30T10:00:00.000Z",
+      eventName: "Human Call",
+      status: "active",
+    }]]),
+    events: 1,
+    cacheHits: 0,
+    truncated: false,
+  }));
+  options.budgetMs = 30;
+  options.profileBudget = 5;
+  options.membershipLoader = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return {
+      complete: true, unique: 2, totalCount: 2, shortfall: 0, apiCalls: 1,
+      leads: [
+        // Matched by the Calendly index in pass 1 — owed a pause.
+        {
+          ccu_id: "ccu-covered", cu_id: "cu-covered", name: "Candidate",
+          to_use_email: "candidate@example.com", created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        },
+        // Unmatched, so it falls through to the profile leg — which is where
+        // the budget runs out.
+        {
+          ccu_id: "ccu-other", cu_id: "cu-other", name: "Other",
+          to_use_email: "other@example.com", created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        },
+      ],
+    };
+  };
+  let published = false, applied = 0;
+  options.leadIndexPublisher = async () => { published = true; return "OK"; };
+  options.decisionApplier = async (decisions) => {
+    applied = decisions.length;
+    return { paused: decisions.length, pausedCcuIds: decisions.map((d) => d.ccuId), pauseErrors: [] };
+  };
+
+  const result = await runBookingSweep(options);
+  assert.equal(result.ok, false, "an incomplete pass is never healthy");
+  assert.equal(result.error, "budget_exceeded");
+  assert.equal(applied, 1, "a lead proven booked must still be paused");
+  assert.equal(published, true, "complete membership may still publish its index");
+});
+
+test("a retry that would finish after the deadline is not attempted", async () => {
+  // Retrying is only free if someone is still there to receive the answer.
+  let calls = 0;
+  const started = Date.now();
+  await assert.rejects(
+    () => withThrottleRetry(
+      async () => { calls++; throw new DOMException("timed out", "TimeoutError"); },
+      { transportDelays: [5000], deadline: Date.now() + 50 },
+    ),
+    (e) => e.name === "TimeoutError",
+  );
+  assert.equal(calls, 1, "must not start a retry it cannot finish in time");
+  assert.ok(Date.now() - started < 1000, "must not sleep past the deadline first");
+});
+
 test("a truncated Calendly source can never produce a green sweep", async () => {
   const result = await runBookingSweep(
     completeSingleLeadSweepOptions(async () => ({

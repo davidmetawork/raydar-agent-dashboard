@@ -463,24 +463,34 @@ export async function withThrottleRetry(fn, {
   onTransient = null,
   delays = AUTH_RETRY_DELAYS_MS,
   transportDelays = TRANSPORT_RETRY_DELAYS_MS,
+  // Epoch ms after which a caller would rather fail than keep waiting. Retrying
+  // is only free if someone is still there to receive the answer: a retry that
+  // finishes after the caller's own deadline just gets the process killed
+  // mid-write, which is how a dead sweep learned to look like a running one.
+  deadline = null,
 } = {}) {
   let throttleAttempt = 0;
   let transportAttempt = 0;
+  const budgetSpent = (delay) => deadline != null && Date.now() + delay >= deadline;
   for (;;) {
     try { return await fn(); }
     catch (e) {
       // Two independent budgets. A pass that is being throttled AND crossing a
       // flaky link must not have one failure mode eat the other's retries.
       if (e?.code === "AUTH_EXPIRED") {
-        if (throttleAttempt >= delays.length) throw e;
+        const delay = delays[throttleAttempt] + Math.floor(Math.random() * 400);
+        if (throttleAttempt >= delays.length || budgetSpent(delay)) throw e;
+        throttleAttempt++;
         if (onThrottle) onThrottle();
-        await sleep(delays[throttleAttempt++] + Math.floor(Math.random() * 400));
+        await sleep(delay);
         continue;
       }
       if (isTransientTransportError(e)) {
-        if (transportAttempt >= transportDelays.length) throw e;
+        const delay = transportDelays[transportAttempt] + Math.floor(Math.random() * 250);
+        if (transportAttempt >= transportDelays.length || budgetSpent(delay)) throw e;
+        transportAttempt++;
         if (onTransient) onTransient();
-        await sleep(transportDelays[transportAttempt++] + Math.floor(Math.random() * 250));
+        await sleep(delay);
         continue;
       }
       throw e;
@@ -553,7 +563,7 @@ export async function campaignMembershipOracle({ force = false } = {}) {
   return map;
 }
 
-export async function completeCampaignLeads(campaignId, { pageSizes = LEAD_PAGE_SIZES, backfill = true } = {}) {
+export async function completeCampaignLeads(campaignId, { pageSizes = LEAD_PAGE_SIZES, backfill = true, deadline = null } = {}) {
   const byCcu = new Map();
   let totalCount = null;
   let apiCalls = 0;
@@ -564,7 +574,7 @@ export async function completeCampaignLeads(campaignId, { pageSizes = LEAD_PAGE_
     let cursor = 0;
     for (let i = 0; i < 500; i++) {
       const page = await withThrottleRetry(() =>
-        trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor, limit }, 1));
+        trpcGet("campaigns.getCampaignLeads", { campaign_id: campaignId, cursor, limit }, 1), { deadline });
       apiCalls++;
       const leads = page?.leads || [];
       if (totalCount === null) totalCount = Math.min(page?.totalCount ?? leads.length, 10000);
