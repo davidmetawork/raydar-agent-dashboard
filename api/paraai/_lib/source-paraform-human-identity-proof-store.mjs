@@ -226,16 +226,12 @@ function normalizeIssuedInput(value) {
   });
 }
 
-function normalizeStoredRecord(raw) {
+export function validateSourceParaformHumanIdentityProofRecord(
+  value,
+) {
   const code =
     "SOURCE_PARAFORM_HUMAN_IDENTITY_PROOF_STORE_RECORD_INVALID";
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    fail(code);
-  }
-  const record = plainRecord(parsed, RECORD_KEYS, code);
+  const record = plainRecord(value, RECORD_KEYS, code);
   let proof;
   try {
     proof = validateParaformHumanIdentityExhaustivenessProof(
@@ -263,6 +259,18 @@ function normalizeStoredRecord(raw) {
     proof,
     retainedAtMs: record.retainedAtMs,
   });
+}
+
+function normalizeStoredRecord(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail(
+      "SOURCE_PARAFORM_HUMAN_IDENTITY_PROOF_STORE_RECORD_INVALID",
+    );
+  }
+  return validateSourceParaformHumanIdentityProofRecord(parsed);
 }
 
 function parseTransition(result, expected) {
