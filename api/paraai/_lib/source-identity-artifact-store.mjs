@@ -2375,6 +2375,10 @@ function canonicalHeadRecord(value) {
   return deepFreeze(record);
 }
 
+export function validateIdentityAliasArtifactHead(value) {
+  return canonicalHeadRecord(value);
+}
+
 function canonicalPageEntry(value, index) {
   const field = `identity alias artifact page.entries[${index}]`;
   const raw = object(value, field);
