@@ -80,6 +80,26 @@ const uniqueReasonCodes = (...values) => [...new Set(
   values.flat().filter((value) => typeof value === "string" && value.trim()),
 )];
 
+/**
+ * The email canary recipient is deliberately an INTERNAL address — a David-only
+ * inbox is the entire point of the canary phase.
+ *
+ * core.mjs's normalizeEmail rejects @raydar.xyz / @raydargroup.com /
+ * @paraform.com so the CANDIDATE path can never mail an internal address. That
+ * guard is correct and stays. Applying it to the canary too was not: it made
+ * the documented recipient (david@raydar.xyz) silently unconfigurable, so
+ * arming EMAIL produced emailCanaryConfigured:false and a permanently
+ * fail-closed canary_recipient_required — safe, but the canary could never fire
+ * and P3 could never be proved.
+ *
+ * This validates shape only. It is used for the canary recipient and nowhere
+ * else; candidate addresses still go through normalizeEmail unchanged.
+ */
+export function normalizeCanaryEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
+}
+
 export function interestConfig(env = process.env, now = Date.now()) {
   const enabled = flag("PARAAI_INTEREST_ENABLED", env);
   // Dry run defaults TRUE. Only an explicit falsey value turns it off.
@@ -101,7 +121,7 @@ export function interestConfig(env = process.env, now = Date.now()) {
   const stopArmed = flag("PARAAI_INTEREST_STOP_APPROVED", env);
   const emailArmedRaw = flag("PARAAI_INTEREST_EMAIL_APPROVED", env);
   const submitArmedRaw = flag("PARAAI_INTEREST_SUBMIT_APPROVED", env);
-  const emailCanaryTo = normalizeEmail(env.PARAAI_INTEREST_EMAIL_CANARY_TO || "");
+  const emailCanaryTo = normalizeCanaryEmail(env.PARAAI_INTEREST_EMAIL_CANARY_TO || "");
 
   // Code-enforced gate ordering.
   const emailArmed = emailArmedRaw && stopArmed;
@@ -749,7 +769,7 @@ export async function sendConfirmation({
   const out = { sent: false, skipped: null, messageId: null };
   const firstName = firstNameFor(candidate.name);
   if (!firstName) { out.skipped = "unusable_first_name"; return out; }
-  const canaryEmail = normalizeEmail(canaryTo || "");
+  const canaryEmail = normalizeCanaryEmail(canaryTo || "");
   const email = canaryEmail || normalizeEmail(candidate.email || "");
   if (!email) { out.skipped = "no_deliverable_email"; return out; }
   const canary = Boolean(canaryEmail);
