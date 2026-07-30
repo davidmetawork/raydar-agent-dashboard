@@ -14,7 +14,10 @@ import {
   buildMime,
   canonicalAddress,
   candidateRepliedAfter,
+  deliverMessage,
+  deterministicActionId,
   deterministicMessageId,
+  findMessageByActionId,
   firstDeliveredInternalDate,
   hardBounceAfter,
   isHardBounce,
@@ -309,10 +312,12 @@ test("company slug and share URL match Paraform's public role shape", () => {
 });
 
 test("Gmail MIME carries deterministic id and reply-thread headers", () => {
-  const messageId = deterministicMessageId("match:request-123");
-  assert.equal(messageId, deterministicMessageId("match:request-123"));
+  const actionKey = "match:request-123";
+  const messageId = deterministicMessageId(actionKey);
+  assert.equal(messageId, deterministicMessageId(actionKey));
   assert.notEqual(messageId, deterministicMessageId("match:request-456"));
   const mime = buildMime({
+    actionKey,
     from: "David Phillips <david@raydar.xyz>",
     to: "candidate@example.com",
     subject: "Re: 1st Round @ CaroHQ 🎉",
@@ -323,8 +328,95 @@ test("Gmail MIME carries deterministic id and reply-thread headers", () => {
     bodyHtml: "<p>Hello</p>",
   });
   assert.match(mime.raw, /Message-ID: <raydar-paraai-/);
+  assert.match(
+    mime.raw,
+    new RegExp(`X-Raydar-Action-ID: ${deterministicActionId(actionKey)}`),
+  );
   assert.match(mime.raw, /In-Reply-To: <last@example.com>/);
   assert.match(mime.raw, /References: <first@example.com> <last@example.com>/);
+});
+
+test("Gmail action reconciliation reads the preserved marker and rejects duplicates", async () => {
+  const actionId = deterministicActionId("match:request-123");
+  const messages = {
+    "gmail-one": {
+      id: "gmail-one",
+      payload: { headers: [{ name: "X-Raydar-Action-ID", value: "other-action" }] },
+    },
+    "gmail-two": {
+      id: "gmail-two",
+      threadId: "thread-two",
+      payload: { headers: [{ name: "X-Raydar-Action-ID", value: actionId }] },
+    },
+  };
+  const calls = [];
+  const gmailCallImpl = async (_mailbox, path) => {
+    calls.push(path);
+    if (path.startsWith("/messages?")) {
+      return { messages: [{ id: "gmail-one" }, { id: "gmail-two" }] };
+    }
+    const id = path.match(/^\/messages\/([^?]+)/)?.[1];
+    return messages[id];
+  };
+  const found = await findMessageByActionId("david@raydar.xyz", actionId, {
+    to: "candidate@example.com",
+    subject: "1st Round @ Example",
+    gmailCallImpl,
+  });
+  assert.equal(found.id, "gmail-two");
+  assert.match(calls[0], /in%3Asent/);
+  assert.equal(
+    calls.filter((path) => path.includes("metadataHeaders=X-Raydar-Action-ID")).length,
+    2,
+  );
+
+  messages["gmail-one"] = {
+    ...messages["gmail-one"],
+    payload: { headers: [{ name: "X-Raydar-Action-ID", value: actionId }] },
+  };
+  await assert.rejects(
+    findMessageByActionId("david@raydar.xyz", actionId, { gmailCallImpl }),
+    { code: "GMAIL_ACTION_DUPLICATE" },
+  );
+});
+
+test("a prior Gmail claim reconciles or fails closed without sending again", async () => {
+  const message = {
+    actionKey: "match:request-123",
+    from: "David Phillips <david@raydar.xyz>",
+    to: "candidate@example.com",
+    subject: "1st Round @ Example",
+    messageId: deterministicMessageId("match:request-123"),
+    bodyText: "Hello",
+    bodyHtml: "<p>Hello</p>",
+  };
+  let sends = 0;
+  const reconciled = await deliverMessage({
+    mailbox: "david@raydar.xyz",
+    message,
+    reconcileOnly: true,
+    findMessageByActionIdImpl: async () => ({
+      id: "gmail-existing",
+      threadId: "thread-existing",
+    }),
+    findMessageByRfc822IdImpl: async () => null,
+    sendMessageImpl: async () => { sends += 1; },
+  });
+  assert.equal(reconciled.delivery, "reconciled");
+  assert.equal(sends, 0);
+
+  await assert.rejects(
+    deliverMessage({
+      mailbox: "david@raydar.xyz",
+      message,
+      reconcileOnly: true,
+      findMessageByActionIdImpl: async () => null,
+      findMessageByRfc822IdImpl: async () => null,
+      sendMessageImpl: async () => { sends += 1; },
+    }),
+    { code: "GMAIL_SEND_UNKNOWN" },
+  );
+  assert.equal(sends, 0);
 });
 
 test("thread context follows the latest Gmail message and replies stop follow-ups", () => {

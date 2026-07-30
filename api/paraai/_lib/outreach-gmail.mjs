@@ -135,6 +135,11 @@ export function deterministicMessageId(actionKey) {
   return `<raydar-paraai-${hash}@raydar.xyz>`;
 }
 
+export function deterministicActionId(actionKey) {
+  const hash = createHash("sha256").update(clean(actionKey)).digest("hex").slice(0, 40);
+  return `raydar-paraai-${hash}`;
+}
+
 export function headerValue(message, name) {
   return (message?.payload?.headers || []).find(
     (header) => String(header?.name || "").toLowerCase() === String(name || "").toLowerCase(),
@@ -335,6 +340,7 @@ export function firstDeliveredInternalDate(thread) {
 }
 
 export function buildMime({
+  actionKey,
   from,
   to,
   subject,
@@ -354,6 +360,9 @@ export function buildMime({
     `Subject: ${encodeHeader(subject)}`,
     `Message-ID: ${messageId}`,
   ];
+  if (clean(actionKey)) {
+    lines.push(`X-Raydar-Action-ID: ${deterministicActionId(actionKey)}`);
+  }
   if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
   if (references) lines.push(`References: ${references}`);
   lines.push(
@@ -437,6 +446,44 @@ export async function findMessageByRfc822Id(mailbox, messageId, { sentOnly = tru
   return rows[0] || null;
 }
 
+const gmailQueryPhrase = (value) => `"${clean(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+
+export async function findMessageByActionId(
+  mailbox,
+  actionId,
+  {
+    to = null,
+    subject = null,
+    gmailCallImpl = gmailCall,
+  } = {},
+) {
+  const expected = clean(actionId);
+  if (!expected) return null;
+  const query = [
+    "in:sent",
+    clean(to) ? `to:${gmailQueryPhrase(to)}` : null,
+    clean(subject) ? `subject:${gmailQueryPhrase(subject)}` : null,
+  ].filter(Boolean).join(" ");
+  const params = new URLSearchParams({ q: query, maxResults: "100" });
+  const refs = (await gmailCallImpl(mailbox, `/messages?${params}`))?.messages || [];
+  const matches = [];
+  // Exact recipient+subject queries are normally tiny. Keep reads bounded and
+  // sequential so a reconciliation cannot burst the delegated Gmail quota.
+  for (const ref of refs.slice(0, 100)) {
+    const message = await gmailCallImpl(
+      mailbox,
+      `/messages/${encodeURIComponent(ref.id)}?format=metadata&metadataHeaders=X-Raydar-Action-ID`,
+    );
+    if (headerValue(message, "X-Raydar-Action-ID") === expected) matches.push(message);
+  }
+  if (matches.length > 1) {
+    const error = new Error("more than one Gmail message has the same Raydar action marker");
+    error.code = "GMAIL_ACTION_DUPLICATE";
+    throw error;
+  }
+  return matches[0] || null;
+}
+
 export async function upsertDraft(mailbox, existingDraftId, message) {
   const mime = buildMime(message);
   const body = { message: { raw: mime.base64url } };
@@ -505,6 +552,14 @@ export async function createReviewDraft(
     error.code = "GMAIL_DRAFT_NOT_VISIBLE";
     throw error;
   }
+  const expectedActionId = clean(message.actionKey)
+    ? deterministicActionId(message.actionKey)
+    : null;
+  if (expectedActionId && readHeader("X-Raydar-Action-ID") !== expectedActionId) {
+    const error = new Error("Gmail draft action marker did not read back");
+    error.code = "GMAIL_DRAFT_NOT_VISIBLE";
+    throw error;
+  }
   return {
     id: draft.id,
     messageId: draft?.message?.id || fetched?.message?.id || null,
@@ -520,6 +575,11 @@ export async function deliverMessage(
     draftId = null,
     draftRfc822MessageId = null,
     message,
+    reconcileOnly = false,
+    findMessageByActionIdImpl = findMessageByActionId,
+    findMessageByRfc822IdImpl = findMessageByRfc822Id,
+    sendDraftImpl = sendDraft,
+    sendMessageImpl = sendMessage,
   } = {},
 ) {
   const reconciliationIds = [...new Set([
@@ -527,18 +587,35 @@ export async function deliverMessage(
     message.messageId,
   ].filter(Boolean))];
   const findDelivered = async () => {
+    const actionId = clean(message?.actionKey)
+      ? deterministicActionId(message.actionKey)
+      : null;
+    if (actionId) {
+      const marked = await findMessageByActionIdImpl(mailbox, actionId, {
+        to: message.to,
+        subject: message.subject,
+      });
+      if (marked) return marked;
+    }
     for (const messageId of reconciliationIds) {
-      const found = await findMessageByRfc822Id(mailbox, messageId);
+      const found = await findMessageByRfc822IdImpl(mailbox, messageId);
       if (found) return found;
     }
     return null;
   };
   const existing = await findDelivered();
   if (existing) return { ...existing, delivery: "reconciled" };
+  if (reconcileOnly) {
+    const unknown = new Error(
+      "a prior Gmail claim could not be reconciled; sending again is not allowed",
+    );
+    unknown.code = "GMAIL_SEND_UNKNOWN";
+    throw unknown;
+  }
   try {
     const sent = draftId
-      ? await sendDraft(mailbox, draftId)
-      : await sendMessage(mailbox, message);
+      ? await sendDraftImpl(mailbox, draftId)
+      : await sendMessageImpl(mailbox, message);
     return { ...sent, delivery: draftId ? "draft_sent" : "sent" };
   } catch (error) {
     const recovered = await findDelivered().catch(() => null);
