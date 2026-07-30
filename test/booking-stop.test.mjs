@@ -19,11 +19,12 @@ import {
   decideLead,
   normEmail,
   runBookingSweep,
+  sweepErrorLabel,
   SWEEP_STALE_AFTER_MS,
 } from "../api/seq/_lib/booking-stop.mjs";
 import { campaignLeads } from "../api/seq/_lib/core.mjs";
 import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/booking-stop.mjs";
-import { completeCampaignLeads, cronAuth } from "../api/seq/_lib/core.mjs";
+import { completeCampaignLeads, cronAuth, trpcGet } from "../api/seq/_lib/core.mjs";
 
 const SECRET = "test-signing-key";
 
@@ -376,6 +377,104 @@ test("a non-auth error is not retried", async () => {
   let calls = 0;
   await assert.rejects(() => withThrottleRetry(async () => { calls++; throw new Error("boom"); }));
   assert.equal(calls, 1);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transport faults (2026-07-30 incident)
+//
+// A pass is ~750 sequential Paraform round trips, each with a hard 20s abort,
+// and NOTHING retried a transport failure — the wrapper only knew about 401.
+// One slow response therefore killed the whole hourly sweep. Measured live: the
+// 17:37Z pass died 117.6s in on a DOMException TimeoutError, and no pass had
+// completed for at least six hours while the board still said "done".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Exactly what AbortSignal.timeout() rejects with. */
+const timeoutError = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
+test("a fetch timeout is retried rather than killing the whole pass", async () => {
+  let calls = 0, transient = 0;
+  const value = await withThrottleRetry(async () => {
+    calls++;
+    if (calls < 3) throw timeoutError();
+    return "ok";
+  }, { onTransient: () => { transient++; }, transportDelays: [1, 2, 3] });
+  assert.equal(value, "ok");
+  assert.equal(calls, 3, "a transient timeout must be retried");
+  assert.equal(transient, 2, "each transport retry must be counted, not hidden");
+});
+
+test("a persistent timeout still surfaces once transport retries are spent", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => withThrottleRetry(async () => { calls++; throw timeoutError(); }, { transportDelays: [1, 2] }),
+    (e) => e.name === "TimeoutError",
+  );
+  assert.equal(calls, 3, "bounded: one attempt plus the ladder, never unbounded");
+});
+
+test("a network fault hidden in a TypeError cause is treated as transient", async () => {
+  let calls = 0;
+  const value = await withThrottleRetry(async () => {
+    calls++;
+    if (calls === 1) {
+      const e = new TypeError("fetch failed");
+      e.cause = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      throw e;
+    }
+    return "ok";
+  }, { transportDelays: [1] });
+  assert.equal(value, "ok");
+  assert.equal(calls, 2);
+});
+
+test("throttle and transport retries draw on independent budgets", async () => {
+  // A pass being throttled AND crossing a flaky link must not have one failure
+  // mode eat the other's retries.
+  const script = ["auth", "timeout", "auth", "timeout", "ok"];
+  let i = 0;
+  const value = await withThrottleRetry(async () => {
+    const step = script[i++];
+    if (step === "auth") { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+    if (step === "timeout") throw timeoutError();
+    return "ok";
+  }, { delays: [1, 2], transportDelays: [1, 2] });
+  assert.equal(value, "ok");
+  assert.equal(i, 5, "both ladders must still have budget left after the other spends some");
+});
+
+test("a 5xx is retryable but a 4xx contract error is not", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => (++calls === 1
+    ? new Response("<html>bad gateway</html>", { status: 502 })
+    : new Response(JSON.stringify({ result: { data: { json: ["ok"] } } }), { status: 200, headers: { "content-type": "application/json" } }));
+  try {
+    const value = await withThrottleRetry(
+      () => trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1),
+      { transportDelays: [1] },
+    );
+    assert.deepEqual(value, ["ok"], "a 502 must be retried, not surfaced as a JSON parse error");
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("the recorded error names the cause instead of a DOMException number", async () => {
+  // A DOMException's legacy numeric code is 23, and `e.code || e.message` used
+  // to record the literal string "23" — which is what health actually showed
+  // while the sweep was dead, and it identified nothing.
+  assert.equal(timeoutError().code, 23, "guard: the numeric code that caused this");
+  assert.equal(sweepErrorLabel(timeoutError()), "TimeoutError");
+
+  const authExpired = Object.assign(new Error("nope"), { code: "AUTH_EXPIRED" });
+  assert.equal(sweepErrorLabel(authExpired), "AUTH_EXPIRED", "string codes still win");
+
+  const scope = Object.assign(new Error("x"), { code: "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE" });
+  assert.equal(sweepErrorLabel(scope), "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+
+  assert.equal(sweepErrorLabel(new Error("plain failure")), "plain failure");
+  assert.equal(sweepErrorLabel("zero_active_leads"), "zero_active_leads");
+  assert.equal(sweepErrorLabel(null), "error");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

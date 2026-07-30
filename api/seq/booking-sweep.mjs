@@ -21,6 +21,7 @@ import {
   runBookingSweep,
   recordSweepAttempt,
   recordSuccessfulSweep,
+  sweepErrorLabel,
   sweepStaleness,
   shouldAlert,
   isSessionActuallyExpired,
@@ -173,7 +174,7 @@ export default async function handler(req, res) {
     if (apply) {
       await recordSweepAttempt({
         status: "failure",
-        error: String(e?.code || e?.message || "error"),
+        error: sweepErrorLabel(e),
       }).catch(() => {});
     }
     // Never report (or alert) an expiry on the strength of one 401: Paraform

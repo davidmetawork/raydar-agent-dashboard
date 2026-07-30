@@ -647,6 +647,9 @@ export async function calendlyBookingIndex({
 // Paraform's throttle can persist for tens of seconds under sustained load, so
 // the ladder has to outlast it. Cheap: these delays only run when we are already
 // being refused, and giving up costs a missed pause.
+// This ladder used to be hand-inlined below, which meant profile reads missed
+// every later fix to the shared wrapper — including transport retry. It now
+// delegates to withThrottleRetry and keeps only the delays it overrides.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 
 // TTL is deliberately SHORT. The rotor already bounds load to a few hundred
@@ -663,16 +666,12 @@ export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_
     const cached = await kvGet(K.profile(cuId));
     if (cached) return cached;
   }
-  let p = null;
-  for (let attempt = 0; ; attempt++) {
-    try { p = await trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1); break; }
-    catch (e) {
-      if (e?.code !== "AUTH_EXPIRED" || attempt >= AUTH_RETRY_DELAYS_MS.length) throw e;
-      if (onThrottle) onThrottle();
-      // Jitter so a fleet of workers does not retry in lockstep.
-      await sleep(AUTH_RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400));
-    }
-  }
+  // Jitter and both retry budgets live in withThrottleRetry now, so a fleet of
+  // workers does not retry in lockstep and a timeout is not read as a miss.
+  const p = await withThrottleRetry(
+    () => trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1),
+    { onThrottle, delays: AUTH_RETRY_DELAYS_MS },
+  );
   if (!p) return null;
   const value = {
     status: p.candidate_user_relationship_status || null,
@@ -1506,6 +1505,19 @@ export async function sweepStaleness(now = Date.now()) {
     leadIndexAgeMs,
     leadIndexCurrent,
   };
+}
+
+/** The one clue health gets about WHY a pass died, so it must not be thrown
+ *  away on the way there. A DOMException carries a legacy NUMERIC `code` — an
+ *  AbortSignal.timeout() is 23 — so `e.code || e.message` recorded the literal
+ *  string "23", which told nobody anything and cost a real diagnosis. Prefer a
+ *  meaningful string code, then the name, then the message. */
+export function sweepErrorLabel(e) {
+  if (typeof e === "string") return e || "error";
+  if (typeof e?.code === "string" && e.code) return e.code;
+  if (typeof e?.name === "string" && e.name && e.name !== "Error") return e.name;
+  if (e?.message) return String(e.message);
+  return e?.code != null ? String(e.code) : "error";
 }
 
 export async function recordSweepAttempt({
