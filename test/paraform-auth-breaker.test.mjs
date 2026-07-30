@@ -7,11 +7,14 @@ import {
   AUTH_LAST_PROBE_KEY,
   AUTH_OPEN_ALERT_KEY,
   AUTH_REMINDER_ALERT_KEY,
+  AUTH_WRITE_FAILURE_KEY,
   PROBE_READS,
   paraformAuthState,
   probeParaformAuth,
   probeReadBudgetMs,
   publicProbeReason,
+  reportParaformWriteAuthFailure,
+  reportParaformWriteAuthSuccess,
   runAuthProbeTick,
 } from "../api/paraai/_lib/auth-probe.mjs";
 import opsHandler from "../api/ops/paraform-auth.mjs";
@@ -65,6 +68,16 @@ function fakeKv(seed = {}) {
       if (flags.includes("XX") && !store.has(key)) return null;
       store.set(key, rest[0]);
       return "OK";
+    }
+    if (command === "EVAL") {
+      const failureKey = rest[1];
+      const succeededAt = String(rest[2] || "");
+      const current = JSON.parse(store.get(failureKey) || "null");
+      if (current?.observedAt && current.observedAt <= succeededAt) {
+        store.delete(failureKey);
+        return 1;
+      }
+      return 0;
     }
     throw new Error(`fake kv: unsupported command ${command}`);
   };
@@ -301,6 +314,65 @@ test("going green clears the flag and slots and posts the resumed message", asyn
   assert.equal(notify.messages.length, 3);
 });
 
+test("a mutation 401 opens the circuit even while all read probes are green", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const failure = await reportParaformWriteAuthFailure(
+    {
+      lane: "paraai_outreach",
+      stage: "digest_mutation",
+      now: NOW,
+    },
+    { kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(failure.circuit.opened, true);
+  assert.ok(kv.store.has(AUTH_WRITE_FAILURE_KEY));
+  assert.ok(kv.store.has(AUTH_FLAG_KEY));
+  assert.match(notify.messages[0], /mutation returned 401/);
+  assert.match(notify.messages[0], /digest_mutation/);
+
+  const stillDown = await runAuthProbeTick(
+    { now: NOW + 5 * 60_000 },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(stillDown.down, true);
+  assert.equal(stillDown.status, "down");
+  assert.equal(kv.store.has(AUTH_FLAG_KEY), true);
+  const heartbeat = JSON.parse(kv.store.get(AUTH_LAST_PROBE_KEY));
+  assert.equal(heartbeat.reason, "write_auth_expired");
+  assert.equal(notify.messages.length, 1);
+});
+
+test("only a later successful mutation clears the write-auth latch", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  await reportParaformWriteAuthFailure(
+    { lane: "paraai_outreach", stage: "digest_mutation", now: NOW },
+    { kvImpl: kv, notifyImpl: notify },
+  );
+
+  const older = await reportParaformWriteAuthSuccess(
+    { lane: "paraai_outreach", stage: "digest_mutation", now: NOW - 1 },
+    { kvImpl: kv },
+  );
+  assert.equal(older.cleared, false);
+  assert.ok(kv.store.has(AUTH_WRITE_FAILURE_KEY));
+
+  const newer = await reportParaformWriteAuthSuccess(
+    { lane: "paraai_outreach", stage: "digest_mutation", now: NOW + 1 },
+    { kvImpl: kv },
+  );
+  assert.equal(newer.cleared, true);
+  assert.equal(kv.store.has(AUTH_WRITE_FAILURE_KEY), false);
+
+  const resumed = await runAuthProbeTick(
+    { now: NOW + 5 * 60_000 },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(resumed.resumed, true);
+  assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
+});
+
 test("overlapping green ticks post exactly one resumed message", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
@@ -492,6 +564,7 @@ test("public probe reasons are a closed enum, never raw internals", () => {
   assert.equal(publicProbeReason("recovered_on_retry"), "recovered_on_retry");
   assert.equal(publicProbeReason("auth_expired"), "auth_expired");
   assert.equal(publicProbeReason("AUTH_EXPIRED"), "auth_expired");
+  assert.equal(publicProbeReason("write_auth_expired"), "write_auth_expired");
   assert.equal(publicProbeReason("PROBE_BUDGET_EXCEEDED"), "probe_budget_exceeded");
   assert.equal(publicProbeReason("fetch failed"), "network");
   assert.equal(publicProbeReason("ECONNRESET"), "network");

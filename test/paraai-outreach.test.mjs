@@ -72,6 +72,7 @@ import {
   probeOutreachStore,
   recordContactCapability,
   recordOutreachException,
+  resolveOutreachException,
 } from "../api/paraai/_lib/outreach-store.mjs";
 
 const role = {
@@ -740,6 +741,8 @@ test("missing-email exceptions are durable and notification claims are deduplica
   });
   assert.equal(record.status, "open");
   assert.equal(record.attempts, 1);
+  assert.equal(record.retryable, false);
+  assert.equal(record.stage, null);
   assert.deepEqual(record.discovery.suggestedEmails, ["candidate@example.com"]);
   assert.match(commands[1][1], /^paraai:outreach:exception:/);
   assert.equal(commands[2][0], "ZADD");
@@ -754,6 +757,53 @@ test("missing-email exceptions are durable and notification claims are deduplica
   assert.equal(await claimOutreachExceptionAlert(request.id, {
     kvImpl: async () => null,
   }), false);
+});
+
+test("staged auth failures are durable and contact recovery cannot erase them", async () => {
+  let stored = null;
+  const request = {
+    id: "request-auth-expired",
+    candidateUserId: "candidate-user",
+    candidateName: "Candidate Name",
+    roleName: "Staff Engineer",
+    companyName: "Example Co",
+  };
+  const kvImpl = async (command) => {
+    if (command[0] === "GET") return stored;
+    if (command[0] === "SET") {
+      stored = command[2];
+      return "OK";
+    }
+    return null;
+  };
+  const pipelineImpl = async (pipeline) => {
+    stored = pipeline[0][2];
+    return ["OK", 1];
+  };
+  const record = await recordOutreachException({
+    request,
+    code: "AUTH_EXPIRED",
+    stage: "digest_mutation",
+    retryable: true,
+  }, { kvImpl, pipelineImpl });
+  assert.equal(record.code, "AUTH_EXPIRED");
+  assert.equal(record.stage, "digest_mutation");
+  assert.equal(record.retryable, true);
+
+  const untouched = await resolveOutreachException(request.id, {
+    resolution: "native_paraform_email",
+    onlyCodes: ["OUTREACH_NO_EMAIL", "OUTREACH_EMAIL_BOUNCED"],
+    kvImpl,
+  });
+  assert.equal(untouched.status, "open");
+  assert.equal(JSON.parse(stored).status, "open");
+
+  const resolved = await resolveOutreachException(request.id, {
+    resolution: "sent",
+    kvImpl,
+  });
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.resolution, "sent");
 });
 
 test("request normalization and ordinal count all Para AI requests for one candidate", () => {
@@ -890,6 +940,47 @@ test("a recoverable exception throttles retries even while the request is unreac
       lastSeenAt: "2026-07-29T11:59:34.000Z",
     }], { now }),
     [request],
+  );
+});
+
+test("write-auth failures retry on a bounded interval while unknown failures stay parked", () => {
+  const now = Date.parse("2026-07-30T12:00:00.000Z");
+  const config = { notBeforeMs: Date.parse("2026-07-18T00:00:00.000Z") };
+  const request = {
+    id: "request-auth",
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-30T03:00:00.000Z"),
+  };
+  const authException = {
+    requestId: request.id,
+    status: "open",
+    code: "AUTH_EXPIRED",
+    retryable: true,
+  };
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], [{
+      ...authException,
+      lastSeenAt: "2026-07-30T11:59:00.000Z",
+    }], { now }),
+    [],
+  );
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], [{
+      ...authException,
+      lastSeenAt: "2026-07-30T11:54:00.000Z",
+    }], { now }),
+    [request],
+  );
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], [{
+      requestId: request.id,
+      status: "open",
+      code: "OUTREACH_FAILED",
+      retryable: false,
+      lastSeenAt: "2026-07-30T11:00:00.000Z",
+    }], { now }),
+    [],
   );
 });
 

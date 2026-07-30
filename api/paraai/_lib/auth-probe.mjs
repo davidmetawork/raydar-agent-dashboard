@@ -3,15 +3,19 @@
 // The shared Paraform session cookie is the recurring single point of failure
 // across every cookie-consuming lane; when it dies, each lane discovers it
 // separately and Slack drowns in per-item AUTH_EXPIRED spam (07-25→07-28).
-// This probe rides the existing */5 worker tick, confirms a real auth outage
-// with two distinct cheap tRPC reads plus one retry pass, and records ONE
-// durable flag that a future per-lane rollout can hold on.
+// This probe rides the existing */5 worker tick, confirms a read-layer auth
+// outage with two distinct cheap tRPC reads plus one retry pass, and records
+// ONE durable flag that a future per-lane rollout can hold on. A Paraform
+// mutation can also report a write-layer 401 into this module. That signal is
+// latched until a later mutation succeeds: authorized reads are not evidence
+// that the write layer recovered (2026-07-30 incident).
 //
 // Phase 1 contract (spec: docs/PARAFORM-ACTIONS-AUTOMATION-IDEAS-2026-07-29.md
 // in the main repo, "Paraform auth circuit breaker with auto resume"):
-// - The probe is the SOLE writer of the `auth:paraform:*` KV namespace. The
-//   `paraai:*` namespace stays single-writer for the Para AI API; nothing
-//   here touches it.
+// - This MODULE is the sole writer of the `auth:paraform:*` KV namespace.
+//   Paraform mutation call sites report success/failure through the exported
+//   functions below; they never write auth keys directly. The `paraai:*`
+//   namespace stays single-writer for the Para AI API; nothing here touches it.
 // - NO lane holds on the flag yet. Lane consumption ships later, per lane,
 //   each behind its own gate.
 // - Hold semantics apply only to Paraform's own 401s. A network error, vendor
@@ -34,6 +38,7 @@ export const AUTH_FLAG_KEY = "auth:paraform:down";
 export const AUTH_LAST_PROBE_KEY = "auth:paraform:lastprobe";
 export const AUTH_OPEN_ALERT_KEY = "auth:paraform:alert:open";
 export const AUTH_REMINDER_ALERT_KEY = "auth:paraform:alert:reminder";
+export const AUTH_WRITE_FAILURE_KEY = "auth:paraform:write-failure";
 const OPEN_ALERT_TTL_SECONDS = 30 * 24 * 60 * 60;
 const REMINDER_TTL_SECONDS = 24 * 60 * 60;
 const LAST_PROBE_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -201,6 +206,7 @@ export function publicProbeReason(raw) {
   if (reason === "auth_expired" || reason === "AUTH_EXPIRED") {
     return "auth_expired";
   }
+  if (reason === "write_auth_expired") return "write_auth_expired";
   if (reason === "PROBE_BUDGET_EXCEEDED") return "probe_budget_exceeded";
   if (/no paraform session cookie|PARAFORM_SESSION_COOKIE not found/i.test(reason)) {
     return "no_cookie";
@@ -255,7 +261,24 @@ export async function runAuthProbeTick(
   { probeImpl = probeParaformAuth, kvImpl = kv, notifyImpl = notifySlack } = {},
 ) {
   const at = new Date(now).toISOString();
-  const probe = await probeImpl();
+  const observed = await probeImpl();
+  const writeFailure = parse(await kvImpl(["GET", AUTH_WRITE_FAILURE_KEY]));
+  // A green GET cannot clear a mutation-layer 401. Keep the outage latched
+  // until reportParaformWriteAuthSuccess atomically clears the signal after a
+  // later successful Paraform mutation.
+  const probe = writeFailure
+    ? {
+        healthy: false,
+        reason: "write_auth_expired",
+        evidence: {
+          code: "AUTH_EXPIRED",
+          mode: "write",
+          lane: writeFailure.lane || "unknown",
+          stage: writeFailure.stage || "unknown",
+          observedAt: writeFailure.observedAt || null,
+        },
+      }
+    : observed;
   // Heartbeat first: the ops endpoint must show probe staleness even when
   // nothing else changes.
   await kvImpl([
@@ -275,7 +298,9 @@ export async function runAuthProbeTick(
 
   if (probe.healthy === true) {
     if (!existing) return { status: "healthy", down: false, resumed: false };
-    // Auto-resume. Alert slots are cleared BEFORE the flag: a crash between
+    // Auto-resume. A latched write-layer failure never reaches this branch;
+    // only a later successful mutation clears that signal. Alert slots are
+    // cleared BEFORE the flag: a crash between
     // the two re-runs this path next tick (the flag still exists), so a
     // suppressed open alert on the next real outage is impossible. The DEL
     // of the flag is then the atomic claim on the episode: overlapping
@@ -296,9 +321,10 @@ export async function runAuthProbeTick(
     };
   }
 
-  // Confirmed down: both distinct reads returned 401 on both passes. The
-  // flag has no TTL on purpose — a dead cookie stays dead until recaptured,
-  // and probe staleness is visible separately via the heartbeat key.
+  // Confirmed down: either both distinct reads returned 401 on both passes,
+  // or a real mutation returned 401. The flag has no TTL on purpose — a dead
+  // cookie stays dead until recaptured, and probe staleness is visible
+  // separately via the heartbeat key.
   const since = existing?.since || at;
   const record = {
     version: 1,
@@ -320,8 +346,11 @@ export async function runAuthProbeTick(
     await kvImpl([
       "SET", AUTH_REMINDER_ALERT_KEY, at, "EX", REMINDER_TTL_SECONDS,
     ]);
+    const evidence = probe.reason === "write_auth_expired"
+      ? `a Paraform mutation returned 401 at ${probe.evidence?.lane || "unknown"}:${probe.evidence?.stage || "unknown"} while read canaries may still be green`
+      : `two consecutive 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}, retried once`;
     const delivered = await notifyImpl(
-      `🚨 Paraform auth circuit OPEN — the shared session cookie is rejected (two consecutive 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}, retried once). Every cookie-consuming lane will fail with AUTH_EXPIRED until it is recaptured — ${RECAPTURE_RUNBOOK}. One daily reminder follows while it stays down. Observe-only: no lane is held by this flag yet.`,
+      `🚨 Paraform auth circuit OPEN — the shared session cookie is rejected (${evidence}). Every cookie-consuming lane can fail with AUTH_EXPIRED until it is recaptured — ${RECAPTURE_RUNBOOK}. A write-layer outage stays latched until a later mutation succeeds; green reads alone cannot close it. One daily reminder follows while it stays down. Observe-only: no lane is held by this flag yet.`,
     ).catch(() => false);
     record.alert = { openedAt: at, delivered: delivered === true };
     await kvImpl(["SET", AUTH_FLAG_KEY, JSON.stringify(record)]);
@@ -372,4 +401,84 @@ export async function runAuthProbeTick(
   }
 
   return { status: "down", down: true };
+}
+
+// Mutation call sites report a Paraform 401 here. The report is durable before
+// the circuit is opened, so a crash between the two cannot lose the evidence:
+// the next ordinary probe tick sees the latch and opens the circuit itself.
+export async function reportParaformWriteAuthFailure(
+  {
+    lane = "unknown",
+    stage = "unknown",
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+    notifyImpl = notifySlack,
+  } = {},
+) {
+  const observedAt = new Date(now).toISOString();
+  const record = {
+    version: 1,
+    observedAt,
+    lane: String(lane || "unknown").slice(0, 48),
+    stage: String(stage || "unknown").slice(0, 80),
+    code: "AUTH_EXPIRED",
+  };
+  await kvImpl(["SET", AUTH_WRITE_FAILURE_KEY, JSON.stringify(record)]);
+  const result = await runAuthProbeTick(
+    { now },
+    {
+      probeImpl: async () => ({
+        healthy: false,
+        reason: "write_auth_expired",
+        evidence: {
+          code: "AUTH_EXPIRED",
+          mode: "write",
+          lane: record.lane,
+          stage: record.stage,
+          observedAt,
+        },
+      }),
+      kvImpl,
+      notifyImpl,
+    },
+  );
+  return { record, circuit: result };
+}
+
+// Clear only a failure observed no later than this successful mutation. The
+// timestamp comparison happens atomically in Redis so an older success racing
+// a newer failure cannot erase the newer outage.
+export async function reportParaformWriteAuthSuccess(
+  {
+    lane = "unknown",
+    stage = "unknown",
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+  } = {},
+) {
+  const succeededAt = new Date(now).toISOString();
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return 0 end
+    local ok, current = pcall(cjson.decode, raw)
+    if not ok then return 0 end
+    local observed = tostring(current.observedAt or '')
+    if observed ~= '' and observed <= ARGV[1] then
+      return redis.call('DEL', KEYS[1])
+    end
+    return 0
+  `;
+  const cleared = Number(await kvImpl([
+    "EVAL", script, 1, AUTH_WRITE_FAILURE_KEY, succeededAt,
+  ])) === 1;
+  return {
+    cleared,
+    succeededAt,
+    lane: String(lane || "unknown").slice(0, 48),
+    stage: String(stage || "unknown").slice(0, 80),
+  };
 }

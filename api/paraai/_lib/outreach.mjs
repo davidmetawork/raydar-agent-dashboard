@@ -5,6 +5,10 @@ import {
   trpcPost,
 } from "./core.mjs";
 import {
+  reportParaformWriteAuthFailure,
+  reportParaformWriteAuthSuccess,
+} from "./auth-probe.mjs";
+import {
   additionalMatchCopy,
   followupCopy,
   initialMatchCopy,
@@ -80,7 +84,13 @@ const EXPIRY_ALERT_TTL_SECONDS = 30 * 24 * 60 * 60;
 // Exception codes that a later tick may legitimately retry on its own. A bounced
 // address behaves exactly like a missing one: the moment David fixes it in
 // Paraform the request becomes sendable again, so it self-heals.
-const RECOVERABLE_EXCEPTION_CODES = new Set(["OUTREACH_NO_EMAIL", "OUTREACH_EMAIL_BOUNCED"]);
+const RECOVERABLE_EXCEPTION_CODES = new Set([
+  "AUTH_EXPIRED",
+  "OUTREACH_NO_EMAIL",
+  "OUTREACH_EMAIL_BOUNCED",
+  "OUTREACH_THREAD_NOT_FOUND",
+  "OUTREACH_DIGEST_NOT_VISIBLE",
+]);
 // Codes that park a request for a human and must never re-enter the tick on
 // their own. OUTREACH_CANDIDATE_REPLIED is the retired 2026-07-26 code, kept here
 // so pre-existing held records stay parked until the release action re-judges
@@ -89,6 +99,12 @@ const HUMAN_HELD_EXCEPTION_CODES = new Set([
   "OUTREACH_CANDIDATE_REPLIED",
   "OUTREACH_CANDIDATE_OFF_MARKET",
   "OUTREACH_CANDIDATE_DO_NOT_CONTACT",
+]);
+// A delivery with an uncertain Gmail outcome must never retry automatically.
+// It stays parked until an operator reconciles the deterministic message ID.
+const SYSTEM_HELD_EXCEPTION_CODES = new Set([
+  "GMAIL_SEND_UNKNOWN",
+  "GMAIL_AUTH_FAILED",
 ]);
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
@@ -222,7 +238,10 @@ export function eligibleNewRequests(
     }
   }
   const recoverable = (exceptions || []).filter((row) => (
-    row?.status === "open" && RECOVERABLE_EXCEPTION_CODES.has(clean(row?.code))
+    row?.status === "open" && (
+      row?.retryable === true ||
+      RECOVERABLE_EXCEPTION_CODES.has(clean(row?.code))
+    )
   ));
   const retryDue = (row) => (
     finiteDate(row?.lastSeenAt) == null ||
@@ -263,11 +282,28 @@ export function eligibleNewRequests(
       .map((row) => clean(row?.requestId))
       .filter(Boolean),
   );
+  const systemHeld = new Set(
+    (exceptions || [])
+      .filter((row) => (
+        row?.status === "open" &&
+        (
+          SYSTEM_HELD_EXCEPTION_CODES.has(clean(row?.code)) ||
+          (
+            row?.retryable !== true &&
+            !RECOVERABLE_EXCEPTION_CODES.has(clean(row?.code)) &&
+            !HUMAN_HELD_EXCEPTION_CODES.has(clean(row?.code))
+          )
+        )
+      ))
+      .map((row) => clean(row?.requestId))
+      .filter(Boolean),
+  );
   return (history || []).filter((request) => (
     REQUEST_STATUSES.has(request.status) &&
     // GUARDRAIL: never outreach a protected recruiter's role (e.g. Kyra's).
     !protectedRecruiterForRoleTitle(request.roleName) &&
     !humanHeld.has(request.id) &&
+    !systemHeld.has(request.id) &&
     !retryThrottled.has(request.id) &&
     (
       retryAuthorized.has(request.id) ||
@@ -355,6 +391,29 @@ async function candidateContact(request, config) {
   }
 }
 
+async function paraformOutreachWrite(stage, operation) {
+  try {
+    const result = await operation();
+    // The write itself is the recovery canary. Clearing is generation-safe:
+    // an older success cannot erase a newer AUTH_EXPIRED report.
+    await reportParaformWriteAuthSuccess({
+      lane: "paraai_outreach",
+      stage,
+    }).catch(() => null);
+    return result;
+  } catch (error) {
+    if (error?.code === "AUTH_EXPIRED") {
+      error.outreachStage ||= stage;
+      // Never let an observability-store problem mask the original 401.
+      await reportParaformWriteAuthFailure({
+        lane: "paraai_outreach",
+        stage,
+      }).catch(() => null);
+    }
+    throw error;
+  }
+}
+
 export async function ensureMatchDigest(request) {
   let digest = await trpcGet("matchDigest.getDigestForCandidate", {
     candidateUserId: request.candidateUserId,
@@ -363,10 +422,14 @@ export async function ensureMatchDigest(request) {
     (role) => clean(role?.roleId) === request.roleId,
   );
   if (!visible()) {
-    await trpcPost("matchDigest.createOrAddRoles", {
-      candidateUserId: request.candidateUserId,
-      submissionRequestIds: [request.id],
-    }, 1);
+    await paraformOutreachWrite("digest_mutation", () => trpcPost(
+      "matchDigest.createOrAddRoles",
+      {
+        candidateUserId: request.candidateUserId,
+        submissionRequestIds: [request.id],
+      },
+      1,
+    ));
     digest = await trpcGet("matchDigest.getDigestForCandidate", {
       candidateUserId: request.candidateUserId,
     });
@@ -557,7 +620,11 @@ export function planDeliveredMatch(state, {
 }
 
 async function markReachedOut(requestId) {
-  await trpcPost("submissionRequest.markReachedOutToCandidate", { id: requestId }, 1);
+  await paraformOutreachWrite("mark_reached_out", () => trpcPost(
+    "submissionRequest.markReachedOutToCandidate",
+    { id: requestId },
+    1,
+  ));
   const history = await readSubmissionRequestHistory();
   const visible = history.find((request) => request.id === requestId);
   if (!visible?.reachedOut) {
@@ -712,13 +779,21 @@ export async function processMatchRequest(
     error.code = "OUTREACH_BUSY";
     throw error;
   }
+  let attemptStage = "contact_discovery";
+  let state = null;
   try {
     const contact = await candidateContact(request, config);
+    attemptStage = "exception_resolution";
     await resolveOutreachException(request.id, {
       resolution: contact.source,
+      // Contact discovery proves only these two failures recovered. It must
+      // never erase an auth/digest failure merely because an email exists.
+      onlyCodes: ["OUTREACH_NO_EMAIL", "OUTREACH_EMAIL_BOUNCED"],
     }).catch(() => {});
-    let state = await getOutreachState(request.candidateUserId);
+    attemptStage = "state_load";
+    state = await getOutreachState(request.candidateUserId);
     if (!state) {
+      attemptStage = "state_create";
       state = await createOutreachState(request.candidateUserId, {
         candidateName: contact.name || request.candidateName,
         candidateEmail: contact.email,
@@ -750,6 +825,7 @@ export async function processMatchRequest(
     };
     const legacyReplyGate = intentGateDisabled();
     const gated = mode === "send" && !allowAfterReply;
+    attemptStage = "candidate_safety";
 
     // A bounce recorded against an address we no longer use is stale: the whole
     // point of surfacing it was to get the address fixed in Paraform.
@@ -842,6 +918,7 @@ export async function processMatchRequest(
       }
     }
 
+    attemptStage = "digest_mutation";
     const ordinal = requestOrdinal(request, history);
     const digest = allowWithoutDigest ? null : await ensureMatchDigest(request);
     const deliveryMode = allowWithoutDigest ? "expired_without_digest" : "digest";
@@ -850,6 +927,7 @@ export async function processMatchRequest(
     const actionKey = `match:${request.id}`;
     const previousOutbox = state.outbox?.[actionKey] || {};
     const previousThreadId = state.threadId || null;
+    attemptStage = "thread_anchor";
     const { context, anchorStatus } = await threadForMatch({
       state,
       request,
@@ -910,6 +988,7 @@ export async function processMatchRequest(
       anchorStatus,
       deliveryMode,
     });
+    attemptStage = "outbox_claim";
     state = await saveOutreachState(claimed, state.revision);
 
     if (mode === "draft") {
@@ -956,6 +1035,7 @@ export async function processMatchRequest(
       };
     }
 
+    attemptStage = "gmail_delivery";
     let sent;
     try {
       sent = await deliverMessage({
@@ -981,6 +1061,11 @@ export async function processMatchRequest(
       deliveryMode,
     }), state.revision);
 
+    await resolveOutreachException(request.id, {
+      resolution: "sent",
+    }).catch(() => {});
+
+    attemptStage = "mark_reached_out";
     if (request.reachedOut) {
       state = await saveOutreachState(appendOutreachJournal({
         ...state,
@@ -1016,7 +1101,28 @@ export async function processMatchRequest(
           .catch(() => state);
       }
     }
+    attemptStage = "complete";
     return { action: "sent", request, ordinal, digest, roleUrl, copy, sent, state };
+  } catch (error) {
+    const stage = clean(error?.outreachStage || attemptStage || "unknown");
+    error.outreachStage ||= stage;
+    // The exception ledger below is the cross-request durable record. Also
+    // attach a stage/code journal event to the candidate state when one exists,
+    // so operators can reconstruct how far this exact attempt progressed.
+    const current = await getOutreachState(request.candidateUserId).catch(() => null);
+    if (current) {
+      const failed = appendOutreachJournal(
+        current,
+        "match_attempt_failed",
+        {
+          requestId: request.id,
+          code: clean(error?.code || "OUTREACH_FAILED"),
+          stage,
+        },
+      );
+      await saveOutreachState(failed, current.revision).catch(() => null);
+    }
+    throw error;
   } finally {
     await releaseOutreachLock(request.candidateUserId, lockToken).catch(() => {});
   }
@@ -1524,7 +1630,7 @@ export async function handleOutreachFailure(
   } = {},
 ) {
   const code = clean(error?.code || "OUTREACH_FAILED");
-  if (!new Set([
+  const tracked = new Set([
     "AUTH_EXPIRED",
     "OUTREACH_NO_EMAIL",
     "OUTREACH_CANDIDATE_REPLIED",
@@ -1535,22 +1641,41 @@ export async function handleOutreachFailure(
     "OUTREACH_DIGEST_NOT_VISIBLE",
     "GMAIL_SEND_UNKNOWN",
     "GMAIL_AUTH_FAILED",
-  ]).has(code)) return;
+  ]);
+  if (!request?.id) {
+    if (tracked.has(code)) {
+      await notifySlack(
+        `🚨 Para AI outreach: ${code} for a scheduled follow-up. No duplicate email will be attempted; review the outreach ledger.`,
+      ).catch(() => {});
+    }
+    return;
+  }
+  // A lock race is expected concurrency, not an attempt failure. The request
+  // remains eligible for the next tick and no operator action is needed.
+  if (code === "OUTREACH_BUSY") return;
   // A blocked match is a human decision, not a system fault: record it durably and
   // alert once, exactly like the missing-email path. Never silent.
-  if (HELD_ALERT_CODES.has(code) && request?.id) {
-    const record = await recordOutreachException({ request, code, discovery: null });
+  if (HELD_ALERT_CODES.has(code)) {
+    const record = await recordOutreachException({
+      request,
+      code,
+      discovery: null,
+      stage: error?.outreachStage || null,
+      retryable: RECOVERABLE_EXCEPTION_CODES.has(code),
+    });
     const escalation = await escalateNearExpiry(request, code, { now });
     const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
     if (!alertClaimed) return { ...record, escalation };
     await notifySlack(heldAlertCopy(code, request, error)).catch(() => false);
     return { ...record, escalation };
   }
-  if (code === "OUTREACH_NO_EMAIL" && request?.id) {
+  if (code === "OUTREACH_NO_EMAIL") {
     const record = await recordOutreachException({
       request,
       code,
       discovery: error?.discovery || null,
+      stage: error?.outreachStage || "contact_discovery",
+      retryable: true,
     });
     const escalation = await escalateNearExpiry(request, code, { now });
     const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
@@ -1578,9 +1703,21 @@ export async function handleOutreachFailure(
     }
     return { ...record, notified, escalation };
   }
+  const record = await recordOutreachException({
+    request,
+    code,
+    discovery: null,
+    stage: error?.outreachStage || null,
+    retryable: RECOVERABLE_EXCEPTION_CODES.has(code),
+  });
+  const escalation = await escalateNearExpiry(request, code, { now });
+  // AUTH_EXPIRED alerting is owned by the global auth latch. It deduplicates
+  // the outage across all requests and carries the recapture runbook.
+  if (code === "AUTH_EXPIRED") return { ...record, escalation };
   await notifySlack(
     `🚨 Para AI outreach: ${code} for ${request?.id || "scheduled follow-up"}. No duplicate email will be attempted; review the outreach ledger.`,
   ).catch(() => {});
+  return { ...record, escalation };
 }
 
 export async function runOutreachTick({
