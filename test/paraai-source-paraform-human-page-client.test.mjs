@@ -11,6 +11,7 @@ import {
   SOURCE_PARAFORM_HUMAN_PAGE_URL,
   SOURCE_PARAFORM_HUMAN_PAGE_VERSION,
   SourceParaformHumanPageClientError,
+  assertPrivateParaformHumanSourcePageResult,
   readPrivateParaformHumanSourcePage,
 } from "../api/paraai/_lib/source-paraform-human-page-client.mjs";
 
@@ -522,4 +523,41 @@ test("returns only a deeply frozen private page without signing internals", asyn
   ]) {
     assert.equal(serialized.includes(forbidden), false);
   }
+});
+
+test("process-local result provenance rejects clones and cross-request replay", async () => {
+  const firstRequest = request();
+  const result = await readPrivateParaformHumanSourcePage(
+    firstRequest,
+    dependencies(async () => jsonResponse(page())),
+  );
+  assert.equal(
+    assertPrivateParaformHumanSourcePageResult(
+      result,
+      firstRequest,
+    ),
+    result,
+  );
+  assert.throws(
+    () => assertPrivateParaformHumanSourcePageResult(
+      structuredClone(result),
+      firstRequest,
+    ),
+    (error) => (
+      error instanceof SourceParaformHumanPageClientError
+      && error.code
+        === "SOURCE_PARAFORM_HUMAN_PAGE_RESULT_UNTRUSTED"
+    ),
+  );
+  assert.throws(
+    () => assertPrivateParaformHumanSourcePageResult(
+      result,
+      request({ checkpoint: checkpoint(50) }),
+    ),
+    (error) => (
+      error instanceof SourceParaformHumanPageClientError
+      && error.code
+        === "SOURCE_PARAFORM_HUMAN_PAGE_RESULT_UNTRUSTED"
+    ),
+  );
 });

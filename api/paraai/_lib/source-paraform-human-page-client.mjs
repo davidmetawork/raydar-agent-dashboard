@@ -75,6 +75,7 @@ const TEST_DEPENDENCY_KEYS = Object.freeze([
   "secret",
   "signalFactory",
 ]);
+const ISSUED_PAGE_RESULTS = new WeakMap();
 
 export class SourceParaformHumanPageClientError extends Error {
   constructor(code) {
@@ -567,6 +568,24 @@ function canonicalResponse(value, request) {
   });
 }
 
+// Process-local provenance boundary for the private pass assembler. A cloned,
+// replayed, or caller-fabricated page cannot be substituted for the exact
+// result returned by this client for this request.
+export function assertPrivateParaformHumanSourcePageResult(
+  value,
+  requestValue,
+) {
+  const request = canonicalRequest(requestValue);
+  if (
+    !value
+    || typeof value !== "object"
+    || ISSUED_PAGE_RESULTS.get(value) !== request.rawBody
+  ) {
+    fail("SOURCE_PARAFORM_HUMAN_PAGE_RESULT_UNTRUSTED");
+  }
+  return value;
+}
+
 export async function readPrivateParaformHumanSourcePage(
   requestValue,
   testDependencies,
@@ -617,7 +636,12 @@ export async function readPrivateParaformHumanSourcePage(
       fail("SOURCE_PARAFORM_HUMAN_PAGE_UNAVAILABLE");
     }
     const raw = await boundedResponseText(response);
-    return canonicalResponse(JSON.parse(raw), request);
+    const normalized = canonicalResponse(
+      JSON.parse(raw),
+      request,
+    );
+    ISSUED_PAGE_RESULTS.set(normalized, request.rawBody);
+    return normalized;
   } catch {
     fail("SOURCE_PARAFORM_HUMAN_PAGE_UNAVAILABLE");
   }
