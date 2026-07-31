@@ -989,6 +989,7 @@ export async function runBookingSweep({
     budgetMs,
     budgetExceeded: false,
     budgetExceededIn: null,
+    profileCutShort: false,
     sequences: 0,
     scopeSchema: null,
     scopeDigest: null,
@@ -1185,19 +1186,16 @@ export async function runBookingSweep({
     : [...candidates.slice(startAt), ...candidates.slice(0, startAt)].slice(0, profileBudget);
   result.profileRotorFrom = startAt;
   result.profileRotorOf = candidates.length;
-  await kvSet(K.rotor, { at: candidates.length ? (startAt + pending.length) % candidates.length : 0, updatedAt: new Date().toISOString() });
   let j = 0;
   const profWorker = async () => {
     while (j < pending.length) {
-      // Unlike membership, stopping here does NOT invalidate the pass's other
-      // outputs: `active` is already complete, coverage is rotor-bounded and
-      // partial by design, and the leads matched in pass 1 still deserve their
-      // pause. So we stop reading, keep the work, and refuse to call it healthy.
-      if (overBudget()) {
-        result.budgetExceeded = true;
-        result.budgetExceededIn ||= "profiles";
-        return;
-      }
+      // Running out of time here is NOT a failed pass. Membership is complete,
+      // so `active` and the published index are sound and every lead matched in
+      // pass 1 was already paused. This leg is partial BY DESIGN — profileBudget
+      // is deliberately smaller than the population and such a pass has always
+      // been recorded green. A leg cut short by the clock is the same kind of
+      // partial as one cut short by the count, so it is reported, not failed.
+      if (overBudget()) { result.profileCutShort = true; return; }
       const { seq, lead } = pending[j++];
       result.profilesAttempted++;
       let prof = null;
@@ -1230,7 +1228,20 @@ export async function runBookingSweep({
     }
   };
   await Promise.all(Array.from({ length: profileConcurrency }, profWorker));
-  result.profileCoverage = `${pending.length}/${active.length - matched.size}`;
+
+  // ROTOR ADVANCE, AFTER the fact and by what was ACTUALLY read. Advancing by
+  // pending.length before the loop meant a leg cut short by the clock skipped
+  // every unread lead to the back of the queue — they would not be looked at
+  // again until a full rotation, which is precisely the permanently-blind tail
+  // the rotor exists to prevent. Coverage is reported the same way: actual, not
+  // planned. A number that describes intent rather than work is how a sweep
+  // convinces everyone it is fine.
+  const profilesProcessed = Math.min(j, pending.length);
+  await kvSet(K.rotor, {
+    at: candidates.length ? (startAt + profilesProcessed) % candidates.length : 0,
+    updatedAt: new Date().toISOString(),
+  });
+  result.profileCoverage = `${profilesProcessed}/${active.length - matched.size}`;
 
   // Apply
   if (apply && result.decisions.length) {
