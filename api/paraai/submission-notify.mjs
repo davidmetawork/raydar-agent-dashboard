@@ -61,14 +61,42 @@ export const config = { maxDuration: 300 };
 // than risking the function budget. Uncapped events are NOT dropped.
 const TEXT_LOOKUP_CAP = 25;
 
-const kvGet = async (key) => kv(["GET", key]);
-const kvSet = async (key, value) => kv(["SET", key, value]);
+const defaultKvGet = async (key) => kv(["GET", key]);
+const defaultKvSet = async (key, value) => kv(["SET", key, value]);
+
+/**
+ * Injectable so the whole tick can be exercised without KV, Gmail, Paraform or
+ * Slack. Mirrors createInboxFeedHandler in api/inbox/feed.mjs, which is this
+ * codebase's existing pattern for a testable endpoint. `export default` below
+ * wires the real io, so production behaviour is unchanged.
+ */
+export function createSubmissionNotifyHandler({
+  corsHandler = cors,
+  authHandler = requireAuth,
+  cronAuthHandler = cronAuth,
+  configured = submissionNotifyConfigured,
+  kvGet = defaultKvGet,
+  kvSet = defaultKvSet,
+  listHandoffs = listInterestHandoffRecords,
+  listCandidates = listCuratedListCandidates,
+  listStates = listOutreachStates,
+  sequenceIds = curatedListSequenceIds,
+  buildFeed = buildInboxFeed,
+  mailboxFor = outreachMailbox,
+  threadFor = getThread,
+  postMessage = (text) => postSubmissionNotification(text),
+  alert = notifySlack,
+  dispatch = dispatchEvents,
+  seededCheck = isSeeded,
+  seededMark = markSeeded,
+  textLookupCap = TEXT_LOOKUP_CAP,
+} = {}) {
 
 async function collectInterest(errors) {
   try {
     const [records, candidates] = await Promise.all([
-      listInterestHandoffRecords(),
-      listCuratedListCandidates().catch(() => []),
+      listHandoffs(),
+      listCandidates().catch(() => []),
     ]);
     return buildInterestEvents({ records, names: nameIndex(candidates) });
   } catch (error) {
@@ -77,9 +105,9 @@ async function collectInterest(errors) {
   }
 }
 
-async function collectRequest(errors) {
+async function collectRequest(errors, seeding) {
   try {
-    const pending = pendingOutreachReplies(await listOutreachStates());
+    const pending = pendingOutreachReplies(await listStates());
 
     // Drop the already-notified BEFORE touching Gmail — that is the whole point
     // of pendingOutreachReplies being KV-only.
@@ -100,12 +128,15 @@ async function collectRequest(errors) {
     }
 
     const detailsById = new Map();
-    const mailbox = outreachMailbox(process.env);
+    // A seeding pass posts nothing, so reading threads for text that will be
+    // discarded is pure waste — and on day one `fresh` is the entire history
+    // of repliers, so this is the single most expensive tick there will ever be.
+    const mailbox = seeding ? null : mailboxFor(process.env);
     if (mailbox) {
-      for (const item of fresh.slice(0, TEXT_LOOKUP_CAP)) {
+      for (const item of fresh.slice(0, textLookupCap)) {
         if (!item.threadId) continue;
         try {
-          const thread = await getThread(mailbox, item.threadId);
+          const thread = await threadFor(mailbox, item.threadId);
           const messages = intentMessagesFromThread(inboundMessagesAfter(thread, mailbox, 0));
           const newest = messages.reduce(
             (best, row) => (Date.parse(row?.at || 0) >= Date.parse(best?.at || 0) ? row : best),
@@ -126,31 +157,31 @@ async function collectSequence(errors) {
   try {
     // Scoping is mandatory: the inbox is CROSS-sequence, so without the
     // curated-list ids this would spray unrelated campaigns into the channel.
-    const sequenceIds = curatedListSequenceIds();
-    if (!sequenceIds?.length) {
+    const ids = sequenceIds();
+    if (!ids?.length) {
       errors.push("sequence: no curated-list sequence ids configured, stream skipped");
       return [];
     }
     // The 90s inbox cache is far shorter than this cron's interval, so a cached
     // read would essentially always miss. Build the feed and accept a partial
     // one: some replies beat none.
-    const feed = await buildInboxFeed();
+    const feed = await buildFeed();
     if (feed?.partial) {
       errors.push("sequence: inbox feed was partial, some campaigns did not respond");
     }
-    return buildSequenceEvents({ rows: feed?.replies || [], sequenceIds });
+    return buildSequenceEvents({ rows: feed?.replies || [], sequenceIds: ids });
   } catch (error) {
     errors.push(`sequence: ${error?.message || error}`);
     return [];
   }
 }
 
-export default async function handler(req, res) {
-  if (cors(req, res)) return;
-  const cron = cronAuth(req);
-  if (!cron.ok && !(await requireAuth(req, res))) return;
+return async function handler(req, res) {
+  if (corsHandler(req, res)) return;
+  const cron = cronAuthHandler(req);
+  if (!cron.ok && !(await authHandler(req, res))) return;
 
-  if (!submissionNotifyConfigured()) {
+  if (!configured()) {
     return res.status(200).json({
       ok: false,
       error: "not_configured",
@@ -158,17 +189,11 @@ export default async function handler(req, res) {
     });
   }
 
-  const errors = [];
-  const [interest, request, sequence] = await Promise.all([
-    collectInterest(errors),
-    collectRequest(errors),
-    collectSequence(errors),
-  ]);
-  const events = [...interest, ...request, ...sequence];
-
+  // Establish seeding FIRST: it decides whether the expensive Gmail lookups are
+  // worth doing at all, and a failed check should cost no upstream reads.
   let seeding = false;
   try {
-    seeding = !(await isSeeded({ kvGet }));
+    seeding = !(await seededCheck({ kvGet }));
   } catch (error) {
     // If we cannot tell whether this is the first run, do NOT assume it is
     // seeded: posting the whole backlog is the one outcome that would teach
@@ -176,11 +201,19 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: false, error: `seed check failed: ${error?.message || error}` });
   }
 
-  const result = await dispatchEvents({
+  const errors = [];
+  const [interest, request, sequence] = await Promise.all([
+    collectInterest(errors),
+    collectRequest(errors, seeding),
+    collectSequence(errors),
+  ]);
+  const events = [...interest, ...request, ...sequence];
+
+  const result = await dispatch({
     events,
     kvGet,
     kvSet,
-    postMessage: (text) => postSubmissionNotification(text),
+    postMessage,
     seeding,
   });
 
@@ -192,7 +225,7 @@ export default async function handler(req, res) {
   // the next tick simply seeds again, silently.
   if (seeding && !errors.length) {
     try {
-      await markSeeded({ kvSet });
+      await seededMark({ kvSet });
     } catch (error) {
       // Not marking means the next run seeds again: quiet and harmless, and far
       // better than posting the backlog.
@@ -203,7 +236,7 @@ export default async function handler(req, res) {
   // A stream failing every tick is otherwise invisible — the channel just looks
   // quiet, which is exactly the failure this build exists to prevent.
   if (errors.length && cron.ok) {
-    await notifySlack(
+    await alert(
       `:warning: Paraform submission notifications ran with ${errors.length} stream error(s): ${errors.join("; ")}`,
     ).catch(() => {});
   }
@@ -215,4 +248,8 @@ export default async function handler(req, res) {
     ...result,
     errors: [...result.errors, ...errors],
   });
+};
 }
+
+// Production wiring: real io, unchanged behaviour.
+export default createSubmissionNotifyHandler();
