@@ -184,7 +184,13 @@ export default async function handler(req, res) {
     seeding,
   });
 
-  if (seeding) {
+  // Only a CLEAN seeding pass may mark the lane seeded. If a collector failed
+  // during seeding, that stream contributed no events, so none of its history
+  // got marked as seen — marking seeded anyway would make its entire backlog
+  // look brand new on the very next tick and flood the channel, which is the
+  // exact outcome seeding exists to prevent. Staying unseeded costs nothing:
+  // the next tick simply seeds again, silently.
+  if (seeding && !errors.length) {
     try {
       await markSeeded({ kvSet });
     } catch (error) {
