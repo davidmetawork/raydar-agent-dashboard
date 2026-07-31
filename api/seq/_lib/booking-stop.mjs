@@ -1013,6 +1013,16 @@ export async function runBookingSweep({
   const startedAt = Date.now();
   const deadline = startedAt + budgetMs;
   const overBudget = () => Date.now() >= deadline;
+  // Per-leg wall clock. Measured 2026-07-31: a pass spends its ENTIRE 210s
+  // budget and reads only 106 of a planned 150 profiles, so the profile budget
+  // is not the constraint — time is. Which leg eats it was still guesswork, and
+  // guessing is how a previous tune got shipped for nothing. These numbers make
+  // the next decision factual.
+  const legMs = {};
+  const timeLeg = async (name, fn) => {
+    const t0 = Date.now();
+    try { return await fn(); } finally { legMs[name] = (legMs[name] || 0) + (Date.now() - t0); }
+  };
   const result = {
     ok: false,
     apply,
@@ -1069,10 +1079,11 @@ export async function runBookingSweep({
     result.budgetExceededIn = leg;
     result.error = "budget_exceeded";
     result.durationMs = Date.now() - startedAt;
+    result.legMs = legMs;
     return result;
   };
 
-  const cal = await calendlyIndexLoader({ now, backDays: calendlyBackDays });
+  const cal = await timeLeg("calendly", () => calendlyIndexLoader({ now, backDays: calendlyBackDays }));
   result.calendlyEvents = cal.events;
   result.calendlyCacheHits = cal.cacheHits;
   result.calendlyTruncated = cal.truncated;
@@ -1098,7 +1109,7 @@ export async function runBookingSweep({
     }
   }
 
-  const scope = await sequenceScopeLoader({ deadline });
+  const scope = await timeLeg("scope", () => sequenceScopeLoader({ deadline }));
   if (
     scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
     || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
@@ -1151,7 +1162,7 @@ export async function runBookingSweep({
     }
   };
   // Membership is the burstiest leg (overlapping windows, ~8 calls a sequence).
-  await Promise.all(Array.from({ length: Number(process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2) }, memWorker));
+  await timeLeg("membership", () => Promise.all(Array.from({ length: Number(process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2) }, memWorker)));
   // Membership short of the full scope means `active` is short too, so neither
   // the decisions nor the published index would be trustworthy. Stop here.
   if (membershipCutShort) return stopForBudget("membership");
@@ -1257,7 +1268,7 @@ export async function runBookingSweep({
       if (d) result.decisions.push(d);
     }
   };
-  await Promise.all(Array.from({ length: profileConcurrency }, profWorker));
+  await timeLeg("profiles", () => Promise.all(Array.from({ length: profileConcurrency }, profWorker)));
 
   // ROTOR ADVANCE, AFTER the fact and by what was ACTUALLY read. Advancing by
   // pending.length before the loop meant a leg cut short by the clock skipped
@@ -1275,7 +1286,7 @@ export async function runBookingSweep({
 
   // Apply
   if (apply && result.decisions.length) {
-    const applied = await decisionApplier(result.decisions);
+    const applied = await timeLeg("apply", () => decisionApplier(result.decisions));
     result.paused = applied.paused;
     result.pausedCcuIds = applied.pausedCcuIds;
     result.pauseErrors.push(...applied.pauseErrors);
@@ -1313,6 +1324,7 @@ export async function runBookingSweep({
   }
   else if (result.pauseErrors.length) result.error = "pause_incomplete";
   result.durationMs = Date.now() - startedAt;
+  result.legMs = legMs;
   return result;
 }
 
@@ -1569,6 +1581,7 @@ export async function sweepStaleness(now = Date.now()) {
     profileCutShort: Boolean(last.profileCutShort),
     profileCoverage: last.profileCoverage ?? null,
     profileRotorOf: last.profileRotorOf ?? null,
+    legMs: last.legMs ?? null,
     calendlyComplete: last.calendlyComplete === true,
     raydarEnabled: Boolean(last.raydarEnabled),
     raydarComplete: Boolean(last.raydarComplete),
@@ -1680,6 +1693,7 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     profileCutShort: Boolean(result.profileCutShort),
     profileCoverage: result.profileCoverage ?? null,
     profileRotorOf: result.profileRotorOf ?? null,
+    legMs: result.legMs ?? null,
     calendlyComplete: true,
     raydarEnabled: Boolean(result.raydarEnabled),
     raydarComplete: Boolean(result.raydarComplete),

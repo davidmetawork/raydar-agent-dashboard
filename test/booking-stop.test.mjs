@@ -903,6 +903,47 @@ test("a profile leg cut short does not skip unread leads past the rotor", async 
   } finally { globalThis.fetch = realFetch; }
 });
 
+test("a pass reports where its time actually went", async () => {
+  // 106 of a planned 150 profiles read inside a fully-spent 210s budget said
+  // time was the constraint, but not WHICH leg spent it. Tuning without that
+  // is guessing, and a previous guess shipped a change that achieved nothing.
+  const options = completeSingleLeadSweepOptions(async () => {
+    await new Promise((r) => setTimeout(r, 40));
+    return { index: new Map(), events: 0, cacheHits: 0, truncated: false };
+  });
+  const result = await runBookingSweep(options);
+  assert.ok(result.legMs, "every pass must report per-leg timing");
+  assert.ok(result.legMs.calendly >= 30, `calendly leg should be measured, got ${result.legMs.calendly}`);
+  assert.ok("membership" in result.legMs, "membership leg must be measured");
+  assert.ok(
+    Object.values(result.legMs).reduce((a, b) => a + b, 0) <= result.durationMs + 50,
+    "leg total must not exceed the pass duration",
+  );
+});
+
+test("a pass that runs out of budget still reports where the time went", async () => {
+  // This is exactly when the numbers matter most, and an early return is the
+  // easiest place to drop them.
+  const options = completeSingleLeadSweepOptions(idleCalendly);
+  options.budgetMs = 30;
+  options.membershipLoader = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return { complete: true, unique: 0, totalCount: 0, shortfall: 0, apiCalls: 1, leads: [] };
+  };
+  options.sequenceScopeLoader = async () => ({
+    schema: "raydar-booking-stop-scope-v2",
+    scopeDigest: "c".repeat(64),
+    catalogFloor: 1,
+    sequences: [{ id: "a", name: "A", enabled: true }, { id: "b", name: "B", enabled: true }, { id: "c", name: "C", enabled: true }],
+    catalogSequences: 3, scannedSequences: 3, linkSequences: 3,
+    enabledLinkSequences: 3, coveredEnabledLinkSequences: 3, complete: true,
+  });
+  const result = await runBookingSweep(options);
+  assert.equal(result.error, "budget_exceeded");
+  assert.ok(result.legMs, "a budget-exceeded pass must still report leg timing");
+  assert.ok(result.legMs.membership >= 50, `the leg that overran must be visible, got ${result.legMs.membership}`);
+});
+
 test("the catalog floor leaves room for a legitimate archive", async () => {
   // It was 75 while Paraform reported exactly 75, so archiving ONE sequence
   // would have thrown BOOKING_STOP_SEQUENCE_CATALOG_INVALID on every pass
