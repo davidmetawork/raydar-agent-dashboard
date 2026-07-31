@@ -35,6 +35,7 @@ import { cors, requireAuth, notifySlack } from "./_lib/core.mjs";
 // cronAuth is the project's single implementation of the Vercel-cron bearer
 // check; duplicating it here would be a second copy of a security check.
 import { cronAuth } from "../seq/_lib/core.mjs";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { kv } from "./_lib/store.mjs";
 import { curatedListSequenceIds, listCuratedListCandidates } from "./_lib/interest.mjs";
 import { listInterestHandoffRecords } from "./_lib/interest-store.mjs";
@@ -52,6 +53,25 @@ import {
   postSubmissionNotification,
   submissionNotifyConfigured,
 } from "./_lib/submission-notify-slack.mjs";
+
+/**
+ * The runner key, accepted alongside Vercel cron and a Google session.
+ *
+ * Without this the tick is UNOBSERVABLE: it cannot be invoked by hand, and a
+ * cron that silently returns nothing is indistinguishable from a cron that
+ * never fired. That ambiguity cost hours on 2026-07-31. Every other Para AI
+ * endpoint (worker, interest) already trusts this credential, so accepting it
+ * here removes an inconsistency rather than widening the trust boundary.
+ */
+export function runnerAuthorized(req, env = process.env) {
+  const secret = env.PARAAI_AUTOMATION_RUNNER_KEY || "";
+  if (!secret) return false;
+  const token = String(req?.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!token) return false;
+  const a = createHash("sha256").update(token).digest();
+  const b = createHash("sha256").update(secret).digest();
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 // The inbox build alone budgets 80s; give the whole tick headroom above that.
 export const config = { maxDuration: 300 };
@@ -74,6 +94,7 @@ export function createSubmissionNotifyHandler({
   corsHandler = cors,
   authHandler = requireAuth,
   cronAuthHandler = cronAuth,
+  runnerAuth = runnerAuthorized,
   configured = submissionNotifyConfigured,
   kvGet = defaultKvGet,
   kvSet = defaultKvSet,
@@ -179,7 +200,8 @@ async function collectSequence(errors) {
 return async function handler(req, res) {
   if (corsHandler(req, res)) return;
   const cron = cronAuthHandler(req);
-  if (!cron.ok && !(await authHandler(req, res))) return;
+  const runner = runnerAuth(req);
+  if (!cron.ok && !runner && !(await authHandler(req, res))) return;
 
   if (!configured()) {
     return res.status(200).json({

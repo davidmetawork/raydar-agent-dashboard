@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createSubmissionNotifyHandler } from "../api/paraai/submission-notify.mjs";
+import { createSubmissionNotifyHandler, runnerAuthorized } from "../api/paraai/submission-notify.mjs";
 
 function res() {
   const out = { code: null, body: null, headers: {} };
@@ -35,7 +35,7 @@ function harness(over = {}) {
   // injected functions close over, never the deps object itself.
   const cfg = {
     handoffs: [], candidates: [], states: [], replies: [], partial: false,
-    slackUp: true, configured: true, authOk: true, cronOk: true,
+    slackUp: true, configured: true, authOk: true, cronOk: true, runnerOk: false,
     handoffsThrows: null, statesThrows: null, feedThrows: null,
     ...over,
   };
@@ -43,6 +43,7 @@ function harness(over = {}) {
     corsHandler: () => false,
     authHandler: async () => cfg.authOk,
     cronAuthHandler: () => ({ ok: cfg.cronOk }),
+    runnerAuth: () => cfg.runnerOk,
     configured: () => cfg.configured,
     kvGet: async (k) => store.get(k) ?? null,
     kvSet: async (k, v) => { store.set(k, v); },
@@ -237,4 +238,30 @@ test("a partial inbox feed is reported but its replies still notify", async () =
   const out = await run(h);
   assert.equal(out.body.posted, 1, "some replies beat none");
   assert.match(out.body.errors.join(" "), /partial/);
+});
+
+/* ─────────────────────────────────────────────────────────── the runner key */
+
+test("the runner key is accepted, so the tick is observable by hand", async () => {
+  // Without this the tick cannot be invoked, and a cron that returns nothing is
+  // indistinguishable from a cron that never fired.
+  const h = harness({ authOk: false, cronOk: false, runnerOk: true, handoffs: [handoff()] });
+  const out = await run(h);
+  assert.equal(out.body.seeding, true, "it ran rather than 401ing");
+});
+
+test("a wrong or absent runner key still cannot run the tick", async () => {
+  const h = harness({ authOk: false, cronOk: false, runnerOk: false, handoffs: [handoff()] });
+  await run(h);
+  assert.equal(h.store.size, 0, "no work, no writes");
+});
+
+test("runnerAuthorized compares the real secret, not a prefix", async () => {
+  const env = { PARAAI_AUTOMATION_RUNNER_KEY: "s3cret-value" };
+  const mk = (t) => ({ headers: { authorization: `Bearer ${t}` } });
+  assert.equal(runnerAuthorized(mk("s3cret-value"), env), true);
+  assert.equal(runnerAuthorized(mk("s3cret"), env), false, "a prefix must not pass");
+  assert.equal(runnerAuthorized(mk("s3cret-value-extra"), env), false);
+  assert.equal(runnerAuthorized({ headers: {} }, env), false);
+  assert.equal(runnerAuthorized(mk("anything"), {}), false, "no secret configured = closed");
 });
