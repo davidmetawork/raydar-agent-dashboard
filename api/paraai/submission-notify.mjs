@@ -105,7 +105,9 @@ export function createSubmissionNotifyHandler({
   buildFeed = buildInboxFeed,
   mailboxFor = outreachMailbox,
   threadFor = getThread,
-  postMessage = (text) => postSubmissionNotification(text),
+  // null by default so the handler can wrap the sender with an onError that
+  // captures Slack's refusal reason; tests inject their own.
+  postMessage = null,
   alert = notifySlack,
   dispatch = dispatchEvents,
   seededCheck = isSeeded,
