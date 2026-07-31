@@ -83,3 +83,27 @@ test("an unparseable Slack response is treated as a failure, not a success", asy
   });
   assert.equal(result, false);
 });
+
+test("Slack's refusal reason reaches the caller, not just a bare false", async () => {
+  // "post returned false" is indistinguishable from a missing channel or a
+  // cron that never ran. The reason must escape.
+  const seen = [];
+  const ok = await postSubmissionNotification("hi", {
+    env: ENV,
+    onError: (r) => seen.push(r),
+    fetchImpl: async () => ({ status: 200, json: async () => ({ ok: false, error: "not_in_channel" }) }),
+  });
+  assert.equal(ok, false);
+  assert.deepEqual(seen, ["not_in_channel"]);
+});
+
+test("misconfiguration and transport failures name themselves too", async () => {
+  const seen = [];
+  await postSubmissionNotification("hi", { env: {}, onError: (r) => seen.push(r) });
+  await postSubmissionNotification("hi", {
+    env: ENV, onError: (r) => seen.push(r),
+    fetchImpl: async () => { throw new Error("network down"); },
+  });
+  assert.equal(seen[0], "missing_token");
+  assert.match(seen[1], /transport: network down/);
+});

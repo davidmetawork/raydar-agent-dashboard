@@ -26,15 +26,23 @@ export function submissionNotifyConfigured(env = process.env) {
 
 /**
  * @returns {Promise<boolean>} true only when Slack confirmed the post.
+ *
+ * `onError` receives Slack's own reason (`not_in_channel`, `channel_not_found`,
+ * `invalid_auth`, …). A bare false is uninformative and cost hours once: a
+ * refused post and a missing channel look identical from the outside, so the
+ * reason must reach the caller even though the boolean is what gates retry.
  */
 export async function postSubmissionNotification(
   text,
-  { env = process.env, fetchImpl = fetch } = {},
+  { env = process.env, fetchImpl = fetch, onError = null } = {},
 ) {
   const token = String(env.SLACK_BOT_TOKEN || "").trim();
   const channel = submissionChannelId(env);
   const body = String(text || "").trim();
-  if (!token || !channel || !body) return false;
+  if (!token || !channel || !body) {
+    if (onError) onError(!token ? "missing_token" : !channel ? "missing_channel" : "empty_text");
+    return false;
+  }
 
   let response;
   try {
@@ -46,10 +54,14 @@ export async function postSubmissionNotification(
       body: JSON.stringify({ channel, text: body, unfurl_links: false, unfurl_media: false }),
       signal: AbortSignal.timeout(10_000),
     });
-  } catch {
+  } catch (error) {
+    if (onError) onError(`transport: ${error?.message || error}`);
     return false; // transport failure: unmarked, retried next run
   }
 
   const payload = await response.json().catch(() => null);
+  if (!payload?.ok && onError) {
+    onError(String(payload?.error || `http_${response.status}`));
+  }
   return Boolean(payload?.ok);
 }

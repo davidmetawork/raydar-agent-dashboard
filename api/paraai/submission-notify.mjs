@@ -224,6 +224,11 @@ return async function handler(req, res) {
   }
 
   const errors = [];
+  // Surface Slack's own refusal reason; "post returned false" alone is useless.
+  const send = postMessage
+    || ((text) => postSubmissionNotification(text, {
+      onError: (reason) => { if (!errors.includes(`slack: ${reason}`)) errors.push(`slack: ${reason}`); },
+    }));
   const [interest, request, sequence] = await Promise.all([
     collectInterest(errors),
     collectRequest(errors, seeding),
@@ -235,7 +240,7 @@ return async function handler(req, res) {
     events,
     kvGet,
     kvSet,
-    postMessage,
+    postMessage: send,
     seeding,
   });
 
