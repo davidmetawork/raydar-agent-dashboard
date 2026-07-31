@@ -10,6 +10,7 @@ import { createHmac } from "node:crypto";
 import { verifyCalendlyWebhook, parseSignatureHeader, calendlyWebhookEvent } from "../api/seq/_lib/calendly-webhook.mjs";
 import { handleCalendlyWebhook } from "../api/seq/calendly-hook.mjs";
 import {
+  BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   campaignHasCandidateSchedulingLink,
   calendlyBookingIndex,
   DEFAULT_SEQ_KEYS,
@@ -900,6 +901,39 @@ test("a profile leg cut short does not skip unread leads past the rotor", async 
       "an unread lead must not be counted as covered — that is how a tail goes blind",
     );
   } finally { globalThis.fetch = realFetch; }
+});
+
+test("the catalog floor leaves room for a legitimate archive", async () => {
+  // It was 75 while Paraform reported exactly 75, so archiving ONE sequence
+  // would have thrown BOOKING_STOP_SEQUENCE_CATALOG_INVALID on every pass
+  // forever. The gate exists to catch a SHORT read, not to pin the count.
+  assert.ok(
+    BOOKING_STOP_REVIEWED_CATALOG_FLOOR <= 60,
+    "floor must keep margin below the live catalog count",
+  );
+  const catalog = (n) => Array.from({ length: n }, (_, i) => ({ id: `c${i}`, enabled: true }));
+  const readCampaign = async () => ({ steps: [] });
+
+  // A legitimately smaller catalog still passes.
+  const ok = await discoverBookingStopSequences({
+    listSequences: async () => catalog(BOOKING_STOP_REVIEWED_CATALOG_FLOOR),
+    readCampaign,
+  });
+  assert.equal(ok.complete, true);
+  assert.equal(ok.catalogSequences, BOOKING_STOP_REVIEWED_CATALOG_FLOOR);
+
+  // A short/truncated read still fails closed.
+  await assert.rejects(
+    () => discoverBookingStopSequences({
+      listSequences: async () => catalog(BOOKING_STOP_REVIEWED_CATALOG_FLOOR - 1),
+      readCampaign,
+    }),
+    (e) => e.code === "BOOKING_STOP_SEQUENCE_CATALOG_INVALID",
+  );
+  await assert.rejects(
+    () => discoverBookingStopSequences({ listSequences: async () => [], readCampaign }),
+    (e) => e.code === "BOOKING_STOP_SEQUENCE_CATALOG_INVALID",
+  );
 });
 
 test("health is told WHICH stage ran out of budget, not just that one did", async () => {

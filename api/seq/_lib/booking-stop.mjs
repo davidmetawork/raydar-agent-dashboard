@@ -55,7 +55,21 @@ export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
 export const BOOKING_STOP_SCOPE_SCHEMA = "raydar-booking-stop-scope-v2";
 export const BOOKING_STOP_LEAD_INDEX_SCHEMA = "raydar-booking-lead-index-v2";
 export const BOOKING_STOP_ATTEMPT_SCHEMA = "raydar-booking-stop-attempt-v2";
-export const BOOKING_STOP_REVIEWED_CATALOG_FLOOR = 75;
+// Guards against a catalog read that comes back SHORT — an empty or truncated
+// list would otherwise sail through as "no sequences have scheduling links" and
+// quietly protect nobody. It is NOT a check that the count is exactly right.
+//
+// It was 75 while Paraform reported exactly 75 sequences, i.e. zero margin:
+// archiving a single sequence would have thrown BOOKING_STOP_SEQUENCE_CATALOG_
+// INVALID on every pass, forever, for a completely legitimate change. That is a
+// design-contract check wearing a safety gate's clothing, and this repo has
+// paid for that confusion before.
+//
+// 60 keeps the gate meaningful — a truncated read realistically returns 0 or a
+// page boundary, nowhere near 60 — while tolerating ~20% legitimate shrinkage.
+// DO NOT ratchet this back up to the live sequence count. If you are tempted,
+// what you actually want is an alert on a large drop, not a hard failure.
+export const BOOKING_STOP_REVIEWED_CATALOG_FLOOR = 60;
 
 export function bookingStopScopeDigest(entries, {
   catalogFloor = BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
@@ -659,6 +673,22 @@ const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 // 6h cache meant their booking could sit unnoticed for 6h behind a stale
 // "CONTACTED". Observed live: two candidates booked at 09:34 and 09:49 were
 // still unpaused at 13:30 for exactly this reason.
+//
+// 1800s is SHORTER than the hourly sweep interval, so the sweep never gets a
+// cache hit and this looks like a misconfiguration. It is not, and it was
+// investigated on 2026-07-31 and deliberately left alone. Two reasons:
+//   1. this cache is also the profileLoader for bookedSetWithSources, which
+//      enroll/preview/release call on USER-FACING paths. Thirty-minute
+//      freshness is load-bearing there — enrolling someone who booked an hour
+//      ago into a "please book a call" sequence is a real observed failure.
+//   2. for the sweep, TTL is dominated by the rotor anyway. With the current
+//      population the rotor revisits a given lead roughly every
+//      ceil(candidates / BOOKING_STOP_PROFILE_BUDGET) passes, so by the time a
+//      lead comes round again any plausible TTL has long expired. Lengthening
+//      the TTL would therefore buy the sweep almost nothing while costing the
+//      enrol gate real freshness.
+// If profile load ever needs cutting, the lever is the BUDGET (and the rotor
+// cycle it implies), not this TTL.
 const PROFILE_TTL_SECONDS = Number(process.env.BOOKING_STOP_PROFILE_TTL_S || 1800);
 
 export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null, deadline = null } = {}) {
@@ -1535,6 +1565,10 @@ export async function sweepStaleness(now = Date.now()) {
     lastAt: last.at,
     ageMs,
     activeLeads: last.activeLeads ?? null,
+    durationMs: last.durationMs ?? null,
+    profileCutShort: Boolean(last.profileCutShort),
+    profileCoverage: last.profileCoverage ?? null,
+    profileRotorOf: last.profileRotorOf ?? null,
     calendlyComplete: last.calendlyComplete === true,
     raydarEnabled: Boolean(last.raydarEnabled),
     raydarComplete: Boolean(last.raydarComplete),
@@ -1639,6 +1673,13 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     activeLeads: result.activeLeads,
     paused: result.paused,
     durationMs: result.durationMs,
+    // Coverage telemetry. Without these, tuning BOOKING_STOP_PROFILE_BUDGET is
+    // guesswork: you cannot tell a pass that finished its profile leg with room
+    // to spare from one that only just squeaked in, and the budget directly
+    // sets how many passes the rotor needs to reach every lead.
+    profileCutShort: Boolean(result.profileCutShort),
+    profileCoverage: result.profileCoverage ?? null,
+    profileRotorOf: result.profileRotorOf ?? null,
     calendlyComplete: true,
     raydarEnabled: Boolean(result.raydarEnabled),
     raydarComplete: Boolean(result.raydarComplete),

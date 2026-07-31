@@ -75,6 +75,14 @@ export default async function handler(req, res) {
       ageMinutes: s.ageMs == null ? null : Math.round(s.ageMs / 60000),
       stale: s.stale,
       activeLeadsLastPass: s.activeLeads ?? null,
+      // Enough to tune BOOKING_STOP_PROFILE_BUDGET from outside the auth path.
+      // durationMs against the budget shows headroom; profileCutShort says the
+      // clock stopped the leg; coverage/rotor say how many passes the rotor
+      // needs to reach every lead. Counts only, no candidate data.
+      lastPassDurationMs: s.durationMs ?? null,
+      profileCutShort: s.profileCutShort ?? null,
+      profileCoverage: s.profileCoverage ?? null,
+      profileRotorOf: s.profileRotorOf ?? null,
       raydarScheduler: {
         enabled: raydarSchedulerBookingStopEnabled(),
         applyEnabled: process.env.BOOKING_STOP_APPLY !== "0",
