@@ -1726,7 +1726,15 @@ export function expiryEscalationCopy(request, code, { rung, hoursLeft }) {
   const role = clean(request?.roleName) || "Unknown role";
   const company = clean(request?.companyName) || "Unknown company";
   const hours = Math.max(1, Math.round(hoursLeft));
-  return `⏳ Para AI outreach DEADLINE: ${candidate} has still not been emailed about ${role} @ ${company}, and the hiring manager's request expires in ~${hours}h (Paraform kills it ${SUBMISSION_REQUEST_EXPIRY_DAYS} days after the request). Blocked by ${clean(code) || "an exception"}. After expiry the match is dead and it counts toward the three expired matches that pause new Para AI matches.${rung <= 12 ? " This is the last warning." : ""}`;
+  // A deadline warning can now be raised by the tick-end sweep for a request
+  // that has no exception at all, so "Blocked by an exception" is no longer a
+  // safe default — saying it would send David hunting for a ledger entry that
+  // does not exist. No code means nothing has reported a reason, which is
+  // itself the more alarming case and must read that way.
+  const why = clean(code)
+    ? `Blocked by ${clean(code)}.`
+    : "NOTHING has reported a reason for this one, so it is not in the exception ledger — check the request on Paraform directly.";
+  return `⏳ Para AI outreach DEADLINE: ${candidate} has still not been emailed about ${role} @ ${company}, and the hiring manager's request expires in ~${hours}h (Paraform kills it ${SUBMISSION_REQUEST_EXPIRY_DAYS} days after the request). ${why} After expiry the match is dead and it counts toward the three expired matches that pause new Para AI matches.${rung <= 12 ? " This is the last warning." : ""}`;
 }
 
 export function expiredUnsentCopy(request) {
@@ -1797,6 +1805,65 @@ export async function sweepStaleOutreachExceptions({
   return { expiredUnsent, closed };
 }
 
+// INCIDENT 2026-07-31. The deadline ladder was unreachable for exactly the
+// requests that needed it. All three escalateNearExpiry call sites live inside
+// handleOutreachFailure, which only runs when a request is PROCESSED — so any
+// request held out of the eligible set (an off-market hold, a role decline, an
+// uncertain send, or a system-held code) escalated once at most, on the tick its
+// failure was first raised, and then went silent until the post-mortem after
+// Paraform expired it. The 12h "last warning" could never fire for a request
+// parked on day one.
+//
+// This sweep closes that by keying on the REQUEST rather than on the exception.
+// That is the stronger invariant and it deliberately covers a case nobody has
+// diagnosed yet: a pending, un-emailed request with NO exception at all is
+// warned about too, where the exception-driven ladder could not have seen it.
+//
+// Alerting is unchanged in volume: escalateNearExpiry claims one alert per
+// (request, rung) with a 30-day TTL, so a request that also fails during the
+// tick cannot produce two lines for the same rung.
+export async function sweepExpiryEscalations({
+  history = [],
+  states = [],
+  exceptions = [],
+  sentThisTick = [],
+  now = Date.now(),
+  escalateImpl = escalateNearExpiry,
+} = {}) {
+  // `states` and `history` are both read at the START of the tick, so a request
+  // this tick has just delivered still looks un-emailed in them. Warning about
+  // one would be a straight falsehood, and the shape is real: a request blocked
+  // for six days and finally sent has hours left on its clock when it lands.
+  const delivered = new Set(sentThisTick || []);
+  for (const state of states || []) {
+    for (const [requestId, record] of Object.entries(state?.matches || {})) {
+      if (record?.sentAt) delivered.add(requestId);
+    }
+  }
+  const codeByRequest = new Map();
+  for (const row of exceptions || []) {
+    const requestId = clean(row?.requestId);
+    if (row?.status === "open" && requestId) codeByRequest.set(requestId, clean(row?.code));
+  }
+  const escalated = [];
+  for (const request of history || []) {
+    const requestId = clean(request?.id);
+    if (!requestId) continue;
+    if (!REQUEST_STATUSES.has(lower(request?.status))) continue;
+    // Two independent proofs that the candidate already heard from us. Our own
+    // delivery record is authoritative, but reached-out can also be set by a
+    // hand-sent email, and "has still not been emailed" would be a false alarm
+    // in that case. A deadline alert nobody needs is how alerting gets muted.
+    if (delivered.has(requestId) || request?.reachedOut === true) continue;
+    const result = await escalateImpl(request, codeByRequest.get(requestId) || null, { now })
+      .catch(() => null);
+    if (result?.notified) {
+      escalated.push({ requestId, rung: result.rung, code: codeByRequest.get(requestId) || null });
+    }
+  }
+  return { escalated };
+}
+
 const HELD_ALERT_CODES = new Set([
   "OUTREACH_CANDIDATE_REPLIED",
   "OUTREACH_CANDIDATE_OFF_MARKET",
@@ -1837,7 +1904,7 @@ export function heldAlertCopy(code, request, error = null) {
 // alert answers "something is blocked"; this answers "and it dies in N hours",
 // which is the fact that actually forces a decision. Claimed per rung with a
 // 30-day TTL, so it fires at most once each and never becomes noise.
-async function escalateNearExpiry(request, code, { now = Date.now() } = {}) {
+export async function escalateNearExpiry(request, code, { now = Date.now() } = {}) {
   if (!request?.id) return null;
   const escalation = expiryEscalationRung(request, { now });
   if (!escalation) return null;
@@ -2021,12 +2088,28 @@ export async function runOutreachTick({
       states,
       exceptions,
     }).catch(() => ({ expiredUnsent: [], closed: [] }));
+    // Deadline warnings for everything still pending and un-emailed, including
+    // the held requests the failure path can never reach (2026-07-31 incident).
+    // Deliberately separate from the sweep above and separately guarded: these
+    // two answer different questions, and one failing must not silence the other.
+    const expiry = await sweepExpiryEscalations({
+      history,
+      states,
+      exceptions,
+      // history/states were read before this tick sent anything, so anything
+      // delivered just now has to be excluded explicitly or it gets warned about.
+      sentThisTick: results
+        .filter((result) => result.action === "sent" && result.requestId)
+        .map((result) => result.requestId),
+      now,
+    }).catch(() => ({ escalated: [] }));
     return {
       enabled: true,
       processed: results.filter((result) => result.action === "sent").length,
       results,
       expiredUnsent: sweep.expiredUnsent,
       closedStaleExceptions: sweep.closed,
+      expiryEscalations: expiry.escalated,
     };
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});

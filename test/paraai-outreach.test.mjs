@@ -54,6 +54,7 @@ import {
   expiryEscalationCopy,
   expiryEscalationRung,
   requestExpiresAtMs,
+  sweepExpiryEscalations,
   sweepStaleOutreachExceptions,
   SUBMISSION_REQUEST_EXPIRY_DAYS,
   heldAlertCopy,
@@ -2056,6 +2057,127 @@ test("a declined role is parked for a human and never retried by the tick", () =
     }]),
     [],
   );
+});
+
+// REGRESSION (incident 2026-07-31): every escalateNearExpiry call site lives
+// inside handleOutreachFailure, which only runs when a request is PROCESSED. So
+// a request held out of the eligible set — an off-market hold, a role decline,
+// an uncertain send — escalated at most once, on the tick its failure was first
+// raised, then went silent until the post-mortem after Paraform expired it. The
+// 12h "last warning" could never fire for a request parked on day one. This
+// sweep keys on the REQUEST instead, so being un-processable is no longer a way
+// to be un-warned.
+test("the deadline sweep warns about held requests the failure path never reaches", async () => {
+  const now = Date.parse("2026-07-31T12:00:00.000Z");
+  // Created 2026-07-25, so ~12h from the seven-day expiry: the tightest rung.
+  const request = {
+    id: "req-held",
+    status: "pending",
+    reachedOut: false,
+    candidateName: "Avery Stone",
+    roleName: "Director of Engineering",
+    companyName: "Toku",
+    createdAtMs: Date.parse("2026-07-25T00:00:00.000Z"),
+  };
+  const calls = [];
+  const escalateImpl = async (req, code, opts) => {
+    calls.push({ requestId: req.id, code, now: opts.now });
+    return { rung: 12, hoursLeft: 12, notified: true };
+  };
+  // Parked on a human-held code, so nothing will ever process it again.
+  const result = await sweepExpiryEscalations({
+    history: [request],
+    states: [],
+    exceptions: [{ requestId: "req-held", status: "open", code: "OUTREACH_ROLE_DECLINED" }],
+    now,
+    escalateImpl,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].requestId, "req-held");
+  // The reason travels with the warning so the alert can name what is blocking.
+  assert.equal(calls[0].code, "OUTREACH_ROLE_DECLINED");
+  assert.deepEqual(result.escalated, [{ requestId: "req-held", rung: 12, code: "OUTREACH_ROLE_DECLINED" }]);
+});
+
+test("the deadline sweep covers a stuck request that has no exception at all", async () => {
+  const now = Date.parse("2026-07-31T12:00:00.000Z");
+  const calls = [];
+  const escalateImpl = async (req, code) => {
+    calls.push({ requestId: req.id, code });
+    return { rung: 48, hoursLeft: 40, notified: true };
+  };
+  // The exception-driven ladder could not have seen this one: pending,
+  // un-emailed, and nothing has reported a reason. Keying on the request is what
+  // makes it visible.
+  await sweepExpiryEscalations({
+    history: [{
+      id: "req-silent",
+      status: "pending",
+      reachedOut: false,
+      createdAtMs: Date.parse("2026-07-25T00:00:00.000Z"),
+    }],
+    states: [],
+    exceptions: [],
+    now,
+    escalateImpl,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].code, null, "no exception means no code, not a fabricated one");
+});
+
+test("the deadline sweep never warns about a request that was already emailed", async () => {
+  const now = Date.parse("2026-07-31T12:00:00.000Z");
+  const base = {
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-25T00:00:00.000Z"),
+  };
+  const calls = [];
+  const escalateImpl = async (req) => { calls.push(req.id); return { rung: 12, notified: true }; };
+  await sweepExpiryEscalations({
+    history: [
+      { ...base, id: "req-delivered" },
+      // Paraform's marker set by a hand-sent email: our ledger has no delivery
+      // record, but the candidate HAS heard from us, so "still not been emailed"
+      // would be false. A deadline alert nobody needs is how alerting gets muted.
+      { ...base, id: "req-reached-out", reachedOut: true },
+      // Delivered during THIS tick: history and states were both read before it
+      // landed, so only the explicit hand-off keeps it quiet.
+      { ...base, id: "req-sent-now" },
+      // Not pending any more, so not our problem: the stale-exception sweep owns it.
+      { ...base, id: "req-submitted", status: "submitted" },
+      { ...base, id: "req-expired", status: "expired" },
+    ],
+    states: [{ matches: { "req-delivered": { sentAt: "2026-07-26T00:00:00.000Z" } } }],
+    exceptions: [],
+    sentThisTick: ["req-sent-now"],
+    now,
+    escalateImpl,
+  });
+  assert.deepEqual(calls, [], "not one of these five is an un-emailed pending request");
+});
+
+test("a deadline warning with no exception says so instead of inventing one", () => {
+  const request = {
+    candidateName: "Avery Stone",
+    roleName: "Director of Engineering",
+    companyName: "Toku",
+    createdAtMs: Date.parse("2026-07-24T17:16:00.000Z"),
+  };
+  const rung = { rung: 12, hoursLeft: 8 };
+  const withCode = expiryEscalationCopy(request, "OUTREACH_ROLE_DECLINED", rung);
+  assert.match(withCode, /Blocked by OUTREACH_ROLE_DECLINED/);
+  // The sweep can raise a warning for a request with no ledger entry. Saying
+  // "blocked by an exception" would send David hunting for one that isn't there.
+  const withoutCode = expiryEscalationCopy(request, null, rung);
+  assert.ok(!/Blocked by an exception/.test(withoutCode));
+  assert.match(withoutCode, /NOTHING has reported a reason/);
+  assert.match(withoutCode, /Paraform/);
+  // Both still carry the deadline and the last-warning marker.
+  for (const copy of [withCode, withoutCode]) {
+    assert.match(copy, /expires in ~8h/);
+    assert.match(copy, /This is the last warning/);
+  }
 });
 
 test("the decline alert names the role and says the other roles still send", () => {
