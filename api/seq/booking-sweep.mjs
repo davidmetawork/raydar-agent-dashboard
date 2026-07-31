@@ -156,6 +156,7 @@ export default async function handler(req, res) {
       budgetMs: result.budgetMs,
       budgetExceeded: result.budgetExceeded,
       budgetExceededIn: result.budgetExceededIn,
+      profileCutShort: result.profileCutShort,
       sequences: result.sequences,
       sequenceCatalogCount: result.sequenceCatalogCount,
       sequenceScopeScanned: result.sequenceScopeScanned,

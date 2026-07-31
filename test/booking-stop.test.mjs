@@ -804,10 +804,13 @@ test("a pass that overruns during membership refuses to publish a partial index"
   assert.equal(published, false, "a partial membership must never publish a lead index — the webhook reads it");
 });
 
-test("a pass that overruns during profiles still applies and publishes what it proved", async () => {
+test("a profile leg cut short by the clock is reduced coverage, not a failed pass", async () => {
   // Membership is complete here, so `active` and the index are trustworthy and
   // the leads matched in pass 1 still deserve their pause. Only coverage is
-  // short, and coverage is rotor-bounded and partial by design anyway.
+  // short — and coverage has ALWAYS been partial by design, since profileBudget
+  // is deliberately smaller than the population and such a pass is recorded
+  // green. Failing it only when the clock rather than the count does the
+  // cutting would be an inconsistency, not a safety property.
   const options = completeSingleLeadSweepOptions(async () => ({
     index: new Map([["candidate@example.com", {
       bookedAt: Date.parse("2026-07-29T10:00:00.000Z"),
@@ -850,10 +853,53 @@ test("a pass that overruns during profiles still applies and publishes what it p
   };
 
   const result = await runBookingSweep(options);
-  assert.equal(result.ok, false, "an incomplete pass is never healthy");
-  assert.equal(result.error, "budget_exceeded");
+  assert.equal(result.ok, true, "a short profile leg does not invalidate a complete pass");
+  assert.equal(result.profileCutShort, true, "but it must say so");
+  assert.equal(result.budgetExceeded, false, "and it is not the fatal kind of overrun");
   assert.equal(applied, 1, "a lead proven booked must still be paused");
   assert.equal(published, true, "complete membership may still publish its index");
+  assert.equal(result.profileCoverage, "0/1", "coverage reports what was READ, not what was planned");
+});
+
+test("a profile leg cut short does not skip unread leads past the rotor", async () => {
+  // The rotor used to advance by pending.length BEFORE the loop ran, so a leg
+  // cut short by the clock pushed every unread lead to the back of the queue —
+  // invisible until a full rotation. That is the permanently-blind tail the
+  // rotor was built to prevent, arriving through the timeout instead.
+  const writes = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.includes("upstash") || u.includes("/pipeline") || u.includes("/set")) {
+      writes.push(String(init?.body || u));
+      return new Response(JSON.stringify({ result: "OK" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ result: { data: { json: null } } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const options = completeSingleLeadSweepOptions(idleCalendly);
+    options.budgetMs = 30;
+    options.profileBudget = 50;
+    options.membershipLoader = async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return {
+        complete: true, unique: 3, totalCount: 3, shortfall: 0, apiCalls: 1,
+        leads: ["a", "b", "c"].map((k) => ({
+          ccu_id: `ccu-${k}`, cu_id: `cu-${k}`, name: k,
+          to_use_email: `${k}@example.com`, created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        })),
+      };
+    };
+    const result = await runBookingSweep(options);
+    assert.equal(result.profileCutShort, true);
+    assert.equal(result.profilesAttempted, 0, "the clock stopped it before any read");
+    assert.equal(
+      result.profileCoverage,
+      "0/3",
+      "an unread lead must not be counted as covered — that is how a tail goes blind",
+    );
+  } finally { globalThis.fetch = realFetch; }
 });
 
 test("health is told WHICH stage ran out of budget, not just that one did", async () => {
