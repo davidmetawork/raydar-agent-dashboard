@@ -76,6 +76,13 @@ import {
   verifyPendingDigestUnavailable,
 } from "../api/paraai/_lib/outreach.mjs";
 import {
+  classifyDeclinedRoles,
+  declinableRoles,
+  extractDeclinedRolesWithModel,
+  mergeDeclinedRoles,
+  roleDeclined,
+} from "../api/paraai/_lib/outreach-decline.mjs";
+import {
   claimOutreachExceptionAlert,
   getContactCapability,
   probeOutreachStore,
@@ -1868,6 +1875,207 @@ test("a role-level decline clears a new role; an accepted offer holds it", async
     classifyImpl: async () => { throw new Error("must not classify a bounce"); },
   });
   assert.equal(assessmentBlockCode(bounced), "OUTREACH_EMAIL_BOUNCED");
+});
+
+// ---------------------------------------------------------------------------
+// PER-ROLE DECLINE MEMORY (built 2026-07-31)
+//
+// The intent gate above answers availability and deliberately lets a
+// single-role "no" through. These cover the other half: remembering WHICH role
+// was refused. The incident: a candidate wrote "I'm not interested in Kapwing
+// or Toku" while a Toku request sat pending, and nothing in the lane could hear
+// it.
+// ---------------------------------------------------------------------------
+
+const TOKU = { roleId: "role-toku", roleName: "Director of Engineering", companyName: "Toku" };
+const ROGER = { roleId: "role-roger", roleName: "Staff Engineer", companyName: "Roger Healthcare" };
+
+test("the declinable set spans emailed roles AND merely-pending ones", () => {
+  const state = {
+    candidateUserId: "cand-1",
+    matches: { "req-old": { roleId: ROGER.roleId, roleName: ROGER.roleName, companyName: ROGER.companyName } },
+  };
+  // The pending Toku request was NEVER emailed — it reached the candidate only
+  // through Paraform's digest page. That is exactly the 07-31 shape, and if the
+  // set were built from `matches` alone his decline would be unmatchable.
+  const history = [
+    { candidateUserId: "cand-1", roleId: TOKU.roleId, roleName: TOKU.roleName, companyName: TOKU.companyName },
+    { candidateUserId: "someone-else", roleId: "role-other", roleName: "PM", companyName: "Acme" },
+  ];
+  const roles = declinableRoles(state, history);
+  assert.deepEqual(roles.map((row) => row.roleId).sort(), ["role-roger", "role-toku"]);
+  // Another candidate's roles must never enter this candidate's closed set.
+  assert.ok(!roles.some((row) => row.roleId === "role-other"));
+  // A role in both sources appears once.
+  assert.equal(declinableRoles(state, [
+    { candidateUserId: "cand-1", roleId: ROGER.roleId, roleName: ROGER.roleName, companyName: ROGER.companyName },
+  ]).length, 1);
+});
+
+test("the model can only ever name a role from the closed set", async () => {
+  const roles = [TOKU, ROGER];
+  const answer = (declined) => async () => ({
+    ok: true,
+    json: async () => ({
+      content: [{ type: "tool_use", name: "record_declined_roles", input: { declined, reason: "x" } }],
+    }),
+  });
+  const env = { ANTHROPIC_API_KEY: "test-key" };
+  const first = await extractDeclinedRolesWithModel([{ text: "no to Toku" }], roles, {
+    fetchImpl: answer([1]), env,
+  });
+  assert.deepEqual(first.roleIds, ["role-toku"]);
+  // Out of range, non-numeric, and duplicated answers are DROPPED, not repaired:
+  // a number we cannot map is not evidence of anything.
+  const junk = await extractDeclinedRolesWithModel([{ text: "?" }], roles, {
+    fetchImpl: answer([7, 0, -1, "role-toku", null, 2, 2]), env,
+  });
+  assert.deepEqual(junk.roleIds, ["role-roger"]);
+});
+
+test("decline extraction fails CLOSED: an unreachable model records nothing", async () => {
+  const roles = [TOKU];
+  const messages = [{ text: "not interested in Toku" }];
+  // No API key: never guess from phrases. A wrong decline silently drops a
+  // candidate from a role they wanted, so silence beats a guess.
+  const unconfigured = await classifyDeclinedRoles(messages, roles, { env: {} });
+  assert.deepEqual(unconfigured.roleIds, []);
+  assert.equal(unconfigured.source, "unavailable");
+  // A dead endpoint is the same answer, and it is distinguishable from a real
+  // "nothing was declined" by `source` — the caller must never confuse them.
+  const dead = await classifyDeclinedRoles(messages, roles, {
+    env: { ANTHROPIC_API_KEY: "k" },
+    fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
+    attempts: 1,
+  });
+  assert.deepEqual(dead.roleIds, []);
+  assert.equal(dead.source, "unavailable");
+  // The kill switch stops extraction without touching the model.
+  const off = await classifyDeclinedRoles(messages, roles, {
+    env: { ANTHROPIC_API_KEY: "k", PARAAI_OUTREACH_ROLE_DECLINE_DISABLED: "1" },
+    fetchImpl: async () => { throw new Error("must not call the model"); },
+  });
+  assert.equal(off.source, "disabled");
+});
+
+test("declines latch: first detection wins and nothing is ever un-declined", () => {
+  const roles = [TOKU, ROGER];
+  const first = mergeDeclinedRoles({}, ["role-toku"], {
+    roles, detectedAt: "2026-07-31T03:30:10.000Z", evidenceMessageId: "msg-1",
+  });
+  assert.equal(first["role-toku"].companyName, "Toku");
+  assert.equal(first["role-toku"].declinedAt, "2026-07-31T03:30:10.000Z");
+  // We store the message id, never the candidate's words.
+  assert.equal(first["role-toku"].evidenceMessageId, "msg-1");
+  assert.ok(!JSON.stringify(first).includes("not interested"));
+  // A later re-read cannot move the timestamp and make an old decline look new.
+  const again = mergeDeclinedRoles(first, ["role-toku"], {
+    roles, detectedAt: "2026-08-05T00:00:00.000Z",
+  });
+  assert.equal(again["role-toku"].declinedAt, "2026-07-31T03:30:10.000Z");
+  // Merging a second role keeps the first. There is no removal path here at all.
+  const both = mergeDeclinedRoles(first, ["role-roger"], { roles });
+  assert.deepEqual(Object.keys(both).sort(), ["role-roger", "role-toku"]);
+});
+
+test("a decline is latched even when the candidate is enthusiastically OPEN", async () => {
+  // The exact 07-31 message: a yes and a no in one breath. Availability and
+  // per-role interest must not be able to veto each other.
+  const state = {
+    candidateUserId: "cand-1",
+    threadId: "t1",
+    firstOutboundAt: "1970-01-01T00:00:01.000Z",
+    matches: { "req-1": { roleId: ROGER.roleId, roleName: ROGER.roleName, companyName: ROGER.companyName } },
+  };
+  const assessment = await assessOutreachThread({
+    state,
+    config: { mailbox: "david@raydar.xyz" },
+    history: [{ candidateUserId: "cand-1", ...TOKU }],
+    threadImpl: async () => ({
+      id: "t1",
+      messages: [ourMessage("1000"), inbound(
+        "Yes, I am interested in Roger Healthcare. I'm not interested in Kapwing or Toku.",
+        { at: "2000" },
+      )],
+    }),
+    classifyImpl: async () => ({ verdict: INTENT_OPEN, reason: "still looking", source: "model" }),
+    declineImpl: async (_messages, roles) => {
+      // The closed set must have been widened to include the pending role.
+      assert.ok(roles.some((row) => row.roleId === "role-toku"));
+      return { roleIds: ["role-toku"], source: "model" };
+    },
+  });
+  assert.equal(assessment.verdict, INTENT_OPEN);
+  assert.equal(assessment.hold, null, "an OPEN candidate is not held");
+  assert.equal(assessmentBlockCode(assessment), null, "and no candidate-level block applies");
+  assert.deepEqual(assessment.declined.roleIds, ["role-toku"]);
+
+  const { patch, event } = assessmentPatch(assessment, { requestId: "req-2", state });
+  assert.equal(event, "roles_declined");
+  assert.equal(patch.declinedRoles["role-toku"].companyName, "Toku");
+  // The reply still stops the nudge ladder, as it always did.
+  assert.equal(patch.followup, null);
+
+  // Enforcement is role-scoped: the declined role is blocked, everything else
+  // for this same candidate still sends. That scoping IS the feature.
+  const next = { ...state, ...patch };
+  assert.ok(roleDeclined(next, "role-toku"));
+  assert.equal(roleDeclined(next, "role-roger"), null);
+  assert.equal(roleDeclined(next, "role-unseen"), null);
+
+  // Re-running with the same knowledge must not churn the revision.
+  const { patch: repeat } = assessmentPatch(assessment, { requestId: "req-3", state: next });
+  assert.equal(repeat.declinedRoles, undefined);
+});
+
+test("a declined role is parked for a human and never retried by the tick", () => {
+  const config = { notBeforeMs: Date.parse("2026-07-18T00:00:00.000Z") };
+  const request = {
+    id: "request-declined",
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-31T00:52:15.493Z"),
+  };
+  // A candidate's own decision is never a transient failure: if it re-entered
+  // the queue the tick would re-throw on it every five minutes forever.
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], [{
+      requestId: request.id,
+      status: "open",
+      code: "OUTREACH_ROLE_DECLINED",
+    }]),
+    [],
+  );
+  // ...and the reached-out retry path must not resurrect it either.
+  assert.deepEqual(
+    eligibleNewRequests([{ ...request, reachedOut: true }], config, [], [{
+      requestId: request.id,
+      status: "open",
+      code: "OUTREACH_ROLE_DECLINED",
+      retryable: true,
+    }]),
+    [],
+  );
+});
+
+test("the decline alert names the role and says the other roles still send", () => {
+  const copy = heldAlertCopy(
+    "OUTREACH_ROLE_DECLINED",
+    { candidateName: "Avery Stone", roleName: "Director of Engineering", companyName: "Toku" },
+    { detail: { declinedAt: "2026-07-31T03:30:10.000Z" } },
+  );
+  assert.match(copy, /Director of Engineering @ Toku/);
+  assert.match(copy, /NOT sent/);
+  assert.match(copy, /2026-07-31/);
+  // The scoping is the reassurance David needs: this is one role, not a person.
+  assert.match(copy, /Every other role for them still sends/);
+  // David's next move is on Paraform, so the alert has to say so.
+  assert.match(copy, /dismiss/i);
+  // Never the candidate's own words, same rule as every other held alert. The
+  // copy states the verdict in OUR voice; anything that reads like a quotation
+  // of their message is the thing this guards against.
+  assert.ok(!/not interested in/i.test(copy));
+  assert.ok(!/["“”]/.test(copy));
 });
 
 test("an already-judged conversation is never re-classified", async () => {

@@ -46,6 +46,12 @@ import {
   offMarketHold,
   OFF_MARKET_HOLD_DAYS,
 } from "./outreach-intent.mjs";
+import {
+  classifyDeclinedRoles,
+  declinableRoles,
+  mergeDeclinedRoles,
+  roleDeclined,
+} from "./outreach-decline.mjs";
 import { discoverCandidateContact, probeCalendarAccess } from "./outreach-contact.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import {
@@ -99,6 +105,10 @@ const HUMAN_HELD_EXCEPTION_CODES = new Set([
   "OUTREACH_CANDIDATE_REPLIED",
   "OUTREACH_CANDIDATE_OFF_MARKET",
   "OUTREACH_CANDIDATE_DO_NOT_CONTACT",
+  // The candidate declined this specific role. Their decision, so it never
+  // re-enters the tick on its own — and unlike the codes above it is scoped to
+  // one role, leaving every other role for this candidate free to send.
+  "OUTREACH_ROLE_DECLINED",
 ]);
 // A delivery with an uncertain Gmail outcome must never retry automatically.
 // It stays parked until an operator reconciles the deterministic message ID.
@@ -779,8 +789,10 @@ async function saveUncertainOutbox(state, actionKey, messageId, error) {
 export async function assessOutreachThread({
   state,
   config = outreachConfig(),
+  history = [],
   threadImpl = getThread,
   classifyImpl = classifyInboundIntent,
+  declineImpl = classifyDeclinedRoles,
 } = {}) {
   if (!state?.threadId) return { checked: false };
   const thread = await threadImpl(config.mailbox, state.threadId).catch(() => null);
@@ -799,6 +811,8 @@ export async function assessOutreachThread({
     verdict: null,
     intent: null,
     hold: null,
+    declined: null,
+    declinableRoles: [],
   };
   // An undeliverable address settles the question before intent matters.
   if (bounce || !inbound.length) return result;
@@ -809,9 +823,19 @@ export async function assessOutreachThread({
     result.cached = true;
     return result;
   }
-  const intent = await classifyImpl(intentMessagesFromThread(inbound));
+  const messages = intentMessagesFromThread(inbound);
+  const roles = declinableRoles(state, history);
+  // Availability and per-role interest are two different questions about the same
+  // sentences, so they are judged independently and neither can veto the other:
+  // "yes to Roger Healthcare, no to Toku" is OPEN *and* a decline of Toku.
+  const [intent, declined] = await Promise.all([
+    classifyImpl(messages),
+    declineImpl(messages, roles),
+  ]);
   result.intent = intent;
   result.verdict = intent.verdict;
+  result.declined = declined;
+  result.declinableRoles = roles;
   result.hold = offMarketHold({
     verdict: intent.verdict,
     // Anchor the six months at what the candidate SAID, not at when we read it,
@@ -832,6 +856,7 @@ export function assessmentPatch(assessment, {
   address = null,
   repliedAt = null,
   stoppedReason = null,
+  state = null,
 } = {}) {
   if (!assessment?.checked) return { patch: {}, event: null };
   const patch = {};
@@ -848,6 +873,22 @@ export function assessmentPatch(assessment, {
   if (assessment.newestInboundMs) {
     patch.intentCheckedThrough = assessment.newestInboundMs;
     patch.intentVerdict = assessment.verdict;
+  }
+  // Latched independently of the reply/hold branches below: a candidate who says
+  // "yes to A, no to B" is neither blocked nor silent, and B must still stick.
+  if (assessment.declined?.roleIds?.length) {
+    const merged = mergeDeclinedRoles(state?.declinedRoles, assessment.declined.roleIds, {
+      roles: assessment.declinableRoles || [],
+      detectedAt: new Date(assessment.newestInboundMs || Date.now()).toISOString(),
+      evidenceMessageId: assessment.declined.evidenceMessageId || null,
+      source: assessment.declined.source || "model",
+    });
+    // Only write when something is actually new, so a re-read cannot churn the
+    // revision or re-fire the journal for declines we already knew about.
+    if (Object.keys(merged).length !== Object.keys(state?.declinedRoles || {}).length) {
+      patch.declinedRoles = merged;
+      event = "roles_declined";
+    }
   }
   if (assessment.bounce) {
     patch.bounce = {
@@ -974,6 +1015,16 @@ export async function processMatchRequest(
     }
 
     if (gated) {
+      // Cheapest gate first, and the only one that is role-specific: a decline
+      // we already latched blocks this role before Gmail or a model is touched.
+      const declined = roleDeclined(state, request.roleId);
+      if (declined) {
+        throw blockFor(
+          "OUTREACH_ROLE_DECLINED",
+          "candidate has declined this role; automatic match send is blocked",
+          declined,
+        );
+      }
       const hold = activeOffMarketHold(state);
       if (hold) {
         throw blockFor(
@@ -1016,13 +1067,14 @@ export async function processMatchRequest(
     // never run again to record one. Reading the thread here is what makes the
     // guard real for exactly the people it most needs to protect.
     if (gated && state.threadId) {
-      const assessment = await assessOutreachThread({ state, config });
+      const assessment = await assessOutreachThread({ state, config, history });
       if (assessment.checked) {
         const { patch, event } = assessmentPatch(assessment, {
           requestId: request.id,
           address: state.candidateEmail || contact.email || null,
           repliedAt: state.repliedAt,
           stoppedReason: state.stoppedReason,
+          state,
         });
         if (Object.keys(patch).length) {
           state = await saveOutreachState(
@@ -1033,6 +1085,18 @@ export async function processMatchRequest(
             }),
             state.revision,
           ).catch(() => ({ ...state, ...patch }));
+        }
+        // Re-checked against the state we just latched. The decline that blocks
+        // this send is very often the one we learned in THIS read: the candidate
+        // replies naming a role while its request is still pending, which is
+        // exactly the 07-31 shape. Checking only before the read would send it.
+        const declinedNow = roleDeclined(state, request.roleId);
+        if (declinedNow) {
+          throw blockFor(
+            "OUTREACH_ROLE_DECLINED",
+            "candidate has declined this role; automatic match send is blocked",
+            declinedNow,
+          );
         }
         const blockCode = assessmentBlockCode(assessment);
         if (blockCode) {
@@ -1738,6 +1802,9 @@ const HELD_ALERT_CODES = new Set([
   "OUTREACH_CANDIDATE_OFF_MARKET",
   "OUTREACH_CANDIDATE_DO_NOT_CONTACT",
   "OUTREACH_EMAIL_BOUNCED",
+  // Actionable, so it alerts: the hiring manager's request is still pending and
+  // will sit there until David dismisses it or the seven days run out.
+  "OUTREACH_ROLE_DECLINED",
 ]);
 
 // Slack only carries the verdict and the role, never the candidate's own words.
@@ -1751,6 +1818,10 @@ export function heldAlertCopy(code, request, error = null) {
   }
   if (code === "OUTREACH_CANDIDATE_DO_NOT_CONTACT") {
     return `🛑 Para AI outreach stopped: ${candidate} asked us to stop emailing, so ${match} was NOT sent — and no future role will be until you clear the hold.`;
+  }
+  if (code === "OUTREACH_ROLE_DECLINED") {
+    const when = clean(error?.detail?.declinedAt).slice(0, 10);
+    return `🙅 Para AI outreach held: ${candidate} has already declined ${match}${when ? ` (${when})` : ""}, so it was NOT sent. Every other role for them still sends normally. The hiring manager's request stays pending until you dismiss it on Paraform.`;
   }
   if (code === "OUTREACH_CANDIDATE_OFF_MARKET") {
     const until = clean(error?.detail?.expiresAt).slice(0, 10);
@@ -2023,6 +2094,22 @@ export async function reviewHeldOutreach({
     const state = candidateUserId
       ? await getOutreachState(candidateUserId).catch(() => null)
       : null;
+    // A latched decline outranks the intent verdict and must be checked BEFORE
+    // the no-thread shortcut below. Intent answers "still on the market", and a
+    // candidate who declined one role almost always still is — so without this
+    // the review would report OPEN, releaseHeldOutreach would send, and the
+    // decline memory would be undone by the very tool meant to review it.
+    const latchedDecline = roleDeclined(state, request.roleId);
+    if (latchedDecline) {
+      row.verdict = INTENT_OPEN;
+      row.reason = "candidate declined this specific role";
+      row.source = "role_decline";
+      row.blockedBy = "OUTREACH_ROLE_DECLINED";
+      row.declinedAt = clean(latchedDecline.declinedAt) || null;
+      row.wouldSend = false;
+      rows.push(row);
+      continue;
+    }
     if (!state?.threadId) {
       row.verdict = INTENT_OPEN;
       row.reason = "no candidate conversation on record";
@@ -2033,7 +2120,7 @@ export async function reviewHeldOutreach({
     }
     let assessment;
     try {
-      assessment = await assessImpl({ state, config });
+      assessment = await assessImpl({ state, config, history });
     } catch (error) {
       row.blockedBy = clean(error?.code || "OUTREACH_ASSESS_FAILED");
       rows.push(row);
@@ -2043,6 +2130,13 @@ export async function reviewHeldOutreach({
     row.reason = clean(assessment.intent?.reason) || null;
     row.source = clean(assessment.intent?.source) || (assessment.cached ? "cached" : null);
     row.blockedBy = assessmentBlockCode(assessment);
+    // A decline found in THIS read blocks it too, not just a previously latched
+    // one — the review is often the first thing to read a reply.
+    if (!row.blockedBy && assessment.declined?.roleIds?.includes(clean(request.roleId))) {
+      row.blockedBy = "OUTREACH_ROLE_DECLINED";
+      row.reason = "candidate declined this specific role";
+      row.source = "role_decline";
+    }
     row.wouldSend = !row.blockedBy;
     // Latch what we just learned so the send path agrees with this report.
     const { patch, event } = assessmentPatch(assessment, {
@@ -2050,6 +2144,7 @@ export async function reviewHeldOutreach({
       address: state.candidateEmail || null,
       repliedAt: state.repliedAt,
       stoppedReason: state.stoppedReason,
+      state,
     });
     if (Object.keys(patch).length) {
       await saveOutreachState(
