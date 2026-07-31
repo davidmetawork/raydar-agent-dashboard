@@ -39,8 +39,13 @@ import {
 import {
   calendarCandidateEvidence,
   discoverCandidateContact,
+  eventMentionsLinkedinHandle,
   gmailCandidateEvidence,
+  handleRouteFor,
+  isAbbreviatedName,
+  linkedinCalendarEvidence,
   normalizeContactName,
+  normalizeLinkedinHandle,
   probeCalendarAccess,
   resolveContactEvidence,
 } from "../api/paraai/_lib/outreach-contact.mjs";
@@ -2178,6 +2183,116 @@ test("a deadline warning with no exception says so instead of inventing one", ()
     assert.match(copy, /expires in ~8h/);
     assert.match(copy, /This is the last warning/);
   }
+});
+
+// REGRESSION (incident 2026-07-29, William M.). Paraform sometimes stores an
+// abbreviated display name, and the calendar half of discovery then cannot work:
+// Google's tokenised search returns a DIFFERENT person's event for q="William M."
+// and the loose name filter would accept that stranger. Since corroboration needs
+// both halves, nobody with an abbreviated name and no Paraform email could ever
+// be resolved. Identity now comes from the LinkedIn handle Calendly writes into
+// the booked event, never from a surname guessed off the handle — measured
+// against 140 known full names, such a guess is still wrong ~4% of the time.
+test("an abbreviated name resolves through the LinkedIn handle, not a guessed surname", () => {
+  assert.equal(isAbbreviatedName("William M."), true);
+  assert.equal(isAbbreviatedName("William M"), true);
+  assert.equal(isAbbreviatedName("William Mulder"), false);
+  assert.equal(isAbbreviatedName("Cher"), false);
+
+  assert.equal(normalizeLinkedinHandle("williammulder"), "williammulder");
+  assert.equal(normalizeLinkedinHandle("https://www.linkedin.com/in/william-mulder/"), "william-mulder");
+  assert.equal(normalizeLinkedinHandle("  WilliamMulder "), "williammulder");
+  // Anything we cannot reduce to a bare handle is refused rather than guessed at.
+  assert.equal(normalizeLinkedinHandle("linkedin.com/company/acme"), "");
+  assert.equal(normalizeLinkedinHandle("not a handle"), "");
+  assert.equal(normalizeLinkedinHandle(""), "");
+});
+
+test("the handle route is chosen for abbreviated names only", () => {
+  // The whole point: this is the case the name route cannot serve.
+  assert.equal(handleRouteFor("William M.", "william-mulder"), "william-mulder");
+  assert.equal(handleRouteFor("William M", "https://linkedin.com/in/william-mulder"), "william-mulder");
+  // A full name keeps the name route. Switching it to the handle would silently
+  // lose every candidate whose meeting was booked outside Calendly, because
+  // those events carry no LinkedIn URL and would yield no evidence at all.
+  assert.equal(handleRouteFor("William Mulder", "william-mulder"), "");
+  // No handle, or an unusable one, means no route change and no guessing.
+  assert.equal(handleRouteFor("William M.", ""), "");
+  assert.equal(handleRouteFor("William M.", "linkedin.com/company/acme"), "");
+});
+
+test("handle matching is exact, so a prefix can never pull in a stranger", () => {
+  const event = (description) => ({ description, attendees: [{ email: "w@example.com" }] });
+  assert.equal(
+    eventMentionsLinkedinHandle(event("Booked via Calendly\nLinkedIn: https://linkedin.com/in/william-mulder"), "william-mulder"),
+    true,
+  );
+  // The failure mode that matters: a shorter handle must not match a longer one.
+  assert.equal(eventMentionsLinkedinHandle(event("linkedin.com/in/williammulder"), "willi"), false);
+  assert.equal(eventMentionsLinkedinHandle(event("linkedin.com/in/amyzhang"), "amy"), false);
+  assert.equal(eventMentionsLinkedinHandle(event("linkedin.com/in/amy"), "amyzhang"), false);
+  // A name in the description is not identity — only the URL counts.
+  assert.equal(eventMentionsLinkedinHandle(event("Call with William Mulder"), "william-mulder"), false);
+  assert.equal(eventMentionsLinkedinHandle(event(""), "william-mulder"), false);
+  assert.equal(eventMentionsLinkedinHandle(event("linkedin.com/in/william-mulder"), ""), false);
+});
+
+test("only handle-bearing events contribute an address, and never our own", () => {
+  const events = [
+    {
+      description: "LinkedIn: https://www.linkedin.com/in/william-mulder",
+      attendees: [{ email: "david@raydar.xyz" }, { email: "William@Example.com" }],
+    },
+    // A different person's event, which is exactly what q="William M." returned
+    // in production. No matching handle, so it contributes nothing.
+    { description: "LinkedIn: https://linkedin.com/in/william-marsh", attendees: [{ email: "marsh@example.com" }] },
+    { description: "no linkedin url here", attendees: [{ email: "stranger@example.com" }] },
+  ];
+  assert.deepEqual(linkedinCalendarEvidence(events, "william-mulder", "david@raydar.xyz"), ["william@example.com"]);
+  // No handle means no evidence at all — never a fallback to "everything".
+  assert.deepEqual(linkedinCalendarEvidence(events, "", "david@raydar.xyz"), []);
+});
+
+test("the handle route runs only for abbreviated names, and corroboration still rules", async () => {
+  const routed = [];
+  const calendarEvidenceImpl = async (_mailbox, name, opts = {}) => {
+    routed.push({ name, linkedinUser: opts.linkedinUser });
+    return ["william@example.com"];
+  };
+  // Gmail keeps offering the disposable-domain lookalikes it found in production.
+  // The intersection with a handle-verified calendar address is what discards
+  // them, which is why the Gmail half was left alone.
+  const gmailEvidenceImpl = async () => [
+    "william@example.com", "william.m@spam.cfd", "william.m@spam.icu",
+  ];
+  const resolved = await discoverCandidateContact(
+    { candidateName: "William M.", mailbox: "david@raydar.xyz", linkedinUser: "william-mulder" },
+    { gmailEvidenceImpl, calendarEvidenceImpl },
+  );
+  assert.equal(resolved.email, "william@example.com");
+  assert.equal(resolved.confidence, "gmail_calendar_corroborated");
+  assert.equal(routed[0].linkedinUser, "william-mulder", "the handle reaches the calendar half");
+
+  // Two corroborated addresses is still ambiguous and must still fail closed —
+  // this path did not loosen the rule, it only fed the calendar half better.
+  const ambiguous = await discoverCandidateContact(
+    { candidateName: "William M.", mailbox: "david@raydar.xyz", linkedinUser: "william-mulder" },
+    {
+      gmailEvidenceImpl: async () => ["a@example.com", "b@example.com"],
+      calendarEvidenceImpl: async () => ["a@example.com", "b@example.com"],
+    },
+  );
+  assert.equal(ambiguous.email, "");
+  assert.equal(ambiguous.confidence, "unresolved");
+
+  // And a candidate with no handle is exactly as resolvable as before: the
+  // feature adds a route, it never removes the existing one.
+  const noHandle = await discoverCandidateContact(
+    { candidateName: "William Mulder", mailbox: "david@raydar.xyz" },
+    { gmailEvidenceImpl: async () => ["william@example.com"], calendarEvidenceImpl },
+  );
+  assert.equal(noHandle.email, "william@example.com");
+  assert.equal(routed[routed.length - 1].linkedinUser, "", "no handle passed, name route as before");
 });
 
 test("the decline alert names the role and says the other roles still send", () => {

@@ -213,6 +213,10 @@ export function normalizeSubmissionRequest(request) {
     candidateId: clean(candidate?.id || request?.candidate_id),
     candidateUserId: clean(candidate?.candidate_user_id || request?.candidate_user_id),
     candidateName: clean(candidate?.name || request?.candidate_name),
+    // Paraform stores this on every row (326/326 in the request history). It is
+    // the only identity token strong enough to resolve a candidate whose display
+    // name is abbreviated — see outreach-contact.mjs.
+    linkedinUser: clean(candidate?.linkedin_user || request?.linkedin_user),
     roleId: clean(role?.id || request?.role_id),
     roleName: clean(role?.name || request?.role_name),
     companyName: clean(role?.company?.name || request?.company_name),
@@ -444,6 +448,7 @@ async function candidateContact(request, config) {
   const discovery = await discoverCandidateContact({
     candidateName: name,
     mailbox: config.mailbox,
+    linkedinUser: request.linkedinUser || record?.linkedin_user || "",
   });
   // Every discovery call already knows whether both halves are usable. Latch it so
   // health can stop guessing (2026-07-29 incident).
@@ -2301,6 +2306,9 @@ export async function discoverOutreachRequestContact(
   const discovery = await discoverCandidateContact({
     candidateName: displayName(request.candidateName),
     mailbox: config.mailbox,
+    // The diagnostic must take the same route as the send path, or it reports
+    // a resolution the worker would never reach.
+    linkedinUser: request.linkedinUser || "",
   });
   return { request, discovery };
 }
