@@ -83,6 +83,7 @@ export default async function handler(req, res) {
       profileCutShort: s.profileCutShort ?? null,
       profileCoverage: s.profileCoverage ?? null,
       profileRotorOf: s.profileRotorOf ?? null,
+      lastPassLegMs: s.legMs ?? null,
       raydarScheduler: {
         enabled: raydarSchedulerBookingStopEnabled(),
         applyEnabled: process.env.BOOKING_STOP_APPLY !== "0",
