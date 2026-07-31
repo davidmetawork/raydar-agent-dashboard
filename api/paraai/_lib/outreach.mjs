@@ -106,12 +106,46 @@ const SYSTEM_HELD_EXCEPTION_CODES = new Set([
   "GMAIL_SEND_UNKNOWN",
   "GMAIL_AUTH_FAILED",
 ]);
+// INCIDENT 2026-07-31. An attempt that dies BEFORE the outbox is claimed cannot
+// have sent anything, so retrying it is safe. Classifying retryability by code
+// alone did not know that: outreach-gmail maps every non-404 to the unlisted
+// GMAIL_REQUEST_FAILED, so one transient 429 on a thread READ wrote
+// `retryable: false`, and the `systemHeld` catch-all in eligibleNewRequests then
+// parked the request permanently — never retried, attempts frozen at 1, no
+// second alert, and (because escalateNearExpiry only runs on a processed
+// failure) no deadline warning either. One candidate sat unemailed for 12h.
+// The boundary is the outbox claim, not the code: from the claim onward the send
+// outcome may be uncertain, which is exactly what SYSTEM_HELD protects. Never
+// widen this set past `thread_anchor`.
+const PRE_SEND_STAGES = new Set([
+  "contact_discovery",
+  "exception_resolution",
+  "state_load",
+  "state_create",
+  "candidate_safety",
+  "digest_mutation",
+  "pending_digest_reverification",
+  "thread_anchor",
+]);
 export const PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE =
   "None of the selected matches are eligible for a digest. Only pending, dismissed, or expired matches can be added.";
 export const PENDING_DIGEST_UNAVAILABLE_REASON = "pending_digest_unavailable";
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
+
+// The single definition of "may this failure re-enter the tick on its own".
+// Explicit classification always wins over the stage, so a human hold and an
+// uncertain send stay parked no matter where they were raised; only an
+// UNCLASSIFIED code falls through to the pre-send test. That fall-through is
+// the fix: an unrecognised failure used to be treated as permanently held.
+export function retryableFailure(code, stage) {
+  const key = clean(code);
+  if (RECOVERABLE_EXCEPTION_CODES.has(key)) return true;
+  if (SYSTEM_HELD_EXCEPTION_CODES.has(key)) return false;
+  if (HUMAN_HELD_EXCEPTION_CODES.has(key)) return false;
+  return PRE_SEND_STAGES.has(clean(stage));
+}
 
 const bool = (value, fallback = false) => {
   if (value == null || value === "") return fallback;
@@ -1838,7 +1872,7 @@ export async function handleOutreachFailure(
     code,
     discovery: null,
     stage: error?.outreachStage || null,
-    retryable: RECOVERABLE_EXCEPTION_CODES.has(code),
+    retryable: retryableFailure(code, error?.outreachStage),
   });
   const escalation = await escalateNearExpiry(request, code, { now });
   // AUTH_EXPIRED alerting is owned by the global auth latch. It deduplicates

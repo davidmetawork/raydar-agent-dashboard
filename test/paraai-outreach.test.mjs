@@ -72,6 +72,7 @@ import {
   planDeliveredFollowup,
   planDeliveredMatch,
   requestOrdinal,
+  retryableFailure,
   verifyPendingDigestUnavailable,
 } from "../api/paraai/_lib/outreach.mjs";
 import {
@@ -1076,6 +1077,81 @@ test("write-auth failures retry on a bounded interval while unknown failures sta
       code: "OUTREACH_FAILED",
       retryable: false,
       lastSeenAt: "2026-07-30T11:00:00.000Z",
+    }], { now }),
+    [],
+  );
+});
+
+// REGRESSION (incident 2026-07-31): a transient Gmail 429 on a thread READ was
+// recorded as GMAIL_REQUEST_FAILED, which appears in none of the code sets, so
+// the write site stamped `retryable: false` and the `systemHeld` catch-all parked
+// the request permanently. One candidate sat unemailed for 12h with attempts
+// frozen at 1 and no second alert, while the tick happily sent for everyone else.
+// The boundary is the outbox claim: nothing before it can have sent an email.
+test("an unclassified failure before the outbox claim is retryable; after it, never", () => {
+  // The exact shape that stalled: unlisted code, pre-send read stage.
+  assert.equal(retryableFailure("GMAIL_REQUEST_FAILED", "thread_anchor"), true);
+  assert.equal(retryableFailure("GMAIL_REQUEST_FAILED", "contact_discovery"), true);
+  assert.equal(retryableFailure("OUTREACH_FAILED", "digest_mutation"), true);
+  // From the claim onward the send outcome may be uncertain. Retrying could
+  // double-send, so an unclassified failure there stays parked for a human.
+  assert.equal(retryableFailure("GMAIL_REQUEST_FAILED", "outbox_claim"), false);
+  assert.equal(retryableFailure("GMAIL_REQUEST_FAILED", "gmail_delivery"), false);
+  assert.equal(retryableFailure("OUTREACH_FAILED", "mark_reached_out"), false);
+  // An unknown or missing stage is not evidence of safety.
+  assert.equal(retryableFailure("OUTREACH_FAILED", "unknown"), false);
+  assert.equal(retryableFailure("OUTREACH_FAILED", null), false);
+  // Explicit classification always outranks the stage, in both directions: a
+  // human hold and an uncertain send stay parked even at a pre-send stage...
+  assert.equal(retryableFailure("OUTREACH_CANDIDATE_OFF_MARKET", "thread_anchor"), false);
+  assert.equal(retryableFailure("GMAIL_SEND_UNKNOWN", "thread_anchor"), false);
+  assert.equal(retryableFailure("GMAIL_AUTH_FAILED", "state_load"), false);
+  // ...and a recoverable code stays retryable even at a post-send stage.
+  assert.equal(retryableFailure("OUTREACH_NO_EMAIL", "gmail_delivery"), true);
+  assert.equal(retryableFailure("AUTH_EXPIRED", "mark_reached_out"), true);
+});
+
+// The two halves must compose: a pre-send failure is stamped retryable, and the
+// eligibility pass then re-admits it once the five-minute throttle has elapsed
+// rather than parking it in `systemHeld`.
+test("a retryable pre-send failure re-enters the queue on the throttle, not never", () => {
+  const now = Date.parse("2026-07-31T13:00:00.000Z");
+  const config = { notBeforeMs: Date.parse("2026-07-18T00:00:00.000Z") };
+  const request = {
+    id: "request-thread-anchor",
+    status: "pending",
+    reachedOut: false,
+    createdAtMs: Date.parse("2026-07-31T00:52:15.493Z"),
+  };
+  const stalled = (lastSeenAt) => [{
+    requestId: request.id,
+    status: "open",
+    code: "GMAIL_REQUEST_FAILED",
+    stage: "thread_anchor",
+    retryable: retryableFailure("GMAIL_REQUEST_FAILED", "thread_anchor"),
+    lastSeenAt,
+  }];
+  // Inside the interval it waits its turn...
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], stalled("2026-07-31T12:59:00.000Z"), { now }),
+    [],
+  );
+  // ...and once the interval is up it comes back, instead of being parked for
+  // twelve hours as it was in production.
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], stalled("2026-07-31T12:50:00.000Z"), { now }),
+    [request],
+  );
+  // The uncertain-send case is the control: same code, post-claim stage, and it
+  // must remain parked no matter how much time passes.
+  assert.deepEqual(
+    eligibleNewRequests([request], config, [], [{
+      requestId: request.id,
+      status: "open",
+      code: "GMAIL_REQUEST_FAILED",
+      stage: "gmail_delivery",
+      retryable: retryableFailure("GMAIL_REQUEST_FAILED", "gmail_delivery"),
+      lastSeenAt: "2026-07-30T00:00:00.000Z",
     }], { now }),
     [],
   );
