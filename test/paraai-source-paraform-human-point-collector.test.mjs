@@ -43,11 +43,15 @@ function semanticDigest(namespace, value) {
 function reference({
   id = CALL_A,
   scheduledAt = "2026-07-25T20:00:00.000Z",
+  createdAt = "2026-07-24T20:00:00.000Z",
   title = "Synthetic Fixture / Recruiter",
   platform = "PHONE",
+  recordingProvider = "TWILIO",
   owner = "Synthetic Recruiter",
+  ownerId = "recruiter-user-synthetic",
   candidateUserId = "candidate-user-synthetic",
   hasTranscript = true,
+  humanCall = true,
   name = "Synthetic Candidate",
   linkedin = "synthetic-candidate",
   emails = ["synthetic.candidate@example.invalid"],
@@ -55,11 +59,15 @@ function reference({
   return {
     id,
     scheduledAt,
+    createdAt,
     title,
     platform,
+    recordingProvider,
     owner,
+    ownerId,
     candidateUserId,
     hasTranscript,
+    humanCall,
     candidate: {
       name,
       linkedin,
@@ -68,28 +76,60 @@ function reference({
   };
 }
 
+function transcript({
+  secondSpeakerChars = 0,
+  maximumEndSeconds = 60,
+} = {}) {
+  const rows = [{
+    speaker: "Recruiter",
+    speaker_id: "speaker-recruiter",
+    words: [{
+      text: "R".repeat(500),
+      start_timestamp: 0,
+      end_timestamp: Math.max(1, maximumEndSeconds - 1),
+    }],
+  }];
+  if (secondSpeakerChars > 0) {
+    rows.push({
+      speaker: "Candidate",
+      speaker_id: "speaker-candidate",
+      words: [{
+        text: "C".repeat(secondSpeakerChars),
+        start_timestamp: 1,
+        end_timestamp: maximumEndSeconds,
+      }],
+    });
+  }
+  return rows;
+}
+
 function point(overrides = {}) {
   return {
-    id: CALL_A,
-    event_scheduled_at:
-      "2026-07-25T20:00:00.000Z",
-    event_title: "Synthetic Fixture / Recruiter",
-    meeting_platform: "PHONE",
-    candidate_user_id: "candidate-user-synthetic",
-    candidate_user: {
-      candidate: {
-        name: "Synthetic Candidate",
-      },
-    },
     attendee_emails: [
       "synthetic.candidate@example.invalid",
     ],
-    recording_transcript: [{
-      speaker_id: "synthetic-speaker",
-      words: [{
-        text: "synthetic private transcript body",
-      }],
-    }],
+    candidate_user: {
+      candidate: {
+        image_src: "https://example.invalid/candidate.png",
+        name: "Synthetic Candidate",
+      },
+    },
+    candidate_user_id: "candidate-user-synthetic",
+    event_scheduled_at:
+      "2026-07-25T20:00:00.000Z",
+    event_title: "Synthetic Fixture / Recruiter",
+    google_calendar_event: null,
+    granola_note_id: null,
+    id: CALL_A,
+    is_public: false,
+    meeting_link: null,
+    meeting_platform: "PHONE",
+    recording_provider: "TWILIO",
+    recording_summary: null,
+    recording_transcript: transcript(),
+    recording_url:
+      "https://example.invalid/private-recording",
+    user_id: "recruiter-user-synthetic",
     ...overrides,
   };
 }
@@ -98,18 +138,32 @@ function pointForReference(
   expectedReference,
   overrides = {},
 ) {
+  const linked = Boolean(
+    expectedReference.candidateUserId,
+  );
   return point({
+    attendee_emails:
+      expectedReference.candidate.emails,
+    candidate_user: linked
+      ? {
+        candidate: {
+          image_src:
+            "https://example.invalid/candidate.png",
+          name: expectedReference.candidate.name,
+        },
+      }
+      : null,
+    candidate_user_id: linked
+      ? expectedReference.candidateUserId
+      : null,
+    event_scheduled_at:
+      expectedReference.scheduledAt,
+    event_title: expectedReference.title || null,
     id: expectedReference.id,
-    event_scheduled_at: expectedReference.scheduledAt,
-    event_title: expectedReference.title,
     meeting_platform: expectedReference.platform,
-    candidate_user_id: expectedReference.candidateUserId,
-    candidate_user: {
-      candidate: {
-        name: expectedReference.candidate.name,
-      },
-    },
-    attendee_emails: expectedReference.candidate.emails,
+    recording_provider:
+      expectedReference.recordingProvider,
+    user_id: expectedReference.ownerId,
     ...overrides,
   });
 }
@@ -133,10 +187,10 @@ function expectCode(fn, code) {
   );
 }
 
-test("exact point request and private scaffold are frozen and unpinnable", () => {
+test("captured phone point request and v2 projection are frozen and hard-dark", () => {
   assert.equal(
     SOURCE_PARAFORM_HUMAN_POINT_COLLECTOR_VERSION,
-    "paraform-human-source-point-scaffold-v1",
+    "paraform-human-source-point-v2",
   );
   const request =
     paraformHumanSourcePointReadRequest(CALL_A);
@@ -159,122 +213,181 @@ test("exact point request and private scaffold are frozen and unpinnable", () =>
       point(),
       options(),
     );
-  assert.deepEqual(projection, {
-    source: "paraform_human",
-    callId: CALL_A,
-    scheduledAt:
-      "2026-07-25T20:00:00.000000000Z",
-    enumeratedScheduledAt:
-      "2026-07-25T20:00:00.000Z",
-    title: "Synthetic Fixture / Recruiter",
-    platform: "PHONE",
-    candidateUserId: "candidate-user-synthetic",
-    candidate: {
-      name: "Synthetic Candidate",
-      emails: [
-        "synthetic.candidate@example.invalid",
-      ],
-    },
-    decisionBoundaryAt: BOUNDARY,
-    pageReference: reference(),
-    pointRecordIdVerified: true,
-    partialReferenceContinuityVerified: true,
-    completePointResponseContractAvailable: false,
-    completeReferenceContinuityAvailable: false,
-    sourceRecordRevisionAvailable: false,
-    humanCallDiscriminatorAvailable: false,
-    successClassificationAvailable: false,
-    candidateIdentityResolutionAvailable: false,
-    pinnable: false,
-  });
+  assert.equal(projection.source, "paraform_human");
+  assert.equal(projection.callId, CALL_A);
+  assert.equal(projection.platform, "PHONE");
+  assert.equal(projection.recordingProvider, "TWILIO");
+  assert.equal(projection.ownerId, "recruiter-user-synthetic");
+  assert.equal(projection.pointResponseContractVerified, true);
+  assert.equal(projection.recordContinuityVerified, true);
+  assert.equal(projection.sourceRecordRevisionAvailable, true);
+  assert.equal(projection.humanCallDiscriminatorAvailable, true);
+  assert.equal(projection.humanCallVerified, true);
+  assert.equal(projection.successClassificationAvailable, true);
+  assert.equal(projection.classification, "pending");
+  assert.equal(projection.successVerified, false);
+  assert.equal(
+    projection.candidateIdentityResolutionAvailable,
+    false,
+  );
+  assert.equal(
+    projection.completeReferenceContinuityAvailable,
+    false,
+  );
+  assert.equal(projection.pinnable, false);
   assert.equal(Object.isFrozen(projection), true);
-  assert.equal(
-    Object.isFrozen(projection.candidate),
-    true,
-  );
-  assert.equal(
-    Object.isFrozen(projection.candidate.emails),
-    true,
-  );
-  assert.equal(
-    Object.isFrozen(projection.pageReference),
-    true,
-  );
-  assert.equal(
-    Object.isFrozen(projection.pageReference.candidate),
-    true,
-  );
-  assert.equal(
-    Object.isFrozen(
-      projection.pageReference.candidate.emails,
-    ),
-    true,
-  );
+  assert.equal(Object.isFrozen(projection.pageReference), true);
   assert.equal(
     Object.keys(projection).includes("transcript"),
     false,
   );
 });
 
-test("point input and returned root id are exact", () => {
-  expectCode(
-    () => normalizeParaformHumanSourcePointRecord(
-      point({ id: CALL_B }),
-      options(),
-    ),
-    "SOURCE_PARAFORM_HUMAN_POINT_EXPECTED_ID_MISMATCH",
-  );
-  for (const id of [
-    "",
-    " leading-space",
-    "trailing-space ",
-    "line\nbreak",
-    "x".repeat(257),
-    42,
+test("stable PHONE plus TWILIO discriminator rejects every other lane", () => {
+  for (const [override, code] of [
+    [
+      { meeting_platform: "GOOGLE_MEET" },
+      "SOURCE_PARAFORM_HUMAN_POINT_NOT_HUMAN",
+    ],
+    [
+      { recording_provider: "RECALL" },
+      "SOURCE_PARAFORM_HUMAN_POINT_NOT_HUMAN",
+    ],
+    [
+      { meeting_platform: null },
+      "SOURCE_PARAFORM_HUMAN_POINT_PLATFORM_INVALID",
+    ],
+    [
+      { recording_provider: null },
+      "SOURCE_PARAFORM_HUMAN_POINT_RECORDING_PROVIDER_INVALID",
+    ],
   ]) {
     expectCode(
-      () => paraformHumanSourcePointReadRequest(id),
-      "SOURCE_PARAFORM_HUMAN_POINT_INPUT_INVALID",
+      () => normalizeParaformHumanSourcePointRecord(
+        point(override),
+        options(),
+      ),
+      code,
     );
   }
+});
+
+test("the captured 16-field phone response contract is exact", () => {
+  const extra = point({ new_vendor_field: true });
   expectCode(
     () => normalizeParaformHumanSourcePointRecord(
-      {},
+      extra,
       options(),
     ),
-    "SOURCE_PARAFORM_HUMAN_POINT_RECORD_ID_INVALID",
+    "SOURCE_PARAFORM_HUMAN_POINT_CONTRACT_INVALID",
+  );
+
+  const missing = point();
+  delete missing.recording_summary;
+  expectCode(
+    () => normalizeParaformHumanSourcePointRecord(
+      missing,
+      options(),
+    ),
+    "SOURCE_PARAFORM_HUMAN_POINT_CONTRACT_INVALID",
+  );
+
+  for (const override of [
+    { google_calendar_event: {} },
+    { granola_note_id: "unexpected" },
+    { is_public: "false" },
+  ]) {
+    expectCode(
+      () => normalizeParaformHumanSourcePointRecord(
+        point(override),
+        options(),
+      ),
+      "SOURCE_PARAFORM_HUMAN_POINT_PHONE_CONTRACT_INVALID",
+    );
+  }
+});
+
+test("linked and unlinked captured phone variants normalize without inventing identity", () => {
+  const unlinkedReference = reference({
+    title: "",
+    candidateUserId: "",
+    name: "",
+    linkedin: "",
+    emails: [],
+  });
+  const unlinked =
+    normalizeParaformHumanSourcePointRecord(
+      pointForReference(unlinkedReference),
+      options({
+        expectedReference: unlinkedReference,
+      }),
+    );
+  assert.equal(unlinked.candidateUserId, "");
+  assert.deepEqual(unlinked.candidate, {
+    name: "",
+    emails: [],
+  });
+  assert.equal(
+    unlinked.candidateIdentityResolutionAvailable,
+    false,
+  );
+
+  expectCode(
+    () => normalizeParaformHumanSourcePointRecord(
+      point({ candidate_user: null }),
+      options(),
+    ),
+    "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_LINKAGE_INVALID",
+  );
+  expectCode(
+    () => normalizeParaformHumanSourcePointRecord(
+      point({ candidate_user_id: null }),
+      options(),
+    ),
+    "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_LINKAGE_INVALID",
   );
 });
 
-test("page reference is exact, complete, and uses page email semantics", () => {
-  const hostileSparseEmails = [];
-  hostileSparseEmails.length = 4_294_967_295;
-  const expectedReference = reference({
-    emails: [
-      "first@example.invalid",
-      "second@example.invalid",
-    ],
-  });
-  const projection =
-    normalizeParaformHumanSourcePointRecord(
-      pointForReference(expectedReference),
-      options({
-        expectedReference,
-      }),
-    );
-  assert.deepEqual(
-    projection.pageReference.candidate.emails,
-    [
-      "first@example.invalid",
-      "second@example.invalid",
-    ],
-  );
-
-  for (const expectedReference of [
+test("complete captured overlap and owner-id continuity are exact", () => {
+  for (const override of [
+    { id: CALL_B },
     {
-      ...reference(),
-      unexpected: true,
+      event_scheduled_at:
+        "2026-07-25T20:00:00.001Z",
     },
+    { event_title: "Changed title" },
+    { user_id: "changed-owner" },
+    { candidate_user_id: "changed-candidate-user" },
+    {
+      candidate_user: {
+        candidate: {
+          image_src: null,
+          name: "Changed Candidate",
+        },
+      },
+    },
+    {
+      attendee_emails: [
+        "changed@example.invalid",
+      ],
+    },
+  ]) {
+    const expectedCode = override.id
+      ? "SOURCE_PARAFORM_HUMAN_POINT_EXPECTED_ID_MISMATCH"
+      : "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_MISMATCH";
+    expectCode(
+      () => normalizeParaformHumanSourcePointRecord(
+        point(override),
+        options(),
+      ),
+      expectedCode,
+    );
+  }
+});
+
+test("page reference v2 is exact, bounded, and Human-only", () => {
+  for (const expectedReference of [
+    { ...reference(), unexpected: true },
     {
       ...reference(),
       candidate: {
@@ -282,30 +395,55 @@ test("page reference is exact, complete, and uses page email semantics", () => {
         unexpected: true,
       },
     },
-    {
-      ...reference(),
-      hasTranscript: "true",
-    },
-    reference({
-      title: " padded",
-    }),
-    reference({
-      emails: ["UPPER@example.invalid"],
-    }),
-    reference({
-      emails: ["two  spaces@example.invalid"],
-    }),
-    reference({
-      emails: [""],
-    }),
+    reference({ platform: "GOOGLE_MEET" }),
+    reference({ recordingProvider: "RECALL" }),
+    reference({ humanCall: false }),
+    reference({ ownerId: "" }),
+    reference({ emails: ["UPPER@example.invalid"] }),
+    reference({ emails: [""] }),
     reference({
       emails: Array.from(
         { length: 513 },
         (_, index) => `${index}@example.invalid`,
       ),
     }),
+  ]) {
+    const expectedCode = (
+      expectedReference.platform !== "PHONE"
+      || expectedReference.recordingProvider !== "TWILIO"
+      || expectedReference.humanCall !== true
+    )
+      ? "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_NOT_HUMAN"
+      : "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_INVALID";
+    expectCode(
+      () => normalizeParaformHumanSourcePointRecord(
+        point(),
+        options({ expectedReference }),
+      ),
+      expectedCode,
+    );
+  }
+});
+
+test("page and point clocks are canonical and strictly before the boundary", () => {
+  for (const expectedReference of [
+    reference({ scheduledAt: BOUNDARY }),
+    reference({ createdAt: BOUNDARY }),
+  ]) {
+    expectCode(
+      () => normalizeParaformHumanSourcePointRecord(
+        point(),
+        options({ expectedReference }),
+      ),
+      "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_OUTSIDE_BOUNDARY",
+    );
+  }
+  for (const expectedReference of [
     reference({
-      emails: hostileSparseEmails,
+      scheduledAt: "2026-07-25T19:00:00.000-05:00",
+    }),
+    reference({
+      createdAt: "2026-02-30T00:00:00.000Z",
     }),
   ]) {
     expectCode(
@@ -316,74 +454,22 @@ test("page reference is exact, complete, and uses page email semantics", () => {
       "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_INVALID",
     );
   }
-});
-
-test("page scheduled time is canonical and strictly before the boundary", () => {
-  for (const scheduledAt of [
-    BOUNDARY,
-    "2026-07-26T00:00:00.001Z",
-  ]) {
-    expectCode(
-      () => normalizeParaformHumanSourcePointRecord(
-        point(),
-        options({
-          expectedReference: reference({
-            scheduledAt,
-          }),
-        }),
-      ),
-      "SOURCE_PARAFORM_HUMAN_POINT_SCHEDULED_AT_OUTSIDE_BOUNDARY",
-    );
-  }
-  for (const scheduledAt of [
-    "2026-07-26T00:00:00.000001Z",
-    "2026-07-25T19:00:00.000-05:00",
-    "2026-02-30T00:00:00.000Z",
-  ]) {
-    expectCode(
-      () => normalizeParaformHumanSourcePointRecord(
-        point(),
-        options({
-          expectedReference: reference({
-            scheduledAt,
-          }),
-        }),
-      ),
-      "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_INVALID",
-    );
-  }
   expectCode(
     () => normalizeParaformHumanSourcePointRecord(
       point(),
-      options({
-        decisionBoundaryAt:
-          "2026-07-26T00:00:00Z",
-      }),
+      {
+        ...options(),
+        decisionBoundaryAt: "2026-07-26T00:00:00Z",
+      },
     ),
     "SOURCE_PARAFORM_HUMAN_POINT_BOUNDARY_INVALID",
   );
 });
 
-test("point scheduled time preserves sub-millisecond evidence and enforces the exact boundary", () => {
+test("vendor offsets and nanoseconds retain the page millisecond identity", () => {
   const expectedReference = reference({
     scheduledAt: "2026-07-25T23:59:59.999Z",
   });
-  const exact = normalizeParaformHumanSourcePointRecord(
-    pointForReference(expectedReference, {
-      event_scheduled_at:
-        "2026-07-25T23:59:59.999999Z",
-    }),
-    options({ expectedReference }),
-  );
-  assert.equal(
-    exact.scheduledAt,
-    "2026-07-25T23:59:59.999999000Z",
-  );
-  assert.equal(
-    exact.enumeratedScheduledAt,
-    expectedReference.scheduledAt,
-  );
-
   const offset = paraformHumanSourcePointEvidence(
     pointForReference(expectedReference, {
       event_scheduled_at:
@@ -403,7 +489,6 @@ test("point scheduled time preserves sub-millisecond evidence and enforces the e
   for (const eventScheduledAt of [
     BOUNDARY,
     "2026-07-26T00:00:00.000001Z",
-    "2026-07-26T09:00:00.000001+09:00",
   ]) {
     expectCode(
       () => normalizeParaformHumanSourcePointRecord(
@@ -417,172 +502,283 @@ test("point scheduled time preserves sub-millisecond evidence and enforces the e
   }
 });
 
-test("point overlap uses the exhaustive page normalization semantics", () => {
-  const expectedReference = reference({
-    emails: [
-      "first@example.invalid",
-      "second @example.invalid",
-    ],
+test("transcript presence is recomputed and checked when the page asserts it", () => {
+  const absentReference = reference({
+    hasTranscript: false,
   });
-  const projection =
+  const absent = normalizeParaformHumanSourcePointRecord(
+    pointForReference(absentReference, {
+      recording_transcript: [],
+    }),
+    options({ expectedReference: absentReference }),
+  );
+  assert.equal(absent.transcriptPresent, false);
+  assert.equal(absent.pageTranscriptContinuityVerified, true);
+
+  expectCode(
+    () => normalizeParaformHumanSourcePointRecord(
+      point({ recording_transcript: [] }),
+      options(),
+    ),
+    "SOURCE_PARAFORM_HUMAN_POINT_TRANSCRIPT_CONTINUITY_MISMATCH",
+  );
+
+  const unassertedReference = reference({
+    hasTranscript: null,
+  });
+  const unasserted =
     normalizeParaformHumanSourcePointRecord(
-      pointForReference(expectedReference, {
-        event_title:
-          "  Synthetic Fixture / Recruiter  ",
-        meeting_platform: " PHONE ",
-        candidate_user_id:
-          " candidate-user-synthetic ",
-        candidate_user: {
-          candidate: {
-            name: " Synthetic Candidate ",
-          },
-        },
-        attendee_emails: [
-          " FIRST@EXAMPLE.INVALID ",
-          "",
-          " SECOND  @EXAMPLE.INVALID ",
-        ],
+      pointForReference(unassertedReference),
+      options({
+        expectedReference: unassertedReference,
       }),
-      options({ expectedReference }),
     );
   assert.equal(
-    projection.title,
-    expectedReference.title,
-  );
-  assert.equal(
-    projection.platform,
-    expectedReference.platform,
-  );
-  assert.equal(
-    projection.candidateUserId,
-    expectedReference.candidateUserId,
-  );
-  assert.deepEqual(
-    projection.candidate,
-    {
-      name: expectedReference.candidate.name,
-      emails: expectedReference.candidate.emails,
-    },
+    unasserted.pageTranscriptContinuityVerified,
+    null,
   );
 });
 
-test("malformed captured point fields fail closed", () => {
-  const hostileSparseEmails = [];
-  hostileSparseEmails.length = 4_294_967_295;
-  const cases = [
-    [
-      { event_scheduled_at: null },
-      "SOURCE_PARAFORM_HUMAN_POINT_SCHEDULED_AT_INVALID",
-    ],
-    [
-      { event_title: null },
-      "SOURCE_PARAFORM_HUMAN_POINT_TITLE_INVALID",
-    ],
-    [
-      { meeting_platform: [] },
-      "SOURCE_PARAFORM_HUMAN_POINT_PLATFORM_INVALID",
-    ],
-    [
-      { candidate_user_id: 42 },
-      "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_USER_ID_INVALID",
-    ],
-    [
-      { candidate_user: null },
-      "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_USER_INVALID",
-    ],
-    [
-      { candidate_user: { candidate: null } },
-      "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_INVALID",
-    ],
-    [
-      {
-        candidate_user: {
-          candidate: {
-            name: false,
-          },
-        },
-      },
-      "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_NAME_INVALID",
-    ],
-    [
-      { attendee_emails: null },
-      "SOURCE_PARAFORM_HUMAN_POINT_ATTENDEE_EMAILS_INVALID",
-    ],
-    [
-      { attendee_emails: [42] },
-      "SOURCE_PARAFORM_HUMAN_POINT_ATTENDEE_EMAILS_INVALID",
-    ],
-    [
-      { attendee_emails: hostileSparseEmails },
-      "SOURCE_PARAFORM_HUMAN_POINT_ATTENDEE_EMAILS_INVALID",
-    ],
+test("substantive two-speaker transcript produces a boundary-complete success", () => {
+  const successful =
+    normalizeParaformHumanSourcePointRecord(
+      point({
+        recording_transcript: transcript({
+          secondSpeakerChars: 400,
+          maximumEndSeconds: 120.125,
+        }),
+      }),
+      options(),
+    );
+  assert.equal(successful.transcriptSpeakerCount, 2);
+  assert.equal(successful.secondSpeakerChars, 400);
+  assert.equal(successful.observedEndedAt,
+    "2026-07-25T20:02:00.125Z");
+  assert.equal(successful.classification, "success");
+  assert.equal(successful.successVerified, true);
+
+  const evidence = paraformHumanSourcePointEvidence(
+    point({
+      recording_transcript: transcript({
+        secondSpeakerChars: 400,
+        maximumEndSeconds: 120.125,
+      }),
+    }),
+    options(),
+  );
+  assert.equal(evidence.classification, "success");
+  assert.equal(evidence.successVerified, true);
+});
+
+test("voicemail, quiet second speaker, and post-boundary speech remain pending", () => {
+  for (const raw of [
+    point(),
+    point({
+      recording_transcript: transcript({
+        secondSpeakerChars: 399,
+      }),
+    }),
+  ]) {
+    const projection =
+      normalizeParaformHumanSourcePointRecord(
+        raw,
+        options(),
+      );
+    assert.equal(projection.classification, "pending");
+    assert.equal(projection.successVerified, false);
+  }
+
+  const nearBoundaryReference = reference({
+    scheduledAt: "2026-07-25T23:59:30.000Z",
+  });
+  const postBoundary =
+    normalizeParaformHumanSourcePointRecord(
+      pointForReference(nearBoundaryReference, {
+        recording_transcript: transcript({
+          secondSpeakerChars: 400,
+          maximumEndSeconds: 60,
+        }),
+      }),
+      options({
+        expectedReference: nearBoundaryReference,
+      }),
+    );
+  assert.equal(postBoundary.observedEndedAt,
+    "2026-07-26T00:00:30.000Z");
+  assert.equal(postBoundary.classification, "pending");
+  assert.equal(postBoundary.successVerified, false);
+});
+
+test("sub-millisecond transcript endings use exact point time at the boundary", () => {
+  const expectedReference = reference({
+    scheduledAt: "2026-07-25T23:59:59.999Z",
+  });
+  const exactTranscript = (candidateEnd) => [{
+    speaker: "Recruiter",
+    speaker_id: "speaker-recruiter",
+    words: [{
+      text: "R".repeat(500),
+      start_timestamp: 0,
+      end_timestamp: 0.0000003,
+    }],
+  }, {
+    speaker: "Candidate",
+    speaker_id: "speaker-candidate",
+    words: [{
+      text: "C".repeat(400),
+      start_timestamp: 0,
+      end_timestamp: candidateEnd,
+    }],
+  }];
+  const before = normalizeParaformHumanSourcePointRecord(
+    pointForReference(expectedReference, {
+      event_scheduled_at:
+        "2026-07-25T23:59:59.999999500Z",
+      recording_transcript:
+        exactTranscript(0.0000004),
+    }),
+    options({ expectedReference }),
+  );
+  assert.equal(before.observedEndedAt, BOUNDARY);
+  assert.equal(before.successVerified, true);
+
+  const after = normalizeParaformHumanSourcePointRecord(
+    pointForReference(expectedReference, {
+      event_scheduled_at:
+        "2026-07-25T23:59:59.999999500Z",
+      recording_transcript:
+        exactTranscript(0.0000006),
+    }),
+    options({ expectedReference }),
+  );
+  assert.equal(after.observedEndedAt,
+    "2026-07-26T00:00:00.001Z");
+  assert.equal(after.successVerified, false);
+  assert.equal(after.classification, "pending");
+});
+
+test("transcript shape, timestamps, and total size fail closed", () => {
+  const invalidTurns = [
+    [{
+      speaker: "Recruiter",
+      speaker_id: "speaker",
+      words: [{
+        text: "hello",
+        start_timestamp: 2,
+        end_timestamp: 1,
+      }],
+    }],
+    [{
+      speaker: "Recruiter",
+      speaker_id: 1,
+      words: [],
+    }],
+    [{
+      speaker: "Recruiter",
+      speaker_id: "speaker",
+      words: [{
+        text: "hello",
+        start_timestamp: 0,
+        end_timestamp: 86_401,
+      }],
+    }],
+    [{
+      speaker: "Recruiter",
+      speaker_id: "speaker",
+      words: [{
+        text: "x".repeat(4_097),
+        start_timestamp: 0,
+        end_timestamp: 1,
+      }],
+    }],
   ];
-  for (const [override, code] of cases) {
-    expectCode(
+  for (const recordingTranscript of invalidTurns) {
+    assert.throws(
       () => normalizeParaformHumanSourcePointRecord(
-        point(override),
+        point({
+          recording_transcript: recordingTranscript,
+        }),
         options(),
       ),
-      code,
+      SourceParaformHumanPointCollectorError,
     );
   }
+
+  const hostileSparse = [];
+  hostileSparse.length = 4_294_967_295;
+  expectCode(
+    () => normalizeParaformHumanSourcePointRecord(
+      point({ recording_transcript: hostileSparse }),
+      options(),
+    ),
+    "SOURCE_PARAFORM_HUMAN_POINT_TRANSCRIPT_INVALID",
+  );
 });
 
-test("captured overlap is exact and both partial and page evidence bind it", () => {
+test("semantic revision binds all decision-bearing phone point material", () => {
   const base = paraformHumanSourcePointEvidence(
     point(),
     options(),
   );
-  const verifiedVariants = [
-    reference({
-      scheduledAt: "2026-07-25T20:00:00.001Z",
+  const variants = [
+    point({ is_public: true }),
+    point({
+      recording_url:
+        "https://example.invalid/changed-recording",
     }),
-    reference({ title: "Changed title" }),
-    reference({ platform: "GOOGLE_MEET" }),
-    reference({
-      candidateUserId: "candidate-user-changed",
+    point({
+      recording_transcript: [{
+        speaker: "Recruiter",
+        speaker_id: "speaker-recruiter",
+        words: [{
+          text: "changed private transcript",
+          start_timestamp: 0,
+          end_timestamp: 1,
+        }],
+      }],
     }),
-    reference({ name: "Changed Candidate" }),
-    reference({
-      emails: ["changed@example.invalid"],
-    }),
-    reference({
-      emails: [
-        "second@example.invalid",
-        "first@example.invalid",
-      ],
+    point({
+      candidate_user: {
+        candidate: {
+          image_src:
+            "https://example.invalid/changed-image",
+          name: "Synthetic Candidate",
+        },
+      },
     }),
   ];
-  for (const expectedReference of verifiedVariants) {
+  for (const raw of variants) {
     const changed = paraformHumanSourcePointEvidence(
-      pointForReference(expectedReference),
-      options({ expectedReference }),
+      raw,
+      options(),
     );
     assert.equal(
       changed.sourceRecordDigest,
       base.sourceRecordDigest,
     );
-    assert.equal(
-      changed.sourceNormalizedInputDigest,
-      base.sourceNormalizedInputDigest,
+    assert.notEqual(
+      changed.sourcePointDigest,
+      base.sourcePointDigest,
     );
     assert.notEqual(
-      changed.sourceReferenceDigest,
-      base.sourceReferenceDigest,
-    );
-    assert.notEqual(
-      changed.sourcePartialPointDigest,
-      base.sourcePartialPointDigest,
+      changed.sourceRecordRevisionDigest,
+      base.sourceRecordRevisionDigest,
     );
   }
+});
 
-  const unverifiedVariants = [
-    reference({ owner: "Changed Recruiter" }),
-    reference({ hasTranscript: false }),
-    reference({ hasTranscript: null }),
-    reference({ linkedin: "changed-candidate" }),
-  ];
-  for (const expectedReference of unverifiedVariants) {
+test("page-only owner and LinkedIn remain bound without inventing canonical identity", () => {
+  const base = paraformHumanSourcePointEvidence(
+    point(),
+    options(),
+  );
+  for (const expectedReference of [
+    reference({ owner: "Changed Recruiter Display" }),
+    reference({ linkedin: "changed-linkedin-hint" }),
+    reference({
+      createdAt: "2026-07-24T20:00:00.001Z",
+    }),
+  ]) {
     const changed = paraformHumanSourcePointEvidence(
       point(),
       options({ expectedReference }),
@@ -591,118 +787,134 @@ test("captured overlap is exact and both partial and page evidence bind it", () 
       changed.sourceReferenceDigest,
       base.sourceReferenceDigest,
     );
-    assert.equal(
-      changed.sourcePartialPointDigest,
-      base.sourcePartialPointDigest,
+    assert.notEqual(
+      changed.sourceRecordRevisionDigest,
+      base.sourceRecordRevisionDigest,
     );
     assert.equal(
-      changed.completeReferenceContinuityAvailable,
+      changed.candidateIdentityResolutionAvailable,
       false,
     );
+    assert.equal(changed.pinnable, false);
   }
 });
 
-test("same-id overlap drift fails rather than blessing an unrelated page reference", () => {
-  const variants = [
-    {
-      event_scheduled_at:
-        "2026-07-25T20:00:00.001Z",
-    },
-    { event_title: "Changed title" },
-    { meeting_platform: "GOOGLE_MEET" },
-    { candidate_user_id: "candidate-user-changed" },
-    {
-      candidate_user: {
-        candidate: {
-          name: "Changed Candidate",
-        },
-      },
-    },
-    {
-      attendee_emails: [
-        "changed@example.invalid",
-      ],
-    },
-  ];
-  for (const variant of variants) {
-    expectCode(
-      () => paraformHumanSourcePointEvidence(
-        point(variant),
-        options(),
-      ),
-      "SOURCE_PARAFORM_HUMAN_POINT_REFERENCE_MISMATCH",
-    );
+test("digest-only evidence excludes raw ids, PII, transcript, and URLs", () => {
+  const raw = point();
+  const expectedReference = reference();
+  const evidence = paraformHumanSourcePointEvidence(
+    raw,
+    options({ expectedReference }),
+  );
+  assert.deepEqual(Object.keys(evidence).sort(), [
+    "candidateIdentityResolutionAvailable",
+    "classification",
+    "completeReferenceContinuityAvailable",
+    "decisionBoundaryDigest",
+    "humanCallDiscriminatorAvailable",
+    "humanCallDiscriminatorDigest",
+    "humanCallVerified",
+    "pageTranscriptContinuityVerified",
+    "pinnable",
+    "pointRecordIdVerified",
+    "pointResponseContractVerified",
+    "recordContinuityVerified",
+    "source",
+    "sourceNormalizedInputDigest",
+    "sourcePointDigest",
+    "sourcePointReadProcedure",
+    "sourceRecordDigest",
+    "sourceRecordRevisionAvailable",
+    "sourceRecordRevisionDigest",
+    "sourceReferenceDigest",
+    "sourceStatusAtBoundaryDigest",
+    "successClassificationAvailable",
+    "successVerified",
+  ]);
+  assert.equal(
+    evidence.sourcePointReadProcedure,
+    SOURCE_IDENTITY_POINT_READ_PROCEDURES
+      .paraformHumanSource,
+  );
+  for (const key of [
+    "sourceNormalizedInputDigest",
+    "sourcePointDigest",
+    "sourceRecordDigest",
+    "sourceRecordRevisionDigest",
+    "sourceReferenceDigest",
+    "sourceStatusAtBoundaryDigest",
+    "humanCallDiscriminatorDigest",
+    "decisionBoundaryDigest",
+  ]) {
+    assert.match(evidence[key], /^[a-f0-9]{64}$/u);
+  }
+  const serialized = JSON.stringify(evidence);
+  for (const forbidden of [
+    CALL_A,
+    raw.event_scheduled_at,
+    raw.user_id,
+    expectedReference.title,
+    expectedReference.owner,
+    expectedReference.candidateUserId,
+    expectedReference.candidate.name,
+    expectedReference.candidate.linkedin,
+    expectedReference.candidate.emails[0],
+    raw.recording_transcript[0].words[0].text,
+    raw.recording_url,
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
   }
 });
 
-test("uncaptured response and post-boundary vendor drift cannot create evidence", () => {
-  const base = paraformHumanSourcePointEvidence(
+test("request, record, discriminator, and boundary digest namespaces are exact", () => {
+  const evidence = paraformHumanSourcePointEvidence(
     point(),
     options(),
   );
-  const changed = paraformHumanSourcePointEvidence(
-    point({
-      recording_transcript: [{
-        speaker_id: "changed-speaker",
-        words: [{
-          text: "materially different private content",
-        }],
-      }],
-      has_transcript: false,
-      user: {
-        name: "Drifted Private Owner",
+  const request = {
+    method: "GET",
+    procedure:
+      "candidateUserMeeting.getCallById",
+    input: {
+      json: {
+        id: CALL_A,
       },
-      candidate_user: {
-        candidate: {
-          name: "Synthetic Candidate",
-          linkedin_user: "drifted-private-linkedin",
-        },
-      },
-      updated_at: "2026-07-27T00:00:00.000Z",
-      new_vendor_field: {
-        arbitrary: true,
-      },
-    }),
-    options(),
-  );
-  assert.deepEqual(changed, base);
+    },
+  };
   assert.equal(
-    changed.completePointResponseContractAvailable,
-    false,
+    evidence.sourceNormalizedInputDigest,
+    semanticDigest(
+      "phase4-paraform-human-source-point-request-v2",
+      request,
+    ),
   );
   assert.equal(
-    changed.completeReferenceContinuityAvailable,
-    false,
+    evidence.sourceRecordDigest,
+    semanticDigest(
+      "phase4-paraform-human-source-record-v1",
+      CALL_A,
+    ),
   );
   assert.equal(
-    changed.sourceRecordRevisionAvailable,
-    false,
+    evidence.humanCallDiscriminatorDigest,
+    semanticDigest(
+      "phase4-paraform-human-discriminator-v1",
+      {
+        platform: "PHONE",
+        recordingProvider: "TWILIO",
+      },
+    ),
+  );
+  assert.equal(
+    evidence.decisionBoundaryDigest,
+    semanticDigest(
+      "phase4-source-decision-boundary-v1",
+      BOUNDARY,
+    ),
   );
 });
 
 test("prototype pollution, accessors, proxies, symbols, and expanded options fail closed", () => {
-  const inheritedOnly = JSON.parse(JSON.stringify({
-    __proto__: null,
-    ["__proto__"]: {
-      id: CALL_A,
-    },
-    recording_transcript: [],
-  }));
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(
-      inheritedOnly,
-      "id",
-    ),
-    false,
-  );
-  expectCode(
-    () => normalizeParaformHumanSourcePointRecord(
-      inheritedOnly,
-      options(),
-    ),
-    "SOURCE_PARAFORM_HUMAN_POINT_RECORD_ID_INVALID",
-  );
-
   const accessor = point();
   Object.defineProperty(accessor, "id", {
     enumerable: true,
@@ -725,6 +937,7 @@ test("prototype pollution, accessors, proxies, symbols, and expanded options fai
     ),
     "SOURCE_PARAFORM_HUMAN_POINT_SYMBOL_INVALID",
   );
+
   assert.throws(
     () => normalizeParaformHumanSourcePointRecord(
       new Proxy(point(), {}),
@@ -734,6 +947,7 @@ test("prototype pollution, accessors, proxies, symbols, and expanded options fai
   );
 
   const inheritedCandidate = Object.create({
+    image_src: null,
     name: "Synthetic Candidate",
   });
   expectCode(
@@ -748,35 +962,6 @@ test("prototype pollution, accessors, proxies, symbols, and expanded options fai
     "SOURCE_PARAFORM_HUMAN_POINT_CANDIDATE_INVALID",
   );
 
-  const accessorEmails = [
-    "synthetic.candidate@example.invalid",
-  ];
-  Object.defineProperty(accessorEmails, "0", {
-    enumerable: true,
-    get: () => "synthetic.candidate@example.invalid",
-  });
-  expectCode(
-    () => normalizeParaformHumanSourcePointRecord(
-      point({
-        attendee_emails: accessorEmails,
-      }),
-      options(),
-    ),
-    "SOURCE_PARAFORM_HUMAN_POINT_ATTENDEE_EMAILS_INVALID",
-  );
-
-  const cyclicReference = reference();
-  cyclicReference.candidate.cycle =
-    cyclicReference.candidate;
-  assert.throws(
-    () => normalizeParaformHumanSourcePointRecord(
-      point(),
-      options({
-        expectedReference: cyclicReference,
-      }),
-    ),
-    SourceParaformHumanPointCollectorError,
-  );
   expectCode(
     () => normalizeParaformHumanSourcePointRecord(
       point(),
@@ -789,155 +974,7 @@ test("prototype pollution, accessors, proxies, symbols, and expanded options fai
   );
 });
 
-test("digest-only evidence excludes raw ids, PII, transcript, and response body", () => {
-  const raw = point();
-  const expectedReference = reference();
-  const evidence = paraformHumanSourcePointEvidence(
-    raw,
-    options({ expectedReference }),
-  );
-  assert.deepEqual(Object.keys(evidence).sort(), [
-    "candidateIdentityResolutionAvailable",
-    "completePointResponseContractAvailable",
-    "completeReferenceContinuityAvailable",
-    "decisionBoundaryDigest",
-    "humanCallDiscriminatorAvailable",
-    "partialReferenceContinuityVerified",
-    "pinnable",
-    "pointRecordIdVerified",
-    "source",
-    "sourceNormalizedInputDigest",
-    "sourcePartialPointDigest",
-    "sourcePointReadProcedure",
-    "sourceRecordDigest",
-    "sourceRecordRevisionAvailable",
-    "sourceReferenceDigest",
-    "successClassificationAvailable",
-  ]);
-  assert.equal(
-    evidence.sourcePointReadProcedure,
-    SOURCE_IDENTITY_POINT_READ_PROCEDURES
-      .paraformHumanSource,
-  );
-  assert.equal(evidence.pinnable, false);
-  assert.equal(
-    evidence.partialReferenceContinuityVerified,
-    true,
-  );
-  assert.equal(
-    evidence.successClassificationAvailable,
-    false,
-  );
-  assert.equal(
-    evidence.humanCallDiscriminatorAvailable,
-    false,
-  );
-  for (const key of [
-    "sourceNormalizedInputDigest",
-    "sourcePartialPointDigest",
-    "sourceRecordDigest",
-    "sourceReferenceDigest",
-    "decisionBoundaryDigest",
-  ]) {
-    assert.match(evidence[key], /^[a-f0-9]{64}$/u);
-  }
-  const serialized = JSON.stringify(evidence);
-  for (const forbidden of [
-    CALL_A,
-    raw.event_scheduled_at,
-    raw.meeting_platform,
-    expectedReference.title,
-    expectedReference.owner,
-    expectedReference.candidateUserId,
-    expectedReference.candidate.name,
-    expectedReference.candidate.linkedin,
-    expectedReference.candidate.emails[0],
-    raw.recording_transcript[0].words[0].text,
-  ]) {
-    assert.equal(serialized.includes(forbidden), false);
-  }
-});
-
-test("request, record, reference, and boundary digest namespaces are exact", () => {
-  const expectedReference = reference();
-  const evidence = paraformHumanSourcePointEvidence(
-    point(),
-    options({ expectedReference }),
-  );
-  const request = {
-    method: "GET",
-    procedure:
-      "candidateUserMeeting.getCallById",
-    input: {
-      json: {
-        id: CALL_A,
-      },
-    },
-  };
-  const sourceRecordDigest = semanticDigest(
-    "phase4-paraform-human-source-record-v1",
-    CALL_A,
-  );
-  assert.equal(
-    evidence.sourceNormalizedInputDigest,
-    semanticDigest(
-      "phase4-paraform-human-source-point-request-v1",
-      request,
-    ),
-  );
-  assert.equal(
-    evidence.sourceRecordDigest,
-    sourceRecordDigest,
-  );
-  assert.equal(
-    evidence.sourcePartialPointDigest,
-    semanticDigest(
-      "phase4-paraform-human-source-partial-point-v1",
-      {
-        sourceRecordDigest,
-        scheduledAt:
-          "2026-07-25T20:00:00.000000000Z",
-        enumeratedScheduledAt:
-          expectedReference.scheduledAt,
-        title: expectedReference.title,
-        platform: expectedReference.platform,
-        candidateUserId:
-          expectedReference.candidateUserId,
-        candidate: {
-          name: expectedReference.candidate.name,
-          emails: expectedReference.candidate.emails,
-        },
-      },
-    ),
-  );
-  assert.equal(
-    evidence.sourceReferenceDigest,
-    semanticDigest(
-      "phase4-paraform-human-source-reference-v1",
-      {
-        sourceRecordDigest,
-        scheduledAt: expectedReference.scheduledAt,
-        title: expectedReference.title,
-        platform: expectedReference.platform,
-        owner: expectedReference.owner,
-        candidateUserId:
-          expectedReference.candidateUserId,
-        hasTranscript:
-          expectedReference.hasTranscript,
-        candidate: expectedReference.candidate,
-      },
-    ),
-  );
-  assert.equal(
-    evidence.decisionBoundaryDigest,
-    semanticDigest(
-      "phase4-source-decision-boundary-v1",
-      BOUNDARY,
-    ),
-  );
-});
-
-test("the Human point scaffold has no I/O, transport, store, or authority surface", async () => {
+test("the Human point v2 projector has no I/O, store, signer, or authority surface", async () => {
   const source = await readFile(
     new URL(
       "../api/paraai/_lib/source-paraform-human-point-collector.mjs",
@@ -953,8 +990,8 @@ test("the Human point scaffold has no I/O, transport, store, or authority surfac
     /\bredis\b/iu,
     /\bcheckpointTrustedSourceCaptureEvent\b/u,
     /\bbuildSourceWatermarkCertificate\b/u,
-    /\btranscriptSubstance\b/u,
     /\bhumanCallReadiness\b/u,
+    /\bsource-capture-coordinator\b/u,
   ]) {
     assert.doesNotMatch(source, forbidden);
   }

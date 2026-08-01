@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { diffInterest } from "../api/paraai/_lib/interest-store.mjs";
+import { normalizeEmail } from "../api/paraai/_lib/core.mjs";
 import {
   firstNameFor,
   interestConfirmationBody,
@@ -10,6 +11,7 @@ import {
 } from "../api/paraai/_lib/interest-copy.mjs";
 import {
   interestConfig,
+  normalizeCanaryEmail,
   interestEmailPlan,
   interestJobAcceptsMoreRoles,
   interestJobDefersNewRoles,
@@ -257,6 +259,41 @@ test("gates arm in the correct order", () => {
   assert.equal(c.submitArmed, true);
   assert.equal(c.writesEnabled, true);
   assert.deepEqual(c.gateOrderViolations, []);
+});
+
+test("the canary recipient may be an internal address; the candidate path still may not", () => {
+  // Regression for a real production defect: every doc specified
+  // EMAIL_CANARY_TO=david@raydar.xyz, but core.mjs normalizeEmail rejects
+  // internal domains, so arming EMAIL yielded emailCanaryConfigured:false and a
+  // permanently fail-closed canary_recipient_required. Safe, but the canary
+  // could never fire. The old tests all used david@example.com, which passes
+  // that filter, so nothing caught it.
+  for (const internal of [
+    "david@raydar.xyz",
+    "david@raydargroup.com",
+    "someone@paraform.com",
+  ]) {
+    assert.equal(normalizeCanaryEmail(internal), internal);
+    // ...and the candidate-facing guard must be UNCHANGED for the same input.
+    assert.equal(normalizeEmail(internal), "");
+  }
+
+  assert.equal(normalizeCanaryEmail("  David@Raydar.XYZ  "), "david@raydar.xyz");
+  for (const bad of ["", null, undefined, "not-an-email", "a@b", "a b@c.com"]) {
+    assert.equal(normalizeCanaryEmail(bad), "");
+  }
+
+  const internalCanary = interestConfig({
+    PARAAI_INTEREST_ENABLED: "1",
+    PARAAI_INTEREST_DRY_RUN: "0",
+    PARAAI_INTEREST_RELEASE_NOT_BEFORE: "2026-07-29T00:00:00Z",
+    PARAAI_INTEREST_STOP_APPROVED: "1",
+    PARAAI_INTEREST_EMAIL_APPROVED: "1",
+    PARAAI_INTEREST_EMAIL_CANARY_TO: "david@raydar.xyz",
+  }, Date.parse("2026-07-29T01:00:00Z"));
+  assert.equal(internalCanary.emailCanaryTo, "david@raydar.xyz");
+  assert.equal(interestEmailPlan({ config: internalCanary }).canaryTo, "david@raydar.xyz");
+  assert.equal(interestEmailPlan({ config: internalCanary }).skipped, null);
 });
 
 test("EMAIL-only rollout can target only the configured canary recipient", () => {

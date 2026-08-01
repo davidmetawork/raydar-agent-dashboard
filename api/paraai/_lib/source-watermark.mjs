@@ -49,11 +49,13 @@ export const SOURCE_IDENTITY_POINT_READ_PROCEDURES =
 // invented "code commitment" literal. There is no merged alias collector or
 // signer yet, so aliases carry no artifact commitment and can become complete
 // only when every edge has a separately authenticated identity receipt.
-const SOURCE_COLLECTOR_ARTIFACT_MERGE_COMMIT =
+const RECALL_COLLECTOR_ARTIFACT_MERGE_COMMIT =
   "e26818f6dc16725d132534cc8da5c7b84e6826e3";
+const PARAFORM_HUMAN_COLLECTOR_ARTIFACT_MERGE_COMMIT =
+  "a3d6f65be6e78de757b6ef975911d9096454d287";
 const RECALL_COLLECTOR_ARTIFACT = Object.freeze({
   source: "recall",
-  mergeCommit: SOURCE_COLLECTOR_ARTIFACT_MERGE_COMMIT,
+  mergeCommit: RECALL_COLLECTOR_ARTIFACT_MERGE_COMMIT,
   runtimePath: "calls-app/api/_lib/recall.js",
   runtimeFileSha256:
     "b03ef301a7fe6037c81fa81a833f72231f1be8707fd001d117fdad15626dd04e",
@@ -63,13 +65,14 @@ const RECALL_COLLECTOR_ARTIFACT = Object.freeze({
 });
 const PARAFORM_HUMAN_COLLECTOR_ARTIFACT = Object.freeze({
   source: "paraform_human",
-  mergeCommit: SOURCE_COLLECTOR_ARTIFACT_MERGE_COMMIT,
+  mergeCommit:
+    PARAFORM_HUMAN_COLLECTOR_ARTIFACT_MERGE_COMMIT,
   runtimePath: "webview/api/_lib/paraform-meetings.js",
   runtimeFileSha256:
-    "d5e1a75cb8884af409fd7750fb54ced80185c2881b48b3a2042e9b95af621c11",
+    "bbdec2f3c0bf9f3f61eabd3d00681d5b14e13c49bdb8e9e090cbcb4bd7e0b54e",
   focusedTestPath: "webview/test/paraform-source-page.test.mjs",
   focusedTestFileSha256:
-    "d3a1511d1716c6c6c7a8baa0de6252fd44b6d477c46b49b354164fb42e7d55ee",
+    "270af807705445ad2804fb8a469daffbdc8e406dbb525017fa42a4e1da19eeb0",
 });
 
 function collectorArtifactCommitment(artifact) {
@@ -112,7 +115,7 @@ export const SOURCE_WATERMARK_APPROVED_COLLECTORS =
       artifact: RECALL_COLLECTOR_ARTIFACT,
     }),
     paraform_human: Object.freeze({
-      collectorVersion: "paraform-human-source-v1",
+      collectorVersion: "paraform-human-source-v2",
       collectorCodeCommitmentDigest:
         collectorArtifactCommitment(
           PARAFORM_HUMAN_COLLECTOR_ARTIFACT,

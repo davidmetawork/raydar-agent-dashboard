@@ -8,6 +8,8 @@ import {
   handleOutreachFailure,
   outreachConfig,
   outreachExecutionEnabled,
+  pendingNoDigestConfirmation,
+  PENDING_DIGEST_UNAVAILABLE_REASON,
   outreachHealth,
   pendingBackfillRequests,
   processMatchRequest,
@@ -150,6 +152,45 @@ export default async function handler(req, res) {
         action: result.action,
         requestId,
         deliveryMode: "expired_without_digest",
+      });
+    }
+    if (action === "send-pending-without-digest") {
+      const requestId = String(body.requestId || "").trim();
+      if (body.confirmation !== pendingNoDigestConfirmation(requestId)) {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      const history = await readSubmissionRequestHistory();
+      const request = history.find((row) => row.id === requestId);
+      if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
+      if (request.status !== "pending" || request.reachedOut) {
+        return res.status(409).json({ ok: false, error: "request_not_pending_unreached" });
+      }
+      let result;
+      try {
+        // Operator-only escape hatch for a Paraform contradiction: the same
+        // request must still read pending+digestable, have no digest, and get
+        // the exact vendor ineligible error again while holding our candidate
+        // lock. There is deliberately no worker/tick fallback into this path.
+        result = await processMatchRequest(request, history, {
+          mode: "send",
+          config,
+          allowAfterReply: true,
+          allowWithoutDigest: true,
+          allowWithoutDigestReason: PENDING_DIGEST_UNAVAILABLE_REASON,
+        });
+      } catch (error) {
+        await handleOutreachFailure(error, request, { config }).catch(() => {});
+        throw error;
+      }
+      return res.status(200).json({
+        ok: true,
+        action: result.action,
+        requestId,
+        deliveryMode: PENDING_DIGEST_UNAVAILABLE_REASON,
       });
     }
     if (action === "record-expired-external-delivery") {

@@ -4,7 +4,7 @@ export const BOOKING_STOP_LEAD_INDEX_SCHEMA =
   "raydar-booking-lead-index-v2";
 export const BOOKING_STOP_ATTEMPT_SCHEMA =
   "raydar-booking-stop-attempt-v3";
-export const BOOKING_STOP_REVIEWED_CATALOG_FLOOR = 75;
+export const BOOKING_STOP_REVIEWED_CATALOG_FLOOR = 60;
 
 export const BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA =
   "raydar-booking-membership-snapshot-v1";

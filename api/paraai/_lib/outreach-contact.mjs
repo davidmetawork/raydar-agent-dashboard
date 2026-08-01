@@ -20,6 +20,83 @@ export function normalizeContactName(value) {
     .replace(/\s+/g, " ");
 }
 
+// INCIDENT 2026-07-29 (William M.). Paraform sometimes stores an abbreviated
+// display name \u2014 "William M." \u2014 and for such a candidate the calendar half of
+// discovery cannot work: Google's tokenised search does not return his event for
+// q="William M.", it returns a DIFFERENT person's event, and our own filter
+// (`includes("william m")`) would have happily accepted that stranger. Because
+// corroboration needs both halves, no address could ever be resolved for anyone
+// whose name is abbreviated and whose Paraform record has no email.
+//
+// The fix is NOT to guess his surname. Measured against the 140 candidates in the
+// request history whose full name we already know \u2014 abbreviating each one and
+// asking the deriver to recover it \u2014 a name derived from the LinkedIn handle is
+// still wrong about 4% of the time (`nithinkkumar` for Kasireddy, `india-a` for
+// Adams). One wrong name in twenty-five, used to pick an email address, means
+// eventually mailing a stranger somebody else's interview request.
+//
+// So identity comes from the handle itself, never from a derived name. Calendly
+// writes the candidate's LinkedIn URL into the booked event's description: 573 of
+// the mailbox's events carry one, 570 of those also carry an external attendee.
+// A handle is an exact token that cannot collide the way "william m" does.
+export function normalizeLinkedinHandle(value) {
+  const raw = clean(value).toLowerCase();
+  if (!raw) return "";
+  const fromUrl = raw.match(/linkedin\.com\/in\/([a-z0-9_-]+)/i);
+  const handle = fromUrl ? fromUrl[1] : raw.replace(/^\/+|\/+$/g, "");
+  // A bare handle only. Anything with a slash left in it is a URL we do not
+  // understand, and guessing at it is how the wrong person gets matched.
+  return /^[a-z0-9_-]+$/.test(handle) ? handle : "";
+}
+
+// True when Paraform's display name is a first name plus a bare initial, which is
+// the only shape this whole path exists for.
+export function isAbbreviatedName(value) {
+  const parts = normalizeContactName(value).split(" ").filter(Boolean);
+  return parts.length >= 2 && parts[parts.length - 1].length === 1;
+}
+
+export function eventMentionsLinkedinHandle(event, handle) {
+  const wanted = normalizeLinkedinHandle(handle);
+  if (!wanted) return false;
+  const description = String(event?.description || "");
+  for (const match of description.matchAll(/linkedin\.com\/in\/([A-Za-z0-9_-]+)/gi)) {
+    // Exact handle equality, never a prefix: `linkedin.com/in/willi` must not
+    // match `william-mulder`, and `/in/amy` must not match `/in/amyzhang`.
+    if (match[1].toLowerCase().replace(/\/+$/, "") === wanted) return true;
+  }
+  return false;
+}
+
+/**
+ * The routing decision, exported so it can be tested directly rather than
+ * inferred from whichever evidence a mocked calendar happens to return.
+ *
+ * Returns the handle to search by, or "" to keep the existing name route. The
+ * handle route is used ONLY for an abbreviated name: for a full name the name
+ * route already works, and switching it to the handle would silently lose every
+ * candidate whose meeting was booked outside Calendly (no LinkedIn URL in the
+ * description, therefore no evidence at all).
+ */
+export function handleRouteFor(candidateName, linkedinUser) {
+  const handle = normalizeLinkedinHandle(linkedinUser);
+  if (!handle) return "";
+  return isAbbreviatedName(candidateName) ? handle : "";
+}
+
+export function linkedinCalendarEvidence(events, handle, mailbox) {
+  if (!normalizeLinkedinHandle(handle)) return [];
+  const emails = new Set();
+  for (const event of events || []) {
+    if (!eventMentionsLinkedinHandle(event, handle)) continue;
+    for (const attendee of event?.attendees || []) {
+      const candidate = externalEmail(attendee?.email, mailbox);
+      if (candidate) emails.add(candidate);
+    }
+  }
+  return [...emails].sort();
+}
+
 function extractEmails(value) {
   return [...new Set(
     (String(value || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
@@ -137,8 +214,17 @@ async function calendarEvidence(
   {
     fetchImpl = fetch,
     now = Date.now(),
+    linkedinUser = "",
   } = {},
 ) {
+  // For an abbreviated name the handle REPLACES the name route rather than
+  // supplementing it. Unioning the two would re-admit exactly the failure this
+  // fixes: q="William M." returns a stranger's event and the loose name filter
+  // accepts it. With no handle available there is nothing safe to do, so this
+  // stays as broken as it was rather than becoming wrong — the send then fails
+  // closed on OUTREACH_NO_EMAIL, which is the documented, alerted outcome.
+  const handle = handleRouteFor(candidateName, linkedinUser);
+  const useHandleRoute = Boolean(handle);
   let token;
   try {
     token = await delegatedGoogleAccessToken(mailbox, {
@@ -152,7 +238,10 @@ async function calendarEvidence(
     throw error;
   }
   const params = new URLSearchParams({
-    q: clean(candidateName),
+    // Searching by the handle finds the Calendly-booked event directly; the
+    // description carries the LinkedIn URL, and the handle is a far better search
+    // token than a name that is missing half of itself.
+    q: useHandleRoute ? handle : clean(candidateName),
     singleEvents: "true",
     orderBy: "startTime",
     maxResults: "250",
@@ -174,7 +263,10 @@ async function calendarEvidence(
       : "GOOGLE_CALENDAR_REQUEST_FAILED";
     throw error;
   }
-  return calendarCandidateEvidence(body?.items || [], candidateName, mailbox);
+  const items = body?.items || [];
+  return useHandleRoute
+    ? linkedinCalendarEvidence(items, handle, mailbox)
+    : calendarCandidateEvidence(items, candidateName, mailbox);
 }
 
 // INCIDENT 2026-07-29. Discovery needs BOTH halves, so the calendar read is a
@@ -223,6 +315,7 @@ export async function discoverCandidateContact(
   {
     candidateName,
     mailbox,
+    linkedinUser = "",
   },
   {
     gmailEvidenceImpl = gmailEvidence,
@@ -235,9 +328,14 @@ export async function discoverCandidateContact(
     gmailError: null,
     calendarError: null,
   };
+  // The Gmail half is deliberately untouched. It already found the right address
+  // for the 07-29 candidate — among three disposable-domain lookalikes — and the
+  // intersection with a handle-verified calendar address is what discards those.
+  // Fixing the calendar half is therefore sufficient, and widening the Gmail
+  // search by a derived name would only add noise to the side that works.
   const [gmail, calendar] = await Promise.allSettled([
     gmailEvidenceImpl(mailbox, candidateName),
-    calendarEvidenceImpl(mailbox, candidateName),
+    calendarEvidenceImpl(mailbox, candidateName, { linkedinUser }),
   ]);
   if (gmail.status === "fulfilled") result.gmailEmails = gmail.value;
   else result.gmailError = clean(gmail.reason?.code || "GMAIL_CONTACT_LOOKUP_FAILED");

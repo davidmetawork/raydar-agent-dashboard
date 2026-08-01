@@ -1,25 +1,69 @@
 {
   "rewrites": [
-    { "source": "/login", "destination": "/login.html" },
-    { "source": "/login/", "destination": "/login.html" },
-    { "source": "/agent-dashboard", "destination": "/index.html" },
-    { "source": "/c/:id", "destination": "/call.html" },
-    { "source": "/sequences", "destination": "/sequences.html" },
-    { "source": "/inbox", "destination": "/inbox.html" },
-    { "source": "/enrich", "destination": "/enrich.html" },
-    { "source": "/sourcing", "destination": "/sourcing.html" },
-    { "source": "/prep", "destination": "/prep.html" },
-    { "source": "/paraai", "destination": "/paraai.html" }
+    {
+      "source": "/login",
+      "destination": "/login.html"
+    },
+    {
+      "source": "/login/",
+      "destination": "/login.html"
+    },
+    {
+      "source": "/agent-dashboard",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/c/:id",
+      "destination": "/call.html"
+    },
+    {
+      "source": "/sequences",
+      "destination": "/sequences.html"
+    },
+    {
+      "source": "/inbox",
+      "destination": "/inbox.html"
+    },
+    {
+      "source": "/enrich",
+      "destination": "/enrich.html"
+    },
+    {
+      "source": "/sourcing",
+      "destination": "/sourcing.html"
+    },
+    {
+      "source": "/prep",
+      "destination": "/prep.html"
+    },
+    {
+      "source": "/paraai",
+      "destination": "/paraai.html"
+    }
   ],
   "redirects": [
-    { "source": "/inbox-classic", "destination": "/inbox", "permanent": false }
+    {
+      "source": "/inbox-classic",
+      "destination": "/inbox",
+      "permanent": false
+    }
   ],
   "functions": {
-    "api/enrich/*.mjs": { "maxDuration": 60 },
-    "api/inbox/*.mjs": { "maxDuration": 120 },
-    "api/sourcing/*.mjs": { "maxDuration": 300 },
-    "api/prepdoc/*.mjs": { "maxDuration": 60 },
-    "api/paraai/*.mjs": { "maxDuration": 120 }
+    "api/enrich/*.mjs": {
+      "maxDuration": 60
+    },
+    "api/inbox/*.mjs": {
+      "maxDuration": 120
+    },
+    "api/sourcing/*.mjs": {
+      "maxDuration": 300
+    },
+    "api/prepdoc/*.mjs": {
+      "maxDuration": 60
+    },
+    "api/paraai/*.mjs": {
+      "maxDuration": 120
+    }
   },
   "crons": [
     { "path": "/api/seq/release", "schedule": "0 16 * * *" },
@@ -27,6 +71,7 @@
     { "path": "/api/seq/guardian", "schedule": "17 * * * *" },
     { "path": "/api/seq/booking-membership-refresh", "schedule": "7,37 * * * *" },
     { "path": "/api/seq/booking-sweep", "schedule": "52 * * * *" },
-    { "path": "/api/ops/n8n-watchdog", "schedule": "7 * * * *" }
+    { "path": "/api/ops/n8n-watchdog", "schedule": "7 * * * *" },
+    { "path": "/api/paraai/submission-notify", "schedule": "47 * * * *" }
   ]
 }

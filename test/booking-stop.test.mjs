@@ -10,6 +10,7 @@ import { createHmac } from "node:crypto";
 import { verifyCalendlyWebhook, parseSignatureHeader, calendlyWebhookEvent } from "../api/seq/_lib/calendly-webhook.mjs";
 import { handleCalendlyWebhook } from "../api/seq/calendly-hook.mjs";
 import {
+  BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   campaignHasCandidateSchedulingLink,
   calendlyBookingIndex,
   DEFAULT_SEQ_KEYS,
@@ -19,11 +20,13 @@ import {
   decideLead,
   normEmail,
   runBookingSweep,
+  sweepAttemptErrorLabel,
+  sweepErrorLabel,
   SWEEP_STALE_AFTER_MS,
 } from "../api/seq/_lib/booking-stop.mjs";
 import { campaignLeads } from "../api/seq/_lib/core.mjs";
 import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/booking-stop.mjs";
-import { completeCampaignLeads, cronAuth } from "../api/seq/_lib/core.mjs";
+import { completeCampaignLeads, cronAuth, trpcGet } from "../api/seq/_lib/core.mjs";
 
 const SECRET = "test-signing-key";
 const SNAPSHOT_GENERATION = "1".repeat(32);
@@ -404,6 +407,104 @@ test("a non-auth error is not retried", async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Transport faults (2026-07-30 incident)
+//
+// A pass is ~750 sequential Paraform round trips, each with a hard 20s abort,
+// and NOTHING retried a transport failure — the wrapper only knew about 401.
+// One slow response therefore killed the whole hourly sweep. Measured live: the
+// 17:37Z pass died 117.6s in on a DOMException TimeoutError, and no pass had
+// completed for at least six hours while the board still said "done".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Exactly what AbortSignal.timeout() rejects with. */
+const timeoutError = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
+test("a fetch timeout is retried rather than killing the whole pass", async () => {
+  let calls = 0, transient = 0;
+  const value = await withThrottleRetry(async () => {
+    calls++;
+    if (calls < 3) throw timeoutError();
+    return "ok";
+  }, { onTransient: () => { transient++; }, transportDelays: [1, 2, 3] });
+  assert.equal(value, "ok");
+  assert.equal(calls, 3, "a transient timeout must be retried");
+  assert.equal(transient, 2, "each transport retry must be counted, not hidden");
+});
+
+test("a persistent timeout still surfaces once transport retries are spent", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => withThrottleRetry(async () => { calls++; throw timeoutError(); }, { transportDelays: [1, 2] }),
+    (e) => e.name === "TimeoutError",
+  );
+  assert.equal(calls, 3, "bounded: one attempt plus the ladder, never unbounded");
+});
+
+test("a network fault hidden in a TypeError cause is treated as transient", async () => {
+  let calls = 0;
+  const value = await withThrottleRetry(async () => {
+    calls++;
+    if (calls === 1) {
+      const e = new TypeError("fetch failed");
+      e.cause = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      throw e;
+    }
+    return "ok";
+  }, { transportDelays: [1] });
+  assert.equal(value, "ok");
+  assert.equal(calls, 2);
+});
+
+test("throttle and transport retries draw on independent budgets", async () => {
+  // A pass being throttled AND crossing a flaky link must not have one failure
+  // mode eat the other's retries.
+  const script = ["auth", "timeout", "auth", "timeout", "ok"];
+  let i = 0;
+  const value = await withThrottleRetry(async () => {
+    const step = script[i++];
+    if (step === "auth") { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+    if (step === "timeout") throw timeoutError();
+    return "ok";
+  }, { delays: [1, 2], transportDelays: [1, 2] });
+  assert.equal(value, "ok");
+  assert.equal(i, 5, "both ladders must still have budget left after the other spends some");
+});
+
+test("a 5xx is retryable but a 4xx contract error is not", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => (++calls === 1
+    ? new Response("<html>bad gateway</html>", { status: 502 })
+    : new Response(JSON.stringify({ result: { data: { json: ["ok"] } } }), { status: 200, headers: { "content-type": "application/json" } }));
+  try {
+    const value = await withThrottleRetry(
+      () => trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1),
+      { transportDelays: [1] },
+    );
+    assert.deepEqual(value, ["ok"], "a 502 must be retried, not surfaced as a JSON parse error");
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("the recorded error names the cause instead of a DOMException number", async () => {
+  // A DOMException's legacy numeric code is 23, and `e.code || e.message` used
+  // to record the literal string "23" — which is what health actually showed
+  // while the sweep was dead, and it identified nothing.
+  assert.equal(timeoutError().code, 23, "guard: the numeric code that caused this");
+  assert.equal(sweepErrorLabel(timeoutError()), "TimeoutError");
+
+  const authExpired = Object.assign(new Error("nope"), { code: "AUTH_EXPIRED" });
+  assert.equal(sweepErrorLabel(authExpired), "AUTH_EXPIRED", "string codes still win");
+
+  const scope = Object.assign(new Error("x"), { code: "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE" });
+  assert.equal(sweepErrorLabel(scope), "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+
+  assert.equal(sweepErrorLabel(new Error("plain failure")), "plain failure");
+  assert.equal(sweepErrorLabel("zero_active_leads"), "zero_active_leads");
+  assert.equal(sweepErrorLabel(null), "error");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Webhook behaviour
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -675,6 +776,267 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
     membershipCurrentLoader: async () => snapshotCurrent(),
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Self-enforced budget (2026-07-30)
+//
+// The platform kills the function at 300s, and a killed pass writes NO outcome:
+// its attempt record stays "running" forever and health cannot tell it from one
+// still in flight. Observed at 975s. The pass now stops itself first, so the
+// failure is recorded and alerted instead of vanishing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const idleCalendly = async () => ({ index: new Map(), events: 0, cacheHits: 0, truncated: false });
+
+test("a pass that overruns while loading a membership snapshot fails before booking reads", async () => {
+  const options = completeSingleLeadSweepOptions(idleCalendly);
+  options.budgetMs = 30;
+  options.sequenceScopeLoader = async () => ({
+    schema: "raydar-booking-stop-scope-v2",
+    scopeDigest: "c".repeat(64),
+    catalogFloor: 1,
+    sequences: [
+      { id: "a", name: "A", enabled: true },
+      { id: "b", name: "B", enabled: true },
+      { id: "c", name: "C", enabled: true },
+    ],
+    catalogSequences: 3,
+    scannedSequences: 3,
+    linkSequences: 3,
+    enabledLinkSequences: 3,
+    coveredEnabledLinkSequences: 3,
+    complete: true,
+  });
+  let calendlyReads = 0;
+  options.membershipSnapshotLoader = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return membershipSnapshot([]);
+  };
+  options.calendlyIndexLoader = async () => {
+    calendlyReads++;
+    return idleCalendly();
+  };
+
+  const result = await runBookingSweep(options);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "budget_exceeded");
+  assert.equal(result.budgetExceeded, true);
+  assert.equal(result.budgetExceededIn, "membership_snapshot");
+  assert.equal(calendlyReads, 0, "an over-budget snapshot cannot reach booking reads");
+});
+
+test("a profile leg cut short by the clock is reduced coverage, not a failed pass", async () => {
+  // Membership is complete here, so `active` and the index are trustworthy and
+  // the leads matched in pass 1 still deserve their pause. Only coverage is
+  // short — and coverage has ALWAYS been partial by design, since profileBudget
+  // is deliberately smaller than the population and such a pass is recorded
+  // green. Failing it only when the clock rather than the count does the
+  // cutting would be an inconsistency, not a safety property.
+  const options = completeSingleLeadSweepOptions(async () => ({
+    index: new Map([["candidate@example.com", {
+      bookedAt: Date.parse("2026-07-29T10:00:00.000Z"),
+      startsAt: "2026-07-30T10:00:00.000Z",
+      eventName: "Human Call",
+      status: "active",
+    }]]),
+    events: 1,
+    cacheHits: 0,
+    truncated: false,
+  }));
+  options.budgetMs = 30;
+  options.profileBudget = 5;
+  options.membershipSnapshotLoader = async () => membershipSnapshot([{
+    seq: { id: "covered", name: "Covered", enabled: true },
+    leads: [
+        // Matched by the Calendly index in pass 1 — owed a pause.
+        {
+          ccu_id: "ccu-covered", cu_id: "cu-covered", name: "Candidate",
+          to_use_email: "candidate@example.com", created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        },
+        // Two unmatched leads make the first slow profile read consume the
+        // clock while leaving one unread candidate for the cutoff check.
+        {
+          ccu_id: "ccu-other", cu_id: "cu-other", name: "Other",
+          to_use_email: "other@example.com", created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        },
+        {
+          ccu_id: "ccu-third", cu_id: "cu-third", name: "Third",
+          to_use_email: "third@example.com", created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        },
+      ],
+  }]);
+  options.profileConcurrency = 1;
+  options.profileLoader = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return {};
+  };
+  let applied = 0;
+  options.decisionApplier = async (decisions) => {
+    applied = decisions.length;
+    return { paused: decisions.length, pausedCcuIds: decisions.map((d) => d.ccuId), pauseErrors: [] };
+  };
+
+  const result = await runBookingSweep(options);
+  assert.equal(result.ok, true, "a short profile leg does not invalidate a complete pass");
+  assert.equal(result.profileCutShort, true, "but it must say so");
+  assert.equal(result.budgetExceeded, false, "and it is not the fatal kind of overrun");
+  assert.equal(applied, 1, "a lead proven booked must still be paused");
+  assert.equal(result.profileCoverage, "1/2", "coverage reports what was READ, not what was planned");
+});
+
+test("a profile leg cut short does not skip unread leads past the rotor", async () => {
+  // The rotor used to advance by pending.length BEFORE the loop ran, so a leg
+  // cut short by the clock pushed every unread lead to the back of the queue —
+  // invisible until a full rotation. That is the permanently-blind tail the
+  // rotor was built to prevent, arriving through the timeout instead.
+  const writes = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.includes("upstash") || u.includes("/pipeline") || u.includes("/set")) {
+      writes.push(String(init?.body || u));
+      return new Response(JSON.stringify({ result: "OK" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ result: { data: { json: null } } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const options = completeSingleLeadSweepOptions(idleCalendly);
+    options.budgetMs = 30;
+    options.profileBudget = 50;
+    options.membershipSnapshotLoader = async () => membershipSnapshot([{
+      seq: { id: "covered", name: "Covered", enabled: true },
+      leads: ["a", "b", "c"].map((k) => ({
+          ccu_id: `ccu-${k}`, cu_id: `cu-${k}`, name: k,
+          to_use_email: `${k}@example.com`, created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+      })),
+    }]);
+    options.profileConcurrency = 1;
+    options.profileLoader = async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return {};
+    };
+    const result = await runBookingSweep(options);
+    assert.equal(result.profileCutShort, true);
+    assert.equal(result.profilesAttempted, 1, "only the profile already in flight may finish");
+    assert.equal(
+      result.profileCoverage,
+      "1/3",
+      "an unread lead must not be counted as covered — that is how a tail goes blind",
+    );
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("a pass reports where its time actually went", async () => {
+  // 106 of a planned 150 profiles read inside a fully-spent 210s budget said
+  // time was the constraint, but not WHICH leg spent it. Tuning without that
+  // is guessing, and a previous guess shipped a change that achieved nothing.
+  const options = completeSingleLeadSweepOptions(async () => {
+    await new Promise((r) => setTimeout(r, 40));
+    return { index: new Map(), events: 0, cacheHits: 0, truncated: false };
+  });
+  const result = await runBookingSweep(options);
+  assert.ok(result.legMs, "every pass must report per-leg timing");
+  assert.ok(result.legMs.calendly >= 30, `calendly leg should be measured, got ${result.legMs.calendly}`);
+  assert.ok("membership_snapshot" in result.legMs, "membership snapshot leg must be measured");
+  assert.ok(
+    Object.values(result.legMs).reduce((a, b) => a + b, 0) <= result.durationMs + 50,
+    "leg total must not exceed the pass duration",
+  );
+});
+
+test("a pass that runs out of budget still reports where the time went", async () => {
+  // This is exactly when the numbers matter most, and an early return is the
+  // easiest place to drop them.
+  const options = completeSingleLeadSweepOptions(idleCalendly);
+  options.budgetMs = 30;
+  options.membershipSnapshotLoader = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return membershipSnapshot([]);
+  };
+  options.sequenceScopeLoader = async () => ({
+    schema: "raydar-booking-stop-scope-v2",
+    scopeDigest: "c".repeat(64),
+    catalogFloor: 1,
+    sequences: [{ id: "a", name: "A", enabled: true }, { id: "b", name: "B", enabled: true }, { id: "c", name: "C", enabled: true }],
+    catalogSequences: 3, scannedSequences: 3, linkSequences: 3,
+    enabledLinkSequences: 3, coveredEnabledLinkSequences: 3, complete: true,
+  });
+  const result = await runBookingSweep(options);
+  assert.equal(result.error, "budget_exceeded");
+  assert.ok(result.legMs, "a budget-exceeded pass must still report leg timing");
+  assert.ok(result.legMs.membership_snapshot >= 50, `the leg that overran must be visible, got ${result.legMs.membership_snapshot}`);
+});
+
+test("the catalog floor leaves room for a legitimate archive", async () => {
+  // It was 75 while Paraform reported exactly 75, so archiving ONE sequence
+  // would have thrown BOOKING_STOP_SEQUENCE_CATALOG_INVALID on every pass
+  // forever. The gate exists to catch a SHORT read, not to pin the count.
+  assert.ok(
+    BOOKING_STOP_REVIEWED_CATALOG_FLOOR <= 60,
+    "floor must keep margin below the live catalog count",
+  );
+  const catalog = (n) => Array.from({ length: n }, (_, i) => ({ id: `c${i}`, enabled: true }));
+  const readCampaign = async () => ({ steps: [] });
+
+  // A legitimately smaller catalog still passes.
+  const ok = await discoverBookingStopSequences({
+    listSequences: async () => catalog(BOOKING_STOP_REVIEWED_CATALOG_FLOOR),
+    readCampaign,
+  });
+  assert.equal(ok.complete, true);
+  assert.equal(ok.catalogSequences, BOOKING_STOP_REVIEWED_CATALOG_FLOOR);
+
+  // A short/truncated read still fails closed.
+  await assert.rejects(
+    () => discoverBookingStopSequences({
+      listSequences: async () => catalog(BOOKING_STOP_REVIEWED_CATALOG_FLOOR - 1),
+      readCampaign,
+    }),
+    (e) => e.code === "BOOKING_STOP_SEQUENCE_CATALOG_INVALID",
+  );
+  await assert.rejects(
+    () => discoverBookingStopSequences({ listSequences: async () => [], readCampaign }),
+    (e) => e.code === "BOOKING_STOP_SEQUENCE_CATALOG_INVALID",
+  );
+});
+
+test("health is told WHICH stage ran out of budget, not just that one did", async () => {
+  // The stage was reaching Slack and the HTTP response while /api/seq/health —
+  // the one unauthenticated surface, and the only one anyone checked while the
+  // sweep was down — got the bare code. Same way "23" hid a TimeoutError.
+  assert.equal(
+    sweepAttemptErrorLabel({ budgetExceeded: true, budgetExceededIn: "membership", error: "budget_exceeded" }),
+    "budget_exceeded:membership",
+  );
+  assert.equal(
+    sweepAttemptErrorLabel({ budgetExceeded: true, budgetExceededIn: "profiles", error: "budget_exceeded" }),
+    "budget_exceeded:profiles",
+  );
+  // Null means "no opinion" so recordSweepAttempt still falls through to
+  // result.error — every other failure keeps the label it always had.
+  assert.equal(sweepAttemptErrorLabel({ ok: false, error: "zero_active_leads" }), null);
+  assert.equal(sweepAttemptErrorLabel({ budgetExceeded: true, budgetExceededIn: null }), null);
+  assert.equal(sweepAttemptErrorLabel(null), null);
+});
+
+test("a retry that would finish after the deadline is not attempted", async () => {
+  // Retrying is only free if someone is still there to receive the answer.
+  let calls = 0;
+  const started = Date.now();
+  await assert.rejects(
+    () => withThrottleRetry(
+      async () => { calls++; throw new DOMException("timed out", "TimeoutError"); },
+      { transportDelays: [5000], deadline: Date.now() + 50 },
+    ),
+    (e) => e.name === "TimeoutError",
+  );
+  assert.equal(calls, 1, "must not start a retry it cannot finish in time");
+  assert.ok(Date.now() - started < 1000, "must not sleep past the deadline first");
+});
 
 test("a truncated Calendly source can never produce a green sweep", async () => {
   const result = await runBookingSweep(

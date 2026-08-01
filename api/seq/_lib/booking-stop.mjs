@@ -764,6 +764,9 @@ export async function calendlyBookingIndex({
 // Paraform's throttle can persist for tens of seconds under sustained load, so
 // the ladder has to outlast it. Cheap: these delays only run when we are already
 // being refused, and giving up costs a missed pause.
+// This ladder used to be hand-inlined below, which meant profile reads missed
+// every later fix to the shared wrapper — including transport retry. It now
+// delegates to withThrottleRetry and keeps only the delays it overrides.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 
 // TTL is deliberately SHORT. The rotor already bounds load to a few hundred
@@ -773,23 +776,35 @@ const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 // 6h cache meant their booking could sit unnoticed for 6h behind a stale
 // "CONTACTED". Observed live: two candidates booked at 09:34 and 09:49 were
 // still unpaused at 13:30 for exactly this reason.
+//
+// 1800s is SHORTER than the hourly sweep interval, so the sweep never gets a
+// cache hit and this looks like a misconfiguration. It is not, and it was
+// investigated on 2026-07-31 and deliberately left alone. Two reasons:
+//   1. this cache is also the profileLoader for bookedSetWithSources, which
+//      enroll/preview/release call on USER-FACING paths. Thirty-minute
+//      freshness is load-bearing there — enrolling someone who booked an hour
+//      ago into a "please book a call" sequence is a real observed failure.
+//   2. for the sweep, TTL is dominated by the rotor anyway. With the current
+//      population the rotor revisits a given lead roughly every
+//      ceil(candidates / BOOKING_STOP_PROFILE_BUDGET) passes, so by the time a
+//      lead comes round again any plausible TTL has long expired. Lengthening
+//      the TTL would therefore buy the sweep almost nothing while costing the
+//      enrol gate real freshness.
+// If profile load ever needs cutting, the lever is the BUDGET (and the rotor
+// cycle it implies), not this TTL.
 const PROFILE_TTL_SECONDS = Number(process.env.BOOKING_STOP_PROFILE_TTL_S || 1800);
 
-export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null } = {}) {
+export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null, deadline = null } = {}) {
   if (!force) {
     const cached = await kvGet(K.profile(cuId));
     if (cached) return cached;
   }
-  let p = null;
-  for (let attempt = 0; ; attempt++) {
-    try { p = await trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1); break; }
-    catch (e) {
-      if (e?.code !== "AUTH_EXPIRED" || attempt >= AUTH_RETRY_DELAYS_MS.length) throw e;
-      if (onThrottle) onThrottle();
-      // Jitter so a fleet of workers does not retry in lockstep.
-      await sleep(AUTH_RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400));
-    }
-  }
+  // Jitter and both retry budgets live in withThrottleRetry now, so a fleet of
+  // workers does not retry in lockstep and a timeout is not read as a miss.
+  const p = await withThrottleRetry(
+    () => trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1),
+    { onThrottle, delays: AUTH_RETRY_DELAYS_MS, deadline },
+  );
   if (!p) return null;
   const value = {
     status: p.candidate_user_relationship_status || null,
@@ -958,12 +973,13 @@ export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
 
 // ---------- the sweep ----------
 export async function discoverBookingStopSequences({
+  deadline = null,
   listSequences = async () =>
     withThrottleRetry(() =>
-      trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1)),
+      trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1), { deadline }),
   readCampaign = async (id) =>
     withThrottleRetry(() =>
-      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1)),
+      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1), { deadline }),
   concurrency = Number(process.env.BOOKING_STOP_SCOPE_CONCURRENCY || 2),
   minimumCatalogCount = Number(
     process.env.BOOKING_STOP_SCOPE_CATALOG_FLOOR
@@ -1075,6 +1091,13 @@ export async function runBookingSweep({
   apply = true,
   now = Date.now(),
   clock = Date.now,
+  // A SOFT budget the pass enforces on itself, well inside the 300s the
+  // platform enforces by killing us. A killed pass writes no outcome at all:
+  // its attempt record stays "running" forever and health cannot tell it from
+  // one still in flight. Observed 2026-07-30 at 975s. Stopping ourselves is the
+  // difference between a diagnosis and a mystery. The headroom is for the
+  // pause writes and the index publish, which run AFTER the budget is spent.
+  budgetMs = Number(process.env.BOOKING_STOP_BUDGET_MS || 210000),
   profileBudget = Number(process.env.BOOKING_STOP_PROFILE_BUDGET || 400),
   concurrency = 8,
   // Paraform 401s under burst (see cachedRelationshipStatus). 4 is the measured
@@ -1094,13 +1117,30 @@ export async function runBookingSweep({
       readMany: kvGetMany,
     }),
   membershipCurrentLoader = () => kvGet(K.membershipCurrent),
+  profileLoader = cachedRelationshipStatus,
   decisionApplier = applyDecisions,
   onDecision = null,
 } = {}) {
   const startedAt = Date.now();
+  const deadline = startedAt + budgetMs;
+  const overBudget = () => Date.now() >= deadline;
+  // Per-leg wall clock. Measured 2026-07-31: a pass spends its ENTIRE 210s
+  // budget and reads only 106 of a planned 150 profiles, so the profile budget
+  // is not the constraint — time is. Which leg eats it was still guesswork, and
+  // guessing is how a previous tune got shipped for nothing. These numbers make
+  // the next decision factual.
+  const legMs = {};
+  const timeLeg = async (name, fn) => {
+    const t0 = Date.now();
+    try { return await fn(); } finally { legMs[name] = (legMs[name] || 0) + (Date.now() - t0); }
+  };
   const result = {
     ok: false,
     apply,
+    budgetMs,
+    budgetExceeded: false,
+    budgetExceededIn: null,
+    profileCutShort: false,
     sequences: 0,
     scopeSchema: null,
     scopeDigest: null,
@@ -1146,15 +1186,33 @@ export async function runBookingSweep({
     durationMs: 0,
   };
 
+  // Stop before a leg whose output would be incomplete. Snapshot membership
+  // removes the former multi-minute live membership walk from this endpoint,
+  // but the sweep still needs a self-owned deadline so a platform kill cannot
+  // leave an attempt looking permanently in progress.
+  const stopForBudget = (leg) => {
+    result.ok = false;
+    result.budgetExceeded = true;
+    result.budgetExceededIn = leg;
+    result.error = "budget_exceeded";
+    result.durationMs = Date.now() - startedAt;
+    result.legMs = legMs;
+    return result;
+  };
+
   let scope = null;
   try {
-    scope = await sequenceScopeLoader();
+    scope = await timeLeg(
+      "scope",
+      () => sequenceScopeLoader({ deadline }),
+    );
   } catch {
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_unavailable";
     result.durationMs = Date.now() - startedAt;
     return result;
   }
+  if (overBudget()) return stopForBudget("scope");
   if (
     scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
     || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
@@ -1190,7 +1248,22 @@ export async function runBookingSweep({
   // booking-membership-refresh. The sweep live-reads only the sequence scope,
   // then consumes a fully verified immutable generation. No fallback to a live
   // membership read is permitted: unknown membership must mean no mutations.
-  const membership = await membershipSnapshotLoader({ scope, now });
+  let membership = null;
+  try {
+    membership = await timeLeg(
+      "membership_snapshot",
+      () => membershipSnapshotLoader({ scope, now }),
+    );
+  } catch (error) {
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError = String(
+      error?.code || error?.message || "snapshot_read_failed",
+    ).slice(0, 120);
+    result.durationMs = Date.now() - startedAt;
+    result.legMs = legMs;
+    return result;
+  }
+  if (overBudget()) return stopForBudget("membership_snapshot");
   const membershipOldestFetchedAtMs = Date.parse(
     String(membership?.oldestFetchedAt || ""),
   );
@@ -1252,10 +1325,14 @@ export async function runBookingSweep({
 
   // External booking sources are read only after membership authority has been
   // established, so an invalid generation exits before doing unrelated work.
-  const cal = await calendlyIndexLoader({ now, backDays: calendlyBackDays });
+  const cal = await timeLeg(
+    "calendly",
+    () => calendlyIndexLoader({ now, backDays: calendlyBackDays }),
+  );
   result.calendlyEvents = cal.events;
   result.calendlyCacheHits = cal.cacheHits;
   result.calendlyTruncated = cal.truncated;
+  if (overBudget()) return stopForBudget("calendly");
 
   let raydar = null;
   if (raydarEnabled) {
@@ -1334,11 +1411,21 @@ export async function runBookingSweep({
   let j = 0;
   const profWorker = async () => {
     while (j < pending.length) {
+      // Running out of time here is NOT a failed pass. Membership is complete,
+      // so `active` and the published index are sound and every lead matched in
+      // pass 1 was already paused. This leg is partial BY DESIGN — profileBudget
+      // is deliberately smaller than the population and such a pass has always
+      // been recorded green. A leg cut short by the clock is the same kind of
+      // partial as one cut short by the count, so it is reported, not failed.
+      if (overBudget()) { result.profileCutShort = true; return; }
       const { seq, lead } = pending[j++];
       result.profilesAttempted++;
       let prof = null;
       try {
-        prof = await cachedRelationshipStatus(lead.cu_id, { onThrottle: () => { result.throttled++; } });
+        prof = await profileLoader(lead.cu_id, {
+          onThrottle: () => { result.throttled++; },
+          deadline,
+        });
       } catch (e) {
         if (e.code === "AUTH_EXPIRED") {
           // Only a serially-confirmed 401 is a real expiry; otherwise it is the
@@ -1365,8 +1452,17 @@ export async function runBookingSweep({
       if (d) result.decisions.push(d);
     }
   };
-  await Promise.all(Array.from({ length: profileConcurrency }, profWorker));
-  result.profileCoverage = `${pending.length}/${active.length - matched.size}`;
+  await timeLeg("profiles", () => Promise.all(Array.from({ length: profileConcurrency }, profWorker)));
+
+  // ROTOR ADVANCE, AFTER the fact and by what was ACTUALLY read. Advancing by
+  // pending.length before the loop meant a leg cut short by the clock skipped
+  // every unread lead to the back of the queue — they would not be looked at
+  // again until a full rotation, which is precisely the permanently-blind tail
+  // the rotor exists to prevent. Coverage is reported the same way: actual, not
+  // planned. A number that describes intent rather than work is how a sweep
+  // convinces everyone it is fine.
+  const profilesProcessed = Math.min(j, pending.length);
+  result.profileCoverage = `${profilesProcessed}/${active.length - matched.size}`;
 
   // Fence mutations against a generation rollover that happened while the
   // booking sources and bounded profile reads were in flight.
@@ -1397,14 +1493,14 @@ export async function runBookingSweep({
 
   await kvSet(K.rotor, {
     at: candidates.length
-      ? (startAt + pending.length) % candidates.length
+      ? (startAt + profilesProcessed) % candidates.length
       : 0,
     updatedAt: new Date().toISOString(),
   });
 
   // Apply
   if (apply && result.decisions.length) {
-    const applied = await decisionApplier(result.decisions);
+    const applied = await timeLeg("apply", () => decisionApplier(result.decisions));
     result.paused = applied.paused;
     result.pausedCcuIds = applied.pausedCcuIds;
     result.pauseErrors.push(...applied.pauseErrors);
@@ -1413,13 +1509,16 @@ export async function runBookingSweep({
 
   result.ok = !result.calendlyTruncated
     && !result.raydarError
+    && !result.budgetExceeded
     && result.pauseErrors.length === 0;
-  if (result.raydarError) result.error = "raydar_index_incomplete";
+  if (result.budgetExceeded) result.error = "budget_exceeded";
+  else if (result.raydarError) result.error = "raydar_index_incomplete";
   else if (result.calendlyTruncated) {
     result.error = "calendly_index_incomplete";
   }
   else if (result.pauseErrors.length) result.error = "pause_incomplete";
   result.durationMs = Date.now() - startedAt;
+  result.legMs = legMs;
   return result;
 }
 
@@ -1768,6 +1867,11 @@ export async function sweepStaleness(now = Date.now(), {
     lastAt: last.at,
     ageMs,
     activeLeads: last.activeLeads ?? null,
+    durationMs: last.durationMs ?? null,
+    profileCutShort: Boolean(last.profileCutShort),
+    profileCoverage: last.profileCoverage ?? null,
+    profileRotorOf: last.profileRotorOf ?? null,
+    legMs: last.legMs ?? null,
     calendlyComplete: last.calendlyComplete === true,
     raydarEnabled: Boolean(last.raydarEnabled),
     raydarComplete: Boolean(last.raydarComplete),
@@ -1797,6 +1901,32 @@ export async function sweepStaleness(now = Date.now(), {
     leadIndexAgeMs,
     leadIndexCurrent,
   };
+}
+
+/** The one clue health gets about WHY a pass died, so it must not be thrown
+ *  away on the way there. A DOMException carries a legacy NUMERIC `code` — an
+ *  AbortSignal.timeout() is 23 — so `e.code || e.message` recorded the literal
+ *  string "23", which told nobody anything and cost a real diagnosis. Prefer a
+ *  meaningful string code, then the name, then the message. */
+export function sweepErrorLabel(e) {
+  if (typeof e === "string") return e || "error";
+  if (typeof e?.code === "string" && e.code) return e.code;
+  if (typeof e?.name === "string" && e.name && e.name !== "Error") return e.name;
+  if (e?.message) return String(e.message);
+  return e?.code != null ? String(e.code) : "error";
+}
+
+/** What health will actually see. `result.error` stays the stable machine code
+ *  so anything matching on it keeps working, but "budget_exceeded" alone is
+ *  useless — the whole point of stopping ourselves was to learn WHERE the time
+ *  goes, and that stage was reaching Slack and the HTTP response while health,
+ *  the one unauthenticated surface, still got nothing. Returning null leaves
+ *  recordSweepAttempt to fall through to `result.error` exactly as before. */
+export function sweepAttemptErrorLabel(result) {
+  if (result?.budgetExceeded && result?.budgetExceededIn) {
+    return `budget_exceeded:${result.budgetExceededIn}`;
+  }
+  return null;
 }
 
 export async function recordSweepAttempt({
@@ -1877,6 +2007,14 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     activeLeads: result.activeLeads,
     paused: result.paused,
     durationMs: result.durationMs,
+    // Coverage telemetry. Without these, tuning BOOKING_STOP_PROFILE_BUDGET is
+    // guesswork: you cannot tell a pass that finished its profile leg with room
+    // to spare from one that only just squeaked in, and the budget directly
+    // sets how many passes the rotor needs to reach every lead.
+    profileCutShort: Boolean(result.profileCutShort),
+    profileCoverage: result.profileCoverage ?? null,
+    profileRotorOf: result.profileRotorOf ?? null,
+    legMs: result.legMs ?? null,
     calendlyComplete: true,
     raydarEnabled: Boolean(result.raydarEnabled),
     raydarComplete: Boolean(result.raydarComplete),
