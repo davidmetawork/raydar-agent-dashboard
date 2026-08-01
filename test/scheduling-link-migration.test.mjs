@@ -9,6 +9,9 @@ import {
   rewriteLegacySchedulingLinks,
 } from "../api/seq/_lib/scheduling-links.mjs";
 import {
+  BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
+} from "../api/seq/_lib/booking-stop.mjs";
+import {
   inventoryUrlsFromText,
   inventorySchedulingIdentityContext,
   loadPlans,
@@ -94,7 +97,8 @@ function cutoverFetch({
             lastSweepSequenceScopeScanned: 75,
             lastSweepScopeSchema: "raydar-booking-stop-scope-v2",
             lastSweepScopeDigest: "a".repeat(64),
-            lastSweepScopeCatalogFloor: 75,
+            lastSweepScopeCatalogFloor:
+              BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
             lastSweepLinkSequences: 62,
             lastSweepEnabledLinkSequences: 32,
             lastSweepCoveredEnabledLinkSequences: 32,

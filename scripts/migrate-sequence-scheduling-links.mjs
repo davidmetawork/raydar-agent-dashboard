@@ -32,6 +32,7 @@ import {
   rewriteLegacySchedulingLinks,
 } from "../api/seq/_lib/scheduling-links.mjs";
 import {
+  BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   BOOKING_STOP_SCOPE_SCHEMA,
   bookingStopScopeDigest,
   isNudgeSequence,
@@ -920,7 +921,7 @@ export async function requireCutoverReadiness(
     || native?.lastSweepScopeSchema !== BOOKING_STOP_SCOPE_SCHEMA
     || !/^[a-f0-9]{64}$/u.test(String(native?.lastSweepScopeDigest || ""))
     || native?.lastSweepScopeCatalogFloor
-      !== REVIEWED_SEQUENCE_CATALOG_FLOOR
+      !== BOOKING_STOP_REVIEWED_CATALOG_FLOOR
     || (
       expectedScopeDigest
       && native.lastSweepScopeDigest !== expectedScopeDigest
