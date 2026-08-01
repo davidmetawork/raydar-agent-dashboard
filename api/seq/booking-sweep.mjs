@@ -80,7 +80,7 @@ export default async function handler(req, res) {
 
   // Staleness check runs BEFORE the sweep so a run that is itself about to fail
   // still surfaces that nothing has succeeded recently.
-  const staleness = await sweepStaleness();
+  let staleness = await sweepStaleness();
   if (staleness.stale && kvConfigured() && (await shouldAlert("sweep-stale"))) {
     const since = staleness.lastAt ? `since ${staleness.lastAt}` : "ever";
     await notifySlack(`:rotating_light: Booking sweep has not completed a full pass ${since}. Candidates who book are not being removed from sequences. Check monitor.raydar.xyz/api/seq/booking-sweep.`).catch(() => {});
@@ -95,6 +95,7 @@ export default async function handler(req, res) {
         result,
         error: sweepAttemptErrorLabel(result),
       });
+      staleness = await sweepStaleness();
     }
 
     // A pass that sees zero active leads is a FAILURE, not a clean run. Two
@@ -123,6 +124,13 @@ export default async function handler(req, res) {
       return res.status(200).json({ ...result, staleness });
     }
 
+    if (!result.ok && result.error === "membership_snapshot_unavailable") {
+      if (await shouldAlert("membership-snapshot-unavailable", 3600)) {
+        await notifySlack(":rotating_light: Booking sweep rejected the immutable Paraform membership snapshot (missing, stale, drifted, or incomplete). It made zero pauses and recorded no successful pass.").catch(() => {});
+      }
+      return res.status(200).json({ ...result, staleness });
+    }
+
     if (result.calendlyTruncated && (await shouldAlert("calendly-truncated"))) {
       await notifySlack(":warning: Booking sweep hit the Calendly pagination ceiling — some bookings may not have been read this pass.").catch(() => {});
     }
@@ -147,6 +155,7 @@ export default async function handler(req, res) {
     if (result.ok && apply) {
       await recordSuccessfulSweep(result);
       await recordSweepAttempt({ status: "success", result });
+      staleness = await sweepStaleness();
     }
 
     // Never return candidate detail in an HTTP response — counts only.
@@ -158,6 +167,15 @@ export default async function handler(req, res) {
       budgetExceededIn: result.budgetExceededIn,
       profileCutShort: result.profileCutShort,
       sequences: result.sequences,
+      membershipSnapshotSchema: result.membershipSnapshotSchema,
+      membershipSnapshotGeneration: result.membershipSnapshotGeneration,
+      membershipSnapshotOldestFetchedAt:
+        result.membershipSnapshotOldestFetchedAt,
+      membershipSnapshotAgeMinutes:
+        result.membershipSnapshotAgeMs == null
+          ? null
+          : Math.round(result.membershipSnapshotAgeMs / 60000),
+      membershipSnapshotCurrent: result.membershipSnapshotCurrent,
       sequenceCatalogCount: result.sequenceCatalogCount,
       sequenceScopeScanned: result.sequenceScopeScanned,
       linkSequences: result.linkSequences,

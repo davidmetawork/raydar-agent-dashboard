@@ -29,6 +29,31 @@ import { withThrottleRetry, isSessionActuallyExpired } from "../api/seq/_lib/boo
 import { completeCampaignLeads, cronAuth, trpcGet } from "../api/seq/_lib/core.mjs";
 
 const SECRET = "test-signing-key";
+const SNAPSHOT_GENERATION = "1".repeat(32);
+const SNAPSHOT_MANIFEST_HASH = "2".repeat(64);
+
+const snapshotCurrent = () => ({
+  schema: "raydar-booking-membership-current-v1",
+  snapshotSchema: "raydar-booking-membership-snapshot-v1",
+  complete: true,
+  generation: SNAPSHOT_GENERATION,
+  manifestHash: SNAPSHOT_MANIFEST_HASH,
+});
+
+const membershipSnapshot = (perSequence) => ({
+  ok: true,
+  complete: true,
+  schema: "raydar-booking-membership-snapshot-v1",
+  generation: SNAPSHOT_GENERATION,
+  manifestHash: SNAPSHOT_MANIFEST_HASH,
+  // Keep the synthetic snapshot safely behind the run's captured clock.
+  // A helper-created timestamp even one millisecond later is correctly
+  // rejected as a future publication by the production freshness fence.
+  oldestFetchedAt: new Date(Date.now() - 1_000).toISOString(),
+  ageMs: 1_000,
+  current: snapshotCurrent(),
+  perSequence,
+});
 
 function signed(body, { secret = SECRET, at = Date.now() } = {}) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
@@ -673,6 +698,8 @@ test("a sweep that sees zero active leads FAILS instead of reporting success", a
         coveredEnabledLinkSequences: 1,
         complete: true,
       }),
+      membershipSnapshotLoader: async () => membershipSnapshot([]),
+      membershipCurrentLoader: async () => snapshotCurrent(),
     });
     assert.equal(r.ok, false, "must not report ok");
     assert.equal(r.error, "zero_active_leads");
@@ -682,7 +709,7 @@ test("a sweep that sees zero active leads FAILS instead of reporting success", a
   }
 });
 
-test("an incomplete covered-sequence membership read fails before index publication", async () => {
+test("an unavailable membership snapshot fails before any index publication", async () => {
   const result = await runBookingSweep({
     apply: false,
     calendlyIndexLoader: async () => ({
@@ -704,18 +731,15 @@ test("an incomplete covered-sequence membership read fails before index publicat
       coveredEnabledLinkSequences: 1,
       complete: true,
     }),
-    membershipLoader: async () => ({
+    membershipSnapshotLoader: async () => ({
+      ok: false,
       complete: false,
-      unique: 1,
-      totalCount: 2,
-      shortfall: 1,
-      apiCalls: 2,
-      leads: [{ ccu_id: "partial" }],
+      error: "membership_snapshot_unavailable",
+      detail: "shard_missing_or_invalid",
     }),
   });
   assert.equal(result.ok, false);
-  assert.equal(result.error, "incomplete_membership");
-  assert.equal(result.incompleteReads.length, 1);
+  assert.equal(result.error, "membership_snapshot_unavailable");
   assert.equal(result.indexedEmails, 0);
 });
 
@@ -737,12 +761,8 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
       coveredEnabledLinkSequences: 1,
       complete: true,
     }),
-    membershipLoader: async () => ({
-      complete: true,
-      unique: 1,
-      totalCount: 1,
-      shortfall: 0,
-      apiCalls: 1,
+    membershipSnapshotLoader: async () => membershipSnapshot([{
+      seq: { id: "covered", name: "Covered", enabled: true },
       leads: [{
         ccu_id: "ccu-covered",
         cu_id: "cu-covered",
@@ -752,8 +772,8 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
         is_paused: false,
         is_archived: false,
       }],
-    }),
-    leadIndexPublisher: async () => "OK",
+    }]),
+    membershipCurrentLoader: async () => snapshotCurrent(),
   };
 }
 
@@ -768,7 +788,7 @@ function completeSingleLeadSweepOptions(calendlyIndexLoader) {
 
 const idleCalendly = async () => ({ index: new Map(), events: 0, cacheHits: 0, truncated: false });
 
-test("a pass that overruns during membership refuses to publish a partial index", async () => {
+test("a pass that overruns while loading a membership snapshot fails before booking reads", async () => {
   const options = completeSingleLeadSweepOptions(idleCalendly);
   options.budgetMs = 30;
   options.sequenceScopeLoader = async () => ({
@@ -787,22 +807,22 @@ test("a pass that overruns during membership refuses to publish a partial index"
     coveredEnabledLinkSequences: 3,
     complete: true,
   });
-  const seen = [];
-  options.membershipLoader = async (id) => {
-    seen.push(id);
+  let calendlyReads = 0;
+  options.membershipSnapshotLoader = async () => {
     await new Promise((r) => setTimeout(r, 60));
-    return { complete: true, unique: 0, totalCount: 0, shortfall: 0, apiCalls: 1, leads: [] };
+    return membershipSnapshot([]);
   };
-  let published = false;
-  options.leadIndexPublisher = async () => { published = true; return "OK"; };
+  options.calendlyIndexLoader = async () => {
+    calendlyReads++;
+    return idleCalendly();
+  };
 
   const result = await runBookingSweep(options);
   assert.equal(result.ok, false);
   assert.equal(result.error, "budget_exceeded");
   assert.equal(result.budgetExceeded, true);
-  assert.equal(result.budgetExceededIn, "membership");
-  assert.ok(seen.length < 3, `must stop short of the full scope, read ${seen.length}/3`);
-  assert.equal(published, false, "a partial membership must never publish a lead index — the webhook reads it");
+  assert.equal(result.budgetExceededIn, "membership_snapshot");
+  assert.equal(calendlyReads, 0, "an over-budget snapshot cannot reach booking reads");
 });
 
 test("a profile leg cut short by the clock is reduced coverage, not a failed pass", async () => {
@@ -825,29 +845,35 @@ test("a profile leg cut short by the clock is reduced coverage, not a failed pas
   }));
   options.budgetMs = 30;
   options.profileBudget = 5;
-  options.membershipLoader = async () => {
-    await new Promise((r) => setTimeout(r, 60));
-    return {
-      complete: true, unique: 2, totalCount: 2, shortfall: 0, apiCalls: 1,
-      leads: [
+  options.membershipSnapshotLoader = async () => membershipSnapshot([{
+    seq: { id: "covered", name: "Covered", enabled: true },
+    leads: [
         // Matched by the Calendly index in pass 1 — owed a pause.
         {
           ccu_id: "ccu-covered", cu_id: "cu-covered", name: "Candidate",
           to_use_email: "candidate@example.com", created_at: "2026-07-29T08:00:00.000Z",
           is_paused: false, is_archived: false,
         },
-        // Unmatched, so it falls through to the profile leg — which is where
-        // the budget runs out.
+        // Two unmatched leads make the first slow profile read consume the
+        // clock while leaving one unread candidate for the cutoff check.
         {
           ccu_id: "ccu-other", cu_id: "cu-other", name: "Other",
           to_use_email: "other@example.com", created_at: "2026-07-29T08:00:00.000Z",
           is_paused: false, is_archived: false,
         },
+        {
+          ccu_id: "ccu-third", cu_id: "cu-third", name: "Third",
+          to_use_email: "third@example.com", created_at: "2026-07-29T08:00:00.000Z",
+          is_paused: false, is_archived: false,
+        },
       ],
-    };
+  }]);
+  options.profileConcurrency = 1;
+  options.profileLoader = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return {};
   };
-  let published = false, applied = 0;
-  options.leadIndexPublisher = async () => { published = true; return "OK"; };
+  let applied = 0;
   options.decisionApplier = async (decisions) => {
     applied = decisions.length;
     return { paused: decisions.length, pausedCcuIds: decisions.map((d) => d.ccuId), pauseErrors: [] };
@@ -858,8 +884,7 @@ test("a profile leg cut short by the clock is reduced coverage, not a failed pas
   assert.equal(result.profileCutShort, true, "but it must say so");
   assert.equal(result.budgetExceeded, false, "and it is not the fatal kind of overrun");
   assert.equal(applied, 1, "a lead proven booked must still be paused");
-  assert.equal(published, true, "complete membership may still publish its index");
-  assert.equal(result.profileCoverage, "0/1", "coverage reports what was READ, not what was planned");
+  assert.equal(result.profileCoverage, "1/2", "coverage reports what was READ, not what was planned");
 });
 
 test("a profile leg cut short does not skip unread leads past the rotor", async () => {
@@ -881,23 +906,25 @@ test("a profile leg cut short does not skip unread leads past the rotor", async 
     const options = completeSingleLeadSweepOptions(idleCalendly);
     options.budgetMs = 30;
     options.profileBudget = 50;
-    options.membershipLoader = async () => {
-      await new Promise((r) => setTimeout(r, 60));
-      return {
-        complete: true, unique: 3, totalCount: 3, shortfall: 0, apiCalls: 1,
-        leads: ["a", "b", "c"].map((k) => ({
+    options.membershipSnapshotLoader = async () => membershipSnapshot([{
+      seq: { id: "covered", name: "Covered", enabled: true },
+      leads: ["a", "b", "c"].map((k) => ({
           ccu_id: `ccu-${k}`, cu_id: `cu-${k}`, name: k,
           to_use_email: `${k}@example.com`, created_at: "2026-07-29T08:00:00.000Z",
           is_paused: false, is_archived: false,
-        })),
-      };
+      })),
+    }]);
+    options.profileConcurrency = 1;
+    options.profileLoader = async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return {};
     };
     const result = await runBookingSweep(options);
     assert.equal(result.profileCutShort, true);
-    assert.equal(result.profilesAttempted, 0, "the clock stopped it before any read");
+    assert.equal(result.profilesAttempted, 1, "only the profile already in flight may finish");
     assert.equal(
       result.profileCoverage,
-      "0/3",
+      "1/3",
       "an unread lead must not be counted as covered — that is how a tail goes blind",
     );
   } finally { globalThis.fetch = realFetch; }
@@ -914,7 +941,7 @@ test("a pass reports where its time actually went", async () => {
   const result = await runBookingSweep(options);
   assert.ok(result.legMs, "every pass must report per-leg timing");
   assert.ok(result.legMs.calendly >= 30, `calendly leg should be measured, got ${result.legMs.calendly}`);
-  assert.ok("membership" in result.legMs, "membership leg must be measured");
+  assert.ok("membership_snapshot" in result.legMs, "membership snapshot leg must be measured");
   assert.ok(
     Object.values(result.legMs).reduce((a, b) => a + b, 0) <= result.durationMs + 50,
     "leg total must not exceed the pass duration",
@@ -926,9 +953,9 @@ test("a pass that runs out of budget still reports where the time went", async (
   // easiest place to drop them.
   const options = completeSingleLeadSweepOptions(idleCalendly);
   options.budgetMs = 30;
-  options.membershipLoader = async () => {
+  options.membershipSnapshotLoader = async () => {
     await new Promise((r) => setTimeout(r, 60));
-    return { complete: true, unique: 0, totalCount: 0, shortfall: 0, apiCalls: 1, leads: [] };
+    return membershipSnapshot([]);
   };
   options.sequenceScopeLoader = async () => ({
     schema: "raydar-booking-stop-scope-v2",
@@ -941,7 +968,7 @@ test("a pass that runs out of budget still reports where the time went", async (
   const result = await runBookingSweep(options);
   assert.equal(result.error, "budget_exceeded");
   assert.ok(result.legMs, "a budget-exceeded pass must still report leg timing");
-  assert.ok(result.legMs.membership >= 50, `the leg that overran must be visible, got ${result.legMs.membership}`);
+  assert.ok(result.legMs.membership_snapshot >= 50, `the leg that overran must be visible, got ${result.legMs.membership_snapshot}`);
 });
 
 test("the catalog floor leaves room for a legitimate archive", async () => {

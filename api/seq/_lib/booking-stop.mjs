@@ -50,26 +50,31 @@ import {
 import {
   hasCandidateSchedulingLink,
 } from "./scheduling-links.mjs";
+import {
+  BOOKING_MEMBERSHIP_CURRENT_SCHEMA,
+  BOOKING_MEMBERSHIP_MAX_AGE_MS,
+  BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
+  BOOKING_STOP_ATTEMPT_SCHEMA,
+  BOOKING_STOP_LEAD_INDEX_SCHEMA,
+  BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
+  BOOKING_STOP_SCOPE_SCHEMA,
+} from "./booking-stop-contract.mjs";
+import {
+  BOOKING_MEMBERSHIP_KEYS,
+  BOOKING_MEMBERSHIP_MAX_SHARDS,
+  bookingMembershipHash,
+  bookingMembershipSnapshotHealth,
+  loadPublishedBookingMembershipSnapshot,
+} from "./booking-membership-snapshot.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
-
-export const BOOKING_STOP_SCOPE_SCHEMA = "raydar-booking-stop-scope-v2";
-export const BOOKING_STOP_LEAD_INDEX_SCHEMA = "raydar-booking-lead-index-v2";
-export const BOOKING_STOP_ATTEMPT_SCHEMA = "raydar-booking-stop-attempt-v2";
-// Guards against a catalog read that comes back SHORT — an empty or truncated
-// list would otherwise sail through as "no sequences have scheduling links" and
-// quietly protect nobody. It is NOT a check that the count is exactly right.
-//
-// It was 75 while Paraform reported exactly 75 sequences, i.e. zero margin:
-// archiving a single sequence would have thrown BOOKING_STOP_SEQUENCE_CATALOG_
-// INVALID on every pass, forever, for a completely legitimate change. That is a
-// design-contract check wearing a safety gate's clothing, and this repo has
-// paid for that confusion before.
-//
-// 60 keeps the gate meaningful — a truncated read realistically returns 0 or a
-// page boundary, nowhere near 60 — while tolerating ~20% legitimate shrinkage.
-// DO NOT ratchet this back up to the live sequence count. If you are tempted,
-// what you actually want is an alert on a large drop, not a hard failure.
-export const BOOKING_STOP_REVIEWED_CATALOG_FLOOR = 60;
+export {
+  BOOKING_MEMBERSHIP_CURRENT_SCHEMA,
+  BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
+  BOOKING_STOP_ATTEMPT_SCHEMA,
+  BOOKING_STOP_LEAD_INDEX_SCHEMA,
+  BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
+  BOOKING_STOP_SCOPE_SCHEMA,
+};
 
 export function bookingStopScopeDigest(entries, {
   catalogFloor = BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
@@ -140,8 +145,9 @@ export function campaignHasCandidateSchedulingLink(campaign) {
 }
 
 // ---------- tiny KV (Upstash REST), namespace seqguard:* ----------
-// Single-writer rule: only the sweep and the webhook write these keys, and they
-// write disjoint kinds. Nothing else in the repo touches seqguard:*.
+// Single-purpose writers: membership refresh publishes membership generations
+// and the lead index; the sweep records liveness/pauses; webhooks record booking
+// evidence and pauses. Nothing outside these controls touches seqguard:*.
 const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
 export const kvConfigured = () => Boolean(KV_URL && KV_TOKEN);
@@ -173,6 +179,52 @@ export const kvGet = async (key) => {
   if (raw == null) return null;
   try { return JSON.parse(raw); } catch { return raw; }
 };
+export function parseKvMgetResult(raw, expectedCount) {
+  if (
+    !Number.isInteger(expectedCount)
+    || expectedCount < 0
+    || expectedCount > BOOKING_MEMBERSHIP_MAX_SHARDS
+    || !Array.isArray(raw)
+    || raw.length !== expectedCount
+  ) {
+    const error = new Error("KV_BATCH_READ_INVALID");
+    error.code = "KV_BATCH_READ_INVALID";
+    throw error;
+  }
+  return raw.map((value) => {
+    if (value == null) return null;
+    if (typeof value !== "string") {
+      const error = new Error("KV_BATCH_READ_INVALID");
+      error.code = "KV_BATCH_READ_INVALID";
+      throw error;
+    }
+    try {
+      return JSON.parse(value);
+    } catch {
+      const error = new Error("KV_BATCH_READ_INVALID");
+      error.code = "KV_BATCH_READ_INVALID";
+      throw error;
+    }
+  });
+}
+export const kvGetMany = async (keys) => {
+  if (
+    !Array.isArray(keys)
+    || keys.length > BOOKING_MEMBERSHIP_MAX_SHARDS
+    || keys.some((key) => typeof key !== "string" || !key)
+    || new Set(keys).size !== keys.length
+  ) {
+    const error = new Error("KV_BATCH_READ_INVALID");
+    error.code = "KV_BATCH_READ_INVALID";
+    throw error;
+  }
+  if (keys.length === 0) return [];
+  const raw = await kv(
+    ["MGET", ...keys],
+    { throwOnTransport: true },
+  );
+  return parseKvMgetResult(raw, keys.length);
+};
 export const kvSet = (key, value, ttlSeconds) =>
   kv(ttlSeconds ? ["SET", key, JSON.stringify(value), "EX", String(ttlSeconds)] : ["SET", key, JSON.stringify(value)]);
 /** Returns "OK" when the claim was won, null when it was already held, and
@@ -188,7 +240,7 @@ function stableJson(value) {
   );
 }
 
-async function durableKvSetAndReadback(key, value, ttlSeconds) {
+export async function durableKvSetAndReadback(key, value, ttlSeconds) {
   const written = await kvSet(key, value, ttlSeconds);
   if (written !== "OK" && written !== true) {
     const error = new Error("KV_CORRECTNESS_WRITE_FAILED");
@@ -208,8 +260,12 @@ async function durableKvSetAndReadback(key, value, ttlSeconds) {
 
 export const K = {
   lastSweep: "seqguard:lastsweep",
-  lastAttempt: "seqguard:lastattempt:v2",
-  leadIndex: "seqguard:leadindex",
+  lastAttempt: "seqguard:lastattempt:v3",
+  leadIndex: BOOKING_MEMBERSHIP_KEYS.leadIndex,
+  membershipCurrent: BOOKING_MEMBERSHIP_KEYS.current,
+  membershipCheckpoint: BOOKING_MEMBERSHIP_KEYS.checkpoint,
+  membershipLock: BOOKING_MEMBERSHIP_KEYS.lock,
+  membershipAttempt: BOOKING_MEMBERSHIP_KEYS.attempt,
   deferred: (email) => `seqguard:deferred:${hash(email)}`,
   event: (uri) => `seqguard:event:${hash(uri)}`,
   raydarEvent: (eventId) => `seqguard:raydar-event:${secureKeyFragment(eventId)}`,
@@ -228,6 +284,53 @@ export const K = {
   alert: (key) => `seqguard:alert:${key}`,
   rotor: "seqguard:rotor",
 };
+
+/**
+ * Publish the immutable generation pointer and the webhook's existing by-email
+ * index in one Redis transaction. The compare-and-swap prevents a resumed,
+ * older builder from replacing a generation that another invocation published.
+ */
+export async function atomicPublishMembershipSnapshot({
+  expectedCurrent,
+  current,
+  leadIndex,
+  ttlSeconds,
+}) {
+  if (
+    !current
+    || !leadIndex
+    || !Number.isInteger(ttlSeconds)
+    || ttlSeconds < 1
+  ) {
+    const error = new Error("BOOKING_MEMBERSHIP_PUBLICATION_INVALID");
+    error.code = "BOOKING_MEMBERSHIP_PUBLICATION_INVALID";
+    throw error;
+  }
+  const encode = (value) => JSON.stringify(stableJson(value));
+  const expected = expectedCurrent == null ? "" : encode(expectedCurrent);
+  const script = [
+    "local existing = redis.call('GET', KEYS[1])",
+    "if ARGV[1] == '' then",
+    "  if existing then return 0 end",
+    "elseif existing ~= ARGV[1] then",
+    "  return 0",
+    "end",
+    "redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])",
+    "redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])",
+    "return 1",
+  ].join("\n");
+  return kv([
+    "EVAL",
+    script,
+    "2",
+    K.membershipCurrent,
+    K.leadIndex,
+    expected,
+    encode(current),
+    encode(leadIndex),
+    String(ttlSeconds),
+  ], { throwOnTransport: true });
+}
 
 export const RAYDAR_WEBHOOK_PROOF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -987,6 +1090,7 @@ export async function loadNudgeSequences() {
 export async function runBookingSweep({
   apply = true,
   now = Date.now(),
+  clock = Date.now,
   // A SOFT budget the pass enforces on itself, well inside the 300s the
   // platform enforces by killing us. A killed pass writes no outcome at all:
   // its attempt record stays "running" forever and health cannot tell it from
@@ -1005,9 +1109,16 @@ export async function runBookingSweep({
   raydarConfigured = raydarSchedulerIndexConfigured(),
   raydarIndexLoader = fetchRaydarBookingIndex,
   sequenceScopeLoader = discoverBookingStopSequences,
-  membershipLoader = completeCampaignLeads,
+  membershipSnapshotLoader = ({ scope, now: snapshotNow }) =>
+    loadPublishedBookingMembershipSnapshot({
+      scope,
+      now: snapshotNow,
+      read: kvGet,
+      readMany: kvGetMany,
+    }),
+  membershipCurrentLoader = () => kvGet(K.membershipCurrent),
+  profileLoader = cachedRelationshipStatus,
   decisionApplier = applyDecisions,
-  leadIndexPublisher = durableKvSetAndReadback,
   onDecision = null,
 } = {}) {
   const startedAt = Date.now();
@@ -1034,6 +1145,12 @@ export async function runBookingSweep({
     scopeSchema: null,
     scopeDigest: null,
     scopeCatalogFloor: null,
+    membershipSnapshotSchema: null,
+    membershipSnapshotGeneration: null,
+    membershipSnapshotManifestHash: null,
+    membershipSnapshotOldestFetchedAt: null,
+    membershipSnapshotAgeMs: null,
+    membershipSnapshotCurrent: false,
     sequenceCatalogCount: 0,
     sequenceScopeScanned: 0,
     linkSequences: 0,
@@ -1069,10 +1186,10 @@ export async function runBookingSweep({
     durationMs: 0,
   };
 
-  // Stopping before a leg whose output would be INCOMPLETE. A partial
-  // membership read cannot publish a lead index — the webhook reads that index,
-  // and a short one silently un-protects whoever is missing from it. Same rule
-  // the incomplete_membership path already follows.
+  // Stop before a leg whose output would be incomplete. Snapshot membership
+  // removes the former multi-minute live membership walk from this endpoint,
+  // but the sweep still needs a self-owned deadline so a platform kill cannot
+  // leave an attempt looking permanently in progress.
   const stopForBudget = (leg) => {
     result.ok = false;
     result.budgetExceeded = true;
@@ -1083,7 +1200,135 @@ export async function runBookingSweep({
     return result;
   };
 
-  const cal = await timeLeg("calendly", () => calendlyIndexLoader({ now, backDays: calendlyBackDays }));
+  let scope = null;
+  try {
+    scope = await timeLeg(
+      "scope",
+      () => sequenceScopeLoader({ deadline }),
+    );
+  } catch {
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError = "live_scope_unavailable";
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
+  if (overBudget()) return stopForBudget("scope");
+  if (
+    scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
+    || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
+    || !Number.isInteger(scope?.catalogFloor)
+    || scope.catalogFloor < 1
+    || scope?.complete !== true
+    || !Array.isArray(scope?.sequences)
+    || !Number.isInteger(scope?.catalogSequences)
+    || scope.catalogSequences < 1
+    || scope.scannedSequences !== scope.catalogSequences
+    || !Number.isInteger(scope?.enabledLinkSequences)
+    || !Number.isInteger(scope?.coveredEnabledLinkSequences)
+    || scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences
+  ) {
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError = "live_scope_incomplete";
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
+  const seqs = scope.sequences;
+  result.scopeSchema = scope.schema;
+  result.scopeDigest = scope.scopeDigest;
+  result.scopeCatalogFloor = scope.catalogFloor;
+  result.sequences = seqs.length;
+  result.sequenceCatalogCount = scope.catalogSequences;
+  result.sequenceScopeScanned = scope.scannedSequences;
+  result.linkSequences = scope.linkSequences;
+  result.enabledLinkSequences = scope.enabledLinkSequences;
+  result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
+  result.linkScopeComplete = true;
+
+  // The measured ~171 second, ~200-call membership walk belongs exclusively to
+  // booking-membership-refresh. The sweep live-reads only the sequence scope,
+  // then consumes a fully verified immutable generation. No fallback to a live
+  // membership read is permitted: unknown membership must mean no mutations.
+  let membership = null;
+  try {
+    membership = await timeLeg(
+      "membership_snapshot",
+      () => membershipSnapshotLoader({ scope, now }),
+    );
+  } catch (error) {
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError = String(
+      error?.code || error?.message || "snapshot_read_failed",
+    ).slice(0, 120);
+    result.durationMs = Date.now() - startedAt;
+    result.legMs = legMs;
+    return result;
+  }
+  if (overBudget()) return stopForBudget("membership_snapshot");
+  const membershipOldestFetchedAtMs = Date.parse(
+    String(membership?.oldestFetchedAt || ""),
+  );
+  const membershipAgeMs = Number(now) - membershipOldestFetchedAtMs;
+  if (
+    membership?.ok !== true
+    || membership.complete !== true
+    || membership.schema !== BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    || !/^[a-f0-9]{32}$/u.test(String(membership.generation || ""))
+    || !/^[a-f0-9]{64}$/u.test(String(membership.manifestHash || ""))
+    || !Array.isArray(membership.perSequence)
+    || !membership.current
+    || typeof membership.current !== "object"
+    || Array.isArray(membership.current)
+    || !Number.isFinite(membershipOldestFetchedAtMs)
+    || membershipOldestFetchedAtMs > Number(now)
+    || membershipAgeMs < 0
+    || membershipAgeMs > BOOKING_MEMBERSHIP_MAX_AGE_MS
+  ) {
+    result.ok = false;
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError =
+      String(membership?.detail || membership?.error || "invalid").slice(0, 120);
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
+  result.membershipSnapshotSchema = membership.schema;
+  result.membershipSnapshotGeneration = membership.generation;
+  result.membershipSnapshotManifestHash = membership.manifestHash;
+  result.membershipSnapshotOldestFetchedAt = membership.oldestFetchedAt;
+  result.membershipSnapshotAgeMs = membershipAgeMs;
+  result.membershipSnapshotCurrent = true;
+  const currentMatchesConsumedGeneration = (current) => Boolean(
+    current?.schema === BOOKING_MEMBERSHIP_CURRENT_SCHEMA
+    && current.snapshotSchema === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    && current.complete === true
+    && current.generation === membership.generation
+    && current.manifestHash === membership.manifestHash
+    && bookingMembershipHash(current)
+      === bookingMembershipHash(membership.current)
+  );
+  const perSeq = membership.perSequence;
+  const snapshotIds = perSeq.map((entry) => String(entry?.seq?.id || ""));
+  const selectedIds = seqs.map((sequence) => sequence.id);
+  if (
+    snapshotIds.some((id) => !id)
+    || new Set(snapshotIds).size !== snapshotIds.length
+    || snapshotIds.length !== selectedIds.length
+    || selectedIds.some((id) => !snapshotIds.includes(id))
+    || perSeq.some((entry) => !Array.isArray(entry?.leads))
+  ) {
+    result.ok = false;
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError = "selected_sequence_coverage_invalid";
+    result.membershipSnapshotCurrent = false;
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
+
+  // External booking sources are read only after membership authority has been
+  // established, so an invalid generation exits before doing unrelated work.
+  const cal = await timeLeg(
+    "calendly",
+    () => calendlyIndexLoader({ now, backDays: calendlyBackDays }),
+  );
   result.calendlyEvents = cal.events;
   result.calendlyCacheHits = cal.cacheHits;
   result.calendlyTruncated = cal.truncated;
@@ -1107,70 +1352,6 @@ export async function runBookingSweep({
         result.raydarError = String(error?.code || error?.message || "RAYDAR_BOOKING_INDEX_UNAVAILABLE").slice(0, 120);
       }
     }
-  }
-
-  const scope = await timeLeg("scope", () => sequenceScopeLoader({ deadline }));
-  if (
-    scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
-    || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
-    || !Number.isInteger(scope?.catalogFloor)
-    || scope.catalogFloor < 1
-    || scope?.complete !== true
-    || !Array.isArray(scope?.sequences)
-    || !Number.isInteger(scope?.catalogSequences)
-    || scope.catalogSequences < 1
-    || scope.scannedSequences !== scope.catalogSequences
-    || !Number.isInteger(scope?.enabledLinkSequences)
-    || !Number.isInteger(scope?.coveredEnabledLinkSequences)
-    || scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences
-  ) {
-    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
-    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
-    throw error;
-  }
-  const seqs = scope.sequences;
-  result.scopeSchema = scope.schema;
-  result.scopeDigest = scope.scopeDigest;
-  result.scopeCatalogFloor = scope.catalogFloor;
-  result.sequences = seqs.length;
-  result.sequenceCatalogCount = scope.catalogSequences;
-  result.sequenceScopeScanned = scope.scannedSequences;
-  result.linkSequences = scope.linkSequences;
-  result.enabledLinkSequences = scope.enabledLinkSequences;
-  result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
-  result.linkScopeComplete = true;
-  if (overBudget()) return stopForBudget("scope");
-
-  // strict:true so an incomplete membership read THROWS rather than silently
-  // reconciling as "everyone left" — the failure mode that makes a broken sweep
-  // look like a clean one.
-  // Overlapping-window reads are ~8 calls per sequence; serially that is minutes.
-  // Bounded concurrency keeps the whole pass inside the function's 300s budget.
-  const perSeq = [];
-  let m = 0;
-  let membershipCutShort = false;
-  const memWorker = async () => {
-    while (m < seqs.length) {
-      if (overBudget()) { membershipCutShort = true; return; }
-      const seq = seqs[m++];
-      const read = await membershipLoader(seq.id, { deadline });
-      if (!read.complete) {
-        result.incompleteReads.push({ sequence: seq.name, got: read.unique, expected: read.totalCount, shortfall: read.shortfall });
-      }
-      result.membershipApiCalls += read.apiCalls;
-      perSeq.push({ seq, leads: read.leads });
-    }
-  };
-  // Membership is the burstiest leg (overlapping windows, ~8 calls a sequence).
-  await timeLeg("membership", () => Promise.all(Array.from({ length: Number(process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2) }, memWorker)));
-  // Membership short of the full scope means `active` is short too, so neither
-  // the decisions nor the published index would be trustworthy. Stop here.
-  if (membershipCutShort) return stopForBudget("membership");
-  if (result.incompleteReads.length) {
-    result.ok = false;
-    result.error = "incomplete_membership";
-    result.durationMs = Date.now() - startedAt;
-    return result;
   }
 
   const active = [];
@@ -1241,7 +1422,10 @@ export async function runBookingSweep({
       result.profilesAttempted++;
       let prof = null;
       try {
-        prof = await cachedRelationshipStatus(lead.cu_id, { onThrottle: () => { result.throttled++; }, deadline });
+        prof = await profileLoader(lead.cu_id, {
+          onThrottle: () => { result.throttled++; },
+          deadline,
+        });
       } catch (e) {
         if (e.code === "AUTH_EXPIRED") {
           // Only a serially-confirmed 401 is a real expiry; otherwise it is the
@@ -1278,11 +1462,41 @@ export async function runBookingSweep({
   // planned. A number that describes intent rather than work is how a sweep
   // convinces everyone it is fine.
   const profilesProcessed = Math.min(j, pending.length);
+  result.profileCoverage = `${profilesProcessed}/${active.length - matched.size}`;
+
+  // Fence mutations against a generation rollover that happened while the
+  // booking sources and bounded profile reads were in flight.
+  const currentBeforeMutation = await membershipCurrentLoader();
+  const mutationNow = Number(clock());
+  const membershipAgeBeforeMutation =
+    mutationNow - membershipOldestFetchedAtMs;
+  const generationStillCurrent =
+    currentMatchesConsumedGeneration(currentBeforeMutation);
+  if (
+    !generationStillCurrent
+    || !Number.isFinite(mutationNow)
+    || membershipOldestFetchedAtMs > mutationNow
+    || membershipAgeBeforeMutation < 0
+    || membershipAgeBeforeMutation > BOOKING_MEMBERSHIP_MAX_AGE_MS
+  ) {
+    result.ok = false;
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError =
+      generationStillCurrent
+        ? "snapshot_stale_before_mutation"
+        : "generation_no_longer_current";
+    result.membershipSnapshotCurrent = false;
+    result.decisions = [];
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
+
   await kvSet(K.rotor, {
-    at: candidates.length ? (startAt + profilesProcessed) % candidates.length : 0,
+    at: candidates.length
+      ? (startAt + profilesProcessed) % candidates.length
+      : 0,
     updatedAt: new Date().toISOString(),
   });
-  result.profileCoverage = `${profilesProcessed}/${active.length - matched.size}`;
 
   // Apply
   if (apply && result.decisions.length) {
@@ -1292,26 +1506,6 @@ export async function runBookingSweep({
     result.pauseErrors.push(...applied.pauseErrors);
   }
   if (onDecision) for (const d of result.decisions) await onDecision(d);
-
-  // Publish the index the webhook reads. Only active, unpaused leads: a paused
-  // lead needs no second pause, and the webhook must not resurrect stale rows.
-  const byEmail = {};
-  const pausedThisPass = new Set(result.pausedCcuIds || []);
-  for (const { seq, lead } of active) {
-    if (pausedThisPass.has(lead.ccu_id)) continue;
-    for (const addr of leadAddresses(lead, null)) {
-      (byEmail[addr] ||= []).push({ s: seq.id, sn: seq.name, ccu: lead.ccu_id, cu: lead.cu_id, n: lead.name || null, t: lead.created_at });
-    }
-  }
-  result.indexedEmails = Object.keys(byEmail).length;
-  await leadIndexPublisher(K.leadIndex, {
-    schema: BOOKING_STOP_LEAD_INDEX_SCHEMA,
-    scopeSchema: result.scopeSchema,
-    scopeDigest: result.scopeDigest,
-    scopeCatalogFloor: result.scopeCatalogFloor,
-    builtAt: new Date().toISOString(),
-    byEmail,
-  }, 6 * 3600);
 
   result.ok = !result.calendlyTruncated
     && !result.raydarError
@@ -1333,8 +1527,9 @@ export async function runBookingSweep({
  *
  * This CANNOT walk every sequence's membership inline — measured in production,
  * that is a ~200-call read that blows the function budget and returns 504 to
- * the provider (which then retries, making it worse). Instead the hourly sweep
- * publishes a lead index and the webhook does ONE KV read against it.
+ * the provider (which then retries, making it worse). Instead the hourly
+ * membership refresh publishes a lead index and the webhook does two KV reads:
+ * the index plus the atomically paired immutable-generation pointer.
  *
  * On an index miss the work is deferred rather than dropped: the next sweep
  * re-evaluates every lead against all booking sources anyway, so the candidate
@@ -1342,6 +1537,56 @@ export async function runBookingSweep({
  * next step is days away — so the delay costs nothing, and the deferral is
  * recorded so "we deferred" can never be confused with "there was nothing to do".
  */
+export function bookingLeadIndexUsable(
+  idx,
+  currentMembership,
+  now = Date.now(),
+) {
+  const builtAt = idx?.builtAt ? Date.parse(idx.builtAt) : null;
+  const oldestFetchedAt = currentMembership?.oldestFetchedAt
+    ? Date.parse(currentMembership.oldestFetchedAt)
+    : null;
+  const publishedAt = currentMembership?.publishedAt
+    ? Date.parse(currentMembership.publishedAt)
+    : null;
+  const ageMs = Number.isFinite(builtAt) ? Number(now) - builtAt : null;
+  const snapshotAgeMs = Number.isFinite(oldestFetchedAt)
+    ? Number(now) - oldestFetchedAt
+    : null;
+  const usable = Boolean(
+    idx?.schema === BOOKING_STOP_LEAD_INDEX_SCHEMA
+    && idx?.snapshotSchema === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    && /^[a-f0-9]{32}$/u.test(String(idx?.generation || ""))
+    && /^[a-f0-9]{64}$/u.test(String(idx?.manifestHash || ""))
+    && idx?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && /^[a-f0-9]{64}$/u.test(String(idx?.scopeDigest || ""))
+    && currentMembership?.schema === BOOKING_MEMBERSHIP_CURRENT_SCHEMA
+    && currentMembership?.snapshotSchema
+      === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    && currentMembership?.complete === true
+    && currentMembership?.generation === idx.generation
+    && currentMembership?.manifestHash === idx.manifestHash
+    && currentMembership?.leadIndexHash === bookingMembershipHash(idx)
+    && idx.builtAt === currentMembership.publishedAt
+    && currentMembership?.scope?.schema === idx.scopeSchema
+    && currentMembership?.scope?.digest === idx.scopeDigest
+    && idx?.byEmail
+    && typeof idx.byEmail === "object"
+    && !Array.isArray(idx.byEmail)
+    && ageMs != null
+    && ageMs >= 0
+    && ageMs <= LEAD_INDEX_MAX_AGE_MS
+    && snapshotAgeMs != null
+    && snapshotAgeMs >= 0
+    && snapshotAgeMs <= BOOKING_MEMBERSHIP_MAX_AGE_MS
+    && Number.isFinite(publishedAt)
+    && publishedAt <= Number(now)
+    && Number.isFinite(oldestFetchedAt)
+    && oldestFetchedAt <= publishedAt
+  );
+  return { usable, ageMs, snapshotAgeMs };
+}
+
 export async function pauseForBooking({
   email,
   bookedAt,
@@ -1355,25 +1600,14 @@ export async function pauseForBooking({
   const out = { decisions: [], paused: 0, pauseErrors: [], deferred: false, indexAgeMs: null };
   if (!target || !Number.isFinite(at)) return out;
 
-  const [idx, lastSweep] = await Promise.all([
+  const [idx, currentMembership] = await Promise.all([
     kvGet(K.leadIndex),
-    kvGet(K.lastSweep),
+    kvGet(K.membershipCurrent),
   ]);
-  const builtAt = idx?.builtAt ? Date.parse(idx.builtAt) : null;
-  out.indexAgeMs = builtAt ? Date.now() - builtAt : null;
-  const usable = (
-    idx?.schema === BOOKING_STOP_LEAD_INDEX_SCHEMA
-    && idx?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
-    && /^[a-f0-9]{64}$/u.test(String(idx?.scopeDigest || ""))
-    && lastSweep?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
-    && lastSweep?.scopeDigest === idx.scopeDigest
-    && lastSweep?.linkScopeComplete === true
-    && idx?.byEmail
-    && builtAt
-    && out.indexAgeMs < LEAD_INDEX_MAX_AGE_MS
-  );
+  const indexStatus = bookingLeadIndexUsable(idx, currentMembership);
+  out.indexAgeMs = indexStatus.ageMs;
 
-  if (!usable) {
+  if (!indexStatus.usable) {
     out.deferred = true;
     await kvSet(K.deferred(target), {
       at: new Date().toISOString(),
@@ -1508,17 +1742,22 @@ export async function bookedSetWithSources(candidateUserIds, {
 export const bookedSetWithCalendly = bookedSetWithSources;
 
 // ---------- staleness ----------
-export const LEAD_INDEX_MAX_AGE_MS = Number(process.env.BOOKING_STOP_INDEX_MAX_AGE_MS || 3 * 3600 * 1000);
+export const LEAD_INDEX_MAX_AGE_MS = BOOKING_MEMBERSHIP_MAX_AGE_MS;
 
 export const SWEEP_STALE_AFTER_MS = Number(process.env.BOOKING_STOP_STALE_MS || 3 * 3600 * 1000);
 
 /** The single most important check here: it is what was missing when the n8n
  *  guardian died silently for nine days. */
-export async function sweepStaleness(now = Date.now()) {
-  const [last, attempt, leadIndex] = await Promise.all([
-    kvGet(K.lastSweep),
-    kvGet(K.lastAttempt),
-    kvGet(K.leadIndex),
+export async function sweepStaleness(now = Date.now(), {
+  read = kvGet,
+  readMany = kvGetMany,
+  snapshotHealthLoader = bookingMembershipSnapshotHealth,
+} = {}) {
+  const [last, attempt, leadIndex, membershipSnapshot] = await Promise.all([
+    read(K.lastSweep),
+    read(K.lastAttempt),
+    read(K.leadIndex),
+    snapshotHealthLoader({ read, readMany, now }),
   ]);
   const attemptAtMs = Date.parse(String(attempt?.at || ""));
   const attemptAgeMs = Number.isFinite(attemptAtMs)
@@ -1538,9 +1777,31 @@ export async function sweepStaleness(now = Date.now()) {
         ? attempt.error
         : null,
   };
+  const snapshotBase = {
+    membershipSnapshotSchema: membershipSnapshot.schema,
+    membershipSnapshotGeneration: membershipSnapshot.generation,
+    membershipSnapshotManifestHash: membershipSnapshot.manifestHash,
+    membershipSnapshotCurrent: membershipSnapshot.current,
+    membershipSnapshotComplete: membershipSnapshot.complete,
+    membershipSnapshotOldestFetchedAt:
+      membershipSnapshot.oldestFetchedAt,
+    membershipSnapshotAgeMs: membershipSnapshot.ageMs,
+    membershipSnapshotScopeSchema: membershipSnapshot.scopeSchema,
+    membershipSnapshotScopeDigest: membershipSnapshot.scopeDigest,
+    membershipSnapshotCatalogSequenceCount:
+      membershipSnapshot.catalogSequenceCount,
+    membershipSnapshotSelectedSequenceCount:
+      membershipSnapshot.selectedSequenceCount,
+    membershipSnapshotLatestAttemptAt:
+      membershipSnapshot.latestAttemptAt,
+    membershipSnapshotLatestAttemptStatus:
+      membershipSnapshot.latestAttemptStatus,
+    membershipSnapshotLatestAttemptError:
+      membershipSnapshot.latestAttemptError,
+  };
   const leadIndexAtMs = Date.parse(String(leadIndex?.builtAt || ""));
   const leadIndexAgeMs = Number.isFinite(leadIndexAtMs)
-    ? Math.max(0, now - leadIndexAtMs)
+    ? now - leadIndexAtMs
     : null;
   if (!last?.at) {
     return {
@@ -1549,7 +1810,10 @@ export async function sweepStaleness(now = Date.now()) {
       ageMs: null,
       calendlyComplete: false,
       ...attemptBase,
+      ...snapshotBase,
       latestAttemptCurrent: false,
+      lastSweepMembershipSnapshotGeneration: null,
+      lastSweepMembershipCurrentMatch: false,
       leadIndexAt: Number.isFinite(leadIndexAtMs)
         ? new Date(leadIndexAtMs).toISOString()
         : null,
@@ -1563,17 +1827,43 @@ export async function sweepStaleness(now = Date.now()) {
     && attempt.status === "success"
     && attempt.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
     && attempt.scopeDigest === last.scopeDigest
+    && attempt.membershipSnapshotGeneration
+      === last.membershipSnapshotGeneration
     && attemptAtMs >= Date.parse(last.at)
+    && attemptAtMs <= now
+  );
+  const lastSweepMembershipCurrentMatch = Boolean(
+    membershipSnapshot.current
+    && last.membershipSnapshotSchema === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    && last.membershipSnapshotGeneration === membershipSnapshot.generation
+    && last.membershipSnapshotManifestHash
+      === membershipSnapshot.manifestHash
+    && last.scopeSchema === membershipSnapshot.scopeSchema
+    && last.scopeDigest === membershipSnapshot.scopeDigest
   );
   const leadIndexCurrent = Boolean(
     leadIndex?.schema === BOOKING_STOP_LEAD_INDEX_SCHEMA
+    && leadIndex.snapshotSchema === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    && leadIndex.generation === membershipSnapshot.generation
+    && leadIndex.manifestHash === membershipSnapshot.manifestHash
+    && /^[a-f0-9]{64}$/u.test(String(leadIndex?.manifestHash || ""))
+    && bookingMembershipHash(leadIndex)
+      === membershipSnapshot.leadIndexHash
     && leadIndex.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
-    && leadIndex.scopeDigest === last.scopeDigest
+    && leadIndex.scopeDigest === membershipSnapshot.scopeDigest
     && leadIndexAgeMs != null
+    && leadIndexAgeMs >= 0
     && leadIndexAgeMs <= LEAD_INDEX_MAX_AGE_MS
   );
   return {
-    stale: ageMs > SWEEP_STALE_AFTER_MS,
+    stale:
+      !Number.isFinite(ageMs)
+      || ageMs < 0
+      || ageMs > SWEEP_STALE_AFTER_MS
+      || !latestAttemptCurrent
+      || membershipSnapshot.current !== true
+      || membershipSnapshot.complete !== true
+      || !leadIndexCurrent,
     lastAt: last.at,
     ageMs,
     activeLeads: last.activeLeads ?? null,
@@ -1600,7 +1890,11 @@ export async function sweepStaleness(now = Date.now()) {
       && last.linkScopeComplete
     ),
     ...attemptBase,
+    ...snapshotBase,
     latestAttemptCurrent,
+    lastSweepMembershipSnapshotGeneration:
+      last.membershipSnapshotGeneration ?? null,
+    lastSweepMembershipCurrentMatch,
     leadIndexAt: Number.isFinite(leadIndexAtMs)
       ? new Date(leadIndexAtMs).toISOString()
       : null,
@@ -1656,6 +1950,12 @@ export async function recordSweepAttempt({
     scopeDigest: /^[a-f0-9]{64}$/u.test(String(result?.scopeDigest || ""))
       ? result.scopeDigest
       : null,
+    membershipSnapshotGeneration:
+      /^[a-f0-9]{32}$/u.test(
+        String(result?.membershipSnapshotGeneration || ""),
+      )
+        ? result.membershipSnapshotGeneration
+        : null,
   };
   await durableKvSetAndReadback(K.lastAttempt, payload, 6 * 3600);
 }
@@ -1673,6 +1973,21 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     || result?.linkScopeComplete !== true
     || result?.sequenceScopeScanned !== result?.sequenceCatalogCount
     || result?.coveredEnabledLinkSequences !== result?.enabledLinkSequences
+    || result?.membershipSnapshotSchema
+      !== BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    || !/^[a-f0-9]{32}$/u.test(
+      String(result?.membershipSnapshotGeneration || ""),
+    )
+    || !/^[a-f0-9]{64}$/u.test(
+      String(result?.membershipSnapshotManifestHash || ""),
+    )
+    || !Number.isFinite(result?.membershipSnapshotAgeMs)
+    || result.membershipSnapshotAgeMs < 0
+    || result.membershipSnapshotAgeMs > BOOKING_MEMBERSHIP_MAX_AGE_MS
+    || !Number.isFinite(
+      Date.parse(String(result?.membershipSnapshotOldestFetchedAt || "")),
+    )
+    || result?.membershipSnapshotCurrent !== true
   ) {
     const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
@@ -1683,6 +1998,12 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     scopeSchema: result.scopeSchema,
     scopeDigest: result.scopeDigest,
     scopeCatalogFloor: result.scopeCatalogFloor,
+    membershipSnapshotSchema: result.membershipSnapshotSchema,
+    membershipSnapshotGeneration: result.membershipSnapshotGeneration,
+    membershipSnapshotManifestHash:
+      result.membershipSnapshotManifestHash,
+    membershipSnapshotOldestFetchedAt:
+      result.membershipSnapshotOldestFetchedAt,
     activeLeads: result.activeLeads,
     paused: result.paused,
     durationMs: result.durationMs,

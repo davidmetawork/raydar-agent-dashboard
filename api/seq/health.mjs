@@ -75,6 +75,33 @@ export default async function handler(req, res) {
       ageMinutes: s.ageMs == null ? null : Math.round(s.ageMs / 60000),
       stale: s.stale,
       activeLeadsLastPass: s.activeLeads ?? null,
+      lastSweepMembershipSnapshotGeneration:
+        s.lastSweepMembershipSnapshotGeneration ?? null,
+      lastSweepMembershipCurrentMatch:
+        s.lastSweepMembershipCurrentMatch ?? false,
+      membershipSnapshot: {
+        schema: s.membershipSnapshotSchema ?? null,
+        generation: s.membershipSnapshotGeneration ?? null,
+        current: s.membershipSnapshotCurrent ?? false,
+        complete: s.membershipSnapshotComplete ?? false,
+        oldestFetchedAt:
+          s.membershipSnapshotOldestFetchedAt ?? null,
+        ageMinutes: s.membershipSnapshotAgeMs == null
+          ? null
+          : Math.round(s.membershipSnapshotAgeMs / 60000),
+        scopeSchema: s.membershipSnapshotScopeSchema ?? null,
+        scopeDigest: s.membershipSnapshotScopeDigest ?? null,
+        catalogSequenceCount:
+          s.membershipSnapshotCatalogSequenceCount ?? null,
+        selectedSequenceCount:
+          s.membershipSnapshotSelectedSequenceCount ?? null,
+        latestAttemptAt:
+          s.membershipSnapshotLatestAttemptAt ?? null,
+        latestAttemptStatus:
+          s.membershipSnapshotLatestAttemptStatus ?? null,
+        latestAttemptError:
+          s.membershipSnapshotLatestAttemptError ?? null,
+      },
       // Enough to tune BOOKING_STOP_PROFILE_BUDGET from outside the auth path.
       // durationMs against the budget shows headroom; profileCutShort says the
       // clock stopped the leg; coverage/rotor say how many passes the rotor
@@ -129,6 +156,10 @@ export default async function handler(req, res) {
         latestSweepAttemptStatus: s.latestAttemptStatus ?? null,
         latestSweepAttemptError: s.latestAttemptError ?? null,
         latestSweepAttemptCurrent: s.latestAttemptCurrent ?? false,
+        lastSweepMembershipSnapshotGeneration:
+          s.lastSweepMembershipSnapshotGeneration ?? null,
+        lastSweepMembershipCurrentMatch:
+          s.lastSweepMembershipCurrentMatch ?? false,
         leadIndexAt: s.leadIndexAt ?? null,
         leadIndexAgeMinutes: s.leadIndexAgeMs == null
           ? null
