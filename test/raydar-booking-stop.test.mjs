@@ -173,6 +173,13 @@ test("native event schema is exact and event/status pairs cannot drift", () => {
     normalizeRaydarBookingEvent(legacyShape).sourceAttribution,
     null,
   );
+  for (const eventId of ["bevt_-Nr_base64url", "bevt__Ft_base64url"]) {
+    assert.equal(normalizeRaydarBookingEvent(booking({ eventId })).eventId, eventId);
+  }
+  assert.throws(
+    () => normalizeRaydarBookingEvent(booking({ bookingId: "bk_-invalid" })),
+    (error) => error.code === "RAYDAR_BOOKING_ID_INVALID",
+  );
   assert.throws(
     () => normalizeRaydarBookingEvent({ ...booking(), privateAssignee: "hidden" }),
     (error) => error.code === "RAYDAR_BOOKING_EVENT_INVALID",

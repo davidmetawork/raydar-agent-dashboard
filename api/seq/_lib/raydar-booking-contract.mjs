@@ -64,7 +64,8 @@ function requiredString(value, code, { max = 256 } = {}) {
 
 function opaqueId(value, prefix, code) {
   const id = requiredString(value, code, { max: 200 });
-  const pattern = new RegExp(`^${prefix}_[A-Za-z0-9][A-Za-z0-9_-]{0,191}$`);
+  const leading = prefix === "bevt" ? "[A-Za-z0-9_-]" : "[A-Za-z0-9]";
+  const pattern = new RegExp(`^${prefix}_${leading}[A-Za-z0-9_-]{0,191}$`);
   if (!pattern.test(id)) throw contractError(code);
   return id;
 }
