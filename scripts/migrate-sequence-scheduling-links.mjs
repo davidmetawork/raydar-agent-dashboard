@@ -13,13 +13,15 @@
  * candidate data. The private rollback manifest contains exact sequence steps,
  * is created mode 0600, and must never be committed.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
+  BASE,
+  headers,
   trpcGet,
   trpcPost,
   withThrottleRetry,
@@ -42,7 +44,7 @@ const APPLY_PHRASE = "APPLY_ALL_RAYDAR_SEQUENCE_LINKS";
 const ROLLBACK_PHRASE = "ROLLBACK_ALL_RAYDAR_SEQUENCE_LINKS";
 const EDIT_FREEZE_PHRASE = "PARAFORM_SEQUENCE_EDIT_FREEZE_CONFIRMED";
 const MANIFEST_SCHEMA = "raydar-sequence-link-migration-v4";
-const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-07-29-v4";
+const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v5";
 const REVIEWED_SEQUENCE_CATALOG_FLOOR = 75;
 const HEALTH_URL = "https://monitor.raydar.xyz/api/seq/health";
 const MAX_CUTOVER_WEBHOOK_AGE_MINUTES = 60;
@@ -472,6 +474,37 @@ export const READBACK_DELAYS_MS = Object.freeze([
   15_000,
   30_000,
 ]);
+
+export async function readCampaignFresh(id, {
+  fetchImpl = fetch,
+  nonce = randomUUID(),
+} = {}) {
+  const input = encodeURIComponent(JSON.stringify({
+    json: { campaign_id: id },
+    meta: { values: {}, v: 1 },
+  }));
+  const response = await fetchImpl(
+    `${BASE}/trpc/campaigns.getCampaign?input=${input}`
+      + `&raydar_readback=${encodeURIComponent(nonce)}`,
+    {
+      headers: { ...headers(), "cache-control": "no-cache" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    },
+  );
+  if (response.status === 401) fail("AUTH_EXPIRED");
+  if (response.status === 429 || response.status >= 500) {
+    fail("SEQUENCE_READBACK_TRANSPORT_FAILED");
+  }
+  if (!response.ok) fail("SEQUENCE_READBACK_REJECTED");
+  const body = await response.json();
+  if (body?.error) fail("SEQUENCE_READBACK_REJECTED");
+  const campaign = body?.result?.data?.json;
+  if (!campaign || typeof campaign !== "object") {
+    fail("SEQUENCE_READBACK_INVALID");
+  }
+  return campaign;
+}
 
 function stepProjection(step) {
   return Object.fromEntries(
@@ -1037,9 +1070,7 @@ async function writeManifest(manifestPath, changed, sourceCommit) {
 export async function updateAndVerify(entry, steps, {
   direction = "apply",
   readCampaign = async (id) => withThrottleRetry(() =>
-    trpcGet("campaigns.getCampaign", {
-      campaign_id: id,
-    }, 1)),
+    readCampaignFresh(id)),
   writeSteps = async (id, value) => withThrottleRetry(() =>
     trpcPost("campaigns.updateSequenceSteps", {
       campaign_id: id,

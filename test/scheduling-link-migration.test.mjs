@@ -18,6 +18,7 @@ import {
   migratePlansTransaction,
   planSequence,
   READBACK_DELAYS_MS,
+  readCampaignFresh,
   requireCutoverReadiness,
   sequenceSourceAttribution,
   updateAndVerify,
@@ -754,6 +755,22 @@ test("readback polls through Paraform eventual consistency", async () => {
   });
   assert.equal(reads, 3);
   assert.deepEqual(slept, [25]);
+});
+
+test("provider readback bypasses stale campaign caches", async () => {
+  let observed = null;
+  const campaign = { id: "seq_readback", steps: [] };
+  const result = await readCampaignFresh(campaign.id, {
+    nonce: "nonce-readback-1",
+    fetchImpl: async (url, options) => {
+      observed = { url: String(url), options };
+      return Response.json({ result: { data: { json: campaign } } });
+    },
+  });
+  assert.deepEqual(result, campaign);
+  assert.match(observed.url, /raydar_readback=nonce-readback-1/u);
+  assert.equal(observed.options.cache, "no-store");
+  assert.equal(observed.options.headers["cache-control"], "no-cache");
 });
 
 test("default readback window covers one minute of provider lag", () => {
