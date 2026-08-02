@@ -1542,7 +1542,7 @@ test("cron refresh is separated before sweep and remains below Vercel's project 
     path === "/api/seq/rearm-pause-canary");
   assert.equal(refresh.schedule, "7,37 * * * *");
   assert.equal(rearm.schedule, "12,42 * * * *");
-  assert.equal(sweep.schedule, "52 * * * *");
+  assert.equal(sweep.schedule, "22,52 * * * *");
   const refreshMinutes = refresh.schedule
     .split(" ")[0]
     .split(",")
@@ -1558,14 +1558,25 @@ test("cron refresh is separated before sweep and remains below Vercel's project 
       < BOOKING_MEMBERSHIP_MAX_AGE_MS,
     "refresh cadence plus the full build budget needs material freshness margin",
   );
-  const sweepMinute = Number(sweep.schedule.split(" ")[0]);
-  const latestRefreshBeforeSweep = Math.max(
-    ...refreshMinutes.filter((minute) => minute < sweepMinute),
-  );
-  assert.ok(
-    (sweepMinute - latestRefreshBeforeSweep) * 60 * 1000
-      > BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
-    "sweep starts only after the refresh build budget has elapsed",
-  );
+  const sweepMinutes = sweep.schedule
+    .split(" ")[0]
+    .split(",")
+    .map(Number)
+    .sort((left, right) => left - right);
+  assert.equal(sweepMinutes.length, refreshMinutes.length);
+  for (const refreshMinute of refreshMinutes) {
+    const nextSweep = sweepMinutes.find((minute) => minute > refreshMinute)
+      ?? sweepMinutes[0] + 60;
+    assert.ok(
+      (nextSweep - refreshMinute) * 60 * 1000
+        > BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
+      "each sweep starts only after its refresh build budget has elapsed",
+    );
+    assert.equal(
+      nextSweep - refreshMinute,
+      15,
+      "every refresh receives a dedicated sweep in the same half-hour cycle",
+    );
+  }
   assert.ok(config.crons.length <= 100);
 });
