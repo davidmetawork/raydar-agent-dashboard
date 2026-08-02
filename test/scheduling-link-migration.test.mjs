@@ -719,6 +719,7 @@ test("full readback rejects dropped attachments and changed wait semantics", asy
     await assert.rejects(
       () => updateAndVerify(plan, plan.afterSteps, {
         direction: "apply",
+        readbackDelaysMs: [0],
         readCampaign: async () => {
           reads++;
           if (reads === 1) return { steps: structuredClone(plan.beforeSteps) };
@@ -732,6 +733,49 @@ test("full readback rejects dropped attachments and changed wait semantics", asy
       /SEQUENCE_READBACK_MISMATCH/u,
     );
   }
+});
+
+test("readback polls through Paraform eventual consistency", async () => {
+  const plan = realisticPlan();
+  let written = null;
+  let reads = 0;
+  const slept = [];
+  await updateAndVerify(plan, plan.afterSteps, {
+    direction: "apply",
+    readbackDelaysMs: [0, 25, 50],
+    sleepImpl: async (delayMs) => { slept.push(delayMs); },
+    readCampaign: async () => {
+      reads++;
+      if (reads <= 2) return { steps: structuredClone(plan.beforeSteps) };
+      return { steps: structuredClone(written) };
+    },
+    writeSteps: async (_id, steps) => { written = structuredClone(steps); },
+  });
+  assert.equal(reads, 3);
+  assert.deepEqual(slept, [25]);
+});
+
+test("provider-managed delivery counters do not create false readback drift", async () => {
+  const plan = realisticPlan();
+  let written = null;
+  let reads = 0;
+  await updateAndVerify(plan, plan.afterSteps, {
+    direction: "apply",
+    readCampaign: async () => {
+      reads++;
+      if (reads === 1) return { steps: structuredClone(plan.beforeSteps) };
+      const readback = structuredClone(written);
+      Object.assign(readback[0], {
+        bounced_count: 1,
+        clicked_count: 2,
+        interested_count: 3,
+        opened_count: 4,
+      });
+      return { steps: readback };
+    },
+    writeSteps: async (_id, steps) => { written = structuredClone(steps); },
+  });
+  assert.equal(reads, 2);
 });
 
 test("rollback restores only text while preserving concurrent non-text fields", async () => {

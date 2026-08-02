@@ -449,10 +449,20 @@ function requirePrivateManifestPath(value) {
 // the migration exactly: attachments, delays, weights, task/channel kind,
 // stable identity, and creation metadata.
 const VOLATILE_STEP_FIELDS = new Set([
+  "bounced_count",
+  "clicked_count",
+  "interested_count",
+  "opened_count",
   "replied_count",
   "sent_email_count",
   "updated_at",
 ]);
+
+// Paraform's sequence mutation is now eventually consistent: the first
+// successful getCampaign after updateSequenceSteps can still return the old
+// text. Poll a bounded window and require one complete exact projection; a
+// permanent mismatch still fails closed and enters the rollback path.
+const READBACK_DELAYS_MS = Object.freeze([0, 500, 1_500, 3_000, 6_000]);
 
 function stepProjection(step) {
   return Object.fromEntries(
@@ -1026,6 +1036,8 @@ export async function updateAndVerify(entry, steps, {
       campaign_id: id,
       steps: value,
     }, 1)),
+  readbackDelaysMs = READBACK_DELAYS_MS,
+  sleepImpl = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
 } = {}) {
   const beforeWrite = await readCampaign(entry.id);
   const currentSteps = Array.isArray(beforeWrite?.steps)
@@ -1054,11 +1066,13 @@ export async function updateAndVerify(entry, steps, {
   // stale full-step snapshot.
   const merged = mergeStepText(currentSteps, steps);
   await writeSteps(entry.id, merged);
-  const readback = await readCampaign(entry.id);
-  const readbackSteps = Array.isArray(readback?.steps) ? readback.steps : [];
-  if (!exactStepReadback(merged, readbackSteps)) {
-    fail("SEQUENCE_READBACK_MISMATCH");
+  for (const delayMs of readbackDelaysMs) {
+    if (delayMs > 0) await sleepImpl(delayMs);
+    const readback = await readCampaign(entry.id);
+    const readbackSteps = Array.isArray(readback?.steps) ? readback.steps : [];
+    if (exactStepReadback(merged, readbackSteps)) return;
   }
+  fail("SEQUENCE_READBACK_MISMATCH");
 }
 
 export async function rollbackEntries(entries, writeAndVerify = updateAndVerify) {
