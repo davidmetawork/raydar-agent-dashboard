@@ -19,6 +19,7 @@ import {
   kvGet,
   kvSet,
   kvSetNx,
+  raydarPauseCanaryIdentityFingerprint,
   shouldAlert,
 } from "./_lib/booking-stop.mjs";
 import {
@@ -36,6 +37,20 @@ const store = {
   setNx: kvSetNx,
   atomicPublish: atomicPublishMembershipSnapshot,
 };
+
+function includeConfiguredPauseCanary(lead) {
+  const configured = String(
+    process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT || "",
+  ).trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(configured)) return false;
+  const emails = new Set([
+    lead?.to_use_email,
+    ...(Array.isArray(lead?.user_emails) ? lead.user_emails : []),
+  ].map((value) => String(value || "").trim().toLowerCase())
+    .filter((value) => value.includes("@")));
+  return [...emails].some((email) =>
+    raydarPauseCanaryIdentityFingerprint({ email }) === configured);
+}
 
 async function recordAttempt(status, {
   result = null,
@@ -88,6 +103,11 @@ export default async function handler(req, res) {
       concurrency: Number(
         process.env.BOOKING_STOP_MEMBERSHIP_CONCURRENCY || 2,
       ),
+      // Keep only the independently fingerprint-bound, no-send canary in the
+      // webhook index while it is paused. Ordinary paused leads remain
+      // excluded. This lets the scheduled rearm prove a real unpause→signed
+      // webhook→pause cycle after every immutable membership refresh.
+      includePausedLead: includeConfiguredPauseCanary,
     });
     await recordAttempt(result.ok ? "success" : "failure", { result });
     if (!result.ok && (await shouldAlert(

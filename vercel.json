@@ -70,6 +70,7 @@
     { "path": "/api/paraai/worker", "schedule": "*/5 * * * *" },
     { "path": "/api/seq/guardian", "schedule": "17 * * * *" },
     { "path": "/api/seq/booking-membership-refresh", "schedule": "7,37 * * * *" },
+    { "path": "/api/seq/rearm-pause-canary", "schedule": "12,42 * * * *" },
     { "path": "/api/seq/booking-sweep", "schedule": "52 * * * *" },
     { "path": "/api/ops/n8n-watchdog", "schedule": "7 * * * *" },
     { "path": "/api/paraai/submission-notify", "schedule": "47 * * * *" }
