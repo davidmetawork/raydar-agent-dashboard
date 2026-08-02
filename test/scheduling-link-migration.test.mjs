@@ -632,6 +632,7 @@ test("a write/read-back failure restores even the currently attempted sequence",
   };
   const writes = [];
   let first = true;
+  let observedError = null;
   await assert.rejects(
     () => migratePlansTransaction([plan], {
       writeAndVerify: async (_entry, steps) => {
@@ -642,9 +643,14 @@ test("a write/read-back failure restores even the currently attempted sequence",
         }
       },
     }),
-    /SEQUENCE_READBACK_MISMATCH/,
+    (error) => {
+      observedError = error;
+      return /SEQUENCE_READBACK_MISMATCH/u.test(error.message);
+    },
   );
   assert.deepEqual(writes, ["native", "legacy"]);
+  assert.equal(observedError.sequenceId, "seq-1");
+  assert.equal(observedError.sequenceIndex, 0);
 });
 
 test("a post-migration inventory failure restores every sequence in reverse order", async () => {
@@ -718,6 +724,7 @@ test("full readback rejects dropped attachments and changed wait semantics", asy
     const plan = realisticPlan();
     let written = null;
     let reads = 0;
+    let observedError = null;
     await assert.rejects(
       () => updateAndVerify(plan, plan.afterSteps, {
         direction: "apply",
@@ -732,8 +739,21 @@ test("full readback rejects dropped attachments and changed wait semantics", asy
         },
         writeSteps: async (_id, steps) => { written = structuredClone(steps); },
       }),
-      /SEQUENCE_READBACK_MISMATCH/u,
+      (error) => {
+        observedError = error;
+        return error.code === "SEQUENCE_READBACK_MISMATCH";
+      },
     );
+    assert.deepEqual(observedError.readbackMismatch, {
+      expectedStepCount: 1,
+      actualStepCount: 1,
+      steps: [{
+        index: 0,
+        expectedStepNumber: 1,
+        actualStepNumber: 1,
+        fields: [damage],
+      }],
+    });
   }
 });
 

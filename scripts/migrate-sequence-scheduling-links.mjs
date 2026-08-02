@@ -44,7 +44,7 @@ const APPLY_PHRASE = "APPLY_ALL_RAYDAR_SEQUENCE_LINKS";
 const ROLLBACK_PHRASE = "ROLLBACK_ALL_RAYDAR_SEQUENCE_LINKS";
 const EDIT_FREEZE_PHRASE = "PARAFORM_SEQUENCE_EDIT_FREEZE_CONFIRMED";
 const MANIFEST_SCHEMA = "raydar-sequence-link-migration-v4";
-const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v8";
+const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v9";
 const REVIEWED_SEQUENCE_CATALOG_FLOOR = 75;
 const HEALTH_URL = "https://monitor.raydar.xyz/api/seq/health";
 const MAX_CUTOVER_WEBHOOK_AGE_MINUTES = 60;
@@ -588,6 +588,38 @@ function exactStepReadback(expected, actual) {
   const wanted = expected.map(stepProjection);
   const got = actual.map(stepProjection);
   return digest(wanted) === digest(got);
+}
+
+function readbackMismatchSummary(expected, actual) {
+  const wanted = expected.map(stepProjection);
+  const got = actual.map(stepProjection);
+  const steps = [];
+  for (let index = 0; index < Math.max(wanted.length, got.length); index++) {
+    const left = wanted[index] || {};
+    const right = got[index] || {};
+    const fields = [...new Set([...Object.keys(left), ...Object.keys(right)])]
+      .filter((field) => digest({
+        present: Object.hasOwn(left, field),
+        value: left[field],
+      }) !== digest({
+        present: Object.hasOwn(right, field),
+        value: right[field],
+      }))
+      .sort();
+    if (fields.length) {
+      steps.push({
+        index,
+        expectedStepNumber: left.step_number ?? null,
+        actualStepNumber: right.step_number ?? null,
+        fields,
+      });
+    }
+  }
+  return {
+    expectedStepCount: wanted.length,
+    actualStepCount: got.length,
+    steps,
+  };
 }
 
 export function planSequence(sequence, campaign) {
@@ -1139,13 +1171,18 @@ export async function updateAndVerify(entry, steps, {
   // stale full-step snapshot.
   const merged = mergeStepText(currentSteps, steps);
   await writeSteps(entry.id, providerWritableSteps(merged));
+  let lastReadbackSteps = [];
   for (const delayMs of readbackDelaysMs) {
     if (delayMs > 0) await sleepImpl(delayMs);
     const readback = await readCampaign(entry.id);
     const readbackSteps = Array.isArray(readback?.steps) ? readback.steps : [];
     if (exactStepReadback(merged, readbackSteps)) return;
+    lastReadbackSteps = readbackSteps;
   }
-  fail("SEQUENCE_READBACK_MISMATCH");
+  const error = new Error("SEQUENCE_READBACK_MISMATCH");
+  error.code = "SEQUENCE_READBACK_MISMATCH";
+  error.readbackMismatch = readbackMismatchSummary(merged, lastReadbackSteps);
+  throw error;
 }
 
 export async function rollbackEntries(entries, writeAndVerify = updateAndVerify) {
@@ -1172,14 +1209,20 @@ export async function migratePlansTransaction(changed, {
 } = {}) {
   const attempted = [];
   try {
-    for (const plan of changed) {
+    for (const [sequenceIndex, plan] of changed.entries()) {
       // Include the current target before issuing its write. If the write
       // succeeds but the read-back request fails or detects drift, this target
       // must still be restored from the pre-write manifest.
       attempted.push(plan);
-      await writeAndVerify(plan, plan.afterSteps, {
-        direction: "apply",
-      });
+      try {
+        await writeAndVerify(plan, plan.afterSteps, {
+          direction: "apply",
+        });
+      } catch (error) {
+        error.sequenceId = plan.id;
+        error.sequenceIndex = sequenceIndex;
+        throw error;
+      }
     }
     await verifyComplete();
     return attempted;
@@ -1382,6 +1425,11 @@ if (isCli) {
       process.stderr.write(`${JSON.stringify({
         ok: false,
         error: String(error?.code || error?.message || "migration_failed"),
+        failedSequenceId: error?.sequenceId || undefined,
+        failedSequenceIndex: Number.isInteger(error?.sequenceIndex)
+          ? error.sequenceIndex
+          : undefined,
+        readbackMismatch: error?.readbackMismatch || undefined,
         rollbackFailures: error?.failures || undefined,
       })}\n`);
       process.exitCode = 1;
