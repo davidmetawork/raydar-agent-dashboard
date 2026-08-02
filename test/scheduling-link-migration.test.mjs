@@ -17,6 +17,7 @@ import {
   loadPlans,
   migratePlansTransaction,
   planSequence,
+  READBACK_DELAYS_MS,
   requireCutoverReadiness,
   sequenceSourceAttribution,
   updateAndVerify,
@@ -753,6 +754,11 @@ test("readback polls through Paraform eventual consistency", async () => {
   });
   assert.equal(reads, 3);
   assert.deepEqual(slept, [25]);
+});
+
+test("default readback window covers one minute of provider lag", () => {
+  assert.equal(READBACK_DELAYS_MS[0], 0);
+  assert.ok(READBACK_DELAYS_MS.reduce((sum, delay) => sum + delay, 0) >= 60_000);
 });
 
 test("provider-managed delivery counters do not create false readback drift", async () => {
