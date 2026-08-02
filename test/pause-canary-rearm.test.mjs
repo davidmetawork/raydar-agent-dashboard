@@ -135,6 +135,20 @@ test("fails closed for the wrong identity, ambiguous leads, and failed readback"
     }),
     { code: "PAUSE_CANARY_REARM_READBACK_FAILED" },
   );
+  let paused = true;
+  await assert.rejects(
+    rearmRaydarPauseCanary({
+      ...base,
+      searchImpl: async (_s, _e, options) => ({
+        ccu_id: options.expectedCcuId,
+        is_paused: paused,
+        is_archived: false,
+      }),
+      updateImpl: async () => { paused = false; },
+      refreshImpl: async () => {},
+    }),
+    { code: "PAUSE_CANARY_REARM_FINAL_READBACK_FAILED" },
+  );
 });
 
 test("private rearm route requires the exact bearer and a bounded body", async () => {
