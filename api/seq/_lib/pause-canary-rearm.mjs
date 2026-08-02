@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
 import {
   campaignLeadBySearch,
@@ -14,6 +14,12 @@ import {
 import {
   loadPublishedBookingMembershipSnapshot,
 } from "./booking-membership-snapshot.mjs";
+import {
+  RAYDAR_BOOKING_HOOK_PATH,
+} from "./raydar-booking-contract.mjs";
+import {
+  handleRaydarBookingWebhook,
+} from "../raydar-booking-hook.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const BARE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
@@ -63,6 +69,69 @@ function leadEmails(lead) {
     BARE_EMAIL.test(value)));
 }
 
+async function refreshCanaryThroughSignedWebhook({ email, env, nowMs }) {
+  const secret = clean(env.RAYDAR_SCHEDULER_WEBHOOK_SECRET);
+  const now = new Date(nowMs);
+  const startsAt = new Date(nowMs + 24 * 60 * 60 * 1_000);
+  const endsAt = new Date(startsAt.getTime() + 15 * 60 * 1_000);
+  const suffix = randomUUID().replaceAll("-", "");
+  const body = {
+    schema: "raydar-booking-event-v1",
+    event: "booking.confirmed",
+    eventId: `bevt_canary_${suffix}`,
+    occurredAt: now.toISOString(),
+    bookingId: `bk_canary_${suffix}`,
+    callType: "agent",
+    candidate: { email, name: "Raydar Canary" },
+    startsAt: startsAt.toISOString(),
+    endsAt: endsAt.toISOString(),
+    bookedAt: now.toISOString(),
+    sourceAttribution: "operator_pause_canary",
+    status: "confirmed",
+    supersedesBookingId: null,
+  };
+  const raw = JSON.stringify(body);
+  const timestamp = String(Math.floor(nowMs / 1_000));
+  const canonical = `${timestamp}\nPOST\n${RAYDAR_BOOKING_HOOK_PATH}\n${raw}`;
+  const signature = createHmac("sha256", secret)
+    .update(canonical)
+    .digest("hex");
+  const request = new Request(
+    `https://monitor.raydar.xyz${RAYDAR_BOOKING_HOOK_PATH}`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-raydar-timestamp": timestamp,
+        "x-raydar-event-id": body.eventId,
+        "x-raydar-signature": `v1=${signature}`,
+      },
+      body: raw,
+    },
+  );
+  const response = await handleRaydarBookingWebhook(request, {
+    enabled: true,
+    secret,
+    pauseCanaryFingerprint:
+      env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
+    nowMs,
+  });
+  const result = await response.json().catch(() => null);
+  if (
+    response.status !== 202
+    || result?.ok !== true
+    || result.apply !== true
+    || result.deferred !== false
+    || !Number.isInteger(result.matched)
+    || result.matched < 1
+    || !Number.isInteger(result.paused)
+    || result.paused < 1
+  ) {
+    throw codedError("PAUSE_CANARY_REARM_REFRESH_FAILED");
+  }
+  return true;
+}
+
 /**
  * Re-arm only the preconfigured no-send pause canary. Ordinary candidates can
  * never be selected: the address must match the independently configured HMAC
@@ -80,6 +149,8 @@ export async function rearmRaydarPauseCanary({
       campaign_to_candidate_user_id: ccuId,
       is_paused: false,
     }, 1)),
+  refreshImpl = refreshCanaryThroughSignedWebhook,
+  nowMs = Date.now(),
 } = {}) {
   const identityDigest = clean(identitySha256).toLowerCase();
   const secret = clean(env.RAYDAR_SCHEDULER_WEBHOOK_SECRET);
@@ -146,33 +217,42 @@ export async function rearmRaydarPauseCanary({
   }
 
   const selected = candidates[0];
-  if (selected.row.is_paused !== true) {
-    return Object.freeze({
-      ok: true,
-      rearmed: 0,
-      alreadyRearmed: true,
-      leadsVerified: 1,
-    });
+  const alreadyRearmed = selected.row.is_paused !== true;
+  if (!alreadyRearmed) {
+    await updateImpl(selected.ccuId);
+    const readback = await searchImpl(
+      selected.sequenceId,
+      email,
+      { expectedCcuId: selected.ccuId },
+    );
+    if (
+      !readback
+      || clean(readback.ccu_id) !== selected.ccuId
+      || readback.is_paused !== false
+      || readback.is_archived === true
+    ) {
+      throw codedError("PAUSE_CANARY_REARM_READBACK_FAILED");
+    }
   }
-
-  await updateImpl(selected.ccuId);
-  const readback = await searchImpl(
+  await refreshImpl({ email, env, nowMs });
+  const finalReadback = await searchImpl(
     selected.sequenceId,
     email,
     { expectedCcuId: selected.ccuId },
   );
   if (
-    !readback
-    || clean(readback.ccu_id) !== selected.ccuId
-    || readback.is_paused !== false
-    || readback.is_archived === true
+    !finalReadback
+    || clean(finalReadback.ccu_id) !== selected.ccuId
+    || finalReadback.is_paused !== true
+    || finalReadback.is_archived === true
   ) {
-    throw codedError("PAUSE_CANARY_REARM_READBACK_FAILED");
+    throw codedError("PAUSE_CANARY_REARM_REFRESH_FAILED");
   }
   return Object.freeze({
     ok: true,
-    rearmed: 1,
-    alreadyRearmed: false,
+    rearmed: alreadyRearmed ? 0 : 1,
+    alreadyRearmed,
+    refreshed: 1,
     leadsVerified: 1,
   });
 }
