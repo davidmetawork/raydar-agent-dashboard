@@ -18,18 +18,28 @@ const env = {
   RAYDAR_PAUSE_CANARY_REARM_KEY: REARM_KEY,
 };
 
+function snapshot(entries = [
+  {
+    seq: { id: "sequence-1" },
+    leads: [{
+      ccu_id: "lead-1",
+      to_use_email: EMAIL,
+      user_emails: [],
+      is_paused: true,
+      is_archived: false,
+    }],
+  },
+]) {
+  return { ok: true, complete: true, perSequence: entries };
+}
+
 test("rearms exactly one fingerprint-bound paused canary and reads it back", async () => {
   let paused = true;
   const writes = [];
   const result = await rearmRaydarPauseCanary({
     identitySha256,
     env,
-    readIndexImpl: async () => ({
-      byEmail: {
-        [EMAIL]: [{ s: "sequence-1", ccu: "lead-1" }],
-        "ordinary@example.invalid": [{ s: "sequence-2", ccu: "lead-2" }],
-      },
-    }),
+    loadSnapshotImpl: async () => snapshot(),
     searchImpl: async (_sequence, _email, options) => ({
       ccu_id: options.expectedCcuId,
       is_paused: paused,
@@ -54,12 +64,7 @@ test("the configured fingerprint can resolve the canary without exposing its ide
   let paused = true;
   const result = await rearmRaydarPauseCanary({
     env,
-    readIndexImpl: async () => ({
-      byEmail: {
-        [EMAIL]: [{ s: "sequence-1", ccu: "lead-1" }],
-        "ordinary@example.invalid": [{ s: "sequence-2", ccu: "lead-2" }],
-      },
-    }),
+    loadSnapshotImpl: async () => snapshot(),
     searchImpl: async (_sequence, _email, options) => ({
       ccu_id: options.expectedCcuId,
       is_paused: paused,
@@ -75,9 +80,7 @@ test("fails closed for the wrong identity, ambiguous leads, and failed readback"
   const base = {
     identitySha256,
     env,
-    readIndexImpl: async () => ({
-      byEmail: { [EMAIL]: [{ s: "sequence-1", ccu: "lead-1" }] },
-    }),
+    loadSnapshotImpl: async () => snapshot(),
   };
   await assert.rejects(
     rearmRaydarPauseCanary({ ...base, identitySha256: "0".repeat(64) }),
@@ -86,14 +89,28 @@ test("fails closed for the wrong identity, ambiguous leads, and failed readback"
   await assert.rejects(
     rearmRaydarPauseCanary({
       ...base,
-      readIndexImpl: async () => ({
-        byEmail: {
-          [EMAIL]: [
-            { s: "sequence-1", ccu: "lead-1" },
-            { s: "sequence-2", ccu: "lead-2" },
-          ],
+      loadSnapshotImpl: async () => snapshot([
+        {
+          seq: { id: "sequence-1" },
+          leads: [{
+            ccu_id: "lead-1",
+            to_use_email: EMAIL,
+            user_emails: [],
+            is_paused: true,
+            is_archived: false,
+          }],
         },
-      }),
+        {
+          seq: { id: "sequence-2" },
+          leads: [{
+            ccu_id: "lead-2",
+            to_use_email: EMAIL,
+            user_emails: [],
+            is_paused: true,
+            is_archived: false,
+          }],
+        },
+      ]),
       searchImpl: async (_s, _e, options) => ({
         ccu_id: options.expectedCcuId,
         is_paused: true,

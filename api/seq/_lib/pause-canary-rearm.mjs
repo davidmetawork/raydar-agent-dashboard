@@ -8,8 +8,12 @@ import {
 import {
   K,
   kvGet,
+  kvGetMany,
   raydarPauseCanaryIdentityFingerprint,
 } from "./booking-stop.mjs";
+import {
+  loadPublishedBookingMembershipSnapshot,
+} from "./booking-membership-snapshot.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const BARE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
@@ -23,6 +27,42 @@ function codedError(code) {
 const clean = (value) => String(value ?? "").trim();
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
+async function loadCurrentMembershipSnapshot() {
+  const current = await kvGet(K.membershipCurrent);
+  const binding = current?.scope;
+  if (
+    !binding
+    || !Array.isArray(binding.selectedSequenceIds)
+  ) {
+    return null;
+  }
+  const scope = {
+    schema: binding.schema,
+    scopeDigest: binding.digest,
+    catalogFloor: binding.catalogFloor,
+    complete: true,
+    sequences: binding.selectedSequenceIds.map((id) => ({ id })),
+    catalogSequences: binding.catalogSequenceCount,
+    scannedSequences: binding.catalogSequenceCount,
+    linkSequences: binding.linkSequenceCount,
+    enabledLinkSequences: binding.enabledLinkSequenceCount,
+    coveredEnabledLinkSequences: binding.coveredEnabledLinkSequenceCount,
+  };
+  return loadPublishedBookingMembershipSnapshot({
+    scope,
+    read: kvGet,
+    readMany: kvGetMany,
+  });
+}
+
+function leadEmails(lead) {
+  return new Set([
+    lead?.to_use_email,
+    ...(Array.isArray(lead?.user_emails) ? lead.user_emails : []),
+  ].map((value) => clean(value).toLowerCase()).filter((value) =>
+    BARE_EMAIL.test(value)));
+}
+
 /**
  * Re-arm only the preconfigured no-send pause canary. Ordinary candidates can
  * never be selected: the address must match the independently configured HMAC
@@ -33,7 +73,7 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 export async function rearmRaydarPauseCanary({
   identitySha256,
   env = process.env,
-  readIndexImpl = () => kvGet(K.leadIndex),
+  loadSnapshotImpl = loadCurrentMembershipSnapshot,
   searchImpl = campaignLeadBySearch,
   updateImpl = (ccuId) => withThrottleRetry(() =>
     trpcPost("campaigns.updateCandidatePauseStatus", {
@@ -54,45 +94,46 @@ export async function rearmRaydarPauseCanary({
     throw codedError("PAUSE_CANARY_REARM_CONFIG_INVALID");
   }
 
-  const index = await readIndexImpl();
+  const snapshot = await loadSnapshotImpl();
   if (
-    !index
-    || typeof index !== "object"
-    || !index.byEmail
-    || typeof index.byEmail !== "object"
-    || Array.isArray(index.byEmail)
+    snapshot?.ok !== true
+    || snapshot.complete !== true
+    || !Array.isArray(snapshot.perSequence)
   ) {
     throw codedError("PAUSE_CANARY_REARM_INDEX_INVALID");
   }
 
-  const identities = [];
-  for (const [rawEmail, rawEntries] of Object.entries(index.byEmail)) {
-    const email = clean(rawEmail).toLowerCase();
-    if (
-      !BARE_EMAIL.test(email)
-      || (identityDigest && sha256(email) !== identityDigest)
-      || raydarPauseCanaryIdentityFingerprint({ secret, email })
-        !== configuredFingerprint
-    ) {
-      continue;
-    }
-    if (!Array.isArray(rawEntries)) {
+  const identityEntries = new Map();
+  for (const group of snapshot.perSequence) {
+    const sequenceId = clean(group?.seq?.id);
+    if (!sequenceId || !Array.isArray(group?.leads)) {
       throw codedError("PAUSE_CANARY_REARM_INDEX_INVALID");
     }
-    identities.push({ email, entries: rawEntries });
+    for (const lead of group.leads) {
+      const ccuId = clean(lead?.ccu_id);
+      if (!ccuId || lead?.is_archived === true) continue;
+      for (const email of leadEmails(lead)) {
+        if (
+          (identityDigest && sha256(email) !== identityDigest)
+          || raydarPauseCanaryIdentityFingerprint({ secret, email })
+            !== configuredFingerprint
+        ) {
+          continue;
+        }
+        const entries = identityEntries.get(email) ?? [];
+        entries.push({ sequenceId, ccuId });
+        identityEntries.set(email, entries);
+      }
+    }
   }
-  if (identities.length !== 1) {
+  if (identityEntries.size !== 1) {
     throw codedError("PAUSE_CANARY_REARM_IDENTITY_MISMATCH");
   }
+  const [[email, entries]] = identityEntries;
 
   const candidates = [];
-  for (const entry of identities[0].entries) {
-    const sequenceId = clean(entry?.s);
-    const ccuId = clean(entry?.ccu);
-    if (!sequenceId || !ccuId) {
-      throw codedError("PAUSE_CANARY_REARM_INDEX_INVALID");
-    }
-    const row = await searchImpl(sequenceId, identities[0].email, {
+  for (const { sequenceId, ccuId } of entries) {
+    const row = await searchImpl(sequenceId, email, {
       expectedCcuId: ccuId,
     });
     if (!row || clean(row.ccu_id) !== ccuId || row.is_archived === true) {
@@ -117,7 +158,7 @@ export async function rearmRaydarPauseCanary({
   await updateImpl(selected.ccuId);
   const readback = await searchImpl(
     selected.sequenceId,
-    identities[0].email,
+    email,
     { expectedCcuId: selected.ccuId },
   );
   if (
