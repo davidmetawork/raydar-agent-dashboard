@@ -44,7 +44,7 @@ const APPLY_PHRASE = "APPLY_ALL_RAYDAR_SEQUENCE_LINKS";
 const ROLLBACK_PHRASE = "ROLLBACK_ALL_RAYDAR_SEQUENCE_LINKS";
 const EDIT_FREEZE_PHRASE = "PARAFORM_SEQUENCE_EDIT_FREEZE_CONFIRMED";
 const MANIFEST_SCHEMA = "raydar-sequence-link-migration-v4";
-const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v6";
+const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v8";
 const REVIEWED_SEQUENCE_CATALOG_FLOOR = 75;
 const HEALTH_URL = "https://monitor.raydar.xyz/api/seq/health";
 const MAX_CUTOVER_WEBHOOK_AGE_MINUTES = 60;
@@ -556,6 +556,31 @@ function mergeStepText(currentSteps, desiredSteps) {
       else delete merged[field];
     }
     return merged;
+  });
+}
+
+function providerWritableSteps(steps) {
+  return steps.map((step) => {
+    const value = step?.attachments;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return step;
+    }
+    const keys = Object.keys(value).sort();
+    if (
+      keys.length !== 2
+      || keys[0] !== "attachments"
+      || keys[1] !== "version"
+      || !Number.isInteger(value.version)
+      || value.version < 1
+      || !Array.isArray(value.attachments)
+    ) {
+      fail("SEQUENCE_ATTACHMENTS_SHAPE_INVALID");
+    }
+    // Paraform's read contract wraps attachment arrays with a schema version,
+    // while updateSequenceSteps accepts only the inner array. Adapt only this
+    // exact wrapper at the write boundary; keep `merged` unchanged so the
+    // subsequent readback still proves the complete provider representation.
+    return { ...step, attachments: value.attachments };
   });
 }
 
@@ -1095,9 +1120,12 @@ export async function updateAndVerify(entry, steps, {
     }
   } else if (direction === "rollback") {
     const currentTextDigest = stepTextDigest(currentSteps);
+    // A failed or unapplied provider mutation can leave the sequence at the
+    // exact preimage. That state is already a fully verified rollback; avoid a
+    // redundant write that the provider may reject for an inactive campaign.
+    if (currentTextDigest === entry.beforeTextDigest) return;
     if (
-      currentTextDigest !== entry.beforeTextDigest
-      && currentTextDigest !== entry.afterTextDigest
+      currentTextDigest !== entry.afterTextDigest
     ) {
       fail("ROLLBACK_CURRENT_STATE_DRIFT");
     }
@@ -1110,7 +1138,7 @@ export async function updateAndVerify(entry, steps, {
   // counters, and any other Paraform-managed fields rather than replaying a
   // stale full-step snapshot.
   const merged = mergeStepText(currentSteps, steps);
-  await writeSteps(entry.id, merged);
+  await writeSteps(entry.id, providerWritableSteps(merged));
   for (const delayMs of readbackDelaysMs) {
     if (delayMs > 0) await sleepImpl(delayMs);
     const readback = await readCampaign(entry.id);

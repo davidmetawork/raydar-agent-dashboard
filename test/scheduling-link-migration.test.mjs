@@ -828,6 +828,41 @@ test("rollback restores only text while preserving concurrent non-text fields", 
   assert.equal(written[0].updated_at, current[0].updated_at);
 });
 
+test("versioned read attachments are losslessly adapted to the write API", async () => {
+  const plan = realisticPlan();
+  const current = structuredClone(plan.afterSteps);
+  const attachmentArray = structuredClone(current[0].attachments);
+  current[0].attachments = { version: 1, attachments: attachmentArray };
+  const readback = structuredClone(current);
+  readback[0].subject = plan.beforeSteps[0].subject;
+  readback[0].body = plan.beforeSteps[0].body;
+  let written = null;
+  let reads = 0;
+
+  await updateAndVerify(plan, plan.beforeSteps, {
+    direction: "rollback",
+    readCampaign: async () => ({
+      steps: structuredClone(++reads === 1 ? current : readback),
+    }),
+    writeSteps: async (_id, steps) => { written = structuredClone(steps); },
+  });
+
+  assert.deepEqual(written[0].attachments, attachmentArray);
+  assert.equal(Array.isArray(written[0].attachments), true);
+  assert.deepEqual(readback[0].attachments, current[0].attachments);
+});
+
+test("rollback is a verified no-op when the provider already has the preimage", async () => {
+  const plan = realisticPlan();
+  let writes = 0;
+  await updateAndVerify(plan, plan.beforeSteps, {
+    direction: "rollback",
+    readCampaign: async () => ({ steps: structuredClone(plan.beforeSteps) }),
+    writeSteps: async () => { writes++; },
+  });
+  assert.equal(writes, 0);
+});
+
 test("apply and rollback preserve exact null and absent text-field state", async () => {
   const beforeSteps = [
     {
