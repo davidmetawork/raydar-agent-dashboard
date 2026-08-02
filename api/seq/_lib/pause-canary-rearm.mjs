@@ -117,17 +117,20 @@ async function refreshCanaryThroughSignedWebhook({ email, env, nowMs }) {
     nowMs,
   });
   const result = await response.json().catch(() => null);
-  if (
-    response.status !== 202
-    || result?.ok !== true
-    || result.apply !== true
-    || result.deferred !== false
-    || !Number.isInteger(result.matched)
-    || result.matched < 1
-    || !Number.isInteger(result.paused)
-    || result.paused < 1
-  ) {
-    throw codedError("PAUSE_CANARY_REARM_REFRESH_FAILED");
+  if (response.status !== 202) {
+    throw codedError("PAUSE_CANARY_REARM_WEBHOOK_STATUS_INVALID");
+  }
+  if (result?.ok !== true || result.apply !== true) {
+    throw codedError("PAUSE_CANARY_REARM_WEBHOOK_RESULT_INVALID");
+  }
+  if (result.deferred !== false) {
+    throw codedError("PAUSE_CANARY_REARM_WEBHOOK_DEFERRED");
+  }
+  if (!Number.isInteger(result.matched) || result.matched < 1) {
+    throw codedError("PAUSE_CANARY_REARM_WEBHOOK_UNMATCHED");
+  }
+  if (!Number.isInteger(result.paused) || result.paused < 1) {
+    throw codedError("PAUSE_CANARY_REARM_WEBHOOK_NOT_PAUSED");
   }
   return true;
 }
@@ -246,7 +249,7 @@ export async function rearmRaydarPauseCanary({
     || finalReadback.is_paused !== true
     || finalReadback.is_archived === true
   ) {
-    throw codedError("PAUSE_CANARY_REARM_REFRESH_FAILED");
+    throw codedError("PAUSE_CANARY_REARM_FINAL_READBACK_FAILED");
   }
   return Object.freeze({
     ok: true,
