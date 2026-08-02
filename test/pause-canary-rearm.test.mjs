@@ -50,6 +50,27 @@ test("rearms exactly one fingerprint-bound paused canary and reads it back", asy
   assert.deepEqual(writes, ["lead-1"]);
 });
 
+test("the configured fingerprint can resolve the canary without exposing its identity", async () => {
+  let paused = true;
+  const result = await rearmRaydarPauseCanary({
+    env,
+    readIndexImpl: async () => ({
+      byEmail: {
+        [EMAIL]: [{ s: "sequence-1", ccu: "lead-1" }],
+        "ordinary@example.invalid": [{ s: "sequence-2", ccu: "lead-2" }],
+      },
+    }),
+    searchImpl: async (_sequence, _email, options) => ({
+      ccu_id: options.expectedCcuId,
+      is_paused: paused,
+      is_archived: false,
+    }),
+    updateImpl: async () => { paused = false; },
+  });
+  assert.equal(result.rearmed, 1);
+  assert.equal(Object.hasOwn(result, "identitySha256"), false);
+});
+
 test("fails closed for the wrong identity, ambiguous leads, and failed readback", async () => {
   const base = {
     identitySha256,
@@ -95,7 +116,7 @@ test("fails closed for the wrong identity, ambiguous leads, and failed readback"
   );
 });
 
-test("private rearm route requires the exact bearer and one digest", async () => {
+test("private rearm route requires the exact bearer and a bounded body", async () => {
   const denied = await handlePauseCanaryRearmRequest(new Request(
     "https://monitor.raydar.xyz/api/seq/rearm-pause-canary",
     { method: "POST", body: JSON.stringify({ identitySha256 }) },
@@ -125,4 +146,23 @@ test("private rearm route requires the exact bearer and one digest", async () =>
     alreadyRearmed: false,
     leadsVerified: 1,
   });
+
+  const fingerprintOnly = await handlePauseCanaryRearmRequest(new Request(
+    "https://monitor.raydar.xyz/api/seq/rearm-pause-canary",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${REARM_KEY}` },
+      body: "{}",
+    },
+  ), {
+    env,
+    rearmImpl: async (input) => ({
+      ok: input.identitySha256 == null,
+      rearmed: 1,
+      alreadyRearmed: false,
+      leadsVerified: 1,
+    }),
+  });
+  assert.equal(fingerprintOnly.status, 200);
+  assert.equal((await fingerprintOnly.json()).ok, true);
 });
