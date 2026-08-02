@@ -773,9 +773,9 @@ test("provider readback bypasses stale campaign caches", async () => {
   assert.equal(observed.options.headers["cache-control"], "no-cache");
 });
 
-test("default readback window covers one minute of provider lag", () => {
+test("default readback window covers two minutes of provider lag", () => {
   assert.equal(READBACK_DELAYS_MS[0], 0);
-  assert.ok(READBACK_DELAYS_MS.reduce((sum, delay) => sum + delay, 0) >= 60_000);
+  assert.ok(READBACK_DELAYS_MS.reduce((sum, delay) => sum + delay, 0) >= 120_000);
 });
 
 test("provider-managed delivery counters do not create false readback drift", async () => {

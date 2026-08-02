@@ -44,7 +44,7 @@ const APPLY_PHRASE = "APPLY_ALL_RAYDAR_SEQUENCE_LINKS";
 const ROLLBACK_PHRASE = "ROLLBACK_ALL_RAYDAR_SEQUENCE_LINKS";
 const EDIT_FREEZE_PHRASE = "PARAFORM_SEQUENCE_EDIT_FREEZE_CONFIRMED";
 const MANIFEST_SCHEMA = "raydar-sequence-link-migration-v4";
-const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v5";
+const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v6";
 const REVIEWED_SEQUENCE_CATALOG_FLOOR = 75;
 const HEALTH_URL = "https://monitor.raydar.xyz/api/seq/health";
 const MAX_CUTOVER_WEBHOOK_AGE_MINUTES = 60;
@@ -462,9 +462,10 @@ const VOLATILE_STEP_FIELDS = new Set([
 
 // Paraform's sequence mutation is now eventually consistent: the first
 // successful getCampaign after updateSequenceSteps can still return the old
-// text for tens of seconds. Poll a bounded one-minute window and require one
+// text for tens of seconds. Poll a bounded two-minute window and require one
 // complete exact projection; a permanent mismatch still fails closed and
-// enters the rollback path.
+// enters the rollback path. The longer final delay also gives a rollback write
+// enough time to settle before it is reported as needing manual recovery.
 export const READBACK_DELAYS_MS = Object.freeze([
   0,
   1_000,
@@ -473,6 +474,7 @@ export const READBACK_DELAYS_MS = Object.freeze([
   8_000,
   15_000,
   30_000,
+  60_000,
 ]);
 
 export async function readCampaignFresh(id, {
@@ -662,9 +664,12 @@ export async function loadPlans({
   listSequences = async () =>
     withThrottleRetry(() =>
       trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1)),
+  // Every catalog snapshot participates in the transactional proof. Use the
+  // same nonce/no-store path as per-write verification so the final full
+  // catalog pass cannot mistake a provider cache entry for rollback-worthy
+  // drift.
   readCampaign = async (id) =>
-    withThrottleRetry(() =>
-      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1)),
+    withThrottleRetry(() => readCampaignFresh(id)),
   minimumSequenceCount = REVIEWED_SEQUENCE_CATALOG_FLOOR,
 } = {}) {
   const sequences = await listSequences();
