@@ -10,6 +10,7 @@ import {
   BOOKING_MEMBERSHIP_MAX_SHARDS,
   bookingMembershipCanonicalJson,
   bookingMembershipHash,
+  bookingMembershipLeadIndex,
   bookingMembershipSnapshotHealth,
   loadPublishedBookingMembershipSnapshot,
   runBookingMembershipRefresh,
@@ -37,6 +38,33 @@ const GEN_B = "b".repeat(32);
 function clone(value) {
   return value == null ? value : structuredClone(value);
 }
+
+test("paused membership keeps only the fingerprint-selected canary in the webhook index", () => {
+  const index = bookingMembershipLeadIndex({
+    generation: GEN_A,
+    manifestHash: "f".repeat(64),
+    scope: {
+      schema: "raydar-booking-stop-scope-v1",
+      scopeDigest: "d".repeat(64),
+      catalogFloor: 1,
+    },
+    builtAt: new Date(BASE_NOW).toISOString(),
+    perSequence: [{
+      sequence: { id: "sequence-1", name: "No-send canary" },
+      leads: [
+        { ccu_id: "active", is_paused: false, is_archived: false, to_use_email: "active@example.invalid" },
+        { ccu_id: "canary", is_paused: true, is_archived: false, to_use_email: "canary@example.invalid" },
+        { ccu_id: "ordinary", is_paused: true, is_archived: false, to_use_email: "ordinary@example.invalid" },
+      ],
+    }],
+    includePausedLead: (lead) => lead.ccu_id === "canary",
+  });
+  assert.deepEqual(Object.keys(index.byEmail).sort(), [
+    "active@example.invalid",
+    "canary@example.invalid",
+  ]);
+  assert.equal(index.byEmail["ordinary@example.invalid"], undefined);
+});
 
 class MemoryStore {
   constructor(now = BASE_NOW) {
@@ -1510,7 +1538,10 @@ test("cron refresh is separated before sweep and remains below Vercel's project 
     path === "/api/seq/booking-membership-refresh");
   const sweep = config.crons.find(({ path }) =>
     path === "/api/seq/booking-sweep");
+  const rearm = config.crons.find(({ path }) =>
+    path === "/api/seq/rearm-pause-canary");
   assert.equal(refresh.schedule, "7,37 * * * *");
+  assert.equal(rearm.schedule, "12,42 * * * *");
   assert.equal(sweep.schedule, "52 * * * *");
   const refreshMinutes = refresh.schedule
     .split(" ")[0]

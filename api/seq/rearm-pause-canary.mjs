@@ -11,8 +11,7 @@ const json = (value, status = 200) => Response.json(value, {
   headers: { "cache-control": "no-store" },
 });
 
-function authorized(header, env) {
-  const key = env.RAYDAR_PAUSE_CANARY_REARM_KEY;
+function authorized(header, key) {
   if (!KEY.test(String(key ?? "")) || typeof header !== "string") {
     return false;
   }
@@ -25,11 +24,27 @@ export async function handlePauseCanaryRearmRequest(request, {
   env = process.env,
   rearmImpl = rearmRaydarPauseCanary,
 } = {}) {
-  if (request.method !== "POST") {
-    return json({ ok: false, error: "POST_only" }, 405);
+  const scheduled = request.method === "GET";
+  const operator = request.method === "POST";
+  if (!scheduled && !operator) {
+    return json({ ok: false, error: "GET_or_POST_only" }, 405);
   }
-  if (!authorized(request.headers.get("authorization"), env)) {
+  const key = scheduled
+    ? env.CRON_SECRET
+    : env.RAYDAR_PAUSE_CANARY_REARM_KEY;
+  if (!authorized(request.headers.get("authorization"), key)) {
     return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  if (scheduled) {
+    try {
+      return json(await rearmImpl({ identitySha256: null, env }));
+    } catch (error) {
+      const code = String(error?.code || "PAUSE_CANARY_REARM_FAILED");
+      const safe = /^PAUSE_CANARY_REARM_[A-Z_]+$/u.test(code)
+        ? code
+        : "PAUSE_CANARY_REARM_FAILED";
+      return json({ ok: false, error: safe }, 409);
+    }
   }
   const raw = await request.text();
   if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {

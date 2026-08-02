@@ -8,6 +8,7 @@ import { handlePauseCanaryRearmRequest } from "../api/seq/rearm-pause-canary.mjs
 const EMAIL = "canary@example.invalid";
 const SECRET = "s".repeat(32);
 const REARM_KEY = "r".repeat(32);
+const CRON_SECRET = "c".repeat(32);
 const identitySha256 = createHash("sha256").update(EMAIL).digest("hex");
 const fingerprint = createHmac("sha256", SECRET)
   .update(`raydar-booking-pause-canary-v1\0${EMAIL}`)
@@ -16,6 +17,7 @@ const env = {
   RAYDAR_SCHEDULER_WEBHOOK_SECRET: SECRET,
   RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT: fingerprint,
   RAYDAR_PAUSE_CANARY_REARM_KEY: REARM_KEY,
+  CRON_SECRET,
 };
 
 function snapshot(entries = [
@@ -200,4 +202,41 @@ test("private rearm route requires the exact bearer and a bounded body", async (
   });
   assert.equal(fingerprintOnly.status, 200);
   assert.equal((await fingerprintOnly.json()).ok, true);
+});
+
+test("scheduled rearm accepts only the exact cron bearer and needs no identity body", async () => {
+  for (const headers of [
+    {},
+    { "x-vercel-cron": "1" },
+    { authorization: `Bearer ${REARM_KEY}` },
+  ]) {
+    const denied = await handlePauseCanaryRearmRequest(new Request(
+      "https://monitor.raydar.xyz/api/seq/rearm-pause-canary",
+      { method: "GET", headers },
+    ), { env });
+    assert.equal(denied.status, 401);
+  }
+
+  let received = "not-called";
+  const accepted = await handlePauseCanaryRearmRequest(new Request(
+    "https://monitor.raydar.xyz/api/seq/rearm-pause-canary",
+    {
+      method: "GET",
+      headers: { authorization: `Bearer ${CRON_SECRET}` },
+    },
+  ), {
+    env,
+    rearmImpl: async ({ identitySha256: identity }) => {
+      received = identity;
+      return { ok: true, rearmed: 1, refreshed: 1, leadsVerified: 1 };
+    },
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(received, null);
+  assert.deepEqual(await accepted.json(), {
+    ok: true,
+    rearmed: 1,
+    refreshed: 1,
+    leadsVerified: 1,
+  });
 });

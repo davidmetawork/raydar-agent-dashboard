@@ -251,11 +251,16 @@ export function bookingMembershipLeadIndex({
   scope,
   builtAt,
   perSequence,
+  includePausedLead = () => false,
 }) {
   const byEmail = {};
   for (const { sequence, leads } of perSequence) {
     for (const lead of leads) {
-      if (lead.is_paused || lead.is_archived || !lead.ccu_id) continue;
+      if (
+        lead.is_archived
+        || !lead.ccu_id
+        || (lead.is_paused && includePausedLead(lead) !== true)
+      ) continue;
       for (const email of leadAddresses(lead)) {
         (byEmail[email] ||= []).push({
           s: sequence.id,
@@ -384,6 +389,7 @@ export async function runBookingMembershipRefresh({
   shardTokenFactory = () => randomBytes(12).toString("hex"),
   budgetMs = BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
   concurrency = 2,
+  includePausedLead = () => false,
 } = {}) {
   if (
     typeof scopeLoader !== "function"
@@ -401,6 +407,7 @@ export async function runBookingMembershipRefresh({
     || !Number.isInteger(concurrency)
     || concurrency < 1
     || concurrency > 4
+    || typeof includePausedLead !== "function"
   ) {
     throw fail("BOOKING_MEMBERSHIP_REFRESH_CONFIG_INVALID");
   }
@@ -726,6 +733,7 @@ export async function runBookingMembershipRefresh({
     scope: scopeAfter,
     builtAt: publishedAt,
     perSequence,
+    includePausedLead,
   });
   const leadIndexHash = bookingMembershipHash(leadIndex);
   const current = {
