@@ -16,8 +16,10 @@ const CONTRACT_REVISION_PATTERN = /^[a-f0-9]{40}$/iu;
 /**
  * The scheduler may bind cutover evidence to this exact deployed dashboard
  * revision. The public health response stays unchanged: proof fields are
- * returned only when both the private bearer and Vercel's immutable Git SHA
- * validate. Every other state fails closed to the existing redacted shape.
+ * returned only when both the private bearer and an exact deployed revision
+ * validate. An explicit revision supports audited local uploads; Vercel's Git
+ * SHA remains the fallback for connected deployments. Every other state fails
+ * closed to the existing redacted shape.
  */
 export function authenticatedSchedulerHealthFields(
   req,
@@ -26,7 +28,8 @@ export function authenticatedSchedulerHealthFields(
   if (req?.method !== "GET") return {};
 
   const key = env?.SCHEDULER_DASHBOARD_HEALTH_READ_KEY;
-  const revision = env?.VERCEL_GIT_COMMIT_SHA;
+  const revision = env?.RAYDAR_DASHBOARD_CONTRACT_REVISION
+    ?? env?.VERCEL_GIT_COMMIT_SHA;
   const provided = req?.headers?.authorization;
   if (
     typeof key !== "string"
