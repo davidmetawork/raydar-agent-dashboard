@@ -25,9 +25,10 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 /**
  * Re-arm only the preconfigured no-send pause canary. Ordinary candidates can
- * never be selected: the address must match both an operator-supplied digest
- * and the independently configured HMAC fingerprint, and exactly one current
- * Paraform lead must read back as the expected row.
+ * never be selected: the address must match the independently configured HMAC
+ * fingerprint, and exactly one current Paraform lead must read back as the
+ * expected row. An operator-supplied digest can narrow the identity further,
+ * but is not needed when the configured fingerprint resolves uniquely.
  */
 export async function rearmRaydarPauseCanary({
   identitySha256,
@@ -46,7 +47,7 @@ export async function rearmRaydarPauseCanary({
     env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
   ).toLowerCase();
   if (
-    !SHA256.test(identityDigest)
+    (identityDigest && !SHA256.test(identityDigest))
     || secret.length < 32
     || !SHA256.test(configuredFingerprint)
   ) {
@@ -69,7 +70,7 @@ export async function rearmRaydarPauseCanary({
     const email = clean(rawEmail).toLowerCase();
     if (
       !BARE_EMAIL.test(email)
-      || sha256(email) !== identityDigest
+      || (identityDigest && sha256(email) !== identityDigest)
       || raydarPauseCanaryIdentityFingerprint({ secret, email })
         !== configuredFingerprint
     ) {

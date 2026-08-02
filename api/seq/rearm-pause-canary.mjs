@@ -45,14 +45,20 @@ export async function handlePauseCanaryRearmRequest(request, {
     !body
     || typeof body !== "object"
     || Array.isArray(body)
-    || Object.keys(body).length !== 1
-    || !SHA256.test(String(body.identitySha256 ?? ""))
+    || ![0, 1].includes(Object.keys(body).length)
+    || (
+      Object.keys(body).length === 1
+      && (
+        !Object.hasOwn(body, "identitySha256")
+        || !SHA256.test(String(body.identitySha256 ?? ""))
+      )
+    )
   ) {
     return json({ ok: false, error: "invalid_request" }, 400);
   }
   try {
     return json(await rearmImpl({
-      identitySha256: body.identitySha256,
+      identitySha256: body.identitySha256 ?? null,
       env,
     }));
   } catch (error) {
