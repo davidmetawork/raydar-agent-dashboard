@@ -821,6 +821,39 @@ test("provider-managed delivery counters do not create false readback drift", as
   assert.equal(reads, 2);
 });
 
+test("provider no-due task normalization accepts only zero and null", async () => {
+  const sourceSteps = structuredClone(realisticPlan().beforeSteps);
+  sourceSteps[0].task_due_days = 0;
+  const plan = planSequence(
+    { id: "seq-task-due", name: "Task due", enabled: false },
+    { steps: sourceSteps },
+  );
+  const current = structuredClone(plan.beforeSteps);
+  current[0].task_due_days = null;
+  let written = null;
+  let reads = 0;
+
+  await updateAndVerify(plan, plan.afterSteps, {
+    direction: "apply",
+    readCampaign: async () => ({
+      steps: structuredClone(++reads === 1 ? current : written),
+    }),
+    writeSteps: async (_id, steps) => { written = structuredClone(steps); },
+  });
+  assert.equal(written[0].task_due_days, null);
+
+  const drifted = structuredClone(plan.beforeSteps);
+  drifted[0].task_due_days = 1;
+  await assert.rejects(
+    () => updateAndVerify(plan, plan.afterSteps, {
+      direction: "apply",
+      readCampaign: async () => ({ steps: drifted }),
+      writeSteps: async () => {},
+    }),
+    /SEQUENCE_PREWRITE_DRIFT/u,
+  );
+});
+
 test("rollback restores only text while preserving concurrent non-text fields", async () => {
   const plan = realisticPlan();
   const current = structuredClone(plan.afterSteps);

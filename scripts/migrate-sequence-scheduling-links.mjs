@@ -44,7 +44,7 @@ const APPLY_PHRASE = "APPLY_ALL_RAYDAR_SEQUENCE_LINKS";
 const ROLLBACK_PHRASE = "ROLLBACK_ALL_RAYDAR_SEQUENCE_LINKS";
 const EDIT_FREEZE_PHRASE = "PARAFORM_SEQUENCE_EDIT_FREEZE_CONFIRMED";
 const MANIFEST_SCHEMA = "raydar-sequence-link-migration-v4";
-const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v9";
+const MIGRATION_CODE_VERSION = "raydar-sequence-link-migration-2026-08-02-v10";
 const REVIEWED_SEQUENCE_CATALOG_FLOOR = 75;
 const HEALTH_URL = "https://monitor.raydar.xyz/api/seq/health";
 const MAX_CUTOVER_WEBHOOK_AGE_MINUTES = 60;
@@ -512,6 +512,16 @@ function stepProjection(step) {
   return Object.fromEntries(
     Object.entries(step || {})
       .filter(([key]) => !VOLATILE_STEP_FIELDS.has(key))
+      // Paraform accepts `task_due_days: 0` but canonicalizes it to null on
+      // every sequence write. Both encode no due-day offset. Treat only this
+      // exact pair as equivalent; positive offsets and field absence remain
+      // safety-bearing drift.
+      .map(([key, value]) => [
+        key,
+        key === "task_due_days" && (value === 0 || value === null)
+          ? null
+          : value,
+      ])
       .sort(([left], [right]) => left.localeCompare(right)),
   );
 }
