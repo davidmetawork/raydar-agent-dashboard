@@ -460,9 +460,18 @@ const VOLATILE_STEP_FIELDS = new Set([
 
 // Paraform's sequence mutation is now eventually consistent: the first
 // successful getCampaign after updateSequenceSteps can still return the old
-// text. Poll a bounded window and require one complete exact projection; a
-// permanent mismatch still fails closed and enters the rollback path.
-const READBACK_DELAYS_MS = Object.freeze([0, 500, 1_500, 3_000, 6_000]);
+// text for tens of seconds. Poll a bounded one-minute window and require one
+// complete exact projection; a permanent mismatch still fails closed and
+// enters the rollback path.
+export const READBACK_DELAYS_MS = Object.freeze([
+  0,
+  1_000,
+  2_000,
+  4_000,
+  8_000,
+  15_000,
+  30_000,
+]);
 
 function stepProjection(step) {
   return Object.fromEntries(
