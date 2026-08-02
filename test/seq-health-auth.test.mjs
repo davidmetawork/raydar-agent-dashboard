@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 const ENV_NAMES = [
   "SCHEDULER_DASHBOARD_HEALTH_READ_KEY",
+  "RAYDAR_DASHBOARD_CONTRACT_REVISION",
   "VERCEL_GIT_COMMIT_SHA",
   "KV_REST_API_URL",
   "KV_REST_API_TOKEN",
@@ -91,7 +92,7 @@ test("authenticated scheduler health proof requires an exact bearer and valid de
       request(`Bearer ${minimumKey}`),
       {
         SCHEDULER_DASHBOARD_HEALTH_READ_KEY: minimumKey,
-        VERCEL_GIT_COMMIT_SHA: REVISION,
+        RAYDAR_DASHBOARD_CONTRACT_REVISION: REVISION,
       },
     ),
     {
