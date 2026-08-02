@@ -49,12 +49,14 @@ test("rearms exactly one fingerprint-bound paused canary and reads it back", asy
       writes.push(ccuId);
       paused = false;
     },
+    refreshImpl: async () => { paused = true; },
   });
 
   assert.deepEqual(result, {
     ok: true,
     rearmed: 1,
     alreadyRearmed: false,
+    refreshed: 1,
     leadsVerified: 1,
   });
   assert.deepEqual(writes, ["lead-1"]);
@@ -71,6 +73,7 @@ test("the configured fingerprint can resolve the canary without exposing its ide
       is_archived: false,
     }),
     updateImpl: async () => { paused = false; },
+    refreshImpl: async () => { paused = true; },
   });
   assert.equal(result.rearmed, 1);
   assert.equal(Object.hasOwn(result, "identitySha256"), false);
@@ -128,6 +131,7 @@ test("fails closed for the wrong identity, ambiguous leads, and failed readback"
         is_archived: false,
       }),
       updateImpl: async () => {},
+      refreshImpl: async () => {},
     }),
     { code: "PAUSE_CANARY_REARM_READBACK_FAILED" },
   );
