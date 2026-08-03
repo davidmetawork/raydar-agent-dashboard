@@ -217,7 +217,7 @@ test("link cutover requires a recent signed webhook proof and authenticated sche
   }
 });
 
-test("semantic link rewrite maps Agent and Human links to distinct native routes", () => {
+test("semantic link rewrite maps Agent and Intro links to distinct native routes", () => {
   const input = [
     '<a href="https://www.paraform.com/cal/raydar/15min">Book Time</a>',
     '<a href="http://calendly.com/raydar-xyz">here</a>',
@@ -230,7 +230,7 @@ test("semantic link rewrite maps Agent and Human links to distinct native routes
   assert.equal(result.value.includes(AGENT_SCHEDULING_URL), true);
   assert.equal(result.value.match(new RegExp(HUMAN_SCHEDULING_URL, "g")).length, 3);
   assert.match(result.value, />Book an Agent Call with Raydar<\/a>/);
-  assert.match(result.value, />Book a Human Call with Raydar<\/a>/);
+  assert.match(result.value, />Book an Intro Call with Raydar<\/a>/);
   assert.equal(findLegacySchedulingLinks(result.value).known.length, 0);
 });
 
@@ -300,6 +300,7 @@ test("source attribution is bounded and rejects malformed caller input", () => {
 test("noncanonical native variants are normalized and remain in pause scope", () => {
   const variants = [
     "http://book.raydar.xyz/agent?utm_source=email",
+    "book.raydar.xyz/intro#choose",
     "book.raydar.xyz/human#choose",
     "HTTPS://BOOK.RAYDAR.XYZ:443/AGENT/",
   ];
@@ -311,7 +312,7 @@ test("noncanonical native variants are normalized and remain in pause scope", ()
   assert.equal(rewritten.value.includes("HTTPS://"), false);
   assert.equal(
     rewritten.value,
-    `${AGENT_SCHEDULING_URL} ${HUMAN_SCHEDULING_URL} ${AGENT_SCHEDULING_URL}`,
+    `${AGENT_SCHEDULING_URL} ${HUMAN_SCHEDULING_URL} ${HUMAN_SCHEDULING_URL} ${AGENT_SCHEDULING_URL}`,
   );
   assert.equal(
     rewriteLegacySchedulingLinks(
@@ -333,23 +334,23 @@ test("noncanonical native variants are normalized and remain in pause scope", ()
   );
 });
 
-test("person-specific and generic Human Call copy is normalized to Raydar", () => {
+test("person-specific and generic Intro Call copy is normalized to Raydar", () => {
   const input = [
     `<p>P.S. if opposed to the agent chat please grab a time with me directly <a href="http://calendly.com/raydar-xyz">here</a></p>`,
     "<p>Interested?&nbsp;Grab&nbsp;a&nbsp;time&nbsp;here:&nbsp;calendly.com/raydar-xyz</p>",
   ].join("");
   const result = rewriteLegacySchedulingLinks(input);
   assert.equal(/with me directly/i.test(result.value), false);
-  assert.match(result.value, /Raydar's Human Call option:/);
-  assert.match(result.value, /Interested\? Book a Human Call with Raydar here:/);
+  assert.match(result.value, /Raydar's Intro Call option:/);
+  assert.match(result.value, /Interested\? Book an Intro Call with Raydar here:/);
   assert.equal(
-    (result.value.match(/Book a Human Call with Raydar/g) || []).length,
+    (result.value.match(/Book an Intro Call with Raydar/g) || []).length,
     2,
   );
   assert.deepEqual(inventorySchedulingIdentityContext(result.value), []);
 });
 
-test("callout copy is never rewritten without a recognized Human Call URL", () => {
+test("callout copy is never rewritten without a recognized Intro Call URL", () => {
   for (const input of [
     "Interested? Grab a time here: tomorrow at noon.",
     "If opposed to the agent chat please grab a time with me directly by replying.",

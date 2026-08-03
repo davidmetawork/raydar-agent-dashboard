@@ -101,7 +101,7 @@ test("sequence rendering and audit are bound to the same explicit link mode", ()
   assert.equal(legacy.steps[0].body.includes(HUMAN_SCHEDULING_URL), false);
   assert.equal(
     native.steps[0].body.includes(
-      `Interested? Book a Human Call with Raydar here: ${HUMAN_SCHEDULING_URL}`,
+      `Interested? Book an Intro Call with Raydar here: ${HUMAN_SCHEDULING_URL}`,
     ),
     true,
   );

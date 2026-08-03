@@ -197,7 +197,7 @@ export function buildIntroEmail(context = {}, sections = {}, {
     `<p><strong>See JD here</strong>: <a target="_blank" rel="noopener noreferrer" class="text-blue-500 underline" href="${escapeHtml(shareUrl)}">${escapeHtml(shareUrl)}</a></p>`,
     "<p></p>",
     nativeSchedulingLinks
-      ? `<p>Interested? Book a Human Call with Raydar here: ${schedulingUrl}</p>`
+      ? `<p>Interested? Book an Intro Call with Raydar here: ${schedulingUrl}</p>`
       : `<p>Interested? Grab time here: ${schedulingUrl}</p>`,
     "<p></p>",
     "<p>Best,</p>",

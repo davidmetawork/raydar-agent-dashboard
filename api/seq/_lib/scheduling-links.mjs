@@ -1,5 +1,5 @@
 export const AGENT_SCHEDULING_URL = "https://book.raydar.xyz/agent";
-export const HUMAN_SCHEDULING_URL = "https://book.raydar.xyz/human";
+export const HUMAN_SCHEDULING_URL = "https://book.raydar.xyz/intro";
 
 // These are candidate-facing sequence URLs only. Calendly cancellation and
 // rescheduling URLs are deliberately not matched.
@@ -12,7 +12,7 @@ const LEGACY_RULES = [
   {
     callType: "human",
     // Live Paraform content uses `raydar-xyz`; the legacy URL supplied in the
-    // cutover brief uses `raydar.xyz`. Both are the same Human Call intent.
+    // cutover brief uses `raydar.xyz`. Both are the same Intro Call intent.
     pattern: /(?<![a-z0-9@._/-])(?:(?:https?:)?\/\/)?(?:www\.)?calendly\.com(?::(?:80|443))?\/raydar[-.]xyz\/?(?:[?#][^\s<>"']*)?[)\],.;:!?]*(?=$|[\s<>"'])/gi,
     replacement: HUMAN_SCHEDULING_URL,
   },
@@ -32,6 +32,15 @@ const NATIVE_RULES = [
   {
     callType: "human",
     pattern:
+      /(?<![a-z0-9@._/-])(?:(?:https?:)?\/\/)?(?:www\.)?book\.raydar\.xyz(?::(?:80|443))?\/intro\/?(?:[?#][^\s<>"']*)?[)\],.;:!?]*(?=$|[\s<>"'])/gi,
+    replacement: HUMAN_SCHEDULING_URL,
+  },
+  {
+    // `/human` is the superseded public path. Keep recognizing it so existing
+    // sequence copy is normalized to `/intro` instead of falling out of pause
+    // scope while the Scheduler's permanent redirect preserves old links.
+    callType: "human",
+    pattern:
       /(?<![a-z0-9@._/-])(?:(?:https?:)?\/\/)?(?:www\.)?book\.raydar\.xyz(?::(?:80|443))?\/human\/?(?:[?#][^\s<>"']*)?[)\],.;:!?]*(?=$|[\s<>"'])/gi,
     replacement: HUMAN_SCHEDULING_URL,
   },
@@ -45,15 +54,15 @@ const CALENDLY_MANAGEMENT_URL =
 const CALLOUT_COPY_RULES = [
   {
     pattern: /if opposed to the agent chat please grab a time with me directly/gi,
-    replacement: "if you prefer a phone call, use Raydar's Human Call option:",
+    replacement: "if you prefer a phone call, use Raydar's Intro Call option:",
   },
   {
     pattern: /if you don't want to chat with the agent,\s*grab a time with me directly/gi,
-    replacement: "If you prefer a phone call, use Raydar's Human Call option:",
+    replacement: "If you prefer a phone call, use Raydar's Intro Call option:",
   },
   {
     pattern: /Interested\?(?:\s|&nbsp;)+Grab(?:\s|&nbsp;)+a(?:\s|&nbsp;)+time(?:\s|&nbsp;)+here:(?:\s|&nbsp;)*/gi,
-    replacement: "Interested? Book a Human Call with Raydar here: ",
+    replacement: "Interested? Book an Intro Call with Raydar here: ",
   },
 ];
 
@@ -93,7 +102,7 @@ function canonicalizeNativeAnchorLabel(
   const url = schedulingUrl(callType, sourceAttribution);
   const label = callType === "agent"
     ? "Book an Agent Call with Raydar"
-    : "Book a Human Call with Raydar";
+    : "Book an Intro Call with Raydar";
   const escapedUrl = baseUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(
     `(<a\\b[^>]*\\bhref\\s*=\\s*)(["'])${escapedUrl}(?:\\?src=[a-z0-9._-]{1,64})?\\2([^>]*)>[\\s\\S]*?<\\/a>`,
