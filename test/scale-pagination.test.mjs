@@ -7,6 +7,7 @@ import {
   findCrmCandidate,
   findCrmCandidateByLinkedin,
   isArchiveImportCandidate,
+  procedureMissing,
   resetCurrentParaformUserCache,
   scanCrm,
 } from "../api/paraai/_lib/core.mjs";
@@ -254,4 +255,17 @@ test("Para AI direct LinkedIn lookup returns null so the CRM walk can still run"
     null,
   );
   assert.equal(await findCrmCandidateByLinkedin("", {}), null);
+});
+
+test("a withdrawn quota procedure cannot block the submit path", async () => {
+  // Paraform removed agency.getTalentNetworkDirectSubmitQuota. The read's only
+  // power was to block on isAtLimit; an absent procedure cannot report a limit,
+  // and a vendor removing a read must never stop our write.
+  assert.equal(procedureMissing({ code: "-32004" }), true);
+  assert.equal(
+    procedureMissing({ message: 'No procedure found on path "agency.getTalentNetworkDirectSubmitQuota"' }),
+    true,
+  );
+  assert.equal(procedureMissing({ code: "AUTH_EXPIRED", message: "AUTH_EXPIRED" }), false);
+  assert.equal(procedureMissing({ code: "HTTP_500", message: "Paraform HTTP 500" }), false);
 });

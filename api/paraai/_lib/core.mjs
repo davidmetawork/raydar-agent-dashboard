@@ -608,9 +608,28 @@ export async function candidatePreferences(candidateUserId, { strict = false } =
   return strict ? read : read.catch(() => null);
 }
 
+// A pre-flight courtesy check whose only power is to block when isAtLimit is
+// true. Paraform withdrew the procedure (-32004 "No procedure found on path")
+// some time before 2026-08-03, and because this read sat on the submit path an
+// absent procedure became a hard blocker on every submission — a vendor
+// removing a read must never stop our write. A procedure that does not exist
+// cannot report a limit, so treat it as unknown and let the write proceed; the
+// real guard has always been the membership read-back after the mutation, not
+// this. Auth, network, and every other vendor failure still propagate, because
+// those say something true about the call we are about to make.
+export function procedureMissing(error) {
+  return String(error?.code) === "-32004"
+    || /no procedure found on path/i.test(String(error?.message || ""));
+}
+
 export async function directSubmitQuota(recruiterId = RECRUITER_ID) {
   const input = recruiterId && recruiterId !== RECRUITER_ID ? { recruiterId } : {};
-  return trpcGet("agency.getTalentNetworkDirectSubmitQuota", input);
+  try {
+    return await trpcGet("agency.getTalentNetworkDirectSubmitQuota", input);
+  } catch (error) {
+    if (procedureMissing(error)) return null;
+    throw error;
+  }
 }
 
 export function candidateAlreadySubmitted(value) {
