@@ -45,6 +45,7 @@ import {
   verifyResumeOnlyBackfillFirstTen,
 } from "./_lib/resume-only-backfill.mjs";
 import {
+  enqueueAutoJob,
   getAutoQueueStats,
   listJobs,
   recordPhase3ShadowAggregateAuditResult,
@@ -668,6 +669,7 @@ export default async function handler(req, res) {
         listJobsImpl: listJobs,
         alertSlotImpl: takeAlertSlot,
         notifyImpl: notifySlack,
+        enqueueImpl: enqueueAutoJob,
       });
     } catch { /* observe-only */ }
     const automation = automationConfig();

@@ -153,3 +153,38 @@ test("the domain candidate id is found in either row shape", () => {
   assert.equal(domainCandidateId({}), null);
   assert.equal(domainCandidateId(null), null);
 });
+
+test("a stalled job with no queue entry is re-queued, not just reported", async () => {
+  // Only the screener recovery feed enqueues work, so a human call or a job
+  // re-prepared out of band sits at ready_to_submit forever with no error:
+  // it is not failing, nobody is asking. That is self-healing, so it is silent.
+  const enqueued = [];
+  const result = await runStuckWatchdogTick({
+    listJobsImpl: async () => ([
+      { id: "human-1", state: "ready_to_submit", candidate: { fullName: "Steve K" }, updatedAt: ago(5 * 3600_000) },
+      { id: "human-2", state: "ready_to_submit", candidate: { fullName: "Sriram K" }, updatedAt: ago(4 * 3600_000) },
+    ]),
+    alertSlotImpl: async () => true,
+    notifyImpl: async () => {},
+    enqueueImpl: async (id, opts) => { enqueued.push([id, opts.source]); return { enqueued: true }; },
+    now: NOW,
+  });
+  assert.deepEqual(enqueued, [["human-1", "stuck_watchdog"], ["human-2", "stuck_watchdog"]]);
+  assert.equal(result.requeued, 2);
+});
+
+test("a failing re-queue never suppresses the alert", async () => {
+  const sent = [];
+  const result = await runStuckWatchdogTick({
+    listJobsImpl: async () => ([
+      { id: "a", state: "resolving_identity", candidate: { fullName: "Yang An" }, updatedAt: ago(9 * 3600_000) },
+    ]),
+    alertSlotImpl: async () => true,
+    notifyImpl: async (message) => sent.push(message),
+    enqueueImpl: async () => { throw new Error("kv down"); },
+    now: NOW,
+  });
+  assert.equal(result.alerted, true);
+  assert.equal(result.requeued, 0);
+  assert.equal(sent.length, 1);
+});

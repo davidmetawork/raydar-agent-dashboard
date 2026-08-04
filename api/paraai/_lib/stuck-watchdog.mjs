@@ -59,7 +59,7 @@ export function findStuckJobs(jobs = [], { now = Date.now(), thresholdMs = stuck
 
 const hours = (ms) => (ms / 3_600_000).toFixed(1);
 
-export function stuckAlertMessage(stuck = []) {
+export function stuckAlertMessage(stuck = [], { requeued = 0 } = {}) {
   if (!stuck.length) return null;
   const worst = stuck[0];
   const states = [...new Set(stuck.map((row) => row.state))].sort().join(", ");
@@ -69,6 +69,7 @@ export function stuckAlertMessage(stuck = []) {
     + `${hours(worst.stalledMs)}h — states: ${states}. Oldest: ${worst.name} `
     + `(${worst.state}, ${hours(worst.stalledMs)}h). Affected: ${names}${more}. `
     + `No new candidate is reaching the Talent Network while this holds. `
+    + (requeued ? `Re-queued ${requeued} with no queue entry. ` : "")
     + `Review https://monitor.raydar.xyz/paraai`;
 }
 
@@ -87,6 +88,7 @@ export async function runStuckWatchdogTick({
   listJobsImpl,
   alertSlotImpl,
   notifyImpl,
+  enqueueImpl = null,
   now = Date.now(),
   thresholdMs = stuckThresholdMs(),
   limit = 500,
@@ -98,9 +100,31 @@ export async function runStuckWatchdogTick({
     return { ok: false, error: String(error?.message || error).slice(0, 120), stuck: 0, alerted: false };
   }
   const stuck = findStuckJobs(jobs, { now, thresholdMs });
-  if (!stuck.length) return { ok: true, stuck: 0, alerted: false };
+  if (!stuck.length) return { ok: true, stuck: 0, alerted: false, requeued: 0 };
+
+  // A job can be stalled simply because nothing is going to tick it. Only the
+  // screener recovery feed enqueues work, so a job that entered any other way —
+  // a human call, or a job re-prepared out of band — can sit at ready_to_submit
+  // forever with no queue entry and no error: it is not failing, nobody is
+  // asking. enqueueAutoJob is idempotent, so re-queueing a job that already has
+  // an entry is a no-op, and this stays silent because it is routine
+  // self-healing rather than something a human must act on.
+  let requeued = 0;
+  if (typeof enqueueImpl === "function") {
+    for (const row of stuck) {
+      try {
+        const result = await enqueueImpl(row.id, {
+          source: "stuck_watchdog",
+          eventId: `stuck:${row.id}:${Math.floor(now / 3_600_000)}`,
+          dueAt: now,
+        });
+        if (result?.enqueued) requeued += 1;
+      } catch { /* a failed re-queue must never break the alert below */ }
+    }
+  }
+
   const took = await alertSlotImpl(stuckAlertSlotKey(stuck), 3 * 3600).catch(() => false);
-  if (!took) return { ok: true, stuck: stuck.length, alerted: false };
-  await notifyImpl(stuckAlertMessage(stuck)).catch(() => {});
-  return { ok: true, stuck: stuck.length, alerted: true, oldest: stuck[0] };
+  if (!took) return { ok: true, stuck: stuck.length, alerted: false, requeued };
+  await notifyImpl(stuckAlertMessage(stuck, { requeued })).catch(() => {});
+  return { ok: true, stuck: stuck.length, alerted: true, requeued, oldest: stuck[0] };
 }
