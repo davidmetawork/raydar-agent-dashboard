@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   candidateTagNames,
+  candidateUserIdByLinkedin,
   findCrmCandidate,
+  findCrmCandidateByLinkedin,
   isArchiveImportCandidate,
+  resetCurrentParaformUserCache,
   scanCrm,
 } from "../api/paraai/_lib/core.mjs";
 import {
@@ -163,4 +166,92 @@ test("sequence project membership exhausts all pages and deduplicates overlap", 
     "candidate-2",
     "candidate-3",
   ]);
+});
+
+test("Para AI CRM scan throws a recordable timeout instead of being killed mid-walk", async () => {
+  // Before the budget the walk simply outlived the function: Vercel returned
+  // FUNCTION_INVOCATION_TIMEOUT, no journal entry was ever written, and the job
+  // sat in resolving_identity while the stale sweep re-ran it forever.
+  let clock = 0;
+  let pages = 0;
+  await assert.rejects(
+    scanCrm({
+      budgetMs: 1_000,
+      now: () => clock,
+      async fetchPage(cursor) {
+        pages += 1;
+        clock += 400;
+        return { items: [{ id: `candidate-${cursor}` }], nextCursor: Number(cursor) + 1 };
+      },
+    }),
+    (thrown) => thrown.code === "CRM_SCAN_TIMEOUT" && thrown.rowsScanned === 3,
+  );
+  // It stops at the budget rather than running until something else kills it.
+  assert.equal(pages, 3);
+});
+
+test("Para AI CRM scan with no budget still walks to cursor exhaustion", async () => {
+  const rows = await scanCrm({
+    budgetMs: 0,
+    async fetchPage(cursor) {
+      const page = Number(cursor);
+      return { items: [{ id: `candidate-${page}` }], nextCursor: page < 3 ? page + 1 : null };
+    },
+  });
+  assert.equal(rows.length, 4);
+});
+
+test("Para AI resolves a LinkedIn identity directly instead of walking the CRM", async () => {
+  const calls = [];
+  resetCurrentParaformUserCache();
+  const row = await findCrmCandidateByLinkedin("yang-an-1305", {
+    lookupImpl: async (handle) => {
+      calls.push(["lookup", handle]);
+      return "candidate-user-42";
+    },
+    readImpl: async (id) => {
+      calls.push(["read", id]);
+      return { id, linkedin_user: "https://www.linkedin.com/in/yang-an-1305" };
+    },
+  });
+  assert.deepEqual(calls, [["lookup", "yang-an-1305"], ["read", "candidate-user-42"]]);
+  assert.equal(row.id, "candidate-user-42");
+});
+
+test("Para AI direct LinkedIn lookup uses the recruiter-scoped procedure once per instance", async () => {
+  const procedures = [];
+  resetCurrentParaformUserCache();
+  const trpcGetImpl = async (procedure, input) => {
+    procedures.push(procedure);
+    if (procedure === "user.getCurrentUser") return { id: "recruiter-1" };
+    assert.deepEqual(input, { linkedin_user: "collin-socha", user_id: "recruiter-1" });
+    return "candidate-user-9";
+  };
+  assert.equal(await candidateUserIdByLinkedin("collin-socha", { trpcGetImpl }), "candidate-user-9");
+  assert.equal(await candidateUserIdByLinkedin("collin-socha", { trpcGetImpl }), "candidate-user-9");
+  assert.deepEqual(procedures, [
+    "user.getCurrentUser",
+    "candidateUser.getCandidateUserByLinkedinUserAndUserId",
+    "candidateUser.getCandidateUserByLinkedinUserAndUserId",
+  ]);
+});
+
+test("Para AI direct LinkedIn lookup fails closed when the readback is a different profile", async () => {
+  resetCurrentParaformUserCache();
+  await assert.rejects(
+    findCrmCandidateByLinkedin("yang-an-1305", {
+      lookupImpl: async () => "candidate-user-42",
+      readImpl: async (id) => ({ id, linkedin_user: "https://www.linkedin.com/in/someone-else" }),
+    }),
+    /CRM_LINKEDIN_LOOKUP_HANDLE_MISMATCH/u,
+  );
+});
+
+test("Para AI direct LinkedIn lookup returns null so the CRM walk can still run", async () => {
+  resetCurrentParaformUserCache();
+  assert.equal(
+    await findCrmCandidateByLinkedin("nobody-here", { lookupImpl: async () => null }),
+    null,
+  );
+  assert.equal(await findCrmCandidateByLinkedin("", {}), null);
 });

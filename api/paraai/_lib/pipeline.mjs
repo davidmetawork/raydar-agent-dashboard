@@ -13,6 +13,7 @@ import {
   directSubmitQuota,
   fetchCall,
   findCrmCandidate,
+  findCrmCandidateByLinkedin,
   findIdentity,
   findLead,
   findResumeUri,
@@ -23,6 +24,7 @@ import {
   isSuccessfulCall,
   isArchiveImportCandidate,
   listSequences,
+  linkedinHandle,
   normLinkedin,
   normName,
   normalizeEmail,
@@ -60,6 +62,7 @@ import {
 import {
   resumeWaitPlanFromEnv,
 } from "./resume-wait.mjs";
+import { probeParaformAuth } from "./auth-probe.mjs";
 import {
   claimSubmissionIntent,
   createJob,
@@ -1217,12 +1220,32 @@ export async function prepareJob({
           : "linked booking identity failed multi-signal verification",
       }), job.revision);
     }
+    // Exact LinkedIn resolution first. Paraform answers "which candidate owns
+    // this handle" in two cheap calls; the full CRM walk that used to be the
+    // only route now takes longer than the function is allowed to live, so it
+    // is the fallback for candidates with no usable LinkedIn URL rather than
+    // the default path. A direct hit is verified by the exact-id readback in
+    // findCrmCandidateByLinkedin, which is a stronger guarantee than any score
+    // computed off a CRM page — but the multi-signal score is still recorded
+    // so the identity's evidence stays legible on the job.
+    let identitySource = null;
+    if (!crmItem) {
+      const handle = linkedinHandle(candidate?.linkedin);
+      if (handle) {
+        crmItem = await findCrmCandidateByLinkedin(handle);
+        if (crmItem) {
+          identityScore = scoreIdentity(candidate, crmItem);
+          identitySource = "linkedin_direct";
+        }
+      }
+    }
     if (!crmItem) {
       const rows = await scanCrm();
       const resolved = findIdentity(candidate, rows);
       crmItem = resolved.match;
       identityScore = resolved.score;
       ambiguous = resolved.ambiguous;
+      if (crmItem) identitySource = "crm_scan";
     }
     if (!crmItem) {
       return saveJob(transition(job, "needs_identity_review", {
@@ -1235,8 +1258,11 @@ export async function prepareJob({
       identity: {
         candidateUserId: crmItem.id,
         candidateId: crmItem.candidate_id || null,
-        signals: identityScore?.signals || [],
+        signals: identitySource === "linkedin_direct"
+          ? [...new Set(["linkedin_direct", ...(identityScore?.signals || [])])]
+          : identityScore?.signals || [],
         ambiguous: false,
+        ...(identitySource ? { source: identitySource } : {}),
         ...(manuallySelectedIdentity ? { humanSelected: true } : {}),
       },
     }), job.revision);
@@ -1357,8 +1383,24 @@ export async function prepareJob({
     }), job.revision);
   } catch (error) {
     if (error?.job) throw error;
-    return fail(job, "PREPARE_FAILED", String(error?.message || error));
+    return fail(job, "PREPARE_FAILED", await classifyPrepareFailure(error));
   }
+}
+
+// A single Paraform 401 is not proof the session is dead. trpcGet maps every
+// 401 to AUTH_EXPIRED, which costs the job a 15-minute backoff and reads to an
+// operator as "David must re-capture the cookie" — but under a long paginated
+// walk Paraform issues transient 401s against a session that is perfectly
+// alive. Confirm with the two-read liveness probe before letting the label
+// stand; a healthy probe means this was a vendor transient and the job should
+// come back on the ordinary short backoff. The probe fails open (healthy:
+// null) so a probe that cannot answer never manufactures a false recovery.
+async function classifyPrepareFailure(error, { probe = probeParaformAuth } = {}) {
+  const message = String(error?.message || error);
+  if (error?.code !== "AUTH_EXPIRED" && message !== "AUTH_EXPIRED") return message;
+  const result = await probe().catch(() => ({ healthy: null }));
+  if (result?.healthy !== true) return message;
+  return "PARAFORM_TRANSIENT_401 (liveness probe passed; session is alive)";
 }
 
 export async function reroutePreparedJob(job) {

@@ -13,6 +13,7 @@ const CAPTURED_MATCH_READ_PROC =
 const TRPC_TIMEOUT_MS = Number(process.env.PARAAI_TRPC_TIMEOUT_MS || 20_000);
 const CRM_PAGE_SIZE = Number(process.env.PARAAI_CRM_PAGE_SIZE || 1000);
 const MAX_CRM_ROWS = Number(process.env.PARAAI_MAX_CRM_ROWS || 250_000);
+const CRM_SCAN_BUDGET_MS = Number(process.env.PARAAI_CRM_SCAN_BUDGET_MS || 60_000);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const RECRUITER_ID = process.env.RECRUITER_ID || "clskvclu80066l60fhutn6kks";
@@ -397,19 +398,37 @@ export async function crmPage(cursor = 0, limit = CRM_PAGE_SIZE) {
   return { items: result?.items || [], nextCursor: result?.next_cursor ?? null };
 }
 
+// The walk is bounded by wall clock as well as rows. Without this the scan
+// simply runs until Vercel kills the invocation, which produces a 504 with no
+// stack, no journal entry, and no durable trace — the job just stays in
+// `resolving_identity` and the stale sweep re-runs it forever. A thrown
+// CRM_SCAN_TIMEOUT is a normal failure the caller can record and retry.
+// The budget must stay comfortably under the function's maxDuration so the
+// throw, the journal write, and the reschedule all still fit.
 export async function scanCrm({
   stopWhen,
   fetchPage = crmPage,
   maxRows = MAX_CRM_ROWS,
+  budgetMs = CRM_SCAN_BUDGET_MS,
+  now = () => Date.now(),
 } = {}) {
   if (!Number.isInteger(maxRows) || maxRows < 1) {
     throw new Error("CRM_SCAN_MAX_ROWS_INVALID");
   }
+  const deadline = Number.isFinite(budgetMs) && budgetMs > 0
+    ? now() + budgetMs
+    : null;
   const items = [];
   let cursor = 0;
   const seenCursors = new Set();
   const seenIds = new Set();
   while (true) {
+    if (deadline != null && now() >= deadline) {
+      const error = new Error("CRM_SCAN_TIMEOUT");
+      error.code = "CRM_SCAN_TIMEOUT";
+      error.rowsScanned = items.length;
+      throw error;
+    }
     const cursorKey = String(cursor);
     if (seenCursors.has(cursorKey)) throw new Error("CRM_SCAN_CURSOR_REPEATED");
     seenCursors.add(cursorKey);
@@ -461,6 +480,61 @@ export async function findCrmCandidate(
     throw new Error("CRM_POINT_LOOKUP_ID_MISMATCH");
   }
   return returnedId ? row : { ...row, id: wanted };
+}
+
+let currentParaformUserId = null;
+
+export function resetCurrentParaformUserCache() {
+  currentParaformUserId = null;
+}
+
+// Paraform's exact LinkedIn read, scoped to the signed-in recruiter. Two cheap
+// calls answer "which candidate owns this handle" outright, so the full CRM
+// walk is only ever needed for a candidate with no usable LinkedIn URL. The
+// `user_id` field is required by the procedure even though production appears
+// to enforce the session owner server-side. Proven shape: the lifecycle
+// engine's clients.mjs has used this route since the resume migration.
+export async function candidateUserIdByLinkedin(
+  handle,
+  { trpcGetImpl = trpcGet } = {},
+) {
+  const wanted = String(handle || "").trim().toLowerCase();
+  if (!wanted) return null;
+  if (!currentParaformUserId) {
+    const current = await trpcGetImpl("user.getCurrentUser", {});
+    currentParaformUserId = current?.id || null;
+  }
+  if (!currentParaformUserId) throw new Error("PARAFORM_CURRENT_USER_MISSING");
+  const id = await trpcGetImpl(
+    "candidateUser.getCandidateUserByLinkedinUserAndUserId",
+    { linkedin_user: wanted, user_id: currentParaformUserId },
+  );
+  return typeof id === "string" && id ? id : null;
+}
+
+// Direct route plus the exact-id readback that proves it. The readback's own
+// LinkedIn handle must equal the one we asked for: a point lookup that answers
+// with a different profile is a vendor contract violation, not a match, and
+// must never become a submission identity.
+export async function findCrmCandidateByLinkedin(
+  handle,
+  { lookupImpl = candidateUserIdByLinkedin, readImpl = findCrmCandidate } = {},
+) {
+  const wanted = String(handle || "").trim().toLowerCase();
+  if (!wanted) return null;
+  const id = await lookupImpl(wanted);
+  if (!id) return null;
+  const row = await readImpl(id);
+  if (!row) return null;
+  const readback = linkedinHandle(
+    row?.linkedin_user || row?.linkedinUrl || row?.linkedin_url,
+  );
+  if (readback && readback !== wanted) {
+    const error = new Error("CRM_LINKEDIN_LOOKUP_HANDLE_MISMATCH");
+    error.code = "CRM_LINKEDIN_LOOKUP_HANDLE_MISMATCH";
+    throw error;
+  }
+  return row;
 }
 
 export async function candidateDetails(candidateUserId, { strict = false } = {}) {
