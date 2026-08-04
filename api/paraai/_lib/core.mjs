@@ -151,10 +151,33 @@ function authExpired() {
   return error;
 }
 
+// A PARAFORM 401 IS A QUESTION, NOT A VERDICT.
+//
+// Paraform 401s in bursts while the session is perfectly alive. Measured
+// 2026-08-04: the curated-interest sweep logged 135 read failures across its
+// first 200 candidates between 18:20Z and 18:30Z, then read 100 more with zero
+// errors — while the auth circuit probe stayed green throughout and the same
+// procedures returned 200 on a hand-run against the same account. One of those
+// 401s landed on a read outside the sweep's per-candidate error wrapper, threw
+// all the way to the worker, and paged Slack for an outage that did not exist.
+//
+// So a READ gives a 401 one more chance before believing it, which is the same
+// two-observations discipline auth-probe.mjs already applies before it opens
+// the circuit. One extra attempt and not the caller's full `tries` budget on
+// purpose: during a REAL outage every read still fails fast enough that a
+// sweep page cannot eat the worker's tick budget.
+//
+// WRITES ARE NOT COVERED and must not be. A 401 on a mutation gets the same
+// single attempt every other mutation failure gets, because a rejected request
+// changed nothing but a replayed one may change everything.
+const AUTH_RETRY_LIMIT = 1;
+const AUTH_RETRY_DELAY_MS = 400;
+
 const envelope = (json) => ({ json, meta: { values: {}, v: 1 } });
 
 export async function trpcGet(proc, json = {}, tries = 3) {
   const url = `${PARAFORM_BASE}/trpc/${proc}?input=${encodeURIComponent(JSON.stringify(envelope(json)))}`;
+  let authRetries = 0;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
       const response = await fetch(url, {
@@ -165,12 +188,23 @@ export async function trpcGet(proc, json = {}, tries = 3) {
       if (!response.ok || body?.error) throw vendorError(response, body);
       return body?.result?.data?.json;
     } catch (error) {
-      if (error?.code === "AUTH_EXPIRED" || attempt === tries - 1) throw error;
+      if (attempt === tries - 1) throw error;
+      if (error?.code === "AUTH_EXPIRED") {
+        if (authRetries >= AUTH_RETRY_LIMIT) throw error;
+        authRetries++;
+        // vendorError already cleared the cookie cache, so this attempt
+        // re-reads the cookie and picks up a rotation mid-flight.
+        await sleep(AUTH_RETRY_DELAY_MS);
+        continue;
+      }
       await sleep(500 * (attempt + 1));
     }
   }
 }
 
+// Mutations. NOTE the deliberate asymmetry with trpcGet above: a 401 here
+// still throws on the first sight of it, because the transient-401 retry is a
+// read-only affordance and a mutation must never be replayed on a guess.
 export async function trpcPost(proc, json = {}, tries = 3) {
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
@@ -212,6 +246,7 @@ export async function paraformRest(
     throw new Error("PARAFORM_REST_PATH_INVALID");
   }
   const attempts = Math.max(1, Number(tries) || 1);
+  let authRetries = 0;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const response = await fetchImpl(url, {
@@ -235,11 +270,13 @@ export async function paraformRest(
       }
       return body;
     } catch (error) {
-      if (
-        error?.code === "AUTH_EXPIRED"
-        || verb !== "GET"
-        || attempt === attempts - 1
-      ) throw error;
+      if (verb !== "GET" || attempt === attempts - 1) throw error;
+      if (error?.code === "AUTH_EXPIRED") {
+        if (authRetries >= AUTH_RETRY_LIMIT) throw error;
+        authRetries++;
+        await sleep(AUTH_RETRY_DELAY_MS);
+        continue;
+      }
       await sleep(500 * (attempt + 1));
     }
   }
