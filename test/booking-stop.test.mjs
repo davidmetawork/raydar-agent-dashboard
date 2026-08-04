@@ -361,15 +361,20 @@ test("content discovery covers every enabled link-bearing sequence and controlle
 // AUTH_EXPIRED and throws without retrying, which silently voided 780/945
 // reads and later aborted a half-applied pause batch. Both paths now retry.
 test("a throttling 401 is retried, not mistaken for an expired session", async () => {
-  let calls = 0, throttles = 0;
-  const value = await withThrottleRetry(async () => {
-    calls++;
-    if (calls < 3) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
-    return "ok";
-  }, { onThrottle: () => { throttles++; } });
-  assert.equal(value, "ok");
-  assert.equal(calls, 3, "must retry through transient 401s");
-  assert.equal(throttles, 2, "each retry must be counted, not hidden");
+  // The auth ladder moved INSIDE trpc* so no caller can forget it, and so a
+  // caller wrapping a trpc call cannot nest one ladder inside another (inner
+  // ladder plus serial confirm is ~40s; nesting it would blow the 300s function
+  // budget). So this now drives the real client rather than a bare callback.
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => (++calls < 3
+    ? new Response("{}", { status: 401 })
+    : new Response(JSON.stringify({ result: { data: { json: ["ok"] } } }), { status: 200, headers: { "content-type": "application/json" } }));
+  try {
+    const value = await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1);
+    assert.deepEqual(value, ["ok"]);
+    assert.equal(calls, 3, "must retry through transient 401s");
+  } finally { globalThis.fetch = realFetch; }
 });
 
 test("a persistent 401 still surfaces as AUTH_EXPIRED once retries are spent", async () => {
@@ -458,16 +463,28 @@ test("a network fault hidden in a TypeError cause is treated as transient", asyn
 test("throttle and transport retries draw on independent budgets", async () => {
   // A pass being throttled AND crossing a flaky link must not have one failure
   // mode eat the other's retries.
-  const script = ["auth", "timeout", "auth", "timeout", "ok"];
+  // Auth is now classified inside trpc*, so what withThrottleRetry still owns is
+  // the transport budget — and a confirmed AUTH_EXPIRED must pass straight
+  // through it rather than consuming that budget.
+  const script = ["timeout", "timeout", "ok"];
   let i = 0;
   const value = await withThrottleRetry(async () => {
     const step = script[i++];
-    if (step === "auth") { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
     if (step === "timeout") throw timeoutError();
     return "ok";
   }, { delays: [1, 2], transportDelays: [1, 2] });
   assert.equal(value, "ok");
-  assert.equal(i, 5, "both ladders must still have budget left after the other spends some");
+  assert.equal(i, 3, "the transport ladder retains its own budget");
+
+  let authCalls = 0;
+  await assert.rejects(
+    () => withThrottleRetry(async () => {
+      authCalls++;
+      const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e;
+    }, { delays: [1, 2], transportDelays: [1, 2] }),
+    (e) => e.code === "AUTH_EXPIRED",
+  );
+  assert.equal(authCalls, 1, "a confirmed expiry is a verdict, never re-laddered");
 });
 
 test("a 5xx is retryable but a 4xx contract error is not", async () => {

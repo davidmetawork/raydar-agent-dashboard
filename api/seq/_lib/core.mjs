@@ -126,46 +126,91 @@ export const headers = () => ({
 const env = (json) => ({ json, meta: { values: {}, v: 1 } });
 const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 
+// ─── Throttle vs expiry: decided HERE, not by each caller ────────────────────
+// Paraform answers 401 to a burst and to role-forbidden procedures as well as
+// to a dead session, so a 401 is a QUESTION, not a verdict. This used to be
+// opt-in via withThrottleRetry, and the paths that never opted in are exactly
+// the ones that kept declaring false expiries. On 2026-08-04 a false expiry
+// stalled the membership snapshot, which stalled the booking-stop sweep, which
+// aged the Scheduler's sequenceStop gate past its 60-minute ceiling and closed
+// Agent Call admission — twice in one day, on a session that answered three
+// clean serial 200s each time.
+//
+// So every trpc call now rides the ladder itself and only reports AUTH_EXPIRED
+// after a SERIAL probe confirms it. Callers cannot forget, because there is
+// nothing left to remember.
+const throttled = () =>
+  Object.assign(new Error("PARAFORM_THROTTLED"), { code: "PARAFORM_THROTTLED" });
+const authExpired = () =>
+  Object.assign(new Error("AUTH_EXPIRED"), { code: "AUTH_EXPIRED" });
+
+async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      if (e?.code !== "PARAFORM_THROTTLED") throw e;
+      if (attempt < delays.length) {
+        // Jitter so a fleet of workers does not retry in lockstep.
+        await sleep(delays[attempt] + Math.floor(Math.random() * 400));
+        continue;
+      }
+      throw (await isSessionActuallyExpired()) ? authExpired() : e;
+    }
+  }
+}
+
 export async function trpcGet(proc, json, tries = 3) {
+  return classifyThrottle(() => trpcGetRaw(proc, json, tries));
+}
+
+async function trpcGetRaw(proc, json, tries = 3) {
   const url = `${BASE}/trpc/${proc}?input=` + encodeURIComponent(JSON.stringify(env(json)));
   for (let a = 0; a < tries; a++) {
     try {
       const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
-      if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      if (r.status === 401) throw throttled();
       // A 5xx/429 body is usually HTML, so without this the failure surfaced as
       // an opaque JSON parse error that nothing could classify as retryable.
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");
       return b?.result?.data?.json;
-    } catch (e) { if (e.code === "AUTH_EXPIRED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
+    } catch (e) { if (e.code === "PARAFORM_THROTTLED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
   }
 }
 export async function trpcPost(proc, json, tries = 3) {
+  return classifyThrottle(() => trpcPostRaw(proc, json, tries));
+}
+
+async function trpcPostRaw(proc, json, tries = 3) {
   for (let a = 0; a < tries; a++) {
     try {
       const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
-      if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      if (r.status === 401) throw throttled();
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");
       return b?.result?.data?.json;
-    } catch (e) { if (e.code === "AUTH_EXPIRED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
+    } catch (e) { if (e.code === "PARAFORM_THROTTLED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
   }
 }
 // A few Paraform mutations use SuperJSON-only input types. Keep the ordinary
 // adapter deliberately simple, and opt into metadata only for those pinned
 // contracts (currently campaign start_date, which must deserialize as Date).
 export async function trpcPostWithMeta(proc, json, values = {}, tries = 3) {
+  return classifyThrottle(() => trpcPostWithMetaRaw(proc, json, values, tries));
+}
+
+async function trpcPostWithMetaRaw(proc, json, values = {}, tries = 3) {
   for (let a = 0; a < tries; a++) {
     try {
       const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
-      if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
+      if (r.status === 401) throw throttled();
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
       if (b?.error) throw new Error(b.error.json?.message || "trpc error");
       return b?.result?.data?.json;
-    } catch (e) { if (e.code === "AUTH_EXPIRED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
+    } catch (e) { if (e.code === "PARAFORM_THROTTLED" || a === tries - 1) throw e; await sleep(500 * (a + 1)); }
   }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -409,7 +454,16 @@ export async function setLeadEmail(ccuId, email) {
 // retrying, a throttle is indistinguishable from an expiry — which silently
 // voided 780 of 945 profile reads in one run, every one of them scoring as
 // "not booked". Opt in with withThrottleRetry where a miss actually matters.
+// Read per call rather than at import, so the ladder can be retuned from the
+// environment without a redeploy — and so tests can run it sub-second.
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
+const authRetryDelays = () => {
+  const parsed = String(process.env.PARAFORM_THROTTLE_DELAYS_MS || "")
+    .split(",").map((n) => Number(n.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  return parsed.length ? parsed : AUTH_RETRY_DELAYS_MS;
+};
+const probeDelayMs = () => Number(process.env.PARAFORM_PROBE_DELAY_MS || 1500);
 
 // ─── Transport faults ────────────────────────────────────────────────────────
 // The throttle ladder above only ever knew about the 401 case. Nothing retried
@@ -477,14 +531,10 @@ export async function withThrottleRetry(fn, {
     catch (e) {
       // Two independent budgets. A pass that is being throttled AND crossing a
       // flaky link must not have one failure mode eat the other's retries.
-      if (e?.code === "AUTH_EXPIRED") {
-        const delay = delays[throttleAttempt] + Math.floor(Math.random() * 400);
-        if (throttleAttempt >= delays.length || budgetSpent(delay)) throw e;
-        throttleAttempt++;
-        if (onThrottle) onThrottle();
-        await sleep(delay);
-        continue;
-      }
+      // AUTH_EXPIRED now arrives pre-classified: trpc* already rode the ladder
+      // and serially confirmed the session is dead. Retrying it here would only
+      // multiply the delays, so this is a verdict and it propagates.
+      if (e?.code === "AUTH_EXPIRED") throw e;
       if (isTransientTransportError(e)) {
         const delay = transportDelays[transportAttempt] + Math.floor(Math.random() * 250);
         if (transportAttempt >= transportDelays.length || budgetSpent(delay)) throw e;
@@ -501,11 +551,13 @@ export async function withThrottleRetry(fn, {
 /** A cheap read retried with growing backoff. One probe is not enough: it races
  *  the very burst it is trying to rule out. */
 export async function isSessionActuallyExpired({ probes = 3 } = {}) {
+  // Deliberately trpcGetRaw: the classifier calls THIS to decide, so going back
+  // through it would recurse forever. Raw also means one probe, one verdict.
   for (let i = 0; i < probes; i++) {
-    try { await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1); return false; }
+    try { await trpcGetRaw("campaigns.getListOfCampaignsOptimized", {}, 1); return false; }
     catch (e) {
-      if (e?.code !== "AUTH_EXPIRED") return false;
-      await sleep(1500 * (i + 1) + Math.floor(Math.random() * 600));
+      if (e?.code !== "PARAFORM_THROTTLED") return false; // reached it, so auth is fine
+      await sleep(probeDelayMs() * (i + 1) + Math.floor(Math.random() * 600));
     }
   }
   return true;
