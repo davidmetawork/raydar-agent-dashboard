@@ -105,12 +105,14 @@ import {
   resumeChaseChainId,
   rescheduleAutoJob,
   saveJob,
+  kv,
   stableStringify,
   stopResumeAskSuppression,
   takeAlertSlot,
   transition,
   upsertPhase3CandidateSuccessProof,
 } from "./store.mjs";
+import { recordSubmitAttempt, submitBudgetGate } from "./submit-budget.mjs";
 
 const TERMINAL_STATES = new Set([
   "awaiting_matches", "ready_to_enroll", "needs_review", "enrolled", "no_email",
@@ -2878,6 +2880,20 @@ async function processAutoJobInner(
     if (!manualConfig.submitApproved || manualConfig.dryRun) {
       return { action: "reschedule", delayMs: 5 * 60_000, state: job.state, detail: "base submit gate is closed" };
     }
+    // Self-imposed daily budget. Paraform stops accepting past roughly 80 a
+    // day WITHOUT saying so, so a write attempted past the ceiling is not a
+    // failure we can see — it is a candidate who silently never joined. Defer
+    // instead of spending it: the job is good, it is only waiting for a slot,
+    // and it stays queued so the backlog drains on its own over later days.
+    const budgetBlock = await submitBudgetGate({ kvImpl: kv });
+    if (budgetBlock) {
+      await annotateAutomation(job, {
+        status: "deferred_budget",
+        reasons: [budgetBlock.detail],
+      });
+      return { ...budgetBlock, state: job.state };
+    }
+    await recordSubmitAttempt(job.id, { kvImpl: kv });
     job = await runStep("submit", () => submitJob(job, {
       confirmation: `SUBMIT ${job.id}`,
       marketConfirmed: true,
@@ -2933,6 +2949,9 @@ async function processAutoJobInner(
       () => getSubmissionIntent(job.identity?.candidateUserId),
     );
     if (intent && !intent.attemptStartedAt) {
+      // Never gated: this job already holds a submission claim, so blocking it
+      // here would strand a half-finished write rather than save a slot.
+      await recordSubmitAttempt(job.id, { kvImpl: kv });
       job = await runStep("submit", () => submitJob(job, {
         confirmation: `SUBMIT ${job.id}`,
         marketConfirmed: true,

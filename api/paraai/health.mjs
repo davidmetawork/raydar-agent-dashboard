@@ -11,7 +11,8 @@ import {
 import {
   outcomeSequenceHealthDecision,
 } from "./_lib/phase3-shadow-policy.mjs";
-import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
+import { getAutoQueueStats, kv, storeConfigured } from "./_lib/store.mjs";
+import { dailySubmitBudget, submitBudgetState } from "./_lib/submit-budget.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -122,6 +123,7 @@ export default async function handler(req, res) {
         process.env.SLACK_WEBHOOK_URL,
       ),
       queue: null,
+      submitBudget: null,
       ready: false,
     },
     outreach: await outreachHealth(),
@@ -161,6 +163,10 @@ export default async function handler(req, res) {
       health.submitApproved && !health.dryRun && networkEnabled,
     );
     health.automation.queue = await getAutoQueueStats().catch(() => null);
+    health.automation.submitBudget = await submitBudgetState({
+      limit: dailySubmitBudget(),
+      kvImpl: kv,
+    }).catch(() => null);
     health.matchShadowReady = Boolean(
       health.storeConfigured
       && health.matchReadPinned
