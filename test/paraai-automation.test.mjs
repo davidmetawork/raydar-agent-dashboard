@@ -756,6 +756,69 @@ test("automatic eligibility admits a complete, source-verified green-lane job", 
   });
 });
 
+test("an exact LinkedIn identity clears the bar the multi-signal score cannot", () => {
+  // The direct lookup returns Paraform's own answer for the handle and is
+  // verified by an exact-id readback, so it is admitted on its own. Scoring it
+  // against the point-lookup row would fail for shape reasons alone.
+  assert.deepEqual(autoEligibility(greenJob({
+    identity: {
+      candidateUserId: "candidate-user-42",
+      source: "linkedin_direct",
+      signals: ["linkedin_direct"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig), { eligible: true, reasons: [] });
+});
+
+test("the exact-identity shortcut cannot be claimed without the verified source", () => {
+  // A signal alone is not the claim: source and signal must agree, so a job
+  // carrying a stray "linkedin_direct" string still faces the multi-signal bar.
+  const forged = autoEligibility(greenJob({
+    identity: {
+      candidateUserId: "candidate-user-42",
+      signals: ["linkedin_direct"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig);
+  assert.equal(forged.eligible, false);
+  assert.ok(forged.reasons.includes("identity"));
+
+  // And an ambiguous resolution is still refused however it was reached.
+  const ambiguous = autoEligibility(greenJob({
+    identity: {
+      candidateUserId: "candidate-user-42",
+      source: "linkedin_direct",
+      signals: ["linkedin_direct"],
+      ambiguous: true,
+    },
+  }), eligibilityConfig);
+  assert.equal(ambiguous.eligible, false);
+  assert.ok(ambiguous.reasons.includes("identity"));
+});
+
+test("the heuristic CRM path still needs two signals with one strong", () => {
+  const weak = autoEligibility(greenJob({
+    identity: {
+      candidateUserId: "candidate-user-42",
+      source: "crm_scan",
+      signals: ["name"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig);
+  assert.equal(weak.eligible, false);
+  assert.ok(weak.reasons.includes("identity"));
+
+  const nameOnlyPlusStrong = autoEligibility(greenJob({
+    identity: {
+      candidateUserId: "candidate-user-42",
+      source: "crm_scan",
+      signals: ["name", "linkedin"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig);
+  assert.deepEqual(nameOnlyPlusStrong, { eligible: true, reasons: [] });
+});
+
 test("automatic eligibility never gates on consent or market evidence", () => {
   const result = autoEligibility(greenJob({
     callStartedAt: null,

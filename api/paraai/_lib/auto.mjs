@@ -358,8 +358,21 @@ export function autoEligibility(job, config = automationConfig()) {
     reasons.push("call source");
   }
   const signals = Array.isArray(job?.identity?.signals) ? job.identity.signals : [];
+  // The multi-signal bar exists because a CRM-page match is heuristic: any one
+  // field can coincide, so two must agree and one must be strong. An exact
+  // LinkedIn lookup is not a weaker version of that — Paraform itself answers
+  // which candidate owns the handle, and findCrmCandidateByLinkedin rejects any
+  // readback whose handle differs. Scoring it against the point-lookup row
+  // would fail for shape reasons alone (that row is not a CRM page row) and
+  // would reject an identity that is strictly better evidenced than the bar.
+  const exactIdentity = job?.identity?.source === "linkedin_direct"
+    && signals.includes("linkedin_direct");
   const strongIdentity = signals.some((signal) => ["linkedin", "phone", "scheduled_time"].includes(signal));
-  if (!job?.identity?.candidateUserId || signals.length < 2 || !strongIdentity || job?.identity?.ambiguous) {
+  if (
+    !job?.identity?.candidateUserId
+    || job?.identity?.ambiguous
+    || (!exactIdentity && (signals.length < 2 || !strongIdentity))
+  ) {
     reasons.push("identity");
   }
   if (!String(job?.submission?.name || "").trim()) reasons.push("name");
