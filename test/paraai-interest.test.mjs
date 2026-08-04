@@ -21,6 +21,7 @@ import {
   interestStopCanProceed,
   interestSweepComplete,
   interestSweepWindow,
+  summariseReadErrors,
   interestTerminalHandoffReasons,
   interestWorkerMaySubmit,
   INTEREST_ROLLOUT_PHASE,
@@ -103,6 +104,36 @@ test("a terminal batch is immutable and a later organic transition needs a new b
       emailed: { skipped: "no_bankable_role" },
     }),
     ["credits_exhausted", "no_bankable_role"],
+  );
+});
+
+test("a sweep records why reads failed, not just how many", () => {
+  const reads = [
+    { candidate: {}, statuses: {} },
+    { __error: "AUTH_EXPIRED" },
+    { __error: "AUTH_EXPIRED" },
+    { __error: "The operation was aborted due to timeout" },
+  ];
+  assert.deepEqual(summariseReadErrors(reads), [
+    { reason: "AUTH_EXPIRED", count: 2 },
+    { reason: "The operation was aborted due to timeout", count: 1 },
+  ]);
+});
+
+test("read-error reasons accumulate across a cycle's pages and stay bounded", () => {
+  const prior = [{ reason: "AUTH_EXPIRED", count: 130 }];
+  assert.deepEqual(
+    summariseReadErrors([{ __error: "AUTH_EXPIRED" }], prior),
+    [{ reason: "AUTH_EXPIRED", count: 131 }],
+  );
+  // A clean page must not erase what the cycle already learned.
+  assert.deepEqual(summariseReadErrors([], prior), prior);
+  // Bounded: at most five distinct reasons, and each one capped in length.
+  const many = Array.from({ length: 9 }, (_, i) => ({ __error: `reason-${i}` }));
+  assert.equal(summariseReadErrors(many).length, 5);
+  assert.equal(
+    summariseReadErrors([{ __error: "x".repeat(400) }])[0].reason.length,
+    120,
   );
 });
 

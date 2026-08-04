@@ -365,6 +365,32 @@ async function mapWithConcurrency(items, limit, fn) {
   return out;
 }
 
+// WHY a read failed, not just how many. The sweep counted read errors and threw
+// the reasons away, so the 2026-08-04 investigation could see 246 failures in
+// one cycle and had no way to tell a transient 401 from a timeout from a vendor
+// 500 — the counter is identical for all three and they need opposite fixes.
+// Bounded on purpose: the top few distinct reasons are diagnostic, a per-
+// candidate error log is a PII surface and an unbounded KV value.
+const READ_ERROR_REASON_LIMIT = 5;
+const READ_ERROR_REASON_CHARS = 120;
+
+export function summariseReadErrors(reads = [], prior = []) {
+  const counts = new Map();
+  for (const entry of prior) {
+    const reason = String(entry?.reason || "").slice(0, READ_ERROR_REASON_CHARS);
+    if (reason) counts.set(reason, (counts.get(reason) || 0) + (Number(entry?.count) || 0));
+  }
+  for (const read of reads) {
+    if (!read?.__error) continue;
+    const reason = String(read.__error).slice(0, READ_ERROR_REASON_CHARS);
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason))
+    .slice(0, READ_ERROR_REASON_LIMIT);
+}
+
 export function interestSweepComplete({
   populationSize,
   candidatesRead,
@@ -553,6 +579,10 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
   const priorAttemptErrors = window.continuing
     ? Math.max(0, Number(priorSweep?.cycleAttemptReadErrors) || 0)
     : 0;
+  const priorErrorReasons = window.continuing
+    && Array.isArray(priorSweep?.cycleReadErrorReasons)
+    ? priorSweep.cycleReadErrorReasons
+    : [];
   const priorStateDeferrals = window.continuing
     ? Math.max(0, Number(priorSweep?.cycleAttemptStateDeferrals) || 0)
     : 0;
@@ -560,6 +590,8 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
   result.cycleSeeded = priorSeeded + result.seeded;
   result.cycleDetected = priorDetected + result.detected.length;
   result.cycleAttemptReadErrors = priorAttemptErrors + result.readErrors;
+  result.readErrorReasons = summariseReadErrors(reads);
+  result.cycleReadErrorReasons = summariseReadErrors(reads, priorErrorReasons);
   result.cycleAttemptStateDeferrals =
     priorStateDeferrals + result.stateDeferrals;
   result.cycleComplete = batchComplete
@@ -588,9 +620,11 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     cycleSeeded: result.cycleSeeded,
     cycleDetected: result.cycleDetected,
     cycleAttemptReadErrors: result.cycleAttemptReadErrors,
+    cycleReadErrorReasons: result.cycleReadErrorReasons,
     cycleAttemptStateDeferrals: result.cycleAttemptStateDeferrals,
     candidatesRead: result.candidatesRead,
     readErrors: result.readErrors,
+    readErrorReasons: result.readErrorReasons,
     stateDeferrals: result.stateDeferrals,
     seeded: result.seeded,
     detected: result.detected.length,
@@ -1444,6 +1478,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
             seeded: sweep.seeded,
             detected: sweep.detected.length,
             readErrors: sweep.readErrors,
+            readErrorReasons: sweep.readErrorReasons,
             stateDeferrals: sweep.stateDeferrals,
           };
         } else {
