@@ -27,7 +27,11 @@
  * them first — that is a change to the interest lane, not to this collector.
  */
 
-import { SIGNAL_INTERESTED, STREAM_INTEREST } from "./submission-notify.mjs";
+import {
+  SIGNAL_INTERESTED,
+  STREAM_INTEREST,
+  paraformCandidateLink,
+} from "./submission-notify.mjs";
 
 const str = (value) => (typeof value === "string" ? value.trim() : "");
 
@@ -72,13 +76,19 @@ export function buildInterestEvents({ records = [], names = new Map() } = {}) {
     if (seenBatches.has(pair)) continue;
     seenBatches.add(pair);
 
+    const candidateName = names.get(candidateUserId) || "";
     events.push({
       stream: STREAM_INTEREST,
       candidateUserId,
-      candidateName: names.get(candidateUserId) || "",
+      candidateName,
       eventId: batchId,
       signal: SIGNAL_INTERESTED,
       roleName: describeRoles(record?.roles),
+      // These records are keyed by a real candidate_user_id, so the link opens
+      // the person. That matters most here: the interest lane is PII-light and
+      // the name can legitimately be missing, and a link to an unfiltered
+      // candidate list would leave nothing at all to act on.
+      link: paraformCandidateLink({ candidateUserId, name: candidateName }),
     });
   }
 

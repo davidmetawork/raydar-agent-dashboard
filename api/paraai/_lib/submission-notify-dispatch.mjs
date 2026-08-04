@@ -46,7 +46,7 @@ export async function markSeeded({ kvSet }) {
 
 /**
  * @param events  [{ stream, candidateUserId, candidateName, eventId, signal,
- *                   replyText?, roleName? }]
+ *                   candidateEmail?, replyText?, roleName?, link? }]
  * @param seeding when true, mark every event as seen and post nothing
  */
 export async function dispatchEvents({

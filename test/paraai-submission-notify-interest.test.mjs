@@ -42,7 +42,19 @@ test("a record becomes one interested event carrying the resolved name", () => {
     eventId: "b1",
     signal: SIGNAL_INTERESTED,
     roleName: "2 roles",
+    link: "https://www.paraform.com/candidates?id=c1",
   });
+});
+
+test("interest links open the candidate by id, not a name search", () => {
+  // The interest lane is PII-light, so the name can be missing — and that is
+  // exactly when a name-search link would be worthless.
+  const [event] = buildInterestEvents({
+    records: [{ candidateUserId: "c9", batchId: "b9", roles: ["r1"] }],
+    names: new Map(),
+  });
+  assert.equal(event.candidateName, "");
+  assert.equal(event.link, "https://www.paraform.com/candidates?id=c9");
 });
 
 test("the same batch seen as both a live job and an archived handoff is ONE event", () => {

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   pendingOutreachReplies,
   buildRequestEvents,
+  latestOutreachMatch,
+  replyIdentity,
 } from "../api/paraai/_lib/submission-notify-request.mjs";
 import { buildSequenceEvents } from "../api/paraai/_lib/submission-notify-sequence.mjs";
 import {
@@ -90,6 +92,78 @@ test("an unreadable thread still notifies, as unclear rather than dropped", () =
   });
   assert.equal(event.signal, SIGNAL_UNCLEAR);
   assert.equal(event.replyText, "");
+});
+
+/* ─────────────────── stream 2: who replied, and about what (2026-08-04) ───── */
+
+const repliedState = (over = {}) => ({
+  candidateUserId: "c1",
+  repliedAt: "2026-08-04T10:00:00Z",
+  intentCheckedThrough: 1000,
+  candidateName: "Ada Lovelace",
+  candidateEmail: "ada@example.com",
+  threadId: "t1",
+  ...over,
+});
+
+test("the state's own identity reaches the notification — this is the whole bug", () => {
+  // Every field below was already in KV on 2026-08-04; the collector simply did
+  // not read it, so the channel said "Unknown candidate" for weeks.
+  const pending = pendingOutreachReplies([repliedState({
+    latestMatchId: "m1",
+    matches: {
+      m1: { roleId: "r1", roleName: "Account Executive", companyName: "Acme", sentAt: "2026-08-01T00:00:00Z" },
+    },
+  })]);
+  const [event] = buildRequestEvents({ pending, detailsById: new Map() });
+  assert.equal(event.candidateName, "Ada Lovelace");
+  assert.equal(event.candidateEmail, "ada@example.com");
+  assert.equal(event.roleName, "Account Executive @ Acme");
+  assert.equal(event.link, "https://www.paraform.com/candidates?id=c1&r_id=r1");
+});
+
+test("the role shown is the newest send, and a second role is stated not hidden", () => {
+  const both = {
+    m1: { roleId: "r1", roleName: "SDR", companyName: "Acme", sentAt: "2026-07-01T00:00:00Z" },
+    m2: { roleId: "r2", roleName: "AE", companyName: "Beta", sentAt: "2026-08-01T00:00:00Z" },
+  };
+  assert.equal(
+    latestOutreachMatch({ latestMatchId: "m2", matches: both }).roleName,
+    "AE @ Beta · latest of 2 roles",
+  );
+  // A state written before latestMatchId existed resolves by send time instead.
+  assert.equal(latestOutreachMatch({ matches: both }).roleId, "r2");
+});
+
+test("no match on the state degrades to a plain candidate link, never a broken one", () => {
+  const [event] = buildRequestEvents({
+    pending: pendingOutreachReplies([repliedState()]),
+    detailsById: new Map(),
+  });
+  assert.equal(event.roleName, "");
+  assert.equal(event.link, "https://www.paraform.com/candidates?id=c1");
+});
+
+test("a state with no stored name falls back to the address on the reply itself", () => {
+  const [event] = buildRequestEvents({
+    pending: pendingOutreachReplies([repliedState({ candidateName: "", candidateEmail: "" })]),
+    detailsById: new Map([["c1", { text: "Hi David", name: "Ada L", email: "ada@example.com" }]]),
+  });
+  assert.equal(event.candidateName, "Ada L");
+  assert.equal(event.candidateEmail, "ada@example.com");
+});
+
+test("From headers yield a person, and never a mojibake one", () => {
+  assert.deepEqual(replyIdentity("Ada Lovelace <ada@example.com>"), {
+    name: "Ada Lovelace", email: "ada@example.com",
+  });
+  assert.deepEqual(replyIdentity('"Lovelace, Ada" <Ada@Example.com>'), {
+    name: "Lovelace, Ada", email: "ada@example.com",
+  });
+  // A bare address is not a name, and an RFC 2047 encoded word is not one either.
+  assert.deepEqual(replyIdentity("ada@example.com"), { name: "", email: "ada@example.com" });
+  assert.equal(replyIdentity("=?UTF-8?B?QWRh?= <ada@example.com>").name, "");
+  assert.deepEqual(replyIdentity(""), { name: "", email: "" });
 });
 
 /* ══════════════════════════ stream 3: curated-list sequence replies ════════ */

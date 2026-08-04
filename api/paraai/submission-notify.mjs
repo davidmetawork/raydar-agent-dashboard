@@ -40,13 +40,17 @@ import { kv } from "./_lib/store.mjs";
 import { curatedListSequenceIds, listCuratedListCandidates } from "./_lib/interest.mjs";
 import { listInterestHandoffRecords } from "./_lib/interest-store.mjs";
 import { listOutreachStates } from "./_lib/outreach-store.mjs";
-import { getThread, inboundMessagesAfter, outreachMailbox } from "./_lib/outreach-gmail.mjs";
+import { getThread, headerValue, inboundMessagesAfter, outreachMailbox } from "./_lib/outreach-gmail.mjs";
 import { intentMessagesFromThread } from "./_lib/outreach-intent.mjs";
 import { buildInboxFeed } from "../inbox/_lib/core.mjs";
 
 import { notificationDedupeKey } from "./_lib/submission-notify.mjs";
 import { nameIndex, buildInterestEvents } from "./_lib/submission-notify-interest.mjs";
-import { pendingOutreachReplies, buildRequestEvents } from "./_lib/submission-notify-request.mjs";
+import {
+  pendingOutreachReplies,
+  buildRequestEvents,
+  replyIdentity,
+} from "./_lib/submission-notify-request.mjs";
 import { buildSequenceEvents } from "./_lib/submission-notify-sequence.mjs";
 import { dispatchEvents, isSeeded, markSeeded } from "./_lib/submission-notify-dispatch.mjs";
 import {
@@ -160,12 +164,20 @@ async function collectRequest(errors, seeding) {
         if (!item.threadId) continue;
         try {
           const thread = await threadFor(mailbox, item.threadId);
-          const messages = intentMessagesFromThread(inboundMessagesAfter(thread, mailbox, 0));
+          // Sorted oldest-first by inboundMessagesAfter, so the last entry is the
+          // newest inbound message — the one whose sender is the person replying.
+          const inbound = inboundMessagesAfter(thread, mailbox, 0);
+          const messages = intentMessagesFromThread(inbound);
           const newest = messages.reduce(
             (best, row) => (Date.parse(row?.at || 0) >= Date.parse(best?.at || 0) ? row : best),
             messages[0] || null,
           );
-          if (newest?.text) detailsById.set(item.candidateUserId, { text: newest.text });
+          // The From header is read even when the text is unreadable: a reply we
+          // cannot classify still has to say who sent it.
+          const identity = replyIdentity(headerValue(inbound[inbound.length - 1], "From"));
+          if (newest?.text || identity.name || identity.email) {
+            detailsById.set(item.candidateUserId, { text: newest?.text || "", ...identity });
+          }
         } catch { /* unclear is the safe fallback; the event still posts */ }
       }
     }

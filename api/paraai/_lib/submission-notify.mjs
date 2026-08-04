@@ -128,13 +128,27 @@ export function signalFromReplyText(text) {
 /* ──────────────────────────────────────────────────────────────── the message */
 
 /**
- * Paraform exposes no stable per-candidate profile route that this codebase has
- * ever proven — the dashboard UI itself deep-links by name search, so we do the
- * same rather than invent a URL that may 404. If an id-based route is ever
- * captured, change only this function.
+ * The exact per-candidate route IS proven, and this file previously said it was
+ * not. `https://www.paraform.com/candidates?id=<candidateUserId>&r_id=<roleId>`
+ * is the "View application" link Paraform's own notification emails carry
+ * (captured in docs/PARAFORM-EMAIL-TO-SLACK-ACTIONS-2026-07-06.md in the Raydar
+ * repo), and the dashboard's sourcing workspace already links candidates that
+ * way. A name search was the fallback for not knowing that: it lands on a list,
+ * not a person, and two candidates with the same name land on the same page.
+ *
+ * Pass `candidateUserId` ONLY when it is a real candidate_user_id. Stream 3's
+ * `ccu_id` is a campaign-to-candidate-user id — a different key space — so that
+ * stream deliberately keeps the name search rather than minting a link that 404s.
  */
-export function paraformCandidateLink(name) {
-  const value = str(name);
+export function paraformCandidateLink(input) {
+  const options = typeof input === "string" ? { name: input } : (input || {});
+  const candidateUserId = str(options.candidateUserId);
+  if (candidateUserId) {
+    const roleId = str(options.roleId);
+    return `https://www.paraform.com/candidates?id=${encodeURIComponent(candidateUserId)}`
+      + (roleId ? `&r_id=${encodeURIComponent(roleId)}` : "");
+  }
+  const value = str(options.name);
   const base = "https://www.paraform.com/candidates?sort=added_at%3Adesc";
   if (!value) return base;
   return `${base}&q=${encodeURIComponent(value).replace(/%20/g, "+")}`;
@@ -154,19 +168,27 @@ export function snippet(text, max = SNIPPET_MAX) {
 /**
  * One message per event. Kept deliberately short: signal, who, what stream,
  * the role if we know it, a snippet if there is one, and the link.
+ *
+ * ── Why the email is a fallback name ──────────────────────────────────────
+ * "Unknown candidate" is a dead end: it names nobody and the link it produces
+ * is an unfiltered candidate list. Every stream reaches this function knowing
+ * at minimum the address it was talking to, so the address stands in when the
+ * name is missing. It is worse than a name and far better than nothing — David
+ * can search it, and it is the same address the thread is under.
  */
 export function buildNotification({
   stream,
   candidateName,
+  candidateEmail = "",
   roleName = "",
   signal,
   replyText = "",
   link = "",
 } = {}) {
   const safeSignal = SIGNALS.has(signal) ? signal : SIGNAL_UNCLEAR;
-  const who = str(candidateName) || "Unknown candidate";
+  const who = str(candidateName) || str(candidateEmail) || "Unknown candidate";
   const role = str(roleName);
-  const url = str(link) || paraformCandidateLink(who);
+  const url = str(link) || paraformCandidateLink({ name: str(candidateName) });
   const context = STREAM_LABEL[stream] || "candidate response";
 
   const head = `${SIGNAL_LABEL[safeSignal]} — *${who}*`;

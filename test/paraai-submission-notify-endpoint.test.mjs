@@ -101,6 +101,34 @@ test("the first configured tick seeds silently and posts nothing", async () => {
   assert.ok(out.body.seeded >= 2, "existing history must be marked, not posted");
 });
 
+test("a request reply names the candidate and links straight to them", async () => {
+  // The 2026-08-04 report: every message in the channel read "Unknown
+  // candidate". Nothing had to be matched — the state already held all of this.
+  const replied = (over = {}) => ({
+    candidateUserId: "cu_1",
+    candidateName: "Ada Lovelace",
+    candidateEmail: "ada@example.com",
+    repliedAt: "2026-08-04T10:00:00Z",
+    threadId: "t1",
+    latestMatchId: "m1",
+    matches: {
+      m1: { roleId: "r_1", roleName: "Account Executive", companyName: "Acme", sentAt: "2026-08-01T00:00:00Z" },
+    },
+    ...over,
+  });
+  const h = harness({ states: [replied({ intentCheckedThrough: 1000 })] });
+  await run(h);                                              // seed
+  h.cfg.states = [replied({ intentCheckedThrough: 2000 })];  // a new reply
+  await run(h);
+
+  assert.equal(h.posted.length, 1, h.posted.join("\n"));
+  const [message] = h.posted;
+  assert.ok(!message.includes("Unknown candidate"), message);
+  assert.match(message, /Ada Lovelace/);
+  assert.match(message, /Account Executive @ Acme/);
+  assert.match(message, /candidates\?id=cu_1&r_id=r_1/);
+});
+
 test("after a clean seed, only genuinely new events post", async () => {
   const h = harness({ handoffs: [handoff()], candidates: [candidate] });
   await run(h);                                  // seed

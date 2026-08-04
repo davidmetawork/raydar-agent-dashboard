@@ -26,6 +26,14 @@ import { STREAM_SEQUENCE, signalFromReplyText } from "./submission-notify.mjs";
 
 const str = (value) => (typeof value === "string" ? value.trim() : "");
 
+// The inbox already substitutes this placeholder for a row it could not name.
+// Passing it through as if it were a name would defeat the address fallback and
+// put the very string this build exists to remove back in the channel.
+const named = (value) => {
+  const name = str(value);
+  return name.toLowerCase() === "unknown candidate" ? "" : name;
+};
+
 /**
  * @param rows          inbox feed reply rows (see flattenCampaignInbox)
  * @param sequenceIds   the curated-list sequence ids to include
@@ -57,9 +65,15 @@ export function buildSequenceEvents({
     events.push({
       stream: STREAM_SEQUENCE,
       // The inbox keys replies by lead, not by candidate user; ccu_id is the
-      // stable per-candidate handle available here.
+      // stable per-candidate handle available here. It is a
+      // campaign_to_candidate_user id, NOT a candidate_user_id, so it is used
+      // for dedupe only and deliberately never passed to the link builder —
+      // `?id=<ccu_id>` would be a confident link to nothing. This stream keeps
+      // the name search, which is sound here because the inbox already resolves
+      // the candidate's real name.
       candidateUserId: str(row?.ccu_id),
-      candidateName: str(row?.candidate_name),
+      candidateName: named(row?.candidate_name),
+      candidateEmail: str(row?.candidate_email),
       eventId,
       signal: signalFromReplyText(text),
       replyText: text,

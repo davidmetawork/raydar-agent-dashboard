@@ -87,15 +87,32 @@ test("ambiguous, empty, and automatic replies stay unclear", () => {
 
 /* ────────────────────────────────────────────────────────────────── the link */
 
-test("the candidate link is a name search, which is the only proven shape", () => {
+test("a known candidate id opens that candidate, and the role when we have it", () => {
+  assert.equal(
+    paraformCandidateLink({ candidateUserId: "cu_1", roleId: "r_1", name: "Ada Lovelace" }),
+    "https://www.paraform.com/candidates?id=cu_1&r_id=r_1",
+  );
+  assert.equal(
+    paraformCandidateLink({ candidateUserId: "cu_1" }),
+    "https://www.paraform.com/candidates?id=cu_1",
+  );
+});
+
+test("without an id the link falls back to the name search", () => {
+  // Stream 3 has no candidate_user_id to offer, so this path must keep working.
   const link = paraformCandidateLink("Ada Lovelace");
   assert.match(link, /^https:\/\/www\.paraform\.com\/candidates\?/);
   assert.match(link, /q=Ada\+Lovelace/);
+  assert.equal(link, paraformCandidateLink({ name: "Ada Lovelace" }));
 });
 
 test("a missing name still yields a usable candidates link", () => {
   assert.equal(
     paraformCandidateLink(""),
+    "https://www.paraform.com/candidates?sort=added_at%3Adesc",
+  );
+  assert.equal(
+    paraformCandidateLink({}),
     "https://www.paraform.com/candidates?sort=added_at%3Adesc",
   );
 });
@@ -125,6 +142,34 @@ test("a notification carries the signal, the person, the stream and a link", () 
   assert.match(text, /curated list interest/);
   assert.match(text, /Founding Engineer/);
   assert.match(text, /Open in Paraform/);
+});
+
+test("an event that carries a link uses it verbatim rather than a name search", () => {
+  const { text } = buildNotification({
+    stream: STREAM_REQUEST,
+    candidateName: "Ada Lovelace",
+    signal: SIGNAL_INTERESTED,
+    link: "https://www.paraform.com/candidates?id=cu_1&r_id=r_1",
+  });
+  assert.match(text, /<https:\/\/www\.paraform\.com\/candidates\?id=cu_1&r_id=r_1\|Open in Paraform>/);
+});
+
+test("a nameless event shows the address rather than 'Unknown candidate'", () => {
+  const { text } = buildNotification({
+    stream: STREAM_REQUEST,
+    candidateName: "",
+    candidateEmail: "ada@example.com",
+    signal: SIGNAL_UNCLEAR,
+  });
+  assert.match(text, /ada@example\.com/);
+  assert.ok(!text.includes("Unknown candidate"), text);
+});
+
+test("with neither a name nor an address the message says so plainly", () => {
+  const { text } = buildNotification({ stream: STREAM_REQUEST, signal: SIGNAL_UNCLEAR });
+  assert.match(text, /Unknown candidate/);
+  // And it must not name-search for the placeholder, which returns nothing.
+  assert.ok(!text.includes("q=Unknown"), text);
 });
 
 test("each stream is labelled distinctly so one channel stays readable", () => {
