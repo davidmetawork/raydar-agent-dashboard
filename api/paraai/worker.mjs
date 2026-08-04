@@ -19,6 +19,7 @@ import {
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
 import { runAuthProbeTick } from "./_lib/auth-probe.mjs";
+import { runStuckWatchdogTick } from "./_lib/stuck-watchdog.mjs";
 import { notifySlack } from "./_lib/core.mjs";
 import {
   PHASE3_AGGREGATE_ALERT_KEY,
@@ -45,6 +46,7 @@ import {
 } from "./_lib/resume-only-backfill.mjs";
 import {
   getAutoQueueStats,
+  listJobs,
   recordPhase3ShadowAggregateAuditResult,
   storeConfigured,
   takeAlertSlot,
@@ -655,6 +657,19 @@ export default async function handler(req, res) {
     // flag is read via GET /api/ops/paraform-auth, and no lane holds on it
     // yet. Covered by test/paraform-auth-breaker.test.mjs.
     try { await runAuthProbeTick(); } catch { /* observe-only */ }
+    // Stuck-job watchdog. Every alert this lane had fired on an explicit error
+    // code, so the 2026-08-03 outage — a Vercel-killed function that never got
+    // to raise one — ran 14 hours in silence while health stayed green. This
+    // watches movement instead of errors: a job that should be mid-flight and
+    // has not moved is reported whatever the cause. Time-capped and never
+    // throws, for the same reason as the auth probe above.
+    try {
+      await runStuckWatchdogTick({
+        listJobsImpl: listJobs,
+        alertSlotImpl: takeAlertSlot,
+        notifyImpl: notifySlack,
+      });
+    } catch { /* observe-only */ }
     const automation = automationConfig();
     const {
       resumeSweep,

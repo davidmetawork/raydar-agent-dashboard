@@ -11,6 +11,7 @@ import {
   candidateProfileInfo,
   candidatePreferences,
   directSubmitQuota,
+  domainCandidateId,
   fetchCall,
   findCrmCandidate,
   findCrmCandidateByLinkedin,
@@ -1190,6 +1191,7 @@ export async function prepareJob({
         : scoreIdentity(candidate, crmItem)
       : null;
     let ambiguous = false;
+    let identitySource = null;
     if (linkedCandidateUserId && !crmItem) {
       return saveJob(transition(job, "needs_identity_review", {
         identity: {
@@ -1205,7 +1207,36 @@ export async function prepareJob({
           : "linked booking identity not found",
       }), job.revision);
     }
-    if (linkedCandidateUserId && crmItem && !identityScore.ok) {
+    // A human call carries no LinkedIn, phone, or scheduled-time evidence of
+    // its own — the booking is a calendar meeting, not a screener dispatch —
+    // so the multi-signal bar can never be met and 64 human jobs sat at
+    // "does not meet the multi-signal identity bar" waiting for evidence that
+    // does not exist for this call type. But the identity was never in doubt:
+    // Paraform's OWN meeting record names the candidate_user_id, which is a
+    // statement of fact from the vendor, not a guess we scored. Accept it, on
+    // the same footing as the exact LinkedIn lookup.
+    //
+    // Contradiction still fails closed. If both sides carry a name and the
+    // names disagree, or the booking carries a LinkedIn or phone that did not
+    // produce its signal, something is genuinely mis-linked and no automatic
+    // submission may follow. Absence of evidence is accepted; conflicting
+    // evidence is not.
+    const bookingLinkAuthoritative = Boolean(
+      linkedCandidateUserId
+      && crmItem
+      && !manuallySelectedIdentity
+      && job?.humanCall === true,
+    );
+    const contradicted = bookingLinkAuthoritative && (
+      (linkedinHandle(candidate?.linkedin)
+        && !identityScore?.signals?.includes("linkedin"))
+      || (String(candidate?.phone || "").trim()
+        && !identityScore?.signals?.includes("phone"))
+      || (normName(candidate?.fullName) && normName(crmItem?.name)
+        && normName(candidate?.fullName) !== normName(crmItem?.name))
+    );
+    const acceptBookingLink = bookingLinkAuthoritative && !contradicted;
+    if (linkedCandidateUserId && crmItem && !identityScore.ok && !acceptBookingLink) {
       return saveJob(transition(job, "needs_identity_review", {
         identity: {
           candidateUserId: null,
@@ -1213,12 +1244,23 @@ export async function prepareJob({
           ambiguous: false,
           reason: manuallySelectedIdentity
             ? "selected Paraform candidate does not match this call"
-            : "linked booking candidate does not meet the multi-signal identity bar",
+            : contradicted
+              ? "linked booking candidate conflicts with the call's own identifiers"
+              : "linked booking candidate does not meet the multi-signal identity bar",
         },
         journalDetail: manuallySelectedIdentity
           ? "selected identity mismatched call"
-          : "linked booking identity failed multi-signal verification",
+          : contradicted
+            ? "linked booking identity contradicted by call identifiers"
+            : "linked booking identity failed multi-signal verification",
       }), job.revision);
+    }
+    if (acceptBookingLink && !identityScore.ok) {
+      identityScore = {
+        signals: [...new Set(["paraform_linked_booking", ...(identityScore?.signals || [])])],
+        ok: true,
+      };
+      identitySource = "paraform_linked_booking";
     }
     // Exact LinkedIn resolution first. Paraform answers "which candidate owns
     // this handle" in two cheap calls; the full CRM walk that used to be the
@@ -1228,7 +1270,6 @@ export async function prepareJob({
     // findCrmCandidateByLinkedin, which is a stronger guarantee than any score
     // computed off a CRM page — but the multi-signal score is still recorded
     // so the identity's evidence stays legible on the job.
-    let identitySource = null;
     if (!crmItem) {
       const handle = linkedinHandle(candidate?.linkedin);
       if (handle) {
@@ -1257,7 +1298,7 @@ export async function prepareJob({
     job = await saveJob(transition(job, "extracting", {
       identity: {
         candidateUserId: crmItem.id,
-        candidateId: crmItem.candidate_id || null,
+        candidateId: domainCandidateId(crmItem),
         signals: identitySource === "linkedin_direct"
           ? [...new Set(["linkedin_direct", ...(identityScore?.signals || [])])]
           : identityScore?.signals || [],
@@ -1342,7 +1383,7 @@ export async function prepareJob({
       : null;
     return saveJob(transition(job, nextState, {
       candidate: { ...candidate, fullName: candidate.fullName || contact?.name || crmItem.name },
-      identity: { ...job.identity, candidateUserId: crmItem.id, candidateId: crmItem.candidate_id || job.identity?.candidateId || null },
+      identity: { ...job.identity, candidateUserId: crmItem.id, candidateId: domainCandidateId(crmItem) || job.identity?.candidateId || null },
       submission,
       extracted,
       reviewPreferences,

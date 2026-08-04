@@ -365,8 +365,13 @@ export function autoEligibility(job, config = automationConfig()) {
   // readback whose handle differs. Scoring it against the point-lookup row
   // would fail for shape reasons alone (that row is not a CRM page row) and
   // would reject an identity that is strictly better evidenced than the bar.
-  const exactIdentity = job?.identity?.source === "linkedin_direct"
-    && signals.includes("linkedin_direct");
+  // Two identity kinds are statements of fact from Paraform rather than
+  // scores we computed: the exact LinkedIn lookup (verified by an exact-id
+  // readback) and the candidate_user_id Paraform itself put on the meeting
+  // record for a human call. Source and signal must agree for either.
+  const AUTHORITATIVE_IDENTITY = ["linkedin_direct", "paraform_linked_booking"];
+  const exactIdentity = AUTHORITATIVE_IDENTITY.includes(String(job?.identity?.source || ""))
+    && signals.includes(String(job?.identity?.source || ""));
   const strongIdentity = signals.some((signal) => ["linkedin", "phone", "scheduled_time"].includes(signal));
   if (
     !job?.identity?.candidateUserId

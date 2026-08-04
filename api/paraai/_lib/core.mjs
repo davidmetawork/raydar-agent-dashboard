@@ -459,6 +459,37 @@ function candidateReadRow(value) {
     || null;
 }
 
+// Two different row shapes reach the same scoring code and only one of them
+// carries the fields it reads. A CRM PAGE row (getCRMExternalCandidates) is
+// flat: name, linkedin_user, phone_number, candidate_id. The POINT-LOOKUP row
+// (getCandidateUserById) is the candidate-USER record, where every one of
+// those is undefined at the top level and the person sits nested under
+// `candidate`. Verified live 2026-08-03: name, linkedin_user,
+// first_parascribe_call and candidate_id are all undefined on a point-lookup
+// row, so scoreIdentity against one can return at most zero signals and can
+// never pass a bar that needs two — it is not a weak match, it is not a match
+// that can happen. That single mismatch produced three separate production
+// symptoms: 64 human-call jobs parked at "linked booking candidate does not
+// meet the multi-signal identity bar", the green lane rejecting exact LinkedIn
+// identities, and phase3_domain_candidate_id_missing after submission.
+//
+// Projecting the nested fields up is the fix at the cause. Page rows already
+// carry them, so the `||` chain leaves those untouched; `id` and the nested
+// `candidate` object are preserved exactly, because `id` must remain the
+// candidate-USER id that every downstream write is keyed on.
+export function normalizeCandidateRow(row) {
+  if (!row || typeof row !== "object") return row;
+  const person = row.candidate && typeof row.candidate === "object" ? row.candidate : {};
+  return {
+    ...row,
+    name: row.name ?? person.name ?? null,
+    linkedin_user: row.linkedin_user ?? person.linkedin_user ?? null,
+    phone_number: row.phone_number ?? person.phone_number ?? null,
+    emails: row.emails ?? person.emails ?? null,
+    candidate_id: domainCandidateId(row),
+  };
+}
+
 export async function findCrmCandidate(
   candidateUserId,
   { trpcGetImpl = trpcGet } = {},
@@ -479,7 +510,23 @@ export async function findCrmCandidate(
   if (returnedId && returnedId !== wanted) {
     throw new Error("CRM_POINT_LOOKUP_ID_MISMATCH");
   }
-  return returnedId ? row : { ...row, id: wanted };
+  return normalizeCandidateRow(returnedId ? row : { ...row, id: wanted });
+}
+
+// The domain candidate id sits in a different place depending on how the row
+// was read. A CRM page row carries a flat `candidate_id`; the point-lookup row
+// returned by getCandidateUserById is the candidate-user record itself with the
+// person nested under `candidate`. Identity used to come only from page rows,
+// so the flat read was enough — the direct LinkedIn route returns point-lookup
+// rows, and reading only `candidate_id` there yields null and strands the job
+// at the Phase 3 match read with phase3_domain_candidate_id_missing.
+export function domainCandidateId(row) {
+  return row?.candidate_id
+    || row?.candidateId
+    || row?.candidate?.id
+    || row?.candidate_user?.candidate_id
+    || row?.candidate_user?.candidate?.id
+    || null;
 }
 
 let currentParaformUserId = null;

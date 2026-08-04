@@ -796,6 +796,50 @@ test("the exact-identity shortcut cannot be claimed without the verified source"
   assert.ok(ambiguous.reasons.includes("identity"));
 });
 
+test("a human call is admitted on Paraform's own booking linkage", () => {
+  // A human call is a calendar meeting, not a screener dispatch: it carries no
+  // LinkedIn, phone, or scheduled-time evidence of its own, so the multi-signal
+  // bar can never be met. Paraform's meeting record names the candidate_user_id
+  // outright, which is a statement of fact, not a score.
+  assert.deepEqual(autoEligibility(greenJob({
+    humanCall: true,
+    humanCallMeta: { provenanceVerified: true },
+    identity: {
+      candidateUserId: "candidate-user-42",
+      source: "paraform_linked_booking",
+      signals: ["paraform_linked_booking"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig), { eligible: true, reasons: [] });
+});
+
+test("booking linkage still needs its own source, and human provenance still bites", () => {
+  const forged = autoEligibility(greenJob({
+    humanCall: true,
+    humanCallMeta: { provenanceVerified: true },
+    identity: {
+      candidateUserId: "candidate-user-42",
+      signals: ["paraform_linked_booking"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig);
+  assert.equal(forged.eligible, false);
+  assert.ok(forged.reasons.includes("identity"));
+
+  const unverified = autoEligibility(greenJob({
+    humanCall: true,
+    humanCallMeta: { provenanceVerified: false },
+    identity: {
+      candidateUserId: "candidate-user-42",
+      source: "paraform_linked_booking",
+      signals: ["paraform_linked_booking"],
+      ambiguous: false,
+    },
+  }), eligibilityConfig);
+  assert.equal(unverified.eligible, false);
+  assert.ok(unverified.reasons.includes("human call provenance"));
+});
+
 test("the heuristic CRM path still needs two signals with one strong", () => {
   const weak = autoEligibility(greenJob({
     identity: {
