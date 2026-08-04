@@ -45,6 +45,40 @@ export async function markSeeded({ kvSet }) {
 }
 
 /**
+ * Forget that these events were ever notified, so the next dispatch posts them
+ * again. The ONLY legitimate use is a message that was posted wrong — the
+ * 2026-08-04 "Unknown candidate" run — where the fix cannot reach a message
+ * Slack has already delivered.
+ *
+ * It deletes marks and nothing else: it does not post, and it does not touch
+ * the seeded flag. Clearing the seeded flag would make the lane re-seed and go
+ * silent on real events, which is the opposite of what a replay is for.
+ *
+ * @param items  [{ stream, candidateUserId, eventId }]
+ * @returns {Promise<{cleared: number, errors: string[]}>}
+ */
+export async function clearNotificationMarks({ items = [], kvDel } = {}) {
+  const result = { cleared: 0, errors: [] };
+  for (const item of items) {
+    const key = notificationDedupeKey({
+      stream: item?.stream,
+      candidateUserId: item?.candidateUserId,
+      eventId: item?.eventId,
+    });
+    try {
+      await kvDel(key);
+      result.cleared++;
+    } catch (error) {
+      // A mark we failed to clear simply stays deduped: the message is not
+      // reposted. Nothing is lost and nothing duplicates, so this is reported
+      // rather than retried.
+      result.errors.push(`clear failed: ${error?.message || error}`);
+    }
+  }
+  return result;
+}
+
+/**
  * @param events  [{ stream, candidateUserId, candidateName, eventId, signal,
  *                   candidateEmail?, replyText?, roleName?, link? }]
  * @param seeding when true, mark every event as seen and post nothing

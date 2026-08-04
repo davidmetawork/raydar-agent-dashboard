@@ -144,6 +144,26 @@ export function pendingOutreachReplies(states = []) {
 }
 
 /**
+ * Pure. The pending replies whose event is at or after `sinceMs`.
+ *
+ * Only this stream can be windowed by time, and that is not an accident: its
+ * event id IS the internal-date of the candidate's newest message. Stream 1's
+ * is a batch id and stream 3's a Gmail message id — neither is ordered, so a
+ * "since" filter over them would silently select the wrong set.
+ *
+ * A non-numeric event id (the `repliedAt` fallback, used by states written
+ * before intent tracking) is parsed as a date rather than dropped.
+ */
+export function repliesSince(pending = [], sinceMs = 0) {
+  const cutoff = Number(sinceMs) || 0;
+  return pending.filter((item) => {
+    const id = str(item?.eventId);
+    const at = /^\d+$/.test(id) ? Number(id) : Date.parse(id);
+    return Number.isFinite(at) && at >= cutoff;
+  });
+}
+
+/**
  * Pure. `detailsById` maps candidateUserId -> { text, name, email }, resolved by
  * the caller from the Gmail thread for the pending replies that survived dedupe.
  * The state's own name wins; the thread's `From` is the fallback.

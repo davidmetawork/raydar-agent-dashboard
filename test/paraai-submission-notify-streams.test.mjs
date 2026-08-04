@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   pendingOutreachReplies,
   buildRequestEvents,
+  repliesSince,
   latestOutreachMatch,
   replyIdentity,
 } from "../api/paraai/_lib/submission-notify-request.mjs";
@@ -151,6 +152,17 @@ test("a state with no stored name falls back to the address on the reply itself"
   });
   assert.equal(event.candidateName, "Ada L");
   assert.equal(event.candidateEmail, "ada@example.com");
+});
+
+test("the replay window reads both event-id shapes this stream produces", () => {
+  const pending = pendingOutreachReplies([
+    repliedState({ candidateUserId: "c_new", intentCheckedThrough: Date.UTC(2026, 7, 4) }),
+    repliedState({ candidateUserId: "c_old", intentCheckedThrough: Date.UTC(2026, 6, 1) }),
+    // The legacy shape: no intent tracking, so the event id is an ISO string.
+    repliedState({ candidateUserId: "c_legacy", intentCheckedThrough: 0, repliedAt: "2026-08-04T09:00:00Z" }),
+  ]);
+  const kept = repliesSince(pending, Date.UTC(2026, 7, 3)).map((p) => p.candidateUserId);
+  assert.deepEqual(kept.sort(), ["c_legacy", "c_new"]);
 });
 
 test("From headers yield a person, and never a mojibake one", () => {

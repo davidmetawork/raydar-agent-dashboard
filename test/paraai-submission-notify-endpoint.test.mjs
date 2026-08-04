@@ -47,6 +47,7 @@ function harness(over = {}) {
     configured: () => cfg.configured,
     kvGet: async (k) => store.get(k) ?? null,
     kvSet: async (k, v) => { store.set(k, v); },
+    kvDel: async (k) => { store.delete(k); },
     listHandoffs: async () => {
       if (cfg.handoffsThrows) throw new Error(cfg.handoffsThrows);
       return cfg.handoffs;
@@ -66,11 +67,16 @@ function harness(over = {}) {
     postMessage: async (t) => { if (!cfg.slackUp) return false; posted.push(t); return true; },
     alert: async (t) => { alerts.push(t); return true; },
     textLookupCap: cfg.textLookupCap,
+    renotifyCap: cfg.renotifyCap,
   };
   return { store, posted, alerts, reads, cfg, handler: createSubmissionNotifyHandler(deps) };
 }
 
-const run = async (h) => { const r = res(); await h.handler({ headers: {} }, r); return r.out; };
+const run = async (h, query) => {
+  const r = res();
+  await h.handler({ headers: {}, ...(query ? { query } : {}) }, r);
+  return r.out;
+};
 
 /* ───────────────────────────────────────────────────────── gates before work */
 
@@ -127,6 +133,75 @@ test("a request reply names the candidate and links straight to them", async () 
   assert.match(message, /Ada Lovelace/);
   assert.match(message, /Account Executive @ Acme/);
   assert.match(message, /candidates\?id=cu_1&r_id=r_1/);
+});
+
+/* ─────────────────────────── the replay: reposting a message posted wrong ── */
+
+const AUG = (day, hour) => Date.UTC(2026, 7, day, hour);
+const repliedAt = (ms, over = {}) => ({
+  candidateUserId: `cu_${ms}`,
+  candidateName: `Candidate ${ms}`,
+  repliedAt: new Date(ms).toISOString(),
+  intentCheckedThrough: ms,
+  ...over,
+});
+
+test("a replay reposts only the window asked for, in the same tick", async () => {
+  const h = harness({ states: [repliedAt(AUG(1, 9)), repliedAt(AUG(4, 9))] });
+  await run(h);                              // seed: both marked, nothing posted
+  assert.equal(h.posted.length, 0);
+
+  const out = await run(h, { renotify: "request", since: "2026-08-03T00:00:00Z" });
+  assert.equal(out.body.replay.cleared, 1, "only the reply inside the window");
+  assert.equal(h.posted.length, 1);
+  assert.match(h.posted[0], new RegExp(`Candidate ${AUG(4, 9)}`));
+});
+
+test("a replayed event is re-marked, so a second replay is needed to repost it", async () => {
+  const h = harness({ states: [repliedAt(AUG(4, 9))] });
+  await run(h);
+  await run(h, { renotify: "request", since: "2026-08-01T00:00:00Z" });
+  assert.equal(h.posted.length, 1);
+  await run(h);                              // an ordinary tick must stay quiet
+  assert.equal(h.posted.length, 1, "the replay must not leave the event permanently un-deduped");
+});
+
+test("a replay without a window is refused rather than replaying everything", async () => {
+  const h = harness({ states: [repliedAt(AUG(1, 9))] });
+  await run(h);
+  const out = await run(h, { renotify: "request" });
+  assert.equal(out.code, 400);
+  assert.match(out.body.error, /since/);
+  assert.equal(h.posted.length, 0, "a refused replay must post nothing");
+});
+
+test("only the request stream can be replayed, because only its ids are ordered", async () => {
+  const h = harness({ handoffs: [handoff()], candidates: [candidate] });
+  await run(h);
+  const out = await run(h, { renotify: "interest", since: "2026-08-01T00:00:00Z" });
+  assert.equal(out.code, 400);
+  assert.equal(h.posted.length, 0);
+});
+
+test("a replay is capped, and says what it did not do", async () => {
+  const states = [AUG(4, 1), AUG(4, 2), AUG(4, 3)].map((ms) => repliedAt(ms));
+  const h = harness({ states, renotifyCap: 2 });
+  await run(h);
+  const out = await run(h, { renotify: "request", since: "2026-08-01T00:00:00Z" });
+  assert.equal(out.body.replay.cleared, 2);
+  assert.equal(out.body.replay.skipped, 1);
+  assert.ok(out.body.errors.some((e) => /capped at 2 of 3/.test(e)), out.body.errors.join("; "));
+  assert.equal(h.posted.length, 2, "the capped one waits for a narrower replay, it is not lost");
+});
+
+test("a replay during seeding clears nothing, so it cannot un-seed the lane", async () => {
+  // Seeding posts nothing, so clearing marks there would only hand the next
+  // tick a backlog to flood with.
+  const h = harness({ states: [repliedAt(AUG(4, 9))] });
+  const out = await run(h, { renotify: "request", since: "2026-08-01T00:00:00Z" });
+  assert.equal(out.body.seeding, true);
+  assert.equal(out.body.replay.cleared, 0);
+  assert.equal(h.posted.length, 0);
 });
 
 test("after a clean seed, only genuinely new events post", async () => {

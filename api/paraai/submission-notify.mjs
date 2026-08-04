@@ -23,6 +23,16 @@
  * Each collector is wrapped so a failure degrades that stream only, and the
  * failure is returned rather than swallowed.
  *
+ * ── The replay, and why it is narrow ──────────────────────────────────────
+ * `?renotify=request&since=<ISO>` forgets that request replies in that window
+ * were ever notified, so this same tick posts them again. It exists because a
+ * message posted WRONG cannot be fixed by fixing the code — Slack already
+ * delivered it (2026-08-04: every request reply said "Unknown candidate").
+ * It is bounded three ways: request-stream only, since it is the only stream
+ * whose event id is a timestamp; `since` is mandatory, because a replay with a
+ * default window is how someone floods a channel by omitting an argument; and
+ * the batch is capped, with the remainder reported rather than dropped.
+ *
  * ── Why it refuses to run unconfigured ────────────────────────────────────
  * Without a channel there is nowhere to post and every event would be left
  * unmarked for retry — correct, but it would burn a full set of upstream reads
@@ -49,10 +59,16 @@ import { nameIndex, buildInterestEvents } from "./_lib/submission-notify-interes
 import {
   pendingOutreachReplies,
   buildRequestEvents,
+  repliesSince,
   replyIdentity,
 } from "./_lib/submission-notify-request.mjs";
 import { buildSequenceEvents } from "./_lib/submission-notify-sequence.mjs";
-import { dispatchEvents, isSeeded, markSeeded } from "./_lib/submission-notify-dispatch.mjs";
+import {
+  dispatchEvents,
+  isSeeded,
+  markSeeded,
+  clearNotificationMarks,
+} from "./_lib/submission-notify-dispatch.mjs";
 import {
   postSubmissionNotification,
   submissionNotifyConfigured,
@@ -85,8 +101,35 @@ export const config = { maxDuration: 300 };
 // than risking the function budget. Uncapped events are NOT dropped.
 const TEXT_LOOKUP_CAP = 25;
 
+// A replay is a deliberate, operator-driven burst into a channel David reads.
+// It is bounded so a wrong `since` cannot empty the whole history into Slack:
+// anything beyond the cap is reported, not silently dropped, and a narrower
+// window reposts the rest.
+const RENOTIFY_CAP = 50;
+
 const defaultKvGet = async (key) => kv(["GET", key]);
 const defaultKvSet = async (key, value) => kv(["SET", key, value]);
+const defaultKvDel = async (key) => kv(["DEL", key]);
+
+/**
+ * Parse `?since=` for a replay. Accepts an ISO date or epoch milliseconds.
+ *
+ * There is NO default. A replay with an implied window is how someone reposts
+ * months of history into Slack by leaving off an argument, so the absence of
+ * `since` is an error, never "everything".
+ */
+export function renotifyWindow(query = {}) {
+  const stream = String(query?.renotify || "").trim().toLowerCase();
+  if (!stream) return { requested: false };
+  if (stream !== "request") {
+    return { requested: true, error: "renotify supports stream 'request' only — it is the only stream whose event id is a timestamp" };
+  }
+  const raw = String(query?.since || "").trim();
+  if (!raw) return { requested: true, error: "renotify requires ?since= (ISO date or epoch ms) — refusing to replay an unbounded window" };
+  const sinceMs = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
+  if (!Number.isFinite(sinceMs)) return { requested: true, error: `renotify could not read since=${raw}` };
+  return { requested: true, stream, sinceMs };
+}
 
 /**
  * Injectable so the whole tick can be exercised without KV, Gmail, Paraform or
@@ -102,6 +145,7 @@ export function createSubmissionNotifyHandler({
   configured = submissionNotifyConfigured,
   kvGet = defaultKvGet,
   kvSet = defaultKvSet,
+  kvDel = defaultKvDel,
   listHandoffs = listInterestHandoffRecords,
   listCandidates = listCuratedListCandidates,
   listStates = listOutreachStates,
@@ -116,8 +160,41 @@ export function createSubmissionNotifyHandler({
   dispatch = dispatchEvents,
   seededCheck = isSeeded,
   seededMark = markSeeded,
+  clearMarks = clearNotificationMarks,
   textLookupCap = TEXT_LOOKUP_CAP,
+  renotifyCap = RENOTIFY_CAP,
 } = {}) {
+
+/**
+ * Clear the dedupe marks for request replies in the window, so the collectors
+ * that run immediately after treat them as new and post them again — through
+ * the normal path, with the normal message builder, so a replayed message is
+ * byte-for-byte what a fresh one would be.
+ *
+ * Deliberately a no-op while seeding: a seeding pass posts nothing, so clearing
+ * marks there would just un-seed history and hand the next tick a flood.
+ */
+async function renotify(window, errors, seeding) {
+  if (seeding) {
+    errors.push("renotify skipped: this pass is seeding, so nothing would post");
+    return { requested: true, cleared: 0, skipped: 0 };
+  }
+  const inWindow = repliesSince(pendingOutreachReplies(await listStates()), window.sinceMs);
+  const selected = inWindow.slice(0, renotifyCap);
+  if (inWindow.length > selected.length) {
+    errors.push(`renotify capped at ${renotifyCap} of ${inWindow.length}; narrow ?since= to replay the rest`);
+  }
+  const { cleared, errors: clearErrors } = await clearMarks({
+    items: selected.map((item) => ({
+      stream: "request",
+      candidateUserId: item.candidateUserId,
+      eventId: item.eventId,
+    })),
+    kvDel,
+  });
+  errors.push(...clearErrors);
+  return { requested: true, cleared, skipped: inWindow.length - selected.length };
+}
 
 async function collectInterest(errors) {
   try {
@@ -238,6 +315,26 @@ return async function handler(req, res) {
   }
 
   const errors = [];
+
+  // A replay must clear its marks BEFORE the collectors run, so the replayed
+  // events flow through this same tick's dedupe as if they were new. Doing it
+  // after would need a second pass and a second set of upstream reads.
+  const window = renotifyWindow(req?.query || {});
+  let replay = null;
+  if (window.requested) {
+    if (window.error) {
+      return res.status(400).json({ ok: false, error: window.error });
+    }
+    try {
+      replay = await renotify(window, errors, seeding);
+    } catch (error) {
+      // A failed replay must not take the ordinary tick down with it: real new
+      // replies still need to post.
+      errors.push(`renotify: ${error?.message || error}`);
+      replay = { requested: true, cleared: 0, skipped: 0, failed: true };
+    }
+  }
+
   // Surface Slack's own refusal reason; "post returned false" alone is useless.
   const send = postMessage
     || ((text) => postSubmissionNotification(text, {
@@ -286,6 +383,7 @@ return async function handler(req, res) {
     ok: true,
     seeding,
     counts: { interest: interest.length, request: request.length, sequence: sequence.length },
+    ...(replay ? { replay } : {}),
     ...result,
     errors: [...result.errors, ...errors],
   });
