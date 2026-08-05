@@ -63,6 +63,7 @@ import {
   sweepStaleOutreachExceptions,
   SUBMISSION_REQUEST_EXPIRY_DAYS,
   heldAlertCopy,
+  isPendingDigestUnavailableError,
   messageForMatch,
   missingEmailAlertCopy,
   normalizeExternalDeliveryEvidence,
@@ -1507,6 +1508,129 @@ test("pending no-digest verifier fails closed when a digest becomes available", 
       ensureDigestImpl: async () => ({ digestId: "digest-now-exists" }),
     }),
     { code: "OUTREACH_DIGEST_NOW_AVAILABLE" },
+  );
+});
+
+// REGRESSION 2026-08-05 (Daniel Israel / Exiger): the tick recognises only this
+// exact vendor contradiction. Every neighbouring failure must stay fatal, or the
+// automatic recovery becomes a way to skip a digest that was legitimately refused.
+test("only the exact vendor contradiction is auto-recoverable", () => {
+  assert.equal(
+    isPendingDigestUnavailableError(Object.assign(
+      new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+      { code: "-32600" },
+    )),
+    true,
+  );
+  assert.equal(
+    isPendingDigestUnavailableError(Object.assign(
+      new Error("Candidate is already submitted to this role."),
+      { code: "-32600" },
+    )),
+    false,
+  );
+  assert.equal(
+    isPendingDigestUnavailableError(Object.assign(
+      new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+      { code: "-32603" },
+    )),
+    false,
+  );
+  assert.equal(
+    isPendingDigestUnavailableError(Object.assign(
+      new Error("AUTH_EXPIRED"),
+      { code: "AUTH_EXPIRED" },
+    )),
+    false,
+  );
+  assert.equal(
+    isPendingDigestUnavailableError(Object.assign(
+      new Error("match digest write did not read back"),
+      { code: "OUTREACH_DIGEST_NOT_VISIBLE" },
+    )),
+    false,
+  );
+  assert.equal(isPendingDigestUnavailableError(null), false);
+});
+
+// The tick has already watched the mutation fail inside the candidate lock, so
+// it hands that error over instead of paying for a second refused write. The
+// live re-reads of status and digest stay mandatory either way.
+test("pending no-digest verifier accepts an already-observed vendor error", async () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  const calls = [];
+  const evidence = await verifyPendingDigestUnavailable(request, {
+    observedError: Object.assign(
+      new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+      { code: "-32600" },
+    ),
+    ensureDigestImpl: async () => {
+      calls.push("ensure");
+      throw new Error("the mutation must not be re-fired");
+    },
+    readStatusImpl: async () => {
+      calls.push("status");
+      return { pendingIds: [request.id], digestableIds: [request.id] };
+    },
+    readDigestImpl: async () => {
+      calls.push("digest");
+      return null;
+    },
+  });
+  assert.deepEqual(calls.filter((call) => call === "ensure"), []);
+  assert.deepEqual(new Set(calls), new Set(["status", "digest"]));
+  assert.equal(evidence.reason, PENDING_DIGEST_UNAVAILABLE_REASON);
+  assert.equal(evidence.eligible, true);
+});
+
+test("an observed error that is not the contradiction is rethrown untouched", async () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  await assert.rejects(
+    verifyPendingDigestUnavailable(request, {
+      observedError: Object.assign(new Error("AUTH_EXPIRED"), { code: "AUTH_EXPIRED" }),
+      readStatusImpl: async () => {
+        throw new Error("status must not be read for a non-recoverable error");
+      },
+      readDigestImpl: async () => {
+        throw new Error("digest must not be read for a non-recoverable error");
+      },
+    }),
+    { code: "AUTH_EXPIRED" },
+  );
+});
+
+// The recovery still fails closed on the evidence, not on who asked for it: an
+// observed contradiction whose live status read no longer agrees stays blocked.
+test("an observed contradiction still needs live pending+digestable agreement", async () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  await assert.rejects(
+    verifyPendingDigestUnavailable(request, {
+      observedError: Object.assign(
+        new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+        { code: "-32600" },
+      ),
+      readStatusImpl: async () => ({ pendingIds: [request.id], digestableIds: [] }),
+      readDigestImpl: async () => null,
+    }),
+    { code: "OUTREACH_PENDING_NO_DIGEST_UNVERIFIED" },
   );
 });
 

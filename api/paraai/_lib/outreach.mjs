@@ -144,6 +144,16 @@ const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
 
+// The one Paraform contradiction the no-digest recovery exists for:
+// matchDigest.createOrAddRoles rejects a request that
+// matchDigest.getRequestIdsByStatus reports as pending AND digestable. Matched
+// on the exact code AND the exact message on purpose — any other -32600 is a
+// real rejection and must keep failing closed.
+export function isPendingDigestUnavailableError(error) {
+  return String(error?.code || "") === "-32600" &&
+    clean(error?.message) === PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE;
+}
+
 // The single definition of "may this failure re-enter the tick on its own".
 // Explicit classification always wins over the stage, so a human hold and an
 // uncertain send stay parked no matter where they were raised; only an
@@ -542,23 +552,27 @@ export async function verifyPendingDigestUnavailable(
       "matchDigest.getDigestForCandidate",
       { candidateUserId },
     ),
+    // The tick calls this having ALREADY watched the mutation fail inside the
+    // candidate lock. Re-firing it would be a second pointless write against a
+    // vendor that just refused. An operator call passes nothing and still
+    // re-proves the failure itself, exactly as before.
+    observedError = null,
   } = {},
 ) {
-  let vendorError;
-  try {
-    await ensureDigestImpl(request);
-  } catch (error) {
-    vendorError = error;
+  let vendorError = observedError || undefined;
+  if (!vendorError) {
+    try {
+      await ensureDigestImpl(request);
+    } catch (error) {
+      vendorError = error;
+    }
   }
   if (!vendorError) {
     const error = new Error("the Paraform digest is now available; use the normal send path");
     error.code = "OUTREACH_DIGEST_NOW_AVAILABLE";
     throw error;
   }
-  if (
-    String(vendorError?.code || "") !== "-32600" ||
-    clean(vendorError?.message) !== PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE
-  ) {
+  if (!isPendingDigestUnavailableError(vendorError)) {
     throw vendorError;
   }
   const [status, digest] = await Promise.all([
@@ -1126,6 +1140,7 @@ export async function processMatchRequest(
     const ordinal = requestOrdinal(request, history);
     let digest = null;
     let deliveryMode = "digest";
+    let autoRecoveredNoDigest = false;
     if (allowWithoutDigest) {
       if (noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON) {
         attemptStage = "pending_digest_reverification";
@@ -1135,7 +1150,23 @@ export async function processMatchRequest(
         deliveryMode = "expired_without_digest";
       }
     } else {
-      digest = await ensureMatchDigest(request);
+      try {
+        digest = await ensureMatchDigest(request);
+      } catch (error) {
+        // 2026-08-05: the operator-only escape hatch was the wrong altitude.
+        // Twice in a week Paraform rejected a digest write for a request its own
+        // status read called pending AND digestable, and both times the tick
+        // retried into a wall until a human noticed — 85 attempts over 7h50m for
+        // the Exiger request, and nobody is watching at 02:00. The recovery
+        // re-proves EVERY gate the manual override demands, against live vendor
+        // state, under this candidate's lock. When that proof holds, take it
+        // here. Every other digest failure still fails closed.
+        if (mode !== "send" || !isPendingDigestUnavailableError(error)) throw error;
+        attemptStage = "pending_digest_reverification";
+        await verifyPendingDigestUnavailable(request, { observedError: error });
+        deliveryMode = PENDING_DIGEST_UNAVAILABLE_REASON;
+        autoRecoveredNoDigest = true;
+      }
     }
     const roleUrl = roleShareUrl(request);
     request = { ...request, candidateEmail: contact.email };
@@ -1211,6 +1242,10 @@ export async function processMatchRequest(
       ordinal,
       anchorStatus,
       deliveryMode,
+      // Self-healing must stay legible: a send that only happened because the
+      // vendor contradicted itself has to be distinguishable, forever, from a
+      // send that took the normal digest path.
+      ...(autoRecoveredNoDigest ? { autoRecoveredNoDigest: true } : {}),
     });
     attemptStage = "outbox_claim";
     state = await saveOutreachState(claimed, state.revision);
@@ -1330,7 +1365,18 @@ export async function processMatchRequest(
       }
     }
     attemptStage = "complete";
-    return { action: "sent", request, ordinal, digest, roleUrl, copy, sent, state };
+    return {
+      action: "sent",
+      request,
+      ordinal,
+      digest,
+      roleUrl,
+      copy,
+      sent,
+      state,
+      deliveryMode,
+      autoRecoveredNoDigest,
+    };
   } catch (error) {
     const stage = clean(error?.outreachStage || attemptStage || "unknown");
     error.outreachStage ||= stage;
@@ -2058,7 +2104,13 @@ export async function runOutreachTick({
       candidatesWithNewMatch.add(request.candidateUserId);
       try {
         const result = await processMatchRequest(request, history, { mode: "send", config });
-        results.push({ action: result.action, requestId: request.id });
+        results.push({
+          action: result.action,
+          requestId: request.id,
+          ...(result.autoRecoveredNoDigest
+            ? { deliveryMode: result.deliveryMode, autoRecoveredNoDigest: true }
+            : {}),
+        });
       } catch (error) {
         await handleOutreachFailure(error, request, { config, now }).catch(() => {});
         results.push({ action: "error", requestId: request.id, code: clean(error?.code || "OUTREACH_FAILED") });
@@ -2115,6 +2167,10 @@ export async function runOutreachTick({
       expiredUnsent: sweep.expiredUnsent,
       closedStaleExceptions: sweep.closed,
       expiryEscalations: expiry.escalated,
+      // Non-zero means Paraform's digest API contradicted itself this tick and
+      // we routed around it. It costs nobody a placement, so it does not page,
+      // but a rising count is the signal to take back to the vendor.
+      autoRecoveredNoDigest: results.filter((result) => result.autoRecoveredNoDigest).length,
     };
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});
