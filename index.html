@@ -151,6 +151,7 @@
     }
     /* candidate-name link → Paraform candidate search */
     .who a { color:inherit; text-decoration:none; border-bottom:1.5px solid transparent; transition:border-color .12s ease; }
+    .candidate-name { white-space:pre-wrap; }
     .who a:hover { border-bottom-color:var(--orange); }
     .who a .ext { font-size:11px; color:var(--ink-3); margin-left:4px; opacity:0; transition:opacity .12s ease; }
     .who a:hover .ext { opacity:1; }
@@ -488,17 +489,29 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s ?? "").replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+    const escAttr = (s) => String(s ?? "").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     const cap = (s) => s ? s.charAt(0).toUpperCase()+s.slice(1) : s;
 
-    // Candidate name → clickable link to the Paraform candidate search (name prefilled).
-    // (The pipeline only carries first names, so the search is by first name.)
-    const paraformQ = (name) => `https://www.paraform.com/candidates?sort=added_at%3Adesc&q=${encodeURIComponent(String(name).trim()).replace(/%20/g,"+")}`;
-    const nameLink = (name) => {
-      const n = String(name ?? "").trim();
-      if (!n || n === "?" || n.toLowerCase() === "unknown")
-        return `<a href="https://www.paraform.com/candidates?sort=added_at%3Adesc" target="_blank" rel="noopener noreferrer" title="Open Paraform candidates">${esc(n || "Unknown")}<span class="ext">↗</span></a>`;
-      return `<a href="${paraformQ(n)}" target="_blank" rel="noopener noreferrer" title="Find ${esc(n)} on Paraform">${esc(n)}<span class="ext">↗</span></a>`;
+    /* BEGIN:PARAFORM-DISPLAY-IDENTITY */
+    // Display identity is intentionally separate from the operational candidate.
+    // Preserve Paraform's exact non-empty string; never copy it into row keys,
+    // matching, grouping, Gmail search, or API requests.
+    const displayName = (row) => {
+      const exact = typeof row?.paraformName === "string" ? row.paraformName : "";
+      return exact.trim() ? exact : String(row?.candidate ?? row?.c ?? row?.name ?? "");
     };
+
+    // Candidate name → clickable link to the Paraform candidate search (name prefilled).
+    // The query follows the visible name; the label preserves that string exactly.
+    const paraformQ = (name) => `https://www.paraform.com/candidates?sort=added_at%3Adesc&q=${encodeURIComponent(String(name ?? "")).replace(/%20/g,"+")}`;
+    const nameLink = (name) => {
+      const n = String(name ?? "");
+      const check = n.trim();
+      if (!check || check === "?" || check.toLowerCase() === "unknown")
+        return `<a class="candidate-name" href="https://www.paraform.com/candidates?sort=added_at%3Adesc" target="_blank" rel="noopener noreferrer" title="Open Paraform candidates">${esc(check || "Unknown")}<span class="ext">↗</span></a>`;
+      return `<a class="candidate-name" href="${escAttr(paraformQ(n))}" target="_blank" rel="noopener noreferrer" title="Find ${escAttr(n)} on Paraform">${esc(n)}<span class="ext">↗</span></a>`;
+    };
+    /* END:PARAFORM-DISPLAY-IDENTITY */
 
     // Candidate name → Gmail search (name in quotes, executed on open).
     // ?authuser=<email> pins the raydar.xyz mailbox — candidate mail lives
@@ -508,7 +521,7 @@
     const gmailLink = (name) => {
       const n = String(name ?? "").trim();
       if (!n || n === "?" || n.toLowerCase() === "unknown") return "";
-      return `<a class="gm" href="${gmailQ(n)}" target="_blank" rel="noopener noreferrer" title="Search Gmail for ${esc(n)}">✉&#xFE0E;</a>`;
+      return `<a class="gm" href="${escAttr(gmailQ(n))}" target="_blank" rel="noopener noreferrer" title="Search Gmail for ${escAttr(n)}">✉&#xFE0E;</a>`;
     };
 
     // ---- plain-language mapping (no jargon for non-technical teammates) ----
@@ -620,7 +633,7 @@
       $("upcoming").innerHTML = up.length ? up.map(u=>{
         const live = (u.status||"").startsWith("in_call");
         return `<div class="row">
-          <div class="who">${nameLink(u.candidate)}</div>
+          <div class="who">${nameLink(displayName(u))}</div>
           <div class="when">${fmtTime(u.join_at)}</div>
           <div class="what">Google Meet · bot ${esc(u.meeting||"")}</div>
           <div><span class="pill ${live?"live":"muted"}"><span class="d"></span>${esc(UPCOMING[u.status]||"Scheduled")}</span></div>
@@ -634,7 +647,7 @@
         const ds = displayStatus(c.verdict, act);
         const showReview = verdictView(c.verdict).review && !act;   // drop REVIEW once actioned
         return `<div class="row">
-          <div class="who">${nameLink(c.candidate)}${showReview?'<span class="review">REVIEW</span>':""}</div>
+          <div class="who">${nameLink(displayName(c))}${showReview?'<span class="review">REVIEW</span>':""}</div>
           <div class="when">${fmtTime(c.startedAt)}</div>
           <div class="what">${esc(whatHappened(c))}</div>
           <div><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span></div>
@@ -661,11 +674,12 @@
       const act = fuAction(c), st = (act||{}).status;
       const ds = fuDisplayStatus(c, act);
       const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
+      const visibleName = displayName(c);
       return `<div class="row fu${why&&why.border?" fu-flag":""}">
-        <div class="who">${nameLink(c.candidate)}<span class="t">${fmtTime(c.startedAt)}</span></div>
+        <div class="who">${nameLink(visibleName)}<span class="t">${fmtTime(c.startedAt)}</span></div>
         <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(fuShortWhat(c))}</span></div>
         <div class="fu-actions">
-          <a class="resched" href="${paraformQ(c.candidate)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(c.candidate)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
+          <a class="resched" href="${escAttr(paraformQ(visibleName))}" target="_blank" rel="noopener noreferrer" title="Open ${escAttr(visibleName)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
           <span class="fu-marks">
             <button type="button" class="mark ${st==='sequence_sent'?'on':''}" onclick="setAction('${c.id}','${st==='sequence_sent'?'none':'sequence_sent'}')" title="A rescheduling sequence is reaching out">Sequence sent</button>
             <button type="button" class="mark ${st==='rescheduled'?'on':''}" onclick="setAction('${c.id}','${st==='rescheduled'?'none':'rescheduled'}')" title="They rebooked — done">Rescheduled</button>
@@ -682,7 +696,7 @@
         ? `${esc(prior)} → booked a live call with you`
         : `${esc(prior)} → new interview booked`;
       return `<div class="row fu done-auto">
-        <div class="who">${nameLink(c.candidate)}<span class="t">${fmtTime(c.startedAt)}</span></div>
+        <div class="who">${nameLink(displayName(c))}<span class="t">${fmtTime(c.startedAt)}</span></div>
         <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${sub}</span></div>
         <div class="fu-actions"><span class="auto-tag">auto</span></div>
       </div>`;
@@ -710,12 +724,14 @@
         for (const c of (day.calls||[])) all.push({
           id:c.id, rowId:c.rowId||c.id, callId:c.callId||c.id, botId:c.botId||c.b||null,
           candidate:c.c, verdict:c.v, startedAt:c.t, endedAt:c.endedAt||c.e||c.t,
+          ...(typeof c.paraformName==="string" && c.paraformName.trim() ? { paraformName:c.paraformName } : {}),
         });
       for (const c of ((lastData&&lastData.calls)||[]))
         all.push({
           id:c.id, rowId:c.rowId||c.id, callId:c.callId||c.id, botId:c.botId||null,
           candidate:c.candidate, verdict:c.verdict, startedAt:c.startedAt,
           endedAt:c.endedAt||c.startedAt, msgs:c.msgs, humanSpeakSecs:c.humanSpeakSecs,
+          ...(typeof c.paraformName==="string" && c.paraformName.trim() ? { paraformName:c.paraformName } : {}),
         });
       // De-dupe only when durable call aliases overlap. Never collapse by name:
       // two different candidates can share a name, and keeping an extra row is
@@ -1067,7 +1083,7 @@
         const rows = (day.calls||[]).map(c=>{
           const ds=displayStatus(c.v,null);
           return `<div class="hrow">
-            <div class="hc">${nameLink(c.c)}</div>
+            <div class="hc">${nameLink(displayName(c))}</div>
             <div class="ht">${fmtClock(c.t)}</div>
             <div class="hw">${esc(histWhat(c.v,c.m))}</div>
             <div><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span></div>
@@ -1547,7 +1563,7 @@
       const cut = f.range==="all" ? 0 : Date.now() - Number(f.range)*864e5;
       const latest=cdLatestSuccessfulRows();
       const rows = (rosterRows||[]).filter(r=>{
-        if(q && !String(r.candidate||"").toLowerCase().includes(q)) return false;
+        if(q && !String(r.candidate||"").toLowerCase().includes(q) && !String(r.paraformName||"").toLowerCase().includes(q)) return false;
         if(f.type!=="all" && cdCallTypeKey(r)!==f.type) return false;
         if(f.status!=="all" && String(r.status||"").trim()!==f.status) return false;
         if(f.paraai!=="all" && cdParaAIKey(r)!==f.paraai) return false;
@@ -1603,7 +1619,7 @@
       const displayOutcome = cdEffectiveOutcome(r);
       return `<tr>
         <td class="cd-when">${cdDate(r)}</td>
-        <td class="who">${nameLink(r.candidate)}${gmailLink(r.candidate)}</td>
+        <td class="who">${nameLink(displayName(r))}${gmailLink(r.candidate)}</td>
         <td>${cdSelect(i,"source",CD_SOURCES,r.source,"Unknown")}${cdErrIn(r,"source")}</td>
         <td>${cdSelect(i,"callType",CD_TYPES,r.callType,"Unknown")}${cdErrIn(r,"callType")}</td>
         <td>${cdStatusPill(r.status)}${heldBtns}${cdErrIn(r,"status")}</td>
@@ -1873,19 +1889,46 @@
     }
     const CV_TONE = { good:"good", muted:"muted", pending:"live", bad:"bad" };
     let cvSearchController = null;
+    let cvDisplayController = null;
     let cvSearchRequest = 0;
     const cvEsc = (s) => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
     const cvPT = (iso) => { try { return new Intl.DateTimeFormat("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/Los_Angeles"}).format(new Date(iso))+" PT"; } catch { return iso||""; } };
     function cvToast(m){ const t=$("cv-toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1500); }
     function cvCopy(u){ navigator.clipboard.writeText(u).then(()=>cvToast("Link copied")).catch(()=>cvToast(u)); }
-    function cvCard(r){
+    function cvCard(r,index,requestId){
       const url = location.origin + "/c/" + r.botId;
       const tone = CV_TONE[r.status.tone] || "muted";
       return `<div class="cv-row">
-        <div class="cv-name">${cvEsc(r.name)} <span class="pill ${tone}" id="cv-status-${cvEsc(r.botId)}"><span class="d"></span>${cvEsc(r.status.label)}</span></div>
+        <div class="cv-name"><span class="candidate-name" id="cv-name-${requestId}-${index}">${cvEsc(displayName({ paraformName:r.paraformName, candidate:r.name }))}</span> <span class="pill ${tone}" id="cv-status-${cvEsc(r.botId)}"><span class="d"></span>${cvEsc(r.status.label)}</span></div>
         <div class="cv-when">${cvEsc(cvPT(r.scheduledStart||r.joinAt))} <span class="mid">· ${cvEsc(r.meeting||"")}</span></div>
         <div class="cv-act"><a class="cv-open" href="/c/${encodeURIComponent(r.botId)}">Open ↗</a><button class="cv-copy" onclick='cvCopy(${JSON.stringify(url)})'>Copy link</button></div>
       </div>`;
+    }
+    async function cvEnrichDisplayNames(results,requestId){
+      const ids=[...new Set(results.map(row=>String(row?.botId||"")).filter(Boolean))].slice(0,30);
+      if(!ids.length) return;
+      const controller=new AbortController();
+      if(cvDisplayController) cvDisplayController.abort();
+      cvDisplayController=controller;
+      const timer=setTimeout(()=>controller.abort(),4000);
+      try{
+        const params=new URLSearchParams();
+        ids.forEach(id=>params.append("id",id));
+        const response=await fetch(API_BASE+"/api/paraform-display-names?"+params,{ signal:controller.signal });
+        if(requestId!==cvSearchRequest || !response.ok) return;
+        const payload=await response.json();
+        if(requestId!==cvSearchRequest || !payload || typeof payload.names!=="object") return;
+        results.forEach((row,index)=>{
+          const id=String(row?.botId||"");
+          if(Object.prototype.hasOwnProperty.call(payload.names,id)) row.paraformName=payload.names[id];
+          const label=$("cv-name-"+requestId+"-"+index);
+          if(label) label.textContent=displayName({ paraformName:row.paraformName, candidate:row.name });
+        });
+      }catch(e){ /* the operational Calls labels stay visible */ }
+      finally{
+        clearTimeout(timer);
+        if(cvDisplayController===controller) cvDisplayController=null;
+      }
     }
     async function cvVerifyStatus(row){
       const pill = $("cv-status-"+row.botId);
@@ -1909,6 +1952,7 @@
       const btn = $("cv-search-btn");
       const requestId = ++cvSearchRequest;
       if(cvSearchController) cvSearchController.abort();
+      if(cvDisplayController) cvDisplayController.abort();
       cvSearchController = new AbortController();
       btn.textContent = deep ? "Searching history…" : "Searching…";
       out.innerHTML = `<div class="cv-spin"></div>`;
@@ -1931,8 +1975,9 @@
           return;
         }
         const head = name ? `${j.count} result${j.count>1?"s":""}` : "Most recent calls";
-        out.innerHTML = `<div class="cv-head">${head}</div><div class="list">${j.results.map(cvCard).join("")}</div>`;
+        out.innerHTML = `<div class="cv-head">${head}</div><div class="list">${j.results.map((row,index)=>cvCard(row,index,requestId)).join("")}</div>`;
         cvVerifyVisibleStatuses(j.results);
+        void cvEnrichDisplayNames(j.results,requestId);
       } catch(e){
         if(e.name!=="AbortError" && requestId===cvSearchRequest) out.innerHTML = `<div class="empty">Couldn’t reach the calls service — try again.</div>`;
       } finally {
