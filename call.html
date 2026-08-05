@@ -56,10 +56,35 @@
   .panel { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:17px 19px; box-shadow:var(--shadow); }
   .panel h3 { font-family:"PP Grafier Display",serif; font-weight:500; font-size:16px; margin:0 0 13px; }
   .tx { max-height:580px; overflow:auto; display:flex; flex-direction:column; gap:13px; }
-  .turn .sp { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; margin-bottom:3px; }
+  .turn .sp { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; margin-bottom:3px; display:flex; align-items:baseline; gap:8px; }
   .turn.agent .sp { color:var(--orange); } .turn.candidate .sp { color:var(--violet); }
   .turn .tt { font-size:14.5px; line-height:1.55; color:var(--ink); }
   .turn.agent .tt { color:var(--ink-2); }
+
+  /* ── click-to-seek ─────────────────────────────────────────────────────── */
+  .ph { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .ph h3 { margin:0; }
+  .hint { font-size:12px; color:var(--ink-3); margin:5px 0 13px; }
+  .follow { appearance:none; border:1.5px solid var(--line); background:var(--card); color:var(--ink-3); cursor:pointer; font-family:inherit; font-weight:600; font-size:11.5px; border-radius:999px; padding:5px 11px; display:inline-flex; align-items:center; gap:6px; transition:color .12s ease, border-color .12s ease, background .12s ease; }
+  .follow::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .follow[aria-pressed="true"] { color:var(--orange); border-color:#F4CDAF; background:#FFF4EC; }
+  .follow:hover { border-color:var(--orange); }
+  .at { font-size:10.5px; font-weight:700; letter-spacing:.02em; color:var(--ink-3); font-variant-numeric:tabular-nums; opacity:.5; transition:opacity .12s ease; }
+  /* The hit area bleeds 10px wider than the text so hover reads as a full row;
+     the scroll box is padded by the same amount so nothing overflows it. */
+  .tx.seekable { padding-inline:10px; margin-inline:-10px; }
+  .turn.seek { cursor:pointer; border-radius:10px; margin:-6px -10px; padding:6px 10px; transition:background .12s ease; }
+  .turn.seek:hover { background:var(--line-2); }
+  .turn.seek:hover .at, .turn.playing .at { opacity:1; }
+  .turn.seek:focus-visible { outline:2px solid var(--violet); outline-offset:1px; }
+  .turn.seek.playing { background:#FFF6EF; }
+  .cue { border-radius:4px; padding:1px 0; transition:background .12s ease, box-shadow .12s ease; }
+  .cue.on { background:#FFE0C6; box-shadow:0 0 0 2px #FFE0C6; color:var(--ink); }
+
+  /* Keep the player in view while the transcript scrolls under it on phones. */
+  @media (max-width:759px) {
+    .player { position:sticky; top:0; z-index:5; background:var(--cream); padding-bottom:10px; }
+  }
   .kv { font-size:13.5px; line-height:1.5; }
   .kv .r { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--line-2); }
   .kv .r:last-child { border-bottom:none; }
@@ -98,10 +123,164 @@
     return exact.trim() ? exact : String(row?.candidate ?? row?.c ?? row?.name ?? "");
   };
   function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1500); }
-  function copyLink(){ navigator.clipboard.writeText(location.href).then(()=>toast("Link copied")).catch(()=>toast(location.href)); }
+  function copyLink(){
+    const at = hashTime();
+    const msg = at != null ? `Link copied at ${fmtClock(at)}` : "Link copied";
+    navigator.clipboard.writeText(location.href).then(()=>toast(msg)).catch(()=>toast(location.href));
+  }
   const fmtPT = (iso) => { try { return new Intl.DateTimeFormat("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/Los_Angeles"}).format(new Date(iso))+" PT"; } catch { return iso||""; } };
   const fmtDur = (s) => s ? `${Math.floor(s/60)}m ${String(s%60).padStart(2,"0")}s` : "—";
+  const fmtClock = (s) => { const t = Math.max(0, Math.floor(Number(s)||0)); return `${Math.floor(t/60)}:${String(t%60).padStart(2,"0")}`; };
   const ICON = { good:"✓", bad:"!", muted:"–", pending:"…" };
+
+  // ── click-to-seek state ───────────────────────────────────────────────────
+  // CUES is a flat, time-sorted index of every seekable moment, so finding the
+  // line being spoken is a binary search rather than a walk of the transcript.
+  let video = null, tx = null, CUES = [], turnEls = [], cueEls = [];
+  let activeKey = "", playingTurn = null, litCue = null;
+  let follow = true, selfScrollUntil = 0, pendingSeek = null;
+
+  // #t=<seconds> deep links: a shared link can open at the exact moment.
+  const hashTime = () => {
+    const m = String(location.hash || "").match(/(?:^|[#&])t=(\d+(?:\.\d+)?)/);
+    return m ? Number(m[1]) : null;
+  };
+
+  function seekTo(secs, { play = true, stamp = true } = {}) {
+    if (!video || !Number.isFinite(secs)) return;
+    const apply = () => {
+      const dur = video.duration;
+      const capped = Number.isFinite(dur) && dur > 0 ? Math.min(secs, dur - 0.15) : secs;
+      try { video.currentTime = Math.max(0, capped); } catch {}
+      if (play) { const p = video.play(); if (p && p.catch) p.catch(()=>{}); }
+      markActive(video.currentTime);
+    };
+    // preload="metadata" means an early click can land before the duration is
+    // known; queue it and let loadedmetadata apply it.
+    if (video.readyState >= 1) apply(); else pendingSeek = { secs, play };
+    if (stamp) { try { history.replaceState(null, "", `#t=${Math.floor(secs)}`); } catch {} }
+    if (!follow) setFollow(true);
+  }
+
+  function setFollow(on) {
+    follow = on;
+    const btn = document.getElementById("follow");
+    if (btn) { btn.setAttribute("aria-pressed", String(on)); btn.textContent = on ? "Following" : "Follow"; }
+    if (on && playingTurn) scrollIntoPanel(playingTurn);
+  }
+
+  function scrollIntoPanel(el) {
+    if (!tx || !el) return;
+    const box = tx.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (r.top >= box.top + 8 && r.bottom <= box.bottom - 8) return;
+    selfScrollUntil = performance.now() + 250; // don't read our own scroll as a manual one
+    tx.scrollTop += (r.top - box.top) - box.height * 0.35;
+  }
+
+  // Highlight the last cue that has started. Deliberately sticky through
+  // silences — clearing on every gap makes the transcript strobe.
+  function markActive(now) {
+    if (!CUES.length) return;
+    let lo = 0, hi = CUES.length - 1, hit = -1;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (CUES[mid].t <= now + 0.05) { hit = mid; lo = mid + 1; } else hi = mid - 1; }
+    const cur = hit >= 0 ? CUES[hit] : null;
+    const key = cur ? `${cur.turn}:${cur.cue}` : "";
+    if (key === activeKey) return;
+    activeKey = key;
+    if (litCue) litCue.classList.remove("on");
+    litCue = cur && cur.cue >= 0 ? (cueEls[cur.turn] || [])[cur.cue] || null : null;
+    if (litCue) litCue.classList.add("on");
+    const turnEl = cur ? turnEls[cur.turn] : null;
+    if (turnEl !== playingTurn) {
+      if (playingTurn) playingTurn.classList.remove("playing");
+      playingTurn = turnEl;
+      if (playingTurn) playingTurn.classList.add("playing");
+    }
+    if (follow && playingTurn) scrollIntoPanel(playingTurn);
+  }
+
+  // Turns are the keyboard/AT target; cues inside them are finer mouse targets.
+  // No nested interactive elements, so the timestamp stays a plain span.
+  function transcriptHtml(turns, seekable) {
+    const rows = turns.map((t, i) => {
+      const canSeek = seekable && t.startSecs != null;
+      const body = (canSeek && Array.isArray(t.cues) && t.cues.length)
+        ? t.cues.map((c, j) => c.startSecs == null
+            ? esc(c.text)
+            : `<span class="cue" data-t="${c.startSecs}" data-c="${j}">${esc(c.text)}</span>`).join(" ")
+        : esc(t.text);
+      const stamp = canSeek ? `<span class="at">${fmtClock(t.startSecs)}</span>` : "";
+      const attrs = canSeek ? ` data-t="${t.startSecs}" role="button" tabindex="0" aria-label="Play from ${fmtClock(t.startSecs)}"` : "";
+      return `<div class="turn ${t.role}${canSeek ? " seek" : ""}" data-i="${i}"${attrs}>
+        <div class="sp">${t.role === "agent" ? "AI Screener" : esc(t.speaker)}${stamp}</div>
+        <div class="tt">${body}</div></div>`;
+    }).join("");
+    const header = seekable
+      ? `<div class="ph"><h3>Transcript</h3><button class="follow" id="follow" type="button" aria-pressed="true">Following</button></div>
+         <div class="hint">Click any line to play the recording from that moment.</div>`
+      : `<h3>Transcript</h3>`;
+    return `<div class="panel">${header}<div class="tx${seekable ? " seekable" : ""}">${rows}</div></div>`;
+  }
+
+  function wireSeek(turns) {
+    video = document.querySelector("video");
+    tx = document.querySelector(".tx");
+    if (!video || !tx) return;
+
+    CUES = [];
+    turns.forEach((t, i) => {
+      if (Array.isArray(t.cues) && t.cues.length) {
+        t.cues.forEach((c, j) => { if (c.startSecs != null) CUES.push({ t: c.startSecs, turn: i, cue: j }); });
+      } else if (t.startSecs != null) CUES.push({ t: t.startSecs, turn: i, cue: -1 });
+    });
+    CUES.sort((a, b) => a.t - b.t);
+    if (!CUES.length) return;
+
+    turnEls = Array.from(tx.querySelectorAll(".turn"));
+    cueEls = turnEls.map((el) => Array.from(el.querySelectorAll(".cue")));
+
+    tx.addEventListener("click", (e) => {
+      const turn = e.target.closest && e.target.closest(".turn.seek");
+      if (!turn) return;
+      // Copying a quote out of the transcript must not yank the player.
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).trim()) return;
+      const cue = e.target.closest(".cue");
+      const t = Number(cue && cue.dataset.t != null ? cue.dataset.t : turn.dataset.t);
+      seekTo(t);
+    });
+    tx.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const turn = e.target.closest && e.target.closest(".turn.seek");
+      if (!turn) return;
+      e.preventDefault();
+      seekTo(Number(turn.dataset.t));
+    });
+    tx.addEventListener("scroll", () => {
+      if (performance.now() < selfScrollUntil) return;
+      if (follow) setFollow(false);
+    }, { passive: true });
+    const btn = document.getElementById("follow");
+    if (btn) btn.addEventListener("click", () => setFollow(!follow));
+
+    video.addEventListener("timeupdate", () => markActive(video.currentTime));
+    video.addEventListener("seeked", () => markActive(video.currentTime));
+    video.addEventListener("loadedmetadata", () => {
+      if (!pendingSeek) return;
+      const q = pendingSeek; pendingSeek = null;
+      seekTo(q.secs, { play: q.play, stamp: false });
+    });
+
+    const at = hashTime();
+    if (at != null) seekTo(at, { play: false, stamp: false });
+    // A timestamped link pasted while already on the page changes only the
+    // hash, so nothing reloads — honour it here. replaceState never fires
+    // hashchange, so our own stamping cannot loop back through this.
+    window.addEventListener("hashchange", () => {
+      const t = hashTime();
+      if (t != null) seekTo(t, { play: false, stamp: false });
+    });
+  }
 
   function botId(){
     const m = location.pathname.match(/\/c\/([^\/?#]+)/);
@@ -112,13 +291,16 @@
   function render(d){
     const v = d.verdict, c = d.candidate, id = d.botId;
     const videoSrc = `${CALLS_API}/api/media?bot=${encodeURIComponent(id)}&kind=video`;
-    const player = (v.hasRecording && d.media.hasVideo)
-      ? `<video controls preload="metadata" playsinline src="${videoSrc}"></video>`
+    const hasVideo = !!(v.hasRecording && d.media.hasVideo);
+    const player = hasVideo
+      ? `<div class="player"><video controls preload="metadata" playsinline src="${videoSrc}"></video></div>`
       : `<div class="norec"><div class="big">No recording for this call</div>${v.verdict==="no_show"?"The candidate never joined the meeting, so there’s nothing to play.":"A recording isn’t available for this call."}</div>`;
 
-    const tx = (d.transcript && d.transcript.length)
-      ? `<div class="panel"><h3>Transcript</h3><div class="tx">${d.transcript.map(t=>`<div class="turn ${t.role}"><div class="sp">${t.role==="agent"?"AI Screener":esc(t.speaker)}</div><div class="tt">${esc(t.text)}</div></div>`).join("")}</div></div>`
-      : "";
+    // Seeking needs both a recording to seek and offsets to seek to; without
+    // either, the transcript renders exactly as it always has.
+    const turns = (d.transcript && d.transcript.length) ? d.transcript : [];
+    const seekable = hasVideo && turns.some((t) => t.startSecs != null);
+    const tx = turns.length ? transcriptHtml(turns, seekable) : "";
 
     const who = (d.presence && d.presence.humans && d.presence.humans.length)
       ? d.presence.humans.join(", ")
@@ -147,7 +329,10 @@
       <div class="banner ${v.tone}"><div class="ic">${ICON[v.tone]||"•"}</div><div><div class="bt">${esc(v.label)}</div><div class="bs">${esc(v.summary)}</div></div></div>
       ${player}
       <div class="grid"><div>${tx}</div>${details}</div>`;
-    document.getElementById("foot").textContent = "Shareable, durable link — it re-fetches the recording on each load, so it never expires. Read-only; independent of the live screener.";
+    if (seekable) wireSeek(turns);
+    document.getElementById("foot").textContent = seekable
+      ? "Shareable, durable link — it re-fetches the recording on each load, so it never expires. Clicking a line adds that timestamp to the link, so a copied link opens at the same moment. Read-only; independent of the live screener."
+      : "Shareable, durable link — it re-fetches the recording on each load, so it never expires. Read-only; independent of the live screener.";
   }
 
   async function enrichDisplayName(id,operationalName){
