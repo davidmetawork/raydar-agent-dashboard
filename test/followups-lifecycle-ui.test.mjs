@@ -175,6 +175,25 @@ test("manual actions follow durable aliases after history/live id changes", () =
   assert.equal(result.manualDone.length, 1);
 });
 
+test("follow-up backlog carries display identity without changing its operational candidate", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [{
+        id: "row-display",
+        b: "bot-display",
+        t: "2026-07-17T15:00:00.000Z",
+        c: "Booking Alias",
+        paraformName: `  Exact "Nickname" O'Neil  `,
+        v: "no_show",
+      }],
+    }],
+  }));
+
+  assert.equal(result.open.length, 1);
+  assert.equal(result.open[0].candidate, "Booking Alias");
+  assert.equal(result.open[0].paraformName, `  Exact "Nickname" O'Neil  `);
+});
+
 function lifecycleContext({ fetchImpl } = {}) {
   const ctx = context({
     lastData: null,

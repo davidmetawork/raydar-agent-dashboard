@@ -31,6 +31,7 @@
 
   .head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px; }
   h1 { font-family:"PP Grafier Display",serif; font-weight:500; font-size:31px; letter-spacing:-.02em; margin:0; line-height:1.1; }
+  .candidate-name { white-space:pre-wrap; }
   .meta { font-size:14px; color:var(--ink-2); margin-top:8px; display:flex; gap:9px; flex-wrap:wrap; align-items:center; }
   .meta a { color:var(--violet); text-decoration:none; font-weight:600; }
   .meta .dot { color:var(--ink-3); }
@@ -89,8 +90,13 @@
 
 <script>
   const CALLS_API = "https://raydar-calls.vercel.app";
+  const DISPLAY_NAMES_API = "https://webview-lake.vercel.app/api/paraform-display-names";
   const app = document.getElementById("app");
   const esc = (s) => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const displayName = (row) => {
+    const exact = typeof row?.paraformName === "string" ? row.paraformName : "";
+    return exact.trim() ? exact : String(row?.candidate ?? row?.c ?? row?.name ?? "");
+  };
   function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1500); }
   function copyLink(){ navigator.clipboard.writeText(location.href).then(()=>toast("Link copied")).catch(()=>toast(location.href)); }
   const fmtPT = (iso) => { try { return new Intl.DateTimeFormat("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/Los_Angeles"}).format(new Date(iso))+" PT"; } catch { return iso||""; } };
@@ -133,7 +139,7 @@
     app.innerHTML = `
       <div class="head">
         <div>
-          <h1>${esc(c.fullName)}</h1>
+          <h1 class="candidate-name" id="candidate-name">${esc(displayName({ candidate:c.fullName }))}</h1>
           <div class="meta">${esc(fmtPT(c.scheduledStart||d.joinAt))}<span class="dot">·</span>${esc(d.meeting||"")}${c.linkedin?`<span class="dot">·</span><a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn ↗</a>`:""}</div>
         </div>
         <button class="copy" onclick="copyLink()">Copy link</button>
@@ -142,6 +148,21 @@
       ${player}
       <div class="grid"><div>${tx}</div>${details}</div>`;
     document.getElementById("foot").textContent = "Shareable, durable link — it re-fetches the recording on each load, so it never expires. Read-only; independent of the live screener.";
+  }
+
+  async function enrichDisplayName(id,operationalName){
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),4000);
+    try{
+      const params=new URLSearchParams();
+      params.append("id",id);
+      const response=await fetch(DISPLAY_NAMES_API+"?"+params,{ signal:controller.signal });
+      if(!response.ok) return;
+      const payload=await response.json();
+      const label=document.getElementById("candidate-name");
+      if(label) label.textContent=displayName({ paraformName:payload?.names?.[id], candidate:operationalName });
+    }catch(e){ /* the operational Calls name remains visible */ }
+    finally{ clearTimeout(timer); }
   }
 
   async function load(){
@@ -153,6 +174,7 @@
       if(r.status===404){ app.innerHTML = `<div class="state">This call link isn’t valid.<br><a class="back" href="/#calls">← Back to search</a></div>`; return; }
       if(!r.ok){ app.innerHTML = `<div class="state">${esc(j.error||"Couldn’t load this call.")}<br><a class="back" href="/#calls">← Back</a></div>`; return; }
       render(j);
+      void enrichDisplayName(id,j.candidate.fullName);
     } catch(e){ app.innerHTML = `<div class="state">Network error — please refresh.</div>`; }
   }
   load();
