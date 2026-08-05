@@ -69,9 +69,9 @@
     { "path": "/api/seq/release", "schedule": "0 16 * * *" },
     { "path": "/api/paraai/worker", "schedule": "*/5 * * * *" },
     { "path": "/api/seq/guardian", "schedule": "17 * * * *" },
-    { "path": "/api/seq/booking-membership-refresh", "schedule": "7,37 * * * *" },
-    { "path": "/api/seq/rearm-pause-canary", "schedule": "12,42 * * * *" },
-    { "path": "/api/seq/booking-sweep", "schedule": "22,52 * * * *" },
+    { "path": "/api/seq/booking-membership-refresh", "schedule": "1,11,21,31,41,51 * * * *" },
+    { "path": "/api/seq/rearm-pause-canary", "schedule": "6,16,26,36,46,56 * * * *" },
+    { "path": "/api/seq/booking-sweep", "schedule": "8,18,28,38,48,58 * * * *" },
     { "path": "/api/ops/n8n-watchdog", "schedule": "7 * * * *" },
     { "path": "/api/paraai/submission-notify", "schedule": "47 * * * *" }
   ]
