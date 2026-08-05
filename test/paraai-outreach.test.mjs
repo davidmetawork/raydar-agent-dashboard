@@ -58,6 +58,8 @@ import {
   expiredUnsentCopy,
   expiryEscalationCopy,
   expiryEscalationRung,
+  genericOutreachFailureAlertKey,
+  handleOutreachFailure,
   requestExpiresAtMs,
   sweepExpiryEscalations,
   sweepStaleOutreachExceptions,
@@ -1167,6 +1169,67 @@ test("a retryable pre-send failure re-enters the queue on the throttle, not neve
       lastSeenAt: "2026-07-30T00:00:00.000Z",
     }], { now }),
     [],
+  );
+});
+
+test("generic outreach failure alerts are deduped while attempts keep recording", async () => {
+  const request = {
+    id: "request-digest-bad-input",
+    candidateUserId: "candidate-user",
+    roleName: "Staff Engineer",
+    companyName: "Example Co",
+  };
+  const error = Object.assign(new Error("bad input"), {
+    code: "-32600",
+    outreachStage: "digest_mutation",
+  });
+  const alertKey = genericOutreachFailureAlertKey(
+    request.id,
+    error.code,
+    error.outreachStage,
+  );
+  const recorded = [];
+  const claims = [];
+  const notices = [];
+  const dependencies = {
+    recordExceptionImpl: async (entry) => {
+      recorded.push(entry);
+      return {
+        ...entry,
+        requestId: entry.request.id,
+        attempts: recorded.length,
+      };
+    },
+    claimAlertImpl: async (key) => {
+      claims.push(key);
+      return claims.length === 1;
+    },
+    notifyImpl: async (message) => {
+      notices.push(message);
+      return true;
+    },
+    escalateImpl: async () => null,
+  };
+
+  const first = await handleOutreachFailure(error, request, dependencies);
+  const second = await handleOutreachFailure(error, request, dependencies);
+
+  assert.equal(first.notified, true);
+  assert.equal(second.notified, false);
+  assert.deepEqual(claims, [alertKey, alertKey]);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /-32600/);
+  assert.equal(recorded.length, 2);
+  assert.deepEqual(
+    recorded.map((entry) => ({
+      code: entry.code,
+      stage: entry.stage,
+      retryable: entry.retryable,
+    })),
+    [
+      { code: "-32600", stage: "digest_mutation", retryable: true },
+      { code: "-32600", stage: "digest_mutation", retryable: true },
+    ],
   );
 });
 

@@ -157,6 +157,15 @@ export function retryableFailure(code, stage) {
   return PRE_SEND_STAGES.has(clean(stage));
 }
 
+export function genericOutreachFailureAlertKey(requestId, code, stage) {
+  return [
+    clean(requestId),
+    "generic",
+    clean(code || "OUTREACH_FAILED"),
+    clean(stage || "unknown"),
+  ].join(":");
+}
+
 const bool = (value, fallback = false) => {
   if (value == null || value === "") return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
@@ -1934,6 +1943,12 @@ export async function handleOutreachFailure(
   {
     config = outreachConfig(),
     now = Date.now(),
+    claimAlertImpl = claimOutreachExceptionAlert,
+    deliverImpl = deliverMessage,
+    escalateImpl = escalateNearExpiry,
+    notifyImpl = notifySlack,
+    recordExceptionImpl = recordOutreachException,
+    releaseAlertImpl = releaseOutreachExceptionAlert,
   } = {},
 ) {
   const code = clean(error?.code || "OUTREACH_FAILED");
@@ -1951,7 +1966,7 @@ export async function handleOutreachFailure(
   ]);
   if (!request?.id) {
     if (tracked.has(code)) {
-      await notifySlack(
+      await notifyImpl(
         `🚨 Para AI outreach: ${code} for a scheduled follow-up. No duplicate email will be attempted; review the outreach ledger.`,
       ).catch(() => {});
     }
@@ -1963,36 +1978,36 @@ export async function handleOutreachFailure(
   // A blocked match is a human decision, not a system fault: record it durably and
   // alert once, exactly like the missing-email path. Never silent.
   if (HELD_ALERT_CODES.has(code)) {
-    const record = await recordOutreachException({
+    const record = await recordExceptionImpl({
       request,
       code,
       discovery: null,
       stage: error?.outreachStage || null,
       retryable: RECOVERABLE_EXCEPTION_CODES.has(code),
     });
-    const escalation = await escalateNearExpiry(request, code, { now });
-    const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
+    const escalation = await escalateImpl(request, code, { now });
+    const alertClaimed = await claimAlertImpl(request.id).catch(() => false);
     if (!alertClaimed) return { ...record, escalation };
-    await notifySlack(heldAlertCopy(code, request, error)).catch(() => false);
+    await notifyImpl(heldAlertCopy(code, request, error)).catch(() => false);
     return { ...record, escalation };
   }
   if (code === "OUTREACH_NO_EMAIL") {
-    const record = await recordOutreachException({
+    const record = await recordExceptionImpl({
       request,
       code,
       discovery: error?.discovery || null,
       stage: error?.outreachStage || "contact_discovery",
       retryable: true,
     });
-    const escalation = await escalateNearExpiry(request, code, { now });
-    const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
+    const escalation = await escalateImpl(request, code, { now });
+    const alertClaimed = await claimAlertImpl(request.id).catch(() => false);
     if (!alertClaimed) return record;
     const copy = missingEmailAlertCopy(request, error?.discovery);
-    let notified = await notifySlack(copy.slack).catch(() => false);
+    let notified = await notifyImpl(copy.slack).catch(() => false);
     if (!notified) {
       const day = new Date().toISOString().slice(0, 10);
       const actionKey = `missing-email-alert:${request.id}:${day}`;
-      notified = Boolean(await deliverMessage({
+      notified = Boolean(await deliverImpl({
         mailbox: config.mailbox,
         message: {
           actionKey,
@@ -2006,25 +2021,32 @@ export async function handleOutreachFailure(
       }).catch(() => null));
     }
     if (!notified) {
-      await releaseOutreachExceptionAlert(request.id).catch(() => {});
+      await releaseAlertImpl(request.id).catch(() => {});
     }
     return { ...record, notified, escalation };
   }
-  const record = await recordOutreachException({
+  const stage = error?.outreachStage || null;
+  const record = await recordExceptionImpl({
     request,
     code,
     discovery: null,
-    stage: error?.outreachStage || null,
-    retryable: retryableFailure(code, error?.outreachStage),
+    stage,
+    retryable: retryableFailure(code, stage),
   });
-  const escalation = await escalateNearExpiry(request, code, { now });
+  const escalation = await escalateImpl(request, code, { now });
   // AUTH_EXPIRED alerting is owned by the global auth latch. It deduplicates
   // the outage across all requests and carries the recapture runbook.
   if (code === "AUTH_EXPIRED") return { ...record, escalation };
-  await notifySlack(
-    `🚨 Para AI outreach: ${code} for ${request?.id || "scheduled follow-up"}. No duplicate email will be attempted; review the outreach ledger.`,
-  ).catch(() => {});
-  return { ...record, escalation };
+  const alertKey = genericOutreachFailureAlertKey(request.id, code, stage);
+  const alertClaimed = await claimAlertImpl(alertKey).catch(() => false);
+  if (!alertClaimed) return { ...record, escalation, notified: false };
+  const notified = await notifyImpl(
+    `🚨 Para AI outreach: ${code} for ${request.id}. No duplicate email will be attempted; review the outreach ledger.`,
+  ).catch(() => false);
+  if (!notified) {
+    await releaseAlertImpl(alertKey).catch(() => {});
+  }
+  return { ...record, escalation, notified };
 }
 
 export async function runOutreachTick({
