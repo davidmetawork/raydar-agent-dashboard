@@ -24,11 +24,12 @@ export const PROTECTED_RECRUITERS = [
     // source-of-truth signal.
     posterAliases: ["kyra phillips (wyman)", "kyra phillips", "kyra wyman"],
     // Known LinkedIn job IDs owned by this recruiter (from the cohort run logs:
-    // Corporate Counsel + its archived Commercial Counsel sibling).
-    linkedinJobIds: ["4436912132", "4400419853"],
+    // Corporate Counsel + its archived Commercial Counsel sibling, plus the
+    // Litigation Counsel - AI job found live on 2026-08-05).
+    linkedinJobIds: ["4436912132", "4400419853", "4447597219"],
     // Role-title patterns — the downstream signal once the poster is no longer
     // attached (the Sequences launcher buckets applicants by parsed role title).
-    roleTitlePatterns: ["corporate counsel", "commercial counsel"],
+    roleTitlePatterns: ["corporate counsel", "commercial counsel", "litigation counsel"],
   },
 ];
 

@@ -20,10 +20,11 @@ test("poster match: Kyra aliases (case/space tolerant), not others", () => {
   assert.equal(protectedRecruiterForPoster(null), null);
 });
 
-test("role-title match: Corporate/Commercial Counsel, embedded + case-insensitive", () => {
+test("role-title match: Corporate/Commercial/Litigation Counsel, embedded + case-insensitive", () => {
   assert.ok(protectedRecruiterForRoleTitle("Corporate Counsel"));
   assert.ok(protectedRecruiterForRoleTitle("corporate counsel (remote - us)"));
   assert.ok(protectedRecruiterForRoleTitle("Commercial Counsel (2nd Legal Hire) - HealthTech"));
+  assert.ok(protectedRecruiterForRoleTitle("Litigation Counsel - AI (Remote)"));
   assert.equal(protectedRecruiterForRoleTitle("Product Manager"), null);
   assert.equal(protectedRecruiterForRoleTitle("General Counsel"), null); // not a listed pattern
   assert.equal(protectedRecruiterForRoleTitle(""), null);
@@ -32,6 +33,7 @@ test("role-title match: Corporate/Commercial Counsel, embedded + case-insensitiv
 test("LinkedIn job id match", () => {
   assert.ok(protectedRecruiterForLinkedinJobId("4436912132"));
   assert.ok(protectedRecruiterForLinkedinJobId("4400419853"));
+  assert.ok(protectedRecruiterForLinkedinJobId("4447597219")); // Litigation Counsel - AI
   assert.equal(protectedRecruiterForLinkedinJobId("4439784327"), null); // David's VP role
   assert.equal(protectedRecruiterForLinkedinJobId(""), null);
 });
