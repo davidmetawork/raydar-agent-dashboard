@@ -11,7 +11,7 @@ import { takeAlertSlot } from "./store.mjs";
 
 export const CURATED_FIT_STATE_URL = String(
   process.env.PARAAI_CURATED_FIT_STATE_URL
-    || "https://raw.githubusercontent.com/davidmetawork/raydar/main/ops/paraai-curate/state.json",
+    || "https://clients.raydar.xyz/paraai-curated-fit-heartbeat.json",
 ).trim();
 export const CURATED_FIT_STALE_AFTER_MS = 90 * 60_000;
 export const CURATED_FIT_ALERT_TTL_SECONDS = 3 * 60 * 60;

@@ -3,11 +3,19 @@ import test from "node:test";
 
 import {
   CURATED_FIT_ALERT_TTL_SECONDS,
+  CURATED_FIT_STATE_URL,
   curatedFitDeadmanStatus,
   runCuratedFitDeadmanTick,
 } from "../api/paraai/_lib/curated-fit-deadman.mjs";
 
 const NOW = Date.parse("2026-08-06T22:30:00.000Z");
+
+test("dead-man reads the public PII-free heartbeat rather than private GitHub", () => {
+  assert.equal(
+    CURATED_FIT_STATE_URL,
+    "https://clients.raydar.xyz/paraai-curated-fit-heartbeat.json",
+  );
+});
 
 function response(body, { status = 200, contentLength = null } = {}) {
   return {
