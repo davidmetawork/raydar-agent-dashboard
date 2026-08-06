@@ -960,6 +960,14 @@
         return { cls:"amber", border:true, label:"attendance unverified",
           title:"The recorder labelled this call a no-show, but Recall did not provide its explicit no-one-ever-joined outcome. Nothing will be sent automatically." };
       }
+      // Connector referrals are followed up on the referrer's own email thread
+      // by the Connector Referral Follow-Ups lane, so the engine deliberately
+      // keeps them OUT of the Paraform reschedule sequence (David, 2026-08-06).
+      // Without this case they would read as "outreach stopped", which is the
+      // opposite of the truth - they ARE being actioned, just elsewhere.
+      if (fuStageIs(stage,["connector_chase"]) || stage==="skipped_connector_chase" || stage==="paused_connector_chase")
+        return { cls:"green", label:"✓ connector follow-up",
+          title:"This candidate came in through a connector referral, so they are being followed up on the original referral email thread rather than the Paraform reschedule sequence. No action needed." };
       if (stage==="enrolled" || stage==="manual_enrolled"){
         if (e.deliveryReady!==true)
           return { cls:"amber", border:true, label:"verification pending",
