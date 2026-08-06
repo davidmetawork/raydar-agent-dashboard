@@ -675,17 +675,18 @@
       const ds = fuDisplayStatus(c, act);
       const why = fuReason(c);   // lifecycle: why the engine did / didn't act (null until the ledger loads)
       const visibleName = displayName(c);
-      return `<div class="row fu${why&&why.border?" fu-flag":""}">
-        <div class="who">${nameLink(visibleName)}<span class="t">${fmtTime(c.startedAt)}</span></div>
-        <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(fuShortWhat(c))}</span></div>
-        <div class="fu-actions">
-          <a class="resched" href="${escAttr(paraformQ(visibleName))}" target="_blank" rel="noopener noreferrer" title="Open ${escAttr(visibleName)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
+      const controls = fuAttendanceConfirmed(c)
+        ? `<span class="auto-tag">auto</span>`
+        : `<a class="resched" href="${escAttr(paraformQ(visibleName))}" target="_blank" rel="noopener noreferrer" title="Open ${escAttr(visibleName)} in Paraform to reschedule">Reschedule <span class="x">↗</span></a>
           <span class="fu-marks">
             <button type="button" class="mark ${st==='sequence_sent'?'on':''}" onclick="setAction('${c.id}','${st==='sequence_sent'?'none':'sequence_sent'}')" title="A rescheduling sequence is reaching out">Sequence sent</button>
             <button type="button" class="mark ${st==='rescheduled'?'on':''}" onclick="setAction('${c.id}','${st==='rescheduled'?'none':'rescheduled'}')" title="They rebooked — done">Rescheduled</button>
             <button type="button" class="mark ${st==='resolved'?'on':''}" onclick="setAction('${c.id}','${st==='resolved'?'none':'resolved'}')" title="Checked it out — nothing more to do">✓ Resolved</button>
-          </span>
-        </div>
+          </span>`;
+      return `<div class="row fu${why&&why.border?" fu-flag":""}">
+        <div class="who">${nameLink(visibleName)}<span class="t">${fmtTime(c.startedAt)}</span></div>
+        <div class="what"><span class="fu-pillrow"><span class="pill ${ds.cls}"><span class="d"></span>${esc(ds.label)}</span>${fuWhyChip(why)}</span><span class="sub">${esc(fuShortWhat(c))}</span></div>
+        <div class="fu-actions">${controls}</div>
       </div>`;
     }
     // Read-only "Rescheduled (auto)" row — candidate auto-detected as rebooked.
@@ -792,6 +793,7 @@
         const nameIsExactHomonym=(refsByName.get(k)||new Set()).size>1;
         if (!nameIsExactHomonym && humanResched.has(k))             autoDone.push({ ...latest, via:"human" });
         else if (!nameIsExactHomonym && rebooked.has(k))            autoDone.push({ ...latest, via:"rebook" });
+        else if (fuAttendanceConfirmed(latest))                      manualDone.push(latest);
         else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved") manualDone.push(latest);
         else                                                        open.push(latest);
       }
@@ -888,13 +890,20 @@
     const fuStageIs = (stage, names) => names.some(name=>stage===name||stage===`manual_${name}`);
     function fuIsDefinitiveNoShow(c){
       return c?.verdict==="no_show"
-        && fuLedgerEntry(c)?.definitiveNoShow===true;
+        && (fuLedgerEntry(c)?.attendanceStatus==="confirmed_no_show"
+          || fuLedgerEntry(c)?.definitiveNoShow===true);
+    }
+    function fuAttendanceConfirmed(c){
+      return c?.verdict==="no_show"
+        && fuLedgerEntry(c)?.attendanceStatus==="attended";
     }
     function fuOutreachStopped(c){
       const stage=String(fuLedgerEntry(c)?.stage||"");
       return stage.startsWith("paused") || stage.startsWith("removed");
     }
     function fuDisplayStatus(c, action){
+      if (fuAttendanceConfirmed(c))
+        return { cls:"good", label:"Attendance confirmed" };
       if (fuOutreachStopped(c))
         return { cls:"muted", label:"Outreach stopped" };
       if (action?.status==="rescheduled" || action?.status==="resolved")
@@ -907,12 +916,15 @@
     }
     function fuShortWhat(c){
       if (c?.verdict!=="no_show") return shortWhat(c?.verdict);
+      if (fuAttendanceConfirmed(c))
+        return "Exact recorder participant log confirms a human joined";
       return fuIsDefinitiveNoShow(c)
         ? "Explicit recorder outcome: nobody ever joined"
         : "Recorder label only — exact no-one-ever-joined proof is unavailable";
     }
     function fuPriorOutcomeLabel(c){
       if (c?.verdict!=="no_show") return verdictView(c?.verdict).label;
+      if (fuAttendanceConfirmed(c)) return "Attendance confirmed";
       return fuIsDefinitiveNoShow(c)
         ? "Confirmed no-show"
         : "Attendance unverified";
@@ -935,7 +947,13 @@
         return { cls:"amber", border:true, label:"not auto-evaluated",
           title:"No durable lifecycle decision is attached to this call. Review the exact call in Paraform." };
       const stage = String(e.stage||"");
-      if (c.verdict==="no_show" && e.definitiveNoShow!==true){
+      if (c.verdict==="no_show" && e.attendanceStatus==="attended")
+        return { cls:"green", label:"✓ no follow-up needed",
+          title:"The exact Recall participant log confirms a human joined this call, so no no-show outreach will be sent." };
+      if (c.verdict==="no_show" && e.attendanceStatus==="unavailable")
+        return { cls:"amber", border:true, label:"historical evidence unavailable",
+          title:"The exact historical recorder artifact is no longer available. Attendance remains unknown and nothing will be sent automatically." };
+      if (c.verdict==="no_show" && !fuIsDefinitiveNoShow(c)){
         if (stage.startsWith("paused") || stage.startsWith("removed"))
           return { cls:"", label:"outreach stopped: unverified",
             title:"The recorder's no-show label lacked explicit no-one-ever-joined proof, so sequence outreach was stopped. The action history is retained for audit." };

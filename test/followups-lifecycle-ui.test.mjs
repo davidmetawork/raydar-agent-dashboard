@@ -35,7 +35,15 @@ function backlogContext({
   upcoming = [],
   actionsMap = {},
   candidateRefs = {},
+  attendanceStatuses = {},
 } = {}) {
+  const ledgerEntry = (row) => {
+    for (const alias of [row?.id, row?.rowId, row?.callId, row?.botId]) {
+      if (attendanceStatuses[alias]) return { attendanceStatus: attendanceStatuses[alias] };
+      if (candidateRefs[alias]) return { candidateRef: candidateRefs[alias] };
+    }
+    return null;
+  };
   return context({
     historyDays,
     lastData: { calls, upcoming },
@@ -51,12 +59,10 @@ function backlogContext({
       || actionsMap[row?.botId]
       || null
     ),
-    fuLedgerEntry: (row) => {
-      for (const alias of [row?.id, row?.rowId, row?.callId, row?.botId]) {
-        if (candidateRefs[alias]) return { candidateRef: candidateRefs[alias] };
-      }
-      return null;
-    },
+    fuLedgerEntry: ledgerEntry,
+    fuAttendanceConfirmed: (row) => (
+      row?.verdict === "no_show" && ledgerEntry(row)?.attendanceStatus === "attended"
+    ),
   });
 }
 
@@ -192,6 +198,46 @@ test("follow-up backlog carries display identity without changing its operationa
   assert.equal(result.open.length, 1);
   assert.equal(result.open[0].candidate, "Booking Alias");
   assert.equal(result.open[0].paraformName, `  Exact "Nickname" O'Neil  `);
+});
+
+test("confirmed attendance moves a historical no-show out of the action queue", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [{
+        id: "row-attended",
+        b: "bot-attended",
+        t: "2026-07-17T15:00:00.000Z",
+        c: "Attended Example",
+        v: "no_show",
+      }],
+    }],
+    attendanceStatuses: { "bot-attended": "attended" },
+  }));
+
+  assert.equal(result.open.length, 0);
+  assert.equal(result.manualDone.length, 1);
+  assert.equal(result.manualDone[0].id, "row-attended");
+});
+
+test("confirmed no-shows and unavailable historical evidence remain visible for review", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [
+        { id: "row-no-show", b: "bot-no-show", t: "2026-07-17T15:00:00.000Z", c: "No Show Example", v: "no_show" },
+        { id: "row-unavailable", b: "bot-unavailable", t: "2026-07-17T16:00:00.000Z", c: "Unavailable Example", v: "no_show" },
+      ],
+    }],
+    attendanceStatuses: {
+      "bot-no-show": "confirmed_no_show",
+      "bot-unavailable": "unavailable",
+    },
+  }));
+
+  assert.deepEqual(
+    Array.from(result.open, (row) => row.id).sort(),
+    ["row-no-show", "row-unavailable"],
+  );
+  assert.equal(result.manualDone.length, 0);
 });
 
 function lifecycleContext({ fetchImpl } = {}) {
@@ -348,6 +394,41 @@ test("definitive no-show proof is presented as confirmed", () => {
   assert.equal(ctx.reason(row).label, "automation pending");
   assert.match(ctx.summary(row), /Explicit recorder outcome/);
   assert.equal(ctx.prior(row), "Confirmed no-show");
+});
+
+test("backfilled attendance states override stale no-show actions without guessing", () => {
+  const ctx = lifecycleContext();
+  const row = {
+    id: "call-1",
+    candidate: "Ada Example",
+    verdict: "no_show",
+    endedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+  };
+
+  ctx.setLedger({
+    byCall: { "call-1": { stage: "paused_wrong_enrollment", attendanceStatus: "attended" } },
+    byKey: {},
+  });
+  assert.equal(ctx.status(row, { status: "resolved" }).label, "Attendance confirmed");
+  assert.equal(ctx.reason(row).label, "✓ no follow-up needed");
+  assert.match(ctx.summary(row), /human joined/);
+  assert.equal(ctx.prior(row), "Attendance confirmed");
+
+  ctx.setLedger({
+    byCall: { "call-1": { stage: "confirmed_pending", attendanceStatus: "confirmed_no_show" } },
+    byKey: {},
+  });
+  assert.equal(ctx.definitive(row), true);
+  assert.equal(ctx.status(row, null).label, "Confirmed no-show");
+  assert.equal(ctx.reason(row).label, "automation pending");
+
+  ctx.setLedger({
+    byCall: { "call-1": { stage: "skipped_unverified_no_show", attendanceStatus: "unavailable" } },
+    byKey: {},
+  });
+  assert.equal(ctx.definitive(row), false);
+  assert.equal(ctx.status(row, null).label, "Attendance unverified");
+  assert.equal(ctx.reason(row).label, "historical evidence unavailable");
 });
 
 test("unsafe enrolled records never render as successfully in sequence", () => {
