@@ -14,18 +14,23 @@ import {
 } from "../../seq/_lib/core.mjs";
 import {
   kv,
+  pipeline,
   storeConfigured,
 } from "../../sourcing/_lib/store.mjs";
 
 export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
 
-export const INBOX_CACHE_KEY = "inbox:v2:feed";
-export const INBOX_BUILD_LOCK_KEY = "inbox:v2:feed:lock";
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
-export const INBOX_CACHE_TTL_SECONDS = 90;
-export const INBOX_FANOUT_CONCURRENCY = 6;
+export const INBOX_SEQUENCE_SNAPSHOTS_KEY = "inbox:v3:sequences";
+export const INBOX_CATALOG_KEY = "inbox:v3:catalog";
+export const INBOX_RECENT_KEY = "inbox:v3:recent";
+export const INBOX_REFRESH_META_KEY = "inbox:v3:refresh";
+export const INBOX_SYNC_LOCK_KEY = "inbox:v3:sync:lock";
+export const INBOX_FANOUT_CONCURRENCY = 3;
 export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
+export const INBOX_SYNC_BATCH_SIZE = 18;
+export const INBOX_SEQUENCE_STALE_MS = 15 * 60 * 1_000;
 export const INBOX_TRIAGE_STATUSES = Object.freeze(["archived", "complete"]);
 export const INBOX_EXCLUDED_ADDRESSES = Object.freeze(["david@raydar.xyz"]);
 
@@ -40,6 +45,7 @@ const stringValue = (value) => (
 );
 
 const arrayValue = (value) => (Array.isArray(value) ? value : []);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function addressParts(value) {
   if (Array.isArray(value)) return value.flatMap(addressParts);
@@ -117,8 +123,11 @@ export async function requireInboxAuth(req, res) {
 export async function inboxTrpcGet(
   procedure,
   json,
-  _tries = 1,
+  tries = 1,
   timeoutMs = INBOX_VENDOR_TIMEOUT_MS,
+  fetchImpl = fetch,
+  sleepImpl = sleep,
+  randomImpl = Math.random,
 ) {
   const input = {
     json,
@@ -126,22 +135,64 @@ export async function inboxTrpcGet(
   };
   const url = `${BASE}/trpc/${procedure}?input=`
     + encodeURIComponent(JSON.stringify(input));
-  const response = await fetch(url, {
-    headers: headers(),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (response.status === 401) {
-    const error = new Error("AUTH_EXPIRED");
-    error.code = "AUTH_EXPIRED";
-    throw error;
+  const attempts = Math.max(1, Number(tries) || 1);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchImpl(url, {
+        headers: headers(),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (response.status === 401) {
+        // Paraform also uses 401 as a burst-throttle signal. Treating it as a
+        // session verdict is what made healthy Inbox runs silently lose most
+        // sequences. The health endpoint owns session-expiry classification;
+        // a feed read only retries and, if needed, retains the old shard.
+        const error = new Error("PARAFORM_THROTTLED");
+        error.code = "PARAFORM_THROTTLED";
+        error.retryable = true;
+        error.retryAfterMs = 600;
+        throw error;
+      }
+      const body = await response.json();
+      if (!response.ok || body?.error) {
+        const error = new Error(
+          body?.error?.json?.message || `Paraform HTTP ${response.status}`,
+        );
+        error.code = response.status === 429
+          ? "PARAFORM_THROTTLED"
+          : response.status >= 500
+            ? "PARAFORM_UPSTREAM"
+            : "PARAFORM_READ_FAILED";
+        error.retryable = response.status === 429 || response.status >= 500;
+        if (response.status === 429) {
+          const retryAfter = Number(response.headers?.get?.("retry-after"));
+          error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(5_000, retryAfter * 1_000)
+            : 600;
+        }
+        throw error;
+      }
+      return body?.result?.data?.json;
+    } catch (error) {
+      if (error?.code === "AUTH_EXPIRED") throw error;
+      if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+        error.code = "PARAFORM_TIMEOUT";
+        error.retryable = true;
+      }
+      if (
+        !error?.code
+        && (error instanceof TypeError || error instanceof SyntaxError)
+      ) {
+        error.code = "PARAFORM_NETWORK";
+        error.retryable = true;
+      }
+      if (attempt >= attempts || error?.retryable !== true) throw error;
+      const retryDelay = Number(error?.retryAfterMs)
+        || (error?.code === "PARAFORM_THROTTLED" ? 600 : 200) * attempt;
+      await sleepImpl(retryDelay + Math.floor(randomImpl() * 250));
+    }
   }
-  const body = await response.json();
-  if (!response.ok || body?.error) {
-    throw new Error(
-      body?.error?.json?.message || `Paraform HTTP ${response.status}`,
-    );
-  }
-  return body?.result?.data?.json;
+  return undefined;
 }
 
 export function normalizeReplyCategory(value) {
@@ -335,14 +386,125 @@ export async function mapWithConcurrency(items, limit, worker) {
   return out;
 }
 
-export async function buildInboxFeed({
+function publicInboxCampaign(campaign) {
+  const emailReplies = Number(campaign?.email_replies);
+  return {
+    id: stringValue(campaign?.id),
+    name: stringValue(campaign?.name) || "Untitled sequence",
+    kind: stringValue(campaign?.kind || campaign?.recipient_kind),
+    can_reply: Boolean(campaign?.can_reply),
+    email_replies: Number.isFinite(emailReplies) ? emailReplies : null,
+  };
+}
+
+function leadCategories(inboxData, relevantLeadIds = new Set()) {
+  const categories = {};
+  for (const lead of arrayValue(inboxData?.campaign_to_candidate_users)) {
+    const id = stringValue(lead?.id);
+    if (!id || !relevantLeadIds.has(id)) continue;
+    categories[id] = {
+      reply_category: normalizeReplyCategory(lead?.reply_category),
+      tracking_status: normalizeTrackingStatus(lead?.tracking_status),
+      is_archived: Boolean(lead?.is_archived),
+    };
+  }
+  return categories;
+}
+
+function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt) {
+  const campaignId = stringValue(campaign?.id);
+  const recentLeadIds = new Set(
+    [...recentByGmail.values()]
+      .filter((reply) => stringValue(reply?.sequence_id) === campaignId)
+      .map((reply) => stringValue(reply?.id))
+      .filter(Boolean),
+  );
+  return {
+    version: 3,
+    sequence_id: campaignId,
+    sequence_name: stringValue(campaign?.name) || "Untitled sequence",
+    email_replies: Number.isFinite(Number(campaign?.email_replies))
+      ? Number(campaign.email_replies)
+      : null,
+    refreshed_at: refreshedAt,
+    replies: flattenCampaignInbox(campaign, inboxData, recentByGmail),
+    // Reply rows already carry their category. Keep only lead metadata needed
+    // to enrich the bounded recent-reply fallback, not every sequence member.
+    lead_categories: leadCategories(inboxData, recentLeadIds),
+  };
+}
+
+function snapshotTime(snapshot) {
+  const value = Date.parse(snapshot?.refreshed_at || "");
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function selectInboxCampaigns(
+  campaigns,
+  previousState,
+  recentReplies,
+  {
+    nowMs = Date.now(),
+    batchSize = INBOX_SYNC_BATCH_SIZE,
+    staleMs = INBOX_SEQUENCE_STALE_MS,
+  } = {},
+) {
+  const snapshots = previousState?.snapshots instanceof Map
+    ? previousState.snapshots
+    : new Map();
+  const attempts = previousState?.meta?.sequence_attempts || {};
+  const recentSequenceIds = new Set(
+    arrayValue(recentReplies)
+      .map((reply) => stringValue(reply?.sequence_id))
+      .filter(Boolean),
+  );
+  const eligible = [];
+  for (const campaign of arrayValue(campaigns)) {
+    const id = stringValue(campaign?.id);
+    const snapshot = snapshots.get(id);
+    const currentCount = Number(campaign?.email_replies);
+    const storedCount = Number(snapshot?.email_replies);
+    const countChanged = snapshot
+      && Number.isFinite(currentCount)
+      && (!Number.isFinite(storedCount) || currentCount !== storedCount);
+    const recent = recentSequenceIds.has(id);
+    const stale = snapshot && nowMs - snapshotTime(snapshot) >= staleMs;
+    let priority;
+    if (!snapshot) priority = 0;
+    else if (countChanged) priority = 1;
+    else if (recent) priority = 2;
+    else if (stale) priority = 3;
+    else continue;
+    const lastAttempt = Date.parse(attempts[id] || "");
+    eligible.push({
+      campaign,
+      priority,
+      attemptedAt: Number.isFinite(lastAttempt) ? lastAttempt : 0,
+      snapshotAt: snapshotTime(snapshot),
+    });
+  }
+  eligible.sort((a, b) => (
+    a.priority - b.priority
+    || a.attemptedAt - b.attemptedAt
+    || a.snapshotAt - b.snapshotAt
+    || stringValue(a.campaign?.id).localeCompare(stringValue(b.campaign?.id))
+  ));
+  const limit = Number.isFinite(batchSize)
+    ? Math.max(0, Math.floor(batchSize))
+    : eligible.length;
+  return eligible.slice(0, limit).map(({ campaign }) => campaign);
+}
+
+export async function buildInboxRefresh({
   get = inboxTrpcGet,
   concurrency = INBOX_FANOUT_CONCURRENCY,
   now = () => new Date(),
   budgetMs = INBOX_BUILD_BUDGET_MS,
+  batchSize = INBOX_SYNC_BATCH_SIZE,
+  previousState = emptyInboxSnapshotState(),
 } = {}) {
   const deadline = Date.now() + Math.max(1_000, budgetMs);
-  const call = (procedure, input) => {
+  const call = (procedure, input, tries = 2) => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       const error = new Error("INBOX_BUILD_DEADLINE");
@@ -352,7 +514,7 @@ export async function buildInboxFeed({
     return get(
       procedure,
       input,
-      1,
+      tries,
       Math.min(INBOX_VENDOR_TIMEOUT_MS, Math.max(250, remaining)),
     );
   };
@@ -376,8 +538,12 @@ export async function buildInboxFeed({
       .filter((item) => stringValue(item?.gmail_id))
       .map((item) => [String(item.gmail_id), item]),
   );
+  const selected = selectInboxCampaigns(targets, previousState, recentReplies, {
+    nowMs: Date.now(),
+    batchSize,
+  });
 
-  const results = await mapWithConcurrency(targets, concurrency, async (campaign) => {
+  const results = await mapWithConcurrency(selected, concurrency, async (campaign) => {
     try {
       const data = await call(
         "campaigns.getCampaignInboxData",
@@ -394,40 +560,38 @@ export async function buildInboxFeed({
   });
 
   const failures = results.filter((result) => !result.ok);
-  const categoryByLead = new Map();
-  const rows = [];
-  for (const result of results.filter((item) => item.ok)) {
-    for (const lead of arrayValue(result.data?.campaign_to_candidate_users)) {
-      categoryByLead.set(
-        `${result.campaign.id}:${lead?.id || ""}`,
-        {
-          reply_category: lead?.reply_category,
-          tracking_status: lead?.tracking_status,
-          is_archived: lead?.is_archived,
-        },
-      );
-    }
-    rows.push(...flattenCampaignInbox(result.campaign, result.data, recentByGmail));
-  }
-
-  const replies = mergeAndSortReplies(
-    rows,
-    recentReplies,
-    campaigns,
-    categoryByLead,
-  );
-  const partial = failures.length > 0 || Boolean(recentError);
   const generatedAt = now().toISOString();
   return {
     generated_at: generatedAt,
-    partial,
-    cacheable: !partial,
-    replies,
-    counts: countInboxReplies(replies),
+    catalog: {
+      version: 3,
+      refreshed_at: generatedAt,
+      campaigns_total: campaigns.length,
+      targets: targets.map(publicInboxCampaign),
+    },
+    target_sequence_ids: targets.map((campaign) => stringValue(campaign?.id)),
+    selected_sequence_ids: selected.map((campaign) => stringValue(campaign?.id)),
+    snapshots: results
+      .filter((result) => result.ok)
+      .map((result) => createSequenceSnapshot(
+        result.campaign,
+        result.data,
+        recentByGmail,
+        generatedAt,
+      )),
+    recent: recentError
+      ? null
+      : {
+          version: 3,
+          refreshed_at: generatedAt,
+          replies: recentReplies,
+        },
     scan: {
       campaigns_total: campaigns.length,
-      campaigns_attempted: targets.length,
-      campaigns_succeeded: targets.length - failures.length,
+      campaigns_targeted: targets.length,
+      campaigns_attempted: selected.length,
+      campaigns_deferred: Math.max(0, targets.length - selected.length),
+      campaigns_succeeded: selected.length - failures.length,
       campaigns_failed: failures.length,
       recent_count: recentReplies.length,
       recent_failed: Boolean(recentError),
@@ -440,6 +604,38 @@ export async function buildInboxFeed({
   };
 }
 
+// Backward-compatible one-shot builder retained for focused contract tests and
+// diagnostics. Production serves the durable v3 materialized state below.
+export async function buildInboxFeed(options = {}) {
+  const refresh = await buildInboxRefresh({
+    ...options,
+    batchSize: Number.POSITIVE_INFINITY,
+    previousState: emptyInboxSnapshotState(),
+  });
+  const state = mergeInboxRefreshState(emptyInboxSnapshotState(), refresh);
+  const materialized = assembleInboxSnapshotFeed(state, {
+    now: options.now || (() => new Date()),
+  });
+  const partial = refresh.scan.campaigns_failed > 0
+    || refresh.scan.recent_failed;
+  return {
+    generated_at: refresh.generated_at,
+    partial,
+    cacheable: !partial,
+    replies: materialized.replies,
+    counts: materialized.counts,
+    scan: {
+      campaigns_total: refresh.scan.campaigns_total,
+      campaigns_attempted: refresh.scan.campaigns_targeted,
+      campaigns_succeeded: refresh.scan.campaigns_succeeded,
+      campaigns_failed: refresh.scan.campaigns_failed,
+      recent_count: refresh.scan.recent_count,
+      recent_failed: refresh.scan.recent_failed,
+      failures: refresh.scan.failures,
+    },
+  };
+}
+
 const parseJson = (value) => {
   try {
     return typeof value === "string" && value ? JSON.parse(value) : null;
@@ -447,6 +643,355 @@ const parseJson = (value) => {
     return null;
   }
 };
+
+function storedObject(value) {
+  return typeof value === "string" ? parseJson(value) : value;
+}
+
+function storedHashEntries(value) {
+  if (Array.isArray(value)) {
+    const entries = [];
+    for (let index = 0; index + 1 < value.length; index += 2) {
+      entries.push([value[index], value[index + 1]]);
+    }
+    return entries;
+  }
+  return value && typeof value === "object" ? Object.entries(value) : [];
+}
+
+function normalizeSequenceSnapshot(value, fieldId) {
+  const snapshot = storedObject(value);
+  const sequenceId = stringValue(snapshot?.sequence_id || fieldId);
+  if (
+    !snapshot
+    || typeof snapshot !== "object"
+    || snapshot.version !== 3
+    || !sequenceId
+    || sequenceId !== stringValue(fieldId)
+    || !Array.isArray(snapshot.replies)
+    || !snapshot.lead_categories
+    || typeof snapshot.lead_categories !== "object"
+  ) {
+    return null;
+  }
+  return {
+    version: 3,
+    sequence_id: sequenceId,
+    sequence_name: stringValue(snapshot.sequence_name) || "Untitled sequence",
+    email_replies: Number.isFinite(Number(snapshot.email_replies))
+      ? Number(snapshot.email_replies)
+      : null,
+    refreshed_at: stringValue(snapshot.refreshed_at),
+    replies: snapshot.replies.filter((reply) => reply && typeof reply === "object"),
+    lead_categories: snapshot.lead_categories,
+  };
+}
+
+export function parseInboxSequenceSnapshots(value, { strict = true } = {}) {
+  const snapshots = new Map();
+  for (const [fieldIdRaw, snapshotRaw] of storedHashEntries(value)) {
+    const fieldId = stringValue(fieldIdRaw);
+    if (!fieldId) continue;
+    const snapshot = normalizeSequenceSnapshot(snapshotRaw, fieldId);
+    if (!snapshot) {
+      if (strict) {
+        const error = new Error("invalid persisted Inbox sequence snapshot");
+        error.code = "INVALID_INBOX_SNAPSHOT";
+        throw error;
+      }
+      continue;
+    }
+    snapshots.set(fieldId, snapshot);
+  }
+  return snapshots;
+}
+
+function normalizeInboxCatalog(value) {
+  const catalog = storedObject(value);
+  if (!catalog) {
+    return { version: 3, refreshed_at: "", campaigns_total: 0, targets: [] };
+  }
+  if (catalog.version !== 3 || !Array.isArray(catalog.targets)) {
+    const error = new Error("invalid persisted Inbox catalog");
+    error.code = "INVALID_INBOX_CATALOG";
+    throw error;
+  }
+  return {
+    version: 3,
+    refreshed_at: stringValue(catalog.refreshed_at),
+    campaigns_total: Math.max(0, Number(catalog.campaigns_total) || 0),
+    targets: catalog.targets
+      .map(publicInboxCampaign)
+      .filter((campaign) => campaign.id),
+  };
+}
+
+function normalizeInboxRecent(value) {
+  const recent = storedObject(value);
+  if (!recent) return { version: 3, refreshed_at: "", replies: [] };
+  if (recent.version !== 3 || !Array.isArray(recent.replies)) {
+    const error = new Error("invalid persisted Inbox recent-reply snapshot");
+    error.code = "INVALID_INBOX_RECENT";
+    throw error;
+  }
+  return {
+    version: 3,
+    refreshed_at: stringValue(recent.refreshed_at),
+    replies: recent.replies.filter((reply) => reply && typeof reply === "object"),
+  };
+}
+
+function normalizeInboxRefreshMeta(value) {
+  const meta = storedObject(value);
+  if (!meta) return { version: 3, sequence_attempts: {}, failures: [] };
+  if (meta.version !== 3 || typeof meta !== "object") {
+    const error = new Error("invalid persisted Inbox refresh metadata");
+    error.code = "INVALID_INBOX_REFRESH_META";
+    throw error;
+  }
+  return {
+    ...meta,
+    version: 3,
+    sequence_attempts: meta.sequence_attempts
+      && typeof meta.sequence_attempts === "object"
+      ? meta.sequence_attempts
+      : {},
+    failures: arrayValue(meta.failures),
+  };
+}
+
+export function emptyInboxSnapshotState() {
+  return {
+    snapshots: new Map(),
+    catalog: normalizeInboxCatalog(null),
+    recent: normalizeInboxRecent(null),
+    meta: normalizeInboxRefreshMeta(null),
+  };
+}
+
+export async function readInboxSnapshotState({
+  pipelineImpl = pipeline,
+  configured = storeConfigured(),
+} = {}) {
+  if (!configured) return { status: "unavailable", value: null };
+  try {
+    const values = await pipelineImpl([
+      ["HGETALL", INBOX_SEQUENCE_SNAPSHOTS_KEY],
+      ["GET", INBOX_CATALOG_KEY],
+      ["GET", INBOX_RECENT_KEY],
+      ["GET", INBOX_REFRESH_META_KEY],
+    ]);
+    if (!Array.isArray(values) || values.length !== 4) {
+      throw new Error("Inbox snapshot read returned an invalid response");
+    }
+    return {
+      status: "ready",
+      value: {
+        snapshots: parseInboxSequenceSnapshots(values[0]),
+        catalog: normalizeInboxCatalog(values[1]),
+        recent: normalizeInboxRecent(values[2]),
+        meta: normalizeInboxRefreshMeta(values[3]),
+      },
+    };
+  } catch {
+    return { status: "error", value: null };
+  }
+}
+
+function failureErrorCounts(failures) {
+  const counts = {};
+  for (const failure of arrayValue(failures)) {
+    const error = stringValue(failure?.error) || "read_failed";
+    counts[error] = (counts[error] || 0) + 1;
+  }
+  return counts;
+}
+
+export function mergeInboxRefreshState(previousState, refresh) {
+  const previous = previousState || emptyInboxSnapshotState();
+  const targetIds = new Set(arrayValue(refresh?.target_sequence_ids));
+  const snapshots = new Map(
+    [...(previous.snapshots || new Map()).entries()]
+      .filter(([sequenceId]) => targetIds.has(sequenceId)),
+  );
+  for (const snapshot of arrayValue(refresh?.snapshots)) {
+    const normalized = normalizeSequenceSnapshot(snapshot, snapshot?.sequence_id);
+    if (!normalized || !targetIds.has(normalized.sequence_id)) continue;
+    snapshots.set(normalized.sequence_id, normalized);
+  }
+  const catalog = normalizeInboxCatalog(refresh?.catalog);
+  const recent = refresh?.recent
+    ? normalizeInboxRecent(refresh.recent)
+    : previous.recent || normalizeInboxRecent(null);
+  const sequenceAttempts = {};
+  for (const [sequenceId, attemptedAt] of Object.entries(
+    previous.meta?.sequence_attempts || {},
+  )) {
+    if (targetIds.has(sequenceId)) sequenceAttempts[sequenceId] = attemptedAt;
+  }
+  for (const sequenceId of arrayValue(refresh?.selected_sequence_ids)) {
+    if (targetIds.has(sequenceId)) {
+      sequenceAttempts[sequenceId] = refresh.generated_at;
+    }
+  }
+  const seeded = [...targetIds].filter((sequenceId) => snapshots.has(sequenceId));
+  const generatedMs = Date.parse(refresh?.generated_at || "");
+  const currentMs = Number.isFinite(generatedMs) ? generatedMs : Date.now();
+  const staleCount = seeded.filter((sequenceId) => (
+    currentMs - snapshotTime(snapshots.get(sequenceId)) >= INBOX_SEQUENCE_STALE_MS
+  )).length;
+  const failures = arrayValue(refresh?.scan?.failures);
+  const coverageComplete = Boolean(catalog.refreshed_at)
+    && seeded.length === targetIds.size
+    && failures.length === 0
+    && !refresh?.scan?.recent_failed;
+  const meta = {
+    version: 3,
+    last_refresh_at: stringValue(refresh?.generated_at),
+    last_complete_at: coverageComplete
+      ? stringValue(refresh?.generated_at)
+      : stringValue(previous.meta?.last_complete_at),
+    campaigns_total: catalog.campaigns_total,
+    campaigns_targeted: targetIds.size,
+    campaigns_attempted: Number(refresh?.scan?.campaigns_attempted) || 0,
+    campaigns_deferred: Number(refresh?.scan?.campaigns_deferred) || 0,
+    campaigns_succeeded: Number(refresh?.scan?.campaigns_succeeded) || 0,
+    campaigns_failed: Number(refresh?.scan?.campaigns_failed) || 0,
+    campaigns_seeded: seeded.length,
+    campaigns_missing: Math.max(0, targetIds.size - seeded.length),
+    campaigns_stale: staleCount,
+    recent_count: Number(refresh?.scan?.recent_count) || recent.replies.length,
+    recent_failed: Boolean(refresh?.scan?.recent_failed),
+    failure_error_counts: failureErrorCounts(failures),
+    failures,
+    sequence_attempts: sequenceAttempts,
+  };
+  return { snapshots, catalog, recent, meta };
+}
+
+export async function writeInboxRefreshState(
+  previousState,
+  refresh,
+  {
+    pipelineImpl = pipeline,
+    configured = storeConfigured(),
+  } = {},
+) {
+  if (!configured) {
+    const error = new Error("Inbox state store not configured");
+    error.code = "INBOX_STORE_NOT_CONFIGURED";
+    throw error;
+  }
+  const merged = mergeInboxRefreshState(previousState, refresh);
+  const commands = [];
+  const targetIds = new Set(arrayValue(refresh?.target_sequence_ids));
+  const snapshotArgs = arrayValue(refresh?.snapshots)
+    .map((snapshot) => normalizeSequenceSnapshot(
+      snapshot,
+      snapshot?.sequence_id,
+    ))
+    .filter((snapshot) => snapshot && targetIds.has(snapshot.sequence_id))
+    .flatMap((snapshot) => [
+      stringValue(snapshot.sequence_id),
+      JSON.stringify(snapshot),
+    ]);
+  if (snapshotArgs.length) {
+    commands.push(["HSET", INBOX_SEQUENCE_SNAPSHOTS_KEY, ...snapshotArgs]);
+  }
+  const retainedIds = new Set(merged.snapshots.keys());
+  const prunedIds = [...(previousState?.snapshots || new Map()).keys()]
+    .filter((sequenceId) => !retainedIds.has(sequenceId));
+  if (prunedIds.length) {
+    commands.push(["HDEL", INBOX_SEQUENCE_SNAPSHOTS_KEY, ...prunedIds]);
+  }
+  commands.push(["SET", INBOX_CATALOG_KEY, JSON.stringify(merged.catalog)]);
+  if (refresh?.recent) {
+    commands.push(["SET", INBOX_RECENT_KEY, JSON.stringify(merged.recent)]);
+  }
+  commands.push(["SET", INBOX_REFRESH_META_KEY, JSON.stringify(merged.meta)]);
+  await pipelineImpl(commands);
+  return merged;
+}
+
+export function assembleInboxSnapshotFeed(
+  state,
+  { now = () => new Date() } = {},
+) {
+  const snapshotState = state || emptyInboxSnapshotState();
+  const targets = arrayValue(snapshotState.catalog?.targets);
+  const targetIds = new Set(targets.map((campaign) => stringValue(campaign?.id)));
+  const rows = [];
+  const categoryByLead = new Map();
+  for (const [sequenceId, snapshot] of snapshotState.snapshots || new Map()) {
+    if (!targetIds.has(sequenceId)) continue;
+    rows.push(...arrayValue(snapshot?.replies));
+    for (const [leadId, category] of Object.entries(
+      snapshot?.lead_categories || {},
+    )) {
+      categoryByLead.set(`${sequenceId}:${leadId}`, category);
+    }
+  }
+  const replies = mergeAndSortReplies(
+    rows,
+    snapshotState.recent?.replies,
+    targets,
+    categoryByLead,
+  );
+  const currentMs = now().getTime();
+  const seededCount = [...targetIds]
+    .filter((sequenceId) => snapshotState.snapshots?.has(sequenceId)).length;
+  const staleCount = [...targetIds].filter((sequenceId) => {
+    const snapshot = snapshotState.snapshots?.get(sequenceId);
+    return snapshot
+      && currentMs - snapshotTime(snapshot) >= INBOX_SEQUENCE_STALE_MS;
+  }).length;
+  const catalogReady = Boolean(snapshotState.catalog?.refreshed_at);
+  const missingCount = Math.max(0, targetIds.size - seededCount);
+  const latestFailures = Number(snapshotState.meta?.campaigns_failed) || 0;
+  const stateName = !catalogReady
+    ? "unseeded"
+    : missingCount > 0
+      ? "seeding"
+      : latestFailures > 0 || staleCount > 0
+        ? "degraded"
+        : "ready";
+  return {
+    generated_at: stringValue(
+      snapshotState.meta?.last_refresh_at
+      || snapshotState.catalog?.refreshed_at
+      || snapshotState.recent?.refreshed_at,
+    ),
+    partial: false,
+    cacheable: true,
+    replies,
+    counts: countInboxReplies(replies),
+    freshness: {
+      state: stateName,
+      coverage_complete: catalogReady && missingCount === 0,
+      last_refresh_at: stringValue(snapshotState.meta?.last_refresh_at),
+      last_complete_at: stringValue(snapshotState.meta?.last_complete_at),
+      campaigns_targeted: targetIds.size,
+      campaigns_seeded: seededCount,
+      campaigns_missing: missingCount,
+      campaigns_stale: staleCount,
+      latest_failures: latestFailures,
+    },
+    scan: {
+      campaigns_total: Number(snapshotState.catalog?.campaigns_total) || 0,
+      campaigns_targeted: targetIds.size,
+      campaigns_attempted: Number(snapshotState.meta?.campaigns_attempted) || 0,
+      campaigns_deferred: Number(snapshotState.meta?.campaigns_deferred) || 0,
+      campaigns_succeeded: Number(snapshotState.meta?.campaigns_succeeded) || 0,
+      campaigns_failed: latestFailures,
+      campaigns_seeded: seededCount,
+      campaigns_missing: missingCount,
+      campaigns_stale: staleCount,
+      recent_count: snapshotState.recent?.replies?.length || 0,
+      recent_failed: Boolean(snapshotState.meta?.recent_failed),
+      failure_error_counts: snapshotState.meta?.failure_error_counts || {},
+    },
+  };
+}
 
 function normalizeInboxTriageRecord(value) {
   const record = typeof value === "string" ? parseJson(value) : value;
@@ -624,37 +1169,18 @@ export async function writeInboxTriage(
   return { gmail_id: gmailId, ...record };
 }
 
-export async function readInboxCache() {
-  if (!storeConfigured()) return { status: "unavailable", value: null };
-  try {
-    const value = parseJson(await kv(["GET", INBOX_CACHE_KEY]));
-    return { status: value ? "hit" : "miss", value };
-  } catch {
-    return { status: "error", value: null };
-  }
-}
-
-export async function writeInboxCache(feed) {
-  if (!storeConfigured() || !feed?.cacheable) return false;
-  await kv([
-    "SET",
-    INBOX_CACHE_KEY,
-    JSON.stringify(feed),
-    "EX",
-    INBOX_CACHE_TTL_SECONDS,
-  ]);
-  return true;
-}
-
-export async function acquireInboxBuildLock() {
-  if (!storeConfigured()) {
+export async function acquireInboxSyncLock({
+  kvImpl = kv,
+  configured = storeConfigured(),
+} = {}) {
+  if (!configured) {
     return { status: "unavailable", token: null };
   }
   const token = randomUUID();
   try {
-    const result = await kv([
+    const result = await kvImpl([
       "SET",
-      INBOX_BUILD_LOCK_KEY,
+      INBOX_SYNC_LOCK_KEY,
       token,
       "NX",
       "EX",
@@ -668,8 +1194,14 @@ export async function acquireInboxBuildLock() {
   }
 }
 
-export async function releaseInboxBuildLock(token) {
-  if (!token || !storeConfigured()) return false;
+export async function releaseInboxSyncLock(
+  token,
+  {
+    kvImpl = kv,
+    configured = storeConfigured(),
+  } = {},
+) {
+  if (!token || !configured) return false;
   const script = `
     if redis.call('GET', KEYS[1]) == ARGV[1] then
       return redis.call('DEL', KEYS[1])
@@ -677,11 +1209,11 @@ export async function releaseInboxBuildLock(token) {
     return 0
   `;
   try {
-    return Number(await kv([
+    return Number(await kvImpl([
       "EVAL",
       script,
       1,
-      INBOX_BUILD_LOCK_KEY,
+      INBOX_SYNC_LOCK_KEY,
       token,
     ])) === 1;
   } catch {
