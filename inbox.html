@@ -230,7 +230,7 @@
 const $=(id)=>document.getElementById(id);
 let AUTH={required:false,authenticated:false,clientId:null,token:null,email:"",domains:["raydar.xyz","raydargroup.com"]};
 const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
-const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,triaging:new Set(),triageRevision:0};
+const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,syncing:false,snapshotState:"unseeded",seedPasses:0,triaging:new Set(),triageRevision:0};
 if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
 
 function setHealth(kind,label){
@@ -640,7 +640,7 @@ async function loadHealth(){
 async function loadFeed(){
   if(STATE.loading)return;
   const triageRevisionAtStart=STATE.triageRevision;
-  STATE.loading=true;$("feedMeta").textContent="Refreshing replies…";
+  STATE.loading=true;$("feedMeta").textContent=STATE.replies.length?"Checking reliable snapshot…":"Loading reliable snapshot…";
   try{
     const response=await fetch("/api/inbox/feed",{headers:authHeaders(),cache:"no-store"});
     const data=await response.json().catch(()=>({}));
@@ -656,23 +656,73 @@ async function loadFeed(){
     STATE.replies=Array.isArray(data.replies)?data.replies:[];
     const counts=updateCounts();postInboxCounts(counts);renderList();selectFirstVisible();
     if(focusToken)requestAnimationFrame(()=>restoreInboxFocus(focusToken));
-    const scan=data.scan||{};
-    $("feedMeta").textContent="Updated "+formatDate(data.generated_at,true)+" · "+(scan.campaigns_succeeded??0)+" sequences checked";
-    if(data.partial){
-      showBanner("warn","Partial feed: "+(scan.campaigns_failed||0)+" sequence read"+((scan.campaigns_failed||0)===1?"":"s")+" failed. This result was not cached.");
+    const freshness=data.freshness||{};
+    STATE.snapshotState=freshness.state||"unseeded";
+    const seeded=Number(freshness.campaigns_seeded)||0;
+    const targeted=Number(freshness.campaigns_targeted)||0;
+    const updated=formatDate(data.generated_at,true);
+    $("feedMeta").textContent=updated
+      ?"Updated "+updated+" · "+seeded+"/"+targeted+" sequences represented"
+      :"Reliable snapshot is not seeded yet";
+    if(STATE.snapshotState==="unseeded"){
+      $("replyCount").textContent="— replies";
+      showBanner("warn","Building the first reliable Inbox snapshot. Failed sequence reads will never be treated as missing email.");
+    }else if(STATE.snapshotState==="seeding"){
+      showBanner("warn","Reliable snapshot: "+seeded+" of "+targeted+" sequences represented. Existing replies are retained while coverage finishes.");
+    }else if(STATE.snapshotState==="degraded"){
+      const failures=Number(freshness.latest_failures)||0;
+      const stale=Number(freshness.campaigns_stale)||0;
+      const detail=failures
+        ?failures+" sequence update"+(failures===1?"":"s")+" failed; last-known-good replies were retained."
+        :stale+" sequence snapshot"+(stale===1?" is":"s are")+" refreshing; last-known-good replies remain visible.";
+      showBanner("warn","Inbox is stable. "+detail);
     }else if($("banner").dataset.source!=="triage")showBanner("", "");
   }catch(error){
-    if(error.code==="feed_refresh_in_progress"){
-      $("feedMeta").textContent="Another Inbox refresh is finishing…";
-      showBanner("warn","Another Inbox refresh is already in progress. Retrying automatically.");
-      setTimeout(loadFeed,Math.max(1,error.retryAfter||3)*1000);
-    }else{
-      $("feedMeta").textContent="Refresh failed";
-      showBanner("bad",error.message==="paraform_auth_expired"?"The Paraform session expired.":"Replies could not be loaded. Try again in a moment.");
-    }
+    $("feedMeta").textContent="Snapshot read failed";
+    showBanner("bad",STATE.replies.length?"The latest snapshot could not be read. Existing replies remain displayed.":"Replies could not be loaded. Try again in a moment.");
   }finally{STATE.loading=false;}
 }
-function startApp(){loadHealth();loadFeed();if(!window.__inboxPoll)window.__inboxPoll=setInterval(loadFeed,180000);}
+function queueInboxSync(delay=0){
+  if(window.__inboxQueuedSync)return;
+  window.__inboxQueuedSync=setTimeout(()=>{
+    window.__inboxQueuedSync=null;
+    syncFeed();
+  },delay);
+}
+async function syncFeed(){
+  if(STATE.syncing)return;
+  STATE.syncing=true;
+  try{
+    const response=await fetch("/api/inbox/sync",{
+      method:"POST",
+      headers:{...authHeaders(),"content-type":"application/json"},
+      body:"{}",
+      cache:"no-store",
+    });
+    const data=await response.json().catch(()=>({}));
+    if(response.status===202&&data.status==="in_progress"){
+      queueInboxSync(Math.max(5,Number(data.retry_after_seconds)||15)*1000);
+      return;
+    }
+    if(!response.ok||!data.ok){const error=new Error(data.error||"Sync unavailable");error.code=data.error;throw error;}
+    STATE.seedPasses+=1;
+    await loadFeed();
+    if(STATE.snapshotState==="seeding"&&STATE.seedPasses<6)queueInboxSync(1000);
+  }catch(error){
+    if(error.code==="paraform_auth_expired"){
+      setHealth("bad","Session expired");
+      showBanner("bad","The Paraform session expired. Existing Inbox replies remain available from the reliable snapshot.");
+    }else{
+      showBanner("warn",STATE.replies.length?"The latest Inbox update failed. Showing last-known-good replies.":"The first reliable Inbox snapshot could not be built yet. Retrying automatically.");
+      if(STATE.snapshotState==="unseeded")queueInboxSync(30000);
+    }
+  }finally{STATE.syncing=false;}
+}
+function startApp(){
+  loadHealth();
+  loadFeed().then(()=>queueInboxSync());
+  if(!window.__inboxPoll)window.__inboxPoll=setInterval(()=>queueInboxSync(),180000);
+}
 
 $("search").addEventListener("input",event=>{STATE.query=event.target.value;renderList();selectFirstVisible();});
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{

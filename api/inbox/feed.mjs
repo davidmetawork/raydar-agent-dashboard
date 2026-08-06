@@ -1,14 +1,29 @@
 import {
-  acquireInboxBuildLock,
   applyInboxTriage,
-  buildInboxFeed,
+  assembleInboxSnapshotFeed,
   cors,
-  readInboxCache,
+  readInboxSnapshotState,
   readInboxTriage,
-  releaseInboxBuildLock,
   requireInboxAuth,
-  writeInboxCache,
 } from "./_lib/core.mjs";
+
+function rejectStateRead(res, state) {
+  if (state.status === "unavailable") {
+    res.status(503).json({
+      ok: false,
+      error: "inbox_store_not_configured",
+    });
+    return true;
+  }
+  if (state.status !== "ready") {
+    res.status(502).json({
+      ok: false,
+      error: "inbox_snapshot_unavailable",
+    });
+    return true;
+  }
+  return false;
+}
 
 function rejectTriageRead(res, triage) {
   if (triage.status === "unavailable") {
@@ -31,12 +46,9 @@ function rejectTriageRead(res, triage) {
 export function createInboxFeedHandler({
   corsHandler = cors,
   authHandler = requireInboxAuth,
-  readCache = readInboxCache,
+  readState = readInboxSnapshotState,
   readTriage = readInboxTriage,
-  acquireLock = acquireInboxBuildLock,
-  buildFeed = buildInboxFeed,
-  writeCache = writeInboxCache,
-  releaseLock = releaseInboxBuildLock,
+  assembleFeed = assembleInboxSnapshotFeed,
   applyTriage = applyInboxTriage,
 } = {}) {
   return async function handler(req, res) {
@@ -49,67 +61,21 @@ export function createInboxFeedHandler({
     if (!(await authHandler(req, res))) return;
 
     try {
-      const [cached, triage] = await Promise.all([
-        readCache(),
+      const [state, triage] = await Promise.all([
+        readState(),
         readTriage(),
       ]);
-      if (rejectTriageRead(res, triage)) return;
-      if (cached.value) {
-        const feed = applyTriage(cached.value, triage.value);
-        return res.status(200).json({
-          ok: true,
-          ...feed,
-          cache: { status: "hit" },
-        });
-      }
-
-      const lock = await acquireLock();
-      if (lock.status === "busy") {
-        res.setHeader("Retry-After", "3");
-        return res.status(503).json({
-          ok: false,
-          error: "feed_refresh_in_progress",
-          retry_after_seconds: 3,
-        });
-      }
-
-      try {
-        const baseFeed = await buildFeed();
-        let cacheStatus = cached.status;
-        if (baseFeed.cacheable) {
-          try {
-            cacheStatus = await writeCache(baseFeed)
-              ? "stored"
-              : cached.status;
-          } catch {
-            cacheStatus = "error";
-          }
-        } else {
-          cacheStatus = "bypassed_partial";
-        }
-        // A cold Paraform fan-out can run for many seconds. Re-read the small
-        // triage hash after it finishes so a click made during that window cannot
-        // be overwritten by this response in the browser.
-        const latestTriage = await readTriage();
-        if (rejectTriageRead(res, latestTriage)) return;
-        const feed = applyTriage(baseFeed, latestTriage.value);
-        return res.status(200).json({
-          ok: true,
-          ...feed,
-          cache: {
-            status: cacheStatus,
-            lock: lock.status,
-          },
-        });
-      } finally {
-        await releaseLock(lock.token);
-      }
+      if (rejectStateRead(res, state) || rejectTriageRead(res, triage)) return;
+      const feed = applyTriage(assembleFeed(state.value), triage.value);
+      return res.status(200).json({
+        ok: true,
+        ...feed,
+        cache: { status: "materialized", version: 3 },
+      });
     } catch (error) {
-      return res.status(error?.code === "AUTH_EXPIRED" ? 503 : 502).json({
+      return res.status(502).json({
         ok: false,
-        error: error?.code === "AUTH_EXPIRED"
-          ? "paraform_auth_expired"
-          : "feed_unavailable",
+        error: "feed_unavailable",
         detail: String(error?.message || error).slice(0, 180),
       });
     }

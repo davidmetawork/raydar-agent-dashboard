@@ -3,17 +3,23 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   applyInboxTriage,
+  assembleInboxSnapshotFeed,
   buildInboxFeed,
   campaignInboxInput,
   campaignsToScan,
   countInboxReplies,
+  emptyInboxSnapshotState,
   flattenCampaignInbox,
   inboxReplyBucket,
+  inboxTrpcGet,
   mergeAndSortReplies,
+  mergeInboxRefreshState,
   normalizeReplyCategory,
   parseInboxTriage,
   readInboxTriage,
+  selectInboxCampaigns,
   shouldExcludeInboxReply,
+  writeInboxRefreshState,
   writeInboxTriage,
 } from "../api/inbox/_lib/core.mjs";
 import {
@@ -22,6 +28,9 @@ import {
 import {
   createInboxTriageHandler,
 } from "../api/inbox/triage.mjs";
+import {
+  createInboxSyncHandler,
+} from "../api/inbox/sync.mjs";
 
 function mockResponse() {
   return {
@@ -177,7 +186,7 @@ test("Inbox exclusion removes delay, bounce, and delivery-failure notifications"
   }), false);
 });
 
-test("campaign rows and cached feeds enforce Inbox exclusions before counts", () => {
+test("campaign rows and materialized feeds enforce Inbox exclusions before counts", () => {
   const campaign = { id: "sequence-1", name: "Platform search" };
   const inboxData = {
     campaign_to_candidate_users: [
@@ -496,29 +505,31 @@ test("triage endpoint authenticates, validates, and returns confirmed state", as
   ]);
 });
 
-test("cold feed builds apply the latest triage read before responding", async () => {
-  const triageReads = [
-    new Map([[
-      "gmail-1",
-      { status: "archived", updated_at: "2026-07-17T18:00:00.000Z" },
-    ]]),
-    new Map([[
-      "gmail-1",
-      { status: "complete", updated_at: "2026-07-17T18:01:00.000Z" },
-    ]]),
-  ];
-  let readCount = 0;
-  let released = "";
+test("feed serves one materialized snapshot with the latest triage overlay", async () => {
+  let stateReads = 0;
+  let triageReads = 0;
+  let assemblies = 0;
   const handler = createInboxFeedHandler({
     corsHandler: () => false,
     authHandler: async () => true,
-    readCache: async () => ({ status: "miss", value: null }),
-    readTriage: async () => ({
-      status: "ready",
-      value: triageReads[readCount++],
-    }),
-    acquireLock: async () => ({ status: "acquired", token: "lock-1" }),
-    buildFeed: async () => ({
+    readState: async () => {
+      stateReads += 1;
+      return { status: "ready", value: { snapshot: true } };
+    },
+    readTriage: async () => {
+      triageReads += 1;
+      return {
+        status: "ready",
+        value: new Map([[
+          "gmail-1",
+          { status: "complete", updated_at: "2026-07-17T18:01:00.000Z" },
+        ]]),
+      };
+    },
+    assembleFeed: (state) => {
+      assert.deepEqual(state, { snapshot: true });
+      assemblies += 1;
+      return {
       generated_at: "2026-07-17T18:00:00.000Z",
       partial: false,
       cacheable: true,
@@ -529,19 +540,16 @@ test("cold feed builds apply the latest triage read before responding", async ()
       }],
       counts: {},
       scan: {},
-    }),
-    writeCache: async () => true,
-    releaseLock: async (token) => {
-      released = token;
-      return true;
+      };
     },
   });
   const response = mockResponse();
   await handler({ method: "GET" }, response);
 
   assert.equal(response.statusCode, 200);
-  assert.equal(readCount, 2);
-  assert.equal(released, "lock-1");
+  assert.equal(stateReads, 1);
+  assert.equal(triageReads, 1);
+  assert.equal(assemblies, 1);
   assert.equal(response.body.replies[0].triage_status, "complete");
   assert.deepEqual(response.body.counts, {
     total: 1,
@@ -552,9 +560,390 @@ test("cold feed builds apply the latest triage read before responding", async ()
     complete: 1,
   });
   assert.deepEqual(response.body.cache, {
-    status: "stored",
-    lock: "acquired",
+    status: "materialized",
+    version: 3,
   });
+});
+
+test("failed sequence updates retain last-known-good replies and stable counts", () => {
+  const previous = emptyInboxSnapshotState();
+  previous.catalog = {
+    version: 3,
+    refreshed_at: "2026-07-17T17:00:00.000Z",
+    campaigns_total: 2,
+    targets: [
+      { id: "sequence-a", name: "Sequence A", email_replies: 1 },
+      { id: "sequence-b", name: "Sequence B", email_replies: 1 },
+    ],
+  };
+  previous.snapshots = new Map([
+    ["sequence-a", {
+      version: 3,
+      sequence_id: "sequence-a",
+      sequence_name: "Sequence A",
+      email_replies: 1,
+      refreshed_at: "2026-07-17T17:00:00.000Z",
+      replies: [{
+        gmail_id: "gmail-old-a",
+        sequence_id: "sequence-a",
+        ccu_id: "lead-a",
+        subject: "Old A",
+        reply_category: "INTERESTED",
+      }],
+      lead_categories: {},
+    }],
+    ["sequence-b", {
+      version: 3,
+      sequence_id: "sequence-b",
+      sequence_name: "Sequence B",
+      email_replies: 1,
+      refreshed_at: "2026-07-17T17:00:00.000Z",
+      replies: [{
+        gmail_id: "gmail-old-b",
+        sequence_id: "sequence-b",
+        ccu_id: "lead-b",
+        subject: "Old B",
+        reply_category: "UNCLEAR",
+      }],
+      lead_categories: {},
+    }],
+  ]);
+  previous.meta = {
+    version: 3,
+    last_refresh_at: "2026-07-17T17:00:00.000Z",
+    last_complete_at: "2026-07-17T17:00:00.000Z",
+    sequence_attempts: {},
+    failures: [],
+  };
+
+  const before = assembleInboxSnapshotFeed(previous, {
+    now: () => new Date("2026-07-17T17:05:00.000Z"),
+  });
+  const next = mergeInboxRefreshState(previous, {
+    generated_at: "2026-07-17T17:06:00.000Z",
+    catalog: {
+      version: 3,
+      refreshed_at: "2026-07-17T17:06:00.000Z",
+      campaigns_total: 2,
+      targets: [
+        { id: "sequence-a", name: "Sequence A", email_replies: 2 },
+        { id: "sequence-b", name: "Sequence B", email_replies: 1 },
+      ],
+    },
+    target_sequence_ids: ["sequence-a", "sequence-b"],
+    selected_sequence_ids: ["sequence-a", "sequence-b"],
+    snapshots: [{
+      version: 3,
+      sequence_id: "sequence-a",
+      sequence_name: "Sequence A",
+      email_replies: 2,
+      refreshed_at: "2026-07-17T17:06:00.000Z",
+      replies: [
+        {
+          gmail_id: "gmail-old-a",
+          sequence_id: "sequence-a",
+          ccu_id: "lead-a",
+          subject: "Old A",
+          reply_category: "INTERESTED",
+        },
+        {
+          gmail_id: "gmail-new-a",
+          sequence_id: "sequence-a",
+          ccu_id: "lead-new-a",
+          subject: "New A",
+          reply_category: "NOT_INTERESTED",
+        },
+      ],
+      lead_categories: {},
+    }],
+    recent: {
+      version: 3,
+      refreshed_at: "2026-07-17T17:06:00.000Z",
+      replies: [],
+    },
+    scan: {
+      campaigns_attempted: 2,
+      campaigns_deferred: 0,
+      campaigns_succeeded: 1,
+      campaigns_failed: 1,
+      recent_count: 0,
+      recent_failed: false,
+      failures: [{
+        sequence_id: "sequence-b",
+        sequence_name: "Sequence B",
+        error: "PARAFORM_TIMEOUT",
+      }],
+    },
+  });
+  const after = assembleInboxSnapshotFeed(next, {
+    now: () => new Date("2026-07-17T17:06:00.000Z"),
+  });
+
+  assert.equal(before.counts.total, 2);
+  assert.equal(after.counts.total, 3);
+  assert.deepEqual(
+    after.replies.map(({ gmail_id }) => gmail_id).sort(),
+    ["gmail-new-a", "gmail-old-a", "gmail-old-b"],
+  );
+  assert.equal(next.snapshots.get("sequence-b").refreshed_at, "2026-07-17T17:00:00.000Z");
+  assert.equal(after.freshness.state, "degraded");
+  assert.equal(after.freshness.coverage_complete, true);
+  assert.equal(after.freshness.latest_failures, 1);
+  assert.equal(after.freshness.last_complete_at, "2026-07-17T17:00:00.000Z");
+});
+
+test("successful catalog refresh prunes sequences removed at the source", () => {
+  const previous = emptyInboxSnapshotState();
+  previous.snapshots = new Map([
+    ["sequence-a", {
+      version: 3,
+      sequence_id: "sequence-a",
+      sequence_name: "Sequence A",
+      email_replies: 1,
+      refreshed_at: "2026-07-17T17:00:00.000Z",
+      replies: [],
+      lead_categories: {},
+    }],
+    ["sequence-b", {
+      version: 3,
+      sequence_id: "sequence-b",
+      sequence_name: "Sequence B",
+      email_replies: 1,
+      refreshed_at: "2026-07-17T17:00:00.000Z",
+      replies: [],
+      lead_categories: {},
+    }],
+  ]);
+  const next = mergeInboxRefreshState(previous, {
+    generated_at: "2026-07-17T18:00:00.000Z",
+    catalog: {
+      version: 3,
+      refreshed_at: "2026-07-17T18:00:00.000Z",
+      campaigns_total: 1,
+      targets: [{ id: "sequence-a", name: "Sequence A", email_replies: 1 }],
+    },
+    target_sequence_ids: ["sequence-a"],
+    selected_sequence_ids: [],
+    snapshots: [],
+    recent: null,
+    scan: {
+      campaigns_attempted: 0,
+      campaigns_deferred: 0,
+      campaigns_succeeded: 0,
+      campaigns_failed: 0,
+      recent_count: 0,
+      recent_failed: true,
+      failures: [],
+    },
+  });
+  assert.deepEqual([...next.snapshots.keys()], ["sequence-a"]);
+});
+
+test("sync selection prioritizes unseeded and changed sequences without starvation", () => {
+  const nowMs = Date.parse("2026-07-17T18:00:00.000Z");
+  const previous = emptyInboxSnapshotState();
+  previous.snapshots = new Map([
+    ["changed", { email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+    ["recent", { email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+    ["stale", { email_replies: 1, refreshed_at: "2026-07-17T16:00:00.000Z" }],
+    ["fresh", { email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+  ]);
+  previous.meta = {
+    sequence_attempts: {
+      "missing-retried": "2026-07-17T17:58:00.000Z",
+    },
+  };
+  const selected = selectInboxCampaigns([
+    { id: "missing-retried", email_replies: 1 },
+    { id: "missing-new", email_replies: 1 },
+    { id: "changed", email_replies: 2 },
+    { id: "recent", email_replies: 1 },
+    { id: "stale", email_replies: 1 },
+    { id: "fresh", email_replies: 1 },
+  ], previous, [{ sequence_id: "recent" }], {
+    nowMs,
+    batchSize: 4,
+    staleMs: 15 * 60 * 1000,
+  });
+  assert.deepEqual(selected.map(({ id }) => id), [
+    "missing-new",
+    "missing-retried",
+    "changed",
+    "recent",
+  ]);
+});
+
+test("snapshot persistence writes only successful shards with no expiry", async () => {
+  const previous = emptyInboxSnapshotState();
+  previous.snapshots = new Map([
+    ["sequence-b", {
+      version: 3,
+      sequence_id: "sequence-b",
+      sequence_name: "Sequence B",
+      email_replies: 1,
+      refreshed_at: "2026-07-17T17:00:00.000Z",
+      replies: [],
+      lead_categories: {},
+    }],
+  ]);
+  let commands = [];
+  await writeInboxRefreshState(previous, {
+    generated_at: "2026-07-17T18:00:00.000Z",
+    catalog: {
+      version: 3,
+      refreshed_at: "2026-07-17T18:00:00.000Z",
+      campaigns_total: 1,
+      targets: [{ id: "sequence-a", name: "Sequence A", email_replies: 1 }],
+    },
+    target_sequence_ids: ["sequence-a"],
+    selected_sequence_ids: ["sequence-a"],
+    snapshots: [{
+      version: 3,
+      sequence_id: "sequence-a",
+      sequence_name: "Sequence A",
+      email_replies: 1,
+      refreshed_at: "2026-07-17T18:00:00.000Z",
+      replies: [],
+      lead_categories: {},
+    }],
+    recent: null,
+    scan: {
+      campaigns_attempted: 1,
+      campaigns_deferred: 0,
+      campaigns_succeeded: 1,
+      campaigns_failed: 0,
+      recent_count: 0,
+      recent_failed: true,
+      failures: [],
+    },
+  }, {
+    configured: true,
+    pipelineImpl: async (value) => {
+      commands = value;
+      return value.map(() => "OK");
+    },
+  });
+
+  assert.equal(commands[0][0], "HSET");
+  assert.equal(commands[0][2], "sequence-a");
+  assert.deepEqual(commands.find(([command]) => command === "HDEL").slice(2), ["sequence-b"]);
+  assert.equal(commands.flat().includes("EX"), false);
+});
+
+test("sync endpoint coalesces overlapping refreshes", async () => {
+  let builds = 0;
+  const handler = createInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    acquireLock: async () => ({ status: "busy", token: null }),
+    buildRefresh: async () => {
+      builds += 1;
+    },
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 202);
+  assert.equal(response.headers["Retry-After"], "15");
+  assert.equal(response.body.status, "in_progress");
+  assert.equal(builds, 0);
+});
+
+test("sync endpoint writes one refresh and always releases its lock", async () => {
+  const previous = emptyInboxSnapshotState();
+  let writtenRefresh = null;
+  let released = "";
+  const refresh = { generated_at: "2026-07-17T18:00:00.000Z" };
+  const handler = createInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    acquireLock: async () => ({ status: "acquired", token: "sync-token" }),
+    readState: async () => ({ status: "ready", value: previous }),
+    buildRefresh: async ({ previousState }) => {
+      assert.equal(previousState, previous);
+      return refresh;
+    },
+    writeState: async (state, value) => {
+      assert.equal(state, previous);
+      writtenRefresh = value;
+      return { materialized: true };
+    },
+    assembleFeed: (state) => {
+      assert.deepEqual(state, { materialized: true });
+      return { freshness: { state: "ready" } };
+    },
+    releaseLock: async (token) => {
+      released = token;
+      return true;
+    },
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.status, "updated");
+  assert.deepEqual(response.body.freshness, { state: "ready" });
+  assert.equal(writtenRefresh, refresh);
+  assert.equal(released, "sync-token");
+});
+
+test("transient Paraform failures retry before succeeding", async () => {
+  let calls = 0;
+  const result = await inboxTrpcGet(
+    "campaigns.example",
+    {},
+    2,
+    1_000,
+    async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          status: 503,
+          ok: false,
+          json: async () => ({ error: { json: { message: "try again" } } }),
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({ result: { data: { json: { ok: true } } } }),
+      };
+    },
+    async () => {},
+    () => 0,
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(result, { ok: true });
+});
+
+test("Paraform 401 burst responses are retried as throttles, not false expiry", async () => {
+  let calls = 0;
+  const result = await inboxTrpcGet(
+    "campaigns.example",
+    {},
+    2,
+    1_000,
+    async () => {
+      calls += 1;
+      return calls === 1
+        ? { status: 401, ok: false, json: async () => ({}) }
+        : {
+            status: 200,
+            ok: true,
+            json: async () => ({ result: { data: { json: ["complete"] } } }),
+          };
+    },
+    async () => {},
+    () => 0,
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(result, ["complete"]);
 });
 
 test("campaign selection retains disabled reply history when aggregate counts exist", () => {
@@ -803,6 +1192,7 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /RaydarAuth\.session\(\)/);
   assert.match(inboxHtml, /RaydarAuth\.signIn\(/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/feed"/);
+  assert.match(inboxHtml, /fetch\("\/api\/inbox\/sync"/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/message\?gmail_id="/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
   assert.match(inboxHtml, /data-filter="archived"/);
@@ -838,6 +1228,9 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   );
   assert.match(inboxHtml, /showTriageBanner\("good","Moved to Complete\."\)/);
   assert.match(inboxHtml, /State unavailable/);
+  assert.match(inboxHtml, /last-known-good replies/);
+  assert.match(inboxHtml, /STATE\.seedPasses<6/);
+  assert.doesNotMatch(inboxHtml, /Partial feed|refresh is already in progress/);
   assert.doesNotMatch(
     inboxHtml,
     /id="replyList"[^>]*aria-live/,
