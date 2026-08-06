@@ -973,6 +973,9 @@
       if (fuStageIs(stage,["failed_booking_evidence"]))
         return { cls:"amber", border:true, label:"booking check retrying",
           title:"The exact original Calendar event, Paraform cancellation mail, or Paraform rebooking evidence could not be completely verified. Nothing was sent; automatic recovery will retry." };
+      if (stage==="manual_review_timeout")
+        return { cls:"amber", border:true, label:"manual review required",
+          title:"The candidate's booking history exceeded the automated verification window. Nothing was sent; confirm cancellation or rebooking in Paraform before taking action." };
       if (fuStageIs(stage,["failed_identity","failed_ambiguous_identity"]))
         return { cls:"amber", border:true, label:"needs recovery: identity",
           title:stage.includes("ambiguous") ? "The exact call matched more than one Paraform identity. Verify the candidate's LinkedIn profile." : "The exact call could not yet be tied to a Paraform profile. Automatic recovery will retry." };
