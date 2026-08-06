@@ -19,6 +19,7 @@ import {
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
 import { runAuthProbeTick } from "./_lib/auth-probe.mjs";
+import { runCuratedFitDeadmanTick } from "./_lib/curated-fit-deadman.mjs";
 import { runStuckWatchdogTick } from "./_lib/stuck-watchdog.mjs";
 import { notifySlack } from "./_lib/core.mjs";
 import {
@@ -658,6 +659,15 @@ export default async function handler(req, res) {
     // flag is read via GET /api/ops/paraform-auth, and no lane holds on it
     // yet. Covered by test/paraform-auth-breaker.test.mjs.
     try { await runAuthProbeTick(); } catch { /* observe-only */ }
+    // Independent dead-man for the GitHub Actions curated-fit lane. This runs
+    // from Vercel/Upstash so a GitHub outage cannot suppress both execution and
+    // its alarm. Aggregate watermark only; no candidate data or Paraform write.
+    try {
+      await runCuratedFitDeadmanTick({
+        alertSlotImpl: takeAlertSlot,
+        notifyImpl: notifySlack,
+      });
+    } catch { /* observe-only */ }
     // Stuck-job watchdog. Every alert this lane had fired on an explicit error
     // code, so the 2026-08-03 outage — a Vercel-killed function that never got
     // to raise one — ran 14 hours in silence while health stayed green. This
