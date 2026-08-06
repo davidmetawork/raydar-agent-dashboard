@@ -546,7 +546,7 @@ test("stale lifecycle data expires instead of leaving a last-good row green", ()
   assert.equal(ctx.reason(row).label, "status refresh delayed");
 });
 
-test("follow-up stages explain pending, identity, email, verification, and expired states", () => {
+test("follow-up stages explain pending, review, identity, email, verification, and expired states", () => {
   const ctx = lifecycleContext();
   const row = {
     id: "call-1",
@@ -561,6 +561,7 @@ test("follow-up stages explain pending, identity, email, verification, and expir
     failed_no_email: "needs email",
     enrolled_missing_email: "needs email",
     failed_booking_evidence: "booking check retrying",
+    manual_review_timeout: "manual review required",
     failed_error: "recovery failed",
     enrolled_unverified: "verification pending",
     enrolling: "verification pending",
