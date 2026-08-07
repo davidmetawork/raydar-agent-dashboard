@@ -272,8 +272,18 @@ export async function runTick({ now = Date.now() } = {}) {
   const overall = worst(counted);
   const counts = { OK: 0, DEGRADED: 0, DOWN: 0, UNKNOWN: 0, PAUSED: 0 };
   for (const c of CATALOG) counts[tiles[c.id]?.state || "UNKNOWN"] += 1;
+  // `overall` is the banner: worst of everything, so the page tells the whole
+  // truth. `criticalDown` is the PAGING verdict: only tier-1, the same set
+  // that wakes a human. The public rollup keys its 200/503 off this, so the
+  // external dead-man fires for the things that matter and stays quiet when a
+  // single tier-2 desktop lane has one bad run — otherwise the backstop
+  // becomes noise and gets ignored, which is the disease, not the cure.
+  const criticalDown = CATALOG.filter((c) =>
+    !c.paused && !acks[c.id] && c.tier === 1 && tiles[c.id]?.state === "DOWN").length;
 
-  const state = { schema: "raydar-health-state-v1", checkedAt: nowIso, overall, counts, tiles };
+  const state = {
+    schema: "raydar-health-state-v1", checkedAt: nowIso, overall, criticalDown, counts, tiles,
+  };
 
   // ---- 9. Persist (best effort; a KV failure must not throw the tick away)
   if (kvOk) {

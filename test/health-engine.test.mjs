@@ -196,3 +196,24 @@ test("uptime counts only DOWN time, and clips the window to known history", () =
   // Nothing observed yet => null, never a confident 100%.
   assert.equal(uptimeFromTransitions([], { state: "OK", since: null }, 1440, now), null);
 });
+
+test("the external pager fires on tier-1 only, not on a single desktop hiccup", () => {
+  // Found live on day one: booking-resume-sync had one transient failing run,
+  // which made `overall` DOWN, which 503'd the public rollup, which would have
+  // emailed David via the hourly backstop. One flaky tier-2 lane must not train
+  // him to ignore the dead-man.
+  const tier1 = CATALOG.filter((c) => c.tier === 1 && !c.paused);
+  const tier2 = CATALOG.filter((c) => c.tier !== 1 && !c.paused);
+  assert.ok(tier1.length && tier2.length);
+
+  const criticalDown = (tiles, acks = {}) => CATALOG.filter((c) =>
+    !c.paused && !acks[c.id] && c.tier === 1 && tiles[c.id]?.state === "DOWN").length;
+
+  assert.equal(criticalDown({ [tier2[0].id]: { state: "DOWN" } }), 0, "tier-2 down does not page");
+  assert.equal(criticalDown({ [tier1[0].id]: { state: "DOWN" } }), 1, "tier-1 down pages");
+  assert.equal(
+    criticalDown({ [tier1[0].id]: { state: "DOWN" } }, { [tier1[0].id]: { until: "x" } }),
+    0,
+    "an acknowledged tier-1 does not page",
+  );
+});

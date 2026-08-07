@@ -16,10 +16,14 @@ export default async function handler(req, res) {
   }
   const age = Date.now() - Date.parse(state.checkedAt);
   const stale = !(age < STALE_MS);
-  const ok = state.overall !== "DOWN" && !stale;
+  // 503 on: a candidate-facing (tier-1) system DOWN, or a tick that stopped.
+  // Deliberately NOT on tier-2/3 degradation — see engine.mjs on criticalDown.
+  const critical = Number(state.criticalDown ?? (state.overall === "DOWN" ? 1 : 0));
+  const ok = critical === 0 && !stale;
   return res.status(ok ? 200 : 503).json({
     ok,
     overall: stale ? "UNKNOWN" : state.overall,
+    criticalDown: critical,
     counts: state.counts,
     checkedAt: state.checkedAt,
     ...(stale ? { error: "stale_state" } : {}),
