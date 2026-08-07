@@ -312,14 +312,7 @@ export function slackTransport({ lastDelivered }) {
   return OK(null, { lastDelivered: lastDelivered.at });
 }
 
-// TEMPORARY — pager drill only, removed immediately after. Always DOWN so a
-// real tier-1 page can be proven end to end without breaking a real system.
-export function drillAlwaysDown() {
-  return { state: "DOWN", reason: "PAGER DRILL — synthetic check, ignore and expect a recovery notice shortly" };
-}
-
 export const EVALUATORS = {
-  drillAlwaysDown,
   bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable,
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
   n8nWatchdog, ghActionsFetch, ghWorkflow, beatLane, desktopRunner,
