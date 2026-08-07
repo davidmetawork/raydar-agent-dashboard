@@ -50,8 +50,13 @@
   .ghead .n{color:var(--muted);font-size:12px}
   .detail{background:#FBFAF6;border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:8px;font-size:13px}
   .detail dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0 0 10px}
-  .detail dt{color:var(--muted)} .detail dd{margin:0}
+  .detail dt{color:var(--muted)}
+  /* Grid and flex children default to min-width:auto, so one long reason or a
+     metrics blob widens the whole page. On a phone that means the board
+     scrolls sideways — pin them to zero and let the text wrap instead. */
+  .detail dd{margin:0;min-width:0;overflow-wrap:anywhere}
   .trow{display:flex;gap:8px;color:var(--muted);font-size:12px;padding:2px 0}
+  .trow span{min-width:0;overflow-wrap:anywhere}
   button.act{font:inherit;border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 11px;cursor:pointer}
   button.act:hover{border-color:var(--ink)}
   a{color:var(--orange)}
@@ -60,7 +65,14 @@
   body.embed header .brand img, body.embed h1, body.embed .sub{display:none}
   body.embed header{margin-bottom:10px}
   body.embed .wrap{padding-top:10px}
-  @media (max-width:700px){ .grid{grid-template-columns:1fr} .wrap{padding:16px 12px 60px} }
+  @media (max-width:700px){
+    .grid{grid-template-columns:1fr} .wrap{padding:16px 12px 60px}
+    /* Label above value, and one transition per block: a phone has no room
+       for a two-column definition list or a three-column row. */
+    .detail dl{grid-template-columns:1fr;gap:0}
+    .detail dt{margin-top:8px;font-size:12px}
+    .trow{flex-direction:column;gap:1px;padding:6px 0;border-top:1px solid var(--line)}
+  }
 </style>
 </head>
 <body>
@@ -159,13 +171,16 @@ async function openTile(id,keep){
   if(!d||!d.ok){ host.innerHTML='<div class="detail">Could not load detail.</div>'; return; }
   const t=d.tile||{};
   const up=d.uptime||{};
-  const pct=(v)=>v==null?"—":v+"%";
+  // A window we have not been watching long enough to fill is marked "*" —
+  // an uptime number that quietly means "since 20 minutes ago" is a lie.
+  const pct=(v)=>v==null?"—":v.pct+"%"+(v.clipped?"*":"");
+  const clipped=[up.day,up.week,up.month].some(v=>v&&v.clipped);
   host.innerHTML=`<div class="detail">
     <dl>
       <dt>State</dt><dd><b>${esc(t.state||"UNKNOWN")}</b>${t.reason?" — "+esc(t.reason):""}</dd>
       <dt>Since</dt><dd>${esc(t.since||"—")} (${esc(ago(t.since))})</dd>
       <dt>Checked</dt><dd>${esc(ago(t.lastCheckedAt))}</dd>
-      <dt>Uptime</dt><dd>24h ${pct(up.day)} · 7d ${pct(up.week)} · 30d ${pct(up.month)}</dd>
+      <dt>Uptime</dt><dd>24h ${pct(up.day)} · 7d ${pct(up.week)} · 30d ${pct(up.month)}${clipped?' <span style="opacity:.6">* window clipped to history start</span>':""}</dd>
       ${t.metrics?`<dt>Metrics</dt><dd>${esc(JSON.stringify(t.metrics))}</dd>`:""}
       ${d.note?`<dt>Note</dt><dd>${esc(d.note)}</dd>`:""}
       ${t.ackUntil?`<dt>Acknowledged</dt><dd>${esc(t.ackReason||"")} until ${esc(t.ackUntil)}</dd>`:""}

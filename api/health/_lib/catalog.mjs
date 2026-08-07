@@ -268,6 +268,7 @@ export const CATALOG = [
       authEnv: "GH_HEALTH_TOKEN",
       authScheme: "Bearer",
       timeoutMs: 12000,
+      okStatuses: [200, 401, 403], // a rejected token is a verdict the evaluator words better
       evaluate: "ghActionsFetch",
     },
     registry: "/operations/monitoring-canaries/",
@@ -419,6 +420,25 @@ export const CATALOG = [
     kind: "derived",
     probe: { evaluate: "upstashKv" },
     registry: "/products/monitor/",
+  },
+  {
+    id: "n8n-cloud",
+    name: "n8n Cloud",
+    group: "deps",
+    tier: 2,
+    kind: "derived",
+    probe: { evaluate: "n8nCloud" },
+    registry: "/operations/monitoring-canaries/",
+    note: "The vendor's reachability, separate from whether a workflow is failing.",
+  },
+  {
+    id: "github-api",
+    name: "GitHub API",
+    group: "deps",
+    tier: 3,
+    kind: "derived",
+    probe: { evaluate: "githubApi" },
+    registry: "/operations/monitoring-canaries/",
   },
   {
     id: "slack-transport",

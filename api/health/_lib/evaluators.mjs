@@ -87,7 +87,9 @@ export function okTrue({ body, status }) {
   if (body && typeof body === "object" && "ok" in body) {
     return body.ok === true ? OK() : DOWN(String(body.error || `ok:false (HTTP ${status})`));
   }
-  return status >= 200 && status < 300 ? OK() : DOWN(`HTTP ${status}`);
+  // We asked a health endpoint whether it is healthy and it did not answer.
+  // That is a question we cannot resolve, not a yes.
+  return UNK(`no ok field in the response (HTTP ${status})`);
 }
 
 export function reachable({ status }) {
@@ -127,6 +129,9 @@ export function reminderHealth({ body, status, keyMissing }) {
 
 export function paraaiLane({ body }) {
   if (!body || typeof body !== "object") return UNK("unparseable body");
+  if (!("automation" in body) && !("paraform" in body)) {
+    return UNK("response is not a paraai-health payload");
+  }
   const a = body.automation || {};
   const q = a.queue || {};
   const metrics = { ready: a.ready, queued: q.queued, due: q.due, leased: q.leased };
@@ -138,6 +143,11 @@ export function paraaiLane({ body }) {
 
 export function seqHealth({ body }) {
   if (!body || typeof body !== "object") return UNK("unparseable body");
+  // Assert this is actually the seq-health payload. An object that merely
+  // parses is not an answer — an error envelope contains no bad news either.
+  if (!("bookingStop" in body) && !("paraform" in body) && !("sequenceCount" in body)) {
+    return UNK("response is not a seq-health payload");
+  }
   const bs = body.bookingStop || {};
   const metrics = {
     sequenceCount: body.sequenceCount,
@@ -275,6 +285,23 @@ export function neonDb({ results }) {
   return OK();
 }
 
+/** The vendor, not the workloads: a streaking workflow means n8n is UP and a
+ *  workflow is broken. Only the watchdog's reachability verdict lands here. */
+export function n8nCloud({ results }) {
+  const n = results["n8n-workflows"];
+  if (!n || n.state === "UNKNOWN") return UNK(n?.reason || "watchdog state unavailable");
+  if (n.state === "DOWN") return DOWN(n.reason);
+  return OK(null, n.metrics);
+}
+
+/** Reachability of the GitHub API itself, derived from the one Actions fetch. */
+export function githubApi({ results }) {
+  const f = results["gh-actions-api"];
+  if (!f) return UNK("actions feed did not run");
+  if (f.state === "UNKNOWN") return UNK(f.reason);
+  return { state: f.state, reason: f.reason, metrics: f.metrics };
+}
+
 export function upstashKv({ kvOk }) {
   return kvOk ? OK() : DOWN("KV read-back failed this tick");
 }
@@ -290,4 +317,5 @@ export const EVALUATORS = {
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
   n8nWatchdog, ghActionsFetch, ghWorkflow, beatLane, desktopRunner,
   vendorApi, googleWorkspace, neonDb, upstashKv, slackTransport,
+  n8nCloud, githubApi,
 };

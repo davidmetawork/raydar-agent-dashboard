@@ -13,6 +13,7 @@ import { hGet, hGetMany, hSet, K, kvConfigured } from "./kv.mjs";
 
 const SAMPLE_CAP = 720; // 24h at 2-min ticks
 const TRANS_CAP = 200;
+const INCIDENT_CAP = 300;
 const TRANS_TTL = 31 * 24 * 3600;
 const STATE_ORDER = { OK: 0, PAUSED: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
 /** States that must be seen twice in a row before they stick. */
@@ -38,9 +39,20 @@ async function runPull(check) {
       redirect: p.redirect || "follow",
       signal: AbortSignal.timeout(p.timeoutMs || 8000),
     });
+    // A status we did not anticipate is a transport-level unknown, not a
+    // verdict (PRD §6: "non-2xx-where-2xx-expected returns UNKNOWN
+    // automatically in the tick engine"). Unless a check explicitly lists the
+    // statuses it can read, only 2xx is a body worth evaluating.
+    //
+    // This is load-bearing: Vercel answers an unknown /api/* path with a
+    // *JSON* envelope when asked for JSON, so a 404 used to sail into an
+    // evaluator, present as a well-formed object with no bad news in it, and
+    // score OK. A missing endpoint must never read as a healthy one.
     const allowed = p.okStatuses;
-    // A status we did not anticipate is a transport-level unknown, not a verdict.
-    if (allowed && !allowed.includes(res.status) && !(res.status >= 200 && res.status < 300)) {
+    const acceptable = allowed
+      ? allowed.includes(res.status)
+      : res.status >= 200 && res.status < 300;
+    if (!acceptable) {
       return { transport: `HTTP ${res.status}`, status: res.status, body: null };
     }
     let body = null;
@@ -161,6 +173,7 @@ export async function runTick({ now = Date.now() } = {}) {
   // ---- 7. Debounce, transitions, incidents
   const tiles = {};
   const transitions = [];
+  const incidentOps = [];
   for (const check of CATALOG) {
     const before = prev.tiles?.[check.id] || {};
     if (check.paused) {
@@ -186,6 +199,50 @@ export async function runTick({ now = Date.now() } = {}) {
       }
     }
     const changed = before.state !== state;
+    // An incident spans one continuous departure from OK: it opens on the
+    // transition that leaves OK, tracks the worst state reached, and closes
+    // when the tile comes back. The pointer rides on the tile so no KV scan
+    // is ever needed to find the open one.
+    let incidentAt = before.incidentAt || null;
+    let incidentWorst = before.incidentWorst || null;
+    if (changed && before.state) {
+      if (state === "OK") {
+        if (incidentAt) {
+          incidentOps.push({
+            key: K.incident(check.id, incidentAt),
+            record: {
+              id: check.id, name: check.name, tier: check.tier,
+              openedAt: incidentAt, closedAt: nowIso,
+              worst: incidentWorst || before.state, reason: before.reason || null,
+            },
+          });
+          incidentAt = null;
+          incidentWorst = null;
+        }
+      } else if (!incidentAt) {
+        incidentAt = nowIso;
+        incidentWorst = state;
+        incidentOps.push({
+          key: K.incident(check.id, incidentAt),
+          index: { id: check.id, openedAt: incidentAt },
+          record: {
+            id: check.id, name: check.name, tier: check.tier,
+            openedAt: incidentAt, closedAt: null,
+            worst: state, reason: raw.reason || null,
+          },
+        });
+      } else if (STATE_ORDER[state] > STATE_ORDER[incidentWorst || "OK"]) {
+        incidentWorst = state;
+        incidentOps.push({
+          key: K.incident(check.id, incidentAt),
+          record: {
+            id: check.id, name: check.name, tier: check.tier,
+            openedAt: incidentAt, closedAt: null,
+            worst: state, reason: raw.reason || null,
+          },
+        });
+      }
+    }
     tiles[check.id] = {
       state,
       reason: raw.reason || null,
@@ -197,6 +254,7 @@ export async function runTick({ now = Date.now() } = {}) {
       tier: check.tier,
       group: check.group,
       name: check.name,
+      ...(incidentAt ? { incidentAt, incidentWorst } : {}),
     };
     if (changed && before.state) {
       transitions.push({
@@ -237,8 +295,20 @@ export async function runTick({ now = Date.now() } = {}) {
         await hSet(K.trans(t.id), list.slice(0, TRANS_CAP), TRANS_TTL);
       })());
     }
+    for (const op of incidentOps) {
+      writes.push(hSet(op.key, op.record, TRANS_TTL));
+    }
+    // One index list so the digest can read incidents without a KV scan.
+    const opened = incidentOps.filter((op) => op.index).map((op) => op.index);
+    if (opened.length) {
+      writes.push((async () => {
+        const list = (await hGet(K.incidentIndex)) || [];
+        list.unshift(...opened);
+        await hSet(K.incidentIndex, list.slice(0, INCIDENT_CAP), TRANS_TTL);
+      })());
+    }
     await Promise.allSettled(writes);
   }
 
-  return { state, transitions, kvOk };
+  return { state, transitions, incidents: incidentOps.map((o) => o.record), kvOk };
 }

@@ -6,8 +6,10 @@ import assert from "node:assert/strict";
 import { worst } from "../api/health/_lib/engine.mjs";
 import {
   bookingDoor, beatLane, desktopRunner, ghWorkflow, vendorApi, seqHealth,
+  okTrue, paraaiLane,
 } from "../api/health/_lib/evaluators.mjs";
 import { CATALOG, byId, beatLanes } from "../api/health/_lib/catalog.mjs";
+import { uptimeFromTransitions } from "../api/health/tile.mjs";
 
 test("worst() ranks DOWN above everything and OK below everything", () => {
   assert.equal(worst(["OK", "OK"]), "OK");
@@ -134,4 +136,63 @@ test("catalog is internally consistent", () => {
   ]);
   assert.ok(byId.get("booking-door"));
   assert.ok(beatLanes.has("hm-chase"));
+});
+
+// ── Regressions found by Drill 1 on 2026-08-07 ────────────────────────────
+// Vercel answers an unknown /api/* path with a JSON error envelope when the
+// caller sends `accept: application/json`. That envelope parses cleanly, says
+// nothing bad, and used to score OK — a deleted endpoint reading as a healthy
+// one. These tests exist so that can never come back.
+
+test("a Vercel 404 envelope is never a healthy seq-health payload", () => {
+  const envelope = { error: { code: "404", message: "The page could not be found" } };
+  assert.equal(seqHealth({ body: envelope }).state, "UNKNOWN");
+  assert.match(seqHealth({ body: envelope }).reason, /not a seq-health payload/);
+  // The real payload still evaluates normally.
+  assert.equal(seqHealth({ body: { paraform: "live", bookingStop: { stale: false } } }).state, "OK");
+});
+
+test("a 404 envelope is never a healthy paraai payload", () => {
+  const envelope = { error: { code: "404" } };
+  assert.equal(paraaiLane({ body: envelope }).state, "UNKNOWN");
+  assert.equal(paraaiLane({ body: { ok: true, automation: { ready: true, queue: {} } } }).state, "OK");
+});
+
+test("a health endpoint that never says ok is UNKNOWN, not OK", () => {
+  assert.equal(okTrue({ body: { service: "x" }, status: 200 }).state, "UNKNOWN");
+  assert.equal(okTrue({ body: { ok: true }, status: 200 }).state, "OK");
+  assert.equal(okTrue({ body: { ok: false, error: "boom" }, status: 200 }).state, "DOWN");
+});
+
+// ── Uptime is reconstructed from transitions (31d), not the 24h sample ring ──
+
+test("uptime counts only DOWN time, and clips the window to known history", () => {
+  const now = Date.parse("2026-08-07T12:00:00Z");
+  const at = (h) => new Date(now - h * 3600_000).toISOString();
+  // Newest first: recovered 2h ago, went DOWN 6h ago. So 4h DOWN in a 24h day.
+  const transitions = [
+    { t: at(2), from: "DOWN", to: "OK" },
+    { t: at(6), from: "OK", to: "DOWN" },
+  ];
+  const tile = { state: "OK", since: at(2) };
+  const day = uptimeFromTransitions(transitions, tile, 1440, now);
+  // History starts 6h ago, so the window is clipped to 6h; 4h of it was DOWN.
+  assert.equal(day.clipped, true);
+  assert.equal(day.observedMin, 360);
+  assert.equal(day.pct, 33.33);
+
+  // DEGRADED and UNKNOWN are "working" — the number answers "was it up".
+  const degraded = uptimeFromTransitions(
+    [{ t: at(3), from: "OK", to: "DEGRADED" }],
+    { state: "DEGRADED", since: at(3) }, 1440, now,
+  );
+  assert.equal(degraded.pct, 100);
+
+  // A tile with no transitions at all reports from `since`.
+  const fresh = uptimeFromTransitions([], { state: "OK", since: at(10) }, 1440, now);
+  assert.equal(fresh.pct, 100);
+  assert.equal(fresh.observedMin, 600);
+
+  // Nothing observed yet => null, never a confident 100%.
+  assert.equal(uptimeFromTransitions([], { state: "OK", since: null }, 1440, now), null);
 });
