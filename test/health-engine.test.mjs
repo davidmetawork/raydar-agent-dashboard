@@ -86,6 +86,19 @@ test("desktop collapse: a closed laptop is one event, not sixteen", () => {
   );
 });
 
+test("intentionally dark desktop lanes cannot trip the runner collapse", () => {
+  const forward = byId.get("lane-resume-forward-v2");
+  const cohort = byId.get("lane-cohort-booking-watch");
+  assert.equal(forward.paused, true);
+  assert.match(forward.note, /Resume Feed owns new-mail ingestion/u);
+  assert.equal(cohort.paused, true);
+  assert.match(cohort.note, /not currently scheduled/u);
+  const activeDesktop = CATALOG.filter((check) =>
+    check.group === "desktop" && check.kind === "beat" && !check.paused);
+  assert.ok(!activeDesktop.some((lane) => lane.id === forward.id));
+  assert.ok(!activeDesktop.some((lane) => lane.id === cohort.id));
+});
+
 test("GitHub Action lanes are heartbeat-covered, needing no API token", () => {
   // Polling the Actions API needed a PAT and only proved GitHub's API answered.
   // A beat at the end of each run needs no credential and proves the workflow
