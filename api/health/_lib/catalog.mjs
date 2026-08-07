@@ -22,6 +22,16 @@ export const GROUPS = [
 ];
 
 export const CATALOG = [
+  // TEMPORARY pager drill — removed after the recovery notice is confirmed.
+  {
+    id: "pager-drill",
+    name: "Pager drill (synthetic)",
+    group: "candidate",
+    tier: 1,
+    kind: "derived",
+    probe: { evaluate: "drillFlag" },
+    registry: "/products/system-health/",
+  },
   // ---------- A. candidate-facing (tier 1: DOWN pages) ----------
   {
     id: "booking-door",

@@ -130,7 +130,8 @@ test("catalog is internally consistent", () => {
     if (c.kind === "beat") assert.ok(c.probe.lane && c.probe.maxSilenceMin, `${c.id} needs lane+window`);
   }
   // Tier 1 = wakes a human. Keep that list short and candidate-facing.
-  const tier1 = CATALOG.filter((c) => c.tier === 1).map((c) => c.id);
+  // pager-drill is a temporary synthetic check; it is removed after the drill.
+  const tier1 = CATALOG.filter((c) => c.tier === 1 && c.id !== "pager-drill").map((c) => c.id);
   assert.deepEqual(tier1.sort(), [
     "booking-door", "calls-api", "paraform-session", "screener-feed", "screener-uplink",
   ]);

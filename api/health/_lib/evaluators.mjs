@@ -312,7 +312,17 @@ export function slackTransport({ lastDelivered }) {
   return OK(null, { lastDelivered: lastDelivered.at });
 }
 
+// TEMPORARY pager drill (removed after this run). Reads an env flag so the
+// same check can be driven DOWN and then back to OK, which is the only way to
+// prove the recovery notice — deleting the check produces no transition.
+export function drillFlag() {
+  return process.env.HEALTH_DRILL_DOWN === "true"
+    ? { state: "DOWN", reason: "PAGER DRILL — synthetic, ignore; a recovery notice follows" }
+    : { state: "OK", reason: null };
+}
+
 export const EVALUATORS = {
+  drillFlag,
   bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable,
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
   n8nWatchdog, ghActionsFetch, ghWorkflow, beatLane, desktopRunner,

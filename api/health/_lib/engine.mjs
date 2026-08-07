@@ -256,10 +256,15 @@ export async function runTick({ now = Date.now() } = {}) {
       name: check.name,
       ...(incidentAt ? { incidentAt, incidentWorst } : {}),
     };
-    if (changed && before.state) {
+    // A first observation counts as a transition. Without this, a check whose
+    // very first result is DOWN records nothing, never fires the initial page,
+    // and is only caught later by the re-page path — which is what happened in
+    // the 2026-08-07 pager drill: the DM read "STILL DOWN (0m)" instead of
+    // "DOWN". A newly added check that is born broken must page like one.
+    if (changed) {
       transitions.push({
         id: check.id, name: check.name, tier: check.tier,
-        from: before.state, to: state, reason: raw.reason || null, at: nowIso,
+        from: before.state || "NEW", to: state, reason: raw.reason || null, at: nowIso,
         sinceLast: before.since || null,
       });
     }
