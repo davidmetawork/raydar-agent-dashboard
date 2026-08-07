@@ -301,23 +301,28 @@ export const CATALOG = [
     registry: "/operations/monitoring-canaries/",
     note: "Collapses a laptop-offline event into ONE tile instead of a wall of red.",
   },
+  // maxSilenceMin is each lane's REAL launchd cadence x2.5, read from its plist
+  // (not estimated): too tight cries wolf, too loose hides a dead lane.
+  // The three KeepAlive services never exit, so they cannot beat for
+  // themselves — ops/health-beat/health-reporter.mjs beats for them every
+  // 5 minutes based on whether launchd is holding a PID.
   ...[
-    ["hm-chase", "HM update chase", 75],
-    ["tn-reenable", "Talent Network re-enable", 2880],
-    ["resume-feed", "Resume feed", 40],
-    ["booking-resume-sync", "Booking resume sync", 90],
-    ["booking-resume-retry", "Booking resume retry", 180],
-    ["booking-resume-email-index", "Booking resume email index", 180],
-    ["applicant-hub-worker", "Applicant hub worker", 60],
-    ["applicant-hub-watchdog", "Applicant hub watchdog", 90],
-    ["archive-backfill", "Archive backfill", 2880],
-    ["resume-chase", "Resume chase", 2880],
-    ["resume-forward-v2", "Resume forward", 180],
-    ["resume-watchdog-v2", "Resume watchdog", 180],
-    ["resume-ledger-backup-v2", "Resume ledger backup", 3000],
-    ["resume-juicebox-bridge-v1", "Juicebox bridge", 3000],
-    ["paraai-interest-observer", "Para AI interest observer", 30],
-    ["cohort-booking-watch", "Cohort booking watch", 3000],
+    ["hm-chase", "HM update chase", 75],                          // every 30m
+    ["tn-reenable", "Talent Network re-enable", 1800],            // daily
+    ["resume-feed", "Resume feed", 40],                           // every 15m
+    ["booking-resume-sync", "Booking resume sync", 20],           // every 5m
+    ["booking-resume-retry", "Booking resume retry", 40],         // every 15m
+    ["booking-resume-email-index", "Booking resume email index", 1800], // daily
+    ["applicant-hub-worker", "Applicant hub worker", 20],         // KeepAlive, reporter
+    ["applicant-hub-watchdog", "Applicant hub watchdog", 30],     // every 10m
+    ["archive-backfill", "Archive backfill", 75],                 // every 30m
+    ["resume-chase", "Resume chase", 75],                         // every 30m
+    ["resume-forward-v2", "Resume forward", 20],                  // every 5m
+    ["resume-watchdog-v2", "Resume watchdog", 20],                // KeepAlive, reporter
+    ["resume-ledger-backup-v2", "Resume ledger backup", 1800],    // daily
+    ["resume-juicebox-bridge-v1", "Juicebox bridge", 20],         // KeepAlive, reporter
+    ["paraai-interest-observer", "Para AI interest observer", 30],// every 10m
+    ["cohort-booking-watch", "Cohort booking watch", 1800],       // daily once scheduled
   ].map(([lane, name, maxSilenceMin]) => ({
     id: `lane-${lane}`,
     name,
