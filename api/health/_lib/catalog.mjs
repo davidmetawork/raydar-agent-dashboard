@@ -293,12 +293,10 @@ export const CATALOG = [
     ["applicant-hub-watchdog", "Applicant hub watchdog", 30],     // every 10m
     ["archive-backfill", "Archive backfill", 75],                 // every 30m
     ["resume-chase", "Resume chase", 75],                         // every 30m
-    ["resume-forward-v2", "Resume forward", 20],                  // every 5m
     ["resume-watchdog-v2", "Resume watchdog", 20],                // KeepAlive, reporter
     ["resume-ledger-backup-v2", "Resume ledger backup", 1800],    // daily
     ["resume-juicebox-bridge-v1", "Juicebox bridge", 20],         // KeepAlive, reporter
     ["paraai-interest-observer", "Para AI interest observer", 30],// every 10m
-    ["cohort-booking-watch", "Cohort booking watch", 1800],       // daily once scheduled
   ].map(([lane, name, maxSilenceMin]) => ({
     id: `lane-${lane}`,
     name,
@@ -308,6 +306,28 @@ export const CATALOG = [
     probe: { lane, maxSilenceMin },
     registry: "/operations/monitoring-canaries/",
   })),
+  {
+    id: "lane-resume-forward-v2",
+    name: "Resume forward",
+    group: "desktop",
+    tier: 3,
+    kind: "beat",
+    paused: true,
+    probe: { lane: "resume-forward-v2", maxSilenceMin: 20 },
+    registry: "/products/resume-feed/",
+    note: "expected-unloaded (Resume Feed owns new-mail ingestion)",
+  },
+  {
+    id: "lane-cohort-booking-watch",
+    name: "Cohort booking watch",
+    group: "desktop",
+    tier: 3,
+    kind: "beat",
+    paused: true,
+    probe: { lane: "cohort-booking-watch", maxSilenceMin: 1800 },
+    registry: "/operations/monitoring-canaries/",
+    note: "not currently scheduled locally",
+  },
   {
     id: "lane-resume-migration-v2",
     name: "Resume migration v2",
