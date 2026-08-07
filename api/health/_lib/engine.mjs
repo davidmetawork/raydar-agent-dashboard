@@ -140,7 +140,12 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 5. Desktop collapse: a closed laptop is ONE event, not sixteen
-  const laneChecks = active.filter((c) => c.kind === "beat");
+  // Desktop lanes only: the runner-offline collapse models ONE machine going
+  // quiet. GitHub Actions lanes are also beats but run on GitHub's infra —
+  // counting them here made the runner tile claim overdue lanes that were
+  // actually a failed Action, and a laptop shutdown would have needed more
+  // silent lanes to trip the collapse.
+  const laneChecks = active.filter((c) => c.kind === "beat" && c.group === "desktop");
   const laneStates = laneChecks.map((c) => ({ id: c.id, paused: false, ...results[c.id] }));
   const runnerVerdict = EVALUATORS.desktopRunner({ laneStates });
   if (runnerVerdict.state === "DOWN") {
