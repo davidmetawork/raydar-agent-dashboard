@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 import { worst } from "../api/health/_lib/engine.mjs";
 import {
-  bookingDoor, beatLane, desktopRunner, ghWorkflow, vendorApi, seqHealth,
+  bookingDoor, beatLane, desktopRunner, vendorApi, seqHealth,
   okTrue, paraaiLane,
 } from "../api/health/_lib/evaluators.mjs";
 import { CATALOG, byId, beatLanes } from "../api/health/_lib/catalog.mjs";
@@ -86,22 +86,20 @@ test("desktop collapse: a closed laptop is one event, not sixteen", () => {
   );
 });
 
-test("GitHub workflow: two consecutive failures are DOWN, one is DEGRADED", () => {
-  const mk = (concl, minsAgo) => ({
-    path: ".github/workflows/paraai-curate.yml",
-    event: "schedule",
-    status: "completed",
-    conclusion: concl,
-    created_at: new Date(Date.now() - minsAgo * 60000).toISOString(),
-  });
-  const probe = { workflowFile: "paraai-curate.yml", cadenceMin: 60 };
-  const feed = (runs) => ({ "gh-actions-api": { state: "OK", raw: { workflow_runs: runs } } });
-
-  assert.equal(ghWorkflow({ probe, results: feed([mk("success", 10)]) }).state, "OK");
-  assert.equal(ghWorkflow({ probe, results: feed([mk("failure", 10), mk("success", 70)]) }).state, "DEGRADED");
-  assert.equal(ghWorkflow({ probe, results: feed([mk("failure", 10), mk("failure", 70)]) }).state, "DOWN");
-  // Nothing has run in 3x cadence -> the schedule itself is dead.
-  assert.equal(ghWorkflow({ probe, results: feed([mk("success", 400)]) }).state, "DOWN");
+test("GitHub Action lanes are heartbeat-covered, needing no API token", () => {
+  // Polling the Actions API needed a PAT and only proved GitHub's API answered.
+  // A beat at the end of each run needs no credential and proves the workflow
+  // actually executed — the stronger signal, and one fewer secret to hold.
+  const actions = CATALOG.filter((c) => c.group === "actions");
+  assert.ok(actions.length >= 6);
+  for (const c of actions) {
+    assert.equal(c.kind, "beat", `${c.id} must be a heartbeat lane`);
+    assert.ok(c.probe.lane && c.probe.maxSilenceMin, `${c.id} needs lane+window`);
+  }
+  assert.ok(
+    !JSON.stringify(CATALOG).includes("GH_HEALTH_TOKEN"),
+    "no GitHub token may be required",
+  );
 });
 
 test("vendor API: revoked credentials are DOWN, throttling is only DEGRADED", () => {

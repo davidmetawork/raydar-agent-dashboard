@@ -92,35 +92,14 @@ export const CATALOG = [
 
   // ---------- B. pipeline ----------
   {
-    id: "scheduler-detail",
-    name: "Scheduler readiness",
-    group: "pipeline",
-    tier: 2,
-    kind: "pull",
-    probe: {
-      url: "https://book.raydar.xyz/api/health",
-      authEnv: "SCHEDULER_HEALTH_READ_KEY",
-      timeoutMs: 12000,
-      okStatuses: [200, 503],
-      evaluate: "schedulerDetail",
-    },
-    registry: "/products/raydar-scheduler/",
-    note: "The door can be open while readiness degrades — separate tile on purpose.",
-  },
-  {
     id: "lifecycle-reminders",
     name: "Lifecycle reminders",
     group: "pipeline",
     tier: 2,
-    kind: "pull",
-    probe: {
-      url: "https://raydar-lifecycle.vercel.app/api/reminders-health",
-      authEnv: "CALL_REMINDER_HEALTH_READ_KEY",
-      timeoutMs: 10000,
-      okStatuses: [200, 401, 503],
-      evaluate: "reminderHealth",
-    },
+    kind: "derived",
+    probe: { evaluate: "nativeReminders" },
     registry: "/products/lifecycle-automation/",
+    note: "Read from the scheduler's public health, which already aggregates it.",
   },
   {
     id: "paraai-lane",
@@ -257,37 +236,24 @@ export const CATALOG = [
   },
 
   // ---------- E. GitHub Actions ----------
-  {
-    id: "gh-actions-api",
-    name: "GitHub Actions API",
-    group: "actions",
-    tier: 3,
-    kind: "pull",
-    probe: {
-      url: "https://api.github.com/repos/davidmetawork/raydar/actions/runs?per_page=60",
-      authEnv: "GH_HEALTH_TOKEN",
-      authScheme: "Bearer",
-      timeoutMs: 12000,
-      okStatuses: [200, 401, 403], // a rejected token is a verdict the evaluator words better
-      evaluate: "ghActionsFetch",
-    },
-    registry: "/operations/monitoring-canaries/",
-    note: "One fetch per tick; the per-workflow tiles below derive from it.",
-  },
+  // Each scheduled Action posts a heartbeat at the end of its run instead of
+  // being polled through the GitHub API. That needs no token, and it proves the
+  // workflow actually RAN rather than that GitHub's API says it did.
   ...[
-    ["gha-cron-backstop", "Cron backstop", "cron-backstop.yml", 90],
-    ["gha-human-outcomes", "Human outcomes", "human-outcomes.yml", 180],
-    ["gha-trademark-watch", "Trademark watch", "trademark-watch.yml", 1440],
-    ["gha-paraai-curate", "Para AI curate", "paraai-curate.yml", 60],
-    ["gha-curate-deadman", "Curate dead-man", "paraai-curate-health.yml", 1440],
-    ["gha-clients-snapshot", "Clients snapshot", "clients-snapshot.yml", 1440],
-  ].map(([id, name, workflowFile, cadenceMin]) => ({
-    id,
+    ["gha-cron-backstop", "Cron backstop", 150],
+    ["gha-human-outcomes", "Human outcomes", 450],
+    ["gha-trademark-watch", "Trademark watch", 3000],
+    ["gha-paraai-curate", "Para AI curate", 150],
+    ["gha-curate-deadman", "Curate dead-man", 3000],
+    ["gha-clients-snapshot", "Clients snapshot", 3000],
+    ["gha-health-backstop", "Health backstop", 150],
+  ].map(([lane, name, maxSilenceMin]) => ({
+    id: lane,
     name,
     group: "actions",
     tier: 2,
-    kind: "derived",
-    probe: { evaluate: "ghWorkflow", workflowFile, cadenceMin },
+    kind: "beat",
+    probe: { lane, maxSilenceMin },
     registry: "/operations/monitoring-canaries/",
   })),
 

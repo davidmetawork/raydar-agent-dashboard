@@ -190,39 +190,6 @@ export function n8nWatchdog({ watchdog }) {
 
 // ---------- GitHub Actions ----------
 
-export function ghActionsFetch({ body, status, keyMissing }) {
-  if (keyMissing) return UNK("key-missing: GH_HEALTH_TOKEN not provisioned");
-  if (status === 401 || status === 403) return UNK(`GitHub token rejected (${status})`);
-  if (!body || !Array.isArray(body.workflow_runs)) return UNK(`unexpected body (HTTP ${status})`);
-  return OK(null, { runs: body.workflow_runs.length });
-}
-
-export function ghWorkflow({ probe, results }) {
-  const feed = results["gh-actions-api"];
-  if (!feed || feed.state === "UNKNOWN") return UNK(feed?.reason || "actions feed unavailable");
-  const runs = (feed.raw?.workflow_runs || []).filter(
-    (r) => String(r.path || "").endsWith(probe.workflowFile) && r.event === "schedule",
-  );
-  if (!runs.length) return UNK("no scheduled runs in the recent window");
-  const completed = runs.filter((r) => r.status === "completed");
-  if (!completed.length) return UNK("no completed scheduled runs yet");
-  completed.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-  const latest = completed[0];
-  const mins = ageMin(latest.created_at);
-  const metrics = { latest: latest.created_at, conclusion: latest.conclusion, ageMin: mins };
-  const cadence = probe.cadenceMin;
-  if (mins != null && mins > cadence * 3) {
-    return DOWN(`no run for ${mins}m (cadence ${cadence}m)`, metrics);
-  }
-  const failed = (r) => r.conclusion && r.conclusion !== "success" && r.conclusion !== "skipped";
-  if (failed(latest) && completed[1] && failed(completed[1])) {
-    return DOWN(`two consecutive ${latest.conclusion} runs`, metrics);
-  }
-  if (failed(latest)) return DEG(`latest run ${latest.conclusion}`, metrics);
-  if (mins != null && mins > cadence * 2) return DEG(`last run ${mins}m ago (cadence ${cadence}m)`, metrics);
-  return OK(null, metrics);
-}
-
 // ---------- desktop ----------
 
 /** A lane is judged purely on heartbeat freshness — plus a self-reported fail. */
@@ -267,21 +234,33 @@ export function vendorApi({ status, keyMissing, probe }) {
   return status >= 200 && status < 300 ? OK(null, { status }) : DEG(`HTTP ${status}`);
 }
 
+// Reads the PUBLIC scheduler health body, not the authorized detail view.
+// The public payload already carries these booleans, so watching Google,
+// Postgres and the reminder lane needs no read key at all — provisioning a
+// secret to learn something already published would be gratuitous.
 export function googleWorkspace({ results }) {
-  const s = results["scheduler-detail"];
-  if (!s || s.state === "UNKNOWN") return UNK("scheduler detail unavailable");
-  const checks = s.raw?.checks || {};
+  const checks = results["booking-door"]?.raw?.checks;
+  if (!checks) return UNK("scheduler public health unavailable");
   const names = ["gmail", "calendars", "meetAccess", "humanStaffCalendars"];
-  const failing = names.filter((n) => checks[n]?.ok === false || checks[n] === false);
+  const failing = names.filter((n) => checks[n] === false);
   if (failing.length) return DEG(`failing: ${failing.join(", ")}`, { failing });
   return OK();
 }
 
 export function neonDb({ results }) {
-  const s = results["scheduler-detail"];
-  if (!s || s.state === "UNKNOWN") return UNK("scheduler detail unavailable");
-  const db = s.raw?.checks?.database;
-  if (db?.ok === false || db === false) return DOWN("scheduler cannot reach Postgres");
+  const checks = results["booking-door"]?.raw?.checks;
+  if (!checks) return UNK("scheduler public health unavailable");
+  if (checks.database === false) return DOWN("scheduler cannot reach Postgres");
+  return OK();
+}
+
+/** Reminder lane liveness, also from the public scheduler payload. */
+export function nativeReminders({ results }) {
+  const checks = results["booking-door"]?.raw?.checks;
+  if (!checks) return UNK("scheduler public health unavailable");
+  if (checks.nativeReminders === false) {
+    return DEG("reminder lane not reporting healthy to the scheduler");
+  }
   return OK();
 }
 
@@ -315,7 +294,7 @@ export function slackTransport({ lastDelivered }) {
 export const EVALUATORS = {
   bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable,
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
-  n8nWatchdog, ghActionsFetch, ghWorkflow, beatLane, desktopRunner,
-  vendorApi, googleWorkspace, neonDb, upstashKv, slackTransport,
+  n8nWatchdog, beatLane, desktopRunner,
+  vendorApi, googleWorkspace, neonDb, nativeReminders, upstashKv, slackTransport,
   n8nCloud, githubApi,
 };
