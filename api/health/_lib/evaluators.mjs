@@ -42,6 +42,35 @@ export function bookingDoor({ body, status }) {
   return OK(null, metrics);
 }
 
+/** Ground truth for the door: what does /api/hold actually answer. */
+export function bookingDoorHold({ body }) {
+  if (!body || typeof body !== "object") return UNK("no probe result");
+  const { hold, holdStatus, health } = body;
+  const checks = health?.checks || {};
+  const soft = ["agentCoverage", "sequenceStop", "nativeReminders", "humanIsolation"]
+    .filter((k) => checks[k] === false);
+  const metrics = {
+    holdStatus,
+    holdError: hold?.error || null,
+    healthOk: health?.ok ?? null,
+    healthAgentAdmission: health?.agentAdmission ?? null,
+  };
+  if (holdStatus === 409) {
+    // slot_taken past the admission gate = the door is open.
+    return soft.length
+      ? DEG(`door open; degraded: ${soft.join(", ")}`, metrics)
+      : OK(null, metrics);
+  }
+  if (holdStatus === 503) {
+    const lying = health?.agentAdmission === true
+      ? " (health claims admission open — attestation-level closure)" : "";
+    return DOWN(`holds refused: ${hold?.error || "503"}${lying}`, metrics);
+  }
+  if (holdStatus === 429) return DEG("hold probe rate-limited", metrics);
+  if (holdStatus === 403) return DOWN(`booking gates off: ${hold?.error || "403"}`, metrics);
+  return UNK(`unexpected hold answer HTTP ${holdStatus}`, metrics);
+}
+
 export function bridge({ body }) {
   if (!body || typeof body !== "object") return UNK("unparseable body");
   const metrics = {
@@ -286,6 +315,7 @@ export function slackTransport({ lastDelivered }) {
 }
 
 export const EVALUATORS = {
+  bookingDoorHold,
   bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable,
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
   n8nWatchdog, beatLane, desktopRunner,

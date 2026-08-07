@@ -216,3 +216,29 @@ test("the external pager fires on tier-1 only, not on a single desktop hiccup", 
     "an acknowledged tier-1 does not page",
   );
 });
+
+test("booking door judges the hold path, and calls out a lying health mirror", async () => {
+  // 2026-08-07 18:40: the domain served a deployment with a signature-invalid
+  // receipt. Health said agentAdmission:true (it skips attestation); every real
+  // hold 503'd. The old tile lied green through a live outage. Ground truth is
+  // what /api/hold answers.
+  const { bookingDoorHold } = await import("../api/health/_lib/evaluators.mjs");
+  const open = bookingDoorHold({ body: {
+    hold: { error: "slot_taken" }, holdStatus: 409,
+    health: { ok: true, agentAdmission: true, checks: {} },
+  } });
+  assert.equal(open.state, "OK");
+
+  const lying = bookingDoorHold({ body: {
+    hold: { error: "booking_temporarily_unavailable" }, holdStatus: 503,
+    health: { ok: true, agentAdmission: true, checks: {} },
+  } });
+  assert.equal(lying.state, "DOWN");
+  assert.match(lying.reason, /attestation-level closure/);
+
+  const degraded = bookingDoorHold({ body: {
+    hold: { error: "slot_taken" }, holdStatus: 409,
+    health: { ok: true, agentAdmission: true, checks: { sequenceStop: false } },
+  } });
+  assert.equal(degraded.state, "DEGRADED");
+});

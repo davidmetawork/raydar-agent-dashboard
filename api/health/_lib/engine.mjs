@@ -22,8 +22,49 @@ const DEBOUNCED = new Set(["UNKNOWN", "DOWN"]);
 export const worst = (states) =>
   states.reduce((acc, s) => (STATE_ORDER[s] > STATE_ORDER[acc] ? s : acc), "OK");
 
+/**
+ * The booking-door ground-truth probe. POSTs /api/hold with a far-future
+ * timestamp deliberately offset off the slot grid plus a fresh browserKey:
+ * admission is asserted before slot matching, so the probe can never create a
+ * hold. 409 slot_taken proves the door is OPEN; 503 proves it is CLOSED. The
+ * paired health GET is fetched only as context for the tile's metrics.
+ */
+async function runHoldProbe(check) {
+  const p = check.probe;
+  const body = {
+    hostSlug: "raydar",
+    eventSlug: "agent",
+    // 4 days out, +37s off any slot boundary — never a real slot.
+    startMs: (Math.floor(Date.now() / 1000) + 4 * 86400) * 1000 + 37000,
+    browserKey: globalThis.crypto.randomUUID(),
+  };
+  try {
+    const [holdRes, healthRes] = await Promise.all([
+      fetch(p.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "user-agent": "raydar-health/1" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(p.timeoutMs || 12000),
+      }),
+      fetch(p.healthUrl, {
+        headers: { accept: "application/json", "user-agent": "raydar-health/1" },
+        signal: AbortSignal.timeout(p.timeoutMs || 12000),
+      }).catch(() => null),
+    ]);
+    const holdBody = await holdRes.text().then((t) => { try { return JSON.parse(t); } catch { return null; } });
+    const healthBody = healthRes
+      ? await healthRes.text().then((t) => { try { return JSON.parse(t); } catch { return null; } })
+      : null;
+    return { transport: null, status: holdRes.status, body: { hold: holdBody, holdStatus: holdRes.status, health: healthBody } };
+  } catch (e) {
+    const msg = String(e?.name === "TimeoutError" ? "timeout" : e?.message || e).slice(0, 140);
+    return { transport: msg, status: 0, body: null };
+  }
+}
+
 async function runPull(check) {
   const p = check.probe;
+  if (p.kind === "holdProbe") return runHoldProbe(check);
   const envName = p.authEnv;
   const secret = envName ? process.env[envName] || "" : null;
   if (envName && !secret) {

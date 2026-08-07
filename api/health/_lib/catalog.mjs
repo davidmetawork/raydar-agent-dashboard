@@ -30,13 +30,22 @@ export const CATALOG = [
     tier: 1,
     kind: "pull",
     probe: {
-      url: "https://book.raydar.xyz/api/health",
-      timeoutMs: 10000,
-      okStatuses: [200, 503], // 503 is a real health answer here, not a transport failure
-      evaluate: "bookingDoor",
+      // Probe the ACTUAL hold path, not the health mirror. On 2026-08-07 the
+      // domain served a deployment whose receipt failed signature verification:
+      // health said agentAdmission:true (it mirrors the health expression,
+      // which skips attestation) while every real hold 503'd on sourceAttested.
+      // The tile lied green through a live outage. Ground truth is a POST to
+      // /api/hold with a deliberately non-slot startMs: admission is asserted
+      // BEFORE slot matching, so an open door answers 409 slot_taken with zero
+      // side effects, and a closed door answers 503.
+      kind: "holdProbe",
+      url: "https://book.raydar.xyz/api/hold",
+      healthUrl: "https://book.raydar.xyz/api/health",
+      timeoutMs: 12000,
+      evaluate: "bookingDoorHold",
     },
     registry: "/products/raydar-scheduler/",
-    note: "The /api/hold gate candidates actually feel.",
+    note: "POSTs a non-slot hold: 409 = door open, 503 = closed. Zero side effects.",
   },
   {
     id: "screener-uplink",
