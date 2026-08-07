@@ -351,6 +351,7 @@
       <button class="tab" id="tab-inbox" onclick="showView('inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></button>
       <button class="tab" id="tab-enrich" onclick="showView('enrich')">Enrich</button>
       <button class="tab" id="tab-prep" onclick="showView('prep')">Prep</button>
+      <button class="tab" id="tab-health" onclick="showView('health')">Health <span class="badge" id="health-badge" style="display:none"></span></button>
     </div>
 
     <div id="view-overview">
@@ -480,6 +481,10 @@
 
     <div id="view-prep" hidden>
       <iframe id="prep-frame" title="Prep" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
+    </div>
+
+    <div id="view-health" hidden>
+      <iframe id="health-frame" title="Health" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
     </div>
 
     <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
@@ -1021,9 +1026,9 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let paraaiLoaded=false, seqLoaded=false, inboxLoaded=false, enrichLoaded=false, prepLoaded=false;
+    let paraaiLoaded=false, seqLoaded=false, inboxLoaded=false, enrichLoaded=false, prepLoaded=false, healthLoaded=false;
     function showView(name){
-      ["overview","candidates","followups","history","analytics","calls","paraai","sequences","inbox","enrich","prep"].forEach(v=>{
+      ["overview","candidates","followups","history","analytics","calls","paraai","sequences","inbox","enrich","prep","health"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
@@ -1032,6 +1037,7 @@
       if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src="/inbox?embed=1"; inboxLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
       if(name==="prep" && !prepLoaded){ $("prep-frame").src="/prep?embed=1"; prepLoaded=true; }
+      if(name==="health" && !healthLoaded){ $("health-frame").src="/health?embed=1"; healthLoaded=true; }
       if(name==="candidates") ensureRoster();
       if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
@@ -1044,6 +1050,21 @@
       else if(name==="inbox"){ if(location.hash!=="#inbox") history.replaceState(null,"","#inbox"); }
       else if(location.hash==="#calls"||location.hash==="#paraai"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
     }
+    // Health badge: a DOWN system must be visible from every tab, not only
+    // after someone thinks to look. Uses the public minimal rollup (no names).
+    async function pollHealthBadge(){
+      try{
+        const r=await fetch("/api/health/rollup",{credentials:"same-origin"});
+        const d=await r.json();
+        const down=Number(d?.counts?.DOWN)||0;
+        const b=$("health-badge"); if(!b) return;
+        b.textContent=String(down);
+        b.className="badge"+(down?"":" good");
+        b.style.display=down?"inline-flex":"none";
+      }catch{}
+    }
+    pollHealthBadge(); setInterval(pollHealthBadge,120000);
+
     window.addEventListener("message",(event)=>{
       if(event.origin!==location.origin||event.data?.type!=="raydar-inbox-counts") return;
       const count=Math.max(0,Number(event.data.interested)||0);

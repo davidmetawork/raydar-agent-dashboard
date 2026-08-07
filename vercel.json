@@ -39,6 +39,10 @@
     {
       "source": "/paraai",
       "destination": "/paraai.html"
+    },
+    {
+      "source": "/health",
+      "destination": "/health.html"
     }
   ],
   "redirects": [
@@ -63,6 +67,9 @@
     },
     "api/paraai/*.mjs": {
       "maxDuration": 120
+    },
+    "api/health/*.mjs": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -73,6 +80,8 @@
     { "path": "/api/seq/rearm-pause-canary", "schedule": "12,42 * * * *" },
     { "path": "/api/seq/booking-sweep", "schedule": "22,52 * * * *" },
     { "path": "/api/ops/n8n-watchdog", "schedule": "7 * * * *" },
-    { "path": "/api/paraai/submission-notify", "schedule": "47 * * * *" }
+    { "path": "/api/paraai/submission-notify", "schedule": "47 * * * *" },
+    { "path": "/api/health/tick", "schedule": "*/2 * * * *" },
+    { "path": "/api/health/digest", "schedule": "0 14 * * *" }
   ]
 }
