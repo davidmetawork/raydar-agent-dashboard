@@ -22,6 +22,16 @@ export const GROUPS = [
 ];
 
 export const CATALOG = [
+  // TEMPORARY pager drill — removed in the very next commit.
+  {
+    id: "pager-drill",
+    name: "Pager drill (synthetic)",
+    group: "candidate",
+    tier: 1,
+    kind: "derived",
+    probe: { evaluate: "drillAlwaysDown" },
+    registry: "/products/system-health/",
+  },
   // ---------- A. candidate-facing (tier 1: DOWN pages) ----------
   {
     id: "booking-door",
