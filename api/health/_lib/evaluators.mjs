@@ -274,12 +274,6 @@ export function n8nCloud({ results }) {
 }
 
 /** Reachability of the GitHub API itself, derived from the one Actions fetch. */
-export function githubApi({ results }) {
-  const f = results["gh-actions-api"];
-  if (!f) return UNK("actions feed did not run");
-  if (f.state === "UNKNOWN") return UNK(f.reason);
-  return { state: f.state, reason: f.reason, metrics: f.metrics };
-}
 
 export function upstashKv({ kvOk }) {
   return kvOk ? OK() : DOWN("KV read-back failed this tick");
@@ -296,5 +290,5 @@ export const EVALUATORS = {
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
   n8nWatchdog, beatLane, desktopRunner,
   vendorApi, googleWorkspace, neonDb, nativeReminders, upstashKv, slackTransport,
-  n8nCloud, githubApi,
+  n8nCloud,
 };

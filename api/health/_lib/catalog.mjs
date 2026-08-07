@@ -398,15 +398,6 @@ export const CATALOG = [
     note: "The vendor's reachability, separate from whether a workflow is failing.",
   },
   {
-    id: "github-api",
-    name: "GitHub API",
-    group: "deps",
-    tier: 3,
-    kind: "derived",
-    probe: { evaluate: "githubApi" },
-    registry: "/operations/monitoring-canaries/",
-  },
-  {
     id: "slack-transport",
     name: "Slack delivery",
     group: "deps",
