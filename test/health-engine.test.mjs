@@ -144,7 +144,8 @@ test("catalog is internally consistent", () => {
   // pager-drill is a temporary synthetic check; it is removed after the drill.
   const tier1 = CATALOG.filter((c) => c.tier === 1 && !c.id.startsWith("pager-drill")).map((c) => c.id);
   assert.deepEqual(tier1.sort(), [
-    "booking-door", "calls-api", "paraform-session", "screener-feed", "screener-uplink",
+    "booking-door", "calls-api", "lifecycle-connector-chase", "lifecycle-human-handoff",
+    "paraform-session", "screener-feed", "screener-uplink",
   ]);
   assert.ok(byId.get("booking-door"));
   assert.ok(beatLanes.has("hm-chase"));

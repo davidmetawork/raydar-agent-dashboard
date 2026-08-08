@@ -110,6 +110,38 @@ export const CATALOG = [
     registry: "/products/lifecycle-automation/",
     note: "Read from the scheduler's public health, which already aggregates it.",
   },
+  // Candidate-facing lifecycle lanes, probed for EXISTENCE (401 = alive,
+  // 404 = evicted by a stale deploy). Tier 1: a candidate who asked the AI
+  // for a human is waiting on the first of these; four evictions happened on
+  // 2026-08-08 alone and none was visible on this board. The GitHub Actions
+  // lifecycle-lane-watchdog auto-heals the 404 within ~15 min; this row is
+  // the minutes-scale page so a human knows it happened.
+  {
+    id: "lifecycle-human-handoff",
+    name: "Human handoff lane",
+    group: "pipeline",
+    tier: 1,
+    kind: "pull",
+    probe: {
+      url: "https://raydar-lifecycle.vercel.app/api/human-handoff",
+      timeoutMs: 8000,
+      evaluate: "authGated",
+    },
+    registry: "/products/human-handoff/",
+  },
+  {
+    id: "lifecycle-connector-chase",
+    name: "Connector chase lane",
+    group: "pipeline",
+    tier: 1,
+    kind: "pull",
+    probe: {
+      url: "https://raydar-lifecycle.vercel.app/api/connector-chase",
+      timeoutMs: 8000,
+      evaluate: "authGated",
+    },
+    registry: "/products/connector-referral-followups/",
+  },
   {
     id: "paraai-lane",
     name: "Para AI automation",
@@ -256,6 +288,9 @@ export const CATALOG = [
     ["gha-curate-deadman", "Curate dead-man", 3000],
     ["gha-clients-snapshot", "Clients snapshot", 3000],
     ["gha-health-backstop", "Health backstop", 150],
+    // */15 cadence; 60 min silent = four missed runs. Auto-heals lifecycle
+    // endpoint evictions, so ITS death would re-open the Omar failure mode.
+    ["gha-lifecycle-watchdog", "Lifecycle watchdog", 60],
   ].map(([lane, name, maxSilenceMin]) => ({
     id: lane,
     name,

@@ -125,6 +125,18 @@ export function reachable({ status }) {
   return status >= 200 && status < 400 ? OK(null, { status }) : DOWN(`HTTP ${status}`);
 }
 
+// A CRON_SECRET-gated endpoint is HEALTHY when it answers 401: the function
+// exists and rejected us, which is all an unauthenticated probe can prove.
+// 404 means a stale `vercel --prod` deploy EVICTED the function (and its cron
+// row) — the 2026-08-08 incident class that cost a candidate his human-handoff
+// email for 84 minutes. Anything else is a question, not an answer.
+export function authGated({ status }) {
+  if (status === 401) return OK(null, { status });
+  if (status === 404) return DOWN("HTTP 404 — function evicted by a stale deploy; redeploy lifecycle/ from main", { status });
+  if (status === 0) return DOWN("unreachable", { status });
+  return UNK(`HTTP ${status} (expected 401)`, { status });
+}
+
 // ---------- pipeline ----------
 
 export function schedulerDetail({ body, status, keyMissing }) {
@@ -316,7 +328,7 @@ export function slackTransport({ lastDelivered }) {
 
 export const EVALUATORS = {
   bookingDoorHold,
-  bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable,
+  bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable, authGated,
   schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
   n8nWatchdog, beatLane, desktopRunner,
   vendorApi, googleWorkspace, neonDb, nativeReminders, upstashKv, slackTransport,
