@@ -122,7 +122,7 @@ test("sync stores a small snapshot and refuses an oversized one before writing",
   const snapshot = { generatedAt: "2026-08-09T00:00:00.000Z", counts: { stream: 1 }, stream: [], queue: [] };
   await handler(request({ body: { snapshot } }), ok);
   assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.body.stored, { snapshot: true, acks: 0 });
+  assert.deepEqual(ok.body.stored, { snapshot: true, queue: false, acks: 0 });
   assert.equal(calls.writeJson.length, 1);
   assert.equal(calls.writeJson[0][0], "apphub:snapshot");
   assert.deepEqual(calls.writeJson[0][1], snapshot);
@@ -167,7 +167,7 @@ test("sync validates every ack key and status before writing any", async () => {
     },
   }), ok);
   assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.body.stored, { snapshot: false, acks: 2 });
+  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 2 });
   assert.equal(calls.writeHash.length, 1);
   const [hashKey, fields] = calls.writeHash[0];
   assert.equal(hashKey, "apphub:acks");
@@ -282,4 +282,23 @@ test("normalizeAcks reports the first offending key", () => {
     "nope!",
   );
   assert.deepEqual(normalizeAcks(null), { ok: false, badKey: null });
+});
+
+test("sync stores the split queue doc under its own key with its own cap", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore();
+  const handler = createSyncHandler(deps);
+  const rows = [{ key: "cu1:role1", tier: "C" }];
+  const ok = response();
+  await handler(request({ body: { snapshot: { generatedAt: "2026-08-09T00:00:00.000Z" }, queue: rows } }), ok);
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.body.stored, { snapshot: true, queue: true, acks: 0 });
+  const queueWrite = calls.writeJson.find(([key]) => key === "apphub:queue");
+  assert.ok(queueWrite, "queue doc written");
+  assert.deepEqual(queueWrite[1], { generatedAt: "2026-08-09T00:00:00.000Z", rows });
+
+  const bad = response();
+  await handler(request({ body: { queue: "nope" } }), bad);
+  assert.equal(bad.statusCode, 400);
+  assert.equal(bad.body.error, "invalid_queue");
 });

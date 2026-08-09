@@ -86,7 +86,7 @@ export function createSyncHandler({
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
       catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
 
-      const stored = { snapshot: false, acks: 0 };
+      const stored = { snapshot: false, queue: false, acks: 0 };
       if (body.snapshot != null) {
         if (typeof body.snapshot !== "object" || Array.isArray(body.snapshot)) {
           return res.status(400).json({ ok: false, error: "invalid_snapshot" });
@@ -97,6 +97,21 @@ export function createSyncHandler({
         }
         await writeJson(K.snapshot, body.snapshot);
         stored.snapshot = true;
+      }
+      // The queue rides its own key so a large review backlog can never
+      // squeeze the stream out of the snapshot cap (each part gets the full
+      // budget; the 2026-08-09 seed hit exactly this with 2,151 queue rows).
+      if (body.queue != null) {
+        if (!Array.isArray(body.queue)) {
+          return res.status(400).json({ ok: false, error: "invalid_queue" });
+        }
+        const doc = { generatedAt: String(body.snapshot?.generatedAt || now()), rows: body.queue };
+        const bytes = Buffer.byteLength(JSON.stringify(doc));
+        if (bytes > MAX_SNAPSHOT_BYTES) {
+          return res.status(413).json({ ok: false, error: "queue_too_large", bytes, max: MAX_SNAPSHOT_BYTES });
+        }
+        await writeJson(K.queue, doc);
+        stored.queue = true;
       }
       if (body.acks != null) {
         const normalized = normalizeAcks(body.acks, now);

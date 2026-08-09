@@ -79,6 +79,7 @@ export const RANK_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export const K = {
   snapshot: "apphub:snapshot",
+  queue: "apphub:queue", // review-queue rows, split out so backlog size never crowds the stream
   decisions: "apphub:decisions",
   acks: "apphub:acks",
   profile: (cuId) => `apphub:profile:${cuId}`,

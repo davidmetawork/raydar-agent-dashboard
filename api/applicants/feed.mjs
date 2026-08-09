@@ -14,11 +14,18 @@ export default async function handler(req, res) {
   if (!(await requireAuth(req, res))) return;
   if (!kvConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
   try {
-    const [snapshot, decisions, acks] = await Promise.all([
+    const [snapshot, queueDoc, decisions, acks] = await Promise.all([
       getJson(K.snapshot),
+      getJson(K.queue),
       hashGetAllJson(K.decisions),
       hashGetAllJson(K.acks),
     ]);
+    // The queue is stored under its own key (size isolation); merge it back so
+    // the page keeps reading one snapshot shape. A queue embedded directly in
+    // the snapshot (older publisher) wins only if the split doc is absent.
+    if (snapshot && queueDoc && Array.isArray(queueDoc.rows)) {
+      snapshot.queue = queueDoc.rows;
+    }
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({ ok: true, snapshot, decisions, acks });
   } catch (error) {
