@@ -5,7 +5,7 @@ const SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
 
 export const config = {
   matcher: [
-    '/((?!api(?:/|$)|login(?:/|\\.html)?$|auth-session\\.js$|c(?:/|$)|call\\.html$|fonts(?:/|$)|robots\\.txt$).*)',
+    '/((?!api(?:/|$)|login(?:/|\\.html)?$|auth-session\\.js$|nav-history\\.js$|c(?:/|$)|call\\.html$|fonts(?:/|$)|robots\\.txt$).*)',
   ],
 };
 

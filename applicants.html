@@ -7,6 +7,7 @@
 <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
 <script src="/auth-session.js"></script>
+<script src="/nav-history.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
@@ -689,6 +690,7 @@ function openProfile(key) {
   STATE.modal = { cu: row.cuId, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream" };
   $("profileModal").classList.add("open");
   document.body.style.overflow = "hidden";
+  RaydarNav.open("profile", closeProfile);   // one screen back, not off the dashboard
   renderModal();
   fetchProfile(row.cuId).then(() => { if (STATE.modal && STATE.modal.cu === row.cuId) { renderModal(); applyAvatar(row.cuId); } })
     .catch(() => { if (STATE.modal && STATE.modal.cu === row.cuId) renderModal(); });
@@ -697,6 +699,11 @@ function closeProfile() {
   $("profileModal").classList.remove("open");
   document.body.style.overflow = "";
   STATE.modal = null;
+}
+// Every way a person dismisses the profile — the ✕, the backdrop, Escape —
+// unwinds the history entry it pushed, so back never fires into a closed modal.
+function dismissProfile() {
+  if (!RaydarNav.back("profile")) closeProfile();
 }
 function chipRowHtml(item) {
   const chips = [];
@@ -750,7 +757,7 @@ function renderModal() {
     tierPill(row.tier) + "</div>" +
     (p.updatedAt ? '<div class="p-asof">LinkedIn data as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
-    '<button class="p-close" onclick="closeProfile()" aria-label="Close">✕</button></div>');
+    '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
     (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") + "</div>");
   if (p.degraded === "paraform_auth") {
@@ -796,7 +803,7 @@ document.addEventListener("click", (event) => {
   }
   const open = event.target.closest("[data-open]");
   if (open) { openProfile(open.dataset.open); return; }
-  if (event.target === $("profileModal")) closeProfile();
+  if (event.target === $("profileModal")) dismissProfile();
 });
 document.addEventListener("change", (event) => {
   const check = event.target.closest("[data-check]");
@@ -804,7 +811,7 @@ document.addEventListener("change", (event) => {
   if (check.checked) STATE.checked.add(check.dataset.check); else STATE.checked.delete(check.dataset.check);
   renderBulk();
 });
-document.addEventListener("keydown", (event) => { if (event.key === "Escape" && STATE.modal) closeProfile(); });
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && STATE.modal) dismissProfile(); });
 
 /* ---- feed ---- */
 async function loadFeed(manual = false) {
