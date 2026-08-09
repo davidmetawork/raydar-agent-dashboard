@@ -70,7 +70,7 @@ export function probeIntervalSeconds(
   raw = process.env.PARAFORM_AUTH_PROBE_INTERVAL_SECONDS,
 ) {
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 30
+  return Number.isFinite(n) && n >= DEFAULT_PROBE_INTERVAL_SECONDS
     ? Math.floor(n)
     : DEFAULT_PROBE_INTERVAL_SECONDS;
 }
@@ -79,7 +79,7 @@ export function confirmationSeparationMs(
   raw = process.env.PARAFORM_AUTH_CONFIRMATION_SEPARATION_MS,
 ) {
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 1_000
+  return Number.isFinite(n) && n >= DEFAULT_CONFIRMATION_SEPARATION_MS
     ? Math.floor(n)
     : DEFAULT_CONFIRMATION_SEPARATION_MS;
 }

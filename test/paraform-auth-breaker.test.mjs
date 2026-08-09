@@ -221,10 +221,12 @@ test("a malformed budget override falls back instead of disarming", () => {
 test("probe cadence and confirmation intervals reject unsafe overrides", () => {
   assert.equal(probeIntervalSeconds(undefined), 300);
   assert.equal(probeIntervalSeconds("5"), 300);
-  assert.equal(probeIntervalSeconds("120"), 120);
+  assert.equal(probeIntervalSeconds("120"), 300);
+  assert.equal(probeIntervalSeconds("600"), 600);
   assert.equal(confirmationSeparationMs(undefined), 180_000);
   assert.equal(confirmationSeparationMs("500"), 180_000);
-  assert.equal(confirmationSeparationMs("10000"), 10_000);
+  assert.equal(confirmationSeparationMs("10000"), 180_000);
+  assert.equal(confirmationSeparationMs("600000"), 600_000);
 });
 
 // ---------------------------------------------------------------------------
