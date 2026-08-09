@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 import { paraformCookieName as sequenceCookieName } from "../api/seq/_lib/core.mjs";
 import {
   clearCookieCache,
+  paraformThrottleDelays,
   paraformCookieName as paraAiCookieName,
   paraformRest,
+  trpcGet,
+  trpcPost,
 } from "../api/paraai/_lib/core.mjs";
 
 const HELPERS = [
@@ -86,4 +89,97 @@ test("Paraform REST adapter rejects foreign paths and never retries writes", asy
     else process.env.PARAFORM_SESSION_COOKIE_NAME = previousName;
     clearCookieCache();
   }
+});
+
+function response(status, body = null) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  };
+}
+
+async function withParaformFetch(script, run) {
+  const previousFetch = globalThis.fetch;
+  const previousCookie = process.env.PARAFORM_SESSION_COOKIE;
+  const previousName = process.env.PARAFORM_SESSION_COOKIE_NAME;
+  const previousDelays = process.env.PARAFORM_THROTTLE_DELAYS_MS;
+  const previousProbeDelay = process.env.PARAFORM_PROBE_DELAY_MS;
+  const calls = [];
+  try {
+    process.env.PARAFORM_SESSION_COOKIE = "Fe26.2*test*seal";
+    delete process.env.PARAFORM_SESSION_COOKIE_NAME;
+    process.env.PARAFORM_THROTTLE_DELAYS_MS = "0";
+    process.env.PARAFORM_PROBE_DELAY_MS = "0";
+    clearCookieCache();
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url: String(url), options });
+      const step = script[Math.min(calls.length - 1, script.length - 1)];
+      return typeof step === "function" ? step(calls) : step;
+    };
+    return await run(calls);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousCookie === undefined) delete process.env.PARAFORM_SESSION_COOKIE;
+    else process.env.PARAFORM_SESSION_COOKIE = previousCookie;
+    if (previousName === undefined) delete process.env.PARAFORM_SESSION_COOKIE_NAME;
+    else process.env.PARAFORM_SESSION_COOKIE_NAME = previousName;
+    if (previousDelays === undefined) delete process.env.PARAFORM_THROTTLE_DELAYS_MS;
+    else process.env.PARAFORM_THROTTLE_DELAYS_MS = previousDelays;
+    if (previousProbeDelay === undefined) delete process.env.PARAFORM_PROBE_DELAY_MS;
+    else process.env.PARAFORM_PROBE_DELAY_MS = previousProbeDelay;
+    clearCookieCache();
+  }
+}
+
+const OK_BODY = { result: { data: { json: { ok: true } } } };
+
+test("an empty throttle override keeps the safe default ladder", () => {
+  assert.deepEqual(paraformThrottleDelays(""), [600, 1800, 4500]);
+  assert.deepEqual(paraformThrottleDelays("0, 5, nope"), [0, 5]);
+});
+
+test("a transient Paraform 401 on a read recovers without AUTH_EXPIRED", async () => {
+  await withParaformFetch(
+    [response(401), response(200, OK_BODY)],
+    async (calls) => {
+      assert.deepEqual(await trpcGet("user.getCurrentUser", {}, 1), { ok: true });
+      assert.equal(calls.length, 2);
+    },
+  );
+});
+
+test("persistent 401s need a serial two-procedure confirmation before expiry", async () => {
+  await withParaformFetch([response(401)], async (calls) => {
+    await assert.rejects(
+      trpcGet("user.getCurrentUser", {}, 1),
+      (error) => error?.code === "AUTH_EXPIRED",
+    );
+    // Two caller observations (one zero-delay ladder retry), followed by
+    // three serial rounds over two distinct confirmation procedures.
+    assert.equal(calls.length, 8);
+    assert.ok(calls.some((call) => call.url.includes("user.getCurrentUser")));
+    assert.ok(calls.some((call) => call.url.includes("candidateUser.getCRMExternalCandidates")));
+  });
+});
+
+test("an explicit mutation 401 may retry, while a transport failure never does", async () => {
+  await withParaformFetch(
+    [response(401), response(200, OK_BODY)],
+    async (calls) => {
+      assert.deepEqual(await trpcPost("matchDigest.createOrAddRoles", {}, 1), { ok: true });
+      assert.equal(calls.length, 2);
+    },
+  );
+
+  await withParaformFetch(
+    [() => { throw new Error("timeout"); }],
+    async (calls) => {
+      await assert.rejects(
+        trpcPost("matchDigest.createOrAddRoles", {}, 3),
+        /timeout/u,
+      );
+      assert.equal(calls.length, 1);
+    },
+  );
 });

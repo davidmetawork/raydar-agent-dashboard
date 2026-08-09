@@ -18,6 +18,7 @@
 // Paraform's own reached_out_to_candidate flag set. Anything else is a review
 // card, never a softer reason.
 import { notifySlack } from "./core.mjs";
+import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
 import { takeAlertSlot } from "./store.mjs";
 import { getOutreachState } from "./outreach-store.mjs";
 import {
@@ -357,12 +358,10 @@ export async function runExpiredTick({
       });
     } catch (error) {
       if (error?.code === "AUTH_EXPIRED") {
-        if (await takeAlertSlot("expired-auth-expired", 12 * 3600).catch(() => false)) {
-          await notifySlack(
-            "🚨 Para AI expired-match actioning paused: the Paraform session cookie expired and needs rotating. "
-            + `${rows.length} expired match(es) are unresolved; ParaAI matching pauses at 3.`,
-          ).catch(() => {});
-        }
+        await reportParaformReadAuthFailure({
+          lane: "paraai_expired",
+          stage: "request_action",
+        }).catch(() => {});
         summary.errors += 1;
         summary.authExpired = true;
         break;

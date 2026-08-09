@@ -135,7 +135,7 @@ async function paraformHeaders() {
 
 function vendorError(response, body) {
   if (response.status === 401) {
-    return authExpired();
+    return throttled();
   }
   const message = body?.error?.json?.message || body?.message || `Paraform HTTP ${response.status}`;
   const error = new Error(String(message));
@@ -151,9 +151,99 @@ function authExpired() {
   return error;
 }
 
+function throttled() {
+  clearCookieCache();
+  const error = new Error("PARAFORM_THROTTLED");
+  error.code = "PARAFORM_THROTTLED";
+  return error;
+}
+
+// Paraform uses HTTP 401 both for an expired session and as a burst-throttle
+// response. A raw 401 therefore rides a paced ladder, then two distinct cheap
+// reads over multiple serial rounds decide whether expiry is real. Keeping the
+// classifier inside every adapter prevents individual lanes from forgetting
+// the contract and paging Slack for ordinary throttling.
+const DEFAULT_THROTTLE_DELAYS_MS = Object.freeze([600, 1_800, 4_500]);
+const DEFAULT_AUTH_PROBE_DELAY_MS = 1_500;
+const AUTH_CONFIRMATION_READS = Object.freeze([
+  { proc: "user.getCurrentUser", input: {} },
+  {
+    proc: "candidateUser.getCRMExternalCandidates",
+    input: {
+      filters: { sort: { field: "updated_at", direction: "desc" } },
+      limit: 1,
+      cursor: 0,
+    },
+  },
+]);
+
+export function paraformThrottleDelays(
+  raw = process.env.PARAFORM_THROTTLE_DELAYS_MS,
+) {
+  const parsed = String(raw || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return parsed.length ? parsed : [...DEFAULT_THROTTLE_DELAYS_MS];
+}
+
+const authProbeDelayMs = () => {
+  const raw = String(process.env.PARAFORM_PROBE_DELAY_MS || "").trim();
+  if (!raw) return DEFAULT_AUTH_PROBE_DELAY_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_AUTH_PROBE_DELAY_MS;
+};
+
+async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (error?.code !== "PARAFORM_THROTTLED") throw error;
+      if (attempt < delays.length) {
+        await sleep(delays[attempt] + Math.floor(Math.random() * 250));
+        continue;
+      }
+      throw (await isParaformSessionActuallyExpired())
+        ? authExpired()
+        : error;
+    }
+  }
+}
+
+export async function isParaformSessionActuallyExpired({ rounds = 3 } = {}) {
+  const totalRounds = Math.max(1, Number(rounds) || 1);
+  for (let round = 0; round < totalRounds; round += 1) {
+    for (const read of AUTH_CONFIRMATION_READS) {
+      try {
+        await trpcGetRaw(read.proc, read.input, 1);
+        return false;
+      } catch (error) {
+        // Any non-401 response reached authenticated vendor logic. It may be a
+        // transport or procedure error, but it is not proof of dead auth.
+        if (error?.code !== "PARAFORM_THROTTLED") return false;
+      }
+    }
+    if (round < totalRounds - 1) {
+      await sleep(
+        authProbeDelayMs() * (round + 1) + Math.floor(Math.random() * 250),
+      );
+    }
+  }
+  return true;
+}
+
 const envelope = (json) => ({ json, meta: { values: {}, v: 1 } });
 
 export async function trpcGet(proc, json = {}, tries = 3) {
+  return classifyThrottle(() => trpcGetRaw(proc, json, tries));
+}
+
+export async function trpcGetRaw(proc, json = {}, tries = 3) {
   const url = `${PARAFORM_BASE}/trpc/${proc}?input=${encodeURIComponent(JSON.stringify(envelope(json)))}`;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
@@ -165,39 +255,48 @@ export async function trpcGet(proc, json = {}, tries = 3) {
       if (!response.ok || body?.error) throw vendorError(response, body);
       return body?.result?.data?.json;
     } catch (error) {
-      if (error?.code === "AUTH_EXPIRED" || attempt === tries - 1) throw error;
+      if (error?.code === "PARAFORM_THROTTLED" || attempt === tries - 1) throw error;
       await sleep(500 * (attempt + 1));
     }
   }
 }
 
-export async function trpcPost(proc, json = {}, tries = 3) {
-  for (let attempt = 0; attempt < tries; attempt++) {
-    try {
-      const response = await fetch(`${PARAFORM_BASE}/trpc/${proc}`, {
-        method: "POST",
-        headers: await paraformHeaders(),
-        body: JSON.stringify(envelope(json)),
-        signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
-      });
-      const body = await response.json().catch(() => null);
-      if (!response.ok || body?.error) throw vendorError(response, body);
-      return body?.result?.data?.json;
-    } catch (error) {
-      if (error?.code === "AUTH_EXPIRED" || attempt === tries - 1) throw error;
-      await sleep(500 * (attempt + 1));
-    }
-  }
+export async function trpcPost(proc, json = {}, _tries = 1) {
+  return classifyThrottle(() => trpcPostRaw(proc, json));
+}
+
+async function trpcPostRaw(proc, json = {}) {
+  // No transport retry: a timeout has no authoritative write verdict and a
+  // replay can duplicate a non-idempotent mutation. classifyThrottle may call
+  // this again only after an explicit 401, which Paraform refused pre-write.
+  const response = await fetch(`${PARAFORM_BASE}/trpc/${proc}`, {
+    method: "POST",
+    headers: await paraformHeaders(),
+    body: JSON.stringify(envelope(json)),
+    signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.error) throw vendorError(response, body);
+  return body?.result?.data?.json;
 }
 
 /**
  * Authenticated Paraform REST request.
  *
  * The submit form's final application write is a REST POST, not tRPC. Reads
- * may retry transient failures; writes deliberately default to one attempt so
- * a timeout cannot blind-replay a non-idempotent application mutation.
+ * may retry transient failures; writes deliberately default to one raw attempt
+ * so a timeout cannot blind-replay a non-idempotent application mutation. The
+ * outer classifier may retry an explicit 401 because Paraform refused it
+ * before the mutation reached the resource.
  */
 export async function paraformRest(
+  path,
+  options = {},
+) {
+  return classifyThrottle(() => paraformRestRaw(path, options));
+}
+
+async function paraformRestRaw(
   path,
   {
     method = "GET",
@@ -222,7 +321,7 @@ export async function paraformRest(
       });
       const body = await response.json().catch(() => null);
       if (!response.ok) {
-        if (response.status === 401) throw authExpired();
+        if (response.status === 401) throw throttled();
         const error = new Error(
           body?.user_facing === true && body?.message
             ? String(body.message)
@@ -236,7 +335,7 @@ export async function paraformRest(
       return body;
     } catch (error) {
       if (
-        error?.code === "AUTH_EXPIRED"
+        error?.code === "PARAFORM_THROTTLED"
         || verb !== "GET"
         || attempt === attempts - 1
       ) throw error;

@@ -6,16 +6,23 @@ import {
   AUTH_FLAG_KEY,
   AUTH_LAST_PROBE_KEY,
   AUTH_OPEN_ALERT_KEY,
+  AUTH_PROBE_CADENCE_KEY,
+  AUTH_READ_RECOVERY_KEY,
+  AUTH_READ_SUSPECT_KEY,
   AUTH_REMINDER_ALERT_KEY,
   AUTH_WRITE_FAILURE_KEY,
   PROBE_READS,
   paraformAuthState,
+  confirmationSeparationMs,
   probeParaformAuth,
+  probeIntervalSeconds,
   probeReadBudgetMs,
   publicProbeReason,
+  reportParaformReadAuthFailure,
   reportParaformWriteAuthFailure,
   reportParaformWriteAuthSuccess,
   runAuthProbeTick,
+  runScheduledAuthProbeTick,
 } from "../api/paraai/_lib/auth-probe.mjs";
 import opsHandler from "../api/ops/paraform-auth.mjs";
 
@@ -211,6 +218,15 @@ test("a malformed budget override falls back instead of disarming", () => {
   assert.equal(probeReadBudgetMs("12000"), 12000);
 });
 
+test("probe cadence and confirmation intervals reject unsafe overrides", () => {
+  assert.equal(probeIntervalSeconds(undefined), 300);
+  assert.equal(probeIntervalSeconds("5"), 300);
+  assert.equal(probeIntervalSeconds("120"), 120);
+  assert.equal(confirmationSeparationMs(undefined), 180_000);
+  assert.equal(confirmationSeparationMs("500"), 180_000);
+  assert.equal(confirmationSeparationMs("10000"), 10_000);
+});
+
 // ---------------------------------------------------------------------------
 // runAuthProbeTick — flag lifecycle and alert discipline.
 // ---------------------------------------------------------------------------
@@ -224,14 +240,114 @@ const downProbe = async () => ({
 });
 const greenProbe = async () => ({ healthy: true, reason: "ok", passes: 1 });
 const unknownProbe = async () => ({ healthy: null, reason: "NETWORK_DOWN", passes: 1 });
+const CONFIRMATION_MS = confirmationSeparationMs();
+
+async function openReadCircuit(kv, notify, now = NOW) {
+  const suspected = await runAuthProbeTick(
+    { now },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(suspected.status, "suspected");
+  assert.equal(suspected.down, false);
+  return runAuthProbeTick(
+    { now: now + CONFIRMATION_MS },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+}
+
+async function closeReadCircuit(kv, notify, now) {
+  const recovering = await runAuthProbeTick(
+    { now },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(recovering.status, "recovering");
+  return runAuthProbeTick(
+    { now: now + CONFIRMATION_MS },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
+}
+
+test("the shared cadence claim admits one probe across overlapping pollers", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  let probes = 0;
+  const probe = async () => { probes += 1; return greenProbe(); };
+  const [first, second] = await Promise.all([
+    runScheduledAuthProbeTick(
+      { now: NOW },
+      { probeImpl: probe, kvImpl: kv, notifyImpl: notify },
+    ),
+    runScheduledAuthProbeTick(
+      { now: NOW },
+      { probeImpl: probe, kvImpl: kv, notifyImpl: notify },
+    ),
+  ]);
+  assert.equal(probes, 1);
+  assert.equal([first, second].filter((result) => result.status === "skipped").length, 1);
+  assert.ok(kv.store.has(AUTH_PROBE_CADENCE_KEY));
+  assert.ok(kv.calls.some(
+    (call) => call[0] === "SET" && call[1] === AUTH_PROBE_CADENCE_KEY
+      && call.includes("NX") && call.includes("EX") && call.includes("300"),
+  ));
+});
+
+test("one failed observation is only a suspicion and a green sample clears it", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const suspected = await runAuthProbeTick(
+    { now: NOW },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(suspected.status, "suspected");
+  assert.equal(kv.store.has(AUTH_READ_SUSPECT_KEY), true);
+  assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
+  assert.equal(notify.messages.length, 0);
+  const green = await runAuthProbeTick(
+    { now: NOW + CONFIRMATION_MS },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(green.status, "healthy");
+  assert.equal(kv.store.has(AUTH_READ_SUSPECT_KEY), false);
+  assert.equal(notify.messages.length, 0);
+});
+
+test("lane AUTH_EXPIRED reports feed the circuit without posting lane Slack", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const reported = await reportParaformReadAuthFailure(
+    { lane: "paraai_interest", stage: "worker", now: NOW },
+    { kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(reported.circuit.status, "suspected");
+  assert.equal(notify.messages.length, 0);
+  const confirmed = await runAuthProbeTick(
+    { now: NOW + CONFIRMATION_MS },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(confirmed.opened, true);
+  assert.equal(notify.messages.length, 1);
+  assert.match(notify.messages[0], /auth circuit OPEN/);
+});
+
+test("one green observation keeps a read-layer incident open", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  await openReadCircuit(kv, notify);
+  const recovering = await runAuthProbeTick(
+    { now: NOW + 10 * 60_000 },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
+  assert.equal(recovering.status, "recovering");
+  assert.equal(recovering.down, true);
+  assert.equal(kv.store.has(AUTH_READ_RECOVERY_KEY), true);
+  assert.equal(kv.store.has(AUTH_FLAG_KEY), true);
+  assert.equal(notify.messages.filter((text) => /resumed/.test(text)).length, 0);
+});
 
 test("opening the circuit sets the flag and sends exactly one runbook alert", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
-  const result = await runAuthProbeTick(
-    { now: NOW },
-    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
-  );
+  const result = await openReadCircuit(kv, notify);
   assert.equal(result.status, "down");
   assert.equal(result.opened, true);
   const flag = JSON.parse(kv.store.get(AUTH_FLAG_KEY));
@@ -251,7 +367,7 @@ test("opening the circuit sets the flag and sends exactly one runbook alert", as
 test("subsequent down ticks keep since, re-alert nothing", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
-  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  await openReadCircuit(kv, notify);
   const later = await runAuthProbeTick(
     { now: NOW + 5 * 60_000 },
     { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
@@ -267,7 +383,7 @@ test("subsequent down ticks keep since, re-alert nothing", async () => {
 test("after the daily slot lapses, one still-down reminder posts with day N", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
-  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  await openReadCircuit(kv, notify);
   // The reminder slot is armed with EX 86400 at open; the fake KV has no
   // clock, so the TTL lapse a day later is simulated by expiring the key.
   assert.ok(kv.calls.some(
@@ -295,21 +411,15 @@ test("after the daily slot lapses, one still-down reminder posts with day N", as
 test("going green clears the flag and slots and posts the resumed message", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
-  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
-  const resumed = await runAuthProbeTick(
-    { now: NOW + 3600_000 },
-    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
-  );
+  await openReadCircuit(kv, notify);
+  const resumed = await closeReadCircuit(kv, notify, NOW + 3600_000);
   assert.equal(resumed.resumed, true);
   assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
   assert.equal(kv.store.has(AUTH_OPEN_ALERT_KEY), false);
   assert.equal(kv.store.has(AUTH_REMINDER_ALERT_KEY), false);
   assert.match(notify.messages.at(-1), /cookie healthy — resumed/);
   // A cleared circuit that breaks again alerts again.
-  const reopened = await runAuthProbeTick(
-    { now: NOW + 2 * 3600_000 },
-    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
-  );
+  const reopened = await openReadCircuit(kv, notify, NOW + 2 * 3600_000);
   assert.equal(reopened.opened, true);
   assert.equal(notify.messages.length, 3);
 });
@@ -376,17 +486,21 @@ test("only a later successful mutation clears the write-auth latch", async () =>
 test("overlapping green ticks post exactly one resumed message", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
-  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  await openReadCircuit(kv, notify);
+  await runAuthProbeTick(
+    { now: NOW + 3600_000 },
+    { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
+  );
   // cron + Fly land on the same episode at once: interleaved on the shared
   // store, both can read the flag as present, but only the DEL that
   // actually removes it claims the episode and posts.
   const [first, second] = await Promise.all([
     runAuthProbeTick(
-      { now: NOW + 3600_000 },
+      { now: NOW + 3600_000 + CONFIRMATION_MS },
       { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
     ),
     runAuthProbeTick(
-      { now: NOW + 3600_000 },
+      { now: NOW + 3600_000 + CONFIRMATION_MS },
       { probeImpl: greenProbe, kvImpl: kv, notifyImpl: notify },
     ),
   ]);
@@ -401,6 +515,10 @@ test("losing the open NX cannot mint a day-1 reminder seconds later", async () =
   // The losing tick's view of the race: the winner claimed the open slot
   // (value = openedAt) moments ago but has not armed the reminder slot yet.
   kv.store.set(AUTH_OPEN_ALERT_KEY, new Date(NOW).toISOString());
+  kv.store.set(AUTH_FLAG_KEY, JSON.stringify({
+    since: new Date(NOW).toISOString(),
+    evidence: { mode: "read", code: "AUTH_EXPIRED" },
+  }));
   const result = await runAuthProbeTick(
     { now: NOW + 30_000 },
     { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
@@ -418,6 +536,10 @@ test("the reminder stays the crash fallback once the grace window passes", async
   // A tick died between the open NX and the open notify two hours ago: the
   // open slot exists, no alert ever posted, no reminder slot armed.
   kv.store.set(AUTH_OPEN_ALERT_KEY, new Date(NOW - 2 * 3600_000).toISOString());
+  kv.store.set(AUTH_FLAG_KEY, JSON.stringify({
+    since: new Date(NOW - 2 * 3600_000).toISOString(),
+    evidence: { mode: "read", code: "AUTH_EXPIRED" },
+  }));
   const result = await runAuthProbeTick(
     { now: NOW },
     { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
@@ -430,7 +552,7 @@ test("the reminder stays the crash fallback once the grace window passes", async
 test("down ticks keep the open slot alive: XX refresh, value preserved", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
-  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  await openReadCircuit(kv, notify);
   const openedAt = kv.store.get(AUTH_OPEN_ALERT_KEY);
   await runAuthProbeTick(
     { now: NOW + 5 * 60_000 },
@@ -490,7 +612,7 @@ test("an unknown probe never opens, closes, or clears the circuit", async () => 
   assert.equal(idle.status, "unknown");
   assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
   // While down: the open circuit stays exactly as it is.
-  await runAuthProbeTick({ now: NOW }, { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify });
+  await openReadCircuit(kv, notify);
   const held = await runAuthProbeTick(
     { now: NOW + 5 * 60_000 },
     { probeImpl: unknownProbe, kvImpl: kv, notifyImpl: notify },
@@ -504,10 +626,7 @@ test("an unknown probe never opens, closes, or clears the circuit", async () => 
 test("Slack being unconfigured degrades to the durable flag, never a throw", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(false); // notifySlack returns false without a token
-  const result = await runAuthProbeTick(
-    { now: NOW },
-    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
-  );
+  const result = await openReadCircuit(kv, notify);
   assert.equal(result.opened, true);
   assert.equal(result.alertDelivered, false);
   const flag = JSON.parse(kv.store.get(AUTH_FLAG_KEY));
@@ -517,10 +636,7 @@ test("Slack being unconfigured degrades to the durable flag, never a throw", asy
 test("a throwing Slack client is swallowed and the flag still lands", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(new Error("slack down"));
-  const result = await runAuthProbeTick(
-    { now: NOW },
-    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify },
-  );
+  const result = await openReadCircuit(kv, notify);
   assert.equal(result.opened, true);
   assert.equal(result.alertDelivered, false);
   assert.ok(kv.store.has(AUTH_FLAG_KEY));
@@ -564,6 +680,8 @@ test("public probe reasons are a closed enum, never raw internals", () => {
   assert.equal(publicProbeReason("recovered_on_retry"), "recovered_on_retry");
   assert.equal(publicProbeReason("auth_expired"), "auth_expired");
   assert.equal(publicProbeReason("AUTH_EXPIRED"), "auth_expired");
+  assert.equal(publicProbeReason("auth_suspected"), "auth_suspected");
+  assert.equal(publicProbeReason("recovery_pending"), "recovery_pending");
   assert.equal(publicProbeReason("write_auth_expired"), "write_auth_expired");
   assert.equal(publicProbeReason("PROBE_BUDGET_EXCEEDED"), "probe_budget_exceeded");
   assert.equal(publicProbeReason("fetch failed"), "network");
@@ -640,7 +758,7 @@ const workerSource = readFileSync(
 );
 
 test("the probe runs on the tick path, before the lane cycle", () => {
-  const probe = workerSource.indexOf("await runAuthProbeTick()");
+  const probe = workerSource.indexOf("await runScheduledAuthProbeTick()");
   const cycle = workerSource.indexOf("await runAutomationCycle(");
   assert.ok(probe > 0, "expected the auth probe on the worker tick");
   assert.ok(cycle > 0, "expected the automation cycle in the handler");
@@ -652,7 +770,7 @@ test("the probe runs on the tick path, before the lane cycle", () => {
 test("a probe failure can never break the tick", () => {
   assert.match(
     workerSource,
-    /try \{ await runAuthProbeTick\(\); \} catch \{ \/\* observe-only \*\/ \}/,
+    /try \{ await runScheduledAuthProbeTick\(\); \} catch \{ \/\* observe-only \*\/ \}/,
   );
 });
 
@@ -660,6 +778,6 @@ test("the probe stays out of the frozen worker response", () => {
   // Phase 1 is observe-only: the flag is read via GET /api/ops/paraform-auth
   // and the worker response shape stays byte-identical for its consumers.
   assert.equal(workerSource.includes("authProbe:"), false);
-  assert.equal((workerSource.match(/runAuthProbeTick/g) || []).length, 2,
+  assert.equal((workerSource.match(/runScheduledAuthProbeTick/g) || []).length, 2,
     "one import, one guarded call — nothing feeds the response");
 });
