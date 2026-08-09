@@ -43,6 +43,10 @@
     {
       "source": "/health",
       "destination": "/health.html"
+    },
+    {
+      "source": "/applicants",
+      "destination": "/applicants.html"
     }
   ],
   "redirects": [
