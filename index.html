@@ -341,17 +341,20 @@
 
     <div class="tabs">
       <a class="tab active" id="tab-overview" href="#overview" onclick="return tabClick(event,'overview')">Overview</a>
-      <a class="tab" id="tab-candidates" href="#candidates" onclick="return tabClick(event,'candidates')">Candidates</a>
       <a class="tab" id="tab-applicants" href="#applicants" onclick="return tabClick(event,'applicants')">Applicants <span class="badge good" id="applicants-badge" style="display:none"></span></a>
+      <a class="tab" id="tab-inbox" href="#inbox" onclick="return tabClick(event,'inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></a>
+      <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></a>
       <a class="tab" id="tab-followups" href="#followups" onclick="return tabClick(event,'followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></a>
       <a class="tab" id="tab-history" href="#history" onclick="return tabClick(event,'history')">History</a>
       <a class="tab" id="tab-analytics" href="#analytics" onclick="return tabClick(event,'analytics')">Analytics</a>
       <a class="tab" id="tab-calls" href="#calls" onclick="return tabClick(event,'calls')">Calls</a>
       <a class="tab" id="tab-sequences" href="#sequences" onclick="return tabClick(event,'sequences')">Sequences</a>
-      <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></a>
-      <a class="tab" id="tab-inbox" href="#inbox" onclick="return tabClick(event,'inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></a>
       <a class="tab" id="tab-enrich" href="#enrich" onclick="return tabClick(event,'enrich')">Enrich</a>
       <a class="tab" id="tab-health" href="#health" onclick="return tabClick(event,'health')">Health <span class="badge" id="health-badge" style="display:none"></span></a>
+      <!-- Candidates is hidden from the nav, not deleted: the roster view and the
+           #candidates deep link still work, and showView() expects a tab element
+           for every entry in VIEWS. Inline display:none so it beats .tab. -->
+      <a class="tab" id="tab-candidates" href="#candidates" style="display:none" onclick="return tabClick(event,'candidates')">Candidates</a>
     </div>
 
     <div id="view-overview">
@@ -1043,7 +1046,11 @@
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
     let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
-    const VIEWS=["overview","candidates","applicants","followups","history","analytics","calls","sequences","activity","inbox","enrich","health"];
+    // Same order as the nav, so the two stay readable together. "overview" must
+    // stay first — RaydarNav falls back to names[0] for an unknown #hash.
+    // "candidates" is last because its tab is hidden; the view and #candidates
+    // deep link still work.
+    const VIEWS=["overview","applicants","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","candidates"];
     let currentView="overview";
     // Tabs are real links (href="#activity", …) so they can be right-clicked or
     // ⌘-clicked into a new tab. A plain left click stays in this page; anything
