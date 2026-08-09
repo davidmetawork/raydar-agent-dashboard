@@ -2052,7 +2052,7 @@
         refreshReschedules();   // human-reschedule feed (CDN-cached upstream; clears candidates who booked a live call)
       } catch(e){
         if(lastData){ setConn(false); }          // keep last good data on screen — never wipe to an error
-        else if(!firstPaint){ $("health-title").textContent="Connecting…"; $("health-sub").textContent="Fetching the latest activity — one moment."; }
+        else if(!firstPaint){ $("rdot").className="dot stale"; $("rtxt").textContent="connecting… retrying every 30s"; }
       }
     }
     skeleton(); load(); setInterval(load, 30000);
