@@ -318,7 +318,6 @@ export const CATALOG = [
   // themselves — ops/health-beat/health-reporter.mjs beats for them every
   // 5 minutes based on whether launchd is holding a PID.
   ...[
-    ["hm-chase", "HM update chase", 75],                          // every 30m
     ["tn-reenable", "Talent Network re-enable", 1800],            // daily
     ["resume-feed", "Resume feed", 40],                           // every 15m
     ["booking-resume-sync", "Booking resume sync", 20],           // every 5m
@@ -341,6 +340,17 @@ export const CATALOG = [
     probe: { lane, maxSilenceMin },
     registry: "/operations/monitoring-canaries/",
   })),
+  {
+    id: "lane-hm-chase",
+    name: "HM update chase",
+    group: "desktop",
+    tier: 3,
+    kind: "beat",
+    paused: true,
+    probe: { lane: "hm-chase", maxSilenceMin: 75 },
+    registry: "/products/hm-update-chase/",
+    note: "expected-unloaded (retired 2026-08-08; restart requires explicit approval and cadence redesign)",
+  },
   {
     id: "lane-resume-forward-v2",
     name: "Resume forward",
