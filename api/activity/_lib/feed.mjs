@@ -30,7 +30,10 @@ import { getJson, setJson } from "./kv.mjs";
 import { crmPage, getInbox, getThread, resolveApplicationThread, whoAmI } from "./paraform.mjs";
 
 export const FEED_KEY = "activity:v1:feed";
-export const FEED_TTL_SECONDS = 120;
+// The cached feed is DURABLE and always served instantly; freshness is a
+// flag, not a gate. A 10-minute warming cron plus client-side
+// stale-while-revalidate keep it current — page open never waits on a build.
+export const FEED_FRESH_SECONDS = 180;
 export const FEED_LOCK_KEY = "activity:v1:feed:lock";
 const THREAD_KEY = (threadId) => `activity:v1:thread:${threadId}`;
 const THREAD_TTL_SECONDS = 14 * 24 * 3600;

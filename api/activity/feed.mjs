@@ -4,7 +4,7 @@
 
 import { cors, requireAuth, cronAuth } from "../seq/_lib/core.mjs";
 import { getJson, setJson, hgetallJson, acquireLock, releaseLock } from "./_lib/kv.mjs";
-import { buildFeed, FEED_KEY, FEED_TTL_SECONDS, FEED_LOCK_KEY } from "./_lib/feed.mjs";
+import { buildFeed, FEED_KEY, FEED_FRESH_SECONDS, FEED_LOCK_KEY } from "./_lib/feed.mjs";
 import { hasCookie, sessionState, transportStats } from "./_lib/paraform.mjs";
 
 export const TRIAGE_KEY = "activity:v1:triage";
@@ -37,13 +37,20 @@ export default async function handler(req, res) {
   if (!isCron && !(await requireAuth(req, res))) return;
   if (!hasCookie()) { res.status(200).json({ ok: false, degraded: "no_cookie" }); return; }
 
-  const force = String(req.query?.refresh || "") === "1";
+  // A cron hit is always a rebuild (the 10-minute warmer); humans get the
+  // durable cache instantly with a staleness flag and refresh in background.
+  const force = isCron || String(req.query?.refresh || "") === "1";
   try {
     if (!force) {
       const cached = await getJson(FEED_KEY);
       if (cached) {
+        const ageSeconds = (Date.now() - Date.parse(cached.generatedAt || 0)) / 1000;
         const triage = await hgetallJson(TRIAGE_KEY).catch(() => ({}));
-        res.status(200).json({ ok: true, cached: true, ...applyTriage(cached, triage) });
+        res.status(200).json({
+          ok: true, cached: true,
+          stale: !(ageSeconds < FEED_FRESH_SECONDS),
+          ...applyTriage(cached, triage),
+        });
         return;
       }
     }
@@ -56,16 +63,16 @@ export default async function handler(req, res) {
     let feed;
     try {
       feed = await buildFeed();
-      // Cache only when the read pass was materially complete — a feed with
-      // large unreadable counts must not become the truth for two minutes.
+      // Cache only when the read pass was materially complete — a bad build
+      // must not clobber the durable good copy that page opens rely on.
       if (feed.counts.unreadable <= Math.max(3, Math.floor(feed.pairsScanned * 0.1))) {
-        await setJson(FEED_KEY, feed, { ttlSeconds: FEED_TTL_SECONDS });
+        await setJson(FEED_KEY, feed);
       }
     } finally {
       await releaseLock(FEED_LOCK_KEY);
     }
     const triage = await hgetallJson(TRIAGE_KEY).catch(() => ({}));
-    res.status(200).json({ ok: true, cached: false, ...applyTriage(feed, triage) });
+    res.status(200).json({ ok: true, cached: false, stale: false, ...applyTriage(feed, triage) });
   } catch (e) {
     const auth = e?.name === "AuthExpired" || /AUTH_EXPIRED/.test(String(e?.message));
     const state = auth ? await sessionState().catch(() => "error") : null;

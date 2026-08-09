@@ -49,37 +49,36 @@
   .page-tab.active .count{background:var(--orange)}
   .stat{color:var(--muted);font-size:12px;margin-left:auto;align-self:center}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
-  .list .row{display:grid;grid-template-columns:minmax(180px,240px) 1fr auto;gap:14px;align-items:start;padding:13px 16px;border-bottom:1px solid var(--line-2);cursor:pointer}
+  /* Gmail-density single-line rows: name — where — snippet — hint — age */
+  .list .row{display:flex;gap:10px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line-2);cursor:pointer;min-width:0}
   .list .row:last-child{border-bottom:0}
   .list .row:hover{background:#FDFCF7}
-  .who{min-width:0}
-  .who .nm{font-weight:700;font-size:13.5px}
-  .who .co{color:var(--ink-2);font-size:12px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .msg{min-width:0}
-  .msg .from{font-weight:600;font-size:12.5px}
-  .msg .from .via{color:var(--muted);font-weight:500}
-  .msg .prev{color:var(--ink-2);font-size:12.5px;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-  .meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px;white-space:nowrap}
-  .age{font-weight:700;font-size:12.5px}
+  .row .nm{font-weight:700;font-size:12.5px;flex:0 0 148px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .co{color:var(--ink-2);font-size:12px;flex:0 0 200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .prev{color:var(--ink-2);font-size:12px;flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .prev b{color:var(--ink);font-weight:600}
+  .row .dot{flex:0 0 8px;width:8px;height:8px;border-radius:50%}
+  .row .dot.likely{background:var(--orange)}
+  .row .dot.booking{background:var(--violet)}
+  .row .dot.fyi{background:var(--line)}
+  .row .sched-mark{flex:0 0 auto;color:var(--good);font-weight:700;font-size:11px}
+  .row .snz{flex:0 0 auto;color:var(--muted);font-size:10.5px;font-weight:700}
+  .age{font-weight:700;font-size:12px;flex:0 0 46px;text-align:right;white-space:nowrap}
   .age.hot{color:var(--bad)}
   .age.warm{color:var(--warn)}
-  .chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
   .chip{display:inline-flex;align-items:center;border-radius:6px;padding:1.5px 7px;font-size:10.5px;font-weight:700;letter-spacing:.02em}
   .chip.stage{background:var(--blue-bg);color:var(--blue)}
-  .chip.sched{background:var(--good-bg);color:var(--good)}
-  .chip.booking{background:var(--violet-bg);color:var(--violet)}
-  .chip.likely{background:var(--warn-bg);color:var(--warn)}
-  .chip.fyi{background:var(--muted-bg);color:var(--ink-2)}
-  .chip.snoozed{background:var(--muted-bg);color:var(--ink-2)}
   .sect{padding:10px 16px;border-bottom:1px solid var(--line-2);color:var(--ink-2);font-weight:700;font-size:12px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;background:#FBF9F1;border-radius:14px 14px 0 0}
   .sect .tw{transition:transform .15s}
   .sect.closed .tw{transform:rotate(-90deg)}
   .empty{padding:34px;text-align:center;color:var(--muted)}
-  .groupcard{padding:13px 16px;border-bottom:1px solid var(--line-2)}
+  .groupcard{padding:10px 16px;border-bottom:1px solid var(--line-2);cursor:pointer}
   .groupcard:last-child{border-bottom:0}
+  .groupcard:hover{background:#FDFCF7}
   .grow{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
-  .roleline{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 0 0 14px;color:var(--ink-2);font-size:12.5px;cursor:pointer}
-  .roleline:hover{color:var(--ink)}
+  .roleline{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 10px;margin:2px -10px 0;color:var(--ink-2);font-size:12.5px;cursor:pointer;border-radius:8px;min-width:0}
+  .roleline:hover{background:var(--muted-bg);color:var(--ink)}
+  .roleline .rl-main{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
   /* detail */
   body.reading .listview{display:none}
   .detail{display:none}
@@ -111,8 +110,8 @@
   body.embed header .brand{display:none}
   body.embed header{margin-bottom:10px;min-height:34px}
   @media (max-width:760px){
-    .list .row{grid-template-columns:1fr;gap:6px}
-    .meta{flex-direction:row;align-items:center;justify-content:space-between}
+    .row .co{display:none}
+    .row .nm{flex-basis:110px}
     .titem{max-width:95%}
   }
 </style>
@@ -194,33 +193,17 @@ const ageClass=(ms)=>{const d=(Date.now()-ms)/86400000;return d>=5?"hot":d>=2?"w
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtWhen=(iso)=>{const t=Date.parse(iso);if(!Number.isFinite(t))return"";const d=new Date(t);return d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" "+d.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});};
 
-function chips(r){
-  let h="";
-  if(r.stageName||r.stage)h+=`<span class="chip stage">${esc(r.stageName||r.stage)}</span>`;
-  if(r.futureInterview)h+=`<span class="chip sched">interview ${esc((r.scheduledAt||"").slice(5,10))} ✓</span>`;
-  const hint=r.inbound&&r.inbound.hint;
-  if(hint==="booking")h+=`<span class="chip booking">booking prompt</span>`;
-  else if(hint==="likely")h+=`<span class="chip likely">likely needs reply</span>`;
-  else if(hint==="fyi")h+=`<span class="chip fyi">may be FYI</span>`;
-  if(r.triage&&r.triage.status==="snoozed")h+=`<span class="chip snoozed">snoozed → ${esc((r.triage.until||"").slice(5,10))}</span>`;
-  return h?`<div class="chips">${h}</div>`:"";
-}
-
 function replyRow(r){
-  return `<div class="row" data-key="${esc(r.key)}">
-    <div class="who">
-      <div class="nm">${esc(r.candidate)}</div>
-      <div class="co">${esc(r.company)} · ${esc(r.role)}</div>
-      ${chips(r)}
-    </div>
-    <div class="msg">
-      <div class="from">${esc(r.inbound?.from||"—")} <span class="via">${r.inbound?.fromType==="paraform"?"· Paraform":""}</span></div>
-      <div class="prev">${esc(r.inbound?.preview||"")}</div>
-    </div>
-    <div class="meta">
-      <span class="age ${ageClass(r.waitingSinceMs)}">waiting ${fmtAge(r.waitingSinceMs)}</span>
-      <span class="note">${esc(fmtWhen(new Date(r.waitingSinceMs||0).toISOString()))}</span>
-    </div>
+  const hint=r.inbound?.hint||"fyi";
+  const hintTitle=hint==="booking"?"Paraform booking prompt":hint==="likely"?"Likely needs a reply":"May be FYI";
+  return `<div class="row" data-key="${esc(r.key)}" title="${esc(r.inbound?.preview||"")}">
+    <span class="dot ${esc(hint)}" title="${hintTitle}"></span>
+    <span class="nm">${esc(r.candidate)}</span>
+    <span class="co">${esc(r.company)} · ${esc(r.role)}</span>
+    <span class="prev"><b>${esc((r.inbound?.from||"—").split(" ")[0])}:</b> ${esc(r.inbound?.preview||"")}</span>
+    ${r.futureInterview?`<span class="sched-mark" title="Interview scheduled ${esc((r.scheduledAt||"").slice(0,10))}">📅✓</span>`:""}
+    ${r.triage?.status==="snoozed"?`<span class="snz">zZ ${esc((r.triage.until||"").slice(5,10))}</span>`:""}
+    <span class="age ${ageClass(r.waitingSinceMs)}">${fmtAge(r.waitingSinceMs)}</span>
   </div>`;
 }
 
@@ -249,17 +232,20 @@ function renderQuiet(){
     byCand.get(r.candidateUserId).rows.push(r);
   }
   const groups=[...byCand.values()].sort((a,b)=>Math.min(...a.rows.map(r=>r.quietSinceMs))-Math.min(...b.rows.map(r=>r.quietSinceMs)));
+  const fmtDay=(ms)=>ms?new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"}):"—";
   $("quiet-list").innerHTML=groups.length?groups.map((g)=>{
     const oldest=Math.min(...g.rows.map(r=>r.quietSinceMs));
-    return `<div class="groupcard">
+    // The whole card is clickable (opens the first role); each role line is
+    // its own full-width click target when a candidate is out for several.
+    return `<div class="groupcard" data-key="${esc(g.rows[0].key)}">
       <div class="grow">
         <div><span style="font-weight:700;font-size:13.5px">${esc(g.name)}</span>
           <span class="note" style="margin-left:8px">${g.rows.length>1?g.rows.length+" roles":""}</span></div>
         <span class="age ${ageClass(oldest)}">quiet ${fmtAge(oldest)}</span>
       </div>
       ${g.rows.map((r)=>`<div class="roleline" data-key="${esc(r.key)}">
-        <span>${esc(r.company)} · ${esc(r.role)} <span class="note">(${esc(r.stageName||r.stage)})</span>${r.lastEmailAt?` <span class="note">· last email ${esc((r.lastEmailAt||"").slice(0,10))}</span>`:""}</span>
-        <span class="note">quiet ${fmtAge(r.quietSinceMs)} · <b>Nudge →</b></span>
+        <span class="rl-main">${esc(r.company)} - ${esc(r.role)} - ${esc(r.stageName||r.stage)} - ${fmtDay(r.lastAnyAt)}</span>
+        <span class="note" style="white-space:nowrap"><b>Nudge →</b></span>
       </div>`).join("")}
     </div>`;
   }).join(""):`<div class="empty">Nothing has gone quiet. Every live submission moved in the last 48 hours.</div>`;
@@ -412,7 +398,7 @@ function renderCompose(r,spl){
         $("reply-text").value="";
         r.triage=null;
         await setTriage(r,"done").catch(()=>{});
-        loadFeed(true);
+        backgroundRefresh();
         setTimeout(()=>openDetail(r.key),800);
       }else if(data.error==="unconfirmed"){
         $("send-note").className="note err";
@@ -428,39 +414,71 @@ function renderCompose(r,spl){
 
 function wireLists(){
   document.body.addEventListener("click",(e)=>{
-    const row=e.target.closest(".row[data-key],.roleline[data-key]");
+    const row=e.target.closest(".row[data-key],.roleline[data-key],.groupcard[data-key]");
     if(row){openDetail(row.dataset.key);return;}
     if(e.target.closest("#booking-toggle")){const l=$("booking-list");const open=l.style.display!=="none";l.style.display=open?"none":"";$("booking-toggle").classList.toggle("closed",open);return;}
     if(e.target.closest("#closed-toggle")){const l=$("closed-list");const open=l.style.display!=="none";l.style.display=open?"none":"";$("closed-toggle").classList.toggle("closed",open);return;}
   });
 }
 
-async function loadFeed(force){
+function applyFeed(data,{updating}={}){
+  $("banner-auth").style.display="none";$("banner-warn").style.display="none";
+  FEED=data;
+  $("health-pill").className="pill good";
+  $("health-pill").textContent=updating?"live · updating…":"live";
+  const age=Math.round((Date.now()-Date.parse(data.generatedAt))/60000);
+  $("freshness").textContent=`Updated ${age<=1?"just now":age+"m ago"}${data.counts.unreadable?` · ${data.counts.unreadable} thread(s) unreadable`:""}`;
+  renderReply();renderQuiet();counts();
+}
+
+function showDegraded(data){
+  if(data.degraded==="paraform_auth"){$("banner-auth").style.display="block";$("health-pill").className="pill bad";$("health-pill").textContent="Paraform session expired";}
+  else if(data.degraded==="paraform_burst"){$("banner-warn").textContent="Paraform is rate-limiting reads right now — data may be stale. It usually clears in a minute.";$("banner-warn").style.display="block";}
+  else{$("banner-warn").textContent="Couldn't refresh: "+(data.error||data.degraded||"error");$("banner-warn").style.display="block";}
+}
+
+// Stale-while-revalidate: the cached feed paints INSTANTLY; a stale flag
+// kicks a background rebuild that swaps in silently when it lands. The
+// reader never waits on Paraform.
+let REFRESHING=false;
+async function backgroundRefresh(){
+  if(REFRESHING)return;
+  REFRESHING=true;
+  if(FEED){$("health-pill").className="pill good";$("health-pill").textContent="live · updating…";}
   try{
-    const resp=await fetch("/api/activity/feed"+(force?"?refresh=1":""),{headers:authHeaders(),cache:"no-store"});
-    if(resp.status===503){setTimeout(()=>loadFeed(false),4500);return;}
-    const data=await resp.json();
-    if(!data.ok){
-      if(data.degraded==="paraform_auth"){$("banner-auth").style.display="block";$("health-pill").className="pill bad";$("health-pill").textContent="Paraform session expired";}
-      else if(data.degraded==="paraform_burst"){$("banner-warn").textContent="Paraform is rate-limiting reads right now — data may be stale. It usually clears in a minute.";$("banner-warn").style.display="block";}
-      else{$("banner-warn").textContent="Couldn't refresh: "+(data.error||data.degraded||"error");$("banner-warn").style.display="block";}
+    for(let i=0;i<30;i++){
+      const resp=await fetch("/api/activity/feed?refresh=1",{headers:authHeaders(),cache:"no-store"});
+      if(resp.status===503){await new Promise((r)=>setTimeout(r,5000));continue;}
+      const data=await resp.json();
+      if(data.ok)applyFeed(data);
+      else if(!FEED)showDegraded(data);
+      else{$("health-pill").className="pill good";$("health-pill").textContent="live";}
       return;
     }
-    $("banner-auth").style.display="none";$("banner-warn").style.display="none";
-    FEED=data;
-    $("health-pill").className="pill good";
-    $("health-pill").textContent=data.cached?"live (cached)":"live";
-    const age=Math.round((Date.now()-Date.parse(data.generatedAt))/60000);
-    $("freshness").textContent=`Updated ${age<=1?"just now":age+"m ago"}${data.counts.unreadable?` · ${data.counts.unreadable} thread(s) unreadable`:""}`;
-    renderReply();renderQuiet();counts();
   }catch(e){
-    $("health-pill").className="pill warn";$("health-pill").textContent="offline?";
+    if(!FEED){$("health-pill").className="pill warn";$("health-pill").textContent="offline?";}
+  }finally{REFRESHING=false;}
+}
+
+async function loadFeed(){
+  try{
+    const resp=await fetch("/api/activity/feed",{headers:authHeaders(),cache:"no-store"});
+    if(resp.status===503){setTimeout(loadFeed,4500);return;}
+    const data=await resp.json();
+    if(!data.ok){
+      if(!FEED)showDegraded(data);
+      return;
+    }
+    applyFeed(data,{updating:data.stale});
+    if(data.stale)backgroundRefresh();
+  }catch(e){
+    if(!FEED){$("health-pill").className="pill warn";$("health-pill").textContent="offline?";}
   }
 }
 
 async function init(){
   wireLists();
-  $("refresh-btn").onclick=()=>{$("health-pill").className="pill muted";$("health-pill").textContent="refreshing…";loadFeed(true);};
+  $("refresh-btn").onclick=()=>{backgroundRefresh();};
   const session=await RaydarAuth.session().catch(()=>null);
   if(session){start();return;}
   // fallback: Google one-tap button flow (rollout parity with inbox.html)
@@ -480,8 +498,8 @@ async function init(){
 function start(){
   $("signin").style.display="none";
   $("app").style.display="";
-  loadFeed(false);
-  POLL=setInterval(()=>{if(!document.hidden&&!document.body.classList.contains("reading"))loadFeed(false);},180000);
+  loadFeed();
+  POLL=setInterval(()=>{if(!document.hidden&&!document.body.classList.contains("reading"))loadFeed();},180000);
 }
 
 init();

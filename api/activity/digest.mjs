@@ -7,7 +7,7 @@
 import { cronAuth } from "../seq/_lib/core.mjs";
 import { sendSlack } from "../health/_lib/alert.mjs";
 import { getJson, setJson } from "./_lib/kv.mjs";
-import { buildFeed, FEED_KEY, FEED_TTL_SECONDS } from "./_lib/feed.mjs";
+import { buildFeed, FEED_KEY } from "./_lib/feed.mjs";
 import { hasCookie, sessionState } from "./_lib/paraform.mjs";
 import { hgetallJson } from "./_lib/kv.mjs";
 import { applyTriage } from "./feed.mjs";
@@ -28,7 +28,7 @@ export default async function handler(req, res) {
     let feed;
     try {
       feed = await buildFeed();
-      await setJson(FEED_KEY, feed, { ttlSeconds: FEED_TTL_SECONDS }).catch(() => {});
+      await setJson(FEED_KEY, feed).catch(() => {});
     } catch (e) {
       const state = await sessionState().catch(() => "error");
       if (state === "expired") {
