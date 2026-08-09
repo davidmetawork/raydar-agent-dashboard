@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Activity — Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9;--ink:#16140F;--ink-2:#57534A;--card:#FFFFFF;--line:#E9E3D5;--muted:#8C877B;
+    --orange:#FF5E00;--good:#119865;--good-bg:#E4F4EC;--bad:#E5484D;--bad-bg:#FBE9E9;
+    --warn:#C7791A;--warn-bg:#FAEEDC;--blue:#2563C9;--blue-bg:#E7EEFB;--muted-bg:#EFEADE;
+    --line-2:#F0EBDE;--violet:#7F72FF;--violet-bg:#ECEAFE;
+    --shadow:0 1px 2px rgba(20,16,8,.04),0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{background:var(--cream);color:var(--ink);font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  button,input,textarea{font:inherit}
+  button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{outline:2px solid #E24500;outline-offset:2px}
+  .wrap{max-width:1180px;margin:0 auto;padding:18px 22px 46px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 14px;padding:0 4px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:12px}
+  h1,h2,h3{font-family:"PP Grafier Display",serif;font-weight:600;margin:0}
+  h1{font-size:23px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:12px;margin-top:3px}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;font-weight:600;font-size:12.5px;white-space:nowrap}
+  .pill.good{background:var(--good-bg);color:var(--good)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)}
+  .pill.warn{background:var(--warn-bg);color:var(--warn)}
+  .pill.muted{background:var(--muted-bg);color:var(--ink-2)}
+  .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:9px;padding:7px 13px;font-weight:600;font-size:12.5px;cursor:pointer}
+  .btn:hover{border-color:#D8D0BE}
+  .btn.primary{background:var(--ink);border-color:var(--ink);color:#fff}
+  .btn.primary:disabled{opacity:.5;cursor:default}
+  .btn.danger{background:var(--bad);border-color:var(--bad);color:#fff}
+  .btn.small{padding:4px 9px;font-size:11.5px;border-radius:7px}
+  .banner{border-radius:11px;padding:10px 14px;margin:0 0 12px;font-weight:600;display:none}
+  .banner.bad{display:block;background:var(--bad-bg);color:var(--bad)}
+  .banner.warn{display:block;background:var(--warn-bg);color:var(--warn)}
+  .pages{display:flex;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+  .page-tab{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:7px 15px;font-weight:600;font-size:12.5px;cursor:pointer;display:inline-flex;gap:8px;align-items:center}
+  .page-tab.active{background:var(--ink);border-color:var(--ink);color:#fff}
+  .count{display:inline-flex;min-width:20px;height:20px;align-items:center;justify-content:center;border-radius:999px;background:var(--orange);color:#fff;font-size:11px;padding:0 6px}
+  .page-tab.active .count{background:var(--orange)}
+  .stat{color:var(--muted);font-size:12px;margin-left:auto;align-self:center}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+  /* Gmail-density single-line rows: name — where — snippet — hint — age */
+  .list .row{display:flex;gap:10px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line-2);cursor:pointer;min-width:0}
+  .list .row:last-child{border-bottom:0}
+  .list .row:hover{background:#FDFCF7}
+  .row .nm{font-weight:700;font-size:12.5px;flex:0 0 148px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .co{color:var(--ink-2);font-size:12px;flex:0 0 200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .prev{color:var(--ink-2);font-size:12px;flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .prev b{color:var(--ink);font-weight:600}
+  .row .dot{flex:0 0 8px;width:8px;height:8px;border-radius:50%}
+  .row .dot.likely{background:var(--orange)}
+  .row .dot.booking{background:var(--violet)}
+  .row .dot.fyi{background:var(--line)}
+  .row .sched-mark{flex:0 0 auto;color:var(--good);font-weight:700;font-size:11px}
+  .row .snz{flex:0 0 auto;color:var(--muted);font-size:10.5px;font-weight:700}
+  .age{font-weight:700;font-size:12px;flex:0 0 46px;text-align:right;white-space:nowrap}
+  .age.hot{color:var(--bad)}
+  .age.warm{color:var(--warn)}
+  .chip{display:inline-flex;align-items:center;border-radius:6px;padding:1.5px 7px;font-size:10.5px;font-weight:700;letter-spacing:.02em}
+  .chip.stage{background:var(--blue-bg);color:var(--blue)}
+  .sect{padding:10px 16px;border-bottom:1px solid var(--line-2);color:var(--ink-2);font-weight:700;font-size:12px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;background:#FBF9F1;border-radius:14px 14px 0 0}
+  .sect .tw{transition:transform .15s}
+  .sect.closed .tw{transform:rotate(-90deg)}
+  .empty{padding:34px;text-align:center;color:var(--muted)}
+  .groupcard{padding:10px 16px;border-bottom:1px solid var(--line-2);cursor:pointer}
+  .groupcard:last-child{border-bottom:0}
+  .groupcard:hover{background:#FDFCF7}
+  .grow{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
+  .roleline{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 10px;margin:2px -10px 0;color:var(--ink-2);font-size:12.5px;cursor:pointer;border-radius:8px;min-width:0}
+  .roleline:hover{background:var(--muted-bg);color:var(--ink)}
+  .roleline .rl-main{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  /* detail */
+  body.reading .listview{display:none}
+  .detail{display:none}
+  body.reading .detail{display:block}
+  .dhead{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line-2);flex-wrap:wrap}
+  .dhead .back{cursor:pointer;border:1px solid var(--line);border-radius:8px;background:var(--card);padding:5px 10px;font-weight:700}
+  .dhead h2{font-size:17px}
+  .dhead .sub2{color:var(--muted);font-size:12px}
+  .timeline{padding:16px;max-height:52vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+  .titem{max-width:78%}
+  .titem.sent{align-self:flex-end}
+  .titem .bub{border-radius:12px;padding:9px 13px;font-size:13px}
+  .titem.recv .bub{background:#F4F1E6;border:1px solid var(--line-2)}
+  .titem.sent .bub{background:var(--blue-bg);border:1px solid #D8E4F8}
+  .titem .bmeta{color:var(--muted);font-size:11px;margin:3px 4px 0}
+  .titem.sent .bmeta{text-align:right}
+  .sys{align-self:center;color:var(--muted);font-size:11.5px;background:var(--muted-bg);border-radius:999px;padding:3px 12px}
+  .compose{border-top:1px solid var(--line-2);padding:14px 16px}
+  .compose textarea{width:100%;min-height:86px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;resize:vertical;background:#FDFCF7}
+  .crow{display:flex;align-items:center;gap:12px;margin-top:10px;flex-wrap:wrap}
+  .crow label{display:inline-flex;gap:6px;align-items:center;color:var(--ink-2);font-size:12.5px;cursor:pointer}
+  .crow .spacer{flex:1}
+  .note{font-size:12px;color:var(--muted)}
+  .note.ok{color:var(--good);font-weight:700}
+  .note.err{color:var(--bad);font-weight:700}
+  .quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .signin{max-width:380px;margin:80px auto;text-align:center}
+  .signin .card{padding:30px}
+  body.embed header .brand{display:none}
+  body.embed header{margin-bottom:10px;min-height:34px}
+  @media (max-width:760px){
+    .row .co{display:none}
+    .row .nm{flex-basis:110px}
+    .titem{max-width:95%}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div>
+        <h1>Activity</h1>
+        <div class="sub">Client messages that need us, and candidates going quiet</div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <span class="pill muted" id="health-pill">checking…</span>
+      <span class="stat" id="freshness"></span>
+      <button class="btn" id="refresh-btn" title="Rebuild from Paraform now">Refresh</button>
+    </div>
+  </header>
+
+  <div class="banner bad" id="banner-auth" style="display:none">Paraform session expired — the queues can’t refresh until David re-authenticates. Showing the last good data.</div>
+  <div class="banner warn" id="banner-warn" style="display:none"></div>
+
+  <div id="signin" class="signin" style="display:none">
+    <div class="card">
+      <h2 style="margin-bottom:8px">Sign in</h2>
+      <p class="sub" style="margin-bottom:18px">Use your Raydar Google account.</p>
+      <div id="gsi-button"></div>
+    </div>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="listview">
+      <div class="pages">
+        <button class="page-tab active" id="ptab-reply" onclick="showPage('reply')">Needs reply <span class="count" id="count-reply" style="display:none">0</span></button>
+        <button class="page-tab" id="ptab-quiet" onclick="showPage('quiet')">Gone quiet <span class="count" id="count-quiet" style="display:none">0</span></button>
+        <span class="stat" id="oldest-stat"></span>
+      </div>
+
+      <div id="page-reply">
+        <div class="card list" id="reply-main"><div class="empty">Reading your Paraform threads… first load takes a minute or two.</div></div>
+        <div style="height:14px"></div>
+        <div class="card" id="booking-card" style="display:none">
+          <div class="sect" id="booking-toggle"><span>Paraform booking prompts — usually only the candidate can answer <span id="booking-count"></span></span><span class="tw">▾</span></div>
+          <div class="list" id="booking-list" style="display:none"></div>
+        </div>
+        <div style="height:14px"></div>
+        <div class="card" id="closed-card" style="display:none">
+          <div class="sect closed" id="closed-toggle"><span>Done / snoozed <span id="closed-count"></span></span><span class="tw">▾</span></div>
+          <div class="list" id="closed-list" style="display:none"></div>
+        </div>
+      </div>
+
+      <div id="page-quiet" style="display:none">
+        <div class="card" id="quiet-list"><div class="empty">Reading your Paraform threads…</div></div>
+      </div>
+    </div>
+
+    <div class="detail card" id="detail"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $=(id)=>document.getElementById(id);
+const AUTH={token:null};
+const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
+if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
+
+let FEED=null, CURRENT=null, PAGE="reply", POLL=null;
+
+const fmtAge=(ms)=>{
+  if(!ms)return"";
+  const d=(Date.now()-ms)/86400000;
+  if(d<1)return Math.max(1,Math.round(d*24))+"h";
+  return d.toFixed(d<10?1:0)+"d";
+};
+const ageClass=(ms)=>{const d=(Date.now()-ms)/86400000;return d>=5?"hot":d>=2?"warm":"";};
+const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtWhen=(iso)=>{const t=Date.parse(iso);if(!Number.isFinite(t))return"";const d=new Date(t);return d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" "+d.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});};
+
+function replyRow(r){
+  const hint=r.inbound?.hint||"fyi";
+  const hintTitle=hint==="booking"?"Paraform booking prompt":hint==="likely"?"Likely needs a reply":"May be FYI";
+  return `<div class="row" data-key="${esc(r.key)}" title="${esc(r.inbound?.preview||"")}">
+    <span class="dot ${esc(hint)}" title="${hintTitle}"></span>
+    <span class="nm">${esc(r.candidate)}</span>
+    <span class="co">${esc(r.company)} · ${esc(r.role)}</span>
+    <span class="prev"><b>${esc((r.inbound?.from||"—").split(" ")[0])}:</b> ${esc(r.inbound?.preview||"")}</span>
+    ${r.futureInterview?`<span class="sched-mark" title="Interview scheduled ${esc((r.scheduledAt||"").slice(0,10))}">📅✓</span>`:""}
+    ${r.triage?.status==="snoozed"?`<span class="snz">zZ ${esc((r.triage.until||"").slice(5,10))}</span>`:""}
+    <span class="age ${ageClass(r.waitingSinceMs)}">${fmtAge(r.waitingSinceMs)}</span>
+  </div>`;
+}
+
+function renderReply(){
+  const rows=FEED.queues.needs_reply;
+  const open=rows.filter((r)=>!r.triage);
+  const main=open.filter((r)=>r.inbound?.hint!=="booking");
+  const booking=open.filter((r)=>r.inbound?.hint==="booking");
+  const closed=rows.filter((r)=>r.triage);
+  $("reply-main").innerHTML=main.length?main.map(replyRow).join(""):`<div class="empty">Queue clear — nobody is waiting on a reply. 🎉</div>`;
+  $("booking-card").style.display=booking.length?"":"none";
+  $("booking-count").textContent=`(${booking.length})`;
+  $("booking-list").innerHTML=booking.map(replyRow).join("");
+  $("closed-card").style.display=closed.length?"":"none";
+  $("closed-count").textContent=`(${closed.length})`;
+  $("closed-list").innerHTML=closed.map(replyRow).join("");
+  const oldest=main[0]||booking[0];
+  $("oldest-stat").textContent=oldest?`Oldest waiting: ${fmtAge(oldest.waitingSinceMs)}`:"";
+}
+
+function renderQuiet(){
+  const rows=FEED.queues.gone_quiet.filter((r)=>!r.triage);
+  const byCand=new Map();
+  for(const r of rows){
+    if(!byCand.has(r.candidateUserId))byCand.set(r.candidateUserId,{name:r.candidate,rows:[]});
+    byCand.get(r.candidateUserId).rows.push(r);
+  }
+  const groups=[...byCand.values()].sort((a,b)=>Math.min(...a.rows.map(r=>r.quietSinceMs))-Math.min(...b.rows.map(r=>r.quietSinceMs)));
+  const fmtDay=(ms)=>ms?new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"}):"—";
+  $("quiet-list").innerHTML=groups.length?groups.map((g)=>{
+    const oldest=Math.min(...g.rows.map(r=>r.quietSinceMs));
+    // The whole card is clickable (opens the first role); each role line is
+    // its own full-width click target when a candidate is out for several.
+    return `<div class="groupcard" data-key="${esc(g.rows[0].key)}">
+      <div class="grow">
+        <div><span style="font-weight:700;font-size:13.5px">${esc(g.name)}</span>
+          <span class="note" style="margin-left:8px">${g.rows.length>1?g.rows.length+" roles":""}</span></div>
+        <span class="age ${ageClass(oldest)}">quiet ${fmtAge(oldest)}</span>
+      </div>
+      ${g.rows.map((r)=>`<div class="roleline" data-key="${esc(r.key)}">
+        <span class="rl-main">${esc(r.company)} - ${esc(r.role)} - ${esc(r.stageName||r.stage)} - ${fmtDay(r.lastAnyAt)}</span>
+        <span class="note" style="white-space:nowrap"><b>Nudge →</b></span>
+      </div>`).join("")}
+    </div>`;
+  }).join(""):`<div class="empty">Nothing has gone quiet. Every live submission moved in the last 48 hours.</div>`;
+}
+
+function counts(){
+  // computed client-side from the queues so local triage clicks update
+  // the badges immediately (the server copy goes stale between polls)
+  const open=FEED?FEED.queues.needs_reply.filter((r)=>!r.triage).length:0;
+  const quiet=FEED?FEED.queues.gone_quiet.filter((r)=>!r.triage).length:0;
+  $("count-reply").textContent=open;$("count-reply").style.display="";
+  $("count-quiet").textContent=quiet;$("count-quiet").style.display="";
+  if(window.parent!==window)window.parent.postMessage({type:"raydar-activity-counts",count:open,quiet},"*");
+}
+
+function showPage(p){
+  PAGE=p;
+  $("ptab-reply").classList.toggle("active",p==="reply");
+  $("ptab-quiet").classList.toggle("active",p==="quiet");
+  $("page-reply").style.display=p==="reply"?"":"none";
+  $("page-quiet").style.display=p==="quiet"?"":"none";
+}
+
+function findRow(key){
+  return FEED.queues.needs_reply.find((r)=>r.key===key)||FEED.queues.gone_quiet.find((r)=>r.key===key)||null;
+}
+
+async function openDetail(key){
+  const r=findRow(key);
+  if(!r)return;
+  CURRENT=r;
+  document.body.classList.add("reading");
+  $("detail").innerHTML=`<div class="dhead">
+      <button class="back" id="back-btn">← Back</button>
+      <div style="min-width:0">
+        <h2>${esc(r.candidate)}</h2>
+        <div class="sub2">${esc(r.company)} · ${esc(r.role)} · ${esc(r.stageName||r.stage)}${r.scheduledAt?` · interview ${esc(fmtWhen(r.scheduledAt))}`:""}</div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap" id="triage-actions"></div>
+    </div>
+    <div class="timeline" id="timeline"><div class="empty">Loading thread…</div></div>
+    <div class="compose" id="compose"></div>`;
+  $("back-btn").onclick=closeDetail;
+  renderTriageActions(r);
+  renderCompose(r,null);
+  try{
+    const resp=await fetch(`/api/activity/thread?application_id=${encodeURIComponent(r.key)}&thread_id=${encodeURIComponent(r.threadId)}&role_id=${encodeURIComponent(r.roleId||"")}`,{headers:authHeaders(),cache:"no-store"});
+    const data=await resp.json();
+    if(!data.ok){$("timeline").innerHTML=`<div class="empty">Couldn't read this thread (${esc(data.error||"error")}). It may be a Paraform blip — try again.</div>`;return;}
+    renderTimeline(data.timeline);
+    renderCompose(r,data.spl);
+  }catch(e){
+    $("timeline").innerHTML=`<div class="empty">Couldn't read this thread — network error.</div>`;
+  }
+}
+
+function closeDetail(){
+  document.body.classList.remove("reading");
+  CURRENT=null;
+}
+
+function renderTimeline(timeline){
+  const items=timeline.map((it)=>{
+    if(it.structural){
+      const label=({application:"Submitted",application_status_update:"Status: "+(it.status||"update"),application_interview_scheduled:"Interview scheduled"+(it.scheduledAt?" · "+fmtWhen(it.scheduledAt):""),application_interview_reminder:"Interview reminder",application_intro_email_sent:"Intro email sent",application_parawatch_approval:"Submission approved",application_scorecard:"Scorecard added"})[it.type]||it.type.replace(/^application_?/,"").replace(/_/g," ");
+      return `<div class="sys">${esc(label)} · ${esc(fmtWhen(it.at))}</div>`;
+    }
+    const dir=it.direction==="sent"?"sent":"recv";
+    return `<div class="titem ${dir}">
+      <div class="bub">${esc(it.text)}</div>
+      <div class="bmeta">${esc(it.from||"")} · ${esc(fmtWhen(it.at))}${it.mentions.length?` · @${esc(it.mentions.join(", @"))}`:""}</div>
+    </div>`;
+  });
+  $("timeline").innerHTML=items.join("")||`<div class="empty">No items.</div>`;
+  $("timeline").scrollTop=$("timeline").scrollHeight;
+}
+
+function renderTriageActions(r){
+  const t=r.triage;
+  $("triage-actions").innerHTML=t
+    ?`<span class="pill muted">${esc(t.status)}${t.until?" → "+esc(t.until.slice(5,10)):""}</span><button class="btn small" id="tr-reopen">Reopen</button>`
+    :`<button class="btn small" id="tr-done">Mark done</button>
+      <button class="btn small" id="tr-snooze1">Snooze 1d</button>
+      <button class="btn small" id="tr-snooze3">Snooze 3d</button>
+      <button class="btn small" id="tr-dismiss">No action needed</button>`;
+  const call=(status,days)=>()=>setTriage(r,status,days);
+  if(t){$("tr-reopen").onclick=call("open");}
+  else{
+    $("tr-done").onclick=call("done");
+    $("tr-snooze1").onclick=call("snoozed",1);
+    $("tr-snooze3").onclick=call("snoozed",3);
+    $("tr-dismiss").onclick=call("dismissed");
+  }
+}
+
+async function setTriage(r,status,days){
+  const body={key:r.key,status,inbound_id:r.inbound?.id||null};
+  if(status==="snoozed")body.until=new Date(Date.now()+days*86400000).toISOString();
+  try{
+    const resp=await fetch("/api/activity/triage",{method:"POST",headers:{...authHeaders(),"content-type":"application/json"},body:JSON.stringify(body)});
+    const data=await resp.json();
+    if(!data.ok){alert("Couldn't save: "+(data.error||"error"));return;}
+    r.triage=data.triage?{status:data.triage.status,until:data.triage.until}:null;
+    renderReply();renderQuiet();counts();
+    if(CURRENT&&CURRENT.key===r.key)renderTriageActions(r);
+  }catch(e){alert("Couldn't save — network error.");}
+}
+
+function quickInserts(r){
+  const out=[];
+  if(r.inbound?.hint==="booking")out.push({label:"Checking with candidate",text:`Checking with ${r.candidate.split(" ")[0]} now — will confirm as soon as I hear back.`});
+  out.push({label:"Any update?",text:"Hey team, any update here?"});
+  out.push({label:"Thanks",text:"Thank you — appreciate the update!"});
+  return out;
+}
+
+function renderCompose(r,spl){
+  const tagDefault=PAGE==="quiet"||!r.inbound; // nudges tag the SPL by default; replies don't
+  const splNote=spl===null?`<span class="note">Owner tag unavailable for this role</span>`
+    :spl&&spl.noTag?`<span class="note">${esc(spl.name)} asked not to be tagged — the comment still lands</span>`
+    :spl?`<label><input type="checkbox" id="tag-spl" ${tagDefault?"checked":""}/> Tag ${esc(spl.label)}</label>`
+    :`<span class="note" id="spl-loading">…</span>`;
+  $("compose").innerHTML=`
+    <textarea id="reply-text" placeholder="Write a comment — it posts to ${esc(r.candidate)}’s thread on Paraform as David."></textarea>
+    <div class="quick">${quickInserts(r).map((q,i)=>`<button class="btn small" data-q="${i}">${esc(q.label)}</button>`).join("")}</div>
+    <div class="crow">
+      ${splNote}
+      <span class="spacer"></span>
+      <span class="note" id="send-note"></span>
+      <button class="btn primary" id="send-btn">Post to Paraform</button>
+    </div>`;
+  $("compose").querySelectorAll("[data-q]").forEach((b)=>{
+    b.onclick=()=>{const q=quickInserts(r)[Number(b.dataset.q)];$("reply-text").value=($("reply-text").value?$("reply-text").value+"\n\n":"")+q.text;$("reply-text").focus();};
+  });
+  let armed=false;
+  $("send-btn").onclick=async()=>{
+    const text=$("reply-text").value.trim();
+    if(!text){$("send-note").textContent="Write something first.";return;}
+    if(!armed){armed=true;$("send-btn").textContent="Confirm — post as David";$("send-btn").classList.add("danger");
+      setTimeout(()=>{armed=false;$("send-btn").textContent="Post to Paraform";$("send-btn").classList.remove("danger");},6000);
+      return;}
+    $("send-btn").disabled=true;$("send-note").className="note";$("send-note").textContent="Posting…";
+    try{
+      const resp=await fetch("/api/activity/reply",{method:"POST",headers:{...authHeaders(),"content-type":"application/json"},
+        body:JSON.stringify({application_id:r.key,thread_id:r.threadId,role_id:r.roleId,text,tag_spl:Boolean($("compose").querySelector("#tag-spl")?.checked)})});
+      const data=await resp.json();
+      if(data.ok&&data.verified){
+        $("send-note").className="note ok";
+        $("send-note").textContent=data.tagged==="posted_untagged"?"Posted ✓ (mention didn’t register — the owner was NOT notified)":"Posted and verified ✓";
+        $("reply-text").value="";
+        r.triage=null;
+        await setTriage(r,"done").catch(()=>{});
+        backgroundRefresh();
+        setTimeout(()=>openDetail(r.key),800);
+      }else if(data.error==="unconfirmed"){
+        $("send-note").className="note err";
+        $("send-note").textContent="Unconfirmed — check the thread in Paraform before posting again. Do not repost blindly.";
+      }else{
+        $("send-note").className="note err";
+        $("send-note").textContent=(data.detail||data.error||"Failed")+"";
+      }
+    }catch(e){$("send-note").className="note err";$("send-note").textContent="Network error — check Paraform before retrying.";}
+    finally{$("send-btn").disabled=false;armed=false;$("send-btn").textContent="Post to Paraform";$("send-btn").classList.remove("danger");}
+  };
+}
+
+function wireLists(){
+  document.body.addEventListener("click",(e)=>{
+    const row=e.target.closest(".row[data-key],.roleline[data-key],.groupcard[data-key]");
+    if(row){openDetail(row.dataset.key);return;}
+    if(e.target.closest("#booking-toggle")){const l=$("booking-list");const open=l.style.display!=="none";l.style.display=open?"none":"";$("booking-toggle").classList.toggle("closed",open);return;}
+    if(e.target.closest("#closed-toggle")){const l=$("closed-list");const open=l.style.display!=="none";l.style.display=open?"none":"";$("closed-toggle").classList.toggle("closed",open);return;}
+  });
+}
+
+function applyFeed(data,{updating}={}){
+  $("banner-auth").style.display="none";$("banner-warn").style.display="none";
+  FEED=data;
+  $("health-pill").className="pill good";
+  $("health-pill").textContent=updating?"live · updating…":"live";
+  const age=Math.round((Date.now()-Date.parse(data.generatedAt))/60000);
+  $("freshness").textContent=`Updated ${age<=1?"just now":age+"m ago"}${data.counts.unreadable?` · ${data.counts.unreadable} thread(s) unreadable`:""}`;
+  renderReply();renderQuiet();counts();
+}
+
+function showDegraded(data){
+  if(data.degraded==="paraform_auth"){$("banner-auth").style.display="block";$("health-pill").className="pill bad";$("health-pill").textContent="Paraform session expired";}
+  else if(data.degraded==="paraform_burst"){$("banner-warn").textContent="Paraform is rate-limiting reads right now — data may be stale. It usually clears in a minute.";$("banner-warn").style.display="block";}
+  else{$("banner-warn").textContent="Couldn't refresh: "+(data.error||data.degraded||"error");$("banner-warn").style.display="block";}
+}
+
+// Stale-while-revalidate: the cached feed paints INSTANTLY; a stale flag
+// kicks a background rebuild that swaps in silently when it lands. The
+// reader never waits on Paraform.
+let REFRESHING=false;
+async function backgroundRefresh(){
+  if(REFRESHING)return;
+  REFRESHING=true;
+  if(FEED){$("health-pill").className="pill good";$("health-pill").textContent="live · updating…";}
+  try{
+    for(let i=0;i<30;i++){
+      const resp=await fetch("/api/activity/feed?refresh=1",{headers:authHeaders(),cache:"no-store"});
+      if(resp.status===503){await new Promise((r)=>setTimeout(r,5000));continue;}
+      const data=await resp.json();
+      if(data.ok)applyFeed(data);
+      else if(!FEED)showDegraded(data);
+      else{$("health-pill").className="pill good";$("health-pill").textContent="live";}
+      return;
+    }
+  }catch(e){
+    if(!FEED){$("health-pill").className="pill warn";$("health-pill").textContent="offline?";}
+  }finally{REFRESHING=false;}
+}
+
+async function loadFeed(){
+  try{
+    const resp=await fetch("/api/activity/feed",{headers:authHeaders(),cache:"no-store"});
+    if(resp.status===503){setTimeout(loadFeed,4500);return;}
+    const data=await resp.json();
+    if(!data.ok){
+      if(!FEED)showDegraded(data);
+      return;
+    }
+    applyFeed(data,{updating:data.stale});
+    if(data.stale)backgroundRefresh();
+  }catch(e){
+    if(!FEED){$("health-pill").className="pill warn";$("health-pill").textContent="offline?";}
+  }
+}
+
+async function init(){
+  wireLists();
+  $("refresh-btn").onclick=()=>{backgroundRefresh();};
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(session){start();return;}
+  // fallback: Google one-tap button flow (rollout parity with inbox.html)
+  $("signin").style.display="";
+  try{
+    const cfgResp=await fetch("/api/seq/config");const cfg=await cfgResp.json();
+    if(!cfg.authRequired){start();return;}
+    google.accounts.id.initialize({client_id:cfg.googleClientId,callback:async(response)=>{
+      const s=await RaydarAuth.signIn(response.credential).catch(()=>null);
+      if(!s)AUTH.token=response.credential;
+      start();
+    }});
+    google.accounts.id.renderButton($("gsi-button"),{theme:"outline",size:"large",width:280});
+  }catch(e){/* leave the sign-in card up */}
+}
+
+function start(){
+  $("signin").style.display="none";
+  $("app").style.display="";
+  loadFeed();
+  POLL=setInterval(()=>{if(!document.hidden&&!document.body.classList.contains("reading"))loadFeed();},180000);
+}
+
+init();
+</script>
+</body>
+</html>

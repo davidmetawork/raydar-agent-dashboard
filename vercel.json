@@ -47,6 +47,10 @@
     {
       "source": "/applicants",
       "destination": "/applicants.html"
+    },
+    {
+      "source": "/activity",
+      "destination": "/activity.html"
     }
   ],
   "redirects": [
@@ -77,6 +81,9 @@
     },
     "api/ops/lifecycle-watchdog-relay.mjs": {
       "maxDuration": 30
+    },
+    "api/activity/*.mjs": {
+      "maxDuration": 120
     }
   },
   "crons": [
@@ -90,6 +97,8 @@
     { "path": "/api/paraai/submission-notify", "schedule": "47 * * * *" },
     { "path": "/api/health/tick", "schedule": "*/2 * * * *" },
     { "path": "/api/health/digest", "schedule": "0 14 * * *" },
-    { "path": "/api/ops/lifecycle-watchdog-relay", "schedule": "7,22,37,52 * * * *" }
+    { "path": "/api/ops/lifecycle-watchdog-relay", "schedule": "7,22,37,52 * * * *" },
+    { "path": "/api/activity/digest", "schedule": "30 15 * * *" },
+    { "path": "/api/activity/feed", "schedule": "4,14,24,34,44,54 * * * *" }
   ]
 }

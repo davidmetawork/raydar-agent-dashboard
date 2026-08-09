@@ -348,6 +348,7 @@
       <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
       <button class="tab" id="tab-calls" onclick="showView('calls')">Calls</button>
       <button class="tab" id="tab-sequences" onclick="showView('sequences')">Sequences</button>
+      <button class="tab" id="tab-activity" onclick="showView('activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></button>
       <button class="tab" id="tab-inbox" onclick="showView('inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></button>
       <button class="tab" id="tab-enrich" onclick="showView('enrich')">Enrich</button>
       <button class="tab" id="tab-health" onclick="showView('health')">Health <span class="badge" id="health-badge" style="display:none"></span></button>
@@ -470,6 +471,10 @@
       <iframe id="seq-frame" title="Sequences" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
     </div>
 
+    <div id="view-activity" hidden>
+      <iframe id="activity-frame" title="Activity" style="width:100%;border:0;min-height:1250px;background:transparent"></iframe>
+    </div>
+
     <div id="view-inbox" hidden>
       <iframe id="inbox-frame" title="Inbox" style="width:100%;border:0;min-height:1250px;background:transparent"></iframe>
     </div>
@@ -536,8 +541,19 @@
       error:        { cls:"bad",   label:"Error", review:true },
       no_show:      { cls:"yellow", label:"No-show" },
       incomplete:   { cls:"muted",  label:"Didn't finish" },
+      // The candidate asked to speak with a person instead of the AI agent. An
+      // outcome, not a failure: no `review` flag, and deliberately absent from
+      // ACTIONABLE below, because the human-handoff lane has already emailed
+      // them the Intro Call booking link. Before this verdict existed these
+      // calls landed here as "Audio failed" purely because opting out makes for
+      // a very short call (David, 2026-08-09).
+      human_requested:{ cls:"blue", label:"Human Call Requested" },
     };
     const verdictView = (v) => VERDICT[v] || { cls:"muted", label:cap(v||"—") };
+    // Someone who completed the whole interview AND asked for a person keeps the
+    // "Completed" pill (the interview really happened) — the ask is surfaced as a
+    // note on the row instead, so neither fact hides the other.
+    const askedForHuman = (r) => r && r.requestedHuman === true && r.verdict !== "human_requested";
 
     // ---- follow-up action state (no-shows + failures the team actions) ----
     const ACTIONABLE = new Set(["no_show","audio_fail","error","joined_silent","incomplete"]);
@@ -555,7 +571,7 @@
       if (st === "sequence_sent") return { cls:"blue", label:"Rescheduling requested" };
       return verdictView(verdict);
     }
-    const whatHappened = (r) => {
+    const whatHappenedBase = (r) => {
       switch (r.verdict) {
         case "success": return `Full interview — ${r.msgs} exchanges, recorded by Parascribe`;
         case "partial": return `Interview — ${r.msgs} exchange${r.msgs===1?"":"s"} before the call ended`;
@@ -567,9 +583,13 @@
         case "error": return `The call errored out — worth a manual follow-up`;
         case "no_show": return "Candidate never joined the Meet — confirmed by the recorder's participant log";
         case "incomplete": return "Candidate joined and said a few words, then went quiet — the interview didn't complete; worth a re-book";
+        case "human_requested": return "Candidate asked to speak with a person instead of the AI agent — the Intro Call booking link was emailed to them automatically";
         default: return r.detail || "";
       }
     };
+    const whatHappened = (r) => askedForHuman(r)
+      ? `${whatHappenedBase(r)} · asked to speak with a person, Intro Call link emailed`
+      : whatHappenedBase(r);
     const UPCOMING = {
       queued:"Bot ready", ready_to_join:"Bot ready",
       joining_call:"Joining…", waiting_room:"Joining…",
@@ -1021,14 +1041,15 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let applicantsLoaded=false, seqLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
+    let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
     function showView(name){
-      ["overview","candidates","applicants","followups","history","analytics","calls","sequences","inbox","enrich","health"].forEach(v=>{
+      ["overview","candidates","applicants","followups","history","analytics","calls","sequences","activity","inbox","enrich","health"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
       if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src="/applicants?embed=1"; applicantsLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
+      if(name==="activity" && !activityLoaded){ $("activity-frame").src="/activity?embed=1"; activityLoaded=true; }
       if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src="/inbox?embed=1"; inboxLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
       if(name==="health" && !healthLoaded){ $("health-frame").src="/health?embed=1"; healthLoaded=true; }
@@ -1041,8 +1062,9 @@
         requestAnimationFrame(()=>$('cv-q').focus());
       }
       else if(name==="applicants"){ if(location.hash!=="#applicants") history.replaceState(null,"","#applicants"); }
+      else if(name==="activity"){ if(location.hash!=="#activity") history.replaceState(null,"","#activity"); }
       else if(name==="inbox"){ if(location.hash!=="#inbox") history.replaceState(null,"","#inbox"); }
-      else if(location.hash==="#calls"||location.hash==="#applicants"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
+      else if(location.hash==="#calls"||location.hash==="#applicants"||location.hash==="#activity"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
     }
     // Health badge: a DOWN system must be visible from every tab, not only
     // after someone thinks to look. Uses the public minimal rollup (no names).
@@ -1067,6 +1089,13 @@
     });
 
     window.addEventListener("message",(event)=>{
+      if(event.origin!==location.origin||event.data?.type!=="raydar-activity-counts") return;
+      const count=Math.max(0,Number(event.data.count)||0);
+      $("activity-badge").textContent=String(count);
+      $("activity-badge").style.display=count?"inline-flex":"none";
+    });
+
+    window.addEventListener("message",(event)=>{
       if(event.origin!==location.origin||event.data?.type!=="raydar-applicants-counts") return;
       const count=Math.max(0,Number(event.data.review)||0);
       $("applicants-badge").textContent=String(count);
@@ -1078,12 +1107,16 @@
       {k:"completed", label:"Completed",     color:"#119865"},
       {k:"no_show",   label:"No-show",       color:"#E6B400"},
       {k:"failed",    label:"Agent failed",  color:"#E5484D"},
+      {k:"human_requested", label:"Human call requested", color:"#3E63DD"},
       {k:"other",     label:"Other",         color:"#BCB4A4"},
     ];
     const dayBuckets = (s) => ({
       completed:(s.success||0)+(s.partial||0),
       no_show:s.no_show||0,
       failed:(s.audio_fail||0)+(s.error||0)+(s.joined_silent||0),
+      // Its own bucket, never folded into "Agent failed": the agent behaved
+      // correctly, the candidate simply opted out of it.
+      human_requested:s.human_requested||0,
       other:(s.silent_fail||0)+(s.in_progress||0)+(s.pending||0)+(s.incomplete||0),
     });
     const fmtClock = (iso) => iso ? new Date(iso).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}) : "";
@@ -1103,6 +1136,7 @@
         case "audio_fail": return "Audio bridge failed — spoke but unheard";
         case "error": return "Call errored out";
         case "joined_silent": return "Joined but stayed silent";
+        case "human_requested": return "Asked for a person — Intro Call link emailed";
         case "silent_fail": return "Unconfirmed";
         case "in_progress": return "In progress";
         case "pending": return "Processing";
@@ -2052,7 +2086,7 @@
         refreshReschedules();   // human-reschedule feed (CDN-cached upstream; clears candidates who booked a live call)
       } catch(e){
         if(lastData){ setConn(false); }          // keep last good data on screen — never wipe to an error
-        else if(!firstPaint){ $("health-title").textContent="Connecting…"; $("health-sub").textContent="Fetching the latest activity — one moment."; }
+        else if(!firstPaint){ $("rdot").className="dot stale"; $("rtxt").textContent="connecting… retrying every 30s"; }
       }
     }
     skeleton(); load(); setInterval(load, 30000);
@@ -2062,6 +2096,7 @@
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
     if(location.hash==="#calls") showView("calls");
     if(location.hash==="#applicants") showView("applicants");
+    if(location.hash==="#activity") showView("activity");
     if(location.hash==="#inbox") showView("inbox");
   </script>
 </body>
