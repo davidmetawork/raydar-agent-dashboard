@@ -348,6 +348,7 @@
       <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
       <button class="tab" id="tab-calls" onclick="showView('calls')">Calls</button>
       <button class="tab" id="tab-sequences" onclick="showView('sequences')">Sequences</button>
+      <button class="tab" id="tab-activity" onclick="showView('activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></button>
       <button class="tab" id="tab-inbox" onclick="showView('inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></button>
       <button class="tab" id="tab-enrich" onclick="showView('enrich')">Enrich</button>
       <button class="tab" id="tab-health" onclick="showView('health')">Health <span class="badge" id="health-badge" style="display:none"></span></button>
@@ -468,6 +469,10 @@
 
     <div id="view-sequences" hidden>
       <iframe id="seq-frame" title="Sequences" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
+    </div>
+
+    <div id="view-activity" hidden>
+      <iframe id="activity-frame" title="Activity" style="width:100%;border:0;min-height:1250px;background:transparent"></iframe>
     </div>
 
     <div id="view-inbox" hidden>
@@ -1036,14 +1041,15 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let applicantsLoaded=false, seqLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
+    let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
     function showView(name){
-      ["overview","candidates","applicants","followups","history","analytics","calls","sequences","inbox","enrich","health"].forEach(v=>{
+      ["overview","candidates","applicants","followups","history","analytics","calls","sequences","activity","inbox","enrich","health"].forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
       if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src="/applicants?embed=1"; applicantsLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
+      if(name==="activity" && !activityLoaded){ $("activity-frame").src="/activity?embed=1"; activityLoaded=true; }
       if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src="/inbox?embed=1"; inboxLoaded=true; }
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
       if(name==="health" && !healthLoaded){ $("health-frame").src="/health?embed=1"; healthLoaded=true; }
@@ -1056,8 +1062,9 @@
         requestAnimationFrame(()=>$('cv-q').focus());
       }
       else if(name==="applicants"){ if(location.hash!=="#applicants") history.replaceState(null,"","#applicants"); }
+      else if(name==="activity"){ if(location.hash!=="#activity") history.replaceState(null,"","#activity"); }
       else if(name==="inbox"){ if(location.hash!=="#inbox") history.replaceState(null,"","#inbox"); }
-      else if(location.hash==="#calls"||location.hash==="#applicants"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
+      else if(location.hash==="#calls"||location.hash==="#applicants"||location.hash==="#activity"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
     }
     // Health badge: a DOWN system must be visible from every tab, not only
     // after someone thinks to look. Uses the public minimal rollup (no names).
@@ -1079,6 +1086,13 @@
       const count=Math.max(0,Number(event.data.interested)||0);
       $("inbox-badge").textContent=String(count);
       $("inbox-badge").style.display=count?"inline-flex":"none";
+    });
+
+    window.addEventListener("message",(event)=>{
+      if(event.origin!==location.origin||event.data?.type!=="raydar-activity-counts") return;
+      const count=Math.max(0,Number(event.data.count)||0);
+      $("activity-badge").textContent=String(count);
+      $("activity-badge").style.display=count?"inline-flex":"none";
     });
 
     window.addEventListener("message",(event)=>{
@@ -2082,6 +2096,7 @@
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
     if(location.hash==="#calls") showView("calls");
     if(location.hash==="#applicants") showView("applicants");
+    if(location.hash==="#activity") showView("activity");
     if(location.hash==="#inbox") showView("inbox");
   </script>
 </body>
