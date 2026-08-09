@@ -218,6 +218,43 @@ test("native index item accepts only the pinned current-booking summary", () => 
   assert.equal(normalized.sourceAttribution, "linkedin_inmail");
   assert.equal(normalized.bookedAtMs, Date.parse("2026-07-29T17:59:00.000Z"));
 
+  const extended = {
+    ...indexBooking(),
+    candidate: {
+      ...indexBooking().candidate,
+      paraformCandidateUserId: `c${"a1".repeat(10)}`,
+      paraformName: "Paraform Candidate",
+    },
+  };
+  assert.equal(
+    normalizeRaydarBookingIndexItem(extended).candidate.email,
+    "candidate@example.com",
+  );
+
+  for (const candidate of [
+    {
+      ...indexBooking().candidate,
+      paraformCandidateUserId: extended.candidate.paraformCandidateUserId,
+    },
+    { ...extended.candidate, unexpected: true },
+    { ...extended.candidate, paraformCandidateUserId: "candidate-123" },
+    { ...extended.candidate, paraformName: "\u0000Candidate" },
+  ]) {
+    assert.throws(
+      () => normalizeRaydarBookingIndexItem(indexBooking({ candidate })),
+      (error) => error.code === "RAYDAR_BOOKING_CANDIDATE_INVALID"
+        || error.code === "RAYDAR_BOOKING_NAME_INVALID",
+    );
+  }
+
+  assert.throws(
+    () => normalizeRaydarBookingEvent(booking({
+      candidate: extended.candidate,
+    })),
+    (error) => error.code === "RAYDAR_BOOKING_CANDIDATE_INVALID",
+    "the signed webhook contract must stay on its original two-field shape",
+  );
+
   assert.throws(
     () => normalizeRaydarBookingIndexItem({
       ...indexBooking(),

@@ -37,7 +37,14 @@ const INDEX_ITEM_FIELDS = new Set([
   "status",
   "supersedesBookingId",
 ]);
-const CANDIDATE_FIELDS = new Set(["email", "name"]);
+const LEGACY_CANDIDATE_FIELDS = ["email", "name"];
+const EXTENDED_CANDIDATE_FIELDS = [
+  "email",
+  "name",
+  "paraformCandidateUserId",
+  "paraformName",
+];
+const PARAFORM_CANDIDATE_USER_ID = /^c[a-z0-9]{20,30}$/u;
 const BOOKING_STATUSES = new Set(["confirmed", "rescheduled", "cancelled"]);
 
 function contractError(code) {
@@ -53,6 +60,33 @@ function exactFields(value, allowed, code) {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw contractError(code);
   }
+}
+
+function exactCandidateFields(value, { extended = false } = {}) {
+  const shapes = extended
+    ? [LEGACY_CANDIDATE_FIELDS, EXTENDED_CANDIDATE_FIELDS]
+    : [LEGACY_CANDIDATE_FIELDS];
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || !shapes.some((shape) => (
+      Object.keys(value).sort().join(",") === [...shape].sort().join(",")
+    ))
+  ) {
+    throw contractError("RAYDAR_BOOKING_CANDIDATE_INVALID");
+  }
+}
+
+function paraformCandidateUserId(value) {
+  if (value === null) return null;
+  if (
+    typeof value !== "string"
+    || !PARAFORM_CANDIDATE_USER_ID.test(value)
+  ) {
+    throw contractError("RAYDAR_BOOKING_CANDIDATE_INVALID");
+  }
+  return value;
 }
 
 function requiredString(value, code, { max = 256 } = {}) {
@@ -140,7 +174,7 @@ export function normalizeRaydarBookingEvent(value) {
     throw contractError("RAYDAR_BOOKING_CALL_TYPE_INVALID");
   }
 
-  exactFields(value.candidate, CANDIDATE_FIELDS, "RAYDAR_BOOKING_CANDIDATE_INVALID");
+  exactCandidateFields(value.candidate);
   const email = normalizedEmail(value.candidate.email);
   const name = candidateName(value.candidate.name);
 
@@ -203,9 +237,17 @@ export function normalizeRaydarBookingIndexItem(value) {
     throw contractError("RAYDAR_BOOKING_STATUS_INVALID");
   }
 
-  exactFields(value.candidate, CANDIDATE_FIELDS, "RAYDAR_BOOKING_CANDIDATE_INVALID");
+  // Scheduler profile hydration extended only the reconciliation index. The
+  // signed webhook deliberately retains its original two-field candidate
+  // contract. Accept the exact legacy index shape or the complete paired
+  // extension; partial and unknown producer drift still fails closed.
+  exactCandidateFields(value.candidate, { extended: true });
   const email = normalizedEmail(value.candidate.email);
   const name = candidateName(value.candidate.name);
+  if (Object.hasOwn(value.candidate, "paraformCandidateUserId")) {
+    paraformCandidateUserId(value.candidate.paraformCandidateUserId);
+    candidateName(value.candidate.paraformName);
+  }
   const startsAt = timestamp(value.startsAt, "RAYDAR_BOOKING_START_INVALID");
   const endsAt = timestamp(value.endsAt, "RAYDAR_BOOKING_END_INVALID");
   const bookedAt = timestamp(value.bookedAt, "RAYDAR_BOOKING_BOOKED_AT_INVALID");
