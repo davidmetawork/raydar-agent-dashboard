@@ -279,8 +279,16 @@ export function vendorApi({ status, keyMissing, probe }) {
 // The public payload already carries these booleans, so watching Google,
 // Postgres and the reminder lane needs no read key at all — provisioning a
 // secret to learn something already published would be gratuitous.
+const schedulerChecks = (results) => {
+  const raw = results["booking-door"]?.raw;
+  // booking-door is now a composite hold+health probe. Its raw body moved
+  // from the scheduler health document to {hold, holdStatus, health}; keep the
+  // direct form for old samples and isolated evaluator callers.
+  return raw?.health?.checks || raw?.checks || null;
+};
+
 export function googleWorkspace({ results }) {
-  const checks = results["booking-door"]?.raw?.checks;
+  const checks = schedulerChecks(results);
   if (!checks) return UNK("scheduler public health unavailable");
   const names = ["gmail", "calendars", "meetAccess", "humanStaffCalendars"];
   const failing = names.filter((n) => checks[n] === false);
@@ -289,7 +297,7 @@ export function googleWorkspace({ results }) {
 }
 
 export function neonDb({ results }) {
-  const checks = results["booking-door"]?.raw?.checks;
+  const checks = schedulerChecks(results);
   if (!checks) return UNK("scheduler public health unavailable");
   if (checks.database === false) return DOWN("scheduler cannot reach Postgres");
   return OK();
@@ -297,7 +305,7 @@ export function neonDb({ results }) {
 
 /** Reminder lane liveness, also from the public scheduler payload. */
 export function nativeReminders({ results }) {
-  const checks = results["booking-door"]?.raw?.checks;
+  const checks = schedulerChecks(results);
   if (!checks) return UNK("scheduler public health unavailable");
   if (checks.nativeReminders === false) {
     return DEG("reminder lane not reporting healthy to the scheduler");

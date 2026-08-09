@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { worst } from "../api/health/_lib/engine.mjs";
 import {
   bookingDoor, beatLane, desktopRunner, vendorApi, seqHealth,
-  okTrue, paraaiLane,
+  googleWorkspace, nativeReminders, neonDb, okTrue, paraaiLane,
 } from "../api/health/_lib/evaluators.mjs";
 import { CATALOG, byId, beatLanes } from "../api/health/_lib/catalog.mjs";
 import { uptimeFromTransitions } from "../api/health/tile.mjs";
@@ -87,16 +87,45 @@ test("desktop collapse: a closed laptop is one event, not sixteen", () => {
 });
 
 test("intentionally dark desktop lanes cannot trip the runner collapse", () => {
+  const hmChase = byId.get("lane-hm-chase");
   const forward = byId.get("lane-resume-forward-v2");
   const cohort = byId.get("lane-cohort-booking-watch");
   assert.equal(forward.paused, true);
   assert.match(forward.note, /Resume Feed owns new-mail ingestion/u);
   assert.equal(cohort.paused, true);
   assert.match(cohort.note, /not currently scheduled/u);
+  assert.equal(hmChase.paused, true);
+  assert.match(hmChase.note, /restart requires explicit approval/u);
   const activeDesktop = CATALOG.filter((check) =>
     check.group === "desktop" && check.kind === "beat" && !check.paused);
   assert.ok(!activeDesktop.some((lane) => lane.id === forward.id));
   assert.ok(!activeDesktop.some((lane) => lane.id === cohort.id));
+  assert.ok(!activeDesktop.some((lane) => lane.id === hmChase.id));
+});
+
+test("scheduler dependencies read the health half of the composite hold probe", () => {
+  const results = {
+    "booking-door": {
+      raw: {
+        holdStatus: 409,
+        hold: { error: "slot_taken" },
+        health: {
+          checks: {
+            database: true, gmail: true, calendars: true,
+            meetAccess: true, humanStaffCalendars: true, nativeReminders: true,
+          },
+        },
+      },
+    },
+  };
+  assert.equal(googleWorkspace({ results }).state, "OK");
+  assert.equal(neonDb({ results }).state, "OK");
+  assert.equal(nativeReminders({ results }).state, "OK");
+
+  results["booking-door"].raw.health.checks.database = false;
+  assert.equal(neonDb({ results }).state, "DOWN");
+  results["booking-door"].raw.health.checks.gmail = false;
+  assert.equal(googleWorkspace({ results }).state, "DEGRADED");
 });
 
 test("GitHub Action lanes are heartbeat-covered, needing no API token", () => {
