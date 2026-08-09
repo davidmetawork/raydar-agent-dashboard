@@ -209,6 +209,118 @@ test("varying page size escapes a tie block that a fixed page size cannot", asyn
   }
 });
 
+test("page size 97 recovers a no-email member hidden by every prior ordering", async () => {
+  const TOTAL = 101;
+  const missingId = "ccu-no-email";
+  const all = Array.from({ length: TOTAL }, (_, i) => ({
+    ccu_id: i === 42 ? missingId : `ccu-${i}`,
+    cu_id: `cu-${i}`,
+    candidate_email: i === 42 ? null : `p${i}@example.com`,
+  }));
+  const realFetch = globalThis.fetch;
+  const limits = [];
+  let oracleCalls = 0;
+  globalThis.fetch = async (url) => {
+    const input = JSON.parse(
+      decodeURIComponent(String(url).split("input=")[1]),
+    ).json;
+    if (String(url).includes("getListOfCampaigns?")) {
+      oracleCalls++;
+      return Response.json({
+        result: { data: { json: [{
+          id: "seq-1",
+          campaign_to_candidate_users: all.map((lead) => ({
+            id: lead.ccu_id,
+            candidate_user_id: lead.cu_id,
+            candidate_email: lead.candidate_email,
+          })),
+        }] } },
+      });
+    }
+    const limit = input.limit;
+    limits.push(limit);
+    const ordered = limit === 97
+      ? all
+      : all.filter((lead) => lead.ccu_id !== missingId);
+    return Response.json({
+      result: { data: { json: {
+        leads: ordered.slice(input.cursor ?? 0, (input.cursor ?? 0) + limit),
+        totalCount: TOTAL,
+      } } },
+    });
+  };
+  try {
+    const result = await completeCampaignLeads("seq-1");
+    assert.equal(result.complete, true);
+    assert.equal(result.unique, TOTAL);
+    assert.ok(limits.includes(97), "the independent 97-row ordering must run");
+    assert.equal(
+      oracleCalls,
+      0,
+      "pagination should recover the member before the email-only fallback",
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("oracle backfill rejects a fuzzy row with the wrong membership id", async () => {
+  const visible = {
+    ccu_id: "ccu-visible",
+    cu_id: "cu-visible",
+    candidate_email: "visible@example.com",
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const input = JSON.parse(
+      decodeURIComponent(String(url).split("input=")[1]),
+    ).json;
+    if (String(url).includes("getListOfCampaigns?")) {
+      return Response.json({
+        result: { data: { json: [{
+          id: "seq-1",
+          campaign_to_candidate_users: [
+            {
+              id: visible.ccu_id,
+              candidate_user_id: visible.cu_id,
+              candidate_email: visible.candidate_email,
+            },
+            {
+              id: "ccu-target",
+              candidate_user_id: "cu-target",
+              candidate_email: "target@example.com",
+            },
+          ],
+        }] } },
+      });
+    }
+    if (input.search) {
+      return Response.json({
+        result: { data: { json: {
+          leads: [{
+            ccu_id: "ccu-fuzzy-wrong",
+            cu_id: "cu-fuzzy-wrong",
+            candidate_email: input.search,
+          }],
+          totalCount: 1,
+        } } },
+      });
+    }
+    return Response.json({
+      result: { data: { json: { leads: [visible], totalCount: 2 } } },
+    });
+  };
+  try {
+    const result = await completeCampaignLeads("seq-1");
+    assert.equal(result.complete, false);
+    assert.equal(result.unique, 1);
+    assert.equal(result.shortfall, 1);
+    assert.equal(result.backfilled, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("completeness has ZERO tolerance — a percentage would swallow real leads", async () => {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
