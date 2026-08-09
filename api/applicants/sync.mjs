@@ -1,17 +1,22 @@
 // Machine channel between the desktop interview loop and the Applicants tab.
 //
-// POST: the loop publishes the stream/queue snapshot and reports send outcomes
-// (acks). GET: the loop pulls human "interview" approvals it has not yet
+// POST: the loop publishes the stream/queue snapshot, reports send outcomes
+// (acks), and prewarms complete applicant profile JSONs (profiles → the
+// apphub:profile:* cache keys plus the apphub:photos hash).
+// GET: the loop pulls human "interview" approvals it has not yet
 // acknowledged. Shared-secret auth (APPHUB_SYNC_KEY), never requireAuth — the
 // caller is a launchd cron, not a browser (pattern: api/health/beat.mjs).
 // 401 carries no detail on purpose.
 
 import { timingSafeEqual } from "node:crypto";
 import {
+  hashDelMany,
   hashGetAllJson,
+  hashKeys,
   hashSetJson,
   K,
   kvConfigured,
+  PROFILE_TTL_SECONDS,
   setJson,
   validKey,
 } from "./_lib/kv.mjs";
@@ -57,11 +62,47 @@ export function normalizeAcks(input, now = () => new Date().toISOString()) {
   return { ok: true, acks };
 }
 
+// Prewarmed profiles ride sync as `{<cuId>: profileJson}` — the desktop loop
+// bulk-writes the same apphub:profile:* cache keys api/applicants/profile.mjs
+// fills on a cache miss (identical shape; see the kv.mjs header contract).
+// All-or-nothing like acks: one bad entry rejects the whole batch before
+// anything is written. Per-profile byte cap because the body-level cap alone
+// would let one bloated profile ride in with the rest of the batch.
+// Photos: only imageSrc values on the stable public Paraform bucket are
+// collected into the apphub:photos hash — anything else (foreign hosts,
+// expiring signed URLs) is silently dropped, not an error.
+const CU_RE = /^[a-z0-9]{10,40}$/i;
+export const MAX_PROFILE_BYTES = 30_000;
+const PHOTO_URL_PREFIX = "https://storage.googleapis.com/paraform-images/";
+
+export function normalizeProfiles(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, badCu: null };
+  }
+  const profiles = {};
+  const photos = {};
+  for (const [rawCu, profile] of Object.entries(input)) {
+    const cu = String(rawCu || "").trim();
+    if (!CU_RE.test(cu)
+      || !profile || typeof profile !== "object" || Array.isArray(profile)
+      || Buffer.byteLength(JSON.stringify(profile)) > MAX_PROFILE_BYTES) {
+      return { ok: false, badCu: cu || null };
+    }
+    profiles[cu] = profile;
+    if (typeof profile.imageSrc === "string" && profile.imageSrc.startsWith(PHOTO_URL_PREFIX)) {
+      photos[cu] = profile.imageSrc;
+    }
+  }
+  return { ok: true, profiles, photos };
+}
+
 export function createSyncHandler({
   kvReady = kvConfigured,
   readHash = hashGetAllJson,
   writeHash = hashSetJson,
   writeJson = setJson,
+  readHashKeys = hashKeys,
+  deleteHashFields = hashDelMany,
   now = () => new Date().toISOString(),
 } = {}) {
   return async function handler(req, res) {
@@ -113,6 +154,21 @@ export function createSyncHandler({
         await writeJson(K.queue, doc);
         stored.queue = true;
       }
+      // Photos hygiene: the hash has no TTL, so without pruning it grows for
+      // every applicant ever seen while feed HGETALLs it on every poll. When a
+      // full publish arrives (snapshot AND queue together), photos for people
+      // no longer on the tab are dropped. Best-effort — a prune failure must
+      // never fail the push that carried real data.
+      if (stored.snapshot && stored.queue) {
+        try {
+          const keep = new Set(
+            [...(Array.isArray(body.snapshot?.stream) ? body.snapshot.stream : []), ...body.queue]
+              .map((row) => row?.cuId).filter(Boolean),
+          );
+          const drop = (await readHashKeys(K.photos)).filter((cu) => !keep.has(cu));
+          if (drop.length) await deleteHashFields(K.photos, drop);
+        } catch { /* hygiene only */ }
+      }
       if (body.acks != null) {
         const normalized = normalizeAcks(body.acks, now);
         if (!normalized.ok) {
@@ -122,6 +178,22 @@ export function createSyncHandler({
           await writeHash(K.acks, normalized.acks);
           stored.acks = Object.keys(normalized.acks).length;
         }
+      }
+      // `stored.profiles` only appears when the field was sent, so responses
+      // to profile-less POSTs (the existing loop payloads) stay unchanged.
+      if (body.profiles != null) {
+        const normalized = normalizeProfiles(body.profiles);
+        if (!normalized.ok) {
+          return res.status(400).json({ ok: false, error: "invalid_profile", cu: normalized.badCu });
+        }
+        const entries = Object.entries(normalized.profiles);
+        for (const [cu, profile] of entries) {
+          await writeJson(K.profile(cu), profile, PROFILE_TTL_SECONDS);
+        }
+        if (Object.keys(normalized.photos).length) {
+          await writeHash(K.photos, normalized.photos);
+        }
+        stored.profiles = entries.length;
       }
       return res.status(200).json({ ok: true, stored });
     } catch (error) {

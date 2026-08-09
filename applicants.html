@@ -88,21 +88,21 @@
   .row { display:grid; align-items:center; gap:14px; background:var(--card); border:1px solid var(--line); border-radius:15px;
     padding:13px 17px; box-shadow:var(--shadow); }
   .row.review-row { grid-template-columns:18px 40px minmax(0,1.35fr) auto minmax(0,1.25fr) 108px auto; }
-  .row.stream-row { grid-template-columns:minmax(0,1.2fr) auto minmax(0,1.3fr) 118px auto; }
+  .row.stream-row { grid-template-columns:40px minmax(0,1.2fr) auto minmax(0,1.3fr) 118px auto; }
   .row.decided-row { opacity:.82; }
   .row.decided-row:hover { opacity:1; }
   .row input[type=checkbox] { width:15px; height:15px; accent-color:var(--ink); cursor:pointer; }
   .avatar { width:40px; height:40px; border-radius:50%; overflow:hidden; display:grid; place-items:center;
     background:var(--live-bg); color:#6658DA; font-weight:700; font-size:13px; flex:none; }
   .avatar img { width:100%; height:100%; object-fit:cover; display:block; }
-  .who { min-width:0; }
-  .who .name { display:inline-flex; align-items:center; gap:7px; font-weight:700; letter-spacing:-.01em; cursor:pointer; max-width:100%; }
+  .who { min-width:0; display:flex; align-items:center; gap:8px; }
+  .who .name { display:inline-flex; align-items:center; gap:7px; font-weight:700; letter-spacing:-.01em; cursor:pointer; max-width:100%; min-width:0; }
   .who .name:hover { color:var(--orange); }
   .who .name span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .li-link { display:inline-grid; place-items:center; width:17px; height:17px; border-radius:4px; background:var(--blue-bg);
-    color:var(--blue); font:800 10px "PP Grafier Text"; text-decoration:none; flex:none; }
-  .li-link:hover { filter:brightness(.94); }
-  .who .subtext { font-size:11.5px; color:var(--ink-3); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .links { display:inline-flex; align-items:center; gap:4px; flex:none; }
+  .li-link, .pf-link { display:inline-grid; place-items:center; width:17px; height:17px; border-radius:4px; text-decoration:none; flex:none; }
+  .li-link svg, .pf-link svg { width:15px; height:15px; display:block; }
+  .li-link:hover, .pf-link:hover { filter:brightness(.94); }
   .role { min-width:0; font-size:13px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .role b { color:var(--ink); font-weight:650; }
   .when { font-size:13px; font-weight:600; white-space:nowrap; }
@@ -213,8 +213,9 @@
     .row.review-row { grid-template-columns:18px 40px minmax(0,1fr) auto; }
     .row.review-row .role, .row.review-row .when { grid-column:3 / -1; }
     .row.review-row .actions { grid-column:1 / -1; justify-content:flex-end; }
-    .row.stream-row { grid-template-columns:minmax(0,1fr) auto; }
-    .row.stream-row .role, .row.stream-row .when { grid-column:1 / -1; }
+    .row.stream-row { grid-template-columns:40px minmax(0,1fr) auto; }
+    .row.stream-row .role, .row.stream-row .when { grid-column:2 / -1; }
+    .row.stream-row .actions { grid-column:1 / -1; justify-content:flex-end; }
     .stats { gap:16px; }
     .updated { margin-left:0; width:100%; }
     .modal { padding:10px; } .modal-card { padding:20px; }
@@ -291,6 +292,7 @@ const STATE = {
   snapshot: null, decisions: {}, acks: {},
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
+  photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "decided"
   role: "all", query: "",
   checked: new Set(), busy: new Set(),
@@ -378,16 +380,25 @@ function statusPill(row) {
   const title = st === "stopped" && row.stoppedReason ? ' title="' + esc(row.stoppedReason) + '"' : "";
   return '<span class="pill st-' + esc(st) + '"' + title + '><span class="lbl">' + esc(label) + "</span>" + extra + "</span>";
 }
-function linkedinLink(handle) {
-  if (!handle) return "";
-  return '<a class="li-link" href="https://linkedin.com/in/' + esc(handle) + '" target="_blank" rel="noopener" title="LinkedIn" onclick="event.stopPropagation()">in</a>';
+const ICON_LI = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="#0A66C2" d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>';
+const ICON_PF = '<svg viewBox="0 0 256 256" width="15" height="15" aria-hidden="true"><circle cx="128" cy="128" r="128" fill="#1A1A1A"/><path fill="#fff" d="M113.387 82.8678C113.387 77.8608 117.446 73.8018 122.453 73.8018H194.981V91.9338H122.453C117.446 91.9338 113.387 87.8748 113.387 82.8678Z"/><path fill="#fff" d="M59 128.195C59 123.188 63.059 119.129 68.066 119.129H194.991V137.261H68.066C63.059 137.261 59 133.202 59 128.195Z"/><path fill="#fff" d="M140.605 173.531C140.605 168.524 144.664 164.465 149.672 164.465H195.002V182.597H149.672C144.664 182.597 140.605 178.538 140.605 173.531Z"/></svg>';
+function liAnchor(url) {
+  if (!url) return "";
+  return '<a class="li-link" href="' + esc(url) + '" target="_blank" rel="noopener" title="LinkedIn" onclick="event.stopPropagation()">' + ICON_LI + "</a>";
+}
+function pfAnchor(cuId) {
+  return '<a class="pf-link" href="https://www.paraform.com/calls?candidate_profile_id=' + esc(cuId) + '" target="_blank" rel="noopener" title="Open in Paraform" onclick="event.stopPropagation()">' + ICON_PF + "</a>";
+}
+function nameLinks(row) {
+  return '<span class="links">' + liAnchor(row.linkedin ? "https://linkedin.com/in/" + row.linkedin : "") + pfAnchor(row.cuId) + "</span>";
 }
 function initials(name) {
   return String(name || "").split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
 }
 function avatarHtml(row) {
   const p = STATE.profiles[row.cuId];
-  const img = p && p.imageSrc ? '<img src="' + esc(p.imageSrc) + '" alt="" loading="lazy" />' : esc(initials(row.name));
+  const src = STATE.photos[row.cuId] || (p && p.imageSrc) || "";
+  const img = src ? '<img src="' + esc(src) + '" alt="" loading="lazy" />' : esc(initials(row.name));
   return '<span class="avatar" data-avatar="' + esc(row.cuId) + '" data-cu="' + esc(row.cuId) + '">' + img + "</span>";
 }
 
@@ -450,9 +461,6 @@ function decidedStatusHtml(key, decision) {
 }
 function reviewRowHtml(row, decision) {
   const key = row.key;
-  const sub = row.tier === "C"
-    ? (row.reason ? row.reason : "C-tier — held for a human call")
-    : "unrated " + (row.unratedSinceHours ? Math.round(row.unratedSinceHours / 24 * 10) / 10 + "d" : "48h+") + (row.reason ? " · " + row.reason : "");
   const busy = STATE.busy.has(key);
   const right = decision
     ? decidedStatusHtml(key, decision)
@@ -464,8 +472,7 @@ function reviewRowHtml(row, decision) {
     : '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />';
   return '<div class="row review-row' + (decision ? " decided-row" : "") + '" data-row="' + esc(key) + '">' +
     check + avatarHtml(row) +
-    '<div class="who"><span class="name" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></span>" + linkedinLink(row.linkedin) +
-    '<div class="subtext">' + esc(sub) + "</div></div>" +
+    '<div class="who"><span class="name" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></span>" + nameLinks(row) + "</div>" +
     tierPill(row.tier) +
     '<div class="role"><b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</div>" +
     '<div class="when">' + esc(shortDate(row.appliedAt)) + '<span class="subtext">applied ' + esc(relTime(row.appliedAt) || "—") + "</span></div>" +
@@ -503,7 +510,8 @@ function renderReview() {
 /* ---- Stream view ---- */
 function streamRowHtml(row) {
   return '<div class="row stream-row" data-row="' + esc(row.key) + '">' +
-    '<div class="who"><span class="name" data-open="' + esc(row.key) + '"><span>' + esc(row.name || "Unknown") + "</span></span>" + linkedinLink(row.linkedin) + "</div>" +
+    avatarHtml(row) +
+    '<div class="who"><span class="name" data-open="' + esc(row.key) + '"><span>' + esc(row.name || "Unknown") + "</span></span>" + nameLinks(row) + "</div>" +
     tierPill(row.tier) +
     '<div class="role"><b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</div>" +
     '<div class="when">' + esc(shortDate(row.appliedAt)) + '<span class="subtext">applied ' + esc(relTime(row.appliedAt) || "—") + (row.addedAt ? " · seen " + esc(relTime(row.addedAt)) : "") + "</span></div>" +
@@ -524,6 +532,7 @@ function renderStream() {
   } else {
     list.innerHTML = filtered.map(streamRowHtml).join("");
   }
+  observeAvatars();
 }
 
 function renderLists() { renderPills(); renderReview(); renderStream(); postCounts(); }
@@ -632,13 +641,13 @@ function observeAvatars() {
   }
   HYDRATE.observer.disconnect();
   HYDRATE.visible.clear();
-  document.querySelectorAll("#reviewList [data-avatar]").forEach((el) => HYDRATE.observer.observe(el));
+  document.querySelectorAll("#reviewList [data-avatar], #streamList [data-avatar]").forEach((el) => HYDRATE.observer.observe(el));
 }
 function pumpHydration() {
   if (HYDRATE.timer || HYDRATE.inflight) return;
   HYDRATE.timer = setTimeout(async () => {
     HYDRATE.timer = null;
-    const next = [...HYDRATE.visible].find((cu) => !(cu in STATE.profiles));
+    const next = [...HYDRATE.visible].find((cu) => !(cu in STATE.profiles) && !STATE.photos[cu]);
     if (!next) return;
     HYDRATE.inflight = true;
     try {
@@ -736,7 +745,7 @@ function renderModal() {
     (p.title ? '<div class="headline">' + esc(p.title) + "</div>" : "") +
     '<div class="meta">' +
     (p.location ? "<span>" + esc(p.location) + "</span>" : "") +
-    (linkedinUrl ? '<a href="' + esc(linkedinUrl) + '" target="_blank" rel="noopener">LinkedIn ↗</a>' : "") +
+    '<span class="links">' + liAnchor(linkedinUrl) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
     (p.updatedAt ? '<div class="p-asof">LinkedIn data as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
@@ -807,6 +816,7 @@ async function loadFeed(manual = false) {
     STATE.snapshot = body.snapshot || null;
     STATE.decisions = body.decisions || {};
     STATE.acks = body.acks || {};
+    STATE.photos = body.photos || {};
     STATE.loaded = true;
     reconcileLocal();
     renderAll();

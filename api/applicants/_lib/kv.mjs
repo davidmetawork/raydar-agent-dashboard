@@ -9,7 +9,15 @@
 //   apphub:snapshot          — POST /api/applicants/sync only
 //   apphub:acks              — POST /api/applicants/sync only
 //   apphub:decisions         — POST /api/applicants/decision only
-//   apphub:profile:<cuId>    — GET  /api/applicants/profile only (6h TTL)
+//   apphub:profile:<cuId>    — TWO accepted writers of one identical shape
+//                              (24h TTL): POST /api/applicants/sync is the
+//                              bulk writer (the loop prewarms complete profile
+//                              JSONs), GET /api/applicants/profile remains the
+//                              cache-miss fallback writer. profile.mjs is the
+//                              source of truth for the shape; the loop mirrors
+//                              it field-for-field.
+//   apphub:photos            — POST /api/applicants/sync only (hash: field
+//                              cuId → JSON string of the photo URL)
 //   apphub:rank:<companyId>  — GET  /api/applicants/profile only (30d TTL)
 
 const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
@@ -70,11 +78,24 @@ export async function hashDel(key, field, { kvImpl = kv } = {}) {
   return kvImpl(["HDEL", key, field]);
 }
 
+export async function hashKeys(key, { kvImpl = kv } = {}) {
+  const fields = await kvImpl(["HKEYS", key]);
+  return Array.isArray(fields) ? fields : [];
+}
+
+export async function hashDelMany(key, fields, { kvImpl = kv } = {}) {
+  if (!fields?.length) return 0;
+  return kvImpl(["HDEL", key, ...fields]);
+}
+
 // `<cuId>:<roleId>` — the one field-key contract every apphub hash shares.
 export const KEY_RE = /^[a-z0-9]+:[a-z0-9]+$/i;
 export const validKey = (key) => typeof key === "string" && key.length <= 130 && KEY_RE.test(key);
 
-export const PROFILE_TTL_SECONDS = 6 * 60 * 60;
+// 24h: profiles are prewarmed daily by the desktop loop (sync POST `profiles`),
+// and the LinkedIn snapshot behind them ages in days anyway — a longer TTL just
+// keeps the modal instant between warms instead of forcing live refetches.
+export const PROFILE_TTL_SECONDS = 24 * 60 * 60;
 export const RANK_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export const K = {
@@ -83,5 +104,6 @@ export const K = {
   decisions: "apphub:decisions",
   acks: "apphub:acks",
   profile: (cuId) => `apphub:profile:${cuId}`,
+  photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
   rank: (companyId) => `apphub:rank:${companyId}`,
 };

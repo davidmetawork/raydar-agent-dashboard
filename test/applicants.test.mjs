@@ -1,13 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { validKey } from "../api/applicants/_lib/kv.mjs";
+import { PROFILE_TTL_SECONDS, validKey } from "../api/applicants/_lib/kv.mjs";
 import {
   createSyncHandler,
+  MAX_PROFILE_BYTES,
   MAX_SNAPSHOT_BYTES,
   normalizeAcks,
+  normalizeProfiles,
 } from "../api/applicants/sync.mjs";
 import { createDecisionHandler } from "../api/applicants/decision.mjs";
+import { createFeedHandler } from "../api/applicants/feed.mjs";
 
 const SAVED_SYNC_KEY = process.env.APPHUB_SYNC_KEY;
 const KEY = "apphub-sync-key-0000000000000000001";
@@ -61,8 +64,8 @@ function fakeStore(initial = {}) {
         calls.writeHash.push([key, fields]);
         return Object.keys(fields).length;
       },
-      writeJson: async (key, value) => {
-        calls.writeJson.push([key, value]);
+      writeJson: async (key, value, ttlSeconds) => {
+        calls.writeJson.push([key, value, ttlSeconds]);
         return "OK";
       },
       now: () => "2026-08-09T00:00:00.000Z",
@@ -72,7 +75,7 @@ function fakeStore(initial = {}) {
 
 test("applicant keys are `<cuId>:<roleId>` and nothing else", () => {
   for (const key of [
-    "clskvclu80066l60fhutn6kks:cmqvf861b00040aksj38cyiwp",
+    "cutestsynthetic0000000001:cmqvf861b00040aksj38cyiwp",
     "abc123:DEF456",
     "a:b",
   ]) {
@@ -301,4 +304,120 @@ test("sync stores the split queue doc under its own key with its own cap", async
   await handler(request({ body: { queue: "nope" } }), bad);
   assert.equal(bad.statusCode, 400);
   assert.equal(bad.body.error, "invalid_queue");
+});
+
+test("sync stores profiles under TTL'd keys and writes only bucket photos to the hash", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore();
+  const handler = createSyncHandler(deps);
+
+  const withPhoto = {
+    name: "Applicant Example",
+    imageSrc: "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/cutestsynthetic0000000001",
+  };
+  const foreignPhoto = { name: "Second Applicant", imageSrc: "https://example.com/pic.jpg" };
+  const noPhoto = { name: "Third Applicant", imageSrc: null };
+  const ok = response();
+  await handler(request({
+    body: {
+      profiles: {
+        cutestsynthetic0000000001: withPhoto,
+        cmqvf861b00040aksj38cyiwp: foreignPhoto,
+        abcdef1234: noPhoto,
+      },
+    },
+  }), ok);
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, profiles: 3 });
+  assert.deepEqual(calls.writeJson, [
+    ["apphub:profile:cutestsynthetic0000000001", withPhoto, PROFILE_TTL_SECONDS],
+    ["apphub:profile:cmqvf861b00040aksj38cyiwp", foreignPhoto, PROFILE_TTL_SECONDS],
+    ["apphub:profile:abcdef1234", noPhoto, PROFILE_TTL_SECONDS],
+  ]);
+  // Only the paraform-images bucket URL made the photos hash; the foreign
+  // host and the null were dropped without failing the batch.
+  assert.deepEqual(calls.writeHash, [[
+    "apphub:photos",
+    { cutestsynthetic0000000001: withPhoto.imageSrc },
+  ]]);
+});
+
+test("sync rejects the whole profiles batch on a bad cuId or oversize profile", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore();
+  const handler = createSyncHandler(deps);
+
+  const good = { name: "Applicant Example" };
+  for (const profiles of [
+    { shortcu: good }, // under 10 chars
+    { "cu_bad_chars12": good }, // invalid characters
+    { ["x".repeat(41)]: good }, // over 40 chars
+    { cutestsynthetic0000000001: "not-an-object" },
+    { cutestsynthetic0000000001: ["not", "a", "plain", "object"] },
+    { cutestsynthetic0000000001: null },
+    { cutestsynthetic0000000001: { blob: "x".repeat(MAX_PROFILE_BYTES) } }, // over cap once serialized
+    { abcdef1234: good, nope: good }, // one bad entry poisons the batch
+    ["not", "a", "profiles", "shape"],
+  ]) {
+    const res = response();
+    await handler(request({ body: { profiles } }), res);
+    assert.equal(res.statusCode, 400, JSON.stringify(profiles).slice(0, 80));
+    assert.equal(res.body.error, "invalid_profile");
+  }
+  assert.equal(calls.writeJson.length, 0); // nothing was written, good entries included
+  assert.equal(calls.writeHash.length, 0);
+});
+
+test("normalizeProfiles reports the offending cuId and filters photos to the bucket prefix", () => {
+  const bad = normalizeProfiles({ abcdef1234: { name: "A" }, "nope!": { name: "B" } });
+  assert.deepEqual(bad, { ok: false, badCu: "nope!" });
+  assert.deepEqual(normalizeProfiles("not-an-object"), { ok: false, badCu: null });
+
+  const bucketUrl = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/abcdef1234";
+  const good = normalizeProfiles({
+    abcdef1234: { name: "A", imageSrc: bucketUrl },
+    // Prefix must include the trailing slash — a lookalike host fails.
+    bcdefa2345: { name: "B", imageSrc: "https://storage.googleapis.com/paraform-images.example.com/x" },
+  });
+  assert.equal(good.ok, true);
+  assert.deepEqual(Object.keys(good.profiles), ["abcdef1234", "bcdefa2345"]);
+  assert.deepEqual(good.photos, { abcdef1234: bucketUrl });
+});
+
+function feedSetup(initial = {}) {
+  const calls = { readJson: [], readHash: [] };
+  const handler = createFeedHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    kvReady: () => true,
+    readJson: async (key) => {
+      calls.readJson.push(key);
+      return initial[key] ?? null;
+    },
+    readHash: async (key) => {
+      calls.readHash.push(key);
+      return initial[key] || {};
+    },
+  });
+  return { calls, handler };
+}
+
+test("feed returns the photos hash alongside the snapshot and overlays", async () => {
+  const photoUrl = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/cu1abcdef0";
+  const { calls, handler } = feedSetup({
+    "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
+    "apphub:queue": { generatedAt: "2026-08-09T00:00:00.000Z", rows: [{ key: "cu1abcdef0:role1" }] },
+    "apphub:decisions": { "cu1abcdef0:role1": { action: "pass" } },
+    "apphub:photos": { cu1abcdef0: photoUrl },
+  });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined }), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.photos, { cu1abcdef0: photoUrl });
+  // The pre-photos merge behavior is intact: split queue doc back onto the snapshot.
+  assert.deepEqual(res.body.snapshot.queue, [{ key: "cu1abcdef0:role1" }]);
+  assert.deepEqual(res.body.decisions, { "cu1abcdef0:role1": { action: "pass" } });
+  assert.deepEqual(res.body.acks, {});
+  assert.equal(res.headers["cache-control"], "no-store");
+  assert.ok(calls.readHash.includes("apphub:photos"));
 });
