@@ -144,7 +144,12 @@ async function probePass({ trpcGetImpl, budgetMs }) {
       await withBudget(trpcGetImpl(read.proc, read.input, 1), budgetMs);
       return { outcome: "healthy", confirmedBy: read.proc };
     } catch (error) {
-      if (error?.code !== "AUTH_EXPIRED") {
+      // The raw Para AI adapter deliberately names a 401
+      // PARAFORM_THROTTLED until this higher-level detector has enough
+      // evidence to distinguish a burst from expiry. Older injected clients
+      // and mutation reports use AUTH_EXPIRED; both mean "this one raw read
+      // received 401" at this boundary.
+      if (!["PARAFORM_THROTTLED", "AUTH_EXPIRED"].includes(error?.code)) {
         // Network failure, vendor 5xx, cookie-store read failure, or budget:
         // NOT evidence of a dead cookie. Fail open and stop this tick.
         return {
