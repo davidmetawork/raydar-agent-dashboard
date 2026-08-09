@@ -459,7 +459,7 @@ export async function setLeadEmail(ccuId, email) {
 const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 const authRetryDelays = () => {
   const parsed = String(process.env.PARAFORM_THROTTLE_DELAYS_MS || "")
-    .split(",").map((n) => Number(n.trim()))
+    .split(",").map((n) => n.trim()).filter(Boolean).map(Number)
     .filter((n) => Number.isFinite(n) && n >= 0);
   return parsed.length ? parsed : AUTH_RETRY_DELAYS_MS;
 };
@@ -585,7 +585,14 @@ export async function isSessionActuallyExpired({ probes = 3 } = {}) {
 // tolerance is actively dangerous here: 1% would silently swallow 11 missing
 // leads on the 1,124-lead sequence. 19 of 45 sequences have a tie block larger
 // than the default page size, so this is not an edge case.
-const LEAD_PAGE_SIZES = [100, 89, 83, 71];
+// Keep several independent orderings. Paraform's LIMIT/OFFSET query has no
+// stable tiebreaker, so a row can be absent from every page at one size while
+// appearing immediately at another. Page size 97 closed a production 610/611
+// hole whose missing member had no email and therefore could not use the exact
+// search fallback. The reader stops as soon as the union reaches totalCount,
+// so the extra ordering costs nothing on already-complete reads and only the
+// minimum additional pages on a short read.
+const LEAD_PAGE_SIZES = [100, 97, 89, 83, 79, 73, 71];
 
 /**
  * Authoritative membership oracle. The HEAVY `campaigns.getListOfCampaigns`
@@ -648,7 +655,15 @@ export async function completeCampaignLeads(campaignId, { pageSizes = LEAD_PAGE_
       const expected = (await campaignMembershipOracle()).get(campaignId) || [];
       for (const e of expected) {
         if (byCcu.has(e.ccu_id)) continue;
-        const row = await campaignLeadBySearch(campaignId, e.candidate_email || e.cu_id);
+        // Search is useful only with an address. Candidate ids are not a
+        // supported search key, and fuzzy results must never let a different
+        // row satisfy the oracle's exact missing membership.
+        if (!e.candidate_email) continue;
+        const row = await campaignLeadBySearch(
+          campaignId,
+          e.candidate_email,
+          { expectedCcuId: e.ccu_id },
+        );
         apiCalls++;
         if (row?.ccu_id && !byCcu.has(row.ccu_id)) { byCcu.set(row.ccu_id, row); backfilled++; }
       }
