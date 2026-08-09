@@ -54,6 +54,11 @@ function scriptedTrpc(script) {
     const step = script.shift() || "ok";
     if (step === "ok") return Promise.resolve({ ok: true });
     if (step === "401") return Promise.reject(authError());
+    if (step === "throttle") {
+      const error = new Error("PARAFORM_THROTTLED");
+      error.code = "PARAFORM_THROTTLED";
+      return Promise.reject(error);
+    }
     if (step === "net") return Promise.reject(networkError());
     return new Promise(() => {});
   };
@@ -145,6 +150,17 @@ test("down requires both distinct reads to 401 on both passes", async () => {
   assert.equal(trpc.calls.length, 4);
   // Two DISTINCT procs, per the spec's two-read definition.
   assert.notEqual(trpc.calls[0].proc, trpc.calls[1].proc);
+});
+
+test("the raw Para AI throttle code is treated as a 401 observation", async () => {
+  const trpc = scriptedTrpc(["throttle", "throttle", "throttle", "throttle"]);
+  const result = await probeParaformAuth(
+    {},
+    { trpcGetImpl: trpc, sleepImpl: noSleep },
+  );
+  assert.equal(result.healthy, false);
+  assert.equal(result.reason, "auth_expired");
+  assert.equal(trpc.calls.length, 4);
 });
 
 test("a network failure is not a dead cookie: fail open as unknown", async () => {
