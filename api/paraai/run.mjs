@@ -1,4 +1,5 @@
 import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
+import { reportParaformReadAuthFailure } from "./_lib/auth-probe.mjs";
 import {
   automationConfig,
   continuousPhase3ShadowTransition,
@@ -55,7 +56,14 @@ async function alert(error, jobId) {
   const code = String(error?.code || "RUN_FAILED");
   if (!ALERT_CODES.has(code)) return;
   try {
-    if (await takeAlertSlot(code === "AUTH_EXPIRED" ? "auth-expired" : `${code}:${jobId}`, code === "AUTH_EXPIRED" ? 12 * 3600 : 3600)) {
+    if (code === "AUTH_EXPIRED") {
+      await reportParaformReadAuthFailure({
+        lane: "paraai_job",
+        stage: "manual_run",
+      });
+      return;
+    }
+    if (await takeAlertSlot(`${code}:${jobId}`, 3600)) {
       await notifySlack(`🚨 Para AI: ${code} for job ${jobId || "unknown"} — ${String(error?.message || error).slice(0, 180)}. Review https://monitor.raydar.xyz/#paraai`);
     }
   } catch { /* the API response remains the primary, visible failure path */ }

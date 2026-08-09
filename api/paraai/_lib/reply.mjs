@@ -13,6 +13,7 @@
 //   PARAAI_REPLY_PASS_APPROVED      the no path, one phase behind submit
 //   PARAAI_REPLY_OFFMARKET_APPROVED the candidate-level off-market write
 import { notifySlack, fetchCall } from "./core.mjs";
+import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
 import { takeAlertSlot, listJobs } from "./store.mjs";
 import { listOutreachStates } from "./outreach-store.mjs";
 import {
@@ -484,9 +485,10 @@ async function scanReplies({ config, now, fetchImpl, mode, limit, ignoreArmingPi
           message: text(error?.message).slice(0, 240),
         });
         if (error?.code === "AUTH_EXPIRED") {
-          if (await takeAlertSlot("reply-auth-expired", 12 * 3600).catch(() => false)) {
-            await notifySlack("🚨 Para AI reply actioning paused: the Paraform session cookie expired and needs rotating.").catch(() => {});
-          }
+          await reportParaformReadAuthFailure({
+            lane: "paraai_reply",
+            stage: "request_action",
+          }).catch(() => {});
           break;
         }
       } finally {

@@ -18,7 +18,10 @@ import {
   runPhase3ShadowReleaseTick,
   sweepPhase1ResumeWaitCards,
 } from "./_lib/auto.mjs";
-import { runAuthProbeTick } from "./_lib/auth-probe.mjs";
+import {
+  reportParaformReadAuthFailure,
+  runScheduledAuthProbeTick,
+} from "./_lib/auth-probe.mjs";
 import { runCuratedFitDeadmanTick } from "./_lib/curated-fit-deadman.mjs";
 import { runStuckWatchdogTick } from "./_lib/stuck-watchdog.mjs";
 import { notifySlack } from "./_lib/core.mjs";
@@ -53,6 +56,21 @@ import {
   storeConfigured,
   takeAlertSlot,
 } from "./_lib/store.mjs";
+
+async function alertWorkerFailure(error, {
+  lane,
+  slot,
+  message,
+}) {
+  const code = String(error?.code || "worker_failed");
+  if (code === "AUTH_EXPIRED") {
+    await reportParaformReadAuthFailure({ lane, stage: "worker" }).catch(() => {});
+    return false;
+  }
+  if (!(await takeAlertSlot(slot, 3600).catch(() => false))) return false;
+  await notifySlack(message(code)).catch(() => {});
+  return true;
+}
 
 export const config = { maxDuration: 120 };
 
@@ -650,15 +668,17 @@ export default async function handler(req, res) {
     if (!new Set(["tick", "recover"]).has(mode)) {
       return res.status(400).json({ ok: false, error: "unsupported_mode" });
     }
-    // OBSERVE-ONLY Paraform auth circuit probe (phase 1). It rides every
-    // */5 tick BEFORE the lane cycle so a full AUTH_EXPIRED outage — the
+    // OBSERVE-ONLY Paraform auth circuit probe (phase 1). It is offered on
+    // every worker poll but a durable five-minute cadence claim admits only
+    // one probe across overlapping Fly + cron invocations. It runs BEFORE the
+    // lane cycle so a full AUTH_EXPIRED outage — the
     // exact condition it detects — cannot starve it behind a throwing tick,
     // its reads are time-capped so a hung Paraform call cannot eat the
     // worker budget, and it never throws into the cycle. Deliberately
     // absent from this response: the worker/monitor wiring is frozen, the
     // flag is read via GET /api/ops/paraform-auth, and no lane holds on it
     // yet. Covered by test/paraform-auth-breaker.test.mjs.
-    try { await runAuthProbeTick(); } catch { /* observe-only */ }
+    try { await runScheduledAuthProbeTick(); } catch { /* observe-only */ }
     // Independent dead-man for the GitHub Actions curated-fit lane. This runs
     // from Vercel/Upstash so a GitHub outage cannot suppress both execution and
     // its alarm. Aggregate watermark only; no candidate data or Paraform write.
@@ -758,11 +778,11 @@ export default async function handler(req, res) {
         error: String(error?.code || "outreach_failed"),
         detail: String(error?.message || error).slice(0, 180),
       };
-      if (await takeAlertSlot("outreach-worker-failed", 3600).catch(() => false)) {
-        await notifySlack(
-          `🚨 Para AI outreach worker failed (${outreachError.error}). Direct-submit queue processing continued.`,
-        ).catch(() => {});
-      }
+      await alertWorkerFailure(error, {
+        lane: "paraai_outreach",
+        slot: "outreach-worker-failed",
+        message: (code) => `🚨 Para AI outreach worker failed (${code}). Direct-submit queue processing continued.`,
+      });
     }
     // Reply actioning runs after outreach and is isolated the same way: a
     // classifier or Paraform failure here must never stop direct submission.
@@ -775,11 +795,11 @@ export default async function handler(req, res) {
         error: String(error?.code || "reply_failed"),
         detail: String(error?.message || error).slice(0, 180),
       };
-      if (await takeAlertSlot("reply-worker-failed", 3600).catch(() => false)) {
-        await notifySlack(
-          `🚨 Para AI reply actioning failed (${replyError.error}). Direct-submit and outreach processing continued.`,
-        ).catch(() => {});
-      }
+      await alertWorkerFailure(error, {
+        lane: "paraai_reply",
+        slot: "reply-worker-failed",
+        message: (code) => `🚨 Para AI reply actioning failed (${code}). Direct-submit and outreach processing continued.`,
+      });
     }
     // ORDER IS A CONTRACT: expired-match actioning runs AFTER reply actioning,
     // never before. A candidate can answer on day 6 and the request expire on
@@ -798,11 +818,11 @@ export default async function handler(req, res) {
         error: String(error?.code || "expired_failed"),
         detail: String(error?.message || error).slice(0, 180),
       };
-      if (await takeAlertSlot("expired-worker-failed", 3600).catch(() => false)) {
-        await notifySlack(
-          `🚨 Para AI expired-match actioning failed (${expiredError.error}). Direct-submit, outreach and reply processing continued.`,
-        ).catch(() => {});
-      }
+      await alertWorkerFailure(error, {
+        lane: "paraai_expired",
+        slot: "expired-worker-failed",
+        message: (code) => `🚨 Para AI expired-match actioning failed (${code}). Direct-submit, outreach and reply processing continued.`,
+      });
     }
     // Curated-interest detection is the final normal actioning lane. Its own
     // durable sweep lease self-paces the expensive population read, while each
@@ -817,11 +837,11 @@ export default async function handler(req, res) {
         error: String(error?.code || "interest_failed"),
         detail: String(error?.message || error).slice(0, 180),
       };
-      if (await takeAlertSlot("interest-worker-failed", 3600).catch(() => false)) {
-        await notifySlack(
-          `🚨 Para AI curated-interest worker failed (${interestError.error}). Direct-submit, outreach, reply and expired-match processing continued.`,
-        ).catch(() => {});
-      }
+      await alertWorkerFailure(error, {
+        lane: "paraai_interest",
+        slot: "interest-worker-failed",
+        message: (code) => `🚨 Para AI curated-interest worker failed (${code}). Direct-submit, outreach, reply and expired-match processing continued.`,
+      });
     }
     let recovery = null;
     let recoveryError = null;

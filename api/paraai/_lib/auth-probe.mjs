@@ -3,9 +3,10 @@
 // The shared Paraform session cookie is the recurring single point of failure
 // across every cookie-consuming lane; when it dies, each lane discovers it
 // separately and Slack drowns in per-item AUTH_EXPIRED spam (07-25→07-28).
-// This probe rides the existing */5 worker tick, confirms a read-layer auth
-// outage with two distinct cheap tRPC reads plus one retry pass, and records
-// ONE durable flag that a future per-lane rollout can hold on. A Paraform
+// This probe rides the existing worker tick, but a durable cadence claim keeps
+// the five-second Fly poller from turning it into a five-second auth hammer.
+// A read-layer outage needs independently paced failed observations before it
+// opens, and independently paced green observations before it closes. A Paraform
 // mutation can also report a write-layer 401 into this module. That signal is
 // latched until a later mutation succeeds: authorized reads are not evidence
 // that the write layer recovered (2026-07-30 incident).
@@ -31,7 +32,7 @@
 // - The probe consumes the shared cookie through the existing core.mjs
 //   helpers and never logs or stores the cookie value anywhere.
 
-import { notifySlack, trpcGet } from "./core.mjs";
+import { notifySlack, trpcGetRaw } from "./core.mjs";
 import { kv } from "./store.mjs";
 
 export const AUTH_FLAG_KEY = "auth:paraform:down";
@@ -39,9 +40,15 @@ export const AUTH_LAST_PROBE_KEY = "auth:paraform:lastprobe";
 export const AUTH_OPEN_ALERT_KEY = "auth:paraform:alert:open";
 export const AUTH_REMINDER_ALERT_KEY = "auth:paraform:alert:reminder";
 export const AUTH_WRITE_FAILURE_KEY = "auth:paraform:write-failure";
+export const AUTH_PROBE_CADENCE_KEY = "auth:paraform:probe:cadence";
+export const AUTH_READ_SUSPECT_KEY = "auth:paraform:read-suspect";
+export const AUTH_READ_RECOVERY_KEY = "auth:paraform:read-recovery";
 const OPEN_ALERT_TTL_SECONDS = 30 * 24 * 60 * 60;
 const REMINDER_TTL_SECONDS = 24 * 60 * 60;
 const LAST_PROBE_TTL_SECONDS = 7 * 24 * 60 * 60;
+const READ_CONFIRMATION_TTL_SECONDS = 30 * 60;
+const DEFAULT_PROBE_INTERVAL_SECONDS = 5 * 60;
+const DEFAULT_CONFIRMATION_SEPARATION_MS = 3 * 60 * 1000;
 // Per-read cap so a hung Paraform read bounds the probe, never the worker's
 // 120s budget. The underlying fetch keeps its own (longer) AbortSignal.
 // A malformed override (e.g. "8s" → NaN) or a sub-500ms value must fall
@@ -58,6 +65,24 @@ const PROBE_RETRY_DELAY_MS = 500;
 // reminder slot and post "still OPEN (day 1)" seconds after the open alert;
 // within this window of the recorded openedAt the reminder is skipped.
 const REMINDER_AFTER_OPEN_GRACE_MS = 60 * 60 * 1000;
+
+export function probeIntervalSeconds(
+  raw = process.env.PARAFORM_AUTH_PROBE_INTERVAL_SECONDS,
+) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 30
+    ? Math.floor(n)
+    : DEFAULT_PROBE_INTERVAL_SECONDS;
+}
+
+export function confirmationSeparationMs(
+  raw = process.env.PARAFORM_AUTH_CONFIRMATION_SEPARATION_MS,
+) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1_000
+    ? Math.floor(n)
+    : DEFAULT_CONFIRMATION_SEPARATION_MS;
+}
 
 // Two DISTINCT cheap reads, so a lone intermittent 401 on one proc never
 // trips the breaker. Both shapes are the proven ones already used by
@@ -172,7 +197,7 @@ async function probePasses({ trpcGetImpl, sleepImpl, budgetMs }) {
 
 export async function probeParaformAuth(
   { budgetMs = PROBE_READ_BUDGET_MS } = {},
-  { trpcGetImpl = trpcGet, sleepImpl = sleep } = {},
+  { trpcGetImpl = trpcGetRaw, sleepImpl = sleep } = {},
 ) {
   // The per-read cap alone still lets slow failures stack: four near-budget
   // 401s plus the retry gap is ~4x the read budget before the lanes run.
@@ -193,11 +218,48 @@ export async function probeParaformAuth(
   }
 }
 
+// The worker endpoint is polled by both Vercel cron and a five-second Fly
+// runner. Without a shared claim, every poll executes four auth reads in a
+// failure case and the detector can create the very 401 burst it interprets.
+// The cadence key is a lease, not state: a thrown tick releases it so the next
+// poll can retry, while a completed (including unknown) observation remains
+// paced. Write-layer reports bypass this wrapper and still open immediately.
+export async function runScheduledAuthProbeTick(
+  { now = Date.now() } = {},
+  {
+    probeImpl = probeParaformAuth,
+    kvImpl = kv,
+    notifyImpl = notifySlack,
+    tickImpl = runAuthProbeTick,
+  } = {},
+) {
+  const at = new Date(now).toISOString();
+  const claimed = (await kvImpl([
+    "SET",
+    AUTH_PROBE_CADENCE_KEY,
+    at,
+    "NX",
+    "EX",
+    probeIntervalSeconds(),
+  ])) === "OK";
+  if (!claimed) return { status: "skipped", reason: "cadence", down: null };
+  try {
+    return await tickImpl(
+      { now },
+      { probeImpl, kvImpl, notifyImpl },
+    );
+  } catch (error) {
+    await kvImpl(["DEL", AUTH_PROBE_CADENCE_KEY]).catch(() => {});
+    throw error;
+  }
+}
+
 // The ops endpoint is a public unauthenticated read: raw internal error
 // strings (vendor bodies, cookie-store messages) must never be republished
 // verbatim. The raw reason still lands in the KV heartbeat for operators;
 // the endpoint sees only this closed enum: ok | recovered_on_retry |
-// auth_expired | probe_budget_exceeded | network | vendor_error |
+// auth_suspected | recovery_pending | auth_expired |
+// probe_budget_exceeded | network | vendor_error |
 // no_cookie | store_error.
 export function publicProbeReason(raw) {
   const reason = String(raw ?? "").trim();
@@ -205,6 +267,9 @@ export function publicProbeReason(raw) {
   if (reason === "ok" || reason === "recovered_on_retry") return reason;
   if (reason === "auth_expired" || reason === "AUTH_EXPIRED") {
     return "auth_expired";
+  }
+  if (reason === "auth_suspected" || reason === "recovery_pending") {
+    return reason;
   }
   if (reason === "write_auth_expired") return "write_auth_expired";
   if (reason === "PROBE_BUDGET_EXCEEDED") return "probe_budget_exceeded";
@@ -279,28 +344,65 @@ export async function runAuthProbeTick(
         },
       }
     : observed;
-  // Heartbeat first: the ops endpoint must show probe staleness even when
-  // nothing else changes.
-  await kvImpl([
+  const existing = parse(await kvImpl(["GET", AUTH_FLAG_KEY]));
+  const writeHeartbeat = async (healthy, reason) => kvImpl([
     "SET",
     AUTH_LAST_PROBE_KEY,
-    JSON.stringify({ at, healthy: probe.healthy, reason: probe.reason }),
+    JSON.stringify({ at, healthy, reason }),
     "EX",
     LAST_PROBE_TTL_SECONDS,
   ]);
-  const existing = parse(await kvImpl(["GET", AUTH_FLAG_KEY]));
 
   if (probe.healthy === null) {
     // Fail open: a probe that could not reach Paraform proves nothing about
-    // the cookie. An existing open circuit stays exactly as it is.
+    // the cookie. It also breaks the consecutive-evidence chain: independent
+    // observations must agree, with no unknown or green sample in between.
+    await kvImpl(["DEL", AUTH_READ_SUSPECT_KEY]);
+    await kvImpl(["DEL", AUTH_READ_RECOVERY_KEY]);
+    await writeHeartbeat(null, probe.reason);
     return { status: "unknown", reason: probe.reason, down: Boolean(existing) };
   }
 
   if (probe.healthy === true) {
-    if (!existing) return { status: "healthy", down: false, resumed: false };
-    // Auto-resume. A latched write-layer failure never reaches this branch;
-    // only a later successful mutation clears that signal. Alert slots are
-    // cleared BEFORE the flag: a crash between
+    await kvImpl(["DEL", AUTH_READ_SUSPECT_KEY]);
+    if (!existing) {
+      await kvImpl(["DEL", AUTH_READ_RECOVERY_KEY]);
+      await writeHeartbeat(true, probe.reason);
+      return { status: "healthy", down: false, resumed: false };
+    }
+
+    // Read-layer recovery uses hysteresis too. One green poll seconds after a
+    // burst is not enough to announce recovery and reopen on the next burst.
+    // A write-layer incident is different: reportParaformWriteAuthSuccess has
+    // already supplied the stronger proof of a successful later mutation, so
+    // it may close on the next green read without another delay.
+    const writeLayerIncident = existing?.evidence?.mode === "write";
+    if (!writeLayerIncident) {
+      const recovery = parse(await kvImpl(["GET", AUTH_READ_RECOVERY_KEY]));
+      const firstAtMs = Date.parse(String(recovery?.firstAt || ""));
+      const separated = Number.isFinite(firstAtMs)
+        && now - firstAtMs >= confirmationSeparationMs();
+      if (!separated) {
+        const record = {
+          version: 1,
+          firstAt: Number.isFinite(firstAtMs) ? recovery.firstAt : at,
+          lastAt: at,
+        };
+        await kvImpl([
+          "SET",
+          AUTH_READ_RECOVERY_KEY,
+          JSON.stringify(record),
+          "EX",
+          READ_CONFIRMATION_TTL_SECONDS,
+        ]);
+        await writeHeartbeat(null, "recovery_pending");
+        return { status: "recovering", down: true, resumed: false };
+      }
+    }
+
+    await writeHeartbeat(true, probe.reason);
+    await kvImpl(["DEL", AUTH_READ_RECOVERY_KEY]);
+    // Auto-resume. Alert slots are cleared BEFORE the flag: a crash between
     // the two re-runs this path next tick (the flag still exists), so a
     // suppressed open alert on the next real outage is impossible. The DEL
     // of the flag is then the atomic claim on the episode: overlapping
@@ -321,11 +423,41 @@ export async function runAuthProbeTick(
     };
   }
 
-  // Confirmed down: either both distinct reads returned 401 on both passes,
-  // or a real mutation returned 401. The flag has no TTL on purpose — a dead
-  // cookie stays dead until recaptured, and probe staleness is visible
-  // separately via the heartbeat key.
-  const since = existing?.since || at;
+  await kvImpl(["DEL", AUTH_READ_RECOVERY_KEY]);
+
+  // A real mutation 401 remains an immediate write-layer verdict. A read-only
+  // failure is merely a suspicion until another paced probe (not another call
+  // in the same burst) independently agrees after the separation window.
+  let since = existing?.since || at;
+  if (probe.reason !== "write_auth_expired" && !existing) {
+    const suspect = parse(await kvImpl(["GET", AUTH_READ_SUSPECT_KEY]));
+    const firstAtMs = Date.parse(String(suspect?.firstAt || ""));
+    const separated = Number.isFinite(firstAtMs)
+      && now - firstAtMs >= confirmationSeparationMs();
+    if (!separated) {
+      const record = {
+        version: 1,
+        firstAt: Number.isFinite(firstAtMs) ? suspect.firstAt : at,
+        lastAt: at,
+      };
+      await kvImpl([
+        "SET",
+        AUTH_READ_SUSPECT_KEY,
+        JSON.stringify(record),
+        "EX",
+        READ_CONFIRMATION_TTL_SECONDS,
+      ]);
+      await writeHeartbeat(null, "auth_suspected");
+      return { status: "suspected", down: false, opened: false };
+    }
+    since = suspect.firstAt;
+  }
+  await kvImpl(["DEL", AUTH_READ_SUSPECT_KEY]);
+  await writeHeartbeat(false, probe.reason);
+
+  // Confirmed down: either independently paced read probes agreed, or a real
+  // mutation returned 401. The flag has no TTL on purpose — a dead cookie
+  // stays dead until recaptured, and probe staleness is visible separately.
   const record = {
     version: 1,
     since,
@@ -348,7 +480,7 @@ export async function runAuthProbeTick(
     ]);
     const evidence = probe.reason === "write_auth_expired"
       ? `a Paraform mutation returned 401 at ${probe.evidence?.lane || "unknown"}:${probe.evidence?.stage || "unknown"} while read canaries may still be green`
-      : `two consecutive 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}, retried once`;
+      : `independently paced checks both saw repeated 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}`;
     const delivered = await notifyImpl(
       `🚨 Paraform auth circuit OPEN — the shared session cookie is rejected (${evidence}). Every cookie-consuming lane can fail with AUTH_EXPIRED until it is recaptured — ${RECAPTURE_RUNBOOK}. A write-layer outage stays latched until a later mutation succeeds; green reads alone cannot close it. One daily reminder follows while it stays down. Observe-only: no lane is held by this flag yet.`,
     ).catch(() => false);
@@ -445,6 +577,42 @@ export async function reportParaformWriteAuthFailure(
     },
   );
   return { record, circuit: result };
+}
+
+// A lane-level AUTH_EXPIRED has already survived the Para AI client's paced
+// ladder and serial two-procedure confirmation, but it still belongs to the
+// read-layer hysteresis instead of owning a separate Slack alert. Recording it
+// here seeds (or advances) the shared suspicion; a later independently paced
+// worker probe must agree before the one circuit alert is allowed to fire.
+export async function reportParaformReadAuthFailure(
+  {
+    lane = "unknown",
+    stage = "unknown",
+    now = Date.now(),
+  } = {},
+  {
+    kvImpl = kv,
+    notifyImpl = notifySlack,
+  } = {},
+) {
+  const result = await runAuthProbeTick(
+    { now },
+    {
+      probeImpl: async () => ({
+        healthy: false,
+        reason: "auth_expired",
+        evidence: {
+          code: "AUTH_EXPIRED",
+          mode: "read",
+          lane: String(lane || "unknown").slice(0, 48),
+          stage: String(stage || "unknown").slice(0, 80),
+        },
+      }),
+      kvImpl,
+      notifyImpl,
+    },
+  );
+  return { lane, stage, circuit: result };
 }
 
 // Clear only a failure observed no later than this successful mutation. The

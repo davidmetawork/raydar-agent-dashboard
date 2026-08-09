@@ -10,6 +10,7 @@ import {
   notifySlack,
   paraAIConfig,
 } from "./core.mjs";
+import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
 import {
   advanceExistingTalentNetworkJob,
   buildPreferenceRouting,
@@ -3056,22 +3057,25 @@ export async function alertOnce(
   // the aggregate escalation path is the sole Slack owner.
   if (aggregateOnly) return false;
   try {
+    if (code === "AUTH_EXPIRED") {
+      await reportParaformReadAuthFailure({
+        lane: "paraai_automation",
+        stage: "job_processing",
+      });
+      return false;
+    }
     const key = objection
       ? `auto:sharing-objection:${botId}`
       : ceiling
         ? `auto:ceiling:${code}:${botId}`
-        : code === "AUTH_EXPIRED"
-          ? "auto-auth-expired"
-          : `auto:${code}:${botId}`;
+        : `auto:${code}:${botId}`;
     const ttl = (
       ttlSeconds != null
       && ttlSeconds !== ""
       && Number.isFinite(Number(ttlSeconds))
     )
       ? Math.max(60, Number(ttlSeconds))
-      : code === "AUTH_EXPIRED"
-        ? 12 * 3600
-        : 3600;
+      : 3600;
     if (!(await takeAlertSlotImpl(key, ttl))) return false;
     if (objection) {
       await notifySlackImpl(
