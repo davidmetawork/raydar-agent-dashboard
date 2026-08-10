@@ -25,18 +25,36 @@
     body {
       background:var(--cream); color:var(--ink);
       font-family:"PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-      -webkit-font-smoothing:antialiased; padding:28px clamp(16px,4vw,48px) 56px;
+      -webkit-font-smoothing:antialiased; padding:0;
     }
     a { color:inherit; }
     .wrap { max-width:1180px; margin:0 auto; }
 
-    /* top bar */
-    .top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:26px; flex-wrap:wrap; }
-    .brand { display:flex; align-items:center; gap:14px; }
-    .brand img { height:30px; width:auto; display:block; }
-    .brand .divider { width:1px; height:24px; background:var(--line); }
-    .brand .sub { font-size:15px; color:var(--ink-2); font-weight:500; letter-spacing:-.01em; }
-    .topright { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+    /* Studio Rail app shell — grouped sidebar nav + white canvas.
+       The rail replaces the old horizontal tab strip; every #tab-<name> id and
+       badge id is unchanged, so showView()/RaydarNav/badge wiring is untouched. */
+    .app { display:grid; grid-template-columns:236px minmax(0,1fr); min-height:100dvh; }
+    .rail {
+      position:sticky; top:0; height:100dvh; overflow-y:auto; scrollbar-width:thin;
+      display:flex; flex-direction:column; gap:4px; padding:22px 14px 16px;
+      background:var(--cream); border-right:1px solid var(--line);
+    }
+    .rail-brand { display:flex; align-items:center; gap:10px; padding:2px 10px 14px; text-decoration:none; }
+    .rail-brand svg { flex:none; display:block; }
+    .rail-brand .word { font-family:"PP Grafier Display",serif; font-weight:400; font-size:21px; letter-spacing:0; }
+    .rail-brand .sub { font-size:11.5px; color:var(--ink-3); font-weight:500; margin-top:3px; }
+    .rail-nav { display:flex; flex-direction:column; gap:18px; flex:1; }
+    .rail-group { display:flex; flex-direction:column; gap:2px; }
+    .rail-title { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-3); padding:0 10px 5px; }
+    .rail-foot { margin-top:16px; padding:12px 10px 0; border-top:1px solid var(--line-2); }
+    /* Canvas stays on the cream ground: the six iframe tabs paint their own
+       opaque cream body, and every card style is tuned for cream. */
+    .canvas { min-width:0; padding:24px clamp(16px,3.4vw,44px) 56px; }
+    .canvas-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:24px; flex-wrap:wrap; max-width:1180px; margin-left:auto; margin-right:auto; }
+    .canvas-head .headright { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    .kbd-hint { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:var(--ink-3); border:1px solid var(--line-2); border-radius:9px; padding:6px 11px; background:transparent; cursor:pointer; font-family:inherit; }
+    .kbd-hint:hover { border-color:var(--ink-3); color:var(--ink-2); }
+    .kbd-hint kbd { font-family:inherit; font-size:11px; font-weight:700; background:var(--line-2); border-radius:5px; padding:1px 6px; color:var(--ink-2); }
     .refresh { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-3); }
     .refresh .dot { width:7px; height:7px; border-radius:50%; background:var(--good); box-shadow:0 0 0 3px var(--good-bg); }
     .refresh .dot.stale { background:var(--warn); box-shadow:0 0 0 3px var(--warn-bg); }
@@ -53,14 +71,46 @@
     .resched .x { font-size:10px; opacity:.8; }
     /* blue status pill — "Rescheduling requested" */
     .pill.blue { background:var(--blue-bg); color:var(--blue); } .pill.blue .d{background:var(--blue);}
-    /* view tabs (Overview ⇄ Follow-ups) */
-    .tabs { display:flex; align-items:center; margin-bottom:24px; border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:thin; }
-    .tab { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:14.5px; font-weight:600; color:var(--ink-3); text-decoration:none;
-      padding:9px 2px; margin-right:26px; border-bottom:2px solid transparent; margin-bottom:-1px; display:inline-flex; align-items:center; gap:8px; transition:color .12s ease; flex:none; }
-    .tab:hover { color:var(--ink-2); }
-    .tab.active { color:var(--ink); border-bottom-color:var(--orange); }
-    .tab .badge { display:inline-flex; align-items:center; justify-content:center; min-width:19px; height:19px; padding:0 6px; border-radius:10px; background:var(--bad); color:#fff; font-size:11px; font-weight:700; }
+    /* rail nav items — same .tab/.badge class names and ids as the old strip */
+    .tab { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:14px; font-weight:600; color:var(--ink-2); text-decoration:none;
+      display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; transition:background .12s ease, color .12s ease; }
+    .tab:hover { background:var(--line-2); color:var(--ink); }
+    .tab.active { background:var(--live-bg); color:var(--ink); }
+    .tab.active .ric { color:var(--violet); }
+    .tab .ric { flex:none; width:16px; height:16px; color:var(--ink-3); }
+    .tab .ric svg { display:block; width:16px; height:16px; }
+    .tab .lbl { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .tab .badge { display:inline-flex; align-items:center; justify-content:center; min-width:19px; height:19px; padding:0 6px; border-radius:10px; background:var(--bad); color:#fff; font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; }
     .tab .badge.good { background:var(--good); }
+    .tab:focus-visible, .rail-brand:focus-visible, .kbd-hint:focus-visible { outline:2px solid var(--violet); outline-offset:2px; }
+    /* ⌘K jump palette */
+    .rk-backdrop { position:fixed; inset:0; background:rgba(22,20,15,.32); z-index:120; display:flex; align-items:flex-start; justify-content:center; padding:12vh 16px 0; }
+    .rk-backdrop[hidden] { display:none; }
+    .rk-panel { width:min(560px,100%); background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:0 2px 4px rgba(20,16,8,.05), 0 24px 56px -18px rgba(20,16,8,.28); overflow:hidden; }
+    .rk-panel input { width:100%; border:none; outline:none; font:inherit; font-size:15.5px; padding:16px 18px; border-bottom:1px solid var(--line-2); background:transparent; color:var(--ink); }
+    .rk-list { max-height:46vh; overflow-y:auto; padding:8px; }
+    .rk-item { display:flex; align-items:center; gap:10px; padding:9px 11px; border-radius:10px; font-size:14px; font-weight:600; color:var(--ink-2); cursor:pointer; }
+    .rk-item .rk-group { margin-left:auto; font-size:11px; font-weight:600; color:var(--ink-3); text-transform:uppercase; letter-spacing:.05em; }
+    .rk-item.on { background:var(--live-bg); color:var(--ink); }
+    .rk-empty { padding:16px 12px; font-size:13.5px; color:var(--ink-3); }
+    /* narrow screens: the rail flattens into a horizontal scroll strip */
+    @media (max-width:920px){
+      .app { grid-template-columns:1fr; }
+      .rail { position:static; height:auto; flex-direction:column; padding:14px 12px 10px; border-right:none; border-bottom:1px solid var(--line); }
+      .rail-nav { flex-direction:row; overflow-x:auto; scrollbar-width:thin; gap:4px; padding-bottom:4px; }
+      .rail-group { display:contents; }
+      .rail-title { display:none; }
+      .tab { flex:none; }
+      .rail-foot { margin-top:6px; padding:8px 4px 0; border-top:none; }
+    }
+    /* With the expanded rail (>=921px) the canvas is ~236px narrower than the
+       viewport, so the row-stacking breakpoints shift up by the rail width. */
+    @media (min-width:921px) and (max-width:1100px){
+      .hrow{ grid-template-columns:1fr auto; row-gap:4px; }
+      .hrow .hw,.hrow .ht{ grid-column:1/-1; }
+      .row{ grid-template-columns:1fr auto; row-gap:6px; }
+      .row .when,.row .what{ grid-column:1/-1; }
+    }
     /* follow-ups view */
     .fu-intro { font-size:13.5px; color:var(--ink-2); margin:0 2px 16px; max-width:700px; }
     .row.fu { grid-template-columns:1fr 1.45fr auto; }
@@ -138,7 +188,7 @@
     .pf-coverage { font-size:12.5px; color:#6f5810; background:#fff9e8; border:1px solid #f3dfa0; border-radius:10px; padding:10px 12px; margin:0 0 16px; }
     .pf-headctl { display:flex; align-items:center; gap:12px; }
     .pf-rangebar button { padding:5px 10px; font-size:12px; }
-    @media (max-width:960px){
+    @media (max-width:1180px){   /* was 960px — shifted up by the expanded rail's width */
       .row.fu{ grid-template-columns:1fr auto; column-gap:20px; row-gap:6px; align-items:start; }
       .row.fu .who{ grid-column:1; grid-row:1; }
       .row.fu .when{ grid-column:1; grid-row:2; }
@@ -326,35 +376,55 @@
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="top">
-      <div class="brand">
-        <img src="https://webview-lake.vercel.app/assets/raydar-black.png" alt="Raydar" />
-        <div class="divider"></div>
-        <div class="sub">Agent Dashboard</div>
-      </div>
-      <div class="topright">
-        <a class="pf-btn" href="https://www.paraform.com/calls" target="_blank" rel="noopener noreferrer">Open Paraform Calls <span class="ext">↗</span></a>
+  <div class="app">
+    <aside class="rail" aria-label="Dashboard navigation">
+      <a class="rail-brand" href="#overview" onclick="return tabClick(event,'overview')">
+        <svg viewBox="0 0 64 64" width="28" height="28" aria-hidden="true" fill="currentColor"><g transform="translate(9.12 9.2151) scale(0.3053) translate(-1145.967 -795.987)"><path d="M1273.44 827.735C1271.52 829.651 1271.04 833.124 1272.6 835.4C1289.93 860.668 1286.56 895.876 1262.49 917.313C1238.42 938.749 1203.4 938.15 1179.94 917.792C1152.26 893.841 1151.17 851.926 1176.69 826.538C1194.02 809.293 1219.05 804.263 1240.83 811.449C1245.28 812.886 1246.49 818.514 1243.24 821.867L1242.63 822.466C1240.95 824.143 1238.42 824.741 1236.14 824.023C1217.72 818.155 1196.54 823.304 1183.07 839.352C1167.78 857.555 1168.14 884.619 1183.67 902.583C1202.56 924.259 1235.66 925.097 1255.75 905.217C1271.28 889.769 1274.28 866.297 1264.54 847.854C1262.61 844.142 1257.68 843.543 1254.67 846.417C1252.74 848.333 1252.26 851.208 1253.59 853.603C1261.41 868.572 1258.28 887.733 1244.08 899.23C1229.88 910.726 1209.9 909.888 1196.66 898.272C1180.54 884.14 1180.06 859.59 1194.98 844.741C1200.39 839.352 1207.13 835.999 1214.11 834.681C1220.25 833.603 1224.1 841.028 1219.65 845.339C1218.81 846.178 1217.72 846.777 1216.52 847.016C1210.98 847.974 1205.81 850.968 1201.96 855.758C1194.98 864.381 1195.1 876.955 1201.96 885.697C1211.11 897.074 1227.95 897.793 1237.94 887.733C1242.63 883.063 1245.04 876.835 1245.04 870.728C1245.04 865.339 1238.3 862.704 1234.45 866.536C1233.37 867.614 1232.65 869.051 1232.65 870.608C1232.65 874.32 1230.96 878.033 1227.47 880.428C1223.62 883.063 1218.21 883.182 1214.35 880.428C1207.98 876.117 1207.37 867.375 1212.55 862.225C1214.6 860.189 1217.12 859.111 1219.77 858.872C1222.42 858.632 1224.94 857.195 1226.87 855.279L1264.06 818.275C1266.82 815.52 1266.34 810.97 1263.21 808.814C1232.41 787.976 1189.2 792.527 1163.57 822.466C1139.98 850.249 1140.1 891.565 1163.93 919.229C1192.69 952.521 1243.36 953.838 1273.92 923.42C1299.8 897.673 1302.81 857.674 1282.83 828.574C1280.66 825.46 1276.09 824.981 1273.32 827.735H1273.44Z"/></g></svg>
+        <span><span class="word">Raydar</span><br /><span class="sub">Agent Dashboard</span></span>
+      </a>
+      <nav class="rail-nav" aria-label="Dashboard surfaces">
+        <div class="rail-group">
+          <div class="rail-title">Live</div>
+          <a class="tab active" id="tab-overview" href="#overview" aria-current="page" onclick="return tabClick(event,'overview')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="2"/><rect x="13" y="13" width="7.5" height="7.5" rx="2"/></svg></span><span class="lbl">Overview</span></a>
+          <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></svg></span><span class="lbl">Activity</span> <span class="badge" id="activity-badge" style="display:none"></span></a>
+        </div>
+        <div class="rail-group">
+          <div class="rail-title">People</div>
+          <a class="tab" id="tab-applicants" href="#applicants" onclick="return tabClick(event,'applicants')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.25"/><path d="M3.5 19.5c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><path d="M15.5 5.4a3.25 3.25 0 0 1 0 5.2M17.6 14.9c1.6.7 2.6 2.2 2.9 4.6"/></svg></span><span class="lbl">Applicants</span> <span class="badge good" id="applicants-badge" style="display:none"></span></a>
+          <a class="tab" id="tab-followups" href="#followups" onclick="return tabClick(event,'followups')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 9a8.5 8.5 0 1 1 2 5.5"/><path d="M3.5 9V4.5M3.5 9H8"/></svg></span><span class="lbl">Follow-ups</span> <span class="badge" id="fu-badge" style="display:none"></span></a>
+          <!-- Candidates is hidden from the nav, not deleted: the roster view and the
+               #candidates deep link still work, and showView() expects a tab element
+               for every entry in VIEWS. Inline display:none so it beats .tab. -->
+          <a class="tab" id="tab-candidates" href="#candidates" style="display:none" onclick="return tabClick(event,'candidates')"><span class="lbl">Candidates</span></a>
+        </div>
+        <div class="rail-group">
+          <div class="rail-title">Outreach</div>
+          <a class="tab" id="tab-sequences" href="#sequences" onclick="return tabClick(event,'sequences')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 3.5 10 14M20.5 3.5 14 20.5l-4-6.5-6.5-4z"/></svg></span><span class="lbl">Sequences</span></a>
+          <a class="tab" id="tab-inbox" href="#inbox" onclick="return tabClick(event,'inbox')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m4.5 7 7.5 6 7.5-6"/></svg></span><span class="lbl">Inbox</span> <span class="badge good" id="inbox-badge" style="display:none"></span></a>
+          <a class="tab" id="tab-enrich" href="#enrich" onclick="return tabClick(event,'enrich')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5 13.8 10 19.5 12l-5.7 2-1.8 5.5L10.2 14 4.5 12l5.7-2z"/></svg></span><span class="lbl">Enrich</span></a>
+        </div>
+        <div class="rail-group">
+          <div class="rail-title">Intelligence</div>
+          <a class="tab" id="tab-analytics" href="#analytics" onclick="return tabClick(event,'analytics')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19.5V13M12 19.5V8M19 19.5V4.5"/></svg></span><span class="lbl">Analytics</span></a>
+          <a class="tab" id="tab-history" href="#history" onclick="return tabClick(event,'history')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></span><span class="lbl">History</span></a>
+          <a class="tab" id="tab-calls" href="#calls" onclick="return tabClick(event,'calls')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4.5h4l1.5 4-2.2 1.7a12 12 0 0 0 5.5 5.5L15.5 13l4 1.5v4a1.5 1.5 0 0 1-1.6 1.5C10.5 19.4 4.6 13.5 4 6.1A1.5 1.5 0 0 1 5 4.5z"/></svg></span><span class="lbl">Calls</span></a>
+        </div>
+        <div class="rail-group">
+          <div class="rail-title">System</div>
+          <a class="tab" id="tab-health" href="#health" onclick="return tabClick(event,'health')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12h4l2-5 3.5 10 2-5h5.5"/></svg></span><span class="lbl">Health</span> <span class="badge" id="health-badge" style="display:none"></span></a>
+        </div>
+      </nav>
+      <div class="rail-foot">
         <div class="refresh"><span class="dot" id="rdot"></span><span id="rtxt">live · updates every 30s</span></div>
       </div>
-    </div>
-
-    <div class="tabs">
-      <a class="tab active" id="tab-overview" href="#overview" onclick="return tabClick(event,'overview')">Overview</a>
-      <a class="tab" id="tab-applicants" href="#applicants" onclick="return tabClick(event,'applicants')">Applicants <span class="badge good" id="applicants-badge" style="display:none"></span></a>
-      <a class="tab" id="tab-inbox" href="#inbox" onclick="return tabClick(event,'inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></a>
-      <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></a>
-      <a class="tab" id="tab-followups" href="#followups" onclick="return tabClick(event,'followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></a>
-      <a class="tab" id="tab-history" href="#history" onclick="return tabClick(event,'history')">History</a>
-      <a class="tab" id="tab-analytics" href="#analytics" onclick="return tabClick(event,'analytics')">Analytics</a>
-      <a class="tab" id="tab-calls" href="#calls" onclick="return tabClick(event,'calls')">Calls</a>
-      <a class="tab" id="tab-sequences" href="#sequences" onclick="return tabClick(event,'sequences')">Sequences</a>
-      <a class="tab" id="tab-enrich" href="#enrich" onclick="return tabClick(event,'enrich')">Enrich</a>
-      <a class="tab" id="tab-health" href="#health" onclick="return tabClick(event,'health')">Health <span class="badge" id="health-badge" style="display:none"></span></a>
-      <!-- Candidates is hidden from the nav, not deleted: the roster view and the
-           #candidates deep link still work, and showView() expects a tab element
-           for every entry in VIEWS. Inline display:none so it beats .tab. -->
-      <a class="tab" id="tab-candidates" href="#candidates" style="display:none" onclick="return tabClick(event,'candidates')">Candidates</a>
+    </aside>
+    <main class="canvas">
+    <div class="wrap">
+    <div class="canvas-head">
+      <button class="kbd-hint" type="button" onclick="rkOpen()">Jump to any surface <kbd id="rk-kbd">⌘K</kbd></button>
+      <div class="headright">
+        <a class="pf-btn" href="https://www.paraform.com/calls" target="_blank" rel="noopener noreferrer">Open Paraform Calls <span class="ext">↗</span></a>
+      </div>
     </div>
 
     <div id="view-overview">
@@ -491,8 +561,16 @@
     </div>
 
     <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
-  </div>
+    </div><!-- /wrap -->
+    </main>
+  </div><!-- /app -->
   <div class="cv-toast" id="cv-toast"></div>
+  <div class="rk-backdrop" id="rk" hidden>
+    <div class="rk-panel" role="dialog" aria-modal="true" aria-label="Jump to any surface">
+      <input id="rk-q" type="text" placeholder="Jump to any surface…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="rk-list" aria-autocomplete="list" />
+      <div class="rk-list" id="rk-list" role="listbox" aria-label="Surfaces"></div>
+    </div>
+  </div>
 
   <script src="/nav-history.js"></script>
   <script>
@@ -1081,7 +1159,9 @@
       currentView=name;
       VIEWS.forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
-        $("tab-"+v).classList.toggle("active", v===name);
+        const t=$("tab-"+v);
+        t.classList.toggle("active", v===name);
+        if(v===name) t.setAttribute("aria-current","page"); else t.removeAttribute("aria-current");
       });
       if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src="/applicants?embed=1"; applicantsLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
@@ -2134,6 +2214,58 @@
       names: VIEWS,
       current: ()=>currentView,
       show: (name)=>showView(name,false),
+    });
+
+    /* ⌘K jump palette — additive navigation over the same showView() the rail
+       uses. No data access; purely a faster way to switch surfaces. */
+    const RK_ITEMS=[
+      {name:"overview",label:"Overview",group:"Live"},
+      {name:"activity",label:"Activity",group:"Live"},
+      {name:"applicants",label:"Applicants",group:"People"},
+      {name:"followups",label:"Follow-ups",group:"People"},
+      {name:"candidates",label:"Candidates",group:"People"},
+      {name:"sequences",label:"Sequences",group:"Outreach"},
+      {name:"inbox",label:"Inbox",group:"Outreach"},
+      {name:"enrich",label:"Enrich",group:"Outreach"},
+      {name:"analytics",label:"Analytics",group:"Intelligence"},
+      {name:"history",label:"History",group:"Intelligence"},
+      {name:"calls",label:"Calls",group:"Intelligence"},
+      {name:"health",label:"Health",group:"System"},
+    ];
+    let rkSel=0, rkMatches=RK_ITEMS, rkPrevFocus=null;
+    function rkOpen(){ rkPrevFocus=document.activeElement; $("rk").hidden=false; $("rk-q").value=""; $("rk-q").setAttribute("aria-expanded","true"); rkFilter(""); $("rk-q").focus(); }
+    function rkClose(){ $("rk").hidden=true; $("rk-q").setAttribute("aria-expanded","false"); if(rkPrevFocus&&rkPrevFocus.focus) rkPrevFocus.focus(); rkPrevFocus=null; }
+    function rkFilter(q){
+      const s=q.trim().toLowerCase();
+      rkMatches=RK_ITEMS.filter(i=>!s||i.label.toLowerCase().includes(s)||i.group.toLowerCase().includes(s));
+      rkSel=0; rkRender();
+    }
+    function rkRender(){
+      const el=$("rk-list");
+      if(!rkMatches.length){ el.innerHTML='<div class="rk-empty" role="status">No surface matches. Esc to close.</div>'; $("rk-q").removeAttribute("aria-activedescendant"); return; }
+      el.innerHTML=rkMatches.map((i,n)=>`<div class="rk-item${n===rkSel?" on":""}" role="option" id="rk-opt-${n}" aria-selected="${n===rkSel}" data-i="${n}" onclick="rkGo(${n})" onmousemove="rkHover(${n})">${esc(i.label)}<span class="rk-group">${esc(i.group)}</span></div>`).join("");
+      $("rk-q").setAttribute("aria-activedescendant","rk-opt-"+rkSel);
+      const on=el.querySelector(".rk-item.on"); if(on) on.scrollIntoView({block:"nearest"});
+    }
+    function rkHover(n){ if(n!==rkSel){ rkSel=n; rkRender(); } }
+    function rkGo(n){ const it=rkMatches[n]; if(!it) return; rkClose(); showView(it.name); }
+    $("rk-q").addEventListener("input",(e)=>rkFilter(e.target.value));
+    $("rk-q").addEventListener("keydown",(e)=>{
+      if(e.key==="ArrowDown"){ e.preventDefault(); rkSel=Math.min(rkSel+1,rkMatches.length-1); rkRender(); }
+      else if(e.key==="ArrowUp"){ e.preventDefault(); rkSel=Math.max(rkSel-1,0); rkRender(); }
+      else if(e.key==="Enter"){ e.preventDefault(); rkGo(rkSel); }
+      else if(e.key==="Escape"){ rkClose(); }
+      else if(e.key==="Tab"){ e.preventDefault(); }   // rk-q is the dialog's only focusable — keep focus in
+    });
+    $("rk").addEventListener("mousedown",(e)=>{ if(e.target===$("rk")) rkClose(); });
+    // Cmd+K on macOS, Ctrl+K elsewhere — never both, so macOS Ctrl+K keeps its
+    // native kill-to-end-of-line behavior in text fields.
+    const rkIsMac=/Mac|iP/.test(navigator.platform);
+    if(!rkIsMac){ const k=$("rk-kbd"); if(k) k.textContent="Ctrl K"; }
+    document.addEventListener("keydown",(e)=>{
+      const mod=rkIsMac ? (e.metaKey&&!e.ctrlKey) : (e.ctrlKey&&!e.metaKey);
+      if(mod&&!e.shiftKey&&!e.altKey&&e.key.toLowerCase()==="k"){ e.preventDefault(); $("rk").hidden?rkOpen():rkClose(); }
+      else if(e.key==="Escape"&&!$("rk").hidden){ rkClose(); }
     });
   </script>
 </body>
