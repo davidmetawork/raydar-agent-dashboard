@@ -7,6 +7,7 @@
 <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
 <script src="/auth-session.js"></script>
+<script src="/nav-history.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
@@ -286,6 +287,10 @@
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
       <span class="spacer"></span>
       <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;STATE.limit=PAGE;renderLists()"><option value="all">All roles</option></select>
+      <select id="sortOrder" aria-label="Sort by application date" onchange="setSortOrder(this.value)">
+        <option value="newest">Newest to oldest</option>
+        <option value="oldest">Oldest to newest</option>
+      </select>
       <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;STATE.limit=PAGE;renderLists()" />
     </div>
 
@@ -325,6 +330,7 @@ const LS_KEY = "apphub-local-decisions-v1";
 // Rows carry inline work history now, so the 2,000-row queue cannot all be in
 // the DOM at once. Render a screenful, grow as the reader reaches the bottom.
 const PAGE = 25;
+const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
   snapshot: null, decisions: {}, acks: {},
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
@@ -334,7 +340,7 @@ const STATE = {
   expanded: new Set(),                // cuIds whose inline history is showing in full
   limit: PAGE,                        // rows rendered in the active list; grows as the reader scrolls
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "decided"
-  role: "all", query: "",
+  role: "all", query: "", sort: loadSortOrder(),
   checked: new Set(), busy: new Set(),
   modal: null,                        // { cu, key, row, source }
   loaded: false,
@@ -343,6 +349,16 @@ const AUTH = { required: false, clientId: "", authenticated: false, email: "" };
 
 function loadLocal() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch { return {}; } }
 function saveLocal() { try { localStorage.setItem(LS_KEY, JSON.stringify(STATE.local)); } catch {} }
+function loadSortOrder() {
+  try { return localStorage.getItem(SORT_KEY) === "oldest" ? "oldest" : "newest"; }
+  catch { return "newest"; }
+}
+function setSortOrder(value) {
+  STATE.sort = value === "oldest" ? "oldest" : "newest";
+  $("sortOrder").value = STATE.sort;
+  try { localStorage.setItem(SORT_KEY, STATE.sort); } catch {}
+  renderLists();
+}
 
 function toast(message, bad = false) {
   const el = $("toast");
@@ -396,6 +412,17 @@ function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
+function sortByApplicationDate(rows) {
+  const direction = STATE.sort === "oldest" ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    const aDate = parseDate(a.appliedAt), bDate = parseDate(b.appliedAt);
+    if (!aDate && !bDate) return String(a.key || "").localeCompare(String(b.key || ""));
+    if (!aDate) return 1;
+    if (!bDate) return -1;
+    const byDate = (aDate.getTime() - bDate.getTime()) * direction;
+    return byDate || String(a.key || "").localeCompare(String(b.key || ""));
+  });
+}
 function matchesFilters(row) {
   if (STATE.role !== "all" && (row.roleTitle || "") !== STATE.role) return false;
   const q = STATE.query.trim().toLowerCase();
@@ -483,6 +510,7 @@ function renderRoleFilter() {
   select.innerHTML = '<option value="all">All roles</option>' + roles.map((r) => '<option value="' + esc(r) + '">' + esc(r) + "</option>").join("");
   select.value = roles.includes(current) ? current : "all";
   STATE.role = select.value;
+  $("sortOrder").value = STATE.sort;
 }
 
 /* ---- Review view ---- */
@@ -597,13 +625,12 @@ function patchRow(cu) {
 function reviewListRows() {
   const decidedMode = STATE.chip === "decided";
   let rows;
-  if (decidedMode) {
-    rows = decidedRows().slice().sort((a, b) => String(effectiveDecision(b.key)?.at || "").localeCompare(String(effectiveDecision(a.key)?.at || "")));
-  } else {
+  if (decidedMode) rows = sortByApplicationDate(decidedRows());
+  else {
     rows = pendingRows();
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
     if (STATE.chip === "unrated") rows = rows.filter((r) => r.tier !== "C");
-    rows = rows.slice().sort((a, b) => String(b.appliedAt || "").localeCompare(String(a.appliedAt || "")));
+    rows = sortByApplicationDate(rows);
   }
   return { rows: rows.filter(matchesFilters), decidedMode };
 }
@@ -649,7 +676,7 @@ function renderStream() {
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
     return;
   }
-  const rows = streamRows().slice().sort((a, b) => String(b.addedAt || b.appliedAt || "").localeCompare(String(a.addedAt || a.appliedAt || "")));
+  const rows = sortByApplicationDate(streamRows());
   const filtered = rows.filter(matchesFilters);
   if (!filtered.length) {
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
@@ -913,8 +940,9 @@ function openProfile(key) {
   STATE.modal = { cu: row.cuId, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream" };
   placeModal();
   $("profileModal").classList.add("open");
-  lockOuterScroll(true);
+  lockOuterScroll(true);                     // locks this frame AND the shell behind it
   $("profileCard").scrollTop = 0;
+  RaydarNav.open("profile", closeProfile);   // one screen back, not off the dashboard
   renderModal();
   fetchProfile(row.cuId).then(() => { if (STATE.modal && STATE.modal.cu === row.cuId) { renderModal(); applyAvatar(row.cuId); } })
     .catch(() => { if (STATE.modal && STATE.modal.cu === row.cuId) renderModal(); });
@@ -924,13 +952,20 @@ function closeProfile() {
   lockOuterScroll(false);
   STATE.modal = null;
 }
+// Every way a person dismisses the profile — the ✕, the backdrop, Escape —
+// unwinds the history entry it pushed, so back never fires into a closed modal.
+function dismissProfile() {
+  if (!RaydarNav.back("profile")) closeProfile();
+}
 /** Reviewing is a queue, so a decision taken inside the profile should hand the
  *  reader the next one rather than dumping them back to the list. The acted-on
- *  row leaves the pending list, so the SAME index is now the next person. */
+ *  row leaves the pending list, so the SAME index is now the next person.
+ *  openProfile reuses the existing history entry, so advancing never stacks
+ *  one back-step per applicant reviewed. */
 function advanceFrom(key, indexBefore) {
   const after = reviewListRows().rows;
   const next = after[indexBefore] || after[after.length - 1] || null;
-  if (!next) { closeProfile(); return; }          // queue emptied
+  if (!next) { dismissProfile(); return; }         // queue emptied
   if (next.key === key) return;                    // the write failed and the row stayed — hold position
   openProfile(next.key);
 }
@@ -986,7 +1021,7 @@ function renderModal() {
     tierPill(row.tier) + "</div>" +
     (p.updatedAt ? '<div class="p-asof">LinkedIn data as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
-    '<button class="p-close" onclick="closeProfile()" aria-label="Close">✕</button></div>');
+    '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
     (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") + "</div>");
   if (p.degraded === "paraform_auth") {
@@ -1054,7 +1089,7 @@ document.addEventListener("click", async (event) => {
   }
   const open = event.target.closest("[data-open]");
   if (open) { openProfile(open.dataset.open); return; }
-  if (event.target === $("profileModal")) closeProfile();
+  if (event.target === $("profileModal")) dismissProfile();
 });
 document.addEventListener("change", (event) => {
   const check = event.target.closest("[data-check]");
@@ -1062,7 +1097,7 @@ document.addEventListener("change", (event) => {
   if (check.checked) STATE.checked.add(check.dataset.check); else STATE.checked.delete(check.dataset.check);
   renderBulk();
 });
-document.addEventListener("keydown", (event) => { if (event.key === "Escape" && STATE.modal) closeProfile(); });
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && STATE.modal) dismissProfile(); });
 
 /* ---- feed ---- */
 async function loadFeed(manual = false) {

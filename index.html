@@ -55,7 +55,7 @@
     .pill.blue { background:var(--blue-bg); color:var(--blue); } .pill.blue .d{background:var(--blue);}
     /* view tabs (Overview ⇄ Follow-ups) */
     .tabs { display:flex; align-items:center; margin-bottom:24px; border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:thin; }
-    .tab { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:14.5px; font-weight:600; color:var(--ink-3);
+    .tab { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:14.5px; font-weight:600; color:var(--ink-3); text-decoration:none;
       padding:9px 2px; margin-right:26px; border-bottom:2px solid transparent; margin-bottom:-1px; display:inline-flex; align-items:center; gap:8px; transition:color .12s ease; flex:none; }
     .tab:hover { color:var(--ink-2); }
     .tab.active { color:var(--ink); border-bottom-color:var(--orange); }
@@ -165,7 +165,7 @@
     .stat.rate { display:flex; align-items:center; gap:18px; }
     .ring { --p:0; width:64px; height:64px; flex:0 0 auto; }
     .stat .hint { font-size:12.5px; color:var(--ink-3); margin-top:8px; }
-    .stat.clickable { cursor:pointer; transition:transform .08s ease, box-shadow .15s ease, border-color .15s ease; }
+    .stat.clickable { cursor:pointer; display:block; color:inherit; text-decoration:none; transition:transform .08s ease, box-shadow .15s ease, border-color .15s ease; }
     .stat.clickable:hover { transform:translateY(-2px); border-color:var(--blush); box-shadow:0 2px 4px rgba(20,16,8,.05), 0 14px 30px -14px rgba(20,16,8,.18); }
     .stat.clickable:hover .hint { color:var(--orange); }
 
@@ -340,18 +340,21 @@
     </div>
 
     <div class="tabs">
-      <button class="tab active" id="tab-overview" onclick="showView('overview')">Overview</button>
-      <button class="tab" id="tab-candidates" onclick="showView('candidates')">Candidates</button>
-      <button class="tab" id="tab-applicants" onclick="showView('applicants')">Applicants <span class="badge good" id="applicants-badge" style="display:none"></span></button>
-      <button class="tab" id="tab-followups" onclick="showView('followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></button>
-      <button class="tab" id="tab-history" onclick="showView('history')">History</button>
-      <button class="tab" id="tab-analytics" onclick="showView('analytics')">Analytics</button>
-      <button class="tab" id="tab-calls" onclick="showView('calls')">Calls</button>
-      <button class="tab" id="tab-sequences" onclick="showView('sequences')">Sequences</button>
-      <button class="tab" id="tab-activity" onclick="showView('activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></button>
-      <button class="tab" id="tab-inbox" onclick="showView('inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></button>
-      <button class="tab" id="tab-enrich" onclick="showView('enrich')">Enrich</button>
-      <button class="tab" id="tab-health" onclick="showView('health')">Health <span class="badge" id="health-badge" style="display:none"></span></button>
+      <a class="tab active" id="tab-overview" href="#overview" onclick="return tabClick(event,'overview')">Overview</a>
+      <a class="tab" id="tab-applicants" href="#applicants" onclick="return tabClick(event,'applicants')">Applicants <span class="badge good" id="applicants-badge" style="display:none"></span></a>
+      <a class="tab" id="tab-inbox" href="#inbox" onclick="return tabClick(event,'inbox')">Inbox <span class="badge good" id="inbox-badge" style="display:none"></span></a>
+      <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')">Activity <span class="badge" id="activity-badge" style="display:none"></span></a>
+      <a class="tab" id="tab-followups" href="#followups" onclick="return tabClick(event,'followups')">Follow-ups <span class="badge" id="fu-badge" style="display:none"></span></a>
+      <a class="tab" id="tab-history" href="#history" onclick="return tabClick(event,'history')">History</a>
+      <a class="tab" id="tab-analytics" href="#analytics" onclick="return tabClick(event,'analytics')">Analytics</a>
+      <a class="tab" id="tab-calls" href="#calls" onclick="return tabClick(event,'calls')">Calls</a>
+      <a class="tab" id="tab-sequences" href="#sequences" onclick="return tabClick(event,'sequences')">Sequences</a>
+      <a class="tab" id="tab-enrich" href="#enrich" onclick="return tabClick(event,'enrich')">Enrich</a>
+      <a class="tab" id="tab-health" href="#health" onclick="return tabClick(event,'health')">Health <span class="badge" id="health-badge" style="display:none"></span></a>
+      <!-- Candidates is hidden from the nav, not deleted: the roster view and the
+           #candidates deep link still work, and showView() expects a tab element
+           for every entry in VIEWS. Inline display:none so it beats .tab. -->
+      <a class="tab" id="tab-candidates" href="#candidates" style="display:none" onclick="return tabClick(event,'candidates')">Candidates</a>
     </div>
 
     <div id="view-overview">
@@ -491,6 +494,7 @@
   </div>
   <div class="cv-toast" id="cv-toast"></div>
 
+  <script src="/nav-history.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s ?? "").replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
@@ -646,7 +650,7 @@
         <div class="stat"><div class="label">Interviews today</div><div class="num">${total}</div><div class="hint">in the last 18 hours</div></div>
         <div class="stat"><div class="label">Completed</div><div class="num">${completed}</div><div class="hint">${t.no_show||0} no-show${(t.no_show||0)===1?"":"s"} · ${t.in_progress||0} live</div></div>
         <div class="stat rate"><svg class="ring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="none" stroke="#EFEADE" stroke-width="7"/><circle cx="32" cy="32" r="28" fill="none" stroke="var(--orange)" stroke-width="7" stroke-linecap="round" stroke-dasharray="${ringDash} 176" transform="rotate(-90 32 32)"/></svg><div><div class="label">Success rate</div><div class="num">${rate==null?"—":rate+"<small>%</small>"}</div><div class="hint">completed, of finished interviews</div></div></div>
-        <div class="stat clickable" onclick="showView('followups')" title="Open Follow-ups"><div class="label">Need review</div><div class="num" style="color:${failures?"var(--bad)":"inherit"}">${failures}</div><div class="hint">${glance?`+ ${glance} to glance at`:"flagged audio/error issues"} →</div></div>`;
+        <a class="stat clickable" href="#followups" onclick="return tabClick(event,'followups')" title="Open Follow-ups"><div class="label">Need review</div><div class="num" style="color:${failures?"var(--bad)":"inherit"}">${failures}</div><div class="hint">${glance?`+ ${glance} to glance at`:"flagged audio/error issues"} →</div></a>`;
 
       // upcoming
       $("up-count").textContent = up.length ? `${up.length} scheduled` : "";
@@ -1042,8 +1046,27 @@
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
     let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
-    function showView(name){
-      ["overview","candidates","applicants","followups","history","analytics","calls","sequences","activity","inbox","enrich","health"].forEach(v=>{
+    // Same order as the nav, so the two stay readable together. "overview" must
+    // stay first — RaydarNav falls back to names[0] for an unknown #hash.
+    // "candidates" is last because its tab is hidden; the view and #candidates
+    // deep link still work.
+    const VIEWS=["overview","applicants","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","candidates"];
+    let currentView="overview";
+    // Tabs are real links (href="#activity", …) so they can be right-clicked or
+    // ⌘-clicked into a new tab. A plain left click stays in this page; anything
+    // the browser would treat as "open elsewhere" is left alone.
+    function tabClick(event,name){
+      if(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||event.button) return true;
+      event.preventDefault();
+      showView(name);
+      return false;
+    }
+    // record=false means "the browser moved us here" (a back/forward gesture or
+    // a deep link on load) — restore the view without writing history again.
+    function showView(name,record){
+      const previous=currentView;
+      currentView=name;
+      VIEWS.forEach(v=>{
         document.getElementById("view-"+v).hidden = v!==name;
         $("tab-"+v).classList.toggle("active", v===name);
       });
@@ -1057,14 +1080,10 @@
       if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
       if(name==="analytics") ensurePlacements();
-      if(name==="calls"){
-        if(location.hash!=="#calls") history.replaceState(null,"","#calls");
-        requestAnimationFrame(()=>$('cv-q').focus());
-      }
-      else if(name==="applicants"){ if(location.hash!=="#applicants") history.replaceState(null,"","#applicants"); }
-      else if(name==="activity"){ if(location.hash!=="#activity") history.replaceState(null,"","#activity"); }
-      else if(name==="inbox"){ if(location.hash!=="#inbox") history.replaceState(null,"","#inbox"); }
-      else if(location.hash==="#calls"||location.hash==="#applicants"||location.hash==="#activity"||location.hash==="#inbox") history.replaceState(null,"",location.pathname);
+      if(name==="calls") requestAnimationFrame(()=>$('cv-q').focus());
+      // Every tab is a real history entry (and a shareable #hash), so the back
+      // gesture walks back through the dashboard instead of leaving it.
+      if(record!==false && name!==previous) RaydarNav.tab(name);
     }
     // Health badge: a DOWN system must be visible from every tab, not only
     // after someone thinks to look. Uses the public minimal rollup (no names).
@@ -2092,12 +2111,17 @@
     skeleton(); load(); setInterval(load, 30000);
     setInterval(()=>{ if(!document.getElementById("view-candidates").hidden) refreshRosterParaAI(); },60000);
     setInterval(refreshLedgerWhileVisible, FU_LEDGER_REFRESH_MS);
-    // Calls tab: Enter-to-search + shareable #calls deep-link.
+    // Calls tab: Enter-to-search.
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
-    if(location.hash==="#calls") showView("calls");
-    if(location.hash==="#applicants") showView("applicants");
-    if(location.hash==="#activity") showView("activity");
-    if(location.hash==="#inbox") showView("inbox");
+    // Deep-link (#calls, #activity, …) BEFORE registering with RaydarNav, so
+    // the first history entry records the tab the user actually landed on.
+    const deepLink = location.hash.replace(/^#/,"");
+    if(VIEWS.includes(deepLink)) showView(deepLink,false);
+    RaydarNav.tabs({
+      names: VIEWS,
+      current: ()=>currentView,
+      show: (name)=>showView(name,false),
+    });
   </script>
 </body>
 </html>

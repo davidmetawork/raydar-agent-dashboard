@@ -7,6 +7,7 @@
 <link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
 <script src="/auth-session.js"></script>
+<script src="/nav-history.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
@@ -278,6 +279,7 @@ async function openDetail(key){
   if(!r)return;
   CURRENT=r;
   document.body.classList.add("reading");
+  RaydarNav.open("thread",closeDetail);   // one screen back, not off the dashboard
   $("detail").innerHTML=`<div class="dhead">
       <button class="back" id="back-btn">← Back</button>
       <div style="min-width:0">
@@ -288,7 +290,7 @@ async function openDetail(key){
     </div>
     <div class="timeline" id="timeline"><div class="empty">Loading thread…</div></div>
     <div class="compose" id="compose"></div>`;
-  $("back-btn").onclick=closeDetail;
+  $("back-btn").onclick=dismissDetail;
   renderTriageActions(r);
   renderCompose(r,null);
   try{
@@ -305,6 +307,12 @@ async function openDetail(key){
 function closeDetail(){
   document.body.classList.remove("reading");
   CURRENT=null;
+}
+
+// The ← Back button and the browser's back gesture must land in the same
+// place, so the button unwinds the history entry the thread pushed.
+function dismissDetail(){
+  if(!RaydarNav.back("thread")) closeDetail();
 }
 
 function renderTimeline(timeline){

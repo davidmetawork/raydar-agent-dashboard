@@ -7,6 +7,7 @@
 <link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
 <script src="/auth-session.js"></script>
+<script src="/nav-history.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
@@ -460,7 +461,7 @@ function paraformLink(reply){
 }
 function detailHeader(reply){
   const head=document.createElement("div");head.className="detail-head";
-  const back=document.createElement("button");back.type="button";back.className="back-control";back.textContent="Back to inbox";back.addEventListener("click",closeReadingPane);head.append(back);
+  const back=document.createElement("button");back.type="button";back.className="back-control";back.textContent="Back to inbox";back.addEventListener("click",dismissReadingPane);head.append(back);
   const titleRow=document.createElement("div");titleRow.className="detail-title-row";
   const title=document.createElement("div");title.className="detail-title";
   const h2=document.createElement("h2");h2.textContent=reply.subject||"(no subject)";
@@ -590,6 +591,7 @@ async function setReplyTriage(reply,requestedStatus,sourceButton){
 }
 async function selectReply(reply){
   document.body.classList.add("reading");
+  RaydarNav.open("reading",closeReadingPane);   // one screen back, not off the dashboard
   STATE.selectedId=reply.gmail_id;renderList();
   if(STATE.messages.has(reply.gmail_id)){renderMessage(reply,STATE.messages.get(reply.gmail_id));return;}
   renderDetailLoading(reply);
@@ -606,6 +608,11 @@ async function selectReply(reply){
 function closeReadingPane(){
   document.body.classList.remove("reading");
   requestAnimationFrame(()=>document.querySelector('.reply-open[data-reply-id="'+CSS.escape(STATE.selectedId)+'"]')?.focus());
+}
+// "Back to inbox" and the browser's back gesture must land in the same place,
+// so the button unwinds the history entry the reading pane pushed.
+function dismissReadingPane(){
+  if(!RaydarNav.back("reading")) closeReadingPane();
 }
 function selectFirstVisible(){
   if(!document.body.classList.contains("reading")){
