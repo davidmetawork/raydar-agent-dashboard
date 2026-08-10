@@ -103,7 +103,7 @@
   .rc-main { flex:1; min-width:0; display:flex; align-items:flex-start; gap:16px; }
   .rc-id { flex:1; min-width:0; }
   .who { min-width:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-  .who .name { display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:14.5px; letter-spacing:-.01em; cursor:pointer; max-width:100%; min-width:0; }
+  .who .name { text-decoration:none; color:inherit; display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:14.5px; letter-spacing:-.01em; cursor:pointer; max-width:100%; min-width:0; }
   .who .name:hover { color:var(--orange); }
   .who .name span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .links { display:inline-flex; align-items:center; gap:4px; flex:none; }
@@ -628,7 +628,7 @@ function rowCardHtml(row, mode, decision) {
     check + avatarHtml(row) +
     '<div class="rc-main">' +
       '<div class="rc-id">' +
-        '<div class="who"><span class="name" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></span>" +
+        '<div class="who"><a class="name" href="' + esc(RaydarNav.href(key)) + '" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></a>" +
           nameLinks(row) + tierPill(row.tier) +
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(row.cuId) + '">' + esc(card?.title || "") + "</div>" +
@@ -720,7 +720,12 @@ function renderStream() {
 }
 
 function renderLists() { renderPills(); renderReview(); renderStream(); postCounts(); }
-function renderAll() { renderStats(); renderRoleFilter(); renderLists(); }
+function renderAll() {
+  renderStats(); renderRoleFilter(); renderLists();
+  // A profile link opened in a new tab: rebuild it now that the feed can
+  // resolve the key. Fires once; a miss just leaves the list showing.
+  RaydarNav.restore((key) => openProfile(key));
+}
 function postCounts() {
   if (window.parent === window) return;
   window.parent.postMessage({ type: "raydar-applicants-counts", review: STATE.snapshot ? pendingRows().length : 0 }, location.origin);
@@ -1028,7 +1033,7 @@ function openProfile(key) {
   $("profileModal").classList.add("open");
   lockOuterScroll(true);                     // locks this frame AND the shell behind it
   $("profileCard").scrollTop = 0;
-  RaydarNav.open("profile", closeProfile);   // one screen back, not off the dashboard
+  RaydarNav.open("profile", closeProfile, key);   // one screen back, and addressable
   renderModal();
   fetchProfile(row.cuId).then(() => { if (STATE.modal && STATE.modal.cu === row.cuId) { renderModal(); applyAvatar(row.cuId); } })
     .catch(() => { if (STATE.modal && STATE.modal.cu === row.cuId) renderModal(); });
@@ -1183,7 +1188,13 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const open = event.target.closest("[data-open]");
-  if (open) { openProfile(open.dataset.open); return; }
+  if (open) {
+    // ⌘/ctrl/shift/middle click: let the browser open the profile elsewhere
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button) return;
+    event.preventDefault();
+    openProfile(open.dataset.open);
+    return;
+  }
 });
 document.addEventListener("change", (event) => {
   const check = event.target.closest("[data-check]");

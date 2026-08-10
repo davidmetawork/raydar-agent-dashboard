@@ -52,6 +52,9 @@
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
   /* Gmail-density single-line rows: name — where — snippet — hint — age */
   .list .row{display:flex;gap:10px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line-2);cursor:pointer;min-width:0}
+  /* rows are links so a thread can be opened in a new tab — they must not
+     pick up link styling */
+  a.row{text-decoration:none;color:inherit}
   .list .row:last-child{border-bottom:0}
   .list .row:hover{background:#FDFCF7}
   .row .nm{font-weight:700;font-size:12.5px;flex:0 0 148px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -190,7 +193,7 @@ const fmtWhen=(iso)=>{const t=Date.parse(iso);if(!Number.isFinite(t))return"";co
 function replyRow(r){
   const hint=r.inbound?.hint||"fyi";
   const hintTitle=hint==="booking"?"Paraform booking prompt":hint==="likely"?"Likely needs a reply":"May be FYI";
-  return `<div class="row" data-key="${esc(r.key)}" title="${esc(r.inbound?.preview||"")}">
+  return `<a class="row" href="${esc(RaydarNav.href(r.key))}" data-key="${esc(r.key)}" title="${esc(r.inbound?.preview||"")}">
     <span class="dot ${esc(hint)}" title="${hintTitle}"></span>
     <span class="nm">${esc(r.candidate)}</span>
     <span class="co">${esc(r.company)} · ${esc(r.role)}</span>
@@ -198,7 +201,7 @@ function replyRow(r){
     ${r.futureInterview?`<span class="sched-mark" title="Interview scheduled ${esc((r.scheduledAt||"").slice(0,10))}">📅✓</span>`:""}
     ${r.triage?.status==="snoozed"?`<span class="snz">zZ ${esc((r.triage.until||"").slice(5,10))}</span>`:""}
     <span class="age ${ageClass(r.waitingSinceMs)}">${fmtAge(r.waitingSinceMs)}</span>
-  </div>`;
+  </a>`;
 }
 
 function renderReply(){
@@ -224,7 +227,7 @@ function renderQuiet(){
   const rows=FEED.queues.gone_quiet.filter((r)=>!r.triage)
     .sort((a,b)=>(a.quietSinceMs??0)-(b.quietSinceMs??0));
   const fmtDay=(ms)=>ms?new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"}):"—";
-  $("quiet-list").innerHTML=rows.length?rows.map((r)=>`<div class="row" data-key="${esc(r.key)}" title="Last Paraform activity ${fmtDay(r.lastAnyAt)} — click to nudge">
+  $("quiet-list").innerHTML=rows.length?rows.map((r)=>`<a class="row" href="${esc(RaydarNav.href(r.key))}" data-key="${esc(r.key)}" title="Last Paraform activity ${fmtDay(r.lastAnyAt)} — click to nudge">
     <span class="dot fyi"></span>
     <span class="nm">${esc(r.candidate)}</span>
     <span class="co">${esc(r.company)} · ${esc(r.role)}</span>
@@ -260,7 +263,7 @@ async function openDetail(key){
   if(!r)return;
   CURRENT=r;
   document.body.classList.add("reading");
-  RaydarNav.open("thread",closeDetail);   // one screen back, not off the dashboard
+  RaydarNav.open("thread",closeDetail,r.key);   // one screen back, and addressable
   $("detail").innerHTML=`<div class="dhead">
       <button class="back" id="back-btn">← Back</button>
       <div style="min-width:0">
@@ -404,7 +407,13 @@ function renderCompose(r,spl){
 function wireLists(){
   document.body.addEventListener("click",(e)=>{
     const row=e.target.closest(".row[data-key]");
-    if(row){openDetail(row.dataset.key);return;}
+    if(row){
+      // ⌘/ctrl/shift/middle click: let the browser open the thread elsewhere
+      if(e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||e.button) return;
+      e.preventDefault();
+      openDetail(row.dataset.key);
+      return;
+    }
     if(e.target.closest("#booking-toggle")){const l=$("booking-list");const open=l.style.display!=="none";l.style.display=open?"none":"";$("booking-toggle").classList.toggle("closed",open);return;}
     if(e.target.closest("#closed-toggle")){const l=$("closed-list");const open=l.style.display!=="none";l.style.display=open?"none":"";$("closed-toggle").classList.toggle("closed",open);return;}
   });
@@ -418,6 +427,9 @@ function applyFeed(data,{updating}={}){
   const age=Math.round((Date.now()-Date.parse(data.generatedAt))/60000);
   $("freshness").textContent=`Updated ${age<=1?"just now":age+"m ago"}${data.counts.unreadable?` · ${data.counts.unreadable} thread(s) unreadable`:""}`;
   renderReply();renderQuiet();counts();
+  // A thread link opened in a new tab: rebuild it now that the feed can
+  // resolve the key. Fires once; a miss just leaves the list showing.
+  RaydarNav.restore((key)=>openDetail(key));
 }
 
 function showDegraded(data){

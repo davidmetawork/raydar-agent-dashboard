@@ -1245,8 +1245,12 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(indexHtml, /<iframe id="inbox-frame"/);
   assert.match(
     indexHtml,
-    /name==="inbox" && !inboxLoaded[\s\S]*?src="\/inbox\?embed=1"[\s\S]*?inboxLoaded=true/,
+    /name==="inbox" && !inboxLoaded[\s\S]*?frameSrc\("\/inbox","inbox"\)[\s\S]*?inboxLoaded=true/,
   );
+  // frameSrc keeps embed=1 and adds the tab (so the frame's rows can link back
+  // to this shell) plus the screen the URL names (so an Inbox message opened in
+  // a new tab is rebuilt on arrival).
+  assert.match(indexHtml, /function frameSrc\(path,tab\)\{[\s\S]*?\?embed=1&tab=\$\{tab\}[\s\S]*?screen=/);
 
   assert.deepEqual(
     vercel.rewrites.find(({ source }) => source === "/inbox"),

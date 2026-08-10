@@ -14,11 +14,20 @@
    Joint iframe session history gives no such guarantee — a lazily-loaded
    frame can rewrite entries the shell already pushed.
 
+   A screen may also carry an ADDRESS — an opaque id for the thing on screen
+   (a thread key, a candidate id, a message id). Addressed screens get a real
+   URL, `#<tab>/<address>`, so a row can be a link the browser will happily
+   open in a new tab, and a fresh load of that URL rebuilds the screen with
+   its list seeded underneath it.
+
    Pages use:
      RaydarNav.tabs({names, current, show})  owner only, once at startup
      RaydarNav.tab(name)                     owner only, the user picked a tab
-     RaydarNav.open(name, close)             a screen just opened
+     RaydarNav.open(name, close, address)    a screen just opened
      RaydarNav.back(name)                    an in-app control closed it
+     RaydarNav.href(address)                 the link to render on a row
+     RaydarNav.restore(fn)                   rebuild the screen the URL names
+     RaydarNav.screen(tab)                   owner only, for composing frame URLs
 */
 (function () {
   const MESSAGE = "raydar-nav";
@@ -32,16 +41,36 @@
   const stack = [];
   let tabs = null;
 
+  // The shell tells an embedded page which tab it lives in (and which screen
+  // to rebuild) through its frame URL; a standalone page reads its own hash.
+  const params = new URLSearchParams(location.search);
+  const myTab = params.get("tab") || "";
+  let restorer = null;
+  let restored = false;
+
   const currentTab = () => (tabs ? tabs.current() : "");
   const entry = (tab, depth) => ({ raydarNav: { tab: tab, depth: depth } });
+
+  // "#activity/app-42" -> { tab: "activity", screen: "app-42" }. A standalone
+  // page has no tab segment, so the whole hash is the screen.
+  function urlParts() {
+    const raw = decodeURIComponent(location.hash.replace(/^#/, ""));
+    if (!tabs) return { tab: "", screen: raw };
+    const cut = raw.indexOf("/");
+    if (cut < 0) return { tab: raw, screen: "" };
+    return { tab: raw.slice(0, cut), screen: raw.slice(cut + 1) };
+  }
 
   // A tab named by the URL, for entries we did not write ourselves — a
   // bookmark, a hand-typed address, a link opened in a new tab.
   function tabFromUrl() {
     if (!tabs) return "";
-    const hash = location.hash.replace(/^#/, "");
-    return tabs.names.includes(hash) ? hash : tabs.names[0];
+    const tab = urlParts().tab;
+    return tabs.names.includes(tab) ? tab : tabs.names[0];
   }
+
+  const screenUrl = (address) =>
+    !address ? "" : "#" + encodeURI(tabs ? currentTab() + "/" + address : address);
 
   function readEntry(state) {
     const saved = state && state.raydarNav;
@@ -62,9 +91,9 @@
     history.replaceState(entry(hash, stack.length), "");
   }
 
-  function post(action, name) {
+  function post(action, name, address) {
     try {
-      window.parent.postMessage({ type: MESSAGE, action: action, name: name }, origin);
+      window.parent.postMessage({ type: MESSAGE, action: action, name: name, address: address }, origin);
     } catch (error) {/* a foreign parent simply gets no in-app back */}
   }
 
@@ -75,12 +104,18 @@
     try { close(); } catch (error) {/* a broken screen must not wedge history */}
   }
 
-  function ownerOpen(win, name) {
+  function ownerOpen(win, name, address) {
     // A screen that re-opens itself (a detail reloading after an action) must
     // not stack a second entry for the user to walk back through.
     if (stack.some((screen) => screen.win === win && screen.name === name)) return;
     stack.push({ win: win, name: name });
-    history.pushState(entry(currentTab(), stack.length), "");
+    const url = screenUrl(address);
+    const state = entry(currentTab(), stack.length);
+    // Rebuilding the screen the URL already names (a link opened in a new tab)
+    // claims that entry rather than stacking a duplicate on top of it.
+    if (url && decodeURIComponent(location.hash) === decodeURIComponent(url)) history.replaceState(state, "");
+    else if (url) history.pushState(state, "", url);
+    else history.pushState(state, "");
   }
 
   function ownerBack(win, name) {
@@ -118,7 +153,7 @@
       return;
     }
     if (!event.source) return;
-    if (data.action === "open") ownerOpen(event.source, data.name);
+    if (data.action === "open") ownerOpen(event.source, data.name, data.address);
     else if (data.action === "back") ownerBack(event.source, data.name);
   }
 
@@ -133,19 +168,28 @@
     // runs, the browser has already moved the URL to the entry being restored.
     tabs: function (config) {
       if (embedded) return;
+      const first = !tabs;
       tabs = config;
-      history.replaceState(entry(config.current(), stack.length), "");
+      if (!first) return;   // re-registering must not seed a second entry
+      const landing = urlParts().screen;
+      if (!landing) { history.replaceState(entry(config.current(), stack.length), ""); return; }
+      // Landing straight on a screen — a row link opened in a new tab. Seed the
+      // list entry beneath it, so back (and the screen's own ← Back button)
+      // returns to the list instead of leaving the dashboard outright.
+      const tab = tabFromUrl();
+      history.replaceState(entry(config.current(), 0), "", "#" + tab);
+      history.pushState(entry(config.current(), 0), "", "#" + encodeURI(tab + "/" + landing));
     },
     tab: function (name) {
       if (embedded || !tabs) return;
       history.pushState(entry(name, stack.length), "", "#" + name);
     },
-    open: function (name, close) {
+    open: function (name, close, address) {
       const known = closers.has(name);
       closers.set(name, close);
       if (known) return;   // same screen, same entry — new contents only
-      if (embedded) post("open", name);
-      else ownerOpen(window, name);
+      if (embedded) post("open", name, address);
+      else ownerOpen(window, name, address);
     },
     // Closing from an in-app control (a "← Back" button). The screen closes
     // immediately and its history entry is unwound behind it, so the button
@@ -158,6 +202,34 @@
       if (embedded) post("back", name);
       else ownerBack(window, name);
       return true;
+    },
+    // The link to put on a row. Embedded, it addresses the shell so a new tab
+    // opens the whole dashboard focused on that screen; standalone, it
+    // addresses this page. Rows stay ordinary links either way.
+    href: function (address) {
+      if (!address) return "";
+      const suffix = "#" + encodeURI(embedded && myTab ? myTab + "/" + address : address);
+      return embedded ? "/" + suffix : location.pathname + suffix;
+    },
+    // Rebuild the screen the URL names, once, after the page has data to
+    // resolve it against. Safe to call on every refresh — it only fires once.
+    restore: function (fn) {
+      restorer = fn;
+      if (restored) return;
+      const screen = embedded ? params.get("screen") : urlParts().screen;
+      if (!screen) return;
+      restored = true;
+      if (!embedded) {
+        // Same seeding as the shell does: put the list underneath the screen.
+        history.replaceState(entry(currentTab(), 0), "", location.pathname + location.search);
+        history.pushState(entry(currentTab(), 0), "", "#" + encodeURI(screen));
+      }
+      try { fn(screen); } catch (error) {/* a screen we cannot rebuild just shows the list */}
+    },
+    // Owner only: the screen this URL names for `tab`, for composing frame URLs.
+    screen: function (tab) {
+      const parts = urlParts();
+      return parts.tab === tab ? parts.screen : "";
     },
   });
 })();

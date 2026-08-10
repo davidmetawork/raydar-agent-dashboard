@@ -71,7 +71,7 @@
   .reply-row:last-child{border-bottom:0}
   .reply-row:hover,.reply-row:focus-within{background:#FDFBF4;box-shadow:0 2px 10px -4px rgba(20,16,8,.18);z-index:1}
   .reply-row.active{background:#FFF7F0;box-shadow:inset 3px 0 0 var(--orange)}
-  .reply-open{appearance:none;width:100%;text-align:left;border:0;background:transparent;cursor:pointer;color:inherit;display:grid;grid-template-columns:10px minmax(132px,186px) fit-content(290px) minmax(160px,1fr) 62px;align-items:center;gap:12px;min-height:46px;padding:8px 16px 8px 14px}
+  .reply-open{appearance:none;width:100%;text-align:left;border:0;background:transparent;cursor:pointer;color:inherit;text-decoration:none;display:grid;grid-template-columns:10px minmax(132px,186px) fit-content(290px) minmax(160px,1fr) 62px;align-items:center;gap:12px;min-height:46px;padding:8px 16px 8px 14px}
   .row-dot{display:block;width:8px;height:8px;border-radius:50%;background:var(--line);justify-self:center}
   .row-dot.interested{background:var(--good)}
   .row-dot.unclear{width:9px;height:9px;background:transparent;border:2px solid var(--blue)}
@@ -429,14 +429,19 @@ function renderList(){
   for(const reply of replies){
     const row=document.createElement("div");
     row.className="reply-row"+(STATE.selectedId===reply.gmail_id?" active":"");
-    const open=document.createElement("button");
-    open.type="button";
+    const open=document.createElement("a");
     open.className="reply-open";
+    open.href=RaydarNav.href(reply.gmail_id||"");
     open.dataset.replyId=reply.gmail_id||"";
     open.dataset.focusKey="reply-open";
     open.dataset.focusRegion="row";
-    open.setAttribute("aria-pressed",STATE.selectedId===reply.gmail_id?"true":"false");
-    open.addEventListener("click",()=>selectReply(reply));
+    if(STATE.selectedId===reply.gmail_id) open.setAttribute("aria-current","true"); else open.removeAttribute("aria-current");
+    open.addEventListener("click",(event)=>{
+      // ⌘/ctrl/shift/middle click: let the browser open the message elsewhere
+      if(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||event.button) return;
+      event.preventDefault();
+      selectReply(reply);
+    });
 
     const dot=sentimentDot(reply.reply_category);
     const name=document.createElement("span");name.className="name";name.textContent=reply.candidate_name||"Unknown candidate";
@@ -591,7 +596,7 @@ async function setReplyTriage(reply,requestedStatus,sourceButton){
 }
 async function selectReply(reply){
   document.body.classList.add("reading");
-  RaydarNav.open("reading",closeReadingPane);   // one screen back, not off the dashboard
+  RaydarNav.open("reading",closeReadingPane,reply.gmail_id);   // one screen back, and addressable
   STATE.selectedId=reply.gmail_id;renderList();
   if(STATE.messages.has(reply.gmail_id)){renderMessage(reply,STATE.messages.get(reply.gmail_id));return;}
   renderDetailLoading(reply);
@@ -662,6 +667,12 @@ async function loadFeed(){
     const focusToken=captureInboxFocus();
     STATE.replies=Array.isArray(data.replies)?data.replies:[];
     const counts=updateCounts();postInboxCounts(counts);renderList();selectFirstVisible();
+    // A message link opened in a new tab: rebuild it now that the feed can
+    // resolve the id. Fires once; a miss just leaves the list showing.
+    RaydarNav.restore((id)=>{
+      const reply=STATE.replies.find(r=>r.gmail_id===id);
+      if(reply) selectReply(reply);
+    });
     if(focusToken)requestAnimationFrame(()=>restoreInboxFocus(focusToken));
     const freshness=data.freshness||{};
     STATE.snapshotState=freshness.state||"unseeded";

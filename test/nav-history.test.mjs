@@ -12,10 +12,19 @@ const source = await readFile(new URL("../nav-history.js", import.meta.url), "ut
 function browser() {
   const frames = [];
 
-  function frame(parent) {
+  function frame(parent, startUrl) {
     const listeners = new Map();
-    const entries = [{ state: null, url: "/" }];
+    const entries = [{ state: null, url: startUrl || "/" }];
     let index = 0;
+    const part = (name) => {
+      const url = entries[index].url;
+      const hash = url.indexOf("#");
+      const query = url.indexOf("?");
+      const end = hash < 0 ? url.length : hash;
+      if (name === "hash") return hash < 0 ? "" : url.slice(hash);
+      if (name === "search") return query < 0 || query > end ? "" : url.slice(query, end);
+      return query < 0 || query > end ? url.slice(0, end) : url.slice(0, query);
+    };
 
     const dispatch = (type, event) => {
       for (const fn of listeners.get(type) || []) fn(event);
@@ -23,7 +32,13 @@ function browser() {
 
     const win = {
       console,
-      location: { origin: ORIGIN, get hash() { return (entries[index].url.split("#")[1] || "") && "#" + entries[index].url.split("#")[1]; } },
+      URL, URLSearchParams, decodeURIComponent, encodeURI, encodeURIComponent,
+      location: {
+        origin: ORIGIN,
+        get hash() { return part("hash"); },
+        get search() { return part("search"); },
+        get pathname() { return part("pathname"); },
+      },
       addEventListener(type, fn) {
         if (!listeners.has(type)) listeners.set(type, []);
         listeners.get(type).push(fn);
@@ -58,6 +73,7 @@ function browser() {
     };
     win.window = win;
     win.parent = parent || win;
+    win.self = win;
     vm.createContext(win);
     vm.runInContext(source, win);
     frames.push(win);
@@ -70,14 +86,14 @@ function browser() {
 /* An embedded page: its parent is the shell, and postMessage in both
    directions carries the sending window as `source`, exactly as a browser
    does for a same-origin iframe. */
-function shellWithFrame() {
+function shellWithFrame(startUrl, frameQuery) {
   const { frame } = browser();
-  const shell = frame();
+  const shell = frame(null, startUrl);
   const guestBox = {};
   const guestParent = {
     postMessage(data, targetOrigin) { shell.postMessage(data, targetOrigin, guestBox.win); },
   };
-  const guest = frame(guestParent);
+  const guest = frame(guestParent, "/activity" + (frameQuery || "?embed=1&tab=activity"));
   guestBox.win = guest;
   // the shell posts back to the frame with itself as the source
   const rawPost = guest.postMessage;
@@ -86,12 +102,17 @@ function shellWithFrame() {
   return { shell, guest };
 }
 
-function tabbedShell() {
-  const { shell, guest } = shellWithFrame();
+function tabbedShell(startUrl, frameQuery) {
+  const { shell, guest } = shellWithFrame(startUrl, frameQuery);
   const shown = [];
+  const names = ["overview", "candidates", "activity"];
   let current = "overview";
+  // index.html resolves the tab from the URL before registering, so the first
+  // history entry records the tab the user actually landed on
+  const landed = shell.location.hash.replace(/^#/, "").split("/")[0];
+  if (names.includes(landed)) current = landed;
   shell.RaydarNav.tabs({
-    names: ["overview", "candidates", "activity"],
+    names: names,
     current: () => current,
     show: (name) => { current = name; shown.push(name); },
   });
@@ -213,4 +234,75 @@ test("a hash navigation the shell did not make still lands on the right tab", ()
   assert.equal(view(), "activity", "the tab should follow the URL");
   assert.equal(shell.entries[shell.index].state.raydarNav.tab, "activity",
     "and the entry should be stamped so back/forward keeps working");
+});
+
+test("an addressed screen gets a real URL that a row can link to", () => {
+  const { shell, guest, tab } = tabbedShell();
+  tab("activity");
+  guest.RaydarNav.open("thread", () => {}, "app-42");
+  assert.equal(shell.entries[shell.index].url, "#activity/app-42",
+    "the open screen should be addressable");
+  assert.equal(guest.RaydarNav.href("app-42"), "/#activity/app-42",
+    "and a row in the frame should link to the shell, not the bare page");
+});
+
+test("back off an addressed screen returns the URL to the tab", () => {
+  const { shell, guest, tab, view } = tabbedShell();
+  tab("activity");
+  let open = true;
+  guest.RaydarNav.open("thread", () => { open = false; }, "app-42");
+  shell.back();
+  assert.equal(open, false);
+  assert.equal(view(), "activity");
+  assert.equal(shell.entries[shell.index].url, "#activity");
+});
+
+test("landing straight on a screen URL seeds the list underneath it", () => {
+  // exactly what "open this row in a new tab" produces
+  const { shell, guest } = tabbedShell("/#activity/app-42", "?embed=1&tab=activity&screen=app-42");
+  assert.equal(shell.entries.length, 2, "a list entry should sit beneath the screen entry");
+  assert.equal(shell.entries[0].url, "#activity", "and it should be the tab itself");
+
+  assert.equal(shell.RaydarNav.screen("activity"), "app-42", "the shell can pass it to the frame");
+
+  let opened = null, closed = false;
+  guest.RaydarNav.restore((id) => {
+    opened = id;
+    guest.RaydarNav.open("thread", () => { closed = true; }, id);
+  });
+  assert.equal(opened, "app-42", "the frame rebuilds the screen the URL names");
+  assert.equal(shell.entries.length, 2, "claiming the entry it landed on, not stacking another");
+  assert.equal(shell.entries[shell.index].state.raydarNav.depth, 1);
+
+  shell.back();
+  assert.equal(closed, true, "back closes the screen…");
+  assert.equal(shell.index, 0, "…and lands on the seeded list, still inside the dashboard");
+});
+
+test("restore fires once, however often a refreshing page calls it", () => {
+  const { guest } = tabbedShell("/#activity/app-42", "?embed=1&tab=activity&screen=app-42");
+  let calls = 0;
+  guest.RaydarNav.restore(() => { calls += 1; });
+  guest.RaydarNav.restore(() => { calls += 1; });
+  assert.equal(calls, 1);
+});
+
+test("a standalone page addresses itself and seeds its own list entry", () => {
+  const { frame } = browser();
+  const page = frame(null, "/activity#app-42");
+  assert.equal(page.RaydarNav.href("app-42"), "/activity#app-42");
+  let closed = false;
+  page.RaydarNav.restore((id) => page.RaydarNav.open("thread", () => { closed = true; }, id));
+  assert.equal(page.entries.length, 2, "list entry seeded beneath the screen");
+  page.back();
+  assert.equal(closed, true);
+  assert.equal(page.entries[page.index].url, "/activity", "back returns to the list, not off the page");
+});
+
+test("a screen with no address behaves exactly as before", () => {
+  const { shell, guest, tab } = tabbedShell();
+  tab("activity");
+  guest.RaydarNav.open("thread", () => {});
+  assert.equal(shell.entries[shell.index].url, "#activity", "the URL is left alone");
+  assert.equal(shell.entries[shell.index].state.raydarNav.depth, 1, "but it is still a real entry");
 });

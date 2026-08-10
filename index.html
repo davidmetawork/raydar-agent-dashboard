@@ -1187,6 +1187,13 @@
       showView(name);
       return false;
     }
+    // An embedded page is told which tab it lives in, so its rows can link back
+    // to this shell, and which screen to rebuild when the URL names one (a row
+    // link someone opened in a new tab).
+    function frameSrc(path,tab){
+      const screen=RaydarNav.screen(tab);
+      return `${path}?embed=1&tab=${tab}`+(screen?`&screen=${encodeURIComponent(screen)}`:"");
+    }
     // record=false means "the browser moved us here" (a back/forward gesture or
     // a deep link on load) — restore the view without writing history again.
     function showView(name,record){
@@ -1198,12 +1205,12 @@
         t.classList.toggle("active", v===name);
         if(v===name) t.setAttribute("aria-current","page"); else t.removeAttribute("aria-current");
       });
-      if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src="/applicants?embed=1"; applicantsLoaded=true; }
-      if(name==="sequences" && !seqLoaded){ $("seq-frame").src="/sequences?embed=1"; seqLoaded=true; }
-      if(name==="activity" && !activityLoaded){ $("activity-frame").src="/activity?embed=1"; activityLoaded=true; }
-      if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src="/inbox?embed=1"; inboxLoaded=true; }
-      if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src="/enrich?embed=1"; enrichLoaded=true; }
-      if(name==="health" && !healthLoaded){ $("health-frame").src="/health?embed=1"; healthLoaded=true; }
+      if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src=frameSrc("/applicants","applicants"); applicantsLoaded=true; }
+      if(name==="sequences" && !seqLoaded){ $("seq-frame").src=frameSrc("/sequences","sequences"); seqLoaded=true; }
+      if(name==="activity" && !activityLoaded){ $("activity-frame").src=frameSrc("/activity","activity"); activityLoaded=true; }
+      if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src=frameSrc("/inbox","inbox"); inboxLoaded=true; }
+      if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src=frameSrc("/enrich","enrich"); enrichLoaded=true; }
+      if(name==="health" && !healthLoaded){ $("health-frame").src=frameSrc("/health","health"); healthLoaded=true; }
       if(name==="candidates") ensureRoster();
       if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
@@ -2240,15 +2247,20 @@
     setInterval(refreshLedgerWhileVisible, FU_LEDGER_REFRESH_MS);
     // Calls tab: Enter-to-search.
     $("cv-q").addEventListener("keydown", (e)=>{ if(e.key==="Enter") cvSearch(); });
-    // Deep-link (#calls, #activity, …) BEFORE registering with RaydarNav, so
-    // the first history entry records the tab the user actually landed on.
-    const deepLink = location.hash.replace(/^#/,"");
-    if(VIEWS.includes(deepLink)) showView(deepLink,false);
+    // Deep links: "#activity" and "#activity/app-42" both land on the Activity
+    // tab, the second with that thread open. The order below matters — name the
+    // landing tab first so the seeded history entry is right, register second so
+    // RaydarNav can seed, and render last so frameSrc() can read the screen
+    // segment out of the URL RaydarNav just settled.
+    const deepLink = decodeURIComponent(location.hash.replace(/^#/,"")).split("/")[0];
+    const landed = VIEWS.includes(deepLink);
+    if(landed) currentView = deepLink;
     RaydarNav.tabs({
       names: VIEWS,
       current: ()=>currentView,
       show: (name)=>showView(name,false),
     });
+    if(landed) showView(deepLink,false);
 
     /* ⌘K jump palette — additive navigation over the same showView() the rail
        uses. No data access; purely a faster way to switch surfaces. */
