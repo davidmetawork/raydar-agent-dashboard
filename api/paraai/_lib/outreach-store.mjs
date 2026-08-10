@@ -351,8 +351,28 @@ export async function getContactCapability({ kvImpl = kv } = {}) {
 // eligible. Per-request retryability is untouched.
 const GMAIL_BACKOFF_KEY = "paraai:outreach:gmail-backoff";
 
+// THE TTL MUST EXCEED GOOGLE'S PENALTY, AND MUST NOT BE A ROUND MULTIPLE OF IT.
+// Gmail answers a throttled user with `Retry after <now + 15 min>`, and ANY
+// request inside that window re-quotes it. The original 15-minute TTL expired
+// at exactly the moment the quoted deadline did, so this lane's recovery probe
+// landed on the boundary, 429'd, and re-armed — forever. Measured live on
+// 2026-08-10: armed 18:20:54Z, expired 18:35:54Z, retried 18:36:12Z, re-armed
+// to 18:51:15Z. The lane was structurally incapable of recovering on its own,
+// and its retries helped hold the whole mailbox down for 37 hours.
+//
+// 20 minutes clears the window with margin; the jitter stops a fleet of lanes
+// (or repeated arms) from resynchronising onto a single probing instant, which
+// is the same burst-alignment problem that caused the outage.
+const GMAIL_BACKOFF_BASE_SECONDS = 20 * 60;
+const GMAIL_BACKOFF_JITTER_SECONDS = 180;
+
+export function gmailBackoffTtlSeconds(random = Math.random) {
+  return GMAIL_BACKOFF_BASE_SECONDS
+    + Math.floor(random() * GMAIL_BACKOFF_JITTER_SECONDS);
+}
+
 export async function armGmailBackoff({
-  ttlSeconds = 15 * 60,
+  ttlSeconds = gmailBackoffTtlSeconds(),
   kvImpl = kv,
 } = {}) {
   const until = new Date(Date.now() + Math.max(60, ttlSeconds) * 1000).toISOString();
