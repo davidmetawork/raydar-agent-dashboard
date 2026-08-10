@@ -12,8 +12,9 @@ test("No LinkedIn chip sits between Unrated and Decided", () => {
   assert.match(applicants, />No LinkedIn <span class="n" id="chipCountNoLinkedin">0<\/span>/);
 });
 
-test("No LinkedIn count and queue use the same missing-handle predicate", () => {
-  assert.match(applicants, /function hasLinkedin\(row\) \{ return Boolean\(String\(row\.linkedin \|\| ""\)\.trim\(\)\); \}/);
-  assert.match(applicants, /const pendingNoLinkedin = pendingRows\(\)\.filter\(\(r\) => !hasLinkedin\(r\)\)\.length;/);
-  assert.match(applicants, /if \(STATE\.chip === "no-linkedin"\) rows = rows\.filter\(\(r\) => !hasLinkedin\(r\)\);/);
+test("No LinkedIn count and queue use the same missing-profile predicate", () => {
+  assert.match(applicants, /function hasNoLinkedin\(row\) \{\s*return !String\(row\.linkedin \|\| ""\)\.trim\(\) \|\| STATE\.noLinkedinHistory\.has\(row\.cuId\);\s*\}/);
+  assert.match(applicants, /const pendingNoLinkedin = pendingRows\(\)\.filter\(hasNoLinkedin\)\.length;/);
+  assert.match(applicants, /if \(STATE\.chip === "no-linkedin"\) rows = rows\.filter\(hasNoLinkedin\);/);
+  assert.match(applicants, /STATE\.noLinkedinHistory = new Set\(body\.noLinkedinHistory \|\| \[\]\);/);
 });
