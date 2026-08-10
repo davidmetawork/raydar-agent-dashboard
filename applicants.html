@@ -24,7 +24,7 @@
   }
   * { box-sizing:border-box; }
   html,body { margin:0; }
-  body { background:var(--cream); color:var(--ink); font:14px "PP Grafier Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  body { background:var(--cream); color:var(--ink); font:14px "Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     -webkit-font-smoothing:antialiased; padding:28px clamp(16px,4vw,48px) 72px; }
   a { color:inherit; }
   .wrap { max-width:1120px; margin:0 auto; }
@@ -37,7 +37,7 @@
   .eyebrow { text-transform:uppercase; letter-spacing:.08em; font-size:10.5px; font-weight:700; color:var(--orange); margin-bottom:4px; }
   h1 { font-size:34px; line-height:1; margin:0; }
   .sub { color:var(--ink-2); margin-top:7px; max-width:560px; line-height:1.45; }
-  .refresh-btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 12px; font:600 12px "PP Grafier Text"; cursor:pointer; }
+  .refresh-btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 12px; font:600 12px "Inter Variable"; cursor:pointer; }
   body.embed header .brand img, body.embed h1, body.embed .sub { display:none; }
   body.embed { padding-top:8px; }
   body.embed header { margin-bottom:12px; min-height:0; }
@@ -47,7 +47,7 @@
     border-radius:16px; padding:13px 20px; box-shadow:var(--shadow); margin-bottom:14px; }
   .stat .s-label { font-size:10.5px; font-weight:700; color:var(--ink-3); text-transform:uppercase; letter-spacing:.06em; }
   .stat .s-num { font-family:"PP Grafier Display",serif; font-weight:500; font-size:24px; line-height:1.05; margin-top:3px; letter-spacing:-.02em; }
-  .stat .s-num .s-unit { font-size:12px; color:var(--ink-3); font-family:"PP Grafier Text"; margin-left:3px; }
+  .stat .s-num .s-unit { font-size:12px; color:var(--ink-3); font-family:"Inter Variable"; margin-left:3px; }
   .updated { margin-left:auto; display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-3); }
   .updated .dot { width:7px; height:7px; border-radius:50%; background:var(--good); box-shadow:0 0 0 3px var(--good-bg); }
   .updated.amber { color:var(--warn); } .updated.amber .dot { background:var(--warn); box-shadow:0 0 0 3px var(--warn-bg); }
@@ -61,7 +61,7 @@
   /* view pills + toolbar */
   .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
   .view-pill { appearance:none; border:1px solid var(--line); background:var(--card); color:var(--ink-2); border-radius:999px;
-    padding:9px 16px; font:650 13px "PP Grafier Text"; cursor:pointer; display:inline-flex; align-items:center; gap:8px;
+    padding:9px 16px; font:650 13px "Inter Variable"; cursor:pointer; display:inline-flex; align-items:center; gap:8px;
     transition:background .12s ease, color .12s ease; }
   .view-pill:hover { color:var(--ink); }
   .view-pill.active { background:var(--ink); border-color:var(--ink); color:var(--cream); }
@@ -69,14 +69,14 @@
   .view-pill.active .n { color:rgba(246,243,233,.72); }
   .toolbar .spacer { flex:1; }
   .toolbar select, .toolbar input[type=text] { border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink);
-    padding:9px 11px; font:13px "PP Grafier Text"; outline:none; }
+    padding:9px 11px; font:13px "Inter Variable"; outline:none; }
   .toolbar select:focus, .toolbar input[type=text]:focus { border-color:var(--orange); }
   .toolbar input[type=text] { min-width:190px; }
 
   /* filter chips (Review view) */
   .chips { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
   .chip-f { appearance:none; border:1px solid var(--line); background:var(--card); color:var(--ink-2); border-radius:999px;
-    padding:6px 12px; font:650 12px "PP Grafier Text"; cursor:pointer; display:inline-flex; align-items:center; gap:7px;
+    padding:6px 12px; font:650 12px "Inter Variable"; cursor:pointer; display:inline-flex; align-items:center; gap:7px;
     transition:background .12s ease, color .12s ease; }
   .chip-f:hover { color:var(--ink); }
   .chip-f.active { background:var(--ink); border-color:var(--ink); color:var(--cream); }
@@ -133,7 +133,7 @@
   .rc-line b { color:var(--ink); font-weight:650; }
   .rc-line i { font-style:italic; color:var(--ink-3); }
   .rc-more { appearance:none; border:0; background:none; padding:2px 0; text-align:left; width:fit-content;
-    font:650 11.5px "PP Grafier Text"; color:var(--ink-3); cursor:pointer; }
+    font:650 11.5px "Inter Variable"; color:var(--ink-3); cursor:pointer; }
   .rc-more:hover { color:var(--orange); }
   .rc-none { font-size:12px; color:var(--ink-3); }
   .rc-skel { height:12px; border-radius:6px; background:linear-gradient(90deg,var(--line-2) 25%,#FBF9F3 50%,var(--line-2) 75%);
@@ -159,7 +159,7 @@
   /* actions */
   .actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
   button.primary, button.ghost, button.undo { appearance:none; border:0; border-radius:10px; padding:8px 13px;
-    font:650 12.5px "PP Grafier Text"; cursor:pointer; transition:transform .08s ease, filter .12s ease; }
+    font:650 12.5px "Inter Variable"; cursor:pointer; transition:transform .08s ease, filter .12s ease; }
   button.primary { background:var(--orange); color:#fff; }
   button.ghost { background:#fff; color:var(--ink); border:1px solid var(--line); }
   button.undo { background:transparent; color:var(--ink-3); border:1px solid var(--line-2); padding:6px 10px; font-size:11.5px; }
@@ -228,7 +228,7 @@
   .xp .xp-desc { color:var(--ink-2); font-size:12.5px; line-height:1.5; margin-top:5px; white-space:pre-line;
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
   .xp .xp-desc.open { display:block; -webkit-line-clamp:unset; }
-  .xp .xp-more { appearance:none; border:0; background:none; color:var(--ink-3); font:650 11px "PP Grafier Text"; cursor:pointer;
+  .xp .xp-more { appearance:none; border:0; background:none; color:var(--ink-3); font:650 11px "Inter Variable"; cursor:pointer;
     padding:2px 0; text-align:left; width:fit-content; }
   .xp .xp-more:hover { color:var(--ink); }
   .xp .xp-chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:7px; }
