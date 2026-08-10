@@ -31,7 +31,13 @@ test("Recent interviews render LinkedIn and Raydar shortcuts from the exact bot 
 });
 
 test("Profile shortcuts are branded, accessible, and open without replacing Monitor", () => {
-  assert.match(dashboard, /\.person-shortcut\.linkedin \{ color:#fff; background:#0A66C2;/u);
+  assert.match(dashboard, /\.person-shortcuts \{ display:inline-flex; align-items:center; gap:4px;/u);
+  assert.match(dashboard, /width:17px; height:17px; display:inline-grid; place-items:center;/u);
+  assert.match(dashboard, /border:0; border-radius:4px; background:transparent; padding:0;/u);
+  assert.match(dashboard, /\.person-shortcut svg \{ display:block; width:15px; height:15px; \}/u);
+  assert.match(dashboard, /<path fill="#0A66C2" d="M20\.447/u);
+  assert.match(dashboard, /<svg viewBox="1145\.967 795\.987 149\.896 149\.273" aria-hidden="true">/u);
+  assert.match(dashboard, /<path fill="currentColor" d="M1273\.44/u);
   assert.match(dashboard, /class="person-shortcut linkedin" data-shortcut="linkedin"/u);
   assert.match(dashboard, /class="person-shortcut raydar" data-shortcut="raydar"/u);
   assert.match(dashboard, /role="group" aria-label="Links for \$\{escAttr\(name\)\}"/u);

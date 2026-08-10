@@ -206,17 +206,15 @@
     .who .candidate-name .ext { font-size:11px; color:var(--ink-3); margin-left:4px; opacity:0; transition:opacity .12s ease; }
     .who .candidate-name:hover .ext { opacity:1; }
     .person-cell { display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap; }
-    .person-shortcuts { display:inline-flex; align-items:center; gap:5px; flex:none; }
+    .person-shortcuts { display:inline-flex; align-items:center; gap:4px; flex:none; }
     .person-shortcut {
-      width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center;
-      border:1px solid var(--line); border-radius:8px; text-decoration:none; line-height:1;
-      transition:transform .12s ease, box-shadow .12s ease, border-color .12s ease, background .12s ease, color .12s ease;
+      width:17px; height:17px; display:inline-grid; place-items:center;
+      border:0; border-radius:4px; background:transparent; padding:0; flex:none;
+      text-decoration:none; line-height:1; transition:filter .12s ease;
     }
-    .person-shortcut svg { display:block; width:14px; height:14px; }
-    .person-shortcut.linkedin { color:#fff; background:#0A66C2; border-color:#0A66C2; }
-    .person-shortcut.linkedin:hover { background:#004182; border-color:#004182; box-shadow:0 4px 12px -7px rgba(10,102,194,.75); transform:translateY(-1px); }
-    .person-shortcut.raydar { color:var(--ink); background:var(--card); }
-    .person-shortcut.raydar:hover { color:var(--ink); background:#FFF7F2; border-color:#F2C9AF; box-shadow:0 4px 12px -8px rgba(255,94,0,.65); transform:translateY(-1px); }
+    .person-shortcut svg { display:block; width:15px; height:15px; }
+    .person-shortcut.raydar { color:var(--ink); }
+    .person-shortcut:hover { filter:brightness(.94); }
     .person-shortcut:focus-visible { outline:2px solid var(--violet); outline-offset:2px; }
     @media (prefers-reduced-motion:reduce){ .person-shortcut { transition:none; } }
 
@@ -626,10 +624,10 @@
       const encodedBotId = encodeURIComponent(botId);
       return `<span class="person-shortcuts" role="group" aria-label="Links for ${escAttr(name)}">
         <a class="person-shortcut linkedin" data-shortcut="linkedin" href="${CALLS_API}/api/linkedin?bot=${encodedBotId}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escAttr(name)} on LinkedIn" title="Open LinkedIn profile">
-          <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM6.814 20.452H3.861V9h2.953v11.452z"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#0A66C2" d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
         </a>
         <a class="person-shortcut raydar" data-shortcut="raydar" href="/c/${encodedBotId}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escAttr(name)}’s Raydar call" title="Open Raydar call">
-          <svg viewBox="0 0 64 64" aria-hidden="true" fill="currentColor"><g transform="translate(9.12 9.2151) scale(0.3053) translate(-1145.967 -795.987)"><path d="M1273.44 827.735C1271.52 829.651 1271.04 833.124 1272.6 835.4C1289.93 860.668 1286.56 895.876 1262.49 917.313C1238.42 938.749 1203.4 938.15 1179.94 917.792C1152.26 893.841 1151.17 851.926 1176.69 826.538C1194.02 809.293 1219.05 804.263 1240.83 811.449C1245.28 812.886 1246.49 818.514 1243.24 821.867L1242.63 822.466C1240.95 824.143 1238.42 824.741 1236.14 824.023C1217.72 818.155 1196.54 823.304 1183.07 839.352C1167.78 857.555 1168.14 884.619 1183.67 902.583C1202.56 924.259 1235.66 925.097 1255.75 905.217C1271.28 889.769 1274.28 866.297 1264.54 847.854C1262.61 844.142 1257.68 843.543 1254.67 846.417C1252.74 848.333 1252.26 851.208 1253.59 853.603C1261.41 868.572 1258.28 887.733 1244.08 899.23C1229.88 910.726 1209.9 909.888 1196.66 898.272C1180.54 884.14 1180.06 859.59 1194.98 844.741C1200.39 839.352 1207.13 835.999 1214.11 834.681C1220.25 833.603 1224.1 841.028 1219.65 845.339C1218.81 846.178 1217.72 846.777 1216.52 847.016C1210.98 847.974 1205.81 850.968 1201.96 855.758C1194.98 864.381 1195.1 876.955 1201.96 885.697C1211.11 897.074 1227.95 897.793 1237.94 887.733C1242.63 883.063 1245.04 876.835 1245.04 870.728C1245.04 865.339 1238.3 862.704 1234.45 866.536C1233.37 867.614 1232.65 869.051 1232.65 870.608C1232.65 874.32 1230.96 878.033 1227.47 880.428C1223.62 883.063 1218.21 883.182 1214.35 880.428C1207.98 876.117 1207.37 867.375 1212.55 862.225C1214.6 860.189 1217.12 859.111 1219.77 858.872C1222.42 858.632 1224.94 857.195 1226.87 855.279L1264.06 818.275C1266.82 815.52 1266.34 810.97 1263.21 808.814C1232.41 787.976 1189.2 792.527 1163.57 822.466C1139.98 850.249 1140.1 891.565 1163.93 919.229C1192.69 952.521 1243.36 953.838 1273.92 923.42C1299.8 897.673 1302.81 857.674 1282.83 828.574C1280.66 825.46 1276.09 824.981 1273.32 827.735H1273.44Z"/></g></svg>
+          <svg viewBox="1145.967 795.987 149.896 149.273" aria-hidden="true"><path fill="currentColor" d="M1273.44 827.735C1271.52 829.651 1271.04 833.124 1272.6 835.4C1289.93 860.668 1286.56 895.876 1262.49 917.313C1238.42 938.749 1203.4 938.15 1179.94 917.792C1152.26 893.841 1151.17 851.926 1176.69 826.538C1194.02 809.293 1219.05 804.263 1240.83 811.449C1245.28 812.886 1246.49 818.514 1243.24 821.867L1242.63 822.466C1240.95 824.143 1238.42 824.741 1236.14 824.023C1217.72 818.155 1196.54 823.304 1183.07 839.352C1167.78 857.555 1168.14 884.619 1183.67 902.583C1202.56 924.259 1235.66 925.097 1255.75 905.217C1271.28 889.769 1274.28 866.297 1264.54 847.854C1262.61 844.142 1257.68 843.543 1254.67 846.417C1252.74 848.333 1252.26 851.208 1253.59 853.603C1261.41 868.572 1258.28 887.733 1244.08 899.23C1229.88 910.726 1209.9 909.888 1196.66 898.272C1180.54 884.14 1180.06 859.59 1194.98 844.741C1200.39 839.352 1207.13 835.999 1214.11 834.681C1220.25 833.603 1224.1 841.028 1219.65 845.339C1218.81 846.178 1217.72 846.777 1216.52 847.016C1210.98 847.974 1205.81 850.968 1201.96 855.758C1194.98 864.381 1195.1 876.955 1201.96 885.697C1211.11 897.074 1227.95 897.793 1237.94 887.733C1242.63 883.063 1245.04 876.835 1245.04 870.728C1245.04 865.339 1238.3 862.704 1234.45 866.536C1233.37 867.614 1232.65 869.051 1232.65 870.608C1232.65 874.32 1230.96 878.033 1227.47 880.428C1223.62 883.063 1218.21 883.182 1214.35 880.428C1207.98 876.117 1207.37 867.375 1212.55 862.225C1214.6 860.189 1217.12 859.111 1219.77 858.872C1222.42 858.632 1224.94 857.195 1226.87 855.279L1264.06 818.275C1266.82 815.52 1266.34 810.97 1263.21 808.814C1232.41 787.976 1189.2 792.527 1163.57 822.466C1139.98 850.249 1140.1 891.565 1163.93 919.229C1192.69 952.521 1243.36 953.838 1273.92 923.42C1299.8 897.673 1302.81 857.674 1282.83 828.574C1280.66 825.46 1276.09 824.981 1273.32 827.735H1273.44Z"/></svg>
         </a>
       </span>`;
     };
