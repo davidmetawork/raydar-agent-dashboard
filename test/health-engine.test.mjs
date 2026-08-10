@@ -69,6 +69,32 @@ test("beat lane: silence past the window is DOWN, a self-reported fail is immedi
   assert.equal(beatLane({ probe, beat: null }).state, "UNKNOWN");
 });
 
+test("scheduled heartbeat jitter degrades before sustained silence is DOWN", () => {
+  const probe = {
+    lane: "gha-health-backstop",
+    degradedAfterMin: 150,
+    maxSilenceMin: 360,
+  };
+  const delayed = beatLane({
+    probe,
+    beat: { at: new Date(Date.now() - 158 * 60000).toISOString(), status: "ok" },
+  });
+  assert.equal(delayed.state, "DEGRADED");
+  assert.match(delayed.reason, /expected within 150m; down after 360m/u);
+
+  const silent = beatLane({
+    probe,
+    beat: { at: new Date(Date.now() - 361 * 60000).toISOString(), status: "ok" },
+  });
+  assert.equal(silent.state, "DOWN");
+
+  const failed = beatLane({
+    probe,
+    beat: { at: new Date().toISOString(), status: "fail", note: "probe failed" },
+  });
+  assert.equal(failed.state, "DOWN", "an observed failure is never softened by the jitter window");
+});
+
 test("desktop collapse: a closed laptop is one event, not sixteen", () => {
   const many = Array.from({ length: 10 }, (_, i) => ({ id: `l${i}`, state: "DOWN" }));
   assert.equal(desktopRunner({ laneStates: many }).state, "DOWN");
@@ -137,6 +163,10 @@ test("GitHub Action lanes are heartbeat-covered, needing no API token", () => {
   for (const c of actions) {
     assert.equal(c.kind, "beat", `${c.id} must be a heartbeat lane`);
     assert.ok(c.probe.lane && c.probe.maxSilenceMin, `${c.id} needs lane+window`);
+    assert.ok(
+      c.probe.degradedAfterMin < c.probe.maxSilenceMin,
+      `${c.id} must degrade before sustained silence is down`,
+    );
   }
   assert.ok(
     !JSON.stringify(CATALOG).includes("GH_HEALTH_TOKEN"),

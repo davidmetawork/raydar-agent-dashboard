@@ -280,24 +280,28 @@ export const CATALOG = [
   // Each scheduled Action posts a heartbeat at the end of its run instead of
   // being polled through the GitHub API. That needs no token, and it proves the
   // workflow actually RAN rather than that GitHub's API says it did.
+  // GitHub documents scheduled events as best-effort: they can be delayed or
+  // dropped under load. One missed window is therefore DEGRADED; only sustained
+  // silence is DOWN. A workflow that runs and reports failure is still DOWN
+  // immediately in beatLane().
   ...[
-    ["gha-cron-backstop", "Cron backstop", 150],
-    ["gha-human-outcomes", "Human outcomes", 450],
-    ["gha-trademark-watch", "Trademark watch", 3000],
-    ["gha-paraai-curate", "Para AI curate", 150],
-    ["gha-curate-deadman", "Curate dead-man", 3000],
-    ["gha-clients-snapshot", "Clients snapshot", 3000],
-    ["gha-health-backstop", "Health backstop", 150],
+    ["gha-cron-backstop", "Cron backstop", 150, 360],
+    ["gha-human-outcomes", "Human outcomes", 450, 720],
+    ["gha-trademark-watch", "Trademark watch", 3000, 4320],
+    ["gha-paraai-curate", "Para AI curate", 150, 360],
+    ["gha-curate-deadman", "Curate dead-man", 3000, 4320],
+    ["gha-clients-snapshot", "Clients snapshot", 3000, 4320],
+    ["gha-health-backstop", "Health backstop", 150, 360],
     // */15 cadence; 60 min silent = four missed runs. Auto-heals lifecycle
     // endpoint evictions, so ITS death would re-open the Omar failure mode.
-    ["gha-lifecycle-watchdog", "Lifecycle watchdog", 60],
-  ].map(([lane, name, maxSilenceMin]) => ({
+    ["gha-lifecycle-watchdog", "Lifecycle watchdog", 60, 120],
+  ].map(([lane, name, degradedAfterMin, maxSilenceMin]) => ({
     id: lane,
     name,
     group: "actions",
     tier: 2,
     kind: "beat",
-    probe: { lane, maxSilenceMin },
+    probe: { lane, degradedAfterMin, maxSilenceMin },
     registry: "/operations/monitoring-canaries/",
   })),
 

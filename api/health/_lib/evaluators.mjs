@@ -233,7 +233,11 @@ export function n8nWatchdog({ watchdog }) {
 
 // ---------- desktop ----------
 
-/** A lane is judged purely on heartbeat freshness — plus a self-reported fail. */
+/**
+ * A lane is judged on heartbeat freshness plus a self-reported failure.
+ * Scheduled vendors can legitimately delay or drop an invocation, so callers
+ * may define a degraded window before sustained silence becomes DOWN.
+ */
 export function beatLane({ probe, beat }) {
   if (!beat) return UNK("no beats yet");
   const mins = ageMin(beat.at);
@@ -243,6 +247,15 @@ export function beatLane({ probe, beat }) {
   }
   if (mins == null) return UNK("beat has no timestamp", metrics);
   if (mins > probe.maxSilenceMin) return DOWN(`no beat for ${mins}m (max ${probe.maxSilenceMin}m)`, metrics);
+  if (
+    Number.isFinite(probe.degradedAfterMin)
+    && mins > probe.degradedAfterMin
+  ) {
+    return DEG(
+      `heartbeat delayed ${mins}m (expected within ${probe.degradedAfterMin}m; down after ${probe.maxSilenceMin}m)`,
+      metrics,
+    );
+  }
   return OK(null, metrics);
 }
 
