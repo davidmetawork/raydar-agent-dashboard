@@ -547,10 +547,12 @@
       incomplete:   { cls:"muted",  label:"Didn't finish" },
       // The candidate asked to speak with a person instead of the AI agent. An
       // outcome, not a failure: no `review` flag, and deliberately absent from
-      // ACTIONABLE below, because the human-handoff lane has already emailed
-      // them the Intro Call booking link. Before this verdict existed these
-      // calls landed here as "Audio failed" purely because opting out makes for
-      // a very short call (David, 2026-08-09).
+      // ACTIONABLE below. Whether the Intro Call email actually went out is
+      // NOT assumed — the feed's `handoffEmail` field carries the send lane's
+      // real outcome and the row text renders from it (2026-08-10: two sends
+      // failed while the board asserted "link emailed"). Before this verdict
+      // existed these calls landed here as "Audio failed" purely because
+      // opting out makes for a very short call (David, 2026-08-09).
       human_requested:{ cls:"blue", label:"Human Call Requested" },
     };
     const verdictView = (v) => VERDICT[v] || { cls:"muted", label:cap(v||"—") };
@@ -587,12 +589,23 @@
         case "error": return `The call errored out — worth a manual follow-up`;
         case "no_show": return "Candidate never joined the Meet — confirmed by the recorder's participant log";
         case "incomplete": return "Candidate joined and said a few words, then went quiet — the interview didn't complete; worth a re-book";
-        case "human_requested": return "Candidate asked to speak with a person instead of the AI agent — the Intro Call booking link was emailed to them automatically";
+        case "human_requested": return `Candidate asked to speak with a person instead of the AI agent — ${handoffEmailText(r)}`;
         default: return r.detail || "";
       }
     };
+    // Email delivery from EVIDENCE (the feed's handoffEmail join reads the send
+    // lane's own state file), never from intent. Missing/unknown renders as
+    // unconfirmed rather than claiming a send that may not have happened.
+    const handoffEmailText = (r) => {
+      const s = String((r && r.handoffEmail) || "");
+      if (s === "delivered") return "the Intro Call booking link was emailed to them";
+      if (s === "queued") return "the Intro Call email is queued; the lane sends it automatically and keeps retrying until Gmail confirms";
+      if (s === "send_failed_unknown") return "the Intro Call email FAILED in an unknown state — check the Sent folder, then send book.raydar.xyz/intro by hand";
+      if (s.startsWith("parked_")) return `the Intro Call email needs a human (${s.slice(7).replace(/_/g, " ")}) — send book.raydar.xyz/intro by hand`;
+      return "Intro Call email status unconfirmed — check the Sent folder for the booking-link email";
+    };
     const whatHappened = (r) => askedForHuman(r)
-      ? `${whatHappenedBase(r)} · asked to speak with a person, Intro Call link emailed`
+      ? `${whatHappenedBase(r)} · asked to speak with a person — ${handoffEmailText(r)}`
       : whatHappenedBase(r);
     const UPCOMING = {
       queued:"Bot ready", ready_to_join:"Bot ready",
@@ -1155,7 +1168,7 @@
         case "audio_fail": return "Audio bridge failed — spoke but unheard";
         case "error": return "Call errored out";
         case "joined_silent": return "Joined but stayed silent";
-        case "human_requested": return "Asked for a person — Intro Call link emailed";
+        case "human_requested": return "Asked for a person instead of the AI";
         case "silent_fail": return "Unconfirmed";
         case "in_progress": return "In progress";
         case "pending": return "Processing";
