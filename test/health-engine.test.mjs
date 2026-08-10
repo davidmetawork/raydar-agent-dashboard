@@ -69,6 +69,32 @@ test("beat lane: silence past the window is DOWN, a self-reported fail is immedi
   assert.equal(beatLane({ probe, beat: null }).state, "UNKNOWN");
 });
 
+test("beat lane: a fresh warning is DEGRADED but a stale warning is still DOWN", () => {
+  const probe = {
+    lane: "gha-paraai-curate",
+    degradedAfterMin: 150,
+    maxSilenceMin: 360,
+  };
+  const warned = beatLane({
+    probe,
+    beat: { at: new Date().toISOString(), status: "warn", note: "1 candidate quarantined" },
+  });
+  assert.equal(warned.state, "DEGRADED");
+  assert.equal(warned.reason, "lane reported warning: 1 candidate quarantined");
+  assert.equal(warned.metrics.status, "warn");
+
+  const stale = beatLane({
+    probe,
+    beat: {
+      at: new Date(Date.now() - 361 * 60000).toISOString(),
+      status: "warn",
+      note: "1 candidate quarantined",
+    },
+  });
+  assert.equal(stale.state, "DOWN");
+  assert.match(stale.reason, /no beat for .*max 360m/u);
+});
+
 test("scheduled heartbeat jitter degrades before sustained silence is DOWN", () => {
   const probe = {
     lane: "gha-health-backstop",
