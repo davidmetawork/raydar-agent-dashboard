@@ -1,14 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PROFILE_TTL_SECONDS, validKey } from "../api/applicants/_lib/kv.mjs";
+import { hashGetMany, PROFILE_TTL_SECONDS, validKey } from "../api/applicants/_lib/kv.mjs";
 import {
+  CARD_FIELD_MAX,
+  cardFromProfile,
   createSyncHandler,
   MAX_PROFILE_BYTES,
   MAX_SNAPSHOT_BYTES,
   normalizeAcks,
   normalizeProfiles,
 } from "../api/applicants/sync.mjs";
+import { createCardsHandler, MAX_CARD_IDS } from "../api/applicants/cards.mjs";
 import { createDecisionHandler } from "../api/applicants/decision.mjs";
 import { createFeedHandler } from "../api/applicants/feed.mjs";
 
@@ -22,11 +25,12 @@ test.after(() => {
 
 // `authorization: null` omits the header entirely (undefined would fall back
 // to the default valid bearer via destructuring).
-function request({ method = "POST", authorization = `Bearer ${KEY}`, body } = {}) {
+function request({ method = "POST", authorization = `Bearer ${KEY}`, body, query } = {}) {
   return {
     method,
     headers: authorization === null ? {} : { authorization },
     body,
+    query,
   };
 }
 
@@ -51,7 +55,7 @@ function response() {
 }
 
 function fakeStore(initial = {}) {
-  const calls = { readHash: [], writeHash: [], writeJson: [] };
+  const calls = { readHash: [], writeHash: [], writeJson: [], readHashKeys: [], deleteHashFields: [] };
   return {
     calls,
     deps: {
@@ -67,6 +71,14 @@ function fakeStore(initial = {}) {
       writeJson: async (key, value, ttlSeconds) => {
         calls.writeJson.push([key, value, ttlSeconds]);
         return "OK";
+      },
+      readHashKeys: async (key) => {
+        calls.readHashKeys.push(key);
+        return Object.keys(initial[key] || {});
+      },
+      deleteHashFields: async (key, fields) => {
+        calls.deleteHashFields.push([key, fields]);
+        return fields.length;
       },
       now: () => "2026-08-09T00:00:00.000Z",
     },
@@ -335,11 +347,13 @@ test("sync stores profiles under TTL'd keys and writes only bucket photos to the
     ["apphub:profile:abcdef1234", noPhoto, PROFILE_TTL_SECONDS],
   ]);
   // Only the paraform-images bucket URL made the photos hash; the foreign
-  // host and the null were dropped without failing the batch.
-  assert.deepEqual(calls.writeHash, [[
+  // host and the null were dropped without failing the batch. (The same pass
+  // also writes apphub:cards — asserted in its own test below — so this looks
+  // up the photos write rather than assuming it is the only hash write.)
+  assert.deepEqual(calls.writeHash.find(([key]) => key === "apphub:photos"), [
     "apphub:photos",
     { cutestsynthetic0000000001: withPhoto.imageSrc },
-  ]]);
+  ]);
 });
 
 test("sync rejects the whole profiles batch on a bad cuId or oversize profile", async () => {
@@ -420,4 +434,324 @@ test("feed returns the photos hash alongside the snapshot and overlays", async (
   assert.deepEqual(res.body.acks, {});
   assert.equal(res.headers["cache-control"], "no-store");
   assert.ok(calls.readHash.includes("apphub:photos"));
+});
+
+const BUCKET_PHOTO = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/abcdef1234";
+
+// Four experiences and four schools on purpose: the card keeps three of each
+// while the counts must still report the full history.
+const CARD_SOURCE_PROFILE = {
+  name: "Applicant Example",
+  title: "Founding Engineer",
+  location: "San Francisco, CA",
+  about: "a".repeat(2_000),
+  imageSrc: BUCKET_PHOTO,
+  updatedAt: "2026-07-01T00:00:00.000Z",
+  experiences: [
+    {
+      roleTitle: "Staff Engineer",
+      companyName: "Example Co",
+      start: "2024-01-01",
+      end: null,
+      current: true,
+      logo: "https://storage.googleapis.com/paraform-images/company-logos/example",
+      description: "b".repeat(2_000),
+      location: "Remote",
+      industry: "Software",
+      aiTags: ["ai", "infra"],
+      talentRank: 3,
+    },
+    { roleTitle: "Senior Engineer", companyName: "Second Co", start: "2021-01-01", end: "2023-12-31", current: false, logo: null },
+    { roleTitle: "Engineer", companyName: "Third Co", start: "2019-01-01", end: "2020-12-31", current: false, logo: null },
+    { roleTitle: "Intern", companyName: "Fourth Co", start: "2018-06-01", end: "2018-09-01", current: false, logo: null },
+  ],
+  education: [
+    { school: "Example University", degree: "BSc Computer Science", start: "2014", end: "2018", logo: "https://storage.googleapis.com/paraform-images/school-logos/example", talentRank: 7 },
+    { school: "Second School", degree: "MSc", start: "2018", end: "2019", logo: null },
+    { school: "Third School", degree: null, start: null, end: null, logo: null },
+    { school: "Fourth School", degree: null, start: null, end: null, logo: null },
+  ],
+};
+
+test("cardFromProfile keeps the top 3 of each list, counts the full ones, and drops the bulk", () => {
+  const card = cardFromProfile(CARD_SOURCE_PROFILE);
+
+  assert.deepEqual(Object.keys(card).sort(), [
+    "edu", "eduCount", "exp", "expCount", "location", "photo", "title", "updatedAt",
+  ]);
+  assert.equal(card.photo, BUCKET_PHOTO);
+  assert.equal(card.title, "Founding Engineer");
+  assert.equal(card.location, "San Francisco, CA");
+  assert.equal(card.updatedAt, "2026-07-01T00:00:00.000Z");
+  assert.equal(Object.hasOwn(card, "about"), false); // deliberately not a card field
+  assert.equal(Object.hasOwn(card, "name"), false); // the row already knows the name
+
+  assert.equal(card.exp.length, 3);
+  assert.equal(card.expCount, 4); // the count is of the FULL list, not the slice
+  assert.deepEqual(card.exp[0], {
+    role: "Staff Engineer",
+    company: "Example Co",
+    start: "2024-01-01",
+    end: null,
+    current: true,
+    logo: "https://storage.googleapis.com/paraform-images/company-logos/example",
+  });
+  assert.deepEqual(card.exp[1].role, "Senior Engineer");
+  assert.equal(card.exp[1].current, false);
+  assert.equal(card.exp[2].role, "Engineer");
+  // The 2,000-char description rode in on the profile and stayed out of the card.
+  assert.ok(!JSON.stringify(card).includes("b".repeat(50)));
+
+  assert.equal(card.edu.length, 3);
+  assert.equal(card.eduCount, 4);
+  assert.deepEqual(card.edu[0], {
+    school: "Example University",
+    degree: "BSc Computer Science",
+    start: "2014",
+    end: "2018",
+    logo: "https://storage.googleapis.com/paraform-images/school-logos/example",
+  });
+  assert.equal(Object.hasOwn(card.edu[0], "talentRank"), false);
+});
+
+test("cardFromProfile nulls a non-bucket photo and caps every string at the field max", () => {
+  assert.equal(cardFromProfile({ imageSrc: "https://example.com/pic.jpg" }).photo, null);
+  assert.equal(cardFromProfile({ imageSrc: null }).photo, null);
+  assert.equal(cardFromProfile({ imageSrc: 42 }).photo, null);
+  // Prefix must include the trailing slash — the same lookalike-host rule the
+  // photos hash uses.
+  assert.equal(
+    cardFromProfile({ imageSrc: "https://storage.googleapis.com/paraform-images.example.com/x" }).photo,
+    null,
+  );
+
+  const long = cardFromProfile({
+    title: "t".repeat(CARD_FIELD_MAX + 200),
+    location: "l".repeat(CARD_FIELD_MAX + 200),
+    experiences: [{ roleTitle: "r".repeat(CARD_FIELD_MAX + 200), companyName: "c".repeat(CARD_FIELD_MAX + 200) }],
+    education: [{ school: "s".repeat(CARD_FIELD_MAX + 200) }],
+  });
+  assert.equal(long.title.length, CARD_FIELD_MAX);
+  assert.equal(long.location.length, CARD_FIELD_MAX);
+  assert.equal(long.exp[0].role.length, CARD_FIELD_MAX);
+  assert.equal(long.exp[0].company.length, CARD_FIELD_MAX);
+  assert.equal(long.edu[0].school.length, CARD_FIELD_MAX);
+});
+
+test("cardFromProfile always returns the full shape, even on junk input", () => {
+  const empty = {
+    photo: null, title: null, location: null, updatedAt: null,
+    exp: [], expCount: 0, edu: [], eduCount: 0,
+  };
+  for (const input of [
+    {},
+    null,
+    undefined,
+    "not-a-profile",
+    ["not", "a", "profile"],
+    { experiences: "nope", education: null },
+    { experiences: {}, education: 7 },
+    { title: "", location: "   " }, // blank strings normalize to null, not ""
+  ]) {
+    assert.deepEqual(cardFromProfile(input), empty, JSON.stringify(input ?? null));
+  }
+  // A ragged row still produces every key of the entry shape.
+  const ragged = cardFromProfile({ experiences: [{}, null], education: [null] });
+  assert.deepEqual(ragged.exp[0], { role: null, company: null, start: null, end: null, current: false, logo: null });
+  assert.deepEqual(ragged.exp[1], { role: null, company: null, start: null, end: null, current: false, logo: null });
+  assert.equal(ragged.expCount, 2);
+  assert.deepEqual(ragged.edu[0], { school: null, degree: null, start: null, end: null, logo: null });
+  assert.equal(ragged.eduCount, 1);
+});
+
+test("sync writes the cards hash beside the photos hash in one profiles pass", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore();
+  const handler = createSyncHandler(deps);
+
+  const foreignPhoto = { name: "Second Applicant", imageSrc: "https://example.com/pic.jpg", title: "Designer" };
+  const ok = response();
+  await handler(request({
+    body: {
+      profiles: {
+        abcdef1234: CARD_SOURCE_PROFILE,
+        cmqvf861b00040aksj38cyiwp: foreignPhoto,
+      },
+    },
+  }), ok);
+  assert.equal(ok.statusCode, 200);
+  // The response contract is unchanged — cards are a side effect of `profiles`.
+  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, profiles: 2 });
+
+  assert.deepEqual(calls.writeHash.map(([key]) => key), ["apphub:photos", "apphub:cards"]);
+  const [, cards] = calls.writeHash.find(([key]) => key === "apphub:cards");
+  // One HSET for the whole batch, and a card for EVERY profile — including the
+  // one whose photo was dropped for living off the bucket.
+  assert.deepEqual(Object.keys(cards), ["abcdef1234", "cmqvf861b00040aksj38cyiwp"]);
+  assert.deepEqual(cards.abcdef1234, cardFromProfile(CARD_SOURCE_PROFILE));
+  assert.equal(cards.cmqvf861b00040aksj38cyiwp.photo, null);
+  assert.equal(cards.cmqvf861b00040aksj38cyiwp.title, "Designer");
+});
+
+test("a full publish prunes cards against the same keep-set as photos, using their own keys", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore({
+    "apphub:photos": { keptcu0001: "url", stalecu001: "url" },
+    // `nophotocu1` never had a bucket photo, so it exists only in cards — the
+    // case a photos-derived drop list would strand forever.
+    "apphub:cards": { keptcu0001: {}, stalecu001: {}, nophotocu1: {} },
+  });
+  const handler = createSyncHandler(deps);
+
+  const ok = response();
+  await handler(request({
+    body: {
+      snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [{ cuId: "keptcu0001" }] },
+      queue: [{ key: "keptcu0001:role1", cuId: "keptcu0001" }],
+    },
+  }), ok);
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.body.stored, { snapshot: true, queue: true, acks: 0 });
+  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards"]);
+  assert.deepEqual(calls.deleteHashFields, [
+    ["apphub:photos", ["stalecu001"]],
+    ["apphub:cards", ["stalecu001", "nophotocu1"]],
+  ]);
+});
+
+test("a cards prune failure never fails the push that carried real data", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore({ "apphub:cards": { stalecu001: {} } });
+  const handler = createSyncHandler(deps);
+  const ok = response();
+  await handler(request({
+    body: {
+      snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
+      queue: [],
+    },
+  }), ok);
+  // Sanity: the prune ran and wanted to drop the stale card.
+  assert.deepEqual(calls.deleteHashFields, [["apphub:cards", ["stalecu001"]]]);
+
+  const exploding = fakeStore({ "apphub:cards": { stalecu001: {} } });
+  exploding.deps.deleteHashFields = async () => { throw new Error("kv down"); };
+  const survived = response();
+  await createSyncHandler(exploding.deps)(request({
+    body: {
+      snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
+      queue: [],
+    },
+  }), survived);
+  assert.equal(survived.statusCode, 200);
+  assert.deepEqual(survived.body.stored, { snapshot: true, queue: true, acks: 0 });
+});
+
+test("hashGetMany aligns HMGET to the requested fields and never fires on an empty list", async () => {
+  const commands = [];
+  const kvImpl = async (command) => {
+    commands.push(command);
+    return [JSON.stringify({ title: "A" }), null, JSON.stringify({ title: "C" })];
+  };
+  assert.deepEqual(
+    await hashGetMany("apphub:cards", ["abcdef1234", "bcdefa2345", "cdefab3456"], { kvImpl }),
+    { abcdef1234: { title: "A" }, cdefab3456: { title: "C" } }, // the miss is absent, not null
+  );
+  assert.deepEqual(commands, [["HMGET", "apphub:cards", "abcdef1234", "bcdefa2345", "cdefab3456"]]);
+
+  assert.deepEqual(await hashGetMany("apphub:cards", [], { kvImpl }), {});
+  assert.deepEqual(await hashGetMany("apphub:cards", null, { kvImpl }), {});
+  assert.equal(commands.length, 1); // `HMGET key` with no fields is a protocol error
+});
+
+function cardsSetup(initial = {}) {
+  const calls = { readHashMany: [] };
+  const handler = createCardsHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    kvReady: () => true,
+    readHashMany: async (key, fields) => {
+      calls.readHashMany.push([key, fields]);
+      const store = initial[key] || {};
+      return Object.fromEntries(fields.filter((field) => store[field] != null).map((field) => [field, store[field]]));
+    },
+  });
+  return { calls, handler };
+}
+
+test("cards returns only the ids the store actually had", async () => {
+  const card = cardFromProfile(CARD_SOURCE_PROFILE);
+  const { calls, handler } = cardsSetup({ "apphub:cards": { abcdef1234: card } });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined, query: { cus: "abcdef1234,bcdefa2345" } }), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { ok: true, cards: { abcdef1234: card } }); // the unknown id is absent
+  assert.deepEqual(calls.readHashMany, [["apphub:cards", ["abcdef1234", "bcdefa2345"]]]);
+  assert.equal(res.headers["cache-control"], "no-store");
+});
+
+test("cards drops invalid ids, dedupes, and caps the batch", async () => {
+  const { calls, handler } = cardsSetup();
+  const res = response();
+  // Padding, blanks, a too-short id, punctuation, an over-40-char id, and a repeat.
+  const tooLong = "z".repeat(41);
+  await handler(request({
+    method: "GET",
+    body: undefined,
+    query: { cus: ` abcdef1234 ,,short,cu_bad_chars12,${tooLong},abcdef1234,bcdefa2345,,` },
+  }), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls.readHashMany[0][1], ["abcdef1234", "bcdefa2345"]);
+
+  const many = Array.from({ length: MAX_CARD_IDS + 10 }, (_, i) => `cu${String(i).padStart(8, "0")}`);
+  const capped = cardsSetup();
+  const cappedRes = response();
+  await capped.handler(request({ method: "GET", body: undefined, query: { cus: many.join(",") } }), cappedRes);
+  assert.equal(cappedRes.statusCode, 200); // an over-eager caller is truncated, not rejected
+  assert.deepEqual(capped.calls.readHashMany[0][1], many.slice(0, MAX_CARD_IDS));
+});
+
+test("cards answers 200 with an empty map when no id survives, and 405 on non-GET", async () => {
+  for (const cus of [undefined, "", "   ", ",,,", "short,cu_bad_chars12", 42]) {
+    const { calls, handler } = cardsSetup();
+    const res = response();
+    await handler(request({ method: "GET", body: undefined, query: { cus } }), res);
+    assert.equal(res.statusCode, 200, String(cus));
+    assert.deepEqual(res.body, { ok: true, cards: {} });
+    assert.equal(calls.readHashMany.length, 0, "no store round-trip for an empty batch");
+  }
+  const missingQuery = response();
+  await cardsSetup().handler(request({ method: "GET", body: undefined }), missingQuery);
+  assert.equal(missingQuery.statusCode, 200);
+  assert.deepEqual(missingQuery.body, { ok: true, cards: {} });
+
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    const res = response();
+    await cardsSetup().handler(request({ method, body: undefined, query: { cus: "abcdef1234" } }), res);
+    assert.equal(res.statusCode, 405, method);
+    assert.deepEqual(res.body, { ok: false, error: "GET only" });
+  }
+});
+
+test("cards surfaces a store failure as 502, not a blank list", async () => {
+  const handler = createCardsHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    kvReady: () => true,
+    readHashMany: async () => { throw new Error("kv down"); },
+  });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined, query: { cus: "abcdef1234" } }), res);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.error, "cards_unavailable");
+  assert.equal(res.body.detail, "kv down");
+
+  const unconfigured = createCardsHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    kvReady: () => false,
+  });
+  const off = response();
+  await unconfigured(request({ method: "GET", body: undefined, query: { cus: "abcdef1234" } }), off);
+  assert.equal(off.statusCode, 503);
+  assert.equal(off.body.error, "state_store_not_configured");
 });

@@ -18,6 +18,15 @@
 //                              it field-for-field.
 //   apphub:photos            — POST /api/applicants/sync only (hash: field
 //                              cuId → JSON string of the photo URL)
+//   apphub:cards             — POST /api/applicants/sync only (hash: field
+//                              cuId → JSON compact card derived from the
+//                              prewarmed profile: headline, location, top-3
+//                              experience/education, so list rows render
+//                              without a profile fetch each). Same lifecycle
+//                              as apphub:photos — written in the same sync
+//                              pass, pruned by the same full-publish prune,
+//                              no TTL of its own. GET /api/applicants/cards
+//                              is a reader only, never a writer.
 //   apphub:rank:<companyId>  — GET  /api/applicants/profile only (30d TTL)
 
 const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
@@ -74,6 +83,25 @@ export async function hashGetJson(key, field, { kvImpl = kv } = {}) {
   return parse(await kvImpl(["HGET", key, field]));
 }
 
+// Upstash REST returns HMGET as an array positionally aligned to the requested
+// fields, with null in the slots that miss. Missing fields are simply absent
+// from the returned object (never null entries), so callers can treat the map
+// as "what the store actually had". An empty field list never issues a command
+// — `HMGET key` with no fields is a protocol error, not an empty answer.
+export async function hashGetMany(key, fields, { kvImpl = kv } = {}) {
+  const wanted = Array.isArray(fields) ? fields : [];
+  if (!wanted.length) return {};
+  const values = await kvImpl(["HMGET", key, ...wanted]);
+  const out = {};
+  if (!Array.isArray(values)) return out;
+  for (let i = 0; i < wanted.length; i += 1) {
+    const value = parse(values[i]);
+    if (value == null) continue;
+    out[wanted[i]] = value;
+  }
+  return out;
+}
+
 export async function hashDel(key, field, { kvImpl = kv } = {}) {
   return kvImpl(["HDEL", key, field]);
 }
@@ -105,5 +133,6 @@ export const K = {
   acks: "apphub:acks",
   profile: (cuId) => `apphub:profile:${cuId}`,
   photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
+  cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
   rank: (companyId) => `apphub:rank:${companyId}`,
 };

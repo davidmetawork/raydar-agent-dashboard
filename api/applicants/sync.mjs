@@ -2,7 +2,8 @@
 //
 // POST: the loop publishes the stream/queue snapshot, reports send outcomes
 // (acks), and prewarms complete applicant profile JSONs (profiles → the
-// apphub:profile:* cache keys plus the apphub:photos hash).
+// apphub:profile:* cache keys plus the apphub:photos and apphub:cards
+// hashes — cards are the compact list-row projection of the same profiles).
 // GET: the loop pulls human "interview" approvals it has not yet
 // acknowledged. Shared-secret auth (APPHUB_SYNC_KEY), never requireAuth — the
 // caller is a launchd cron, not a browser (pattern: api/health/beat.mjs).
@@ -71,7 +72,10 @@ export function normalizeAcks(input, now = () => new Date().toISOString()) {
 // Photos: only imageSrc values on the stable public Paraform bucket are
 // collected into the apphub:photos hash — anything else (foreign hosts,
 // expiring signed URLs) is silently dropped, not an error.
-const CU_RE = /^[a-z0-9]{10,40}$/i;
+//
+// CU_RE is exported so the read side (api/applicants/cards.mjs) validates
+// cuIds against the exact contract the writer enforces, not a drifting copy.
+export const CU_RE = /^[a-z0-9]{10,40}$/i;
 export const MAX_PROFILE_BYTES = 30_000;
 const PHOTO_URL_PREFIX = "https://storage.googleapis.com/paraform-images/";
 
@@ -94,6 +98,63 @@ export function normalizeProfiles(input) {
     }
   }
   return { ok: true, profiles, photos };
+}
+
+// Compact list-row card, derived from the same prewarmed profile that fills
+// apphub:profile:<cuId>. It exists so the Applicants list can render
+// LinkedIn-Recruiter-style rows (headline, location, top-3 experience, top-3
+// education) from ONE hash read instead of a profile fetch per row.
+//
+// Shape is fixed and total: every key is always present, so the UI never has
+// to branch on absence — a card with nothing known is all nulls, empty arrays
+// and zero counts. Descriptions/about/aiTags/talentRank are deliberately left
+// out (that is what opening the profile modal is for), and every string is
+// capped at CARD_FIELD_MAX purely defensively — a bloated card store would
+// re-create the per-row cost this exists to remove.
+export const CARD_FIELD_MAX = 300;
+export const CARD_LIST_MAX = 3;
+
+const cardStr = (value) => {
+  if (value == null) return null;
+  const s = String(value).trim();
+  return s ? s.slice(0, CARD_FIELD_MAX) : null;
+};
+
+const asList = (value) => (Array.isArray(value) ? value : []);
+
+export function cardFromProfile(profile) {
+  const source = profile && typeof profile === "object" && !Array.isArray(profile) ? profile : {};
+  const experiences = asList(source.experiences);
+  const education = asList(source.education);
+  return {
+    // Same bucket-prefix rule as the photos hash: foreign hosts and expiring
+    // signed URLs are dropped rather than baked into a long-lived card.
+    photo: typeof source.imageSrc === "string" && source.imageSrc.startsWith(PHOTO_URL_PREFIX)
+      ? cardStr(source.imageSrc)
+      : null,
+    title: cardStr(source.title),
+    location: cardStr(source.location),
+    updatedAt: cardStr(source.updatedAt),
+    exp: experiences.slice(0, CARD_LIST_MAX).map((row) => ({
+      role: cardStr(row?.roleTitle),
+      company: cardStr(row?.companyName),
+      start: cardStr(row?.start),
+      end: cardStr(row?.end),
+      current: Boolean(row?.current),
+      logo: cardStr(row?.logo),
+    })),
+    // Counts are of the FULL list, not the truncated one — the row shows
+    // "+N more" from these.
+    expCount: experiences.length,
+    edu: education.slice(0, CARD_LIST_MAX).map((row) => ({
+      school: cardStr(row?.school),
+      degree: cardStr(row?.degree),
+      start: cardStr(row?.start),
+      end: cardStr(row?.end),
+      logo: cardStr(row?.logo),
+    })),
+    eduCount: education.length,
+  };
 }
 
 export function createSyncHandler({
@@ -154,11 +215,11 @@ export function createSyncHandler({
         await writeJson(K.queue, doc);
         stored.queue = true;
       }
-      // Photos hygiene: the hash has no TTL, so without pruning it grows for
-      // every applicant ever seen while feed HGETALLs it on every poll. When a
-      // full publish arrives (snapshot AND queue together), photos for people
-      // no longer on the tab are dropped. Best-effort — a prune failure must
-      // never fail the push that carried real data.
+      // Photos/cards hygiene: neither hash has a TTL, so without pruning they
+      // grow for every applicant ever seen while feed HGETALLs photos on every
+      // poll. When a full publish arrives (snapshot AND queue together), rows
+      // for people no longer on the tab are dropped. Best-effort — a prune
+      // failure must never fail the push that carried real data.
       if (stored.snapshot && stored.queue) {
         try {
           const keep = new Set(
@@ -167,6 +228,13 @@ export function createSyncHandler({
           );
           const drop = (await readHashKeys(K.photos)).filter((cu) => !keep.has(cu));
           if (drop.length) await deleteHashFields(K.photos, drop);
+          // Same keep-set, but cards needs its own key list: a card is written
+          // for EVERY prewarmed profile while a photo only lands for bucket-
+          // hosted images, so the photos drop list would strand cards forever.
+          // Sequenced after the photos prune on purpose — the photos path keeps
+          // exactly the failure semantics it had before cards existed.
+          const dropCards = (await readHashKeys(K.cards)).filter((cu) => !keep.has(cu));
+          if (dropCards.length) await deleteHashFields(K.cards, dropCards);
         } catch { /* hygiene only */ }
       }
       if (body.acks != null) {
@@ -192,6 +260,12 @@ export function createSyncHandler({
         }
         if (Object.keys(normalized.photos).length) {
           await writeHash(K.photos, normalized.photos);
+        }
+        // One card per prewarmed profile, one HSET for the whole batch — the
+        // list rows read these instead of fetching a profile each.
+        const cards = Object.fromEntries(entries.map(([cu, profile]) => [cu, cardFromProfile(profile)]));
+        if (Object.keys(cards).length) {
+          await writeHash(K.cards, cards);
         }
         stored.profiles = entries.length;
       }
