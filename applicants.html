@@ -253,6 +253,10 @@
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
       <span class="spacer"></span>
       <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;renderLists()"><option value="all">All roles</option></select>
+      <select id="sortOrder" aria-label="Sort by application date" onchange="setSortOrder(this.value)">
+        <option value="newest">Newest to oldest</option>
+        <option value="oldest">Oldest to newest</option>
+      </select>
       <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;renderLists()" />
     </div>
 
@@ -289,13 +293,14 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 
 const LS_KEY = "apphub-local-decisions-v1";
+const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
   snapshot: null, decisions: {}, acks: {},
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "decided"
-  role: "all", query: "",
+  role: "all", query: "", sort: loadSortOrder(),
   checked: new Set(), busy: new Set(),
   modal: null,                        // { cu, key, row, source }
   loaded: false,
@@ -304,6 +309,16 @@ const AUTH = { required: false, clientId: "", authenticated: false, email: "" };
 
 function loadLocal() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch { return {}; } }
 function saveLocal() { try { localStorage.setItem(LS_KEY, JSON.stringify(STATE.local)); } catch {} }
+function loadSortOrder() {
+  try { return localStorage.getItem(SORT_KEY) === "oldest" ? "oldest" : "newest"; }
+  catch { return "newest"; }
+}
+function setSortOrder(value) {
+  STATE.sort = value === "oldest" ? "oldest" : "newest";
+  $("sortOrder").value = STATE.sort;
+  try { localStorage.setItem(SORT_KEY, STATE.sort); } catch {}
+  renderLists();
+}
 
 function toast(message, bad = false) {
   const el = $("toast");
@@ -357,6 +372,17 @@ function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
+function sortByApplicationDate(rows) {
+  const direction = STATE.sort === "oldest" ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    const aDate = parseDate(a.appliedAt), bDate = parseDate(b.appliedAt);
+    if (!aDate && !bDate) return String(a.key || "").localeCompare(String(b.key || ""));
+    if (!aDate) return 1;
+    if (!bDate) return -1;
+    const byDate = (aDate.getTime() - bDate.getTime()) * direction;
+    return byDate || String(a.key || "").localeCompare(String(b.key || ""));
+  });
+}
 function matchesFilters(row) {
   if (STATE.role !== "all" && (row.roleTitle || "") !== STATE.role) return false;
   const q = STATE.query.trim().toLowerCase();
@@ -444,6 +470,7 @@ function renderRoleFilter() {
   select.innerHTML = '<option value="all">All roles</option>' + roles.map((r) => '<option value="' + esc(r) + '">' + esc(r) + "</option>").join("");
   select.value = roles.includes(current) ? current : "all";
   STATE.role = select.value;
+  $("sortOrder").value = STATE.sort;
 }
 
 /* ---- Review view ---- */
@@ -487,12 +514,12 @@ function renderReview() {
     return;
   }
   let rows, decidedMode = STATE.chip === "decided";
-  if (decidedMode) rows = decidedRows().slice().sort((a, b) => String(effectiveDecision(b.key)?.at || "").localeCompare(String(effectiveDecision(a.key)?.at || "")));
+  if (decidedMode) rows = sortByApplicationDate(decidedRows());
   else {
     rows = pendingRows();
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
     if (STATE.chip === "unrated") rows = rows.filter((r) => r.tier !== "C");
-    rows = rows.slice().sort((a, b) => String(b.appliedAt || "").localeCompare(String(a.appliedAt || "")));
+    rows = sortByApplicationDate(rows);
   }
   const filtered = rows.filter(matchesFilters);
   if (!filtered.length) {
@@ -525,7 +552,7 @@ function renderStream() {
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
     return;
   }
-  const rows = streamRows().slice().sort((a, b) => String(b.addedAt || b.appliedAt || "").localeCompare(String(a.addedAt || a.appliedAt || "")));
+  const rows = sortByApplicationDate(streamRows());
   const filtered = rows.filter(matchesFilters);
   if (!filtered.length) {
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
