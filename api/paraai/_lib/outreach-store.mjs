@@ -340,6 +340,37 @@ export async function getContactCapability({ kvImpl = kv } = {}) {
   return parse(await kvImpl(["GET", CONTACT_CAPABILITY_KEY]), null);
 }
 
+// Fleet-wide Gmail stand-down. INCIDENT 2026-08-10: the mailbox's per-user
+// Gmail bucket was continuously exhausted (429 with a sliding Retry-After),
+// and because a pre-claim GMAIL_REQUEST_FAILED correctly leaves a request
+// retryable, every ~45-90s outreach pass re-attempted the same requests with
+// 6-10 Gmail calls each — the lane itself kept the bucket drained, starving
+// every other lane that mails as this mailbox (reminders, human-handoff,
+// interview invites). One observed 429 now arms this breaker: passes skip all
+// Gmail work until it expires (KV TTL is the timer), requests simply stay
+// eligible. Per-request retryability is untouched.
+const GMAIL_BACKOFF_KEY = "paraai:outreach:gmail-backoff";
+
+export async function armGmailBackoff({
+  ttlSeconds = 15 * 60,
+  kvImpl = kv,
+} = {}) {
+  const until = new Date(Date.now() + Math.max(60, ttlSeconds) * 1000).toISOString();
+  await kvImpl([
+    "SET",
+    GMAIL_BACKOFF_KEY,
+    until,
+    "EX",
+    Math.max(60, Math.floor(ttlSeconds)),
+  ]);
+  return until;
+}
+
+export async function getGmailBackoff({ kvImpl = kv } = {}) {
+  const raw = await kvImpl(["GET", GMAIL_BACKOFF_KEY]);
+  return raw ? String(raw) : null;
+}
+
 export async function claimOutreachExceptionAlert(
   requestId,
   {

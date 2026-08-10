@@ -58,6 +58,8 @@ import {
   acquireOutreachLock,
   acquireOutreachPollSlot,
   appendOutreachJournal,
+  armGmailBackoff,
+  getGmailBackoff,
   claimOutreachExceptionAlert,
   createOutreachState,
   getContactCapability,
@@ -1983,6 +1985,19 @@ export async function handleOutreachFailure(
   } = {},
 ) {
   const code = clean(error?.code || "OUTREACH_FAILED");
+  // One observed Gmail 429 stands the whole lane down (see armGmailBackoff).
+  // Alert at most once per 6h so the stand-down is visible without spamming.
+  if (code === "GMAIL_REQUEST_FAILED" && Number(error?.status) === 429) {
+    const until = await armGmailBackoff().catch(() => null);
+    if (until) {
+      const claimed = await claimOutreachExceptionAlert("gmail-429-backoff", { ttlSeconds: 6 * 60 * 60 }).catch(() => false);
+      if (claimed) {
+        await notifySlack(
+          `Para AI outreach: Gmail answered 429 (per-user rate limit) — outreach is standing down until ${until} so the mailbox bucket can recover. Requests stay queued; nothing is lost.`,
+        ).catch(() => {});
+      }
+    }
+  }
   const tracked = new Set([
     "AUTH_EXPIRED",
     "OUTREACH_NO_EMAIL",
@@ -2086,6 +2101,14 @@ export async function runOutreachTick({
   }
   const pollToken = await acquireOutreachPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!pollToken) return { enabled: true, processed: 0, reason: "poll_not_due" };
+  // Gmail-429 breaker (2026-08-10): while armed, run no Gmail work at all.
+  // Requests stay eligible and are picked up when the breaker expires; without
+  // this, the pass itself kept the mailbox's per-user bucket exhausted 24/7.
+  const gmailBackoffUntil = await getGmailBackoff().catch(() => null);
+  if (gmailBackoffUntil) {
+    await releaseOutreachPollSlot(pollToken).catch(() => {});
+    return { enabled: true, processed: 0, reason: "gmail_rate_limited", until: gmailBackoffUntil };
+  }
   try {
     const [history, states, exceptions] = await Promise.all([
       readSubmissionRequestHistory(),
