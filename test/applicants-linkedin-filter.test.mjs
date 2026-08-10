@@ -12,9 +12,9 @@ test("No LinkedIn chip sits between Unrated and Decided", () => {
   assert.match(applicants, />No LinkedIn <span class="n" id="chipCountNoLinkedin">0<\/span>/);
 });
 
-test("No LinkedIn count and queue use the same missing-profile predicate", () => {
-  assert.match(applicants, /function hasNoLinkedin\(row\) \{\s*return !String\(row\.linkedin \|\| ""\)\.trim\(\) \|\| STATE\.noLinkedinHistory\.has\(row\.cuId\);\s*\}/);
+test("No LinkedIn count and queue use the same missing-button predicate", () => {
+  assert.match(applicants, /function hasNoLinkedin\(row\) \{\s*return !String\(row\.linkedin \|\| ""\)\.trim\(\);\s*\}/);
   assert.match(applicants, /const pendingNoLinkedin = pendingRows\(\)\.filter\(hasNoLinkedin\)\.length;/);
   assert.match(applicants, /if \(STATE\.chip === "no-linkedin"\) rows = rows\.filter\(hasNoLinkedin\);/);
-  assert.match(applicants, /STATE\.noLinkedinHistory = new Set\(body\.noLinkedinHistory \|\| \[\]\);/);
+  assert.doesNotMatch(applicants, /noLinkedinHistory/);
 });
