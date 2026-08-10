@@ -22,12 +22,13 @@ export function createFeedHandler({
     if (!(await authHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
     try {
-      const [snapshot, queueDoc, decisions, acks, photos] = await Promise.all([
+      const [snapshot, queueDoc, decisions, acks, photos, counts] = await Promise.all([
         readJson(K.snapshot),
         readJson(K.queue),
         readHash(K.decisions),
         readHash(K.acks),
         readHash(K.photos),
+        readJson(K.counts),
       ]);
       // The queue is stored under its own key (size isolation); merge it back so
       // the page keeps reading one snapshot shape. A queue embedded directly in
@@ -36,7 +37,9 @@ export function createFeedHandler({
         snapshot.queue = queueDoc.rows;
       }
       res.setHeader("Cache-Control", "no-store");
-      return res.status(200).json({ ok: true, snapshot, decisions, acks, photos });
+      // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
+      // tab shows a warning banner when counts.alert is set, data untouched.
+      return res.status(200).json({ ok: true, snapshot, decisions, acks, photos, counts });
     } catch (error) {
       return res.status(502).json({
         ok: false,

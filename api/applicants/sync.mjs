@@ -11,6 +11,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import {
+  getJson,
   hashDelMany,
   hashGetAllJson,
   hashKeys,
@@ -157,11 +158,53 @@ export function cardFromProfile(profile) {
   };
 }
 
+// Count-drop tripwire. On 2026-08-10 a poisoned upstream CRM index collapsed
+// the review queue 2,244 → 22 overnight and the tab rendered it silently —
+// the only warnings were age-based. Sync is the one place that sees
+// consecutive publishes, so it keeps a tiny apphub:counts doc: the queue and
+// stream sizes of the last publish, plus a latched alert when either falls
+// below COUNT_DROP_RATIO of its baseline. The alert LATCHES on the pre-drop
+// baseline because a broken publisher republishes the same collapsed number
+// every cycle — compared only against the previous publish, the alert would
+// self-clear one cycle after tripping. It clears when the count recovers past
+// the ratio of that baseline. The floor keeps small queues quiet (4 → 1 is a
+// 75% drop and pure noise). Display-only by contract: a tripped alert never
+// rejects or blocks the sync — feed hands it to the tab, which shows a
+// banner while still rendering the data.
+export const COUNT_DROP_RATIO = 0.5;
+export const COUNT_DROP_FLOOR = 50;
+const COUNT_DIMENSIONS = ["queue", "stream"];
+
+export function nextCountsDoc(prev, incoming, at) {
+  const doc = { updatedAt: at, alert: null };
+  const alerts = {};
+  for (const dim of COUNT_DIMENSIONS) {
+    const next = incoming[dim];
+    const prior = typeof prev?.[dim] === "number" ? prev[dim] : null;
+    const latched = prev?.alert?.[dim];
+    if (typeof next !== "number") {
+      // This publish did not carry the dimension — carry it forward untouched.
+      if (prior != null) doc[dim] = prior;
+      if (latched) alerts[dim] = latched;
+      continue;
+    }
+    doc[dim] = next;
+    const baseline = latched ? latched.baseline : prior;
+    if (typeof baseline === "number" && baseline >= COUNT_DROP_FLOOR
+      && next < baseline * COUNT_DROP_RATIO) {
+      alerts[dim] = { baseline, seen: next, at: latched?.at || at };
+    }
+  }
+  if (Object.keys(alerts).length) doc.alert = alerts;
+  return doc;
+}
+
 export function createSyncHandler({
   kvReady = kvConfigured,
   readHash = hashGetAllJson,
   writeHash = hashSetJson,
   writeJson = setJson,
+  readJson = getJson,
   readHashKeys = hashKeys,
   deleteHashFields = hashDelMany,
   now = () => new Date().toISOString(),
@@ -236,6 +279,27 @@ export function createSyncHandler({
           const dropCards = (await readHashKeys(K.cards)).filter((cu) => !keep.has(cu));
           if (dropCards.length) await deleteHashFields(K.cards, dropCards);
         } catch { /* hygiene only */ }
+      }
+      // Count tripwire (see nextCountsDoc above). Best-effort like the prune:
+      // a counts failure must never fail the push that carried real data. The
+      // queue count prefers the split key; a queue embedded in the snapshot
+      // (older publisher) counts only when no split doc rode this POST —
+      // mirroring feed's merge precedence. A stored snapshot with no stream
+      // array counts as stream 0, because that is what the tab will render.
+      if (stored.snapshot || stored.queue) {
+        try {
+          const incoming = {
+            ...(stored.queue
+              ? { queue: body.queue.length }
+              : Array.isArray(body.snapshot?.queue)
+                ? { queue: body.snapshot.queue.length }
+                : {}),
+            ...(stored.snapshot
+              ? { stream: Array.isArray(body.snapshot.stream) ? body.snapshot.stream.length : 0 }
+              : {}),
+          };
+          await writeJson(K.counts, nextCountsDoc(await readJson(K.counts), incoming, now()));
+        } catch { /* display-only tripwire */ }
       }
       if (body.acks != null) {
         const normalized = normalizeAcks(body.acks, now);

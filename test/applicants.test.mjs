@@ -55,7 +55,7 @@ function response() {
 }
 
 function fakeStore(initial = {}) {
-  const calls = { readHash: [], writeHash: [], writeJson: [], readHashKeys: [], deleteHashFields: [] };
+  const calls = { readHash: [], writeHash: [], writeJson: [], readJson: [], readHashKeys: [], deleteHashFields: [] };
   return {
     calls,
     deps: {
@@ -63,6 +63,10 @@ function fakeStore(initial = {}) {
       readHash: async (key) => {
         calls.readHash.push(key);
         return initial[key] || {};
+      },
+      readJson: async (key) => {
+        calls.readJson.push(key);
+        return initial[key] ?? null;
       },
       writeHash: async (key, fields) => {
         calls.writeHash.push([key, fields]);
@@ -138,15 +142,17 @@ test("sync stores a small snapshot and refuses an oversized one before writing",
   await handler(request({ body: { snapshot } }), ok);
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(ok.body.stored, { snapshot: true, queue: false, acks: 0 });
-  assert.equal(calls.writeJson.length, 1);
-  assert.equal(calls.writeJson[0][0], "apphub:snapshot");
-  assert.deepEqual(calls.writeJson[0][1], snapshot);
+  // A stored snapshot also refreshes the apphub:counts tripwire doc, so the
+  // snapshot write is looked up by key rather than assumed to be the only one.
+  const snapshotWrites = () => calls.writeJson.filter(([key]) => key === "apphub:snapshot");
+  assert.equal(snapshotWrites().length, 1);
+  assert.deepEqual(snapshotWrites()[0][1], snapshot);
 
   const big = response();
   await handler(request({ body: { snapshot: { blob: "x".repeat(MAX_SNAPSHOT_BYTES) } } }), big);
   assert.equal(big.statusCode, 413);
   assert.equal(big.body.error, "snapshot_too_large");
-  assert.equal(calls.writeJson.length, 1); // the oversized snapshot never reached the store
+  assert.equal(snapshotWrites().length, 1); // the oversized snapshot never reached the store
 
   const notObject = response();
   await handler(request({ body: { snapshot: ["not", "an", "object"] } }), notObject);

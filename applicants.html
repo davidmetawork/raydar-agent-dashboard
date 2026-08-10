@@ -57,6 +57,7 @@
   .banner { display:none; gap:12px; padding:13px 15px; border-radius:13px; background:var(--warn-bg); color:var(--warn); margin-bottom:14px; line-height:1.45; }
   .banner.on { display:flex; }
   .banner strong { display:block; }
+  .banner.danger { background:var(--bad-bg); color:var(--bad); }
 
   /* view pills + toolbar */
   .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
@@ -287,6 +288,8 @@
 
     <div class="banner" id="staleBanner"><div>●</div><div><strong id="staleTitle">Snapshot is stale</strong><span id="staleText"></span></div></div>
 
+    <div class="banner danger" id="countsBanner"><div>●</div><div><strong>Counts dropped sharply since the last snapshot</strong><span id="countsText"></span></div></div>
+
     <div class="toolbar">
       <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
@@ -339,6 +342,7 @@ const PAGE = 25;
 const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
   snapshot: null, decisions: {}, acks: {},
+  counts: null,                       // sync's count-drop tripwire doc; .alert set = show the danger banner
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
@@ -487,6 +491,23 @@ function renderStats() {
   const chip = $("updatedChip"), banner = $("staleBanner");
   chip.classList.remove("amber", "red");
   banner.classList.remove("on");
+  // Count-drop tripwire banner: sync latches an alert in apphub:counts when a
+  // publish's queue or stream collapses versus the previous one (the 2026-08-10
+  // poisoned-index incident rendered 2,244 → 22 silently). Display-only — the
+  // data below still renders. Toggled before the no-snapshot early return so a
+  // missing snapshot can never hide an active alert.
+  const drops = STATE.counts?.alert || null;
+  if (drops) {
+    const dropLine = (label, d) => label + " " + Number(d.baseline).toLocaleString() + " → " + Number(d.seen).toLocaleString();
+    const parts = [];
+    if (drops.queue) parts.push(dropLine("review queue", drops.queue));
+    if (drops.stream) parts.push(dropLine("stream", drops.stream));
+    $("countsText").textContent = (parts.length ? parts.join(", ") + ". " : "")
+      + "Upstream data may be broken — check ~/Library/Logs/raydar-interview-index.log on the desktop. Everything below still renders the published snapshot.";
+    $("countsBanner").classList.add("on");
+  } else {
+    $("countsBanner").classList.remove("on");
+  }
   if (!at) { $("updatedText").textContent = "No snapshot yet"; chip.classList.add("amber"); return; }
   const ageH = (Date.now() - at.getTime()) / 3600000;
   $("updatedText").textContent = "Updated " + relTime(at);
@@ -1183,6 +1204,7 @@ async function loadFeed(manual = false) {
     STATE.decisions = body.decisions || {};
     STATE.acks = body.acks || {};
     STATE.photos = body.photos || {};
+    STATE.counts = body.counts || null;
     STATE.loaded = true;
     reconcileLocal();
     renderAll();

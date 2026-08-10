@@ -28,6 +28,11 @@
 //                              no TTL of its own. GET /api/applicants/cards
 //                              is a reader only, never a writer.
 //   apphub:rank:<companyId>  — GET  /api/applicants/profile only (30d TTL)
+//   apphub:counts            — POST /api/applicants/sync only (tiny doc: the
+//                              queue/stream sizes of the last publish plus a
+//                              latched count-drop alert; feed reads it so the
+//                              tab can warn when a publish collapses. Display
+//                              only — it never gates a sync or a feed.)
 
 const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
@@ -134,5 +139,6 @@ export const K = {
   profile: (cuId) => `apphub:profile:${cuId}`,
   photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
   cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
+  counts: "apphub:counts", // last publish's queue/stream sizes + latched drop alert (see header)
   rank: (companyId) => `apphub:rank:${companyId}`,
 };
