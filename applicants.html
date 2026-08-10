@@ -343,6 +343,7 @@ const STATE = {
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
   cards: {},                          // cuId -> compact card (headline, location, top-3 history) for the row
+  noLinkedinHistory: new Set(),       // cuIds whose cards confirm no experience or education history
   expanded: new Set(),                // cuIds whose inline history is showing in full
   limit: PAGE,                        // rows rendered in the active list; grows as the reader scrolls
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "no-linkedin" | "decided"
@@ -418,7 +419,9 @@ function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
-function hasLinkedin(row) { return Boolean(String(row.linkedin || "").trim()); }
+function hasNoLinkedin(row) {
+  return !String(row.linkedin || "").trim() || STATE.noLinkedinHistory.has(row.cuId);
+}
 function sortByApplicationDate(rows) {
   const direction = STATE.sort === "oldest" ? 1 : -1;
   return rows.slice().sort((a, b) => {
@@ -504,7 +507,7 @@ function renderPills() {
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
-  const pendingNoLinkedin = pendingRows().filter((r) => !hasLinkedin(r)).length;
+  const pendingNoLinkedin = pendingRows().filter(hasNoLinkedin).length;
   $("chipCountC").textContent = String(pendingC);
   $("chipCountU").textContent = String(pendingU);
   $("chipCountNoLinkedin").textContent = String(pendingNoLinkedin);
@@ -639,7 +642,7 @@ function reviewListRows() {
     rows = pendingRows();
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
     if (STATE.chip === "unrated") rows = rows.filter((r) => r.tier !== "C");
-    if (STATE.chip === "no-linkedin") rows = rows.filter((r) => !hasLinkedin(r));
+    if (STATE.chip === "no-linkedin") rows = rows.filter(hasNoLinkedin);
     rows = sortByApplicationDate(rows);
   }
   return { rows: rows.filter(matchesFilters), decidedMode };
@@ -1181,6 +1184,7 @@ async function loadFeed(manual = false) {
     STATE.decisions = body.decisions || {};
     STATE.acks = body.acks || {};
     STATE.photos = body.photos || {};
+    STATE.noLinkedinHistory = new Set(body.noLinkedinHistory || []);
     STATE.loaded = true;
     reconcileLocal();
     renderAll();
