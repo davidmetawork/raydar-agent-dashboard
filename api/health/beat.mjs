@@ -11,6 +11,8 @@ import { timingSafeEqual } from "node:crypto";
 import { hSet, K } from "./_lib/kv.mjs";
 import { beatLanes } from "./_lib/catalog.mjs";
 
+const BEAT_STATUSES = new Set(["ok", "warn", "fail"]);
+
 function authed(req) {
   const secret = process.env.HEALTH_BEAT_KEY || "";
   if (!secret) return false;
@@ -28,7 +30,12 @@ export default async function handler(req, res) {
   if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = null; } }
   const lane = String(body?.lane || "");
   if (!beatLanes.has(lane)) return res.status(404).json({ ok: false, error: "unknown_lane" });
-  const status = body?.status === "fail" ? "fail" : "ok";
+  // Keep an omitted status backward-compatible with the original green beat,
+  // but never turn a typo or a new unrecognised state into a false OK.
+  const status = body?.status === undefined ? "ok" : String(body.status);
+  if (!BEAT_STATUSES.has(status)) {
+    return res.status(400).json({ ok: false, error: "invalid_status" });
+  }
   const note = String(body?.note || "").slice(0, 200);
   await hSet(K.beat(lane), { at: new Date().toISOString(), status, note });
   return res.status(200).json({ ok: true, lane, status });

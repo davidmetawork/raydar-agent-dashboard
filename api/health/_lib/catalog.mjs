@@ -283,7 +283,9 @@ export const CATALOG = [
   // GitHub documents scheduled events as best-effort: they can be delayed or
   // dropped under load. One missed window is therefore DEGRADED; only sustained
   // silence is DOWN. A workflow that runs and reports failure is still DOWN
-  // immediately in beatLane().
+  // immediately in beatLane(). A completed run may instead report `warn` when
+  // the lane operated safely but quarantined a bounded candidate-level issue;
+  // that is DEGRADED immediately, while stale beats still become DOWN.
   ...[
     ["gha-cron-backstop", "Cron backstop", 150, 360],
     ["gha-human-outcomes", "Human outcomes", 450, 720],
