@@ -96,8 +96,10 @@
   .avatar { width:48px; height:48px; border-radius:50%; overflow:hidden; display:grid; place-items:center;
     background:var(--live-bg); color:#6658DA; font-weight:700; font-size:15px; flex:none; }
   .avatar img { width:100%; height:100%; object-fit:cover; display:block; }
-  .rc-main { flex:1; min-width:0; }
-  .rc-top { display:flex; align-items:flex-start; gap:16px; }
+  /* The action rail sits BESIDE the whole left column, not above the history —
+     stacking it on top made the row's top section as tall as the date plus two
+     buttons and left a dead band under the name. */
+  .rc-main { flex:1; min-width:0; display:flex; align-items:flex-start; gap:16px; }
   .rc-id { flex:1; min-width:0; }
   .who { min-width:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .who .name { display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:14.5px; letter-spacing:-.01em; cursor:pointer; max-width:100%; min-width:0; }
@@ -122,7 +124,7 @@
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .rc-applied b { color:var(--ink-2); font-weight:650; }
   /* inline history, label column on the left like Recruiter */
-  .rc-body { margin-top:8px; display:flex; flex-direction:column; gap:6px; }
+  .rc-body { margin-top:5px; display:flex; flex-direction:column; gap:5px; }
   .rc-sec { display:flex; gap:13px; align-items:flex-start; }
   .rc-lab { flex:none; width:88px; text-align:right; padding-top:1px; font-size:10px; font-weight:700; letter-spacing:.06em;
     text-transform:uppercase; color:var(--ink-3); white-space:nowrap; }
@@ -248,8 +250,8 @@
   .gateerr { color:var(--bad); font-size:12px; margin-top:10px; min-height:15px; }
 
   @media (max-width:820px) {
-    .rc-top { flex-direction:column; gap:9px; }
-    .rc-right { align-items:flex-start; flex-direction:row; align-self:stretch; justify-content:space-between; }
+    .rc-main { flex-direction:column; gap:9px; }
+    .rc-right { align-items:center; flex-direction:row; align-self:stretch; justify-content:space-between; }
     /* No room for a label gutter — stack the label above its lines rather than
        squeezing it into a column narrower than the word. */
     .rc-sec { flex-direction:column; gap:1px; }
@@ -598,15 +600,15 @@ function rowCardHtml(row, mode, decision) {
   return '<div class="row' + (decision ? " decided-row" : "") + '" data-row="' + esc(key) + '">' +
     check + avatarHtml(row) +
     '<div class="rc-main">' +
-      '<div class="rc-top"><div class="rc-id">' +
+      '<div class="rc-id">' +
         '<div class="who"><span class="name" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></span>" +
           nameLinks(row) + tierPill(row.tier) +
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(row.cuId) + '">' + esc(card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(row.cuId) + '">' + esc(card?.location || "") + "</div>" +
+        '<div class="rc-body" data-body="' + esc(row.cuId) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
-      '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div></div>" +
-      '<div class="rc-body" data-body="' + esc(row.cuId) + '">' + historyHtml(row) + "</div>" +
+      '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
     "</div></div>";
 }
 function reviewRowHtml(row, decision) { return rowCardHtml(row, "review", decision); }
@@ -809,7 +811,14 @@ const SCAN = { queued: false };
 function scheduleScan() {
   if (SCAN.queued) return;
   SCAN.queued = true;
-  requestAnimationFrame(() => { SCAN.queued = false; scanViewport(); });
+  // rAF alone is not enough: a browser throttles it hard for an iframe that is
+  // offscreen or in a background tab, and this page spends its life inside one.
+  // Without the timer, a reader who opens the tab and does not scroll would sit
+  // and watch skeletons forever. Whichever fires first wins; the flag makes the
+  // other a no-op.
+  const run = () => { if (!SCAN.queued) return; SCAN.queued = false; scanViewport(); };
+  requestAnimationFrame(run);
+  setTimeout(run, 120);
 }
 function scanViewport() {
   if (!STATE.loaded) return;
