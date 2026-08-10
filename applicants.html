@@ -303,6 +303,7 @@
       <div class="chips" id="chipsRow">
         <button class="chip-f" data-chip="ctier" onclick="setChip('ctier')">C-tier <span class="n" id="chipCountC">0</span></button>
         <button class="chip-f" data-chip="unrated" onclick="setChip('unrated')">Unrated <span class="n" id="chipCountU">0</span></button>
+        <button class="chip-f" data-chip="no-linkedin" onclick="setChip('no-linkedin')">No LinkedIn <span class="n" id="chipCountNoLinkedin">0</span></button>
         <button class="chip-f" data-chip="decided" onclick="setChip('decided')">Decided <span class="n" id="chipCountD">0</span></button>
         <span class="hint" id="chipHint"></span>
       </div>
@@ -344,7 +345,7 @@ const STATE = {
   cards: {},                          // cuId -> compact card (headline, location, top-3 history) for the row
   expanded: new Set(),                // cuIds whose inline history is showing in full
   limit: PAGE,                        // rows rendered in the active list; grows as the reader scrolls
-  view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "decided"
+  view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "no-linkedin" | "decided"
   role: "all", query: "", sort: loadSortOrder(),
   checked: new Set(), busy: new Set(),
   modal: null,                        // { cu, key, row, source }
@@ -417,6 +418,7 @@ function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
+function hasLinkedin(row) { return Boolean(String(row.linkedin || "").trim()); }
 function sortByApplicationDate(rows) {
   const direction = STATE.sort === "oldest" ? 1 : -1;
   return rows.slice().sort((a, b) => {
@@ -502,8 +504,10 @@ function renderPills() {
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
+  const pendingNoLinkedin = pendingRows().filter((r) => !hasLinkedin(r)).length;
   $("chipCountC").textContent = String(pendingC);
   $("chipCountU").textContent = String(pendingU);
+  $("chipCountNoLinkedin").textContent = String(pendingNoLinkedin);
   $("chipCountD").textContent = String(decidedRows().length);
   document.querySelectorAll("[data-chip]").forEach((el) => el.classList.toggle("active", el.dataset.chip === STATE.chip));
   $("chipHint").textContent = STATE.chip === "" ? "" : STATE.chip === "decided" ? "Archive of your calls" : "Click again to see the whole queue";
@@ -635,6 +639,7 @@ function reviewListRows() {
     rows = pendingRows();
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
     if (STATE.chip === "unrated") rows = rows.filter((r) => r.tier !== "C");
+    if (STATE.chip === "no-linkedin") rows = rows.filter((r) => !hasLinkedin(r));
     rows = sortByApplicationDate(rows);
   }
   return { rows: rows.filter(matchesFilters), decidedMode };
