@@ -293,7 +293,6 @@ function renderResult(kind, d){
     <div><b>${groups.length}</b><div>${seqLabel}</div></div>
   </div>` : `<div class="summ">
     <div><b>${d.enrolledTotal ?? 0}</b><div>enrolled</div></div>
-    <div><b>${d.createdTotal ?? 0}</b><div>created</div></div>
     <div><b>${parked}</b><div>identity parked</div></div>
     <div><b>${d.failedTotal ?? 0}</b><div>failed</div></div>
     <div><b>${groups.length}</b><div>${seqLabel}</div></div>
@@ -309,8 +308,7 @@ function renderResult(kind, d){
   html += `</table>`;
   if(kind==="preview"){
     const un = d.unmatchedSample||[];
-    if(un.length && d.unmatchedCreateGranted){ html += `<div class="banner warn" style="margin-top:14px"><b>${d.unmatched} unmatched identities have the exceptional create grant</b> — they will be created from their exact LinkedIn URL and enrolled: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
-    else if(un.length){ html += `<div class="banner warn" style="margin-top:14px"><b>${parked} unmatched identities will be parked</b> — no Paraform profile, enrollment, or email will be created until identity is resolved: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
+    if(un.length){ html += `<div class="banner warn" style="margin-top:14px"><b>${parked} unmatched identities will be parked</b> — no Paraform profile, enrollment, or email will be created until Applicant Hub or identity authority resolves them: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
     if(d.skipEstimate){ const b=d.bookedEstimate||0, s=d.skipEstimate-b, parts=[]; if(b)parts.push(`${b} already booked a call`); if(s)parts.push(`${s} already in another sequence`); html += `<div class="note" style="margin-top:8px"><b>~${d.skipEstimate} will be skipped</b> (${parts.join(", ")}) — not messaged. New applicants can't be booked, so the booked count is confirmed on enroll.</div>`; }
   }
   if(kind==="enroll"){

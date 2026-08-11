@@ -340,11 +340,11 @@ export async function projectEmailIndex(options = {}) {
 
 // ---------- delayed enrollment (store = Paraform projects, no extra infra) ----------
 // A scheduled cohort is a CRM project named "⏳SeqDelay|YYYY-MM-DD|sendAs|TPL|<Role>"
-// (templated) or "⏳SeqDelay|YYYY-MM-DD|sendAs|SEQ|<sequenceId>|<label>". Candidates
-// are resolved + filed at upload time; unmatched identities remain parked unless
-// the separately named create grant is enabled. The daily release cron enrolls due
-// projects (running the booked/in-sequence checks THEN — the whole point of the
-// delay) and deletes the project. State is visible/editable in Paraform's Projects UI.
+// (templated) or "⏳SeqDelay|YYYY-MM-DD|sendAs|SEQ|<sequenceId>|<label>". Resolved
+// candidates are filed at upload time; unmatched identities remain parked for the
+// external identity authority. The daily release cron enrolls due projects (running
+// the booked/in-sequence checks THEN — the whole point of the delay) and deletes the
+// project. State is visible/editable in Paraform's Projects UI.
 export const DELAY_PREFIX = "⏳SeqDelay|";
 export function delayProjectName({ dueDate, sendAs, kind, key, label }) {
   // key = role title (TPL) or sequence id (SEQ); label only used for SEQ display
@@ -408,52 +408,17 @@ export async function ensureRoleSequence(title, sendAs, seqCache) {
   return { id: newId, name: targetName, created: true };
 }
 
-// ---------- create / upsert a candidate from their LinkedIn URL ----------
+// ---------- candidate identity authority boundary ----------
 // The Sequences matcher proves only email membership inside MATCH_PROJECT_ID.
 // Absence there is NOT proof that the person is absent from the agency CRM, and
-// LinkedIn vanity URLs are mutable aliases rather than stable person ids. Keep
-// unmatched creation behind a separately named, exact-value deployment grant.
-// Existing candidate_user_id rows never need this grant.
-export const SEQUENCES_UNMATCHED_LINKEDIN_CREATE_GRANT_VALUE =
-  "allow-sequences-unmatched-linkedin-create-v1";
+// LinkedIn vanity URLs are mutable aliases rather than stable person ids. This
+// dashboard is not an identity authority and intentionally exposes no candidate-
+// create primitive or runtime override. Applicant Hub / the identity-authority
+// writer must resolve the row first; known candidate_user_id rows continue unchanged.
 export const SEQUENCE_IDENTITY_AUTHORITY_REQUIRED =
   "SEQUENCE_IDENTITY_AUTHORITY_REQUIRED";
 
-export function sequencesUnmatchedLinkedinCreateGranted(
-  value = process.env.SEQUENCES_UNMATCHED_LINKEDIN_CREATE_GRANT || "",
-) {
-  return value === SEQUENCES_UNMATCHED_LINKEDIN_CREATE_GRANT_VALUE;
-}
-
-// candidates.createExternalCandidateFromManual takes ONLY linkedin_url and
-// enriches from LinkedIn/CrustData. Paraform is idempotent only for the exact
-// URL string, so this primitive must remain default-off until the caller has a
-// separately authorized complete identity-absence proof.
-export async function createCandidate(linkedinUrl, {
-  createGrant = process.env.SEQUENCES_UNMATCHED_LINKEDIN_CREATE_GRANT || "",
-  postImpl = trpcPost,
-} = {}) {
-  if (!sequencesUnmatchedLinkedinCreateGranted(createGrant)) {
-    return Object.freeze({
-      id: null,
-      status: "parked",
-      parked: true,
-      reason: SEQUENCE_IDENTITY_AUTHORITY_REQUIRED,
-    });
-  }
-  const r = await postImpl("candidates.createExternalCandidateFromManual", {
-    linkedin_url: linkedinUrl,
-  });
-  return {
-    id: r?.candidate_user_id || null,
-    status: r?.status || "unknown",
-    parked: false,
-  };
-}
-
-export async function resolveSequenceCandidate(row, {
-  createCandidateImpl = createCandidate,
-} = {}) {
+export function resolveSequenceCandidate(row) {
   if (row?.candidate_user_id) {
     return {
       ok: true,
@@ -462,42 +427,12 @@ export async function resolveSequenceCandidate(row, {
       isNew: false,
     };
   }
-  const url = String(row?.linkedinUrl || "").trim();
-  if (!url) {
-    return { ok: false, email: row?.email, reason: "no LinkedIn URL" };
-  }
-  try {
-    const { id, status, parked, reason } = await createCandidateImpl(url);
-    if (parked || status === "parked") {
-      return {
-        ok: false,
-        email: row?.email,
-        parkedIdentity: true,
-        reason: reason || SEQUENCE_IDENTITY_AUTHORITY_REQUIRED,
-      };
-    }
-    return id
-      ? {
-          ok: true,
-          cu: id,
-          email: row?.email,
-          created: true,
-          isNew: status === "new",
-        }
-      : { ok: false, email: row?.email, reason: "no id returned" };
-  } catch (error) {
-    return {
-      ok: false,
-      email: row?.email,
-      reason: String(error?.message || error).slice(0, 120),
-    };
-  }
-}
-
-// Best-effort: file created candidates under the "LinkedIn Job Applicants" CRM project.
-export async function addToProject(candidateUserIds, projectId = CONFIG.MATCH_PROJECT_ID) {
-  if (!candidateUserIds.length) return { count: 0 };
-  return (await trpcPost("candidateProjects.addCandidateUsersToProject", { project_id: projectId, candidate_user_ids: candidateUserIds })) || { count: 0 };
+  return Object.freeze({
+    ok: false,
+    email: row?.email,
+    parkedIdentity: true,
+    reason: SEQUENCE_IDENTITY_AUTHORITY_REQUIRED,
+  });
 }
 
 export async function enrollIntoCampaign(campaignId, candidateUserIds) {
@@ -933,7 +868,7 @@ export async function buildPlan({ sequenceId, rows, sendAs }) {
     exists: targetId ? true : seqs.some((s) => s.name === targetName),
     rows: grows,                                            // all rows (carry email + linkedinUrl through)
     existingIds: grows.filter((r) => r.candidate_user_id).map((r) => r.candidate_user_id),
-    toCreate: grows.filter((r) => !r.candidate_user_id),   // unmatched rows; parked unless separately granted
+    unresolvedRows: grows.filter((r) => !r.candidate_user_id), // parked for the identity authority
     candidateCount: grows.length,
   });
   if (templated) {
