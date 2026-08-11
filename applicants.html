@@ -424,7 +424,7 @@ function streamRows() { return STATE.snapshot?.stream || []; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
 function hasNoLinkedin(row) {
-  return !String(row.linkedin || "").trim();
+  return !linkedinProfileUrl(row.linkedin);
 }
 function sortByApplicationDate(rows) {
   const direction = STATE.sort === "oldest" ? 1 : -1;
@@ -474,15 +474,123 @@ function statusPill(row) {
 }
 const ICON_LI = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="#0A66C2" d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>';
 const ICON_PF = '<svg viewBox="0 0 256 256" width="15" height="15" aria-hidden="true"><circle cx="128" cy="128" r="128" fill="#1A1A1A"/><path fill="#fff" d="M113.387 82.8678C113.387 77.8608 117.446 73.8018 122.453 73.8018H194.981V91.9338H122.453C117.446 91.9338 113.387 87.8748 113.387 82.8678Z"/><path fill="#fff" d="M59 128.195C59 123.188 63.059 119.129 68.066 119.129H194.991V137.261H68.066C63.059 137.261 59 133.202 59 128.195Z"/><path fill="#fff" d="M140.605 173.531C140.605 168.524 144.664 164.465 149.672 164.465H195.002V182.597H149.672C144.664 182.597 140.605 178.538 140.605 173.531Z"/></svg>';
-function liAnchor(url) {
+/** Paraform's `linkedin_user` contract permits either a bare public slug or a
+ *  complete profile URL. This is the browser port of Raydar's hardened
+ *  canonicalParaformLinkedinProfile boundary: normalize once at render time,
+ *  preserve slug case, and fail closed on malformed or non-profile values. */
+function linkedinRawUrlPath(value) {
+  const authorityStart = value.indexOf("://") + 3;
+  const pathStart = value.indexOf("/", authorityStart);
+  if (pathStart < 0) return "";
+  const queryStart = value.indexOf("?", authorityStart);
+  const fragmentStart = value.indexOf("#", authorityStart);
+  const endings = [queryStart, fragmentStart].filter((index) => index >= 0);
+  const pathEnd = endings.length ? Math.min(...endings) : value.length;
+  return pathStart < pathEnd ? value.slice(pathStart, pathEnd) : "";
+}
+function linkedinEncodedPathSegment(value) {
+  let current = value;
+  let decoded = false;
+  for (let iteration = 0; iteration < 16; iteration++) {
+    const hasEscape = /%[0-9a-f]{2}/iu.test(current);
+    if (!hasEscape) {
+      if (!decoded && current.includes("%")) return "";
+      break;
+    }
+    if (/%(?![0-9a-f]{2})/iu.test(current)) return "";
+    try { current = decodeURIComponent(current); } catch { return ""; }
+    decoded = true;
+    if (/[/\\?#\u0000-\u001f\u007f]/u.test(current)) return "";
+    if (iteration === 15 && /%[0-9a-f]{2}/iu.test(current)) return "";
+  }
+  if (
+    !current
+    || current === "."
+    || current === ".."
+    || /^AEMAAA[A-Za-z0-9_-]{16,512}$/u.test(current)
+    || !/^[A-Za-z0-9._-]+$/u.test(current)
+    || /[/\\?#\u0000-\u001f\u007f]/u.test(current)
+  ) return "";
+  try {
+    const encoded = encodeURIComponent(current)
+      .replace(/[!'()*]/gu, (character) => "%" + character.codePointAt(0).toString(16).toUpperCase())
+      .replace(/\.$/u, "%2E");
+    return encoded.length <= 200 ? encoded : "";
+  } catch {
+    return "";
+  }
+}
+function linkedinTrimmedUrlCandidate(value) {
+  return String(value ?? "").trim()
+    .replace(/^[<([{"']+/u, "")
+    .replace(/[>\])},"';:.!?]+$/u, "");
+}
+function linkedinProfileUrlOnce(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw || raw.length > 2048 || /[\\\u0000-\u001f\u007f]/u.test(raw)) return "";
+  const absolute = /^https?:\/\//iu.test(raw) ? raw : "https://" + raw;
+  let parsed;
+  try { parsed = new URL(absolute); } catch { return ""; }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/u, "");
+  const linkedinHost = hostname === "linkedin.com"
+    || hostname === "www.linkedin.com"
+    || /^[a-z]{2,3}\.linkedin\.com$/u.test(hostname);
+  if (
+    !["http:", "https:"].includes(parsed.protocol)
+    || !linkedinHost
+    || parsed.username
+    || parsed.password
+    || parsed.port
+  ) return "";
+
+  let path = linkedinRawUrlPath(absolute);
+  if (!path.startsWith("/") || path === "/") return "";
+  if (path.endsWith("/")) path = path.slice(0, -1);
+  const parts = path.split("/");
+  const route = parts[1];
+  const rawSegments = parts.slice(2);
+  if (
+    parts[0] !== ""
+    || !["in", "pub"].includes(route)
+    || rawSegments.some((segment) => !segment)
+    || (route === "in" && rawSegments.length !== 1)
+    || (route === "pub" && (rawSegments.length < 1 || rawSegments.length > 5))
+  ) return "";
+  const segments = rawSegments.map(linkedinEncodedPathSegment);
+  if (segments.some((segment) => !segment) || segments[0].length < 2) return "";
+  parsed.protocol = "https:";
+  parsed.hostname = "www.linkedin.com";
+  parsed.pathname = "/" + route + "/" + segments.join("/");
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.href.replace(/\/$/u, "");
+}
+function linkedinProfileUrl(value) {
+  const direct = linkedinProfileUrlOnce(linkedinTrimmedUrlCandidate(value));
+  if (direct && linkedinProfileUrlOnce(direct) === direct) return direct;
+  const slug = String(value ?? "").trim();
+  if (
+    slug.length < 2
+    || slug.length > 200
+    || /[\/\\\s?#]/u.test(slug)
+    || /%(?:2f|5c)/iu.test(slug)
+  ) return "";
+  const canonical = linkedinProfileUrlOnce("https://www.linkedin.com/in/" + slug);
+  return canonical && linkedinProfileUrlOnce(canonical) === canonical ? canonical : "";
+}
+function preferredLinkedinProfileUrl(primary, fallback) {
+  return linkedinProfileUrl(primary) || linkedinProfileUrl(fallback);
+}
+function liAnchor(value) {
+  const url = linkedinProfileUrl(value);
   if (!url) return "";
-  return '<a class="li-link" href="' + esc(url) + '" target="_blank" rel="noopener" title="LinkedIn" onclick="event.stopPropagation()">' + ICON_LI + "</a>";
+  return '<a class="li-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" title="LinkedIn" onclick="event.stopPropagation()">' + ICON_LI + "</a>";
 }
 function pfAnchor(cuId) {
   return '<a class="pf-link" href="https://www.paraform.com/calls?candidate_profile_id=' + esc(cuId) + '" target="_blank" rel="noopener" title="Open in Paraform" onclick="event.stopPropagation()">' + ICON_PF + "</a>";
 }
 function nameLinks(row) {
-  return '<span class="links">' + liAnchor(row.linkedin ? "https://linkedin.com/in/" + row.linkedin : "") + pfAnchor(row.cuId) + "</span>";
+  return '<span class="links">' + liAnchor(row.linkedin) + pfAnchor(row.cuId) + "</span>";
 }
 function initials(name) {
   return String(name || "").split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
@@ -620,7 +728,7 @@ function historyHtml(row) {
   const out = [];
   if (exps.length) out.push(secHtml("Experience", exps.map(expLineHtml).join("")));
   if (edus.length) out.push(secHtml("Education", edus.map(eduLineHtml).join("")));
-  if (!out.length) return '<div class="rc-none">No LinkedIn history on file.</div>';
+  if (!out.length) return '<div class="rc-none">No work or education history cached in Paraform.</div>';
   if (expanded) out.push('<button class="rc-more" data-less="' + esc(cu) + '">Show less</button>');
   else if (hidden > 0) out.push('<button class="rc-more" data-more="' + esc(cu) + '">Show all (' + (expTotal + eduTotal) + ")</button>");
   return out.join("");
@@ -1123,8 +1231,7 @@ function renderModal() {
   const profile = STATE.profiles[modal.cu];
   const loading = !(modal.cu in STATE.profiles);
   const p = profile || {};
-  const linkedin = p.linkedin || row.linkedin;
-  const linkedinUrl = linkedin ? (String(linkedin).startsWith("http") ? linkedin : "https://linkedin.com/in/" + linkedin) : "";
+  const linkedin = preferredLinkedinProfileUrl(p.linkedin, row.linkedin);
   const decision = modal.source === "queue" ? effectiveDecision(modal.key) : null;
   const busy = STATE.busy.has(modal.key);
   const parts = [];
@@ -1133,7 +1240,7 @@ function renderModal() {
     (p.title ? '<div class="headline">' + esc(p.title) + "</div>" : "") +
     '<div class="meta">' +
     (p.location ? "<span>" + esc(p.location) + "</span>" : "") +
-    '<span class="links">' + liAnchor(linkedinUrl) + pfAnchor(row.cuId) + "</span>" +
+    '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
     (p.updatedAt ? '<div class="p-asof">LinkedIn data as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
@@ -1154,7 +1261,7 @@ function renderModal() {
     if (Array.isArray(p.education) && p.education.length)
       parts.push('<div class="p-section"><h3>Education</h3>' + p.education.map(educationHtml).join("") + "</div>");
     if (!(p.experiences || []).length && !(p.education || []).length && p.degraded !== "paraform_auth")
-      parts.push('<div class="p-loading">No LinkedIn history on file for this applicant.</div>');
+      parts.push('<div class="p-loading">Paraform has no cached work or education history for this applicant.</div>');
   }
   if (modal.source === "queue") {
     parts.push('<div class="p-actions">' +
