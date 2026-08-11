@@ -340,10 +340,11 @@ export async function projectEmailIndex(options = {}) {
 
 // ---------- delayed enrollment (store = Paraform projects, no extra infra) ----------
 // A scheduled cohort is a CRM project named "⏳SeqDelay|YYYY-MM-DD|sendAs|TPL|<Role>"
-// (templated) or "⏳SeqDelay|YYYY-MM-DD|sendAs|SEQ|<sequenceId>|<label>". Candidates
-// are created + filed at upload time; the daily release cron enrolls due projects
-// (running the booked/in-sequence checks THEN — the whole point of the delay) and
-// deletes the project. State is visible/editable in Paraform's own Projects UI.
+// (templated) or "⏳SeqDelay|YYYY-MM-DD|sendAs|SEQ|<sequenceId>|<label>". Resolved
+// candidates are filed at upload time; unmatched identities remain parked for the
+// external identity authority. The daily release cron enrolls due projects (running
+// the booked/in-sequence checks THEN — the whole point of the delay) and deletes the
+// project. State is visible/editable in Paraform's Projects UI.
 export const DELAY_PREFIX = "⏳SeqDelay|";
 export function delayProjectName({ dueDate, sendAs, kind, key, label }) {
   // key = role title (TPL) or sequence id (SEQ); label only used for SEQ display
@@ -407,21 +408,31 @@ export async function ensureRoleSequence(title, sendAs, seqCache) {
   return { id: newId, name: targetName, created: true };
 }
 
-// ---------- create / upsert a candidate from their LinkedIn URL ----------
-// candidates.createExternalCandidateFromManual takes ONLY linkedin_url and enriches
-// from LinkedIn/CrustData. Idempotent by URL: re-runs return status:"existing" with the
-// SAME candidate_user_id, so re-uploading a cohort never duplicates. Returns the id, or
-// throws (e.g. "CrustData failed to enrich" for a bad/dead LinkedIn URL) — caller catches
-// per-row so one bad URL doesn't sink the batch.
-export async function createCandidate(linkedinUrl) {
-  const r = await trpcPost("candidates.createExternalCandidateFromManual", { linkedin_url: linkedinUrl });
-  return { id: r?.candidate_user_id || null, status: r?.status || "unknown" };
-}
+// ---------- candidate identity authority boundary ----------
+// The Sequences matcher proves only email membership inside MATCH_PROJECT_ID.
+// Absence there is NOT proof that the person is absent from the agency CRM, and
+// LinkedIn vanity URLs are mutable aliases rather than stable person ids. This
+// dashboard is not an identity authority and intentionally exposes no candidate-
+// create primitive or runtime override. Applicant Hub / the identity-authority
+// writer must resolve the row first; known candidate_user_id rows continue unchanged.
+export const SEQUENCE_IDENTITY_AUTHORITY_REQUIRED =
+  "SEQUENCE_IDENTITY_AUTHORITY_REQUIRED";
 
-// Best-effort: file created candidates under the "LinkedIn Job Applicants" CRM project.
-export async function addToProject(candidateUserIds, projectId = CONFIG.MATCH_PROJECT_ID) {
-  if (!candidateUserIds.length) return { count: 0 };
-  return (await trpcPost("candidateProjects.addCandidateUsersToProject", { project_id: projectId, candidate_user_ids: candidateUserIds })) || { count: 0 };
+export function resolveSequenceCandidate(row) {
+  if (row?.candidate_user_id) {
+    return {
+      ok: true,
+      cu: row.candidate_user_id,
+      email: row.email,
+      isNew: false,
+    };
+  }
+  return Object.freeze({
+    ok: false,
+    email: row?.email,
+    parkedIdentity: true,
+    reason: SEQUENCE_IDENTITY_AUTHORITY_REQUIRED,
+  });
 }
 
 export async function enrollIntoCampaign(campaignId, candidateUserIds) {
@@ -857,7 +868,7 @@ export async function buildPlan({ sequenceId, rows, sendAs }) {
     exists: targetId ? true : seqs.some((s) => s.name === targetName),
     rows: grows,                                            // all rows (carry email + linkedinUrl through)
     existingIds: grows.filter((r) => r.candidate_user_id).map((r) => r.candidate_user_id),
-    toCreate: grows.filter((r) => !r.candidate_user_id),   // rows needing createExternalCandidateFromManual
+    unresolvedRows: grows.filter((r) => !r.candidate_user_id), // parked for the identity authority
     candidateCount: grows.length,
   });
   if (templated) {
