@@ -298,6 +298,7 @@
       <select id="sortOrder" aria-label="Sort by application date" onchange="setSortOrder(this.value)">
         <option value="newest">Newest to oldest</option>
         <option value="oldest">Oldest to newest</option>
+        <option value="actioned" disabled>Most recently actioned</option>
       </select>
       <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;STATE.limit=PAGE;renderLists()" />
     </div>
@@ -436,6 +437,17 @@ function sortByApplicationDate(rows) {
     return byDate || String(a.key || "").localeCompare(String(b.key || ""));
   });
 }
+function sortByDecisionDate(rows) {
+  return rows.slice().sort((a, b) => {
+    const aDate = parseDate(effectiveDecision(a.key)?.at);
+    const bDate = parseDate(effectiveDecision(b.key)?.at);
+    if (!aDate && !bDate) return String(a.key || "").localeCompare(String(b.key || ""));
+    if (!aDate) return 1;
+    if (!bDate) return -1;
+    const byDate = bDate.getTime() - aDate.getTime();
+    return byDate || String(a.key || "").localeCompare(String(b.key || ""));
+  });
+}
 function matchesFilters(row) {
   if (STATE.role !== "all" && (row.roleTitle || "") !== STATE.role) return false;
   const q = STATE.query.trim().toLowerCase();
@@ -542,7 +554,15 @@ function renderRoleFilter() {
   select.innerHTML = '<option value="all">All roles</option>' + roles.map((r) => '<option value="' + esc(r) + '">' + esc(r) + "</option>").join("");
   select.value = roles.includes(current) ? current : "all";
   STATE.role = select.value;
-  $("sortOrder").value = STATE.sort;
+  renderSortControl();
+}
+
+function renderSortControl() {
+  const select = $("sortOrder");
+  const decidedMode = STATE.view === "review" && STATE.chip === "decided";
+  select.disabled = decidedMode;
+  select.value = decidedMode ? "actioned" : STATE.sort;
+  select.setAttribute("aria-label", decidedMode ? "Sorted by most recently actioned" : "Sort by application date");
 }
 
 /* ---- Review view ---- */
@@ -657,7 +677,7 @@ function patchRow(cu) {
 function reviewListRows() {
   const decidedMode = STATE.chip === "decided";
   let rows;
-  if (decidedMode) rows = sortByApplicationDate(decidedRows());
+  if (decidedMode) rows = sortByDecisionDate(decidedRows());
   else {
     rows = pendingRows();
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
@@ -719,7 +739,7 @@ function renderStream() {
   }
 }
 
-function renderLists() { renderPills(); renderReview(); renderStream(); postCounts(); }
+function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); postCounts(); }
 function renderAll() {
   renderStats(); renderRoleFilter(); renderLists();
   // A profile link opened in a new tab: rebuild it now that the feed can
