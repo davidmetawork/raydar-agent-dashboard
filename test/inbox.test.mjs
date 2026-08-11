@@ -12,6 +12,7 @@ import {
   flattenCampaignInbox,
   inboxReplyBucket,
   inboxTrpcGet,
+  isInboxRoleOutreachCampaign,
   mergeAndSortReplies,
   mergeInboxRefreshState,
   normalizeReplyCategory,
@@ -948,21 +949,47 @@ test("Paraform 401 burst responses are retried as throttles, not false expiry", 
 
 test("campaign selection retains disabled reply history when aggregate counts exist", () => {
   const selected = campaignsToScan([
-    { id: "disabled-history", status: "DISABLED", email_replies: 4 },
-    { id: "active-empty", status: "ACTIVE", email_replies: 0 },
-    { id: "disabled-empty", status: "DISABLED", email_replies: "0" },
-    { id: "", email_replies: 8 },
+    { id: "disabled-history", project_id: "project-1", status: "DISABLED", email_replies: 4 },
+    { id: "active-empty", project_id: "project-2", status: "ACTIVE", email_replies: 0 },
+    { id: "disabled-empty", project_id: "project-3", status: "DISABLED", email_replies: "0" },
+    { id: "", project_id: "project-4", email_replies: 8 },
   ]);
   assert.deepEqual(selected.map(({ id }) => id), ["disabled-history"]);
 
   const withMixedCounts = campaignsToScan([
-    { id: "active-counted", status: "ACTIVE", email_replies: 0 },
-    { id: "disabled-unknown", status: "DISABLED" },
+    { id: "active-counted", role_id: "role-1", status: "ACTIVE", email_replies: 0 },
+    { id: "disabled-unknown", role_id: "role-2", status: "DISABLED" },
   ]);
   assert.deepEqual(
     withMixedCounts.map(({ id }) => id),
     ["active-counted", "disabled-unknown"],
   );
+});
+
+test("Inbox campaign eligibility admits only linked role outreach and excludes the primary mailbox", () => {
+  assert.equal(isInboxRoleOutreachCampaign({
+    id: "project-outreach",
+    project_id: "project-1",
+    campaign_to_accounts: [{ account: { email: "david@heyraydar.com" } }],
+  }), true);
+  assert.equal(isInboxRoleOutreachCampaign({
+    id: "role-outreach",
+    role_id: "role-1",
+  }), true);
+  assert.equal(isInboxRoleOutreachCampaign({
+    id: "admin-follow-up",
+    name: "(Raydar Agent) No Matches - Added to Para AI",
+    campaign_to_accounts: [{ account: { email: "david@raydar.xyz" } }],
+  }), false);
+  assert.equal(isInboxRoleOutreachCampaign({
+    id: "linked-primary-mailbox",
+    project_id: "project-2",
+    campaign_to_accounts: [{ account: { email: "DAVID@RAYDAR.XYZ" } }],
+  }), false);
+  assert.equal(isInboxRoleOutreachCampaign({
+    id: "unlinked-generic-sequence",
+    campaign_to_accounts: [{ account: { email: "david@heyraydar.com" } }],
+  }), false);
 });
 
 test("company sequence inbox reads include the live audience discriminator", () => {
@@ -1050,24 +1077,33 @@ test("feed building bounds fanout and returns partial metadata with recent fallb
   const campaigns = [
     {
       id: "sequence-live",
+      project_id: "project-live",
       name: "Live sequence",
       email_replies: 1,
       can_reply: true,
     },
     {
       id: "sequence-failed",
+      project_id: "project-failed",
       name: "Failed disabled sequence",
       status: "DISABLED",
       email_replies: 2,
     },
     {
       id: "sequence-recent",
+      project_id: "project-recent",
       name: "Company sequence",
       kind: "COMPANY",
       email_replies: 1,
       can_reply: true,
     },
-    { id: "sequence-empty", name: "Empty sequence", email_replies: 0 },
+    { id: "sequence-empty", project_id: "project-empty", name: "Empty sequence", email_replies: 0 },
+    {
+      id: "sequence-admin",
+      name: "Administrative follow-up",
+      email_replies: 1,
+      campaign_to_accounts: [{ account: { email: "david@raydar.xyz" } }],
+    },
   ];
   const recentReplies = [
     {
@@ -1080,6 +1116,15 @@ test("feed building bounds fanout and returns partial metadata with recent fallb
       email_date: "2026-07-16T20:00:00.000Z",
       gmail_id: "gmail-recent",
       attachment_count: 2,
+    },
+    {
+      id: "lead-admin",
+      sequence_id: "sequence-admin",
+      candidate_name: "Administrative contact",
+      candidate_email: "admin-contact@example.com",
+      email_subject: "Re: Internal follow-up",
+      email_date: "2026-07-16T20:30:00.000Z",
+      gmail_id: "gmail-admin",
     },
   ];
   const inboxCalls = [];
@@ -1166,11 +1211,13 @@ test("feed building bounds fanout and returns partial metadata with recent fallb
     complete: 0,
   });
   assert.deepEqual(feed.scan, {
-    campaigns_total: 4,
+    campaigns_total: 5,
+    campaigns_excluded: 1,
     campaigns_attempted: 3,
     campaigns_succeeded: 2,
     campaigns_failed: 1,
     recent_count: 1,
+    recent_excluded: 1,
     recent_failed: false,
     failures: [{
       sequence_id: "sequence-failed",

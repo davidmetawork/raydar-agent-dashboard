@@ -78,6 +78,42 @@ function addressFields(source) {
   ].flatMap(addressParts);
 }
 
+function campaignAccountRows(campaign) {
+  return [
+    ...arrayValue(campaign?.campaign_to_accounts),
+    ...arrayValue(campaign?.send_from_accounts),
+    ...arrayValue(campaign?.sender_accounts),
+    ...arrayValue(campaign?.gmail_accounts),
+    ...arrayValue(campaign?.accounts),
+  ];
+}
+
+function campaignSenderAddresses(campaign) {
+  return [
+    ...addressFields(campaign),
+    campaign?.send_from_email,
+    campaign?.sender_email,
+    ...campaignAccountRows(campaign).flatMap((row) => [
+      ...addressFields(row),
+      ...addressFields(row?.account),
+      row?.email,
+      row?.account?.email,
+    ]),
+  ];
+}
+
+function linkedOutreachId(campaign) {
+  return stringValue(
+    campaign?.project_id
+    || campaign?.linked_project_id
+    || campaign?.candidate_project_id
+    || campaign?.project?.id
+    || campaign?.role_id
+    || campaign?.role_specific_id
+    || campaign?.role?.id,
+  );
+}
+
 function emailTokens(values) {
   return arrayValue(values).flatMap((value) => (
     String(value || "").toLowerCase().match(EMAIL_TOKEN_RE) || []
@@ -209,8 +245,19 @@ export function campaignInboxInput(campaign) {
   return input;
 }
 
+export function isInboxRoleOutreachCampaign(campaign) {
+  if (!stringValue(campaign?.id) || !linkedOutreachId(campaign)) return false;
+  const senderTokens = emailTokens(campaignSenderAddresses(campaign));
+  return !senderTokens.some((token) => INBOX_EXCLUDED_ADDRESSES.includes(token));
+}
+
 export function campaignsToScan(campaigns) {
-  const valid = arrayValue(campaigns).filter((campaign) => stringValue(campaign?.id));
+  // This is a role-outreach inbox, not an agency-wide Paraform mailbox. Only
+  // sequences positively linked to a role or sourcing Project are admitted.
+  // Generic/admin follow-ups have neither link and therefore fail closed.
+  // Campaign-level sender metadata is checked too, so attaching the primary
+  // Raydar inbox cannot opt a linked sequence back into Monitor ingestion.
+  const valid = arrayValue(campaigns).filter(isInboxRoleOutreachCampaign);
   const hasReplyCounts = valid.length > 0 && valid.every((campaign) => (
     Object.prototype.hasOwnProperty.call(campaign, "email_replies")
     && Number.isFinite(Number(campaign.email_replies))
@@ -360,6 +407,8 @@ export function mergeAndSortReplies(rows, recentReplies, campaigns, categoryByLe
     if (key) merged.set(key, row);
   }
   for (const recent of arrayValue(recentReplies)) {
+    const sequenceId = stringValue(recent?.sequence_id);
+    if (!campaignById.has(sequenceId)) continue;
     const row = recentFallbackRow(recent, campaignById, categoryByLead);
     if (shouldExcludeInboxReply(row, addressFields(recent))) continue;
     const key = rowKey(row);
@@ -525,14 +574,21 @@ export async function buildInboxRefresh({
   if (campaignResult.status === "rejected") throw campaignResult.reason;
   const campaignsRaw = campaignResult.value;
   const campaigns = arrayValue(campaignsRaw);
+  const eligibleCampaigns = campaigns.filter(isInboxRoleOutreachCampaign);
   const targets = campaignsToScan(campaigns);
+  const targetIds = new Set(
+    targets.map((campaign) => stringValue(campaign?.id)).filter(Boolean),
+  );
 
   const recentError = recentResult.status === "rejected"
     ? recentResult.reason
     : null;
-  const recentReplies = recentResult.status === "fulfilled"
+  const recentRepliesRaw = recentResult.status === "fulfilled"
     ? arrayValue(recentResult.value)
     : [];
+  const recentReplies = recentRepliesRaw.filter((reply) => (
+    targetIds.has(stringValue(reply?.sequence_id))
+  ));
   const recentByGmail = new Map(
     recentReplies
       .filter((item) => stringValue(item?.gmail_id))
@@ -588,12 +644,14 @@ export async function buildInboxRefresh({
         },
     scan: {
       campaigns_total: campaigns.length,
+      campaigns_excluded: campaigns.length - eligibleCampaigns.length,
       campaigns_targeted: targets.length,
       campaigns_attempted: selected.length,
       campaigns_deferred: Math.max(0, targets.length - selected.length),
       campaigns_succeeded: selected.length - failures.length,
       campaigns_failed: failures.length,
       recent_count: recentReplies.length,
+      recent_excluded: recentRepliesRaw.length - recentReplies.length,
       recent_failed: Boolean(recentError),
       failures: failures.map((item) => ({
         sequence_id: stringValue(item.campaign?.id),
@@ -626,10 +684,12 @@ export async function buildInboxFeed(options = {}) {
     counts: materialized.counts,
     scan: {
       campaigns_total: refresh.scan.campaigns_total,
+      campaigns_excluded: refresh.scan.campaigns_excluded,
       campaigns_attempted: refresh.scan.campaigns_targeted,
       campaigns_succeeded: refresh.scan.campaigns_succeeded,
       campaigns_failed: refresh.scan.campaigns_failed,
       recent_count: refresh.scan.recent_count,
+      recent_excluded: refresh.scan.recent_excluded,
       recent_failed: refresh.scan.recent_failed,
       failures: refresh.scan.failures,
     },
@@ -861,6 +921,7 @@ export function mergeInboxRefreshState(previousState, refresh) {
     campaigns_missing: Math.max(0, targetIds.size - seeded.length),
     campaigns_stale: staleCount,
     recent_count: Number(refresh?.scan?.recent_count) || recent.replies.length,
+    recent_excluded: Number(refresh?.scan?.recent_excluded) || 0,
     recent_failed: Boolean(refresh?.scan?.recent_failed),
     failure_error_counts: failureErrorCounts(failures),
     failures,
@@ -987,6 +1048,7 @@ export function assembleInboxSnapshotFeed(
       campaigns_missing: missingCount,
       campaigns_stale: staleCount,
       recent_count: snapshotState.recent?.replies?.length || 0,
+      recent_excluded: Number(snapshotState.meta?.recent_excluded) || 0,
       recent_failed: Boolean(snapshotState.meta?.recent_failed),
       failure_error_counts: snapshotState.meta?.failure_error_counts || {},
     },
