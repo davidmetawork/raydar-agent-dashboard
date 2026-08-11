@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet, sequencesUnmatchedLinkedinCreateGranted } from "./_lib/core.mjs";
 // Same external-booking-aware check enroll uses, so the preview cannot promise
 // to enrol someone enroll will skip.
 import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
@@ -16,15 +16,16 @@ export default async function handler(req, res) {
     if (!sequenceId || !rows.length) return res.status(400).json({ ok: false, error: "sequenceId and rows required" });
     const plan = await buildPlan({ sequenceId, rows, sendAs });
     // Estimate skips (already in a sequence). Read-only, so we can only check rows we
-    // already resolved to a candidate id (CRM-matched). Brand-new applicants that turn
-    // out to exist under a different email are caught at enroll time — so this is a
-    // lower bound. Reported as an estimate.
+    // already resolved to a candidate id (CRM-matched). Unmatched applicants stay
+    // parked unless deployment explicitly grants the unsafe URL-create fallback, so
+    // this remains a lower bound. Reported as an estimate.
     const already = await enrolledElsewhereSet();
-    // Booked check only applies to CRM-matched rows (brand-new applicants can't have
-    // booked). Enroll re-checks authoritatively after upsert.
+    // Booked check only applies to CRM-matched rows. Enroll re-checks resolved
+    // identities authoritatively before writing.
     const matchedIds = plan.groups.flatMap((g) => (g.rows || []).filter((r) => r.candidate_user_id).map((r) => r.candidate_user_id));
     const booked = await bookedSet(matchedIds);
     let skipEstimate = 0, bookedEstimate = 0;
+    const unmatchedCreateGranted = sequencesUnmatchedLinkedinCreateGranted();
     const groups = plan.groups.map((g) => {
       let gs = 0, gb = 0;
       for (const r of (g.rows || [])) {
@@ -39,7 +40,8 @@ export default async function handler(req, res) {
         willCreateSequence: plan.templated && !g.exists,
         candidates: g.candidateCount,
         alreadyInCrm: g.existingIds.length,
-        willCreateInCrm: g.toCreate.length,
+        willCreateInCrm: unmatchedCreateGranted ? g.toCreate.length : 0,
+        willParkIdentity: unmatchedCreateGranted ? 0 : g.toCreate.length,
         willSkip: gs,
       };
     });
@@ -53,6 +55,8 @@ export default async function handler(req, res) {
       unmatched: plan.unmatchedCount,
       skipEstimate,
       bookedEstimate,
+      unmatchedCreateGranted,
+      parkedIdentity: unmatchedCreateGranted ? 0 : plan.unmatchedCount,
       unmatchedSample: plan.unmatched.slice(0, 20).map((r) => ({ name: `${r.firstName || ""} ${r.lastName || ""}`.trim(), email: r.email })),
       groups,
     });

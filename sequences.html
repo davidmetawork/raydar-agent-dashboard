@@ -91,7 +91,7 @@
     <label>Upload CSV <span class="req">*</span></label>
     <div id="drop" class="drop">
       <div>📎&nbsp; Drag &amp; drop or browse (up to 15 files — CSV or XLSX)</div>
-      <div class="hint">LinkedIn Recruiter "Export all to XLSX" works as-is (role from Job Title) · CSV needs First Name, Last Name, Profile URL, Active Project · Email optional (no-email candidates enroll, then Enrich)</div>
+      <div class="hint">LinkedIn Recruiter "Export all to XLSX" works as-is (role from Job Title) · CSV needs First Name, Last Name, Profile URL, Active Project · Email optional for profiles already matched in Paraform</div>
     </div>
     <input id="file" type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden" multiple />
     <div id="csvInfo" class="note hidden"></div>
@@ -115,7 +115,7 @@
           <option value="7">In 7 days</option>
           <option value="14">In 14 days</option>
         </select>
-        <div class="note">Delayed cohorts are added to Paraform now but only enrolled (and booked-checked) on the due date — gives them time to book on their own.</div>
+        <div class="note">Delayed cohorts resolve existing Paraform profiles now, then enroll (and booked-check) on the due date. Unmatched identities are parked for review.</div>
       </div>
     </div>
 
@@ -182,10 +182,10 @@ drop.addEventListener("click", ()=>$("file").click());
 drop.addEventListener("drop", e=>{ if(e.dataTransfer.files.length) handleFiles([...e.dataTransfer.files]); });
 $("file").addEventListener("change", e=>{ if(e.target.files.length) handleFiles([...e.target.files]); });
 
-// Shared row mapper for both formats. Email is NOT required — candidates are created
-// from their LinkedIn Profile URL; a row needs a Profile URL (to create) OR an email
-// (to match an existing CRM record). No-email candidates enroll fine; they just can't
-// be *sent* until an address is found. LinkedIn Recruiter "Job Applicant Report" XLSX
+// Shared row mapper for both formats. Email is NOT required — a row needs a Profile
+// URL (to identify or park for review) OR an email (to match an existing CRM record).
+// Matched no-email candidates enroll fine; they just can't be *sent* until an address
+// is found. LinkedIn Recruiter "Job Applicant Report" XLSX
 // has no Active Project column but has Job Title — synthesize "Raydar - <Job Title>"
 // so the existing role fan-out ("Company - Title" -> Title) works unchanged.
 function mapRows(raw){
@@ -252,7 +252,7 @@ async function handleFiles(files){
     + (capped.length>1?` (${parsed.map(p=>`${p.name}: ${p.rows.length}`).join(" · ")})`:"")
     + ` — <b>${total}</b> candidates`
     + (dupes>0?` · ${dupes} cross-file duplicates merged`:"")
-    + (noEmail>0?` · <b>${noEmail}</b> without an email (enrolled now, emailed once an address is found — use Enrich)`:"")
+    + (noEmail>0?` · <b>${noEmail}</b> without an email (matched profiles can enroll; unmatched identities are parked)`:"")
     + (dropped>0?` · ${dropped} skipped (no Profile URL or email)`:"")
     + (files.length>15?` · <b>only the first 15 files were used</b>`:"") + `.`;
   drop.querySelector("div").textContent = "✓ "+label+" ("+total+" candidates)";
@@ -264,8 +264,8 @@ $("previewBtn").addEventListener("click", ()=>run("preview"));
 $("goBtn").addEventListener("click", ()=>{
   const days = parseInt($("delay").value,10)||0;
   const msg = days>0
-    ? "Schedule "+ROWS.length+" candidates for enrollment in "+days+" days? They're added to Paraform now; no emails until the due date (booked-check runs then)."
-    : "Enroll "+ROWS.length+" candidates into live Paraform sequences? This starts real emails.";
+    ? "Resolve "+ROWS.length+" candidates and schedule matched profiles for enrollment in "+days+" days? Unmatched identities will be parked; no emails until the due date (booked-check runs then)."
+    : "Resolve "+ROWS.length+" candidates and enroll matched profiles into live Paraform sequences? Unmatched identities will be parked; enrollment starts real emails.";
   if(confirm(msg)) run("enroll");
 });
 
@@ -285,14 +285,16 @@ async function run(kind){
 function renderResult(kind, d){
   const groups = d.groups||[];
   const seqLabel = (d.templated ?? (groups.length>1)) ? "role sequences" : "target";
+  const parked = d.parkedIdentity ?? d.parkedIdentityTotal ?? 0;
   let html = kind==="preview" ? `<div class="summ">
     <div><b>${d.totalRows ?? "—"}</b><div>rows</div></div>
     <div><b>${d.matched ?? 0}</b><div>already in CRM</div></div>
-    <div><b>${d.unmatched ?? 0}</b><div>will be created</div></div>
+    <div><b>${parked}</b><div>identity parked</div></div>
     <div><b>${groups.length}</b><div>${seqLabel}</div></div>
   </div>` : `<div class="summ">
     <div><b>${d.enrolledTotal ?? 0}</b><div>enrolled</div></div>
     <div><b>${d.createdTotal ?? 0}</b><div>created</div></div>
+    <div><b>${parked}</b><div>identity parked</div></div>
     <div><b>${d.failedTotal ?? 0}</b><div>failed</div></div>
     <div><b>${groups.length}</b><div>${seqLabel}</div></div>
   </div>`;
@@ -307,10 +309,12 @@ function renderResult(kind, d){
   html += `</table>`;
   if(kind==="preview"){
     const un = d.unmatchedSample||[];
-    if(un.length){ html += `<div class="note" style="margin-top:14px"><b>${d.unmatched} new to Paraform</b> — will be auto-created from their LinkedIn URL and enrolled: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
+    if(un.length && d.unmatchedCreateGranted){ html += `<div class="banner warn" style="margin-top:14px"><b>${d.unmatched} unmatched identities have the exceptional create grant</b> — they will be created from their exact LinkedIn URL and enrolled: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
+    else if(un.length){ html += `<div class="banner warn" style="margin-top:14px"><b>${parked} unmatched identities will be parked</b> — no Paraform profile, enrollment, or email will be created until identity is resolved: `+un.map(u=>u.email||u.name||"?").join(", ")+(d.unmatched>un.length?" …":"")+`</div>`; }
     if(d.skipEstimate){ const b=d.bookedEstimate||0, s=d.skipEstimate-b, parts=[]; if(b)parts.push(`${b} already booked a call`); if(s)parts.push(`${s} already in another sequence`); html += `<div class="note" style="margin-top:8px"><b>~${d.skipEstimate} will be skipped</b> (${parts.join(", ")}) — not messaged. New applicants can't be booked, so the booked count is confirmed on enroll.</div>`; }
   }
   if(kind==="enroll"){
+    if(parked){ html += `<div class="banner warn" style="margin-top:12px"><b>${parked} unmatched identities were parked</b> — no Paraform profile, enrollment, or email was created for them.</div>`; }
     if(d.skippedTotal){ const parts=[]; if(d.skippedBookedTotal)parts.push(`${d.skippedBookedTotal} already booked a call`); if(d.skippedInSequence)parts.push(`${d.skippedInSequence} already in another sequence`); html += `<div class="note" style="margin-top:12px"><b>${d.skippedTotal} skipped</b> (${parts.join(", ")||"already engaged"} — not messaged).</div>`; }
     const cf = d.createFailures||[];
     if(cf.length){ html += `<div class="banner bad" style="margin-top:12px"><b>${d.failedTotal} could not be created</b> (bad/dead LinkedIn URL — enroll the rest, fix these by hand): `+cf.map(f=>(f.email||"?")+" — "+f.reason).join("; ")+`</div>`; }
@@ -323,14 +327,16 @@ function renderDelayed(d){
   const groups = d.groups||[];
   let html = `<div class="summ">
     <div><b>${d.scheduledTotal ?? 0}</b><div>scheduled</div></div>
+    <div><b>${d.parkedIdentityTotal ?? 0}</b><div>identity parked</div></div>
     <div><b>${d.failedTotal ?? 0}</b><div>failed</div></div>
     <div><b>${groups.length}</b><div>${groups.length>1?"cohorts":"cohort"}</div></div>
     <div><b>${d.dueDate}</b><div>enrolls on</div></div>
   </div>`;
-  html += `<div class="note">Sequence: <b>${d.sequence}</b> · send as <b>${d.sendAs}</b> · candidates were created in Paraform now; enrollment + the booked-check run automatically on <b>${d.dueDate}</b> (daily 9am PT). Anyone who books before then is skipped.</div>`;
+  html += `<div class="note">Sequence: <b>${d.sequence}</b> · send as <b>${d.sendAs}</b> · resolved profiles were scheduled; enrollment + the booked-check run automatically on <b>${d.dueDate}</b> (daily 9am PT). Anyone who books before then is skipped.</div>`;
   html += `<table><tr><th>Role</th><th>Target sequence</th><th>Scheduled</th></tr>`;
   for(const g of groups) html += `<tr><td>${g.role||"—"}</td><td>${g.target||""}</td><td>${g.scheduled ?? 0}</td></tr>`;
   html += `</table>`;
+  if(d.parkedIdentityTotal){ html += `<div class="banner warn" style="margin-top:12px"><b>${d.parkedIdentityTotal} unmatched identities were parked</b> — no Paraform profile, delayed enrollment, or email was created for them.</div>`; }
   const cf = d.createFailures||[];
   if(cf.length){ html += `<div class="banner bad" style="margin-top:12px"><b>${d.failedTotal} could not be created</b>: `+cf.map(f=>(f.email||"?")+" — "+f.reason).join("; ")+`</div>`; }
   $("outBody").innerHTML = html;
