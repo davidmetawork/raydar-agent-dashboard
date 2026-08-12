@@ -292,10 +292,19 @@ export const CATALOG = [
     group: "actions",
     tier: 1,
     kind: "beat",
+    // The guard's cron is */5, but GitHub does NOT deliver that: measured over
+    // 2026-08-12, every scheduled gap exceeded 30 minutes (median 80, max 107)
+    // while every run SUCCEEDED. A 30-minute dead-man on a best-effort
+    // scheduler is therefore a 100%-false-alarm lane — and because this lane is
+    // tier 1, that false silence took the whole public rollup to 503 and broke
+    // the external dead-man that health-backstop.yml depends on. Windows are
+    // now set from observed delivery, not from the cron string. No real signal
+    // is lost: beatLane() returns DOWN on a `fail` beat before it looks at any
+    // window, so a genuinely disabled Vercel cron still pages immediately.
     probe: {
       lane: "gha-scheduler-cron-guard",
-      degradedAfterMin: 15,
-      maxSilenceMin: 30,
+      degradedAfterMin: 120,
+      maxSilenceMin: 240,
     },
     registry: "/products/raydar-scheduler/",
     note: "Exact Vercel project cron-control proof; a fail beat pages immediately.",

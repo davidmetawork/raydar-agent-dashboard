@@ -137,6 +137,39 @@ test("Scheduler cron control failure is immediately DOWN on a paging lane", () =
   assert.match(result.reason, /production Scheduler crons disabled/u);
 });
 
+// The guard's cron is */5, but GitHub delivers scheduled events best-effort.
+// Measured on 2026-08-12: every gap between scheduled runs exceeded 30 minutes
+// (median 80, max 107) while every run succeeded. The lane is tier 1, so a
+// window tighter than GitHub's real delivery does not just cry wolf — it takes
+// the public rollup to 503 and blinds the external dead-man. Size the window
+// from observed delivery, not from the cron string.
+test("Scheduler cron control tolerates GitHub's real scheduled-run latency", () => {
+  const check = byId.get("gha-scheduler-cron-guard");
+  const beatAgedMin = (mins, status = "ok") => beatLane({
+    probe: check.probe,
+    beat: { at: new Date(Date.now() - mins * 60_000).toISOString(), status },
+  });
+  assert.equal(
+    beatAgedMin(107).state,
+    "OK",
+    "the worst observed GitHub delivery gap must not be an alarm",
+  );
+  assert.ok(
+    check.probe.maxSilenceMin >= 240,
+    "a dead-man on a best-effort scheduler needs hours of silence, not minutes",
+  );
+  assert.equal(
+    beatAgedMin(check.probe.maxSilenceMin + 1).state,
+    "DOWN",
+    "sustained silence must still be DOWN — this is a dead-man, not a mute",
+  );
+  assert.equal(
+    beatAgedMin(1, "fail").state,
+    "DOWN",
+    "widening the window must never soften an observed failure",
+  );
+});
+
 test("desktop collapse: a closed laptop is one event, not sixteen", () => {
   const many = Array.from({ length: 10 }, (_, i) => ({ id: `l${i}`, state: "DOWN" }));
   assert.equal(desktopRunner({ laneStates: many }).state, "DOWN");
