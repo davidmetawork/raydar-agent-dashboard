@@ -68,6 +68,11 @@ export function bookingDoorHold({ body }) {
   }
   if (holdStatus === 429) return DEG("hold probe rate-limited", metrics);
   if (holdStatus === 403) return DOWN(`booking gates off: ${hold?.error || "403"}`, metrics);
+  if (holdStatus >= 500) {
+    // Any server error IS the door failing — the 2026-08-12 Neon quota outage
+    // 500'd here for 7.5h and sat in UNKNOWN, which never pages.
+    return DOWN(`hold probe HTTP ${holdStatus}: ${hold?.error || "server error"}`, metrics);
+  }
   return UNK(`unexpected hold answer HTTP ${holdStatus}`, metrics);
 }
 

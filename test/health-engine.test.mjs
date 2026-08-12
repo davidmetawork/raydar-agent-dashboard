@@ -358,4 +358,13 @@ test("booking door judges the hold path, and calls out a lying health mirror", a
     health: { ok: true, agentAdmission: true, checks: { sequenceStop: false } },
   } });
   assert.equal(degraded.state, "DEGRADED");
+
+  // 2026-08-12: Neon quota exhaustion made /api/hold 500 (unmapped SQLSTATE
+  // 53000) for 7.5h; the old evaluator filed it UNKNOWN, which never pages.
+  const serverError = bookingDoorHold({ body: {
+    hold: { error: "internal_error" }, holdStatus: 500,
+    health: { ok: false, agentAdmission: null, checks: {} },
+  } });
+  assert.equal(serverError.state, "DOWN");
+  assert.match(serverError.reason, /HTTP 500/);
 });
