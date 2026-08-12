@@ -286,6 +286,20 @@ export const CATALOG = [
   // immediately in beatLane(). A completed run may instead report `warn` when
   // the lane operated safely but quarantined a bounded candidate-level issue;
   // that is DEGRADED immediately, while stale beats still become DOWN.
+  {
+    id: "gha-scheduler-cron-guard",
+    name: "Scheduler cron control",
+    group: "actions",
+    tier: 1,
+    kind: "beat",
+    probe: {
+      lane: "gha-scheduler-cron-guard",
+      degradedAfterMin: 15,
+      maxSilenceMin: 30,
+    },
+    registry: "/products/raydar-scheduler/",
+    note: "Exact Vercel project cron-control proof; a fail beat pages immediately.",
+  },
   ...[
     ["gha-cron-backstop", "Cron backstop", 150, 360],
     ["gha-human-outcomes", "Human outcomes", 450, 720],

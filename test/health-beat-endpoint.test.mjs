@@ -97,3 +97,23 @@ test("health beat keeps an omitted status backward-compatible as OK", async () =
   assert.equal(res.body.status, "ok");
   assert.equal(JSON.parse(writes[0][2]).status, "ok");
 });
+
+test("health beat accepts the Scheduler cron control-plane guard lane", async () => {
+  writes.length = 0;
+  const res = response();
+  await beatHandler(request({
+    lane: "gha-scheduler-cron-guard",
+    status: "fail",
+    note: "production Scheduler crons disabled",
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    ok: true,
+    lane: "gha-scheduler-cron-guard",
+    status: "fail",
+  });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][1], "hlth:beat:gha-scheduler-cron-guard");
+  assert.equal(JSON.parse(writes[0][2]).status, "fail");
+});

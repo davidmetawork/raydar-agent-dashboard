@@ -121,6 +121,22 @@ test("scheduled heartbeat jitter degrades before sustained silence is DOWN", () 
   assert.equal(failed.state, "DOWN", "an observed failure is never softened by the jitter window");
 });
 
+test("Scheduler cron control failure is immediately DOWN on a paging lane", () => {
+  const check = byId.get("gha-scheduler-cron-guard");
+  assert.ok(check);
+  assert.equal(check.tier, 1);
+  const result = beatLane({
+    probe: check.probe,
+    beat: {
+      at: new Date().toISOString(),
+      status: "fail",
+      note: "production Scheduler crons disabled",
+    },
+  });
+  assert.equal(result.state, "DOWN");
+  assert.match(result.reason, /production Scheduler crons disabled/u);
+});
+
 test("desktop collapse: a closed laptop is one event, not sixteen", () => {
   const many = Array.from({ length: 10 }, (_, i) => ({ id: `l${i}`, state: "DOWN" }));
   assert.equal(desktopRunner({ laneStates: many }).state, "DOWN");
@@ -229,10 +245,12 @@ test("catalog is internally consistent", () => {
   // pager-drill is a temporary synthetic check; it is removed after the drill.
   const tier1 = CATALOG.filter((c) => c.tier === 1 && !c.id.startsWith("pager-drill")).map((c) => c.id);
   assert.deepEqual(tier1.sort(), [
-    "booking-door", "calls-api", "lifecycle-connector-chase", "lifecycle-human-handoff",
-    "paraform-session", "screener-feed", "screener-uplink",
+    "booking-door", "calls-api", "gha-scheduler-cron-guard", "lifecycle-connector-chase",
+    "lifecycle-human-handoff", "paraform-session", "screener-feed", "screener-uplink",
   ]);
   assert.ok(byId.get("booking-door"));
+  assert.ok(byId.get("gha-scheduler-cron-guard"));
+  assert.ok(beatLanes.has("gha-scheduler-cron-guard"));
   assert.ok(beatLanes.has("hm-chase"));
 });
 
