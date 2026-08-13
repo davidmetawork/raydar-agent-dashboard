@@ -73,6 +73,7 @@
     padding:9px 11px; font:13px "Inter Variable"; outline:none; }
   .toolbar select:focus, .toolbar input[type=text]:focus { border-color:var(--orange); }
   .toolbar input[type=text] { min-width:190px; }
+  .toolbar .decision-filter[hidden] { display:none; }
 
   /* filter chips (Review view) */
   .chips { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
@@ -190,12 +191,11 @@
   /* profile modal */
   .modal { position:fixed; inset:0; background:rgba(22,20,15,.58); z-index:40; display:none; align-items:flex-start; justify-content:center; padding:24px; overflow:hidden; }
   .modal.open { display:flex; }
-  /* Embedded in the Monitor shell the iframe has no viewport of its own (it is
-     sized to its content and the SHELL scrolls), so a fixed overlay would pin
-     itself to the top of a 3000px document. In that mode JS measures the band
-     of the iframe the reader can actually see and positions the overlay there;
-     the card scrolls inside itself and contains its overscroll, so the page
-     behind never moves. */
+  /* Embedded in the Monitor shell, the fixed-height iframe and the shell can
+     both clip or scroll the Applicants document. A fixed overlay would pin
+     itself to the wrong portion of a long list, so JS measures the exact
+     document-space band the reader can see and positions the overlay there;
+     the card scrolls inside itself and contains its overscroll. */
   .modal.embedded { position:absolute; inset:auto 0 auto 0; }
   .modal-card { width:min(720px,100%); background:#fff; border-radius:20px; padding:26px 28px; box-shadow:0 24px 90px rgba(0,0,0,.28);
     margin:auto; max-height:100%; overflow-y:auto; overscroll-behavior:contain; }
@@ -300,6 +300,13 @@
         <option value="oldest">Oldest to newest</option>
         <option value="actioned" disabled>Most recently actioned</option>
       </select>
+      <select id="decisionFilter" class="decision-filter" aria-label="Filter decided applicants by outcome" onchange="setDecisionFilter(this.value)" hidden>
+        <option value="all">All decisions</option>
+        <option value="passed">Passed</option>
+        <option value="queued">Queued to send</option>
+        <option value="emailed">Emailed</option>
+        <option value="blocked">Blocked</option>
+      </select>
       <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;STATE.limit=PAGE;renderLists()" />
     </div>
 
@@ -351,7 +358,7 @@ const STATE = {
   expanded: new Set(),                // cuIds whose inline history is showing in full
   limit: PAGE,                        // rows rendered in the active list; grows as the reader scrolls
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "no-linkedin" | "decided"
-  role: "all", query: "", sort: loadSortOrder(),
+  role: "all", query: "", sort: loadSortOrder(), decisionStatus: "all",
   checked: new Set(), busy: new Set(),
   modal: null,                        // { cu, key, row, source }
   loaded: false,
@@ -671,18 +678,45 @@ function renderSortControl() {
   select.disabled = decidedMode;
   select.value = decidedMode ? "actioned" : STATE.sort;
   select.setAttribute("aria-label", decidedMode ? "Sorted by most recently actioned" : "Sort by application date");
+  renderDecisionFilter(decidedMode);
 }
 
 /* ---- Review view ---- */
 function ackFor(key) { return STATE.acks[key] || null; }
+function decisionStatus(key, decision) {
+  const ack = ackFor(key);
+  if (decision?.action === "pass") return "passed";
+  if (ack?.status === "invited") return "emailed";
+  if (ack?.status === "blocked") return "blocked";
+  return "queued";
+}
+function setDecisionFilter(value) {
+  STATE.decisionStatus = ["passed", "queued", "emailed", "blocked"].includes(value) ? value : "all";
+  STATE.limit = PAGE;
+  renderLists();
+}
+function renderDecisionFilter(decidedMode) {
+  const select = $("decisionFilter");
+  select.hidden = !decidedMode;
+  select.disabled = !decidedMode;
+  select.value = STATE.decisionStatus;
+  const counts = { passed: 0, queued: 0, emailed: 0, blocked: 0 };
+  for (const row of decidedRows()) counts[decisionStatus(row.key, effectiveDecision(row.key))] += 1;
+  const labels = { passed: "Passed", queued: "Queued to send", emailed: "Emailed", blocked: "Blocked" };
+  select.options[0].textContent = "All decisions (" + decidedRows().length + ")";
+  for (const [status, label] of Object.entries(labels)) {
+    const option = select.querySelector('option[value="' + status + '"]');
+    option.textContent = label + " (" + counts[status] + ")";
+  }
+}
 function decidedStatusHtml(key, decision) {
   const ack = ackFor(key);
   const by = String(decision.by || "").split("@")[0] || "you";
   const when = decision.at ? shortDate(decision.at) + " · " + relTime(decision.at) : "";
   let chip;
-  if (decision.action === "pass") chip = '<span class="decided-chip passed">Passed</span>';
-  else if (ack && ack.status === "invited") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
-  else if (ack && ack.status === "blocked") chip = '<span class="decided-chip blocked">Blocked: ' + esc(ack.reason || "see loop log") + "</span>";
+  if (decisionStatus(key, decision) === "passed") chip = '<span class="decided-chip passed">Passed</span>';
+  else if (decisionStatus(key, decision) === "emailed") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
+  else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">Blocked: ' + esc(ack.reason || "see loop log") + "</span>";
   else chip = '<span class="decided-chip queued">Queued to send</span>';
   const undo = !ack ? '<button class="undo" data-act="undo" data-key="' + esc(key) + '">Undo</button>' : "";
   return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
@@ -785,7 +819,12 @@ function patchRow(cu) {
 function reviewListRows() {
   const decidedMode = STATE.chip === "decided";
   let rows;
-  if (decidedMode) rows = sortByDecisionDate(decidedRows());
+  if (decidedMode) {
+    rows = sortByDecisionDate(decidedRows());
+    if (STATE.decisionStatus !== "all") {
+      rows = rows.filter((row) => decisionStatus(row.key, effectiveDecision(row.key)) === STATE.decisionStatus);
+    }
+  }
   else {
     rows = pendingRows();
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
@@ -947,11 +986,11 @@ async function decide(key, action, row, silent = false) {
 }
 
 /* ---- what the reader can actually see ----------------------------------
-   Embedded in the Monitor shell this page has no scrollport of its own: the
-   iframe is as tall as its content and the SHELL scrolls. An IntersectionObserver
-   inside the frame therefore calls every row visible at once, which would defeat
-   both paging and lazy hydration. Same-origin lets us measure the shell directly
-   and compute the band of this document the reader is looking at. */
+   Embedded in the Monitor shell, the fixed-height iframe can scroll its own
+   long document while the SHELL can also move or clip that frame. A plain
+   IntersectionObserver cannot express both coordinate systems reliably.
+   Same-origin lets us measure the shell-visible slice and translate it by this
+   document's own scroll offset before driving paging and lazy hydration. */
 function parentWin() { try { return window.frameElement ? window.parent : null; } catch { return null; } }
 function viewBand() {
   const pw = parentWin();
@@ -960,7 +999,13 @@ function viewBand() {
       const rect = window.frameElement.getBoundingClientRect();
       const top = Math.max(0, -rect.top);
       const bottom = Math.max(top, Math.min(rect.height, pw.innerHeight - rect.top));
-      return { top, bottom };
+      // The shell can clip the frame while the frame also scrolls its own
+      // document once a long archive exceeds the fixed iframe height. `top`
+      // and `bottom` above are frame-viewport coordinates; translate them by
+      // this document's scroll position before comparing them with row
+      // document coordinates. Without this offset, Decided stopped hydrating
+      // and paging after the first frameful.
+      return { top: window.scrollY + top, bottom: window.scrollY + bottom };
     } catch { /* cross-origin or detached — fall through to our own viewport */ }
   }
   return { top: window.scrollY, bottom: window.scrollY + window.innerHeight };
@@ -1380,8 +1425,8 @@ async function onCredential(response) {
 function startApp() {
   loadFeed();
   if (!startApp.timer) startApp.timer = setInterval(loadFeed, 60000);
-  // Hydration and paging follow the SHELL's scroll when embedded (this frame
-  // has no scrollport of its own), our own when standalone.
+  // Hydration and paging follow both scrollports when embedded (the iframe's
+  // own long document and the shell around it), or just ours when standalone.
   if (!startApp.scrollBound) {
     startApp.scrollBound = true;
     window.addEventListener("scroll", scheduleScan, { passive: true });

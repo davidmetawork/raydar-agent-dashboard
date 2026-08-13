@@ -18,7 +18,7 @@ test("Applicants defaults and persists the date sort preference", () => {
 });
 
 test("Review and Stream use application dates, while Decided uses newest action first", () => {
-  assert.match(applicants, /if \(decidedMode\) rows = sortByDecisionDate\(decidedRows\(\)\)/);
+  assert.match(applicants, /if \(decidedMode\) \{\s*rows = sortByDecisionDate\(decidedRows\(\)\)/);
   assert.match(applicants, /rows = sortByApplicationDate\(rows\)/);
   assert.match(applicants, /const rows = sortByApplicationDate\(streamRows\(\)\)/);
   assert.match(applicants, /if \(!aDate\) return 1;\s*if \(!bDate\) return -1;/);
