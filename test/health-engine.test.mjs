@@ -268,7 +268,7 @@ test("seq health: the live PARAFORM_THROTTLED shape is DEGRADED, not a false gre
 test("catalog is internally consistent", () => {
   assert.equal(new Set(CATALOG.map((c) => c.id)).size, CATALOG.length, "ids unique");
   for (const c of CATALOG) {
-    assert.ok(["candidate", "pipeline", "fly", "n8n", "actions", "desktop", "deps"].includes(c.group), `${c.id} group`);
+    assert.ok(["candidate", "pipeline", "email", "fly", "n8n", "actions", "desktop", "deps"].includes(c.group), `${c.id} group`);
     assert.ok([1, 2, 3].includes(c.tier), `${c.id} tier`);
     assert.ok(["pull", "beat", "derived"].includes(c.kind), `${c.id} kind`);
     if (c.kind === "pull") assert.ok(c.probe.url, `${c.id} needs a url`);
@@ -276,9 +276,14 @@ test("catalog is internally consistent", () => {
   }
   // Tier 1 = wakes a human. Keep that list short and candidate-facing.
   // pager-drill is a temporary synthetic check; it is removed after the drill.
+  // email-inbox-david joined 2026-08-13: a corroborated david@ mailbox lockout
+  // starves candidate-facing email (handoff, reminders, invites) and only
+  // David can clear the third-party halves — but its DOWN needs two
+  // independent 429 witnesses, so a single self-healing breaker never pages.
   const tier1 = CATALOG.filter((c) => c.tier === 1 && !c.id.startsWith("pager-drill")).map((c) => c.id);
   assert.deepEqual(tier1.sort(), [
-    "booking-door", "calls-api", "gha-scheduler-cron-guard", "lifecycle-connector-chase",
+    "booking-door", "calls-api", "email-inbox-david", "gha-scheduler-cron-guard",
+    "lifecycle-connector-chase",
     "lifecycle-human-handoff", "paraform-session", "screener-feed", "screener-uplink",
   ]);
   assert.ok(byId.get("booking-door"));

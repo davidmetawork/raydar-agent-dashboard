@@ -246,7 +246,15 @@ export function n8nWatchdog({ watchdog }) {
 export function beatLane({ probe, beat }) {
   if (!beat) return UNK("no beats yet");
   const mins = ageMin(beat.at);
-  const metrics = { lastBeat: beat.at, ageMin: mins, status: beat.status };
+  // Producer-reported numbers (sent, deferred, gmail429…) ride the beat and
+  // surface on the tile. Spread first: the freshness fields are the board's
+  // own facts and must never be overwritten by a producer key collision.
+  const metrics = {
+    ...(beat.metrics && typeof beat.metrics === "object" ? beat.metrics : {}),
+    lastBeat: beat.at,
+    ageMin: mins,
+    status: beat.status,
+  };
   if (beat.status === "fail") {
     return DOWN(`lane reported failure: ${String(beat.note || "").slice(0, 120)}`, metrics);
   }
@@ -356,6 +364,236 @@ export function slackTransport({ lastDelivered }) {
   return OK(null, { lastDelivered: lastDelivered.at });
 }
 
+// ---------- email lanes ----------
+// Spec: docs/PRD-EMAIL-LANES-HEALTH-2026-08-13.md (main repo). Everything in
+// this section is a PASSIVE read of witnesses that already exist — never a
+// Gmail call. During a lockout every Gmail request re-quotes the now+15min
+// penalty, so an active probe would hold the very lock it reports on.
+
+const GMAIL_429_RE = /429|rate.?limit|quota|gmail/i;
+
+const futureIso = (iso) => {
+  const t = Date.parse(iso || "");
+  return Number.isFinite(t) && t > Date.now();
+};
+
+/** Newest per-day counter entries, for send-volume metrics. Counter keys are
+ *  date strings (PT dates in the lifecycle files); lexical sort orders them. */
+const newestCounters = (counters) => {
+  if (!counters || typeof counters !== "object") return {};
+  const days = Object.keys(counters).sort().reverse().slice(0, 2);
+  const out = {};
+  if (days[0]) out.sentLatestDay = Number(counters[days[0]]?.sent) || 0;
+  if (days[1]) out.sentPriorDay = Number(counters[days[1]]?.sent) || 0;
+  return out;
+};
+
+/**
+ * A lifecycle Gmail send lane, judged from its own state file (human-handoff
+ * or connector-chase): heartbeat freshness, consecutive failures, persisted
+ * Gmail quota state, queue depth and per-day send counters. The existing
+ * 401-alive tiles prove the FUNCTION exists; this proves mail is MOVING.
+ */
+export function lifecycleEmailLane({ body, status, keyMissing }) {
+  if (keyMissing) return UNK("key-missing: LIFECYCLE_GIST_ID not provisioned");
+  if (!body || typeof body !== "object") return UNK(`unparseable state file (HTTP ${status})`);
+  const health = body.health;
+  if (!health || typeof health !== "object") return UNK("state file has no health block — schema drift?");
+  const mins = health.lastOkAt ? ageMin(health.lastOkAt) : null;
+  const consecutive = Number(health.consecutiveFailures) || 0;
+  const quota = body.quota || {};
+  const backoffArmed = futureIso(quota.retryAfter);
+  const metrics = {
+    lastOkAt: health.lastOkAt || null,
+    ageMin: mins,
+    consecutiveFailures: consecutive,
+    lastCode: health.lastCode || null,
+    ...(body.pending && typeof body.pending === "object"
+      ? { pending: Object.keys(body.pending).length } : {}),
+    ...(backoffArmed ? { gmailRetryAfter: quota.retryAfter } : {}),
+    ...newestCounters(body.counters),
+  };
+  if (mins == null) return UNK("lane has never recorded a successful tick", metrics);
+  if (mins > 180) return DOWN(`no successful tick for ${mins}m`, metrics);
+  if (consecutive >= 6) return DOWN(`${consecutive} consecutive failures (last: ${health.lastCode || "?"})`, metrics);
+  if (backoffArmed) return DEG(`Gmail backoff armed until ${quota.retryAfter}`, metrics);
+  if (consecutive >= 3) return DEG(`${consecutive} consecutive failures (last: ${health.lastCode || "?"})`, metrics);
+  if (mins > 45) return DEG(`last successful tick ${mins}m ago`, metrics);
+  return OK(null, metrics);
+}
+
+/** Para AI outreach as an EMAIL lane: config/readiness from the paraai health
+ *  payload already fetched this tick, plus the fleet Gmail breaker key. */
+export function paraaiOutreachEmail({ results, gmailBackoffUntil }) {
+  const raw = results["paraai-lane"]?.raw;
+  const outreach = raw?.outreach;
+  const breakerArmed = futureIso(gmailBackoffUntil);
+  const metrics = {
+    breakerArmed,
+    ...(breakerArmed ? { breakerUntil: String(gmailBackoffUntil) } : {}),
+    ...(outreach ? {
+      approved: outreach.approved,
+      sendApproved: outreach.sendApproved,
+      executionReady: outreach.executionReady,
+      mailbox: outreach.mailbox || null,
+    } : {}),
+    due: raw?.automation?.queue?.due,
+  };
+  if (breakerArmed) {
+    return DEG(`Gmail 429 breaker armed until ${gmailBackoffUntil} — sends queued, not lost`, metrics);
+  }
+  if (!outreach) return UNK("paraai health unavailable this tick", metrics);
+  if (outreach.approved && outreach.executionReady === false) {
+    return DEG("outreach approved but not execution-ready", metrics);
+  }
+  return OK(null, metrics);
+}
+
+/** The scheduler's OWN sending identity (a separate Gmail bucket from
+ *  david@) — read from the booking-door health fetch already in every tick. */
+export function schedulerSenderEmail({ results }) {
+  const raw = results["booking-door"]?.raw;
+  const checks = raw?.health?.checks || raw?.checks || null;
+  if (!checks) return UNK("scheduler public health unavailable");
+  if (checks.gmail === false) {
+    return DOWN("scheduler reports its Gmail check failing — booking emails are not going out");
+  }
+  if (checks.nativeReminders === false) {
+    return DEG("scheduler reminder lane not reporting healthy");
+  }
+  return OK();
+}
+
+/** Paraform-platform outreach email, from the seq + inbox payloads already
+ *  fetched this tick. Volume rides sequenceCount. */
+export function paraformSequencesEmail({ results }) {
+  const seq = results["seq-guardian"]?.raw;
+  const inbox = results["inbox-health"];
+  // The inbox RESULT object exists even when its probe could not run — only a
+  // non-UNKNOWN state is an observation. Without one real observation this
+  // tile must say UNKNOWN, or an offline tick scores platform email OK.
+  const inboxObserved = inbox && inbox.state !== "UNKNOWN";
+  if (!seq && !inboxObserved) return UNK("no seq/inbox health available this tick");
+  const metrics = { sequenceCount: seq?.sequenceCount };
+  const bs = seq?.bookingStop || {};
+  if (bs.stale === true) {
+    return DEG(`booking-stop sweep stale${bs.latestAttemptError ? `: ${bs.latestAttemptError}` : ""}`, metrics);
+  }
+  if (inbox && inbox.state === "DOWN") {
+    return DEG("reply-snapshot lane down — replies to platform email are invisible", metrics);
+  }
+  return OK(null, metrics);
+}
+
+/** The ~27 Paraform-connected sending accounts, via the cached roster
+ *  endpoint (which is the only thing that talks to Paraform). */
+export function paraformMailboxes({ body, status, keyMissing }) {
+  if (keyMissing) return UNK("key-missing: HEALTH_BEAT_KEY not provisioned");
+  if (!body || typeof body !== "object" || !("counts" in body || "paraform" in body)) {
+    return UNK(`response is not a mailboxes payload (HTTP ${status})`);
+  }
+  if (body.paraform !== "live") {
+    return UNK(`Paraform roster unreadable: ${body.error || body.paraform || "unavailable"} (session tile covers the cookie)`);
+  }
+  const c = body.counts || {};
+  const metrics = {
+    total: c.total,
+    gmailActive: c.gmailActive,
+    gmailError: c.gmailError,
+    davidGmailStatus: body.davidGmailStatus || null,
+    cacheAgeMin: body.cacheAgeMin,
+    ...(Array.isArray(body.errorDomains) && body.errorDomains.length
+      ? { errorDomains: body.errorDomains.slice(0, 10).join(",") } : {}),
+  };
+  const total = Number(c.total) || 0;
+  const errors = Number(c.gmailError) || 0;
+  if (!total) return UNK("roster returned zero accounts", metrics);
+  if (String(body.davidGmailStatus || "").toUpperCase() === "ERROR") {
+    return DOWN("david@raydar.xyz shows ERROR in Paraform — applicant/no-match sequences cannot send", metrics);
+  }
+  if (errors >= total * 0.3) return DOWN(`${errors}/${total} sending accounts in ERROR`, metrics);
+  if (errors > 0) return DEG(`${errors}/${total} sending accounts in ERROR`, metrics);
+  return OK(null, metrics);
+}
+
+/**
+ * THE INBOX TILE: can automations use david@raydar.xyz right now?
+ *
+ * Judged ONLY from independent witnesses that already observed the mailbox —
+ * never by asking Gmail (see the design rule at the top of this section).
+ * One witness = a lane hit a 429 and its breaker is handling it (DEGRADED).
+ * Two independent witnesses = the 2026-08-09 lockout shape (DOWN, tier 1 —
+ * the recovery levers, Apps Script and Fyxer, are David's alone).
+ */
+export function gmailInboxDavid({ results, beats, gmailBackoffUntil, kvOk, probe }) {
+  const witnesses = [];
+  let sourcesReadable = 0;
+
+  // W1 — the Para AI fleet breaker: set only when a pass actually saw a 429.
+  // hGet returns null for both "not armed" and "KV unreadable"; kvOk is what
+  // separates a healthy absence from blindness.
+  if (kvOk) sourcesReadable += 1;
+  if (futureIso(gmailBackoffUntil)) {
+    witnesses.push(`Para AI breaker armed until ${gmailBackoffUntil}`);
+  }
+
+  // W2 — connector chase's persisted quota state.
+  const connector = results["email-connector-chase"];
+  if (connector?.raw) {
+    sourcesReadable += 1;
+    const quota = connector.raw.quota || {};
+    if (futureIso(quota.retryAfter)) {
+      witnesses.push(`connector quota.retryAfter ${quota.retryAfter}`);
+    } else if (Number(quota.consecutive) >= 3) {
+      witnesses.push(`connector ${quota.consecutive} consecutive quota hits`);
+    }
+  }
+
+  // W3 — any david@-bucket desktop lane whose beat reports a Gmail/429 note.
+  const laneList = probe?.davidLanes || [];
+  const distressed = [];
+  for (const lane of laneList) {
+    const beat = beats?.[lane];
+    if (!beat) continue;
+    sourcesReadable += 1;
+    if ((beat.status === "warn" || beat.status === "fail") && GMAIL_429_RE.test(String(beat.note || ""))) {
+      distressed.push(lane);
+    }
+  }
+  if (distressed.length) witnesses.push(`beat 429 from ${distressed.join(", ")}`);
+
+  // W4 — send-lane distress: a 429-family lastCode in human-handoff's state,
+  // or the reminder lane silent past two hours.
+  const handoff = results["email-human-handoff"];
+  if (handoff?.raw) {
+    sourcesReadable += 1;
+    const code = String(handoff.raw.health?.lastCode || "");
+    if (GMAIL_429_RE.test(code)) witnesses.push(`handoff lastCode ${code}`);
+  }
+  const reminders = results["email-precall-reminders"];
+  if (reminders && reminders.state !== "UNKNOWN") {
+    sourcesReadable += 1;
+    if (Number(reminders.metrics?.ageMin) > 120) {
+      witnesses.push(`reminders silent ${reminders.metrics.ageMin}m`);
+    }
+  }
+
+  const metrics = {
+    witnesses: witnesses.length,
+    sourcesReadable,
+    ...(witnesses.length ? { evidence: witnesses.slice(0, 4).join(" + ") } : {}),
+    ...(futureIso(gmailBackoffUntil) ? { breakerUntil: String(gmailBackoffUntil) } : {}),
+  };
+  if (witnesses.length >= 2) {
+    return DOWN(`mailbox rate-limited — ${witnesses.slice(0, 3).join(" + ")}`, metrics);
+  }
+  if (witnesses.length === 1) {
+    return DEG(`one 429 witness: ${witnesses[0]}`, metrics);
+  }
+  if (!sourcesReadable) return UNK("no witness source readable this tick", metrics);
+  return OK(null, metrics);
+}
+
 export const EVALUATORS = {
   bookingDoorHold,
   bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable, authGated,
@@ -363,4 +601,6 @@ export const EVALUATORS = {
   n8nWatchdog, beatLane, desktopRunner,
   vendorApi, googleWorkspace, neonDb, nativeReminders, upstashKv, slackTransport,
   n8nCloud,
+  lifecycleEmailLane, paraaiOutreachEmail, schedulerSenderEmail,
+  paraformSequencesEmail, paraformMailboxes, gmailInboxDavid,
 };

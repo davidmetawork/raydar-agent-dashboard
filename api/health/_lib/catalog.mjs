@@ -14,11 +14,25 @@
 export const GROUPS = [
   { id: "candidate", label: "Candidate-facing" },
   { id: "pipeline", label: "Pipeline" },
+  { id: "email", label: "Email lanes" },
   { id: "fly", label: "Fly apps" },
   { id: "n8n", label: "n8n" },
   { id: "actions", label: "GitHub Actions" },
   { id: "desktop", label: "Desktop lanes" },
   { id: "deps", label: "Dependencies" },
+];
+
+// Beat lanes that touch the david@raydar.xyz per-user Gmail bucket. Their
+// warn/fail beat notes are eligible 429 witnesses for the email-inbox-david
+// tile (a beat from resume-feed is NOT — that lane reads resume@metawork.us,
+// a separate bucket that stayed green through the whole 2026-08-09 lockout).
+export const DAVID_MAILBOX_BEAT_LANES = [
+  "booking-resume-sync",
+  "booking-resume-retry",
+  "resume-chase",
+  "interview-invites",
+  "hm-chase",
+  "tn-reenable",
 ];
 
 export const CATALOG = [
@@ -226,6 +240,180 @@ export const CATALOG = [
     registry: "/products/clients-site/",
   },
 
+  // ---------- B2. email lanes ----------
+  // Email is Raydar's largest silent-failure surface (480 unalerted send
+  // failures 2026-08-04; the ~37h david@ mailbox lockout 2026-08-09/10).
+  // Spec: docs/PRD-EMAIL-LANES-HEALTH-2026-08-13.md (main repo).
+  //
+  // DESIGN RULE: never probe Gmail actively — during a lockout every call
+  // re-quotes the now+15min penalty, so a monitoring probe would hold the
+  // lock open. Everything here derives from witnesses that already exist.
+  {
+    id: "email-inbox-david",
+    name: "david@raydar.xyz mailbox",
+    group: "email",
+    tier: 1,
+    kind: "derived",
+    probe: { evaluate: "gmailInboxDavid", davidLanes: DAVID_MAILBOX_BEAT_LANES },
+    registry: "/products/email-lanes-health/",
+    note: "Can automations use the shared mailbox right now? DOWN needs two independent 429 witnesses; one witness is DEGRADED (a breaker is handling it).",
+  },
+  {
+    id: "email-precall-reminders",
+    name: "Pre-call reminder emails",
+    group: "email",
+    tier: 2,
+    kind: "pull",
+    probe: {
+      url: "https://raydar-lifecycle.vercel.app/api/reminders-health",
+      authEnv: "CALL_REMINDER_HEALTH_READ_KEY",
+      timeoutMs: 10000,
+      okStatuses: [200, 401, 503],
+      evaluate: "reminderHealth",
+    },
+    registry: "/products/pre-call-reminders/",
+    note: "T-24h/T-1h reminder emails to booked candidates, sent as david@raydar.xyz from the lifecycle project.",
+  },
+  {
+    id: "email-human-handoff",
+    name: "Human handoff emails",
+    group: "email",
+    tier: 2,
+    kind: "pull",
+    probe: {
+      // The lane's own state file (identifier-free by design): health
+      // heartbeat, pending queue depth, per-day send counters. Raw read of
+      // the anonymously readable secret-by-URL gist — the API JSON path is
+      // NOT equivalent (its truncation flag recreated the 2026-08-10 outage).
+      urlEnv: "LIFECYCLE_GIST_ID",
+      url: () =>
+        `https://gist.githubusercontent.com/davidmetawork/${process.env.LIFECYCLE_GIST_ID}/raw/human-handoff.json`,
+      timeoutMs: 10000,
+      evaluate: "lifecycleEmailLane",
+    },
+    registry: "/products/human-handoff/",
+    note: "Emails David when a screener candidate asks for a human — the candidate is waiting on this send. Sent as david@raydar.xyz.",
+  },
+  {
+    id: "email-connector-chase",
+    name: "Connector chase emails",
+    group: "email",
+    tier: 2,
+    kind: "pull",
+    probe: {
+      urlEnv: "LIFECYCLE_GIST_ID",
+      url: () =>
+        `https://gist.githubusercontent.com/davidmetawork/${process.env.LIFECYCLE_GIST_ID}/raw/connector-chase.json`,
+      timeoutMs: 10000,
+      evaluate: "lifecycleEmailLane",
+    },
+    registry: "/products/connector-referral-followups/",
+    note: "Referral follow-up emails to connectors (peaks ~150/day), sent as david@raydar.xyz. quota.retryAfter here is a persisted Gmail-429 witness.",
+  },
+  {
+    id: "email-paraai-outreach",
+    name: "Para AI outreach emails",
+    group: "email",
+    tier: 2,
+    kind: "derived",
+    probe: { evaluate: "paraaiOutreachEmail" },
+    registry: "/products/paraai-outreach/",
+    note: "Interview-request outreach sent as david@raydar.xyz by the Para AI worker. An armed fleet breaker means a 429 was observed minutes ago.",
+  },
+  {
+    id: "email-scheduler-sender",
+    name: "Scheduler booking emails",
+    group: "email",
+    tier: 2,
+    kind: "derived",
+    probe: { evaluate: "schedulerSenderEmail" },
+    registry: "/products/raydar-scheduler/",
+    note: "Booking confirmations/reschedules/native reminders from the scheduler's own delegated identity — a separate Gmail bucket from david@ (it sent 233/24h through the 08-10 lockout).",
+  },
+  {
+    id: "email-paraform-mailboxes",
+    name: "Paraform sending mailboxes",
+    group: "email",
+    tier: 2,
+    kind: "pull",
+    probe: {
+      url: "https://monitor.raydar.xyz/api/health/mailboxes",
+      authEnv: "HEALTH_BEAT_KEY",
+      timeoutMs: 15000,
+      evaluate: "paraformMailboxes",
+    },
+    registry: "/products/email-lanes-health/",
+    note: "The ~27 Paraform-connected sending accounts (26 cold-outreach aliases + david@raydar.xyz). Roster cached 25 min to respect Paraform background-load limits.",
+  },
+  {
+    id: "email-paraform-sequences",
+    name: "Paraform sequence email",
+    group: "email",
+    tier: 3,
+    kind: "derived",
+    probe: { evaluate: "paraformSequencesEmail" },
+    registry: "/products/sequences/",
+    note: "Candidate outreach the Paraform platform sends on our behalf (applicant ladders, no-show/no-match follow-ups, cold sequences).",
+  },
+  // Desktop email lanes, moved here from the generic desktop list so every
+  // email lane lives in one section. Same ids — samples and transition
+  // history survive; the desktop-runner collapse keys on `runner`, not group.
+  ...[
+    ["resume-feed", "Resume feed (resume@ ingest)", 40,
+      "Reads resume@metawork.us (its own mailbox and quota — stayed green through the 08-10 lockout); creates Paraform candidates from new resumes."],
+    ["booking-resume-sync", "Booking resume sync", 20,
+      "Reads david@raydar.xyz for Paraform booking mail and attaches resumes; honors the shared Gmail backoff file."],
+    ["booking-resume-retry", "Booking resume retry", 40,
+      "Retry half of booking-resume; same mailbox and runtime family."],
+    ["booking-resume-email-index", "Booking resume email index", 1800,
+      "Nightly Paraform CRM email-address index — identity data, no mail transport."],
+    ["archive-backfill", "Archive backfill (resume@)", 75,
+      "Gmail metadata reads over the resume@ historical corpus."],
+    ["resume-chase", "Resume chase emails", 75,
+      "Sends resume-chase emails as david@raydar.xyz at :07/:37 — deliberately off the shared :00/:05 burst boundary."],
+    ["applicant-hub-worker", "Applicant hub worker", 20,
+      "Consumes the resume@metawork.us ingestion WAL (KeepAlive service; the health reporter beats for it)."],
+  ].map(([lane, name, maxSilenceMin, note]) => ({
+    id: `lane-${lane}`,
+    name,
+    group: "email",
+    tier: 2,
+    kind: "beat",
+    runner: "desktop",
+    probe: { lane, maxSilenceMin },
+    registry: "/operations/monitoring-canaries/",
+    note,
+  })),
+  {
+    id: "lane-interview-invites",
+    name: "Interview invite emails",
+    group: "email",
+    tier: 2,
+    kind: "beat",
+    runner: "desktop",
+    // 09:10/13:10/17:10 local — the longest NORMAL gap is the 16h overnight
+    // one, so the windows are sized to the schedule's real shape, not to a
+    // fantasy hourly cadence: one missed run is DEGRADED, a whole missed
+    // day is DOWN. (Its plist has posted beats all along — run-with-beat.sh
+    // is baked into the template — but without this row the sink answered
+    // 404 unknown_lane and the lane stayed invisible.)
+    probe: { lane: "interview-invites", degradedAfterMin: 990, maxSilenceMin: 1470 },
+    registry: "/products/email-lanes-health/",
+    note: "Invite emails walking applicants toward booking, sent as david@raydar.xyz at 09:10/13:10/17:10 (call-evidence oracle re-checked before every step).",
+  },
+  {
+    id: "lane-apps-script-auto-reply",
+    name: "Apps Script auto-reply",
+    group: "email",
+    tier: 3,
+    kind: "beat",
+    runner: "desktop",
+    paused: true,
+    probe: { lane: "apps-script-auto-reply", maxSilenceMin: 75 },
+    registry: "/products/email-lanes-health/",
+    note: "Paraform candidate auto-reply running INSIDE david@'s account on a 30-min trigger (activateLiveAutomation() reinstalls 10-min — re-fix after every activation). Paused until David adds a UrlFetchApp beat to the script.",
+  },
+
   // ---------- C. fly ----------
   {
     id: "fly-paraai-worker",
@@ -346,16 +534,11 @@ export const CATALOG = [
   // The three KeepAlive services never exit, so they cannot beat for
   // themselves — ops/health-beat/health-reporter.mjs beats for them every
   // 5 minutes based on whether launchd is holding a PID.
+  // (The email-touching desktop lanes live in the "email" group above; they
+  // still carry runner:"desktop" so the runner-offline collapse sees them.)
   ...[
     ["tn-reenable", "Talent Network re-enable", 1800],            // daily
-    ["resume-feed", "Resume feed", 40],                           // every 15m
-    ["booking-resume-sync", "Booking resume sync", 20],           // every 5m
-    ["booking-resume-retry", "Booking resume retry", 40],         // every 15m
-    ["booking-resume-email-index", "Booking resume email index", 1800], // daily
-    ["applicant-hub-worker", "Applicant hub worker", 20],         // KeepAlive, reporter
     ["applicant-hub-watchdog", "Applicant hub watchdog", 30],     // every 10m
-    ["archive-backfill", "Archive backfill", 75],                 // every 30m
-    ["resume-chase", "Resume chase", 75],                         // every 30m
     ["resume-watchdog-v2", "Resume watchdog", 20],                // KeepAlive, reporter
     ["resume-ledger-backup-v2", "Resume ledger backup", 1800],    // daily
     ["resume-juicebox-bridge-v1", "Juicebox bridge", 20],         // KeepAlive, reporter
@@ -366,26 +549,29 @@ export const CATALOG = [
     group: "desktop",
     tier: 2,
     kind: "beat",
+    runner: "desktop",
     probe: { lane, maxSilenceMin },
     registry: "/operations/monitoring-canaries/",
   })),
   {
     id: "lane-hm-chase",
     name: "HM update chase",
-    group: "desktop",
+    group: "email",
     tier: 3,
     kind: "beat",
+    runner: "desktop",
     paused: true,
     probe: { lane: "hm-chase", maxSilenceMin: 75 },
     registry: "/products/hm-update-chase/",
-    note: "expected-unloaded (retired 2026-08-08; restart requires explicit approval and cadence redesign)",
+    note: "expected-unloaded (retired 2026-08-08; drafted/sent HM update emails as david@raydar.xyz; restart requires explicit approval and cadence redesign)",
   },
   {
     id: "lane-resume-forward-v2",
     name: "Resume forward",
-    group: "desktop",
+    group: "email",
     tier: 3,
     kind: "beat",
+    runner: "desktop",
     paused: true,
     probe: { lane: "resume-forward-v2", maxSilenceMin: 20 },
     registry: "/products/resume-feed/",
@@ -397,6 +583,7 @@ export const CATALOG = [
     group: "desktop",
     tier: 3,
     kind: "beat",
+    runner: "desktop",
     paused: true,
     probe: { lane: "cohort-booking-watch", maxSilenceMin: 1800 },
     registry: "/operations/monitoring-canaries/",
@@ -408,6 +595,7 @@ export const CATALOG = [
     group: "desktop",
     tier: 3,
     kind: "beat",
+    runner: "desktop",
     paused: true,
     probe: { lane: "resume-migration-v2", maxSilenceMin: 3000 },
     registry: "/products/resume-mailbox/",
@@ -419,6 +607,7 @@ export const CATALOG = [
     group: "desktop",
     tier: 3,
     kind: "beat",
+    runner: "desktop",
     paused: true,
     probe: { lane: "interview-sheet-mirror", maxSilenceMin: 180 },
     registry: "/products/interview-sheet-agent/",
