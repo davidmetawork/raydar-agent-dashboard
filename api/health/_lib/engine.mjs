@@ -65,6 +65,12 @@ async function runHoldProbe(check) {
 async function runPull(check) {
   const p = check.probe;
   if (p.kind === "holdProbe") return runHoldProbe(check);
+  // A probe whose URL needs an env value (e.g. the lifecycle gist id) is a
+  // key-missing UNKNOWN until that value is provisioned — same contract as a
+  // missing auth secret, and never a broken fetch against "undefined".
+  if (p.urlEnv && !process.env[p.urlEnv]) {
+    return { transport: "key-missing", status: 0, body: null, keyMissing: true };
+  }
   const envName = p.authEnv;
   const secret = envName ? process.env[envName] || "" : null;
   if (envName && !secret) {
@@ -128,11 +134,15 @@ export async function runTick({ now = Date.now() } = {}) {
   const prev = (await hGet(K.state)) || { tiles: {} };
   const beatKeys = CATALOG.filter((c) => c.kind === "beat").map((c) => K.beat(c.probe.lane));
   const ackKeys = CATALOG.map((c) => K.ack(c.id));
-  const [beatVals, ackVals, watchdog, lastDelivered] = await Promise.all([
+  const [beatVals, ackVals, watchdog, lastDelivered, gmailBackoffUntil] = await Promise.all([
     hGetMany(beatKeys),
     hGetMany(ackKeys),
     hGet("seqguard:n8nwatch"), // READ-ONLY: owned by /api/ops/n8n-watchdog
     hGet(K.lastDelivered),
+    // READ-ONLY: owned by api/paraai/_lib/outreach-store.mjs. Present only
+    // while the fleet Gmail breaker is armed — i.e. an outreach pass actually
+    // observed a 429 on david@raydar.xyz within the last ~20 minutes.
+    hGet("paraai:outreach:gmail-backoff"),
   ]);
   const beats = {};
   CATALOG.filter((c) => c.kind === "beat").forEach((c, i) => { beats[c.probe.lane] = beatVals[i]; });
@@ -181,12 +191,13 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 5. Desktop collapse: a closed laptop is ONE event, not sixteen
-  // Desktop lanes only: the runner-offline collapse models ONE machine going
-  // quiet. GitHub Actions lanes are also beats but run on GitHub's infra —
-  // counting them here made the runner tile claim overdue lanes that were
-  // actually a failed Action, and a laptop shutdown would have needed more
-  // silent lanes to trip the collapse.
-  const laneChecks = active.filter((c) => c.kind === "beat" && c.group === "desktop");
+  // Desktop-RUNNER lanes only: the runner-offline collapse models ONE machine
+  // going quiet. GitHub Actions lanes are also beats but run on GitHub's
+  // infra — counting them here made the runner tile claim overdue lanes that
+  // were actually a failed Action. The filter keys on `runner`, not group:
+  // email-touching desktop lanes render in the email group but still ride the
+  // same laptop, so they belong in this denominator wherever they display.
+  const laneChecks = active.filter((c) => c.kind === "beat" && c.runner === "desktop");
   const laneStates = laneChecks.map((c) => ({ id: c.id, paused: false, ...results[c.id] }));
   const runnerVerdict = EVALUATORS.desktopRunner({ laneStates });
   if (runnerVerdict.state === "DOWN") {
@@ -208,7 +219,7 @@ export async function runTick({ now = Date.now() } = {}) {
     }
     try {
       results[check.id] = evaluate({
-        results, watchdog, kvOk, lastDelivered, laneStates,
+        results, watchdog, kvOk, lastDelivered, laneStates, beats, gmailBackoffUntil,
         probe: check.probe, check,
       });
     } catch (e) {

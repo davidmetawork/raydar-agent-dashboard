@@ -98,6 +98,43 @@ test("health beat keeps an omitted status backward-compatible as OK", async () =
   assert.equal(JSON.parse(writes[0][2]).status, "ok");
 });
 
+test("health beat stores valid producer metrics on the beat", async () => {
+  writes.length = 0;
+  const res = response();
+  await beatHandler(request({
+    lane: "interview-invites",
+    status: "ok",
+    metrics: { planned: 14, sent: 12, deferred: 2, gmail429: 0 },
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { ok: true, lane: "interview-invites", status: "ok" });
+  const stored = JSON.parse(writes[0][2]);
+  assert.deepEqual(stored.metrics, { planned: 14, sent: 12, deferred: 2, gmail429: 0 });
+});
+
+test("health beat drops malformed metrics WITHOUT losing the heartbeat", async () => {
+  // Losing the beat would fake a dead lane — worse than losing a number.
+  // The drop is visible in the response so producer tests can catch it.
+  writes.length = 0;
+  for (const bad of [
+    { sent: "twelve" },                          // non-numeric value
+    { note: Infinity },                          // non-finite
+    ["array"],                                   // not a plain object
+    Object.fromEntries(Array.from({ length: 13 }, (_, i) => [`k${i}`, i])), // too many keys
+    { "bad key!": 1 },                           // invalid key
+    {},                                          // empty object
+  ]) {
+    const res = response();
+    await beatHandler(request({ lane: "interview-invites", status: "warn", metrics: bad }), res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.metricsDropped, true);
+    const stored = JSON.parse(writes.at(-1)[2]);
+    assert.equal(stored.status, "warn", "the typed status must survive a metrics drop");
+    assert.ok(!("metrics" in stored));
+  }
+});
+
 test("health beat accepts the Scheduler cron control-plane guard lane", async () => {
   writes.length = 0;
   const res = response();
