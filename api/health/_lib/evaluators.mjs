@@ -507,7 +507,15 @@ export function paraformMailboxes({ body, status, keyMissing }) {
   };
   const total = Number(c.total) || 0;
   const errors = Number(c.gmailError) || 0;
+  const active = Number(c.gmailActive) || 0;
   if (!total) return UNK("roster returned zero accounts", metrics);
+  // The ERROR statuses observed on 2026-08-04 came from a per-SEQUENCE
+  // readback; whether the account roster carries gmail_status too is
+  // unverified. A roster where no account reports ANY status is blindness,
+  // not health — say so instead of scoring 27 unknowns green.
+  if (!active && !errors) {
+    return UNK("roster rows carry no gmail_status — needs the per-campaign status read instead", metrics);
+  }
   if (String(body.davidGmailStatus || "").toUpperCase() === "ERROR") {
     return DOWN("david@raydar.xyz shows ERROR in Paraform — applicant/no-match sequences cannot send", metrics);
   }

@@ -233,6 +233,14 @@ test("paraform mailboxes: david@ in ERROR is DOWN; a few alias errors DEGRADED; 
   assert.equal(paraformMailboxes({ status: 200, body: { ok: false, paraform: "no_cookie" } }).state, "UNKNOWN");
   assert.equal(paraformMailboxes({ keyMissing: true }).state, "UNKNOWN");
   assert.equal(paraformMailboxes({ status: 200, body: { hello: 1 } }).state, "UNKNOWN");
+
+  // A roster where NO account reports any status is blindness, not health.
+  const statusless = paraformMailboxes({
+    status: 200,
+    body: { ok: true, paraform: "live", counts: { total: 27, gmailActive: 0, gmailError: 0 }, davidGmailStatus: "UNKNOWN" },
+  });
+  assert.equal(statusless.state, "UNKNOWN");
+  assert.match(statusless.reason, /no gmail_status/);
 });
 
 test("paraform sequences: a fully blind tick is UNKNOWN — an UNKNOWN inbox result is not an observation", () => {
