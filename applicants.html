@@ -166,9 +166,11 @@
   button.ghost { background:#fff; color:var(--ink); border:1px solid var(--line); }
   button.undo { background:transparent; color:var(--ink-3); border:1px solid var(--line-2); padding:6px 10px; font-size:11.5px; }
   button.undo:hover { color:var(--ink); border-color:var(--ink-3); }
+  button.decided-interview { padding:6px 10px; font-size:11.5px; }
   button.primary:hover, button.ghost:hover { filter:brightness(1.04); transform:translateY(-1px); }
   button:disabled { opacity:.5; cursor:default; filter:none; transform:none; }
   .decided-stack { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+  .decided-actions { display:flex; align-items:center; justify-content:flex-end; gap:6px; }
   .decided-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
   .decided-chip.passed { background:var(--muted-bg); color:var(--ink-2); }
   .decided-chip.queued { background:var(--warn-bg); color:var(--warn); }
@@ -718,8 +720,12 @@ function decidedStatusHtml(key, decision) {
   else if (decisionStatus(key, decision) === "emailed") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
   else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">Blocked: ' + esc(ack.reason || "see loop log") + "</span>";
   else chip = '<span class="decided-chip queued">Queued to send</span>';
+  const interview = decision.action === "pass" && !ack
+    ? '<button class="primary decided-interview" data-act="interview" data-key="' + esc(key) + '">Interview</button>'
+    : "";
   const undo = !ack ? '<button class="undo" data-act="undo" data-key="' + esc(key) + '">Undo</button>' : "";
-  return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
+  const actions = interview || undo ? '<div class="decided-actions">' + interview + undo + "</div>" : "";
+  return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + actions + "</div>";
 }
 /* ---- inline work history: the Recruiter-shaped body every row carries, so a
    reviewer can judge someone without opening them. Filled from the compact
