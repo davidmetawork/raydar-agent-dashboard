@@ -51,6 +51,10 @@
     {
       "source": "/activity",
       "destination": "/activity.html"
+    },
+    {
+      "source": "/home",
+      "destination": "/home.html"
     }
   ],
   "redirects": [
@@ -84,6 +88,9 @@
     },
     "api/activity/*.mjs": {
       "maxDuration": 120
+    },
+    "api/revenue/*.mjs": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -99,6 +106,7 @@
     { "path": "/api/health/digest", "schedule": "0 14 * * *" },
     { "path": "/api/ops/lifecycle-watchdog-relay", "schedule": "7,22,37,52 * * * *" },
     { "path": "/api/activity/digest", "schedule": "30 15 * * *" },
-    { "path": "/api/activity/feed", "schedule": "4,14,24,34,44,54 * * * *" }
+    { "path": "/api/activity/feed", "schedule": "4,14,24,34,44,54 * * * *" },
+    { "path": "/api/revenue/refresh", "schedule": "*/5 * * * *" }
   ]
 }

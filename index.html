@@ -397,7 +397,8 @@
       <nav class="rail-nav" aria-label="Dashboard surfaces">
         <div class="rail-group">
           <div class="rail-title">Live</div>
-          <a class="tab active" id="tab-overview" href="#overview" aria-current="page" onclick="return tabClick(event,'overview')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="2"/><rect x="13" y="13" width="7.5" height="7.5" rx="2"/></svg></span><span class="lbl">Overview</span></a>
+          <a class="tab active" id="tab-home" href="#home" aria-current="page" onclick="return tabClick(event,'home')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V9.8L12 3.5l8 6.3v9.7"/><path d="M9.5 19.5v-6h5v6"/></svg></span><span class="lbl">Home</span></a>
+          <a class="tab" id="tab-overview" href="#overview" onclick="return tabClick(event,'overview')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="2"/><rect x="13" y="13" width="7.5" height="7.5" rx="2"/></svg></span><span class="lbl">Overview</span></a>
           <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></svg></span><span class="lbl">Activity</span> <span class="badge" id="activity-badge" style="display:none"></span></a>
         </div>
         <div class="rail-group">
@@ -495,6 +496,10 @@
         </div>
         <div class="list cd-wrap" id="cd-table-wrap"><div class="empty">Loading candidates…</div></div>
       </section>
+    </div>
+
+    <div id="view-home" hidden>
+      <iframe id="home-frame" title="Home" style="width:100%;border:0;min-height:1700px;background:transparent"></iframe>
     </div>
 
     <div id="view-applicants" hidden>
@@ -1169,13 +1174,15 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false;
-    // Same order as the nav, so the two stay readable together. "overview" must
-    // stay first — RaydarNav falls back to names[0] for an unknown #hash.
+    let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false, homeLoaded=false;
+    // Same order as the nav, so the two stay readable together. "home" must
+    // stay first — RaydarNav falls back to names[0] for an unknown #hash, and
+    // Home is the landing surface, so a bare monitor.raydar.xyz lands on the
+    // revenue view. Overview keeps its own tab and its #overview deep link.
     // "candidates" is last because its tab is hidden; the view and #candidates
     // deep link still work.
-    const VIEWS=["overview","applicants","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","candidates"];
-    let currentView="overview";
+    const VIEWS=["home","overview","applicants","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","candidates"];
+    let currentView="home";
     // Tabs are real links (href="#activity", …) so they can be right-clicked or
     // ⌘-clicked into a new tab. A plain left click stays in this page; anything
     // the browser would treat as "open elsewhere" is left alone.
@@ -1203,6 +1210,7 @@
         t.classList.toggle("active", v===name);
         if(v===name) t.setAttribute("aria-current","page"); else t.removeAttribute("aria-current");
       });
+      if(name==="home" && !homeLoaded){ $("home-frame").src=frameSrc("/home","home"); homeLoaded=true; }
       if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src=frameSrc("/applicants","applicants"); applicantsLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src=frameSrc("/sequences","sequences"); seqLoaded=true; }
       if(name==="activity" && !activityLoaded){ $("activity-frame").src=frameSrc("/activity","activity"); activityLoaded=true; }
@@ -2263,6 +2271,7 @@
     /* ⌘K jump palette — additive navigation over the same showView() the rail
        uses. No data access; purely a faster way to switch surfaces. */
     const RK_ITEMS=[
+      {name:"home",label:"Home",group:"Live"},
       {name:"overview",label:"Overview",group:"Live"},
       {name:"activity",label:"Activity",group:"Live"},
       {name:"applicants",label:"Applicants",group:"People"},
