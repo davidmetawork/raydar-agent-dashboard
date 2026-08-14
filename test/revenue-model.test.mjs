@@ -241,6 +241,38 @@ test("a pasted sheet imports real rows and reports every skip with a reason", ()
   assert.match(skipped[1].reason, /offer-signed date/);
 });
 
+test("the live sheet's dated A/R header still maps, so A/R is never silently zeroed", () => {
+  // The real column is literally "A/R: 8/14/26". If the as-of date defeats the
+  // header match, every imported deal gets A/R 0 and reads as fully collected.
+  const pasted = [
+    "Team Member\tClient\tJob Title\tCandidate Name\tOffer Signed\tStart Date\tPaid\tDeal Size\tA/R: 8/14/26",
+    "Kyra\tSunlight\tGeneral Counsel\tPerson A\tAugust 1st\tAugust 24th\t\t$32,000.00\t$12,500.00",
+    "Noah\tLoancrate\tSenior SWE\tPerson B\tJune 1\tJun 15\t-\t$25,000.00\t$10,000.00",
+  ].join("\n");
+
+  const { rows, skipped } = parseImport(pasted, { defaultYear: "2026", now: AUG });
+  assert.equal(skipped.length, 0);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].arCents, 1250000, "A/R must survive the dated header");
+  assert.equal(rows[1].arCents, 1000000);
+  assert.equal(rows[0].offerSignedAt, "2026-08-01");
+  assert.equal(rows[1].startAt, "2026-06-15");
+  assert.equal(rows[1].paidAt, null, '"-" is an honest unknown, not a date');
+});
+
+test("a bonus row dated only by year is skipped with a reason, never guessed", () => {
+  // Two real rows carry "2025" in the Offer Signed column. A bare year has no
+  // day, so it cannot be bucketed; reporting it beats inventing a date.
+  const pasted = [
+    "Team Member\tClient\tJob Title\tCandidate Name\tOffer Signed\tDeal Size",
+    "EXTRA\tPomelo Care\tCounsel\tBONUS\t2025\t$2,256.00",
+  ].join("\n");
+  const { rows, skipped } = parseImport(pasted, { defaultYear: "2026", now: AUG });
+  assert.equal(rows.length, 0);
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].reason, /offer-signed date "2025"/);
+});
+
 test("import refuses a paste whose columns it cannot identify", () => {
   const result = parseImport("Foo\tBar\nbaz\tqux", { defaultYear: "2026", now: AUG });
   assert.ok(result.error);
