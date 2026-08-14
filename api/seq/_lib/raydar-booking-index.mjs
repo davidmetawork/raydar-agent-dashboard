@@ -226,6 +226,12 @@ export async function fetchRaydarBookingIndex({
 
   return {
     index,
+    // Every validated booking, undeduplicated. `index` is keyed by candidate
+    // email and keeps only that person's latest active booking — right for
+    // enrollment blocking, wrong for counting, because someone who books twice
+    // is two calls set. Additive: existing callers destructure and are
+    // unaffected by the extra key.
+    bookingList: [...byBookingId.values()].map(({ booking }) => booking),
     items: itemCount,
     bookings: byBookingId.size,
     active,

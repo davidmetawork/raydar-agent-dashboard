@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Home · Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9; --ink:#16140F; --card:#FFFFFF; --line:#E9E3D5; --muted:#8C877B;
+    --orange:#FF5E00; --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FAEEDC; --violet:#7F72FF; --violet-bg:#ECEAFE; --muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font-family:"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px}
+  h1{font-family:"PP Grafier Display",serif;font-weight:600;font-size:30px;margin:0}
+  h2{font-family:"PP Grafier Display",serif;font-weight:600;font-size:16px;margin:0 0 12px}
+  .sub{color:var(--muted);margin:4px 0 0}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px;flex-wrap:wrap}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px;margin-bottom:16px}
+  a{color:var(--orange)}
+  button.act{font:inherit;border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 11px;cursor:pointer}
+  button.act:hover{border-color:var(--ink)}
+  button.act.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  button.act[disabled]{opacity:.5;cursor:not-allowed}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .spacer{flex:1}
+
+  /* ── Band 1: the number ─────────────────────────────────────────────── */
+  .hero{background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);padding:26px 26px 22px;margin-bottom:16px}
+  .hero .label{color:var(--muted);font-size:13px;letter-spacing:.02em;text-transform:uppercase}
+  .hero .big{font-family:"PP Grafier Display",serif;font-weight:600;font-size:clamp(46px,9vw,92px);line-height:1.02;margin:4px 0 2px;font-variant-numeric:tabular-nums}
+  .hero .of{color:var(--muted);font-size:15px;margin-bottom:18px}
+  .meter{position:relative;height:22px;border-radius:11px;background:var(--muted-bg);overflow:hidden}
+  .meter .fill{height:100%;border-radius:11px;background:var(--orange);transition:width .9s cubic-bezier(.22,1,.36,1)}
+  .meter .pace{position:absolute;top:-5px;bottom:-5px;width:2px;background:var(--ink);opacity:.55}
+  .meterLegend{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:7px;gap:10px;flex-wrap:wrap}
+  .verdict{margin-top:16px;padding:14px 16px;border-radius:13px;font-size:15px;line-height:1.5}
+  .verdict.behind{background:var(--warn-bg);border:1px solid #EEDBB4}
+  .verdict.ahead{background:var(--good-bg);border:1px solid #BFE6D3}
+  .verdict strong{font-weight:650}
+  .heroStats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+  .stat .k{color:var(--muted);font-size:12px}
+  .stat .v{font-family:"PP Grafier Display",serif;font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+
+  /* ── shared tiles/charts ────────────────────────────────────────────── */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+  .tile{border:1px solid var(--line);border-radius:13px;padding:13px 15px;background:#fff}
+  .tile .k{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+  .tile .v{font-family:"PP Grafier Display",serif;font-size:27px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+  .tile .n{color:var(--muted);font-size:12px;margin-top:2px}
+  .chip{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;background:var(--muted-bg);color:var(--muted)}
+  .chip.est{background:var(--violet-bg);color:#5B4FD6}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
+  .seg button{font:inherit;border:0;background:#fff;padding:6px 13px;cursor:pointer;color:var(--muted)}
+  .seg button[aria-pressed="true"]{background:var(--ink);color:#fff}
+  svg{display:block;max-width:100%}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:8px}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-1px}
+  .banner{border-radius:14px;padding:13px 16px;margin-bottom:14px;font-size:13px}
+  .banner.warn{background:var(--warn-bg);border:1px solid #EEDBB4}
+  .banner.bad{background:var(--bad-bg);border:1px solid #F3C9CA}
+  .scroller{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-weight:500;font-size:12px}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr.void td{opacity:.45;text-decoration:line-through}
+  .miss{color:var(--muted);font-size:13px;line-height:1.6}
+  .miss li{margin-bottom:6px}
+
+  /* ── forms / modal ──────────────────────────────────────────────────── */
+  .modal{position:fixed;inset:0;background:rgba(20,16,8,.45);display:none;align-items:flex-start;justify-content:center;z-index:30;padding:24px;overflow-y:auto}
+  .modal[open]{display:flex}
+  .sheet{background:var(--card);border-radius:18px;padding:22px;max-width:660px;width:100%;box-shadow:0 20px 60px -20px rgba(20,16,8,.4)}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
+  input,select,textarea{font:inherit;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink)}
+  textarea{min-height:110px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .fields{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-bottom:14px}
+  .fields .full{grid-column:1/-1}
+  .err{color:var(--bad);font-size:13px;margin-top:8px}
+  .ok{color:var(--good);font-size:13px;margin-top:8px}
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.96);display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;z-index:40}
+  #confetti{position:fixed;inset:0;pointer-events:none;z-index:35;display:none}
+
+  body.embed header .brand h1, body.embed header .brand .sub{display:none}
+  body.embed header{margin-bottom:10px}
+  body.embed .wrap{padding-top:10px}
+  @media (max-width:700px){
+    .wrap{padding:16px 12px 60px} .fields{grid-template-columns:1fr}
+    .hero{padding:20px 18px} .grid{grid-template-columns:1fr}
+  }
+  @media (prefers-reduced-motion:reduce){ .meter .fill{transition:none} }
+</style>
+</head>
+<body data-palette="#FF5E00,#7F72FF">
+<div class="gate" id="gate">
+  <div style="font-family:'PP Grafier Display',serif;font-size:20px">Sign in to view Raydar revenue</div>
+  <div id="gsi"></div>
+  <div class="err" id="gateErr"></div>
+</div>
+<canvas id="confetti"></canvas>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1>Home</h1>
+      <div class="sub">Where Raydar's revenue stands today, and what it takes from here.</div>
+    </div>
+    <div class="row">
+      <button class="act" id="addBtn">Add deal</button>
+      <button class="act" id="importBtn" hidden>Import</button>
+      <button class="act" id="exportBtn">Export CSV</button>
+      <button class="act" id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+
+  <div id="alerts"></div>
+
+  <!-- Band 1 ───────────────────────────────────────────────────────────── -->
+  <section class="hero" id="hero" hidden>
+    <div class="label">Booked revenue · <span id="heroYear"></span></div>
+    <div class="big" id="heroValue">$0</div>
+    <div class="of">of <span id="heroTarget"></span> target</div>
+    <div class="meter">
+      <div class="fill" id="meterFill" style="width:0%"></div>
+      <div class="pace" id="meterPace" style="left:0%" title="Where an even pace would put us today"></div>
+    </div>
+    <div class="meterLegend">
+      <span id="meterPct">0%</span>
+      <span id="meterPaceNote"></span>
+      <span id="meterRemaining"></span>
+    </div>
+    <div class="verdict" id="verdict"></div>
+    <div class="heroStats">
+      <div class="stat"><div class="k">Collected</div><div class="v" id="statCollected">—</div></div>
+      <div class="stat"><div class="k">Outstanding A/R</div><div class="v" id="statAr">—</div></div>
+      <div class="stat"><div class="k">Deals booked</div><div class="v" id="statDeals">—</div></div>
+      <div class="stat"><div class="k">Needed per month</div><div class="v" id="statRequired">—</div></div>
+    </div>
+  </section>
+
+  <!-- Band 2 ───────────────────────────────────────────────────────────── -->
+  <section class="card" id="periodCard" hidden>
+    <div class="row" style="margin-bottom:14px">
+      <h2 style="margin:0">Revenue</h2>
+      <div class="spacer"></div>
+      <div class="seg" id="periodToggle">
+        <button data-p="month" aria-pressed="false">Month</button>
+        <button data-p="quarter" aria-pressed="false">Quarter</button>
+        <button data-p="year" aria-pressed="true">Year</button>
+      </div>
+    </div>
+    <div id="periodChart"></div>
+    <div class="legend">
+      <span><i style="background:var(--orange)"></i>Booked</span>
+      <span><i style="background:var(--muted-bg);border:1px solid var(--line)"></i>Target</span>
+    </div>
+  </section>
+
+  <section class="card" id="breakdownCard" hidden>
+    <div class="grid">
+      <div>
+        <h2>By team member</h2>
+        <div id="memberChart"></div>
+      </div>
+      <div>
+        <h2>A/R aging</h2>
+        <div id="arChart"></div>
+        <div class="n" style="color:var(--muted);font-size:12px;margin-top:8px">Aged from start date where known, otherwise from offer signed.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="dealsCard" hidden>
+    <div class="row" style="margin-bottom:12px">
+      <h2 style="margin:0">Deals</h2>
+      <div class="spacer"></div>
+      <span class="chip" id="dealsCount"></span>
+    </div>
+    <div class="scroller">
+      <table id="dealsTable">
+        <thead><tr>
+          <th>Signed</th><th>Client</th><th>Role</th><th>Who</th>
+          <th class="num">Deal</th><th class="num">A/R</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody id="dealsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Band 3 ───────────────────────────────────────────────────────────── -->
+  <section class="card" id="activityCard" hidden>
+    <div class="row" style="margin-bottom:12px">
+      <h2 style="margin:0">Activity</h2>
+      <div class="spacer"></div>
+      <span class="chip" id="activityAge"></span>
+    </div>
+    <div class="grid" id="activityTiles"></div>
+    <div style="margin-top:20px">
+      <h2>Calls set per week</h2>
+      <div id="callsChart"></div>
+      <div class="legend">
+        <span><i style="background:var(--orange)"></i>Agent</span>
+        <span><i style="background:var(--violet)"></i>Human</span>
+      </div>
+      <div style="color:var(--muted);font-size:12px;margin-top:8px" id="callsNote"></div>
+    </div>
+  </section>
+
+  <section class="card" id="missingCard" hidden>
+    <h2>Not shown, and why</h2>
+    <ul class="miss" id="missingList"></ul>
+  </section>
+</div>
+
+<!-- Add / edit deal ─────────────────────────────────────────────────────── -->
+<div class="modal" id="dealModal">
+  <div class="sheet">
+    <h2 id="dealModalTitle">Add a deal</h2>
+    <form id="dealForm">
+      <input type="hidden" name="id" />
+      <div class="fields">
+        <div><label for="f-client">Client</label><input id="f-client" name="client" required /></div>
+        <div><label for="f-job">Job title</label><input id="f-job" name="jobTitle" /></div>
+        <div><label for="f-cand">Candidate</label><input id="f-cand" name="candidateRef" /></div>
+        <div><label for="f-member">Team member</label><select id="f-member" name="teamMember"></select></div>
+        <div><label for="f-signed">Offer signed</label><input id="f-signed" name="offerSignedAt" type="date" required /></div>
+        <div><label for="f-start">Start date</label><input id="f-start" name="startAt" type="date" /></div>
+        <div><label for="f-size">Deal size (USD)</label><input id="f-size" name="dealSize" inputmode="decimal" required placeholder="47500" /></div>
+        <div><label for="f-ar">Outstanding A/R (USD)</label><input id="f-ar" name="ar" inputmode="decimal" placeholder="defaults to the full fee" /></div>
+        <div><label for="f-cat">Category</label><select id="f-cat" name="category">
+          <option value="placement">Placement</option><option value="platform">Platform revenue</option><option value="bonus">Bonus / other</option>
+        </select></div>
+        <div><label for="f-status">Status</label><select id="f-status" name="status">
+          <option value="booked">Booked</option><option value="collected">Collected</option><option value="fell_through">Fell through</option>
+        </select></div>
+        <div class="full"><label for="f-notes">Notes</label><input id="f-notes" name="notes" /></div>
+      </div>
+      <div class="row">
+        <button type="submit" class="act primary" id="dealSave">Save</button>
+        <button type="button" class="act" data-close>Cancel</button>
+        <div class="spacer"></div>
+        <button type="button" class="act" id="dealDelete" hidden>Delete</button>
+      </div>
+      <div class="err" id="dealErr"></div>
+    </form>
+  </div>
+</div>
+
+<!-- Import ──────────────────────────────────────────────────────────────── -->
+<div class="modal" id="importModal">
+  <div class="sheet">
+    <h2>Import from the revenue sheet</h2>
+    <p style="color:var(--muted);margin-top:0">
+      Copy the rows out of the sheet, including the header row, and paste them here.
+      Nothing is saved until you confirm the preview. Rows that already exist are skipped.
+    </p>
+    <textarea id="importText" placeholder="Team Member	Client	Job Title	Candidate Name	Offer Signed	Start Date	Paid	Deal Size	A/R"></textarea>
+    <div class="row" style="margin-top:12px">
+      <button type="button" class="act primary" id="importPreview">Preview</button>
+      <button type="button" class="act" id="importCommit" hidden>Import them</button>
+      <button type="button" class="act" data-close>Close</button>
+    </div>
+    <div id="importResult"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const AUTH = { required: true, clientId: "" };
+const params = new URLSearchParams(location.search);
+if (params.has("embed")) document.body.classList.add("embed");
+
+let STATE = null;
+let PERIOD = localStorage.getItem("revPeriod") || "year";
+
+const money = (cents, { compact = false } = {}) => {
+  if (cents == null || Number.isNaN(cents)) return "—";
+  const dollars = cents / 100;
+  if (compact && Math.abs(dollars) >= 1000) {
+    return `$${(dollars / 1000).toFixed(Math.abs(dollars) >= 100000 ? 0 : 1)}k`;
+  }
+  return `$${Math.round(dollars).toLocaleString("en-US")}`;
+};
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ── data ────────────────────────────────────────────────────────────────────
+async function api(path, options) {
+  const response = await fetch(path, {
+    credentials: "same-origin", cache: "no-store",
+    ...options,
+    headers: { accept: "application/json", ...(options?.body ? { "content-type": "application/json" } : {}), ...(options?.headers) },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    const error = new Error(body.detail || body.error || `HTTP ${response.status}`);
+    error.details = body.details; error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+async function load() {
+  try {
+    const [summary, ledger] = await Promise.all([api("/api/revenue/summary"), api("/api/revenue/deals")]);
+    STATE = { ...summary, deals: ledger.deals };
+    render();
+    celebrateIfNew();
+  } catch (error) {
+    $("alerts").innerHTML = `<div class="banner bad">Could not load revenue: ${esc(error.message)}</div>`;
+  }
+}
+
+// ── render ──────────────────────────────────────────────────────────────────
+function render() {
+  const { revenue, activity, activityStale, canEdit } = STATE;
+  $("importBtn").hidden = !canEdit;
+
+  const alerts = [];
+  if (activityStale) alerts.push(`<div class="banner warn"><strong>Activity data is stale.</strong> The revenue figures below are ours and are current; the Paraform activity section may be behind.</div>`);
+  const missing = revenue.reconciliation?.missingTotal || 0;
+  if (missing > 0) {
+    const months = revenue.reconciliation.months.filter((m) => m.missing > 0)
+      .map((m) => `${m.month} (${m.missing})`).join(", ");
+    alerts.push(`<div class="banner warn"><strong>Paraform shows ${missing} more hire${missing === 1 ? "" : "s"} than the ledger has deals.</strong> Months: ${esc(months)}. If those placements earned revenue, add them so the number stays true.</div>`);
+  }
+  $("alerts").innerHTML = alerts.join("");
+
+  renderHero(revenue);
+  renderPeriod(revenue);
+  renderBreakdown(revenue);
+  renderDeals(STATE.deals, canEdit);
+  renderActivity(activity, STATE.activityRefreshedAt);
+  for (const id of ["hero", "periodCard", "breakdownCard", "dealsCard"]) $(id).hidden = false;
+}
+
+function renderHero(revenue) {
+  $("heroYear").textContent = revenue.year;
+  $("heroTarget").textContent = money(revenue.targetCents);
+  countUp($("heroValue"), revenue.bookedCents);
+
+  const pct = revenue.targetCents ? (revenue.bookedCents / revenue.targetCents) : 0;
+  $("meterFill").style.width = `${Math.min(100, pct * 100).toFixed(1)}%`;
+  $("meterPace").style.left = `${(revenue.pace.progress * 100).toFixed(1)}%`;
+  $("meterPct").textContent = `${Math.round(pct * 100)}% of goal`;
+  $("meterPaceNote").textContent = `Even pace today: ${money(revenue.pace.paceTargetCents, { compact: true })}`;
+  $("meterRemaining").textContent = `${money(revenue.pace.remainingCents, { compact: true })} to go`;
+
+  const behind = revenue.pace.varianceCents < 0;
+  const verdict = $("verdict");
+  verdict.className = `verdict ${behind ? "behind" : "ahead"}`;
+  const required = revenue.pace.requiredPerMonthCents;
+  const trailing = revenue.pace.trailingPerMonthCents;
+  const multiple = trailing > 0 ? (required / trailing) : null;
+  verdict.innerHTML = behind
+    ? `<strong>${money(Math.abs(revenue.pace.varianceCents))} behind an even pace.</strong>
+       Closing the year needs <strong>${money(required)} per month</strong> for the remaining
+       ${revenue.pace.monthsRemaining.toFixed(1)} months, against a trailing average of ${money(trailing)}
+       ${multiple ? `— about <strong>${multiple.toFixed(1)}×</strong> the current rate.` : "."}`
+    : `<strong>${money(revenue.pace.varianceCents)} ahead of an even pace.</strong>
+       Holding ${money(required)} per month for the remaining ${revenue.pace.monthsRemaining.toFixed(1)} months
+       closes the year; the trailing average is ${money(trailing)}.`;
+
+  $("statCollected").textContent = money(revenue.collectedCents);
+  $("statAr").textContent = money(revenue.arCents);
+  $("statDeals").textContent = String(revenue.dealCount);
+  $("statRequired").textContent = money(required);
+}
+
+function countUp(node, cents) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) { node.textContent = money(cents); return; }
+  const start = performance.now();
+  const step = (at) => {
+    const t = Math.min(1, (at - start) / 900);
+    node.textContent = money(Math.round(cents * (1 - Math.pow(1 - t, 3))));
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// Vertical bars: booked per period against its share of the target. One series
+// plus a reference outline, so a single hue is correct — no categorical colour.
+function renderPeriod(revenue) {
+  const rows = PERIOD === "quarter" ? revenue.byQuarter.map((q) => ({ label: q.quarter.slice(5), ...q }))
+    : PERIOD === "month" ? revenue.byMonth.map((m) => ({ label: m.month.slice(5), ...m }))
+    : [{ label: revenue.year, bookedCents: revenue.bookedCents, targetCents: revenue.targetCents, deals: revenue.dealCount }];
+
+  const width = 1120, height = 230, padL = 8, padB = 30, padT = 24;
+  const max = Math.max(...rows.map((r) => Math.max(r.bookedCents, r.targetCents)), 1);
+  const slot = (width - padL * 2) / rows.length;
+  const barW = Math.min(72, slot * 0.58);
+
+  const bars = rows.map((row, i) => {
+    const cx = padL + slot * i + slot / 2;
+    const scale = (value) => (height - padB - padT) * (value / max);
+    const bh = scale(row.bookedCents);
+    const th = scale(row.targetCents);
+    const y = height - padB - bh;
+    return `
+      <g>
+        <rect x="${cx - barW / 2}" y="${height - padB - th}" width="${barW}" height="${Math.max(th, 1)}"
+              rx="4" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="3 3"></rect>
+        ${bh > 0 ? `<rect x="${cx - barW / 2}" y="${y}" width="${barW}" height="${bh}" rx="4" fill="var(--orange)"><title>${esc(row.label)}: ${money(row.bookedCents)} booked, ${row.deals} deal${row.deals === 1 ? "" : "s"}</title></rect>` : ""}
+        ${bh > 18 ? `<text x="${cx}" y="${y - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">${money(row.bookedCents, { compact: true })}</text>` : ""}
+        <text x="${cx}" y="${height - 10}" text-anchor="middle" font-size="11" fill="var(--muted)">${esc(row.label)}</text>
+      </g>`;
+  }).join("");
+
+  $("periodChart").innerHTML =
+    `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Booked revenue by ${PERIOD} against target">${bars}</svg>`;
+}
+
+// Horizontal ranked bars. Magnitude by identity -> one hue, direct-labelled.
+function hbars(rows, { valueOf, labelOf, noteOf, hue = "var(--orange)" }) {
+  if (!rows.length) return `<div style="color:var(--muted);font-size:13px">Nothing yet.</div>`;
+  const max = Math.max(...rows.map(valueOf), 1);
+  return rows.map((row) => `
+    <div style="margin-bottom:11px">
+      <div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:3px">
+        <span>${esc(labelOf(row))}</span>
+        <span style="font-variant-numeric:tabular-nums">${money(valueOf(row))}${noteOf ? ` <span style="color:var(--muted)">${esc(noteOf(row))}</span>` : ""}</span>
+      </div>
+      <div style="height:9px;border-radius:5px;background:var(--muted-bg)">
+        <div style="height:100%;border-radius:5px;width:${(valueOf(row) / max * 100).toFixed(1)}%;background:${hue}"></div>
+      </div>
+    </div>`).join("");
+}
+
+function renderBreakdown(revenue) {
+  $("breakdownCard").hidden = false;
+  $("memberChart").innerHTML = hbars(revenue.byMember, {
+    valueOf: (r) => r.bookedCents,
+    labelOf: (r) => r.key,
+    noteOf: (r) => `· ${r.deals} deal${r.deals === 1 ? "" : "s"}`,
+  });
+  // Aging is severity, so it reads as a sequential ramp: newest lightest.
+  const shades = ["#FFB07A", "#FF8C46", "#FF6E1A", "#D94A00"];
+  const buckets = revenue.ar.buckets;
+  $("arChart").innerHTML = buckets.every((b) => b.cents === 0)
+    ? `<div style="color:var(--muted);font-size:13px">Nothing outstanding.</div>`
+    : buckets.map((bucket, i) => `
+        <div style="margin-bottom:11px">
+          <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px">
+            <span>${bucket.label} days</span>
+            <span style="font-variant-numeric:tabular-nums">${money(bucket.cents)}</span>
+          </div>
+          <div style="height:9px;border-radius:5px;background:var(--muted-bg)">
+            <div style="height:100%;border-radius:5px;background:${shades[i]};width:${(bucket.cents / Math.max(revenue.ar.totalCents, 1) * 100).toFixed(1)}%"></div>
+          </div>
+        </div>`).join("");
+}
+
+function renderDeals(deals, canEdit) {
+  $("dealsCount").textContent = `${deals.length} row${deals.length === 1 ? "" : "s"}`;
+  $("dealsBody").innerHTML = deals.map((deal) => `
+    <tr class="${deal.status === "fell_through" ? "void" : ""}">
+      <td>${esc(deal.offerSignedAt)}</td>
+      <td>${esc(deal.client) || "—"}</td>
+      <td>${esc(deal.jobTitle) || "—"}</td>
+      <td>${esc(deal.teamMember)}</td>
+      <td class="num">${money(deal.dealSizeCents)}</td>
+      <td class="num">${deal.arCents ? money(deal.arCents) : "—"}</td>
+      <td><span class="chip">${esc(deal.status.replace(/_/g, " "))}</span></td>
+      <td>${canEdit ? `<button class="act" data-edit="${esc(deal.id)}">Edit</button>` : ""}</td>
+    </tr>`).join("");
+  for (const button of document.querySelectorAll("[data-edit]")) {
+    button.onclick = () => openDeal(deals.find((d) => d.id === button.dataset.edit));
+  }
+}
+
+function renderActivity(activity, refreshedAt) {
+  if (!activity) { $("activityCard").hidden = true; $("missingCard").hidden = true; return; }
+  $("activityCard").hidden = false;
+
+  $("activityAge").textContent = refreshedAt
+    ? `updated ${new Date(refreshedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+    : "not yet refreshed";
+
+  const tiles = [];
+  const calls = activity.calls;
+  if (calls) {
+    tiles.push(tile("Calls set this week", String(calls.thisWeek.total),
+      `${calls.thisWeek.agent} agent · ${calls.thisWeek.human} human` +
+      (calls.priorWeekAverage != null ? ` · ${calls.priorWeekAverage}/wk average` : ""), "week in progress"));
+  }
+  const paraform = activity.paraform;
+  if (paraform) {
+    const month = paraform.windows?.["1m"];
+    if (month) {
+      tiles.push(tile("Submissions", fmt(month.submissions), "trailing 30 days"));
+      tiles.push(tile("Interviews", fmt(month.interviews), "trailing 30 days, round unspecified"));
+      tiles.push(tile("Hires", fmt(month.hired), `trailing 30 days · goal ${paraform.goalHiresPerMonth}/mo`));
+    }
+    const year = paraform.windows?.["1y"];
+    if (year?.ratios?.submissions_per_hire?.display) {
+      tiles.push(tile("Submissions per hire", year.ratios.submissions_per_hire.display, "trailing 365 days"));
+    }
+    if (year?.ratios?.mid_round_per_hire?.display) {
+      tiles.push(tile("Mid round per hire", year.ratios.mid_round_per_hire.display, "trailing 365 days", "estimate"));
+    }
+  }
+  $("activityTiles").innerHTML = tiles.join("") || `<div style="color:var(--muted)">No activity data available.</div>`;
+
+  renderCalls(calls);
+
+  $("missingCard").hidden = false;
+  $("missingList").innerHTML = (activity.unavailable || [])
+    .map((item) => `<li><strong>${esc(item.metric)}</strong> — ${esc(item.reason)}</li>`).join("");
+}
+
+const fmt = (value) => (value == null ? "—" : Number(value).toLocaleString("en-US"));
+
+function tile(label, value, note, badge) {
+  return `<div class="tile">
+    <div class="k">${esc(label)}${badge ? ` <span class="chip est">${esc(badge)}</span>` : ""}</div>
+    <div class="v">${esc(value)}</div>
+    <div class="n">${esc(note || "")}</div>
+  </div>`;
+}
+
+// Grouped bars, agent vs human. Two series -> the validated categorical pair
+// (#FF5E00 / #7F72FF, CVD ΔE 31.7), with a legend, never colour alone.
+function renderCalls(calls) {
+  if (!calls || !calls.weeks?.length) {
+    $("callsChart").innerHTML = `<div style="color:var(--muted);font-size:13px">Calls data unavailable.</div>`;
+    $("callsNote").textContent = "";
+    return;
+  }
+  const weeks = calls.weeks;
+  const width = 1120, height = 190, padB = 28, padT = 16;
+  const max = Math.max(...weeks.map((w) => w.total), 1);
+  const slot = width / weeks.length;
+  const barW = Math.min(26, slot * 0.36);
+
+  const bars = weeks.map((week, i) => {
+    const cx = slot * i + slot / 2;
+    const scale = (v) => (height - padB - padT) * (v / max);
+    const parts = [
+      { value: week.agent, color: "var(--orange)", name: "agent" },
+      { value: week.human, color: "var(--violet)", name: "human" },
+    ];
+    // 2px surface gap between the two fills so they never fuse into one block.
+    let offset = -barW / 2 - 1;
+    const rects = parts.map((part) => {
+      const h = scale(part.value);
+      const x = cx + offset;
+      offset += barW / 2 + 2;
+      return h > 0
+        ? `<rect x="${x}" y="${height - padB - h}" width="${barW / 2}" height="${h}" rx="3" fill="${part.color}" opacity="${week.partial ? 0.62 : 1}"><title>Week of ${esc(week.week)}: ${part.value} ${part.name}</title></rect>`
+        : "";
+    }).join("");
+    const label = i % 2 === 0 || weeks.length <= 8 ? `<text x="${cx}" y="${height - 9}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(week.week.slice(5))}</text>` : "";
+    return `<g>${rects}${label}</g>`;
+  }).join("");
+
+  $("callsChart").innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Calls booked per week, agent and human">${bars}</svg>`;
+  $("callsNote").textContent = `${calls.note} The final bar is the current week and is still filling.`;
+}
+
+// ── celebration ─────────────────────────────────────────────────────────────
+// Stores only an opaque deal id and a count — never a name or an amount.
+function celebrateIfNew() {
+  const deals = (STATE.deals || []).filter((d) => d.status !== "fell_through");
+  if (!deals.length) return;
+  const newest = deals[0];
+  const seen = localStorage.getItem("revLastSeenDeal");
+  localStorage.setItem("revLastSeenDeal", newest.id);
+  if (!seen || seen === newest.id) return;
+  burst();
+}
+
+function burst() {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const canvas = $("confetti");
+  const ctx = canvas.getContext("2d");
+  canvas.width = innerWidth; canvas.height = innerHeight;
+  canvas.style.display = "block";
+  const colors = ["#FF5E00", "#7F72FF", "#119865", "#C7791A"];
+  const pieces = Array.from({ length: 90 }, () => ({
+    x: innerWidth / 2 + (Math.random() - 0.5) * 220, y: innerHeight * 0.3,
+    vx: (Math.random() - 0.5) * 9, vy: Math.random() * -9 - 3,
+    size: 5 + Math.random() * 5, color: colors[Math.floor(Math.random() * colors.length)],
+    spin: (Math.random() - 0.5) * 0.3, angle: Math.random() * Math.PI,
+  }));
+  let frame = 0;
+  (function tick() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const piece of pieces) {
+      piece.vy += 0.32; piece.x += piece.vx; piece.y += piece.vy; piece.angle += piece.spin;
+      ctx.save(); ctx.translate(piece.x, piece.y); ctx.rotate(piece.angle);
+      ctx.fillStyle = piece.color; ctx.globalAlpha = Math.max(0, 1 - frame / 150);
+      ctx.fillRect(-piece.size / 2, -piece.size / 2, piece.size, piece.size * 0.6);
+      ctx.restore();
+    }
+    if (++frame < 150) requestAnimationFrame(tick);
+    else { canvas.style.display = "none"; ctx.clearRect(0, 0, canvas.width, canvas.height); }
+  })();
+}
+
+// ── interactions ────────────────────────────────────────────────────────────
+for (const button of $("periodToggle").querySelectorAll("button")) {
+  button.setAttribute("aria-pressed", String(button.dataset.p === PERIOD));
+  button.onclick = () => {
+    PERIOD = button.dataset.p;
+    localStorage.setItem("revPeriod", PERIOD);
+    for (const other of $("periodToggle").querySelectorAll("button")) {
+      other.setAttribute("aria-pressed", String(other.dataset.p === PERIOD));
+    }
+    renderPeriod(STATE.revenue);
+  };
+}
+
+const MEMBERS = ["David", "Kyra", "Noah", "Alzen", "Vanessa", "Raydar"];
+$("f-member").innerHTML = MEMBERS.map((name) => `<option>${name}</option>`).join("");
+
+function openDeal(deal) {
+  const form = $("dealForm");
+  form.reset();
+  $("dealErr").textContent = "";
+  $("dealModalTitle").textContent = deal ? "Edit deal" : "Add a deal";
+  $("dealDelete").hidden = !deal;
+  form.id.value = deal?.id || "";
+  if (deal) {
+    form.client.value = deal.client || ""; form.jobTitle.value = deal.jobTitle || "";
+    form.candidateRef.value = deal.candidateRef || ""; form.teamMember.value = deal.teamMember || "Raydar";
+    form.offerSignedAt.value = deal.offerSignedAt || ""; form.startAt.value = deal.startAt || "";
+    form.dealSize.value = (deal.dealSizeCents / 100).toFixed(2);
+    form.ar.value = (deal.arCents / 100).toFixed(2);
+    form.category.value = deal.category; form.status.value = deal.status; form.notes.value = deal.notes || "";
+  }
+  $("dealModal").setAttribute("open", "");
+}
+
+$("addBtn").onclick = () => openDeal(null);
+$("exportBtn").onclick = () => { location.href = "/api/revenue/deals?format=csv"; };
+$("refreshBtn").onclick = load;
+$("importBtn").onclick = () => { $("importResult").innerHTML = ""; $("importCommit").hidden = true; $("importModal").setAttribute("open", ""); };
+for (const button of document.querySelectorAll("[data-close]")) {
+  button.onclick = () => { $("dealModal").removeAttribute("open"); $("importModal").removeAttribute("open"); };
+}
+
+$("dealForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const payload = Object.fromEntries(new FormData(form).entries());
+  const editing = Boolean(payload.id);
+  if (!editing) delete payload.id;
+  $("dealSave").disabled = true;
+  $("dealErr").textContent = "";
+  try {
+    await api("/api/revenue/deal", { method: editing ? "PATCH" : "POST", body: JSON.stringify(payload) });
+    $("dealModal").removeAttribute("open");
+    await load();
+  } catch (error) {
+    $("dealErr").textContent = (error.details || [error.message]).join("; ");
+  } finally { $("dealSave").disabled = false; }
+};
+
+$("dealDelete").onclick = async () => {
+  const id = $("dealForm").id.value;
+  if (!id || !confirm("Delete this deal? Voiding it as 'fell through' keeps the history instead.")) return;
+  try {
+    await api("/api/revenue/deal", { method: "DELETE", body: JSON.stringify({ id }) });
+    $("dealModal").removeAttribute("open");
+    await load();
+  } catch (error) { $("dealErr").textContent = error.message; }
+};
+
+async function runImport(confirmIt) {
+  const text = $("importText").value;
+  if (!text.trim()) return;
+  try {
+    const result = await api("/api/revenue/import", { method: "POST", body: JSON.stringify({ text, confirm: confirmIt }) });
+    const lines = [
+      `<div class="${result.committed ? "ok" : ""}" style="margin-top:12px">`,
+      result.committed
+        ? `Imported <strong>${result.imported}</strong> deals, ${money(result.totalCents)} total.`
+        : `Ready to import <strong>${result.wouldImport}</strong> deals, ${money(result.totalCents)} total.`,
+      result.duplicates ? ` ${result.duplicates} already in the ledger (skipped).` : "",
+      "</div>",
+    ];
+    if (result.skipped?.length) {
+      lines.push(`<div style="margin-top:8px;color:var(--muted);font-size:12px">Skipped: ` +
+        result.skipped.map((s) => `line ${s.line} — ${esc(s.reason)}`).join("; ") + `</div>`);
+    }
+    if (result.invalid?.length) {
+      lines.push(`<div class="err">Rejected: ` + result.invalid.map((i) => `${esc(i.client)} — ${esc(i.reason)}`).join("; ") + `</div>`);
+    }
+    $("importResult").innerHTML = lines.join("");
+    $("importCommit").hidden = result.committed || !result.wouldImport;
+    if (result.committed) await load();
+  } catch (error) {
+    $("importResult").innerHTML = `<div class="err">${esc(error.message)}</div>`;
+  }
+}
+$("importPreview").onclick = () => runImport(false);
+$("importCommit").onclick = () => runImport(true);
+
+// ── auth boot ───────────────────────────────────────────────────────────────
+async function init() {
+  const config = await fetch("/api/auth/config", { credentials: "same-origin" }).then((r) => r.json()).catch(() => ({}));
+  AUTH.required = config.authRequired !== false;
+  AUTH.clientId = config.clientId || "";
+  if (!AUTH.required) { load(); setInterval(load, 300000); return; }
+  const session = await RaydarAuth.session().catch(() => null);
+  if (session?.authenticated) { $("gate").style.display = "none"; load(); setInterval(load, 300000); return; }
+  $("gate").style.display = "flex";
+  (function start() {
+    if (!(window.google && google.accounts && google.accounts.id)) return setTimeout(start, 150);
+    google.accounts.id.initialize({ client_id: AUTH.clientId, callback: onCredential });
+    google.accounts.id.renderButton($("gsi"), { theme: "filled_black", size: "large", text: "signin_with", shape: "pill" });
+  })();
+}
+async function onCredential(response) {
+  try {
+    await RaydarAuth.signIn(response.credential);
+    $("gate").style.display = "none";
+    load(); setInterval(load, 300000);
+  } catch { $("gateErr").textContent = "Sign-in failed. Try again."; }
+}
+init();
+</script>
+</body>
+</html>
