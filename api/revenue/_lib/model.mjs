@@ -428,7 +428,13 @@ export function parseImport(text, { defaultYear, now = new Date(), timeZone = TI
   const delimiter = lines[0].includes("\t") ? "\t" : ",";
   const cells = (line) => line.split(delimiter).map((cell) => cell.trim().replace(/^"(.*)"$/, "$1"));
 
-  const headerCells = cells(lines[0]).map((cell) => cell.toLowerCase().replace(/\s+/g, " ").trim());
+  // Real sheet headers carry an as-of date: the live A/R column is literally
+  // "A/R: 8/14/26". Everything from the first colon on is an annotation, not
+  // part of the column name. Without this the A/R column silently fails to
+  // map and every imported deal defaults to zero outstanding — i.e. it reads
+  // as fully collected, which is the worst possible silent error here.
+  const headerCells = cells(lines[0])
+    .map((cell) => cell.toLowerCase().split(":")[0].replace(/\s+/g, " ").trim());
   const mapped = headerCells.map((cell) => IMPORT_HEADERS[cell] || null);
   if (!mapped.includes("dealSize") || !mapped.includes("offerSignedAt")) {
     return { rows: [], skipped: [], headers: headerCells, error: "need at least a deal-size column and an offer-signed column" };
