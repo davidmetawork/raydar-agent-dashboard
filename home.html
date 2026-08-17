@@ -580,9 +580,11 @@ function renderActivity(activity, refreshedAt) {
   if (paraform) {
     const month = paraform.windows?.["1m"];
     if (month) {
-      tiles.push(tile("Submissions", fmt(month.submissions), "trailing 30 days"));
-      tiles.push(tile("Interviews", fmt(month.interviews), "trailing 30 days, round unspecified"));
-      tiles.push(tile("Hires", fmt(month.hired), `trailing 30 days · goal ${paraform.goalHiresPerMonth}/mo`));
+      // `badge` carries the metric's own honesty flags: the provider marks a
+      // window it could only estimate, or one whose coverage is incomplete.
+      tiles.push(tile("Submissions", fmt(month.submissions), "trailing 30 days", flag(month.submissions)));
+      tiles.push(tile("Interviews", fmt(month.interviews), "trailing 30 days, round unspecified", flag(month.interviews)));
+      tiles.push(tile("Hires", fmt(month.hired), `trailing 30 days · goal ${paraform.goalHiresPerMonth}/mo`, flag(month.hired)));
     }
     const year = paraform.windows?.["1y"];
     if (year?.ratios?.submissions_per_hire?.display) {
@@ -597,7 +599,18 @@ function renderActivity(activity, refreshedAt) {
     : `<div class="empty">No activity data available right now.</div>`;
 }
 
-const fmt = (value) => (value == null ? "—" : Number(value).toLocaleString("en-US"));
+// A windowed metric arrives as {value, basis, estimated, partial}; older cached
+// payloads hold the raw provider wrapper, which also has .value. Anything that
+// is not a finite number renders as an honest "—". This page is compensation
+// facing: it must never print NaN, and it must never invent a zero either.
+const fmt = (metric) => {
+  const value = Number(metric && typeof metric === "object" ? metric.value : metric);
+  return Number.isFinite(value) ? value.toLocaleString("en-US") : "—";
+};
+// The badge a metric's own flags earn it, or nothing. Never both at once —
+// "partial" is the more urgent caveat, so it wins.
+const flag = (metric) =>
+  (metric?.partial && "partial") || (metric?.estimated && "estimate") || undefined;
 
 function tile(label, value, note, badge) {
   return `<div class="tile" style="--accent:{{accent}}">

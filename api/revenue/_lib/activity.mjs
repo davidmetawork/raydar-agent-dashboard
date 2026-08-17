@@ -30,6 +30,39 @@ export const UNAVAILABLE = [
 ];
 
 /**
+ * Read one windowed metric out of the placement-metrics payload.
+ *
+ * Those fields are NOT bare numbers. Every windowed metric arrives wrapped as
+ * `{value, basis, since, partial, estimated}` — the same shape the ratios use,
+ * which is why the ratios (read via `.display`) always rendered while the raw
+ * counts did not. Passing the wrapper straight through meant the UI ran
+ * `Number({value: 424})` and printed **NaN** on a compensation-facing surface.
+ *
+ * Returns `{value, basis, estimated, partial}` or null. A bare number is still
+ * accepted, so an upstream shape change degrades to an honest "missing" rather
+ * than to NaN, and null is returned for anything that is not a finite number.
+ */
+export function readMetric(raw) {
+  if (raw == null) return null;
+  const wrapped = typeof raw === "object";
+  const source = wrapped ? raw.value : raw;
+  // Number(null), Number(""), Number([]) and Number(false) are all 0. A silent
+  // zero is the worst outcome here — "no submissions this month" is a very
+  // different claim from "we could not read it" — so only an actual number or
+  // a numeric string is allowed to become a value.
+  if (typeof source !== "number" && typeof source !== "string") return null;
+  if (typeof source === "string" && !source.trim()) return null;
+  const value = Number(source);
+  if (!Number.isFinite(value)) return null;
+  return {
+    value,
+    basis: wrapped ? (raw.basis ?? null) : null,
+    estimated: wrapped ? Boolean(raw.estimated) : false,
+    partial: wrapped ? Boolean(raw.partial) : false,
+  };
+}
+
+/**
  * Pull the already-cached placement metrics payload from the webview backend.
  * That endpoint serves its own KV last-good copy in ~250ms, so this is a cheap
  * hop, not a Paraform round trip.
@@ -50,8 +83,15 @@ export async function fetchParaformMetrics({ fetchImpl = fetch, url = METRICS_UR
  *
  * `goal_pace.monthly` is the calendar-month series (deliberately NOT the 1m
  * window, which counts calendar months merely OVERLAPPING a 30-day span and so
- * can absorb a whole extra month). Month labels arrive as bare names with no
- * year, so they are anchored by counting back from the current month.
+ * can absorb a whole extra month).
+ *
+ * The live payload labels each entry with an explicit `YYYY-MM` ("2025-08"), so
+ * that label is authoritative when present. Positional anchoring — counting
+ * back from the current month — is the fallback for a bare month name, and it
+ * is only safe while the series is contiguous and ends at the current month; a
+ * stale upstream refresh silently shifts every bucket. Reconciliation drives a
+ * "Paraform is ahead of the ledger" prompt, so a shifted series means chasing
+ * placements in the wrong month.
  */
 export function hiresByMonth(metrics, asOf) {
   const monthly = metrics?.goal_pace?.monthly;
@@ -68,6 +108,14 @@ export function hiresByMonth(metrics, asOf) {
     const entry = monthly[i];
     const hires = Number(entry?.hires ?? entry?.hired ?? entry?.count);
     if (!Number.isFinite(hires)) continue;
+
+    // An explicit YYYY-MM needs no anchoring at all — take it and move on.
+    const explicit = /^(\d{4})-(\d{2})$/.exec(String(entry?.month || entry?.label || "").trim());
+    if (explicit && Number(explicit[2]) >= 1 && Number(explicit[2]) <= 12) {
+      out[`${explicit[1]}-${explicit[2]}`] = hires;
+      continue;
+    }
+
     const absolute = (currentYear * 12 + (currentMonth - 1)) - offset;
     const year = Math.floor(absolute / 12);
     const month = (absolute % 12) + 1;
@@ -138,9 +186,9 @@ export async function buildActivity({ now = new Date(), weeks = 12, fetchImpl = 
         if (window) {
           out[key] = {
             days: window.days,
-            submissions: window.metrics?.submissions ?? null,
-            interviews: window.metrics?.interviews ?? null,
-            hired: window.metrics?.hired ?? null,
+            submissions: readMetric(window.metrics?.submissions),
+            interviews: readMetric(window.metrics?.interviews),
+            hired: readMetric(window.metrics?.hired),
             ratios: window.ratios || null,
           };
         }

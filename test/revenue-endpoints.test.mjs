@@ -11,6 +11,7 @@ import { createDealsHandler } from "../api/revenue/deals.mjs";
 import { createImportHandler } from "../api/revenue/import.mjs";
 import { createRefreshHandler } from "../api/revenue/refresh.mjs";
 import { createSummaryHandler } from "../api/revenue/summary.mjs";
+import { buildActivity, hiresByMonth, readMetric } from "../api/revenue/_lib/activity.mjs";
 
 const noCors = () => false;
 const allowAuth = (email = "someone@raydar.xyz") => async (req) => { req.authedEmail = email; return true; };
@@ -295,4 +296,78 @@ test("a partial success is still worth persisting", async () => {
   assert.equal(persisted, 1);
   assert.equal(res.body.ok, true);
   assert.equal(res.body.calls, false);
+});
+
+// ── the NaN defect (2026-08-17) ──────────────────────────────────────────────
+// Every windowed metric in the placement-metrics payload is a WRAPPER —
+// {value, basis, since, partial, estimated} — not a bare number. Passing it
+// through meant the page ran Number({value: 424}) and rendered "NaN" on three
+// tiles for three days. The ratios were unaffected because they are read via
+// .display, which is exactly why the bug looked so selective.
+
+test("a windowed metric is unwrapped to a number, never passed through whole", () => {
+  const metric = readMetric({ value: 424, basis: "snapshots", since: "2026-07-18", partial: false, estimated: false });
+  assert.equal(metric.value, 424);
+  assert.equal(metric.basis, "snapshots");
+  assert.equal(metric.estimated, false);
+  // The actual regression: whatever the UI formats must survive Number().
+  assert.ok(Number.isFinite(Number(metric.value)), "unwrapped value must be finite");
+});
+
+test("a metric that is not a finite number is null, never NaN and never zero", () => {
+  const missing = [null, undefined, {}, { value: null }, { value: "" }, { value: [] },
+                   { value: false }, { value: "many" }, "n/a", "", NaN, { value: Infinity }, true];
+  for (const bad of missing) {
+    assert.equal(readMetric(bad), null, `${JSON.stringify(bad)} should read as missing`);
+  }
+  // A zero is real data and must survive — "no hires" is not "unknown".
+  assert.equal(readMetric({ value: 0 }).value, 0);
+  assert.equal(readMetric(0).value, 0);
+});
+
+test("a bare number still reads, so an upstream unwrap cannot break the page", () => {
+  const metric = readMetric(424);
+  assert.equal(metric.value, 424);
+  assert.equal(metric.estimated, false);
+});
+
+test("buildActivity emits unwrapped window metrics", async () => {
+  const payload = await buildActivity({
+    now: new Date("2026-08-17T18:00:00Z"),
+    fetchImpl: async (url) => {
+      if (String(url).includes("paraform-metrics")) {
+        return { ok: true, json: async () => ({
+          windows: { "1m": { days: 30, metrics: {
+            submissions: { value: 424, basis: "snapshots", partial: false, estimated: false },
+            interviews: { value: 155, basis: "snapshots", partial: false, estimated: false },
+            hired: { value: 3, basis: "snapshots", partial: true, estimated: false },
+          } } },
+          goal_pace: { goal_per_month: 10, monthly: [{ month: "2026-08", hires: 3 }] },
+        }) };
+      }
+      throw new Error("calls source unavailable in this test");
+    },
+  });
+  const month = payload.paraform.windows["1m"];
+  assert.equal(month.submissions.value, 424);
+  assert.equal(month.interviews.value, 155);
+  assert.equal(month.hired.value, 3);
+  assert.equal(month.hired.partial, true, "the provider's own partial flag must survive");
+});
+
+test("an explicit YYYY-MM label anchors reconciliation, not the position in the array", () => {
+  // The live payload labels every entry "2025-08"-style. Positional anchoring
+  // is only correct while the series ends at the current month; a stale
+  // upstream refresh would shift every bucket and send us chasing placements
+  // in the wrong month. Here the series ends two months BEFORE asOf.
+  const stale = { goal_pace: { monthly: [
+    { month: "2026-05", hires: 1 },
+    { month: "2026-06", hires: 4 },
+  ] } };
+  assert.deepEqual(hiresByMonth(stale, "2026-08-17"), { "2026-05": 1, "2026-06": 4 });
+});
+
+test("an unlabelled series still falls back to counting back from today", () => {
+  const bare = { goal_pace: { monthly: [{ month: "July", hires: 2 }, { month: "August", hires: 5 }] } };
+  assert.deepEqual(hiresByMonth(bare, "2026-08-17"), { "2026-07": 2, "2026-08": 5 });
 });
