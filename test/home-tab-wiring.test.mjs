@@ -36,9 +36,29 @@ test("home is the landing view and the unknown-hash fallback", () => {
   assert.match(index, /<a class="tab active" id="tab-home" href="#home" aria-current="page"/);
 });
 
-test("overview keeps its own tab and deep link, just not the default", () => {
+test("a bare monitor.raydar.xyz settles on Home, hash or no hash", () => {
+  // THE landing bug: boot used to call showView() only for a recognised #hash,
+  // so a URL with no hash left whatever the static markup happened to show. The
+  // call must be unconditional, and the static markup must paint Home — every
+  // other view carries `hidden` so nothing else can be the one on screen.
+  assert.match(index, /showView\(landed \? deepLink : VIEWS\[0\],\s*false\);/);
+  assert.doesNotMatch(index, /if\(landed\) showView\(/);
+  assert.match(index, /<div id="view-home">/);
+  assert.match(index, /<div id="view-overview" hidden>/);
+  // Exactly one view may paint without `hidden`, or two stack on first load.
+  const containers = [...index.matchAll(/<div id="view-([a-z]+)"( hidden)?>/g)];
+  const visible = containers.filter((m) => !m[2]).map((m) => m[1]);
+  assert.deepEqual(visible, ["home"], `views painted on load: ${visible.join(", ")}`);
+});
+
+test("the live-call view is labelled Agent Calls but keeps the overview name", () => {
+  // Renaming the LABEL only: every existing #overview bookmark, deep link and
+  // cross-page link resolves against the internal name, which must not move.
   assert.ok(views.includes("overview"));
   assert.match(index, /<a class="tab" id="tab-overview" href="#overview"/);
+  assert.match(index, /<span class="lbl">Agent Calls<\/span>/);
+  assert.match(index, /\{name:"overview",label:"Agent Calls",group:"Live"\}/);
+  assert.doesNotMatch(index, /<span class="lbl">Overview<\/span>/);
   // Exactly one tab may be pre-marked active, or two look selected on first paint.
   assert.equal((index.match(/class="tab active"/g) || []).length, 1);
   assert.equal((index.match(/aria-current="page"/g) || []).length, 1);
@@ -70,9 +90,10 @@ test("home.html renders inside the shell iframe and behind the Google gate", () 
 test("home.html never caches the revenue payload to localStorage", () => {
   // The placement-metrics payload is PII-free and is cached for instant paint.
   // This one carries client names, candidate labels and amounts, so the same
-  // trick would put PII in browser storage. Only opaque prefs may be stored.
+  // trick would put PII in browser storage. Only opaque prefs may be stored:
+  // a deal id, a milestone COUNT (0-4), and the period toggle. No amounts.
   const stored = [...home.matchAll(/localStorage\.setItem\("([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(stored.sort(), ["revLastSeenDeal", "revPeriod"]);
+  assert.deepEqual(stored.sort(), ["revLastSeenDeal", "revMilestone", "revPeriod"]);
 });
 
 test("landing on Home does not delay the live status poll", () => {
@@ -86,7 +107,54 @@ test("landing on Home does not delay the live status poll", () => {
   assert.ok(!/view-|hidden|currentView/.test(line), `status poll became view-conditional: ${line}`);
 });
 
-test("the honest-gap section is rendered, not quietly dropped", () => {
-  assert.match(home, /Not shown, and why/);
-  assert.match(home, /missingList/);
+// ── the page's scope, as David set it ────────────────────────────────────────
+// Home tracks ONE thing: the moment a deal is signed. Collection, ageing and
+// per-person attribution were deliberately removed — they made a shared target
+// read as an accounting report. The ledger still STORES arCents (the sheet
+// import maps a real A/R column and the CSV export still carries it); the rule
+// is that none of it surfaces here.
+
+test("no collection or A/R concept reaches the page", () => {
+  const body = home.replace(/<textarea[\s\S]*?<\/textarea>/g, "");   // the paste hint mirrors David's sheet header
+  for (const banned of [/statCollected/, /statAr/, /arChart/, /A\/R aging/i, /Outstanding A\/R/i,
+                        /collectedCents/, /revenue\.ar\b/]) {
+    assert.doesNotMatch(body, banned, `"${banned}" is back on the homepage`);
+  }
+});
+
+test("the deals table drops Who and A/R and keeps six columns", () => {
+  const head = home.match(/<thead><tr>([\s\S]*?)<\/tr><\/thead>/)[1];
+  const columns = [...head.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1].trim());
+  assert.deepEqual(columns, ["Signed", "Client", "Role", "Deal", "Status", ""]);
+  // colspan on the empty state must match, or the placeholder row misaligns.
+  assert.match(home, /colspan="6"/);
+});
+
+test("per-team-member breakdown is gone — one team, one number", () => {
+  for (const banned of [/By team member/i, /memberChart/, /f-member/, /teamMember/]) {
+    assert.doesNotMatch(home, banned, `"${banned}" is back on the homepage`);
+  }
+});
+
+test("Activity sits above Deals", () => {
+  assert.ok(home.indexOf('id="activityCard"') < home.indexOf('id="dealsCard"'),
+    "the Activity card must come before the Deals card in the document");
+});
+
+test("the calls-per-week chart and the honest-gap list are gone", () => {
+  for (const banned of [/Calls set per week/i, /callsChart/, /renderCalls/,
+                        /Not shown, and why/i, /missingList/]) {
+    assert.doesNotMatch(home, banned, `"${banned}" is back on the homepage`);
+  }
+});
+
+test("signed dates render long-form, timezone-free", () => {
+  // "2026-08-13" -> "August 13th, 2026". Parsed from the string's own parts:
+  // new Date("2026-08-13") is UTC midnight and renders as the 12th west of
+  // Greenwich, which would silently misdate every deal on the board.
+  assert.match(home, /function prettyDate\(iso\)/);
+  assert.match(home, /prettyDate\(deal\.offerSignedAt\)/);
+  const pretty = home.match(/function prettyDate[\s\S]*?\n\}/)[0];
+  assert.doesNotMatch(pretty, /new Date\(/, "prettyDate must not go through Date()");
+  assert.match(home, /function ordinal\(day\)/);
 });
