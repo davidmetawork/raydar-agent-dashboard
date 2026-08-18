@@ -10,6 +10,7 @@
 import { cors, requireAuth } from "../seq/_lib/core.mjs";
 import { hGet, K } from "../health/_lib/kv.mjs";
 import { LANES, READERS, MAILBOXES, GROUPS, QUOTA_COSTS } from "./_lib/lanes.mjs";
+import { activityFrom } from "./_lib/activity.mjs";
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
@@ -42,6 +43,10 @@ export default async function handler(req, res) {
       healthId,
     };
   };
+  // Last-activity is derived from the tile's evaluator metrics with the kind
+  // kept explicit — real send counts where a lane counts them, run timestamps
+  // where only a heartbeat exists, and null rather than a guess otherwise.
+  const activity = (healthId) => activityFrom(tiles[healthId]?.metrics);
 
   return res.status(200).json({
     ok: true,
@@ -50,7 +55,7 @@ export default async function handler(req, res) {
     groups: GROUPS,
     mailboxes: MAILBOXES.map((m) => ({ ...m, observed: observe(m.healthId) })),
     quotaCosts: QUOTA_COSTS,
-    lanes: LANES.map((l) => ({ ...l, observed: observe(l.healthId) })),
-    readers: READERS.map((r) => ({ ...r, observed: observe(r.healthId) })),
+    lanes: LANES.map((l) => ({ ...l, observed: observe(l.healthId), activity: activity(l.healthId) })),
+    readers: READERS.map((r) => ({ ...r, observed: observe(r.healthId), activity: activity(r.healthId) })),
   });
 }

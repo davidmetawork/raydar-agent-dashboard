@@ -88,13 +88,21 @@
   .lane{border:1px solid var(--line);border-radius:12px;background:#fff;margin-bottom:6px;overflow:hidden}
   .lane.dn{border-color:#F3C9CA} .lane.dg{border-color:#EEDBB4}
   .lane.off{opacity:.66}
-  .lhead{display:grid;grid-template-columns:1fr auto auto auto;gap:12px;align-items:center;padding:11px 14px;cursor:pointer;font:inherit;color:inherit;background:none;border:0;width:100%;text-align:left}
+  .lhead{display:grid;grid-template-columns:1fr auto auto auto auto;gap:12px;align-items:center;padding:11px 14px;cursor:pointer;font:inherit;color:inherit;background:none;border:0;width:100%;text-align:left}
   .lhead:hover{background:#FBFAF6}
   .lname{min-width:0;display:flex;align-items:center;gap:8px}
   .lname b{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lsys{color:var(--muted);font-size:11.5px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lcad{color:var(--ink-2);font-size:12px;text-align:right;max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lmsg{color:var(--muted);font-size:11.5px;white-space:nowrap}
+  .llast{font-size:11.5px;color:var(--ink-2);white-space:nowrap}
+  .llast.sent{color:var(--good);font-weight:600}
+  .llast.none{color:var(--muted);font-style:italic}
+  .lexpl{display:flex;gap:8px;align-items:baseline;padding:8px 14px 10px;border-top:1px dashed var(--line);font-size:12.5px;line-height:1.45;color:var(--ink-2)}
+  .lexpl b{flex:none;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+  .lexpl.bad{background:var(--bad-bg)} .lexpl.bad b{color:var(--bad)}
+  .lexpl.warn{background:var(--warn-bg)} .lexpl.warn b{color:var(--warn)}
+  .lexpl.mut{background:#FBFAF6} .lexpl.mut b{color:var(--ink-3)}
   .pill{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2.5px 8px;border-radius:999px;white-space:nowrap}
   .p-live{background:var(--good-bg);color:var(--good)}
   .p-paused{background:var(--warn-bg);color:var(--warn)}
@@ -154,7 +162,7 @@
     .wrap{padding:16px 12px 60px}
     :root{--labelw:130px}
     .lhead{grid-template-columns:1fr auto;gap:8px}
-    .lcad,.lmsg{display:none}
+    .lcad,.lmsg,.llast{display:none}
     .msg{grid-template-columns:1fr;gap:2px}
     .mstep{margin-top:4px}
   }
@@ -218,6 +226,23 @@ const AUTH={required:true,clientId:"",authenticated:false};
 let DATA=null, OPEN=null, CHART="hour";
 const PILE=8; // red only for a genuine stack, not for every :05 boundary
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function ago(iso){
+  const ms=Date.now()-Date.parse(iso||"");
+  if(!isFinite(ms)||ms<0) return "";
+  const m=Math.floor(ms/60000);
+  if(m<1) return "just now"; if(m<60) return m+"m ago";
+  if(m<1440) return Math.floor(m/60)+"h ago";
+  return Math.floor(m/1440)+"d ago";
+}
+/* Honest one-liner for a lane's last activity. Send counts only where the
+   lane itself counts them; a heartbeat is labelled as a run, never a send. */
+function actLabel(a){
+  if(!a||!a.at) return null;
+  const t=ago(a.at); if(!t) return null;
+  if(a.sentToday!=null) return a.sentToday+" sent today · ran "+t;
+  if(a.sentLastRun!=null&&a.sentLastRun>0) return "sent "+a.sentLastRun+" last run · "+t;
+  return "ran "+t;
+}
 
 async function api(path){
   const r=await fetch(path,{credentials:"same-origin"});
@@ -286,6 +311,28 @@ function obsChip(o){
   return `<span class="obs o-${esc(o.state)}" title="${esc(o.reason||"")}"><span class="dot d-${esc(o.state)}"></span>${esc(label)}</span>`;
 }
 
+function actCell(l){
+  const t=actLabel(l.activity);
+  if(!t) return `<span class="llast none">no send data</span>`;
+  const sent=(l.activity.sentToday!=null&&l.activity.sentToday>0)||(l.activity.sentLastRun!=null&&l.activity.sentLastRun>0);
+  return `<span class="llast${sent?" sent":""}" title="Derived from the lane's own counters and heartbeat">${esc(t)}</span>`;
+}
+/* Visible without expanding: a red/degraded lane explains itself in place,
+   and a paused/dark/deprecated lane says why it is off. */
+function explain(l){
+  const o=l.observed||{};
+  if(o.watched&&(o.state==="DOWN"||o.state==="DEGRADED")){
+    const live=o.reason?esc(o.reason)+". ":"";
+    return `<div class="lexpl bad"><b>why it's ${esc(o.state.toLowerCase())}</b><span>${live}${esc(l.ifDown||"")}</span></div>`;
+  }
+  if(o.watched&&o.state==="PAUSED"&&l.status==="live"){
+    return `<div class="lexpl warn"><b>watcher paused</b><span>${esc(l.ifDown||o.reason||"")}</span></div>`;
+  }
+  if(["paused","dark","deprecated"].includes(l.status)&&l.statusReason){
+    return `<div class="lexpl mut"><b>why it's ${esc(l.status)}</b><span>${esc(l.statusReason)}</span></div>`;
+  }
+  return "";
+}
 function laneRow(l){
   const o=l.observed||{};
   const cls=o.state==="DOWN"?" dn":o.state==="DEGRADED"?" dg":"";
@@ -295,8 +342,10 @@ function laneRow(l){
       <span class="lname"><span><b>${esc(l.name)}</b><div class="lsys">${esc(l.system)}</div></span></span>
       <span class="lcad">${esc(l.cadence)}</span>
       <span class="lmsg">${l.messages.length} msg</span>
-      <span style="display:flex;gap:6px;align-items:center">${obsChip(o)}<span class="pill p-${esc(l.status)}">${esc(l.status)}</span></span>
+      ${actCell(l)}
+      <span style="display:flex;gap:6px;align-items:center">${["dark","deprecated"].includes(l.status)?"":obsChip(o)}<span class="pill p-${esc(l.status)}">${esc(l.status)}</span></span>
     </button>
+    ${explain(l)}
     <div id="det-${esc(l.id)}"></div>
   </div>`;
 }
@@ -321,6 +370,8 @@ function laneDetail(l){
     ["Fires when",l.trigger],["Cadence",l.cadence],["Runs on",l.runsOn],["Volume",l.volume],
     ["If Gmail throttles",l.rateLimit],["Stops when",(l.stops||[]).join(" · ")],
     ["Sends as",l.sender],["Goes to",l.recipient],["Live check",watch],
+    ["Last activity",l.activity&&l.activity.at?new Date(l.activity.at).toLocaleString()+(l.activity.sentToday!=null?" · "+l.activity.sentToday+" sent today":l.activity.sentLastRun!=null?" · "+l.activity.sentLastRun+" sent on that run":""):"not tracked — no lane counter or heartbeat carries a timestamp"],
+    ["If it breaks",l.ifDown],
   ].filter(([,v])=>v&&String(v).trim());
   return `<div class="ldet">
     <p class="lsum">${esc(l.summary)}</p>
@@ -377,7 +428,7 @@ function render(d){
 
   $("readers").innerHTML=d.readers.map(r=>`<div class="rd-row${r.fixed?" fixed":""}">
     <div><b>${esc(r.name)}</b>${r.mailbox!=="david"?' <span class="lmsg">· separate mailbox</span>':""}<div class="rd-note">${esc(r.note)}</div></div>
-    <div class="lcad">${esc(r.cadence)}</div>
+    <div class="lcad">${esc(r.cadence)}${(()=>{const t=actLabel(r.activity);return t?` · <span class=\"llast\">${esc(t)}</span>`:""})()}</div>
     <div>${obsChip(r.observed)}</div>
   </div>`).join("");
 

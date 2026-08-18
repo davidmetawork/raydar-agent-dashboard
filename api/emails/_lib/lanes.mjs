@@ -144,7 +144,8 @@ export const LANES =
         "delay": "About 6 to 11 minutes after the call"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Down usually means the lifecycle cron is failing, or a stale deploy from another workspace unscheduled it (this has happened four times). A candidate who asked for a human is waiting, so treat it as urgent; a lone 429 shows degraded and clears itself."
   },
   {
     "id": "connector-ongoing",
@@ -207,7 +208,8 @@ export const LANES =
         "delay": "7 days after step 2"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Degraded is almost always the persisted Gmail backoff clearing itself. Down means six straight failures or no successful run for three hours; check the david@ mailbox card first, since a locked mailbox surfaces here."
   },
   {
     "id": "connector-backfill",
@@ -263,7 +265,8 @@ export const LANES =
         "delay": "4 days after the first email"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Shares the ongoing ladder’s plumbing and tile, so whatever downs one downs both. Its pacing deadline has passed, so a stall followed by recovery can release every due thread in a single run."
   },
   {
     "id": "paraai-missing-email",
@@ -312,7 +315,8 @@ export const LANES =
         "delay": "Immediate, right after Slack fails"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same worker and tile as outreach, with one design wrinkle: this alert about email failure is itself an email through the same mailbox, so a mailbox lockout silences it too. Slack is the primary channel."
   },
   {
     "id": "interview-invites",
@@ -379,7 +383,8 @@ export const LANES =
         "delay": "14 days after the first email, the last"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "A desktop lane: down usually means the Mac is asleep or launchd failed, so check the desktop-runner tile first. A Gmail 429 halts the whole run with no retry until the next hour, and what runs is a frozen copy on the Mac, not the repo."
   },
   {
     "id": "interview-fit",
@@ -446,7 +451,8 @@ export const LANES =
         "delay": "Same timing, only one version is sent"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Rides the interview-invites cycle and tile, so it goes down with the Mac. Its sends also stop silently when the call-evidence oracle cannot be read."
   },
   {
     "id": "resume-chase",
@@ -516,7 +522,8 @@ export const LANES =
         "delay": "7 days after the call, or 4 after touch 2"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Its Gmail cooldown circuit exits clean while a banked 429 window is open, so a healthy beat with zero sends can hide the backoff for up to three straight failures; the fourth exhausts the circuit and the run exits with a failure beat, turning the tile red with the Mac awake — its usual red state. Otherwise a hard down means the Mac is asleep or the run crashed."
   },
   {
     "id": "paraai-first-request",
@@ -578,7 +585,8 @@ export const LANES =
         "delay": "2 days after step 2 was sent"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Degraded means the fleet Gmail breaker observed a 429 minutes ago (sends queue and resume on their own), or outreach is approved but not execution-ready. This tile never shows down: a dead Fly worker surfaces as a growing due queue on the Para AI automation tile and on the Fly worker tile."
   },
   {
     "id": "paraai-additional-request",
@@ -634,7 +642,8 @@ export const LANES =
         "delay": "2 days after the first email"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Shares the outreach worker and tile: degraded is the breaker self-healing, or outreach approved but not execution-ready. The tile never shows down; a dead worker surfaces as a growing due queue on the Para AI automation tile and on the Fly worker tile."
   },
   {
     "id": "curated-interest",
@@ -688,7 +697,9 @@ export const LANES =
         "delay": "Same pass, after the roles are checked"
       }
     ],
-    "status": "dark"
+    "status": "dark",
+    "ifDown": "Never armed, so nothing can be down. Before arming it: the mailer as coded builds a malformed message Gmail cannot deliver, and that must be fixed first.",
+    "statusReason": "Built dark and never armed: every write gate ships closed and dry-run is the default, so no candidate has ever received it. It also has a known flaw to fix before arming: the mailer as coded would post a malformed message Gmail cannot deliver."
   },
   {
     "id": "applicant-ladder",
@@ -745,7 +756,8 @@ export const LANES =
         "delay": "not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "The tile watches our enrollment and pause plumbing, not Paraform’s delivery. If david@’s account errors on Paraform’s side, the mailbox fleet card is built to go down on that gmail status error; the 2026-08-04 failure was caught by a per-sequence readback."
   },
   {
     "id": "agent-no-matches",
@@ -800,7 +812,8 @@ export const LANES =
         "delay": "not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Enrollment is a GitHub Actions tick at :35, so a red curated-fit routing run is the usual cause of a stall. Paraform sending afterwards is its own risk: more than 6 hours to first send counts as stalled."
   },
   {
     "id": "human-no-matches",
@@ -855,7 +868,8 @@ export const LANES =
         "delay": "not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same :35 Actions tick and the same failure shape as the agent lane: red Actions run first, then a Paraform first-send stall past 6 hours."
   },
   {
     "id": "agent-curated",
@@ -910,7 +924,8 @@ export const LANES =
         "delay": "not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same :35 Actions tick as the no-matches lanes. A switched-off sequence target hard-stops routing rather than silently mis-filing candidates."
   },
   {
     "id": "human-curated",
@@ -965,7 +980,8 @@ export const LANES =
         "delay": "not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same :35 Actions tick as the no-matches lanes. A switched-off sequence target hard-stops routing rather than silently mis-filing candidates."
   },
   {
     "id": "retired-new-matches",
@@ -1011,7 +1027,9 @@ export const LANES =
         "delay": "not in code"
       }
     ],
-    "status": "deprecated"
+    "status": "deprecated",
+    "ifDown": "Nothing on our side runs it, so nothing can be down. A send could still be Paraform advancing a leftover pre-cutover member; verify in Paraform before treating a send as a bug.",
+    "statusReason": "Retired: new enrollment is blocked in code, and only leftover Paraform members could still advance. Nothing on our side should ever send these again."
   },
   {
     "id": "no-show-followup",
@@ -1077,7 +1095,8 @@ export const LANES =
         "delay": "Plan: 5 days after enrollment; not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "A Vercel cron on the lifecycle project. The historical cause of silent stops is a stale-tree deploy unscheduling the sibling crons; a dedicated :15/:45 recovery drain with reserved slots keeps the backlog from starving fresh calls."
   },
   {
     "id": "audio-fail-followup",
@@ -1141,7 +1160,8 @@ export const LANES =
         "delay": "Plan: 5 days after step 1; not in code"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same lifecycle cron family as the no-show lane, but with no recovery drain: a missed window stays missed until the next :03/:33 tick."
   },
   {
     "id": "curated-fit-routing",
@@ -1220,7 +1240,8 @@ export const LANES =
         "delay": "Paraform setting; only step one observed"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "A red curated-fit routing run under GitHub Actions, or a stalled first-send verification. Skips are recorded durably, and 536 skipped against 315 routed in its first two weeks is normal shape, not failure."
   },
   {
     "id": "precall-reminder",
@@ -1276,7 +1297,8 @@ export const LANES =
         "delay": "Same window, chosen by call type"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Two-plus hours with no successful run shows degraded; down means the lane itself reports unhealthy. It sends as calls@ but reads David’s calendar, so a locked david@ mailbox stalls it — that stopped reminders for 31 hours in the 08-09 incident. A 429 burns that reminder for good."
   },
   {
     "id": "booking-confirm",
@@ -1332,7 +1354,8 @@ export const LANES =
         "delay": "Also waits for both calendar holds"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Mirrors the scheduler’s own Gmail check. This bucket sailed through both mailbox lockouts, so red here means the scheduler deploy or the calls@ delegation, not Gmail-wide trouble."
   },
   {
     "id": "legacy-booking-confirm",
@@ -1379,7 +1402,9 @@ export const LANES =
         "delay": "Sent on the next run, within 2 minutes"
       }
     ],
-    "status": "dark"
+    "status": "dark",
+    "ifDown": "Expected silent: its chip mirrors the scheduler sender. Any send appearing from this lane means the legacy fallback path re-activated, which is worth chasing.",
+    "statusReason": "Dark by design: superseded by the scheduler’s calls@ outbox, and it can only mail the approved test address. Kept because the code is reachable and it is the one scheduler path that could put send volume on david@; expected volume is zero."
   },
   {
     "id": "booking-cancel",
@@ -1429,7 +1454,8 @@ export const LANES =
         "delay": "Within about 2 minutes of cancelling"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same outbox and tile as confirmations: red here means the scheduler’s sender is broken for confirmations, cancellations and reschedules alike."
   },
   {
     "id": "booking-reschedule",
@@ -1485,7 +1511,8 @@ export const LANES =
         "delay": "A minute later, after the replaced notice"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Same outbox and tile as confirmations: red here means the scheduler’s sender is broken for confirmations, cancellations and reschedules alike."
   },
   {
     "id": "calendar-invites",
@@ -1538,7 +1565,8 @@ export const LANES =
         "delay": "The moment the change or removal lands"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "Google sends these itself the moment the calendar write lands. If bookings confirm but invitations stop arriving, the calendar write is what failed; the tile only watches the scheduler around it."
   },
   {
     "id": "apps-script-reply",
@@ -1589,7 +1617,8 @@ export const LANES =
         "delay": "Within about 30 minutes of the referral"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "The paused chip is the watcher, not the lane: the script still replies every 30 minutes inside the mailbox, and the board cannot currently see it fail. It is the lane that sustained the 08-10 lockout at its old 10-minute cadence."
   },
   {
     "id": "hm-chase",
@@ -1648,13 +1677,15 @@ export const LANES =
         "delay": "Drafted on the tick, never auto-sent"
       }
     ],
-    "status": "paused"
+    "status": "paused",
+    "ifDown": "Cannot be down: nothing is installed. The paused chip is accurate, and arming it is a decision, not a repair.",
+    "statusReason": "Paused on purpose: David retired the desktop job on 8 August because clients were getting annoyed, so nothing runs today. Restarting it needs his explicit go and a cadence redesign; the draft-then-send machinery itself is complete."
   },
   {
     "id": "trademark-watch",
     "group": "sa",
     "mailbox": "david",
-    "healthId": null,
+    "healthId": "gha-trademark-watch",
     "schedule": {
       "kind": "daily",
       "times": [
@@ -1711,7 +1742,8 @@ export const LANES =
         "delay": "1st of each month, moved or not"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "The board watches only the Actions run: a failed run reports a fail beat at once, and sustained silence goes down after three days. The emails themselves have no tile — the monthly digest is the dead-man’s switch, so no digest by the 3rd of the month means the watcher is dead."
   },
   {
     "id": "cold-sourcing",
@@ -1775,13 +1807,14 @@ export const LANES =
         "delay": "4 days after step 2 (live fleet shows 2)"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "The fleet card watches gmail status through Paraform: any alias in error means pause its sequences before the domain burns. Warmup keeps background volume flowing, so a quiet campaign is not evidence of a healthy mailbox."
   },
   {
     "id": "calendly-role-chat",
     "group": "scheduler",
     "mailbox": "none",
-    "healthId": null,
+    "healthId": "n8n-workflows",
     "schedule": {
       "kind": "every",
       "n": 1,
@@ -1825,7 +1858,8 @@ export const LANES =
         "delay": "Within about a minute of the booking"
       }
     ],
-    "status": "live"
+    "status": "live",
+    "ifDown": "An n8n cloud workflow patching the calendar every minute; failure streaks surface on the n8n tile. Google then emails the update itself, so patches succeeding without mail arriving points at Google’s send, not ours."
   },
   {
     "id": "slack-prefilled",
@@ -1902,7 +1936,8 @@ export const LANES =
         "delay": "On click, on a scheduling alert"
       }
     ],
-    "status": "human-initiated"
+    "status": "human-initiated",
+    "ifDown": "Nothing automated to break: sends happen from David’s browser. If the buttons stop appearing in Slack, the n8n notify workflow is the thing to check."
   },
   {
     "id": "olivia",
@@ -1949,6 +1984,8 @@ export const LANES =
         "delay": "Internal sends at once, external after a yes"
       }
     ],
-    "status": "dark"
+    "status": "dark",
+    "ifDown": "Nothing to watch until she launches: no schedule exists and her mailbox has sent zero emails, so there is no state this page could report.",
+    "statusReason": "Dark: fully built and verified offline, never launched in production Slack. Her mailbox has sent zero emails."
   }
 ];

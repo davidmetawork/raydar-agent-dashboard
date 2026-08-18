@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { LANES, READERS, MAILBOXES, GROUPS, QUOTA_COSTS } from "../api/emails/_lib/lanes.mjs";
+import { activityFrom } from "../api/emails/_lib/activity.mjs";
 import { CATALOG } from "../api/health/_lib/catalog.mjs";
 
 const SCHEDULE_KINDS = new Set(["every", "marks", "hourly", "daily", "event", "none"]);
@@ -94,4 +95,48 @@ test("quota costs keep the read-vs-send story intact", () => {
   const byCall = Object.fromEntries(QUOTA_COSTS.map((c) => [c.call, c.units]));
   assert.ok(byCall["Ask what changed"] < byCall["Open a thread, full"], "the cheap call must be cheaper");
   assert.equal(QUOTA_COSTS.filter((c) => c.good).length, 1, "exactly one call is the recommended one");
+});
+
+
+// Down/paused explanations: the page promises a reason for every unhealthy or
+// switched-off lane, so the data must actually carry one.
+test("every lane explains what a red chip most likely means", () => {
+  for (const l of LANES) {
+    assert.ok(String(l.ifDown || "").trim().length >= 40, `${l.id} needs a substantive ifDown`);
+  }
+});
+
+test("every non-live lane says why it is off", () => {
+  for (const l of LANES.filter((x) => ["paused", "dark", "deprecated"].includes(x.status))) {
+    assert.ok(String(l.statusReason || "").trim().length >= 40, `${l.id} needs a statusReason`);
+  }
+});
+
+// Last-activity honesty: send counts only where a lane counts them, heartbeats
+// labelled as runs, and never an invented timestamp.
+test("activityFrom keeps kinds honest", () => {
+  assert.deepEqual(
+    activityFrom({ lastOkAt: "2026-08-18T19:00:00Z", sentLatestDay: 3 }),
+    { at: "2026-08-18T19:00:00Z", kind: "run", sentToday: 3 });
+  assert.deepEqual(
+    activityFrom({ lastBeat: "2026-08-18T19:10:00Z", sent: 12 }),
+    { at: "2026-08-18T19:10:00Z", kind: "run", sentLastRun: 12 });
+  // beat with no producer metrics: a run, with no send claim at all
+  assert.deepEqual(
+    activityFrom({ lastBeat: "2026-08-18T19:10:00Z" }),
+    { at: "2026-08-18T19:10:00Z", kind: "run", sentLastRun: null });
+  // nothing usable: null, never a guess
+  assert.equal(activityFrom({ breakerArmed: true }), null);
+  assert.equal(activityFrom(undefined), null);
+  // lastOkAt wins over lastBeat when both exist, and a zero count survives
+  assert.deepEqual(
+    activityFrom({ lastOkAt: "2026-08-18T19:00:00Z", lastBeat: "2026-08-18T18:00:00Z", sentLatestDay: 0 }),
+    { at: "2026-08-18T19:00:00Z", kind: "run", sentToday: 0 });
+});
+
+test("the page renders the new fields", async () => {
+  const page = await readFile(new URL("../emails.html", import.meta.url), "utf8");
+  for (const needle of ["actLabel", "lexpl", "ifDown", "statusReason", "Last activity", "If it breaks"]) {
+    assert.ok(page.includes(needle), `emails.html missing ${needle}`);
+  }
 });
