@@ -405,12 +405,6 @@ function render() {
 
   const alerts = [];
   if (activityStale) alerts.push(`<div class="banner warn"><strong>Activity data is stale.</strong> The revenue figures below are ours and are current; the Paraform activity section may be behind.</div>`);
-  const missing = revenue.reconciliation?.missingTotal || 0;
-  if (missing > 0) {
-    const months = revenue.reconciliation.months.filter((m) => m.missing > 0)
-      .map((m) => `${m.month} (${m.missing})`).join(", ");
-    alerts.push(`<div class="banner warn"><strong>Paraform shows ${missing} more hire${missing === 1 ? "" : "s"} than the ledger has deals.</strong> Months: ${esc(months)}. If those placements earned revenue, add them so the number stays true.</div>`);
-  }
   $("alerts").innerHTML = alerts.join("");
 
   renderHero(revenue);
