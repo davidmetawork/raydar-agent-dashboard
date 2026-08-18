@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Emails · Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9; --ink:#16140F; --ink-2:#4A4741; --ink-3:#716D63;
+    --card:#FFFFFF; --line:#E9E3D5; --line-2:#F1ECE0; --muted:#8C877B;
+    --orange:#FF5E00; --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FAEEDC; --violet:#7F72FF; --violet-bg:#ECEAFE; --violet-700:#574EA9;
+    --muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font-family:"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px}
+  h1{font-family:"PP Grafier Display",serif;font-weight:600;font-size:30px;margin:0}
+  h2{font-family:"PP Grafier Display",serif;font-weight:600;font-size:17px;margin:0}
+  .sub{color:var(--muted);margin:4px 0 0}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px;margin-bottom:16px}
+  button.act{font:inherit;border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 11px;cursor:pointer}
+  button.act:hover{border-color:var(--ink)}
+  a{color:var(--orange)}
+
+  /* ── summary strip ── */
+  .sumrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+  .sum{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 15px}
+  .sum .n{font-family:"PP Grafier Display",serif;font-size:26px;line-height:1.1}
+  .sum .l{color:var(--muted);font-size:12.5px;margin-top:2px}
+  .sum.hot .n{color:var(--bad)} .sum.ok .n{color:var(--good)} .sum.vi .n{color:var(--violet-700)}
+
+  /* ── mailbox cards ── */
+  .mbrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin-bottom:8px}
+  .mb{border:1px solid var(--line);border-radius:14px;padding:13px 15px;background:#fff}
+  .mb.hot{border-color:#F3C9CA;background:var(--bad-bg)}
+  .mb.ok{border-color:#BFE6D3;background:var(--good-bg)}
+  .mb.warn{border-color:#EEDBB4;background:var(--warn-bg)}
+  .mb.muted{opacity:.72}
+  .mb .addr{font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:7px}
+  .mb .role{color:var(--ink-3);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-top:2px}
+  .mb .det{font-size:12.5px;color:var(--ink-2);margin-top:7px;line-height:1.42}
+  .mb .lims{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+  .mb .lim{font-size:11px;background:rgba(255,255,255,.75);border:1px solid var(--line);border-radius:999px;padding:2px 8px;white-space:nowrap}
+
+  /* ── status dots ── */
+  .dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+  .d-OK{background:var(--good)} .d-DEGRADED{background:var(--warn)} .d-DOWN{background:var(--bad)}
+  .d-UNKNOWN{background:var(--violet)} .d-PAUSED{background:#BDB7A8} .d-NONE{background:#D6D0C1}
+
+  /* ── timing chart ── */
+  .chart{overflow-x:auto;padding-bottom:4px}
+  .chart-inner{min-width:840px}
+  .ct-head{display:flex;align-items:flex-end;gap:0;margin-left:var(--labelw);height:46px}
+  .ct-col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;min-width:0}
+  .ct-bar{width:76%;background:var(--violet);border-radius:2px 2px 0 0;min-height:1px}
+  .ct-bar.pile{background:var(--bad)}
+  .ct-cnt{font-size:9px;color:var(--muted);margin-bottom:2px}
+  .ct-axis{display:flex;margin-left:var(--labelw);border-top:1px solid var(--ink);padding-top:3px;margin-bottom:6px}
+  .ct-axis span{flex:1;font-size:9.5px;color:var(--muted);text-align:center;min-width:0}
+  .ct-row{display:flex;align-items:center;height:19px}
+  .ct-lab{width:var(--labelw);flex:none;font-size:11.5px;padding-right:9px;text-align:right;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ct-lab.rd{color:var(--ink-3);font-style:italic}
+  .ct-track{flex:1;display:flex;height:100%;align-items:center;position:relative}
+  .ct-cell{flex:1;height:100%;min-width:0;display:flex;align-items:center;justify-content:center;border-left:1px solid var(--line-2)}
+  .ct-cell.q{border-left-color:#DCD5C3}
+  .ct-tick{width:70%;max-width:9px;height:9px;border-radius:2px;background:var(--violet)}
+  .ct-row.rd .ct-tick{background:#C3BCF6}
+  :root{--labelw:190px}
+  .ct-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted);margin-top:10px}
+  .ct-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+  .daybar{display:flex;margin-left:var(--labelw);gap:0}
+  .tabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .tabs button{font:inherit;border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 13px;cursor:pointer;font-size:13px}
+  .tabs button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+
+  /* ── lane list ── */
+  .group{margin-bottom:22px}
+  .ghead{display:flex;align-items:baseline;gap:10px;margin-bottom:3px;flex-wrap:wrap}
+  .ghead .n{color:var(--muted);font-size:12px}
+  .gblurb{color:var(--ink-3);font-size:12.5px;margin-bottom:9px;max-width:78ch}
+  .lane{border:1px solid var(--line);border-radius:12px;background:#fff;margin-bottom:6px;overflow:hidden}
+  .lane.dn{border-color:#F3C9CA} .lane.dg{border-color:#EEDBB4}
+  .lane.off{opacity:.66}
+  .lhead{display:grid;grid-template-columns:1fr auto auto auto;gap:12px;align-items:center;padding:11px 14px;cursor:pointer;font:inherit;color:inherit;background:none;border:0;width:100%;text-align:left}
+  .lhead:hover{background:#FBFAF6}
+  .lname{min-width:0;display:flex;align-items:center;gap:8px}
+  .lname b{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lsys{color:var(--muted);font-size:11.5px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lcad{color:var(--ink-2);font-size:12px;text-align:right;max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lmsg{color:var(--muted);font-size:11.5px;white-space:nowrap}
+  .pill{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2.5px 8px;border-radius:999px;white-space:nowrap}
+  .p-live{background:var(--good-bg);color:var(--good)}
+  .p-paused{background:var(--warn-bg);color:var(--warn)}
+  .p-dark,.p-deprecated{background:var(--muted-bg);color:var(--ink-3)}
+  .p-human-initiated{background:var(--violet-bg);color:var(--violet-700)}
+  .obs{font-size:10.5px;padding:2.5px 8px;border-radius:999px;white-space:nowrap;display:flex;align-items:center;gap:5px;border:1px solid var(--line)}
+  .obs.unwatched{color:var(--muted);border-style:dashed}
+  .obs.o-DOWN{background:var(--bad-bg);border-color:#F3C9CA;color:var(--bad);font-weight:700}
+  .obs.o-DEGRADED{background:var(--warn-bg);border-color:#EEDBB4;color:var(--warn);font-weight:700}
+  .obs.o-OK{background:var(--good-bg);border-color:#BFE6D3;color:var(--good)}
+  .obs.o-UNKNOWN{background:var(--violet-bg);border-color:#D4CFFB;color:var(--violet-700)}
+
+  .ldet{border-top:1px solid var(--line);padding:14px;background:#FBFAF6;font-size:13px}
+  .lsum{font-size:14px;line-height:1.5;margin:0 0 12px;max-width:88ch}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-bottom:13px}
+  .fn{font-size:11.5px;padding:3px 8px;border-radius:6px;background:#fff;border:1px solid var(--line);white-space:nowrap}
+  .fn.q{background:var(--violet-bg);border-color:#D4CFFB;color:var(--violet-700);font-weight:600}
+  .fn.s{background:var(--ink);color:#fff;border-color:var(--ink);font-weight:600}
+  .fn.e{background:var(--violet);color:#fff;border-color:var(--violet);font-weight:600}
+  .far{color:var(--muted);font-size:11px}
+  .msgs{border-top:1px solid var(--line);margin-bottom:13px}
+  .msg{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:9px 0;border-bottom:1px solid var(--line-2)}
+  .mstep{font-size:12px;font-weight:700;color:var(--violet-700)}
+  .mdelay{font-size:11.5px;color:var(--muted);margin-top:2px}
+  .msubj{font-weight:600;font-size:13.5px;margin-bottom:3px}
+  .msubj.none{font-weight:400;font-style:italic;color:var(--muted);font-size:12.5px}
+  .mgist{font-size:12.5px;color:var(--ink-2);line-height:1.45}
+  .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:0 18px;border-top:1px solid var(--line)}
+  .kv>div{padding:8px 0;border-bottom:1px solid var(--line-2)}
+  .kv dt{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
+  .kv dd{margin:0;font-size:12.5px;line-height:1.42;overflow-wrap:anywhere}
+  .gotch{background:var(--warn-bg);border-radius:10px;padding:10px 12px;margin-bottom:13px}
+  .gotch b{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--warn);display:block;margin-bottom:5px}
+  .gotch li{font-size:12.5px;line-height:1.44;margin-bottom:4px}
+  .gotch ul{margin:0;padding-left:16px}
+  .gotch li:last-child{margin-bottom:0}
+
+  /* ── readers ── */
+  .rd-row{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:5px}
+  .rd-row.fixed{border-color:#BFE6D3;background:var(--good-bg)}
+  .rd-note{color:var(--ink-2);font-size:12px;margin-top:2px;line-height:1.4}
+  .costs{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+  .cost{border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:#fff;display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+  .cost.hot{background:var(--bad-bg);border-color:#F3C9CA}
+  .cost.good{background:var(--good-bg);border-color:#BFE6D3}
+  .cost .u{font-family:"PP Grafier Display",serif;font-size:19px}
+  .cost .c{font-size:12.5px}
+  .cost .nt{font-size:11px;color:var(--muted);display:block;margin-top:1px}
+
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.96);display:none;align-items:flex-start;justify-content:center;flex-direction:column;gap:14px;z-index:20;padding:32px 20px 20px}
+  .err{color:var(--bad)}
+  .note{font-size:12.5px;color:var(--ink-3);line-height:1.45;margin-top:10px}
+  body.embed header .brand h1, body.embed header .brand .sub{display:none}
+  body.embed header{margin-bottom:10px}
+  body.embed .wrap{padding-top:10px}
+  @media (max-width:820px){
+    .wrap{padding:16px 12px 60px}
+    :root{--labelw:130px}
+    .lhead{grid-template-columns:1fr auto;gap:8px}
+    .lcad,.lmsg{display:none}
+    .msg{grid-template-columns:1fr;gap:2px}
+    .mstep{margin-top:4px}
+  }
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div style="font-family:'PP Grafier Display',serif;font-size:20px">Sign in to view Raydar emails</div>
+  <div id="gsi"></div>
+  <div class="err" id="gateErr"></div>
+</div>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1>Emails</h1>
+      <div class="sub">Every email Raydar sends, what it says, and when it fires.</div>
+    </div>
+    <button class="act" id="refresh">Refresh</button>
+  </header>
+
+  <div class="sumrow" id="sumrow"></div>
+
+  <div class="card">
+    <h2>The mailboxes they share</h2>
+    <div class="sub" style="margin-bottom:12px">Which bucket each lane spends. This is the blast radius.</div>
+    <div class="mbrow" id="mbrow"></div>
+  </div>
+
+  <div class="card">
+    <h2>When everything fires</h2>
+    <div class="sub" style="margin-bottom:12px" id="chartSub">Every scheduled lane, laid over one hour. The bar on top counts how many fire on the same minute.</div>
+    <div class="tabs" id="chartTabs">
+      <button data-v="hour" class="on">Minute of the hour</button>
+      <button data-v="day">Across the day</button>
+    </div>
+    <div class="chart"><div class="chart-inner" id="chart"></div></div>
+    <div class="ct-legend">
+      <span><i style="background:var(--violet)"></i>Sending lane</span>
+      <span><i style="background:#C3BCF6"></i>Reader robot</span>
+      <span><i style="background:var(--bad)"></i>Eight or more at once</span>
+      <span id="chartNote"></span>
+    </div>
+  </div>
+
+  <div id="groups"></div>
+
+  <div class="card">
+    <h2>The robots reading your mail</h2>
+    <div class="sub" style="margin-bottom:12px">These send nothing. They are what actually exhausted the mailbox, at roughly twenty reads per send.</div>
+    <div id="readers"></div>
+    <h2 style="margin-top:18px">What each call costs</h2>
+    <div class="sub" style="margin-bottom:10px">Gmail quota units. Re-priced upward in May 2026, so reading got four times more expensive.</div>
+    <div class="costs" id="costs"></div>
+  </div>
+</div>
+
+<script>
+const $=(id)=>document.getElementById(id);
+if(new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
+const AUTH={required:true,clientId:"",authenticated:false};
+let DATA=null, OPEN=null, CHART="hour";
+const PILE=8; // red only for a genuine stack, not for every :05 boundary
+const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path){
+  const r=await fetch(path,{credentials:"same-origin"});
+  if(r.status===401||r.status===403){ showGate(); throw new Error("auth"); }
+  return r.json();
+}
+
+/* Which minutes past the hour a schedule fires. Sub-hourly only: daily and
+   event-driven lanes have nothing to draw on a 60-minute track. */
+function minutesOf(s){
+  if(!s) return [];
+  if(s.kind==="every"){ const out=[]; for(let m=0;m<60;m++) if(((m-(s.offset||0))%s.n+s.n)%s.n===0) out.push(m); return out; }
+  if(s.kind==="marks") return s.minutes||[];
+  if(s.kind==="hourly") return [s.minute||0];
+  return [];
+}
+function hoursOf(s){
+  if(!s) return [];
+  if(s.kind==="daily") return (s.times||[]).map(t=>parseInt(String(t).split(":")[0],10)).filter(h=>!isNaN(h));
+  if(s.kind==="every"||s.kind==="marks"||s.kind==="hourly") return Array.from({length:24},(_,i)=>i);
+  return [];
+}
+const scheduled=(x)=>x.schedule && !["event","none"].includes(x.schedule.kind);
+
+function renderChart(){
+  const lanes=DATA.lanes.filter(scheduled).map(l=>({...l,_rd:false}));
+  const readers=DATA.readers.filter(scheduled).map(r=>({...r,_rd:true}));
+  const rows=[...lanes,...readers];
+  const host=$("chart");
+
+  if(CHART==="hour"){
+    const per=rows.map(r=>({r,ms:minutesOf(r.schedule)})).filter(x=>x.ms.length);
+    const counts=Array.from({length:60},(_,m)=>per.filter(x=>x.ms.includes(m)).length);
+    const peak=Math.max(1,...counts);
+    const worst=counts.map((c,m)=>[c,m]).filter(([c])=>c===peak).map(([,m])=>":"+String(m).padStart(2,"0"));
+    $("chartNote").textContent=`Worst minute fires ${peak} at once (${worst.join(", ")})`;
+    $("chartSub").textContent="Every scheduled lane, laid over one hour. The bar on top counts how many fire on the same minute.";
+    host.innerHTML=
+      `<div class="ct-head">${counts.map(c=>
+        `<div class="ct-col">${c?`<div class="ct-cnt">${c}</div><div class="ct-bar${c>=PILE?" pile":""}" style="height:${Math.round(c/peak*30)}px"></div>`:""}</div>`).join("")}</div>`+
+      `<div class="ct-axis">${Array.from({length:60},(_,m)=>`<span>${m%5===0?":"+String(m).padStart(2,"0"):""}</span>`).join("")}</div>`+
+      per.map(({r,ms})=>
+        `<div class="ct-row${r._rd?" rd":""}"><div class="ct-lab${r._rd?" rd":""}" title="${esc(r.name)}">${esc(r.name)}</div>`+
+        `<div class="ct-track">${Array.from({length:60},(_,m)=>
+          `<div class="ct-cell${m%5===0?" q":""}">${ms.includes(m)?'<div class="ct-tick"></div>':""}</div>`).join("")}</div></div>`).join("");
+  } else {
+    const per=rows.map(r=>({r,hs:hoursOf(r.schedule)})).filter(x=>x.hs.length);
+    const counts=Array.from({length:24},(_,h)=>per.filter(x=>x.hs.includes(h)).length);
+    const peak=Math.max(1,...counts);
+    $("chartNote").textContent="Hourly lanes fill every hour; daily lanes show one mark";
+    $("chartSub").textContent="The same lanes across a full day. Sub-hourly lanes run all day; daily jobs show a single mark.";
+    host.innerHTML=
+      `<div class="ct-head">${counts.map(c=>
+        `<div class="ct-col">${c?`<div class="ct-cnt">${c}</div><div class="ct-bar${c>=PILE?" pile":""}" style="height:${Math.round(c/peak*30)}px"></div>`:""}</div>`).join("")}</div>`+
+      `<div class="ct-axis">${Array.from({length:24},(_,h)=>`<span>${String(h).padStart(2,"0")}</span>`).join("")}</div>`+
+      per.map(({r,hs})=>
+        `<div class="ct-row${r._rd?" rd":""}"><div class="ct-lab${r._rd?" rd":""}" title="${esc(r.name)}">${esc(r.name)}</div>`+
+        `<div class="ct-track">${Array.from({length:24},(_,h)=>
+          `<div class="ct-cell${h%6===0?" q":""}">${hs.includes(h)?'<div class="ct-tick"></div>':""}</div>`).join("")}</div></div>`).join("");
+  }
+}
+
+function obsChip(o){
+  if(!o||!o.watched) return `<span class="obs unwatched" title="No health check watches this lane">not watched</span>`;
+  const label=o.state==="OK"?"sending":o.state==="DOWN"?"down":o.state==="DEGRADED"?"degraded":o.state.toLowerCase();
+  return `<span class="obs o-${esc(o.state)}" title="${esc(o.reason||"")}"><span class="dot d-${esc(o.state)}"></span>${esc(label)}</span>`;
+}
+
+function laneRow(l){
+  const o=l.observed||{};
+  const cls=o.state==="DOWN"?" dn":o.state==="DEGRADED"?" dg":"";
+  const off=["paused","dark","deprecated"].includes(l.status)?" off":"";
+  return `<div class="lane${cls}${off}" id="lane-${esc(l.id)}">
+    <button class="lhead" data-id="${esc(l.id)}">
+      <span class="lname"><span><b>${esc(l.name)}</b><div class="lsys">${esc(l.system)}</div></span></span>
+      <span class="lcad">${esc(l.cadence)}</span>
+      <span class="lmsg">${l.messages.length} msg</span>
+      <span style="display:flex;gap:6px;align-items:center">${obsChip(o)}<span class="pill p-${esc(l.status)}">${esc(l.status)}</span></span>
+    </button>
+    <div id="det-${esc(l.id)}"></div>
+  </div>`;
+}
+
+function laneDetail(l){
+  const flow=l.flow.map((s,i)=>{
+    const q=/^Q:/i.test(s), t=esc(s.replace(/^Q:\s*/i,""));
+    const c=q?"fn q":i===0?"fn s":i===l.flow.length-1?"fn e":"fn";
+    return `<span class="${c}">${t}</span>`+(i<l.flow.length-1?'<span class="far">→</span>':"");
+  }).join("");
+  const msgs=l.messages.map(m=>{
+    const none=/^no subject|^not in code/i.test(m.subject);
+    return `<div class="msg"><div><div class="mstep">${esc(m.step)}</div><div class="mdelay">${esc(m.delay)}</div></div>
+      <div><div class="msubj${none?" none":""}">${esc(m.subject)}</div><div class="mgist">${esc(m.gist)}</div></div></div>`;
+  }).join("");
+  const g=l.gotchas.length?`<div class="gotch"><b>Worth knowing</b><ul>${l.gotchas.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>`:"";
+  const o=l.observed||{};
+  const watch=o.watched
+    ? `${esc(o.state)}${o.reason?" — "+esc(o.reason):""}`
+    : "No health check watches this lane. Its status above is what the code says, not proof mail moved.";
+  const rows=[
+    ["Fires when",l.trigger],["Cadence",l.cadence],["Runs on",l.runsOn],["Volume",l.volume],
+    ["If Gmail throttles",l.rateLimit],["Stops when",(l.stops||[]).join(" · ")],
+    ["Sends as",l.sender],["Goes to",l.recipient],["Live check",watch],
+  ].filter(([,v])=>v&&String(v).trim());
+  return `<div class="ldet">
+    <p class="lsum">${esc(l.summary)}</p>
+    ${flow?`<div class="flow">${flow}</div>`:""}
+    ${msgs?`<div class="msgs">${msgs}</div>`:""}
+    ${g}
+    <dl class="kv">${rows.map(([k,v])=>`<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+  </div>`;
+}
+
+function toggle(id){
+  const host=$("det-"+id); if(!host) return;
+  if(OPEN===id){ host.innerHTML=""; OPEN=null; return; }
+  document.querySelectorAll("[id^=det-]").forEach(d=>d.innerHTML="");
+  const l=DATA.lanes.find(x=>x.id===id); if(!l) return;
+  host.innerHTML=laneDetail(l); OPEN=id;
+}
+
+function render(d){
+  DATA=d;
+  const live=d.lanes.filter(l=>l.status==="live").length;
+  const watched=d.lanes.filter(l=>l.observed&&l.observed.watched).length;
+  const bad=[...d.lanes,...d.readers].filter(x=>x.observed&&["DOWN","DEGRADED"].includes(x.observed.state)).length;
+  const davidLanes=d.lanes.filter(l=>l.mailbox==="david").length;
+  $("sumrow").innerHTML=[
+    ["",d.lanes.length,"email lanes"],
+    ["ok",live,"live right now"],
+    ["hot",davidLanes,"on your mailbox"],
+    ["vi",d.readers.filter(r=>r.mailbox==="david").length,"robots reading it"],
+    [bad?"hot":"ok",bad,bad===1?"needs attention":"need attention"],
+    ["",watched+"/"+d.lanes.length,"watched by health"],
+  ].map(([c,n,l])=>`<div class="sum ${c}"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");
+
+  $("mbrow").innerHTML=d.mailboxes.map(m=>`<div class="mb ${esc(m.tone)}">
+    <div class="addr">${m.observed&&m.observed.watched?`<span class="dot d-${esc(m.observed.state)}"></span>`:""}${esc(m.address)}</div>
+    <div class="role">${esc(m.role)}</div>
+    <div class="det">${esc(m.detail)}</div>
+    <div class="lims">${m.limits.map(x=>`<span class="lim">${esc(x)}</span>`).join("")}</div>
+  </div>`).join("");
+
+  renderChart();
+
+  $("groups").innerHTML=d.groups.map(g=>{
+    const items=d.lanes.filter(l=>l.group===g.id);
+    if(!items.length) return "";
+    const nbad=items.filter(l=>l.observed&&["DOWN","DEGRADED"].includes(l.observed.state)).length;
+    return `<div class="group">
+      <div class="ghead"><h2>${esc(g.label)}</h2><span class="n">${items.length} lanes${nbad?` · ${nbad} need attention`:""}</span></div>
+      <div class="gblurb">${esc(g.blurb)}</div>
+      ${items.map(laneRow).join("")}
+    </div>`;
+  }).join("");
+  document.querySelectorAll(".lhead").forEach(b=>b.onclick=()=>toggle(b.dataset.id));
+
+  $("readers").innerHTML=d.readers.map(r=>`<div class="rd-row${r.fixed?" fixed":""}">
+    <div><b>${esc(r.name)}</b>${r.mailbox!=="david"?' <span class="lmsg">· separate mailbox</span>':""}<div class="rd-note">${esc(r.note)}</div></div>
+    <div class="lcad">${esc(r.cadence)}</div>
+    <div>${obsChip(r.observed)}</div>
+  </div>`).join("");
+
+  $("costs").innerHTML=d.quotaCosts.map(c=>`<div class="cost${c.hot?" hot":c.good?" good":""}">
+    <span class="c">${esc(c.call)}${c.note?`<span class="nt">${esc(c.note)}</span>`:""}</span><span class="u">${esc(c.units)}</span></div>`).join("");
+
+  if(!d.boardReadable){
+    $("chartNote").textContent+=" · health board unreadable, live status unavailable";
+  }
+}
+
+async function load(){
+  try{ const d=await api("/api/emails/state"); if(d&&d.ok) render(d); }
+  catch(e){ if(String(e.message)!=="auth") console.error(e); }
+}
+$("chartTabs").onclick=(e)=>{
+  const b=e.target.closest("button"); if(!b) return;
+  CHART=b.dataset.v;
+  [...$("chartTabs").children].forEach(x=>x.classList.toggle("on",x===b));
+  renderChart();
+};
+function showGate(){ $("gate").style.display="flex"; }
+async function init(){
+  const cfg=await fetch("/api/auth/config",{credentials:"same-origin"}).then(r=>r.json()).catch(()=>({}));
+  AUTH.required=cfg.authRequired!==false; AUTH.clientId=cfg.clientId||"";
+  if(!AUTH.required){ load(); setInterval(load,120000); return; }
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(session&&session.authenticated){ $("gate").style.display="none"; load(); setInterval(load,120000); return; }
+  showGate();
+  (function start(){
+    if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
+    google.accounts.id.initialize({client_id:AUTH.clientId,callback:onCred});
+    google.accounts.id.renderButton($("gsi"),{theme:"filled_black",size:"large",text:"signin_with",shape:"pill"});
+  })();
+}
+async function onCred(resp){
+  try{ await RaydarAuth.signIn(resp.credential); $("gate").style.display="none"; load(); setInterval(load,120000); }
+  catch(e){ $("gateErr").textContent="Sign-in failed. Try again."; }
+}
+$("refresh").onclick=load;
+init();
+</script>
+</body>
+</html>
