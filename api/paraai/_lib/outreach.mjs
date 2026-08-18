@@ -2049,23 +2049,11 @@ export async function handleOutreachFailure(
     const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
     if (!alertClaimed) return record;
     const copy = missingEmailAlertCopy(request, error?.discovery);
-    let notified = await notifySlack(copy.slack).catch(() => false);
-    if (!notified) {
-      const day = new Date().toISOString().slice(0, 10);
-      const actionKey = `missing-email-alert:${request.id}:${day}`;
-      notified = Boolean(await deliverMessage({
-        mailbox: config.mailbox,
-        message: {
-          actionKey,
-          from: `David Phillips <${config.mailbox}>`,
-          to: config.mailbox,
-          subject: copy.subject,
-          messageId: deterministicMessageId(actionKey),
-          bodyText: copy.text,
-          bodyHtml: copy.html,
-        },
-      }).catch(() => null));
-    }
+    // Slack-only by David's order (2026-08-18): the old Gmail fallback emailed
+    // the same contended mailbox this alert exists to protect. A failed Slack
+    // post releases the claim below, so delivery is retried next tick, and the
+    // blocked candidate stays durable in KV either way.
+    const notified = await notifySlack(copy.slack).catch(() => false);
     if (!notified) {
       await releaseOutreachExceptionAlert(request.id).catch(() => {});
     }

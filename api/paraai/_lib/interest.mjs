@@ -1,6 +1,5 @@
 import { trpcGet, trpcPost, normalizeEmail, paraformRest } from "./core.mjs";
 import {
-  buildMime,
   deliverMessage,
   deterministicMessageId,
   gmailConfigured,
@@ -733,19 +732,25 @@ export function interestStopCanProceed(stop) {
  * replays this send reconciles against the already-delivered message instead of
  * sending a second copy.
  */
-export function gmailMailer({ mailbox = outreachMailbox() } = {}) {
+export function gmailMailer({ mailbox = outreachMailbox(), deliver = deliverMessage } = {}) {
   return async ({ to, subject, text, html, candidate }) => {
     const actionKey = `interest:${candidate.candidateUserId}:${candidate.batchId || subject}`;
     const messageId = deterministicMessageId(actionKey);
-    const mime = buildMime({
-      from: `David Phillips <${mailbox}>`,
-      to,
-      subject,
-      messageId,
-      bodyText: text,
-      bodyHtml: html,
+    // deliverMessage builds the MIME from these fields itself. Handing it a
+    // prebuilt blob (the pre-2026-08-18 bug) produced "From: undefined" mail
+    // Gmail could not deliver, and dropped the actionKey reconciliation marker.
+    const delivered = await deliver({
+      mailbox,
+      message: {
+        actionKey,
+        from: `David Phillips <${mailbox}>`,
+        to,
+        subject,
+        messageId,
+        bodyText: text,
+        bodyHtml: html,
+      },
     });
-    const delivered = await deliverMessage({ mailbox, message: { ...mime, messageId } });
     return { messageId, delivery: delivered?.delivery || null, id: delivered?.id || null };
   };
 }

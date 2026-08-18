@@ -65,18 +65,157 @@ export const MAILBOXES = [
 // mailbox: roughly twenty reads per send. Costs are Gmail's published quota
 // units per call, which were re-priced upward in May 2026.
 export const READERS = [
-  { id:"booking-resume-sync",  name:"Booking resume sync",       mailbox:"david", cadence:"Every minute, Gmail work every 5", schedule:{kind:"every",n:5,offset:0,tz:"UTC"}, healthId:"lane-booking-resume-sync",  note:"Reads Paraform 'Meeting scheduled' mail. Was the single heaviest lane at ~992,000 units/day before its cache shipped.", fixed:true },
-  { id:"booking-resume-retry", name:"Booking resume retry",      mailbox:"david", cadence:"Every 15 minutes",                  schedule:{kind:"every",n:15,offset:0,tz:"UTC"}, healthId:"lane-booking-resume-retry", note:"The lane that was missed on the first recovery attempt, which is why that attempt failed." },
-  { id:"booking-email-index",  name:"Booking resume email index",mailbox:"david", cadence:"Daily",                             schedule:{kind:"daily",times:["04:00"],tz:"UTC"}, healthId:"lane-booking-resume-email-index", note:"Rebuilds the message index once a day." },
-  { id:"resume-chase-reader",  name:"Resume chase reader",       mailbox:"david", cadence:"At :07 and :37",                    schedule:{kind:"marks",minutes:[7,37],tz:"local"}, healthId:"lane-resume-chase", note:"Polls for resumes that came back. Same lane that sends the chase." },
-  { id:"paraai-reply-rescan",  name:"Para AI reply rescan",      mailbox:"david", cadence:"With every worker pass, every 5 min",schedule:{kind:"every",n:5,offset:0,tz:"UTC"}, healthId:"paraai-lane", note:"Re-opened every outreach thread every 45 seconds before the fix. Reply detection is the second-largest read cost." },
-  { id:"tn-reenable",          name:"Talent Network re-enable",  mailbox:"david", cadence:"Daily at 09:20",                    schedule:{kind:"daily",times:["09:20"],tz:"local"}, healthId:"lane-tn-reenable", note:"Read-only by design: it holds a scope that physically cannot send." },
-  { id:"n8n-paraform-notify",  name:"Paraform notify",           mailbox:"david", cadence:"Every 10 min, 06:00-21:00 PT weekdays", schedule:{kind:"every",n:10,offset:0,tz:"PT"}, healthId:"n8n-workflows", note:"Turns Paraform notification mail into Slack actions. The source of the prefilled candidate emails." },
-  { id:"n8n-booking-evidence", name:"Booking evidence",          mailbox:"david", cadence:"Per lifecycle evaluation",          schedule:{kind:"event"}, healthId:"n8n-workflows", note:"An on-demand Gmail oracle the lifecycle engine consults for booking proof." },
-  { id:"submission-notify",    name:"Submission responses",      mailbox:"david", cadence:"Hourly at :47",                     schedule:{kind:"hourly",minute:47,tz:"UTC"}, healthId:null, note:"New Paraform request replies into Slack." },
-  { id:"resume-feed",          name:"Resume feed",               mailbox:"other", cadence:"Every 15 minutes",                  schedule:{kind:"every",n:15,offset:0,tz:"UTC"}, healthId:"lane-resume-feed", note:"Reads resume@metawork.us, a different mailbox on a different credential. Sailed through the lockout untouched, which is the proof that separating mailboxes works.", fixed:true },
-  { id:"archive-backfill",     name:"Archive backfill",          mailbox:"other", cadence:"Every 30 minutes",                  schedule:{kind:"every",n:30,offset:0,tz:"UTC"}, healthId:"lane-archive-backfill", note:"Backfills the resume mailbox archive." },
-  { id:"applicant-hub-worker", name:"Applicant hub worker",      mailbox:"other", cadence:"Always on",                         schedule:{kind:"event"}, healthId:"lane-applicant-hub-worker", note:"Consumes the resume corpus through its own write-ahead log." },
+  {
+    "id": "booking-resume-sync",
+    "name": "Booking resume sync",
+    "mailbox": "david",
+    "cadence": "Every minute, Gmail work every 5",
+    "schedule": {
+      "kind": "every",
+      "n": 5,
+      "offset": 0,
+      "tz": "UTC"
+    },
+    "healthId": "lane-booking-resume-sync",
+    "note": "Reads Paraform 'Meeting scheduled' mail. Was the single heaviest lane at ~992,000 units/day before its cache shipped.",
+    "fixed": true
+  },
+  {
+    "id": "booking-resume-retry",
+    "name": "Booking resume retry",
+    "mailbox": "david",
+    "cadence": "Every 15 minutes",
+    "schedule": {
+      "kind": "every",
+      "n": 15,
+      "offset": 0,
+      "tz": "UTC"
+    },
+    "healthId": "lane-booking-resume-retry",
+    "note": "The lane that was missed on the first recovery attempt, which is why that attempt failed."
+  },
+  {
+    "id": "booking-email-index",
+    "name": "Booking resume email index",
+    "mailbox": "david",
+    "cadence": "Daily",
+    "schedule": {
+      "kind": "daily",
+      "times": [
+        "04:00"
+      ],
+      "tz": "UTC"
+    },
+    "healthId": "lane-booking-resume-email-index",
+    "note": "Rebuilds the message index once a day."
+  },
+  {
+    "id": "paraai-reply-rescan",
+    "name": "Para AI reply rescan",
+    "mailbox": "david",
+    "cadence": "With every worker pass, every 5 min",
+    "schedule": {
+      "kind": "every",
+      "n": 5,
+      "offset": 0,
+      "tz": "UTC"
+    },
+    "healthId": "paraai-lane",
+    "note": "Re-opened every outreach thread every 45 seconds before the fix. Reply detection is the second-largest read cost."
+  },
+  {
+    "id": "tn-reenable",
+    "name": "Talent Network re-enable",
+    "mailbox": "david",
+    "cadence": "Daily at 09:20",
+    "schedule": {
+      "kind": "daily",
+      "times": [
+        "09:20"
+      ],
+      "tz": "local"
+    },
+    "healthId": "lane-tn-reenable",
+    "note": "Read-only by design: it holds a scope that physically cannot send."
+  },
+  {
+    "id": "n8n-paraform-notify",
+    "name": "Paraform notify",
+    "mailbox": "david",
+    "cadence": "Every 10 min, 06:00-21:00 PT weekdays",
+    "schedule": {
+      "kind": "every",
+      "n": 10,
+      "offset": 0,
+      "tz": "PT"
+    },
+    "healthId": "n8n-workflows",
+    "note": "Turns Paraform notification mail into Slack actions. The source of the prefilled candidate emails."
+  },
+  {
+    "id": "n8n-booking-evidence",
+    "name": "Booking evidence",
+    "mailbox": "david",
+    "cadence": "Per lifecycle evaluation",
+    "schedule": {
+      "kind": "event"
+    },
+    "healthId": "n8n-workflows",
+    "note": "An on-demand Gmail oracle the lifecycle engine consults for booking proof."
+  },
+  {
+    "id": "submission-notify",
+    "name": "Submission responses",
+    "mailbox": "david",
+    "cadence": "Hourly at :47",
+    "schedule": {
+      "kind": "hourly",
+      "minute": 47,
+      "tz": "UTC"
+    },
+    "healthId": null,
+    "note": "New Paraform request replies into Slack."
+  },
+  {
+    "id": "resume-feed",
+    "name": "Resume feed",
+    "mailbox": "other",
+    "cadence": "Every 15 minutes",
+    "schedule": {
+      "kind": "every",
+      "n": 15,
+      "offset": 0,
+      "tz": "UTC"
+    },
+    "healthId": "lane-resume-feed",
+    "note": "Reads resume@metawork.us, a different mailbox on a different credential. Sailed through the lockout untouched, which is the proof that separating mailboxes works.",
+    "fixed": true
+  },
+  {
+    "id": "archive-backfill",
+    "name": "Archive backfill",
+    "mailbox": "other",
+    "cadence": "Every 30 minutes",
+    "schedule": {
+      "kind": "every",
+      "n": 30,
+      "offset": 0,
+      "tz": "UTC"
+    },
+    "healthId": "lane-archive-backfill",
+    "note": "Backfills the resume mailbox archive."
+  },
+  {
+    "id": "applicant-hub-worker",
+    "name": "Applicant hub worker",
+    "mailbox": "other",
+    "cadence": "Always on",
+    "schedule": {
+      "kind": "event"
+    },
+    "healthId": "lane-applicant-hub-worker",
+    "note": "Consumes the resume corpus through its own write-ahead log."
+  }
 ];
 
 export const QUOTA_COSTS = [
@@ -145,7 +284,8 @@ export const LANES =
       }
     ],
     "status": "live",
-    "ifDown": "Down usually means the lifecycle cron is failing, or a stale deploy from another workspace unscheduled it (this has happened four times). A candidate who asked for a human is waiting, so treat it as urgent; a lone 429 shows degraded and clears itself."
+    "ifDown": "Down usually means the lifecycle cron is failing, or a stale deploy from another workspace unscheduled it (this has happened four times). A candidate who asked for a human is waiting, so treat it as urgent; a lone 429 shows degraded and clears itself.",
+    "upgrade": true
   },
   {
     "id": "connector-ongoing",
@@ -161,7 +301,7 @@ export const LANES =
     },
     "name": "Connector chase, ongoing ladder",
     "system": "Connector referral follow-ups",
-    "summary": "Chases fresh Paraform connector referrals who never booked a call. It replies to the candidate on the original referral thread with three nudges, and any reply from them resets the ladder to the first step.",
+    "summary": "Chases Paraform connector referrals who never booked a call, replying on the original referral thread with three nudges; any reply from them resets the ladder. Since 2026-08-18 every thread takes this route, and the old backfill branch is retired.",
     "sender": "david@raydar.xyz · service account",
     "recipient": "Candidate",
     "trigger": "A Paraform referral thread under 7 days old, with the welcome email sent and no call booked.",
@@ -265,58 +405,9 @@ export const LANES =
         "delay": "4 days after the first email"
       }
     ],
-    "status": "live",
-    "ifDown": "Shares the ongoing ladder’s plumbing and tile, so whatever downs one downs both. Its pacing deadline has passed, so a stall followed by recovery can release every due thread in a single run."
-  },
-  {
-    "id": "paraai-missing-email",
-    "group": "sa",
-    "mailbox": "david",
-    "healthId": "email-paraai-outreach",
-    "schedule": {
-      "kind": "every",
-      "n": 5,
-      "offset": 0,
-      "tz": "UTC"
-    },
-    "name": "Missing email internal alert",
-    "system": "Para AI interview outreach",
-    "summary": "When Para AI outreach cannot find a deliverable email for a candidate, and Slack is unavailable, it mails an action-needed alert to David's own mailbox so the block is not lost. It is a Slack fallback, not a primary channel.",
-    "sender": "david@raydar.xyz · service account",
-    "recipient": "David",
-    "trigger": "Outreach finds no email for a candidate and the Slack post fails or Slack is not configured.",
-    "cadence": "Per event, at most one email per blocked candidate per day. The block itself retries every 5 minutes.",
-    "runsOn": "Vercel cron, inside the outreach worker",
-    "volume": "not measured; capped at one per blocked candidate per day",
-    "rateLimit": "No breaker of its own. A rate-limited send is dropped and the alert is retried next run.",
-    "stops": [
-      "Slack accepted the message, no email sent",
-      "One alert per candidate in 24 hours",
-      "Adding the email in Paraform clears it"
-    ],
-    "gotchas": [
-      "The fallback for \"we could not email the candidate\" is itself an email from the same throttled mailbox, so an outage feeds itself.",
-      "For nine days the alert blamed a missing Paraform field when the real fault was broken Google Calendar access."
-    ],
-    "flow": [
-      "No email found for candidate",
-      "Block recorded for retry",
-      "Q: Already alerted today?",
-      "Try Slack first",
-      "Q: Did Slack accept?",
-      "Email David instead",
-      "Retry next run if both fail"
-    ],
-    "messages": [
-      {
-        "step": "Step 1 · only message",
-        "subject": "Action needed: missing email for {candidate}",
-        "gist": "Names the candidate, role and company, says whether Google found addresses at all, and asks: \"Add the correct email to the candidate's Paraform profile.\"",
-        "delay": "Immediate, right after Slack fails"
-      }
-    ],
-    "status": "live",
-    "ifDown": "Same worker and tile as outreach, with one design wrinkle: this alert about email failure is itself an email through the same mailbox, so a mailbox lockout silences it too. Slack is the primary channel."
+    "status": "deprecated",
+    "ifDown": "Shares the ongoing ladder’s plumbing and tile, so whatever downs one downs both. Its pacing deadline has passed, so a stall followed by recovery can release every due thread in a single run.",
+    "statusReason": "Retired 2026-08-18 on David’s order: the backfill did its job (the cold population is drained). Every thread now routes through the ongoing ladder, whose 30-days-from-referral stop retires anything ancient."
   },
   {
     "id": "interview-invites",
@@ -384,7 +475,8 @@ export const LANES =
       }
     ],
     "status": "live",
-    "ifDown": "A desktop lane: down usually means the Mac is asleep or launchd failed, so check the desktop-runner tile first. A Gmail 429 halts the whole run with no retry until the next hour, and what runs is a frozen copy on the Mac, not the repo."
+    "ifDown": "A desktop lane: down usually means the Mac is asleep or launchd failed, so check the desktop-runner tile first. A Gmail 429 halts the whole run with no retry until the next hour, and what runs is a frozen copy on the Mac, not the repo.",
+    "upgrade": true
   },
   {
     "id": "interview-fit",
@@ -452,7 +544,8 @@ export const LANES =
       }
     ],
     "status": "live",
-    "ifDown": "Rides the interview-invites cycle and tile, so it goes down with the Mac. Its sends also stop silently when the call-evidence oracle cannot be read."
+    "ifDown": "Rides the interview-invites cycle and tile, so it goes down with the Mac. Its sends also stop silently when the call-evidence oracle cannot be read.",
+    "upgrade": true
   },
   {
     "id": "resume-chase",
@@ -522,8 +615,9 @@ export const LANES =
         "delay": "7 days after the call, or 4 after touch 2"
       }
     ],
-    "status": "live",
-    "ifDown": "Its Gmail cooldown circuit exits clean while a banked 429 window is open, so a healthy beat with zero sends can hide the backoff for up to three straight failures; the fourth exhausts the circuit and the run exits with a failure beat, turning the tile red with the Mac awake — its usual red state. Otherwise a hard down means the Mac is asleep or the run crashed."
+    "status": "deprecated",
+    "ifDown": "Its Gmail cooldown circuit exits clean while a banked 429 window is open, so a healthy beat with zero sends can hide the backoff for up to three straight failures; the fourth exhausts the circuit and the run exits with a failure beat, turning the tile red with the Mac awake — its usual red state. Otherwise a hard down means the Mac is asleep or the run crashed.",
+    "statusReason": "Retired 2026-08-18 on David’s order: every booking now requires a resume up front (book.raydar.xyz) or arrives via Workable, so there is nothing left to chase. The desktop job is unloaded and its state archived."
   },
   {
     "id": "paraai-first-request",
@@ -586,7 +680,8 @@ export const LANES =
       }
     ],
     "status": "live",
-    "ifDown": "Degraded means the fleet Gmail breaker observed a 429 minutes ago (sends queue and resume on their own), or outreach is approved but not execution-ready. This tile never shows down: a dead Fly worker surfaces as a growing due queue on the Para AI automation tile and on the Fly worker tile."
+    "ifDown": "Degraded means the fleet Gmail breaker observed a 429 minutes ago (sends queue and resume on their own), or outreach is approved but not execution-ready. This tile never shows down: a dead Fly worker surfaces as a growing due queue on the Para AI automation tile and on the Fly worker tile.",
+    "upgrade": true
   },
   {
     "id": "paraai-additional-request",
@@ -643,7 +738,8 @@ export const LANES =
       }
     ],
     "status": "live",
-    "ifDown": "Shares the outreach worker and tile: degraded is the breaker self-healing, or outreach approved but not execution-ready. The tile never shows down; a dead worker surfaces as a growing due queue on the Para AI automation tile and on the Fly worker tile."
+    "ifDown": "Shares the outreach worker and tile: degraded is the breaker self-healing, or outreach approved but not execution-ready. The tile never shows down; a dead worker surfaces as a growing due queue on the Para AI automation tile and on the Fly worker tile.",
+    "upgrade": true
   },
   {
     "id": "curated-interest",
@@ -699,7 +795,8 @@ export const LANES =
     ],
     "status": "dark",
     "ifDown": "Never armed, so nothing can be down. Before arming it: the mailer as coded builds a malformed message Gmail cannot deliver, and that must be fixed first.",
-    "statusReason": "Built dark and never armed: every write gate ships closed and dry-run is the default, so no candidate has ever received it. It also has a known flaw to fix before arming: the mailer as coded would post a malformed message Gmail cannot deliver."
+    "statusReason": "Arming in progress (2026-08-18): the mailer bug is fixed and the canary path sends the next real interest event to David’s own inbox only. Candidate-facing sends additionally require arming the submission handoff, which is David’s call after the canary.",
+    "upgrade": true
   },
   {
     "id": "applicant-ladder",
@@ -1404,7 +1501,7 @@ export const LANES =
     ],
     "status": "dark",
     "ifDown": "Expected silent: its chip mirrors the scheduler sender. Any send appearing from this lane means the legacy fallback path re-activated, which is worth chasing.",
-    "statusReason": "Dark by design: superseded by the scheduler’s calls@ outbox, and it can only mail the approved test address. Kept because the code is reachable and it is the one scheduler path that could put send volume on david@; expected volume is zero."
+    "statusReason": "Dark and marked for removal (David, 2026-08-18). It can only mail the approved test address; deleting the code awaits a scheduler release, which is not worth doing for gated-off dead code alone."
   },
   {
     "id": "booking-cancel",
@@ -1984,8 +2081,8 @@ export const LANES =
         "delay": "Internal sends at once, external after a yes"
       }
     ],
-    "status": "dark",
+    "status": "deprecated",
     "ifDown": "Nothing to watch until she launches: no schedule exists and her mailbox has sent zero emails, so there is no state this page could report.",
-    "statusReason": "Dark: fully built and verified offline, never launched in production Slack. Her mailbox has sent zero emails."
+    "statusReason": "Abandoned 2026-08-18 on David’s order: fully built, never launched, zero emails sent. Code removal is a later cleanup; nothing runs."
   }
 ];

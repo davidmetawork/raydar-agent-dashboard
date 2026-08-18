@@ -313,7 +313,7 @@ test("catalog: desktop-runner collapse counts laptop lanes wherever they are gro
   assert.deepEqual(live, [
     "applicant-hub-watchdog", "applicant-hub-worker", "archive-backfill",
     "booking-resume-email-index", "booking-resume-retry", "booking-resume-sync",
-    "interview-invites", "paraai-interest-observer", "resume-chase",
+    "interview-invites", "paraai-interest-observer",
     "resume-feed", "resume-juicebox-bridge-v1", "resume-ledger-backup-v2",
     "resume-watchdog-v2", "tn-reenable",
   ]);

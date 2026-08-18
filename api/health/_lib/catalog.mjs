@@ -29,7 +29,6 @@ export const GROUPS = [
 export const DAVID_MAILBOX_BEAT_LANES = [
   "booking-resume-sync",
   "booking-resume-retry",
-  "resume-chase",
   "interview-invites",
   "hm-chase",
   "tn-reenable",
@@ -369,8 +368,6 @@ export const CATALOG = [
       "Nightly Paraform CRM email-address index — identity data, no mail transport."],
     ["archive-backfill", "Archive backfill (resume@)", 75,
       "Gmail metadata reads over the resume@ historical corpus."],
-    ["resume-chase", "Resume chase emails", 75,
-      "Sends resume-chase emails as david@raydar.xyz at :07/:37 — deliberately off the shared :00/:05 burst boundary."],
     ["applicant-hub-worker", "Applicant hub worker", 20,
       "Consumes the resume@metawork.us ingestion WAL (KeepAlive service; the health reporter beats for it)."],
   ].map(([lane, name, maxSilenceMin, note]) => ({
@@ -553,6 +550,18 @@ export const CATALOG = [
     probe: { lane, maxSilenceMin },
     registry: "/operations/monitoring-canaries/",
   })),
+  {
+    id: "lane-resume-chase",
+    name: "Resume chase emails",
+    group: "email",
+    tier: 3,
+    kind: "beat",
+    runner: "desktop",
+    paused: true,
+    probe: { lane: "resume-chase" },
+    note: "Retired 2026-08-18 on David's order: resumes are now mandatory at booking (book.raydar.xyz) or arrive via Workable, so nothing is chased. Launchd job booted out; state archived.",
+    registry: "/products/human-call-resume-chase/",
+  },
   {
     id: "lane-hm-chase",
     name: "HM update chase",

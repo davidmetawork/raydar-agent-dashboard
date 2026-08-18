@@ -108,6 +108,7 @@
   .p-paused{background:var(--warn-bg);color:var(--warn)}
   .p-dark,.p-deprecated{background:var(--muted-bg);color:var(--ink-3)}
   .p-human-initiated{background:var(--violet-bg);color:var(--violet-700)}
+  .p-up{background:#fff;border:1px dashed var(--violet);color:var(--violet-700);font-weight:600;text-transform:none;letter-spacing:0}
   .obs{font-size:10.5px;padding:2.5px 8px;border-radius:999px;white-space:nowrap;display:flex;align-items:center;gap:5px;border:1px solid var(--line)}
   .obs.unwatched{color:var(--muted);border-style:dashed}
   .obs.o-DOWN{background:var(--bad-bg);border-color:#F3C9CA;color:var(--bad);font-weight:700}
@@ -343,7 +344,7 @@ function laneRow(l){
       <span class="lcad">${esc(l.cadence)}</span>
       <span class="lmsg">${l.messages.length} msg</span>
       ${actCell(l)}
-      <span style="display:flex;gap:6px;align-items:center">${["dark","deprecated"].includes(l.status)?"":obsChip(o)}<span class="pill p-${esc(l.status)}">${esc(l.status)}</span></span>
+      <span style="display:flex;gap:6px;align-items:center">${["dark","deprecated"].includes(l.status)?"":obsChip(o)}${l.upgrade?'<span class="pill p-up" title="David 2026-08-18: eligible to move to provider infrastructure that still appears as him, replies landing in his inbox. Migration is its own project.">infra eligible</span>':""}<span class="pill p-${esc(l.status)}">${esc(l.status)}</span></span>
     </button>
     ${explain(l)}
     <div id="det-${esc(l.id)}"></div>
