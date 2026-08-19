@@ -107,7 +107,7 @@
     },
     {
       "path": "/api/paraai/worker",
-      "schedule": "*/5 * * * *"
+      "schedule": "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
     },
     {
       "path": "/api/seq/guardian",
