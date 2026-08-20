@@ -129,6 +129,24 @@
   .mrl-row select{font:inherit;font-size:12px;padding:4px 7px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);max-width:100%}
   .mrl-row select:disabled{opacity:.55;cursor:not-allowed}
   .mrl-audit{margin-top:9px;font-size:11.5px;color:var(--ink-3);line-height:1.6}
+  .mrl-edit{border:none;background:none;font:inherit;font-size:11.5px;color:var(--violet-700);text-decoration:underline;cursor:pointer;padding:0}
+  .mrc{margin-top:10px;border:1px solid var(--violet);border-radius:12px;padding:14px;background:#FCFBFF}
+  .mrc h4{margin:0 0 3px;font-size:13px}
+  .mrc .mrc-hint{font-size:11.5px;color:var(--ink-3);margin-bottom:10px;line-height:1.6}
+  .mrc label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3);margin:9px 0 3px}
+  .mrc input[type=text],.mrc textarea{width:100%;font:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+  .mrc textarea{min-height:190px;line-height:1.6;resize:vertical}
+  .mrc .mrc-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px;align-items:center}
+  .mrc .mrc-acts button{font:inherit;font-size:12.5px;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer}
+  .mrc .mrc-acts button.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .mrc .mrc-acts button:disabled{opacity:.5;cursor:not-allowed}
+  .mrc .mrc-msg{font-size:12px;margin-top:9px;line-height:1.55}
+  .mrc .mrc-msg.bad{color:var(--bad)} .mrc .mrc-msg.good{color:var(--good)}
+  .mrc .mrc-vers{margin-top:11px;font-size:12px;border-top:1px solid var(--line-2);padding-top:9px}
+  .mrc .mrc-ver{display:flex;gap:9px;align-items:center;padding:4px 0;flex-wrap:wrap}
+  .mrc .mrc-ver .v{font-weight:600;font-variant-numeric:tabular-nums}
+  .mrc .mrc-ver .who{color:var(--ink-3);font-size:11.5px}
+  .mrc pre.prev{background:#fff;border:1px solid var(--line);border-radius:8px;padding:11px;margin:8px 0 0;font:12.5px/1.62 ui-monospace,monospace;white-space:pre-wrap}
   .mr-row[data-mid]{cursor:pointer}
   .mr-row[data-mid]:hover{background:#FBFAF6}
   .mr-view{margin-top:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
@@ -228,6 +246,7 @@
     <h2>The Mailroom · what the new send service has processed</h2>
     <div class="sub" style="margin-bottom:12px">Email System v2's shared outbox, newest first. Click any row to read the exact email the recipient received (Hub step 2). Still read-only — sender switching and copy editing arrive as later, separately-approved steps.</div>
     <div id="mrlanes"></div>
+    <div id="mrcopy" style="display:none"></div>
     <div id="mailroom" class="sub">Loading the mailroom feed…</div>
     <div id="mrview" style="display:none"></div>
   </div>
@@ -514,6 +533,94 @@ function renderMailroom(d){
   el.classList.remove("sub");
   el.innerHTML=`<div class="mr-sum">${chips}</div>`+(rows||`<div class="sub">Nothing processed yet. The canary was the first send; migrated lanes will appear here.</div>`);
 }
+const TEMPLATABLE=new Set(["screener-optout","canary"]);
+const MRC={lane:null,data:null};
+function mrcPreview(subject,body){
+  const vars={firstName:"Sam",bookingUrl:"https://book.raydar.xyz/intro?src=agent_optout"};
+  const fill=(s)=>String(s).replace(/\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g,(w,n)=>n in vars?vars[n]:w);
+  return "Subject: "+fill(subject)+"\n\n"+fill(body)+"\n\n--\nDavid Phillips\nFounder & CEO\n+1(818) 625-4635\nwww.raydar.xyz";
+}
+function renderCopyEditor(){
+  const host=$("mrcopy"); if(!host) return;
+  const d=MRC.data;
+  if(!MRC.lane||!d){ host.innerHTML=""; host.style.display="none"; return; }
+  const versions=(d.templates||[]).slice().sort((a,b)=>b.version-a.version);
+  const active=versions.find(v=>v.status==="active");
+  const base=active||versions[0]||{subject:"",body_text:""};
+  const ph=(d.placeholders&&d.placeholders[MRC.lane])||[];
+  host.style.display="block"; host.className="mrc";
+  host.innerHTML=`<h4>Copy for “${esc(MRC.lane)}”</h4>
+    <div class="mrc-hint">
+      Live right now: <b>${active?"version "+active.version+" (edited here)":"the copy written in code"}</b>.
+      Placeholders you can use: ${ph.map(x=>`<code>{{${esc(x)}}}</code>`).join(", ")||"none"} — leave them in, they fill in per candidate.
+      Blank lines separate paragraphs. Saving creates a new version; nothing changes for candidates until you press Make live.
+    </div>
+    <label for="mrcSubj">Subject</label>
+    <input type="text" id="mrcSubj" value="${esc(base.subject)}">
+    <label for="mrcBody">Body</label>
+    <textarea id="mrcBody">${esc(base.body_text)}</textarea>
+    <div class="mrc-acts">
+      <button id="mrcPrev">Preview</button>
+      <button id="mrcSave">Save as new version</button>
+      ${active?'<button id="mrcRevert">Revert to code copy</button>':""}
+      <button id="mrcClose">Close</button>
+    </div>
+    <div class="mrc-msg" id="mrcMsg"></div>
+    <div class="mrc-vers">${versions.length?versions.map(v=>`<div class="mrc-ver">
+        <span class="v">v${v.version}</span>
+        <span class="pill ${v.status==="active"?"p-live":"p-dark"}">${esc(v.status)}</span>
+        <span class="who">${esc(v.actor)} · ${esc(mrTime(v.created_at))}${v.note?" · "+esc(v.note):""}</span>
+        ${v.status!=="active"?`<button class="mrl-edit" data-activate="${v.version}">make live</button>`:""}
+        <button class="mrl-edit" data-load="${v.version}">load</button>
+      </div>`).join(""):'<span class="who">No saved versions yet.</span>'}</div>`;
+  $("mrcClose").onclick=()=>{ MRC.lane=null; renderCopyEditor(); };
+  $("mrcPrev").onclick=()=>{
+    const p=document.createElement("pre"); p.className="prev";
+    p.textContent=mrcPreview($("mrcSubj").value,$("mrcBody").value);
+    const old=host.querySelector("pre.prev"); if(old) old.remove();
+    $("mrcMsg").after(p);
+  };
+  $("mrcSave").onclick=()=>mrcPost({action:"save",subject:$("mrcSubj").value,bodyText:$("mrcBody").value},"Saved as a new version. Press “make live” when you want candidates to get it.");
+  const rev=$("mrcRevert");
+  if(rev) rev.onclick=()=>{
+    if(!confirm("Revert this lane to the copy written in code?\n\nThe next email goes out with the original wording. Your saved versions are kept.")) return;
+    mrcPost({action:"revert"},"Reverted to the code copy.");
+  };
+  host.querySelectorAll("[data-activate]").forEach(b=>{ b.onclick=()=>{
+    const v=Number(b.dataset.activate);
+    if(!confirm(`Make version ${v} the live copy?\n\nEvery future email from this lane uses this wording. You can switch back to any version, or to the code copy, at any time.`)) return;
+    mrcPost({action:"activate",version:v},`Version ${v} is live.`);
+  };});
+  host.querySelectorAll("[data-load]").forEach(b=>{ b.onclick=()=>{
+    const v=versions.find(x=>x.version===Number(b.dataset.load));
+    if(v){ $("mrcSubj").value=v.subject; $("mrcBody").value=v.body_text; $("mrcMsg").textContent="Loaded v"+v.version+" into the editor. Save it as a new version to keep changes."; $("mrcMsg").className="mrc-msg"; }
+  };});
+}
+async function mrcPost(payload,okMsg){
+  const msg=$("mrcMsg"); msg.className="mrc-msg"; msg.textContent="Working…";
+  try{
+    const r=await fetch("/api/emails/mailroom",{method:"POST",credentials:"same-origin",
+      headers:{"content-type":"application/json"},body:JSON.stringify({lane:MRC.lane,...payload})});
+    const d=await r.json().catch(()=>({}));
+    if(!d.ok){
+      msg.className="mrc-msg bad";
+      msg.innerHTML=(d.problems&&d.problems.length)?"Not saved:<br>"+d.problems.map(esc).join("<br>"):"Not saved: "+esc((d&&d.error)||"unknown error");
+      return;
+    }
+    await openCopyEditor(MRC.lane,true);
+    const m2=$("mrcMsg"); if(m2){ m2.className="mrc-msg good"; m2.textContent=okMsg; }
+    loadMailroomLanes();
+  }catch(e){ msg.className="mrc-msg bad"; msg.textContent="Could not reach the Mailroom."; }
+}
+async function openCopyEditor(lane,keep){
+  MRC.lane=lane;
+  try{
+    const d=await api("/api/emails/mailroom?templates="+encodeURIComponent(lane));
+    MRC.data=d.ok?d:null;
+    renderCopyEditor();
+    if(!keep) $("mrcopy").scrollIntoView({block:"nearest",behavior:"smooth"});
+  }catch(e){ if(String(e.message)!=="auth") console.error(e); }
+}
 function mrLaneRow(l,senders){
   const opts=senders.map(s=>{
     const dis=s.status==="paused"&&s.id!==l.sender_id;
@@ -525,7 +632,7 @@ function mrLaneRow(l,senders){
     <div><div class="mrl-name">${esc(l.id)}</div><div class="mrl-meta">${esc(String(l.total))} email${l.total===1?"":"s"}${last?" · "+last:""}</div></div>
     <div class="mrl-meta">sends as</div>
     <div><select data-lane="${esc(l.id)}" aria-label="Sender for ${esc(l.id)}">${opts}</select></div>
-    <div class="mrl-meta">${from}${l.enabled?"":" · disabled"}</div>
+    <div class="mrl-meta">${from}${l.enabled?"":" · disabled"}${TEMPLATABLE.has(l.id)?` · <button class="mrl-edit" data-copy="${esc(l.id)}">edit copy</button>`:""}</div>
   </div>`;
 }
 function renderMailroomLanes(d){
@@ -542,6 +649,10 @@ function renderMailroomLanes(d){
     sel.dataset.prev=sel.value;
     sel.onchange=()=>mrSetSender(sel);
   });
+  el.querySelectorAll("[data-copy]").forEach(b=>{ b.onclick=()=>openCopyEditor(b.dataset.copy); });
+  // The lane list refreshes every 2 minutes; never re-render an open editor
+  // over text David is in the middle of typing.
+  if(MRC.lane && !$("mrcopy").querySelector("#mrcBody")) renderCopyEditor();
 }
 async function mrSetSender(sel){
   const lane=sel.dataset.lane, next=sel.value, prev=sel.dataset.prev;
