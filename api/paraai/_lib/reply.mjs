@@ -390,9 +390,13 @@ export async function runReplyBackfill({
 
 // How often the scan re-reads everything regardless of the delta. The delta is
 // a fast path, never the only path: a full sweep is the self-heal for anything
-// Gmail's history could not tell us (an expired watermark, a page cap, a KV
-// blip). Six hours costs one expensive pass a quarter-day.
-const FULL_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Gmail's history could not tell us. It is a SECOND line of defence — an
+// expired or unreadable history already forces an immediate full scan — so
+// the interval matches the 24h sweep the booking-resume Gmail cache has run
+// in production since August. At the observed shape (37 threads carrying
+// pending requests, a 45s poll) this lands the lane near 5,300 units/day
+// against roughly 2.8M before.
+const FULL_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 // Decide which outreach states this pass must open.
 //

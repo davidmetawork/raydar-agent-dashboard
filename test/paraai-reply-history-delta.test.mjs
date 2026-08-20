@@ -81,7 +81,7 @@ test("first run with no watermark reads everything and anchors first", async () 
 });
 
 test("a full sweep runs on schedule even when the delta is healthy", async () => {
-  const stale = { historyId: "5000", fullScanAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() };
+  const stale = { historyId: "5000", fullScanAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() };
   const result = await plan({ readWatermark: async () => stale });
   assert.equal(result.deltaUsed, false);
   assert.equal(result.reason, "full_sweep_due");
