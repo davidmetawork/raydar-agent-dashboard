@@ -14,6 +14,22 @@ export default async function handler(req, res) {
     // Not an outage — the page explains the one missing env instead of erroring.
     return res.status(200).json({ ok: false, configured: false });
   }
+  // Hub step 2: ?message=<id> returns one email with its full body so the
+  // page can render it exactly as the recipient received it.
+  const messageId = Number(req.query?.message);
+  if (Number.isInteger(messageId) && messageId > 0) {
+    try {
+      const r = await fetch(`${base}/api/message?id=${messageId}`, {
+        headers: { authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom message ${r.status}` });
+      return res.status(200).json({ ok: true, configured: true, ...body });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String(err && err.message || err).slice(0, 200) });
+    }
+  }
   try {
     const [feedRes, healthRes] = await Promise.all([
       fetch(`${base}/api/feed?limit=100`, {
