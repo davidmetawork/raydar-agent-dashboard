@@ -512,7 +512,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who complete or rebook clear themselves automatically.</p>
+        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Exact lifecycle proof of cancellation, rebooking, recent success, reply, or completed follow-up moves a row to Handled automatically.</p>
         <div id="followups"></div>
       </section>
     </div>
@@ -849,16 +849,16 @@
         <div class="fu-actions">${controls}</div>
       </div>`;
     }
-    // Read-only "Rescheduled (auto)" row — candidate auto-detected as rebooked.
-    // `via:"human"` = booked a live call with David (calendar); else a new AI interview.
+    // Read-only handled row — backed by a current booking or an exact lifecycle
+    // decision, never by a candidate-name guess alone.
     function fuAutoRow(c){
       const prior = fuPriorOutcomeLabel(c);
-      const sub = c.via==="human"
-        ? `${esc(prior)} → booked a live call with you`
-        : `${esc(prior)} → new interview booked`;
+      const disposition = c.autoDisposition || (c.via==="human"
+        ? { label:"Rescheduled", sub:`${prior} → booked a live call with you` }
+        : { label:"Rescheduled", sub:`${prior} → new interview booked` });
       return `<div class="row fu done-auto">
         <div class="who">${nameLink(displayName(c))}<span class="t">${fmtTime(c.startedAt)}</span></div>
-        <div class="what"><span class="pill good"><span class="d"></span>Rescheduled</span><span class="sub">${sub}</span></div>
+        <div class="what"><span class="pill good"><span class="d"></span>${esc(disposition.label)}</span><span class="sub">${esc(disposition.sub)}</span></div>
         <div class="fu-actions"><span class="auto-tag">auto</span></div>
       </div>`;
     }
@@ -943,6 +943,38 @@
         list.push(c);
       }
       const byTime = (a,b)=> new Date(b.startedAt)-new Date(a.startedAt);
+      // The lifecycle engine has stronger, exact-profile evidence than the
+      // shell's name-only upcoming set. Move only closed, fresh decisions to
+      // Handled; retryable failures and manual-review states stay actionable.
+      const lifecycleDisposition = (c) => {
+        if (!fuLedgerIsFresh()) return null;
+        const e=fuLedgerEntry(c);
+        if (!e) return null;
+        const stage=String(e.stage||"");
+        if ((stage==="enrolled" || stage==="manual_enrolled") && e.deliveryReady===true)
+          return { label:"Sequence sent", sub:"Verified in the follow-up sequence with a sendable email" };
+        if (fuStageIs(stage,["connector_chase"]) || stage==="skipped_connector_chase" || stage==="paused_connector_chase")
+          return { label:"Follow-up active", sub:"Connector referral follow-up is running on the original email thread" };
+        if (stage==="stopped_replied")
+          return { label:"Replied", sub:"Candidate replied, so further sequence delivery stopped" };
+        const closed = {
+          skipped_cancelled: ["Cancelled", "Original interview was cancelled"],
+          paused_cancelled: ["Cancelled", "Cancellation was verified and outreach stopped"],
+          skipped_rescheduled: ["Rescheduled", "A changed interview time was verified"],
+          paused_rebooked: ["Rescheduled", "A new booking was verified and outreach stopped"],
+          skipped_call_scheduled: ["Rescheduled", "Another candidate call is already scheduled"],
+          skipped_has_upcoming_booking: ["Rescheduled", "An upcoming booking was verified"],
+          skipped_calendly_booked: ["Rescheduled", "A Calendly booking was verified"],
+          paused_calendly_booked: ["Rescheduled", "A Calendly booking was verified and outreach stopped"],
+          skipped_recent_success: ["No follow-up needed", "A recent successful call was verified"],
+          skipped_superseded_by_newer_call: ["Newer outcome", "A newer call now owns this candidate's follow-up state"],
+          skipped_cooldown: ["Cooldown active", "Another recent or pending follow-up owns the safety cooldown"],
+          skipped_archive_import: ["Not eligible", "Historical archive imports are excluded from follow-up"],
+          skipped_internal: ["Not eligible", "Internal or test calls are excluded from follow-up"],
+          skipped_internal_name: ["Not eligible", "Internal or test calls are excluded from follow-up"],
+        }[stage];
+        return closed ? { label:closed[0], sub:closed[1] } : null;
+      };
       const open=[], manualDone=[], autoDone=[];
       for (const list of byCandidate.values()){
         list.sort(byTime);
@@ -951,10 +983,13 @@
         const k=fuNorm(latest.candidate);
         const st=(fuAction(latest)||{}).status;
         const nameIsExactHomonym=(refsByName.get(k)||new Set()).size>1;
+        const autoDisposition=lifecycleDisposition(latest);
         if (!nameIsExactHomonym && humanResched.has(k))             autoDone.push({ ...latest, via:"human" });
         else if (!nameIsExactHomonym && rebooked.has(k))            autoDone.push({ ...latest, via:"rebook" });
         else if (fuAttendanceConfirmed(latest))                      manualDone.push(latest);
-        else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved") manualDone.push(latest);
+        else if (st==="rescheduled" || st==="resolved")              manualDone.push(latest);
+        else if (autoDisposition)                                    autoDone.push({ ...latest, autoDisposition });
+        else if (st==="sequence_sent")                               manualDone.push(latest);
         else                                                        open.push(latest);
       }
       open.sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));

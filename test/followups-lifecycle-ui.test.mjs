@@ -36,11 +36,19 @@ function backlogContext({
   actionsMap = {},
   candidateRefs = {},
   attendanceStatuses = {},
+  ledgerEntries = {},
+  ledgerFresh = true,
 } = {}) {
   const ledgerEntry = (row) => {
     for (const alias of [row?.id, row?.rowId, row?.callId, row?.botId]) {
-      if (attendanceStatuses[alias]) return { attendanceStatus: attendanceStatuses[alias] };
-      if (candidateRefs[alias]) return { candidateRef: candidateRefs[alias] };
+      const entry = ledgerEntries[alias];
+      const attendanceStatus = attendanceStatuses[alias];
+      const candidateRef = candidateRefs[alias];
+      if (entry || attendanceStatus || candidateRef) return {
+        ...(entry || {}),
+        ...(attendanceStatus ? { attendanceStatus } : {}),
+        ...(candidateRef ? { candidateRef } : {}),
+      };
     }
     return null;
   };
@@ -60,6 +68,8 @@ function backlogContext({
       || null
     ),
     fuLedgerEntry: ledgerEntry,
+    fuLedgerIsFresh: () => ledgerFresh,
+    fuStageIs: (stage, names) => names.some((name) => stage === name || stage === `manual_${name}`),
     fuAttendanceConfirmed: (row) => (
       row?.verdict === "no_show" && ledgerEntry(row)?.attendanceStatus === "attended"
     ),
@@ -238,6 +248,103 @@ test("confirmed no-shows and unavailable historical evidence remain visible for 
     ["row-no-show", "row-unavailable"],
   );
   assert.equal(result.manualDone.length, 0);
+});
+
+test("fresh exact terminal lifecycle decisions move rows to Handled", () => {
+  const terminal = {
+    cancelled: { stage: "skipped_cancelled", label: "Cancelled" },
+    rescheduled: { stage: "skipped_rescheduled", label: "Rescheduled" },
+    scheduled: { stage: "skipped_call_scheduled", label: "Rescheduled" },
+    success: { stage: "skipped_recent_success", label: "No follow-up needed" },
+    cooldown: { stage: "skipped_cooldown", label: "Cooldown active" },
+    archive: { stage: "skipped_archive_import", label: "Not eligible" },
+    replied: { stage: "stopped_replied", label: "Replied" },
+    connector: { stage: "skipped_connector_chase", label: "Follow-up active" },
+    enrolled: { stage: "enrolled", deliveryReady: true, label: "Sequence sent" },
+  };
+  const historyRows = Object.entries(terminal).map(([id], index) => ({
+    id,
+    b: id,
+    t: new Date(Date.UTC(2026, 7, 1, index)).toISOString(),
+    c: `Candidate ${id}`,
+    v: "no_show",
+  }));
+  const ledgerEntries = Object.fromEntries(
+    Object.entries(terminal).map(([id, entry]) => [id, { ...entry, definitiveNoShow: true }]),
+  );
+
+  const result = runBacklog(backlogContext({
+    historyDays: [{ calls: historyRows }],
+    ledgerEntries,
+  }));
+
+  assert.equal(result.open.length, 0);
+  assert.equal(result.autoDone.length, historyRows.length);
+  assert.deepEqual(
+    Object.fromEntries(Array.from(result.autoDone, (row) => [row.id, row.autoDisposition.label])),
+    Object.fromEntries(Object.entries(terminal).map(([id, entry]) => [id, entry.label])),
+  );
+});
+
+test("retryable, manual-review, and stale lifecycle decisions remain actionable", () => {
+  const stages = [
+    "failed_booking_evidence",
+    "failed_identity",
+    "manual_review_timeout",
+    "expired_window",
+    "observed",
+    "paused_existing",
+    "paused_wrong_enrollment",
+    "skipped_unverified_no_show",
+  ];
+  const rows = stages.map((stage, index) => ({
+    id: stage,
+    b: stage,
+    t: new Date(Date.UTC(2026, 7, 2, index)).toISOString(),
+    c: `Candidate ${index}`,
+    v: "no_show",
+  }));
+  const ledgerEntries = Object.fromEntries(stages.map((stage) => [
+    stage,
+    { stage, definitiveNoShow: stage !== "skipped_unverified_no_show" },
+  ]));
+
+  const fresh = runBacklog(backlogContext({
+    historyDays: [{ calls: rows }],
+    ledgerEntries,
+  }));
+  assert.deepEqual(Array.from(fresh.open, (row) => row.id).sort(), [...stages].sort());
+  assert.equal(fresh.autoDone.length, 0);
+
+  const stale = runBacklog(backlogContext({
+    historyDays: [{ calls: [rows[0]] }],
+    ledgerEntries: { [rows[0].id]: { stage: "skipped_cancelled", definitiveNoShow: true } },
+    ledgerFresh: false,
+  }));
+  assert.equal(stale.open.length, 1);
+  assert.equal(stale.autoDone.length, 0);
+});
+
+test("explicit manual resolution wins while a later terminal fact supersedes sequence-sent", () => {
+  const historyDays = [{ calls: [
+    { id: "resolved", b: "resolved", t: "2026-08-02T12:00:00.000Z", c: "Resolved Candidate", v: "no_show" },
+    { id: "sequence", b: "sequence", t: "2026-08-02T13:00:00.000Z", c: "Sequence Candidate", v: "no_show" },
+  ] }];
+  const result = runBacklog(backlogContext({
+    historyDays,
+    actionsMap: {
+      resolved: { status: "resolved" },
+      sequence: { status: "sequence_sent" },
+    },
+    ledgerEntries: {
+      resolved: { stage: "skipped_cancelled", definitiveNoShow: true },
+      sequence: { stage: "skipped_cancelled", definitiveNoShow: true },
+    },
+  }));
+
+  assert.deepEqual(Array.from(result.manualDone, (row) => row.id), ["resolved"]);
+  assert.deepEqual(Array.from(result.autoDone, (row) => row.id), ["sequence"]);
+  assert.equal(result.autoDone[0].autoDisposition.label, "Cancelled");
 });
 
 function lifecycleContext({ fetchImpl } = {}) {
