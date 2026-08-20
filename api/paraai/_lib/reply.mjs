@@ -415,7 +415,8 @@ export async function planReplyScan({
   });
 
   // The backfill lane exists to sweep history deliberately; never narrow it.
-  if (mode !== "poll") return fullScan("mode_not_poll");
+  // Everything else ("organic", the routine tick) is what we are optimising.
+  if (mode === "backfill") return fullScan("mode_backfill");
   if (force) return fullScan("delta_disabled");
 
   let watermark = null;

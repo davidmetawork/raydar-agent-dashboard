@@ -21,7 +21,7 @@ const fresh = { historyId: "5000", fullScanAt: new Date().toISOString() };
 const plan = (over = {}) => planReplyScan({
   states: STATES,
   config: CONFIG,
-  mode: "poll",
+  mode: "organic",
   force: false,
   readWatermark: async () => fresh,
   readHistoryId: async () => "9999",
@@ -91,13 +91,21 @@ test("a full sweep runs on schedule even when the delta is healthy", async () =>
 test("the backfill lane and the kill switch always read everything", async () => {
   const backfill = await plan({ mode: "backfill" });
   assert.equal(backfill.deltaUsed, false);
-  assert.equal(backfill.reason, "mode_not_poll");
+  assert.equal(backfill.reason, "mode_backfill");
   assert.equal(backfill.states.length, STATES.length);
 
   const disabled = await plan({ force: true });
   assert.equal(disabled.deltaUsed, false);
   assert.equal(disabled.reason, "delta_disabled");
   assert.equal(disabled.states.length, STATES.length);
+});
+
+test("the routine production mode is the one that gets narrowed", async () => {
+  // reply.mjs calls scanReplies with mode "organic" on the routine tick. A
+  // gate written for a mode name that never occurs silently disables the
+  // whole optimisation, which is exactly what happened on first deploy.
+  const organic = await plan({ mode: "organic" });
+  assert.equal(organic.deltaUsed, true, "the routine tick must use the delta");
 });
 
 test("a state whose thread did not change is not opened", async () => {
