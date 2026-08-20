@@ -34,7 +34,14 @@
   const viewIsRules = () => { const s = pageState(); return !!s && s.view === "rules"; };
   const enc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const field = (name) => state.catalog.find((f) => f.name === name) || null;
-  const nameFor = (id) => state.directories.schools[id] || state.directories.companies[id] || id;
+  /* Directory first (it tracks renames), then the labels the rule was saved
+     with, then the bare id. The middle step is what keeps a rule readable when
+     it names a school the prewarm has not reached yet. */
+  const nameFor = (id, rule) =>
+    state.directories.schools[id]
+    || state.directories.companies[id]
+    || (rule && rule.labels && rule.labels[id])
+    || id;
 
   /* ── styles ──────────────────────────────────────────────────────────── */
   const CSS = `
@@ -183,7 +190,7 @@
   }
 
   /* ── rendering the list ──────────────────────────────────────────────── */
-  function describe(condition) {
+  function describe(condition, rule) {
     const f = field(condition.field);
     if (!f) return "(unknown condition)";
     const value = condition.value;
@@ -192,7 +199,7 @@
     if (condition.op === "any_of") {
       const shown = (Array.isArray(value) ? value : [value]).map((v) => {
         if (f.kind === "levels") return (state.degreeLevels.find((l) => l.id === v) || {}).label || v;
-        return f.picker ? nameFor(v) : v;
+        return f.picker ? nameFor(v, rule) : v;
       });
       return f.label + " " + shown.slice(0, 3).join(", ") + (shown.length > 3 ? " and " + (shown.length - 3) + " more" : "");
     }
@@ -205,7 +212,7 @@
     const paused = state.pausedAll || rule.state === "off";
     const conds = (rule.conditions || []).map((c) => {
       const f = field(c.field);
-      return '<li class="' + (f && f.approximate ? "approx" : "") + '">' + enc(describe(c)) + "</li>";
+      return '<li class="' + (f && f.approximate ? "approx" : "") + '">' + enc(describe(c, rule)) + "</li>";
     }).join("");
     const scope = (rule.scope && rule.scope.roleIds && rule.scope.roleIds.length)
       ? rule.scope.roleIds.length + " role" + (rule.scope.roleIds.length === 1 ? "" : "s")
@@ -551,12 +558,26 @@
     });
   }
 
+  /** Every id the draft references, with the best name we can show for it. */
+  function labelsForDraft(draft) {
+    const labels = { ...(draft.labels || {}) };
+    for (const condition of draft.conditions || []) {
+      const f = field(condition.field);
+      if (!f || !f.picker || !Array.isArray(condition.value)) continue;
+      const source = f.picker === "schools" ? state.directories.schools
+        : f.picker === "companies" ? state.directories.companies
+          : Object.fromEntries(roleOptions());
+      for (const id of condition.value) if (source[id]) labels[id] = source[id];
+    }
+    return labels;
+  }
+
   async function saveDraft() {
     const error = el("ruleErr");
     error.textContent = "";
     el("ruleSave").disabled = true;
     try {
-      await api({ op: "save", rev: state.rev, rule: state.draft });
+      await api({ op: "save", rev: state.rev, rule: { ...state.draft, labels: labelsForDraft(state.draft) } });
       await load();
       closeEditor();
       render();
@@ -739,10 +760,11 @@
   window.RaydarRules = {
     async show() {
       mount();
-      if (!state.loaded) {
-        render();
-        try { await load(); } catch (e) { toast(e.message, true); }
-      }
+      // ALWAYS refresh. Rules are shared — a teammate can add or arm one while
+      // this tab sits open — and a stale rule list is the one thing that would
+      // make somebody arm a duplicate or assume a rule is off when it is live.
+      if (!state.loaded) render();
+      try { await load(); } catch (e) { if (!state.loaded) toast(e.message, true); }
       render();
       paintBadge();
     },

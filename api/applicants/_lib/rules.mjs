@@ -35,6 +35,8 @@ export const NOTE_MAX = 400;
 export const MAX_CONDITIONS = 12;
 export const MAX_VALUES = 60;      // ids in one any_of list
 export const MAX_RULES = 200;
+/** Ids a rule may carry a display label for (see `labels` on the rule). */
+export const MAX_LABELS = 120;
 
 const lower = (value) => String(value ?? "").trim().toLowerCase();
 const num = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -393,6 +395,22 @@ export function normalizeRule(input, { now = () => new Date().toISOString(), by 
     if (problem) return { ok: false, error: problem };
   }
 
+  // LABELS. A rule stores ids, but a person has to be able to read it. The
+  // picker directory is built from prewarmed profiles and lags behind — a
+  // school nobody has been warmed for yet is simply not in it — so a rule that
+  // relied on the directory alone would render "Attended clfq6t2ju000tl60g..."
+  // to the whole team. The rule therefore carries the names it was written
+  // with. The directory still wins when it has the id, so a school Paraform
+  // later renames reads correctly rather than freezing at its old name.
+  const labels = {};
+  if (input?.labels && typeof input.labels === "object" && !Array.isArray(input.labels)) {
+    for (const [id, label] of Object.entries(input.labels).slice(0, MAX_LABELS)) {
+      if (typeof id === "string" && typeof label === "string" && id && label) {
+        labels[id.slice(0, 80)] = label.slice(0, 120);
+      }
+    }
+  }
+
   const roleIds = Array.isArray(input?.scope?.roleIds)
     ? input.scope.roleIds.filter((id) => typeof id === "string" && id).slice(0, MAX_VALUES)
     : [];
@@ -407,6 +425,7 @@ export function normalizeRule(input, { now = () => new Date().toISOString(), by 
       action,
       state,
       scope: { roleIds },
+      labels,
       conditions: conditions.map((condition) => ({
         field: condition.field,
         op: condition.op,
@@ -453,5 +472,8 @@ export function describeCondition(condition, names = {}) {
 }
 
 export function describeRule(rule, names = {}) {
-  return (rule?.conditions ?? []).map((condition) => describeCondition(condition, names));
+  // The rule's own labels fill the gaps the caller's directory has; the
+  // caller's names still win, because a directory tracks renames.
+  const merged = { ...(rule?.labels ?? {}), ...names };
+  return (rule?.conditions ?? []).map((condition) => describeCondition(condition, merged));
 }

@@ -357,3 +357,32 @@ test("every field in the catalog is describable and has at least one operator", 
     assert.equal(typeof field.read, "function", `${name} has no read`);
   }
 });
+
+test("a rule stays readable when the picker directory has not caught up", () => {
+  // The directory is built from prewarmed profiles and lags; a rule naming a
+  // school nobody has been warmed for yet would otherwise render its raw id to
+  // the whole team.
+  const saved = normalizeRule({
+    name: "Harvard undergrads",
+    action: "interview",
+    labels: { sch_harvard: "Harvard University" },
+    conditions: [{ field: "school.id", op: "any_of", value: ["sch_harvard"] }],
+  });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.rule.labels, { sch_harvard: "Harvard University" });
+  assert.deepEqual(describeRule(saved.rule), ["Attended Harvard University"]);
+  // A live directory still wins, so a renamed school reads correctly.
+  assert.deepEqual(
+    describeRule(saved.rule, { sch_harvard: "Harvard College" }),
+    ["Attended Harvard College"],
+  );
+});
+
+test("labels are sanitised and never unbounded", () => {
+  const saved = normalizeRule({
+    name: "x", action: "pass",
+    labels: { good: "Fine", bad: 42, "": "empty id", other: "" },
+    conditions: [{ field: "application.tier", op: "any_of", value: ["C"] }],
+  });
+  assert.deepEqual(saved.rule.labels, { good: "Fine" });
+});
