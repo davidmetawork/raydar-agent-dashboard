@@ -147,6 +147,18 @@
   .mrc .mrc-ver .v{font-weight:600;font-variant-numeric:tabular-nums}
   .mrc .mrc-ver .who{color:var(--ink-3);font-size:11.5px}
   .mrc pre.prev{background:#fff;border:1px solid var(--line);border-radius:8px;padding:11px;margin:8px 0 0;font:12.5px/1.62 ui-monospace,monospace;white-space:pre-wrap}
+  .mr-act{border:none;background:none;font:inherit;font-size:11px;color:var(--violet-700);text-decoration:underline;cursor:pointer;padding:0 0 0 8px}
+  .mr-act.bad{color:var(--bad)}
+  .mrbrake{background:var(--bad-bg);border:1px solid #F3C9CA;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12.5px;color:var(--bad);display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}
+  .mrchart{margin-top:14px;border-top:1px solid var(--line-2);padding-top:11px}
+  .mrchart h3{font-size:13px;font-weight:700;margin:0 0 8px}
+  .mrbars{display:flex;align-items:flex-end;gap:3px;height:64px;margin-bottom:4px}
+  .mrbars .b{flex:1;min-width:3px;background:var(--violet);border-radius:2px 2px 0 0;min-height:2px;position:relative}
+  .mrbars .b.zero{background:var(--line)}
+  .mrbars-x{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)}
+  .mrtot{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+  .mrtot .t{font-size:11.5px;border:1px solid var(--line);border-radius:999px;padding:3px 10px;color:var(--ink-2)}
+  .mrtot .t b{font-variant-numeric:tabular-nums}
   .mr-row[data-mid]{cursor:pointer}
   .mr-row[data-mid]:hover{background:#FBFAF6}
   .mr-view{margin-top:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
@@ -247,6 +259,7 @@
     <div class="sub" style="margin-bottom:12px">Email System v2's shared outbox, newest first. Click any row to read the exact email the recipient received (Hub step 2). Still read-only — sender switching and copy editing arrive as later, separately-approved steps.</div>
     <div id="mrlanes"></div>
     <div id="mrcopy" style="display:none"></div>
+    <div id="mrchart"></div>
     <div id="mailroom" class="sub">Loading the mailroom feed…</div>
     <div id="mrview" style="display:none"></div>
   </div>
@@ -518,9 +531,12 @@ function renderMailroom(d){
       : `<span class="pill p-dark">no brakes armed</span>`,
     h.lastSent?`<span class="pill p-dark">last send ${esc(mrTime(h.lastSent))}</span>`:"",
   ].join("");
+  const brake=(h.brakes||[]).map(b=>`<div class="mrbrake"><span>Sending from <b>${esc(b.mailbox)}</b> is paused until ${esc(mrTime(b.armed_until))} (${esc(b.reason||"rate limit")}). Queued mail waits; nothing is lost.</span><button class="mr-act" data-clearbrake="${esc(b.mailbox)}">clear it now</button></div>`).join("");
   const rows=(d.rows||[]).map(r=>{
     const who=esc(r.mailbox||r.sender_id)+" → "+esc(r.to_email);
-    const err=r.last_error?`<div class="mr-err">${esc(r.last_error)}</div>`:"";
+    const parked=r.state==="review"||r.state==="dead";
+    const acts=parked?`<div class="mr-err">Parked. <button class="mr-act" data-retry="${esc(r.id)}">send it now</button><button class="mr-act bad" data-cancel="${esc(r.id)}">abandon it</button></div>`:"";
+    const err=r.last_error?`<div class="mr-err">${esc(r.last_error)}${acts?"":""}</div>`+acts:acts;
     return `<div class="mr-row" data-mid="${esc(r.id)}" title="Click to read the exact email">
       <span class="mono">${esc(mrTime(r.created_at))}</span>
       <span class="mono">${esc(r.lane_id)}</span>
@@ -531,9 +547,46 @@ function renderMailroom(d){
     </div>`;
   }).join("");
   el.classList.remove("sub");
-  el.innerHTML=`<div class="mr-sum">${chips}</div>`+(rows||`<div class="sub">Nothing processed yet. The canary was the first send; migrated lanes will appear here.</div>`);
+  el.innerHTML=`<div class="mr-sum">${chips}</div>`+brake+(rows||`<div class="sub">Nothing processed yet. The canary was the first send; migrated lanes will appear here.</div>`);
+  el.querySelectorAll("[data-retry]").forEach(b=>{b.onclick=(e)=>{e.stopPropagation();mrControl({action:"retry",id:Number(b.dataset.retry)},"Put this email back in the queue?\n\nIt sends on the next drain, within about two minutes. It cannot be sent twice.","Back in the queue.");};});
+  el.querySelectorAll("[data-cancel]").forEach(b=>{b.onclick=(e)=>{e.stopPropagation();mrControl({action:"cancel",id:Number(b.dataset.cancel)},"Abandon this email for good?\n\nIt will never be sent. Use this when you have handled the person another way.","Abandoned.");};});
+  el.querySelectorAll("[data-clearbrake]").forEach(b=>{b.onclick=()=>mrControl({action:"clear-brake",mailbox:b.dataset.clearbrake},"Clear the brake now?\n\nOnly do this if you know Gmail is healthy again. It re-arms itself if the rate limit is still there.","Brake cleared.");});
 }
 const TEMPLATABLE=new Set(["screener-optout","canary"]);
+async function mrControl(payload,confirmText,okMsg){
+  if(confirmText&&!confirm(confirmText)) return;
+  try{
+    const r=await fetch("/api/emails/mailroom",{method:"POST",credentials:"same-origin",
+      headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
+    const d=await r.json().catch(()=>({}));
+    if(!d.ok) alert("Did not work: "+((d&&(d.detail||d.error))||"unknown error"));
+    else if(okMsg) alert(okMsg);
+  }catch(e){ alert("Could not reach the Mailroom."); }
+  loadMailroom(); loadMailroomLanes();
+}
+function renderMailroomChart(d){
+  const el=$("mrchart");
+  if(!d||!d.ok||!(d.byLane||[]).length){ el.innerHTML=""; return; }
+  const byDay=new Map();
+  (d.daily||[]).forEach(r=>byDay.set(r.day,(byDay.get(r.day)||0)+r.n));
+  const days=[];
+  for(let i=d.days-1;i>=0;i--){
+    const dt=new Date(Date.now()-i*86400000).toISOString().slice(0,10);
+    days.push([dt,byDay.get(dt)||0]);
+  }
+  const max=Math.max(1,...days.map(x=>x[1]));
+  const bars=days.map(([dt,n])=>`<div class="b${n?"":" zero"}" style="height:${Math.max(2,Math.round(n/max*64))}px" title="${esc(dt)}: ${n} email${n===1?"":"s"}"></div>`).join("");
+  const tot=(d.byLane||[]).map(l=>`<span class="t">${esc(l.lane_id)} <b>${l.sent}</b> sent${l.queued?` · <b>${l.queued}</b> queued`:""}${l.review?` · <b>${l.review}</b> parked`:""}</span>`).join("");
+  el.className="mrchart";
+  el.innerHTML=`<h3>Volume, last ${d.days} days</h3>
+    <div class="mrbars">${bars}</div>
+    <div class="mrbars-x"><span>${esc(days[0][0])}</span><span>today</span></div>
+    <div class="mrtot">${tot}<span class="t">retried then delivered <b>${d.retried||0}</b></span></div>`;
+}
+async function loadMailroomChart(){
+  try{ renderMailroomChart(await api("/api/emails/mailroom?stats=1")); }
+  catch(e){ if(String(e.message)!=="auth") console.error(e); }
+}
 const MRC={lane:null,data:null};
 function mrcPreview(subject,body){
   const vars={firstName:"Sam",bookingUrl:"https://book.raydar.xyz/intro?src=agent_optout"};
@@ -632,7 +685,7 @@ function mrLaneRow(l,senders){
     <div><div class="mrl-name">${esc(l.id)}</div><div class="mrl-meta">${esc(String(l.total))} email${l.total===1?"":"s"}${last?" · "+last:""}</div></div>
     <div class="mrl-meta">sends as</div>
     <div><select data-lane="${esc(l.id)}" aria-label="Sender for ${esc(l.id)}">${opts}</select></div>
-    <div class="mrl-meta">${from}${l.enabled?"":" · disabled"}${TEMPLATABLE.has(l.id)?` · <button class="mrl-edit" data-copy="${esc(l.id)}">edit copy</button>`:""}</div>
+    <div class="mrl-meta">${from}${TEMPLATABLE.has(l.id)?` · <button class="mrl-edit" data-copy="${esc(l.id)}">edit copy</button>`:""} · <button class="mrl-edit" data-pause="${esc(l.id)}" data-on="${l.enabled?"1":"0"}">${l.enabled?"pause":"resume"}</button></div>
   </div>`;
 }
 function renderMailroomLanes(d){
@@ -650,6 +703,13 @@ function renderMailroomLanes(d){
     sel.onchange=()=>mrSetSender(sel);
   });
   el.querySelectorAll("[data-copy]").forEach(b=>{ b.onclick=()=>openCopyEditor(b.dataset.copy); });
+  el.querySelectorAll("[data-pause]").forEach(b=>{ b.onclick=()=>{
+    const on=b.dataset.on==="1";
+    mrControl({lane:b.dataset.pause,enabled:!on},
+      on?`Pause “${b.dataset.pause}”?\n\nThe lane stops handing new email to the Mailroom. Whatever sends it, keeps trying and will deliver once you resume, so nothing is lost.`
+        :`Resume “${b.dataset.pause}”?`,
+      on?"Lane paused.":"Lane resumed.");
+  };});
   // The lane list refreshes every 2 minutes; never re-render an open editor
   // over text David is in the middle of typing.
   if(MRC.lane && !$("mrcopy").querySelector("#mrcBody")) renderCopyEditor();
@@ -734,6 +794,7 @@ async function load(){
   catch(e){ if(String(e.message)!=="auth") console.error(e); }
   loadMailroom();
   loadMailroomLanes();
+  loadMailroomChart();
 }
 $("chartTabs").onclick=(e)=>{
   const b=e.target.closest("button"); if(!b) return;

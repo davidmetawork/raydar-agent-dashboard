@@ -40,14 +40,18 @@ export default async function handler(req, res) {
     if (req.method === "POST") {
       const actor = req.authedEmail || "unknown@raydar.xyz";
       const payload = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-      if (!payload.lane) return res.status(400).json({ ok: false, error: "lane_required" });
+      const controlAction = ["retry", "cancel", "clear-brake"].includes(payload.action);
+      if (!payload.lane && !controlAction) return res.status(400).json({ ok: false, error: "lane_required" });
       // Copy edits (step 4) and sender switches (step 3) are different
       // endpoints on the Mailroom; both are attributed to the signed-in user.
       const isCopy = ["save", "activate", "revert"].includes(payload.action);
-      const path = isCopy ? "/api/template" : "/api/lane";
-      const bodyOut = isCopy
-        ? { lane: payload.lane, action: payload.action, subject: payload.subject, bodyText: payload.bodyText, version: payload.version, note: payload.note, actor }
-        : { lane: payload.lane, sender: payload.sender, enabled: payload.enabled, actor };
+      const isControl = ["retry", "cancel", "clear-brake"].includes(payload.action);
+      const path = isControl ? "/api/control" : isCopy ? "/api/template" : "/api/lane";
+      const bodyOut = isControl
+        ? { action: payload.action, id: payload.id, mailbox: payload.mailbox, actor }
+        : isCopy
+          ? { lane: payload.lane, action: payload.action, subject: payload.subject, bodyText: payload.bodyText, version: payload.version, note: payload.note, actor }
+          : { lane: payload.lane, sender: payload.sender, enabled: payload.enabled, actor };
       const r = await proxy(path, { method: "POST", body: JSON.stringify(bodyOut) });
       return res.status(200).json({ ok: r.ok && r.body.ok !== false, ...r.body });
     }
@@ -56,6 +60,12 @@ export default async function handler(req, res) {
     if (Number.isInteger(messageId) && messageId > 0) {
       const r = await proxy(`/api/message?id=${messageId}`);
       if (!r.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom message ${r.status}` });
+      return res.status(200).json({ ok: true, configured: true, ...r.body });
+    }
+
+    if (req.query?.stats) {
+      const r = await proxy("/api/stats");
+      if (!r.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom stats ${r.status}` });
       return res.status(200).json({ ok: true, configured: true, ...r.body });
     }
 
