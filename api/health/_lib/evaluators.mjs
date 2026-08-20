@@ -508,19 +508,20 @@ export function paraformMailboxes({ body, status, keyMissing }) {
   const total = Number(c.total) || 0;
   const errors = Number(c.gmailError) || 0;
   const active = Number(c.gmailActive) || 0;
+  const unknown = Math.max(0, total - active - errors);
   if (!total) return UNK("roster returned zero accounts", metrics);
-  // The ERROR statuses observed on 2026-08-04 came from a per-SEQUENCE
-  // readback; whether the account roster carries gmail_status too is
-  // unverified. A roster where no account reports ANY status is blindness,
-  // not health — say so instead of scoring 27 unknowns green.
+  // Provider status is joined from full campaign reads. A response with no
+  // status coverage is blindness, not health; partial coverage is visible too
+  // so one owner/read failure cannot be scored green.
   if (!active && !errors) {
-    return UNK("roster rows carry no gmail_status — needs the per-campaign status read instead", metrics);
+    return UNK("full-campaign reads returned no gmail_status", metrics);
   }
   if (String(body.davidGmailStatus || "").toUpperCase() === "ERROR") {
     return DOWN("david@raydar.xyz shows ERROR in Paraform — applicant/no-match sequences cannot send", metrics);
   }
   if (errors >= total * 0.3) return DOWN(`${errors}/${total} sending accounts in ERROR`, metrics);
   if (errors > 0) return DEG(`${errors}/${total} sending accounts in ERROR`, metrics);
+  if (unknown > 0) return DEG(`${unknown}/${total} sending accounts have no full-campaign gmail_status`, metrics);
   return OK(null, metrics);
 }
 
