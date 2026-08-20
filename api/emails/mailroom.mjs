@@ -1,49 +1,69 @@
-// Email Hub step 1: a read-only, server-side proxy to the Mailroom's feed and
-// health endpoints. The MAILROOM_API_KEY never reaches the browser; this
-// endpoint sits behind the same Raydar auth as the rest of the Emails page.
+// The Email Hub's server-side bridge to the Mailroom. The MAILROOM_API_KEY
+// never reaches the browser, and every write is attributed to the Google
+// account the dashboard authenticated (req.authedEmail).
+//
+//   GET  /api/emails/mailroom              feed + health (Hub step 1)
+//   GET  /api/emails/mailroom?message=<id> one email, full body (step 2)
+//   GET  /api/emails/mailroom?lanes=1      lane registry + senders (step 3)
+//   POST /api/emails/mailroom              { lane, sender?, enabled? } (step 3)
 import { cors, requireAuth } from "../seq/_lib/core.mjs";
+
+const TIMEOUT = 8000;
+
+function mailroom() {
+  return {
+    base: process.env.MAILROOM_BASE || "https://raydar-mailroom.vercel.app",
+    key: process.env.MAILROOM_API_KEY,
+  };
+}
+
+async function proxy(path, init = {}) {
+  const { base, key } = mailroom();
+  const r = await fetch(`${base}${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${key}`, "content-type": "application/json", ...(init.headers || {}) },
+    signal: AbortSignal.timeout(TIMEOUT),
+  });
+  const body = await r.json().catch(() => ({}));
+  return { status: r.status, ok: r.ok, body };
+}
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!(await requireAuth(req, res))) return;
   res.setHeader("cache-control", "no-store");
 
-  const base = process.env.MAILROOM_BASE || "https://raydar-mailroom.vercel.app";
-  const key = process.env.MAILROOM_API_KEY;
-  if (!key) {
-    // Not an outage — the page explains the one missing env instead of erroring.
-    return res.status(200).json({ ok: false, configured: false });
-  }
-  // Hub step 2: ?message=<id> returns one email with its full body so the
-  // page can render it exactly as the recipient received it.
-  const messageId = Number(req.query?.message);
-  if (Number.isInteger(messageId) && messageId > 0) {
-    try {
-      const r = await fetch(`${base}/api/message?id=${messageId}`, {
-        headers: { authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(8000),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom message ${r.status}` });
-      return res.status(200).json({ ok: true, configured: true, ...body });
-    } catch (err) {
-      return res.status(200).json({ ok: false, configured: true, error: String(err && err.message || err).slice(0, 200) });
-    }
-  }
+  const { key } = mailroom();
+  if (!key) return res.status(200).json({ ok: false, configured: false });
+
   try {
-    const [feedRes, healthRes] = await Promise.all([
-      fetch(`${base}/api/feed?limit=100`, {
-        headers: { authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(8000),
-      }),
-      fetch(`${base}/api/health`, { signal: AbortSignal.timeout(8000) }),
-    ]);
-    const feed = await feedRes.json().catch(() => ({}));
-    const health = await healthRes.json().catch(() => ({}));
-    if (!feedRes.ok) {
-      return res.status(200).json({ ok: false, configured: true, error: `mailroom feed ${feedRes.status}` });
+    if (req.method === "POST") {
+      const actor = req.authedEmail || "unknown@raydar.xyz";
+      const payload = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+      if (!payload.lane) return res.status(400).json({ ok: false, error: "lane_required" });
+      const r = await proxy("/api/lane", {
+        method: "POST",
+        body: JSON.stringify({ lane: payload.lane, sender: payload.sender, enabled: payload.enabled, actor }),
+      });
+      return res.status(200).json({ ok: r.ok && r.body.ok !== false, ...r.body });
     }
-    return res.status(200).json({ ok: true, configured: true, rows: feed.rows || [], health });
+
+    const messageId = Number(req.query?.message);
+    if (Number.isInteger(messageId) && messageId > 0) {
+      const r = await proxy(`/api/message?id=${messageId}`);
+      if (!r.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom message ${r.status}` });
+      return res.status(200).json({ ok: true, configured: true, ...r.body });
+    }
+
+    if (req.query?.lanes) {
+      const r = await proxy("/api/lanes");
+      if (!r.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom lanes ${r.status}` });
+      return res.status(200).json({ ok: true, configured: true, ...r.body });
+    }
+
+    const [feed, health] = await Promise.all([proxy("/api/feed?limit=100"), proxy("/api/health")]);
+    if (!feed.ok) return res.status(200).json({ ok: false, configured: true, error: `mailroom feed ${feed.status}` });
+    return res.status(200).json({ ok: true, configured: true, rows: feed.body.rows || [], health: health.body });
   } catch (err) {
     return res.status(200).json({ ok: false, configured: true, error: String(err && err.message || err).slice(0, 200) });
   }
