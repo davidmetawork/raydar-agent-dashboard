@@ -345,9 +345,14 @@ export function createSyncHandler({
         // not. Best-effort — a facts failure must never fail the push that
         // carried the profiles, because the profiles are the durable thing and
         // facts rebuild from them on the next prewarm.
+        // Reported in the response rather than only swallowed: a facts
+        // derivation that failed every cycle would otherwise be invisible,
+        // and the rules engine would quietly skip everybody with
+        // "no_facts_yet" forever while looking healthy.
         try {
           const facts = Object.fromEntries(entries.map(([cu, profile]) => [cu, factsFromProfile(profile)]));
           await writeHash(K.facts, facts);
+          stored.facts = entries.length;
           // Picker directories, harvested from the same facts. Paraform
           // exposes no school or company search we can call, so the only
           // directory we can offer is the one our own applicants describe.
@@ -360,7 +365,11 @@ export function createSyncHandler({
           }
           if (Object.keys(schools).length) await writeHash(K.schools, schools);
           if (Object.keys(companies).length) await writeHash(K.companies, companies);
-        } catch { /* derived state; the next prewarm rebuilds it */ }
+        } catch (error) {
+          // Derived state; the next prewarm rebuilds it. Name the failure so a
+          // publisher log shows it instead of a silent zero.
+          stored.factsError = String(error?.message || error).slice(0, 120);
+        }
         stored.profiles = entries.length;
       }
       return res.status(200).json({ ok: true, stored });

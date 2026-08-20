@@ -346,7 +346,7 @@ test("sync stores profiles under TTL'd keys and writes only bucket photos to the
     },
   }), ok);
   assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, profiles: 3 });
+  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, facts: 3, profiles: 3 });
   assert.deepEqual(calls.writeJson, [
     ["apphub:profile:cutestsynthetic0000000001", withPhoto, PROFILE_TTL_SECONDS],
     ["apphub:profile:cmqvf861b00040aksj38cyiwp", foreignPhoto, PROFILE_TTL_SECONDS],
@@ -588,7 +588,9 @@ test("sync writes the cards hash beside the photos hash in one profiles pass", a
   }), ok);
   assert.equal(ok.statusCode, 200);
   // The response contract is unchanged — cards are a side effect of `profiles`.
-  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, profiles: 2 });
+  // `facts` rides alongside `profiles`: reported, not silent, so a derivation
+  // that started failing every cycle is visible in the publisher's log.
+  assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, facts: 2, profiles: 2 });
 
   // facts/schools/companies ride the same batch as cards (Applicant Decision
   // Rules). CARD_SOURCE_PROFILE carries a school and a company id, so both
