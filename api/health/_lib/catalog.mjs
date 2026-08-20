@@ -553,7 +553,6 @@ export const CATALOG = [
     ["resume-watchdog-v2", "Resume watchdog", 20],                // KeepAlive, reporter
     ["resume-ledger-backup-v2", "Resume ledger backup", 1800],    // daily
     ["resume-juicebox-bridge-v1", "Juicebox bridge", 20],         // KeepAlive, reporter
-    ["paraai-interest-observer", "Para AI interest observer", 30],// every 10m
   ].map(([lane, name, maxSilenceMin]) => ({
     id: `lane-${lane}`,
     name,
