@@ -456,6 +456,7 @@ const CARD_SOURCE_PROFILE = {
   experiences: [
     {
       roleTitle: "Staff Engineer",
+      companyId: "cmpexample1",
       companyName: "Example Co",
       start: "2024-01-01",
       end: null,
@@ -472,7 +473,7 @@ const CARD_SOURCE_PROFILE = {
     { roleTitle: "Intern", companyName: "Fourth Co", start: "2018-06-01", end: "2018-09-01", current: false, logo: null },
   ],
   education: [
-    { school: "Example University", degree: "BSc Computer Science", start: "2014", end: "2018", logo: "https://storage.googleapis.com/paraform-images/school-logos/example", talentRank: 7 },
+    { schoolId: "schexample1", school: "Example University", degree: "BSc Computer Science", start: "2014", end: "2018", logo: "https://storage.googleapis.com/paraform-images/school-logos/example", talentRank: 7 },
     { school: "Second School", degree: "MSc", start: "2018", end: "2019", logo: null },
     { school: "Third School", degree: null, start: null, end: null, logo: null },
     { school: "Fourth School", degree: null, start: null, end: null, logo: null },
@@ -589,7 +590,11 @@ test("sync writes the cards hash beside the photos hash in one profiles pass", a
   // The response contract is unchanged — cards are a side effect of `profiles`.
   assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, profiles: 2 });
 
-  assert.deepEqual(calls.writeHash.map(([key]) => key), ["apphub:photos", "apphub:cards"]);
+  // facts/schools/companies ride the same batch as cards (Applicant Decision
+  // Rules). CARD_SOURCE_PROFILE carries a school and a company id, so both
+  // directories are written; the foreign-photo profile contributes neither.
+  assert.deepEqual(calls.writeHash.map(([key]) => key),
+    ["apphub:photos", "apphub:cards", "apphub:facts", "apphub:schools", "apphub:companies"]);
   const [, cards] = calls.writeHash.find(([key]) => key === "apphub:cards");
   // One HSET for the whole batch, and a card for EVERY profile — including the
   // one whose photo was dropped for living off the bucket.
@@ -606,6 +611,9 @@ test("a full publish prunes cards against the same keep-set as photos, using the
     // `nophotocu1` never had a bucket photo, so it exists only in cards — the
     // case a photos-derived drop list would strand forever.
     "apphub:cards": { keptcu0001: {}, stalecu001: {}, nophotocu1: {} },
+    // Same again for facts: `factsonlycu` proves facts is pruned from its own
+    // key list rather than from the cards drop list.
+    "apphub:facts": { keptcu0001: {}, stalecu001: {}, factsonlycu: {} },
   });
   const handler = createSyncHandler(deps);
 
@@ -618,10 +626,11 @@ test("a full publish prunes cards against the same keep-set as photos, using the
   }), ok);
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(ok.body.stored, { snapshot: true, queue: true, acks: 0 });
-  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards"]);
+  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards", "apphub:facts"]);
   assert.deepEqual(calls.deleteHashFields, [
     ["apphub:photos", ["stalecu001"]],
     ["apphub:cards", ["stalecu001", "nophotocu1"]],
+    ["apphub:facts", ["stalecu001", "factsonlycu"]],
   ]);
 });
 

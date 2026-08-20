@@ -156,6 +156,10 @@
     {
       "path": "/api/revenue/refresh",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/applicants/rules-tick",
+      "schedule": "2,12,22,32,42,52 * * * *"
     }
   ]
 }

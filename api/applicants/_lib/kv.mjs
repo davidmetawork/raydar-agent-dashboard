@@ -8,7 +8,20 @@
 // Write ownership (the contract — do not widen):
 //   apphub:snapshot          — POST /api/applicants/sync only
 //   apphub:acks              — POST /api/applicants/sync only
-//   apphub:decisions         — POST /api/applicants/decision only
+//   apphub:decisions         — TWO accepted writers, both writing the IDENTICAL
+//                              record shape through the same module
+//                              (_lib/decision-record.mjs):
+//                              POST /api/applicants/decision is the human
+//                              click, and GET /api/applicants/rules-tick is
+//                              an armed rule. This is a deliberate widening
+//                              (2026-08-20, Applicant Decision Rules): an
+//                              automatic decision has to be indistinguishable
+//                              from a human one downstream, because that is
+//                              what makes it inherit the loop's approval pull,
+//                              every send-time gate, the ack, and Undo without
+//                              a second code path. `by` is what tells them
+//                              apart — a signed-in email, or "rule:<id>".
+//                              The tick NEVER overwrites an existing field.
 //   apphub:profile:<cuId>    — TWO accepted writers of one identical shape
 //                              (24h TTL): POST /api/applicants/sync is the
 //                              bulk writer (the loop prewarms complete profile
@@ -132,6 +145,18 @@ export const PROFILE_TTL_SECONDS = 24 * 60 * 60;
 export const RANK_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export const K = {
+  // ── Applicant Decision Rules (2026-08-20) ────────────────────────────────
+  // facts/schools/companies are derived projections: written in the same sync
+  // pass as cards, pruned by the same full-publish prune, and always
+  // regenerable from the prewarmed profiles. Losing them costs a tick, never
+  // data. rules/rulestats/ruleruns are the real state.
+  facts: "apphub:facts",         // hash: cuId → evaluation facts (see _lib/facts.mjs)
+  schools: "apphub:schools",     // hash: schoolId → school name (picker directory)
+  companies: "apphub:companies", // hash: companyId → company name (picker directory)
+  rules: "apphub:rules",         // doc: {rules[], pausedAll, updatedAt} — writer: /api/applicants/rules only
+  rulestats: "apphub:rulestats", // hash: ruleId → {fired, firedAt, ...} — writer: /api/applicants/rules-tick only
+  ruleruns: "apphub:ruleruns",   // hash: `<cuId>:<roleId>` → why a rule fired — writer: rules-tick only
+
   snapshot: "apphub:snapshot",
   queue: "apphub:queue", // review-queue rows, split out so backlog size never crowds the stream
   decisions: "apphub:decisions",

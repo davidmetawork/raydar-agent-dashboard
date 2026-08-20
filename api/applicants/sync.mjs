@@ -10,6 +10,7 @@
 // 401 carries no detail on purpose.
 
 import { timingSafeEqual } from "node:crypto";
+import { directoryFromFacts, factsFromProfile } from "./_lib/facts.mjs";
 import {
   getJson,
   hashDelMany,
@@ -278,6 +279,13 @@ export function createSyncHandler({
           // exactly the failure semantics it had before cards existed.
           const dropCards = (await readHashKeys(K.cards)).filter((cu) => !keep.has(cu));
           if (dropCards.length) await deleteHashFields(K.cards, dropCards);
+          // Facts follow cards exactly: same keep-set, same lifecycle, its own
+          // key list. The picker directories are deliberately NOT pruned —
+          // a school stays a valid rule target after the last applicant who
+          // attended it leaves the tab, and re-adding it later would silently
+          // break every rule that referenced it.
+          const dropFacts = (await readHashKeys(K.facts)).filter((cu) => !keep.has(cu));
+          if (dropFacts.length) await deleteHashFields(K.facts, dropFacts);
         } catch { /* hygiene only */ }
       }
       // Count tripwire (see nextCountsDoc above). Best-effort like the prune:
@@ -331,6 +339,28 @@ export function createSyncHandler({
         if (Object.keys(cards).length) {
           await writeHash(K.cards, cards);
         }
+        // Evaluation facts ride the same batch (see _lib/facts.mjs). Distinct
+        // from cards on purpose: facts keep EVERY school and job plus their
+        // stable ids, which is what a rule needs and a render projection does
+        // not. Best-effort — a facts failure must never fail the push that
+        // carried the profiles, because the profiles are the durable thing and
+        // facts rebuild from them on the next prewarm.
+        try {
+          const facts = Object.fromEntries(entries.map(([cu, profile]) => [cu, factsFromProfile(profile)]));
+          await writeHash(K.facts, facts);
+          // Picker directories, harvested from the same facts. Paraform
+          // exposes no school or company search we can call, so the only
+          // directory we can offer is the one our own applicants describe.
+          const schools = {};
+          const companies = {};
+          for (const record of Object.values(facts)) {
+            const found = directoryFromFacts(record);
+            Object.assign(schools, found.schools);
+            Object.assign(companies, found.companies);
+          }
+          if (Object.keys(schools).length) await writeHash(K.schools, schools);
+          if (Object.keys(companies).length) await writeHash(K.companies, companies);
+        } catch { /* derived state; the next prewarm rebuilds it */ }
         stored.profiles = entries.length;
       }
       return res.status(200).json({ ok: true, stored });

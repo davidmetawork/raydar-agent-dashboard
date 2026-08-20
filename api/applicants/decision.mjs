@@ -6,6 +6,7 @@
 // approvals send first and acks land the same cycle.)
 
 import { cors, requireAuth } from "./_lib/core.mjs";
+import { PASS_REASON_IDS, decisionRecord } from "./_lib/decision-record.mjs";
 import {
   hashDel,
   hashGetJson,
@@ -51,13 +52,22 @@ export function createDecisionHandler({
         await deleteDecision(key);
         return res.status(200).json({ ok: true, key, undone: true });
       }
-      const decision = {
+      // Shared with the rules tick so a human decision and an automatic one
+      // are the same shape downstream (see _lib/decision-record.mjs).
+      // A reason only makes sense on a Pass, and only from the fixed list.
+      // Anything else is dropped rather than rejected: a reason is a bonus,
+      // and losing one must never cost the decision itself.
+      const reason = action === "pass" && PASS_REASON_IDS.has(String(body.reason || ""))
+        ? String(body.reason)
+        : null;
+      const decision = decisionRecord({
         action,
         at: now(),
-        by: String(req.authedEmail || "").trim().toLowerCase() || "unknown",
-        name: String(body.name || "").slice(0, 120),
-        roleTitle: String(body.roleTitle || "").slice(0, 160),
-      };
+        by: req.authedEmail,
+        name: body.name,
+        roleTitle: body.roleTitle,
+        reason,
+      });
       await writeDecision(key, decision);
       return res.status(200).json({ ok: true, key, decision });
     } catch (error) {

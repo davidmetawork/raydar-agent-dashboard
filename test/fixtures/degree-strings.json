@@ -1,0 +1,557 @@
+{
+ "_comment": "Every distinct `degree` string observed in a live read-only sample of the C-tier and unrated review queue, 2026-08-20. Expected levels are hand-audited. Do not edit an expectation without re-auditing the string.",
+ "cases": [
+  {
+   "degree": "Bachelor of Science Business Administration and Management, General",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor's degree Business Administration, Management and Operations",
+   "level": "bachelors"
+  },
+  {
+   "degree": "200-Hour Registered Yoga Teacher (RYT-200) Anusara Yoga",
+   "level": "certificate"
+  },
+  {
+   "degree": "Master's degree History",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's degree",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Cyber/Electronic Operations and Warfare",
+   "level": "masters"
+  },
+  {
+   "degree": "Master of Science - MS Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's degree Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Masters",
+   "level": "masters"
+  },
+  {
+   "degree": "Executive MBA",
+   "level": "masters"
+  },
+  {
+   "degree": "Master's degree",
+   "level": "masters"
+  },
+  {
+   "degree": "Master's degree, Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor’s Degree, Computer Science and Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor's degree Political Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": null,
+   "level": "unknown"
+  },
+  {
+   "degree": "B.tech Information Technology",
+   "level": "bachelors"
+  },
+  {
+   "degree": "BS Chemistry",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Arts - BA Mathematics & Economics with a Certificate in Financial Policy and Analysis",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Business Analytics",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Business Administration - BBA Finance and Sports Business",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Science (BSc) Business",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Business Administration - BBA Computer Information Systems (Data Analytics)",
+   "level": "bachelors"
+  },
+  {
+   "degree": "High School Diploma",
+   "level": "secondary"
+  },
+  {
+   "degree": "Master of Science - MS Computer Engineering",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech Computer Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Technology Computational Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Science Computational Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Intermediate MPC",
+   "level": "secondary"
+  },
+  {
+   "degree": "Full-Stack Coding Bootcamp Computer Software Engineering",
+   "level": "certificate"
+  },
+  {
+   "degree": "Bachelor of Science - BS, Elements of Computing, Business Foundations Program Elements of Computing, Business Foundations Program, Biochemistry",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Artificial Intelligence",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Science Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Associate's degree Business Administration",
+   "level": "associate"
+  },
+  {
+   "degree": "Bachelor of Business Administration - BBA",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's Degree Data Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Master of Science Data Science",
+   "level": "masters"
+  },
+  {
+   "degree": "DBA",
+   "level": "doctorate"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech Electrical and Electronics Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "High School American Diploma & Colombian Bachillerato ",
+   "level": "secondary"
+  },
+  {
+   "degree": "B.S. Business and Economics",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Science - BS Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "High School Diploma Computer Science",
+   "level": "secondary"
+  },
+  {
+   "degree": "Graduate Computer Engineering",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Engineering - BE Electronics and Communications Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "PUC",
+   "level": "secondary"
+  },
+  {
+   "degree": "Electrical and Computer Engineering",
+   "level": "unknown"
+  },
+  {
+   "degree": "Master's degree, Computer and Information Sciences, General",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's degree, Computer Science and Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelors Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Business Administration - MBA",
+   "level": "masters"
+  },
+  {
+   "degree": "Doctor of Medicine (M.D.)",
+   "level": "doctorate"
+  },
+  {
+   "degree": "Bachelor’s Degree",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's Degree Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Master's degree Computer/Information Technology Administration and Management",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Engineering - BE",
+   "level": "bachelors"
+  },
+  {
+   "degree": "HSC SCIENCE WITH INFORMATION TECHNOLGY",
+   "level": "secondary"
+  },
+  {
+   "degree": "SSC SCIENCE",
+   "level": "secondary"
+  },
+  {
+   "degree": "Master's Degree, Business Administration and Sport Management ",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor, Business Administration and Management, General",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Science Industrial Distribution",
+   "level": "bachelors"
+  },
+  {
+   "degree": "BS Industrial Distribution -Department of Engineering Technology Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Science - MS Data Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Engineering - BE Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Computer Science, Bachelor in Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "estudiante, asdministracion de empresas",
+   "level": "unknown"
+  },
+  {
+   "degree": "Flex Software Engineering Immersive Computer Software Engineering",
+   "level": "certificate"
+  },
+  {
+   "degree": "Bachelor's degree Computer Science and Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Engineering - BE Electrical, Electronics and Communications Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Masters Information Systems",
+   "level": "masters"
+  },
+  {
+   "degree": "Masters Data Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Engineering - BE Electronics and telecommunication",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Masters Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "BE Computer Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "12th vocational computer Science",
+   "level": "secondary"
+  },
+  {
+   "degree": "Bachelor's degree Mathematics and Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Data Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology ELECTRONICS AND COMMUNICATION ENGINEERING",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's Degree Information Systems",
+   "level": "masters"
+  },
+  {
+   "degree": "Certificate Computational Languages",
+   "level": "certificate"
+  },
+  {
+   "degree": "Bachelor's degree Marketing",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor's Degree Marketing/Marketing Management, General",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor's degree Foreign Languages and Literatures, General",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Senior Secondary Science and Maths",
+   "level": "secondary"
+  },
+  {
+   "degree": "Secondary Education CBSE",
+   "level": "secondary"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech Computer Science and Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech Computer Science and Engineering with specialization in Big Data Analytics",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Science - BS",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Information Systems",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Engineering - BE Computer Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Master of Science - MS Computer Science and Engineering",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech (Honours) Computer Engineering with Minor in Machine Learning and Data Analytics",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Science Science",
+   "level": "unknown"
+  },
+  {
+   "degree": "Science",
+   "level": "unknown"
+  },
+  {
+   "degree": "Master of Science - MS Cybersecurity in Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Master of Science - MS",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech",
+   "level": "bachelors"
+  },
+  {
+   "degree": "10th & 12th",
+   "level": "secondary"
+  },
+  {
+   "degree": "MSBA (Business Analytics)",
+   "level": "masters"
+  },
+  {
+   "degree": "Post Graduate Diploma in Management Finance & Financial Services and Business Analytics",
+   "level": "masters"
+  },
+  {
+   "degree": "Master of Science - MS Data science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's degree Electrical and Electronics Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "School",
+   "level": "unknown"
+  },
+  {
+   "degree": "Bachelor of Science Data Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor's degree Information Technology",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's degree Information Technology",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech Artificial Intelligence",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech CSE",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor's Degree Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Technology-B.Tech Electronics and Communication Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Grade 12th Mathematics, Physics and Chemistry",
+   "level": "secondary"
+  },
+  {
+   "degree": "Grade 10th, CBSE",
+   "level": "secondary"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech ECE",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Science - MS Management Information Systems, General",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's degree Electrical, Electronic and Communications Engineering Technology",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Science - MS Applied Data Analytics",
+   "level": "masters"
+  },
+  {
+   "degree": "High School Physics, Chemistry, Mathematics, English, Physical Education",
+   "level": "secondary"
+  },
+  {
+   "degree": "Master's Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's Degree Electrical, Electronics and Communications Engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Mechanical Engineering",
+   "level": "unknown"
+  },
+  {
+   "degree": "Master's degree Information Science/Studies",
+   "level": "masters"
+  },
+  {
+   "degree": "ChFC, CLU Finance",
+   "level": "certificate"
+  },
+  {
+   "degree": "ARM - Associate Risk Mgmt",
+   "level": "certificate"
+  },
+  {
+   "degree": "Master of Business Administration (M.B.A.) Business Administration and Management, General",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor’s Degree Political Science, Economics",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech cse",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Science (M.Sc.) Networking, Distributed Systems (Major) , Algorithms  and Machine Learning (Minors)",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Applied Science (BASc) Information Technology",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master of Science - MS, Computer Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology - BTech, Computer science and engineering",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Integrated Post Graduation Information Technology",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor of Technology Information Technology",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Technology",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Arts - BA Computer Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Bachelor of Engineering Computational Science",
+   "level": "bachelors"
+  },
+  {
+   "degree": "Master's Degree Computational Science",
+   "level": "masters"
+  },
+  {
+   "degree": "Bachelor's Degree Computational Science",
+   "level": "bachelors"
+  }
+ ]
+}

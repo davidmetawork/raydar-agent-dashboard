@@ -71,6 +71,12 @@ async function talentRanks(companyIds) {
 function mapExperience(row, ranks) {
   const companyId = row?.company_id ?? row?.company?.id ?? null;
   return {
+    // The stable Paraform id. Added 2026-08-20 for Applicant Decision Rules:
+    // rules match companies and schools by id, never by typed text, because
+    // name matching cannot tell Harvard College from Harvard Business School.
+    // MIRROR THIS IN src/interviews/publish.mjs — that file is the other
+    // writer of apphub:profile:* and any drift is a bug in both.
+    companyId: companyId == null ? null : String(companyId),
     roleTitle: str(row?.role_title ?? row?.title),
     companyName: str(row?.company_name ?? row?.company?.name),
     start: row?.start_date ?? null,
@@ -92,6 +98,7 @@ function mapExperience(row, ranks) {
 function mapEducation(row, ranks) {
   const schoolId = row?.school?.id ?? row?.school_id ?? null;
   return {
+    schoolId: schoolId == null ? null : String(schoolId),   // see mapExperience
     school: str(row?.school?.name ?? row?.school_name ?? (typeof row?.school === "string" ? row.school : null)),
     degree: str(row?.degree ?? row?.degree_name),
     start: row?.start_date ?? null,
@@ -153,6 +160,13 @@ export default async function handler(req, res) {
       imageSrc: str(record.image_src ?? record.imageSrc ?? record.profile_pic_url ?? record.profile_picture_url),
       linkedin: str(record.linkedin_user ?? record.public_identifier),
       updatedAt: record.updated_at ?? null,
+      // The number behind the S/A/B/C letter, and Paraform's own fake-profile
+      // flag. Both are cheap scalars already on the record and both are rule
+      // criteria; same mirroring rule as the ids above.
+      densityScore: typeof record.candidate_talent_density_score === "number"
+        ? record.candidate_talent_density_score
+        : null,
+      possibleFake: Boolean(record.possible_fake_candidate),
       resumeUrl: str(resume?.signed_url ?? resume?.signedUrl ?? resume?.url ?? resume?.resume_uri ?? resume?.uri),
       experiences: experienceRows.map((row) => mapExperience(row, ranks)),
       education: educationRows.map((row) => mapEducation(row, ranks)),
