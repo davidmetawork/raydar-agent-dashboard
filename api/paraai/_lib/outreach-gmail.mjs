@@ -402,6 +402,64 @@ export async function searchThreads(mailbox, query, maxResults = 20) {
   return (await gmailCall(mailbox, `/threads?${params}`))?.threads || [];
 }
 
+// ── Change detection ─────────────────────────────────────────────────────────
+// Reading a thread costs 40 quota units; asking Gmail "what changed since X?"
+// costs 2. The reply scan used to re-open every pending thread on every pass
+// (~768k units/day on the shared david@ mailbox, the dominant cause of the
+// August rate-limit lockouts). These two calls let it open only the threads
+// Gmail says actually changed.
+
+// The mailbox's current historyId — the watermark a later delta reads from.
+export async function getMailboxHistoryId(mailbox) {
+  const profile = await gmailCall(mailbox, "/profile");
+  const id = profile?.historyId;
+  return id ? String(id) : null;
+}
+
+// Thread ids with new messages since `startHistoryId`.
+//
+// Returns { threadIds:Set, historyId:string|null, expired:boolean }.
+// `expired` means Gmail no longer holds history that far back (it keeps about
+// a week, and returns 404 for an id older than that) — the caller must fall
+// back to a full scan rather than assume "nothing changed", which is the one
+// way a delta reader can silently lose a candidate's reply.
+export async function listChangedThreads(mailbox, startHistoryId, { maxPages = 10 } = {}) {
+  const threadIds = new Set();
+  let pageToken = null;
+  let historyId = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    const query = new URLSearchParams({
+      startHistoryId: String(startHistoryId),
+      historyTypes: "messageAdded",
+      maxResults: "500",
+    });
+    if (pageToken) query.set("pageToken", pageToken);
+    let body;
+    try {
+      body = await gmailCall(mailbox, `/history?${query.toString()}`);
+    } catch (error) {
+      if (error?.status === 404 || error?.status === 410) {
+        return { threadIds: new Set(), historyId: null, expired: true };
+      }
+      throw error;
+    }
+    for (const entry of body?.history || []) {
+      for (const added of entry.messagesAdded || []) {
+        const threadId = added?.message?.threadId;
+        if (threadId) threadIds.add(String(threadId));
+      }
+    }
+    if (body?.historyId) historyId = String(body.historyId);
+    pageToken = body?.nextPageToken || null;
+    if (!pageToken) break;
+  }
+  // A page cap reached with more to read is not "nothing changed": treat it as
+  // expired so the caller does a full scan instead of advancing past unread
+  // history.
+  if (pageToken) return { threadIds, historyId: null, expired: true };
+  return { threadIds, historyId, expired: false };
+}
+
 export async function getThread(mailbox, threadId) {
   return gmailCall(mailbox, `/threads/${encodeURIComponent(threadId)}?format=full`);
 }

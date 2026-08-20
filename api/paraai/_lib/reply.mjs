@@ -15,13 +15,19 @@
 import { notifySlack, fetchCall } from "./core.mjs";
 import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
 import { takeAlertSlot, listJobs } from "./store.mjs";
-import { listOutreachStates } from "./outreach-store.mjs";
+import {
+  listOutreachStates,
+  getReplyWatermark,
+  setReplyWatermark,
+} from "./outreach-store.mjs";
 import {
   getThread,
   candidateReplyMessages,
   firstDeliveredInternalDate,
   outreachMailbox,
   gmailConfigured,
+  getMailboxHistoryId,
+  listChangedThreads,
 } from "./outreach-gmail.mjs";
 import {
   stripQuotedReply,
@@ -382,13 +388,100 @@ export async function runReplyBackfill({
   }
 }
 
+// How often the scan re-reads everything regardless of the delta. The delta is
+// a fast path, never the only path: a full sweep is the self-heal for anything
+// Gmail's history could not tell us (an expired watermark, a page cap, a KV
+// blip). Six hours costs one expensive pass a quarter-day.
+const FULL_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+// Decide which outreach states this pass must open.
+//
+// Returns { states, deltaUsed, reason, nextHistoryId }. `nextHistoryId` is the
+// watermark to store IF the pass completes without truncation — advancing it
+// after a truncated pass is the one way this design could skip a reply, so the
+// caller only stores it when nothing was left behind.
+export async function planReplyScan({
+  states,
+  config,
+  mode,
+  force,
+  readWatermark = getReplyWatermark,
+  readHistoryId = getMailboxHistoryId,
+  readChanged = listChangedThreads,
+  nowMs = Date.now(),
+}) {
+  const fullScan = (reason, nextHistoryId = null) => ({
+    states, deltaUsed: false, reason, nextHistoryId,
+  });
+
+  // The backfill lane exists to sweep history deliberately; never narrow it.
+  if (mode !== "poll") return fullScan("mode_not_poll");
+  if (force) return fullScan("delta_disabled");
+
+  let watermark = null;
+  try {
+    watermark = await readWatermark();
+  } catch {
+    return fullScan("watermark_unreadable");
+  }
+
+  const sweepDue = !watermark?.fullScanAt
+    || (nowMs - Date.parse(watermark.fullScanAt) > FULL_SWEEP_INTERVAL_MS);
+
+  if (!watermark || sweepDue) {
+    // Take the mailbox's current position BEFORE the full scan, so anything
+    // arriving during it is still ahead of the watermark and gets picked up.
+    let nextHistoryId = null;
+    try {
+      nextHistoryId = await readHistoryId(config.mailbox);
+    } catch {
+      nextHistoryId = null;
+    }
+    return fullScan(watermark ? "full_sweep_due" : "no_watermark", nextHistoryId);
+  }
+
+  let changed;
+  try {
+    changed = await readChanged(config.mailbox, watermark.historyId);
+  } catch (error) {
+    // A read failure must not be read as "nothing changed".
+    return fullScan(`history_failed:${error?.status || "unknown"}`);
+  }
+  if (changed.expired) {
+    let nextHistoryId = null;
+    try {
+      nextHistoryId = await readHistoryId(config.mailbox);
+    } catch {
+      nextHistoryId = null;
+    }
+    return fullScan("history_expired", nextHistoryId);
+  }
+
+  const narrowed = states.filter((state) => state?.threadId && changed.threadIds.has(String(state.threadId)));
+  return {
+    states: narrowed,
+    deltaUsed: true,
+    reason: "delta",
+    nextHistoryId: changed.historyId || watermark.historyId,
+  };
+}
+
 async function scanReplies({ config, now, fetchImpl, mode, limit, ignoreArmingPin = false }) {
   {
-    const [states, requests, jobs] = await Promise.all([
+    const [allStates, requests, jobs] = await Promise.all([
       listOutreachStates(),
       readSubmissionRequests(),
       listJobs(300).catch(() => []),
     ]);
+    // Open only the threads Gmail says changed. Falls back to reading
+    // everything whenever the delta cannot be trusted.
+    const plan = await planReplyScan({
+      states: allStates,
+      config,
+      mode,
+      force: String(process.env.PARAAI_REPLY_DELTA_DISABLE || "").trim() === "1",
+    });
+    const states = plan.states;
     const results = [];
     let processed = 0;
     let scanned = 0;
@@ -495,6 +588,20 @@ async function scanReplies({ config, now, fetchImpl, mode, limit, ignoreArmingPi
         await releaseReplyLock(replyId, lock).catch(() => {});
       }
     }
+    // Advance the watermark only when nothing was left behind. A truncated
+    // pass (limit reached) keeps the old watermark so the next pass re-derives
+    // the same change set; re-deriving is free of side effects because an
+    // already-recorded reply is skipped.
+    const truncated = processed >= limit;
+    if (!truncated && plan.nextHistoryId) {
+      await setReplyWatermark({
+        historyId: plan.nextHistoryId,
+        fullScanAt: plan.deltaUsed
+          ? (await getReplyWatermark().catch(() => null))?.fullScanAt || new Date().toISOString()
+          : new Date().toISOString(),
+      }).catch(() => {});
+    }
+
     return {
       enabled: true,
       mode,
@@ -502,6 +609,13 @@ async function scanReplies({ config, now, fetchImpl, mode, limit, ignoreArmingPi
       limit,
       more: processed >= limit,
       scanned,
+      delta: {
+        used: plan.deltaUsed,
+        reason: plan.reason,
+        considered: states.length,
+        ofTotal: allStates.length,
+        watermarkAdvanced: Boolean(!truncated && plan.nextHistoryId),
+      },
       skipped: {
         noPendingRequest: skippedNoPending,
         noReply: skippedNoReply,

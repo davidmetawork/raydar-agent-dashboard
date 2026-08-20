@@ -391,6 +391,48 @@ export async function getGmailBackoff({ kvImpl = kv } = {}) {
   return raw ? String(raw) : null;
 }
 
+// ── Reply-scan watermark ─────────────────────────────────────────────────────
+// Where the last successful reply scan reached, so the next pass can ask Gmail
+// only what changed since. Also carries when the last full sweep ran: the
+// delta is a fast path, never the only path.
+const REPLY_WATERMARK_KEY = "paraai:reply:history-watermark";
+
+export async function getReplyWatermark({ kvImpl = kv } = {}) {
+  const raw = await kvImpl(["GET", REPLY_WATERMARK_KEY]);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (!parsed?.historyId) return null;
+    return {
+      historyId: String(parsed.historyId),
+      fullScanAt: parsed.fullScanAt ? String(parsed.fullScanAt) : null,
+      updatedAt: parsed.updatedAt ? String(parsed.updatedAt) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function setReplyWatermark(
+  { historyId, fullScanAt = null },
+  { kvImpl = kv, now = new Date() } = {},
+) {
+  if (!historyId) return null;
+  const value = {
+    historyId: String(historyId),
+    fullScanAt: fullScanAt ? String(fullScanAt) : null,
+    updatedAt: now.toISOString(),
+  };
+  // No TTL: losing this key silently would mean a full scan forever, which is
+  // safe but expensive, and the value is tiny.
+  await kvImpl(["SET", REPLY_WATERMARK_KEY, JSON.stringify(value)]);
+  return value;
+}
+
+export async function clearReplyWatermark({ kvImpl = kv } = {}) {
+  await kvImpl(["DEL", REPLY_WATERMARK_KEY]);
+}
+
 export async function claimOutreachExceptionAlert(
   requestId,
   {
