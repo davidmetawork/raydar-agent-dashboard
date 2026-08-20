@@ -258,6 +258,20 @@ export const CATALOG = [
     note: "Can automations use the shared mailbox right now? DOWN needs two independent 429 witnesses; one witness is DEGRADED (a breaker is handling it).",
   },
   {
+    id: "email-mailroom",
+    name: "Mailroom send service",
+    group: "email",
+    tier: 2,
+    kind: "pull",
+    probe: {
+      url: "https://raydar-mailroom.vercel.app/api/health",
+      timeoutMs: 8000,
+      evaluate: "okTrue",
+    },
+    registry: "/products/mailroom/",
+    note: "Email System v2's shared outbox (own Vercel project + Neon DB). ok:false means rows parked for review or a mailbox brake armed — read /emails for which.",
+  },
+  {
     id: "email-precall-reminders",
     name: "Pre-call reminder emails",
     group: "email",

@@ -109,6 +109,16 @@
   .p-dark,.p-deprecated{background:var(--muted-bg);color:var(--ink-3)}
   .p-human-initiated{background:var(--violet-bg);color:var(--violet-700)}
   .p-up{background:#fff;border:1px dashed var(--violet);color:var(--violet-700);font-weight:600;text-transform:none;letter-spacing:0}
+  .mr-sum{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .mr-row{display:grid;grid-template-columns:110px 90px minmax(160px,1fr) minmax(200px,2fr) 90px;gap:10px;align-items:center;padding:8px 10px;border-top:1px solid var(--line);font-size:12.5px}
+  .mr-row:first-of-type{border-top:none}
+  .mr-row .mono{font-variant-numeric:tabular-nums;color:var(--ink-3);white-space:nowrap}
+  .mr-row .to{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mr-row .subj{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mr-err{grid-column:1/-1;font-size:11.5px;color:var(--bad)}
+  .p-sent{background:var(--good-bg);color:var(--good)}
+  .p-pending,.p-claimed{background:var(--warn-bg);color:var(--warn)}
+  .p-review,.p-dead{background:var(--bad-bg);color:var(--bad)}
   .obs{font-size:10.5px;padding:2.5px 8px;border-radius:999px;white-space:nowrap;display:flex;align-items:center;gap:5px;border:1px solid var(--line)}
   .obs.unwatched{color:var(--muted);border-style:dashed}
   .obs.o-DOWN{background:var(--bad-bg);border-color:#F3C9CA;color:var(--bad);font-weight:700}
@@ -190,6 +200,12 @@
     <h2>The mailboxes they share</h2>
     <div class="sub" style="margin-bottom:12px">Which bucket each lane spends. This is the blast radius.</div>
     <div class="mbrow" id="mbrow"></div>
+  </div>
+
+  <div class="card">
+    <h2>The Mailroom · what the new send service has processed</h2>
+    <div class="sub" style="margin-bottom:12px">Email System v2's shared outbox, newest first. Read-only — this is Email Hub step 1; sender switching and copy editing arrive as later, separately-approved steps.</div>
+    <div id="mailroom" class="sub">Loading the mailroom feed…</div>
   </div>
 
   <div class="card">
@@ -441,9 +457,47 @@ function render(d){
   }
 }
 
+function mrTime(x){
+  if(!x) return "";
+  return new Date(x).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+}
+function renderMailroom(d){
+  const el=$("mailroom");
+  if(!d.configured){ el.textContent="MAILROOM_API_KEY is not set on the dashboard project yet, so the feed cannot be read. One env var away."; return; }
+  if(!d.ok){ el.textContent="Mailroom unreachable: "+(d.error||"unknown")+". The Mailroom itself may still be fine — this is only the dashboard's read of it."; return; }
+  const h=d.health||{}; const depths=h.depths||{};
+  const chips=[
+    `<span class="pill p-sent">sent ${depths.sent||0}</span>`,
+    `<span class="pill p-pending">queued ${(depths.pending||0)+(depths.claimed||0)}</span>`,
+    `<span class="pill ${depths.review?"p-review":"p-dark"}">review ${depths.review||0}</span>`,
+    (h.brakes||[]).length
+      ? `<span class="pill p-review">brake armed: ${esc(h.brakes.map(b=>b.mailbox).join(", "))}</span>`
+      : `<span class="pill p-dark">no brakes armed</span>`,
+    h.lastSent?`<span class="pill p-dark">last send ${esc(mrTime(h.lastSent))}</span>`:"",
+  ].join("");
+  const rows=(d.rows||[]).map(r=>{
+    const who=esc(r.mailbox||r.sender_id)+" → "+esc(r.to_email);
+    const err=r.last_error?`<div class="mr-err">${esc(r.last_error)}</div>`:"";
+    return `<div class="mr-row">
+      <span class="mono">${esc(mrTime(r.created_at))}</span>
+      <span class="mono">${esc(r.lane_id)}</span>
+      <span class="to" title="${who}">${who}</span>
+      <span class="subj" title="${esc(r.subject)}">${esc(r.subject)}</span>
+      <span class="pill p-${esc(r.state)}">${esc(r.state)}</span>
+      ${err}
+    </div>`;
+  }).join("");
+  el.classList.remove("sub");
+  el.innerHTML=`<div class="mr-sum">${chips}</div>`+(rows||`<div class="sub">Nothing processed yet. The canary was the first send; migrated lanes will appear here.</div>`);
+}
+async function loadMailroom(){
+  try{ const d=await api("/api/emails/mailroom"); renderMailroom(d); }
+  catch(e){ if(String(e.message)!=="auth") console.error(e); }
+}
 async function load(){
   try{ const d=await api("/api/emails/state"); if(d&&d.ok) render(d); }
   catch(e){ if(String(e.message)!=="auth") console.error(e); }
+  loadMailroom();
 }
 $("chartTabs").onclick=(e)=>{
   const b=e.target.closest("button"); if(!b) return;
