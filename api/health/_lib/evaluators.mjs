@@ -533,6 +533,52 @@ export function paraformMailboxes({ body, status, keyMissing }) {
  * Two independent witnesses = the 2026-08-09 lockout shape (DOWN, tier 1 —
  * the recovery levers, Apps Script and Fyxer, are David's alone).
  */
+/**
+ * How much of the daily Gmail allowance david@raydar.xyz has spent, and how
+ * long it has been unusable today. Fed by /api/health/gmail-quota.
+ *
+ * The send cap is a HARD wall — at 2,000 Gmail simply stops accepting mail for
+ * 24 hours — so this warns early and loudly rather than at the edge. Reads are
+ * deliberately not scored here: nothing reports quota units, and a tile that
+ * guesses at a number nobody can verify is worse than one that admits the gap.
+ */
+export function gmailQuotaDavid({ raw }) {
+  if (!raw || raw.ok !== true) {
+    return UNK("quota endpoint unreadable", null);
+  }
+  const { sends, cap, pct, exact, suppressed, suppressedReason } = raw;
+  const locked = Number(raw.lockedMinutesToday || 0);
+  const metrics = {
+    sends, cap, pct, exact,
+    lockedMinutesToday: raw.lockedMinutesToday,
+    blindMinutesToday: raw.blindMinutesToday,
+    four29Today: raw.four29Today,
+    checkedAt: raw.checkedAt,
+  };
+
+  if (sends == null) {
+    return UNK(
+      suppressed ? `no count yet today (${suppressedReason || "suppressed"})` : "no count yet today",
+      metrics,
+    );
+  }
+  if (sends >= cap) {
+    return DOWN(`${sends}/${cap} sends — the daily cap is spent, Gmail is refusing mail`, metrics);
+  }
+  if (sends >= cap * 0.8) {
+    return DEG(`${sends}/${cap} sends — ${pct}% of the daily cap`, metrics);
+  }
+  // Being locked out for a large part of the day matters even when the send
+  // count looks calm, because the reason sends are low may BE the lockout.
+  if (locked >= 60) {
+    return DEG(`mailbox unhealthy for ${locked} min today (${sends}/${cap} sends)`, metrics);
+  }
+  if (suppressed) {
+    return DEG(`not counting right now: ${suppressedReason || "suppressed"}`, metrics);
+  }
+  return OK(`${sends}/${cap} sends today${exact === false ? " (at least)" : ""}`, metrics);
+}
+
 export function gmailInboxDavid({ results, beats, gmailBackoffUntil, kvOk, probe }) {
   const witnesses = [];
   let sourcesReadable = 0;
@@ -610,5 +656,5 @@ export const EVALUATORS = {
   vendorApi, googleWorkspace, neonDb, nativeReminders, upstashKv, slackTransport,
   n8nCloud,
   lifecycleEmailLane, paraaiOutreachEmail, schedulerSenderEmail,
-  paraformSequencesEmail, paraformMailboxes, gmailInboxDavid,
+  paraformSequencesEmail, paraformMailboxes, gmailInboxDavid, gmailQuotaDavid,
 };
