@@ -131,7 +131,7 @@
     },
     {
       "path": "/api/paraai/submission-notify",
-      "schedule": "47 * * * *"
+      "schedule": "20 * * * *"
     },
     {
       "path": "/api/health/tick",

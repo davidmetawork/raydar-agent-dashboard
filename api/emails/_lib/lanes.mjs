@@ -69,11 +69,11 @@ export const READERS = [
     "id": "booking-resume-sync",
     "name": "Booking resume sync",
     "mailbox": "david",
-    "cadence": "Every minute, Gmail work every 5",
+    "cadence": "Every 5 minutes at :03 past",
     "schedule": {
       "kind": "every",
       "n": 5,
-      "offset": 0,
+      "offset": 3,
       "tz": "UTC"
     },
     "healthId": "lane-booking-resume-sync",
@@ -84,11 +84,11 @@ export const READERS = [
     "id": "booking-resume-retry",
     "name": "Booking resume retry",
     "mailbox": "david",
-    "cadence": "Every 15 minutes",
+    "cadence": "Every 15 minutes at :06 past",
     "schedule": {
       "kind": "every",
       "n": 15,
-      "offset": 0,
+      "offset": 6,
       "tz": "UTC"
     },
     "healthId": "lane-booking-resume-retry",
@@ -113,11 +113,11 @@ export const READERS = [
     "id": "paraai-reply-rescan",
     "name": "Para AI reply rescan",
     "mailbox": "david",
-    "cadence": "With every worker pass, every 5 min",
+    "cadence": "With every worker pass, every 5 min at :04 past",
     "schedule": {
       "kind": "every",
       "n": 5,
-      "offset": 0,
+      "offset": 4,
       "tz": "UTC"
     },
     "healthId": "paraai-lane",
@@ -142,11 +142,11 @@ export const READERS = [
     "id": "n8n-paraform-notify",
     "name": "Paraform notify",
     "mailbox": "david",
-    "cadence": "Every 10 min, 06:00-21:00 PT weekdays",
+    "cadence": "Every 10 min at :05 past, 06:00-21:00 PT weekdays",
     "schedule": {
       "kind": "every",
       "n": 10,
-      "offset": 0,
+      "offset": 5,
       "tz": "PT"
     },
     "healthId": "n8n-workflows",
@@ -167,10 +167,10 @@ export const READERS = [
     "id": "submission-notify",
     "name": "Submission responses",
     "mailbox": "david",
-    "cadence": "Hourly at :47",
+    "cadence": "Hourly at :20",
     "schedule": {
       "kind": "hourly",
-      "minute": 47,
+      "minute": 20,
       "tz": "UTC"
     },
     "healthId": null,
@@ -195,11 +195,11 @@ export const READERS = [
     "id": "archive-backfill",
     "name": "Archive backfill",
     "mailbox": "other",
-    "cadence": "Every 30 minutes",
+    "cadence": "Every 30 minutes at :05 past",
     "schedule": {
       "kind": "every",
       "n": 30,
-      "offset": 0,
+      "offset": 5,
       "tz": "UTC"
     },
     "healthId": "lane-archive-backfill",
@@ -627,7 +627,7 @@ export const LANES =
     "schedule": {
       "kind": "every",
       "n": 5,
-      "offset": 0,
+      "offset": 4,
       "tz": "UTC"
     },
     "name": "First interview request sequence",
@@ -691,7 +691,7 @@ export const LANES =
     "schedule": {
       "kind": "every",
       "n": 5,
-      "offset": 0,
+      "offset": 4,
       "tz": "UTC"
     },
     "name": "Additional interview request sequence",
