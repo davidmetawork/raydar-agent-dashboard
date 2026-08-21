@@ -38,6 +38,7 @@
   h1 { font-size:34px; line-height:1; margin:0; }
   .sub { color:var(--ink-2); margin-top:7px; max-width:560px; line-height:1.45; }
   .refresh-btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 12px; font:600 12px "Inter Variable"; cursor:pointer; }
+  .refresh-btn[disabled] { cursor:progress; color:var(--muted); background:var(--wash); font-variant-numeric:tabular-nums; }
   body.embed header .brand img, body.embed h1, body.embed .sub { display:none; }
   body.embed { padding-top:8px; }
   body.embed header { margin-bottom:12px; min-height:0; }
@@ -276,7 +277,7 @@
           <div class="sub">Every inbound applicant on David&rsquo;s roles. S/A/B tiers flow through the invite loop automatically; C-tier and unrated applicants wait here for a human call.</div>
         </div>
       </div>
-      <button class="refresh-btn" onclick="loadFeed(true)">Refresh</button>
+      <button class="refresh-btn" id="refreshBtn" onclick="requestRefresh()">Refresh</button>
     </header>
 
     <div class="stats" id="statsRow">
@@ -1424,6 +1425,93 @@ document.addEventListener("change", (event) => {
   renderBulk();
 });
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && STATE.modal) dismissProfile(); });
+
+/* ---- on-demand refresh ---- */
+// WHAT THE BUTTON CAN AND CANNOT DO. This page cannot compute a snapshot; the
+// desktop loop publishes one and the tab reads it. So Refresh used to re-read
+// the same cached snapshot and report "Refreshed." — true, useless, and the
+// reason the number looked frozen for hours while the button claimed to work.
+//
+// It now leaves a request (POST /api/applicants/refresh), then WATCHES for the
+// answer: success is the snapshot's own generatedAt moving past the one that
+// was on screen at the moment of the click. Nothing else counts — not the POST
+// returning 200, not a fetch completing. That way the button can only say
+// "Refreshed" when something genuinely newer is being rendered.
+//
+// And when nothing comes back it says so, in the one way that is actually
+// useful: the desktop is asleep or its listener is down, here is how old what
+// you are looking at is. A button that lies quietly is worse than a slow one.
+const REFRESH = { running: false, timer: null, startedAt: 0, before: 0 };
+// The desktop listener polls every 15s and a refresh re-runs the plan (a
+// Paraform top-up walk) before republishing, so the honest worst case is
+// roughly 15 + 70s. 120s gives that room without stranding the button.
+const REFRESH_TIMEOUT_MS = 120_000;
+// The label ticks every second; the feed is only re-read every Nth tick,
+// because a feed read is six KV reads and the answer cannot arrive faster
+// than the desktop can walk Paraform anyway.
+const REFRESH_TICK_MS = 1000;
+const REFRESH_POLL_TICKS = 6;
+
+function setRefreshBusy(seconds) {
+  const btn = $("refreshBtn");
+  if (!btn) return;
+  if (seconds == null) { btn.disabled = false; btn.textContent = "Refresh"; return; }
+  btn.disabled = true;
+  btn.textContent = "Refreshing… " + seconds + "s";
+}
+
+async function requestRefresh() {
+  if (REFRESH.running) return;   // a second click rides the first
+  const before = parseDate(STATE.snapshot?.generatedAt)?.getTime() || 0;
+  try {
+    const response = await fetch("/api/applicants/refresh", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    if (response.status === 401 || response.status === 403) { showGate(); return; }
+    const body = await response.json().catch(() => null);
+    if (!response.ok || body?.ok === false) throw new Error(body?.error || "refresh_request_failed");
+  } catch {
+    // No trigger reachable — an older deploy, KV down, or no network. Do what
+    // the button did before rather than letting the click do nothing at all.
+    await loadFeed(true);
+    return;
+  }
+  REFRESH.running = true;
+  REFRESH.startedAt = Date.now();
+  REFRESH.before = before;
+  setRefreshBusy(0);
+  let ticks = 0;
+  const tick = async () => {
+    const elapsed = Date.now() - REFRESH.startedAt;
+    setRefreshBusy(Math.round(elapsed / 1000));
+    ticks += 1;
+    if (ticks % REFRESH_POLL_TICKS === 0) {
+      await loadFeed();
+      const at = parseDate(STATE.snapshot?.generatedAt)?.getTime() || 0;
+      if (at > REFRESH.before) return endRefreshWatch(true);
+    }
+    if (elapsed >= REFRESH_TIMEOUT_MS) return endRefreshWatch(false);
+    REFRESH.timer = setTimeout(tick, REFRESH_TICK_MS);
+  };
+  REFRESH.timer = setTimeout(tick, REFRESH_TICK_MS);
+}
+
+function endRefreshWatch(ok) {
+  clearTimeout(REFRESH.timer);
+  REFRESH.running = false;
+  REFRESH.timer = null;
+  setRefreshBusy(null);
+  if (ok) { toast("Refreshed — the desktop republished just now."); return; }
+  const at = parseDate(STATE.snapshot?.generatedAt);
+  toast(at
+    ? "The desktop didn’t answer in " + Math.round(REFRESH_TIMEOUT_MS / 1000)
+      + "s — it may be asleep. Still showing the snapshot from " + relTime(at) + "."
+    : "The desktop didn’t answer — no snapshot has been published yet.", true);
+}
 
 /* ---- feed ---- */
 async function loadFeed(manual = false) {

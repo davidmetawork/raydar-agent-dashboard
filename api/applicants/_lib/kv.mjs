@@ -46,6 +46,12 @@
 //                              latched count-drop alert; feed reads it so the
 //                              tab can warn when a publish collapses. Display
 //                              only — it never gates a sync or a feed.)
+//   apphub:refresh           — /api/applicants/refresh only, BOTH methods
+//                              (tiny doc: {requestedAt, by} — the browser's
+//                              standing "please republish" note, 1h TTL. The
+//                              desktop refresh listener only ever READS it and
+//                              keeps its own served-watermark on disk, which is
+//                              what keeps the on-demand path idempotent.)
 
 const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
@@ -165,5 +171,6 @@ export const K = {
   photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
   cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
   counts: "apphub:counts", // last publish's queue/stream sizes + latched drop alert (see header)
+  refresh: "apphub:refresh", // on-demand refresh request from the tab (see header)
   rank: (companyId) => `apphub:rank:${companyId}`,
 };
