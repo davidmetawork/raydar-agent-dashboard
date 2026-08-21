@@ -1,5 +1,7 @@
 // How much of david@raydar.xyz's daily Gmail allowance is gone, and how long
-// the mailbox has been unusable today.
+// the mailbox has been unusable today. WRITER ONLY: a cron calls this to keep
+// the numbers fresh; the human view is the Allowance panel on /emails, which
+// reads these same KV records through /api/emails/state.
 //
 // WHY THIS EXISTS: Google publishes no API that reports quota consumption.
 // You cannot ask "how many units have I spent?" — the only number obtainable
@@ -24,6 +26,7 @@
 // the tick owns; this file never writes there.
 import { timingSafeEqual } from "node:crypto";
 
+import { cronAuth } from "../seq/_lib/core.mjs";
 import { hGet, hSet } from "./_lib/kv.mjs";
 import { delegatedGoogleAccessToken } from "../paraai/_lib/outreach-gmail.mjs";
 
@@ -40,7 +43,13 @@ const dayKey = (day) => `hlth:gmailquota:${day}`;
 const GMAIL_LIST = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 
+// Two callers, both machines: the Vercel cron that keeps the count fresh, and
+// a manual beat-key call for debugging. Browsers never reach this — they read
+// the stored numbers through /api/emails/state, which owns the human gate.
 function authed(req) {
+  // cronAuth returns {ok,...}, NOT a boolean — truthiness here would leave the
+  // endpoint wide open, which is the exact bug the n8n watchdog shipped once.
+  if (cronAuth(req).ok === true) return true;
   const secret = process.env.HEALTH_BEAT_KEY || "";
   if (!secret) return false;
   const a = Buffer.from(String(req.headers?.authorization || ""));
@@ -125,8 +134,17 @@ async function countSentToday(day, { fetchImpl = fetch, tokenImpl = delegatedGoo
   return { sends, exact: !pageToken, pages };
 }
 
+export const numberOrNull = (value) => (
+  value === null || value === undefined || value === "" || !Number.isFinite(Number(value))
+    ? null
+    : Number(value)
+);
+
 export function summarize(record, lockout) {
-  const sends = Number.isFinite(Number(record?.sends)) ? Number(record.sends) : null;
+  // Number(null) is 0 and Number.isFinite(0) is true, so a naive coercion
+  // turns "we have not counted yet" into a confident "0 of 2000 sent" — the
+  // most misleading thing this panel could say.
+  const sends = numberOrNull(record?.sends);
   return {
     ok: true,
     mailbox: MAILBOX,

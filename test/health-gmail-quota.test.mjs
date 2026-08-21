@@ -12,7 +12,7 @@ import {
   pacificMidnightEpoch,
   summarize,
 } from "../api/health/gmail-quota.mjs";
-import { gmailQuotaDavid } from "../api/health/_lib/evaluators.mjs";
+import { createHandler } from "../api/health/gmail-quota.mjs";
 
 test("the Pacific day boundary survives the DST changeover", () => {
   // 2026-03-08 is the US spring-forward; 2026-11-01 the fall-back.
@@ -45,41 +45,18 @@ test("no samples means null, never a confident zero", () => {
   assert.equal(out.blindMinutes, null);
 });
 
-test("a healthy day reads OK and carries the count", () => {
-  const raw = summarize(
+test("summarize reports pct against the cap and never invents a count", () => {
+  const full = summarize(
     { day: "2026-08-21", sends: 235, exact: true, checkedAt: "2026-08-21T20:00:00Z", four29: 0 },
     { lockedMinutes: 0, blindMinutes: 0, samples: 400 },
   );
-  const verdict = gmailQuotaDavid({ raw });
-  assert.equal(verdict.state, "OK");
-  assert.match(verdict.reason, /235\/2000/u);
-  assert.equal(verdict.metrics.pct, 11.8);
-});
+  assert.equal(full.sends, 235);
+  assert.equal(full.cap, 2000);
+  assert.equal(full.pct, 11.8);
 
-test("80% of the send cap is DEGRADED, and the cap itself is DOWN", () => {
-  const at80 = gmailQuotaDavid({
-    raw: summarize({ day: "d", sends: 1600, exact: true, four29: 0 }, { lockedMinutes: 0 }),
-  });
-  assert.equal(at80.state, "DEGRADED");
-  const atCap = gmailQuotaDavid({
-    raw: summarize({ day: "d", sends: 2000, exact: true, four29: 0 }, { lockedMinutes: 0 }),
-  });
-  assert.equal(atCap.state, "DOWN");
-  assert.match(atCap.reason, /refusing mail/u);
-});
-
-test("an hour of lockout is DEGRADED even when sends look calm", () => {
-  const verdict = gmailQuotaDavid({
-    raw: summarize({ day: "d", sends: 12, exact: true, four29: 3 }, { lockedMinutes: 96 }),
-  });
-  assert.equal(verdict.state, "DEGRADED");
-  assert.match(verdict.reason, /96 min/u);
-  assert.equal(verdict.metrics.four29Today, 3);
-});
-
-test("an unreadable endpoint is UNKNOWN, never OK", () => {
-  assert.equal(gmailQuotaDavid({ raw: null }).state, "UNKNOWN");
-  assert.equal(gmailQuotaDavid({ raw: { ok: false } }).state, "UNKNOWN");
+  const empty = summarize({ day: "2026-08-21", sends: null, four29: 0 }, { lockedMinutes: null });
+  assert.equal(empty.sends, null, "not counted yet is null, never a confident zero");
+  assert.equal(empty.pct, null);
 });
 
 test("a suppressed probe keeps the last real count rather than reverting to unknown", () => {
@@ -88,14 +65,42 @@ test("a suppressed probe keeps the last real count rather than reverting to unkn
     { lockedMinutes: 10 },
   );
   assert.equal(raw.sends, 190, "a stale-but-real number beats null against a hard cap");
-  const verdict = gmailQuotaDavid({ raw });
-  assert.equal(verdict.state, "DEGRADED");
-  assert.match(verdict.reason, /GMAIL_429/u);
+  assert.equal(raw.suppressed, true);
+  assert.equal(raw.four29Today, 1);
 });
 
 test("a partial count is flagged rather than reported as the whole truth", () => {
   const raw = summarize({ day: "d", sends: 2500, exact: false, four29: 0 }, { lockedMinutes: 0 });
   assert.equal(raw.exact, false);
-  const verdict = gmailQuotaDavid({ raw });
-  assert.equal(verdict.state, "DOWN"); // 2500 is past the cap either way
+});
+
+// cronAuth returns an object; `if (cronAuth(req))` is always truthy and would
+// leave this endpoint open to anyone. That bug shipped once in the n8n
+// watchdog, and it is cheap to make it impossible to ship again.
+test("an unauthenticated caller is refused, header alone is not enough", async () => {
+  const prevCron = process.env.CRON_SECRET;
+  const prevBeat = process.env.HEALTH_BEAT_KEY;
+  process.env.CRON_SECRET = "cron-secret";
+  process.env.HEALTH_BEAT_KEY = "beat-secret";
+  const handler = createHandler({
+    fetchImpl: async () => { throw new Error("must not reach Gmail"); },
+    tokenImpl: async () => { throw new Error("must not mint a token"); },
+  });
+  const call = async (headers) => {
+    let code = null; let body = null;
+    const res = {
+      setHeader() {},
+      status(c) { code = c; return this; },
+      json(b) { body = b; return this; },
+    };
+    await handler({ method: "GET", headers }, res);
+    return { code, body };
+  };
+
+  assert.equal((await call({})).code, 401, "no credentials");
+  assert.equal((await call({ "x-vercel-cron": "1" })).code, 401, "the cron header alone proves nothing");
+  assert.equal((await call({ authorization: "Bearer wrong" })).code, 401, "a wrong bearer");
+
+  process.env.CRON_SECRET = prevCron;
+  process.env.HEALTH_BEAT_KEY = prevBeat;
 });

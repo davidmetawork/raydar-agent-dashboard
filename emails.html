@@ -54,6 +54,34 @@
   .d-OK{background:var(--good)} .d-DEGRADED{background:var(--warn)} .d-DOWN{background:var(--bad)}
   .d-UNKNOWN{background:var(--violet)} .d-PAUSED{background:#BDB7A8} .d-NONE{background:#D6D0C1}
 
+  /* ── daily allowance ── */
+  .alw{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start}
+  .alw-main{flex:1 1 320px;min-width:280px}
+  .alw-big{font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+  .alw-of{font-size:15px;font-weight:500;color:var(--muted)}
+  .alw-meter{position:relative;height:26px;border:1px solid var(--line);border-radius:4px;background:var(--muted-bg);overflow:hidden;margin-top:10px}
+  .alw-fill{position:absolute;inset:0 auto 0 0;background:var(--good);transition:width .3s}
+  .alw-fill.warn{background:var(--warn)}
+  .alw-fill.bad{background:var(--bad)}
+  .alw-mark{position:absolute;top:0;bottom:0;width:1px;background:var(--ink-3);opacity:.55}
+  /* the label lives OUTSIDE the meter: the meter clips its own overflow */
+  .alw-scale{position:relative;height:14px;margin-top:2px}
+  .alw-scale span{position:absolute;transform:translateX(-50%);font-size:10px;color:var(--muted);white-space:nowrap}
+  .alw-side{flex:0 0 auto;display:flex;gap:26px}
+  .alw-stat{min-width:96px}
+  .alw-stat b{display:block;font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15}
+  .alw-stat span{display:block;font-size:11px;color:var(--muted);margin-top:2px}
+  .alw-stat.hot b{color:var(--bad)}
+  .alw-note{margin-top:14px;font-size:12px;color:var(--muted)}
+  .alw-note.flag{color:var(--warn)}
+  /* 7-day history: bars are read against the same 2,000 cap as the meter */
+  .alw-hist{margin-top:16px;border-top:1px solid var(--line-2);padding-top:12px}
+  .alw-hist h3{font-size:12px;font-weight:700;margin:0 0 9px;color:var(--ink-2)}
+  .alw-days{display:flex;gap:6px;align-items:flex-end;height:56px}
+  .alw-day{flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
+  .alw-bar{width:100%;background:var(--violet);border-radius:2px 2px 0 0;min-height:2px}
+  .alw-bar.none{background:repeating-linear-gradient(45deg,var(--line),var(--line) 2px,transparent 2px,transparent 5px);border:1px dashed var(--line);border-bottom:none;min-height:8px}
+  .alw-day em{font-style:normal;font-size:10px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
   /* ── timing chart ── */
   .chart{overflow-x:auto;padding-bottom:4px}
   .chart-inner{min-width:840px}
@@ -248,6 +276,12 @@
 
   <div class="sumrow" id="sumrow"></div>
 
+  <div class="card" id="allowanceCard">
+    <h2>Today's allowance · david@raydar.xyz</h2>
+    <div class="sub" style="margin-bottom:12px">Sending is capped at 2,000 a day per mailbox and Gmail simply stops accepting mail once it is spent. Reads are not shown because Google publishes no way to measure them.</div>
+    <div id="allowance">Loading…</div>
+  </div>
+
   <div class="card">
     <h2>The mailboxes they share</h2>
     <div class="sub" style="margin-bottom:12px">Which bucket each lane spends. This is the blast radius.</div>
@@ -298,6 +332,49 @@ if(new URLSearchParams(location.search).has("embed")) document.body.classList.ad
 const AUTH={required:true,clientId:"",authenticated:false};
 let DATA=null, OPEN=null, CHART="hour";
 const PILE=8; // red only for a genuine stack, not for every :05 boundary
+// Today's allowance. Every number here is either measured or absent — a null
+// count renders as "not counted yet", never as a reassuring zero, because the
+// whole point of a gauge against a hard cap is that you can trust it.
+function renderAllowance(q){
+  const el=$("allowance");
+  if(!q){el.innerHTML='<div class="sub">The allowance record is unreadable right now. Everything else on this page is unaffected.</div>';return;}
+  const cap=q.cap||2000;
+  const counted=q.sends!==null&&q.sends!==undefined;
+  const pct=counted?Math.min(100,(q.sends/cap)*100):0;
+  const tone=!counted?"":q.sends>=cap?"bad":q.sends>=cap*0.8?"warn":"";
+  const locked=q.lockedMinutesToday;
+  const lockText=locked===null||locked===undefined?"—":locked>=60?`${Math.floor(locked/60)}h ${locked%60}m`:`${locked}m`;
+  const notes=[];
+  if(q.suppressed)notes.push(["flag",`Not counting right now — ${esc(q.suppressedReason||"suppressed")}. The count below is the last real one; the probe stays silent while the mailbox is locked so it can never hold the lockout open.`]);
+  else if(q.checkedAt)notes.push(["",`Counted ${esc(new Date(q.checkedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}))}, and every 15 minutes.`]);
+  if(q.exact===false)notes.push(["flag","More than 2,500 messages in Sent today — the figure shown is a floor, not the total."]);
+
+  const hist=(q.history||[]).map(h=>{
+    const has=h.sends!==null&&h.sends!==undefined;
+    const height=has?Math.max(2,Math.round((Math.min(h.sends,cap)/cap)*100)):0;
+    const label=h.day.slice(5).replace("-","/");
+    return `<div class="alw-day" title="${esc(h.day)}: ${has?esc(h.sends)+" sent":"not counted"}">
+      <div class="alw-bar ${has?"":"none"}" style="height:${has?height:8}%"></div><em>${esc(label)}</em></div>`;
+  }).join("");
+
+  el.innerHTML=`<div class="alw">
+    <div class="alw-main">
+      <div><span class="alw-big">${counted?esc(q.sends):"—"}</span> <span class="alw-of">of ${esc(cap)} sent today</span></div>
+      <div class="alw-meter">
+        <div class="alw-fill ${tone}" style="width:${pct}%"></div>
+        <div class="alw-mark" style="left:80%"></div>
+      </div>
+      <div class="alw-scale"><span style="left:80%">80%</span></div>
+      ${notes.map(([c,t])=>`<div class="alw-note ${c}">${t}</div>`).join("")}
+    </div>
+    <div class="alw-side">
+      <div class="alw-stat ${locked?"hot":""}"><b>${esc(lockText)}</b><span>unusable today</span></div>
+      <div class="alw-stat ${q.four29Today?"hot":""}"><b>${esc(q.four29Today??0)}</b><span>429s seen</span></div>
+    </div>
+  </div>
+  ${hist?`<div class="alw-hist"><h3>Sent per day, against the same 2,000 cap</h3><div class="alw-days">${hist}</div></div>`:""}`;
+}
+
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function ago(iso){
   const ms=Date.now()-Date.parse(iso||"");
@@ -477,6 +554,8 @@ function render(d){
     [bad?"hot":"ok",bad,bad===1?"needs attention":"need attention"],
     ["",watched+"/"+d.lanes.length,"watched by health"],
   ].map(([c,n,l])=>`<div class="sum ${c}"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");
+
+  renderAllowance(d.quota);
 
   $("mbrow").innerHTML=d.mailboxes.map(m=>`<div class="mb ${esc(m.tone)}">
     <div class="addr">${m.observed&&m.observed.watched?`<span class="dot d-${esc(m.observed.state)}"></span>`:""}${esc(m.address)}</div>

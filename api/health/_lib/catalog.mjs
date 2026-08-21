@@ -258,21 +258,6 @@ export const CATALOG = [
     note: "Can automations use the shared mailbox right now? DOWN needs two independent 429 witnesses; one witness is DEGRADED (a breaker is handling it).",
   },
   {
-    id: "email-quota-david",
-    name: "david@raydar.xyz daily allowance",
-    group: "email",
-    tier: 1,
-    kind: "pull",
-    probe: {
-      url: "https://monitor.raydar.xyz/api/health/gmail-quota",
-      authEnv: "HEALTH_BEAT_KEY",
-      timeoutMs: 12000,
-      evaluate: "gmailQuotaDavid",
-    },
-    registry: "/products/email-lanes-health/",
-    note: "Sends used against the hard 2,000/day Workspace cap, plus how many minutes the mailbox was unusable today. Warns at 80%. The one place that probes Gmail on purpose — a single Sent search every 15 min, suppressed the moment a 429 witness is live so it can never hold a lockout open.",
-  },
-  {
     id: "email-mailroom",
     name: "Mailroom send service",
     group: "email",

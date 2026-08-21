@@ -10,6 +10,7 @@
 import { cors, requireAuth } from "../seq/_lib/core.mjs";
 import { hGet, K } from "../health/_lib/kv.mjs";
 import { LANES, READERS, MAILBOXES, GROUPS, QUOTA_COSTS } from "./_lib/lanes.mjs";
+import { lockoutFromSamples, numberOrNull, pacificDay, summarize as summarizeQuota } from "../health/gmail-quota.mjs";
 import { activityFrom } from "./_lib/activity.mjs";
 
 export default async function handler(req, res) {
@@ -48,9 +49,38 @@ export default async function handler(req, res) {
   // where only a heartbeat exists, and null rather than a guess otherwise.
   const activity = (healthId) => activityFrom(tiles[healthId]?.metrics);
 
+  // The daily allowance, read from the records /api/health/gmail-quota owns.
+  // Reading is all this endpoint does — it never counts, never calls Gmail,
+  // and a missing record renders as "not counted yet", never as zero.
+  let quota = null;
+  try {
+    const today = pacificDay();
+    const days = [];
+    for (let back = 0; back < 7; back += 1) {
+      const d = pacificDay(Date.now() - back * 24 * 3600 * 1000);
+      days.push(d);
+    }
+    const [samples, ...records] = await Promise.all([
+      hGet("hlth:samples:email-inbox-david"),
+      ...days.map((d) => hGet(`hlth:gmailquota:${d}`)),
+    ]);
+    const todayRecord = records[0];
+    quota = {
+      ...summarizeQuota(todayRecord || { day: today, sends: null, four29: 0 },
+        lockoutFromSamples(samples)),
+      history: days.map((d, i) => ({
+        day: d,
+        sends: numberOrNull(records[i]?.sends),
+      })).reverse(),
+    };
+  } catch {
+    quota = null; // the page renders the rest of itself regardless
+  }
+
   return res.status(200).json({
     ok: true,
     checkedAt,
+    quota,
     boardReadable: Object.keys(tiles).length > 0,
     groups: GROUPS,
     mailboxes: MAILBOXES.map((m) => ({ ...m, observed: observe(m.healthId) })),
