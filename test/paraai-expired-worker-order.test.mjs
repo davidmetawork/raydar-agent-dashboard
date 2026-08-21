@@ -28,11 +28,29 @@ test("the ordering carries its rationale in the code", () => {
   assert.match(source, /ORDER IS A CONTRACT/);
 });
 
+// Every lane routes its caught failure through the shared alertWorkerFailure
+// helper (PR #132, which moved the per-lane takeAlertSlot calls into one place
+// so an AUTH_EXPIRED failure reports to the auth probe instead of flapping
+// Slack). The throttle window therefore lives in the helper, and each lane owns
+// only its slot key — so the per-lane tests below assert the slot they pass,
+// and this one pins the window they all share.
+test("worker-lane alerts are throttled to one per hour", () => {
+  assert.match(
+    source,
+    /takeAlertSlot\(slot, 3600\)/,
+    "alertWorkerFailure must throttle every lane's alert to one per hour",
+  );
+});
+
 test("an expired-tick failure cannot stop the other lanes", () => {
   // Same isolation shape as outreach and reply: caught, throttled-alerted,
   // surfaced as degraded, never rethrown into the cycle.
   assert.match(source, /expired = await runExpiredTick\(\);\s*\}\s*catch \(error\) \{/);
-  assert.match(source, /takeAlertSlot\("expired-worker-failed", 3600\)/);
+  assert.match(
+    source,
+    /expired = await runExpiredTick\(\);\s*\}\s*catch \(error\) \{[\s\S]*?alertWorkerFailure\(error, \{[\s\S]*?slot: "expired-worker-failed"/,
+    "the expired lane's catch must alert on its own slot",
+  );
   assert.match(source, /\|\|\s*expiredError/, "expiredError must feed the degraded flag");
   assert.match(source, /\n\s+expired,\n\s+expiredError,/, "the tick result must be reported");
 });
@@ -43,7 +61,11 @@ test("the lane's health is exposed on the status mode", () => {
 
 test("an interest-tick failure cannot stop the other lanes", () => {
   assert.match(source, /interest = await runInterestTick\(\);\s*\}\s*catch \(error\) \{/);
-  assert.match(source, /takeAlertSlot\("interest-worker-failed", 3600\)/);
+  assert.match(
+    source,
+    /interest = await runInterestTick\(\);\s*\}\s*catch \(error\) \{[\s\S]*?alertWorkerFailure\(error, \{[\s\S]*?slot: "interest-worker-failed"/,
+    "the curated-interest lane's catch must alert on its own slot",
+  );
   assert.match(source, /\|\|\s*interestError/, "interestError must feed the degraded flag");
   assert.match(source, /\n\s+interest,\n\s+interestError,/, "the tick result must be reported");
 });

@@ -309,11 +309,15 @@ test("catalog: desktop-runner collapse counts laptop lanes wherever they are gro
   const gha = CATALOG.filter((c) => c.id.startsWith("gha-"));
   for (const c of gha) assert.notEqual(c.runner, "desktop");
   // Every previously-collapsing lane still collapses: the live desktop census.
+  // Update this list when a lane is genuinely added or retired on the desktop —
+  // paraai-interest-observer left on 2026-08-20 (launchd job booted out, plist
+  // archived to retired-20260818/) because its pause-watchdog baseline went out
+  // of date when David re-armed the interest lane.
   const live = runnerLanes.filter((c) => !c.paused).map((c) => c.probe.lane).sort();
   assert.deepEqual(live, [
     "applicant-hub-watchdog", "applicant-hub-worker", "archive-backfill",
     "booking-resume-email-index", "booking-resume-retry", "booking-resume-sync",
-    "interview-invites", "paraai-interest-observer",
+    "interview-invites",
     "resume-feed", "resume-juicebox-bridge-v1", "resume-ledger-backup-v2",
     "resume-watchdog-v2", "tn-reenable",
   ]);

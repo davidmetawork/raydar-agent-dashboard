@@ -571,7 +571,11 @@ export const CATALOG = [
     kind: "beat",
     runner: "desktop",
     paused: true,
-    probe: { lane: "resume-chase" },
+    // maxSilenceMin is the window this lane carried before retirement (75m).
+    // A beat row must keep its window even while paused: the evaluator compares
+    // `mins > probe.maxSilenceMin`, and an undefined window makes that NaN
+    // comparison always false — un-pausing the row would read permanently green.
+    probe: { lane: "resume-chase", maxSilenceMin: 75 },
     note: "Retired 2026-08-18 on David's order: resumes are now mandatory at booking (book.raydar.xyz) or arrive via Workable, so nothing is chased. Launchd job booted out; state archived.",
     registry: "/products/human-call-resume-chase/",
   },
