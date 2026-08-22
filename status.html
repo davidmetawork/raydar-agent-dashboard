@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Status · Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9; --ink:#16140F; --ink-2:#4A4741; --ink-3:#716D63;
+    --card:#FFFFFF; --line:#E9E3D5; --line-2:#F1ECE0; --muted:#8C877B;
+    --orange:#FF5E00; --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FAEEDC; --violet:#7F72FF; --violet-bg:#ECEAFE; --violet-700:#574EA9;
+    --muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font-family:"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+  .wrap{max-width:1100px;margin:0 auto;padding:28px 20px 80px}
+  h1{font-family:"PP Grafier Display",serif;font-weight:600;font-size:30px;margin:0}
+  h2{font-family:"PP Grafier Display",serif;font-weight:600;font-size:17px;margin:0}
+  .sub{color:var(--muted);margin:4px 0 0}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px;margin-bottom:16px}
+  button.act{font:inherit;border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 11px;cursor:pointer}
+  button.act:hover{border-color:var(--ink)}
+  a{color:var(--orange)}
+
+  /* ── verdict banner ── */
+  .banner{border-radius:16px;padding:20px 22px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .banner .verdict{font-family:"PP Grafier Display",serif;font-size:24px;font-weight:600}
+  .banner.ok{background:var(--good-bg);border:1px solid #BFE6D3}
+  .banner.deg{background:var(--warn-bg);border:1px solid #EEDBB4}
+  .banner.down{background:var(--bad-bg);border:1px solid #F3C9CA}
+  .banner.unk{background:var(--violet-bg);border:1px solid #D4CFFB}
+  .asof{color:var(--ink-2);font-size:13px;text-align:right;cursor:help}
+  .asof b{font-weight:600}
+
+  /* ── to-do strip (David-only) ── */
+  .todos{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:16px}
+  .todo{background:var(--warn-bg);border:1px solid #EEDBB4;border-radius:14px;padding:13px 15px}
+  .todo .tl{font-weight:600}
+  .todo .td{color:var(--ink-2);font-size:12.5px;margin-top:4px}
+  .todo.info{opacity:.85}
+  .todo .tag{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--warn);margin-bottom:4px}
+
+  /* ── impact band ── */
+  .impact{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:16px}
+  .imp{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:16px 18px}
+  .imp h2{margin-bottom:8px}
+  .imp-big{font-size:28px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
+  .imp-of{font-size:14px;font-weight:500;color:var(--muted)}
+  .imp-meter{position:relative;height:20px;border:1px solid var(--line);border-radius:4px;background:var(--muted-bg);overflow:hidden;margin-top:10px}
+  .imp-fill{position:absolute;inset:0 auto 0 0;background:var(--good);transition:width .3s}
+  .imp-fill.warn{background:var(--warn)} .imp-fill.bad{background:var(--bad)}
+  .imp-stats{display:flex;gap:22px;margin-top:12px;flex-wrap:wrap}
+  .imp-stat b{display:block;font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+  .imp-stat span{display:block;font-size:11px;color:var(--muted);margin-top:1px}
+  .imp-stat.hot b{color:var(--bad)}
+  .imp-note{margin-top:10px;font-size:12px;color:var(--muted)}
+
+  /* ── status dots ── */
+  .dot{width:10px;height:10px;border-radius:50%;flex:none;display:inline-block}
+  .s-healthy{background:var(--good)}
+  .s-degraded{background:var(--warn)}
+  .s-down{background:var(--bad)}
+  .s-paused{background:#BDB7A8}
+  .s-no-signal{background:transparent;border:2px solid #BDB7A8;width:8px;height:8px}
+
+  /* ── groups & rows ── */
+  .ghead{display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap}
+  .ghead .n{color:var(--muted);font-size:12px}
+  .rollup{display:flex;gap:3px;align-items:center;flex-wrap:wrap;max-width:280px}
+  .rollup i{width:7px;height:7px;border-radius:50%;display:inline-block}
+  .rollup i.s-no-signal{width:5px;height:5px;border-width:1.5px}
+  .row{border-top:1px solid var(--line-2);padding:12px 2px}
+  .row:first-of-type{border-top:0}
+  .row.dim{opacity:.62}
+  .rline{display:flex;align-items:baseline;gap:10px;cursor:pointer;flex-wrap:wrap}
+  .rline .dot{position:relative;top:0}
+  .rname{font-weight:600;font-size:14.5px}
+  .rstate{font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 9px;border-radius:999px;background:var(--muted-bg);color:var(--ink-2);white-space:nowrap}
+  .rstate.sending{background:var(--good-bg);color:var(--good)}
+  .rstate.frozen{background:var(--violet-bg);color:var(--violet-700)}
+  .rstate.notyet{background:var(--warn-bg);color:var(--warn)}
+  .chip{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:var(--ink-2);background:#fff;white-space:nowrap;cursor:default}
+  .chip.backlog{border-color:#EEDBB4;background:var(--warn-bg);color:var(--warn);font-weight:600;cursor:pointer}
+  .rcad{color:var(--muted);font-size:12px;margin-left:auto;white-space:nowrap}
+  .rsum{color:var(--ink-2);font-size:12.5px;margin:3px 0 0 20px}
+  .rwhy{color:var(--bad);font-size:12px;margin:2px 0 0 20px}
+  .rwhy.deg{color:var(--warn)}
+  .unv{font-size:10.5px;color:var(--violet-700);border:1px dashed #D4CFFB;border-radius:999px;padding:1px 7px;white-space:nowrap}
+
+  /* ── activity drawer ── */
+  .drawer{background:#FBFAF6;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0 2px 20px;font-size:13px}
+  .drawer .dh{font-weight:700;font-size:12px;margin-bottom:6px;color:var(--ink-2)}
+  .arow{display:flex;gap:9px;align-items:baseline;padding:3px 0;min-width:0}
+  .arow .when{color:var(--muted);font-size:12px;flex:0 0 72px}
+  .arow .note{color:var(--ink-2);min-width:0;overflow-wrap:anywhere}
+  .stamp{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 8px;border-radius:999px;flex:none}
+  .stamp.success{background:var(--good-bg);color:var(--good)}
+  .stamp.partial{background:var(--warn-bg);color:var(--warn)}
+  .stamp.fail{background:var(--bad-bg);color:var(--bad)}
+  .dnote{color:var(--muted);font-size:12px;margin-top:6px}
+  .dlinks{margin-top:10px;font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap}
+
+  .foot{color:var(--muted);font-size:12.5px;margin-top:8px}
+  .foot ul{margin:6px 0 0;padding-left:18px}
+  .foot li{margin-top:2px}
+
+  .err{color:var(--bad)}
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.96);display:none;align-items:flex-start;justify-content:center;flex-direction:column;gap:14px;z-index:20;padding:32px 20px 20px}
+  body.embed header .brand h1, body.embed header .brand .sub{display:none}
+  body.embed header{margin-bottom:10px}
+  body.embed .wrap{padding-top:10px}
+  @media (max-width:700px){
+    .wrap{padding:16px 12px 60px}
+    .rcad{margin-left:20px;white-space:normal;width:100%}
+    .arow .when{flex-basis:56px}
+  }
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div style="font-family:'PP Grafier Display',serif;font-size:20px">Sign in to view Raydar status</div>
+  <div id="gsi"></div>
+  <div class="err" id="gateErr"></div>
+</div>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1>Status</h1>
+      <div class="sub">Every Raydar system — is it working, what did it do, and what does it still owe.</div>
+    </div>
+    <button class="act" id="refresh">Refresh</button>
+  </header>
+
+  <div id="banner" class="banner unk">
+    <div class="verdict" id="verdict">Loading…</div>
+    <div class="asof" id="asof"></div>
+  </div>
+
+  <div class="todos" id="todos" style="display:none"></div>
+
+  <div class="impact" id="impact" style="display:none"></div>
+
+  <div id="groups"></div>
+
+  <div class="foot" id="foot"></div>
+</div>
+<script>
+const $=(id)=>document.getElementById(id);
+const params=new URLSearchParams(location.search);
+if(params.has("embed")) document.body.classList.add("embed");
+const AUTH={required:true,clientId:""};
+let OPEN=null;
+
+const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function ago(iso){
+  const ms=Date.now()-Date.parse(iso||"");
+  if(!isFinite(ms)||ms<0) return "—";
+  const m=Math.round(ms/60000);
+  if(m<1) return "just now";
+  if(m<60) return m+"m ago";
+  if(m<1440) return Math.floor(m/60)+"h ago";
+  return Math.floor(m/1440)+"d ago";
+}
+async function api(path){
+  const r=await fetch(path,{credentials:"same-origin"});
+  if(r.status===401||r.status===403){ showGate(); throw new Error("auth"); }
+  return r.json();
+}
+
+// David's words only — plain speech, no operator jargon.
+const STATE_WORDS={"sending":"Sending","paused":"Paused","not-yet":"Not sending yet","read-only":"Read-only","manual":"Manual","frozen":"Frozen"};
+const STATE_CLS={"sending":"sending","not-yet":"notyet","frozen":"frozen"};
+const RANK={down:0,degraded:1,healthy:2,"no-signal":3,paused:4};
+const ASOF_LABELS={health:"health board",gmailQuota:"Gmail allowance",actionsRuns:"GitHub runs",matchWatch:"match-watch feed",curate:"curate heartbeat"};
+
+function chip(kind,cls,note){
+  if(!cls||cls==="none") return "";
+  return `<span class="chip" title="${esc(note||"")}">${kind} · ${esc(cls)}</span>`;
+}
+
+function renderRow(sys){
+  const dim=sys.status==="paused"||sys.status==="no-signal";
+  const stateWord=STATE_WORDS[sys.state]||sys.state;
+  const unv=(sys.unverified&&sys.unverified.length)?`<span class="unv" title="${esc(sys.unverified.join(" · "))}">unverified</span>`:"";
+  const backlog=sys.backlog?`<span class="chip backlog" title="${esc(sys.backlog.detail||"")}">${esc(sys.backlog.label)}: ${esc(String(sys.backlog.count))}</span>`:"";
+  const why=(sys.status==="down"||sys.status==="degraded")&&sys.statusReason
+    ?`<div class="rwhy${sys.status==="degraded"?" deg":""}">${esc(sys.statusReason)}</div>`
+    :(sys.status==="no-signal"?`<div class="rwhy deg" style="color:var(--muted)">no health signal — ${esc(sys.gap||sys.statusReason||"")}</div>`:"");
+  return `<div class="row${dim?" dim":""}" id="row-${esc(sys.id)}">
+    <div class="rline" data-id="${esc(sys.id)}">
+      <span class="dot s-${esc(sys.status)}"></span>
+      <span class="rname">${esc(sys.name)}</span>
+      <span class="rstate ${STATE_CLS[sys.state]||""}">${esc(stateWord)}</span>
+      ${backlog}
+      ${chip("Gmail",sys.gmail&&sys.gmail.class,sys.gmail&&sys.gmail.note)}
+      ${chip("Paraform",sys.paraform&&sys.paraform.class,sys.paraform&&sys.paraform.note)}
+      ${unv}
+      <span class="rcad">${esc(sys.cadence)}</span>
+    </div>
+    <div class="rsum">${esc(sys.summary)}</div>
+    ${why}
+    <div id="drawer-${esc(sys.id)}"></div>
+  </div>`;
+}
+
+function renderDrawer(sys){
+  const acts=(sys.activity||[]).map(a=>`<div class="arow">
+      <span class="when">${esc(ago(a.at))}</span>
+      <span class="stamp ${esc(a.stamp)}">${esc(a.stamp)}</span>
+      <span class="note">${esc(a.note||"")}</span>
+    </div>`).join("");
+  const bits=[];
+  if(sys.stateNote) bits.push(esc(sys.stateNote));
+  if(sys.feedPending) bits.push("Its status feed hasn't published yet — first publish pending; showing GitHub run history meanwhile.");
+  if(sys.historyStart) bits.push("Per-run history starts "+esc(sys.historyStart)+" — earlier runs were not recorded per-run.");
+  if(sys.unverified&&sys.unverified.length) bits.push("Unverified: "+esc(sys.unverified.join("; "))+".");
+  const backlog=sys.backlog?`<div class="dnote"><b>Backlog:</b> ${esc(sys.backlog.detail||"")}</div>`+
+    (sys.backlog.skipHistogram?`<div class="dnote">Why candidates were skipped (latest reason each): ${
+      esc(Object.entries(sys.backlog.skipHistogram).sort((a,b)=>b[1]-a[1]).slice(0,6)
+        .map(([k,v])=>k.replace(/_/g," ")+" "+v).join(" · "))}</div>`:"")
+    :"";
+  const links=[];
+  if(sys.links&&sys.links.health) links.push(`<a href="${esc(sys.links.health)}" target="_top">Health tile ↗</a>`);
+  if(sys.links&&sys.links.emails) links.push(`<a href="${esc(sys.links.emails)}" target="_top">Emails lane ↗</a>`);
+  if(sys.links&&sys.links.registry) links.push(`<a href="https://docs.raydar.xyz${esc(sys.links.registry)}" target="_blank" rel="noopener">registry page ↗</a>`);
+  return `<div class="drawer">
+    <div class="dh">Recent activity</div>
+    ${acts||'<div class="dnote">Nothing recorded yet.</div>'}
+    ${backlog}
+    ${bits.map(b=>`<div class="dnote">${b}</div>`).join("")}
+    ${links.length?`<div class="dlinks">${links.join("")}</div>`:""}
+  </div>`;
+}
+
+let SYSTEMS_BY_ID={};
+function toggleDrawer(id){
+  const host=$("drawer-"+id); if(!host) return;
+  if(OPEN===id){ OPEN=null; host.innerHTML=""; return; }
+  if(OPEN){ const prev=$("drawer-"+OPEN); if(prev) prev.innerHTML=""; }
+  OPEN=id;
+  host.innerHTML=renderDrawer(SYSTEMS_BY_ID[id]);
+}
+
+function render(data){
+  SYSTEMS_BY_ID={};
+  const all=(data.groups||[]).flatMap(g=>g.systems||[]);
+  all.forEach(s=>{SYSTEMS_BY_ID[s.id]=s;});
+
+  // Verdict: down + degraded are "need attention"; paused and no-signal are not.
+  const bad=all.filter(s=>s.status==="down"||s.status==="degraded");
+  const down=all.filter(s=>s.status==="down").length;
+  $("banner").className="banner "+(down?"down":bad.length?"deg":"ok");
+  $("verdict").textContent=bad.length
+    ? bad.length+" system"+(bad.length===1?"":"s")+" need"+(bad.length===1?"s":"")+" attention"
+    : "Everything is healthy";
+  const perSource=Object.entries(data.dataAsOf||{})
+    .filter(([,at])=>at)
+    .map(([k,at])=>(ASOF_LABELS[k]||k)+": "+ago(at))
+    .join("\n");
+  $("asof").title=perSource;
+  $("asof").innerHTML=data.oldest
+    ? `data as of <b>${esc(ago(data.oldest.at))}</b><br /><span style="font-size:11.5px;color:var(--muted)">oldest source: ${esc(ASOF_LABELS[data.oldest.source]||data.oldest.source)} — hover for all</span>`
+    : "";
+
+  // To-do strip — only when non-empty, only things exclusively David can do.
+  const todos=data.todos||[];
+  $("todos").style.display=todos.length?"grid":"none";
+  $("todos").innerHTML=todos.map(t=>`<div class="todo${t.informational?" info":""}">
+      <span class="tag">${t.informational?"heads-up":"only you can do this"}</span>
+      <div class="tl">${esc(t.label)}</div>
+      ${t.detail?`<div class="td">${esc(t.detail)}</div>`:""}
+    </div>`).join("");
+
+  // Impact band — real Gmail numbers; Paraform measured-or-say-so.
+  const g=(data.impact||{}).gmail||{};
+  const p=(data.impact||{}).paraform||{};
+  const pct=g.sends==null?null:Math.min(100,Math.round(g.sends/(g.cap||2000)*100));
+  const fill=pct==null?0:pct;
+  const fillCls=pct==null?"":pct>=90?"bad":pct>=60?"warn":"";
+  const measured=(p.measured||[]).map(m=>`<div class="imp-stat"><b>${esc(String(m.callsLastRun??"—"))}${m.budget?`<span class="imp-of"> / ${esc(String(m.budget))}</span>`:""}</b><span>match-watch calls last run${m.budget?" vs budget":""}</span></div>`).join("");
+  $("impact").style.display="grid";
+  $("impact").innerHTML=`
+    <div class="imp">
+      <h2>Gmail today</h2>
+      <div><span class="imp-big">${g.sends==null?"not counted yet":esc(String(g.sends))}</span>${g.sends==null?"":`<span class="imp-of"> of ${esc(String(g.cap||2000))} sends</span>`}</div>
+      <div class="imp-meter"><div class="imp-fill ${fillCls}" style="width:${fill}%"></div></div>
+      <div class="imp-stats">
+        <div class="imp-stat${g.four29?" hot":""}"><b>${esc(String(g.four29??0))}</b><span>rate-limit hits (429s)</span></div>
+        <div class="imp-stat${g.lockoutMinutes?" hot":""}"><b>${g.lockoutMinutes==null?"—":esc(String(g.lockoutMinutes))}</b><span>minutes locked out today</span></div>
+      </div>
+      ${g.suppressed?'<div class="imp-note">Counting is paused while a rate-limit is live — the witness never adds load to a struggling mailbox.</div>':""}
+      <div class="imp-note">Reads are not shown: Google publishes no way to measure them. The heavy readers are listed in the footer.</div>
+    </div>
+    <div class="imp">
+      <h2>Paraform load</h2>
+      <div class="imp-stats">${measured||'<div class="imp-stat"><b>—</b><span>no measured run yet</span></div>'}</div>
+      <div class="imp-note">${esc(p.note||"")}</div>
+    </div>`;
+
+  // Four fixed-order groups; unhealthy rows sort to the top of each.
+  $("groups").innerHTML=(data.groups||[]).map(gr=>{
+    const items=(gr.systems||[]).slice().sort((a,b)=>(RANK[a.status]??9)-(RANK[b.status]??9));
+    const bad=items.filter(i=>i.status==="down"||i.status==="degraded").length;
+    const rollup=items.map(i=>`<i class="s-${esc(i.status)}" title="${esc(i.name)}"></i>`).join("");
+    return `<div class="card">
+      <div class="ghead"><h2>${esc(gr.label)}</h2><span class="rollup">${rollup}</span>
+        <span class="n">${items.length} systems${bad?` · ${bad} need attention`:""}</span></div>
+      ${items.map(renderRow).join("")}
+    </div>`;
+  }).join("");
+
+  // Footer: coverage + the honesty notes.
+  const f=data.footer||{};
+  $("foot").innerHTML=`<b>${esc(f.coverage||"")}</b><ul>${(f.notes||[]).map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`;
+
+  document.querySelectorAll(".rline").forEach(el=>{
+    el.onclick=(ev)=>{ if(ev.target.closest("a")) return; toggleDrawer(el.dataset.id); };
+  });
+  if(OPEN&&SYSTEMS_BY_ID[OPEN]){ const host=$("drawer-"+OPEN); if(host) host.innerHTML=renderDrawer(SYSTEMS_BY_ID[OPEN]); }
+}
+
+async function load(){
+  try{
+    const data=await api("/api/status/state");
+    if(!data.ok){ $("verdict").textContent="Could not load status"; $("asof").textContent=data.error||""; return; }
+    render(data);
+  }catch(e){ if(String(e.message)!=="auth") console.error(e); }
+}
+
+function showGate(){ $("gate").style.display="flex"; }
+async function init(){
+  const cfg=await fetch("/api/auth/config",{credentials:"same-origin"}).then(r=>r.json()).catch(()=>({}));
+  AUTH.required=cfg.authRequired!==false; AUTH.clientId=cfg.clientId||"";
+  if(!AUTH.required){ load(); setInterval(load,60000); return; }
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(session?.authenticated){ $("gate").style.display="none"; load(); setInterval(load,60000); return; }
+  showGate();
+  (function start(){
+    if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
+    google.accounts.id.initialize({client_id:AUTH.clientId,callback:onCred});
+    google.accounts.id.renderButton($("gsi"),{theme:"filled_black",size:"large",text:"signin_with",shape:"pill"});
+  })();
+}
+async function onCred(resp){
+  try{
+    await RaydarAuth.signIn(resp.credential);
+    $("gate").style.display="none"; load(); setInterval(load,60000);
+  }catch(e){ $("gateErr").textContent="Sign-in failed. Try again."; }
+}
+$("refresh").onclick=load;
+init();
+</script>
+</body>
+</html>

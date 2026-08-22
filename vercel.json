@@ -59,6 +59,10 @@
     {
       "source": "/home",
       "destination": "/home.html"
+    },
+    {
+      "source": "/status",
+      "destination": "/status.html"
     }
   ],
   "redirects": [
@@ -97,6 +101,9 @@
       "maxDuration": 60
     },
     "api/emails/*.mjs": {
+      "maxDuration": 30
+    },
+    "api/status/*.mjs": {
       "maxDuration": 30
     }
   },
