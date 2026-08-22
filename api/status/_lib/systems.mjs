@@ -153,14 +153,14 @@ export const SYSTEMS = [
     priority: 1,
     state: "sending",
     stateNote: "The desktop job reported exit code 1 on 2026-08-20 — worth a look.",
-    cadence: "Hourly at :10 from the desktop (per the lane inventory).",
+    cadence: "Hourly at :10 from GitHub Actions (per the lane inventory).",
     unverified: [
       "cadence: lanes.mjs and the migration PRD say hourly :10, the health catalog says 09:10/13:10/17:10 — resolve from the plist",
     ],
     gmail: { class: "sends", note: "1,232 in 8 days; 480/day ceiling" },
     paraform: { class: "reads", note: "role and applicant data" },
-    healthIds: ["lane-interview-invites"],
-    workflow: null,
+    healthIds: ["gha-interview-invites"],
+    workflow: "interview-invites.yml",
     feed: null,
     flow: {
       stages: [
@@ -178,7 +178,7 @@ export const SYSTEMS = [
     },
     links: { health: HEALTH, emails: EMAILS, registry: null },
     davidAction: null,
-    dupes: ["interview-fit", "interview-index", "applicants-freshener"],
+    dupes: ["interview-fit", "interview-index", "applicants-freshener", "lane-interview-invites"],
   },
   {
     id: "paraform-sequence-email",

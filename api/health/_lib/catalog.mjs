@@ -526,6 +526,13 @@ export const CATALOG = [
     // best-effort, so the windows come from observed delivery, not the cron.
     ["gha-match-watch", "Match watch", 3000, 4320],
     ["gha-match-watch-deadman", "Match watch dead-man", 3000, 4320],
+    // The interview lane cut over from launchd to Actions on 2026-08-22; the
+    // desktop rows below in the launchd group went paused the same day.
+    // Hourly lane inside a 5:00-19:00 PT window: 240 min silent covers the
+    // overnight gap without crying wolf all night... no — overnight IS
+    // silent by design (quiet window), so the window must span it: worst
+    // legitimate gap is 19:10 -> 05:10 = 600 min, plus GitHub drift.
+    ["gha-interview-invites", "LinkedIn applicant emails", 720, 900],
   ].map(([lane, name, degradedAfterMin, maxSilenceMin]) => ({
     id: lane,
     name,
