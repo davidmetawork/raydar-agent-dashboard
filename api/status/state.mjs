@@ -37,6 +37,7 @@ const ACTIVITY_CAP = 10;
 const FEED_URLS = {
   "match-watch-status": "https://clients.raydar.xyz/match-watch-status.json",
   "paraai-curated-fit-heartbeat": "https://clients.raydar.xyz/paraai-curated-fit-heartbeat.json",
+  "interview-lane-status": "https://clients.raydar.xyz/interview-lane-status.json",
 };
 
 // Per-feed annotation for a GitHub FAILED conclusion the lane's own feed
@@ -45,6 +46,7 @@ const FEED_URLS = {
 const FEED_OVERRIDE_NOTES = {
   "match-watch-status": "GitHub shows FAILED — heartbeat 404, tick itself succeeded",
   "paraai-curated-fit-heartbeat": "GitHub shows FAILED — the lane's own heartbeat confirms the tick ran",
+  "interview-lane-status": "GitHub shows FAILED — the lane's own status feed confirms the cycle ran",
 };
 
 const utcDay = (value) => {
@@ -158,6 +160,20 @@ export function feedStampFor(row, feeds) {
       overrideNote: FEED_OVERRIDE_NOTES[row.feed],
     };
   }
+  if (row.feed === "interview-lane-status") {
+    const at = data.generatedAt;
+    if (!at) return null;
+    const bits = [];
+    const f = data.funnel || {};
+    if (Number.isFinite(Number(data.sentToday))) bits.push(`sent ${data.sentToday} today`);
+    if (Number.isFinite(Number(f.enrolled))) bits.push(`${f.enrolled} enrolled`);
+    if (Number.isFinite(Number(f.followupsParked))) bits.push(`${f.followupsParked} in review`);
+    return {
+      at, day: utcDay(at), stamp: "success",
+      note: bits.join(", "),
+      overrideNote: FEED_OVERRIDE_NOTES[row.feed],
+    };
+  }
   // paraai-curated-fit-heartbeat — v1 is {version,lastRun}; v2 adds counts.
   const at = data.lastRun || data.generatedAt;
   if (!at) return null;
@@ -206,6 +222,12 @@ const objectAt = (obj, path) => {
 function flowContext(row, feeds) {
   const mw = feeds?.["match-watch-status"]?.data ?? null;
   if (row.id === "match-watch") return { feed: mw };
+  if (row.id === "interview-invites") {
+    // The lane's own counts-only funnel feed (published by the cycle's
+    // workflow from Postgres aggregates + the plan's pool numbers). A 404
+    // (first publish pending) leaves feed null and every stage renders "—".
+    return { feed: feeds?.["interview-lane-status"]?.data ?? null };
+  }
   if (row.id === "tn-reenable") {
     const cohort = finiteOrNull(mw?.latestRun?.cohort);
     const notIn = finiteOrNull(mw?.skipHistogram?.not_in_talent_network);
@@ -469,18 +491,17 @@ export async function buildState({
     }
   }
 
-  // 3. The two public feeds — 5-min cache, 404 tolerated as "first publish
+  // 3. The public feeds — 5-min cache, 404 tolerated as "first publish
   //    pending", stale served on error.
   let feeds = feedsCache && typeof feedsCache === "object" ? feedsCache : null;
   if (!feeds || !feeds.at || nowMs - Date.parse(feeds.at) > FEEDS_FRESH_MS) {
-    const [matchWatch, curate] = await Promise.all([
-      fetchFeed(FEED_URLS["match-watch-status"], fetchImpl),
-      fetchFeed(FEED_URLS["paraai-curated-fit-heartbeat"], fetchImpl),
-    ]);
+    const feedKeys = Object.keys(FEED_URLS);
+    const fetched = await Promise.all(
+      feedKeys.map((key) => fetchFeed(FEED_URLS[key], fetchImpl)),
+    );
     const fresh = {
       at: new Date(nowMs).toISOString(),
-      "match-watch-status": matchWatch,
-      "paraai-curated-fit-heartbeat": curate,
+      ...Object.fromEntries(feedKeys.map((key, i) => [key, fetched[i]])),
     };
     // A transient error must not wipe a previously-good feed projection.
     if (feeds) {

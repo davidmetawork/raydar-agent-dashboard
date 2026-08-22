@@ -348,11 +348,52 @@ test("flowFor: curate v1 renders structure with the next-tick note; v2 fills the
   assert.ok(!f2.note, "a v2 heartbeat needs no still-v1 note");
 });
 
-test("flowFor: interview-invites is structural — no counts claimed, honest note instead", () => {
-  const flow = flowFor(rowById("interview-invites"), {});
-  assert.ok(flow.counted, "structural flow still shows the — slots");
-  assert.ok(flow.stages.every((s) => s.count === null));
-  assert.match(flow.note, /not published yet/);
+test("flowFor: interview-invites counts resolve from its own funnel feed", () => {
+  const row = rowById("interview-invites");
+  assert.equal(row.feed, "interview-lane-status"); // the row names its feed
+  const feeds = { "interview-lane-status": { data: {
+    version: 1, generatedAt: "2026-08-22T22:28:08Z",
+    funnel: {
+      applicants: 8334, candidates: 90753, enrolled: 1747, emailedOnce: 1728,
+      bookedPeople: 745, bookings: 833,
+      followupsSent: 503, followupsParked: 308, followupsPending: 17, followupsSkipped: 5,
+    },
+    sendsByStep: { 1: 1728, 2: 944, 3: 396, 4: 158 },
+    sentToday: 127,
+  } } };
+  const flow = flowFor(row, feeds);
+  const by = new Map(flow.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("applicants").count, 8334);
+  assert.equal(by.get("invited").count, 1747);
+  assert.equal(by.get("emailed").count, 1728);
+  assert.deepEqual(by.get("emailed").secondary, { label: "today", count: 127 });
+  assert.equal(by.get("booked").count, 745);
+  assert.deepEqual(by.get("booked").secondary, { label: "bookings", count: 833 });
+  assert.equal(by.get("fit").count, 503);
+  assert.equal(by.get("in-review").count, 308); // the parked side pool
+  assert.equal(by.get("in-review").accent, "bad-when-positive"); // humans owed a look
+  assert.ok(!flow.missing);
+  assert.match(flow.sourceNote, /own published status feed/);
+});
+
+test("flowFor: interview-invites before the first publish — every stage is a dash, never 0", () => {
+  for (const feeds of [{}, { "interview-lane-status": { missing: true } },
+    { "interview-lane-status": { data: { version: 1, generatedAt: "2026-08-22T22:00:00Z" } } }]) {
+    const flow = flowFor(rowById("interview-invites"), feeds);
+    assert.ok(flow.counted && flow.missing);
+    assert.ok(flow.stages.every((s) => s.count === null));
+  }
+  // null pool numbers (the plan walked instead of reading the index) stay
+  // dashes for those stages while the ledger half still shows.
+  const partial = flowFor(rowById("interview-invites"), { "interview-lane-status": { data: {
+    version: 1, generatedAt: "2026-08-22T22:28:08Z",
+    funnel: { applicants: null, candidates: null, enrolled: 1747, emailedOnce: 1728, bookedPeople: 745, bookings: 833, followupsSent: 503, followupsParked: 308, followupsPending: 17, followupsSkipped: 5 },
+    sentToday: 127,
+  } } });
+  const by = new Map(partial.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("applicants").count, null);
+  assert.equal(by.get("invited").count, 1747);
+  assert.ok(partial.missing);
 });
 
 // full-pipeline fakes ---------------------------------------------------------

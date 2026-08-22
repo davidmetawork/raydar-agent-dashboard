@@ -161,20 +161,31 @@ export const SYSTEMS = [
     paraform: { class: "reads", note: "role and applicant data" },
     healthIds: ["gha-interview-invites"],
     workflow: "interview-invites.yml",
-    feed: null,
+    feed: "interview-lane-status",
     flow: {
+      // Counts resolve from the lane's own published funnel feed
+      // (clients.raydar.xyz/interview-lane-status.json — Postgres ledger
+      // aggregates plus the plan's pool numbers, counts only). Until the
+      // first publish lands, every stage renders "—", never zero.
       stages: [
-        { id: "applicants", label: "Applicants" },
-        { id: "invited", label: "Invited" },
-        { id: "booked", label: "Booked" },
-        { id: "called", label: "Called" },
-        { id: "fit", label: "Fit follow-up" },
+        { id: "applicants", label: "Applicants", countKey: "feed.funnel.applicants" },
+        { id: "invited", label: "Invited", countKey: "feed.funnel.enrolled" },
+        {
+          id: "emailed", label: "Emailed", countKey: "feed.funnel.emailedOnce",
+          secondary: { label: "today", countKey: "feed.sentToday" },
+        },
+        {
+          id: "booked", label: "Booked", countKey: "feed.funnel.bookedPeople",
+          secondary: { label: "bookings", countKey: "feed.funnel.bookings" },
+        },
+        { id: "fit", label: "Follow-up sent", countKey: "feed.funnel.followupsSent" },
+        { id: "in-review", label: "In review", countKey: "feed.funnel.followupsParked", accent: "bad-when-positive" },
       ],
       edges: [
-        ["applicants", "invited"], ["invited", "booked"],
-        ["booked", "called"], ["called", "fit"],
+        ["applicants", "invited"], ["invited", "emailed"],
+        ["emailed", "booked"], ["booked", "fit"], ["booked", "in-review"],
       ],
-      countsNote: "Stage counts not published yet — this lane runs on the desktop; liveness comes from its heartbeat.",
+      sourceNote: "Counts from the lane's own published status feed.",
     },
     links: { health: HEALTH, emails: EMAILS, registry: null },
     davidAction: null,
