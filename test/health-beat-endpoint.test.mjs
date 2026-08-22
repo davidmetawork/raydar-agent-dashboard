@@ -59,13 +59,19 @@ test("health beat accepts warn and persists the typed status", async () => {
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, { ok: true, lane: "gha-paraai-curate", status: "warn" });
   assert.equal(res.headers["cache-control"], "no-store");
-  assert.equal(writes.length, 1);
+  // Two KV writes per beat since the Status tab shipped: the overwrite beat
+  // (liveness) plus the hlth:beatlog ring append (per-run history).
+  assert.equal(writes.length, 2);
   assert.equal(writes[0][0], "SET");
   assert.equal(writes[0][1], "hlth:beat:gha-paraai-curate");
   const stored = JSON.parse(writes[0][2]);
   assert.equal(stored.status, "warn");
   assert.equal(stored.note, "1 candidate quarantined");
   assert.ok(!Number.isNaN(Date.parse(stored.at)));
+  // The ring append is one pipeline call: LPUSH the same record, LTRIM to 50.
+  const ring = writes[1];
+  assert.deepEqual(ring[0], ["LPUSH", "hlth:beatlog:gha-paraai-curate", writes[0][2]]);
+  assert.deepEqual(ring[1], ["LTRIM", "hlth:beatlog:gha-paraai-curate", "0", "49"]);
 });
 
 test("health beat rejects an unknown status instead of storing a false OK", async () => {
@@ -129,7 +135,7 @@ test("health beat drops malformed metrics WITHOUT losing the heartbeat", async (
     await beatHandler(request({ lane: "interview-invites", status: "warn", metrics: bad }), res);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.metricsDropped, true);
-    const stored = JSON.parse(writes.at(-1)[2]);
+    const stored = JSON.parse(writes.filter((w) => w[0] === "SET").at(-1)[2]);
     assert.equal(stored.status, "warn", "the typed status must survive a metrics drop");
     assert.ok(!("metrics" in stored));
   }
@@ -150,7 +156,7 @@ test("health beat accepts the Scheduler cron control-plane guard lane", async ()
     lane: "gha-scheduler-cron-guard",
     status: "fail",
   });
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, 2); // beat + ring append
   assert.equal(writes[0][1], "hlth:beat:gha-scheduler-cron-guard");
   assert.equal(JSON.parse(writes[0][2]).status, "fail");
 });

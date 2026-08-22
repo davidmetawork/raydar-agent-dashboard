@@ -519,6 +519,13 @@ export const CATALOG = [
     // */15 cadence; 60 min silent = four missed runs. Auto-heals lifecycle
     // endpoint evictions, so ITS death would re-open the Omar failure mode.
     ["gha-lifecycle-watchdog", "Lifecycle watchdog", 60, 120],
+    // Both match-watch workflows have been POSTing these lanes since arming
+    // (2026-08-21) and 404ing for want of a row — which made every green run
+    // report FAILED at the workflow level. Daily lanes, windows sized like
+    // the other daily Actions (trademark-watch): GitHub's scheduler is
+    // best-effort, so the windows come from observed delivery, not the cron.
+    ["gha-match-watch", "Match watch", 3000, 4320],
+    ["gha-match-watch-deadman", "Match watch dead-man", 3000, 4320],
   ].map(([lane, name, degradedAfterMin, maxSilenceMin]) => ({
     id: lane,
     name,

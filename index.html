@@ -424,6 +424,7 @@
         </div>
         <div class="rail-group">
           <div class="rail-title">System</div>
+          <a class="tab" id="tab-status" href="#status" onclick="return tabClick(event,'status')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg></span><span class="lbl">Status</span></a>
           <a class="tab" id="tab-emails" href="#emails" onclick="return tabClick(event,'emails')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="m3.8 7.5 8.2 6 8.2-6"/><path d="M3 15.5h4"/></svg></span><span class="lbl">Emails</span></a>
           <a class="tab" id="tab-health" href="#health" onclick="return tabClick(event,'health')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12h4l2-5 3.5 10 2-5h5.5"/></svg></span><span class="lbl">Health</span> <span class="badge" id="health-badge" style="display:none"></span></a>
         </div>
@@ -582,6 +583,10 @@
 
     <div id="view-emails" hidden>
       <iframe id="emails-frame" title="Emails" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
+    </div>
+
+    <div id="view-status" hidden>
+      <iframe id="status-frame" title="Status" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
     </div>
 
     <div class="foot" id="foot">Updates automatically. The Raydar bot joins each booked Google Meet, runs the screening, and Parascribe records it.</div>
@@ -1181,7 +1186,7 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false, emailsLoaded=false, homeLoaded=false;
+    let applicantsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false, emailsLoaded=false, statusLoaded=false, homeLoaded=false;
     // Same order as the nav, so the two stay readable together. "home" must
     // stay first — RaydarNav falls back to names[0] for an unknown #hash, and
     // Home is the landing surface, so a bare monitor.raydar.xyz lands on the
@@ -1190,7 +1195,7 @@
     // bookmark and cross-page link still resolves.
     // "candidates" is last because its tab is hidden; the view and #candidates
     // deep link still work.
-    const VIEWS=["home","overview","applicants","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","emails","candidates"];
+    const VIEWS=["home","overview","applicants","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","emails","status","candidates"];
     let currentView="home";
     // Tabs are real links (href="#activity", …) so they can be right-clicked or
     // ⌘-clicked into a new tab. A plain left click stays in this page; anything
@@ -1227,6 +1232,7 @@
       if(name==="enrich" && !enrichLoaded){ $("enrich-frame").src=frameSrc("/enrich","enrich"); enrichLoaded=true; }
       if(name==="health" && !healthLoaded){ $("health-frame").src=frameSrc("/health","health"); healthLoaded=true; }
       if(name==="emails" && !emailsLoaded){ $("emails-frame").src=frameSrc("/emails","emails"); emailsLoaded=true; }
+      if(name==="status" && !statusLoaded){ $("status-frame").src=frameSrc("/status","status"); statusLoaded=true; }
       if(name==="candidates") ensureRoster();
       if(name==="followups") ensureLedger();   // lifecycle ledger: lazy, once per session
       if(name==="history"||name==="analytics") ensureHistory();
@@ -2299,6 +2305,7 @@
       {name:"history",label:"History",group:"Intelligence"},
       {name:"calls",label:"Calls",group:"Intelligence"},
       {name:"health",label:"Health",group:"System"},
+      {name:"status",label:"Status",group:"System"},
     ];
     let rkSel=0, rkMatches=RK_ITEMS, rkPrevFocus=null;
     function rkOpen(){ rkPrevFocus=document.activeElement; $("rk").hidden=false; $("rk-q").value=""; $("rk-q").setAttribute("aria-expanded","true"); rkFilter(""); $("rk-q").focus(); }
