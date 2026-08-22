@@ -147,7 +147,7 @@ export const SYSTEMS = [
   },
   {
     id: "interview-invites",
-    name: "Interview invites and follow-up",
+    name: "LinkedIn Applicant Email Sequence",
     summary: "Emails LinkedIn applicants inviting them to book an AI interview, then a follow-up after the call.",
     group: "candidate-emails",
     priority: 1,
