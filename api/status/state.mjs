@@ -168,6 +168,135 @@ export function feedStampFor(row, feeds) {
   };
 }
 
+// ── flow diagrams (2026-08-22 redesign) ────────────────────────────────────
+// Each flow-carrying catalog row declares stages with dotted countKeys; the
+// aggregator resolves them here against data it ALREADY fetched (the two
+// public feeds) plus derived convenience numbers computed from that same
+// data. A path that does not resolve yields null — the page renders "—" and
+// a "no data yet" note, NEVER a fake zero. Nothing here may throw: a broken
+// feed shape must degrade to blank counts, not a blank page.
+
+const finiteOrNull = (value) => {
+  if (value == null || typeof value === "object" || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+/** Walk a dotted path; return a finite number or null. Never throws. */
+export function resolvePath(obj, path) {
+  let cur = obj;
+  for (const part of String(path || "").split(".")) {
+    if (cur == null || typeof cur !== "object") return null;
+    cur = cur[part];
+  }
+  return finiteOrNull(cur);
+}
+
+const objectAt = (obj, path) => {
+  let cur = obj;
+  for (const part of String(path || "").split(".")) {
+    if (cur == null || typeof cur !== "object") return null;
+    cur = cur[part];
+  }
+  return cur && typeof cur === "object" && !Array.isArray(cur) ? cur : null;
+};
+
+// The per-row count context. tn-reenable deliberately reads the match-watch
+// feed — its honest window is the 180-day called cohort that sweep observes.
+function flowContext(row, feeds) {
+  const mw = feeds?.["match-watch-status"]?.data ?? null;
+  if (row.id === "match-watch") return { feed: mw };
+  if (row.id === "tn-reenable") {
+    const cohort = finiteOrNull(mw?.latestRun?.cohort);
+    const notIn = finiteOrNull(mw?.skipHistogram?.not_in_talent_network);
+    return {
+      feed: mw,
+      derived: {
+        spokenTo: cohort,
+        inTalentNetwork: cohort != null && notIn != null ? cohort - notIn : null,
+      },
+    };
+  }
+  if (row.id === "paraform-sequence-email") {
+    const hb = feeds?.["paraai-curated-fit-heartbeat"]?.data ?? null;
+    const v2 = hb && Number(hb.version) >= 2;
+    // v2's shape is tolerated loosely (records/counts/states) — same rule as
+    // backlogFor: the first object found wins, nothing is guessed.
+    const records = v2
+      ? [hb.records, hb.counts, hb.states].find((o) => o && typeof o === "object" && !Array.isArray(o)) ?? null
+      : null;
+    const tn = v2 ? objectAt(hb, "tn") : null;
+    const tnParts = tn
+      ? ["confirmed", "accepted", "rejected"].map((k) => finiteOrNull(tn[k])).filter((v) => v != null)
+      : [];
+    return {
+      feed: hb,
+      derived: {
+        records,
+        tn,
+        tnTotal: tnParts.length ? tnParts.reduce((a, b) => a + b, 0) : null,
+      },
+    };
+  }
+  return {};
+}
+
+const HISTOGRAM_TOP = 4;
+
+/** Resolve a catalog row's declarative flow into drawable stages+counts. */
+export function flowFor(row, feeds) {
+  const flow = row?.flow;
+  if (!flow || !Array.isArray(flow.stages)) return null;
+  const ctx = flowContext(row, feeds);
+  const stages = flow.stages.map((st) => {
+    const out = {
+      id: st.id,
+      label: st.label,
+      count: st.countKey ? resolvePath(ctx, st.countKey) : null,
+      ...(st.accent ? { accent: st.accent } : {}),
+    };
+    if (st.secondary) {
+      const v = resolvePath(ctx, st.secondary.countKey);
+      if (v != null) out.secondary = { label: st.secondary.label, count: v };
+    }
+    if (st.histogramKey) {
+      const hist = objectAt(ctx, st.histogramKey);
+      const entries = hist
+        ? Object.entries(hist)
+            .map(([k, v]) => [k, finiteOrNull(v)])
+            .filter(([, v]) => v != null)
+            .sort((a, b) => b[1] - a[1])
+        : [];
+      if (entries.length) {
+        out.subcounts = entries.slice(0, HISTOGRAM_TOP)
+          .map(([k, v]) => ({ label: k.replace(/_/g, " "), count: v }));
+        if (out.count == null) out.count = entries.reduce((sum, [, v]) => sum + v, 0);
+      }
+    }
+    return out;
+  });
+  // counted: this flow is expected to show numbers (so a missing one renders
+  // an honest "—"). A purely structural flow (interview-invites) opts in via
+  // countsNote; generic client-drawn flows show labels only.
+  const counted = flow.stages.some((st) => st.countKey || st.histogramKey) || Boolean(flow.countsNote);
+  const missing = counted && stages.some((st) => st.count == null);
+  let note = flow.countsNote || null;
+  if (!note && row.feed === "paraai-curated-fit-heartbeat") {
+    const hb = feeds?.["paraai-curated-fit-heartbeat"]?.data;
+    if (!hb || Number(hb.version) < 2) {
+      note = "The heartbeat is still v1 — it publishes these counts after the next tick.";
+    }
+  }
+  return {
+    stages,
+    edges: Array.isArray(flow.edges) ? flow.edges : [],
+    counted,
+    ...(missing ? { missing: true } : {}),
+    ...(flow.sourceNote ? { sourceNote: flow.sourceNote } : {}),
+    ...(note ? { note } : {}),
+  };
+}
+
 export function backlogFor(row, feeds) {
   if (row.id === "match-watch") {
     const data = feeds?.["match-watch-status"]?.data;
@@ -407,6 +536,10 @@ export async function buildState({
     const feedPending = Boolean(row.feed && feeds?.[row.feed]?.missing);
     return {
       ...row,
+      // The declarative flow is replaced by its resolved form (counts filled
+      // in server-side from data this request already holds); `priority`
+      // rides through the spread untouched.
+      flow: flowFor(row, feeds),
       status: s.status,
       statusReason: s.statusReason,
       activity,

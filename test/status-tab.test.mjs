@@ -1,4 +1,4 @@
-// The Status tab's three contracts:
+// The Status tab's four contracts:
 //
 //  1. THE CATALOG IS COMPLETE AND HONEST. 47 rows, every lane and beat in the
 //     other inventories claimed by exactly one row — so a lane added to
@@ -11,6 +11,11 @@
 //     publish pending", and zero external fetches on a warm cache.
 //  3. THE BEAT RING CANNOT HURT THE BEAT. Losing a history entry is fine;
 //     rejecting a heartbeat fakes a dead lane.
+//  4. FLOWS NEVER INVENT NUMBERS (2026-08-22 redesign). Every row carries an
+//     importance band (priority 1-5); the four rich rows carry drawable
+//     flows whose countKeys resolve against data the aggregator already
+//     holds — a missing path is null ("—" on the page), never a fake zero,
+//     and no feed shape can make the resolver throw.
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -24,6 +29,7 @@ import {
 } from "../api/status/_lib/systems.mjs";
 import {
   buildState, systemStatus, mergeActivity, deriveTodos, backlogFor, feedStampFor,
+  flowFor, resolvePath,
 } from "../api/status/state.mjs";
 
 // ── 1. catalog invariants ───────────────────────────────────────────────────
@@ -64,6 +70,52 @@ test("healthIds all resolve, and a row with none says why (gap) — no false gre
       assert.ok(typeof s.gap === "string" && s.gap.trim(),
         `${s.id}: no healthIds and no gap — it would render false green`);
     }
+  }
+});
+
+test("every row carries an importance band: priority 1-5, aligned with its purpose group", () => {
+  const bandRange = {
+    "candidate-emails": [1, 2],
+    "paraform-writes": [3, 3],
+    "background-readers": [4, 4],
+    "infrastructure": [5, 5],
+  };
+  for (const s of SYSTEMS) {
+    assert.ok(Number.isInteger(s.priority) && s.priority >= 1 && s.priority <= 5,
+      `${s.id}: priority must be an integer 1-5, got ${s.priority}`);
+    const [lo, hi] = bandRange[s.group];
+    assert.ok(s.priority >= lo && s.priority <= hi,
+      `${s.id}: priority ${s.priority} outside its group's band [${lo},${hi}]`);
+  }
+  // David's named top band, in his order: match emails, Para AI outreach,
+  // interview invites, sequences — exactly these four, first in the catalog.
+  assert.deepEqual(SYSTEMS.filter((s) => s.priority === 1).map((s) => s.id),
+    ["match-watch", "paraai-outreach", "interview-invites", "paraform-sequence-email"]);
+  assert.equal(SYSTEMS[0].id, "match-watch");
+});
+
+const FLOW_ROWS = ["match-watch", "paraform-sequence-email", "tn-reenable", "interview-invites"];
+const rowById = (id) => SYSTEMS.find((s) => s.id === id);
+
+test("the four rich rows carry a drawable flow: ≥3 stages, unique ids, edges resolve", () => {
+  for (const id of FLOW_ROWS) {
+    const flow = rowById(id)?.flow;
+    assert.ok(flow && Array.isArray(flow.stages), `${id}: missing flow`);
+    assert.ok(flow.stages.length >= 3, `${id}: flow needs at least 3 stages`);
+    const ids = flow.stages.map((s) => s.id);
+    assert.equal(new Set(ids).size, ids.length, `${id}: duplicate stage ids`);
+    assert.ok(Array.isArray(flow.edges) && flow.edges.length >= 2, `${id}: flow needs edges`);
+    for (const [a, b] of flow.edges) {
+      assert.ok(ids.includes(a) && ids.includes(b), `${id}: edge ${a}→${b} references a missing stage`);
+    }
+    for (const st of flow.stages) {
+      assert.ok(st.label && String(st.label).trim(), `${id}/${st.id}: stage needs a label`);
+    }
+  }
+  // everything else stays flow-free in the catalog — the page draws its
+  // generic trigger→action sketch and never claims stage counts for them
+  for (const s of SYSTEMS) {
+    if (!FLOW_ROWS.includes(s.id)) assert.ok(!s.flow, `${s.id}: unexpected flow`);
   }
 });
 
@@ -190,6 +242,119 @@ test("backlogs: match-watch owed + skips, curate v1 stays silent, static eligibl
   assert.ok(ci && ci.count === 712, "expected the 712-eligible static estimate from lanes.mjs");
 });
 
+// ── flow resolution (contract 4) ────────────────────────────────────────────
+
+test("resolvePath walks dotted paths defensively — numbers or null, never a throw", () => {
+  assert.equal(resolvePath({ a: { b: { c: 7 } } }, "a.b.c"), 7);
+  assert.equal(resolvePath({ a: { b: { c: "12" } } }, "a.b.c"), 12);
+  assert.equal(resolvePath({ a: 5 }, "a.b.c"), null); // walked past a leaf
+  assert.equal(resolvePath(null, "a"), null);
+  assert.equal(resolvePath({ a: { b: {} } }, "a.b"), null); // objects are not counts
+  assert.equal(resolvePath({ a: NaN }, "a"), null);
+  assert.equal(resolvePath({ a: "" }, "a"), null);
+});
+
+test("flowFor: any feed shape resolves without throwing; missing paths are null, never 0", () => {
+  const weirdFeeds = [
+    {},
+    null,
+    { "match-watch-status": { missing: true } },
+    { "match-watch-status": { data: null } },
+    { "match-watch-status": { data: { latestRun: "not-an-object", owed: 7, skipHistogram: [1, 2] } } },
+    { "paraai-curated-fit-heartbeat": { data: { version: 2, records: "nope", tn: 3 } } },
+  ];
+  for (const feeds of weirdFeeds) {
+    for (const id of FLOW_ROWS) {
+      const row = rowById(id);
+      const flow = flowFor(row, feeds); // must not throw
+      assert.equal(flow.stages.length, row.flow.stages.length, id);
+      for (const st of flow.stages) {
+        assert.ok(st.count === null || Number.isFinite(st.count),
+          `${id}/${st.id}: count must be a finite number or null`);
+      }
+    }
+  }
+  // fully-empty payload: counted flow, every stage "—", flagged missing
+  const mw = flowFor(rowById("match-watch"), {});
+  assert.ok(mw.counted && mw.missing);
+  assert.ok(mw.stages.every((st) => st.count === null));
+});
+
+test("flowFor: match-watch counts resolve from its feed; held-back pools the skip histogram", () => {
+  const feeds = { "match-watch-status": { data: {
+    latestRun: { cohort: 3477, checked: 3477, curatedAdds: 341, sends: 32 },
+    sentTotal: 320,
+    owed: { candidates: 52 },
+    skipHistogram: {
+      not_in_talent_network: 1285, matches_not_generated_today: 715,
+      suppressed_role_interview_flow: 40, auto_off_market_awaiting_reenable: 22, other: 5,
+    },
+  } } };
+  const flow = flowFor(rowById("match-watch"), feeds);
+  const by = new Map(flow.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("called").count, 3477);
+  assert.equal(by.get("checked").count, 3477);
+  assert.equal(by.get("added").count, 341);
+  assert.equal(by.get("emailed").count, 32);
+  assert.deepEqual(by.get("emailed").secondary, { label: "all-time", count: 320 });
+  assert.equal(by.get("owed").count, 52);
+  assert.equal(by.get("owed").accent, "bad-when-positive"); // RED when > 0
+  const held = by.get("held");
+  assert.equal(held.count, 1285 + 715 + 40 + 22 + 5); // the pool sums the whole histogram
+  assert.equal(held.subcounts.length, 4); // top buckets, labeled sub-counts
+  assert.deepEqual(held.subcounts[0], { label: "not in talent network", count: 1285 });
+  assert.ok(!flow.missing);
+});
+
+test("flowFor: tn-reenable derives from the match-watch sweep, window labeled honestly", () => {
+  const feeds = { "match-watch-status": { data: {
+    latestRun: { cohort: 3477 },
+    skipHistogram: { not_in_talent_network: 1285, auto_off_market_awaiting_reenable: 22 },
+  } } };
+  const flow = flowFor(rowById("tn-reenable"), feeds);
+  const by = new Map(flow.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("spoken").count, 3477);
+  assert.equal(by.get("intn").count, 3477 - 1285); // derived, from EXISTING data only
+  assert.equal(by.get("missing").count, 1285);
+  assert.equal(by.get("missing").accent, "warn-when-positive"); // amber
+  assert.equal(by.get("offmarket").count, 22);
+  assert.match(flow.sourceNote, /180-day called cohort, from the match-watch sweep/);
+  // half a feed: the derived difference is null, never a made-up number
+  const partial = flowFor(rowById("tn-reenable"),
+    { "match-watch-status": { data: { latestRun: { cohort: 3477 } } } });
+  assert.equal(new Map(partial.stages.map((s) => [s.id, s])).get("intn").count, null);
+  assert.ok(partial.missing);
+});
+
+test("flowFor: curate v1 renders structure with the next-tick note; v2 fills the counts", () => {
+  const row = rowById("paraform-sequence-email");
+  const f1 = flowFor(row, { "paraai-curated-fit-heartbeat": { data: { version: 1, lastRun: "2026-08-21T23:54:58Z" } } });
+  assert.ok(f1.stages.every((s) => s.count === null));
+  assert.match(f1.note, /next tick/);
+  const f2 = flowFor(row, { "paraai-curated-fit-heartbeat": { data: {
+    version: 2, lastRun: "2026-08-22T15:00:00Z",
+    records: { discovered: 120, done: 96, skipped: 14, failed: 2, pending_tn: 8 },
+    tn: { confirmed: 40, accepted: 31, rejected: 6 },
+  } } });
+  const by = new Map(f2.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("discovered").count, 120);
+  assert.equal(by.get("done").count, 96);
+  assert.equal(by.get("skipped").count, 14);
+  assert.equal(by.get("failed").count, 2);
+  assert.equal(by.get("failed").accent, "bad-when-positive");
+  assert.equal(by.get("pending").count, 8);
+  assert.equal(by.get("tn").count, 40 + 31 + 6);
+  assert.equal(by.get("tn").subcounts.length, 3);
+  assert.ok(!f2.note, "a v2 heartbeat needs no still-v1 note");
+});
+
+test("flowFor: interview-invites is structural — no counts claimed, honest note instead", () => {
+  const flow = flowFor(rowById("interview-invites"), {});
+  assert.ok(flow.counted, "structural flow still shows the — slots");
+  assert.ok(flow.stages.every((s) => s.count === null));
+  assert.match(flow.note, /not published yet/);
+});
+
 // full-pipeline fakes ---------------------------------------------------------
 
 function fakeDeps({ board, ghaByUrl = {}, feedByUrl = {}, statCache = {}, calls } = {}) {
@@ -259,6 +424,12 @@ test("buildState: feed present → annotated activity, backlog, measured Parafor
   assert.match(mw.activity[0].note, /GitHub shows FAILED/);
   assert.equal(mw.backlog.count, 52);
   assert.equal(mw.backlog.skipHistogram.not_in_talent_network, 1285);
+  // priority + resolved flow ride through the aggregator contract
+  assert.equal(mw.priority, 1);
+  const mwStages = new Map(mw.flow.stages.map((s) => [s.id, s]));
+  assert.equal(mwStages.get("called").count, 3477);
+  assert.equal(mwStages.get("owed").count, 52);
+  assert.equal(flat.find((s) => s.id === "human-handoff").flow, null); // generic rows carry none
 
   // curate feed 404 → tolerated as "first publish pending", nothing thrown
   const seq = flat.find((s) => s.id === "paraform-sequence-email");
@@ -351,11 +522,23 @@ test("the beat handler appends to the ring only AFTER the beat itself landed", a
 
 // ── page wiring odds and ends ───────────────────────────────────────────────
 
-test("status.html honours the embed contract and never invents jargon states", async () => {
+test("status.html: thin strips, importance sort, drawn flows, embed contract, no jargon", async () => {
   const html = await readFile(new URL("../status.html", import.meta.url), "utf8");
   assert.match(html, /params\.has\("embed"\)/);
   assert.match(html, /RaydarAuth\.session\(\)/);
   assert.match(html, /body\.embed header \.brand h1/);
+  // the one continuous list sorts by the catalog's priority band, with
+  // unhealthy rows floating only WITHIN their band
+  assert.match(html, /a\.priority/);
+  assert.match(html, /URGENT\[a\.status\]/);
+  // collapsed strip: dot + name + at most the one backlog chip, only when > 0
+  assert.match(html, /class="strip/);
+  assert.match(html, /Number\(sys\.backlog\.count\)>0/);
+  // subtle group separators, the SVG flow renderer, and the honesty dash
+  assert.match(html, /class="gsep"/);
+  assert.match(html, /function drawFlow/);
+  assert.match(html, /function genericFlow/);
+  assert.match(html, /never assumed to be zero/);
   // David's words, spelled exactly
   for (const word of ["Sending", "Paused", "Not sending yet", "Read-only", "Manual", "Frozen"]) {
     assert.ok(html.includes(`"${word}"`), `missing plain state word ${word}`);

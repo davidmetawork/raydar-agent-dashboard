@@ -19,107 +19,123 @@
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--cream);color:var(--ink);font-family:"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
-  .wrap{max-width:1100px;margin:0 auto;padding:28px 20px 80px}
-  h1{font-family:"PP Grafier Display",serif;font-weight:600;font-size:30px;margin:0}
-  h2{font-family:"PP Grafier Display",serif;font-weight:600;font-size:17px;margin:0}
+  .wrap{max-width:980px;margin:0 auto;padding:24px 20px 80px}
+  h1{font-family:"PP Grafier Display",serif;font-weight:600;font-size:28px;margin:0}
   .sub{color:var(--muted);margin:4px 0 0}
-  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px;margin-bottom:16px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}
   button.act{font:inherit;border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 11px;cursor:pointer}
   button.act:hover{border-color:var(--ink)}
   a{color:var(--orange)}
 
-  /* ── verdict banner ── */
-  .banner{border-radius:16px;padding:20px 22px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
-  .banner .verdict{font-family:"PP Grafier Display",serif;font-size:24px;font-weight:600}
+  /* ── verdict banner (tight) ── */
+  .banner{border-radius:14px;padding:11px 16px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+  .banner .verdict{font-family:"PP Grafier Display",serif;font-size:19px;font-weight:600}
   .banner.ok{background:var(--good-bg);border:1px solid #BFE6D3}
   .banner.deg{background:var(--warn-bg);border:1px solid #EEDBB4}
   .banner.down{background:var(--bad-bg);border:1px solid #F3C9CA}
   .banner.unk{background:var(--violet-bg);border:1px solid #D4CFFB}
-  .asof{color:var(--ink-2);font-size:13px;text-align:right;cursor:help}
+  .asof{color:var(--ink-2);font-size:12px;text-align:right;cursor:help}
   .asof b{font-weight:600}
 
-  /* ── to-do strip (David-only) ── */
-  .todos{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:16px}
-  .todo{background:var(--warn-bg);border:1px solid #EEDBB4;border-radius:14px;padding:13px 15px}
-  .todo .tl{font-weight:600}
-  .todo .td{color:var(--ink-2);font-size:12.5px;margin-top:4px}
+  /* ── to-do strip (David-only, compact) ── */
+  .todos{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+  .todo{background:var(--warn-bg);border:1px solid #EEDBB4;border-radius:11px;padding:7px 12px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+  .todo .tag{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--warn);white-space:nowrap}
+  .todo .tl{font-weight:600;font-size:13px}
+  .todo .td{color:var(--ink-2);font-size:12px}
   .todo.info{opacity:.85}
-  .todo .tag{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--warn);margin-bottom:4px}
 
-  /* ── impact band ── */
-  .impact{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:16px}
-  .imp{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:16px 18px}
-  .imp h2{margin-bottom:8px}
-  .imp-big{font-size:28px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
-  .imp-of{font-size:14px;font-weight:500;color:var(--muted)}
-  .imp-meter{position:relative;height:20px;border:1px solid var(--line);border-radius:4px;background:var(--muted-bg);overflow:hidden;margin-top:10px}
-  .imp-fill{position:absolute;inset:0 auto 0 0;background:var(--good);transition:width .3s}
-  .imp-fill.warn{background:var(--warn)} .imp-fill.bad{background:var(--bad)}
-  .imp-stats{display:flex;gap:22px;margin-top:12px;flex-wrap:wrap}
-  .imp-stat b{display:block;font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
-  .imp-stat span{display:block;font-size:11px;color:var(--muted);margin-top:1px}
-  .imp-stat.hot b{color:var(--bad)}
-  .imp-note{margin-top:10px;font-size:12px;color:var(--muted)}
+  /* ── impact: one slim band ── */
+  .band{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:9px 14px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2)}
+  .band .blb{font-weight:700;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3);white-space:nowrap}
+  .band b{font-variant-numeric:tabular-nums;color:var(--ink)}
+  .band .hot{color:var(--bad);font-weight:700}
+  .band .div{width:1px;align-self:stretch;background:var(--line)}
+  .mini{position:relative;width:130px;height:9px;border:1px solid var(--line);border-radius:3px;background:var(--muted-bg);overflow:hidden;flex:none}
+  .mini i{position:absolute;inset:0 auto 0 0;background:var(--good)}
+  .mini i.warn{background:var(--warn)} .mini i.bad{background:var(--bad)}
+  .band .note{color:var(--muted);cursor:help}
 
   /* ── status dots ── */
-  .dot{width:10px;height:10px;border-radius:50%;flex:none;display:inline-block}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
   .s-healthy{background:var(--good)}
   .s-degraded{background:var(--warn)}
   .s-down{background:var(--bad)}
   .s-paused{background:#BDB7A8}
   .s-no-signal{background:transparent;border:2px solid #BDB7A8;width:8px;height:8px}
+  @keyframes throb{0%{box-shadow:0 0 0 0 rgba(17,152,101,.40)}70%{box-shadow:0 0 0 6px rgba(17,152,101,0)}100%{box-shadow:0 0 0 0 rgba(17,152,101,0)}}
+  .strip .dot.s-healthy{animation:throb 2.8s ease-out infinite}
+  @media (prefers-reduced-motion: reduce){ .strip .dot.s-healthy{animation:none} }
 
-  /* ── groups & rows ── */
-  .ghead{display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap}
-  .ghead .n{color:var(--muted);font-size:12px}
-  .rollup{display:flex;gap:3px;align-items:center;flex-wrap:wrap;max-width:280px}
-  .rollup i{width:7px;height:7px;border-radius:50%;display:inline-block}
-  .rollup i.s-no-signal{width:5px;height:5px;border-width:1.5px}
-  .row{border-top:1px solid var(--line-2);padding:12px 2px}
-  .row:first-of-type{border-top:0}
-  .row.dim{opacity:.62}
-  .rline{display:flex;align-items:baseline;gap:10px;cursor:pointer;flex-wrap:wrap}
-  .rline .dot{position:relative;top:0}
-  .rname{font-weight:600;font-size:14.5px}
-  .rstate{font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 9px;border-radius:999px;background:var(--muted-bg);color:var(--ink-2);white-space:nowrap}
+  /* ── the one importance-sorted list of thin strips ── */
+  .list{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:6px 8px 10px}
+  .gsep{display:flex;align-items:center;gap:10px;color:var(--ink-3);font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;padding:12px 8px 4px}
+  .gsep::after{content:"";flex:1;height:1px;background:var(--line-2)}
+  .srow{border-radius:10px}
+  .srow.open{background:#FBFAF6;box-shadow:inset 0 0 0 1px var(--line)}
+  .strip{display:flex;align-items:center;gap:10px;padding:6px 10px;min-height:31px;cursor:pointer;border-radius:10px}
+  .strip:hover{background:var(--line-2)}
+  .srow.open .strip:hover{background:transparent}
+  .sname{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .strip.dim .sname{color:var(--ink-3);font-weight:500}
+  .schip{font-size:10.5px;font-weight:700;border:1px solid #EEDBB4;background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:1px 8px;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+  /* ── expanded panel ── */
+  .panel{padding:2px 12px 14px 31px}
+  .pline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+  .rstate{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 9px;border-radius:999px;background:var(--muted-bg);color:var(--ink-2);white-space:nowrap}
   .rstate.sending{background:var(--good-bg);color:var(--good)}
   .rstate.frozen{background:var(--violet-bg);color:var(--violet-700)}
   .rstate.notyet{background:var(--warn-bg);color:var(--warn)}
-  .chip{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:var(--ink-2);background:#fff;white-space:nowrap;cursor:default}
-  .chip.backlog{border-color:#EEDBB4;background:var(--warn-bg);color:var(--warn);font-weight:600;cursor:pointer}
-  .rcad{color:var(--muted);font-size:12px;margin-left:auto;white-space:nowrap}
-  .rsum{color:var(--ink-2);font-size:12.5px;margin:3px 0 0 20px}
-  .rwhy{color:var(--bad);font-size:12px;margin:2px 0 0 20px}
+  .chip{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--ink-2);background:#fff;white-space:nowrap;cursor:default}
+  .pcad{color:var(--muted);font-size:12px;margin-left:auto}
+  .rwhy{color:var(--bad);font-size:12.5px;font-weight:600}
   .rwhy.deg{color:var(--warn)}
+  .rwhy.mut{color:var(--muted);font-weight:500}
   .unv{font-size:10.5px;color:var(--violet-700);border:1px dashed #D4CFFB;border-radius:999px;padding:1px 7px;white-space:nowrap}
+  .psum{color:var(--ink-2);font-size:12.5px;margin-bottom:8px}
 
-  /* ── activity drawer ── */
-  .drawer{background:#FBFAF6;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0 2px 20px;font-size:13px}
-  .drawer .dh{font-weight:700;font-size:12px;margin-bottom:6px;color:var(--ink-2)}
-  .arow{display:flex;gap:9px;align-items:baseline;padding:3px 0;min-width:0}
-  .arow .when{color:var(--muted);font-size:12px;flex:0 0 72px}
+  /* ── the flow diagram ── */
+  .floww{overflow-x:auto;padding:4px 0 2px;margin:2px 0 4px}
+  .fnode{fill:#fff;stroke:var(--line);stroke-width:1.25}
+  .fnode.hot{fill:var(--bad-bg);stroke:#F3C9CA}
+  .fnode.warm{fill:var(--warn-bg);stroke:#EEDBB4}
+  .fcount{font:700 17px "Inter Variable",-apple-system,sans-serif;fill:var(--ink);font-variant-numeric:tabular-nums}
+  .fcount.miss{fill:var(--muted);font-weight:600}
+  .fcount.hotc{fill:var(--bad)}
+  .fcount.warmc{fill:var(--warn)}
+  .flabel{font:500 10.5px "Inter Variable",-apple-system,sans-serif;fill:var(--ink-2)}
+  .flabel.gen{font-size:11px}
+  .fsub{font:500 10px "Inter Variable",-apple-system,sans-serif;fill:var(--muted)}
+  .fedge{fill:none;stroke:#C9C2B2;stroke-width:1.5}
+  .fhead{fill:#C9C2B2}
+  .fnote{color:var(--muted);font-size:11.5px;margin:2px 0}
+
+  /* ── activity + detail inside the panel ── */
+  .dh{font-weight:700;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3);margin:10px 0 4px}
+  .arow{display:flex;gap:9px;align-items:baseline;padding:2px 0;min-width:0;font-size:12.5px}
+  .arow .when{color:var(--muted);font-size:11.5px;flex:0 0 66px}
   .arow .note{color:var(--ink-2);min-width:0;overflow-wrap:anywhere}
-  .stamp{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 8px;border-radius:999px;flex:none}
+  .stamp{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 8px;border-radius:999px;flex:none}
   .stamp.success{background:var(--good-bg);color:var(--good)}
   .stamp.partial{background:var(--warn-bg);color:var(--warn)}
   .stamp.fail{background:var(--bad-bg);color:var(--bad)}
-  .dnote{color:var(--muted);font-size:12px;margin-top:6px}
-  .dlinks{margin-top:10px;font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap}
+  .dnote{color:var(--muted);font-size:12px;margin-top:4px}
+  .dlinks{margin-top:8px;font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
 
-  .foot{color:var(--muted);font-size:12.5px;margin-top:8px}
+  .foot{color:var(--muted);font-size:12.5px;margin-top:10px}
   .foot ul{margin:6px 0 0;padding-left:18px}
   .foot li{margin-top:2px}
 
   .err{color:var(--bad)}
   .gate{position:fixed;inset:0;background:rgba(246,243,233,.96);display:none;align-items:flex-start;justify-content:center;flex-direction:column;gap:14px;z-index:20;padding:32px 20px 20px}
   body.embed header .brand h1, body.embed header .brand .sub{display:none}
-  body.embed header{margin-bottom:10px}
+  body.embed header{margin-bottom:8px}
   body.embed .wrap{padding-top:10px}
   @media (max-width:700px){
-    .wrap{padding:16px 12px 60px}
-    .rcad{margin-left:20px;white-space:normal;width:100%}
-    .arow .when{flex-basis:56px}
+    .wrap{padding:16px 10px 60px}
+    .panel{padding-left:14px}
+    .pcad{margin-left:0;width:100%}
   }
 </style>
 </head>
@@ -133,7 +149,7 @@
   <header>
     <div class="brand">
       <h1>Status</h1>
-      <div class="sub">Every Raydar system — is it working, what did it do, and what does it still owe.</div>
+      <div class="sub">Every Raydar system, most important first — click a line to see how it flows.</div>
     </div>
     <button class="act" id="refresh">Refresh</button>
   </header>
@@ -145,9 +161,9 @@
 
   <div class="todos" id="todos" style="display:none"></div>
 
-  <div class="impact" id="impact" style="display:none"></div>
+  <div class="band" id="impact" style="display:none"></div>
 
-  <div id="groups"></div>
+  <div class="list" id="list"></div>
 
   <div class="foot" id="foot"></div>
 </div>
@@ -159,6 +175,7 @@ const AUTH={required:true,clientId:""};
 let OPEN=null;
 
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt=(n)=>n==null?"—":Number(n).toLocaleString("en-US");
 function ago(iso){
   const ms=Date.now()-Date.parse(iso||"");
   if(!isFinite(ms)||ms<0) return "—";
@@ -177,85 +194,212 @@ async function api(path){
 // David's words only — plain speech, no operator jargon.
 const STATE_WORDS={"sending":"Sending","paused":"Paused","not-yet":"Not sending yet","read-only":"Read-only","manual":"Manual","frozen":"Frozen"};
 const STATE_CLS={"sending":"sending","not-yet":"notyet","frozen":"frozen"};
-const RANK={down:0,degraded:1,healthy:2,"no-signal":3,paused:4};
 const ASOF_LABELS={health:"health board",gmailQuota:"Gmail allowance",actionsRuns:"GitHub runs",matchWatch:"match-watch feed",curate:"curate heartbeat"};
+const GROUP_LABELS={"candidate-emails":"Candidate emails","paraform-writes":"Paraform writes","background-readers":"Background readers","infrastructure":"Infrastructure"};
 
-function chip(kind,cls,note){
+// ── the flow diagram ─────────────────────────────────────────────────────────
+// Layered layout: depth = longest path from a root, columns left to right,
+// nodes stacked inside a column. Counts come resolved from the aggregator; a
+// null count draws "—", never zero.
+function wrapLabel(text,max,maxLines){
+  max=max||18; maxLines=maxLines||3;
+  const words=String(text||"").split(/\s+/).filter(Boolean);
+  const lines=[]; let cur="";
+  for(const w of words){
+    if(!cur) cur=w;
+    else if((cur+" "+w).length<=max) cur+=" "+w;
+    else { lines.push(cur); cur=w; }
+  }
+  if(cur) lines.push(cur);
+  if(lines.length>maxLines){ lines.length=maxLines; lines[maxLines-1]=lines[maxLines-1].slice(0,max-1)+"…"; }
+  return lines;
+}
+function clip(s,max){ s=String(s||""); return s.length>max?s.slice(0,max-1)+"…":s; }
+
+function drawFlow(flow){
+  const stages=flow.stages||[]; if(!stages.length) return "";
+  const edges=(flow.edges||[]).filter((e)=>Array.isArray(e)&&e.length===2);
+  const byId=new Map(stages.map((s)=>[s.id,s]));
+  const depth=new Map(stages.map((s)=>[s.id,0]));
+  for(let i=0;i<stages.length;i++){
+    let changed=false;
+    for(const [a,b] of edges){
+      if(!byId.has(a)||!byId.has(b)) continue;
+      if(depth.get(a)+1>depth.get(b)){ depth.set(b,depth.get(a)+1); changed=true; }
+    }
+    if(!changed) break;
+  }
+  const W=150,GX=54,PADX=6,PADY=6,VGAP=14;
+  const counted=Boolean(flow.counted);
+  const geo=new Map();
+  for(const s of stages){
+    const lines=wrapLabel(s.label);
+    const extra=(s.secondary?1:0)+((s.subcounts||[]).length);
+    const h=counted ? 34+lines.length*13+extra*13+8 : 12+lines.length*14+12;
+    geo.set(s.id,{lines,h});
+  }
+  const cols=new Map();
+  for(const s of stages){ const d=depth.get(s.id); if(!cols.has(d)) cols.set(d,[]); cols.get(d).push(s.id); }
+  let maxBottom=0;
+  for(const [d,ids] of cols){
+    let y=PADY;
+    for(const id of ids){ const g=geo.get(id); g.x=PADX+d*(W+GX); g.y=y; y+=g.h+VGAP; }
+    maxBottom=Math.max(maxBottom,y-VGAP);
+  }
+  const maxD=Math.max(...stages.map((s)=>depth.get(s.id)));
+  const width=PADX*2+(maxD+1)*W+maxD*GX, height=maxBottom+PADY;
+  const parts=[];
+  for(const [a,b] of edges){
+    const ga=geo.get(a),gb=geo.get(b); if(!ga||!gb) continue;
+    const sx=ga.x+W, sy=ga.y+Math.min(24,ga.h/2), tx=gb.x-7, ty=gb.y+Math.min(24,gb.h/2);
+    const mx=(sx+tx)/2;
+    parts.push(`<path class="fedge" d="M${sx} ${sy} C ${mx} ${sy}, ${mx} ${ty}, ${tx} ${ty}" marker-end="url(#farrow)"/>`);
+  }
+  for(const s of stages){
+    const g=geo.get(s.id);
+    const hot=s.accent==="bad-when-positive"&&(s.count||0)>0;
+    const warm=s.accent==="warn-when-positive"&&(s.count||0)>0;
+    parts.push(`<g transform="translate(${g.x},${g.y})">`);
+    parts.push(`<rect class="fnode${hot?" hot":warm?" warm":""}" width="${W}" height="${g.h}" rx="10"/>`);
+    if(counted){
+      const miss=s.count==null;
+      parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}</text>`);
+      let ty=40;
+      for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
+      if(s.secondary){ parts.push(`<text class="fsub" x="12" y="${ty}">${esc(fmt(s.secondary.count))} ${esc(clip(s.secondary.label,20))}</text>`); ty+=13; }
+      for(const sc of (s.subcounts||[])){
+        const full=fmt(sc.count)+" "+sc.label;
+        parts.push(`<text class="fsub" x="12" y="${ty}">${esc(clip(full,24))}<title>${esc(full)}</title></text>`); ty+=13;
+      }
+    } else {
+      let ty=Math.round(g.h/2-((g.lines.length-1)*14)/2)+4;
+      for(const line of g.lines){ parts.push(`<text class="flabel gen" x="${W/2}" y="${ty}" text-anchor="middle">${esc(line)}</text>`); ty+=14; }
+    }
+    parts.push(`</g>`);
+  }
+  return `<div class="floww"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img">`+
+    `<defs><marker id="farrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fhead"/></marker></defs>`+
+    parts.join("")+`</svg></div>`;
+}
+
+// Systems without a declared flow get an honest two-node sketch built from
+// what the catalog already says (cadence + impact classes) — no invented
+// stage counts, no invented numbers.
+function genericFlow(sys){
+  const acts=[];
+  const g=sys.gmail&&sys.gmail.class, p=sys.paraform&&sys.paraform.class;
+  if(g==="sends") acts.push("Sends email");
+  else if(g==="reads") acts.push("Reads the mailbox");
+  else if(g==="both") acts.push("Reads + sends email");
+  if(p==="writes") acts.push("Writes to Paraform");
+  else if(p==="reads") acts.push("Reads Paraform");
+  else if(p==="both") acts.push("Reads + writes Paraform");
+  const fallback={"read-only":"Watches, changes nothing","manual":"Waits for a human click","frozen":"Runs untouched","paused":"Does nothing while paused"};
+  const action=acts.join(", ")||fallback[sys.state]||"Does its job";
+  const trigger=clip((sys.cadence||"").split(/[;(]/)[0].replace(/\.\s*$/,"").trim(),44)||"Runs on its schedule";
+  return { stages:[{id:"t",label:trigger},{id:"a",label:action}], edges:[["t","a"]], counted:false };
+}
+
+// ── strips ───────────────────────────────────────────────────────────────────
+function renderStrip(sys){
+  const dim=sys.status==="paused"||sys.status==="no-signal";
+  const chip=(sys.backlog&&Number(sys.backlog.count)>0)
+    ?`<span class="schip" title="${esc(sys.backlog.detail||"")}">${esc(fmt(sys.backlog.count))} ${esc(sys.backlog.label)}</span>`
+    :"";
+  return `<div class="srow${OPEN===sys.id?" open":""}" id="row-${esc(sys.id)}">
+    <div class="strip${dim?" dim":""}" data-id="${esc(sys.id)}" role="button" aria-expanded="${OPEN===sys.id}">
+      <span class="dot s-${esc(sys.status)}"></span>
+      <span class="sname">${esc(sys.name)}</span>
+      ${chip}
+    </div>
+    <div id="panel-${esc(sys.id)}">${OPEN===sys.id?renderPanel(sys):""}</div>
+  </div>`;
+}
+
+function impactChip(kind,cls,note){
   if(!cls||cls==="none") return "";
   return `<span class="chip" title="${esc(note||"")}">${kind} · ${esc(cls)}</span>`;
 }
 
-function renderRow(sys){
-  const dim=sys.status==="paused"||sys.status==="no-signal";
+function renderPanel(sys){
   const stateWord=STATE_WORDS[sys.state]||sys.state;
-  const unv=(sys.unverified&&sys.unverified.length)?`<span class="unv" title="${esc(sys.unverified.join(" · "))}">unverified</span>`:"";
-  const backlog=sys.backlog?`<span class="chip backlog" title="${esc(sys.backlog.detail||"")}">${esc(sys.backlog.label)}: ${esc(String(sys.backlog.count))}</span>`:"";
   const why=(sys.status==="down"||sys.status==="degraded")&&sys.statusReason
-    ?`<div class="rwhy${sys.status==="degraded"?" deg":""}">${esc(sys.statusReason)}</div>`
-    :(sys.status==="no-signal"?`<div class="rwhy deg" style="color:var(--muted)">no health signal — ${esc(sys.gap||sys.statusReason||"")}</div>`:"");
-  return `<div class="row${dim?" dim":""}" id="row-${esc(sys.id)}">
-    <div class="rline" data-id="${esc(sys.id)}">
-      <span class="dot s-${esc(sys.status)}"></span>
-      <span class="rname">${esc(sys.name)}</span>
-      <span class="rstate ${STATE_CLS[sys.state]||""}">${esc(stateWord)}</span>
-      ${backlog}
-      ${chip("Gmail",sys.gmail&&sys.gmail.class,sys.gmail&&sys.gmail.note)}
-      ${chip("Paraform",sys.paraform&&sys.paraform.class,sys.paraform&&sys.paraform.note)}
-      ${unv}
-      <span class="rcad">${esc(sys.cadence)}</span>
-    </div>
-    <div class="rsum">${esc(sys.summary)}</div>
-    ${why}
-    <div id="drawer-${esc(sys.id)}"></div>
-  </div>`;
-}
+    ?`<span class="rwhy${sys.status==="degraded"?" deg":""}">${esc(sys.statusReason)}</span>`
+    :(sys.status==="no-signal"?`<span class="rwhy mut">no health signal — ${esc(sys.gap||sys.statusReason||"")}</span>`:"");
+  const unv=(sys.unverified&&sys.unverified.length)?`<span class="unv" title="${esc(sys.unverified.join(" · "))}">unverified</span>`:"";
 
-function renderDrawer(sys){
-  const acts=(sys.activity||[]).map(a=>`<div class="arow">
+  const flow=sys.flow||genericFlow(sys);
+  const fnotes=[];
+  if(flow.sourceNote) fnotes.push(esc(flow.sourceNote));
+  if(flow.note) fnotes.push(esc(flow.note));
+  if(flow.missing) fnotes.push("— means that number has not been published yet; it is never assumed to be zero.");
+
+  const acts=(sys.activity||[]).map((a)=>`<div class="arow">
       <span class="when">${esc(ago(a.at))}</span>
       <span class="stamp ${esc(a.stamp)}">${esc(a.stamp)}</span>
       <span class="note">${esc(a.note||"")}</span>
     </div>`).join("");
+
   const bits=[];
   if(sys.stateNote) bits.push(esc(sys.stateNote));
   if(sys.feedPending) bits.push("Its status feed hasn't published yet — first publish pending; showing GitHub run history meanwhile.");
   if(sys.historyStart) bits.push("Per-run history starts "+esc(sys.historyStart)+" — earlier runs were not recorded per-run.");
   if(sys.unverified&&sys.unverified.length) bits.push("Unverified: "+esc(sys.unverified.join("; "))+".");
+
   const backlog=sys.backlog?`<div class="dnote"><b>Backlog:</b> ${esc(sys.backlog.detail||"")}</div>`+
     (sys.backlog.skipHistogram?`<div class="dnote">Why candidates were skipped (latest reason each): ${
       esc(Object.entries(sys.backlog.skipHistogram).sort((a,b)=>b[1]-a[1]).slice(0,6)
         .map(([k,v])=>k.replace(/_/g," ")+" "+v).join(" · "))}</div>`:"")
     :"";
+
   const links=[];
   if(sys.links&&sys.links.health) links.push(`<a href="${esc(sys.links.health)}" target="_top">Health tile ↗</a>`);
   if(sys.links&&sys.links.emails) links.push(`<a href="${esc(sys.links.emails)}" target="_top">Emails lane ↗</a>`);
   if(sys.links&&sys.links.registry) links.push(`<a href="https://docs.raydar.xyz${esc(sys.links.registry)}" target="_blank" rel="noopener">registry page ↗</a>`);
-  return `<div class="drawer">
+
+  return `<div class="panel">
+    <div class="pline">
+      <span class="rstate ${STATE_CLS[sys.state]||""}">${esc(stateWord)}</span>
+      ${why}
+      ${impactChip("Gmail",sys.gmail&&sys.gmail.class,sys.gmail&&sys.gmail.note)}
+      ${impactChip("Paraform",sys.paraform&&sys.paraform.class,sys.paraform&&sys.paraform.note)}
+      ${unv}
+      <span class="pcad">${esc(sys.cadence)}</span>
+    </div>
+    <div class="psum">${esc(sys.summary)}</div>
+    ${drawFlow(flow)}
+    ${fnotes.map((n)=>`<div class="fnote">${n}</div>`).join("")}
+    ${backlog}
     <div class="dh">Recent activity</div>
     ${acts||'<div class="dnote">Nothing recorded yet.</div>'}
-    ${backlog}
-    ${bits.map(b=>`<div class="dnote">${b}</div>`).join("")}
+    ${bits.map((b)=>`<div class="dnote">${b}</div>`).join("")}
     ${links.length?`<div class="dlinks">${links.join("")}</div>`:""}
   </div>`;
 }
 
 let SYSTEMS_BY_ID={};
-function toggleDrawer(id){
-  const host=$("drawer-"+id); if(!host) return;
-  if(OPEN===id){ OPEN=null; host.innerHTML=""; return; }
-  if(OPEN){ const prev=$("drawer-"+OPEN); if(prev) prev.innerHTML=""; }
-  OPEN=id;
-  host.innerHTML=renderDrawer(SYSTEMS_BY_ID[id]);
+function togglePanel(id){
+  const prev=OPEN;
+  OPEN=(OPEN===id)?null:id;
+  for(const pid of [prev,id]){
+    if(!pid) continue;
+    const row=$("row-"+pid), host=$("panel-"+pid);
+    if(!row||!host) continue;
+    row.classList.toggle("open",OPEN===pid);
+    const strip=row.querySelector(".strip");
+    if(strip) strip.setAttribute("aria-expanded",String(OPEN===pid));
+    host.innerHTML=OPEN===pid?renderPanel(SYSTEMS_BY_ID[pid]):"";
+  }
 }
 
 function render(data){
   SYSTEMS_BY_ID={};
-  const all=(data.groups||[]).flatMap(g=>g.systems||[]);
-  all.forEach(s=>{SYSTEMS_BY_ID[s.id]=s;});
+  const flat=(data.groups||[]).flatMap((g)=>g.systems||[]);
+  flat.forEach((s,i)=>{ s._i=i; SYSTEMS_BY_ID[s.id]=s; });
 
   // Verdict: down + degraded are "need attention"; paused and no-signal are not.
-  const bad=all.filter(s=>s.status==="down"||s.status==="degraded");
-  const down=all.filter(s=>s.status==="down").length;
+  const bad=flat.filter((s)=>s.status==="down"||s.status==="degraded");
+  const down=flat.filter((s)=>s.status==="down").length;
   $("banner").className="banner "+(down?"down":bad.length?"deg":"ok");
   $("verdict").textContent=bad.length
     ? bad.length+" system"+(bad.length===1?"":"s")+" need"+(bad.length===1?"s":"")+" attention"
@@ -266,64 +410,62 @@ function render(data){
     .join("\n");
   $("asof").title=perSource;
   $("asof").innerHTML=data.oldest
-    ? `data as of <b>${esc(ago(data.oldest.at))}</b><br /><span style="font-size:11.5px;color:var(--muted)">oldest source: ${esc(ASOF_LABELS[data.oldest.source]||data.oldest.source)} — hover for all</span>`
+    ? `data as of <b>${esc(ago(data.oldest.at))}</b><br /><span style="font-size:11px;color:var(--muted)">oldest source: ${esc(ASOF_LABELS[data.oldest.source]||data.oldest.source)} — hover for all</span>`
     : "";
 
   // To-do strip — only when non-empty, only things exclusively David can do.
   const todos=data.todos||[];
-  $("todos").style.display=todos.length?"grid":"none";
-  $("todos").innerHTML=todos.map(t=>`<div class="todo${t.informational?" info":""}">
-      <span class="tag">${t.informational?"heads-up":"only you can do this"}</span>
-      <div class="tl">${esc(t.label)}</div>
-      ${t.detail?`<div class="td">${esc(t.detail)}</div>`:""}
+  $("todos").style.display=todos.length?"flex":"none";
+  $("todos").innerHTML=todos.map((t)=>`<div class="todo${t.informational?" info":""}">
+      <span class="tag">${t.informational?"heads-up":"only you"}</span>
+      <span class="tl">${esc(t.label)}</span>
+      ${t.detail?`<span class="td">${esc(t.detail)}</span>`:""}
     </div>`).join("");
 
-  // Impact band — real Gmail numbers; Paraform measured-or-say-so.
+  // Impact: one slim band — real Gmail numbers; Paraform measured-or-say-so.
   const g=(data.impact||{}).gmail||{};
   const p=(data.impact||{}).paraform||{};
   const pct=g.sends==null?null:Math.min(100,Math.round(g.sends/(g.cap||2000)*100));
-  const fill=pct==null?0:pct;
   const fillCls=pct==null?"":pct>=90?"bad":pct>=60?"warn":"";
-  const measured=(p.measured||[]).map(m=>`<div class="imp-stat"><b>${esc(String(m.callsLastRun??"—"))}${m.budget?`<span class="imp-of"> / ${esc(String(m.budget))}</span>`:""}</b><span>match-watch calls last run${m.budget?" vs budget":""}</span></div>`).join("");
-  $("impact").style.display="grid";
+  const m=(p.measured||[])[0];
+  $("impact").style.display="flex";
   $("impact").innerHTML=`
-    <div class="imp">
-      <h2>Gmail today</h2>
-      <div><span class="imp-big">${g.sends==null?"not counted yet":esc(String(g.sends))}</span>${g.sends==null?"":`<span class="imp-of"> of ${esc(String(g.cap||2000))} sends</span>`}</div>
-      <div class="imp-meter"><div class="imp-fill ${fillCls}" style="width:${fill}%"></div></div>
-      <div class="imp-stats">
-        <div class="imp-stat${g.four29?" hot":""}"><b>${esc(String(g.four29??0))}</b><span>rate-limit hits (429s)</span></div>
-        <div class="imp-stat${g.lockoutMinutes?" hot":""}"><b>${g.lockoutMinutes==null?"—":esc(String(g.lockoutMinutes))}</b><span>minutes locked out today</span></div>
-      </div>
-      ${g.suppressed?'<div class="imp-note">Counting is paused while a rate-limit is live — the witness never adds load to a struggling mailbox.</div>':""}
-      <div class="imp-note">Reads are not shown: Google publishes no way to measure them. The heavy readers are listed in the footer.</div>
-    </div>
-    <div class="imp">
-      <h2>Paraform load</h2>
-      <div class="imp-stats">${measured||'<div class="imp-stat"><b>—</b><span>no measured run yet</span></div>'}</div>
-      <div class="imp-note">${esc(p.note||"")}</div>
-    </div>`;
+    <span class="blb">Gmail today</span>
+    <span class="mini"><i class="${fillCls}" style="width:${pct==null?0:pct}%"></i></span>
+    <span>${g.sends==null?"not counted yet":`<b>${esc(fmt(g.sends))}</b> of ${esc(fmt(g.cap||2000))} sends`}</span>
+    <span class="${g.four29?"hot":""}"><b>${esc(String(g.four29??0))}</b> rate-limit hits</span>
+    <span class="${g.lockoutMinutes?"hot":""}"><b>${g.lockoutMinutes==null?"—":esc(String(g.lockoutMinutes))}</b> min locked out</span>
+    ${g.suppressed?`<span class="note" title="Counting is paused while a rate-limit is live — the witness never adds load to a struggling mailbox.">counting paused ⓘ</span>`:""}
+    <span class="note" title="Reads are not shown: Google publishes no way to measure them. The heavy readers are listed in the footer.">reads not measurable ⓘ</span>
+    <span class="div"></span>
+    <span class="blb">Paraform</span>
+    <span>${m?`<b>${esc(fmt(m.callsLastRun))}</b>${m.budget?` / ${esc(fmt(m.budget))}`:""} match-watch calls last run`:"no measured run yet"}</span>
+    <span class="note" title="${esc(p.note||"")}">others estimated ⓘ</span>`;
 
-  // Four fixed-order groups; unhealthy rows sort to the top of each.
-  $("groups").innerHTML=(data.groups||[]).map(gr=>{
-    const items=(gr.systems||[]).slice().sort((a,b)=>(RANK[a.status]??9)-(RANK[b.status]??9));
-    const bad=items.filter(i=>i.status==="down"||i.status==="degraded").length;
-    const rollup=items.map(i=>`<i class="s-${esc(i.status)}" title="${esc(i.name)}"></i>`).join("");
-    return `<div class="card">
-      <div class="ghead"><h2>${esc(gr.label)}</h2><span class="rollup">${rollup}</span>
-        <span class="n">${items.length} systems${bad?` · ${bad} need attention`:""}</span></div>
-      ${items.map(renderRow).join("")}
-    </div>`;
-  }).join("");
+  // ONE continuous list: priority band, then unhealthy floats WITHIN its band,
+  // then catalog order. Subtle separators where the purpose group changes.
+  const URGENT={down:0,degraded:1};
+  const sorted=flat.slice().sort((a,b)=>
+    ((a.priority||9)-(b.priority||9))
+    ||((URGENT[a.status]??2)-(URGENT[b.status]??2))
+    ||(a._i-b._i));
+  let html="",lastGroup=null;
+  for(const sys of sorted){
+    if(sys.group!==lastGroup){
+      html+=`<div class="gsep">${esc(GROUP_LABELS[sys.group]||sys.group)}</div>`;
+      lastGroup=sys.group;
+    }
+    html+=renderStrip(sys);
+  }
+  $("list").innerHTML=html;
 
   // Footer: coverage + the honesty notes.
   const f=data.footer||{};
-  $("foot").innerHTML=`<b>${esc(f.coverage||"")}</b><ul>${(f.notes||[]).map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`;
+  $("foot").innerHTML=`<b>${esc(f.coverage||"")}</b><ul>${(f.notes||[]).map((n)=>`<li>${esc(n)}</li>`).join("")}</ul>`;
 
-  document.querySelectorAll(".rline").forEach(el=>{
-    el.onclick=(ev)=>{ if(ev.target.closest("a")) return; toggleDrawer(el.dataset.id); };
+  document.querySelectorAll(".strip").forEach((el)=>{
+    el.onclick=(ev)=>{ if(ev.target.closest("a")) return; togglePanel(el.dataset.id); };
   });
-  if(OPEN&&SYSTEMS_BY_ID[OPEN]){ const host=$("drawer-"+OPEN); if(host) host.innerHTML=renderDrawer(SYSTEMS_BY_ID[OPEN]); }
 }
 
 async function load(){
@@ -336,7 +478,7 @@ async function load(){
 
 function showGate(){ $("gate").style.display="flex"; }
 async function init(){
-  const cfg=await fetch("/api/auth/config",{credentials:"same-origin"}).then(r=>r.json()).catch(()=>({}));
+  const cfg=await fetch("/api/auth/config",{credentials:"same-origin"}).then((r)=>r.json()).catch(()=>({}));
   AUTH.required=cfg.authRequired!==false; AUTH.clientId=cfg.clientId||"";
   if(!AUTH.required){ load(); setInterval(load,60000); return; }
   const session=await RaydarAuth.session().catch(()=>null);
