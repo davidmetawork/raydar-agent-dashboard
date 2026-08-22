@@ -8,7 +8,7 @@
 // Shared-secret auth (HEALTH_BEAT_KEY), not the Google session: the callers are
 // cron jobs, not browsers.
 import { timingSafeEqual } from "node:crypto";
-import { hSet, K } from "./_lib/kv.mjs";
+import { hSet, lPushTrim, K } from "./_lib/kv.mjs";
 import { beatLanes } from "./_lib/catalog.mjs";
 
 const BEAT_STATUSES = new Set(["ok", "warn", "fail"]);
@@ -41,6 +41,23 @@ function sanitizeMetrics(raw) {
   return { metrics, dropped: false };
 }
 
+// The activity ring for the Status tab: hlth:beat:<lane> is overwrite-only
+// liveness, so per-run outcomes used to be thrown away one beat later. Each
+// beat is additionally appended to a 50-entry ring, hlth:beatlog:<lane>.
+// A ring failure can NEVER affect the beat response — losing the beat would
+// fake a dead lane, which is worse than losing a history entry — so this
+// swallows everything and reports success/failure only as a boolean.
+export const BEATLOG_KEEP = 50;
+
+export async function appendBeatLog(lane, record, { push = lPushTrim } = {}) {
+  try {
+    await push(K.beatlog(lane), record, BEATLOG_KEEP);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function authed(req) {
   const secret = process.env.HEALTH_BEAT_KEY || "";
   if (!secret) return false;
@@ -66,11 +83,13 @@ export default async function handler(req, res) {
   }
   const note = String(body?.note || "").slice(0, 200);
   const { metrics, dropped } = sanitizeMetrics(body?.metrics);
-  await hSet(K.beat(lane), {
+  const record = {
     at: new Date().toISOString(),
     status,
     note,
     ...(metrics ? { metrics } : {}),
-  });
+  };
+  await hSet(K.beat(lane), record);
+  await appendBeatLog(lane, record); // never throws; the beat already landed
   return res.status(200).json({ ok: true, lane, status, ...(dropped ? { metricsDropped: true } : {}) });
 }
