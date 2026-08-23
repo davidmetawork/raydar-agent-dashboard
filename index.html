@@ -1065,6 +1065,12 @@
       paraform_read_incomplete:"a Paraform list came back incomplete, so nothing was sent",
       vendor_timeout:"a Paraform or recorder request timed out",
       unexpected_error:"an unexpected error stopped this one",
+      copy_unrenderable:"we could not greet this candidate by a real first name, so nothing was sent",
+      recipient_rejected:"the mailbox rejected this address permanently",
+      send_outcome_unknown:"the Mailroom could not confirm whether it sent",
+      mailroom_queued:"queued in the Mailroom, waiting its turn",
+      mailroom_lane_stopped:"this email lane is paused in the Emails tab",
+      mailroom_unreachable:"the Mailroom could not be reached",
     };
     const fuReasonText = (e) => e?.reasonCode && FU_REASONS[e.reasonCode] ? ` — ${FU_REASONS[e.reasonCode]}` : "";
     function fuIsDefinitiveNoShow(c){
@@ -1140,6 +1146,13 @@
       if (fuStageIs(stage,["connector_chase"]) || stage==="skipped_connector_chase" || stage==="paused_connector_chase")
         return { cls:"green", label:"✓ connector follow-up",
           title:"This candidate came in through a connector referral, so they are being followed up on the original referral email thread rather than the Paraform reschedule sequence. No action needed." };
+      // Raydar sends these itself through the Mailroom since 2026-08-23.
+      if (stage==="emailed")
+        return { cls:"green", label:"\u2713 emailed", title:`Raydar sent this candidate the ${e.sequenceName||"follow-up email"}${e.at&&!isNaN(Date.parse(e.at))?` on ${new Date(e.at).toLocaleDateString([],{month:"short",day:"numeric"})}`:""}. Delivery was confirmed by the mailbox; read the exact email in the Emails tab.` };
+      if (stage==="sending")
+        return { cls:"amber", label:"sending", title:`The follow-up email is queued in the Mailroom${fuReasonText(e)}. It will go out on its own; nothing is lost.` };
+      if (fuStageIs(stage,["failed_send_unknown"]))
+        return { cls:"amber", border:true, label:"needs review: send outcome unknown", title:`The Mailroom could not prove whether this email left the mailbox${fuReasonText(e)}. It was parked rather than resent. Check the Emails tab before sending by hand.` };
       if (stage==="enrolled" || stage==="manual_enrolled"){
         if (e.deliveryReady!==true)
           return { cls:"amber", border:true, label:"verification pending",
