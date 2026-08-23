@@ -107,22 +107,42 @@ export const SYSTEMS = [
     workflow: "match-watch.yml",
     feed: "match-watch-status",
     flow: {
+      // ONE CLOCK PER ROW (David's 2026-08-23 ruling): every box in this
+      // chain is THIS MORNING's tick, resolved from the latest runsRing
+      // entry — the flow never borrows the ledger-wide standing pile (on
+      // day one 3,324 examined minus the 3,090-person pile "added up" to
+      // 234 by pure coincidence; from day two the two clocks diverge). The
+      // standing pile renders as its own labeled strip below the flow, from
+      // the feed's `pile` field. People units everywhere: role counts are
+      // secondary lines, never a box a person-count box flows into. A feed
+      // that predates the per-tick fields (v1) renders "—" for the derived
+      // boxes — never a silently mixed clock again.
       stages: [
         { id: "called", label: "Called candidates", countKey: "feed.latestRun.cohort" },
-        { id: "checked", label: "Checked for new roles", countKey: "feed.latestRun.checked" },
-        { id: "added", label: "New roles added", countKey: "feed.latestRun.curatedAdds" },
+        { id: "examined", label: "Examined this morning", countKey: "feed.latestRun.checked" },
+        // checked minus THIS tick's skip total — both from the same ring
+        // entry, so the subtraction is real, not cross-clock.
+        { id: "matchable", label: "Matchable", countKey: "derived.matchable" },
         {
-          id: "emailed", label: "Emailed", countKey: "feed.latestRun.sends",
-          secondary: { label: "all-time", countKey: "feed.sentTotal" },
+          id: "adds", label: "People with new roles", countKey: "feed.latestRun.candidatesWithAdds",
+          secondary: { label: "roles", countKey: "feed.latestRun.curatedAdds", unit: "roles" },
         },
-        { id: "owed", label: "Owed an email", countKey: "feed.owed.candidates", accent: "bad-when-positive" },
-        { id: "held", label: "Held back", histogramKey: "feed.skipHistogram" },
+        // The remainder that makes the people-math visible:
+        // examined = matchable + held; matchable = new-roles + nothing-new.
+        { id: "nothing", label: "Nothing new today", countKey: "derived.nothingNew" },
+        { id: "emailed", label: "Emailed", countKey: "feed.latestRun.sends" },
+        {
+          id: "owed", label: "Owed an email", countKey: "feed.owed.candidates", accent: "bad-when-positive",
+          secondary: { label: "role entries", countKey: "feed.owed.roles", unit: "roles" },
+        },
+        { id: "held", label: "Held back this morning", histogramKey: "feed.latestRun.skips" },
       ],
       edges: [
-        ["called", "checked"], ["checked", "added"], ["added", "emailed"],
-        ["emailed", "owed"], ["checked", "held"],
+        ["called", "examined"], ["examined", "matchable"], ["examined", "held"],
+        ["matchable", "adds"], ["matchable", "nothing"],
+        ["adds", "emailed"], ["emailed", "owed"],
       ],
-      sourceNote: "Counts from the lane's own daily status feed.",
+      sourceNote: "One clock: every count is this morning's tick, from the lane's own feed (Owed is the standing debt as of that tick). The standing pile below is the all-time view.",
     },
     links: { health: HEALTH, emails: null, registry: "/products/daily-match-watch/" },
     davidAction: null,
@@ -166,7 +186,7 @@ export const SYSTEMS = [
       // Counts resolve from the lane's own published funnel feed
       // (clients.raydar.xyz/interview-lane-status.json — Postgres ledger
       // aggregates plus the plan's pool numbers, counts only). Until the
-      // first publish lands, every stage renders "—", never zero.
+      // v2 publish lands, the new stages render "—", never zero.
       stages: [
         { id: "applicants", label: "Applicants", countKey: "feed.funnel.applicants" },
         { id: "invited", label: "Invited", countKey: "feed.funnel.enrolled" },
@@ -176,16 +196,41 @@ export const SYSTEMS = [
         },
         {
           id: "booked", label: "Booked", countKey: "feed.funnel.bookedPeople",
-          secondary: { label: "bookings", countKey: "feed.funnel.bookings" },
+          secondary: { label: "bookings", countKey: "feed.funnel.bookings", unit: "bookings" },
+        },
+        {
+          // David's 2026-08-23 ruling: what actually happened on the call,
+          // between Booked and Follow-up sent — the feed's six fixed outcome
+          // buckets as small stacked tiles (they sum to total bookings, so
+          // the two honesty remainders render too). Amber only where the
+          // call itself went wrong; asking for a human is a normal outcome.
+          // Per booking, not per person — declared, never implied.
+          id: "outcome", label: "What the call became",
+          unit: "bookings",
+          buckets: [
+            { id: "ok", label: "Successful call", countKey: "feed.outcomes.successfulCall" },
+            { id: "noshow", label: "No-show", countKey: "feed.outcomes.noShow", accent: "warn-when-positive" },
+            { id: "broke", label: "Call broke", countKey: "feed.outcomes.callBroke", accent: "warn-when-positive" },
+            { id: "human", label: "Asked for a human", countKey: "feed.outcomes.askedForHuman" },
+            { id: "undetermined", label: "Not determined yet", countKey: "feed.outcomes.undetermined" },
+            { id: "notours", label: "Not ours (staff, reschedules)", countKey: "feed.outcomes.notOurs" },
+          ],
         },
         { id: "fit", label: "Follow-up sent", countKey: "feed.funnel.followupsSent" },
-        { id: "in-review", label: "In review", countKey: "feed.funnel.followupsParked", accent: "bad-when-positive" },
+        {
+          // The old vague "In review" pool is gone (same ruling): one amber
+          // tile per hold reason, labeled by the feed's own frozen labels
+          // map (raw token fallback), capped at 6 plus an Other rollup.
+          id: "held", label: "Waiting on David", poolKey: "feed.parkedByReason",
+          labelsKey: "feed.labels", tileAccent: "warn-when-positive", unit: "bookings",
+        },
       ],
       edges: [
         ["applicants", "invited"], ["invited", "emailed"],
-        ["emailed", "booked"], ["booked", "fit"], ["booked", "in-review"],
+        ["emailed", "booked"], ["booked", "outcome"],
+        ["outcome", "fit"], ["outcome", "held"],
       ],
-      sourceNote: "Counts from the lane's own published status feed.",
+      sourceNote: "Counts from the lane's own published status feed. Outcome and parked counts are per booking (a person can book twice). No-shows and broken calls are only counted here — rebooking them belongs to the lifecycle no-show lane.",
     },
     links: { health: HEALTH, emails: EMAILS, registry: null },
     davidAction: null,
@@ -478,14 +523,17 @@ export const SYSTEMS = [
     workflow: null,
     feed: null,
     flow: {
+      // This row's numbers are deliberately the STANDING-PILE clock (current
+      // latest status per person) — that is its honest window. Resolved via
+      // derived.* so the feed's pile/skipHistogram rename cannot dash it.
       stages: [
         { id: "spoken", label: "Spoken to", countKey: "derived.spokenTo" },
         { id: "intn", label: "In Talent Network", countKey: "derived.inTalentNetwork" },
-        { id: "missing", label: "Missing from the network", countKey: "feed.skipHistogram.not_in_talent_network", accent: "warn-when-positive" },
-        { id: "offmarket", label: "Off-market, awaiting re-enable", countKey: "feed.skipHistogram.auto_off_market_awaiting_reenable" },
+        { id: "missing", label: "Missing from the network", countKey: "derived.notInNetwork", accent: "warn-when-positive" },
+        { id: "offmarket", label: "Off-market, awaiting re-enable", countKey: "derived.offMarket" },
       ],
       edges: [["spoken", "intn"], ["spoken", "missing"], ["intn", "offmarket"]],
-      sourceNote: "180-day called cohort, from the match-watch sweep.",
+      sourceNote: "180-day called cohort, from the match-watch sweep's standing pile (current status per person, not one morning's tick).",
     },
     links: { health: HEALTH, emails: EMAILS, registry: "/products/talent-network-reenable/" },
     davidAction: null,

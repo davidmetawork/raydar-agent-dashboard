@@ -167,7 +167,7 @@ export function feedStampFor(row, feeds) {
     const f = data.funnel || {};
     if (Number.isFinite(Number(data.sentToday))) bits.push(`sent ${data.sentToday} today`);
     if (Number.isFinite(Number(f.enrolled))) bits.push(`${f.enrolled} enrolled`);
-    if (Number.isFinite(Number(f.followupsParked))) bits.push(`${f.followupsParked} in review`);
+    if (Number.isFinite(Number(f.followupsParked))) bits.push(`${f.followupsParked} parked`);
     return {
       at, day: utcDay(at), stamp: "success",
       note: bits.join(", "),
@@ -219,9 +219,43 @@ const objectAt = (obj, path) => {
 
 // The per-row count context. tn-reenable deliberately reads the match-watch
 // feed — its honest window is the 180-day called cohort that sweep observes.
+// The standing pile: the mw feed's ledger-wide latest-status histogram.
+// v2 publishes it as `pile`; `skipHistogram` is the one-release deprecated
+// alias (and the only name v1 feeds have).
+const mwPile = (mw) => {
+  const pile = mw?.pile ?? mw?.skipHistogram;
+  return pile && typeof pile === "object" && !Array.isArray(pile) ? pile : null;
+};
+
 function flowContext(row, feeds) {
   const mw = feeds?.["match-watch-status"]?.data ?? null;
-  if (row.id === "match-watch") return { feed: mw };
+  if (row.id === "match-watch") {
+    // ONE CLOCK: every derived number subtracts fields of the SAME runsRing
+    // entry. A feed that predates the per-tick fields (skips /
+    // candidatesWithAdds null or absent) derives null — the page draws "—"
+    // rather than silently borrowing the standing pile's clock (the day-one
+    // 3,324−3,090=234 coincidence).
+    const run = mw?.latestRun && typeof mw.latestRun === "object" && !Array.isArray(mw.latestRun)
+      ? mw.latestRun : null;
+    const skips = run?.skips && typeof run.skips === "object" && !Array.isArray(run.skips)
+      ? run.skips : null;
+    const skipTotal = skips
+      ? Object.values(skips).map(finiteOrNull).filter((v) => v != null).reduce((a, b) => a + b, 0)
+      : null;
+    const checked = finiteOrNull(run?.checked);
+    const withAdds = finiteOrNull(run?.candidatesWithAdds);
+    const matchable = checked != null && skipTotal != null ? checked - skipTotal : null;
+    return {
+      feed: mw,
+      derived: {
+        skipTotal,
+        matchable,
+        // The bucket that makes the people-math add up on the page:
+        // examined = matchable + held; matchable = new-roles + nothing-new.
+        nothingNew: matchable != null && withAdds != null ? matchable - withAdds : null,
+      },
+    };
+  }
   if (row.id === "interview-invites") {
     // The lane's own counts-only funnel feed (published by the cycle's
     // workflow from Postgres aggregates + the plan's pool numbers). A 404
@@ -230,12 +264,15 @@ function flowContext(row, feeds) {
   }
   if (row.id === "tn-reenable") {
     const cohort = finiteOrNull(mw?.latestRun?.cohort);
-    const notIn = finiteOrNull(mw?.skipHistogram?.not_in_talent_network);
+    const pile = mwPile(mw);
+    const notIn = finiteOrNull(pile?.not_in_talent_network);
     return {
       feed: mw,
       derived: {
         spokenTo: cohort,
         inTalentNetwork: cohort != null && notIn != null ? cohort - notIn : null,
+        notInNetwork: notIn,
+        offMarket: finiteOrNull(pile?.auto_off_market_awaiting_reenable),
       },
     };
   }
@@ -264,6 +301,9 @@ function flowContext(row, feeds) {
 }
 
 const HISTOGRAM_TOP = 4;
+// A pool stage renders at most this many per-reason tiles; the rest roll up
+// into one "Other" tile so a noisy ledger cannot stretch the diagram.
+export const POOL_TILE_CAP = 6;
 
 /** Resolve a catalog row's declarative flow into drawable stages+counts. */
 export function flowFor(row, feeds) {
@@ -276,10 +316,19 @@ export function flowFor(row, feeds) {
       label: st.label,
       count: st.countKey ? resolvePath(ctx, st.countKey) : null,
       ...(st.accent ? { accent: st.accent } : {}),
+      // Unit declaration (David's 2026-08-23 people-units ruling): a box
+      // counts people unless it SAYS otherwise. Declared units ride to the
+      // page so nothing renders a role count where people-counts flow.
+      ...(st.unit ? { unit: st.unit } : {}),
     };
     if (st.secondary) {
       const v = resolvePath(ctx, st.secondary.countKey);
-      if (v != null) out.secondary = { label: st.secondary.label, count: v };
+      if (v != null) {
+        out.secondary = {
+          label: st.secondary.label, count: v,
+          ...(st.secondary.unit ? { unit: st.secondary.unit } : {}),
+        };
+      }
     }
     if (st.histogramKey) {
       const hist = objectAt(ctx, st.histogramKey);
@@ -292,21 +341,94 @@ export function flowFor(row, feeds) {
       if (entries.length) {
         out.subcounts = entries.slice(0, HISTOGRAM_TOP)
           .map(([k, v]) => ({ label: k.replace(/_/g, " "), count: v }));
-        if (out.count == null) out.count = entries.reduce((sum, [, v]) => sum + v, 0);
       }
+      // A PRESENT histogram with no entries is an honest zero (nothing held
+      // back this tick); only an ABSENT one stays null ("—" — e.g. a feed
+      // that predates the per-tick skips field).
+      if (out.count == null && hist) out.count = entries.reduce((sum, [, v]) => sum + v, 0);
+    }
+    // BUCKET ROW (2026-08-23): a stage that is a short stack of small tiles
+    // between chain nodes — the interview lane's call-outcome buckets. Each
+    // bucket resolves its own countKey; a missing path is a "—" tile, and
+    // the stage only counts as resolved when every bucket did (so a pre-v2
+    // feed honestly flags the flow as missing data).
+    if (Array.isArray(st.buckets) && st.buckets.length) {
+      out.kind = "buckets";
+      out.tiles = st.buckets.map((b) => ({
+        id: b.id,
+        label: b.label,
+        count: b.countKey ? resolvePath(ctx, b.countKey) : null,
+        ...(b.accent ? { accent: b.accent } : {}),
+      }));
+      if (out.count == null) {
+        const counts = out.tiles.map((t) => t.count);
+        out.count = counts.every((c) => c != null)
+          ? counts.reduce((a, c) => a + c, 0)
+          : null;
+      }
+    }
+    // POOL BY REASON (same redesign): one tile per entry of a feed-published
+    // {token: count} object, labeled by the feed's own labels map with the
+    // raw token as the fallback, sorted by count, capped at POOL_TILE_CAP
+    // with an "Other" rollup. A missing pool object stays null ("—"), never
+    // zero; a present-but-empty one is an honest 0 with no tiles.
+    if (st.poolKey) {
+      const pool = objectAt(ctx, st.poolKey);
+      out.kind = "pool";
+      if (pool) {
+        const labels = objectAt(ctx, st.labelsKey) ?? {};
+        const entries = Object.entries(pool)
+          .map(([k, v]) => [k, finiteOrNull(v)])
+          .filter(([, v]) => v != null)
+          .sort((a, b) => b[1] - a[1]);
+        const cap = Number.isInteger(st.cap) && st.cap > 0 ? st.cap : POOL_TILE_CAP;
+        out.tiles = entries.slice(0, cap).map(([k, v]) => ({
+          id: k,
+          label: typeof labels[k] === "string" && labels[k].trim() ? labels[k] : k,
+          count: v,
+          ...(st.tileAccent ? { accent: st.tileAccent } : {}),
+        }));
+        const rest = entries.slice(cap);
+        if (rest.length) {
+          out.tiles.push({
+            id: "overflow",
+            label: "Other",
+            count: rest.reduce((a, [, v]) => a + v, 0),
+            ...(st.tileAccent ? { accent: st.tileAccent } : {}),
+          });
+        }
+        if (out.count == null) out.count = entries.reduce((a, [, v]) => a + v, 0);
+        if (st.tileAccent && !out.accent) out.accent = st.tileAccent;
+      }
+      // no pool published yet: header "—", no tiles
     }
     return out;
   });
   // counted: this flow is expected to show numbers (so a missing one renders
-  // an honest "—"). A purely structural flow (interview-invites) opts in via
-  // countsNote; generic client-drawn flows show labels only.
-  const counted = flow.stages.some((st) => st.countKey || st.histogramKey) || Boolean(flow.countsNote);
+  // an honest "—"). A purely structural flow opts in via countsNote; generic
+  // client-drawn flows show labels only.
+  const counted = flow.stages.some((st) => st.countKey || st.histogramKey || st.buckets || st.poolKey)
+    || Boolean(flow.countsNote);
   const missing = counted && stages.some((st) => st.count == null);
   let note = flow.countsNote || null;
   if (!note && row.feed === "paraai-curated-fit-heartbeat") {
     const hb = feeds?.["paraai-curated-fit-heartbeat"]?.data;
     if (!hb || Number(hb.version) < 2) {
       note = "The heartbeat is still v1 — it publishes these counts after the next tick.";
+    }
+  }
+  // Old-feed honesty notes (never a silently mixed clock): say WHY the new
+  // boxes are dashes while a lane's feed predates its v2 fields.
+  if (!note && row.id === "match-watch") {
+    const run = feeds?.["match-watch-status"]?.data?.latestRun;
+    if (run && (run.skips == null || run.candidatesWithAdds == null)) {
+      note = "This feed predates the per-tick fields — the dashed boxes fill in after the next morning tick.";
+    }
+  }
+  if (!note && row.id === "interview-invites") {
+    const iv = feeds?.["interview-lane-status"]?.data;
+    if (iv && Number(iv.version) < 2) {
+      note = "The lane's feed is still v1 — call outcomes and per-reason parked tiles fill in after the next cycle publishes v2.";
     }
   }
   return {
@@ -326,13 +448,15 @@ export function backlogFor(row, feeds) {
     if (!owed || !Number.isFinite(Number(owed.candidates))) return null;
     const candidates = Number(owed.candidates);
     const roles = Number(owed.roles);
+    const pile = mwPile(data);
     return {
       label: "owed",
       count: candidates,
       detail: `${candidates} candidate${candidates === 1 ? "" : "s"}${Number.isFinite(roles) ? ` / ${roles} role entries` : ""} owed an email`,
-      ...(data.skipHistogram && typeof data.skipHistogram === "object"
-        ? { skipHistogram: data.skipHistogram }
-        : {}),
+      // THE STANDING PILE (v2 `pile`, v1 `skipHistogram`): everyone's current
+      // latest status — the all-time clock, rendered as its own labeled strip
+      // on the page, never inside the morning flow.
+      ...(pile ? { pile } : {}),
     };
   }
   if (row.id === "paraform-sequence-email") {
