@@ -1118,13 +1118,6 @@
       if (c.verdict==="no_show" && e.attendanceStatus==="unavailable")
         return { cls:"amber", border:true, label:"historical evidence unavailable",
           title:"The exact historical recorder artifact is no longer available. Attendance remains unknown and nothing will be sent automatically." };
-      if (c.verdict==="no_show" && !fuIsDefinitiveNoShow(c)){
-        if (stage.startsWith("paused") || stage.startsWith("removed"))
-          return { cls:"", label:"outreach stopped: unverified",
-            title:"The recorder's no-show label lacked explicit no-one-ever-joined proof, so sequence outreach was stopped. The action history is retained for audit." };
-        return { cls:"amber", border:true, label:"attendance unverified",
-          title:"The recorder labelled this call a no-show, but Recall did not provide its explicit no-one-ever-joined outcome. Nothing will be sent automatically." };
-      }
       // Connector referrals are followed up on the referrer's own email thread
       // by the Connector Referral Follow-Ups lane, so the engine deliberately
       // keeps them OUT of the Paraform reschedule sequence (David, 2026-08-06).
@@ -1161,6 +1154,15 @@
       if (stage==="enrolling" || stage==="manual_enrolling" || stage==="enrolled_unverified" || stage==="manual_enrolled_unverified")
         return { cls:"amber", label:"verification pending",
           title:"Paraform may already contain this lead. Automatic readback is reconciling membership and email; do not add it again." };
+      if (fuStageIs(stage,["failed_add_unverified"]))
+        return { cls:"amber", border:true, label:"needs review: possible live lead",
+          title:`The engine used up its enrollment attempts without proving a sequence lead${e.lastError?`: ${e.lastError}`:""}. It will not try again — check Paraform for a live lead before acting.` };
+      if (stage==="manual_review_timeout")
+        return { cls:"", label:"too old to auto-email",
+          title:"This call is past the automatic follow-up window, so no reschedule email will be sent. Reach out by hand if it still matters." };
+      if (stage==="dry_run")
+        return { cls:"amber", label:"dry run: would enroll",
+          title:"The engine cleared every guard for this candidate but is running in DRY_RUN, so nothing was sent." };
       if (stage==="expired_window")
         return { cls:"amber", border:true, label:"recovery required",
           title:"The original automatic window expired without a verified enrollment. Confirmed calls recover automatically; otherwise review the exact call." };
@@ -1176,6 +1178,17 @@
       if (stage.startsWith("skipped_")){
         const why = stage.slice(8).replace(/_/g," ");
         return { cls:"", label:"blocked: "+why, title:`The engine evaluated this candidate and held off — ${why}${e.rule?` (rule: ${e.rule})`:""}.` };
+      }
+      // Attendance-unverified is a FALLBACK, never a mask: every stage above
+      // says what actually happened to this person and wins over it. Since the
+      // 2026-08-23 engine rebuild an unverified no-show with no human trace on
+      // the call IS emailed, so the copy no longer promises silence.
+      if (c.verdict==="no_show" && !fuIsDefinitiveNoShow(c)){
+        if (stage.startsWith("paused") || stage.startsWith("removed"))
+          return { cls:"", label:"outreach stopped: unverified",
+            title:"The recorder's no-show label lacked explicit no-one-ever-joined proof, and sequence outreach was stopped. The action history is retained for audit." };
+        return { cls:"amber", border:true, label:"attendance unverified",
+          title:"The recorder labelled this a no-show without explicit no-one-ever-joined proof. No human trace was found on the call either, so the reschedule email still goes out automatically." };
       }
       if (stage==="manual_oracle_blocked")
         return { cls:"", label:"blocked by call evidence",
