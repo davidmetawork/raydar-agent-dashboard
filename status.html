@@ -109,7 +109,16 @@
   .fsub{font:500 10px "Inter Variable",-apple-system,sans-serif;fill:var(--muted)}
   .fedge{fill:none;stroke:#C9C2B2;stroke-width:1.5}
   .fhead{fill:#C9C2B2}
+  .ftile{fill:#F8F6F0;stroke:var(--line);stroke-width:1}
+  .ftile.warm{fill:var(--warn-bg);stroke:#EEDBB4}
+  .ftile.hot{fill:var(--bad-bg);stroke:#F3C9CA}
+  .ftxt{font:600 10.5px "Inter Variable",-apple-system,sans-serif;fill:var(--ink-2);font-variant-numeric:tabular-nums}
+  .ftxt.miss{fill:var(--muted)}
+  .ftxt.warmc{fill:var(--warn)}
+  .ftxt.hotc{fill:var(--bad)}
+  .funit{font:500 10px "Inter Variable",-apple-system,sans-serif;fill:var(--muted)}
   .fnote{color:var(--muted);font-size:11.5px;margin:2px 0}
+  .pilestrip{background:var(--muted-bg);border:1px solid var(--line);border-radius:10px;padding:7px 11px;font-size:12px;color:var(--ink-2);margin:6px 0}
 
   /* ── activity + detail inside the panel ── */
   .dh{font-weight:700;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3);margin:10px 0 4px}
@@ -232,10 +241,20 @@ function drawFlow(flow){
   const W=150,GX=54,PADX=6,PADY=6,VGAP=14;
   const counted=Boolean(flow.counted);
   const geo=new Map();
+  const TILE_H=20,TILE_GAP=4;
   for(const s of stages){
     const lines=wrapLabel(s.label);
-    const extra=(s.secondary?1:0)+((s.subcounts||[]).length);
-    const h=counted ? 34+lines.length*13+extra*13+8 : 12+lines.length*14+12;
+    let h;
+    if(s.tiles){
+      // Tile stages (call-outcome buckets, per-reason pools): a header —
+      // pool stages lead with their total, bucket stages with the label —
+      // then one small tile per entry.
+      const headH=(s.kind==="pool"?30:8)+lines.length*13;
+      h=s.tiles.length ? headH+4+s.tiles.length*(TILE_H+TILE_GAP)+2 : headH+8;
+    } else {
+      const extra=(s.secondary?1:0)+((s.subcounts||[]).length);
+      h=counted ? 34+lines.length*13+extra*13+8 : 12+lines.length*14+12;
+    }
     geo.set(s.id,{lines,h});
   }
   const cols=new Map();
@@ -261,9 +280,28 @@ function drawFlow(flow){
     const warm=s.accent==="warn-when-positive"&&(s.count||0)>0;
     parts.push(`<g transform="translate(${g.x},${g.y})">`);
     parts.push(`<rect class="fnode${hot?" hot":warm?" warm":""}" width="${W}" height="${g.h}" rx="10"/>`);
-    if(counted){
+    if(counted&&s.tiles){
+      // Tile stages: pool stages lead with their total (unit-suffixed so a
+      // bookings count never reads as people), bucket stages with the label.
+      let ty;
+      if(s.kind==="pool"){
+        const miss=s.count==null;
+        parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
+        ty=40;
+      } else { ty=18; }
+      for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
+      ty+=4;
+      for(const t of s.tiles){
+        const tHot=t.accent==="bad-when-positive"&&(t.count||0)>0;
+        const tWarm=t.accent==="warn-when-positive"&&(t.count||0)>0;
+        parts.push(`<rect class="ftile${tHot?" hot":tWarm?" warm":""}" x="8" y="${ty}" width="${W-16}" height="${TILE_H}" rx="6"/>`);
+        const full=fmt(t.count)+" "+t.label;
+        parts.push(`<text class="ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}" x="14" y="${ty+14}">${esc(clip(full,22))}<title>${esc(full)}</title></text>`);
+        ty+=TILE_H+TILE_GAP;
+      }
+    } else if(counted){
       const miss=s.count==null;
-      parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}</text>`);
+      parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
       let ty=40;
       for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
       if(s.secondary){ parts.push(`<text class="fsub" x="12" y="${ty}">${esc(fmt(s.secondary.count))} ${esc(clip(s.secondary.label,20))}</text>`); ty+=13; }
@@ -346,11 +384,23 @@ function renderPanel(sys){
   if(sys.historyStart) bits.push("Per-run history starts "+esc(sys.historyStart)+" — earlier runs were not recorded per-run.");
   if(sys.unverified&&sys.unverified.length) bits.push("Unverified: "+esc(sys.unverified.join("; "))+".");
 
-  const backlog=sys.backlog?`<div class="dnote"><b>Backlog:</b> ${esc(sys.backlog.detail||"")}</div>`+
-    (sys.backlog.skipHistogram?`<div class="dnote">Why candidates were skipped (latest reason each): ${
-      esc(Object.entries(sys.backlog.skipHistogram).sort((a,b)=>b[1]-a[1]).slice(0,6)
-        .map(([k,v])=>k.replace(/_/g," ")+" "+v).join(" · "))}</div>`:"")
-    :"";
+  const backlog=sys.backlog?`<div class="dnote"><b>Backlog:</b> ${esc(sys.backlog.detail||"")}</div>`:"";
+
+  // THE STANDING PILE (one-clock ruling, 2026-08-23): the all-time view —
+  // everyone's CURRENT latest status — renders as its own clearly-labeled
+  // strip BELOW the morning flow, never inside it. One person, one vote
+  // (their latest reason); from the feed's `pile` field.
+  let pile="";
+  const pileMap=sys.backlog&&sys.backlog.pile;
+  if(pileMap&&typeof pileMap==="object"){
+    const entries=Object.entries(pileMap).map(([k,v])=>[k,Number(v)])
+      .filter(([,v])=>isFinite(v)).sort((a,b)=>b[1]-a[1]);
+    if(entries.length){
+      const top=entries.slice(0,6).map(([k,v])=>fmt(v)+" "+k.replace(/_/g," ")).join(" · ");
+      const rest=entries.slice(6).reduce((a,[,v])=>a+v,0);
+      pile=`<div class="pilestrip"><b>The standing pile</b> — everyone's current status, all-time (latest reason each): ${esc(top)}${rest>0?" · "+esc(fmt(rest))+" other":""}</div>`;
+    }
+  }
 
   const links=[];
   if(sys.links&&sys.links.health) links.push(`<a href="${esc(sys.links.health)}" target="_top">Health tile ↗</a>`);
@@ -369,6 +419,7 @@ function renderPanel(sys){
     <div class="psum">${esc(sys.summary)}</div>
     ${drawFlow(flow)}
     ${fnotes.map((n)=>`<div class="fnote">${n}</div>`).join("")}
+    ${pile}
     ${backlog}
     <div class="dh">Recent activity</div>
     ${acts||'<div class="dnote">Nothing recorded yet.</div>'}

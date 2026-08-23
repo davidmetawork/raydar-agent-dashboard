@@ -29,7 +29,7 @@ import {
 } from "../api/status/_lib/systems.mjs";
 import {
   buildState, systemStatus, mergeActivity, deriveTodos, backlogFor, feedStampFor,
-  flowFor, resolvePath,
+  flowFor, resolvePath, POOL_TILE_CAP,
 } from "../api/status/state.mjs";
 
 // ── 1. catalog invariants ───────────────────────────────────────────────────
@@ -224,14 +224,18 @@ test("todo gating: items appear only while their signal is live", () => {
   assert.ok(!expired.some((t) => t.id === "gmail-breaker"));
 });
 
-test("backlogs: match-watch owed + skips, curate v1 stays silent, static eligible parses", () => {
+test("backlogs: match-watch owed + the standing pile, curate v1 stays silent, static eligible parses", () => {
   const feeds = {
     "match-watch-status": { data: { owed: { candidates: 52, roles: 122 }, skipHistogram: { not_in_talent_network: 1285 } } },
     "paraai-curated-fit-heartbeat": { data: { version: 1, lastRun: "2026-08-21T23:54:58Z" } },
   };
   const mw = backlogFor(SYSTEMS.find((s) => s.id === "match-watch"), feeds);
   assert.equal(mw.count, 52);
-  assert.equal(mw.skipHistogram.not_in_talent_network, 1285);
+  // v1 feed: the pile comes from the deprecated skipHistogram alias.
+  assert.equal(mw.pile.not_in_talent_network, 1285);
+  // v2 feed: `pile` is preferred over the alias when both are present.
+  feeds["match-watch-status"].data.pile = { not_in_talent_network: 1298 };
+  assert.equal(backlogFor(SYSTEMS.find((s) => s.id === "match-watch"), feeds).pile.not_in_talent_network, 1298);
   // v1 heartbeat has no counts — no invented backlog
   assert.equal(backlogFor(SYSTEMS.find((s) => s.id === "paraform-sequence-email"), feeds), null);
   // v2, when it arrives, is picked up without a code change
@@ -280,30 +284,102 @@ test("flowFor: any feed shape resolves without throwing; missing paths are null,
   assert.ok(mw.stages.every((st) => st.count === null));
 });
 
-test("flowFor: match-watch counts resolve from its feed; held-back pools the skip histogram", () => {
+test("flowFor: match-watch is ONE CLOCK — this morning's ring entry only, and the people-math adds up", () => {
   const feeds = { "match-watch-status": { data: {
-    latestRun: { cohort: 3477, checked: 3477, curatedAdds: 341, sends: 32 },
-    sentTotal: 320,
-    owed: { candidates: 52 },
-    skipHistogram: {
-      not_in_talent_network: 1285, matches_not_generated_today: 715,
-      suppressed_role_interview_flow: 40, auto_off_market_awaiting_reenable: 22, other: 5,
+    version: 2,
+    latestRun: {
+      cohort: 3477, checked: 3324, curatedAdds: 341, candidatesWithAdds: 234, sends: 32,
+      skips: { matches_not_generated_today: 2890, not_in_talent_network: 100, gmail_breaker: 10 },
     },
+    sentTotal: 132,
+    owed: { candidates: 4, roles: 8 },
+    // The standing pile is DIFFERENT from this tick's skips — it must never
+    // leak into the flow (the day-one 3,324−3,090=234 coincidence).
+    pile: { not_in_talent_network: 1298, matches_not_generated_today: 732, other: 1060 },
+    skipHistogram: { not_in_talent_network: 1298, matches_not_generated_today: 732, other: 1060 },
   } } };
   const flow = flowFor(rowById("match-watch"), feeds);
   const by = new Map(flow.stages.map((s) => [s.id, s]));
   assert.equal(by.get("called").count, 3477);
-  assert.equal(by.get("checked").count, 3477);
-  assert.equal(by.get("added").count, 341);
+  assert.equal(by.get("examined").count, 3324);
+  assert.equal(by.get("matchable").count, 324); // checked − THIS tick's skips, same ring entry
+  assert.equal(by.get("adds").count, 234);      // PEOPLE with new roles; roles are the secondary
+  assert.deepEqual(by.get("adds").secondary, { label: "roles", count: 341, unit: "roles" });
+  assert.equal(by.get("nothing").count, 90);    // the remainder that makes the math visible
   assert.equal(by.get("emailed").count, 32);
-  assert.deepEqual(by.get("emailed").secondary, { label: "all-time", count: 320 });
-  assert.equal(by.get("owed").count, 52);
+  assert.equal(by.get("owed").count, 4);
   assert.equal(by.get("owed").accent, "bad-when-positive"); // RED when > 0
+  assert.deepEqual(by.get("owed").secondary, { label: "role entries", count: 8, unit: "roles" });
   const held = by.get("held");
-  assert.equal(held.count, 1285 + 715 + 40 + 22 + 5); // the pool sums the whole histogram
-  assert.equal(held.subcounts.length, 4); // top buckets, labeled sub-counts
-  assert.deepEqual(held.subcounts[0], { label: "not in talent network", count: 1285 });
+  assert.equal(held.count, 3000, "held-back is THIS tick's skips, never the 3,090-person standing pile");
+  assert.deepEqual(held.subcounts[0], { label: "matches not generated today", count: 2890 });
+  // PEOPLE-MATH: examined = matchable + held; matchable = new-roles + nothing-new.
+  assert.equal(by.get("examined").count, by.get("matchable").count + held.count);
+  assert.equal(by.get("matchable").count, by.get("adds").count + by.get("nothing").count);
   assert.ok(!flow.missing);
+  assert.match(flow.sourceNote, /One clock/);
+});
+
+test("flowFor: a match-watch feed without the per-tick fields draws dashes — never the pile's clock", () => {
+  const feeds = { "match-watch-status": { data: {
+    version: 1,
+    latestRun: { cohort: 3477, checked: 3324, curatedAdds: 341, sends: 32 },
+    sentTotal: 132,
+    owed: { candidates: 4, roles: 8 },
+    skipHistogram: { not_in_talent_network: 1298, matches_not_generated_today: 732, other: 1060 },
+  } } };
+  const flow = flowFor(rowById("match-watch"), feeds);
+  const by = new Map(flow.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("examined").count, 3324);
+  for (const id of ["matchable", "adds", "nothing", "held"]) {
+    assert.equal(by.get(id).count, null,
+      `${id} must dash on an old feed — 3,324−3,090=234 was a day-one coincidence across two clocks, not math`);
+  }
+  assert.ok(flow.missing);
+  assert.match(flow.note, /predates the per-tick fields/);
+  // An empty-but-present skips map is an honest zero, not a dash.
+  feeds["match-watch-status"].data.latestRun.skips = {};
+  feeds["match-watch-status"].data.latestRun.candidatesWithAdds = 0;
+  const zero = flowFor(rowById("match-watch"), feeds);
+  const zby = new Map(zero.stages.map((s) => [s.id, s]));
+  assert.equal(zby.get("held").count, 0);
+  assert.equal(zby.get("matchable").count, 3324);
+  assert.equal(zby.get("adds").count, 0);
+  assert.equal(zby.get("nothing").count, 3324);
+  assert.ok(!zero.note);
+});
+
+test("UNITS: a count in role units is declared unit:'roles' and only ever a secondary line", () => {
+  const ROLES_KEYS = new Set(["feed.latestRun.curatedAdds", "feed.owed.roles"]);
+  for (const id of FLOW_ROWS) {
+    for (const st of rowById(id).flow.stages) {
+      if (st.countKey) {
+        assert.ok(!ROLES_KEYS.has(st.countKey), `${id}/${st.id}: a roles count as a primary box`);
+      }
+      for (const b of st.buckets || []) {
+        assert.ok(!ROLES_KEYS.has(b.countKey), `${id}/${st.id}/${b.id}: a roles count as a tile`);
+      }
+      if (st.secondary && ROLES_KEYS.has(st.secondary.countKey)) {
+        assert.equal(st.secondary.unit, "roles", `${id}/${st.id}: roles secondary must declare its unit`);
+      }
+      // Any box not counting people must say what it counts.
+      if (st.unit) assert.ok(st.unit === "bookings", `${id}/${st.id}: unknown unit "${st.unit}"`);
+    }
+  }
+  // The interview outcome + parked stages count bookings, and say so — and
+  // the declaration rides through resolution to the page.
+  const iv = rowById("interview-invites");
+  assert.equal(iv.flow.stages.find((s) => s.id === "outcome").unit, "bookings");
+  assert.equal(iv.flow.stages.find((s) => s.id === "held").unit, "bookings");
+  const resolved = flowFor(iv, { "interview-lane-status": { data: { version: 2 } } });
+  assert.equal(resolved.stages.find((s) => s.id === "outcome").unit, "bookings");
+  const mw = flowFor(rowById("match-watch"), { "match-watch-status": { data: {
+    version: 2,
+    latestRun: { checked: 5, skips: {}, candidatesWithAdds: 1, curatedAdds: 3 },
+    owed: { candidates: 2, roles: 6 },
+  } } });
+  const adds = mw.stages.find((s) => s.id === "adds");
+  assert.equal(adds.secondary.unit, "roles");
 });
 
 test("flowFor: tn-reenable derives from the match-watch sweep, window labeled honestly", () => {
@@ -324,6 +400,17 @@ test("flowFor: tn-reenable derives from the match-watch sweep, window labeled ho
     { "match-watch-status": { data: { latestRun: { cohort: 3477 } } } });
   assert.equal(new Map(partial.stages.map((s) => [s.id, s])).get("intn").count, null);
   assert.ok(partial.missing);
+  // v2 feeds publish the same histogram as `pile` — resolved identically,
+  // and preferred over the deprecated alias when both are present.
+  const v2 = flowFor(rowById("tn-reenable"), { "match-watch-status": { data: {
+    latestRun: { cohort: 3477 },
+    pile: { not_in_talent_network: 1290, auto_off_market_awaiting_reenable: 21 },
+    skipHistogram: { not_in_talent_network: 9999, auto_off_market_awaiting_reenable: 9999 },
+  } } });
+  const vby = new Map(v2.stages.map((s) => [s.id, s]));
+  assert.equal(vby.get("missing").count, 1290);
+  assert.equal(vby.get("intn").count, 3477 - 1290);
+  assert.equal(vby.get("offmarket").count, 21);
 });
 
 test("flowFor: curate v1 renders structure with the next-tick note; v2 fills the counts", () => {
@@ -348,32 +435,109 @@ test("flowFor: curate v1 renders structure with the next-tick note; v2 fills the
   assert.ok(!f2.note, "a v2 heartbeat needs no still-v1 note");
 });
 
-test("flowFor: interview-invites counts resolve from its own funnel feed", () => {
+test("flowFor: interview-invites resolves the v2 feed — outcome buckets and per-reason parked tiles", () => {
   const row = rowById("interview-invites");
   assert.equal(row.feed, "interview-lane-status"); // the row names its feed
   const feeds = { "interview-lane-status": { data: {
-    version: 1, generatedAt: "2026-08-22T22:28:08Z",
+    version: 2, generatedAt: "2026-08-23T03:33:55Z",
     funnel: {
-      applicants: 8334, candidates: 90753, enrolled: 1747, emailedOnce: 1728,
-      bookedPeople: 745, bookings: 833,
-      followupsSent: 503, followupsParked: 308, followupsPending: 17, followupsSkipped: 5,
+      applicants: 8334, candidates: 90753, poolSource: "index+topup",
+      enrolled: 1747, emailedOnce: 1728,
+      bookedPeople: 747, bookings: 836,
+      followupsSent: 503, followupsParked: 312, followupsPending: 16, followupsSkipped: 5,
     },
-    sendsByStep: { 1: 1728, 2: 944, 3: 396, 4: 158 },
-    sentToday: 127,
+    // The six fixed buckets sum to total bookings (the feed's contract).
+    outcomes: {
+      successfulCall: 512, noShow: 229, callBroke: 34,
+      askedForHuman: 35, undetermined: 18, notOurs: 8,
+    },
+    // 8 families: 6 tiles + an Other rollup of the smallest two.
+    parkedByReason: {
+      call_no_show: 229, candidate_requested_human: 35, call_not_dispatched: 22,
+      call_evidence_unavailable: 17, no_recording_no_outreach_david_rule: 6,
+      transcript_failed: 3, junk_field: 2, some_future_reason: 1,
+    },
+    labels: {
+      call_no_show: "Candidate did not show up",
+      candidate_requested_human: "Asked for a human",
+      call_not_dispatched: "Our agent never joined",
+      call_evidence_unavailable: "Recording service unreachable",
+      no_recording_no_outreach_david_rule: "No recording, so no email",
+      // transcript_failed deliberately unlabeled — raw-token fallback
+    },
+    sendsByStep: { 1: 1728, 2: 944, 3: 396, 4: 217 },
+    sentToday: 186,
   } } };
   const flow = flowFor(row, feeds);
   const by = new Map(flow.stages.map((s) => [s.id, s]));
   assert.equal(by.get("applicants").count, 8334);
   assert.equal(by.get("invited").count, 1747);
   assert.equal(by.get("emailed").count, 1728);
-  assert.deepEqual(by.get("emailed").secondary, { label: "today", count: 127 });
-  assert.equal(by.get("booked").count, 745);
-  assert.deepEqual(by.get("booked").secondary, { label: "bookings", count: 833 });
+  assert.deepEqual(by.get("emailed").secondary, { label: "today", count: 186 });
+  assert.equal(by.get("booked").count, 747);
+  assert.deepEqual(by.get("booked").secondary, { label: "bookings", count: 836, unit: "bookings" });
   assert.equal(by.get("fit").count, 503);
-  assert.equal(by.get("in-review").count, 308); // the parked side pool
-  assert.equal(by.get("in-review").accent, "bad-when-positive"); // humans owed a look
+  assert.ok(!by.has("in-review"), "the vague In-review pool is gone (David's 2026-08-23 ruling)");
+
+  // The outcome bucket row, between Booked and Follow-up sent.
+  const outcome = by.get("outcome");
+  assert.equal(outcome.kind, "buckets");
+  assert.equal(outcome.count, 836, "the six buckets sum to total bookings");
+  assert.equal(outcome.unit, "bookings");
+  assert.equal(outcome.tiles.length, 6);
+  assert.deepEqual(outcome.tiles[0], { id: "ok", label: "Successful call", count: 512 });
+  const noshow = outcome.tiles.find((t) => t.id === "noshow");
+  assert.equal(noshow.count, 229);
+  assert.equal(noshow.accent, "warn-when-positive"); // amber, not red — counted, owned elsewhere
+  assert.equal(outcome.tiles.find((t) => t.id === "broke").accent, "warn-when-positive");
+  assert.ok(!outcome.tiles.find((t) => t.id === "human").accent, "asking for a human is a normal outcome");
+  // the honesty remainders render too — nothing is silently absorbed
+  assert.equal(outcome.tiles.find((t) => t.id === "undetermined").count, 18);
+  assert.equal(outcome.tiles.find((t) => t.id === "notours").count, 8);
+
+  // Per-reason parked tiles: feed labels, raw-token fallback, cap + Other.
+  const held = by.get("held");
+  assert.equal(held.kind, "pool");
+  assert.equal(held.count, 229 + 35 + 22 + 17 + 6 + 3 + 2 + 1);
+  assert.equal(held.tiles.length, POOL_TILE_CAP + 1); // 6 + the Other rollup
+  assert.deepEqual(held.tiles[0], {
+    id: "call_no_show", label: "Candidate did not show up", count: 229,
+    accent: "warn-when-positive",
+  });
+  assert.equal(held.tiles[5].id, "transcript_failed");
+  assert.equal(held.tiles[5].label, "transcript_failed", "an unlabeled family falls back to its raw token");
+  const other = held.tiles[6];
+  assert.equal(other.id, "overflow");
+  assert.equal(other.label, "Other");
+  assert.equal(other.count, 2 + 1, "families past the cap roll up");
+  assert.equal(held.accent, "warn-when-positive");
+
+  // Ownership honesty: the note declares which outcomes other lanes own.
+  assert.match(flow.sourceNote, /rebooking them belongs to the lifecycle no-show lane/);
+  assert.match(flow.sourceNote, /per booking/);
   assert.ok(!flow.missing);
-  assert.match(flow.sourceNote, /own published status feed/);
+  assert.ok(!flow.note, "a v2 feed needs no still-v1 note");
+});
+
+test("flowFor: a v1 interview feed keeps the chain and dashes the new stages, with the honest note", () => {
+  const feeds = { "interview-lane-status": { data: {
+    version: 1, generatedAt: "2026-08-23T03:33:55Z",
+    funnel: {
+      applicants: 839, candidates: null, enrolled: 1747, emailedOnce: 1728,
+      bookedPeople: 747, bookings: 836,
+      followupsSent: 503, followupsParked: 312, followupsPending: 16, followupsSkipped: 5,
+    },
+    sentToday: 186,
+  } } };
+  const flow = flowFor(rowById("interview-invites"), feeds);
+  const by = new Map(flow.stages.map((s) => [s.id, s]));
+  assert.equal(by.get("booked").count, 747);
+  assert.equal(by.get("outcome").count, null, "no invented outcome counts from a v1 feed");
+  for (const t of by.get("outcome").tiles) assert.equal(t.count, null);
+  assert.equal(by.get("held").count, null);
+  assert.ok(!by.get("held").tiles, "no invented parked tiles from a v1 feed");
+  assert.ok(flow.missing);
+  assert.match(flow.note, /still v1/);
 });
 
 test("flowFor: interview-invites before the first publish — every stage is a dash, never 0", () => {
@@ -464,12 +628,15 @@ test("buildState: feed present → annotated activity, backlog, measured Parafor
   assert.equal(mw.activity[0].stamp, "partial"); // 5 alerts → partial, not FAILED
   assert.match(mw.activity[0].note, /GitHub shows FAILED/);
   assert.equal(mw.backlog.count, 52);
-  assert.equal(mw.backlog.skipHistogram.not_in_talent_network, 1285);
+  assert.equal(mw.backlog.pile.not_in_talent_network, 1285); // alias fallback — never a 404 on shape
   // priority + resolved flow ride through the aggregator contract
   assert.equal(mw.priority, 1);
   const mwStages = new Map(mw.flow.stages.map((s) => [s.id, s]));
   assert.equal(mwStages.get("called").count, 3477);
   assert.equal(mwStages.get("owed").count, 52);
+  // this feed body predates the per-tick fields: derived boxes dash, noted
+  assert.equal(mwStages.get("matchable").count, null);
+  assert.match(mw.flow.note, /predates the per-tick fields/);
   assert.equal(flat.find((s) => s.id === "human-handoff").flow, null); // generic rows carry none
 
   // curate feed 404 → tolerated as "first publish pending", nothing thrown
@@ -580,6 +747,15 @@ test("status.html: thin strips, importance sort, drawn flows, embed contract, no
   assert.match(html, /function drawFlow/);
   assert.match(html, /function genericFlow/);
   assert.match(html, /never assumed to be zero/);
+  // the 2026-08-23 one-clock additions: tile stages (outcome buckets +
+  // per-reason pools) and the standing pile as its own labeled strip that
+  // renders OUTSIDE the flow, from the feed's pile field
+  assert.match(html, /class="ftile/);
+  assert.match(html, /s\.tiles/);
+  assert.match(html, /The standing pile<\/b> — everyone's current status/);
+  assert.match(html, /pilestrip/);
+  assert.match(html, /sys\.backlog\.pile/);
+  assert.doesNotMatch(html, /skipHistogram/, "the page must not read the deprecated alias — the aggregator resolves it");
   // David's words, spelled exactly
   for (const word of ["Sending", "Paused", "Not sending yet", "Read-only", "Manual", "Frozen"]) {
     assert.ok(html.includes(`"${word}"`), `missing plain state word ${word}`);
