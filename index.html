@@ -1053,6 +1053,20 @@
       return Number.isFinite(endedMs) && nowMs-endedMs < FU_PENDING_MS;
     }
     const fuStageIs = (stage, names) => names.some(name=>stage===name||stage===`manual_${name}`);
+    // The engine publishes a short, non-PII reason code for stuck rows.
+    const FU_REASONS = {
+      no_paraform_match:"no matching Paraform profile was found for this call",
+      no_recall_metadata:"the recorder's booking details for this call are unavailable",
+      identity_conflict:"the call's booking details disagree with the matched Paraform profile",
+      no_verified_email:"the Paraform profile has no confirmed email address",
+      sequence_unavailable:"the target sequence is missing, renamed, or switched off in Paraform",
+      paraform_throttled:"Paraform is rate-limiting us right now",
+      oracle_unavailable:"the safety check could not read Paraform",
+      paraform_read_incomplete:"a Paraform list came back incomplete, so nothing was sent",
+      vendor_timeout:"a Paraform or recorder request timed out",
+      unexpected_error:"an unexpected error stopped this one",
+    };
+    const fuReasonText = (e) => e?.reasonCode && FU_REASONS[e.reasonCode] ? ` — ${FU_REASONS[e.reasonCode]}` : "";
     function fuIsDefinitiveNoShow(c){
       return c?.verdict==="no_show"
         && (fuLedgerEntry(c)?.attendanceStatus==="confirmed_no_show"
@@ -1144,19 +1158,19 @@
           title:"The candidate's booking history exceeded the automated verification window. Nothing was sent; confirm cancellation or rebooking in Paraform before taking action." };
       if (fuStageIs(stage,["failed_identity","failed_ambiguous_identity"]))
         return { cls:"amber", border:true, label:"needs recovery: identity",
-          title:stage.includes("ambiguous") ? "The exact call matched more than one Paraform identity. Verify the candidate's LinkedIn profile." : "The exact call could not yet be tied to a Paraform profile. Automatic recovery will retry." };
+          title:(stage.includes("ambiguous") ? "The exact call matched more than one Paraform identity. Verify the candidate's LinkedIn profile." : "The exact call could not yet be tied to a Paraform profile. Automatic recovery will retry.")+fuReasonText(e) };
       if (fuStageIs(stage,["failed_no_email"]) || stage==="enrolled_missing_email" || stage==="manual_enrolled_missing_email")
         return { cls:"amber", border:true, label:"needs email",
           title:"The exact Paraform profile or sequence lead does not have a read-back-verified email. Recovery will retry; open Paraform if it persists." };
       if (fuStageIs(stage,["failed_error"]) || stage==="manual_target_unavailable")
         return { cls:"amber", border:true, label:"recovery failed",
-          title:`The last recovery attempt failed${e.lastError?`: ${e.lastError}`:""}. It remains retryable.` };
+          title:`The last recovery attempt failed${fuReasonText(e)}. It remains retryable.` };
       if (stage==="enrolling" || stage==="manual_enrolling" || stage==="enrolled_unverified" || stage==="manual_enrolled_unverified")
         return { cls:"amber", label:"verification pending",
           title:"Paraform may already contain this lead. Automatic readback is reconciling membership and email; do not add it again." };
       if (fuStageIs(stage,["failed_add_unverified"]))
         return { cls:"amber", border:true, label:"needs review: possible live lead",
-          title:`The engine used up its enrollment attempts without proving a sequence lead${e.lastError?`: ${e.lastError}`:""}. It will not try again — check Paraform for a live lead before acting.` };
+          title:`The engine used up its enrollment attempts without proving a sequence lead${fuReasonText(e)}. It will not try again — check Paraform for a live lead before acting.` };
       if (stage==="manual_review_timeout")
         return { cls:"", label:"too old to auto-email",
           title:"This call is past the automatic follow-up window, so no reschedule email will be sent. Reach out by hand if it still matters." };
