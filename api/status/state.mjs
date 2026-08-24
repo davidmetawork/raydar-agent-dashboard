@@ -244,7 +244,16 @@ function flowContext(row, feeds) {
       : null;
     const checked = finiteOrNull(run?.checked);
     const withAdds = finiteOrNull(run?.candidatesWithAdds);
-    const matchable = checked != null && skipTotal != null ? checked - skipTotal : null;
+    // COUNTED BY THE LANE, NOT DERIVED HERE (2026-08-24). This used to be
+    // `checked - skipTotal`, which rendered "-173 Matchable" and "-178 Nothing
+    // new today" on the live page. The two numbers count different
+    // populations: `checked` is incremented only after the early gates
+    // (tier-deferred, budget, tick deadline, cheap suppression, profile read),
+    // while `skips` is the histogram for the WHOLE tick including those gates.
+    // On 2026-08-23 that was 3,179 - 3,352. The lane now publishes `matchable`
+    // itself; ring entries older than the field carry null and render "—",
+    // which is the honest answer for a tick that never counted it.
+    const matchable = finiteOrNull(run?.matchable);
     return {
       feed: mw,
       derived: {

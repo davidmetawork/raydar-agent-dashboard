@@ -289,6 +289,9 @@ test("flowFor: match-watch is ONE CLOCK — this morning's ring entry only, and 
     version: 2,
     latestRun: {
       cohort: 3477, checked: 3324, curatedAdds: 341, candidatesWithAdds: 234, sends: 32,
+      // Counted by the lane. NOT checked − skips: those two count different
+      // populations and produced negative people on the live page 2026-08-23.
+      matchable: 324,
       skips: { matches_not_generated_today: 2890, not_in_talent_network: 100, gmail_breaker: 10 },
     },
     sentTotal: 132,
@@ -302,7 +305,7 @@ test("flowFor: match-watch is ONE CLOCK — this morning's ring entry only, and 
   const by = new Map(flow.stages.map((s) => [s.id, s]));
   assert.equal(by.get("called").count, 3477);
   assert.equal(by.get("examined").count, 3324);
-  assert.equal(by.get("matchable").count, 324); // checked − THIS tick's skips, same ring entry
+  assert.equal(by.get("matchable").count, 324); // the lane's own count, same ring entry
   assert.equal(by.get("adds").count, 234);      // PEOPLE with new roles; roles are the secondary
   assert.deepEqual(by.get("adds").secondary, { label: "roles", count: 341, unit: "roles" });
   assert.equal(by.get("nothing").count, 90);    // the remainder that makes the math visible
@@ -337,16 +340,46 @@ test("flowFor: a match-watch feed without the per-tick fields draws dashes — n
   }
   assert.ok(flow.missing);
   assert.match(flow.note, /predates the per-tick fields/);
-  // An empty-but-present skips map is an honest zero, not a dash.
+  // An empty-but-present skips map is an honest zero for HELD. Matchable still
+  // dashes: it is the lane's count, and a tick that never counted it has no
+  // answer to give — inferring one is what produced negative people.
   feeds["match-watch-status"].data.latestRun.skips = {};
   feeds["match-watch-status"].data.latestRun.candidatesWithAdds = 0;
   const zero = flowFor(rowById("match-watch"), feeds);
   const zby = new Map(zero.stages.map((s) => [s.id, s]));
   assert.equal(zby.get("held").count, 0);
-  assert.equal(zby.get("matchable").count, 3324);
   assert.equal(zby.get("adds").count, 0);
-  assert.equal(zby.get("nothing").count, 3324);
-  assert.ok(!zero.note);
+  assert.equal(zby.get("matchable").count, null);
+  assert.equal(zby.get("nothing").count, null);
+});
+
+test("flowFor: the live 2026-08-23 shape can no longer render negative people", () => {
+  // The exact numbers off the live feed the morning the page showed −173.
+  const feeds = { "match-watch-status": { data: {
+    version: 2,
+    latestRun: {
+      cohort: 3561, checked: 3179, curatedAdds: 5, candidatesWithAdds: 5, sends: 9,
+      skips: {
+        not_in_talent_network: 1214, matches_not_generated_today: 667,
+        suppressed_role_interview_flow: 518, auto_off_market_awaiting_reenable: 383,
+        tick_deadline_reached: 317, other: 253,
+      },
+    },
+    sentTotal: 132, owed: { candidates: 0, roles: 0 },
+  } } };
+  const by = new Map(flowFor(rowById("match-watch"), feeds).stages.map((s) => [s.id, s]));
+  // No `matchable` on this entry, so it dashes rather than reporting −173.
+  assert.equal(by.get("matchable").count, null);
+  assert.equal(by.get("nothing").count, null);
+  // And with the lane's own count present, it is a real headcount again.
+  feeds["match-watch-status"].data.latestRun.matchable = 206;
+  const fixed = new Map(flowFor(rowById("match-watch"), feeds).stages.map((s) => [s.id, s]));
+  assert.equal(fixed.get("matchable").count, 206);
+  assert.equal(fixed.get("nothing").count, 201);
+  for (const id of ["matchable", "nothing", "held", "examined"]) {
+    const n = fixed.get(id).count;
+    assert.ok(n == null || n >= 0, `${id} must never be a negative headcount`);
+  }
 });
 
 test("UNITS: a count in role units is declared unit:'roles' and only ever a secondary line", () => {
