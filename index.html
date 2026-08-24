@@ -513,7 +513,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence — once it has emailed someone, that row moves to <b>Handled</b> on its own; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who complete or rebook clear themselves automatically.</p>
+        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence — rows clear themselves into <b>Handled</b> once Raydar has emailed them, or once the ledger proves nothing more is owed (cancelled, moved, another call booked, replied); use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who complete or rebook clear themselves automatically.</p>
         <div id="followups"></div>
       </section>
     </div>
@@ -862,6 +862,17 @@
       // rebooked, Raydar has done the one thing it was going to do for them.
       // It leaves the to-action list because there is no move left for David,
       // and it says so plainly rather than borrowing the "Rescheduled" pill.
+      // via:"closed" — the ledger proved nothing more is owed. It shows the
+      // reason in words, because a row that vanishes without saying why is how
+      // the last version of this lost David's trust.
+      if (c.via==="closed"){
+        const why = fuLedgerClosed(c) || "";
+        return `<div class="row fu done-auto">
+          <div class="who">${nameLink(displayName(c))}<span class="t">${fmtTime(c.startedAt)}</span></div>
+          <div class="what"><span class="pill good"><span class="d"></span>No action needed</span><span class="sub">${esc(fuPriorOutcomeLabel(c))} → ${esc(why)}</span></div>
+          <div class="fu-actions"><span class="auto-tag">auto</span></div>
+        </div>`;
+      }
       if (c.via==="emailed"){
         const e = fuLedgerEntry(c) || {};
         const when = e.at && !isNaN(Date.parse(e.at))
@@ -975,6 +986,7 @@
         else if (fuAttendanceConfirmed(latest))                      manualDone.push(latest);
         else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved") manualDone.push(latest);
         else if (fuFollowupEmailed(latest))                         autoDone.push({ ...latest, via:"emailed" });
+        else if (fuLedgerClosed(latest))                            autoDone.push({ ...latest, via:"closed" });
         else                                                        open.push(latest);
       }
       open.sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
@@ -1106,6 +1118,54 @@
     // failed or paused stage, so an unconfirmed send can never hide a row.
     function fuFollowupEmailed(c){
       return String(fuLedgerEntry(c)?.stage || "") === "emailed";
+    }
+    // TERMINAL LIFECYCLE DECISIONS — evidence closes the row, not a tick.
+    // David's 2026-08-08 rule, re-implemented 2026-08-24 after an audit found
+    // it absent from the live board while this behaviour was documented as
+    // shipped: a row leaves the to-action list when the ledger carries a fresh
+    // exact decision that nothing more is owed — the call was cancelled or
+    // moved, another call is booked, a later call succeeded, they replied,
+    // another lane owns the outreach, or they are out of scope by policy.
+    // This is an ALLOWLIST and it is deliberately narrow: retryable failures,
+    // unknown attendance, manual-review timeouts, expired windows and every
+    // other paused_/removed_/failed_ stage keep the row OPEN, because those are
+    // the rows a human still has to do something about.
+    const FU_CLOSED_STAGES = new Map([
+      ["skipped_cancelled",            "the call was cancelled"],
+      ["paused_cancelled",             "the call was cancelled"],
+      ["skipped_rescheduled",          "they moved the call to a new time"],
+      ["skipped_call_scheduled",       "another call is already booked"],
+      ["skipped_has_upcoming_booking", "another call is already booked"],
+      ["skipped_calendly_booked",      "they booked a live call with you"],
+      ["skipped_recent_success",       "a later call with them succeeded"],
+      ["skipped_archive_import",       "archived in Paraform — out of scope"],
+      ["skipped_cooldown",             "another follow-up reached them recently"],
+      ["stopped_replied",              "they replied, so outreach stopped"],
+      ["skipped_connector_chase",      "the connector referral lane is following up"],
+      ["paused_connector_chase",       "the connector referral lane is following up"],
+      ["skipped_role_interview_flow",  "the role-interview lane sends their email"],
+      ["skipped_internal_name",        "internal call — not a candidate"],
+    ]);
+    // Returns the plain-English reason this row is closed, or null to keep it
+    // open. FAIL-CLOSED on three counts: an unrecognised stage keeps the row,
+    // a decision with no usable timestamp keeps the row, and a decision that
+    // predates the call itself keeps the row — so a July decision can never
+    // close an August no-show.
+    function fuLedgerClosed(c){
+      const e = fuLedgerEntry(c);
+      if (!e) return null;
+      const stage = String(e.stage || "");
+      const decidedAt = Date.parse(e.at || "");
+      if (!Number.isFinite(decidedAt)) return null;
+      const calledAt = Date.parse(c?.endedAt || c?.startedAt || "");
+      if (Number.isFinite(calledAt) && decidedAt < calledAt) return null;
+      if (FU_CLOSED_STAGES.has(stage)) return FU_CLOSED_STAGES.get(stage);
+      // Verified sequence delivery on the FOLLOWUP_TRANSPORT=paraform rollback
+      // path: membership and the send-to address both read back. Without
+      // deliveryReady this is an unproven enrollment and stays actionable.
+      if ((stage === "enrolled" || stage === "manual_enrolled") && e.deliveryReady === true)
+        return `they are in "${e.sequenceName || "a reschedule sequence"}"`;
+      return null;
     }
     function fuOutreachStopped(c){
       const stage=String(fuLedgerEntry(c)?.stage||"");

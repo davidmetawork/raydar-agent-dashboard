@@ -29,6 +29,13 @@ function context(values = {}) {
   });
 }
 
+// The allowlist is read out of the shipped index.html so this harness
+// cannot quietly drift from what the board actually does.
+function shippedClosedStages() {
+  const block = between(html, "const FU_CLOSED_STAGES = new Map([", "]);");
+  return new Set([...block.matchAll(/\["([a-z_]+)",/g)].map((m) => m[1]));
+}
+
 function backlogContext({
   historyDays = [],
   calls = [],
@@ -38,9 +45,23 @@ function backlogContext({
   attendanceStatuses = {},
   stages = {},
 } = {}) {
+  const closedStages = shippedClosedStages();
+  const closedReason = (row) => {
+    const e = ledgerEntry(row);
+    if (!e) return null;
+    const decidedAt = Date.parse(e.at || "");
+    if (!Number.isFinite(decidedAt)) return null;
+    const calledAt = Date.parse(row?.endedAt || row?.startedAt || "");
+    if (Number.isFinite(calledAt) && decidedAt < calledAt) return null;
+    if (closedStages.has(String(e.stage || ""))) return "closed";
+    if ((e.stage === "enrolled" || e.stage === "manual_enrolled") && e.deliveryReady === true) return "in sequence";
+    return null;
+  };
   const ledgerEntry = (row) => {
     for (const alias of [row?.id, row?.rowId, row?.callId, row?.botId]) {
-      if (stages[alias]) return { stage: stages[alias], candidateRef: candidateRefs[alias] };
+      if (stages[alias]) return typeof stages[alias] === "string"
+        ? { stage: stages[alias], at: "2026-08-19T21:00:00.000Z", candidateRef: candidateRefs[alias] }
+        : { at: "2026-08-19T21:00:00.000Z", candidateRef: candidateRefs[alias], ...stages[alias] };
       if (attendanceStatuses[alias]) return { attendanceStatus: attendanceStatuses[alias] };
       if (candidateRefs[alias]) return { candidateRef: candidateRefs[alias] };
     }
@@ -66,6 +87,7 @@ function backlogContext({
       row?.verdict === "no_show" && ledgerEntry(row)?.attendanceStatus === "attended"
     ),
     fuFollowupEmailed: (row) => String(ledgerEntry(row)?.stage || "") === "emailed",
+    fuLedgerClosed: closedReason,
   });
 }
 
@@ -682,4 +704,56 @@ test("a rebooking still outranks an emailed follow-up in the Handled row it rend
   assert.equal(result.open.length, 0);
   assert.equal(result.autoDone.length, 1);
   assert.equal(result.autoDone[0].via, "rebook");
+});
+
+test("a terminal ledger decision clears the row and says why", () => {
+  for (const stage of ["skipped_cancelled", "skipped_rescheduled", "skipped_call_scheduled",
+    "skipped_recent_success", "skipped_archive_import", "skipped_cooldown", "stopped_replied",
+    "skipped_connector_chase", "skipped_role_interview_flow", "paused_cancelled"]) {
+    const result = runBacklog(backlogContext({
+      historyDays: [{ calls: [{ id: `row-${stage}`, b: `bot-${stage}`, t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
+      stages: { [`bot-${stage}`]: stage },
+    }));
+    assert.equal(result.open.length, 0, `${stage} should clear`);
+    assert.equal(result.autoDone[0]?.via, "closed", `${stage} should render as closed`);
+  }
+});
+
+test("rows a human still has to act on are never closed by the ledger", () => {
+  for (const stage of ["failed_identity", "failed_error", "failed_booking_evidence", "failed_send_unknown",
+    "manual_review_timeout", "expired_window", "paused_existing", "paused_wrong_enrollment",
+    "removed_wrong_enrollment", "observed", "confirmed_pending", "some_unknown_future_stage"]) {
+    const result = runBacklog(backlogContext({
+      historyDays: [{ calls: [{ id: `row-${stage}`, b: `bot-${stage}`, t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
+      stages: { [`bot-${stage}`]: stage },
+    }));
+    assert.equal(result.open.length, 1, `${stage} must stay actionable`);
+  }
+});
+
+test("an unproven enrollment stays open; a read-back-verified one clears", () => {
+  const open = runBacklog(backlogContext({
+    historyDays: [{ calls: [{ id: "row-e", b: "bot-e", t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
+    stages: { "bot-e": { stage: "enrolled" } },
+  }));
+  assert.equal(open.open.length, 1);
+  const done = runBacklog(backlogContext({
+    historyDays: [{ calls: [{ id: "row-e", b: "bot-e", t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
+    stages: { "bot-e": { stage: "enrolled", deliveryReady: true } },
+  }));
+  assert.equal(done.open.length, 0);
+  assert.equal(done.autoDone[0].via, "closed");
+});
+
+test("a decision older than the call never closes it, and neither does a timestampless one", () => {
+  const stale = runBacklog(backlogContext({
+    historyDays: [{ calls: [{ id: "row-s", b: "bot-s", t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
+    stages: { "bot-s": { stage: "skipped_rescheduled", at: "2026-07-01T10:00:00.000Z" } },
+  }));
+  assert.equal(stale.open.length, 1);
+  const undated = runBacklog(backlogContext({
+    historyDays: [{ calls: [{ id: "row-u", b: "bot-u", t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
+    stages: { "bot-u": { stage: "skipped_rescheduled", at: null } },
+  }));
+  assert.equal(undated.open.length, 1);
 });
