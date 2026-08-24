@@ -291,6 +291,8 @@
 
     <div class="banner danger" id="countsBanner"><div>●</div><div><strong>Counts dropped sharply since the last snapshot</strong><span id="countsText"></span></div></div>
 
+    <div class="banner danger" id="trimBanner"><div>●</div><div><strong id="trimTitle">Some applicants are missing from this queue</strong><span id="trimText"></span></div></div>
+
     <div class="toolbar">
       <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
@@ -653,6 +655,31 @@ function renderStats() {
   } else {
     $("countsBanner").classList.remove("on");
   }
+  // Withheld-rows banner. The publisher drops rows when the review queue
+  // outgrows the snapshot size limit, and until 2026-08-24 it did so in
+  // silence: a steady ~100-row shave is a 4% drop, so the count-drop tripwire
+  // above (which needs 50%) never fired, and the only trace was one line in a
+  // log file on the desktop. `queueTrim` rides the snapshot and is absent when
+  // nothing was dropped, so its presence alone means rows are missing.
+  //
+  // Only a PENDING row raises the alarm. Losing the tail of the Decided
+  // archive is housekeeping; losing an applicant nobody has looked at means
+  // this tab is hiding work from the person whose job is to do it. The benign
+  // case is reported on the Decided chip instead (see renderPills).
+  const trim = STATE.snapshot?.queueTrim || null;
+  if (trim && trim.droppedPending > 0) {
+    const n = Number(trim.droppedPending).toLocaleString();
+    $("trimTitle").textContent = n + " applicant" + (trim.droppedPending === 1 ? " is" : "s are") + " missing from this queue";
+    $("trimText").textContent = "The review queue is too big for one snapshot, so the "
+      + n + " longest-waiting applicant" + (trim.droppedPending === 1 ? "" : "s")
+      + " nobody has actioned yet " + (trim.droppedPending === 1 ? "was" : "were") + " left out of this tab"
+      + (trim.droppedDecided ? " (after dropping " + Number(trim.droppedDecided).toLocaleString() + " already-decided row(s) first)" : "")
+      + ". They are still in the invite plan and nothing has been sent to them — but they cannot be reviewed here until the queue gets smaller. "
+      + "Showing " + Number(trim.kept).toLocaleString() + " of " + Number(trim.total).toLocaleString() + " rows.";
+    $("trimBanner").classList.add("on");
+  } else {
+    $("trimBanner").classList.remove("on");
+  }
   if (!at) { $("updatedText").textContent = "No snapshot yet"; chip.classList.add("amber"); return; }
   const ageH = (Date.now() - at.getTime()) / 3600000;
   $("updatedText").textContent = "Updated " + relTime(at);
@@ -708,7 +735,14 @@ function renderPills() {
   $("chipCountNoHistory").textContent = String(pendingNoHistory);
   $("chipCountD").textContent = String(decidedRows().length);
   document.querySelectorAll("[data-chip]").forEach((el) => el.classList.toggle("active", el.dataset.chip === STATE.chip));
-  $("chipHint").textContent = STATE.chip === "" ? "" : STATE.chip === "decided" ? "Archive of your calls" : "Click again to see the whole queue";
+  // A decided-only trim is routine, so it is reported here rather than in a
+  // banner: the Decided chip is the only thing it changed, and this is where
+  // someone wondering "where did the old ones go?" is already looking.
+  const trimmedDecided = STATE.snapshot?.queueTrim?.droppedDecided || 0;
+  const decidedHint = trimmedDecided
+    ? "Archive of your calls — oldest " + Number(trimmedDecided).toLocaleString() + " trimmed to fit"
+    : "Archive of your calls";
+  $("chipHint").textContent = STATE.chip === "" ? "" : STATE.chip === "decided" ? decidedHint : "Click again to see the whole queue";
 }
 
 function renderRoleFilter() {

@@ -224,7 +224,29 @@ export function createSyncHandler({
         const approvals = Object.entries(decisions)
           .filter(([key, decision]) => decision?.action === "interview" && !acks[key])
           .map(([key, decision]) => ({ key, ...decision }));
-        return res.status(200).json({ ok: true, generatedAt: now(), decisions: approvals });
+        // `decisions` is deliberately narrow — un-acked interviews, the only
+        // thing the loop's next plan has to ACT on. `decidedKeys` is the wider
+        // question the loop also needs answered: which rows has a human (or an
+        // armed rule) already handled at all?
+        //
+        // It exists for the publisher's queue trim. When the review queue
+        // outgrows the KV budget the loop has to drop rows from the tab, and
+        // until 2026-08-24 it dropped the oldest-applied ones blindly — safe
+        // only by luck, because the oldest happened to be decided. With this it
+        // can spend the DECIDED rows first and leave every pending applicant
+        // visible, which is the only version of that trim that cannot silently
+        // hide someone nobody has reviewed. Passes are the important half here:
+        // an interviewed applicant leaves the queue on the next plan, a passed
+        // one never does, so passes are what the backlog silts up with.
+        //
+        // Keys only, no records — the publisher needs set membership, and the
+        // full hash is the browser's business (feed.mjs), not the loop's.
+        return res.status(200).json({
+          ok: true,
+          generatedAt: now(),
+          decisions: approvals,
+          decidedKeys: Object.keys(decisions),
+        });
       }
       if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method" });
 
