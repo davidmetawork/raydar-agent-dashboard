@@ -656,12 +656,40 @@ function renderStats() {
   if (!at) { $("updatedText").textContent = "No snapshot yet"; chip.classList.add("amber"); return; }
   const ageH = (Date.now() - at.getTime()) / 3600000;
   $("updatedText").textContent = "Updated " + relTime(at);
+  // TWO CLOCKS, AND THE CHIP USED TO SHOW ONLY ONE. `generatedAt` says when
+  // the desktop last PUBLISHED; `planAt` says how old the plan underneath it
+  // is. Publishing is cheap and frequent (a ten-minute freshener, and since
+  // 2026-08-21 any Refresh click); re-planning is hourly and is the only thing
+  // that can move these counts. So a publish over a stale plan is a green chip
+  // over day-old numbers — which is exactly what happened on 2026-08-24, with
+  // the invite lane unloaded from launchd for 27 hours and the tab reporting
+  // "Updated 0m ago". A button that can repaint the freshness indicator
+  // without refreshing the data is the failure this whole change set exists
+  // to remove, so plan age is now shown wherever it disagrees with the chip.
+  const planAt = parseDate(STATE.snapshot?.planAt);
+  const planH = planAt ? (Date.now() - planAt.getTime()) / 3600000 : null;
+  // The plan re-runs hourly; 3h allows a missed cycle before it means anything.
+  const planStale = planH != null && planH > 3;
   if (ageH > 6) {
     chip.classList.add("red");
     $("updatedText").textContent += " · desktop asleep?";
     $("staleTitle").textContent = "Snapshot is " + Math.round(ageH) + "h old";
     $("staleText").textContent = "The desktop invite loop has not synced in a while — it may be asleep. Everything below reflects the last sync; decisions you make here still queue and send when it wakes.";
     banner.classList.add("on");
+  } else if (planStale) {
+    // The snapshot is fresh and the plan is not: the publisher is alive but
+    // the loop behind it is not re-planning. Say precisely that, because the
+    // counts cannot move until it does and no amount of clicking Refresh will
+    // change them.
+    chip.classList.add(planH > 6 ? "red" : "amber");
+    $("updatedText").textContent += " · plan " + Math.round(planH) + "h old";
+    if (planH > 6) {
+      $("staleTitle").textContent = "The invite loop has not re-planned in " + Math.round(planH) + "h";
+      $("staleText").textContent = "The snapshot below is current, but it is built from a "
+        + Math.round(planH) + "-hour-old plan — so these counts cannot move, and Refresh cannot move them. "
+        + "The hourly cycle (com.raydar.interview-invites) is the thing to check on the desktop.";
+      banner.classList.add("on");
+    }
   } else if (ageH > 2) {
     chip.classList.add("amber");
   }

@@ -163,3 +163,28 @@ test("the button cannot be double-fired or left stuck disabled", () => {
   // Both exits from the watch go through the one place that re-enables it.
   assert.match(applicants, /function endRefreshWatch\(ok\) \{[\s\S]*?setRefreshBusy\(null\);/);
 });
+
+/* ---- the two clocks ---- */
+
+test("a fresh publish over a stale plan is reported, not painted green", () => {
+  // The failure this guards: 2026-08-24, invite lane unloaded from launchd for
+  // 27h, snapshot republished on demand, chip read "Updated 0m ago".
+  assert.match(applicants, /const planAt = parseDate\(STATE\.snapshot\?\.planAt\);/);
+  assert.match(applicants, /const planStale = planH != null && planH > 3;/);
+  assert.match(applicants, /\$\("updatedText"\)\.textContent \+= " · plan " \+ Math\.round\(planH\) \+ "h old";/);
+});
+
+test("a badly stale plan raises the banner and says Refresh cannot fix it", () => {
+  assert.match(applicants, /The invite loop has not re-planned in " \+ Math\.round\(planH\) \+ "h"/);
+  assert.match(applicants, /Refresh cannot move them/);
+  assert.match(applicants, /com\.raydar\.interview-invites/);
+});
+
+test("plan age never downgrades a snapshot that is itself stale", () => {
+  // ageH > 6 keeps its own red branch and message; plan age is the `else if`,
+  // so a sleeping desktop is still reported as a sleeping desktop.
+  const stats = applicants.slice(applicants.indexOf("function renderStats"));
+  const redBranch = stats.indexOf("if (ageH > 6)");
+  const planBranch = stats.indexOf("} else if (planStale)");
+  assert.ok(redBranch >= 0 && planBranch > redBranch, "the ageH>6 branch must come first");
+});
