@@ -969,10 +969,13 @@
 
     function renderFollowups(d){
       const { open, manualDone, autoDone } = buildBacklog();
+      // Three groups, David 2026-08-24: what broke, who to chase, what is done.
+      // Confirmed and unverified no-shows are one list now — the engine treats
+      // them the same since the rebuild (no human trace on the call means the
+      // reschedule email goes out), and each row's own chip still says which
+      // it is, so splitting them only fragmented the queue.
       const errors  = open.filter(c=>c.verdict==="audio_fail"||c.verdict==="error"||c.verdict==="joined_silent");
-      const noshows = open.filter(c=>c.verdict==="no_show" && fuIsDefinitiveNoShow(c));
-      const unverified = open.filter(c=>c.verdict==="no_show" && !fuIsDefinitiveNoShow(c));
-      const didnt   = open.filter(c=>c.verdict==="incomplete");   // joined but didn't finish — not a failure
+      const followups = open.filter(c=>c.verdict==="no_show" || c.verdict==="incomplete");
       const doneCount = manualDone.length + autoDone.length;
       const openN = open.length;
 
@@ -986,9 +989,7 @@
         ? `<div class="fu-completed"><div class="fu-group-head done">Handled <span class="n">${doneCount}</span></div><div class="list">${manualDone.map(fuRow).join("")}${autoDone.map(fuAutoRow).join("")}</div></div>`
         : "";
       const html = groupBlock("Errors & failures", errors.map(fuRow))
-                 + groupBlock("Confirmed no-shows", noshows.map(fuRow))
-                 + groupBlock("Attendance unverified", unverified.map(fuRow))
-                 + groupBlock("Didn't finish", didnt.map(fuRow))
+                 + groupBlock("Follow-ups", followups.map(fuRow))
                  + completedBlock;
       $("followups").innerHTML = (openN||doneCount)
         ? html
