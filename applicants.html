@@ -712,9 +712,15 @@ function renderStats() {
     $("updatedText").textContent += " · plan " + Math.round(planH) + "h old";
     if (planH > 6) {
       $("staleTitle").textContent = "The invite loop has not re-planned in " + Math.round(planH) + "h";
+      // Deliberately does NOT name a job or a machine. When this shipped it
+      // said "check com.raydar.interview-invites on the desktop" — and within
+      // two days that was wrong advice, because the lane had been cut over to
+      // GitHub Actions and that job was booted out ON PURPOSE. A banner that
+      // names today's runner ages into a banner that misdirects. The task
+      // board is the thing that stays true, so it points there.
       $("staleText").textContent = "The snapshot below is current, but it is built from a "
         + Math.round(planH) + "-hour-old plan — so these counts cannot move, and Refresh cannot move them. "
-        + "The hourly cycle (com.raydar.interview-invites) is the thing to check on the desktop.";
+        + "Something upstream has stopped re-planning; which sender owns this lane changes, so check the task board at docs.raydar.xyz/tasks rather than assuming it is the desktop.";
       banner.classList.add("on");
     }
   } else if (ageH > 2) {

@@ -177,7 +177,12 @@ test("a fresh publish over a stale plan is reported, not painted green", () => {
 test("a badly stale plan raises the banner and says Refresh cannot fix it", () => {
   assert.match(applicants, /The invite loop has not re-planned in " \+ Math\.round\(planH\) \+ "h"/);
   assert.match(applicants, /Refresh cannot move them/);
-  assert.match(applicants, /com\.raydar\.interview-invites/);
+  // It must NOT name a specific job or machine: the lane was cut over to
+  // GitHub Actions two days after this shipped, which turned the original
+  // "check com.raydar.interview-invites on the desktop" into misdirection.
+  const banner = applicants.slice(applicants.indexOf("staleText\").textContent = \"The snapshot below"));
+  assert.ok(!/com\.raydar\.[a-z-]+/.test(banner.slice(0, 900)), "the banner must not name a launchd job");
+  assert.match(applicants, /docs\.raydar\.xyz\/tasks/);
 });
 
 test("plan age never downgrades a snapshot that is itself stale", () => {
