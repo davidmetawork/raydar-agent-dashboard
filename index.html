@@ -1145,6 +1145,14 @@
       ["paused_connector_chase",       "the connector referral lane is following up"],
       ["skipped_role_interview_flow",  "the role-interview lane sends their email"],
       ["skipped_internal_name",        "internal call — not a candidate"],
+      // The call never dispatched: neither the recorder nor the Calls archive
+      // has any record of it, after four attempts across seven hours. There is
+      // no address for these people in any system we hold, so no follow-up is
+      // possible from this board — 81 of them are the 2026-08-19 storm, where
+      // the row carries a verdict but no messages and no duration. The outage
+      // itself is tracked on its own task; leaving them here only buries the
+      // rows that CAN be actioned.
+      ["failed_no_dispatch_record",    "no record of this call anywhere — it never dispatched"],
     ]);
     // Returns the plain-English reason this row is closed, or null to keep it
     // open. FAIL-CLOSED on three counts: an unrecognised stage keeps the row,

@@ -709,7 +709,8 @@ test("a rebooking still outranks an emailed follow-up in the Handled row it rend
 test("a terminal ledger decision clears the row and says why", () => {
   for (const stage of ["skipped_cancelled", "skipped_rescheduled", "skipped_call_scheduled",
     "skipped_recent_success", "skipped_archive_import", "skipped_cooldown", "stopped_replied",
-    "skipped_connector_chase", "skipped_role_interview_flow", "paused_cancelled"]) {
+    "skipped_connector_chase", "skipped_role_interview_flow", "paused_cancelled",
+    "failed_no_dispatch_record"]) {
     const result = runBacklog(backlogContext({
       historyDays: [{ calls: [{ id: `row-${stage}`, b: `bot-${stage}`, t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }] }],
       stages: { [`bot-${stage}`]: stage },
