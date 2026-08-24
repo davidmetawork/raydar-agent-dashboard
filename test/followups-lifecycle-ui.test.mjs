@@ -36,9 +36,11 @@ function backlogContext({
   actionsMap = {},
   candidateRefs = {},
   attendanceStatuses = {},
+  stages = {},
 } = {}) {
   const ledgerEntry = (row) => {
     for (const alias of [row?.id, row?.rowId, row?.callId, row?.botId]) {
+      if (stages[alias]) return { stage: stages[alias], candidateRef: candidateRefs[alias] };
       if (attendanceStatuses[alias]) return { attendanceStatus: attendanceStatuses[alias] };
       if (candidateRefs[alias]) return { candidateRef: candidateRefs[alias] };
     }
@@ -63,6 +65,7 @@ function backlogContext({
     fuAttendanceConfirmed: (row) => (
       row?.verdict === "no_show" && ledgerEntry(row)?.attendanceStatus === "attended"
     ),
+    fuFollowupEmailed: (row) => String(ledgerEntry(row)?.stage || "") === "emailed",
   });
 }
 
@@ -641,4 +644,42 @@ test("canonical and deployed-shell lifecycle state blocks are identical", async 
   const start = "    /* BEGIN:LIFECYCLE-FOLLOWUP-STATE */";
   const end = "    /* END:LIFECYCLE-FOLLOWUP-STATE */";
   assert.equal(between(html, start, end), between(canonical, start, end));
+});
+
+test("a confirmed follow-up email clears the row into Handled", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [{ id: "row-emailed", b: "bot-emailed", t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }],
+    }],
+    stages: { "bot-emailed": "emailed" },
+  }));
+  assert.equal(result.open.length, 0);
+  assert.equal(result.autoDone.length, 1);
+  assert.equal(result.autoDone[0].via, "emailed");
+});
+
+test("only a confirmed send clears a row — in-flight, failed and paused stages stay actionable", () => {
+  for (const stage of ["sending", "failed_send_unknown", "failed_identity", "paused_existing", "manual_review_timeout"]) {
+    const result = runBacklog(backlogContext({
+      historyDays: [{
+        calls: [{ id: `row-${stage}`, b: `bot-${stage}`, t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }],
+      }],
+      stages: { [`bot-${stage}`]: stage },
+    }));
+    assert.equal(result.open.length, 1, `${stage} must stay actionable`);
+    assert.equal(result.autoDone.length, 0, `${stage} must not read as handled`);
+  }
+});
+
+test("a rebooking still outranks an emailed follow-up in the Handled row it renders", () => {
+  const result = runBacklog(backlogContext({
+    historyDays: [{
+      calls: [{ id: "row-both", b: "bot-both", t: "2026-08-19T19:14:00.000Z", c: "Ada Example", v: "no_show" }],
+    }],
+    upcoming: [{ candidate: "Ada Example" }],
+    stages: { "bot-both": "emailed" },
+  }));
+  assert.equal(result.open.length, 0);
+  assert.equal(result.autoDone.length, 1);
+  assert.equal(result.autoDone[0].via, "rebook");
 });

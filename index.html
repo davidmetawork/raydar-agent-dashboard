@@ -513,7 +513,7 @@
     <div id="view-followups" hidden>
       <section>
         <div class="sec-head"><h3>Follow-ups</h3><span class="count" id="fu-count"></span></div>
-        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who complete or rebook clear themselves automatically.</p>
+        <p class="fu-intro">Your running backlog of no-shows and failed interviews — one row per candidate, based on their newest screening outcome. <b>Nothing unresolved drops off on its own.</b> Raydar automatically recovers eligible no-shows into the right sequence — once it has emailed someone, that row moves to <b>Handled</b> on its own; use <b>Reschedule</b> to open Paraform for an exception, then mark the row <b>Sequence sent</b>, <b>Rescheduled</b>, or <b>✓ Resolved</b> (you checked it out — nothing more to do). Candidates who complete or rebook clear themselves automatically.</p>
         <div id="followups"></div>
       </section>
     </div>
@@ -858,6 +858,20 @@
     // `via:"human"` = booked a live call with David (calendar); else a new AI interview.
     function fuAutoRow(c){
       const prior = fuPriorOutcomeLabel(c);
+      // via:"emailed" is a DIFFERENT kind of done: the candidate has not
+      // rebooked, Raydar has done the one thing it was going to do for them.
+      // It leaves the to-action list because there is no move left for David,
+      // and it says so plainly rather than borrowing the "Rescheduled" pill.
+      if (c.via==="emailed"){
+        const e = fuLedgerEntry(c) || {};
+        const when = e.at && !isNaN(Date.parse(e.at))
+          ? ` on ${new Date(e.at).toLocaleDateString([], { month:"short", day:"numeric" })}` : "";
+        return `<div class="row fu done-auto">
+          <div class="who">${nameLink(displayName(c))}<span class="t">${fmtTime(c.startedAt)}</span></div>
+          <div class="what"><span class="pill blue"><span class="d"></span>Follow-up sent</span><span class="sub">${esc(prior)} → Raydar emailed them${esc(when)} — read it in the Emails tab</span></div>
+          <div class="fu-actions"><span class="auto-tag">auto</span></div>
+        </div>`;
+      }
       const sub = c.via==="human"
         ? `${esc(prior)} → booked a live call with you`
         : `${esc(prior)} → new interview booked`;
@@ -960,6 +974,7 @@
         else if (!nameIsExactHomonym && rebooked.has(k))            autoDone.push({ ...latest, via:"rebook" });
         else if (fuAttendanceConfirmed(latest))                      manualDone.push(latest);
         else if (st==="rescheduled" || st==="sequence_sent" || st==="resolved") manualDone.push(latest);
+        else if (fuFollowupEmailed(latest))                         autoDone.push({ ...latest, via:"emailed" });
         else                                                        open.push(latest);
       }
       open.sort((a,b)=> (FU_SEVERITY[a.verdict]-FU_SEVERITY[b.verdict]) || byTime(a,b));
@@ -1083,6 +1098,14 @@
     function fuAttendanceConfirmed(c){
       return c?.verdict==="no_show"
         && fuLedgerEntry(c)?.attendanceStatus==="attended";
+    }
+    // Raydar sent this person their follow-up email and the mailbox confirmed
+    // delivery. The engine sends exactly one, so there is no next touch to wait
+    // for: the row is done from David's side and only a rebooking (handled
+    // above) can improve on it. Strictly `emailed` — never `sending`, never a
+    // failed or paused stage, so an unconfirmed send can never hide a row.
+    function fuFollowupEmailed(c){
+      return String(fuLedgerEntry(c)?.stage || "") === "emailed";
     }
     function fuOutreachStopped(c){
       const stage=String(fuLedgerEntry(c)?.stage||"");
