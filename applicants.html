@@ -417,6 +417,13 @@ function parseDate(v) {
   return isNaN(d) ? null : d;
 }
 function shortDate(v) { const d = parseDate(v); return d ? MONTHS[d.getMonth()] + " " + d.getDate() : "—"; }
+/* Does this value carry a clock time at all? A bare YYYY-MM-DD does not, and
+   showing "12:00 AM" for one would be inventing precision we were never given. */
+function hasClockTime(v) { return !!v && !DATE_ONLY.test(String(v)) && !!parseDate(v); }
+function timeOfDay(v) {
+  const d = parseDate(v); if (!d) return "";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
 function monthYear(v) { const d = parseDate(v); return d ? MONTHS[d.getMonth()] + " " + d.getFullYear() : String(v || ""); }
 function relTime(v) {
   const d = parseDate(v); if (!d) return "";
@@ -900,9 +907,20 @@ function rowCardHtml(row, mode, decision) {
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
-  const when = row.appliedAt
-    ? "<b>" + esc(shortDate(row.appliedAt)) + "</b>applied " + esc(relTime(row.appliedAt) || "—") +
-      (mode === "stream" && row.addedAt ? " · seen " + esc(relTime(row.addedAt)) : "")
+  /* THE AGE COMES FROM addedAt WHEN WE HAVE IT, because appliedAt is a DATE.
+     The source gives no clock time, so relTime(appliedAt) measures from local
+     midnight and every applicant from one day reports the same age — on
+     2026-08-25 the whole day's intake read "13h ago" whether it landed at
+     00:30 or 18:22, and a queue refreshed minutes earlier looked half a day
+     stale. `addedAt` is when the Applicant Hub created the Paraform record, to
+     the minute. It is labelled "added", not "applied", because those are not
+     the same event: ingestion is batched, and no true application timestamp
+     exists anywhere upstream to show instead. */
+  const when = row.appliedAt || row.addedAt
+    ? "<b>" + esc(shortDate(row.appliedAt || row.addedAt)) + "</b>" +
+      (hasClockTime(row.addedAt)
+        ? "added " + esc(timeOfDay(row.addedAt)) + " · " + esc(relTime(row.addedAt))
+        : "applied " + esc(relTime(row.appliedAt) || "—"))
     : "";
   return '<div class="row' + (decision ? " decided-row" : "") + '" data-row="' + esc(key) + '">' +
     check + avatarHtml(row) +

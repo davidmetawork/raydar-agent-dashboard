@@ -66,3 +66,31 @@ test("the guard is in the file, so a simplification back to new Date(v) fails he
   assert.match(source, /const DATE_ONLY = \/\^\\d\{4\}-\\d\{2\}-\\d\{2\}\$\//);
   assert.match(source, /DATE_ONLY\.test\(s\) \? new Date\(s \+ "T00:00:00"\) : new Date\(s\)/);
 });
+
+test("a real arrival time is shown to the minute; a bare date never invents one", () => {
+  // The bug this closes: appliedAt is a DATE, so relTime measured it from local
+  // midnight and every applicant from one day reported the same age — the whole
+  // of 2026-08-25 read "13h ago" whether it landed at 00:30 or 18:22.
+  assert.match(source, /function hasClockTime\(v\) \{ return !!v && !DATE_ONLY\.test\(String\(v\)\) && !!parseDate\(v\); \}/);
+  assert.match(source, /function timeOfDay\(v\)/);
+  // The row uses addedAt for the age when it carries a clock, and says "added"
+  // rather than "applied" — they are different events and ingestion is batched.
+  assert.match(source, /hasClockTime\(row\.addedAt\)/);
+  assert.match(source, /"added " \+ esc\(timeOfDay\(row\.addedAt\)\)/);
+  // ...and falls back to the old wording when there is no clock time to show.
+  assert.match(source, /: "applied " \+ esc\(relTime\(row\.appliedAt\) \|\| "—"\)/);
+});
+
+test("timeOfDay is never called on a bare date, in any timezone", () => {
+  // Rendering "12:00 AM" for a date-only value would be inventing precision
+  // upstream never gave us. hasClockTime is the guard; prove it holds.
+  const helpers = extractHelpers()
+    + '\nconst DATE_ONLY2 = DATE_ONLY;'
+    + '\nfunction hasClockTime(v) { return !!v && !DATE_ONLY2.test(String(v)) && !!parseDate(v); }';
+  for (const tz of ["America/Los_Angeles", "UTC", "Asia/Tokyo"]) {
+    const out = execFileSync(process.execPath, ["-e",
+      `${helpers}\nprocess.stdout.write([hasClockTime("2026-08-25"), hasClockTime("2026-08-25T18:22:34.404Z"), hasClockTime(null)].join(","));`,
+    ], { env: { ...process.env, TZ: tz }, encoding: "utf8" });
+    assert.equal(out, "false,true,false", `in ${tz}`);
+  }
+});
