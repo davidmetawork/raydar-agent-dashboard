@@ -114,6 +114,7 @@
     font-size:12.5px; font-weight:400; color:var(--ink); margin:0; padding:3px 4px; cursor:pointer; }
   .multi input { width:auto; }
   .picksearch { width:100%; margin-bottom:5px; }
+  .pickmore { font-size:11.5px; color:var(--ink-3); padding:4px 4px 2px; }
   .addcond { border:1px dashed var(--line); background:transparent; border-radius:9px; width:100%;
     padding:8px; font:600 12px "Inter Variable",sans-serif; color:var(--ink-2); cursor:pointer; }
   .addcond:hover { color:var(--ink); border-color:var(--ink-3); }
@@ -306,6 +307,39 @@
     el("ruleEditor").classList.remove("on");
   }
 
+  /* THE PICKER RENDERS A WINDOW OVER THE DIRECTORY, AND THE FILTER SEARCHES
+     THE WHOLE OF IT. The directories are far bigger than a checkbox list can
+     hold (measured 2026-08-25: 1,464 schools, 5,496 companies), so only the
+     first PICK_WINDOW entries are ever drawn. That cap is only safe because
+     the filter re-renders from the full list: filtering by hiding already-
+     drawn rows — which is what this did until 2026-08-25 — makes every entry
+     past the cap unreachable no matter what you type. Alphabetically the
+     schools cap fell in the G's, so UC Berkeley, Yale and Stanford could not
+     be picked at all, and 5,096 of the companies were invisible. */
+  const PICK_WINDOW = 400;
+  /* condition index -> its full [id, label] list, so the filter can search
+     the directory rather than the DOM. Rebuilt on every editor render. */
+  const pickOptions = {};
+
+  function pickListHtml(options, chosen, index, needle) {
+    const term = String(needle || "").trim().toLowerCase();
+    // A chosen entry always survives the filter: an edit must never hide its
+    // own selection, which is also what keeps the checkbox list truthful.
+    const hits = term
+      ? options.filter(([id, label]) => chosen.includes(id) || String(label).toLowerCase().includes(term))
+      : options;
+    const shown = hits.slice(0, PICK_WINDOW);
+    const labels = shown.map(([id, label]) =>
+      '<label><input type="checkbox" data-ci="' + index + '" data-part="pick" value="' + enc(id) + '"' +
+      (chosen.includes(id) ? " checked" : "") + "><span>" + enc(label) + "</span></label>").join("");
+    if (hits.length > shown.length) {
+      return labels + '<div class="pickmore">' + (hits.length - shown.length) +
+        " more — type above to narrow the list.</div>";
+    }
+    if (!hits.length) return '<div class="pickmore">Nothing here matches that.</div>';
+    return labels;
+  }
+
   function valueControl(condition, index) {
     const f = field(condition.field);
     if (!f) return "";
@@ -332,13 +366,10 @@
         const pick = chosen.includes(b[0]) - chosen.includes(a[0]);
         return pick || String(a[1]).localeCompare(String(b[1]));
       });
-      const shown = big ? options.slice(0, 400) : options;
+      pickOptions[index] = options;
       return '<div class="v">' +
-        (big ? '<input class="picksearch" type="text" placeholder="Filter…" data-ci="' + index + '" data-part="filter">' : "") +
-        '<div class="multi" data-ci="' + index + '">' +
-        shown.map(([id, label]) =>
-          '<label><input type="checkbox" data-ci="' + index + '" data-part="pick" value="' + enc(id) + '"' +
-          (chosen.includes(id) ? " checked" : "") + "><span>" + enc(label) + "</span></label>").join("") +
+        (big ? '<input class="picksearch" type="text" placeholder="Search all ' + options.length + '…" data-ci="' + index + '" data-part="filter">' : "") +
+        '<div class="multi" data-ci="' + index + '">' + pickListHtml(options, chosen, index, "") +
         "</div></div>";
     }
     if (condition.op === "between") {
@@ -379,6 +410,7 @@
   function renderEditor() {
     const draft = state.draft;
     if (!draft) return;
+    for (const key of Object.keys(pickOptions)) delete pickOptions[key];
     const byGroup = new Map();
     draft.conditions.forEach((condition, index) => {
       const f = field(condition.field);
@@ -487,6 +519,23 @@
     return "";
   }
 
+  /** Toggling one entry in a picker. Shared, because the filter redraws the
+   *  list and the redrawn checkboxes must behave exactly like the first ones. */
+  const pickHandler = (condition) => (e) => {
+    const list = Array.isArray(condition.value) ? condition.value.slice() : [];
+    const at = list.indexOf(e.target.value);
+    if (e.target.checked && at < 0) list.push(e.target.value);
+    if (!e.target.checked && at >= 0) list.splice(at, 1);
+    condition.value = list;
+    schedulePreview();
+  };
+
+  function bindPicks(container, condition) {
+    container.querySelectorAll('input[data-part="pick"]').forEach((box) => {
+      box.onchange = pickHandler(condition);
+    });
+  }
+
   function wireEditor() {
     const draft = state.draft;
     el("ruleName").oninput = (e) => { draft.name = e.target.value; schedulePreview(); };
@@ -523,21 +572,16 @@
           renderEditor(); schedulePreview();
         };
       } else if (part === "pick") {
-        node.onchange = (e) => {
-          const list = Array.isArray(condition.value) ? condition.value.slice() : [];
-          const at = list.indexOf(e.target.value);
-          if (e.target.checked && at < 0) list.push(e.target.value);
-          if (!e.target.checked && at >= 0) list.splice(at, 1);
-          condition.value = list;
-          schedulePreview();
-        };
+        node.onchange = pickHandler(condition);
       } else if (part === "filter") {
         node.oninput = (e) => {
-          const needle = e.target.value.trim().toLowerCase();
-          node.parentNode.querySelectorAll(".multi label").forEach((label) => {
-            const hit = label.textContent.toLowerCase().includes(needle);
-            label.style.display = hit || label.querySelector("input").checked ? "" : "none";
-          });
+          const list = node.parentNode.querySelector(".multi");
+          if (!list) return;
+          const chosen = Array.isArray(condition.value) ? condition.value : [];
+          list.innerHTML = pickListHtml(pickOptions[index] || [], chosen, index, e.target.value);
+          // The rows are new elements, so they carry none of wireEditor's
+          // handlers — rebinding here is what keeps a filtered row clickable.
+          bindPicks(list, condition);
         };
       } else if (part === "from" || part === "to") {
         node.oninput = () => {
