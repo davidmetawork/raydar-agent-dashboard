@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   COUNT_DROP_FLOOR,
   COUNT_DROP_RATIO,
+  acknowledgeCountsDoc,
   createSyncHandler,
   nextCountsDoc,
 } from "../api/applicants/sync.mjs";
@@ -161,6 +162,93 @@ test("an acks-only POST never touches the counts doc", async () => {
   assert.equal(res.statusCode, 200);
   assert.equal(calls.readJson.length, 0);
   assert.equal(countsWrite(calls), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// ACKNOWLEDGEMENT. The latch is one-way on purpose, which is right for a break
+// and wrong for a verified permanent change (2026-08-24: the invite lane's
+// queue legitimately settled at ~1,183 against a stale 2,479 baseline, so the
+// alert could never clear and rules-tick stayed parked indefinitely).
+// ---------------------------------------------------------------------------
+
+test("acknowledging re-baselines to today's counts and records who accepted what", () => {
+  const prev = { queue: 1183, stream: 1923, updatedAt: AT, alert: { queue: { baseline: 2479, seen: 196, at: AT } } };
+  const { doc, cleared } = acknowledgeCountsDoc(prev, { by: "david", at: AT, note: "index restored" });
+
+  assert.equal(doc.alert, null);
+  assert.deepEqual(cleared, { queue: { baseline: 2479, seen: 196, at: AT } });
+  // The counts themselves are untouched — this moves the baseline, it does not
+  // invent a number.
+  assert.equal(doc.queue, 1183);
+  assert.equal(doc.stream, 1923);
+  assert.deepEqual(doc.acknowledged, {
+    at: AT, by: "david", note: "index restored",
+    cleared: { queue: { baseline: 2479, seen: 196, at: AT } },
+    accepted: { queue: 1183, stream: 1923 },
+  });
+});
+
+test("acknowledging does NOT suppress the next genuine collapse", () => {
+  const prev = { queue: 1183, stream: 1923, updatedAt: AT, alert: { queue: { baseline: 2479, seen: 196, at: AT } } };
+  const { doc } = acknowledgeCountsDoc(prev, { by: "david", at: AT });
+
+  // A normal publish right after: nothing trips, and the baseline is now 1183.
+  assert.equal(nextCountsDoc(doc, { queue: 1190, stream: 1930 }, AT).alert, null);
+  // A real collapse from the NEW baseline trips immediately.
+  assert.deepEqual(
+    nextCountsDoc(doc, { queue: 30, stream: 1930 }, AT).alert,
+    { queue: { baseline: 1183, seen: 30, at: AT } },
+  );
+});
+
+test("acknowledging with nothing latched is a no-op, not an error", () => {
+  const { doc, cleared } = acknowledgeCountsDoc({ queue: 100, stream: 100, alert: null }, { by: "david", at: AT });
+  assert.equal(cleared, null);
+  assert.equal(doc.alert, null);
+  assert.equal(doc.acknowledged, undefined);
+});
+
+test("sync acknowledges a latched alert, and refuses one with no author", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const latched = { queue: 1183, stream: 1923, updatedAt: AT, alert: { queue: { baseline: 2479, seen: 196, at: AT } } };
+
+  // No `by` — refused. An unattributed re-baseline is exactly the reset button
+  // this must not be.
+  {
+    const { calls, deps } = fakeStore({ "apphub:counts": latched });
+    const res = response();
+    await createSyncHandler(deps)(request({ body: { acknowledgeCountsAlert: {} } }), res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.error, "acknowledge_requires_by");
+    assert.equal(countsWrite(calls), undefined);
+  }
+
+  // With an author — cleared and recorded.
+  {
+    const { calls, deps } = fakeStore({ "apphub:counts": latched });
+    const res = response();
+    await createSyncHandler(deps)(request({ body: { acknowledgeCountsAlert: { by: "david", note: "verified" } } }), res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body.cleared, { queue: { baseline: 2479, seen: 196, at: AT } });
+    const written = countsWrite(calls);
+    assert.equal(written.alert, null);
+    assert.equal(written.queue, 1183);
+    assert.equal(written.acknowledged.by, "david");
+  }
+});
+
+test("an acknowledge POST never writes the snapshot or queue keys", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore({
+    "apphub:counts": { queue: 1183, stream: 1923, alert: { queue: { baseline: 2479, seen: 196, at: AT } } },
+  });
+  const res = response();
+  await createSyncHandler(deps)(request({
+    // A snapshot riding along is ignored: acknowledging is not a publish.
+    body: { acknowledgeCountsAlert: { by: "david" }, snapshot: { generatedAt: AT, stream: [] }, queue: [] },
+  }), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls.writeJson.map(([key]) => key), ["apphub:counts"]);
 });
 
 test("feed returns the counts doc alongside the snapshot", async () => {

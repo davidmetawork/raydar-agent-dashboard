@@ -200,6 +200,44 @@ export function nextCountsDoc(prev, incoming, at) {
   return doc;
 }
 
+/**
+ * Re-baseline a latched count-drop alert against what is published TODAY.
+ *
+ * The latch is deliberately one-way: it holds against the PRE-DROP baseline so
+ * a broken publisher cannot clear it by republishing its own collapsed number.
+ * That is right for a break, and wrong for the other thing with the same shape
+ * — a real, verified, permanent change in what the queue contains.
+ *
+ * 2026-08-24 was the second kind. The invite lane moved to GitHub Actions
+ * without its CRM index, published a truncated queue for two days, and latched
+ * a 2,479 baseline. Once the index was restored the queue came back at ~1,183,
+ * which is CORRECT (independently rebuilt from plan.mjs and reconciled against
+ * the tab row for row) but still under half of 2,479 — so the alert could not
+ * clear, and `rules-tick` stayed parked on `snapshot_counts_alert`, meaning no
+ * applicant rule acted at all. Waiting for a stale high-water mark to be
+ * re-reached is not a decision anyone made; it is just what the code did.
+ *
+ * So: an explicit, authenticated, RECORDED acknowledgement. It never suppresses
+ * a future alert — it only moves the baseline to the current published counts,
+ * so the very next genuine collapse trips again from there. `acknowledged`
+ * stays on the doc as the audit trail of who re-baselined and what they
+ * accepted.
+ */
+export function acknowledgeCountsDoc(prev, { by, at, note = null }) {
+  const doc = { ...(prev || {}), updatedAt: at, alert: null };
+  const cleared = prev?.alert || null;
+  if (!cleared) return { doc, cleared: null };
+  doc.acknowledged = {
+    at, by, note,
+    cleared,
+    // The counts this acknowledgement accepts as the new normal. Stored
+    // explicitly so a later reader can see what was re-baselined TO, not just
+    // what was dismissed.
+    accepted: { queue: prev?.queue ?? null, stream: prev?.stream ?? null },
+  };
+  return { doc, cleared };
+}
+
 export function createSyncHandler({
   kvReady = kvConfigured,
   readHash = hashGetAllJson,
@@ -253,6 +291,25 @@ export function createSyncHandler({
       let body;
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
       catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
+
+      // ACKNOWLEDGE A LATCHED COUNT-DROP ALERT. Its own branch, and it returns
+      // immediately: re-baselining must never ride along with a data publish,
+      // because the whole point is that someone VERIFIED the new counts are
+      // real. `by` is required for the same reason — this write is an audit
+      // record, not a reset button.
+      if (body.acknowledgeCountsAlert) {
+        const by = String(body.acknowledgeCountsAlert.by || "").trim();
+        if (!by) return res.status(400).json({ ok: false, error: "acknowledge_requires_by" });
+        const note = body.acknowledgeCountsAlert.note
+          ? String(body.acknowledgeCountsAlert.note).slice(0, 500) : null;
+        const prev = await readJson(K.counts);
+        if (!prev?.alert) {
+          return res.status(200).json({ ok: true, at: now(), cleared: null, detail: "no latched alert" });
+        }
+        const { doc, cleared } = acknowledgeCountsDoc(prev, { by, at: now(), note });
+        await writeJson(K.counts, doc);
+        return res.status(200).json({ ok: true, at: doc.updatedAt, cleared, counts: doc });
+      }
 
       const stored = { snapshot: false, queue: false, acks: 0 };
       if (body.snapshot != null) {
