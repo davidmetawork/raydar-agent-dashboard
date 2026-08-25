@@ -11,14 +11,21 @@
 // per-education `school` object carries `primary_location` and `website`;
 // neither profile writer mapped them until now.
 //
-// TWO SIGNALS, IN THIS ORDER, AND THE ORDER IS LOAD-BEARING.
+// THREE STEPS, IN THIS ORDER, AND THE ORDER IS LOAD-BEARING.
 //
-//   1. A `.edu` website. The registry restricts .edu to institutions
-//      accredited by an agency the US Department of Education recognises, so
-//      this is the ONE signal that speaks to "accredited" as well as "US".
-//      It must be matched on the END of the hostname: `srmist.edu.in` and
-//      `umt.edu.pk` are real schools in this queue and neither is a .edu.
-//   2. A location whose LAST segment names the country. "Austin, Texas,
+//   1. A location whose last segment names a country that is NOT the United
+//      States is a FULL STOP — no later signal can overturn it. This step
+//      exists because of PES University, Bengaluru: it holds `pes.edu`, a
+//      legacy .edu registered before the 2001 rules closed the domain to
+//      non-US institutions, and on 2026-08-25 it auto-interviewed an Indian
+//      B.Tech holder. An explicit country always beats a domain suffix.
+//   2. A `.edu` website. The registry restricts new .edu registrations to
+//      institutions accredited by an agency the US Department of Education
+//      recognises, so it is the one signal that speaks to "accredited" as
+//      well as "US" — for every school whose location did not already say
+//      otherwise. It must be matched on the END of the hostname:
+//      `srmist.edu.in` and `umt.edu.pk` are neither .edu nor US.
+//   3. A location whose LAST segment names the country. "Austin, Texas,
 //      United States" is the common shape.
 //
 // WHAT IS DELIBERATELY REFUSED. A bare state, spelled out or abbreviated,
@@ -46,6 +53,35 @@ const US_COUNTRY = new Set([
   "us",
 ]);
 
+/**
+ * Country names that appear as the last segment of a LinkedIn school location.
+ * Deliberately a country list and nothing else: it is only ever asked "does
+ * this name a country other than the US", so an unlisted country simply falls
+ * through to the .edu test, which is the behaviour that existed before.
+ * Grown from the countries actually seen in this queue plus the rest of the
+ * world's larger senders of applicants.
+ */
+const COUNTRIES = new Set([
+  "afghanistan", "albania", "algeria", "argentina", "armenia", "australia", "austria",
+  "azerbaijan", "bahrain", "bangladesh", "belarus", "belgium", "bolivia", "bosnia and herzegovina",
+  "brazil", "bulgaria", "cambodia", "cameroon", "canada", "chile", "china", "colombia",
+  "costa rica", "croatia", "cuba", "cyprus", "czechia", "czech republic", "denmark",
+  "dominican republic", "ecuador", "egypt", "el salvador", "estonia", "ethiopia", "finland",
+  "france", "georgia", "germany", "ghana", "greece", "guatemala", "honduras", "hong kong",
+  "hungary", "iceland", "india", "indonesia", "iran", "iraq", "ireland", "israel", "italy",
+  "jamaica", "japan", "jordan", "kazakhstan", "kenya", "kuwait", "kyrgyzstan", "laos",
+  "latvia", "lebanon", "libya", "lithuania", "luxembourg", "malaysia", "malta", "mexico",
+  "moldova", "mongolia", "montenegro", "morocco", "myanmar", "nepal", "netherlands",
+  "new zealand", "nicaragua", "nigeria", "north macedonia", "norway", "oman", "pakistan",
+  "palestine", "panama", "paraguay", "peru", "philippines", "poland", "portugal", "qatar",
+  "romania", "russia", "russian federation", "rwanda", "saudi arabia", "senegal", "serbia",
+  "singapore", "slovakia", "slovenia", "somalia", "south africa", "south korea", "korea",
+  "spain", "sri lanka", "sudan", "sweden", "switzerland", "syria", "taiwan", "tanzania",
+  "thailand", "tunisia", "turkey", "türkiye", "uganda", "ukraine", "united arab emirates",
+  "united kingdom", "england", "scotland", "wales", "northern ireland", "uruguay",
+  "uzbekistan", "venezuela", "vietnam", "yemen", "zambia", "zimbabwe",
+]);
+
 /** True when the website's hostname ends in `.edu` — never a substring. */
 export function isDotEdu(website) {
   const raw = String(website ?? "").trim();
@@ -70,10 +106,24 @@ export function locationSaysUS(location) {
 }
 
 /**
+ * Does the location's last segment name a country at all? Only a recognised
+ * country name counts — a street address, a bare city or a US state does not,
+ * so those fall through to the .edu test rather than vetoing it.
+ */
+export function locationNamesForeignCountry(location) {
+  const parts = lower(location).split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return false;      // "Utica, ny" has no country to read
+  const last = parts[parts.length - 1].replace(/\.$/, "");
+  if (US_COUNTRY.has(last) || US_COUNTRY.has(`${last}.`)) return false;
+  return COUNTRIES.has(last);
+}
+
+/**
  * One school row -> is it in the US? Total: anything unrecognised is `false`,
  * never null, so the evaluator has a plain boolean to compare and an unknown
  * school can never satisfy a rule.
  */
 export function schoolInUS({ website = null, location = null } = {}) {
+  if (locationNamesForeignCountry(location)) return false;
   return isDotEdu(website) || locationSaysUS(location);
 }

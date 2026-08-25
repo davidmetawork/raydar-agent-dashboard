@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { FIELDS, evaluateRule, normalizeRule } from "../api/applicants/_lib/rules.mjs";
-import { isDotEdu, locationSaysUS, schoolInUS } from "../api/applicants/_lib/school-us.mjs";
+import { isDotEdu, locationNamesForeignCountry, locationSaysUS, schoolInUS } from "../api/applicants/_lib/school-us.mjs";
 
 test(".edu is matched on the end of the hostname, never as a substring", () => {
   assert.equal(isDotEdu("https://www.iup.edu/"), true);
@@ -40,6 +40,23 @@ test("a bare state is refused, spelled out or abbreviated", () => {
   assert.equal(schoolInUS({ location: "Sriperumbudur, TN" }), false);
   assert.equal(schoolInUS({ location: "Toronto, ON, CA" }), false);
   assert.equal(schoolInUS({ location: "Utica, ny" }), false);
+});
+
+test("an explicit foreign country beats a .edu, because legacy .edu holders exist", () => {
+  // PES University, Bengaluru holds pes.edu — registered before the 2001 rules
+  // closed .edu to non-US institutions. On 2026-08-25 it auto-interviewed an
+  // Indian B.Tech holder whose master's was American, which is the exact
+  // person these rules exist to distinguish.
+  assert.equal(schoolInUS({ website: "http://pes.edu/", location: "Bengaluru, Karnataka, India" }), false);
+  assert.equal(locationNamesForeignCountry("Bengaluru, Karnataka, India"), true);
+  // The veto needs a real country name, so a US school with a street address
+  // or a state-only location still gets its .edu answered.
+  assert.equal(locationNamesForeignCountry("1011 South Drive Sutton Hall, Suite 120"), false);
+  assert.equal(locationNamesForeignCountry("Utica, ny"), false);
+  assert.equal(schoolInUS({ website: "https://www.sunypoly.edu", location: "Utica, ny" }), true);
+  // ... and the US itself is never foreign.
+  assert.equal(locationNamesForeignCountry("Los Angeles, California, United States"), false);
+  assert.equal(schoolInUS({ website: "http://www.usc.edu", location: "Los Angeles, California, United States" }), true);
 });
 
 test("either signal is enough, and neither means false rather than unknown", () => {
