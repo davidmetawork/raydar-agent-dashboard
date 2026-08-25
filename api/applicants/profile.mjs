@@ -104,6 +104,12 @@ function mapEducation(row, ranks) {
     start: row?.start_date ?? null,
     end: row?.end_date ?? null,
     logo: str(row?.school?.logo_src),
+    // Where the school is, and its site. Added 2026-08-25 so a rule can ask
+    // whether a degree is American — the applicant's own location answers a
+    // different question (see _lib/school-us.mjs). Both ride the nested
+    // school object; MIRRORS src/interviews/publish.mjs in the Raydar repo.
+    schoolLocation: str(row?.school?.primary_location),
+    schoolWebsite: str(row?.school?.website),
     talentRank: schoolId != null ? ranks.get(String(schoolId)) ?? null : null,
   };
 }

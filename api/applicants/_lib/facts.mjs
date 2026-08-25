@@ -21,6 +21,7 @@
 // in rules.mjs.
 
 import { degreeLevel } from "./degree.mjs";
+import { schoolInUS } from "./school-us.mjs";
 
 /**
  * Bump when the shape changes in a way a stored rule could misread. The tick
@@ -28,6 +29,13 @@ import { degreeLevel } from "./degree.mjs";
  * older shape, and the next prewarm rebuilds it.
  */
 export const FACTS_VERSION = 1;
+// NOT bumped when `location`/`inUS` were added on 2026-08-25. A bump makes the
+// tick skip EVERY stored record until the whole queue is re-warmed, which at
+// the measured 8-12 profiles per cycle would have taken the existing live rule
+// off the air for days. The new keys are additive and fail closed on their
+// own: a record built before them has `inUS: undefined`, which compares false,
+// so a rule asking for a US school simply does not match that person until
+// their next prewarm. Bump only for a change a stored rule could MISREAD.
 
 // Caps exist so one 23-role profile cannot bloat the hash the tick reads in
 // batches. Both sit comfortably above the observed p99 (jobs p90 = 9, max 23;
@@ -109,6 +117,13 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
     degree: str(row?.degree),
     endYear: yearOf(row?.end),
     rank: str(row?.talentRank),
+    location: str(row?.schoolLocation),
+    // Classified here for the same reason `level` is: once per profile rather
+    // than once per rule per tick, and by ONE function so the preview, the
+    // tick and the audit can never disagree about what "American" means.
+    // A school whose record carries neither a location nor a website is
+    // `false`, not unknown — see school-us.mjs on the tail that leaves.
+    inUS: schoolInUS({ website: row?.schoolWebsite, location: row?.schoolLocation }),
   }));
 
   const jobs = list(source.experiences).slice(0, MAX_JOBS).map((row) => ({

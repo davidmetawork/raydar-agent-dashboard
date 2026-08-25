@@ -72,6 +72,15 @@ export const FIELDS = {
     group: "school", ops: ["after", "before", "between"], kind: "year",
     label: "Graduated", read: (_s, row) => row?.endYear,
   },
+  "school.inUS": {
+    group: "school", ops: ["is"], kind: "bool", label: "School is in the US",
+    read: (_s, row) => row?.inUS,
+    display: (_s, row) => row?.location ?? row?.name ?? null,
+  },
+  "school.location": {
+    group: "school", ops: ["contains"], kind: "text", label: "School location",
+    approximate: true, read: (_s, row) => row?.location,
+  },
   "school.rank": {
     group: "school", ops: ["any_of"], kind: "ranks", label: "School talent rank is",
     read: (_s, row) => row?.rank,
