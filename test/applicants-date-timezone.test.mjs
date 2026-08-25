@@ -78,7 +78,7 @@ test("a real arrival time is shown to the minute; a bare date never invents one"
   assert.match(source, /hasClockTime\(row\.addedAt\)/);
   assert.match(source, /"added " \+ esc\(timeOfDay\(row\.addedAt\)\)/);
   // ...and falls back to the old wording when there is no clock time to show.
-  assert.match(source, /: "applied " \+ esc\(relTime\(row\.appliedAt\) \|\| "—"\)/);
+  assert.match(source, /"applied " \+ esc\(relTime\(row\.appliedAt\) \|\| "—"\)/);
 });
 
 test("timeOfDay is never called on a bare date, in any timezone", () => {
@@ -93,4 +93,19 @@ test("timeOfDay is never called on a bare date, in any timezone", () => {
     ], { env: { ...process.env, TZ: tz }, encoding: "utf8" });
     assert.equal(out, "false,true,false", `in ${tz}`);
   }
+});
+
+test("the exact application time wins, and only it may say 'applied'", () => {
+  // Three sources, best first. appliedAtIso is when the person actually
+  // applied (from the Applicant Hub's Workable record, 98% of rows); addedAt
+  // is when ingestion reached them, ~40h later on the live queue; a bare
+  // appliedAt date is the retired path's last resort.
+  assert.match(source, /const exactApplied = hasClockTime\(row\.appliedAtIso\) \? row\.appliedAtIso : null;/);
+  assert.match(source, /\? "applied " \+ esc\(timeOfDay\(exactApplied\)\) \+ " · " \+ esc\(relTime\(exactApplied\)\)/);
+  // addedAt keeps its own, different word — conflating the two would claim a
+  // precision about the APPLICATION that the ingestion time does not have.
+  assert.match(source, /\? "added " \+ esc\(timeOfDay\(row\.addedAt\)\) \+ " · " \+ esc\(relTime\(row\.addedAt\)\)/);
+  // The date is what the row is stamped with when an exact time exists, so the
+  // day shown is the day they applied rather than the day we ingested them.
+  assert.match(source, /esc\(shortDate\(exactApplied \|\| row\.appliedAt \|\| row\.addedAt\)\)/);
 });

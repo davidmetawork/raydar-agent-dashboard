@@ -916,11 +916,26 @@ function rowCardHtml(row, mode, decision) {
      the minute. It is labelled "added", not "applied", because those are not
      the same event: ingestion is batched, and no true application timestamp
      exists anywhere upstream to show instead. */
-  const when = row.appliedAt || row.addedAt
-    ? "<b>" + esc(shortDate(row.appliedAt || row.addedAt)) + "</b>" +
-      (hasClockTime(row.addedAt)
-        ? "added " + esc(timeOfDay(row.addedAt)) + " · " + esc(relTime(row.addedAt))
-        : "applied " + esc(relTime(row.appliedAt) || "—"))
+  /* THREE SOURCES FOR ONE LINE, best first, and each labelled for what it is.
+
+     1. `appliedAtIso` — when the person ACTUALLY applied, to the second, out
+        of the Applicant Hub's own record of the Workable submission. Covers
+        98% of rows. This is the only one that can honestly say "applied".
+     2. `addedAt` — when the Paraform record was created, i.e. when ingestion
+        reached them. Measured across the queue on 2026-08-25 it runs ~40 hours
+        behind the real application and once 5.6 days, so it says "added".
+     3. `appliedAt` alone — a bare DATE with no clock time, which is all the
+        retired LinkedIn/Gmail path ever recorded. relTime then measures from
+        local midnight, so every row from one day reads the same; that is the
+        old behaviour and it is the last resort, not the default. */
+  const exactApplied = hasClockTime(row.appliedAtIso) ? row.appliedAtIso : null;
+  const when = row.appliedAt || row.addedAt || exactApplied
+    ? "<b>" + esc(shortDate(exactApplied || row.appliedAt || row.addedAt)) + "</b>" +
+      (exactApplied
+        ? "applied " + esc(timeOfDay(exactApplied)) + " · " + esc(relTime(exactApplied))
+        : hasClockTime(row.addedAt)
+          ? "added " + esc(timeOfDay(row.addedAt)) + " · " + esc(relTime(row.addedAt))
+          : "applied " + esc(relTime(row.appliedAt) || "—"))
     : "";
   return '<div class="row' + (decision ? " decided-row" : "") + '" data-row="' + esc(key) + '">' +
     check + avatarHtml(row) +
