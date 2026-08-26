@@ -81,6 +81,36 @@ export const FIELDS = {
     group: "school", ops: ["contains"], kind: "text", label: "School location",
     approximate: true, read: (_s, row) => row?.location,
   },
+  // The five curated top-university lists (school-top.mjs). One boolean per
+  // list rather than one multi-pick field: conditions AND with no OR, so a
+  // separate field per list is what lets "top 50 US bachelor's" be one rule
+  // whose name says exactly which list fired. All five read the same derived
+  // `top` group, so a school can satisfy at most one of them.
+  "school.topUS50": {
+    group: "school", ops: ["is"], kind: "bool", label: "Top 50 US school",
+    read: (_s, row) => (row?.top == null ? false : row.top === "us50"),
+    display: (_s, row) => row?.name ?? null,
+  },
+  "school.topCA10": {
+    group: "school", ops: ["is"], kind: "bool", label: "Top 10 Canadian school",
+    read: (_s, row) => (row?.top == null ? false : row.top === "ca10"),
+    display: (_s, row) => row?.name ?? null,
+  },
+  "school.topIN5": {
+    group: "school", ops: ["is"], kind: "bool", label: "Top 5 Indian school",
+    read: (_s, row) => (row?.top == null ? false : row.top === "in5"),
+    display: (_s, row) => row?.name ?? null,
+  },
+  "school.topEU10": {
+    group: "school", ops: ["is"], kind: "bool", label: "Top 10 European school",
+    read: (_s, row) => (row?.top == null ? false : row.top === "eu10"),
+    display: (_s, row) => row?.name ?? null,
+  },
+  "school.topASIA20": {
+    group: "school", ops: ["is"], kind: "bool", label: "Top 20 Asian school",
+    read: (_s, row) => (row?.top == null ? false : row.top === "asia20"),
+    display: (_s, row) => row?.name ?? null,
+  },
   "school.rank": {
     group: "school", ops: ["any_of"], kind: "ranks", label: "School talent rank is",
     read: (_s, row) => row?.rank,

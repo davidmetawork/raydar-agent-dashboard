@@ -22,6 +22,7 @@
 
 import { degreeLevel } from "./degree.mjs";
 import { schoolInUS } from "./school-us.mjs";
+import { topSchoolGroup } from "./school-top.mjs";
 
 /**
  * Bump when the shape changes in a way a stored rule could misread. The tick
@@ -124,6 +125,10 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
     // A school whose record carries neither a location nor a website is
     // `false`, not unknown — see school-us.mjs on the tail that leaves.
     inUS: schoolInUS({ website: row?.schoolWebsite, location: row?.schoolLocation }),
+    // Which curated top-university list this school is on, or null. Derived
+    // from the NAME (the one deliberate exception to id matching — see
+    // school-top.mjs for why ids cannot express a world ranking).
+    top: topSchoolGroup(row?.school),
   }));
 
   const jobs = list(source.experiences).slice(0, MAX_JOBS).map((row) => ({
