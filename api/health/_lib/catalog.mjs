@@ -533,6 +533,10 @@ export const CATALOG = [
     // silent by design (quiet window), so the window must span it: worst
     // legitimate gap is 19:10 -> 05:10 = 600 min, plus GitHub drift.
     ["gha-interview-invites", "LinkedIn applicant emails", 720, 900],
+    // The missed-interviewer alarm (dispatch-watch.yml): every 30 min, one
+    // query over past confirmed agent bookings that never dispatched a bot.
+    // Born from the 2026-08-19..25 outage that nothing else could see.
+    ["gha-dispatch-watch", "Missed-interviewer alarm", 75, 180],
   ].map(([lane, name, degradedAfterMin, maxSilenceMin]) => ({
     id: lane,
     name,
