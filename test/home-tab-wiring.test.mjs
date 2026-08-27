@@ -12,6 +12,7 @@ import test from "node:test";
 
 const index = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const home = await readFile(new URL("../home.html", import.meta.url), "utf8");
+const submissions = await readFile(new URL("../submissions.html", import.meta.url), "utf8");
 const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
 
 const views = JSON.parse(index.match(/const VIEWS=(\[[^\]]+\]);/)[1].replace(/'/g, '"'));
@@ -73,6 +74,26 @@ test("the home frame is lazy-loaded exactly once, like every other iframe tab", 
 test("/home is routed and the revenue functions are configured", () => {
   assert.ok(vercel.rewrites.some((r) => r.source === "/home" && r.destination === "/home.html"));
   assert.ok(vercel.functions["api/revenue/*.mjs"], "revenue functions need a maxDuration");
+});
+
+test("Submissions is wired through all five dashboard registries", () => {
+  assert.ok(views.includes("submissions"));
+  assert.match(index, /id="tab-submissions"/);
+  assert.match(index, /id="view-submissions" hidden/);
+  assert.match(index, /\{name:"submissions",label:"Submissions",group:"People"\}/);
+  assert.ok(vercel.rewrites.some((row) => row.source === "/submissions" && row.destination === "/submissions.html"));
+  assert.ok(vercel.functions["api/submissions/*.mjs"]);
+  assert.ok(vercel.crons.some((row) => row.path === "/api/submissions/refresh" && row.schedule === "3,18,33,48 * * * *"));
+});
+
+test("Submissions is team-gated, cache-rendered, and never auto-submits from the page", () => {
+  assert.match(submissions, /RaydarAuth\.session\(\)/);
+  assert.match(submissions, /\/api\/submissions\/list/);
+  assert.match(submissions, /action:"preview"/);
+  assert.match(submissions, /action:"submit"/);
+  assert.doesNotMatch(submissions, /\/api\/paraai\/(?:worker|interest)|action:"tick"/);
+  assert.match(submissions, /Raydar sends no candidate email/);
+  assert.match(submissions, /Resume tailoring awaits the supervised capture/);
 });
 
 test("the activity warmer cron is registered so the page never waits on Paraform", () => {

@@ -37,8 +37,8 @@
       "destination": "/prep.html"
     },
     {
-      "source": "/paraai",
-      "destination": "/paraai.html"
+      "source": "/submissions",
+      "destination": "/submissions.html"
     },
     {
       "source": "/health",
@@ -87,6 +87,9 @@
     },
     "api/paraai/*.mjs": {
       "maxDuration": 120
+    },
+    "api/submissions/*.mjs": {
+      "maxDuration": 300
     },
     "api/health/*.mjs": {
       "maxDuration": 60
@@ -139,6 +142,10 @@
     {
       "path": "/api/paraai/submission-notify",
       "schedule": "20 * * * *"
+    },
+    {
+      "path": "/api/submissions/refresh",
+      "schedule": "3,18,33,48 * * * *"
     },
     {
       "path": "/api/health/tick",

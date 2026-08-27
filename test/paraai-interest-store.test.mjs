@@ -12,6 +12,7 @@ import {
   recordInterestHandoff,
   recordSubmissionOutcome,
   recordSubmissionPrepared,
+  releaseSubmissionClaim,
   releaseLock,
   resolveInterestHandoff,
   saveJob,
@@ -32,6 +33,16 @@ function inMemoryClaimKv() {
       if (raw) return [0, raw];
       values.set(key, argv[0]);
       return [1, argv[0]];
+    }
+
+    if (script.includes("if claim.lane ~= ARGV[2]")) {
+      if (!raw) return [0, ""];
+      const claim = JSON.parse(raw);
+      if (claim.attemptId !== argv[0]) return [-1, raw];
+      if (claim.lane !== argv[1]) return [-2, raw];
+      if (["accepted", "verified"].includes(claim.outcome)) return [-3, raw];
+      values.delete(key);
+      return [1, raw];
     }
 
     if (!raw) return [-1, ""];
@@ -185,6 +196,32 @@ test("unknown can reconcile to verified but cannot be rewritten as accepted", as
     { attemptId, kvImpl },
   );
   assert.equal(reconciled.status, "advanced");
+});
+
+test("human recovery releases only its exact non-terminal Path B fencing token", async () => {
+  const kvImpl = inMemoryClaimKv();
+  const won = await claimSubmissionAttempt(
+    "candidate-1",
+    "role-1",
+    { lane: "submissions" },
+    { kvImpl },
+  );
+  await assert.rejects(
+    releaseSubmissionClaim("candidate-1", "role-1", "stale", { lane: "submissions", kvImpl }),
+    (error) => error.code === "SUBMISSION_CLAIM_CONFLICT",
+  );
+  await assert.rejects(
+    releaseSubmissionClaim("candidate-1", "role-1", won.claim.attemptId, { lane: "worker", kvImpl }),
+    (error) => error.code === "SUBMISSION_CLAIM_LANE_CONFLICT",
+  );
+  const released = await releaseSubmissionClaim(
+    "candidate-1",
+    "role-1",
+    won.claim.attemptId,
+    { lane: "submissions", kvImpl },
+  );
+  assert.equal(released.released, true);
+  assert.equal(await getSubmissionClaim("candidate-1", "role-1", { kvImpl }), null);
 });
 
 function inMemoryQueueKv() {

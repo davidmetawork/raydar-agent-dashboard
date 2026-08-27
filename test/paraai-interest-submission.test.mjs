@@ -618,14 +618,14 @@ test("duplicate response flags are deterministic blockers", () => {
   ]);
 });
 
-test("weekly credit boundary is Monday 09:00 Pacific across DST", () => {
+test("weekly credit boundary is Paraform's observed Monday midnight Pacific across DST", () => {
   assert.equal(
     singleSubmissionWeekStart("2026-07-29T18:00:00Z"),
-    "2026-07-27T16:00:00.000Z",
+    "2026-07-27T07:00:00.000Z",
   );
   assert.equal(
     singleSubmissionWeekStart("2026-01-07T18:00:00Z"),
-    "2026-01-05T17:00:00.000Z",
+    "2026-01-05T08:00:00.000Z",
   );
 });
 
@@ -869,6 +869,23 @@ test("captured executor rechecks credits and snippet requirements before POST", 
   assert.equal(exhausted.mutationAttempted, false);
   assert.ok(exhausted.blockers.includes("credits_exhausted"));
   assert.equal(exhaustedHarness.applicationPosts(), 0);
+
+  const advisoryHarness = capturedExecutorHarness({ creditsExhausted: true });
+  const advisory = await executeCapturedSingleSubmission({
+    candidate: contractCandidate,
+    roleId: "role-1",
+    candidateToApprovedRoleId: "candidate-role-1",
+    submissionDraft: contractDraft,
+    trpcGetImpl: advisoryHarness.trpcGetImpl,
+    trpcPostImpl: advisoryHarness.trpcPostImpl,
+    restImpl: advisoryHarness.restImpl,
+    sleepImpl: async () => {},
+    advisoryCredits: true,
+    phoneScreened: false,
+  });
+  assert.equal(advisory.verified, true);
+  assert.equal(advisoryHarness.applicationPosts(), 1);
+  assert.equal(advisoryHarness.postedPayload().phone_screened, false);
 
   const snippetHarness = capturedExecutorHarness({ snippetRequired: true });
   const snippet = await executeCapturedSingleSubmission({

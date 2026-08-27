@@ -720,6 +720,7 @@ export function buildSingleSubmissionPayload({
   requireReviewByParaform = false,
   timezone = "America/Los_Angeles",
   isJobHopper = false,
+  phoneScreened = true,
   attachmentRequirement = null,
 } = {}) {
   const blockers = [];
@@ -849,7 +850,7 @@ export function buildSingleSubmissionPayload({
       salary_explanation: null,
       visa_sponsorship: visaSponsorship,
       relocation,
-      phone_screened: true,
+      phone_screened: phoneScreened === true,
       additional_info: clean(draft?.additionalInfo) || null,
       sourced_from: null,
       sourced_msg: null,
@@ -1298,7 +1299,10 @@ export function singleSubmissionWeekStart(
     year: localDate.getUTCFullYear(),
     month: localDate.getUTCMonth() + 1,
     day: localDate.getUTCDate(),
-    hour: 9,
+    // Paraform's observed week turns over at local midnight. The earlier
+    // bundle reading used 09:00 PT and made every credit query nine hours
+    // stale on Monday.
+    hour: 0,
   }, timeZone).toISOString();
 }
 
@@ -1327,6 +1331,7 @@ export async function precheckCapturedSingleSubmissionContext({
   trpcPostImpl,
   restImpl = paraformRest,
   now = new Date(),
+  advisoryCredits = false,
 } = {}) {
   if (typeof trpcGetImpl !== "function") throw new TypeError("trpcGetImpl required");
   if (typeof trpcPostImpl !== "function") throw new TypeError("trpcPostImpl required");
@@ -1379,7 +1384,7 @@ export async function precheckCapturedSingleSubmissionContext({
   if (roleSettings?.screening_call_snippet_required === true) {
     blockers.push("submission_screening_call_snippet_required");
   }
-  if (!singleSubmissionCreditsAvailable(ledger)) blockers.push("credits_exhausted");
+  if (!advisoryCredits && !singleSubmissionCreditsAvailable(ledger)) blockers.push("credits_exhausted");
   blockers.push(...duplicateSubmissionBlockers(duplicates));
   if (role?.companyId) {
     try {
@@ -1402,8 +1407,11 @@ export async function precheckCapturedSingleSubmissionContext({
     ok: unique(blockers).length === 0,
     blockers: unique(blockers),
     signals: {
+      creditsAvailable: singleSubmissionCreditsAvailable(ledger),
       paraformConfirmationExpected:
         roleSettings?.candidate_application_confirm_email === true,
+      roleName: clean(role?.title ?? role?.name),
+      companyName: clean(role?.company?.name ?? role?.company_name ?? role?.companyName),
     },
   };
 }
@@ -1463,6 +1471,8 @@ export async function executeCapturedSingleSubmission({
   trpcPostImpl,
   restImpl = paraformRest,
   now = new Date(),
+  advisoryCredits = false,
+  phoneScreened = true,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (typeof trpcGetImpl !== "function") throw new TypeError("trpcGetImpl required");
@@ -1573,6 +1583,7 @@ export async function executeCapturedSingleSubmission({
     // hard-coded false even when role settings ask Paraform to review.
     requireReviewByParaform: false,
     isJobHopper: preflightSignals?.jobHopper === true,
+    phoneScreened,
     attachmentRequirement: roleSettings?.submission_attachment_requirements,
   });
   blockers.push(...built.blockers);
@@ -1582,7 +1593,7 @@ export async function executeCapturedSingleSubmission({
       "roleSlots.getMySingleSubmissionData",
       { weekStart },
     );
-    if (!singleSubmissionCreditsAvailable(ledgerBeforeRaw)) {
+    if (!advisoryCredits && !singleSubmissionCreditsAvailable(ledgerBeforeRaw)) {
       blockers.push("credits_exhausted");
     }
   } catch {

@@ -85,21 +85,69 @@ export async function readSubmissionRequestClaim(requestId, { kvImpl = kvDefault
   return null;
 }
 
-// Claim BEFORE the Paraform write, and never release it: a crash mid-write must
-// not be able to produce a second attempt at the same request. Returns false
-// when the request is already spoken for by either namespace.
-export async function claimSubmissionRequest(requestId, action, lane, { kvImpl = kvDefault } = {}) {
+// Claim BEFORE the Paraform write. Ordinary automation treats the claim as
+// permanent. The Submissions tab is the one supervised recovery path: it may
+// release its OWN neutral claim only after a live Paraform read-back proves the
+// request is still pending and carries no application. That release is exposed
+// separately below and cannot touch legacy claims.
+export async function claimSubmissionRequestAttempt(requestId, action, lane, { kvImpl = kvDefault } = {}) {
   if (!requestId) throw new Error("requestId required");
   const legacy = parse(await kvImpl(["GET", legacyReplyClaimKey(requestId)]), null);
-  if (legacy) return false;
-  const payload = JSON.stringify({
+  if (legacy) return { status: "existing", claim: { ...legacy, namespace: "reply-claim" } };
+  const claim = {
     action: String(action || ""),
     lane: String(lane || ""),
     claimId: randomUUID(),
     claimedAt: new Date().toISOString(),
-  });
+  };
+  const payload = JSON.stringify(claim);
   const result = await kvImpl(["SET", claimKey(requestId), payload, "NX"]);
-  return result === "OK" || result === true;
+  if (result === "OK" || result === true) {
+    return { status: "claimed", claim: { ...claim, namespace: "request-claim" } };
+  }
+  return {
+    status: "existing",
+    claim: await readSubmissionRequestClaim(requestId, { kvImpl }),
+  };
+}
+
+export async function claimSubmissionRequest(requestId, action, lane, { kvImpl = kvDefault } = {}) {
+  const result = await claimSubmissionRequestAttempt(requestId, action, lane, { kvImpl });
+  return result.status === "claimed";
+}
+
+export async function releaseSubmissionRequestClaim(
+  requestId,
+  claimId,
+  { lane = "submissions", kvImpl = kvDefault } = {},
+) {
+  if (!requestId) throw new Error("requestId required");
+  if (!claimId) throw new Error("claimId required");
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return -1 end
+    local claim = cjson.decode(raw)
+    if claim.claimId ~= ARGV[1] then return -2 end
+    if claim.lane ~= ARGV[2] then return -3 end
+    return redis.call('DEL', KEYS[1])
+  `;
+  const result = Number(await kvImpl([
+    "EVAL", script, 1, claimKey(requestId), String(claimId), String(lane),
+  ]));
+  if (result === 1) return true;
+  const error = new Error(
+    result === -1
+      ? "submission request claim not found"
+      : result === -2
+        ? "submission request claim changed"
+        : "submission request claim belongs to another lane",
+  );
+  error.code = result === -1
+    ? "REQUEST_CLAIM_NOT_FOUND"
+    : result === -2
+      ? "REQUEST_CLAIM_CONFLICT"
+      : "REQUEST_CLAIM_LANE_MISMATCH";
+  throw error;
 }
 
 export { neutralHash, legacyReplyHash };

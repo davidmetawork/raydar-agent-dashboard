@@ -17,6 +17,7 @@ import {
   pipeline,
   storeConfigured,
 } from "../../sourcing/_lib/store.mjs";
+import { OUTCOME_SEQUENCE_RULES } from "../../roster/_lib/outcome-sequences.mjs";
 
 export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
 
@@ -251,13 +252,25 @@ export function isInboxRoleOutreachCampaign(campaign) {
   return !senderTokens.some((token) => INBOX_EXCLUDED_ADDRESSES.includes(token));
 }
 
+// The five post-call curated-list sequences intentionally have no role or
+// Project link. Admit only their pinned IDs; all other unlinked/admin
+// campaigns keep failing closed through isInboxRoleOutreachCampaign().
+export function isInboxCuratedListCampaign(campaign) {
+  const id = stringValue(campaign?.id);
+  return Boolean(id && OUTCOME_SEQUENCE_RULES.some((rule) => rule.id === id));
+}
+
+function isAdmittedInboxCampaign(campaign) {
+  return isInboxRoleOutreachCampaign(campaign) || isInboxCuratedListCampaign(campaign);
+}
+
 export function campaignsToScan(campaigns) {
   // This is a role-outreach inbox, not an agency-wide Paraform mailbox. Only
   // sequences positively linked to a role or sourcing Project are admitted.
   // Generic/admin follow-ups have neither link and therefore fail closed.
   // Campaign-level sender metadata is checked too, so attaching the primary
   // Raydar inbox cannot opt a linked sequence back into Monitor ingestion.
-  const valid = arrayValue(campaigns).filter(isInboxRoleOutreachCampaign);
+  const valid = arrayValue(campaigns).filter((campaign) => isAdmittedInboxCampaign(campaign));
   const hasReplyCounts = valid.length > 0 && valid.every((campaign) => (
     Object.prototype.hasOwnProperty.call(campaign, "email_replies")
     && Number.isFinite(Number(campaign.email_replies))
@@ -326,7 +339,16 @@ export function flattenCampaignInbox(campaign, inboxData, recentByGmail = new Ma
     const gmailId = stringValue(email.gmail_id);
     const recent = recentByGmail.get(gmailId) || {};
 
+    const candidateUserId = stringValue(
+        lead?.cu_id
+        || lead?.candidate_user_id
+        || lead?.candidateUserId
+        || lead?.candidate_user?.id,
+      );
+    const roleId = linkedOutreachId(campaign);
     const row = {
+      ...(candidateUserId ? { candidate_user_id: candidateUserId } : {}),
+      ...(roleId ? { role_id: roleId } : {}),
       candidate_name: stringValue(recent.candidate_name || candidate.name) || "Unknown candidate",
       candidate_email: stringValue(recent.candidate_email) || candidateEmail(lead),
       candidate_image: stringValue(recent.candidate_image || candidate.image_src),
@@ -374,7 +396,16 @@ function recentFallbackRow(recent, campaignById, categoryByLead) {
   const categoryKey = `${sequenceId}:${ccuId}`;
   const lead = categoryByLead.get(categoryKey) || {};
   const campaign = campaignById.get(sequenceId) || {};
+  const candidateUserId = stringValue(
+      recent?.cu_id
+      || recent?.candidate_user_id
+      || recent?.candidateUserId
+      || recent?.candidate_user?.id,
+    );
+  const roleId = linkedOutreachId(campaign);
   return {
+    ...(candidateUserId ? { candidate_user_id: candidateUserId } : {}),
+    ...(roleId ? { role_id: roleId } : {}),
     candidate_name: stringValue(recent?.candidate_name) || "Unknown candidate",
     candidate_email: stringValue(recent?.candidate_email),
     candidate_image: stringValue(recent?.candidate_image),
@@ -574,7 +605,7 @@ export async function buildInboxRefresh({
   if (campaignResult.status === "rejected") throw campaignResult.reason;
   const campaignsRaw = campaignResult.value;
   const campaigns = arrayValue(campaignsRaw);
-  const eligibleCampaigns = campaigns.filter(isInboxRoleOutreachCampaign);
+  const eligibleCampaigns = campaigns.filter((campaign) => isAdmittedInboxCampaign(campaign));
   const targets = campaignsToScan(campaigns);
   const targetIds = new Set(
     targets.map((campaign) => stringValue(campaign?.id)).filter(Boolean),

@@ -75,6 +75,16 @@ async function kv(args) {
   return body?.result ?? null;
 }
 
+async function kvPipeline(commands) {
+  if (!commands.length) return [];
+  const body = await request("/pipeline", commands);
+  if (!Array.isArray(body)) throw new Error("interest state store pipeline failed");
+  return body.map((item) => {
+    if (item?.error) throw new Error(String(item.error));
+    return item?.result ?? null;
+  });
+}
+
 export async function probeInterestStore({ kvImpl = kv } = {}) {
   const nonce = randomUUID();
   const key = `paraai:interest:canary:${nonce}`;
@@ -144,6 +154,17 @@ export function appendJournal(state, event, detail = {}) {
 
 export async function getSnapshot(candidateUserId, { kvImpl = kv } = {}) {
   return parse(await kvImpl(["GET", snapKey(candidateUserId)]), null);
+}
+
+export async function listInterestSnapshots(
+  candidateUserIds,
+  { pipelineImpl = kvPipeline } = {},
+) {
+  const ids = [...new Set((Array.isArray(candidateUserIds) ? candidateUserIds : [])
+    .map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const values = await pipelineImpl(ids.map((id) => ["GET", snapKey(id)]));
+  return new Map(ids.map((id, index) => [id, parse(values[index], null)]));
 }
 
 export async function putSnapshot(candidateUserId, statuses, { kvImpl = kv, seeded = false } = {}) {
@@ -486,6 +507,52 @@ export async function claimSubmissionAttempt(
 
 export async function getSubmissionClaim(candidateUserId, roleId, { kvImpl = kv } = {}) {
   return parse(await kvImpl(["GET", claimKey(candidateUserId, roleId)]), null);
+}
+
+/**
+ * Human recovery for this tab's own Path B claim. The caller must first prove
+ * from live Paraform reads that no application landed. The atomic delete here
+ * then checks the exact attempt fencing token and lane; worker-owned or
+ * verified claims can never be released through this function.
+ */
+export async function releaseSubmissionClaim(
+  candidateUserId,
+  roleId,
+  attemptId,
+  { lane = "submissions", kvImpl = kv } = {},
+) {
+  const attempt = String(attemptId || "").trim();
+  const expectedLane = String(lane || "").trim();
+  if (!attempt || !expectedLane) throw new Error("attemptId and lane required");
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {0, ''} end
+    local claim = cjson.decode(raw)
+    if claim.attemptId ~= ARGV[1] then return {-1, raw} end
+    if claim.lane ~= ARGV[2] then return {-2, raw} end
+    if claim.outcome == 'accepted' or claim.outcome == 'verified' then return {-3, raw} end
+    redis.call('DEL', KEYS[1])
+    return {1, raw}
+  `;
+  const result = await kvImpl([
+    "EVAL", script, 1, claimKey(candidateUserId, roleId), attempt, expectedLane,
+  ]);
+  const code = Number(result?.[0]);
+  if (code === 0) return { released: false, reason: "not_found", claim: null };
+  const claim = parse(result?.[1], null);
+  if (code === 1) return { released: true, reason: null, claim };
+  const error = new Error(code === -1
+    ? "interest submission attempt does not own claim"
+    : code === -2
+      ? "interest submission claim belongs to another lane"
+      : "verified interest submission claim cannot be released");
+  error.code = code === -1
+    ? "SUBMISSION_CLAIM_CONFLICT"
+    : code === -2
+      ? "SUBMISSION_CLAIM_LANE_CONFLICT"
+      : "SUBMISSION_CLAIM_TERMINAL";
+  error.claim = claim;
+  throw error;
 }
 
 function submissionClaimError(code, claim = null) {

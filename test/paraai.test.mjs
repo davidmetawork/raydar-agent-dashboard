@@ -534,40 +534,13 @@ test("only positive submission readback clears verified submission failures", as
   assert.equal(unconfirmed.automation.stepFailures.submit.count, 1);
 });
 
-test("Para AI HTML inline JavaScript parses", async () => {
+test("the retired Para AI page redirects to Submissions and exposes no operator control", async () => {
   const html = await readFile(new URL("../paraai.html", import.meta.url), "utf8");
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((match) => match[1]).filter((source) => source.trim());
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  assert.doesNotMatch(html, /id="marketConfirmed"|market confirmation|I have screened this candidate and confirmed/);
-  assert.doesNotMatch(html, /<input[^>]+id="[^"]*(?:market|consent)[^"]*"/i);
-  assert.match(html, /marketConfirmed:true/);
-  assert.match(html, /function reviewReasonStack/);
-  assert.match(html, /reviewPolicy\?\.preferenceRouting/);
-  assert.match(html, /Stated → routed preferences/);
-  assert.match(html, /job\.reviewAction\?\.allowed===true/);
-  assert.match(html, /Apply ladder and submit/);
-  assert.match(html, /action:'apply-ladder-submit',jobId:id,expectedRevision:job\.revision/);
-  assert.match(html, /max="200000"/);
-  assert.match(html, /async function submitReviewedBody/);
-  assert.match(html, /function reconcileOpenReview/);
-  assert.match(html, /latest\.state!=='ready_to_submit'/);
-  assert.match(html, /expectedRevision:latest\.revision/);
-  assert.match(html, /action:'reconcile-submit'/);
-  assert.match(html, /Match shadow/);
-  assert.match(html, /record\.mode==="manual_review"/);
-  assert.match(html, /Inspect the blocked transition/);
-  assert.match(html, /This lane took no candidate-facing action/);
-  assert.match(html, /Recommended fit/);
-  assert.match(html, /Possible fit/);
-  assert.match(html, /worker-owned/);
-  assert.doesNotMatch(html, /Check matches|action:'refresh-matches'/);
-  assert.match(html, /ready&&STATE\.health\?\.enrollmentReady===true/);
-  assert.match(html, /Accepted by Paraform\. Approval may take a couple minutes/);
-  assert.match(html, /Waiting for resume/);
-  assert.match(html, /g\.waitingForResume\|\|\[\],waitingResumeCard/);
-  assert.match(html, /Resume attach signals re-check immediately/);
-  assert.doesNotMatch(html, /action:\s*["']direct-submit/);
+  assert.match(html, /location\.replace\("\/#submissions"\)/);
+  assert.doesNotMatch(html, /Apply ladder and submit|action:'apply-ladder-submit'|reconcile-submit/);
   const run = await readFile(new URL("../api/paraai/run.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(run, /["']direct-submit["']/);
   assert.match(run, /"apply-ladder-submit"/);
@@ -618,8 +591,9 @@ test("Phase 4 health verifies all five live sequences by ID without exposing IDs
   );
 });
 
-test("Vercel config exposes one Para AI page and grouped API duration", async () => {
+test("Vercel retires the Para AI page while keeping its worker API duration", async () => {
   const config = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
-  assert.deepEqual(config.rewrites.find((row) => row.source === "/paraai"), { source: "/paraai", destination: "/paraai.html" });
+  assert.equal(config.rewrites.find((row) => row.source === "/paraai"), undefined);
+  assert.deepEqual(config.rewrites.find((row) => row.source === "/submissions"), { source: "/submissions", destination: "/submissions.html" });
   assert.equal(config.functions["api/paraai/*.mjs"].maxDuration, 120);
 });

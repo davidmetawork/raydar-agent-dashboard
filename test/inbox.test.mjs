@@ -12,6 +12,7 @@ import {
   flattenCampaignInbox,
   inboxReplyBucket,
   inboxTrpcGet,
+  isInboxCuratedListCampaign,
   isInboxRoleOutreachCampaign,
   mergeAndSortReplies,
   mergeInboxRefreshState,
@@ -23,6 +24,7 @@ import {
   writeInboxRefreshState,
   writeInboxTriage,
 } from "../api/inbox/_lib/core.mjs";
+import { OUTCOME_SEQUENCE_RULES } from "../api/roster/_lib/outcome-sequences.mjs";
 import {
   createInboxFeedHandler,
 } from "../api/inbox/feed.mjs";
@@ -990,6 +992,54 @@ test("Inbox campaign eligibility admits only linked role outreach and excludes t
     id: "unlinked-generic-sequence",
     campaign_to_accounts: [{ account: { email: "david@heyraydar.com" } }],
   }), false);
+});
+
+test("Inbox admits only the five pinned unlinked curated-list sequences", () => {
+  const curatedId = OUTCOME_SEQUENCE_RULES[0].id;
+  assert.equal(isInboxCuratedListCampaign({ id: curatedId }), true);
+  assert.equal(isInboxCuratedListCampaign({ id: "unlinked-generic-sequence" }), false);
+  assert.deepEqual(
+    campaignsToScan([
+      { id: curatedId, name: "Curated list", email_replies: 3 },
+      { id: "unlinked-generic-sequence", email_replies: 4 },
+    ]).map(({ id }) => id),
+    [curatedId],
+  );
+});
+
+test("Inbox refresh fans out the pinned unlinked curated-list sequence", async () => {
+  const curatedId = OUTCOME_SEQUENCE_RULES[0].id;
+  const inboxCalls = [];
+  const feed = await buildInboxFeed({
+    get: async (procedure, input) => {
+      if (procedure === "campaigns.getListOfCampaignsOptimized") {
+        return [{ id: curatedId, name: "Curated list", email_replies: 1 }];
+      }
+      if (procedure === "campaigns.getRecentReplies") return [];
+      assert.equal(procedure, "campaigns.getCampaignInboxData");
+      inboxCalls.push(input.campaign_id);
+      return {
+        campaign_to_candidate_users: [{
+          id: "lead-curated",
+          reply_category: "interested",
+          candidate_email: "candidate@example.com",
+          candidate_user: { candidate: { name: "Curated Candidate" } },
+        }],
+        campaign_emails: [{
+          campaign_to_candidate_user_id: "lead-curated",
+          email: {
+            gmail_id: "gmail-curated",
+            sent_from_paraform: false,
+            email_date: "2026-08-27T12:00:00.000Z",
+          },
+        }],
+      };
+    },
+    now: () => new Date("2026-08-27T12:01:00.000Z"),
+  });
+  assert.deepEqual(inboxCalls, [curatedId]);
+  assert.equal(feed.replies[0].sequence_id, curatedId);
+  assert.equal(feed.replies[0].reply_category, "INTERESTED");
 });
 
 test("company sequence inbox reads include the live audience discriminator", () => {
