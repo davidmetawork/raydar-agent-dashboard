@@ -52,6 +52,44 @@ export const REQUEST_TTL_SECONDS = 3600;
 // the one already on its way.
 export const COOLDOWN_MS = 20_000;
 
+// THE CLOUD DISPATCH — inert until David adds GH_DISPATCH_TOKEN (2026-08-27).
+//
+// The desktop listener is the button's normal collector, and while the lane
+// is PAUSED it already forwards a click to GitHub as a publish_only run of
+// interview-invites.yml. But the listener only runs while the Mac is awake.
+// This is the same forward taken from HERE, so a click works from a phone at
+// midnight: fire a workflow_dispatch straight at the repo. publish_only=true
+// gates every send/write step in that workflow — a Refresh stays a refresh.
+//
+// INERT BY DEFAULT, deliberately: without the token env this function does
+// nothing and the endpoint behaves exactly as before. The token wants to be
+// a fine-grained PAT with actions:write on davidmetawork/raydar only.
+// Best-effort by contract — a GitHub hiccup must not fail the click, whose
+// durable half (the KV note) is already written.
+async function dispatchCloudRefresh() {
+  const token = process.env.GH_DISPATCH_TOKEN || "";
+  if (!token) return false;
+  try {
+    const r = await fetch(
+      "https://api.github.com/repos/davidmetawork/raydar/actions/workflows/interview-invites.yml/dispatches",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "raydar-apphub-refresh",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ref: "main", inputs: { publish_only: "true" } }),
+        signal: AbortSignal.timeout(4000),
+      },
+    );
+    return r.status === 204;
+  } catch {
+    return false;
+  }
+}
+
 function machineAuthed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
   if (!secret) return false;
@@ -67,6 +105,7 @@ export function createRefreshHandler({
   kvReady = kvConfigured,
   readJson = getJson,
   writeJson = setJson,
+  dispatchCloud = dispatchCloudRefresh,
   now = () => Date.now(),
 } = {}) {
   return async function handler(req, res) {
@@ -110,7 +149,13 @@ export function createRefreshHandler({
       }
       const request = { requestedAt: new Date(at).toISOString(), by: req.authedEmail || "" };
       await writeJson(K.refresh, request, REQUEST_TTL_SECONDS);
-      return res.status(200).json({ ok: true, ...request, deduped: false });
+      // After the durable note, not instead of it: the note is what the
+      // desktop listener collects and what the page's watch verifies against;
+      // the dispatch is the fast path when the token exists. The cooldown
+      // above is also the dispatch's rate limit — a deduped click never
+      // reaches this line.
+      const dispatched = await dispatchCloud();
+      return res.status(200).json({ ok: true, ...request, deduped: false, dispatched });
     } catch (error) {
       return res.status(502).json({
         ok: false,

@@ -750,6 +750,25 @@ function renderStats() {
   } else if (ageH > 2) {
     chip.classList.add("amber");
   }
+
+  // A PARTIAL SNAPSHOT SAYS SO, AND IT OUTRANKS THE AGE TEXT (2026-08-27).
+  // `partial` rides the snapshot when the publisher accepted a plan that KNEW
+  // it under-counted — a truncated applicant walk, published anyway because
+  // withholding it any longer would have frozen the tab entirely
+  // (src/interviews/snapshot-meta.mjs, TRUNCATED_HOLD_HOURS). A number that is
+  // FRESH and incomplete misleads worse than one that is merely old, and the
+  // 2026-08-27 incident was exactly that: 376 rendered as fact from a walk
+  // that had hit its page ceiling. Written last so the age branches above
+  // still set the chip's colour; only the banner's words are replaced.
+  if (STATE.snapshot?.partial) {
+    chip.classList.add("amber");
+    $("updatedText").textContent += " · partial";
+    $("staleTitle").textContent = "This count is INCOMPLETE";
+    $("staleText").textContent = "The invite loop could not read the whole applicant list this cycle, so "
+      + "people who applied recently may be missing from the queue below. Everyone shown is real and safe "
+      + "to action — the number is a floor, not a total. It corrects itself on the next complete cycle.";
+    banner.classList.add("on");
+  }
 }
 
 function renderPills() {

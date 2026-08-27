@@ -38,3 +38,20 @@ test("the banner names the log to check and says the data still rendered", () =>
   assert.match(applicants, /~\/Library\/Logs\/raydar-interview-index\.log/);
   assert.match(applicants, /Everything below still renders the published snapshot/);
 });
+
+// ---- the partial-snapshot notice (2026-08-27) ----
+
+test("a partial snapshot says so, and says the count is a floor", () => {
+  assert.match(applicants, /STATE\.snapshot\?\.partial/);
+  assert.match(applicants, /This count is INCOMPLETE/);
+  assert.match(applicants, /the number is a floor, not a total/);
+});
+
+test("the partial notice is written AFTER the age branches, so age still colours the chip", () => {
+  const body = applicants.slice(applicants.indexOf("function renderStats()"));
+  const ageBranch = body.indexOf('$("updatedText").textContent += " · desktop asleep?"');
+  const partial = body.indexOf('$("updatedText").textContent += " · partial"');
+  assert.ok(ageBranch > 0 && partial > 0, "both branches present");
+  assert.ok(partial > ageBranch,
+    "partial must come after the age branches — an early return would swallow the red chip");
+});

@@ -19,9 +19,10 @@ function res() {
 // A handler with every collaborator stubbed: no CORS preflight, an authed
 // browser session, the machine secret accepted only when asked for, and an
 // in-memory KV that records what was written and with what TTL.
-function harness({ authed = true, machine = false, stored = null, at = Date.parse("2026-08-21T22:00:00.000Z") } = {}) {
+function harness({ authed = true, machine = false, stored = null, at = Date.parse("2026-08-21T22:00:00.000Z"), dispatch } = {}) {
   const writes = [];
   const reads = [];
+  const dispatches = [];
   const handler = createRefreshHandler({
     corsHandler: () => false,
     authHandler: async (req) => { if (authed) req.authedEmail = "david@raydar.xyz"; return authed; },
@@ -29,9 +30,10 @@ function harness({ authed = true, machine = false, stored = null, at = Date.pars
     kvReady: () => true,
     readJson: async (key) => { reads.push(key); return stored; },
     writeJson: async (key, value, ttl) => { writes.push({ key, value, ttl }); },
+    dispatchCloud: dispatch ?? (async () => { dispatches.push(1); return false; }),
     now: () => at,
   });
-  return { handler, writes, reads };
+  return { handler, writes, reads, dispatches };
 }
 
 test("a signed-in click stores one request, stamped and expiring", async () => {
@@ -192,4 +194,36 @@ test("plan age never downgrades a snapshot that is itself stale", () => {
   const redBranch = stats.indexOf("if (ageH > 6)");
   const planBranch = stats.indexOf("} else if (planStale)");
   assert.ok(redBranch >= 0 && planBranch > redBranch, "the ageH>6 branch must come first");
+});
+
+// ---- the cloud dispatch (2026-08-27, inert until GH_DISPATCH_TOKEN) ----
+
+test("a fresh click asks the cloud once, after the durable note", async () => {
+  const calls = [];
+  const { handler, writes } = harness({ dispatch: async () => { calls.push(writes.length); return true; } });
+  const r = res();
+  await handler({ method: "POST", headers: {}, body: {} }, r);
+  assert.equal(r.out.code, 200);
+  assert.equal(r.out.body.dispatched, true);
+  assert.deepEqual(calls, [1], "dispatch fired exactly once, and only after the KV write");
+});
+
+test("a deduped click does not re-ask the cloud", async () => {
+  const { handler, dispatches } = harness({
+    stored: { requestedAt: "2026-08-21T21:59:55.000Z" },
+  });
+  const r = res();
+  await handler({ method: "POST", headers: {}, body: {} }, r);
+  assert.equal(r.out.body.deduped, true);
+  assert.deepEqual(dispatches, [], "the cooldown is also the dispatch rate limit");
+});
+
+test("a cloud failure never fails the click - the durable note already landed", async () => {
+  const { handler, writes } = harness({ dispatch: async () => false });
+  const r = res();
+  await handler({ method: "POST", headers: {}, body: {} }, r);
+  assert.equal(r.out.code, 200);
+  assert.equal(r.out.body.ok, true);
+  assert.equal(r.out.body.dispatched, false);
+  assert.equal(writes.length, 1);
 });
