@@ -59,6 +59,14 @@ export function createPacedReader({ paceMs = DEFAULT_PACE_MS, sleepImpl = sleep 
 
 function candidateFromProfile(candidateUserId, candidateUser = {}, fallbackName = "Candidate") {
   const candidate = candidateUser?.candidate || {};
+  const careerArrays = [
+    candidateUser?.experiences,
+    candidateUser?.experience,
+    candidateUser?.positions,
+    candidate?.experiences,
+    candidate?.experience,
+    candidate?.positions,
+  ].filter(Array.isArray);
   const email = [
     ...(Array.isArray(candidateUser?.emails) ? candidateUser.emails : []),
     candidate?.email,
@@ -78,6 +86,9 @@ function candidateFromProfile(candidateUserId, candidateUser = {}, fallbackName 
       || candidateUser?.latest_application_resume_id
       || candidate?.resume_id,
     ),
+    hasCareerHistory: careerArrays.length
+      ? careerArrays.some((rows) => rows.some((row) => row && typeof row === "object"))
+      : null,
   };
 }
 
@@ -275,6 +286,7 @@ export async function syncPathARows({
           companyName: precheck.signals?.companyName || pair.companyName,
           linkedinUser: candidate.linkedinUser,
           hasResume: candidate.hasResume,
+          hasCareerHistory: candidate.hasCareerHistory,
           hasCall: Boolean(job),
         });
         if (readFailed) failed += 1;

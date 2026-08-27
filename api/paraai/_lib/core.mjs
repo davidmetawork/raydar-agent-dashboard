@@ -237,7 +237,13 @@ export async function isParaformSessionActuallyExpired({ rounds = 3 } = {}) {
   return true;
 }
 
-const envelope = (json) => ({ json, meta: { values: {}, v: 1 } });
+export function superjsonEnvelope(json, dateFields = []) {
+  const values = {};
+  for (const field of dateFields) values[String(field)] = ["Date"];
+  return { json, meta: { values, v: 1 } };
+}
+
+const envelope = (json) => superjsonEnvelope(json);
 
 export async function trpcGet(proc, json = {}, tries = 3) {
   return classifyThrottle(() => trpcGetRaw(proc, json, tries));
@@ -265,14 +271,22 @@ export async function trpcPost(proc, json = {}, _tries = 1) {
   return classifyThrottle(() => trpcPostRaw(proc, json));
 }
 
-async function trpcPostRaw(proc, json = {}) {
+// Paraform's current CRM resume writer validates resume_uploaded_at as a Date,
+// so callers must preserve SuperJSON's Date metadata instead of sending a bare
+// ISO string. Keep this separate from ordinary mutations to make the unusual
+// wire contract explicit at the call site.
+export async function trpcPostWithDates(proc, json = {}, dateFields = []) {
+  return classifyThrottle(() => trpcPostRaw(proc, json, dateFields));
+}
+
+async function trpcPostRaw(proc, json = {}, dateFields = []) {
   // No transport retry: a timeout has no authoritative write verdict and a
   // replay can duplicate a non-idempotent mutation. classifyThrottle may call
   // this again only after an explicit 401, which Paraform refused pre-write.
   const response = await fetch(`${PARAFORM_BASE}/trpc/${proc}`, {
     method: "POST",
     headers: await paraformHeaders(),
-    body: JSON.stringify(envelope(json)),
+    body: JSON.stringify(superjsonEnvelope(json, dateFields)),
     signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
   });
   const body = await response.json().catch(() => null);

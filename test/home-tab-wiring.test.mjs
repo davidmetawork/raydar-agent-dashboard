@@ -93,7 +93,10 @@ test("Submissions is team-gated, cache-rendered, and never auto-submits from the
   assert.match(submissions, /action:"submit"/);
   assert.doesNotMatch(submissions, /\/api\/paraai\/(?:worker|interest)|action:"tick"/);
   assert.match(submissions, /Raydar sends no candidate email/);
-  assert.match(submissions, /Resume tailoring awaits the supervised capture/);
+  assert.match(submissions, /\/api\/submissions\/resume/);
+  assert.match(submissions, /this replaces their profile resume\./);
+  assert.match(submissions, /Save edits as new version/);
+  assert.match(submissions, /Preview branded PDF/);
 });
 
 test("the activity warmer cron is registered so the page never waits on Paraform", () => {

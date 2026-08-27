@@ -76,6 +76,12 @@ export function contextFromQuickSubmitForm(form, {
   const missing = form?.missingCandidateFields || {};
   const candidate = form?.candidate || {};
   const defaults = form?.defaultValues || {};
+  const careerArrays = [
+    candidate.experiences,
+    candidate.experience,
+    candidate.positions,
+    candidate.work_experience,
+  ].filter(Array.isArray);
   const eligibility = text(form?.eligibility?.status) || "unknown";
   const blockers = [];
   if (eligibility === "alreadySubmitted") blockers.push("already_submitted");
@@ -94,6 +100,9 @@ export function contextFromQuickSubmitForm(form, {
     phoneScreenRequired: form?.role?.phone_screen === "REQUIRED",
     linkedinUser: text(candidate.linkedin_user) || null,
     hasResume: Boolean(text(defaults.resume_id)),
+    hasCareerHistory: careerArrays.length
+      ? careerArrays.some((rows) => rows.some((row) => row && typeof row === "object"))
+      : null,
     missingPreferenceFields: Array.isArray(preferences?.missingFields)
       ? preferences.missingFields.map(text).filter(Boolean).slice(0, 20)
       : [],
@@ -157,7 +166,9 @@ export function buildPathARows({ requests = [], ledgers = new Map(), priorRows =
       blockers: [...new Set(blockers)].map((code) => ({ code, label: chipText(code) })),
       warnings: [...new Set(warnings)].map((code) => ({ code, label: chipText(code) })),
       context,
-      ledger,
+      ledger: context?.hasCareerHistory === false && context?.hasResume === false
+        ? { ...(ledger || {}), resumeUnavailableReason: "no_career_history" }
+        : ledger,
       links: {
         candidate: `https://www.paraform.com/candidates?id=${encodeURIComponent(request.candidateUserId)}&r_id=${encodeURIComponent(request.roleId)}`,
         role: `https://www.paraform.com/role/${encodeURIComponent(request.roleId)}`,
@@ -289,7 +300,9 @@ export function buildCombinedRows({
       blockers: [...new Set(blockers)].map((code) => ({ code, label: chipText(code) })),
       warnings: [...new Set(warnings)].map((code) => ({ code, label: chipText(code) })),
       context,
-      ledger,
+      ledger: context?.hasCareerHistory === false && context?.hasResume === false
+        ? { ...(ledger || {}), resumeUnavailableReason: "no_career_history" }
+        : ledger,
       links: {
         candidate: `https://www.paraform.com/candidates?id=${encodeURIComponent(pair.candidateUserId)}&r_id=${encodeURIComponent(pair.roleId)}`,
         role: `https://www.paraform.com/role/${encodeURIComponent(pair.roleId)}`,
