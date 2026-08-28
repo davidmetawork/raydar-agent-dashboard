@@ -11,11 +11,13 @@ const JOB_INDEX_KEY = "paraai:interest:job:index";
 const SWEEP_KEY = "paraai:interest:sweep";
 const REVIEW_INDEX_KEY = "paraai:interest:review:index";
 const HANDOFF_INDEX_KEY = "paraai:interest:handoff:index";
+const POST_CALL_OUTBOX_INDEX_KEY = "paraai:interest:post-call-outbox:index";
 const SNAP_TTL_SECONDS = 730 * 24 * 60 * 60;
 const JOB_TTL_SECONDS = 180 * 24 * 60 * 60;
 const LOCK_TTL_SECONDS = 150;
 const REVIEW_TTL_SECONDS = 730 * 24 * 60 * 60;
 const HANDOFF_TTL_SECONDS = 730 * 24 * 60 * 60;
+const POST_CALL_OUTBOX_TTL_SECONDS = 730 * 24 * 60 * 60;
 const TERMINAL_JOB_STAGES = new Set(["done", "awaiting_human_submission"]);
 
 const KV_URL = String(
@@ -130,6 +132,58 @@ const handoffKeyFromMember = (member) =>
 const handoffKey = (cuid, batchId) =>
   handoffKeyFromMember(handoffIndexMember(cuid, batchId));
 
+function postCallIdentifier(value, field, maximum = 256) {
+  const selected = String(value || "").trim();
+  if (
+    !selected
+    || selected.length > maximum
+    || !/^[A-Za-z0-9._-]+$/u.test(selected)
+  ) {
+    const error = new Error(`${field} invalid`);
+    error.code = "POST_CALL_INTEREST_ID_INVALID";
+    throw error;
+  }
+  return selected;
+}
+
+function postCallInstant(value) {
+  const selected = String(value || "").trim();
+  const milliseconds = Date.parse(selected);
+  if (
+    !Number.isFinite(milliseconds)
+    || new Date(milliseconds).toISOString() !== selected
+  ) {
+    const error = new Error("occurredAt invalid");
+    error.code = "POST_CALL_INTEREST_OCCURRED_AT_INVALID";
+    throw error;
+  }
+  return selected;
+}
+
+export function postCallInterestEventKey(candidateUserId, batchId, roleId) {
+  return [
+    "curated-interest",
+    postCallIdentifier(candidateUserId, "candidateUserId"),
+    postCallIdentifier(batchId, "batchId", 200),
+    postCallIdentifier(roleId, "roleId"),
+  ].join(":");
+}
+
+function postCallOutboxHash(eventKey) {
+  return createHash("sha256")
+    .update("paraai-post-call-interest-outbox")
+    .update("\0")
+    .update(eventKey)
+    .digest("hex");
+}
+
+const postCallOutboxKeyFromHash = (hash) =>
+  `paraai:interest:post-call-outbox:${String(hash || "")}`;
+
+function postCallOutboxKey(eventKey) {
+  return postCallOutboxKeyFromHash(postCallOutboxHash(eventKey));
+}
+
 // Submission claims are per (candidate, role) and PERMANENT. They are never
 // released: a claim means "this lane has committed to submitting this candidate
 // to this role", and a timeout may have landed.
@@ -203,6 +257,175 @@ export function diffInterest(prior, current) {
     }
   }
   return { firstSight: !seen, newlyInterested, declined };
+}
+
+/* ------------------------------------------------------- post-call outbox */
+
+function normalizePostCallInterestEvent({
+  candidateUserId,
+  batchId,
+  roleId,
+  occurredAt,
+} = {}) {
+  const candidate = postCallIdentifier(candidateUserId, "candidateUserId");
+  const batch = postCallIdentifier(batchId, "batchId", 200);
+  const role = postCallIdentifier(roleId, "roleId");
+  return Object.freeze({
+    eventKey: postCallInterestEventKey(candidate, batch, role),
+    candidateUserId: candidate,
+    batchId: batch,
+    roleId: role,
+    occurredAt: postCallInstant(occurredAt),
+  });
+}
+
+/**
+ * Persist one PENDING -> APPLIED_TO_ROLE transition before its source snapshot
+ * advances. The KV key and index member are hashes; the record contains only
+ * opaque Paraform ids and no candidate contact data.
+ */
+export async function recordPostCallInterestEvent(input, { kvImpl = kv } = {}) {
+  const event = normalizePostCallInterestEvent(input);
+  const key = postCallOutboxKey(event.eventKey);
+  const now = new Date().toISOString();
+  const pending = {
+    version: 1,
+    state: "pending",
+    ...event,
+    attempts: 0,
+    lastAttemptAt: null,
+    lastErrorCode: null,
+    deliveredAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const created = await kvImpl([
+    "SET",
+    key,
+    JSON.stringify(pending),
+    "NX",
+    "EX",
+    POST_CALL_OUTBOX_TTL_SECONDS,
+  ]);
+  const stored = created === "OK" || created === true
+    ? pending
+    : parse(await kvImpl(["GET", key]), null);
+  if (
+    !stored
+    || stored.version !== 1
+    || stored.eventKey !== event.eventKey
+    || stored.candidateUserId !== event.candidateUserId
+    || stored.batchId !== event.batchId
+    || stored.roleId !== event.roleId
+    || !["pending", "delivered"].includes(stored.state)
+  ) {
+    const error = new Error("post-call interest outbox conflict");
+    error.code = "POST_CALL_INTEREST_OUTBOX_CONFLICT";
+    throw error;
+  }
+  // The first durable occurrence timestamp wins. Retries reuse that exact body,
+  // even when a source sweep reaches the same transition at a later wall clock.
+  postCallInstant(stored.occurredAt);
+  if (stored.state === "pending") {
+    await kvImpl([
+      "SADD",
+      POST_CALL_OUTBOX_INDEX_KEY,
+      postCallOutboxHash(event.eventKey),
+    ]);
+  }
+  return Object.freeze({ created: created === "OK" || created === true, record: stored });
+}
+
+export async function listPendingPostCallInterestEvents(
+  limit = 50,
+  { kvImpl = kv } = {},
+) {
+  const selectedLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+  const hashes = (await kvImpl(["SMEMBERS", POST_CALL_OUTBOX_INDEX_KEY])) || [];
+  const pending = [];
+  for (const hash of hashes.slice(0, selectedLimit)) {
+    if (!/^[a-f0-9]{64}$/u.test(String(hash || ""))) {
+      await kvImpl(["SREM", POST_CALL_OUTBOX_INDEX_KEY, hash]);
+      continue;
+    }
+    const record = parse(
+      await kvImpl(["GET", postCallOutboxKeyFromHash(hash)]),
+      null,
+    );
+    if (
+      record?.state === "pending"
+      && postCallOutboxHash(String(record.eventKey || "")) === hash
+    ) {
+      pending.push(record);
+    } else {
+      await kvImpl(["SREM", POST_CALL_OUTBOX_INDEX_KEY, hash]);
+    }
+  }
+  return pending;
+}
+
+export async function settlePostCallInterestEvent(
+  eventKey,
+  {
+    delivered,
+    responseEventKey = null,
+    statusCode = null,
+    errorCode = null,
+  } = {},
+  { kvImpl = kv } = {},
+) {
+  const selectedEventKey = String(eventKey || "").trim();
+  const key = postCallOutboxKey(selectedEventKey);
+  const current = parse(await kvImpl(["GET", key]), null);
+  if (
+    !current
+    || current.eventKey !== selectedEventKey
+    || !["pending", "delivered"].includes(current.state)
+  ) {
+    const error = new Error("post-call interest outbox record missing");
+    error.code = "POST_CALL_INTEREST_OUTBOX_MISSING";
+    throw error;
+  }
+  if (delivered === true && responseEventKey !== selectedEventKey) {
+    const error = new Error("post-call interest delivery identity mismatch");
+    error.code = "POST_CALL_INTEREST_DELIVERY_MISMATCH";
+    throw error;
+  }
+  if (current.state === "delivered") return current;
+  const now = new Date().toISOString();
+  const next = {
+    ...current,
+    state: delivered === true ? "delivered" : "pending",
+    attempts: Math.max(0, Number(current.attempts) || 0) + 1,
+    lastAttemptAt: now,
+    lastErrorCode: delivered === true
+      ? null
+      : String(errorCode || "POST_CALL_INTEREST_DELIVERY_FAILED").slice(0, 120),
+    deliveredAt: delivered === true ? now : null,
+    statusCode: Number.isInteger(statusCode) ? statusCode : null,
+    updatedAt: now,
+  };
+  const written = await kvImpl([
+    "SET",
+    key,
+    JSON.stringify(next),
+    "XX",
+    "EX",
+    POST_CALL_OUTBOX_TTL_SECONDS,
+  ]);
+  if (written !== "OK" && written !== true) {
+    const error = new Error("post-call interest outbox settlement failed");
+    error.code = "POST_CALL_INTEREST_OUTBOX_SETTLEMENT_FAILED";
+    throw error;
+  }
+  if (next.state === "delivered") {
+    await kvImpl([
+      "SREM",
+      POST_CALL_OUTBOX_INDEX_KEY,
+      postCallOutboxHash(selectedEventKey),
+    ]);
+  }
+  return next;
 }
 
 /* --------------------------------------------------------------------- jobs */

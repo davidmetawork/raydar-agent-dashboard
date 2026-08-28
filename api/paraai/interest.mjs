@@ -157,6 +157,8 @@ export default async function handler(req, res) {
           detected: result.detected.length,
           readErrors: result.readErrors,
           stateDeferrals: result.stateDeferrals,
+          postCallOutboxQueued: result.postCallOutboxQueued,
+          postCallOutboxErrors: result.postCallOutboxErrors,
           durationMs: result.durationMs,
         });
       }

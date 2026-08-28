@@ -231,6 +231,12 @@ test("every write gate defaults closed", () => {
   assert.equal(c.stopArmed, false);
   assert.equal(c.emailArmed, false);
   assert.equal(c.submitArmed, false);
+  assert.equal(c.postCallInterestEnabled, false);
+});
+
+test("post-call interest projection has its own explicit gate", () => {
+  const c = interestConfig({ PARAAI_POST_CALL_INTEREST_ENABLED: "true" });
+  assert.equal(c.postCallInterestEnabled, true);
 });
 
 test("email gate refuses to arm without the stop gate", () => {

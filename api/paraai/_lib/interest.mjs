@@ -47,7 +47,12 @@ import {
   recordSweep,
   getSweepState,
   appendJournal,
+  recordPostCallInterestEvent,
 } from "./interest-store.mjs";
+import {
+  drainPostCallInterestOutbox,
+  postCallInterestProducerEnabled,
+} from "./post-call-interest-outbox.mjs";
 
 // Curated-list interest to submission.
 //
@@ -149,6 +154,7 @@ export function interestConfig(env = process.env, now = Date.now()) {
       Number(env.PARAAI_INTEREST_SWEEP_INTERVAL_MS || 15 * 60 * 1000),
     ),
     batchWindowMs: Math.max(0, Number(env.PARAAI_INTEREST_BATCH_WINDOW_MS ?? 30 * 60 * 1000)),
+    postCallInterestEnabled: postCallInterestProducerEnabled(env),
   };
 }
 
@@ -412,6 +418,8 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     declined: 0,
     skippedBeforeCutoff: 0,
     stateDeferrals: 0,
+    postCallOutboxQueued: 0,
+    postCallOutboxErrors: 0,
     durationMs: 0,
   };
 
@@ -471,6 +479,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
         } else {
           try {
             const existing = await getJob(candidate.candidateUserId);
+            let receivingJob = null;
             // email_complete is the durable boundary immediately after an
             // email attempt but before the terminal handoff record. Do not
             // reuse that outbox batch, replace the unfinished job, or advance
@@ -482,7 +491,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
               const added = diff.newlyInterested.filter(
                 (roleId) => !(Array.isArray(existing.roles) ? existing.roles : []).includes(roleId),
               );
-              await saveJob(appendJournal({
+              receivingJob = await saveJob(appendJournal({
                 ...existing,
                 // Never let a retry or a later role addition inherit newer gates.
                 // Legacy jobs without the field fail closed to shadow.
@@ -502,11 +511,34 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
                   terminalReasons,
                 );
               }
-              await createJob(candidate.candidateUserId, {
+              receivingJob = await createJob(candidate.candidateUserId, {
                 candidateId: candidate.candidateId,
                 roles: diff.newlyInterested,
                 rolloutPhase: interestRolloutPhase(config),
               });
+            }
+            if (
+              !snapshotDeferred
+              && config.postCallInterestEnabled === true
+            ) {
+              try {
+                const occurredAt = new Date(now).toISOString();
+                for (const roleId of diff.newlyInterested) {
+                  await recordPostCallInterestEvent({
+                    candidateUserId: candidate.candidateUserId,
+                    batchId: receivingJob?.batchId,
+                    roleId,
+                    occurredAt,
+                  });
+                  result.postCallOutboxQueued += 1;
+                }
+              } catch {
+                // The source snapshot must remain pinned until every event is
+                // durable; a later sweep reuses the job's stable batch id.
+                snapshotDeferred = true;
+                result.stateDeferrals += 1;
+                result.postCallOutboxErrors += 1;
+              }
             }
           } finally {
             await releaseLock(candidate.candidateUserId, token);
@@ -1367,6 +1399,7 @@ export async function interestStatus() {
       humanHandoffRequired: true,
       writesEnabled: config.writesEnabled,
       emailCanaryConfigured: Boolean(config.emailCanaryTo),
+      postCallInterestEnabled: config.postCallInterestEnabled === true,
       gateOrderViolations: config.gateOrderViolations,
     },
     lastSweep: sweep,
@@ -1390,6 +1423,7 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
     sweep: null,
     processed: [],
     reviews: 0,
+    postCallInterest: null,
   };
 
   if (!config.enabled) { result.reason = "disabled"; return result; }
@@ -1442,6 +1476,8 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
             detected: sweep.detected.length,
             readErrors: sweep.readErrors,
             stateDeferrals: sweep.stateDeferrals,
+            postCallOutboxQueued: sweep.postCallOutboxQueued,
+            postCallOutboxErrors: sweep.postCallOutboxErrors,
           };
         } else {
           result.sweep = { skipped: "not_due" };
@@ -1454,6 +1490,20 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
     }
   } else {
     result.sweep = { skipped: "not_due" };
+  }
+
+  try {
+    result.postCallInterest = await drainPostCallInterestOutbox({
+      enabled: config.postCallInterestEnabled === true,
+    });
+  } catch (error) {
+    result.postCallInterest = {
+      enabled: config.postCallInterestEnabled === true,
+      attempted: 0,
+      delivered: 0,
+      pending: null,
+      error: String(error?.code || "POST_CALL_INTEREST_DELIVERY_FAILED"),
+    };
   }
 
   const candidateByUserId = sweep?.candidateByUserId || new Map();
