@@ -90,18 +90,33 @@ export async function readQuickSubmitForm(requestId) {
   return form;
 }
 
+function preferencePresent(value) {
+  if (Array.isArray(value)) return value.some((item) => text(item));
+  if (typeof value === "number") return Number.isFinite(value) && value > 0;
+  if (typeof value === "string") return Boolean(text(value));
+  return value != null;
+}
+
+export function candidatePreferencesReadiness(
+  preferences,
+  requiredFields = REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
+) {
+  const missingFields = requiredFields.filter((field) => !preferencePresent(preferences?.[field]));
+  return { ready: missingFields.length === 0, missingFields };
+}
+
 export async function candidatePreferencesReady(
   candidateUserId,
   requiredFields = REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
 ) {
-  const result = await trpcGet("candidateUserPreference.hasUserInputPreferences", {
+  // Paraform retired hasUserInputPreferences (HTTP 404 in production on
+  // 2026-08-27). The underlying profile read remains live and is already the
+  // source used by both submission preflights, so derive the same boolean
+  // without guessing or treating a failed read as an empty profile.
+  const result = await trpcGet("candidateUserPreference.getCandidateUserPrefs", {
     candidate_user_id: candidateUserId,
-    required_fields: requiredFields,
   });
-  return {
-    ready: result?.hasAllRequired === true,
-    missingFields: Array.isArray(result?.missingFields) ? result.missingFields : [],
-  };
+  return candidatePreferencesReadiness(result, requiredFields);
 }
 
 const money = (value) => {

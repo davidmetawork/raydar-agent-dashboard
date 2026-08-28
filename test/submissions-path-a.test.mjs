@@ -15,6 +15,7 @@ import {
   undoDismissPathA,
 } from "../api/submissions/_lib/path-a.mjs";
 import { syncPathARows } from "../api/submissions/_lib/sync.mjs";
+import { candidatePreferencesReadiness } from "../api/paraai/_lib/reply-actions.mjs";
 
 const request = (patch = {}) => ({
   id: "req-1",
@@ -58,6 +59,27 @@ const draft = {
   salary_explanation: null,
   additional_notes: null,
 };
+
+test("Path A derives the captured preference gate from the live profile object", () => {
+  const complete = candidatePreferencesReadiness({
+    locations: ["new_york"],
+    salary_min: 180_000,
+    workplace: ["REMOTE"],
+    last_funding_round: ["SERIES_B"],
+    visa: ["Not available"],
+  });
+  assert.deepEqual(complete, { ready: true, missingFields: [] });
+  assert.deepEqual(candidatePreferencesReadiness({
+    locations: [],
+    salary_min: 0,
+    workplace: ["REMOTE"],
+    last_funding_round: null,
+    visa: [],
+  }), {
+    ready: false,
+    missingFields: ["locations", "salary_min", "last_funding_round", "visa"],
+  });
+});
 
 test("Path A groups repeated requests into one candidate-role row and prefers a pending request", () => {
   const groups = groupSubmissionRequests([
