@@ -1,44 +1,66 @@
 import { requireAuth } from "../seq/_lib/core.mjs";
 
-const RAYDAR_DOMAINS = new Set(["raydar.xyz", "raydargroup.com"]);
-
 function emails(value) {
   return new Set(String(value || "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean));
 }
 
-function combinedEmails(...values) {
-  return new Set(values.flatMap((value) => [...emails(value)]));
+function mutationOrigins(env = process.env) {
+  const configured = String(env.DASHBOARD_MUTATION_ORIGINS || "").split(",").map((item) => item.trim()).filter(Boolean);
+  return new Set((configured.length ? configured : [
+    "https://monitor.raydar.xyz",
+    "https://raydar-agent-dashboard.vercel.app",
+    "http://localhost:3000",
+  ]).map((item) => {
+    try { return new URL(item).origin.toLowerCase(); } catch { return ""; }
+  }).filter(Boolean));
 }
 
 export function operatorAccess(email, env = process.env) {
   const normalized = String(email || "").trim().toLowerCase();
-  const domain = normalized.split("@")[1] || "";
-  // Accept the service-owned role names as well as the older dashboard aliases;
-  // the upstream service still derives and enforces its own role independently.
-  const admins = combinedEmails(env.POST_CALL_REVIEW_ADMIN_EMAILS, env.POST_CALL_MONITOR_ADMIN_EMAILS);
-  const reviewers = combinedEmails(env.POST_CALL_REVIEW_ASSISTANT_EMAILS, env.POST_CALL_REVIEWER_EMAILS);
+  // These names intentionally match the owning post-call service.  Domain
+  // membership is authentication, not authorization: candidate PII and review
+  // mutations stay unavailable until the exact operator is allowlisted.
+  const admins = emails(env.POST_CALL_REVIEW_ADMIN_EMAILS);
+  const reviewers = emails(env.POST_CALL_REVIEW_ASSISTANT_EMAILS);
   const mailroomEditors = emails(env.MAILROOM_EDITOR_EMAILS);
+  const mailroomViewers = emails(env.MAILROOM_VIEWER_EMAILS);
   const reviewReadOnly = String(env.POST_CALL_REVIEW_READ_ONLY || "").trim().toLowerCase() === "true";
 
-  // David remains the safe bootstrap administrator. Every other write role is
-  // explicit in env, except Review work which is intentionally available to a
-  // signed-in Raydar teammate (including David's assistant).
-  const admin = normalized === "david@raydar.xyz" || admins.has(normalized);
-  const reviewWrite = !reviewReadOnly && (admin || reviewers.has(normalized) || RAYDAR_DOMAINS.has(domain));
+  const admin = admins.has(normalized);
+  const reviewRead = admin || reviewers.has(normalized);
+  const reviewWrite = !reviewReadOnly && reviewRead;
   const mailroomWrite = admin || mailroomEditors.has(normalized);
+  const mailroomRead = mailroomWrite || mailroomViewers.has(normalized);
 
   return {
     email: normalized,
     role: admin ? "admin" : mailroomWrite ? "mailroom_editor" : reviewWrite ? "reviewer" : "viewer",
     capabilities: {
-      reviewRead: Boolean(normalized),
+      reviewRead,
       reviewWrite,
       resumeUpload: reviewWrite,
-      mailroomRead: Boolean(normalized),
+      mailroomRead,
       mailroomWrite,
     },
   };
 }
+
+export function requireSameOrigin(req, res, env = process.env) {
+  if (["GET", "HEAD", "OPTIONS"].includes(String(req.method || "GET").toUpperCase())) return true;
+  const origin = String(req.headers?.origin || "").trim();
+  const forwardedHost = String(req.headers?.["x-forwarded-host"] || req.headers?.host || "").split(",")[0].trim().toLowerCase();
+  const forwardedProto = String(req.headers?.["x-forwarded-proto"] || "https").split(",")[0].trim().toLowerCase();
+  let parsed;
+  try { parsed = new URL(origin); } catch { parsed = null; }
+  if (!parsed || !forwardedHost || !mutationOrigins(env).has(parsed.origin.toLowerCase())
+      || parsed.host.toLowerCase() !== forwardedHost || parsed.protocol !== `${forwardedProto}:`) {
+    res.status(403).json({ ok: false, error: "same_origin_required" });
+    return false;
+  }
+  return true;
+}
+
+export const operatorAccessInternals = { emails, mutationOrigins };
 
 export async function requireOperator(req, res, capability) {
   if (!(await requireAuth(req, res))) return null;

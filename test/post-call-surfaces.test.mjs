@@ -62,9 +62,10 @@ test("Review proxy owns auth attribution and optimistic concurrency", () => {
 });
 
 test("Review can be deployed read-only without changing its future role model", () => {
-  const normal = operatorAccess("david@raydar.xyz", {});
+  const allowlist = { POST_CALL_REVIEW_ADMIN_EMAILS: "david@raydar.xyz" };
+  const normal = operatorAccess("david@raydar.xyz", allowlist);
   assert.equal(normal.capabilities.reviewWrite, true);
-  const preview = operatorAccess("david@raydar.xyz", { POST_CALL_REVIEW_READ_ONLY: "true" });
+  const preview = operatorAccess("david@raydar.xyz", { ...allowlist, POST_CALL_REVIEW_READ_ONLY: "true" });
   assert.equal(preview.capabilities.reviewRead, true);
   assert.equal(preview.capabilities.reviewWrite, false);
   assert.equal(preview.capabilities.resumeUpload, false);
