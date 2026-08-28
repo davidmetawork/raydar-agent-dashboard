@@ -53,6 +53,10 @@ import {
   roleDeclined,
 } from "./outreach-decline.mjs";
 import { discoverCandidateContact, probeCalendarAccess } from "./outreach-contact.mjs";
+import {
+  deliverViaMailroomRelief,
+  mailroomReliefConfig,
+} from "./outreach-mailroom.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import {
   acquireOutreachLock,
@@ -687,7 +691,9 @@ function matchRecord({
   sent,
   sentAt,
   deliveryMode,
+  transport = "gmail",
 }) {
+  const providerMessageId = sent?.providerMessageId || sent?.id || null;
   return {
     requestId: request.id,
     ordinal,
@@ -698,8 +704,11 @@ function matchRecord({
     digestId: digest?.digestId || null,
     digestOmitted: !digest?.digestId,
     deliveryMode,
+    transport,
     sentAt,
-    gmailMessageId: sent?.id || null,
+    gmailMessageId: transport === "gmail" ? sent?.id || null : null,
+    providerMessageId: transport === "gmail" ? null : providerMessageId,
+    mailroomRowId: sent?.mailroomRowId || null,
     copyVariant: copy.variant,
   };
 }
@@ -714,6 +723,8 @@ export function planDeliveredMatch(state, {
   sentAt,
   messageId,
   deliveryMode = "digest",
+  transport = "gmail",
+  armFollowup = true,
 }) {
   const previousFollowup = state.followup;
   const remaining = ordinal === 1 ? 2 : 1;
@@ -732,7 +743,7 @@ export function planDeliveredMatch(state, {
     matches: {
       ...(state.matches || {}),
       [request.id]: matchRecord({
-        request, ordinal, roleUrl, digest, copy, sent, sentAt, deliveryMode,
+        request, ordinal, roleUrl, digest, copy, sent, sentAt, deliveryMode, transport,
       }),
     },
     outbox: {
@@ -741,15 +752,22 @@ export function planDeliveredMatch(state, {
         ...(state.outbox?.[`match:${request.id}`] || {}),
         status: "delivered",
         messageId,
-        gmailMessageId: sent?.id || null,
-        threadId: sent?.threadId || state.threadId || null,
+        gmailMessageId: transport === "gmail" ? sent?.id || null : null,
+        threadId: transport === "gmail"
+          ? sent?.threadId || state.threadId || null
+          : null,
         deliveredAt: sentAt,
         deliveryMode,
+        transport,
+        providerMessageId: transport === "gmail"
+          ? null
+          : sent?.providerMessageId || sent?.id || null,
+        mailroomRowId: sent?.mailroomRowId || null,
       },
     },
     // A candidate who has already replied never gets a re-armed nudge ladder,
     // even when an operator explicitly overrides the send for a new role.
-    followup: (state.repliedAt || state.stoppedReason) ? null : {
+    followup: (!armFollowup || state.repliedAt || state.stoppedReason) ? null : {
       ownerMatchId: request.id,
       ordinal,
       number: 1,
@@ -765,6 +783,8 @@ export function planDeliveredMatch(state, {
     requestId: request.id,
     ordinal,
     deliveryMode,
+    transport,
+    ...(armFollowup ? {} : { followupSuppressed: true }),
     ...(previousFollowup ? {
       supersededFollowupFor: previousFollowup.ownerMatchId,
     } : {}),
@@ -787,7 +807,13 @@ async function markReachedOut(requestId) {
   return visible;
 }
 
-async function saveUncertainOutbox(state, actionKey, messageId, error) {
+async function saveUncertainOutbox(
+  state,
+  actionKey,
+  messageId,
+  error,
+  { transport = "gmail" } = {},
+) {
   const uncertain = appendOutreachJournal({
     ...state,
     outbox: {
@@ -798,9 +824,13 @@ async function saveUncertainOutbox(state, actionKey, messageId, error) {
         messageId,
         errorCode: clean(error?.code || "GMAIL_SEND_UNKNOWN"),
         uncertainAt: new Date().toISOString(),
+        transport,
       },
     },
-  }, "gmail_delivery_uncertain", { actionKey });
+  }, `${transport === "gmail" ? "gmail" : "mailroom"}_delivery_uncertain`, {
+    actionKey,
+    transport,
+  });
   return saveOutreachState(uncertain, state.revision).catch(() => uncertain);
 }
 
@@ -943,6 +973,8 @@ export async function processMatchRequest(
     allowAfterReply = false,
     allowWithoutDigest = false,
     allowWithoutDigestReason = null,
+    transport = "gmail",
+    deliveryImpl = null,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -953,6 +985,12 @@ export async function processMatchRequest(
     throw error;
   }
   const noDigestReason = clean(allowWithoutDigestReason);
+  const reliefTransport = clean(transport) === "mailroom-relief";
+  if (!new Set(["gmail", "mailroom-relief"]).has(clean(transport))) {
+    const error = new Error("unsupported Para AI outreach transport");
+    error.code = "OUTREACH_TRANSPORT_INVALID";
+    throw error;
+  }
   if (allowWithoutDigest) {
     const expiredAllowed = expiredNoDigestOverrideEligible(request) &&
       (!noDigestReason || noDigestReason === "expired_without_digest");
@@ -1176,20 +1214,24 @@ export async function processMatchRequest(
     const previousOutbox = state.outbox?.[actionKey] || {};
     const previousThreadId = state.threadId || null;
     attemptStage = "thread_anchor";
-    const { context, anchorStatus } = await threadForMatch({
-      state,
-      request,
-      mailbox: config.mailbox,
-      digestUrl: digest?.digestUrl || null,
-    });
+    const { context, anchorStatus } = reliefTransport
+      ? { context: null, anchorStatus: "none" }
+      : await threadForMatch({
+          state,
+          request,
+          mailbox: config.mailbox,
+          digestUrl: digest?.digestUrl || null,
+        });
     const replaceExistingDraft = Boolean(
       mode === "draft" &&
       previousOutbox.draftId &&
       anchorStatus === "none"
     );
-    const signatureHtml = context
+    const signatureHtml = reliefTransport
       ? ""
-      : await getSignatureHtml(config.mailbox).catch(() => "");
+      : context
+        ? ""
+        : await getSignatureHtml(config.mailbox).catch(() => "");
     let copy = copyForMatch({
       request,
       ordinal,
@@ -1237,13 +1279,19 @@ export async function processMatchRequest(
           requestId: request.id,
           claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
           deliveryMode,
+          transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
         },
       },
-    }, mode === "draft" ? "review_draft_claimed" : "gmail_delivery_claimed", {
+    }, mode === "draft"
+      ? "review_draft_claimed"
+      : reliefTransport
+        ? "mailroom_delivery_claimed"
+        : "gmail_delivery_claimed", {
       requestId: request.id,
       ordinal,
       anchorStatus,
       deliveryMode,
+      transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
       // Self-healing must stay legible: a send that only happened because the
       // vendor contradicted itself has to be distinguishable, forever, from a
       // send that took the normal digest path.
@@ -1296,21 +1344,37 @@ export async function processMatchRequest(
       };
     }
 
-    attemptStage = "gmail_delivery";
+    attemptStage = reliefTransport ? "mailroom_delivery" : "gmail_delivery";
     let sent;
     try {
-      sent = await deliverMessage({
-        mailbox: config.mailbox,
-        draftId: previousOutbox.draftId || null,
-        draftRfc822MessageId: previousOutbox.gmailDraftRfc822MessageId || null,
-        message,
-        // A process can die after Gmail accepts the email and before Redis
-        // records delivery. A previous claim must reconcile by action marker;
-        // it must never become authorization for a second send.
-        reconcileOnly: ["claimed", "uncertain"].includes(previousOutbox.status),
-      });
+      if (reliefTransport) {
+        const send = deliveryImpl || deliverViaMailroomRelief;
+        sent = await send({
+          message,
+          requestId: request.id,
+          candidateName: contact.name || request.candidateName,
+        });
+      } else {
+        const send = deliveryImpl || deliverMessage;
+        sent = await send({
+          mailbox: config.mailbox,
+          draftId: previousOutbox.draftId || null,
+          draftRfc822MessageId: previousOutbox.gmailDraftRfc822MessageId || null,
+          message,
+          // A process can die after Gmail accepts the email and before Redis
+          // records delivery. A previous claim must reconcile by action marker;
+          // it must never become authorization for a second send.
+          reconcileOnly: ["claimed", "uncertain"].includes(previousOutbox.status),
+        });
+      }
     } catch (error) {
-      await saveUncertainOutbox(state, message.actionKey, message.messageId, error);
+      await saveUncertainOutbox(
+        state,
+        message.actionKey,
+        message.messageId,
+        error,
+        { transport: reliefTransport ? "mailroom-sendgrid" : "gmail" },
+      );
       throw error;
     }
     const sentAt = new Date().toISOString();
@@ -1324,6 +1388,10 @@ export async function processMatchRequest(
       sentAt,
       messageId: message.messageId,
       deliveryMode,
+      transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
+      // SendGrid opens a fresh conversation and Mailroom does not yet ingest
+      // replies, so automatic nudges would be unsafe for this relief path.
+      armFollowup: !reliefTransport,
     }), state.revision);
 
     await resolveOutreachException(request.id, {
@@ -1377,6 +1445,7 @@ export async function processMatchRequest(
       sent,
       state,
       deliveryMode,
+      transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
       autoRecoveredNoDigest,
     };
   } catch (error) {
@@ -2419,6 +2488,7 @@ export async function outreachHealth({
     notBeforePinned: config.notBeforeMs != null,
     gmailConfigured: config.gmailConfigured,
     storeConfigured: config.storeConfigured,
+    mailroomReliefConfigured: mailroomReliefConfig().configured,
     mailbox: config.mailbox,
     executionReady: outreachExecutionEnabled(config),
     // Three-state on purpose: false when Gmail is not configured, null when the

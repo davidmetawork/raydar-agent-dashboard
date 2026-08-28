@@ -117,6 +117,42 @@ export default async function handler(req, res) {
       }
       return res.status(200).json({ ok: true, action: result.action, requestId });
     }
+    if (action === "send-request-via-mailroom") {
+      const requestId = String(body.requestId || "").trim();
+      if (body.confirmation !== `SEND VIA MAILROOM ${requestId}`) {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      const history = await readSubmissionRequestHistory();
+      const request = history.find((row) => row.id === requestId);
+      if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
+      if (request.status !== "pending" || request.reachedOut) {
+        return res.status(409).json({ ok: false, error: "request_not_pending_unreached" });
+      }
+      let result;
+      try {
+        result = await processMatchRequest(request, history, {
+          mode: "send",
+          config,
+          transport: "mailroom-relief",
+        });
+      } catch (error) {
+        await handleOutreachFailure(error, request, { config }).catch(() => {});
+        throw error;
+      }
+      return res.status(200).json({
+        ok: true,
+        action: result.action,
+        requestId,
+        transport: result.transport || result.match?.transport || null,
+        mailroomRowId:
+          result.sent?.mailroomRowId || result.match?.mailroomRowId || null,
+        followup: null,
+      });
+    }
     if (action === "send-expired-without-digest") {
       const requestId = String(body.requestId || "").trim();
       if (body.confirmation !== `SEND EXPIRED WITHOUT DIGEST ${requestId}`) {
