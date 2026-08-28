@@ -57,10 +57,11 @@ test("declines are recorded but never acted on", () => {
   assert.deepEqual(d.declined, ["r1"]);
 });
 
-test("a role appearing for the first time on a known candidate does not fire", () => {
-  // New role added to an existing list: no prior status, so no transition.
+test("a role clicked before its first PENDING snapshot still fires for a known candidate", () => {
+  // The candidate itself was seeded earlier, but this role was added and
+  // clicked between polls; losing it here would leave follow-ups running.
   const d = diffInterest({ statuses: { r1: "PENDING" } }, { r1: "PENDING", r2: "APPLIED_TO_ROLE" });
-  assert.deepEqual(d.newlyInterested, [], "needs an observed PENDING before it can transition");
+  assert.deepEqual(d.newlyInterested, ["r2"]);
 });
 
 test("multiple roles in one batch are all detected", () => {

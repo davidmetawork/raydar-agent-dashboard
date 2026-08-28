@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "tuple": {
+    "candidateUserId": "candidate_1",
+    "batchId": "batch-1",
+    "roleId": "role_1"
+  },
+  "occurredAt": "2026-08-28T17:00:00.000Z",
+  "canonicalJson": "{\"batchId\":\"batch-1\",\"candidateUserId\":\"candidate_1\",\"roleId\":\"role_1\"}",
+  "eventKey": "curated-interest:a080c3af4df6762dfdd84f76030a9f2be5884ecc63e554bb12f0ca70efeb7f79"
+}

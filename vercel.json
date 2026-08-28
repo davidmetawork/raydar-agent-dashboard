@@ -134,6 +134,10 @@
       "schedule": "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
     },
     {
+      "path": "/api/paraai/post-call-interest",
+      "schedule": "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
+    },
+    {
       "path": "/api/seq/guardian",
       "schedule": "17 * * * *"
     },

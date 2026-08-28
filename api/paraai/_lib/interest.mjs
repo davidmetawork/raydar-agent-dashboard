@@ -24,6 +24,8 @@ import {
   storeConfigured,
   getSnapshot,
   putSnapshot,
+  getPostCallInterestSnapshot,
+  putPostCallInterestSnapshot,
   diffInterest,
   getJob,
   saveJob,
@@ -48,6 +50,9 @@ import {
   getSweepState,
   appendJournal,
   recordPostCallInterestEvent,
+  postCallProjectionBatchId,
+  getPostCallInterestSweepState,
+  recordPostCallInterestSweep,
 } from "./interest-store.mjs";
 import {
   drainPostCallInterestOutbox,
@@ -479,7 +484,6 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
         } else {
           try {
             const existing = await getJob(candidate.candidateUserId);
-            let receivingJob = null;
             // email_complete is the durable boundary immediately after an
             // email attempt but before the terminal handoff record. Do not
             // reuse that outbox batch, replace the unfinished job, or advance
@@ -491,7 +495,7 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
               const added = diff.newlyInterested.filter(
                 (roleId) => !(Array.isArray(existing.roles) ? existing.roles : []).includes(roleId),
               );
-              receivingJob = await saveJob(appendJournal({
+              await saveJob(appendJournal({
                 ...existing,
                 // Never let a retry or a later role addition inherit newer gates.
                 // Legacy jobs without the field fail closed to shadow.
@@ -511,34 +515,11 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
                   terminalReasons,
                 );
               }
-              receivingJob = await createJob(candidate.candidateUserId, {
+              await createJob(candidate.candidateUserId, {
                 candidateId: candidate.candidateId,
                 roles: diff.newlyInterested,
                 rolloutPhase: interestRolloutPhase(config),
               });
-            }
-            if (
-              !snapshotDeferred
-              && config.postCallInterestEnabled === true
-            ) {
-              try {
-                const occurredAt = new Date(now).toISOString();
-                for (const roleId of diff.newlyInterested) {
-                  await recordPostCallInterestEvent({
-                    candidateUserId: candidate.candidateUserId,
-                    batchId: receivingJob?.batchId,
-                    roleId,
-                    occurredAt,
-                  });
-                  result.postCallOutboxQueued += 1;
-                }
-              } catch {
-                // The source snapshot must remain pinned until every event is
-                // durable; a later sweep reuses the job's stable batch id.
-                snapshotDeferred = true;
-                result.stateDeferrals += 1;
-                result.postCallOutboxErrors += 1;
-              }
             }
           } finally {
             await releaseLock(candidate.candidateUserId, token);
@@ -617,6 +598,196 @@ export async function sweepInterest({ config = interestConfig(), now = Date.now(
     stateDeferrals: result.stateDeferrals,
     seeded: result.seeded,
     detected: result.detected.length,
+    durationMs: result.durationMs,
+  });
+  return result;
+}
+
+/**
+ * Independent source projection for the unified post-call stop signal. It has
+ * its own snapshots and sweep cursor, so it cannot consume a transition from
+ * the established curated-interest lane or create/advance one of that lane's
+ * jobs. Its only durable outputs are projection snapshots, sweep telemetry,
+ * and the post-call engagement outbox.
+ */
+export async function sweepPostCallInterestProjection({
+  config = interestConfig(),
+  now = Date.now(),
+  listCandidatesImpl = listCuratedListCandidates,
+  readStatusesImpl = readInterestStatuses,
+  getSnapshotImpl = getPostCallInterestSnapshot,
+  putSnapshotImpl = putPostCallInterestSnapshot,
+  getSweepStateImpl = getPostCallInterestSweepState,
+  recordSweepImpl = recordPostCallInterestSweep,
+  acquireLockImpl = acquireLock,
+  releaseLockImpl = releaseLock,
+  recordEventImpl = recordPostCallInterestEvent,
+} = {}) {
+  if (config.postCallInterestEnabled !== true) {
+    const error = new Error("post-call interest projection disabled");
+    error.code = "POST_CALL_INTEREST_DISABLED";
+    throw error;
+  }
+  const started = Date.now();
+  const observedAt = new Date(now).toISOString();
+  const result = {
+    ok: false,
+    populationSize: 0,
+    candidatesRead: 0,
+    readErrors: 0,
+    seeded: 0,
+    detected: [],
+    declined: 0,
+    stateDeferrals: 0,
+    postCallOutboxQueued: 0,
+    postCallOutboxErrors: 0,
+    durationMs: 0,
+  };
+
+  const priorSweep = await getSweepStateImpl().catch(() => null);
+  const population = (await listCandidatesImpl())
+    .sort((left, right) => String(left.candidateUserId || "")
+      .localeCompare(String(right.candidateUserId || "")));
+  result.populationSize = population.length;
+  const window = interestSweepWindow({
+    populationSize: population.length,
+    batchSize: config.sweepBatchSize,
+    priorSweep,
+  });
+  const batch = population.slice(window.start, window.end);
+  result.cursorStart = window.start;
+  result.cursorEnd = window.end;
+  result.cycleStartedAt = window.continuing
+    ? priorSweep.cycleStartedAt
+    : observedAt;
+  const reads = await mapWithConcurrency(
+    batch,
+    config.sweepConcurrency,
+    async (candidate) => ({
+      candidate,
+      statuses: await readStatusesImpl(candidate.candidateUserId),
+    }),
+  );
+
+  for (const read of reads) {
+    if (!read || read.__error) { result.readErrors += 1; continue; }
+    result.candidatesRead += 1;
+    const { candidate, statuses } = read;
+    const prior = await getSnapshotImpl(candidate.candidateUserId);
+    const diff = diffInterest(prior, statuses);
+    if (diff.firstSight) {
+      await putSnapshotImpl(candidate.candidateUserId, statuses, { seeded: true });
+      result.seeded += 1;
+      continue;
+    }
+
+    result.declined += diff.declined.length;
+    let snapshotDeferred = false;
+    let snapshotAdvanced = false;
+    if (diff.newlyInterested.length) {
+      const token = await acquireLockImpl(candidate.candidateUserId);
+      if (!token) {
+        snapshotDeferred = true;
+        result.stateDeferrals += 1;
+      } else {
+        try {
+          const batchId = postCallProjectionBatchId(
+            candidate.candidateUserId,
+            prior.generationId,
+            prior.revision,
+            diff.newlyInterested,
+          );
+          for (const roleId of diff.newlyInterested) {
+            await recordEventImpl({
+              candidateUserId: candidate.candidateUserId,
+              batchId,
+              roleId,
+              occurredAt: observedAt,
+            });
+            result.postCallOutboxQueued += 1;
+          }
+          await putSnapshotImpl(candidate.candidateUserId, statuses);
+          snapshotAdvanced = true;
+        } catch {
+          // Snapshot advancement is the acknowledgement boundary. Any record
+          // failure leaves the same generation/revision in place, so retry
+          // recreates the exact batch and idempotency keys.
+          snapshotDeferred = true;
+          result.stateDeferrals += 1;
+          result.postCallOutboxErrors += 1;
+        } finally {
+          await releaseLockImpl(candidate.candidateUserId, token);
+        }
+      }
+      if (!snapshotDeferred) {
+        result.detected.push({ candidate, roleIds: diff.newlyInterested, statuses });
+      }
+    }
+    if (!snapshotDeferred && !snapshotAdvanced) {
+      await putSnapshotImpl(candidate.candidateUserId, statuses);
+    }
+  }
+
+  const batchComplete = interestSweepComplete({
+    populationSize: batch.length,
+    candidatesRead: result.candidatesRead,
+    readErrors: result.readErrors,
+    stateDeferrals: result.stateDeferrals,
+  });
+  const priorAdvanced = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleCandidatesRead) || 0)
+    : 0;
+  const priorSeeded = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleSeeded) || 0)
+    : 0;
+  const priorDetected = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleDetected) || 0)
+    : 0;
+  const priorAttemptErrors = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleAttemptReadErrors) || 0)
+    : 0;
+  const priorStateDeferrals = window.continuing
+    ? Math.max(0, Number(priorSweep?.cycleAttemptStateDeferrals) || 0)
+    : 0;
+  result.cycleCandidatesRead = priorAdvanced + (batchComplete ? batch.length : 0);
+  result.cycleSeeded = priorSeeded + result.seeded;
+  result.cycleDetected = priorDetected + result.detected.length;
+  result.cycleAttemptReadErrors = priorAttemptErrors + result.readErrors;
+  result.cycleAttemptStateDeferrals =
+    priorStateDeferrals + result.stateDeferrals;
+  result.cycleComplete = batchComplete && window.end === population.length;
+  result.nextCursor = result.cycleComplete
+    ? 0
+    : batchComplete
+      ? window.end
+      : window.start;
+  result.ok = result.cycleComplete
+    && interestSweepComplete({
+      populationSize: population.length,
+      candidatesRead: result.cycleCandidatesRead,
+      readErrors: 0,
+    });
+  result.durationMs = Date.now() - started;
+  await recordSweepImpl({
+    ok: result.ok,
+    populationSize: result.populationSize,
+    cursorStart: result.cursorStart,
+    cursorEnd: result.cursorEnd,
+    nextCursor: result.nextCursor,
+    cycleStartedAt: result.cycleStartedAt,
+    cycleComplete: result.cycleComplete,
+    cycleCandidatesRead: result.cycleCandidatesRead,
+    cycleSeeded: result.cycleSeeded,
+    cycleDetected: result.cycleDetected,
+    cycleAttemptReadErrors: result.cycleAttemptReadErrors,
+    cycleAttemptStateDeferrals: result.cycleAttemptStateDeferrals,
+    candidatesRead: result.candidatesRead,
+    readErrors: result.readErrors,
+    stateDeferrals: result.stateDeferrals,
+    seeded: result.seeded,
+    detected: result.detected.length,
+    postCallOutboxQueued: result.postCallOutboxQueued,
+    postCallOutboxErrors: result.postCallOutboxErrors,
     durationMs: result.durationMs,
   });
   return result;
@@ -1413,6 +1584,166 @@ export async function interestStatus() {
 
 /* -------------------------------------------------------------------- tick */
 
+function interestSweepSummary(sweep) {
+  return {
+    ok: sweep.ok,
+    populationSize: sweep.populationSize,
+    cursorStart: sweep.cursorStart,
+    cursorEnd: sweep.cursorEnd,
+    nextCursor: sweep.nextCursor,
+    cycleComplete: sweep.cycleComplete,
+    cycleCandidatesRead: sweep.cycleCandidatesRead,
+    candidatesRead: sweep.candidatesRead,
+    seeded: sweep.seeded,
+    detected: sweep.detected.length,
+    readErrors: sweep.readErrors,
+    stateDeferrals: sweep.stateDeferrals,
+    postCallOutboxQueued: sweep.postCallOutboxQueued,
+    postCallOutboxErrors: sweep.postCallOutboxErrors,
+  };
+}
+
+/**
+ * The legacy lane and the dedicated post-call projection share this exact
+ * scheduling/lease primitive. Whichever invocation wins the durable sweep
+ * lease performs the source read; an overlap observes `locked`, and the winner
+ * rechecks due state after acquiring the lease before touching Paraform.
+ */
+export async function runScheduledInterestSweep({
+  config = interestConfig(),
+  now = Date.now(),
+  getSweepStateImpl = getSweepState,
+  acquireLockImpl = acquireLock,
+  releaseLockImpl = releaseLock,
+  sweepImpl = sweepInterest,
+} = {}) {
+  const sweepIntervalMs = Math.max(
+    60_000,
+    Number(config.sweepIntervalMs) || 15 * 60 * 1000,
+  );
+  const priorSweep = await getSweepStateImpl().catch(() => null);
+  const priorSweepAt = Date.parse(String(priorSweep?.at || ""));
+  const retryIntervalMs = priorSweep?.cycleComplete !== true
+    ? Math.min(sweepIntervalMs, 60_000)
+    : sweepIntervalMs;
+  const sweepDue = !Number.isFinite(priorSweepAt)
+    || Number(now) - priorSweepAt >= retryIntervalMs;
+  if (!sweepDue) return { sweep: null, summary: { skipped: "not_due" } };
+
+  const sweepToken = await acquireLockImpl("__curated_interest_sweep__", {
+    ttlSeconds: Math.max(600, Math.ceil(sweepIntervalMs / 1000)),
+  });
+  if (!sweepToken) return { sweep: null, summary: { skipped: "locked" } };
+  try {
+    const currentSweep = await getSweepStateImpl().catch(() => null);
+    const currentSweepAt = Date.parse(String(currentSweep?.at || ""));
+    const currentRetryIntervalMs = currentSweep?.cycleComplete !== true
+      ? Math.min(sweepIntervalMs, 60_000)
+      : sweepIntervalMs;
+    if (
+      Number.isFinite(currentSweepAt)
+      && Number(now) - currentSweepAt < currentRetryIntervalMs
+    ) {
+      return { sweep: null, summary: { skipped: "not_due" } };
+    }
+    const sweep = await sweepImpl({ config, now });
+    return { sweep, summary: interestSweepSummary(sweep) };
+  } finally {
+    await releaseLockImpl("__curated_interest_sweep__", sweepToken);
+  }
+}
+
+export async function runScheduledPostCallInterestProjectionSweep({
+  config = interestConfig(),
+  now = Date.now(),
+  getSweepStateImpl = getPostCallInterestSweepState,
+  acquireLockImpl = acquireLock,
+  releaseLockImpl = releaseLock,
+  sweepImpl = sweepPostCallInterestProjection,
+} = {}) {
+  return runScheduledInterestSweep({
+    config,
+    now,
+    getSweepStateImpl,
+    acquireLockImpl,
+    releaseLockImpl,
+    sweepImpl,
+  });
+}
+
+/**
+ * Dedicated, default-off source projection for the unified post-call system.
+ * It deliberately ignores every legacy actioning/release gate and forces a
+ * shadow-only sweep configuration: source reads, dedicated snapshots/sweep
+ * telemetry, and the durable engagement outbox may change, but no legacy job,
+ * Paraform mutation, or candidate email is authorized. The same KV remains a
+ * required persistence
+ * dependency; it is not a legacy activation gate.
+ */
+export async function runPostCallInterestProjectionTick({
+  config = interestConfig(),
+  now = Date.now(),
+  storeConfiguredImpl = storeConfigured,
+  sweepRunner = runScheduledPostCallInterestProjectionSweep,
+  drainImpl = drainPostCallInterestOutbox,
+} = {}) {
+  const result = {
+    ok: false,
+    ran: false,
+    reason: null,
+    sweep: null,
+    postCallInterest: null,
+  };
+  if (config.postCallInterestEnabled !== true) {
+    result.reason = "disabled";
+    return result;
+  }
+  if (!storeConfiguredImpl()) {
+    result.reason = "store_not_configured";
+    return result;
+  }
+
+  result.ran = true;
+  const projectionConfig = {
+    ...config,
+    // The producer owns only source projection. These explicit values keep a
+    // future legacy-lane configuration from accidentally granting mutations.
+    enabled: false,
+    dryRun: true,
+    notBefore: null,
+    notBeforeConfigured: false,
+    releaseReady: false,
+    stopArmed: false,
+    emailArmed: false,
+    submitArmed: false,
+    writesEnabled: false,
+    gateOrderViolations: [],
+    postCallInterestEnabled: true,
+  };
+  try {
+    const scheduled = await sweepRunner({ config: projectionConfig, now });
+    result.sweep = scheduled.summary;
+  } catch (error) {
+    result.sweep = {
+      error: String(error?.code || "POST_CALL_INTEREST_SWEEP_FAILED"),
+    };
+  }
+  try {
+    result.postCallInterest = await drainImpl({ enabled: true });
+  } catch (error) {
+    result.postCallInterest = {
+      enabled: true,
+      attempted: 0,
+      delivered: 0,
+      pending: null,
+      error: String(error?.code || "POST_CALL_INTEREST_DELIVERY_FAILED"),
+    };
+  }
+  result.ok = !result.sweep?.error && !result.postCallInterest?.error;
+  result.reason = result.ok ? null : "degraded";
+  return result;
+}
+
 export async function runInterestTick({ config = interestConfig(), mailer = undefined, now = Date.now() } = {}) {
   // Default to the real sender when Gmail is configured; callers (tests, dry
   // runs) can inject their own or pass null to force a no-send.
@@ -1435,62 +1766,9 @@ export async function runInterestTick({ config = interestConfig(), mailer = unde
   }
 
   result.ran = true;
-  let sweep = null;
-  const sweepIntervalMs = Math.max(
-    60_000,
-    Number(config.sweepIntervalMs) || 15 * 60 * 1000,
-  );
-  const priorSweep = await getSweepState().catch(() => null);
-  const priorSweepAt = Date.parse(String(priorSweep?.at || ""));
-  const retryIntervalMs = priorSweep?.cycleComplete !== true
-    ? Math.min(sweepIntervalMs, 60_000)
-    : sweepIntervalMs;
-  const sweepDue = !Number.isFinite(priorSweepAt)
-    || Number(now) - priorSweepAt >= retryIntervalMs;
-  if (sweepDue) {
-    const sweepToken = await acquireLock("__curated_interest_sweep__", {
-      ttlSeconds: Math.max(600, Math.ceil(sweepIntervalMs / 1000)),
-    });
-    if (sweepToken) {
-      try {
-        const currentSweep = await getSweepState().catch(() => null);
-        const currentSweepAt = Date.parse(String(currentSweep?.at || ""));
-        const currentRetryIntervalMs = currentSweep?.cycleComplete !== true
-          ? Math.min(sweepIntervalMs, 60_000)
-          : sweepIntervalMs;
-        if (
-          !Number.isFinite(currentSweepAt)
-          || Number(now) - currentSweepAt >= currentRetryIntervalMs
-        ) {
-          sweep = await sweepInterest({ config, now });
-          result.sweep = {
-            ok: sweep.ok,
-            populationSize: sweep.populationSize,
-            cursorStart: sweep.cursorStart,
-            cursorEnd: sweep.cursorEnd,
-            nextCursor: sweep.nextCursor,
-            cycleComplete: sweep.cycleComplete,
-            cycleCandidatesRead: sweep.cycleCandidatesRead,
-            candidatesRead: sweep.candidatesRead,
-            seeded: sweep.seeded,
-            detected: sweep.detected.length,
-            readErrors: sweep.readErrors,
-            stateDeferrals: sweep.stateDeferrals,
-            postCallOutboxQueued: sweep.postCallOutboxQueued,
-            postCallOutboxErrors: sweep.postCallOutboxErrors,
-          };
-        } else {
-          result.sweep = { skipped: "not_due" };
-        }
-      } finally {
-        await releaseLock("__curated_interest_sweep__", sweepToken);
-      }
-    } else {
-      result.sweep = { skipped: "locked" };
-    }
-  } else {
-    result.sweep = { skipped: "not_due" };
-  }
+  const scheduledSweep = await runScheduledInterestSweep({ config, now });
+  const sweep = scheduledSweep.sweep;
+  result.sweep = scheduledSweep.summary;
 
   try {
     result.postCallInterest = await drainPostCallInterestOutbox({

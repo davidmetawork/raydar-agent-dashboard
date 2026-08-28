@@ -1,12 +1,14 @@
 import { safeUpstreamBase } from "../../_lib/safe-upstream.mjs";
 import {
-  listPendingPostCallInterestEvents,
+  claimPendingPostCallInterestEvents,
   postCallInterestEventKey,
   settlePostCallInterestEvent,
 } from "./interest-store.mjs";
 
 const ENDPOINT_PATH = "/api/v1/engagement-events";
-const TIMEOUT_MS = 12_000;
+const TIMEOUT_MS = 8_000;
+const RUN_BUDGET_MS = 45_000;
+const MAX_BATCH_SIZE = 5;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const TRUE = new Set(["1", "true", "yes", "on"]);
 
@@ -128,31 +130,42 @@ export async function drainPostCallInterestOutbox({
   enabled = postCallInterestProducerEnabled(),
   env = process.env,
   fetchImpl = globalThis.fetch,
-  listImpl = listPendingPostCallInterestEvents,
+  claimImpl = claimPendingPostCallInterestEvents,
   settleImpl = settlePostCallInterestEvent,
-  limit = 50,
+  limit = MAX_BATCH_SIZE,
+  runBudgetMs = RUN_BUDGET_MS,
+  nowImpl = Date.now,
   signalFactory = (milliseconds) => AbortSignal.timeout(milliseconds),
 } = {}) {
   // Hard-dark means no state read and no network attempt, even when unrelated
   // Post-call credentials happen to exist in the same runtime.
   if (enabled !== true) {
-    return Object.freeze({ enabled: false, attempted: 0, delivered: 0, pending: 0 });
+    return Object.freeze({
+      enabled: false, attempted: 0, delivered: 0, pending: 0, leased: 0, deferred: 0,
+    });
   }
   if (
     typeof fetchImpl !== "function"
-    || typeof listImpl !== "function"
+    || typeof claimImpl !== "function"
     || typeof settleImpl !== "function"
+    || typeof nowImpl !== "function"
     || typeof signalFactory !== "function"
   ) {
     throw codedError("POST_CALL_INTEREST_DEPENDENCY_INVALID");
   }
   const { endpoint, key } = deliveryConfig(env);
-  const pending = await listImpl(Math.max(1, Math.min(200, Number(limit) || 50)));
+  const selectedLimit = Math.max(1, Math.min(MAX_BATCH_SIZE, Number(limit) || MAX_BATCH_SIZE));
+  const selectedBudgetMs = Math.max(1_000, Math.min(55_000, Number(runBudgetMs) || RUN_BUDGET_MS));
+  const deadlineMs = Number(nowImpl()) + selectedBudgetMs;
+  const pending = await claimImpl(selectedLimit);
   const results = [];
   for (const record of pending) {
-    const request = postCallInterestRequest(record);
+    const remainingMs = deadlineMs - Number(nowImpl());
+    if (remainingMs < 250) break;
+    let request = null;
     let response = null;
     try {
+      request = postCallInterestRequest(record);
       response = await fetchImpl(endpoint, {
         method: "POST",
         redirect: "error",
@@ -162,7 +175,7 @@ export async function drainPostCallInterestOutbox({
           "content-type": "application/json",
         },
         body: JSON.stringify(request.body),
-        signal: signalFactory(TIMEOUT_MS),
+        signal: signalFactory(Math.max(250, Math.min(TIMEOUT_MS, remainingMs))),
       });
       const body = await boundedJson(response);
       if (
@@ -181,19 +194,25 @@ export async function drainPostCallInterestOutbox({
       }
       await settleImpl(request.eventKey, {
         delivered: true,
+        leaseToken: record.leaseToken,
         responseEventKey: body.eventKey,
         statusCode: response.status,
       });
       results.push(Object.freeze({ eventKey: request.eventKey, delivered: true }));
     } catch (error) {
-      const errorCode = safeFailureCode(error);
-      await settleImpl(request.eventKey, {
-        delivered: false,
-        statusCode: Number.isInteger(response?.status) ? response.status : null,
-        errorCode,
-      });
+      let errorCode = safeFailureCode(error);
+      try {
+        await settleImpl(request?.eventKey || record.eventKey, {
+          delivered: false,
+          leaseToken: record.leaseToken,
+          statusCode: Number.isInteger(response?.status) ? response.status : null,
+          errorCode,
+        });
+      } catch (settlementError) {
+        errorCode = safeFailureCode(settlementError);
+      }
       results.push(Object.freeze({
-        eventKey: request.eventKey,
+        eventKey: request?.eventKey || record.eventKey,
         delivered: false,
         errorCode,
       }));
@@ -204,6 +223,8 @@ export async function drainPostCallInterestOutbox({
     attempted: results.length,
     delivered: results.filter((result) => result.delivered).length,
     pending: results.filter((result) => !result.delivered).length,
+    leased: pending.length,
+    deferred: Math.max(0, pending.length - results.length),
     results: Object.freeze(results),
   });
 }
@@ -211,7 +232,9 @@ export async function drainPostCallInterestOutbox({
 export const postCallInterestOutboxContract = Object.freeze({
   endpointPath: ENDPOINT_PATH,
   eventKind: "curated_role_interest",
-  eventKey: "curated-interest:{candidateUserId}:{batchId}:{roleId}",
+  eventKey: "curated-interest:sha256(canonical {batchId,candidateUserId,roleId})",
   authentication: "bearer:POST_CALL_ENGAGEMENT_API_KEY",
   defaultMode: "off",
+  maxBatchSize: MAX_BATCH_SIZE,
+  runBudgetMs: RUN_BUDGET_MS,
 });

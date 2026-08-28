@@ -9,15 +9,23 @@ import { createHash, randomUUID } from "node:crypto";
 const INDEX_KEY = "paraai:interest:index";
 const JOB_INDEX_KEY = "paraai:interest:job:index";
 const SWEEP_KEY = "paraai:interest:sweep";
+const POST_CALL_SNAPSHOT_PREFIX = "paraai:interest:post-call-projection:v1:snap:";
+const POST_CALL_SWEEP_KEY = "paraai:interest:post-call-projection:v1:sweep";
 const REVIEW_INDEX_KEY = "paraai:interest:review:index";
 const HANDOFF_INDEX_KEY = "paraai:interest:handoff:index";
-const POST_CALL_OUTBOX_INDEX_KEY = "paraai:interest:post-call-outbox:index";
+// v2 is a due-time sorted set. The never-deployed v1 branch used a Redis set;
+// a versioned key makes an accidental partial rollout fail isolated instead of
+// producing WRONGTYPE or silently inheriting non-fair ordering.
+const POST_CALL_OUTBOX_INDEX_KEY = "paraai:interest:post-call-outbox:v2:index";
+const POST_CALL_OUTBOX_KEY_PREFIX = "paraai:interest:post-call-outbox:v2:";
+const POST_CALL_OUTBOX_LEASE_PREFIX = "paraai:interest:post-call-outbox:v2:lease:";
 const SNAP_TTL_SECONDS = 730 * 24 * 60 * 60;
 const JOB_TTL_SECONDS = 180 * 24 * 60 * 60;
 const LOCK_TTL_SECONDS = 150;
 const REVIEW_TTL_SECONDS = 730 * 24 * 60 * 60;
 const HANDOFF_TTL_SECONDS = 730 * 24 * 60 * 60;
 const POST_CALL_OUTBOX_TTL_SECONDS = 730 * 24 * 60 * 60;
+const POST_CALL_OUTBOX_LEASE_MS = 60_000;
 const TERMINAL_JOB_STAGES = new Set(["done", "awaiting_human_submission"]);
 
 const KV_URL = String(
@@ -161,12 +169,49 @@ function postCallInstant(value) {
 }
 
 export function postCallInterestEventKey(candidateUserId, batchId, roleId) {
-  return [
-    "curated-interest",
-    postCallIdentifier(candidateUserId, "candidateUserId"),
-    postCallIdentifier(batchId, "batchId", 200),
-    postCallIdentifier(roleId, "roleId"),
-  ].join(":");
+  const selected = {
+    batchId: postCallIdentifier(batchId, "batchId", 200),
+    candidateUserId: postCallIdentifier(candidateUserId, "candidateUserId"),
+    roleId: postCallIdentifier(roleId, "roleId"),
+  };
+  // This is the exact canonical tuple and digest used by the owning post-call
+  // service.  The hash is both the cross-service receipt and the durable
+  // idempotency key; opaque Paraform ids never appear in that receipt.
+  const digest = createHash("sha256")
+    .update(JSON.stringify(selected))
+    .digest("hex");
+  return `curated-interest:${digest}`;
+}
+
+export function postCallProjectionBatchId(
+  candidateUserId,
+  generationId,
+  priorRevision,
+  roleIds,
+) {
+  const candidate = postCallIdentifier(candidateUserId, "candidateUserId");
+  const generation = postCallIdentifier(generationId, "generationId");
+  const revision = Number(priorRevision);
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    const error = new Error("priorRevision invalid");
+    error.code = "POST_CALL_INTEREST_REVISION_INVALID";
+    throw error;
+  }
+  const roles = [...new Set((Array.isArray(roleIds) ? roleIds : [])
+    .map((roleId) => postCallIdentifier(roleId, "roleId")))]
+    .sort();
+  if (!roles.length || roles.length > 100) {
+    const error = new Error("roleIds invalid");
+    error.code = "POST_CALL_INTEREST_ROLES_INVALID";
+    throw error;
+  }
+  const digest = createHash("sha256").update(JSON.stringify({
+    candidateUserId: candidate,
+    generationId: generation,
+    priorRevision: revision,
+    roleIds: roles,
+  })).digest("hex");
+  return `projection-${digest}`;
 }
 
 function postCallOutboxHash(eventKey) {
@@ -178,7 +223,10 @@ function postCallOutboxHash(eventKey) {
 }
 
 const postCallOutboxKeyFromHash = (hash) =>
-  `paraai:interest:post-call-outbox:${String(hash || "")}`;
+  `${POST_CALL_OUTBOX_KEY_PREFIX}${String(hash || "")}`;
+
+const postCallOutboxLeaseKeyFromHash = (hash) =>
+  `${POST_CALL_OUTBOX_LEASE_PREFIX}${String(hash || "")}`;
 
 function postCallOutboxKey(eventKey) {
   return postCallOutboxKeyFromHash(postCallOutboxHash(eventKey));
@@ -236,11 +284,48 @@ export async function putSnapshot(candidateUserId, statuses, { kvImpl = kv, seed
   return next;
 }
 
+const postCallProjectionSnapshotKey = (candidateUserId) =>
+  `${POST_CALL_SNAPSHOT_PREFIX}${interestCandidateHash(candidateUserId)}`;
+
+export async function getPostCallInterestSnapshot(
+  candidateUserId,
+  { kvImpl = kv } = {},
+) {
+  return parse(await kvImpl(["GET", postCallProjectionSnapshotKey(candidateUserId)]), null);
+}
+
+export async function putPostCallInterestSnapshot(
+  candidateUserId,
+  statuses,
+  { kvImpl = kv, seeded = false } = {},
+) {
+  const prior = await getPostCallInterestSnapshot(candidateUserId, { kvImpl });
+  const next = {
+    version: 1,
+    candidateUserId,
+    generationId: prior?.generationId || randomUUID(),
+    statuses: statuses && typeof statuses === "object" ? statuses : {},
+    seededAt: prior?.seededAt || (seeded ? new Date().toISOString() : null),
+    revision: Number(prior?.revision || 0) + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  await kvImpl([
+    "SET",
+    postCallProjectionSnapshotKey(candidateUserId),
+    JSON.stringify(next),
+    "EX",
+    SNAP_TTL_SECONDS,
+  ]);
+  return next;
+}
+
 /**
  * The whole detection rule, isolated and pure so it is testable without KV.
  *
- * Acts ONLY on PENDING -> APPLIED_TO_ROLE. A candidate seen for the first time
- * is seeded and never acted on, which is what makes arming forward-only.
+ * Acts on a known candidate's transition into APPLIED_TO_ROLE, including a
+ * role first observed in that state. A candidate seen for the first time is
+ * still seeded and never acted on, which keeps activation forward-only while
+ * ensuring a role added and clicked between two polls cannot disappear.
  */
 export function diffInterest(prior, current) {
   const priorStatuses = prior?.statuses || null;
@@ -249,7 +334,7 @@ export function diffInterest(prior, current) {
   const declined = [];
   for (const [roleId, status] of Object.entries(current || {})) {
     const before = priorStatuses ? priorStatuses[roleId] : undefined;
-    if (status === "APPLIED_TO_ROLE" && seen && before && before !== "APPLIED_TO_ROLE") {
+    if (status === "APPLIED_TO_ROLE" && seen && before !== "APPLIED_TO_ROLE") {
       newlyInterested.push(roleId);
     }
     if (status === "NOT_INTERESTED" && seen && before && before !== "NOT_INTERESTED") {
@@ -280,7 +365,7 @@ function normalizePostCallInterestEvent({
 }
 
 /**
- * Persist one PENDING -> APPLIED_TO_ROLE transition before its source snapshot
+ * Persist one transition into APPLIED_TO_ROLE before its source snapshot
  * advances. The KV key and index member are hashes; the record contains only
  * opaque Paraform ids and no candidate contact data.
  */
@@ -299,17 +384,31 @@ export async function recordPostCallInterestEvent(input, { kvImpl = kv } = {}) {
     createdAt: now,
     updatedAt: now,
   };
-  const created = await kvImpl([
-    "SET",
-    key,
-    JSON.stringify(pending),
-    "NX",
-    "EX",
-    POST_CALL_OUTBOX_TTL_SECONDS,
+  const script = `-- post-call-outbox-record-v2
+    local created = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2])
+    local raw = created and ARGV[1] or redis.call('GET', KEYS[1])
+    if not raw then return {0, false} end
+    if created then
+      local clock = redis.call('TIME')
+      local now = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+      redis.call('ZADD', KEYS[2], now, ARGV[3])
+    else
+      local ok, record = pcall(cjson.decode, raw)
+      if ok and type(record) == 'table' and record.state == 'pending'
+          and not redis.call('ZSCORE', KEYS[2], ARGV[3]) then
+        local clock = redis.call('TIME')
+        local now = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+        redis.call('ZADD', KEYS[2], now, ARGV[3])
+      end
+    end
+    return {created and 1 or 0, raw}`;
+  const result = await kvImpl([
+    "EVAL", script, 2, key, POST_CALL_OUTBOX_INDEX_KEY,
+    JSON.stringify(pending), String(POST_CALL_OUTBOX_TTL_SECONDS),
+    postCallOutboxHash(event.eventKey),
   ]);
-  const stored = created === "OK" || created === true
-    ? pending
-    : parse(await kvImpl(["GET", key]), null);
+  const created = Number(result?.[0]) === 1;
+  const stored = parse(result?.[1], null);
   if (
     !stored
     || stored.version !== 1
@@ -326,14 +425,107 @@ export async function recordPostCallInterestEvent(input, { kvImpl = kv } = {}) {
   // The first durable occurrence timestamp wins. Retries reuse that exact body,
   // even when a source sweep reaches the same transition at a later wall clock.
   postCallInstant(stored.occurredAt);
-  if (stored.state === "pending") {
-    await kvImpl([
-      "SADD",
-      POST_CALL_OUTBOX_INDEX_KEY,
-      postCallOutboxHash(event.eventKey),
-    ]);
+  return Object.freeze({ created, record: stored });
+}
+
+async function discardInvalidPostCallClaim(hash, leaseToken, { kvImpl = kv } = {}) {
+  const script = `-- post-call-outbox-discard-invalid-v2
+    if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
+    redis.call('DEL', KEYS[2])
+    redis.call('ZREM', KEYS[1], ARGV[2])
+    return 1`;
+  return Number(await kvImpl([
+    "EVAL", script, 2, POST_CALL_OUTBOX_INDEX_KEY,
+    postCallOutboxLeaseKeyFromHash(hash), leaseToken, hash,
+  ])) === 1;
+}
+
+/**
+ * Atomically claims the oldest due records using Redis TIME, one lease per
+ * event, and advances each sorted-set score to its lease expiry. A crashed
+ * worker becomes retryable automatically; an overlapping worker cannot own the
+ * same record until that expiry.
+ */
+export async function claimPendingPostCallInterestEvents(
+  limit = 5,
+  {
+    kvImpl = kv,
+    leaseMs = POST_CALL_OUTBOX_LEASE_MS,
+    token = randomUUID(),
+  } = {},
+) {
+  const selectedLimit = Math.max(1, Math.min(10, Number(limit) || 5));
+  const selectedLeaseMs = Math.max(1_000, Math.min(5 * 60_000, Number(leaseMs) || POST_CALL_OUTBOX_LEASE_MS));
+  const selectedToken = String(token || "").trim();
+  if (!/^[A-Za-z0-9._-]{8,160}$/u.test(selectedToken)) {
+    const error = new Error("post-call interest lease token invalid");
+    error.code = "POST_CALL_INTEREST_LEASE_TOKEN_INVALID";
+    throw error;
   }
-  return Object.freeze({ created: created === "OK" || created === true, record: stored });
+  const script = `-- post-call-outbox-claim-v2
+    local clock = redis.call('TIME')
+    local now = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+    local leaseUntil = now + tonumber(ARGV[2])
+    local scanLimit = math.max(tonumber(ARGV[1]) * 4, 20)
+    local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, scanLimit)
+    local claimed = {}
+    for _, hash in ipairs(due) do
+      local recordKey = ARGV[4] .. hash
+      local leaseKey = ARGV[5] .. hash
+      local raw = redis.call('GET', recordKey)
+      if not raw then
+        redis.call('ZREM', KEYS[1], hash)
+      else
+        local ok, record = pcall(cjson.decode, raw)
+        if not ok or type(record) ~= 'table' or record.state ~= 'pending' then
+          redis.call('ZREM', KEYS[1], hash)
+        else
+          local leaseToken = ARGV[3] .. '.' .. hash
+          local won = redis.call('SET', leaseKey, leaseToken, 'NX', 'PX', ARGV[2])
+          if won then
+            redis.call('ZADD', KEYS[1], leaseUntil, hash)
+            table.insert(claimed, hash)
+            table.insert(claimed, raw)
+            table.insert(claimed, leaseToken)
+            table.insert(claimed, tostring(now))
+            table.insert(claimed, tostring(leaseUntil))
+            if (#claimed / 5) >= tonumber(ARGV[1]) then break end
+          end
+        end
+      end
+    end
+    return claimed`;
+  const flat = await kvImpl([
+    "EVAL", script, 1, POST_CALL_OUTBOX_INDEX_KEY,
+    String(selectedLimit), String(selectedLeaseMs), selectedToken,
+    POST_CALL_OUTBOX_KEY_PREFIX, POST_CALL_OUTBOX_LEASE_PREFIX,
+  ]);
+  const claimed = [];
+  for (let index = 0; index < (Array.isArray(flat) ? flat.length : 0); index += 5) {
+    const hash = String(flat[index] || "");
+    const record = parse(flat[index + 1], null);
+    const leaseToken = String(flat[index + 2] || "");
+    const claimedAtMs = Number(flat[index + 3]);
+    const leaseUntilMs = Number(flat[index + 4]);
+    let valid = false;
+    try {
+      valid = /^[a-f0-9]{64}$/u.test(hash)
+        && record?.version === 1
+        && record?.state === "pending"
+        && postCallOutboxHash(String(record.eventKey || "")) === hash
+        && postCallInterestEventKey(record.candidateUserId, record.batchId, record.roleId) === record.eventKey
+        && postCallInstant(record.occurredAt) === record.occurredAt
+        && Number.isFinite(claimedAtMs)
+        && Number.isFinite(leaseUntilMs)
+        && leaseUntilMs > claimedAtMs;
+    } catch { valid = false; }
+    if (!valid) {
+      await discardInvalidPostCallClaim(hash, leaseToken, { kvImpl }).catch(() => {});
+      continue;
+    }
+    claimed.push(Object.freeze({ ...record, leaseToken, claimedAtMs, leaseUntilMs }));
+  }
+  return claimed;
 }
 
 export async function listPendingPostCallInterestEvents(
@@ -341,11 +533,11 @@ export async function listPendingPostCallInterestEvents(
   { kvImpl = kv } = {},
 ) {
   const selectedLimit = Math.max(1, Math.min(200, Number(limit) || 50));
-  const hashes = (await kvImpl(["SMEMBERS", POST_CALL_OUTBOX_INDEX_KEY])) || [];
+  const hashes = (await kvImpl(["ZRANGE", POST_CALL_OUTBOX_INDEX_KEY, 0, selectedLimit - 1])) || [];
   const pending = [];
   for (const hash of hashes.slice(0, selectedLimit)) {
     if (!/^[a-f0-9]{64}$/u.test(String(hash || ""))) {
-      await kvImpl(["SREM", POST_CALL_OUTBOX_INDEX_KEY, hash]);
+      await kvImpl(["ZREM", POST_CALL_OUTBOX_INDEX_KEY, hash]);
       continue;
     }
     const record = parse(
@@ -358,7 +550,7 @@ export async function listPendingPostCallInterestEvents(
     ) {
       pending.push(record);
     } else {
-      await kvImpl(["SREM", POST_CALL_OUTBOX_INDEX_KEY, hash]);
+      await kvImpl(["ZREM", POST_CALL_OUTBOX_INDEX_KEY, hash]);
     }
   }
   return pending;
@@ -368,6 +560,7 @@ export async function settlePostCallInterestEvent(
   eventKey,
   {
     delivered,
+    leaseToken,
     responseEventKey = null,
     statusCode = null,
     errorCode = null,
@@ -375,15 +568,12 @@ export async function settlePostCallInterestEvent(
   { kvImpl = kv } = {},
 ) {
   const selectedEventKey = String(eventKey || "").trim();
+  const selectedLeaseToken = String(leaseToken || "").trim();
+  const hash = postCallOutboxHash(selectedEventKey);
   const key = postCallOutboxKey(selectedEventKey);
-  const current = parse(await kvImpl(["GET", key]), null);
-  if (
-    !current
-    || current.eventKey !== selectedEventKey
-    || !["pending", "delivered"].includes(current.state)
-  ) {
-    const error = new Error("post-call interest outbox record missing");
-    error.code = "POST_CALL_INTEREST_OUTBOX_MISSING";
+  if (!selectedEventKey || !selectedLeaseToken) {
+    const error = new Error("post-call interest outbox claim required");
+    error.code = "POST_CALL_INTEREST_CLAIM_REQUIRED";
     throw error;
   }
   if (delivered === true && responseEventKey !== selectedEventKey) {
@@ -391,41 +581,66 @@ export async function settlePostCallInterestEvent(
     error.code = "POST_CALL_INTEREST_DELIVERY_MISMATCH";
     throw error;
   }
-  if (current.state === "delivered") return current;
   const now = new Date().toISOString();
-  const next = {
-    ...current,
-    state: delivered === true ? "delivered" : "pending",
-    attempts: Math.max(0, Number(current.attempts) || 0) + 1,
-    lastAttemptAt: now,
-    lastErrorCode: delivered === true
-      ? null
-      : String(errorCode || "POST_CALL_INTEREST_DELIVERY_FAILED").slice(0, 120),
-    deliveredAt: delivered === true ? now : null,
-    statusCode: Number.isInteger(statusCode) ? statusCode : null,
-    updatedAt: now,
-  };
-  const written = await kvImpl([
-    "SET",
-    key,
-    JSON.stringify(next),
-    "XX",
-    "EX",
-    POST_CALL_OUTBOX_TTL_SECONDS,
+  const script = `-- post-call-outbox-settle-v2
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return {0, 'missing'} end
+    local ok, current = pcall(cjson.decode, raw)
+    if not ok or type(current) ~= 'table' or current.eventKey ~= ARGV[1] then
+      return {0, 'conflict'}
+    end
+    if current.state == 'delivered' then
+      redis.call('ZREM', KEYS[2], ARGV[3])
+      if redis.call('GET', KEYS[3]) == ARGV[2] then redis.call('DEL', KEYS[3]) end
+      return {2, raw}
+    end
+    if current.state ~= 'pending' or redis.call('GET', KEYS[3]) ~= ARGV[2] then
+      return {0, 'claim_lost'}
+    end
+    local clock = redis.call('TIME')
+    local nowMs = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+    current.attempts = math.max(0, tonumber(current.attempts) or 0) + 1
+    current.lastAttemptAt = ARGV[5]
+    current.updatedAt = ARGV[5]
+    if ARGV[4] == '1' then
+      current.state = 'delivered'
+      current.lastErrorCode = cjson.null
+      current.deliveredAt = ARGV[5]
+      current.nextAttemptAtMs = cjson.null
+    else
+      current.state = 'pending'
+      current.lastErrorCode = ARGV[7]
+      current.deliveredAt = cjson.null
+      local exponent = math.min(6, current.attempts - 1)
+      local delay = math.min(300000, 5000 * (2 ^ exponent))
+      current.nextAttemptAtMs = nowMs + delay
+      redis.call('ZADD', KEYS[2], current.nextAttemptAtMs, ARGV[3])
+    end
+    if ARGV[6] == '' then current.statusCode = cjson.null
+    else current.statusCode = tonumber(ARGV[6]) end
+    local encoded = cjson.encode(current)
+    redis.call('SET', KEYS[1], encoded, 'XX', 'EX', ARGV[8])
+    if ARGV[4] == '1' then redis.call('ZREM', KEYS[2], ARGV[3]) end
+    redis.call('DEL', KEYS[3])
+    return {1, encoded}`;
+  const result = await kvImpl([
+    "EVAL", script, 3, key, POST_CALL_OUTBOX_INDEX_KEY,
+    postCallOutboxLeaseKeyFromHash(hash), selectedEventKey,
+    selectedLeaseToken, hash, delivered === true ? "1" : "0", now,
+    Number.isInteger(statusCode) ? String(statusCode) : "",
+    delivered === true ? "" : String(errorCode || "POST_CALL_INTEREST_DELIVERY_FAILED").slice(0, 120),
+    String(POST_CALL_OUTBOX_TTL_SECONDS),
   ]);
-  if (written !== "OK" && written !== true) {
-    const error = new Error("post-call interest outbox settlement failed");
-    error.code = "POST_CALL_INTEREST_OUTBOX_SETTLEMENT_FAILED";
-    throw error;
-  }
-  if (next.state === "delivered") {
-    await kvImpl([
-      "SREM",
-      POST_CALL_OUTBOX_INDEX_KEY,
-      postCallOutboxHash(selectedEventKey),
-    ]);
-  }
-  return next;
+  const code = Number(result?.[0]);
+  if (code === 1 || code === 2) return parse(result?.[1], null);
+  const reason = String(result?.[1] || "settlement_failed");
+  const error = new Error(`post-call interest outbox settlement failed: ${reason}`);
+  error.code = reason === "claim_lost"
+    ? "POST_CALL_INTEREST_CLAIM_LOST"
+    : reason === "missing"
+      ? "POST_CALL_INTEREST_OUTBOX_MISSING"
+      : "POST_CALL_INTEREST_OUTBOX_SETTLEMENT_FAILED";
+  throw error;
 }
 
 /* --------------------------------------------------------------------- jobs */
@@ -1007,6 +1222,16 @@ export async function getSweepState({ kvImpl = kv } = {}) {
 export async function recordSweep(result, { kvImpl = kv } = {}) {
   const next = { version: 1, ...result, at: new Date().toISOString() };
   await kvImpl(["SET", SWEEP_KEY, JSON.stringify(next)]);
+  return next;
+}
+
+export async function getPostCallInterestSweepState({ kvImpl = kv } = {}) {
+  return parse(await kvImpl(["GET", POST_CALL_SWEEP_KEY]), null);
+}
+
+export async function recordPostCallInterestSweep(result, { kvImpl = kv } = {}) {
+  const next = { version: 1, ...result, at: new Date().toISOString() };
+  await kvImpl(["SET", POST_CALL_SWEEP_KEY, JSON.stringify(next)]);
   return next;
 }
 
