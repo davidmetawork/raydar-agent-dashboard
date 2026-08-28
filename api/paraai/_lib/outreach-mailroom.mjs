@@ -24,6 +24,21 @@ export function mailroomReliefDedupeKey(requestId) {
   return `paraai-outreach:${id}`;
 }
 
+export function mailroomReliefConfirmation(
+  requestId,
+  { recipientEmail = "", withoutDigest = false } = {},
+) {
+  const id = clean(requestId);
+  const email = clean(recipientEmail).toLowerCase();
+  if (!id) throw new Error("requestId required");
+  return [
+    "SEND VIA MAILROOM",
+    id,
+    ...(email ? ["TO", email] : []),
+    ...(withoutDigest ? ["WITHOUT DIGEST"] : []),
+  ].join(" ");
+}
+
 export class OutreachMailroomError extends Error {
   constructor(code, detail = "", status = null) {
     super(`${code}${detail ? `:${detail}` : ""}`);

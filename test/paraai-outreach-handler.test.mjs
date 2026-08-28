@@ -30,7 +30,10 @@ test("Mailroom relief send requires the request-scoped confirmation phrase", asy
       body: {
         action: "send-request-via-mailroom",
         requestId: "req-guarded",
-        confirmation: "SEND VIA MAILROOM wrong-request",
+        recipientEmail: "candidate@example.com",
+        // The pre-override phrase is deliberately insufficient: the operator
+        // must confirm both the request and the exact recipient.
+        confirmation: "SEND VIA MAILROOM req-guarded",
       },
     };
     const res = responseRecorder();

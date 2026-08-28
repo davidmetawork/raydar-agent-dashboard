@@ -1,4 +1,5 @@
 import {
+  firstEmail,
   normalizeEmail,
   notifySlack,
   trpcGet,
@@ -146,6 +147,8 @@ const PRE_SEND_STAGES = new Set([
 export const PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE =
   "None of the selected matches are eligible for a digest. Only pending, dismissed, or expired matches can be added.";
 export const PENDING_DIGEST_UNAVAILABLE_REASON = "pending_digest_unavailable";
+export const OPERATOR_CONFIRMED_NO_DIGEST_REASON =
+  "operator_confirmed_without_digest";
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -443,16 +446,74 @@ function firstName(name) {
   return displayName(name).split(/\s+/)[0] || "there";
 }
 
-async function candidateContact(request, config) {
+export function normalizeOperatorContactOverride(request, override) {
+  if (!override) return null;
+  const email = normalizeEmail(override.email);
+  if (!email) {
+    const error = new Error("operator contact override requires a valid email");
+    error.code = "OUTREACH_OPERATOR_EMAIL_INVALID";
+    throw error;
+  }
+  return {
+    name: displayName(override.name || request?.candidateName),
+    email,
+    source: "operator_paraform_profile",
+    discovery: null,
+  };
+}
+
+export function candidateEmailFromRecord(record) {
+  const existing = firstEmail(record);
+  if (existing) return existing;
+  const candidates = [
+    record,
+    record?.candidate_user,
+    record?.candidateUser,
+    record?.candidate,
+    record?.item,
+  ].filter((value) => value && typeof value === "object");
+  for (const candidate of candidates) {
+    for (const key of [
+      "email",
+      "emails",
+      "candidate_email",
+      "to_use_email",
+      "user_email",
+      "user_emails",
+    ]) {
+      const values = Array.isArray(candidate[key])
+        ? candidate[key]
+        : [candidate[key]];
+      for (const value of values) {
+        const email = normalizeEmail(
+          typeof value === "object"
+            ? value?.value || value?.email || value?.address
+            : value,
+        );
+        if (email) return email;
+      }
+    }
+  }
+  return "";
+}
+
+async function candidateContact(request, config, override = null) {
   const rows = await trpcGet("candidateUser.getCandidateUsersByIds", {
     candidate_user_ids: [request.candidateUserId],
   });
   const record = (Array.isArray(rows) ? rows : [rows]).find(
     (row) => clean(row?.id) === clean(request.candidateUserId),
   ) || (Array.isArray(rows) ? rows[0] : rows);
-  const emails = Array.isArray(record?.emails) ? record.emails : [record?.email];
-  const email = emails.map(normalizeEmail).find(Boolean) || "";
+  // Paraform's candidate batch read returns several source-dependent shapes.
+  // The detail UI already uses the recursive contact shape; reading only the
+  // two top-level fields made real profile emails look absent.
+  const email = candidateEmailFromRecord(record);
   const name = displayName(record?.name || record?.candidate?.name || request.candidateName);
+  const operatorContact = normalizeOperatorContactOverride(
+    { ...request, candidateName: name || request.candidateName },
+    override,
+  );
+  if (operatorContact) return operatorContact;
   if (email) {
     return {
       name,
@@ -975,6 +1036,7 @@ export async function processMatchRequest(
     allowWithoutDigestReason = null,
     transport = "gmail",
     deliveryImpl = null,
+    contactOverride = null,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -991,6 +1053,13 @@ export async function processMatchRequest(
     error.code = "OUTREACH_TRANSPORT_INVALID";
     throw error;
   }
+  if (contactOverride && (mode !== "send" || !reliefTransport)) {
+    const error = new Error(
+      "operator contact overrides are restricted to confirmed Mailroom relief sends",
+    );
+    error.code = "OUTREACH_OPERATOR_EMAIL_OVERRIDE_INVALID";
+    throw error;
+  }
   if (allowWithoutDigest) {
     const expiredAllowed = expiredNoDigestOverrideEligible(request) &&
       (!noDigestReason || noDigestReason === "expired_without_digest");
@@ -998,7 +1067,16 @@ export async function processMatchRequest(
       noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON &&
       lower(request?.status) === "pending" &&
       request?.reachedOut !== true;
-    if (mode !== "send" || (!expiredAllowed && !pendingAllowed)) {
+    const operatorReliefAllowed =
+      noDigestReason === OPERATOR_CONFIRMED_NO_DIGEST_REASON &&
+      reliefTransport &&
+      lower(request?.status) === "pending" &&
+      request?.reachedOut !== true &&
+      Boolean(contactOverride);
+    if (
+      mode !== "send" ||
+      (!expiredAllowed && !pendingAllowed && !operatorReliefAllowed)
+    ) {
       const error = new Error(
         "no-digest delivery requires an approved expired or re-verified pending recovery",
       );
@@ -1017,7 +1095,7 @@ export async function processMatchRequest(
   let attemptStage = "contact_discovery";
   let state = null;
   try {
-    const contact = await candidateContact(request, config);
+    const contact = await candidateContact(request, config, contactOverride);
     attemptStage = "exception_resolution";
     await resolveOutreachException(request.id, {
       resolution: contact.source,
@@ -1186,6 +1264,8 @@ export async function processMatchRequest(
         attemptStage = "pending_digest_reverification";
         await verifyPendingDigestUnavailable(request);
         deliveryMode = PENDING_DIGEST_UNAVAILABLE_REASON;
+      } else if (noDigestReason === OPERATOR_CONFIRMED_NO_DIGEST_REASON) {
+        deliveryMode = OPERATOR_CONFIRMED_NO_DIGEST_REASON;
       } else {
         deliveryMode = "expired_without_digest";
       }
@@ -1242,12 +1322,17 @@ export async function processMatchRequest(
       // rather than sending a thread-starting email with no name at all.
       signatureFollows: Boolean(signatureHtml),
     });
-    if (deliveryMode === PENDING_DIGEST_UNAVAILABLE_REASON) {
+    if (
+      deliveryMode === PENDING_DIGEST_UNAVAILABLE_REASON ||
+      deliveryMode === OPERATOR_CONFIRMED_NO_DIGEST_REASON
+    ) {
       copy = {
         ...copy,
         variant: clean(copy.variant).replace(
           "_expired_no_digest",
-          "_pending_digest_unavailable",
+          deliveryMode === PENDING_DIGEST_UNAVAILABLE_REASON
+            ? "_pending_digest_unavailable"
+            : "_operator_confirmed_no_digest",
         ),
       };
     }
