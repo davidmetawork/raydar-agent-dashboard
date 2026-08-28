@@ -1,5 +1,6 @@
 import { cors } from "../seq/_lib/core.mjs";
-import { requireOperator } from "../_lib/operator-access.mjs";
+import { requireOperator, requireSameOrigin } from "../_lib/operator-access.mjs";
+import { safeUpstreamBase } from "../_lib/safe-upstream.mjs";
 
 const TIMEOUT_MS = 12_000;
 const ACTIONS = new Set([
@@ -12,12 +13,24 @@ const FILE_TYPES = new Set([
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]);
+const CALL_OUTCOMES = new Set(["completed_success", "no_show", "failed", "incomplete", "cancelled_or_rescheduled", "ambiguous"]);
+const WORKPLACES = new Set(["REMOTE", "HYBRID", "ON_SITE"]);
+const FUNDING_ROUNDS = new Set(["PRE_SEED", "SEED", "SERIES_A", "SERIES_B", "SERIES_C", "SERIES_D_PLUS", "UNKNOWN"]);
+const VISA_AUTHORIZATIONS = new Set(["NO_VISA_AUTHORIZATION_NEEDED", "NEEDS_NEW_VISA_AUTHORIZATION"]);
 
 function config() {
-  return {
-    base: String(process.env.POST_CALL_BASE || "").replace(/\/$/, ""),
-    key: process.env.POST_CALL_MONITOR_API_KEY || "",
-  };
+  try {
+    return {
+      base: safeUpstreamBase(process.env.POST_CALL_BASE, {
+        allowedOrigins: process.env.POST_CALL_ALLOWED_ORIGINS,
+        service: "post_call",
+      }),
+      key: process.env.POST_CALL_MONITOR_API_KEY || "",
+      error: null,
+    };
+  } catch (error) {
+    return { base: "", key: process.env.POST_CALL_MONITOR_API_KEY || "", error: String(error?.message || error) };
+  }
 }
 
 function parseBody(req) {
@@ -43,10 +56,41 @@ function safeChanges(value) {
   return out;
 }
 
+function validStringList(value, allowed = null, maxLength = 160) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 50
+    && value.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= maxLength && (!allowed || allowed.has(item)));
+}
+
+function validateChanges(action, changes) {
+  if (action === "select_profile") return Boolean(changes?.candidateUserId && /^[a-zA-Z0-9_-]{3,160}$/.test(changes.candidateUserId));
+  if (action === "set_call_outcome") return Boolean(changes && CALL_OUTCOMES.has(changes.callOutcome));
+  if (action === "set_role_verdict") return Boolean(changes && ["good", "bad"].includes(changes.roleVerdict));
+  if (action !== "set_field") return true;
+  if (!changes || !Object.keys(changes).length) return false;
+  for (const [field, value] of Object.entries(changes)) {
+    if (field === "fullName" && !(typeof value === "string" && value.trim().length > 0 && value.length <= 200)) return false;
+    else if (field === "email" && !(typeof value === "string" && value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) return false;
+    else if (field === "phone" && !(typeof value === "string" && value.length <= 64 && value.replace(/\D/g, "").length >= 7)) return false;
+    else if (field === "linkedinUrl") {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== "https:" || !["linkedin.com", "www.linkedin.com"].includes(url.hostname.toLowerCase()) || !url.pathname.toLowerCase().startsWith("/in/")) return false;
+      } catch { return false; }
+    } else if (field === "locations" && !validStringList(value)) return false;
+    else if (field === "minimumBaseSalary" && !(Number.isInteger(value) && value > 0 && value <= 10_000_000)) return false;
+    else if (field === "workplaces" && !validStringList(value, WORKPLACES)) return false;
+    else if (field === "fundingRounds" && !validStringList(value, FUNDING_ROUNDS)) return false;
+    else if (field === "visaAuthorization" && !VISA_AUTHORIZATIONS.has(value)) return false;
+    else if (!["fullName", "email", "phone", "linkedinUrl", "locations", "minimumBaseSalary", "workplaces", "fundingRounds", "visaAuthorization"].includes(field)) return false;
+  }
+  return true;
+}
+
 async function upstream(path, access, init = {}) {
   const { base, key } = config();
   const response = await fetch(`${base}${path}`, {
     ...init,
+    redirect: "error",
     headers: {
       authorization: `Bearer ${key}`,
       accept: "application/json",
@@ -66,12 +110,13 @@ function withActor(body, access) {
 
 export default async function handler(req, res) {
   if (cors(req, res)) return;
+  if (!requireSameOrigin(req, res)) return;
   res.setHeader("cache-control", "no-store");
   const access = await requireOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
   if (!access) return;
 
-  const { base, key } = config();
-  if (!base || !key) return res.status(503).json({ ok: false, configured: false, error: "post_call_monitor_not_configured" });
+  const { base, key, error: configError } = config();
+  if (!base || !key) return res.status(503).json({ ok: false, configured: false, error: "post_call_monitor_not_configured", detail: configError || undefined });
 
   try {
     if (req.method === "GET") {
@@ -100,7 +145,7 @@ export default async function handler(req, res) {
       const mimeType = safeString(payload.mimeType, 180).toLowerCase();
       const sizeBytes = Number(payload.sizeBytes);
       const sha256 = safeString(payload.sha256, 64).toLowerCase();
-      if (!fileName || !FILE_TYPES.has(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 15 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) {
+      if (!fileName || /[\\/\0]/.test(fileName) || !FILE_TYPES.has(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 20 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) {
         return res.status(400).json({ ok: false, error: "resume_metadata_invalid" });
       }
       const { response, body } = await upstream("/api/v1/review-files", access, {
@@ -116,6 +161,10 @@ export default async function handler(req, res) {
     if (!reason) return res.status(400).json({ ok: false, error: "review_reason_required" });
     const bodyOut = { schemaVersion: 1, reviewId, action, reason };
     const changes = safeChanges(payload.changes);
+    if (action === "select_profile" && !changes?.candidateUserId) {
+      return res.status(400).json({ ok: false, error: "candidate_user_id_required" });
+    }
+    if (!validateChanges(action, changes)) return res.status(400).json({ ok: false, error: "review_value_invalid" });
     if (changes && Object.keys(changes).length) bodyOut.changes = changes;
     const { response, body } = await upstream("/api/v1/review-actions", access, {
       method: "POST",
