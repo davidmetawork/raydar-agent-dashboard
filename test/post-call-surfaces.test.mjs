@@ -65,7 +65,7 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /fundingRounds:/);
   assert.match(review, /SERIES_D_PLUS/);
   assert.match(review, /NEEDS_NEW_VISA_AUTHORIZATION/);
-  assert.match(review, /20 MB maximum/);
+  assert.match(review, /25 MB maximum/);
   assert.match(review, /credentials:"omit"/);
 });
 
@@ -216,6 +216,26 @@ test("Review proxy sends the owning service's exact action contract", async () =
     } }, invalid);
     assert.equal(invalid.statusCode, 400);
     assert.equal(invalid.body.error, "review_value_invalid");
+    assert.equal(captured, null);
+
+    const atLimit = proxyResponse();
+    await reviewHandler({ method: "POST", headers: authenticatedHeaders("assistant@raydar.xyz"), body: {
+      action: "prepare_resume", reviewId: "review-1", version: 7,
+      fileName: "resume.pdf", mimeType: "application/pdf", sizeBytes: 25 * 1024 * 1024,
+      sha256: "a".repeat(64),
+    } }, atLimit);
+    assert.equal(atLimit.statusCode, 200);
+    assert.equal(captured.body.sizeBytes, 25 * 1024 * 1024);
+
+    captured = null;
+    const overLimit = proxyResponse();
+    await reviewHandler({ method: "POST", headers: authenticatedHeaders("assistant@raydar.xyz"), body: {
+      action: "prepare_resume", reviewId: "review-1", version: 7,
+      fileName: "resume.pdf", mimeType: "application/pdf", sizeBytes: 25 * 1024 * 1024 + 1,
+      sha256: "a".repeat(64),
+    } }, overLimit);
+    assert.equal(overLimit.statusCode, 400);
+    assert.equal(overLimit.body.error, "resume_metadata_invalid");
     assert.equal(captured, null);
   } finally {
     globalThis.fetch = priorFetch;

@@ -145,7 +145,7 @@ export default async function handler(req, res) {
       const mimeType = safeString(payload.mimeType, 180).toLowerCase();
       const sizeBytes = Number(payload.sizeBytes);
       const sha256 = safeString(payload.sha256, 64).toLowerCase();
-      if (!fileName || /[\\/\0]/.test(fileName) || !FILE_TYPES.has(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 20 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) {
+      if (!fileName || /[\\/\0]/.test(fileName) || !FILE_TYPES.has(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 25 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) {
         return res.status(400).json({ ok: false, error: "resume_metadata_invalid" });
       }
       const { response, body } = await upstream("/api/v1/review-files", access, {
