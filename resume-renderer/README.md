@@ -11,11 +11,11 @@ Required Fly secrets:
 - `ANTHROPIC_API_KEY` — selects and orders supplied fact IDs; it cannot author
   resume prose.
 
-Deploy from the dashboard repository root so the Docker build can include the
-shared `fonts/` directory:
+Deploy from the dashboard repository root with that repository as the explicit
+build context so Docker can include the shared `fonts/` directory:
 
 ```sh
-flyctl deploy --config resume-renderer/fly.toml
+flyctl deploy . --config resume-renderer/fly.toml
 ```
 
 Monitor requires `RESUME_RENDERER_URL`, `RESUME_RENDERER_KEY`, and the private

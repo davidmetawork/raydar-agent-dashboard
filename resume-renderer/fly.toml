@@ -2,7 +2,7 @@ app = "raydar-resume-renderer"
 primary_region = "sjc"
 
 [build]
-  dockerfile = "resume-renderer/Dockerfile"
+  dockerfile = "Dockerfile"
 
 [env]
   PORT = "8080"
@@ -27,4 +27,3 @@ primary_region = "sjc"
   memory = "512mb"
   cpu_kind = "shared"
   cpus = 1
-
