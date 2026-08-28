@@ -133,6 +133,29 @@ test("the Path A sync performs one history read, warms context, and writes an ho
   assert.equal(written.rows[0].context.paraformConfirmationExpected, true);
 });
 
+test("the sync records only aggregate public failure codes for production diagnosis", async () => {
+  let written = null;
+  await syncPathARows({
+    readRequestsImpl: async () => [request()],
+    readSnapshotImpl: async () => null,
+    listJobsImpl: async () => [],
+    readSignalsImpl: async () => ({ pairs: [], unresolved: [], errors: [], coverage: {} }),
+    readLedgersImpl: async () => new Map(),
+    readFormImpl: async () => {
+      const error = new Error("sensitive upstream detail");
+      error.code = "PARAFORM_THROTTLED";
+      throw error;
+    },
+    writeSnapshotImpl: async (snapshot) => { written = snapshot; return snapshot; },
+    acquireLockImpl: async () => "lock",
+    releaseLockImpl: async () => true,
+    paceMs: 0,
+  });
+  assert.equal(written.trustworthy, false);
+  assert.deepEqual(written.sync.failureCodes, { paraform_throttled: 1 });
+  assert.doesNotMatch(JSON.stringify(written.sync.failureCodes), /sensitive upstream detail/);
+});
+
 test("preview keeps the no-call override visible while allowing the draft panel", async () => {
   const result = await previewPathA({
     requestId: "req-1", candidateUserId: "cu-1", roleId: "role-1",

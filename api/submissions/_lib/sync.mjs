@@ -171,6 +171,11 @@ export async function syncPathARows({
     let attempted = 0;
     let refreshed = 0;
     let failed = 0;
+    const failureCodes = new Map();
+    const recordFailure = (code) => {
+      const safeCode = String(code || "submission_context_read_failed").slice(0, 120);
+      failureCodes.set(safeCode, (failureCodes.get(safeCode) || 0) + 1);
+    };
     let systemicFailure = null;
     let stoppedForDeadline = false;
 
@@ -217,6 +222,7 @@ export async function syncPathARows({
       } catch (error) {
         failed += 1;
         const code = publicReadError(error);
+        recordFailure(code);
         contextByKey.set(group.key, {
           status: "failed",
           code,
@@ -289,11 +295,19 @@ export async function syncPathARows({
           hasCareerHistory: candidate.hasCareerHistory,
           hasCall: Boolean(job),
         });
-        if (readFailed) failed += 1;
-        else refreshed += 1;
+        if (readFailed) {
+          failed += 1;
+          const readFailureCodes = [...new Set((precheck.blockers || [])
+            .map((code) => String(code))
+            .filter((code) => code.startsWith("submission_context_read_failed")))];
+          for (const code of readFailureCodes.length
+            ? readFailureCodes
+            : ["submission_context_read_failed"]) recordFailure(code);
+        } else refreshed += 1;
       } catch (error) {
         failed += 1;
         const code = publicReadError(error);
+        recordFailure(code);
         contextByKey.set(pair.key, {
           status: "failed",
           code,
@@ -324,6 +338,9 @@ export async function syncPathARows({
     const summary = snapshotSummary(built.rows, built.dismissed);
     const failureRatio = attempted ? failed / attempted : 0;
     const trustworthy = !systemicFailure && failed < 3 && failureRatio < 0.2;
+    const publicFailureCodes = Object.fromEntries(
+      [...failureCodes.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    );
     const snapshot = await writeSnapshotImpl({
       generatedAt: new Date().toISOString(),
       trustworthy,
@@ -339,6 +356,7 @@ export async function syncPathARows({
         attempted,
         refreshed,
         failed,
+        failureCodes: publicFailureCodes,
         stoppedForDeadline,
         remaining: built.rows.filter((row) => (
           ["requested", "blocked"].includes(row.state)
@@ -348,6 +366,18 @@ export async function syncPathARows({
       summary,
       rows: built.rows,
     });
+    console.info("submissions_sync_complete", JSON.stringify({
+      trustworthy,
+      unhealthyReason: snapshot.unhealthyReason,
+      attempted,
+      refreshed,
+      failed,
+      failureCodes: publicFailureCodes,
+      stoppedForDeadline,
+      sourceErrors: signalResult.errors,
+      sourceUnresolved: signalResult.unresolved.length,
+      rowCount: built.rows.length,
+    }));
     return { ok: true, snapshot };
   } finally {
     await releaseLockImpl(token).catch(() => {});
