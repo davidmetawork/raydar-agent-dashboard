@@ -3,12 +3,18 @@ import test from "node:test";
 
 import {
   deliverViaMailroomRelief,
+  mailroomReliefConfirmation,
   mailroomReliefConfig,
   mailroomReliefDedupeKey,
   OutreachMailroomError,
   PARAAI_OUTREACH_RELIEF_LANE,
 } from "../api/paraai/_lib/outreach-mailroom.mjs";
-import { planDeliveredMatch } from "../api/paraai/_lib/outreach.mjs";
+import {
+  candidateEmailFromRecord,
+  normalizeOperatorContactOverride,
+  OPERATOR_CONFIRMED_NO_DIGEST_REASON,
+  planDeliveredMatch,
+} from "../api/paraai/_lib/outreach.mjs";
 
 const config = {
   base: "https://mailroom.test",
@@ -35,6 +41,50 @@ test("mailroom relief configuration is explicit and dedupe is request-scoped", (
     MAILROOM_API_KEY: "secret",
   }), config);
   assert.equal(mailroomReliefDedupeKey("req-1"), "paraai-outreach:req-1");
+  assert.equal(
+    mailroomReliefConfirmation("req-1"),
+    "SEND VIA MAILROOM req-1",
+  );
+  assert.equal(
+    mailroomReliefConfirmation("req-1", {
+      recipientEmail: "Candidate@Example.com",
+    }),
+    "SEND VIA MAILROOM req-1 TO candidate@example.com",
+  );
+  assert.equal(
+    mailroomReliefConfirmation("req-1", {
+      recipientEmail: "Candidate@Example.com",
+      withoutDigest: true,
+    }),
+    "SEND VIA MAILROOM req-1 TO candidate@example.com WITHOUT DIGEST",
+  );
+});
+
+test("operator profile contact overrides are normalized and auditable", () => {
+  assert.equal(
+    candidateEmailFromRecord({
+      candidate_user: {
+        emails: [{ value: "Nested@Example.com" }],
+      },
+    }),
+    "nested@example.com",
+  );
+  assert.deepEqual(normalizeOperatorContactOverride(
+    { candidateName: "Candidate One" },
+    { email: " Candidate@Example.com " },
+  ), {
+    name: "Candidate One",
+    email: "candidate@example.com",
+    source: "operator_paraform_profile",
+    discovery: null,
+  });
+  assert.throws(
+    () => normalizeOperatorContactOverride(
+      { candidateName: "Candidate One" },
+      { email: "not-an-email" },
+    ),
+    (error) => error.code === "OUTREACH_OPERATOR_EMAIL_INVALID",
+  );
 });
 
 test("mailroom relief enqueues once, drains, and returns the provider receipt", async () => {
@@ -166,4 +216,38 @@ test("a SendGrid relief delivery is recorded without an automatic follow-up", ()
   assert.equal(planned.matches["req-5"].providerMessageId, "sendgrid-provider-5");
   assert.equal(planned.outbox["match:req-5"].mailroomRowId, 2405);
   assert.equal(planned.journal.at(-1).followupSuppressed, true);
+});
+
+test("operator-confirmed no-digest relief has a distinct durable audit mode", () => {
+  const planned = planDeliveredMatch({
+    candidateUserId: "candidate-2",
+    revision: 1,
+    journal: [],
+    matches: {},
+    outbox: {},
+    followup: null,
+  }, {
+    request: {
+      id: "req-6",
+      roleId: "role-6",
+      roleName: "Product Marketing Manager",
+      companyName: "Acme",
+    },
+    ordinal: 1,
+    roleUrl: "https://www.paraform.com/share/acme/role-6",
+    digest: null,
+    copy: { variant: "initial_operator_confirmed_no_digest" },
+    sent: { providerMessageId: "sendgrid-provider-6", mailroomRowId: 2406 },
+    sentAt: "2026-08-28T16:30:00.000Z",
+    messageId: "<mailroom-message-6>",
+    deliveryMode: OPERATOR_CONFIRMED_NO_DIGEST_REASON,
+    transport: "mailroom-sendgrid",
+    armFollowup: false,
+  });
+  assert.equal(
+    planned.matches["req-6"].deliveryMode,
+    OPERATOR_CONFIRMED_NO_DIGEST_REASON,
+  );
+  assert.equal(planned.matches["req-6"].digestOmitted, true);
+  assert.equal(planned.followup, null);
 });

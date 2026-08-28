@@ -8,6 +8,7 @@ import {
   handleOutreachFailure,
   outreachConfig,
   outreachExecutionEnabled,
+  OPERATOR_CONFIRMED_NO_DIGEST_REASON,
   pendingNoDigestConfirmation,
   PENDING_DIGEST_UNAVAILABLE_REASON,
   outreachHealth,
@@ -19,6 +20,7 @@ import {
   reviewHeldOutreach,
   runOutreachTick,
 } from "./_lib/outreach.mjs";
+import { mailroomReliefConfirmation } from "./_lib/outreach-mailroom.mjs";
 import {
   listOutreachExceptions,
   listOutreachStates,
@@ -119,8 +121,22 @@ export default async function handler(req, res) {
     }
     if (action === "send-request-via-mailroom") {
       const requestId = String(body.requestId || "").trim();
-      if (body.confirmation !== `SEND VIA MAILROOM ${requestId}`) {
+      if (!requestId) {
+        return res.status(400).json({ ok: false, error: "requestId_required" });
+      }
+      const recipientEmail = String(body.recipientEmail || "").trim().toLowerCase();
+      const withoutDigest = body.withoutDigest === true;
+      if (body.confirmation !== mailroomReliefConfirmation(requestId, {
+        recipientEmail,
+        withoutDigest,
+      })) {
         return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      if (withoutDigest && !recipientEmail) {
+        return res.status(400).json({
+          ok: false,
+          error: "recipientEmail_required_for_no_digest_relief",
+        });
       }
       const config = outreachConfig();
       if (!outreachExecutionEnabled(config)) {
@@ -137,7 +153,17 @@ export default async function handler(req, res) {
         result = await processMatchRequest(request, history, {
           mode: "send",
           config,
+          // This route is already protected by an exact request + recipient
+          // confirmation. Match the established operator-send semantics so a
+          // historical Gmail thread cannot turn an approved relief send into a
+          // mailbox read or an automatic hold.
+          allowAfterReply: true,
           transport: "mailroom-relief",
+          contactOverride: recipientEmail ? { email: recipientEmail } : null,
+          allowWithoutDigest: withoutDigest,
+          allowWithoutDigestReason: withoutDigest
+            ? OPERATOR_CONFIRMED_NO_DIGEST_REASON
+            : null,
         });
       } catch (error) {
         await handleOutreachFailure(error, request, { config }).catch(() => {});
@@ -148,6 +174,7 @@ export default async function handler(req, res) {
         action: result.action,
         requestId,
         transport: result.transport || result.match?.transport || null,
+        deliveryMode: result.deliveryMode || result.match?.deliveryMode || null,
         mailroomRowId:
           result.sent?.mailroomRowId || result.match?.mailroomRowId || null,
         followup: null,
