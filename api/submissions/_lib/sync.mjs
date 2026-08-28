@@ -38,8 +38,27 @@ function publicReadError(error) {
 
 function shouldRefresh(context, now, force) {
   if (force || !context?.checkedAt) return true;
+  if (context.status === "failed") return true;
   const checkedAt = Date.parse(context.checkedAt);
   return !Number.isFinite(checkedAt) || now - checkedAt >= CONTEXT_MAX_AGE_MS;
+}
+
+async function readAtStage(stage, fn) {
+  try {
+    return await fn();
+  } catch (error) {
+    const wrapped = new Error(String(error?.message || "Paraform read failed"));
+    wrapped.code = error?.code;
+    wrapped.submissionReadStage = stage;
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
+function diagnosticReadError(error) {
+  const code = publicReadError(error);
+  const stage = String(error?.submissionReadStage || "");
+  return stage ? `${code}:${stage}` : code;
 }
 
 export function createPacedReader({ paceMs = DEFAULT_PACE_MS, sleepImpl = sleep } = {}) {
@@ -192,14 +211,16 @@ export async function syncPathARows({
       attempted += 1;
       try {
         const request = group.primary;
-        const form = await paced(() => readFormImpl(request.id));
-        const preferences = await paced(() => readPreferencesImpl(
+        const form = await readAtStage("path_a_form", () => paced(() => readFormImpl(request.id)));
+        const preferences = await readAtStage("path_a_preferences", () => paced(() => readPreferencesImpl(
           form?.candidateUserId || request.candidateUserId,
           [],
-        ));
+        )));
         let settings = roleSettings.get(request.roleId);
         if (!settings) {
-          settings = await paced(() => readRoleSettingsImpl(request.roleId));
+          settings = await readAtStage("path_a_role_settings", () => (
+            paced(() => readRoleSettingsImpl(request.roleId))
+          ));
           roleSettings.set(request.roleId, settings || {});
         }
         const job = findJobForCandidate(jobs, request.candidateUserId);
@@ -222,7 +243,7 @@ export async function syncPathARows({
       } catch (error) {
         failed += 1;
         const code = publicReadError(error);
-        recordFailure(code);
+        recordFailure(diagnosticReadError(error));
         contextByKey.set(group.key, {
           status: "failed",
           code,
@@ -254,7 +275,9 @@ export async function syncPathARows({
       }
       attempted += 1;
       try {
-        const candidateUser = await paced(() => readCandidateImpl(pair.candidateUserId));
+        const candidateUser = await readAtStage("path_b_candidate", () => (
+          paced(() => readCandidateImpl(pair.candidateUserId))
+        ));
         const candidate = candidateFromProfile(
           pair.candidateUserId,
           candidateUser,
@@ -263,7 +286,7 @@ export async function syncPathARows({
         const pacedGet = (procedure, input, tries) => paced(() => trpcGetImpl(procedure, input, tries));
         const pacedPost = (procedure, input, tries) => paced(() => trpcPostImpl(procedure, input, tries));
         const pacedRest = (path, options) => paced(() => restImpl(path, options));
-        const precheck = await precheckPathBImpl({
+        const precheck = await readAtStage("path_b_precheck", () => precheckPathBImpl({
           candidate,
           roleId: pair.roleId,
           trpcGetImpl: pacedGet,
@@ -271,7 +294,7 @@ export async function syncPathARows({
           restImpl: pacedRest,
           now: new Date(now),
           advisoryCredits: true,
-        });
+        }));
         if (!candidate.hasResume) {
           precheck.blockers = [...new Set([...(precheck.blockers || []), "submission_resume_missing"])];
           precheck.ok = false;
@@ -307,7 +330,7 @@ export async function syncPathARows({
       } catch (error) {
         failed += 1;
         const code = publicReadError(error);
-        recordFailure(code);
+        recordFailure(diagnosticReadError(error));
         contextByKey.set(pair.key, {
           status: "failed",
           code,
@@ -336,8 +359,12 @@ export async function syncPathARows({
       now,
     });
     const summary = snapshotSummary(built.rows, built.dismissed);
+    const activeContextFailures = built.rows.filter((row) => row.context?.status === "failed").length;
     const failureRatio = attempted ? failed / attempted : 0;
-    const trustworthy = !systemicFailure && failed < 3 && failureRatio < 0.2;
+    const trustworthy = !systemicFailure
+      && activeContextFailures < 3
+      && failed < 3
+      && failureRatio < 0.2;
     const publicFailureCodes = Object.fromEntries(
       [...failureCodes.entries()].sort(([left], [right]) => left.localeCompare(right)),
     );
@@ -357,6 +384,7 @@ export async function syncPathARows({
         refreshed,
         failed,
         failureCodes: publicFailureCodes,
+        activeContextFailures,
         stoppedForDeadline,
         remaining: built.rows.filter((row) => (
           ["requested", "blocked"].includes(row.state)
@@ -373,6 +401,7 @@ export async function syncPathARows({
       refreshed,
       failed,
       failureCodes: publicFailureCodes,
+      activeContextFailures,
       stoppedForDeadline,
       sourceErrors: signalResult.errors,
       sourceUnresolved: signalResult.unresolved.length,
@@ -384,4 +413,10 @@ export async function syncPathARows({
   }
 }
 
-export { CONTEXT_MAX_AGE_MS, DEFAULT_DEADLINE_MS, DEFAULT_PACE_MS, publicReadError };
+export {
+  CONTEXT_MAX_AGE_MS,
+  DEFAULT_DEADLINE_MS,
+  DEFAULT_PACE_MS,
+  diagnosticReadError,
+  publicReadError,
+};

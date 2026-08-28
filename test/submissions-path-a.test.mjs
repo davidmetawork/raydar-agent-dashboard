@@ -152,8 +152,70 @@ test("the sync records only aggregate public failure codes for production diagno
     paceMs: 0,
   });
   assert.equal(written.trustworthy, false);
-  assert.deepEqual(written.sync.failureCodes, { paraform_throttled: 1 });
+  assert.deepEqual(written.sync.failureCodes, { "paraform_throttled:path_a_form": 1 });
   assert.doesNotMatch(JSON.stringify(written.sync.failureCodes), /sensitive upstream detail/);
+});
+
+test("a recent failed context is retried instead of being trusted for 24 hours", async () => {
+  const key = groupSubmissionRequests([request()])[0].key;
+  let formReads = 0;
+  let written = null;
+  await syncPathARows({
+    readRequestsImpl: async () => [request()],
+    readSnapshotImpl: async () => ({
+      generatedAt: new Date().toISOString(),
+      rows: [{ key, context: {
+        status: "failed",
+        code: "submission_context_read_failed",
+        checkedAt: new Date().toISOString(),
+      } }],
+    }),
+    listJobsImpl: async () => [],
+    readSignalsImpl: async () => ({ pairs: [], unresolved: [], errors: [], coverage: {} }),
+    readLedgersImpl: async () => new Map(),
+    readFormImpl: async () => { formReads += 1; return form(); },
+    readPreferencesImpl: async () => ({ ready: true, missingFields: [] }),
+    readRoleSettingsImpl: async () => ({ candidate_application_confirm_email: true }),
+    writeSnapshotImpl: async (snapshot) => { written = snapshot; return snapshot; },
+    acquireLockImpl: async () => "lock",
+    releaseLockImpl: async () => true,
+    paceMs: 0,
+  });
+  assert.equal(formReads, 1);
+  assert.equal(written.sync.activeContextFailures, 0);
+  assert.equal(written.trustworthy, true);
+});
+
+test("three retained failed contexts keep a later partial sweep fail-closed", async () => {
+  const requests = [1, 2, 3].map((index) => request({
+    id: `req-${index}`,
+    candidateUserId: `cu-${index}`,
+    roleId: `role-${index}`,
+  }));
+  const previousRows = requests.map((item) => ({
+    key: groupSubmissionRequests([item])[0].key,
+    context: {
+      status: "failed",
+      code: "submission_context_read_failed",
+      checkedAt: new Date().toISOString(),
+    },
+  }));
+  let written = null;
+  await syncPathARows({
+    readRequestsImpl: async () => requests,
+    readSnapshotImpl: async () => ({ rows: previousRows }),
+    listJobsImpl: async () => [],
+    readSignalsImpl: async () => ({ pairs: [], unresolved: [], errors: [], coverage: {} }),
+    readLedgersImpl: async () => new Map(),
+    writeSnapshotImpl: async (snapshot) => { written = snapshot; return snapshot; },
+    acquireLockImpl: async () => "lock",
+    releaseLockImpl: async () => true,
+    deadlineMs: -1,
+    paceMs: 0,
+  });
+  assert.equal(written.sync.attempted, 0);
+  assert.equal(written.sync.activeContextFailures, 3);
+  assert.equal(written.trustworthy, false);
 });
 
 test("preview keeps the no-call override visible while allowing the draft panel", async () => {
