@@ -53,6 +53,10 @@
       "destination": "/emails.html"
     },
     {
+      "source": "/review",
+      "destination": "/review.html"
+    },
+    {
       "source": "/applicants",
       "destination": "/applicants.html"
     },
@@ -112,6 +116,9 @@
     },
     "api/emails/*.mjs": {
       "maxDuration": 30
+    },
+    "api/post-call/*.mjs": {
+      "maxDuration": 60
     },
     "api/status/*.mjs": {
       "maxDuration": 30
