@@ -7,6 +7,7 @@ import {
   quickSubmitBlockingReasons,
   readQuickSubmitForm,
   readSubmissionRequests,
+  REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
   submitQuickSubmission,
   verifyRequestOutcome,
 } from "../../paraai/_lib/reply-actions.mjs";
@@ -139,7 +140,10 @@ async function loadPrepared(request, {
   // transient Paraform failure does not stop reply triage. This human submit
   // path has a stricter contract: inability to prove readiness blocks the
   // click. Keep that distinction local to Submissions.
-  const preferences = await readPreferencesImpl(request.candidateUserId, []);
+  const preferences = await readPreferencesImpl(
+    request.candidateUserId,
+    [...REQUIRED_CANDIDATE_PREFERENCE_FIELDS],
+  );
   if (preferences.ready === false) {
     throw codedError(
       "SUBMISSION_BLOCKED",

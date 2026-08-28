@@ -1,4 +1,6 @@
 import { trpcGet, trpcPost, normalizeEmail, paraformRest } from "./core.mjs";
+import { REQUIRED_CANDIDATE_PREFERENCE_FIELDS } from "./reply-actions.mjs";
+export { REQUIRED_CANDIDATE_PREFERENCE_FIELDS } from "./reply-actions.mjs";
 import {
   deliverMessage,
   deterministicMessageId,
@@ -62,16 +64,6 @@ export const INTEREST_STATUS = Object.freeze({
   APPLIED: "APPLIED_TO_ROLE",
   NOT_INTERESTED: "NOT_INTERESTED",
 });
-
-// Current submit-form bundle constant. Passing [] makes
-// hasUserInputPreferences trivially succeed even when the profile is empty.
-export const REQUIRED_CANDIDATE_PREFERENCE_FIELDS = Object.freeze([
-  "locations",
-  "salary_min",
-  "workplace",
-  "last_funding_round",
-  "visa",
-]);
 
 const TRUE = new Set(["1", "true", "yes", "on"]);
 const flag = (name, env = process.env) => TRUE.has(String(env[name] ?? "").trim().toLowerCase());

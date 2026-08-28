@@ -96,6 +96,7 @@ test("Path A rows never turn a failed requirement read into a fabricated blocker
 
 test("the Path A sync performs one history read, warms context, and writes an honest snapshot", async () => {
   let historyReads = 0;
+  let preferenceFields = null;
   let written = null;
   const result = await syncPathARows({
     readRequestsImpl: async () => { historyReads += 1; return [request()]; },
@@ -117,7 +118,10 @@ test("the Path A sync performs one history read, warms context, and writes an ho
     }),
     readLedgersImpl: async () => new Map(),
     readFormImpl: async () => form(),
-    readPreferencesImpl: async () => ({ ready: true, missingFields: [] }),
+    readPreferencesImpl: async (_candidateUserId, fields) => {
+      preferenceFields = fields;
+      return { ready: true, missingFields: [] };
+    },
     readRoleSettingsImpl: async () => ({ candidate_application_confirm_email: true }),
     writeSnapshotImpl: async (snapshot) => { written = snapshot; return snapshot; },
     acquireLockImpl: async () => "lock",
@@ -131,6 +135,13 @@ test("the Path A sync performs one history read, warms context, and writes an ho
   assert.equal(written.paths.B, true);
   assert.equal(written.summary.requested, 1);
   assert.equal(written.rows[0].context.paraformConfirmationExpected, true);
+  assert.deepEqual(preferenceFields, [
+    "locations",
+    "salary_min",
+    "workplace",
+    "last_funding_round",
+    "visa",
+  ]);
 });
 
 test("the sync records only aggregate public failure codes for production diagnosis", async () => {
@@ -219,13 +230,17 @@ test("three retained failed contexts keep a later partial sweep fail-closed", as
 });
 
 test("preview keeps the no-call override visible while allowing the draft panel", async () => {
+  let preferenceFields = null;
   const result = await previewPathA({
     requestId: "req-1", candidateUserId: "cu-1", roleId: "role-1",
   }, {
     readRequestsImpl: async () => [request()],
     readLedgerImpl: async () => null,
     listJobsImpl: async () => [],
-    readPreferencesImpl: async () => ({ ready: true, missingFields: [] }),
+    readPreferencesImpl: async (_candidateUserId, fields) => {
+      preferenceFields = fields;
+      return { ready: true, missingFields: [] };
+    },
     readRoleSettingsImpl: async () => ({ candidate_application_confirm_email: true }),
     prepareImpl: async () => ({
       form: form(),
@@ -239,6 +254,13 @@ test("preview keeps the no-call override visible while allowing the draft panel"
   assert.deepEqual(result.blocked, []);
   assert.match(result.warnings[0], /phone_screened=false/);
   assert.equal(result.draft.great_fit_reason, draft.great_fit_reason);
+  assert.deepEqual(preferenceFields, [
+    "locations",
+    "salary_min",
+    "workplace",
+    "last_funding_round",
+    "visa",
+  ]);
 });
 
 test("Path A fails closed when live preference readiness cannot be read", async () => {

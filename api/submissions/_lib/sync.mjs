@@ -3,6 +3,7 @@ import {
   candidatePreferencesReady,
   readQuickSubmitForm,
   readSubmissionRequests,
+  REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
 } from "../../paraai/_lib/reply-actions.mjs";
 import { findJobForCandidate } from "../../paraai/_lib/reply.mjs";
 import { listJobs } from "../../paraai/_lib/store.mjs";
@@ -214,7 +215,7 @@ export async function syncPathARows({
         const form = await readAtStage("path_a_form", () => paced(() => readFormImpl(request.id)));
         const preferences = await readAtStage("path_a_preferences", () => paced(() => readPreferencesImpl(
           form?.candidateUserId || request.candidateUserId,
-          [],
+          [...REQUIRED_CANDIDATE_PREFERENCE_FIELDS],
         )));
         let settings = roleSettings.get(request.roleId);
         if (!settings) {

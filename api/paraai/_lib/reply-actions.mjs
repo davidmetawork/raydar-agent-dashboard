@@ -10,6 +10,17 @@ import { claimRequestAction, readRequestClaim } from "./reply-store.mjs";
 
 export const MAX_SALARY_BAND_SPREAD = Number(process.env.PARAAI_REPLY_MAX_SALARY_SPREAD || 50_000);
 
+// Current submit-form bundle constant. Passing [] makes
+// hasUserInputPreferences trivially succeed on older contracts and is rejected
+// by the current one, so human submission paths always send the exact fields.
+export const REQUIRED_CANDIDATE_PREFERENCE_FIELDS = Object.freeze([
+  "locations",
+  "salary_min",
+  "workplace",
+  "last_funding_round",
+  "visa",
+]);
+
 // SUBMISSION_REQUEST_CONFIG.EXPIRATION_DAYS, read out of the Paraform client
 // bundle on 2026-07-28: exactly 7. The previous value of 10 was inferred from a
 // single "3 days left" sighting and was three days long.
@@ -79,7 +90,10 @@ export async function readQuickSubmitForm(requestId) {
   return form;
 }
 
-export async function candidatePreferencesReady(candidateUserId, requiredFields = []) {
+export async function candidatePreferencesReady(
+  candidateUserId,
+  requiredFields = REQUIRED_CANDIDATE_PREFERENCE_FIELDS,
+) {
   const result = await trpcGet("candidateUserPreference.hasUserInputPreferences", {
     candidate_user_id: candidateUserId,
     required_fields: requiredFields,
