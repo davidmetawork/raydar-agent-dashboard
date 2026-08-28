@@ -45,6 +45,9 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(review, /application\/pdf/);
   assert.match(review, /attach_resume/);
+  assert.match(review, /25 MB maximum/);
+  assert.match(review, /file\.size>25\*1024\*1024/);
+  assert.match(reviewProxy, /sizeBytes > 25 \* 1024 \* 1024/);
   assert.match(review, /authoritative source/);
   assert.match(review, /never kept in Monitor browser storage/);
   assert.match(review, /evidence v/);
