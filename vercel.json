@@ -49,6 +49,14 @@
       "destination": "/emails.html"
     },
     {
+      "source": "/mailroom",
+      "destination": "/mailroom.html"
+    },
+    {
+      "source": "/review",
+      "destination": "/review.html"
+    },
+    {
       "source": "/applicants",
       "destination": "/applicants.html"
     },
@@ -105,6 +113,12 @@
     },
     "api/emails/*.mjs": {
       "maxDuration": 30
+    },
+    "api/mailroom/*.mjs": {
+      "maxDuration": 30
+    },
+    "api/post-call/*.mjs": {
+      "maxDuration": 60
     },
     "api/status/*.mjs": {
       "maxDuration": 30
