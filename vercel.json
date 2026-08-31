@@ -25,6 +25,10 @@
       "destination": "/inbox.html"
     },
     {
+      "source": "/master-inbox",
+      "destination": "/master-inbox.html"
+    },
+    {
       "source": "/enrich",
       "destination": "/enrich.html"
     },
@@ -78,6 +82,9 @@
     },
     "api/inbox/*.mjs": {
       "maxDuration": 120
+    },
+    "api/master-inbox/*.mjs": {
+      "maxDuration": 60
     },
     "api/sourcing/*.mjs": {
       "maxDuration": 300

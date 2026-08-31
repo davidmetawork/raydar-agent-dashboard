@@ -398,6 +398,7 @@
         <div class="rail-group">
           <div class="rail-title">Live</div>
           <a class="tab active" id="tab-home" href="#home" aria-current="page" onclick="return tabClick(event,'home')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V9.8L12 3.5l8 6.3v9.7"/><path d="M9.5 19.5v-6h5v6"/></svg></span><span class="lbl">Home</span></a>
+          <a class="tab" id="tab-master-inbox" href="#master-inbox" onclick="return tabClick(event,'master-inbox')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m4.5 7 7.5 6 7.5-6"/><path d="M8 3.5h8"/></svg></span><span class="lbl">Master Inbox</span> <span class="badge good" id="master-inbox-badge" style="display:none"></span></a>
           <a class="tab" id="tab-overview" href="#overview" onclick="return tabClick(event,'overview')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="2"/><rect x="13" y="13" width="7.5" height="7.5" rx="2"/></svg></span><span class="lbl">Agent Calls</span></a>
           <a class="tab" id="tab-activity" href="#activity" onclick="return tabClick(event,'activity')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></svg></span><span class="lbl">Activity</span> <span class="badge" id="activity-badge" style="display:none"></span></a>
         </div>
@@ -505,6 +506,10 @@
          paints. Every other view carries `hidden` and is revealed by showView(). -->
     <div id="view-home">
       <iframe id="home-frame" title="Home" style="width:100%;border:0;min-height:1700px;background:transparent"></iframe>
+    </div>
+
+    <div id="view-master-inbox" hidden>
+      <iframe id="master-inbox-frame" title="Master Inbox" style="width:100%;border:0;min-height:1250px;background:transparent"></iframe>
     </div>
 
     <div id="view-applicants" hidden>
@@ -1324,7 +1329,7 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let applicantsLoaded=false, submissionsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, enrichLoaded=false, healthLoaded=false, emailsLoaded=false, statusLoaded=false, homeLoaded=false;
+    let applicantsLoaded=false, submissionsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, masterInboxLoaded=false, enrichLoaded=false, healthLoaded=false, emailsLoaded=false, statusLoaded=false, homeLoaded=false;
     // Same order as the nav, so the two stay readable together. "home" must
     // stay first — RaydarNav falls back to names[0] for an unknown #hash, and
     // Home is the landing surface, so a bare monitor.raydar.xyz lands on the
@@ -1333,7 +1338,7 @@
     // bookmark and cross-page link still resolves.
     // "candidates" is last because its tab is hidden; the view and #candidates
     // deep link still work.
-    const VIEWS=["home","overview","applicants","submissions","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","emails","status","candidates"];
+    const VIEWS=["home","master-inbox","overview","applicants","submissions","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","emails","status","candidates"];
     let currentView="home";
     // Tabs are real links (href="#activity", …) so they can be right-clicked or
     // ⌘-clicked into a new tab. A plain left click stays in this page; anything
@@ -1369,6 +1374,7 @@
         if(v===name) t.setAttribute("aria-current","page"); else t.removeAttribute("aria-current");
       });
       if(name==="home" && !homeLoaded){ $("home-frame").src=frameSrc("/home","home"); homeLoaded=true; }
+      if(name==="master-inbox" && !masterInboxLoaded){ $("master-inbox-frame").src=frameSrc("/master-inbox","master-inbox"); masterInboxLoaded=true; }
       if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src=frameSrc("/applicants","applicants"); applicantsLoaded=true; }
       if(name==="submissions" && !submissionsLoaded){ $("submissions-frame").src=frameSrc("/submissions","submissions"); submissionsLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src=frameSrc("/sequences","sequences"); seqLoaded=true; }
@@ -1407,6 +1413,13 @@
       const count=Math.max(0,Number(event.data.interested)||0);
       $("inbox-badge").textContent=String(count);
       $("inbox-badge").style.display=count?"inline-flex":"none";
+    });
+
+    window.addEventListener("message",(event)=>{
+      if(event.origin!==location.origin||event.data?.type!=="raydar-master-inbox-counts") return;
+      const count=Math.max(0,Number(event.data.unread)||0);
+      $("master-inbox-badge").textContent=String(count);
+      $("master-inbox-badge").style.display=count?"inline-flex":"none";
     });
 
     window.addEventListener("message",(event)=>{
@@ -2438,6 +2451,7 @@
        uses. No data access; purely a faster way to switch surfaces. */
     const RK_ITEMS=[
       {name:"home",label:"Home",group:"Live"},
+      {name:"master-inbox",label:"Master Inbox",group:"Live"},
       {name:"overview",label:"Agent Calls",group:"Live"},
       {name:"activity",label:"Activity",group:"Live"},
       {name:"applicants",label:"Applicants",group:"People"},

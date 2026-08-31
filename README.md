@@ -2,7 +2,8 @@
 
 Static host and isolated serverless tools for **monitor.raydar.xyz**. The main
 Monitor page loads its frozen status contract from `webview-lake.vercel.app`.
-Standalone workspaces live at `/sequences`, `/enrich`, and `/sourcing`.
+Standalone workspaces live at `/sequences`, `/enrich`, `/sourcing`, and the separately gated
+`/master-inbox`; the existing `/inbox` remains the independent Sequence Reply Inbox.
 
 Every internal page shares one Raydar Google login. The server exchanges the
 verified Google credential for a `raydar.xyz` domain-wide, HttpOnly
@@ -27,3 +28,8 @@ session.
 
 Source of truth for the dashboard UI lives in the agent system repo
 (`webview/dashboard.html`); this is a deployment copy.
+
+Master Inbox's browser receives no Gmail credential and persists no message content; its protected
+serverless proxy requires `MASTER_INBOX_BASE`, `MASTER_INBOX_SERVICE_KEY`, and the same
+`MASTER_INBOX_SESSION_ASSERTION_KEY` as the mailbox service, and every live deployment/navigation
+change requires the separately approved Master Inbox launch manifest.
