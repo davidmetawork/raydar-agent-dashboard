@@ -497,8 +497,36 @@ export function candidateEmailFromRecord(record) {
   return "";
 }
 
-async function candidateContact(request, config, override = null) {
-  const rows = await trpcGet("candidateUser.getCandidateUsersByIds", {
+export async function candidateEmailFromParaformSources(
+  candidateUserId,
+  batchRecord,
+  { trpcGetImpl = trpcGet } = {},
+) {
+  const batchEmail = candidateEmailFromRecord(batchRecord);
+  if (batchEmail) return { email: batchEmail, snapshot: null };
+
+  // Paraform's current profile header merges candidate-user data with this
+  // candidate snapshot. The batch record can have an empty emails[] even when
+  // the profile visibly has an address, so check the same snapshot before
+  // falling through to the existing Gmail + Calendar corroboration path.
+  const id = clean(candidateUserId);
+  const snapshot = id
+    ? await trpcGetImpl("candidates.getCandidateByCandidateUserId", id)
+      .catch(() => null)
+    : null;
+  return {
+    email: candidateEmailFromRecord(snapshot),
+    snapshot,
+  };
+}
+
+export async function candidateContact(
+  request,
+  config,
+  override = null,
+  { trpcGetImpl = trpcGet } = {},
+) {
+  const rows = await trpcGetImpl("candidateUser.getCandidateUsersByIds", {
     candidate_user_ids: [request.candidateUserId],
   });
   const record = (Array.isArray(rows) ? rows : [rows]).find(
@@ -507,8 +535,18 @@ async function candidateContact(request, config, override = null) {
   // Paraform's candidate batch read returns several source-dependent shapes.
   // The detail UI already uses the recursive contact shape; reading only the
   // two top-level fields made real profile emails look absent.
-  const email = candidateEmailFromRecord(record);
-  const name = displayName(record?.name || record?.candidate?.name || request.candidateName);
+  const { email, snapshot } = await candidateEmailFromParaformSources(
+    request.candidateUserId,
+    record,
+    { trpcGetImpl },
+  );
+  const name = displayName(
+    record?.name ||
+    record?.candidate?.name ||
+    snapshot?.name ||
+    snapshot?.candidate?.name ||
+    request.candidateName,
+  );
   const operatorContact = normalizeOperatorContactOverride(
     { ...request, candidateName: name || request.candidateName },
     override,
@@ -525,7 +563,13 @@ async function candidateContact(request, config, override = null) {
   const discovery = await discoverCandidateContact({
     candidateName: name,
     mailbox: config.mailbox,
-    linkedinUser: request.linkedinUser || record?.linkedin_user || "",
+    linkedinUser:
+      request.linkedinUser ||
+      record?.linkedin_user ||
+      record?.candidate?.linkedin_user ||
+      snapshot?.linkedin_user ||
+      snapshot?.candidate?.linkedin_user ||
+      "",
   });
   // Every discovery call already knows whether both halves are usable. Latch it so
   // health can stop guessing (2026-07-29 incident).

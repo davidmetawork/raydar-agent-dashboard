@@ -53,6 +53,8 @@ import {
   assessOutreachThread,
   assessmentBlockCode,
   assessmentPatch,
+  candidateContact,
+  candidateEmailFromParaformSources,
   eligibleNewRequests,
   expiredNoDigestOverrideEligible,
   expiredUnsentCopy,
@@ -107,6 +109,62 @@ const role = {
 const bodyPayload = (text, mimeType = "text/plain") => ({
   mimeType,
   body: { data: Buffer.from(text, "utf8").toString("base64url") },
+});
+
+test("candidate email lookup checks the profile snapshot when the batch record is empty", async () => {
+  const calls = [];
+  const result = await candidateContact(
+    {
+      candidateUserId: "candidate-user-1",
+      candidateName: "Candidate One",
+      linkedinUser: "",
+    },
+    { mailbox: "david@example.com" },
+    null,
+    {
+      trpcGetImpl: async (procedure, input) => {
+        calls.push({ procedure, input });
+        if (procedure === "candidateUser.getCandidateUsersByIds") {
+          return [{
+            id: "candidate-user-1",
+            candidate: { name: "Candidate One" },
+            emails: [],
+          }];
+        }
+        return {
+          id: "candidate-1",
+          emails: [{ email: "Candidate@Example.com" }],
+        };
+      },
+    },
+  );
+
+  assert.equal(result.email, "candidate@example.com");
+  assert.equal(result.source, "paraform");
+  assert.deepEqual(calls, [
+    {
+      procedure: "candidateUser.getCandidateUsersByIds",
+      input: { candidate_user_ids: ["candidate-user-1"] },
+    },
+    {
+      procedure: "candidates.getCandidateByCandidateUserId",
+      input: "candidate-user-1",
+    },
+  ]);
+});
+
+test("candidate email lookup does not call the profile snapshot when the batch record has an email", async () => {
+  const result = await candidateEmailFromParaformSources(
+    "candidate-user-1",
+    { id: "candidate-user-1", emails: ["batch@example.com"] },
+    {
+      trpcGetImpl: async () => {
+        throw new Error("profile snapshot should not be read");
+      },
+    },
+  );
+
+  assert.deepEqual(result, { email: "batch@example.com", snapshot: null });
 });
 
 test("initial subject matches the approved interview-request format", () => {
