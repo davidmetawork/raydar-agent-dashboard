@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { operatorAccess } from "../api/_lib/operator-access.mjs";
+import { operatorAccess, reviewAccess } from "../api/_lib/operator-access.mjs";
 
 const index = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const review = await readFile(new URL("../review.html", import.meta.url), "utf8");
@@ -45,22 +45,27 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(review, /application\/pdf/);
   assert.match(review, /attach_resume/);
-  assert.match(review, /25 MB maximum/);
+  assert.match(review, /up to 25 MB/);
   assert.match(review, /file\.size>25\*1024\*1024/);
   assert.match(reviewProxy, /sizeBytes > 25 \* 1024 \* 1024/);
   assert.match(review, /authoritative source/);
-  assert.match(review, /never kept in Monitor browser storage/);
   assert.match(review, /evidence v/);
   assert.match(review, /new URLSearchParams/);
   assert.match(review, /Search candidate, email, LinkedIn, call, or recruiter/);
-  assert.match(review, /Continuing…/);
+  assert.match(review, /The workflow is continuing/);
   assert.match(review, /startContinuingPoll/);
-  assert.match(review, /Approve and send email/);
+  assert.match(review, /Approve and send/);
   assert.match(review, /approveSend:true/);
   assert.match(review, /item\.candidate\?\.displayName/);
-  assert.match(review, /item\.blockers/);
-  assert.match(review, /item\.sourceLinks/);
+  assert.match(review, /What needs to happen/);
+  assert.match(review, /Save and continue/);
+  assert.match(review, /Upload résumé and continue/);
+  assert.match(review, /Call transcript/);
   assert.doesNotMatch(review, /Technical evidence/);
+  assert.doesNotMatch(review, /What needs attention/);
+  assert.doesNotMatch(review, /Source records/);
+  assert.doesNotMatch(review, /Close without sending/);
+  assert.doesNotMatch(review, /You have read-only access/);
   assert.doesNotMatch(review, /metrics=1/);
   assert.doesNotMatch(review, /Short audit note/);
   assert.doesNotMatch(review, /Save assignment/);
@@ -69,7 +74,7 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /All \(90 days\)/);
   assert.match(review, /item\.identityCandidates/);
   assert.match(review, /This call is attached/);
-  assert.match(review, /This call is not attached/);
+  assert.match(review, /Call attachment not confirmed/);
   assert.match(review, /identityChoice/);
   assert.match(review, /allowed\.has\("resume"\)&&!identityChoice/);
 });
@@ -98,7 +103,7 @@ test("Review can be deployed read-only without changing its future role model", 
   assert.equal(preview.capabilities.resumeUpload, false);
 });
 
-test("Review permissions separate assistant, recruiter, and high-risk admin powers", () => {
+test("everyone who can see Review can resolve and continue its workflow", () => {
   const env = {
     POST_CALL_REVIEW_ADMIN_EMAILS: "david@raydar.xyz",
     POST_CALL_REVIEW_ASSISTANT_EMAILS: "assistant@raydar.xyz",
@@ -108,13 +113,30 @@ test("Review permissions separate assistant, recruiter, and high-risk admin powe
   const assistant = operatorAccess("assistant@raydar.xyz", env);
   assert.equal(assistant.role, "assistant");
   assert.equal(assistant.capabilities.reviewWrite, true);
-  assert.equal(assistant.capabilities.reviewIdentityOverride, false);
+  assert.equal(assistant.capabilities.reviewIdentityOverride, true);
+  assert.equal(assistant.capabilities.reviewSendApproval, true);
   assert.equal(assistant.capabilities.reviewAssign, true);
   const recruiter = operatorAccess("recruiter@raydar.xyz", env);
   assert.equal(recruiter.role, "recruiter");
   assert.equal(recruiter.capabilities.reviewRead, true);
-  assert.equal(recruiter.capabilities.reviewWrite, false);
+  assert.equal(recruiter.capabilities.reviewWrite, true);
+  assert.equal(recruiter.capabilities.reviewIdentityOverride, true);
   const admin = operatorAccess("david@raydar.xyz", env);
   assert.equal(admin.capabilities.reviewIdentityOverride, true);
+  assert.equal(admin.capabilities.reviewSendApproval, true);
   assert.equal(admin.capabilities.reviewPriority, true);
+});
+
+test("a Google-authenticated dashboard viewer is authorized only on Review", () => {
+  const env = {};
+  const ordinary = operatorAccess("teammate@raydar.xyz", env);
+  assert.equal(ordinary.capabilities.reviewRead, false);
+  assert.equal(ordinary.capabilities.mailroomRead, false);
+  const review = reviewAccess("teammate@raydar.xyz", env);
+  assert.equal(review.role, "reviewer");
+  assert.equal(review.capabilities.reviewRead, true);
+  assert.equal(review.capabilities.reviewWrite, true);
+  assert.equal(review.capabilities.reviewIdentityOverride, true);
+  assert.equal(review.capabilities.reviewSendApproval, true);
+  assert.equal(review.capabilities.mailroomRead, false);
 });

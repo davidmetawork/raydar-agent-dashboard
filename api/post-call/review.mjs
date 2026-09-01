@@ -1,5 +1,5 @@
 import { cors } from "../seq/_lib/core.mjs";
-import { requireOperator, requireSameOrigin } from "../_lib/operator-access.mjs";
+import { requireReviewOperator, requireSameOrigin } from "../_lib/operator-access.mjs";
 import { safeUpstreamBase } from "../_lib/safe-upstream.mjs";
 
 const TIMEOUT_MS = 280_000;
@@ -116,7 +116,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!requireSameOrigin(req, res)) return;
   res.setHeader("cache-control", "no-store");
-  const access = await requireOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
+  const access = await requireReviewOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
   if (!access) return;
 
   const { base, key, error: configError } = config();
@@ -173,16 +173,13 @@ export default async function handler(req, res) {
     if (action === "set_priority" && !access.capabilities.reviewPriority) return res.status(403).json({ ok: false, error: "review_admin_required" });
     if (action === "assign" && !access.capabilities.reviewAssign) return res.status(403).json({ ok: false, error: "review_assignment_forbidden" });
     const approveSend = payload.approveSend === true;
-    if (approveSend && (action !== "resume" || !access.capabilities.reviewIdentityOverride)) {
+    if (approveSend && (action !== "resume" || !access.capabilities.reviewSendApproval)) {
       return res.status(403).json({ ok: false, error: "review_send_approval_forbidden" });
     }
     const reason = safeString(payload.reason, 1_000);
     if (!reason) return res.status(400).json({ ok: false, error: "review_reason_required" });
     const bodyOut = { schemaVersion: 2, reviewId, action, reason };
     const changes = safeChanges(payload.changes);
-    if (action === "set_field" && Object.hasOwn(changes || {}, "email") && !access.capabilities.reviewIdentityOverride) {
-      return res.status(403).json({ ok: false, error: "review_admin_required" });
-    }
     if (action === "select_profile" && !changes?.candidateUserId) {
       return res.status(400).json({ ok: false, error: "candidate_user_id_required" });
     }

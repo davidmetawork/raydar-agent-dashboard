@@ -17,9 +17,11 @@ function mutationOrigins(env = process.env) {
 
 export function operatorAccess(email, env = process.env) {
   const normalized = String(email || "").trim().toLowerCase();
-  // These names intentionally match the owning post-call service.  Domain
-  // membership is authentication, not authorization: candidate PII and review
-  // mutations stay unavailable until the exact operator is allowlisted.
+  // These names intentionally match the owning post-call service. Review is a
+  // deliberately small staff-only work surface: anyone allowlisted to see its
+  // candidate queue may resolve its blockers. Mailroom permissions remain
+  // separate, and the emergency read-only switch still fails all mutations
+  // closed without changing who can read the queue.
   const admins = emails(env.POST_CALL_REVIEW_ADMIN_EMAILS);
   const assistants = emails(env.POST_CALL_REVIEW_ASSISTANT_EMAILS);
   const operators = emails(env.POST_CALL_REVIEW_OPERATOR_EMAILS);
@@ -33,7 +35,7 @@ export function operatorAccess(email, env = process.env) {
   const operator = operators.has(normalized);
   const recruiter = recruiters.has(normalized);
   const reviewRead = admin || assistant || operator || recruiter;
-  const reviewWrite = !reviewReadOnly && (admin || assistant || operator);
+  const reviewWrite = !reviewReadOnly && reviewRead;
   const mailroomWrite = admin || mailroomEditors.has(normalized);
   const mailroomRead = mailroomWrite || mailroomViewers.has(normalized);
 
@@ -45,10 +47,37 @@ export function operatorAccess(email, env = process.env) {
       reviewWrite,
       resumeUpload: reviewWrite,
       reviewAssign: reviewWrite,
-      reviewIdentityOverride: !reviewReadOnly && admin,
+      reviewIdentityOverride: reviewWrite,
+      reviewSendApproval: reviewWrite,
       reviewPriority: !reviewReadOnly && admin,
       mailroomRead,
       mailroomWrite,
+    },
+  };
+}
+
+// Review is itself the authorization boundary: the dashboard's existing
+// Google session has already restricted the viewer to an approved Raydar
+// domain, and every mutation still goes through the same-origin proxy plus the
+// owning workflow's exact action, field, version, manifest, and readback gates.
+// Keep this separate from operatorAccess so no other PII or Mailroom surface
+// inherits Review's intentionally simple "if you can see it, you can fix it"
+// rule.
+export function reviewAccess(email, env = process.env) {
+  const access = operatorAccess(email, env);
+  const reviewReadOnly = String(env.POST_CALL_REVIEW_READ_ONLY || "").trim().toLowerCase() === "true";
+  const reviewWrite = !reviewReadOnly;
+  return {
+    ...access,
+    role: access.role === "viewer" || access.role === "mailroom_editor" ? "reviewer" : access.role,
+    capabilities: {
+      ...access.capabilities,
+      reviewRead: true,
+      reviewWrite,
+      resumeUpload: reviewWrite,
+      reviewAssign: reviewWrite,
+      reviewIdentityOverride: reviewWrite,
+      reviewSendApproval: reviewWrite,
     },
   };
 }
@@ -81,6 +110,20 @@ export async function requireOperator(req, res, capability) {
   const access = operatorAccess(req.authedEmail);
   if (capability && !access.capabilities[capability]) {
     res.status(403).json({ ok: false, error: "operator_role_forbidden", role: access.role });
+    return null;
+  }
+  return access;
+}
+
+export async function requireReviewOperator(req, res, capability) {
+  if (!(await requireAuth(req, res))) return null;
+  if (!req.authedEmail) {
+    res.status(503).json({ ok: false, error: "operator_auth_not_configured" });
+    return null;
+  }
+  const access = reviewAccess(req.authedEmail);
+  if (capability && !access.capabilities[capability]) {
+    res.status(403).json({ ok: false, error: "review_read_only", role: access.role });
     return null;
   }
   return access;
