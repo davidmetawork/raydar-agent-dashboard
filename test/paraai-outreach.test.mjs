@@ -73,6 +73,7 @@ import {
   OUTREACH_INCIDENT_HALT,
   outreachConfig,
   outreachExecutionEnabled,
+  paraformCandidateRecipientPremark,
   pendingNoDigestConfirmation,
   pendingNoDigestOverrideEligible,
   PENDING_DIGEST_UNAVAILABLE_REASON,
@@ -981,6 +982,8 @@ test("request normalization and ordinal count all Para AI requests for one candi
     id: "request-first",
     status: "submitted",
     reached_out_to_candidate: true,
+    reached_out_to_candidate_at: "2026-07-13T17:07:20.487Z",
+    recipient_types: ["RECRUITER", "CANDIDATE", "CANDIDATE"],
     created_at: "2026-07-13T17:07:20.087Z",
     candidate: {
       id: "candidate-db",
@@ -1003,6 +1006,10 @@ test("request normalization and ordinal count all Para AI requests for one candi
   });
   assert.equal(requestOrdinal(first, [second, first]), 1);
   assert.equal(requestOrdinal(second, [second, first]), 2);
+  assert.equal(first.reachedOutAt, "2026-07-13T17:07:20.487Z");
+  assert.equal(first.reachedOutAtMs, Date.parse("2026-07-13T17:07:20.487Z"));
+  assert.deepEqual(first.recipientTypes, ["RECRUITER", "CANDIDATE"]);
+  assert.equal(paraformCandidateRecipientPremark(first), true);
 });
 
 test("eligibility requires pending, unreached, post-cutoff, and not already delivered", () => {
@@ -1053,6 +1060,59 @@ test("eligibility requires pending, unreached, post-cutoff, and not already deli
     }]),
     [],
   );
+});
+
+test("Paraform's instant candidate-recipient marker needs a separate pinned rollout cutoff", () => {
+  const createdAtMs = Date.parse("2026-09-01T20:00:00.000Z");
+  const base = {
+    id: "request-candidate-recipient",
+    status: "pending",
+    reachedOut: true,
+    reachedOutAtMs: createdAtMs + 452,
+    recipientTypes: ["RECRUITER", "CANDIDATE"],
+    createdAtMs,
+  };
+  const closed = {
+    notBeforeMs: Date.parse("2026-07-18T00:00:00.000Z"),
+    candidateRecipientNotBeforeMs: null,
+  };
+  assert.equal(paraformCandidateRecipientPremark(base), true);
+  assert.deepEqual(eligibleNewRequests([base], closed, []), []);
+
+  const futureOnly = {
+    ...closed,
+    candidateRecipientNotBeforeMs: Date.parse("2026-09-01T19:00:00.000Z"),
+  };
+  assert.deepEqual(eligibleNewRequests([base], futureOnly, []), [base]);
+  assert.deepEqual(eligibleNewRequests([{
+    ...base,
+    id: "request-historical",
+    createdAtMs: Date.parse("2026-08-29T18:27:19.521Z"),
+    reachedOutAtMs: Date.parse("2026-08-29T18:27:19.973Z"),
+  }], futureOnly, []), []);
+  assert.deepEqual(eligibleNewRequests([{
+    ...base,
+    id: "request-historical-retry",
+    createdAtMs: Date.parse("2026-08-29T18:27:19.521Z"),
+    reachedOutAtMs: Date.parse("2026-08-29T18:27:19.973Z"),
+  }], futureOnly, [], [{
+    requestId: "request-historical-retry",
+    status: "open",
+    code: "OUTREACH_NO_EMAIL",
+  }]), []);
+  assert.deepEqual(eligibleNewRequests([{
+    ...base,
+    id: "request-hand-sent",
+    reachedOutAtMs: createdAtMs + 5 * 60_000,
+  }], futureOnly, []), []);
+  assert.deepEqual(eligibleNewRequests([{
+    ...base,
+    id: "request-recruiter-only",
+    recipientTypes: ["RECRUITER"],
+  }], futureOnly, []), []);
+  assert.deepEqual(eligibleNewRequests([base], futureOnly, [{
+    matches: { [base.id]: { sentAt: "2026-09-01T20:01:00.000Z" } },
+  }]), []);
 });
 
 // REGRESSION (incident 2026-07-29): the five-minute retry interval was reachable
@@ -1480,6 +1540,22 @@ test("pending no-digest recovery requires the exact live Paraform contradiction"
     ),
     false,
   );
+  const createdAtMs = Date.parse("2026-09-01T20:00:00.000Z");
+  assert.equal(
+    pendingNoDigestOverrideEligible(
+      {
+        ...request,
+        reachedOut: true,
+        createdAtMs,
+        reachedOutAtMs: createdAtMs + 452,
+        recipientTypes: ["RECRUITER", "CANDIDATE"],
+      },
+      vendorError,
+      status,
+      null,
+    ),
+    true,
+  );
   assert.equal(
     pendingNoDigestOverrideEligible(
       request,
@@ -1788,6 +1864,7 @@ test("all three live-send gates and a pinned cutoff are required", () => {
     PARAAI_OUTREACH_SEND_APPROVED: "true",
     PARAAI_OUTREACH_DRY_RUN: "false",
     PARAAI_OUTREACH_NOT_BEFORE: "2026-07-18T17:00:00.000Z",
+    PARAAI_OUTREACH_CANDIDATE_RECIPIENT_NOT_BEFORE: "2026-09-01T20:00:00.000Z",
     GOOGLE_SA_KEY_FILE: "/private/key.json",
     PARAAI_OUTREACH_MAILBOX: "david@raydar.xyz",
     KV_REST_API_URL: "https://kv.example",
@@ -1800,6 +1877,10 @@ test("all three live-send gates and a pinned cutoff are required", () => {
   assert.equal(open.sendApproved, true);
   assert.equal(open.dryRun, false);
   assert.equal(open.notBeforeMs, Date.parse("2026-07-18T17:00:00.000Z"));
+  assert.equal(
+    open.candidateRecipientNotBeforeMs,
+    Date.parse("2026-09-01T20:00:00.000Z"),
+  );
   assert.equal(open.gmailConfigured, true);
   // INCIDENT 2026-07-20: the outreach incident halt is a top-level override that
   // forces execution off even when every gate is live. It flips back to
@@ -2342,6 +2423,44 @@ test("the deadline sweep never warns about a request that was already emailed", 
     escalateImpl,
   });
   assert.deepEqual(calls, [], "not one of these five is an un-emailed pending request");
+});
+
+test("the deadline sweep treats only newly armed Paraform candidate premarks as unemailed", async () => {
+  const createdAtMs = Date.parse("2026-09-01T20:00:00.000Z");
+  const request = {
+    id: "req-candidate-premark",
+    status: "pending",
+    reachedOut: true,
+    recipientTypes: ["RECRUITER", "CANDIDATE"],
+    createdAtMs,
+    reachedOutAtMs: createdAtMs + 300,
+  };
+  const calls = [];
+  const escalateImpl = async (row) => {
+    calls.push(row.id);
+    return { rung: 72, notified: true };
+  };
+  await sweepExpiryEscalations({
+    history: [request],
+    config: { candidateRecipientNotBeforeMs: null },
+    escalateImpl,
+  });
+  assert.deepEqual(calls, []);
+
+  await sweepExpiryEscalations({
+    history: [request],
+    config: { candidateRecipientNotBeforeMs: createdAtMs - 1 },
+    escalateImpl,
+  });
+  assert.deepEqual(calls, [request.id]);
+
+  await sweepExpiryEscalations({
+    history: [request],
+    states: [{ matches: { [request.id]: { sentAt: "2026-09-01T20:01:00.000Z" } } }],
+    config: { candidateRecipientNotBeforeMs: createdAtMs - 1 },
+    escalateImpl,
+  });
+  assert.deepEqual(calls, [request.id]);
 });
 
 test("a deadline warning with no exception says so instead of inventing one", () => {

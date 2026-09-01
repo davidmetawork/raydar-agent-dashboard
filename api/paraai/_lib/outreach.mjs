@@ -149,6 +149,7 @@ export const PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE =
 export const PENDING_DIGEST_UNAVAILABLE_REASON = "pending_digest_unavailable";
 export const OPERATOR_CONFIRMED_NO_DIGEST_REASON =
   "operator_confirmed_without_digest";
+export const PARAFORM_CANDIDATE_PREMARK_MAX_MS = 60_000;
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -188,11 +189,15 @@ const finiteDate = (value) => {
 
 export function outreachConfig(env = process.env) {
   const notBeforeMs = finiteDate(env.PARAAI_OUTREACH_NOT_BEFORE);
+  const candidateRecipientNotBeforeMs = finiteDate(
+    env.PARAAI_OUTREACH_CANDIDATE_RECIPIENT_NOT_BEFORE,
+  );
   return {
     approved: bool(env.PARAAI_OUTREACH_APPROVED),
     dryRun: !("PARAAI_OUTREACH_DRY_RUN" in env) || bool(env.PARAAI_OUTREACH_DRY_RUN, true),
     sendApproved: bool(env.PARAAI_OUTREACH_SEND_APPROVED),
     notBeforeMs,
+    candidateRecipientNotBeforeMs,
     mailbox: outreachMailbox(env),
     gmailConfigured: gmailConfigured(env),
     storeConfigured: storeConfigured(),
@@ -227,6 +232,13 @@ export function normalizeSubmissionRequest(request) {
     id: clean(request?.id),
     status: lower(request?.status),
     reachedOut: request?.reached_out_to_candidate === true,
+    reachedOutAt: clean(request?.reached_out_to_candidate_at) || null,
+    reachedOutAtMs: finiteDate(request?.reached_out_to_candidate_at),
+    recipientTypes: [...new Set(
+      (Array.isArray(request?.recipient_types) ? request.recipient_types : [])
+        .map((value) => clean(value).toUpperCase())
+        .filter(Boolean),
+    )],
     createdAt: clean(request?.created_at),
     createdAtMs: finiteDate(request?.created_at),
     candidateId: clean(candidate?.id || request?.candidate_id),
@@ -240,6 +252,45 @@ export function normalizeSubmissionRequest(request) {
     roleName: clean(role?.name || request?.role_name),
     companyName: clean(role?.company?.name || request?.company_name),
   };
+}
+
+// Paraform can address a request to both the recruiter and the candidate. In
+// that shape it writes reached_out_to_candidate in the SAME transaction that
+// creates the request, before Raydar has had any opportunity to send the
+// approved Para AI email. A later reached-out timestamp remains valid evidence
+// of a hand send, so this classification is intentionally limited to the
+// candidate-recipient marker and a tight creation-time window.
+export function paraformCandidateRecipientPremark(request) {
+  const createdAtMs = Number(request?.createdAtMs);
+  const reachedOutAtMs = Number(request?.reachedOutAtMs);
+  const deltaMs = reachedOutAtMs - createdAtMs;
+  return Boolean(
+    request?.reachedOut === true &&
+    Array.isArray(request?.recipientTypes) &&
+    request.recipientTypes.includes("CANDIDATE") &&
+    Number.isFinite(createdAtMs) &&
+    Number.isFinite(reachedOutAtMs) &&
+    deltaMs >= 0 &&
+    deltaMs <= PARAFORM_CANDIDATE_PREMARK_MAX_MS
+  );
+}
+
+function candidateRecipientPremarkArmed(request, config) {
+  return Boolean(
+    paraformCandidateRecipientPremark(request) &&
+    config?.candidateRecipientNotBeforeMs != null &&
+    request.createdAtMs >= config.candidateRecipientNotBeforeMs
+  );
+}
+
+function automaticRequestMarkerEligible(request, config) {
+  if (
+    request?.createdAtMs == null ||
+    config?.notBeforeMs == null ||
+    request.createdAtMs < config.notBeforeMs
+  ) return false;
+  if (request?.reachedOut !== true) return true;
+  return candidateRecipientPremarkArmed(request, config);
 }
 
 export function expiredNoDigestOverrideEligible(request) {
@@ -268,7 +319,7 @@ export function pendingNoDigestOverrideEligible(
     candidateUserId &&
     roleId &&
     lower(request?.status) === "pending" &&
-    request?.reachedOut !== true &&
+    (request?.reachedOut !== true || paraformCandidateRecipientPremark(request)) &&
     String(vendorError?.code || "") === "-32600" &&
     clean(vendorError?.message) === PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE &&
     pendingIds.includes(requestId) &&
@@ -408,12 +459,14 @@ export function eligibleNewRequests(
     !systemHeld.has(request.id) &&
     !retryThrottled.has(request.id) &&
     (
-      retryAuthorized.has(request.id) ||
       (
-        request.reachedOut !== true &&
-        request.createdAtMs != null &&
-        request.createdAtMs >= config.notBeforeMs
-      )
+        retryAuthorized.has(request.id) &&
+        (
+          !paraformCandidateRecipientPremark(request) ||
+          candidateRecipientPremarkArmed(request, config)
+        )
+      ) ||
+      automaticRequestMarkerEligible(request, config)
     ) &&
     !delivered.has(request.id)
   )).sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
@@ -1110,12 +1163,12 @@ export async function processMatchRequest(
     const pendingAllowed =
       noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON &&
       lower(request?.status) === "pending" &&
-      request?.reachedOut !== true;
+      (request?.reachedOut !== true || paraformCandidateRecipientPremark(request));
     const operatorReliefAllowed =
       noDigestReason === OPERATOR_CONFIRMED_NO_DIGEST_REASON &&
       reliefTransport &&
       lower(request?.status) === "pending" &&
-      request?.reachedOut !== true &&
+      (request?.reachedOut !== true || paraformCandidateRecipientPremark(request)) &&
       Boolean(contactOverride);
     if (
       mode !== "send" ||
@@ -2079,6 +2132,7 @@ export async function sweepExpiryEscalations({
   exceptions = [],
   sentThisTick = [],
   now = Date.now(),
+  config = outreachConfig(),
   escalateImpl = escalateNearExpiry,
 } = {}) {
   // `states` and `history` are both read at the START of the tick, so a request
@@ -2105,7 +2159,11 @@ export async function sweepExpiryEscalations({
     // delivery record is authoritative, but reached-out can also be set by a
     // hand-sent email, and "has still not been emailed" would be a false alarm
     // in that case. A deadline alert nobody needs is how alerting gets muted.
-    if (delivered.has(requestId) || request?.reachedOut === true) continue;
+    const premarkNeedsRaydarEmail = candidateRecipientPremarkArmed(request, config);
+    if (
+      delivered.has(requestId) ||
+      (request?.reachedOut === true && !premarkNeedsRaydarEmail)
+    ) continue;
     const result = await escalateImpl(request, codeByRequest.get(requestId) || null, { now })
       .catch(() => null);
     if (result?.notified) {
@@ -2368,6 +2426,7 @@ export async function runOutreachTick({
         .filter((result) => result.action === "sent" && result.requestId)
         .map((result) => result.requestId),
       now,
+      config,
     }).catch(() => ({ escalated: [] }));
     return {
       enabled: true,
@@ -2615,6 +2674,8 @@ export async function outreachHealth({
     dryRun: config.dryRun,
     sendApproved: config.sendApproved,
     notBeforePinned: config.notBeforeMs != null,
+    candidateRecipientNotBeforePinned:
+      config.candidateRecipientNotBeforeMs != null,
     gmailConfigured: config.gmailConfigured,
     storeConfigured: config.storeConfigured,
     mailroomReliefConfigured: mailroomReliefConfig().configured,

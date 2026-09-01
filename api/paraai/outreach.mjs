@@ -9,6 +9,7 @@ import {
   outreachConfig,
   outreachExecutionEnabled,
   OPERATOR_CONFIRMED_NO_DIGEST_REASON,
+  paraformCandidateRecipientPremark,
   pendingNoDigestConfirmation,
   PENDING_DIGEST_UNAVAILABLE_REASON,
   outreachHealth,
@@ -145,7 +146,10 @@ export default async function handler(req, res) {
       const history = await readSubmissionRequestHistory();
       const request = history.find((row) => row.id === requestId);
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
-      if (request.status !== "pending" || request.reachedOut) {
+      if (
+        request.status !== "pending" ||
+        (request.reachedOut && !paraformCandidateRecipientPremark(request))
+      ) {
         return res.status(409).json({ ok: false, error: "request_not_pending_unreached" });
       }
       let result;
@@ -229,7 +233,10 @@ export default async function handler(req, res) {
       const history = await readSubmissionRequestHistory();
       const request = history.find((row) => row.id === requestId);
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
-      if (request.status !== "pending" || request.reachedOut) {
+      if (
+        request.status !== "pending" ||
+        (request.reachedOut && !paraformCandidateRecipientPremark(request))
+      ) {
         return res.status(409).json({ ok: false, error: "request_not_pending_unreached" });
       }
       let result;
