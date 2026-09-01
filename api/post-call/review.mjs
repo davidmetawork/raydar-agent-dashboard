@@ -2,7 +2,7 @@ import { cors } from "../seq/_lib/core.mjs";
 import { requireOperator, requireSameOrigin } from "../_lib/operator-access.mjs";
 import { safeUpstreamBase } from "../_lib/safe-upstream.mjs";
 
-const TIMEOUT_MS = 12_000;
+const TIMEOUT_MS = 280_000;
 const ACTIONS = new Set([
   "select_profile", "confirm_absent", "set_field", "set_call_outcome",
   "set_role_verdict", "attach_resume", "retry", "resume", "abandon", "assign", "set_priority",
@@ -172,6 +172,10 @@ export default async function handler(req, res) {
     }
     if (action === "set_priority" && !access.capabilities.reviewPriority) return res.status(403).json({ ok: false, error: "review_admin_required" });
     if (action === "assign" && !access.capabilities.reviewAssign) return res.status(403).json({ ok: false, error: "review_assignment_forbidden" });
+    const approveSend = payload.approveSend === true;
+    if (approveSend && (action !== "resume" || !access.capabilities.reviewIdentityOverride)) {
+      return res.status(403).json({ ok: false, error: "review_send_approval_forbidden" });
+    }
     const reason = safeString(payload.reason, 1_000);
     if (!reason) return res.status(400).json({ ok: false, error: "review_reason_required" });
     const bodyOut = { schemaVersion: 2, reviewId, action, reason };
@@ -184,6 +188,7 @@ export default async function handler(req, res) {
     }
     if (!validateChanges(action, changes)) return res.status(400).json({ ok: false, error: "review_value_invalid" });
     if (changes && Object.keys(changes).length) bodyOut.changes = changes;
+    if (approveSend) bodyOut.approveSend = true;
     const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/actions`, access, {
       method: "POST",
       headers: { "if-match": `"${version}"` },

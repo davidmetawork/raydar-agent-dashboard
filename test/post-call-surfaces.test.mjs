@@ -55,6 +55,8 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /Search candidate, email, LinkedIn, call, or recruiter/);
   assert.match(review, /Continuing…/);
   assert.match(review, /startContinuingPoll/);
+  assert.match(review, /Approve and send email/);
+  assert.match(review, /approveSend:true/);
   assert.match(review, /item\.candidate\?\.displayName/);
   assert.match(review, /item\.blockers/);
   assert.match(review, /item\.sourceLinks/);
@@ -71,6 +73,9 @@ test("Review proxy owns auth attribution and optimistic concurrency", () => {
   assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/resume-files/);
   assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/actions/);
   assert.match(reviewProxy, /\/api\/v2\/reviews\/metrics/);
+  assert.match(reviewProxy, /const TIMEOUT_MS = 280_000/);
+  assert.match(reviewProxy, /review_send_approval_forbidden/);
+  assert.match(reviewProxy, /bodyOut\.approveSend = true/);
   assert.doesNotMatch(reviewProxy, /payload\.actor/);
 });
 
