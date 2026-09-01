@@ -60,6 +60,7 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /What needs to happen/);
   assert.match(review, /Save and continue/);
   assert.match(review, /Upload résumé and continue/);
+  assert.match(review, /const c=item\.candidate\|\|\{\},call=item\.call\|\|\{\},continuing=.*help=/);
   assert.match(review, /Call transcript/);
   assert.doesNotMatch(review, /Technical evidence/);
   assert.doesNotMatch(review, /What needs attention/);
