@@ -21,24 +21,32 @@ export function operatorAccess(email, env = process.env) {
   // membership is authentication, not authorization: candidate PII and review
   // mutations stay unavailable until the exact operator is allowlisted.
   const admins = emails(env.POST_CALL_REVIEW_ADMIN_EMAILS);
-  const reviewers = emails(env.POST_CALL_REVIEW_ASSISTANT_EMAILS);
+  const assistants = emails(env.POST_CALL_REVIEW_ASSISTANT_EMAILS);
+  const operators = emails(env.POST_CALL_REVIEW_OPERATOR_EMAILS);
+  const recruiters = emails(env.POST_CALL_REVIEW_RECRUITER_EMAILS);
   const mailroomEditors = emails(env.MAILROOM_EDITOR_EMAILS);
   const mailroomViewers = emails(env.MAILROOM_VIEWER_EMAILS);
   const reviewReadOnly = String(env.POST_CALL_REVIEW_READ_ONLY || "").trim().toLowerCase() === "true";
 
   const admin = admins.has(normalized);
-  const reviewRead = admin || reviewers.has(normalized);
-  const reviewWrite = !reviewReadOnly && reviewRead;
+  const assistant = assistants.has(normalized);
+  const operator = operators.has(normalized);
+  const recruiter = recruiters.has(normalized);
+  const reviewRead = admin || assistant || operator || recruiter;
+  const reviewWrite = !reviewReadOnly && (admin || assistant || operator);
   const mailroomWrite = admin || mailroomEditors.has(normalized);
   const mailroomRead = mailroomWrite || mailroomViewers.has(normalized);
 
   return {
     email: normalized,
-    role: admin ? "admin" : mailroomWrite ? "mailroom_editor" : reviewWrite ? "reviewer" : "viewer",
+    role: admin ? "admin" : assistant ? "assistant" : operator ? "operator" : recruiter ? "recruiter" : mailroomWrite ? "mailroom_editor" : "viewer",
     capabilities: {
       reviewRead,
       reviewWrite,
       resumeUpload: reviewWrite,
+      reviewAssign: reviewWrite,
+      reviewIdentityOverride: !reviewReadOnly && admin,
+      reviewPriority: !reviewReadOnly && admin,
       mailroomRead,
       mailroomWrite,
     },

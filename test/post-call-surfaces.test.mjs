@@ -51,7 +51,16 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /authoritative source/);
   assert.match(review, /never kept in Monitor browser storage/);
   assert.match(review, /evidence v/);
-  assert.match(review, /limit=50&cursor=/);
+  assert.match(review, /new URLSearchParams/);
+  assert.match(review, /Search candidate, email, LinkedIn, call, or recruiter/);
+  assert.match(review, /Continuing…/);
+  assert.match(review, /startContinuingPoll/);
+  assert.match(review, /item\.candidate\?\.displayName/);
+  assert.match(review, /item\.blockers/);
+  assert.match(review, /item\.sourceLinks/);
+  assert.match(review, /Technical evidence/);
+  assert.match(review, /metrics=1/);
+  assert.match(review, /All \(90 days\)/);
 });
 
 test("Review proxy owns auth attribution and optimistic concurrency", () => {
@@ -59,8 +68,9 @@ test("Review proxy owns auth attribution and optimistic concurrency", () => {
   assert.match(reviewProxy, /POST_CALL_MONITOR_API_KEY/);
   assert.match(reviewProxy, /"x-raydar-actor-email": access\.email/);
   assert.match(reviewProxy, /"if-match": `"\$\{version\}"`/);
-  assert.match(reviewProxy, /\/api\/v1\/review-files/);
-  assert.match(reviewProxy, /\/api\/v1\/review-actions/);
+  assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/resume-files/);
+  assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/actions/);
+  assert.match(reviewProxy, /\/api\/v2\/reviews\/metrics/);
   assert.doesNotMatch(reviewProxy, /payload\.actor/);
 });
 
@@ -72,4 +82,25 @@ test("Review can be deployed read-only without changing its future role model", 
   assert.equal(preview.capabilities.reviewRead, true);
   assert.equal(preview.capabilities.reviewWrite, false);
   assert.equal(preview.capabilities.resumeUpload, false);
+});
+
+test("Review permissions separate assistant, recruiter, and high-risk admin powers", () => {
+  const env = {
+    POST_CALL_REVIEW_ADMIN_EMAILS: "david@raydar.xyz",
+    POST_CALL_REVIEW_ASSISTANT_EMAILS: "assistant@raydar.xyz",
+    POST_CALL_REVIEW_OPERATOR_EMAILS: "ops@raydar.xyz",
+    POST_CALL_REVIEW_RECRUITER_EMAILS: "recruiter@raydar.xyz",
+  };
+  const assistant = operatorAccess("assistant@raydar.xyz", env);
+  assert.equal(assistant.role, "assistant");
+  assert.equal(assistant.capabilities.reviewWrite, true);
+  assert.equal(assistant.capabilities.reviewIdentityOverride, false);
+  assert.equal(assistant.capabilities.reviewAssign, true);
+  const recruiter = operatorAccess("recruiter@raydar.xyz", env);
+  assert.equal(recruiter.role, "recruiter");
+  assert.equal(recruiter.capabilities.reviewRead, true);
+  assert.equal(recruiter.capabilities.reviewWrite, false);
+  const admin = operatorAccess("david@raydar.xyz", env);
+  assert.equal(admin.capabilities.reviewIdentityOverride, true);
+  assert.equal(admin.capabilities.reviewPriority, true);
 });
