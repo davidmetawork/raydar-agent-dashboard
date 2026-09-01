@@ -14,6 +14,7 @@ import {
   followupCopy,
   initialMatchCopy,
   initialSubject,
+  matchBundleCopy,
   roleShareUrl,
 } from "./outreach-copy.mjs";
 import {
@@ -21,6 +22,7 @@ import {
   candidateRepliedAfter,
   createReviewDraft,
   deliverMessage,
+  deterministicActionId,
   deterministicMessageId,
   findDigestThread,
   firstDeliveredInternalDate,
@@ -149,6 +151,7 @@ export const PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE =
 export const PENDING_DIGEST_UNAVAILABLE_REASON = "pending_digest_unavailable";
 export const OPERATOR_CONFIRMED_NO_DIGEST_REASON =
   "operator_confirmed_without_digest";
+export const PARAFORM_CANDIDATE_PREMARK_MAX_MS = 60_000;
 const REQUEST_STATUSES = new Set(["pending"]);
 const clean = (value) => String(value || "").trim();
 const lower = (value) => clean(value).toLowerCase();
@@ -188,11 +191,15 @@ const finiteDate = (value) => {
 
 export function outreachConfig(env = process.env) {
   const notBeforeMs = finiteDate(env.PARAAI_OUTREACH_NOT_BEFORE);
+  const candidateRecipientNotBeforeMs = finiteDate(
+    env.PARAAI_OUTREACH_CANDIDATE_RECIPIENT_NOT_BEFORE,
+  );
   return {
     approved: bool(env.PARAAI_OUTREACH_APPROVED),
     dryRun: !("PARAAI_OUTREACH_DRY_RUN" in env) || bool(env.PARAAI_OUTREACH_DRY_RUN, true),
     sendApproved: bool(env.PARAAI_OUTREACH_SEND_APPROVED),
     notBeforeMs,
+    candidateRecipientNotBeforeMs,
     mailbox: outreachMailbox(env),
     gmailConfigured: gmailConfigured(env),
     storeConfigured: storeConfigured(),
@@ -227,6 +234,13 @@ export function normalizeSubmissionRequest(request) {
     id: clean(request?.id),
     status: lower(request?.status),
     reachedOut: request?.reached_out_to_candidate === true,
+    reachedOutAt: clean(request?.reached_out_to_candidate_at) || null,
+    reachedOutAtMs: finiteDate(request?.reached_out_to_candidate_at),
+    recipientTypes: [...new Set(
+      (Array.isArray(request?.recipient_types) ? request.recipient_types : [])
+        .map((value) => clean(value).toUpperCase())
+        .filter(Boolean),
+    )],
     createdAt: clean(request?.created_at),
     createdAtMs: finiteDate(request?.created_at),
     candidateId: clean(candidate?.id || request?.candidate_id),
@@ -240,6 +254,45 @@ export function normalizeSubmissionRequest(request) {
     roleName: clean(role?.name || request?.role_name),
     companyName: clean(role?.company?.name || request?.company_name),
   };
+}
+
+// Paraform can address a request to both the recruiter and the candidate. In
+// that shape it writes reached_out_to_candidate in the SAME transaction that
+// creates the request, before Raydar has had any opportunity to send the
+// approved Para AI email. A later reached-out timestamp remains valid evidence
+// of a hand send, so this classification is intentionally limited to the
+// candidate-recipient marker and a tight creation-time window.
+export function paraformCandidateRecipientPremark(request) {
+  const createdAtMs = Number(request?.createdAtMs);
+  const reachedOutAtMs = Number(request?.reachedOutAtMs);
+  const deltaMs = reachedOutAtMs - createdAtMs;
+  return Boolean(
+    request?.reachedOut === true &&
+    Array.isArray(request?.recipientTypes) &&
+    request.recipientTypes.includes("CANDIDATE") &&
+    Number.isFinite(createdAtMs) &&
+    Number.isFinite(reachedOutAtMs) &&
+    deltaMs >= 0 &&
+    deltaMs <= PARAFORM_CANDIDATE_PREMARK_MAX_MS
+  );
+}
+
+function candidateRecipientPremarkArmed(request, config) {
+  return Boolean(
+    paraformCandidateRecipientPremark(request) &&
+    config?.candidateRecipientNotBeforeMs != null &&
+    request.createdAtMs >= config.candidateRecipientNotBeforeMs
+  );
+}
+
+function automaticRequestMarkerEligible(request, config) {
+  if (
+    request?.createdAtMs == null ||
+    config?.notBeforeMs == null ||
+    request.createdAtMs < config.notBeforeMs
+  ) return false;
+  if (request?.reachedOut !== true) return true;
+  return candidateRecipientPremarkArmed(request, config);
 }
 
 export function expiredNoDigestOverrideEligible(request) {
@@ -268,7 +321,7 @@ export function pendingNoDigestOverrideEligible(
     candidateUserId &&
     roleId &&
     lower(request?.status) === "pending" &&
-    request?.reachedOut !== true &&
+    (request?.reachedOut !== true || paraformCandidateRecipientPremark(request)) &&
     String(vendorError?.code || "") === "-32600" &&
     clean(vendorError?.message) === PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE &&
     pendingIds.includes(requestId) &&
@@ -408,12 +461,14 @@ export function eligibleNewRequests(
     !systemHeld.has(request.id) &&
     !retryThrottled.has(request.id) &&
     (
-      retryAuthorized.has(request.id) ||
       (
-        request.reachedOut !== true &&
-        request.createdAtMs != null &&
-        request.createdAtMs >= config.notBeforeMs
-      )
+        retryAuthorized.has(request.id) &&
+        (
+          !paraformCandidateRecipientPremark(request) ||
+          candidateRecipientPremarkArmed(request, config)
+        )
+      ) ||
+      automaticRequestMarkerEligible(request, config)
     ) &&
     !delivered.has(request.id)
   )).sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
@@ -1110,12 +1165,12 @@ export async function processMatchRequest(
     const pendingAllowed =
       noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON &&
       lower(request?.status) === "pending" &&
-      request?.reachedOut !== true;
+      (request?.reachedOut !== true || paraformCandidateRecipientPremark(request));
     const operatorReliefAllowed =
       noDigestReason === OPERATOR_CONFIRMED_NO_DIGEST_REASON &&
       reliefTransport &&
       lower(request?.status) === "pending" &&
-      request?.reachedOut !== true &&
+      (request?.reachedOut !== true || paraformCandidateRecipientPremark(request)) &&
       Boolean(contactOverride);
     if (
       mode !== "send" ||
@@ -1602,6 +1657,312 @@ export async function processMatchRequest(
   }
 }
 
+function bundleActionKeyFor(requests) {
+  const requestIds = requests.map((request) => clean(request?.id)).sort();
+  return `match-bundle:${requestIds.join(",")}`;
+}
+
+export function planDeliveredMatchBundle(state, {
+  requests,
+  history,
+  digest,
+  copy,
+  sent,
+  sentAt,
+  messageId,
+  bundleActionKey,
+}) {
+  const bundleRequestIds = requests.map((request) => request.id).sort();
+  let next = state;
+  for (const request of requests) {
+    next = planDeliveredMatch(next, {
+      request,
+      ordinal: requestOrdinal(request, history),
+      roleUrl: roleShareUrl(request),
+      digest,
+      copy,
+      sent,
+      sentAt,
+      messageId,
+      deliveryMode: "digest_bundle",
+      transport: "mailroom-sendgrid",
+      armFollowup: false,
+    });
+  }
+  const providerMessageId = sent?.providerMessageId || sent?.id || null;
+  const matchPatch = {};
+  const outboxPatch = {};
+  for (const requestId of bundleRequestIds) {
+    matchPatch[requestId] = {
+      ...next.matches?.[requestId],
+      bundleActionKey,
+      bundleRequestIds,
+      reachedOutVerifiedAt: sentAt,
+    };
+    outboxPatch[`match:${requestId}`] = {
+      ...next.outbox?.[`match:${requestId}`],
+      bundleActionKey,
+      bundleRequestIds,
+    };
+  }
+  next = {
+    ...next,
+    matches: { ...(next.matches || {}), ...matchPatch },
+    outbox: {
+      ...(next.outbox || {}),
+      ...outboxPatch,
+      [bundleActionKey]: {
+        ...(next.outbox?.[bundleActionKey] || {}),
+        status: "delivered",
+        requestIds: bundleRequestIds,
+        messageId,
+        deliveredAt: sentAt,
+        deliveryMode: "digest_bundle",
+        transport: "mailroom-sendgrid",
+        providerMessageId,
+        mailroomRowId: sent?.mailroomRowId || null,
+        copyVariant: copy.variant,
+      },
+    },
+    followup: null,
+  };
+  next = appendOutreachJournal(next, "match_bundle_delivered", {
+    requestIds: bundleRequestIds,
+    deliveryMode: "digest_bundle",
+    transport: "mailroom-sendgrid",
+    providerMessageId,
+    mailroomRowId: sent?.mailroomRowId || null,
+    followupSuppressed: true,
+  });
+  for (const requestId of bundleRequestIds) {
+    next = appendOutreachJournal(next, "paraform_reached_out_already_visible", {
+      requestId,
+      bundleActionKey,
+    });
+  }
+  return next;
+}
+
+// Operator-only recovery for multiple requests that Paraform premarked as
+// reached-out in the creation transaction. One deterministic Mailroom row is
+// the delivery truth; every request is linked to that same receipt and no
+// automatic follow-up is armed because Mailroom does not ingest replies.
+export async function processMatchRequestBundleViaMailroom(
+  requests,
+  history,
+  {
+    config = outreachConfig(),
+    contactOverride = null,
+    deliveryImpl = deliverViaMailroomRelief,
+  } = {},
+) {
+  if (OUTREACH_INCIDENT_HALT) {
+    const error = new Error("Para AI outreach sending is halted (2026-07-20 Kyra incident)");
+    error.code = "OUTREACH_HALTED";
+    throw error;
+  }
+  const rows = Array.isArray(requests) ? requests : [];
+  const requestIds = rows.map((request) => clean(request?.id));
+  const candidateUserIds = new Set(rows.map((request) => clean(request?.candidateUserId)));
+  if (
+    rows.length < 2 ||
+    rows.length > 5 ||
+    requestIds.some((id) => !id) ||
+    new Set(requestIds).size !== rows.length ||
+    candidateUserIds.size !== 1 ||
+    rows.some((request) => (
+      lower(request?.status) !== "pending" ||
+      !paraformCandidateRecipientPremark(request) ||
+      protectedRecruiterForRoleTitle(request.roleName)
+    ))
+  ) {
+    const error = new Error(
+      "bundle recovery requires 2-5 unique pending candidate-recipient premarks for one candidate",
+    );
+    error.code = "OUTREACH_BUNDLE_INVALID";
+    throw error;
+  }
+  if (!contactOverride) {
+    const error = new Error("bundle recovery requires an operator-confirmed recipient");
+    error.code = "OUTREACH_OPERATOR_EMAIL_OVERRIDE_INVALID";
+    throw error;
+  }
+
+  const candidateUserId = rows[0].candidateUserId;
+  const bundleActionKey = bundleActionKeyFor(rows);
+  const bundleDeliveryRequestId = deterministicActionId(bundleActionKey);
+  const messageId = deterministicMessageId(bundleActionKey);
+  const lockToken = await acquireOutreachLock(candidateUserId);
+  if (!lockToken) {
+    const error = new Error("candidate outreach is already being processed");
+    error.code = "OUTREACH_BUSY";
+    throw error;
+  }
+  let state = null;
+  let attemptStage = "contact_discovery";
+  try {
+    const contact = await candidateContact(rows[0], config, contactOverride);
+    attemptStage = "exception_resolution";
+    await Promise.all(rows.map((request) => resolveOutreachException(request.id, {
+      resolution: contact.source,
+      onlyCodes: ["OUTREACH_NO_EMAIL", "OUTREACH_EMAIL_BOUNCED"],
+    }).catch(() => {})));
+
+    attemptStage = "state_load";
+    state = await getOutreachState(candidateUserId);
+    if (!state) {
+      attemptStage = "state_create";
+      state = await createOutreachState(candidateUserId, {
+        candidateName: contact.name || rows[0].candidateName,
+        candidateEmail: contact.email,
+        candidateEmailSource: contact.source,
+      });
+    }
+    state = {
+      ...state,
+      candidateName: contact.name || rows[0].candidateName,
+      candidateEmail: contact.email,
+      candidateEmailSource: contact.source,
+    };
+    const conflicting = rows.find((request) => {
+      const match = state.matches?.[request.id];
+      return match?.sentAt && match.bundleActionKey !== bundleActionKey;
+    });
+    if (conflicting) {
+      const error = new Error(`request ${conflicting.id} already has a different delivery`);
+      error.code = "OUTREACH_ALREADY_DELIVERED";
+      throw error;
+    }
+    const deliveredMatches = rows.filter((request) => state.matches?.[request.id]?.sentAt);
+    if (deliveredMatches.length === rows.length) {
+      return {
+        action: "existing",
+        requests: rows,
+        state,
+        match: state.matches[rows[0].id],
+        transport: "mailroom-sendgrid",
+        deliveryMode: "digest_bundle",
+      };
+    }
+
+    attemptStage = "digest_mutation";
+    const digests = [];
+    for (const request of rows) digests.push(await ensureMatchDigest(request));
+    const digestIds = new Set(digests.map((digest) => clean(digest?.digestId)));
+    if (digestIds.size !== 1 || digestIds.has("")) {
+      const error = new Error("bundle requests did not resolve to one visible digest");
+      error.code = "OUTREACH_BUNDLE_DIGEST_MISMATCH";
+      throw error;
+    }
+    const digest = digests[0];
+    const copy = matchBundleCopy({
+      firstName: firstName(contact.name || rows[0].candidateName),
+      requests: rows.map((request) => ({ ...request, roleUrl: roleShareUrl(request) })),
+      digestUrl: digest.digestUrl,
+    });
+    const message = {
+      actionKey: bundleActionKey,
+      from: `David Phillips <${config.mailbox}>`,
+      to: contact.email,
+      subject: copy.subject,
+      messageId,
+      bodyText: copy.text,
+      bodyHtml: copy.html,
+    };
+    const previousOutbox = state.outbox?.[bundleActionKey] || {};
+    const claimed = appendOutreachJournal({
+      ...state,
+      digestId: digest.digestId,
+      digestUrl: digest.digestUrl,
+      threadSubject: state.threadSubject || message.subject,
+      outbox: {
+        ...(state.outbox || {}),
+        [bundleActionKey]: {
+          ...previousOutbox,
+          status: "claimed",
+          requestIds: [...requestIds].sort(),
+          messageId,
+          claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
+          deliveryMode: "digest_bundle",
+          transport: "mailroom-sendgrid",
+        },
+      },
+    }, "mailroom_bundle_delivery_claimed", {
+      requestIds: [...requestIds].sort(),
+      deliveryMode: "digest_bundle",
+      transport: "mailroom-sendgrid",
+    });
+    attemptStage = "outbox_claim";
+    state = await saveOutreachState(claimed, state.revision);
+
+    attemptStage = "mailroom_delivery";
+    let sent;
+    try {
+      sent = await deliveryImpl({
+        message,
+        requestId: bundleDeliveryRequestId,
+        candidateName: contact.name || rows[0].candidateName,
+      });
+    } catch (error) {
+      await saveUncertainOutbox(
+        state,
+        bundleActionKey,
+        messageId,
+        error,
+        { transport: "mailroom-sendgrid" },
+      );
+      throw error;
+    }
+    const sentAt = sent?.sentAt || new Date().toISOString();
+    state = await saveOutreachState(planDeliveredMatchBundle(state, {
+      requests: rows,
+      history,
+      digest,
+      copy,
+      sent,
+      sentAt,
+      messageId,
+      bundleActionKey,
+    }), state.revision);
+
+    await Promise.all(rows.map((request) => resolveOutreachException(request.id, {
+      resolution: "sent",
+    }).catch(() => {})));
+    attemptStage = "complete";
+    return {
+      action: "sent",
+      requests: rows,
+      digest,
+      copy,
+      message,
+      sent,
+      state,
+      bundleActionKey,
+      bundleDeliveryRequestId,
+      deliveryMode: "digest_bundle",
+      transport: "mailroom-sendgrid",
+    };
+  } catch (error) {
+    const stage = clean(error?.outreachStage || attemptStage || "unknown");
+    error.outreachStage ||= stage;
+    const current = await getOutreachState(candidateUserId).catch(() => null);
+    if (current) {
+      await saveOutreachState(appendOutreachJournal(
+        current,
+        "match_bundle_attempt_failed",
+        {
+          requestIds: [...requestIds].sort(),
+          code: clean(error?.code || "OUTREACH_FAILED"),
+          stage,
+        },
+      ), current.revision).catch(() => null);
+    }
+    throw error;
+  } finally {
+    await releaseOutreachLock(candidateUserId, lockToken).catch(() => {});
+  }
+}
+
 export async function recordExpiredExternalDelivery(
   request,
   history,
@@ -2079,6 +2440,7 @@ export async function sweepExpiryEscalations({
   exceptions = [],
   sentThisTick = [],
   now = Date.now(),
+  config = outreachConfig(),
   escalateImpl = escalateNearExpiry,
 } = {}) {
   // `states` and `history` are both read at the START of the tick, so a request
@@ -2105,7 +2467,11 @@ export async function sweepExpiryEscalations({
     // delivery record is authoritative, but reached-out can also be set by a
     // hand-sent email, and "has still not been emailed" would be a false alarm
     // in that case. A deadline alert nobody needs is how alerting gets muted.
-    if (delivered.has(requestId) || request?.reachedOut === true) continue;
+    const premarkNeedsRaydarEmail = candidateRecipientPremarkArmed(request, config);
+    if (
+      delivered.has(requestId) ||
+      (request?.reachedOut === true && !premarkNeedsRaydarEmail)
+    ) continue;
     const result = await escalateImpl(request, codeByRequest.get(requestId) || null, { now })
       .catch(() => null);
     if (result?.notified) {
@@ -2368,6 +2734,7 @@ export async function runOutreachTick({
         .filter((result) => result.action === "sent" && result.requestId)
         .map((result) => result.requestId),
       now,
+      config,
     }).catch(() => ({ escalated: [] }));
     return {
       enabled: true,
@@ -2615,6 +2982,8 @@ export async function outreachHealth({
     dryRun: config.dryRun,
     sendApproved: config.sendApproved,
     notBeforePinned: config.notBeforeMs != null,
+    candidateRecipientNotBeforePinned:
+      config.candidateRecipientNotBeforeMs != null,
     gmailConfigured: config.gmailConfigured,
     storeConfigured: config.storeConfigured,
     mailroomReliefConfigured: mailroomReliefConfig().configured,

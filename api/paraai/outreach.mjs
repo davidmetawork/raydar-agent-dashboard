@@ -9,18 +9,23 @@ import {
   outreachConfig,
   outreachExecutionEnabled,
   OPERATOR_CONFIRMED_NO_DIGEST_REASON,
+  paraformCandidateRecipientPremark,
   pendingNoDigestConfirmation,
   PENDING_DIGEST_UNAVAILABLE_REASON,
   outreachHealth,
   pendingBackfillRequests,
   processMatchRequest,
+  processMatchRequestBundleViaMailroom,
   readSubmissionRequestHistory,
   recordExpiredExternalDelivery,
   releaseHeldOutreach,
   reviewHeldOutreach,
   runOutreachTick,
 } from "./_lib/outreach.mjs";
-import { mailroomReliefConfirmation } from "./_lib/outreach-mailroom.mjs";
+import {
+  mailroomMatchBundleConfirmation,
+  mailroomReliefConfirmation,
+} from "./_lib/outreach-mailroom.mjs";
 import {
   listOutreachExceptions,
   listOutreachStates,
@@ -145,7 +150,10 @@ export default async function handler(req, res) {
       const history = await readSubmissionRequestHistory();
       const request = history.find((row) => row.id === requestId);
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
-      if (request.status !== "pending" || request.reachedOut) {
+      if (
+        request.status !== "pending" ||
+        (request.reachedOut && !paraformCandidateRecipientPremark(request))
+      ) {
         return res.status(409).json({ ok: false, error: "request_not_pending_unreached" });
       }
       let result;
@@ -177,6 +185,59 @@ export default async function handler(req, res) {
         deliveryMode: result.deliveryMode || result.match?.deliveryMode || null,
         mailroomRowId:
           result.sent?.mailroomRowId || result.match?.mailroomRowId || null,
+        followup: null,
+      });
+    }
+    if (action === "send-request-bundle-via-mailroom") {
+      const requestIds = (Array.isArray(body.requestIds) ? body.requestIds : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      const recipientEmail = String(body.recipientEmail || "").trim().toLowerCase();
+      let expectedConfirmation = null;
+      try {
+        expectedConfirmation = mailroomMatchBundleConfirmation(requestIds, {
+          recipientEmail,
+        });
+      } catch {
+        return res.status(400).json({ ok: false, error: "bundle_manifest_invalid" });
+      }
+      if (body.confirmation !== expectedConfirmation) {
+        return res.status(400).json({ ok: false, error: "confirmation_required" });
+      }
+      const config = outreachConfig();
+      if (!outreachExecutionEnabled(config)) {
+        return res.status(503).json({ ok: false, error: "outreach_gates_closed" });
+      }
+      const history = await readSubmissionRequestHistory();
+      const requests = requestIds.map((requestId) => (
+        history.find((row) => row.id === requestId)
+      ));
+      if (requests.some((request) => !request)) {
+        return res.status(404).json({ ok: false, error: "request_not_found" });
+      }
+      let result;
+      try {
+        result = await processMatchRequestBundleViaMailroom(requests, history, {
+          config,
+          contactOverride: { email: recipientEmail },
+        });
+      } catch (error) {
+        await Promise.all(requests.map((request) => (
+          handleOutreachFailure(error, request, { config }).catch(() => {})
+        )));
+        throw error;
+      }
+      return res.status(200).json({
+        ok: true,
+        action: result.action,
+        requestIds,
+        transport: result.transport,
+        deliveryMode: result.deliveryMode,
+        mailroomRowId:
+          result.sent?.mailroomRowId || result.match?.mailroomRowId || null,
+        providerMessageId:
+          result.sent?.providerMessageId || result.match?.providerMessageId || null,
+        subject: result.copy?.subject || result.state?.threadSubject || null,
         followup: null,
       });
     }
@@ -229,7 +290,10 @@ export default async function handler(req, res) {
       const history = await readSubmissionRequestHistory();
       const request = history.find((row) => row.id === requestId);
       if (!request) return res.status(404).json({ ok: false, error: "request_not_found" });
-      if (request.status !== "pending" || request.reachedOut) {
+      if (
+        request.status !== "pending" ||
+        (request.reachedOut && !paraformCandidateRecipientPremark(request))
+      ) {
         return res.status(409).json({ ok: false, error: "request_not_pending_unreached" });
       }
       let result;

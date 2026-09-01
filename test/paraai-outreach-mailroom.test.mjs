@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deliverViaMailroomRelief,
+  mailroomMatchBundleConfirmation,
   mailroomReliefConfirmation,
   mailroomReliefConfig,
   mailroomReliefDedupeKey,
@@ -14,6 +15,7 @@ import {
   normalizeOperatorContactOverride,
   OPERATOR_CONFIRMED_NO_DIGEST_REASON,
   planDeliveredMatch,
+  planDeliveredMatchBundle,
 } from "../api/paraai/_lib/outreach.mjs";
 
 const config = {
@@ -57,6 +59,12 @@ test("mailroom relief configuration is explicit and dedupe is request-scoped", (
       withoutDigest: true,
     }),
     "SEND VIA MAILROOM req-1 TO candidate@example.com WITHOUT DIGEST",
+  );
+  assert.equal(
+    mailroomMatchBundleConfirmation(["req-2", "req-1"], {
+      recipientEmail: "Candidate@Example.com",
+    }),
+    "SEND BUNDLE VIA MAILROOM req-1,req-2 TO candidate@example.com",
   );
 });
 
@@ -250,4 +258,73 @@ test("operator-confirmed no-digest relief has a distinct durable audit mode", ()
   );
   assert.equal(planned.matches["req-6"].digestOmitted, true);
   assert.equal(planned.followup, null);
+});
+
+test("one Mailroom bundle receipt is linked to both requests without a follow-up", () => {
+  const requests = [
+    {
+      id: "req-b",
+      candidateUserId: "candidate-bundle",
+      roleId: "role-b",
+      roleName: "Chief of Staff",
+      companyName: "InFrame Risk",
+      createdAtMs: 2,
+    },
+    {
+      id: "req-a",
+      candidateUserId: "candidate-bundle",
+      roleId: "role-a",
+      roleName: "Chief of Staff",
+      companyName: "Halluminate",
+      createdAtMs: 1,
+    },
+  ];
+  const bundleActionKey = "match-bundle:req-a,req-b";
+  const planned = planDeliveredMatchBundle({
+    candidateUserId: "candidate-bundle",
+    revision: 3,
+    journal: [],
+    matches: {},
+    outbox: {
+      [bundleActionKey]: {
+        status: "claimed",
+        requestIds: ["req-a", "req-b"],
+      },
+    },
+    followup: { ownerMatchId: "older-request" },
+  }, {
+    requests,
+    history: requests,
+    digest: {
+      digestId: "digest-bundle",
+      digestUrl: "https://www.paraform.com/digest/digest-bundle",
+    },
+    copy: {
+      subject: "2 Interview Requests - Halluminate + InFrame Risk 🎉",
+      variant: "bundle_exact",
+    },
+    sent: {
+      providerMessageId: "sendgrid-provider-bundle",
+      mailroomRowId: 2500,
+    },
+    sentAt: "2026-09-01T18:00:00.000Z",
+    messageId: "<bundle-message>",
+    bundleActionKey,
+  });
+
+  assert.equal(planned.followup, null);
+  for (const requestId of ["req-a", "req-b"]) {
+    assert.equal(planned.matches[requestId].deliveryMode, "digest_bundle");
+    assert.equal(planned.matches[requestId].providerMessageId, "sendgrid-provider-bundle");
+    assert.equal(planned.matches[requestId].mailroomRowId, 2500);
+    assert.equal(planned.matches[requestId].bundleActionKey, bundleActionKey);
+    assert.deepEqual(planned.matches[requestId].bundleRequestIds, ["req-a", "req-b"]);
+    assert.equal(planned.outbox[`match:${requestId}`].mailroomRowId, 2500);
+  }
+  assert.equal(planned.outbox[bundleActionKey].status, "delivered");
+  assert.equal(planned.outbox[bundleActionKey].mailroomRowId, 2500);
+  assert.equal(
+    planned.journal.filter((event) => event.event === "match_bundle_delivered").length,
+    1,
+  );
 });
