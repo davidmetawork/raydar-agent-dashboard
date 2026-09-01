@@ -17,3 +17,10 @@ test("Master Inbox rows and embedded reader have bounded, non-overlapping layout
   assert.match(source, /\.embedded \.app\{max-width:none;height:100vh/);
   assert.match(source, /\.meta strong,\.meta small\{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis\}/);
 });
+
+test("Master Inbox decodes provider text entities before safely rendering previews", () => {
+  assert.match(source, /const displayText=value=>/);
+  assert.match(source, /esc\(displayText\(row\.subject/);
+  assert.match(source, /esc\(displayText\(row\.snippet\)\)/);
+  assert.match(source, /esc\(displayText\(thread\.subject/);
+});
