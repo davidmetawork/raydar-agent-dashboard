@@ -97,6 +97,66 @@ export function initialMatchCopy({
   };
 }
 
+export function matchBundleCopy({ firstName, requests, digestUrl }) {
+  const first = clean(firstName) || "there";
+  const rows = (Array.isArray(requests) ? requests : []).map((request) => ({
+    roleName: clean(request?.roleName),
+    companyName: clean(request?.companyName),
+    roleUrl: clean(request?.roleUrl),
+  }));
+  if (rows.length < 2 || rows.some((row) => (
+    !row.roleName || !row.companyName || !row.roleUrl
+  ))) {
+    throw new Error("at least two complete interview requests are required");
+  }
+  const companies = rows.map((row) => row.companyName);
+  const subject = `${rows.length} Interview Requests - ${companies.join(" + ")} 🎉`;
+  const digestLabel = digestLinkLabel(first);
+  const textLines = [
+    `Hey ${first},`,
+    "",
+    `You have ${rows.length} interview requests:`,
+    "",
+    ...rows.flatMap((row, index) => [
+      `${index + 1}. ${row.roleName} @ ${row.companyName} (${row.roleUrl})`,
+      ...(index < rows.length - 1 ? [""] : []),
+    ]),
+    "",
+    "Both teams think your background could be a really strong fit.",
+    "",
+    "Would you be open to connecting with either or both teams to learn more?",
+  ];
+  if (clean(digestUrl)) {
+    textLines.push(
+      "",
+      `I am keeping all of your requests together here: ${digestLabel} (${clean(digestUrl)})`,
+    );
+  }
+  textLines.push("", "Let me know!", "", "Thanks,", "David");
+
+  const htmlLines = [
+    `Hey ${escapeHtml(first)},`,
+    `You have ${rows.length} interview requests:`,
+    ...rows.map((row, index) => (
+      `${index + 1}. ${anchor(`${row.roleName} @ ${row.companyName}`, row.roleUrl)}`
+    )),
+    "Both teams think your background could be a really strong fit.",
+    "Would you be open to connecting with either or both teams to learn more?",
+  ];
+  if (clean(digestUrl)) {
+    htmlLines.push(
+      `I am keeping all of your requests together here: ${anchor(digestLabel, digestUrl)}`,
+    );
+  }
+  htmlLines.push("Let me know!", "Thanks,<br>David");
+  return {
+    subject,
+    text: textLines.join("\n"),
+    html: paragraphHtml(htmlLines),
+    variant: "bundle_exact",
+  };
+}
+
 const LATER_MATCH_VARIANTS = Object.freeze([
   {
     opening: (role) => `Another interview request just came in for the ${role}`,

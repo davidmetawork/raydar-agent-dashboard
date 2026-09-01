@@ -39,6 +39,22 @@ export function mailroomReliefConfirmation(
   ].join(" ");
 }
 
+export function mailroomMatchBundleConfirmation(
+  requestIds,
+  { recipientEmail = "" } = {},
+) {
+  const ids = (Array.isArray(requestIds) ? requestIds : [])
+    .map(clean)
+    .filter(Boolean)
+    .sort();
+  const email = clean(recipientEmail).toLowerCase();
+  if (ids.length < 2 || new Set(ids).size !== ids.length) {
+    throw new Error("at least two unique requestIds required");
+  }
+  if (!email) throw new Error("recipientEmail required");
+  return `SEND BUNDLE VIA MAILROOM ${ids.join(",")} TO ${email}`;
+}
+
 export class OutreachMailroomError extends Error {
   constructor(code, detail = "", status = null) {
     super(`${code}${detail ? `:${detail}` : ""}`);

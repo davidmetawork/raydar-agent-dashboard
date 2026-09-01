@@ -14,6 +14,7 @@ import {
   followupCopy,
   initialMatchCopy,
   initialSubject,
+  matchBundleCopy,
   roleShareUrl,
 } from "./outreach-copy.mjs";
 import {
@@ -21,6 +22,7 @@ import {
   candidateRepliedAfter,
   createReviewDraft,
   deliverMessage,
+  deterministicActionId,
   deterministicMessageId,
   findDigestThread,
   firstDeliveredInternalDate,
@@ -1652,6 +1654,312 @@ export async function processMatchRequest(
     throw error;
   } finally {
     await releaseOutreachLock(request.candidateUserId, lockToken).catch(() => {});
+  }
+}
+
+function bundleActionKeyFor(requests) {
+  const requestIds = requests.map((request) => clean(request?.id)).sort();
+  return `match-bundle:${requestIds.join(",")}`;
+}
+
+export function planDeliveredMatchBundle(state, {
+  requests,
+  history,
+  digest,
+  copy,
+  sent,
+  sentAt,
+  messageId,
+  bundleActionKey,
+}) {
+  const bundleRequestIds = requests.map((request) => request.id).sort();
+  let next = state;
+  for (const request of requests) {
+    next = planDeliveredMatch(next, {
+      request,
+      ordinal: requestOrdinal(request, history),
+      roleUrl: roleShareUrl(request),
+      digest,
+      copy,
+      sent,
+      sentAt,
+      messageId,
+      deliveryMode: "digest_bundle",
+      transport: "mailroom-sendgrid",
+      armFollowup: false,
+    });
+  }
+  const providerMessageId = sent?.providerMessageId || sent?.id || null;
+  const matchPatch = {};
+  const outboxPatch = {};
+  for (const requestId of bundleRequestIds) {
+    matchPatch[requestId] = {
+      ...next.matches?.[requestId],
+      bundleActionKey,
+      bundleRequestIds,
+      reachedOutVerifiedAt: sentAt,
+    };
+    outboxPatch[`match:${requestId}`] = {
+      ...next.outbox?.[`match:${requestId}`],
+      bundleActionKey,
+      bundleRequestIds,
+    };
+  }
+  next = {
+    ...next,
+    matches: { ...(next.matches || {}), ...matchPatch },
+    outbox: {
+      ...(next.outbox || {}),
+      ...outboxPatch,
+      [bundleActionKey]: {
+        ...(next.outbox?.[bundleActionKey] || {}),
+        status: "delivered",
+        requestIds: bundleRequestIds,
+        messageId,
+        deliveredAt: sentAt,
+        deliveryMode: "digest_bundle",
+        transport: "mailroom-sendgrid",
+        providerMessageId,
+        mailroomRowId: sent?.mailroomRowId || null,
+        copyVariant: copy.variant,
+      },
+    },
+    followup: null,
+  };
+  next = appendOutreachJournal(next, "match_bundle_delivered", {
+    requestIds: bundleRequestIds,
+    deliveryMode: "digest_bundle",
+    transport: "mailroom-sendgrid",
+    providerMessageId,
+    mailroomRowId: sent?.mailroomRowId || null,
+    followupSuppressed: true,
+  });
+  for (const requestId of bundleRequestIds) {
+    next = appendOutreachJournal(next, "paraform_reached_out_already_visible", {
+      requestId,
+      bundleActionKey,
+    });
+  }
+  return next;
+}
+
+// Operator-only recovery for multiple requests that Paraform premarked as
+// reached-out in the creation transaction. One deterministic Mailroom row is
+// the delivery truth; every request is linked to that same receipt and no
+// automatic follow-up is armed because Mailroom does not ingest replies.
+export async function processMatchRequestBundleViaMailroom(
+  requests,
+  history,
+  {
+    config = outreachConfig(),
+    contactOverride = null,
+    deliveryImpl = deliverViaMailroomRelief,
+  } = {},
+) {
+  if (OUTREACH_INCIDENT_HALT) {
+    const error = new Error("Para AI outreach sending is halted (2026-07-20 Kyra incident)");
+    error.code = "OUTREACH_HALTED";
+    throw error;
+  }
+  const rows = Array.isArray(requests) ? requests : [];
+  const requestIds = rows.map((request) => clean(request?.id));
+  const candidateUserIds = new Set(rows.map((request) => clean(request?.candidateUserId)));
+  if (
+    rows.length < 2 ||
+    rows.length > 5 ||
+    requestIds.some((id) => !id) ||
+    new Set(requestIds).size !== rows.length ||
+    candidateUserIds.size !== 1 ||
+    rows.some((request) => (
+      lower(request?.status) !== "pending" ||
+      !paraformCandidateRecipientPremark(request) ||
+      protectedRecruiterForRoleTitle(request.roleName)
+    ))
+  ) {
+    const error = new Error(
+      "bundle recovery requires 2-5 unique pending candidate-recipient premarks for one candidate",
+    );
+    error.code = "OUTREACH_BUNDLE_INVALID";
+    throw error;
+  }
+  if (!contactOverride) {
+    const error = new Error("bundle recovery requires an operator-confirmed recipient");
+    error.code = "OUTREACH_OPERATOR_EMAIL_OVERRIDE_INVALID";
+    throw error;
+  }
+
+  const candidateUserId = rows[0].candidateUserId;
+  const bundleActionKey = bundleActionKeyFor(rows);
+  const bundleDeliveryRequestId = deterministicActionId(bundleActionKey);
+  const messageId = deterministicMessageId(bundleActionKey);
+  const lockToken = await acquireOutreachLock(candidateUserId);
+  if (!lockToken) {
+    const error = new Error("candidate outreach is already being processed");
+    error.code = "OUTREACH_BUSY";
+    throw error;
+  }
+  let state = null;
+  let attemptStage = "contact_discovery";
+  try {
+    const contact = await candidateContact(rows[0], config, contactOverride);
+    attemptStage = "exception_resolution";
+    await Promise.all(rows.map((request) => resolveOutreachException(request.id, {
+      resolution: contact.source,
+      onlyCodes: ["OUTREACH_NO_EMAIL", "OUTREACH_EMAIL_BOUNCED"],
+    }).catch(() => {})));
+
+    attemptStage = "state_load";
+    state = await getOutreachState(candidateUserId);
+    if (!state) {
+      attemptStage = "state_create";
+      state = await createOutreachState(candidateUserId, {
+        candidateName: contact.name || rows[0].candidateName,
+        candidateEmail: contact.email,
+        candidateEmailSource: contact.source,
+      });
+    }
+    state = {
+      ...state,
+      candidateName: contact.name || rows[0].candidateName,
+      candidateEmail: contact.email,
+      candidateEmailSource: contact.source,
+    };
+    const conflicting = rows.find((request) => {
+      const match = state.matches?.[request.id];
+      return match?.sentAt && match.bundleActionKey !== bundleActionKey;
+    });
+    if (conflicting) {
+      const error = new Error(`request ${conflicting.id} already has a different delivery`);
+      error.code = "OUTREACH_ALREADY_DELIVERED";
+      throw error;
+    }
+    const deliveredMatches = rows.filter((request) => state.matches?.[request.id]?.sentAt);
+    if (deliveredMatches.length === rows.length) {
+      return {
+        action: "existing",
+        requests: rows,
+        state,
+        match: state.matches[rows[0].id],
+        transport: "mailroom-sendgrid",
+        deliveryMode: "digest_bundle",
+      };
+    }
+
+    attemptStage = "digest_mutation";
+    const digests = [];
+    for (const request of rows) digests.push(await ensureMatchDigest(request));
+    const digestIds = new Set(digests.map((digest) => clean(digest?.digestId)));
+    if (digestIds.size !== 1 || digestIds.has("")) {
+      const error = new Error("bundle requests did not resolve to one visible digest");
+      error.code = "OUTREACH_BUNDLE_DIGEST_MISMATCH";
+      throw error;
+    }
+    const digest = digests[0];
+    const copy = matchBundleCopy({
+      firstName: firstName(contact.name || rows[0].candidateName),
+      requests: rows.map((request) => ({ ...request, roleUrl: roleShareUrl(request) })),
+      digestUrl: digest.digestUrl,
+    });
+    const message = {
+      actionKey: bundleActionKey,
+      from: `David Phillips <${config.mailbox}>`,
+      to: contact.email,
+      subject: copy.subject,
+      messageId,
+      bodyText: copy.text,
+      bodyHtml: copy.html,
+    };
+    const previousOutbox = state.outbox?.[bundleActionKey] || {};
+    const claimed = appendOutreachJournal({
+      ...state,
+      digestId: digest.digestId,
+      digestUrl: digest.digestUrl,
+      threadSubject: state.threadSubject || message.subject,
+      outbox: {
+        ...(state.outbox || {}),
+        [bundleActionKey]: {
+          ...previousOutbox,
+          status: "claimed",
+          requestIds: [...requestIds].sort(),
+          messageId,
+          claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
+          deliveryMode: "digest_bundle",
+          transport: "mailroom-sendgrid",
+        },
+      },
+    }, "mailroom_bundle_delivery_claimed", {
+      requestIds: [...requestIds].sort(),
+      deliveryMode: "digest_bundle",
+      transport: "mailroom-sendgrid",
+    });
+    attemptStage = "outbox_claim";
+    state = await saveOutreachState(claimed, state.revision);
+
+    attemptStage = "mailroom_delivery";
+    let sent;
+    try {
+      sent = await deliveryImpl({
+        message,
+        requestId: bundleDeliveryRequestId,
+        candidateName: contact.name || rows[0].candidateName,
+      });
+    } catch (error) {
+      await saveUncertainOutbox(
+        state,
+        bundleActionKey,
+        messageId,
+        error,
+        { transport: "mailroom-sendgrid" },
+      );
+      throw error;
+    }
+    const sentAt = sent?.sentAt || new Date().toISOString();
+    state = await saveOutreachState(planDeliveredMatchBundle(state, {
+      requests: rows,
+      history,
+      digest,
+      copy,
+      sent,
+      sentAt,
+      messageId,
+      bundleActionKey,
+    }), state.revision);
+
+    await Promise.all(rows.map((request) => resolveOutreachException(request.id, {
+      resolution: "sent",
+    }).catch(() => {})));
+    attemptStage = "complete";
+    return {
+      action: "sent",
+      requests: rows,
+      digest,
+      copy,
+      message,
+      sent,
+      state,
+      bundleActionKey,
+      bundleDeliveryRequestId,
+      deliveryMode: "digest_bundle",
+      transport: "mailroom-sendgrid",
+    };
+  } catch (error) {
+    const stage = clean(error?.outreachStage || attemptStage || "unknown");
+    error.outreachStage ||= stage;
+    const current = await getOutreachState(candidateUserId).catch(() => null);
+    if (current) {
+      await saveOutreachState(appendOutreachJournal(
+        current,
+        "match_bundle_attempt_failed",
+        {
+          requestIds: [...requestIds].sort(),
+          code: clean(error?.code || "OUTREACH_FAILED"),
+          stage,
+        },
+      ), current.revision).catch(() => null);
+    }
+    throw error;
+  } finally {
+    await releaseOutreachLock(candidateUserId, lockToken).catch(() => {});
   }
 }
 

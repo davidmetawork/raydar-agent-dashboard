@@ -8,6 +8,7 @@ import {
   followupCopy,
   initialMatchCopy,
   initialSubject,
+  matchBundleCopy,
   roleShareUrl,
 } from "../api/paraai/_lib/outreach-copy.mjs";
 import {
@@ -185,6 +186,32 @@ test("first-match copy preserves the approved wording and links", () => {
   assert.match(copy.html, /<a href="https:\/\/www\.paraform\.com\/digest\/digest-12345678">Amy's Interview Requests<\/a>/);
   assert.doesNotMatch(copy.html, />https:\/\/www\.paraform\.com\/digest\//);
   assert.equal(digestLinkLabel("Amy"), "Amy's Interview Requests");
+});
+
+test("bundle copy puts two interview requests into one exact email", () => {
+  const copy = matchBundleCopy({
+    firstName: "Christian",
+    requests: [
+      {
+        roleName: "Chief of Staff",
+        companyName: "Halluminate",
+        roleUrl: "https://www.paraform.com/share/halluminate/role-1",
+      },
+      {
+        roleName: "Chief of Staff",
+        companyName: "InFrame Risk",
+        roleUrl: "https://www.paraform.com/share/inframe-risk/role-2",
+      },
+    ],
+    digestUrl: "https://www.paraform.com/digest/digest-1",
+  });
+  assert.equal(copy.subject, "2 Interview Requests - Halluminate + InFrame Risk 🎉");
+  assert.equal(copy.variant, "bundle_exact");
+  assert.equal(copy.text.match(/^Hey Christian,$/gm)?.length, 1);
+  assert.equal(copy.text.match(/^Thanks,$/gm)?.length, 1);
+  assert.match(copy.text, /1\. Chief of Staff @ Halluminate \(https:\/\/www\.paraform\.com\/share\/halluminate\/role-1\)/);
+  assert.match(copy.text, /2\. Chief of Staff @ InFrame Risk \(https:\/\/www\.paraform\.com\/share\/inframe-risk\/role-2\)/);
+  assert.match(copy.text, /Christian's Interview Requests \(https:\/\/www\.paraform\.com\/digest\/digest-1\)/);
 });
 
 test("expired first-match override keeps the role link and omits unavailable digest language", () => {
