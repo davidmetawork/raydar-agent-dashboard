@@ -24,3 +24,14 @@ test("Master Inbox decodes provider text entities before safely rendering previe
   assert.match(source, /esc\(displayText\(row\.snippet\)\)/);
   assert.match(source, /esc\(displayText\(thread\.subject/);
 });
+
+test("Master Inbox composer can close before required fields are filled", () => {
+  assert.match(source, /value="cancel" formnovalidate aria-label="Close"/);
+});
+
+test("Master Inbox collapses RFC-identical mailbox copies only in the read view", () => {
+  assert.match(source, /function logicalMessages\(messages\)/);
+  assert.match(source, /message\.rfc_message_id\?`rfc:/);
+  assert.match(source, /const threadMessages=logicalMessages\(thread\.messages\|\|\[\]\)/);
+  assert.match(source, /const threadTargets=\(STATE\.thread\?\.messages\|\|\[\]\)/);
+});
