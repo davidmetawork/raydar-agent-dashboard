@@ -24,3 +24,7 @@ test("Master Inbox decodes provider text entities before safely rendering previe
   assert.match(source, /esc\(displayText\(row\.snippet\)\)/);
   assert.match(source, /esc\(displayText\(thread\.subject/);
 });
+
+test("Master Inbox composer can close before required fields are filled", () => {
+  assert.match(source, /value="cancel" formnovalidate aria-label="Close"/);
+});
