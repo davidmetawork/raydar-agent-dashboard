@@ -4,8 +4,9 @@
 // (acks), and prewarms complete applicant profile JSONs (profiles → the
 // apphub:profile:* cache keys plus the apphub:photos and apphub:cards
 // hashes — cards are the compact list-row projection of the same profiles).
-// GET: the loop pulls human "interview" approvals it has not yet
-// acknowledged. Shared-secret auth (APPHUB_SYNC_KEY), never requireAuth — the
+// GET: Applicant Core pulls every unacknowledged human decision while legacy
+// callers retain their narrower interview-only approvals field; shared-secret
+// auth (APPHUB_SYNC_KEY), never requireAuth — the
 // caller is a launchd cron, not a browser (pattern: api/health/beat.mjs).
 // 401 carries no detail on purpose.
 
@@ -259,9 +260,11 @@ export function createSyncHandler({
           readHash(K.decisions),
           readHash(K.acks),
         ]);
-        const approvals = Object.entries(decisions)
-          .filter(([key, decision]) => decision?.action === "interview" && !acks[key])
+        const decisionRecords = Object.entries(decisions)
+          .filter(([key, decision]) =>
+            ["interview", "pass"].includes(decision?.action) && !acks[key])
           .map(([key, decision]) => ({ key, ...decision }));
+        const approvals = decisionRecords.filter(({ action }) => action === "interview");
         // `decisions` is deliberately narrow — un-acked interviews, the only
         // thing the loop's next plan has to ACT on. `decidedKeys` is the wider
         // question the loop also needs answered: which rows has a human (or an
@@ -283,6 +286,7 @@ export function createSyncHandler({
           ok: true,
           generatedAt: now(),
           decisions: approvals,
+          decisionRecords,
           decidedKeys: Object.keys(decisions),
         });
       }

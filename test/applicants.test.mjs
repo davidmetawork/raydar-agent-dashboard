@@ -204,7 +204,7 @@ test("sync validates every ack key and status before writing any", async () => {
   });
 });
 
-test("sync GET returns only un-acked interview approvals", async () => {
+test("sync GET preserves legacy approvals and exposes all un-acked Core decisions", async () => {
   process.env.APPHUB_SYNC_KEY = KEY;
   const { deps } = fakeStore({
     "apphub:decisions": {
@@ -226,6 +226,21 @@ test("sync GET returns only un-acked interview approvals", async () => {
     at: "2026-08-09T00:01:00.000Z",
     by: "hi@davidphillips.world",
   }]);
+  assert.deepEqual(res.body.decisionRecords, [
+    {
+      key: "cu1:role1",
+      action: "interview",
+      at: "2026-08-09T00:01:00.000Z",
+      by: "hi@davidphillips.world",
+    },
+    {
+      key: "cu2:role1",
+      action: "pass",
+      at: "2026-08-09T00:02:00.000Z",
+      by: "hi@davidphillips.world",
+    },
+  ]);
+  assert.deepEqual(res.body.decidedKeys, ["cu1:role1", "cu2:role1", "cu3:role2"]);
 });
 
 function decisionSetup({ ack = null } = {}) {
