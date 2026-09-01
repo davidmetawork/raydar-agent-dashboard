@@ -406,6 +406,7 @@
           <div class="rail-title">People</div>
           <a class="tab" id="tab-applicants" href="#applicants" onclick="return tabClick(event,'applicants')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.25"/><path d="M3.5 19.5c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><path d="M15.5 5.4a3.25 3.25 0 0 1 0 5.2M17.6 14.9c1.6.7 2.6 2.2 2.9 4.6"/></svg></span><span class="lbl">Applicants</span> <span class="badge good" id="applicants-badge" style="display:none"></span></a>
           <a class="tab" id="tab-submissions" href="#submissions" onclick="return tabClick(event,'submissions')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5h10M4 11.5h8M4 16.5h6"/><path d="m14 16 2.5 2.5L21 13"/></svg></span><span class="lbl">Submissions</span></a>
+          <a class="tab" id="tab-review" href="#review" onclick="return tabClick(event,'review')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5v-1h6v1M8.5 10h7M8.5 14h4"/><path d="m14.5 16 1.5 1.5 3-3"/></svg></span><span class="lbl">Review</span></a>
           <a class="tab" id="tab-followups" href="#followups" onclick="return tabClick(event,'followups')"><span class="ric"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 9a8.5 8.5 0 1 1 2 5.5"/><path d="M3.5 9V4.5M3.5 9H8"/></svg></span><span class="lbl">Follow-ups</span> <span class="badge" id="fu-badge" style="display:none"></span></a>
           <!-- Candidates is hidden from the nav, not deleted: the roster view and the
                #candidates deep link still work, and showView() expects a tab element
@@ -518,6 +519,10 @@
 
     <div id="view-submissions" hidden>
       <iframe id="submissions-frame" title="Submissions" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
+    </div>
+
+    <div id="view-review" hidden>
+      <iframe id="review-frame" title="Review" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
     </div>
 
     <div id="view-followups" hidden>
@@ -1329,7 +1334,7 @@
       why ? `<span class="fu-why${why.cls?" "+why.cls:""}" title="${cdEsc(why.title)}">${esc(why.label)}</span>` : "";
     /* END:LIFECYCLE-FOLLOWUP-STATE */
 
-    let applicantsLoaded=false, submissionsLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, masterInboxLoaded=false, enrichLoaded=false, healthLoaded=false, emailsLoaded=false, statusLoaded=false, homeLoaded=false;
+    let applicantsLoaded=false, submissionsLoaded=false, reviewLoaded=false, seqLoaded=false, activityLoaded=false, inboxLoaded=false, masterInboxLoaded=false, enrichLoaded=false, healthLoaded=false, emailsLoaded=false, statusLoaded=false, homeLoaded=false;
     // Same order as the nav, so the two stay readable together. "home" must
     // stay first — RaydarNav falls back to names[0] for an unknown #hash, and
     // Home is the landing surface, so a bare monitor.raydar.xyz lands on the
@@ -1338,7 +1343,7 @@
     // bookmark and cross-page link still resolves.
     // "candidates" is last because its tab is hidden; the view and #candidates
     // deep link still work.
-    const VIEWS=["home","master-inbox","overview","applicants","submissions","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","emails","status","candidates"];
+    const VIEWS=["home","master-inbox","overview","applicants","submissions","review","inbox","activity","followups","history","analytics","calls","sequences","enrich","health","emails","status","candidates"];
     let currentView="home";
     // Tabs are real links (href="#activity", …) so they can be right-clicked or
     // ⌘-clicked into a new tab. A plain left click stays in this page; anything
@@ -1362,6 +1367,13 @@
       const height=Math.max(900,Math.min(12000,Number(event.data.height)||0));
       frame.style.height=height+"px";
     });
+    window.addEventListener("message",(event)=>{
+      if(event.origin!==location.origin) return;
+      const frameId=event.data?.type==="raydar-review-height"?"review-frame":null;
+      if(!frameId) return;
+      const height=Math.max(900,Math.min(12000,Number(event.data.height)||0));
+      $(frameId).style.height=height+"px";
+    });
     // record=false means "the browser moved us here" (a back/forward gesture or
     // a deep link on load) — restore the view without writing history again.
     function showView(name,record){
@@ -1377,6 +1389,7 @@
       if(name==="master-inbox" && !masterInboxLoaded){ $("master-inbox-frame").src=frameSrc("/master-inbox","master-inbox"); masterInboxLoaded=true; }
       if(name==="applicants" && !applicantsLoaded){ $("applicants-frame").src=frameSrc("/applicants","applicants"); applicantsLoaded=true; }
       if(name==="submissions" && !submissionsLoaded){ $("submissions-frame").src=frameSrc("/submissions","submissions"); submissionsLoaded=true; }
+      if(name==="review" && !reviewLoaded){ $("review-frame").src=frameSrc("/review","review"); reviewLoaded=true; }
       if(name==="sequences" && !seqLoaded){ $("seq-frame").src=frameSrc("/sequences","sequences"); seqLoaded=true; }
       if(name==="activity" && !activityLoaded){ $("activity-frame").src=frameSrc("/activity","activity"); activityLoaded=true; }
       if(name==="inbox" && !inboxLoaded){ $("inbox-frame").src=frameSrc("/inbox","inbox"); inboxLoaded=true; }
@@ -2456,6 +2469,7 @@
       {name:"activity",label:"Activity",group:"Live"},
       {name:"applicants",label:"Applicants",group:"People"},
       {name:"submissions",label:"Submissions",group:"People"},
+      {name:"review",label:"Review",group:"People"},
       {name:"followups",label:"Follow-ups",group:"People"},
       {name:"candidates",label:"Candidates",group:"People"},
       {name:"sequences",label:"Sequences",group:"Outreach"},
@@ -2465,6 +2479,7 @@
       {name:"history",label:"History",group:"Intelligence"},
       {name:"calls",label:"Calls",group:"Intelligence"},
       {name:"health",label:"Health",group:"System"},
+      {name:"emails",label:"Emails",group:"System"},
       {name:"status",label:"Status",group:"System"},
     ];
     let rkSel=0, rkMatches=RK_ITEMS, rkPrevFocus=null;
