@@ -38,7 +38,15 @@ function equalSecret(left, right) {
   const b = Buffer.from(String(right || ""));
   return a.length > 0 && a.length === b.length && timingSafeEqual(a, b);
 }
-async function authorized(req, res) {
+function bundleRecoveryAuthorized(req, body) {
+  if (body?.action !== "send-request-bundle-via-mailroom") return false;
+  const configured = String(process.env.PARAAI_OUTREACH_BUNDLE_RECOVERY_KEY || "");
+  const provided = String(req.headers?.["x-paraai-bundle-recovery-key"] || "");
+  return configured.length >= 32 && equalSecret(provided, configured);
+}
+
+async function authorized(req, res, body = null) {
+  if (bundleRecoveryAuthorized(req, body)) return true;
   const bearer = String(req.headers?.authorization || "").replace(/^Bearer\s+/i, "");
   if (
     bearer &&
@@ -62,7 +70,8 @@ export default async function handler(req, res) {
   if (!["GET", "POST"].includes(req.method)) {
     return res.status(405).json({ ok: false, error: "GET_or_POST_only" });
   }
-  if (!(await authorized(req, res))) return;
+  const requestBody = req.method === "POST" ? bodyOf(req) : null;
+  if (!(await authorized(req, res, requestBody))) return;
 
   try {
     if (req.method === "GET") {
@@ -77,7 +86,7 @@ export default async function handler(req, res) {
         exceptions,
       });
     }
-    const body = bodyOf(req);
+    const body = requestBody || {};
     const action = String(body.action || "");
     if (action === "tick") {
       return res.status(200).json({ ok: true, tick: await runOutreachTick() });
