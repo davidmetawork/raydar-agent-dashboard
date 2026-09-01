@@ -78,6 +78,12 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /Call attachment not confirmed/);
   assert.match(review, /identityChoice/);
   assert.match(review, /allowed\.has\("resume"\)&&!identityChoice/);
+  assert.match(review, /Search Paraform by name, email, or LinkedIn/);
+  assert.match(review, /Paste Paraform profile link/);
+  assert.match(review, /identitySearch=\$\{encodeURIComponent\(query\)\}/);
+  assert.match(review, /profileIdFromLink/);
+  assert.match(review, /runAction\("select_profile",\{candidateUserId\}\)/);
+  assert.match(reviewProxy, /identitySearch/);
 });
 
 test("Review proxy owns auth attribution and optimistic concurrency", () => {

@@ -144,6 +144,7 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const id = safeString(req.query?.id, 160);
+      const identitySearch = safeString(req.query?.identitySearch, 240);
       const status = OUTCOMES.has(String(req.query?.status || "open")) ? String(req.query.status || "open") : "open";
       const cursor = safeString(req.query?.cursor, 400);
       const limit = Math.max(1, Math.min(50, Number(req.query?.limit) || 50));
@@ -155,7 +156,7 @@ export default async function handler(req, res) {
       }
       const path = String(req.query?.metrics || "") === "1"
         ? "/api/v2/reviews/metrics"
-        : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
+        : id ? `/api/v2/reviews/${encodeURIComponent(id)}${identitySearch ? `?identitySearch=${encodeURIComponent(identitySearch)}` : ""}` : `/api/v2/reviews?${query}`;
       const { response, body } = await upstream(path, access, feedKey);
       return sendUpstream(res, response, body, access, { configured: true });
     }
