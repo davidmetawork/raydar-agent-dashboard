@@ -60,8 +60,12 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /item\.candidate\?\.displayName/);
   assert.match(review, /item\.blockers/);
   assert.match(review, /item\.sourceLinks/);
-  assert.match(review, /Technical evidence/);
-  assert.match(review, /metrics=1/);
+  assert.doesNotMatch(review, /Technical evidence/);
+  assert.doesNotMatch(review, /metrics=1/);
+  assert.doesNotMatch(review, /Short audit note/);
+  assert.doesNotMatch(review, /Save assignment/);
+  assert.doesNotMatch(review, /Save priority/);
+  assert.doesNotMatch(review, /Review queue summary/);
   assert.match(review, /All \(90 days\)/);
   assert.match(review, /item\.identityCandidates/);
   assert.match(review, /This call is attached/);
