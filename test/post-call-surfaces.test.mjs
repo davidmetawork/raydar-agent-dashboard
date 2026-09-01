@@ -82,6 +82,10 @@ test("Review renders only server-allowlisted actions and fields", () => {
 test("Review proxy owns auth attribution and optimistic concurrency", () => {
   assert.match(reviewProxy, /POST_CALL_BASE/);
   assert.match(reviewProxy, /POST_CALL_MONITOR_API_KEY/);
+  assert.match(reviewProxy, /POST_CALL_REVIEW_FEED_API_KEY/);
+  assert.match(reviewProxy, /POST_CALL_REVIEW_ACTION_API_KEY/);
+  assert.match(reviewProxy, /post_call_service_authorization_failed/);
+  assert.match(reviewProxy, /res\.status\(502\)/);
   assert.match(reviewProxy, /"x-raydar-actor-email": access\.email/);
   assert.match(reviewProxy, /"if-match": `"\$\{version\}"`/);
   assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/resume-files/);

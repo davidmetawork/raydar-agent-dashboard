@@ -25,11 +25,17 @@ function config() {
         allowedOrigins: process.env.POST_CALL_ALLOWED_ORIGINS,
         service: "post_call",
       }),
-      key: process.env.POST_CALL_MONITOR_API_KEY || "",
+      feedKey: process.env.POST_CALL_REVIEW_FEED_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "",
+      actionKey: process.env.POST_CALL_REVIEW_ACTION_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "",
       error: null,
     };
   } catch (error) {
-    return { base: "", key: process.env.POST_CALL_MONITOR_API_KEY || "", error: String(error?.message || error) };
+    return {
+      base: "",
+      feedKey: process.env.POST_CALL_REVIEW_FEED_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "",
+      actionKey: process.env.POST_CALL_REVIEW_ACTION_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "",
+      error: String(error?.message || error),
+    };
   }
 }
 
@@ -90,8 +96,8 @@ function validateChanges(action, changes) {
   return true;
 }
 
-async function upstream(path, access, init = {}) {
-  const { base, key } = config();
+async function upstream(path, access, key, init = {}) {
+  const { base } = config();
   const response = await fetch(`${base}${path}`, {
     ...init,
     redirect: "error",
@@ -112,6 +118,18 @@ function withActor(body, access) {
   return { ...body, actor: { email: access.email, role: access.role, capabilities: access.capabilities } };
 }
 
+function sendUpstream(res, response, body, access, extra = {}) {
+  if (response.status === 401 || response.status === 403) {
+    return res.status(502).json(withActor({
+      ok: false,
+      configured: true,
+      error: "post_call_service_authorization_failed",
+      detail: "The Review service could not authorize this request; nothing was changed.",
+    }, access));
+  }
+  return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, ...extra, ...body }, access));
+}
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!requireSameOrigin(req, res)) return;
@@ -119,8 +137,9 @@ export default async function handler(req, res) {
   const access = await requireReviewOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
   if (!access) return;
 
-  const { base, key, error: configError } = config();
-  if (!base || !key) return res.status(503).json({ ok: false, configured: false, error: "post_call_monitor_not_configured", detail: configError || undefined });
+  const { base, feedKey, actionKey, error: configError } = config();
+  const serviceKey = req.method === "GET" ? feedKey : actionKey;
+  if (!base || !serviceKey) return res.status(503).json({ ok: false, configured: false, error: "post_call_monitor_not_configured", detail: configError || undefined });
 
   try {
     if (req.method === "GET") {
@@ -137,8 +156,8 @@ export default async function handler(req, res) {
       const path = String(req.query?.metrics || "") === "1"
         ? "/api/v2/reviews/metrics"
         : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
-      const { response, body } = await upstream(path, access);
-      return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, configured: true, ...body }, access));
+      const { response, body } = await upstream(path, access, feedKey);
+      return sendUpstream(res, response, body, access, { configured: true });
     }
 
     if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method_not_allowed" });
@@ -158,12 +177,12 @@ export default async function handler(req, res) {
       if (!fileName || /[\\/\0]/.test(fileName) || !FILE_TYPES.has(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 25 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) {
         return res.status(400).json({ ok: false, error: "resume_metadata_invalid" });
       }
-      const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/resume-files`, access, {
+      const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/resume-files`, access, actionKey, {
         method: "POST",
         headers: { "if-match": `"${version}"` },
         body: JSON.stringify({ schemaVersion: 2, reviewId, fileName, mimeType, sizeBytes, sha256 }),
       });
-      return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, ...body }, access));
+      return sendUpstream(res, response, body, access);
     }
 
     if (!ACTIONS.has(action)) return res.status(400).json({ ok: false, error: "review_action_not_allowed" });
@@ -186,12 +205,12 @@ export default async function handler(req, res) {
     if (!validateChanges(action, changes)) return res.status(400).json({ ok: false, error: "review_value_invalid" });
     if (changes && Object.keys(changes).length) bodyOut.changes = changes;
     if (approveSend) bodyOut.approveSend = true;
-    const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/actions`, access, {
+    const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/actions`, access, actionKey, {
       method: "POST",
       headers: { "if-match": `"${version}"` },
       body: JSON.stringify(bodyOut),
     });
-    return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, ...body }, access));
+    return sendUpstream(res, response, body, access);
   } catch (error) {
     return res.status(502).json({ ok: false, configured: true, error: "post_call_proxy_failed", detail: String(error?.message || error).slice(0, 180) });
   }
