@@ -63,6 +63,11 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /Technical evidence/);
   assert.match(review, /metrics=1/);
   assert.match(review, /All \(90 days\)/);
+  assert.match(review, /item\.identityCandidates/);
+  assert.match(review, /This call is attached/);
+  assert.match(review, /This call is not attached/);
+  assert.match(review, /identityChoice/);
+  assert.match(review, /allowed\.has\("resume"\)&&!identityChoice/);
 });
 
 test("Review proxy owns auth attribution and optimistic concurrency", () => {
