@@ -10,7 +10,7 @@
 // caller is a launchd cron, not a browser (pattern: api/health/beat.mjs).
 // 401 carries no detail on purpose.
 
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { directoryFromFacts, factsFromProfile } from "./_lib/facts.mjs";
 import {
   getJson,
@@ -39,6 +39,14 @@ function authed(req) {
   const a = Buffer.from(provided);
   const b = Buffer.from(`Bearer ${secret}`);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function stableHash(value) {
+  const canonical = JSON.stringify(value, (_key, item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)));
+  });
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 // Accepts acks as `{key: record}` or `[{key, ...record}]`. All-or-nothing:
@@ -260,6 +268,23 @@ export function createSyncHandler({
           readHash(K.decisions),
           readHash(K.acks),
         ]);
+        if (String(req.query?.history || "") === "1") {
+          const orderedDecisions = Object.fromEntries(Object.entries(decisions).sort(([a], [b]) => a.localeCompare(b)));
+          const orderedAcks = Object.fromEntries(Object.entries(acks).sort(([a], [b]) => a.localeCompare(b)));
+          return res.status(200).json({
+            ok: true,
+            generatedAt: now(),
+            history: {
+              decisions: orderedDecisions,
+              acks: orderedAcks,
+              counts: {
+                decisions: Object.keys(orderedDecisions).length,
+                acks: Object.keys(orderedAcks).length,
+              },
+              digest: stableHash({ decisions: orderedDecisions, acks: orderedAcks }),
+            },
+          });
+        }
         const decisionRecords = Object.entries(decisions)
           .filter(([key, decision]) =>
             ["interview", "pass"].includes(decision?.action) && !acks[key])
