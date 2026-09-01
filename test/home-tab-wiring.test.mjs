@@ -25,7 +25,7 @@ test("every VIEWS entry has a nav anchor and a view container", () => {
 });
 
 test("every ⌘K palette entry is a real view", () => {
-  const palette = [...index.matchAll(/\{name:"([a-z]+)",label:"[^"]+",group:"[^"]+"\}/g)].map((m) => m[1]);
+  const palette = [...index.matchAll(/\{name:"([a-z-]+)",label:"[^"]+",group:"[^"]+"\}/g)].map((m) => m[1]);
   assert.ok(palette.length >= views.length - 1, "palette looks truncated");
   for (const name of palette) assert.ok(views.includes(name), `palette entry "${name}" is not in VIEWS`);
 });
