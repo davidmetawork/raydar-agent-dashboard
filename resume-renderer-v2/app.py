@@ -905,19 +905,28 @@ class ResumeLayout:
             for entry in row:
                 metric_node = entry["header"][0]
                 label_nodes = [*entry["header"][1:], *entry["body"]]
+                metric_width = card_width - 14
+                metric_size = 14.0
+                metric_words = re.findall(r"\S+", rendered_text(metric_node["text"]))
+                while metric_size > 7.5 and any(
+                    font_width(word, "Inter-Bold", metric_size) > metric_width
+                    for word in metric_words
+                ):
+                    metric_size -= 0.25
+                metric_leading = metric_size + 1.0
                 metric_lines = wrap_node(
-                    metric_node, card_width - 14, 14.0,
+                    metric_node, metric_width, metric_size,
                     regular_font="Inter-Bold", bold_font="Inter-Bold",
                 )
                 label_lines = [
                     (node, wrap_node(node, card_width - 14, 7.5), 7.5, 9.0)
                     for node in label_nodes[:2]
                 ]
-                height = 8 + len(metric_lines) * 15.0 + sum(len(lines) * leading + 1 for _, lines, _, leading in label_lines) + 7
-                measurements.append((entry, metric_node, metric_lines, label_lines, max(42.0, height)))
-            row_height = max(item[4] for item in measurements)
+                height = 8 + len(metric_lines) * metric_leading + sum(len(lines) * leading + 1 for _, lines, _, leading in label_lines) + 7
+                measurements.append((entry, metric_node, metric_lines, metric_size, metric_leading, label_lines, max(42.0, height)))
+            row_height = max(item[6] for item in measurements)
             page_index, cursor = advance(page_index, cursor, row_height)
-            for column, (_, metric_node, metric_lines, label_lines, _) in enumerate(measurements):
+            for column, (_, metric_node, metric_lines, metric_size, metric_leading, label_lines, _) in enumerate(measurements):
                 card_x = x + column * (card_width + gap)
                 page = self.pages[page_index]
                 page.operations.append({
@@ -926,7 +935,7 @@ class ResumeLayout:
                 })
                 text_top = cursor - 7
                 used = page.add_lines(
-                    x=card_x + 7, top=text_top, lines=metric_lines, size=14.0, leading=15.0,
+                    x=card_x + 7, top=text_top, lines=metric_lines, size=metric_size, leading=metric_leading,
                     color=VIOLET_TEXT, content_id=metric_node["id"],
                 )
                 text_top -= used + 2

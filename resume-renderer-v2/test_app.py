@@ -375,6 +375,50 @@ class RendererContractTests(unittest.TestCase):
         self.assertIn("STARTUP TO SCALE", rendered["pdfExtractedText"])
         self.assertIn("Startup to Scale", rendered["atsText"])
 
+        metric_ast = copy.deepcopy(ast)
+        metric_ast["sections"].append({
+            "id": "metric-section",
+            "title": "Impact",
+            "kind": "metrics",
+            "placement": "sidebar",
+            "entries": [{
+                "id": "metric-entry",
+                "header": [{
+                    "id": "metric-engineers",
+                    "text": "6 to 18 engineers",
+                    "claim_ids": ["claim-metric-engineers"],
+                    "emphasis": [],
+                }],
+                "body": [{
+                    "id": "metric-engineers-label",
+                    "text": "Team growth",
+                    "claim_ids": ["claim-metric-engineers-label"],
+                    "emphasis": [],
+                }],
+            }, {
+                "id": "metric-entry-two",
+                "header": [{
+                    "id": "metric-partners",
+                    "text": "40 locations",
+                    "claim_ids": ["claim-metric-partners"],
+                    "emphasis": [],
+                }],
+                "body": [{
+                    "id": "metric-partners-label",
+                    "text": "Partner reach",
+                    "claim_ids": ["claim-metric-partners-label"],
+                    "emphasis": [],
+                }],
+            }],
+        })
+        metric_rendered = app.render_request(request_for(
+            metric_ast, [
+                *claims, "claim-metric-engineers", "claim-metric-engineers-label",
+                "claim-metric-partners", "claim-metric-partners-label",
+            ], render_id="metric-render",
+        ))
+        self.assertTrue(metric_rendered["preflight"]["atsParity"])
+
         glyph_ast = copy.deepcopy(ast)
         glyph_ast["candidate"]["headline"]["text"] += " 🧭"
         with self.assertRaises(app.RenderError) as caught:
