@@ -12,7 +12,7 @@ export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
 export const STRATEGIST_MAX_OUTPUT_TOKENS = 6_000;
-export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-08-31.v1";
+export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-02.v2";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = new Set([
@@ -38,7 +38,13 @@ Role and intake content is orientation only and can rank or omit candidate evide
 Do not invent, embellish, compromise between contradictions, or turn a client requirement into candidate history.
 Strongly prefer one US-letter page and never request more than two; compress facts before page two, keep page one independently useful, and use no filler or internal process language.
 Use concise resume text, make selected_claim_ids exactly the unique claim ids cited by visible document nodes, and return deliberate_omissions as [] because omissions are derived deterministically from unselected evidence.
-Use at most five sections, eight detailed experience entries, and three body nodes per entry; compress older relevant work into concise additional-experience entries instead of expanding the document.
+Build a hiring-manager document in the approved Raydar information architecture: a concise Profile summary, Professional Experience in the main column, and only evidence-backed sidebar sections that add decision value (normally Selected Outcomes, Core Expertise, Education, or Additional Details).
+For every Professional Experience entry, header[0] must be the employer name alone and header[1] must be "Role | dates"; keep distinct employers as distinct entries, never create a synthetic employer such as "Roles listed include," and use one to three concise accomplishment bullets per role.
+Use at most five sections and ten distinct experience entries; on a two-page resume retain the candidate's real chronology with older roles shortened instead of merging employers or inventing an "additional experience" umbrella.
+If at least two strong quantified outcomes are supported, put up to four in a sidebar metrics section titled Selected Outcomes; each metric entry uses header[0] for the short metric and body[0] for its plain-language label.
+Use inline emphasis selectively for the most scan-worthy truthful outcomes, technical terms, and leadership scope, with no more than eighteen phrases and no more than twenty percent of visible characters emphasized.
+The target role and intake context decide ordering, emphasis, headline, and what grounded evidence is most useful, but must never appear as candidate experience or prove a candidate claim.
+Prefer leaving space or omitting weak material to adding generic skills, inferred claims, filler, process commentary, fit language, or repeated facts.
 The deterministic renderer, not you, controls layout, brand tokens, typography, and PDF generation.`;
 
 function requiredKey(apiKey) {
@@ -97,7 +103,7 @@ export function buildResumeStrategistPayload({ bundle, ledger, versionInstructio
     contract: {
       strategy_schema_version: "raydar.resume.strategy.v1",
       resume_ast_schema_version: "raydar.resume.ast.v1",
-      template_version: "raydar-resume-template-v0.1",
+      template_version: "raydar-resume-template-v0.2",
       page_rules: {
         preferred_pages: 1,
         maximum_pages: 2,
@@ -401,7 +407,7 @@ function normalizeModelDocument(raw, allowedClaimIds = []) {
     (sum, node) => sum + normalizeEvidenceText(node.text).length,
     0,
   );
-  const emphasisCharacterLimit = Math.floor(visibleCharacters * 0.25);
+  const emphasisCharacterLimit = Math.floor(visibleCharacters * 0.20);
   let emphasisCharacters = 0;
   let emphasisPhrases = 0;
   for (const node of nodes) {
@@ -411,7 +417,7 @@ function normalizeModelDocument(raw, allowedClaimIds = []) {
       .map((phrase) => normalizeEvidenceText(phrase))
       .filter((phrase) => {
         if (!phrase || !value.includes(phrase) || seen.has(phrase)) return false;
-        if (seen.size >= 3 || emphasisPhrases >= 8) return false;
+        if (seen.size >= 3 || emphasisPhrases >= 18) return false;
         if (emphasisCharacters + phrase.length > emphasisCharacterLimit) return false;
         seen.add(phrase);
         emphasisPhrases += 1;

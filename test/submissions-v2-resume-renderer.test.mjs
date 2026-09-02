@@ -48,8 +48,8 @@ function ast() {
         entries: [{
           id: "entry-alpha",
           header: [
-            { id: "alpha-role", text: "Engineer — Alpha", claim_ids: ["claim-title"], emphasis: [] },
-            { id: "alpha-dates", text: "2022–Present", claim_ids: ["claim-dates"], emphasis: [] },
+            { id: "alpha-company", text: "Alpha", claim_ids: ["claim-title"], emphasis: [] },
+            { id: "alpha-role-dates", text: "Engineer | 2022–Present", claim_ids: ["claim-dates"], emphasis: [] },
           ],
           body: [{
             id: "alpha-outcome",
@@ -84,7 +84,7 @@ const claimIds = [
   "claim-skill",
 ];
 
-test("fixed Template v0.1 produces deterministic one-page HTML and ATS output", () => {
+test("fixed Template v0.2 produces deterministic template-parity HTML and ATS output", () => {
   const first = prepareResumeRender(ast(), {
     allowedClaimIds: claimIds,
     selectedClaimIds: claimIds,
@@ -100,6 +100,8 @@ test("fixed Template v0.1 produces deterministic one-page HTML and ATS output", 
   assert.equal(first.atsSha256, second.atsSha256);
   assert.match(first.html, /PP Grafier Display/u);
   assert.match(first.html, /#7f72ff/iu);
+  assert.match(first.html, /raydar-resume-template-v0\.2/u);
+  assert.match(first.html, />Profile</u);
   assert.match(first.html, /data:image\/png;base64/u);
   assert.match(first.atsText, /Built a scheduling system used by 20 teams\./u);
 });
@@ -113,7 +115,7 @@ test("renderer rejects filler, internal copy, and documents beyond two pages", (
   oversized.sections = [{
     id: "section-long",
     title: "Experience",
-    kind: "experience",
+    kind: "custom",
     placement: "main",
     entries: Array.from({ length: 20 }, (_, entryIndex) => ({
       id: `entry-${entryIndex}`,
@@ -135,7 +137,7 @@ test("renderer rejects filler, internal copy, and documents beyond two pages", (
   assert.throws(() => createRenderPlan(checked), (error) => error.code === "RESUME_PAGE_LIMIT_EXCEEDED");
 });
 
-test("an underfilled second page is compressed by removing the lowest-priority trailing detail", () => {
+test("estimated pagination never deletes validated candidate facts", () => {
   const underfilled = ast();
   underfilled.sections = [{
     id: "section-experience",
@@ -145,8 +147,13 @@ test("an underfilled second page is compressed by removing the lowest-priority t
     entries: Array.from({ length: 10 }, (_, entryIndex) => ({
       id: `entry-${entryIndex}`,
       header: [{
+        id: `company-${entryIndex}`,
+        text: `Supported Company ${entryIndex}`,
+        claim_ids: [`claim-company-${entryIndex}`],
+        emphasis: [],
+      }, {
         id: `header-${entryIndex}`,
-        text: `Engineering role ${entryIndex} at a supported company`,
+        text: `Engineering role ${entryIndex} | 2020-Present`,
         claim_ids: [`claim-header-${entryIndex}`],
         emphasis: [],
       }],
@@ -159,10 +166,11 @@ test("an underfilled second page is compressed by removing the lowest-priority t
     })),
   }];
   const checked = assertResumeAst(underfilled);
-  assert.throws(() => createRenderPlan(checked), (error) => error.code === "RESUME_PAGE_TWO_UNDERFILLED");
+  const estimated = createRenderPlan(checked);
   const compressed = compressUnderfilledResume(checked);
-  assert.equal(createRenderPlan(compressed).expectedPages, 1);
-  assert.ok(collectContentNodes(compressed).length < collectContentNodes(checked).length);
+  assert.ok([1, 2].includes(estimated.expectedPages));
+  assert.deepEqual(compressed, checked);
+  assert.equal(collectContentNodes(compressed).length, collectContentNodes(checked).length);
 });
 
 test("unsupported nodes disappear and validator rewrites flow into the final AST", () => {
@@ -172,8 +180,8 @@ test("unsupported nodes disappear and validator rewrites flow into the final AST
     { id: "candidate-headline", text: "Product engineer" },
     { id: "candidate-location", text: "San Francisco, CA" },
     { id: "candidate-summary", text: "Engineer focused on reliable products." },
-    { id: "alpha-role", text: "Engineer — Alpha" },
-    { id: "alpha-dates", text: "2022–Present" },
+    { id: "alpha-company", text: "Alpha" },
+    { id: "alpha-role-dates", text: "Engineer | 2022–Present" },
     { id: "alpha-outcome", text: "Built a scheduling system." },
   ];
   const rewritten = applyValidatedClaimsToAst(checked, validation);

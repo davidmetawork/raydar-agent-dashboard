@@ -40,8 +40,8 @@ ROOT = Path(__file__).resolve().parent
 FONT_DIR = ROOT / "fonts" if (ROOT / "fonts").exists() else ROOT.parent / "fonts"
 LOCKUP_PATH = ROOT / "assets" / "raydar-lockup.svg"
 
-RENDERER_VERSION = "raydar-resume-renderer-v2.1"
-TEMPLATE_VERSION = "raydar-resume-template-v0.1"
+RENDERER_VERSION = "raydar-resume-renderer-v2.2"
+TEMPLATE_VERSION = "raydar-resume-template-v0.2"
 BRAND_ASSET_ID = "raydar-official-lockup-black-v1"
 RENDER_REQUEST_VERSION = "raydar.resume.render-request.v1"
 RENDER_RESULT_VERSION = "raydar.resume.render-result.v1"
@@ -57,21 +57,37 @@ MAX_AST_NODES = 500
 MAX_AST_VISIBLE_CHARS = 80_000
 
 PAGE_WIDTH, PAGE_HEIGHT = LETTER
-MARGIN = 0.55 * 72
+MARGIN = 42.0
 PRINTABLE_TOP = PAGE_HEIGHT - MARGIN
 PRINTABLE_BOTTOM = MARGIN
 PRINTABLE_HEIGHT = PRINTABLE_TOP - PRINTABLE_BOTTOM
 PRINTABLE_WIDTH = PAGE_WIDTH - (2 * MARGIN)
 PAGE_TWO_MINIMUM_OCCUPANCY = 0.40
 
-INK = colors.HexColor("#211F26")
-MUTED = colors.HexColor("#6F6974")
-BEIGE = colors.HexColor("#F3EDE3")
-SIDEBAR = colors.HexColor("#FAF7F0")
+INK = colors.HexColor("#0F0F0F")
+BODY = colors.HexColor("#4A4741")
+MUTED = colors.HexColor("#716D63")
+BEIGE = colors.HexColor("#F6F3E9")
+SIDEBAR = colors.HexColor("#FAF9F5")
 VIOLET = colors.HexColor("#7F72FF")
-ORANGE = colors.HexColor("#F06F3C")
+VIOLET_TEXT = colors.HexColor("#574EA9")
+ORANGE = colors.HexColor("#FF6E00")
+RULE = colors.HexColor("#E4DFD1")
 WHITE = colors.white
 PRACTICE = colors.HexColor("#8A2333")
+
+# Golden-template geometry, measured from the approved one- and two-page PDFs.
+TOP_RAIL_HEIGHT = 4.0
+PAGE_ONE_HEADER_HEIGHT = 105.2
+PAGE_TWO_HEADER_HEIGHT = 76.0
+MAIN_X = 42.0
+MAIN_WIDTH = 354.0
+SIDEBAR_BACKGROUND_X = 399.0
+SIDEBAR_BACKGROUND_WIDTH = 171.0
+SIDEBAR_CONTENT_X = 409.0
+SIDEBAR_CONTENT_WIDTH = 151.0
+CONTENT_BOTTOM = 56.0
+FOOTER_RULE_Y = 42.8
 
 ALLOWED_SECTION_KINDS = {
     "experience", "projects", "education", "skills", "details", "metrics", "custom",
@@ -287,6 +303,25 @@ def validate_ast(raw: Any, validated_claim_ids: Any) -> dict[str, Any]:
                     for index, node in enumerate(entry["body"])
                 ],
             })
+        if kind == "experience" and placement == "main":
+            invalid = next((item for item in entries if len(item["header"]) != 2 or len(item["body"]) > 3), None)
+            if invalid:
+                raise RenderError(
+                    "RESUME_EXPERIENCE_STRUCTURE_INVALID",
+                    "Each experience entry requires employer, role and dates, and no more than three accomplishment bullets",
+                    details={"path": path, "entry_id": invalid["id"]},
+                )
+        if kind == "metrics":
+            invalid = (
+                placement != "sidebar" or not 2 <= len(entries) <= 4
+                or any(len(item["header"]) != 1 or len(item["body"]) != 1 for item in entries)
+            )
+            if invalid:
+                raise RenderError(
+                    "RESUME_METRICS_STRUCTURE_INVALID",
+                    "Selected Outcomes requires two to four sidebar cards with one metric and one label each",
+                    details={"path": path},
+                )
         sections.append({
             "id": section_id,
             "title": title,
@@ -296,7 +331,13 @@ def validate_ast(raw: Any, validated_claim_ids: Any) -> dict[str, Any]:
         })
     if not any(section["placement"] == "main" for section in sections):
         raise RenderError("RESUME_MAIN_CONTENT_REQUIRED", "Resume requires hiring-manager-facing main content")
-    if context.emphasis_count > 8 or context.emphasis_characters / max(1, context.visible_characters) > 0.25:
+    experience_entries = sum(
+        len(section["entries"]) for section in sections
+        if section["kind"] == "experience" and section["placement"] == "main"
+    )
+    if experience_entries > 10:
+        raise RenderError("RESUME_EXPERIENCE_LIMIT_EXCEEDED", "Resume may contain at most ten distinct experience entries")
+    if context.emphasis_count > 18 or context.emphasis_characters / max(1, context.visible_characters) > 0.20:
         raise RenderError("RESUME_EMPHASIS_EXCESSIVE", "Resume emphasis must remain restrained")
     unused = sorted(set(validated) - context.used_claim_ids)
     if unused:
@@ -355,8 +396,11 @@ def ensure_fonts() -> tuple[dict[str, Path], dict[str, set[int]]]:
         "Inter-Regular": (
             FONT_DIR / "inter-latin-var.woff2", output / "Inter-Regular-v2.ttf", 400, "Inter", "Regular",
         ),
-        "Inter-Semibold": (
-            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Semibold-v2.ttf", 700, "Inter", "Semibold",
+        "Inter-Medium": (
+            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Medium-v2.ttf", 500, "Inter", "Medium",
+        ),
+        "Inter-Bold": (
+            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Bold-v2.ttf", 700, "Inter", "Bold",
         ),
     }
     paths: dict[str, Path] = {}
@@ -397,10 +441,10 @@ class Density:
 
 
 DENSITIES = (
-    Density("editorial", 10.2, 8.2, 14.0, 10.8, 13.6, 15.4, 17.0, 14.0, 6.0, 17.0),
-    Density("airy", 9.3, 7.9, 12.5, 10.2, 12.8, 14.2, 10.0, 8.0, 4.2, 16.0),
-    Density("standard", 9.0, 7.7, 11.7, 9.6, 12.2, 13.4, 8.0, 6.5, 3.6, 14.0),
-    Density("compact", 8.5, 7.5, 10.2, 9.0, 11.6, 12.8, 6.5, 5.0, 3.0, 12.0),
+    Density("editorial", 9.2, 8.0, 12.2, 10.2, 12.2, 13.4, 10.0, 8.0, 4.0, 0.0),
+    Density("airy", 8.8, 7.8, 11.5, 9.8, 12.2, 13.4, 8.0, 6.5, 3.4, 0.0),
+    Density("standard", 8.5, 7.6, 10.8, 9.3, 12.2, 13.4, 6.5, 5.0, 3.0, 0.0),
+    Density("compact", 8.5, 7.5, 10.2, 9.0, 12.2, 13.4, 5.0, 3.5, 2.5, 0.0),
 )
 
 
@@ -451,7 +495,7 @@ def wrap_node(
     width: float,
     size: float,
     regular_font: str = "Inter-Regular",
-    bold_font: str = "Inter-Semibold",
+    bold_font: str = "Inter-Bold",
 ) -> list[list[tuple[str, str]]]:
     lines: list[list[tuple[str, str]]] = []
     line: list[tuple[str, str]] = []
@@ -559,118 +603,125 @@ class ResumeLayout:
 
     def _layout_shared_headers(self) -> None:
         page = self.pages[0]
-        pad = self.density.header_padding
-        lockup_width = 66.0
-        name_width = PRINTABLE_WIDTH - (2 * pad) - lockup_width - 18
+        page.operations.extend([
+            {
+                "kind": "round_rect", "x": 0, "y": PAGE_HEIGHT - TOP_RAIL_HEIGHT,
+                "width": PAGE_WIDTH, "height": TOP_RAIL_HEIGHT, "radius": 0, "fill": VIOLET,
+            },
+            {
+                "kind": "round_rect", "x": 0, "y": PAGE_HEIGHT - PAGE_ONE_HEADER_HEIGHT,
+                "width": PAGE_WIDTH, "height": PAGE_ONE_HEADER_HEIGHT - TOP_RAIL_HEIGHT,
+                "radius": 0, "fill": BEIGE,
+            },
+        ])
+        name_width = 400.0
+        name_size = 29.0
         name_lines = wrap_node(
-            self.ast["candidate"]["name"], name_width, 23.0,
+            self.ast["candidate"]["name"], name_width, name_size,
             regular_font="PPGrafierDisplay-Regular", bold_font="PPGrafierDisplay-Regular",
         )
-        headline_lines = wrap_node(self.ast["candidate"]["headline"], name_width, 10.0)
-        contact_text = "  •  ".join(rendered_text(node["text"]) for node in self.ast["candidate"]["contact"])
-        contact_lines = wrap_plain(contact_text, PRINTABLE_WIDTH - 2 * pad, "Inter-Regular", self.density.support_size) if contact_text else []
-        content_height = (
-            len(name_lines) * 24.0 + 4
-            + len(headline_lines) * 12.4
-            + (5 + len(contact_lines) * self.density.support_leading if contact_lines else 0)
-        )
-        header_height = max(88.0, content_height + 2 * pad)
-        header_top = PRINTABLE_TOP
-        page.operations.append({
-            "kind": "round_rect", "x": MARGIN, "y": header_top - header_height,
-            "width": PRINTABLE_WIDTH, "height": header_height, "radius": 12,
-            "fill": BEIGE,
-        })
-        text_top = header_top - pad
-        used = page.add_lines(
-            x=MARGIN + pad, top=text_top, lines=name_lines, size=23.0, leading=24.0,
+        while len(name_lines) > 1 and name_size > 21.0:
+            name_size -= 1.0
+            name_lines = wrap_node(
+                self.ast["candidate"]["name"], name_width, name_size,
+                regular_font="PPGrafierDisplay-Regular", bold_font="PPGrafierDisplay-Regular",
+            )
+        page.add_lines(
+            x=MAIN_X, top=770.0, lines=name_lines, size=name_size, leading=name_size + 1,
             color=INK, content_id=self.ast["candidate"]["name"]["id"],
         )
-        text_top -= used + 4
-        used = page.add_lines(
-            x=MARGIN + pad, top=text_top, lines=headline_lines, size=10.0, leading=12.4,
-            color=MUTED, content_id=self.ast["candidate"]["headline"]["id"],
+        headline_text = rendered_text(self.ast["candidate"]["headline"]["text"]).upper()
+        headline_lines = wrap_plain(headline_text, 430.0, "Inter-Medium", 10.3)
+        headline_used = page.add_lines(
+            x=MAIN_X, top=734.3, lines=headline_lines, size=10.3, leading=11.3,
+            color=VIOLET_TEXT, content_id=self.ast["candidate"]["headline"]["id"],
         )
-        text_top -= used + 5
-        if contact_lines:
+        contact_text = "  |  ".join(rendered_text(node["text"]) for node in self.ast["candidate"]["contact"])
+        if contact_text:
+            contact_lines = wrap_plain(contact_text, 430.0, "Inter-Regular", 7.5)
             page.add_lines(
-                x=MARGIN + pad, top=text_top, lines=contact_lines,
-                size=self.density.support_size, leading=self.density.support_leading,
+                x=MAIN_X, top=min(713.6, 734.3 - headline_used - 5.0),
+                lines=contact_lines, size=7.5, leading=9.0,
                 color=MUTED, content_id="candidate-contact",
             )
-        self._lockup(0, PAGE_WIDTH - MARGIN - pad - lockup_width, header_top - pad - 19, lockup_width)
-        cursor = header_top - header_height - 12
-        if self.ast["summary"]:
-            summary_lines = wrap_node(self.ast["summary"], PRINTABLE_WIDTH, self.density.body_size)
-            used = page.add_lines(
-                x=MARGIN, top=cursor, lines=summary_lines,
-                size=self.density.body_size, leading=self.density.body_leading,
-                color=INK, content_id=self.ast["summary"]["id"],
-            )
-            cursor -= used + 7
-            page.operations.append({
-                "kind": "line", "x1": MARGIN, "y1": cursor,
-                "x2": PAGE_WIDTH - MARGIN, "y2": cursor, "color": VIOLET, "width": 0.7,
-            })
-            cursor -= 10
-        self.content_tops[0] = cursor
+        self._lockup(0, 477.0, 738.0, 92.0)
+        self.content_tops[0] = 666.0
 
         for page_index in range(1, self.maximum_pages):
             current = self.pages[page_index]
-            strip_height = 42.0
-            current.operations.append({
-                "kind": "round_rect", "x": MARGIN, "y": PRINTABLE_TOP - strip_height,
-                "width": PRINTABLE_WIDTH, "height": strip_height, "radius": 9, "fill": BEIGE,
-            })
-            self._lockup(page_index, PAGE_WIDTH - MARGIN - 70, PRINTABLE_TOP - 29, 58)
-            self.content_tops[page_index] = PRINTABLE_TOP - strip_height - 12
+            current.operations.extend([
+                {
+                    "kind": "round_rect", "x": 0, "y": PAGE_HEIGHT - TOP_RAIL_HEIGHT,
+                    "width": PAGE_WIDTH, "height": TOP_RAIL_HEIGHT, "radius": 0, "fill": VIOLET,
+                },
+                {
+                    "kind": "round_rect", "x": 0, "y": PAGE_HEIGHT - PAGE_TWO_HEADER_HEIGHT,
+                    "width": PAGE_WIDTH, "height": PAGE_TWO_HEADER_HEIGHT - TOP_RAIL_HEIGHT,
+                    "radius": 0, "fill": BEIGE,
+                },
+            ])
+            continuation_name = wrap_node(
+                self.ast["candidate"]["name"], 390.0, 21.0,
+                regular_font="PPGrafierDisplay-Regular", bold_font="PPGrafierDisplay-Regular",
+            )
+            current.add_lines(
+                x=MAIN_X, top=770.0, lines=continuation_name, size=21.0, leading=22.0,
+                color=INK, content_id="continuation-name", real_content=False,
+            )
+            current.add_lines(
+                x=MAIN_X, top=741.0,
+                lines=wrap_plain("EARLIER EXPERIENCE | CONTINUED", 390.0, "Inter-Medium", 8.1),
+                size=8.1, leading=9.2, color=VIOLET_TEXT,
+                content_id="continuation-label", real_content=False,
+            )
+            self._lockup(page_index, 477.0, 738.0, 92.0)
+            self.content_tops[page_index] = 696.0
 
     def layout(self) -> tuple[list[PageLayout], int]:
         main_sections = [section for section in self.ast["sections"] if section["placement"] == "main"]
         sidebar_sections = [section for section in self.ast["sections"] if section["placement"] == "sidebar"]
-        gap = 18.0 if sidebar_sections else 0.0
-        sidebar_width = 156.0 if sidebar_sections else 0.0
-        main_width = PRINTABLE_WIDTH - sidebar_width - gap
+        main_width = MAIN_WIDTH if sidebar_sections else PAGE_WIDTH - (2 * MAIN_X)
         self._layout_column(
             main_sections,
-            x=MARGIN,
+            x=MAIN_X,
             width=main_width,
             sidebar=False,
+            profile=self.ast["summary"],
         )
         if sidebar_sections:
-            sidebar_x = MARGIN + main_width + gap
-            self._layout_column(sidebar_sections, x=sidebar_x, width=sidebar_width, sidebar=True)
-            for page_index, top in enumerate(self.content_tops):
-                has_sidebar_content = any(
-                    box.real_content and box.x >= sidebar_x - 0.5
-                    for box in self.pages[page_index].boxes
-                )
-                if has_sidebar_content:
-                    # Insert behind text and rules; never draw an empty column
-                    # on a continuation page that has no sidebar evidence.
-                    self.pages[page_index].operations.insert(0, {
-                        "kind": "round_rect", "x": sidebar_x - 9, "y": PRINTABLE_BOTTOM,
-                        "width": sidebar_width + 18, "height": max(1, top - PRINTABLE_BOTTOM),
-                        "radius": 10, "fill": SIDEBAR,
-                    })
+            self._layout_column(
+                sidebar_sections, x=SIDEBAR_CONTENT_X, width=SIDEBAR_CONTENT_WIDTH,
+                sidebar=True, profile=None,
+            )
         used_pages = 1
         for index, page in enumerate(self.pages):
             if any(box.real_content for box in page.boxes) or index == 0:
                 used_pages = index + 1
+        if sidebar_sections:
+            for page_index in range(used_pages):
+                self.pages[page_index].operations.insert(0, {
+                    "kind": "round_rect", "x": SIDEBAR_BACKGROUND_X, "y": CONTENT_BOTTOM,
+                    "width": SIDEBAR_BACKGROUND_WIDTH,
+                    "height": max(1, self.content_tops[page_index] - CONTENT_BOTTOM),
+                    "radius": 10, "fill": SIDEBAR,
+                })
         return self.pages[:used_pages], used_pages
 
-    def _layout_column(self, sections: list[dict[str, Any]], *, x: float, width: float, sidebar: bool) -> None:
+    def _layout_column(
+        self, sections: list[dict[str, Any]], *, x: float, width: float,
+        sidebar: bool, profile: dict[str, Any] | None,
+    ) -> None:
         page_index = 0
         cursor = self.content_tops[0]
 
         def advance(current_page: int, current_cursor: float, required: float) -> tuple[int, float]:
-            if current_cursor - required >= PRINTABLE_BOTTOM:
+            if current_cursor - required >= CONTENT_BOTTOM:
                 return current_page, current_cursor
             current_page += 1
             if current_page >= self.maximum_pages:
                 raise LayoutOverflow
             current_cursor = self.content_tops[current_page]
-            if current_cursor - required < PRINTABLE_BOTTOM:
+            if current_cursor - required < CONTENT_BOTTOM:
                 raise LayoutOverflow
             return current_page, current_cursor
 
@@ -681,18 +732,40 @@ class ResumeLayout:
         def body_advance(current_page: int, current_cursor: float, required: float) -> tuple[int, float]:
             return advance(current_page, current_cursor, required)
 
+        if profile:
+            profile_heading = wrap_plain("Profile", width, "PPGrafierDisplay-Regular", 12.2)
+            profile_lines = wrap_node(profile, width, self.density.body_size)
+            profile_height = 13.4 + 8.0 + len(profile_lines) * self.density.body_leading + 9.0
+            require(profile_height)
+            page = self.pages[page_index]
+            used = page.add_lines(
+                x=x, top=cursor, lines=profile_heading, size=12.2, leading=13.4,
+                color=INK, content_id="profile-heading", real_content=False,
+            )
+            cursor -= used + 3.0
+            page.operations.append({
+                "kind": "line", "x1": x, "y1": cursor,
+                "x2": x + width, "y2": cursor, "color": VIOLET, "width": 0.65,
+            })
+            cursor -= 7.0
+            used = page.add_lines(
+                x=x, top=cursor, lines=profile_lines, size=self.density.body_size,
+                leading=self.density.body_leading, color=BODY, content_id=profile["id"],
+            )
+            cursor -= used + 9.0
+
         for section in sections:
             heading_lines = wrap_plain(
                 section["title"], width, "PPGrafierDisplay-Regular", self.density.section_size,
             )
             heading_height = len(heading_lines) * self.density.section_leading + 6
             first_entry = section["entries"][0]
-            first_entry_height = self._entry_minimum_height(first_entry, width, sidebar)
-            page_capacity = max(top - PRINTABLE_BOTTOM for top in self.content_tops)
+            first_entry_height = self._entry_minimum_height(first_entry, width, sidebar, section["kind"])
+            page_capacity = max(top - CONTENT_BOTTOM for top in self.content_tops)
             if section["kind"] == "metrics":
-                preferred = self._entry_total_height(first_entry, width - 14, sidebar) + 14
+                preferred = 49.0
             else:
-                preferred = self._entry_total_height(first_entry, width, sidebar) + 2
+                preferred = self._entry_total_height(first_entry, width, sidebar, section["kind"]) + 2
             if preferred <= page_capacity:
                 first_entry_height = preferred
             require(heading_height + first_entry_height)
@@ -700,75 +773,99 @@ class ResumeLayout:
             used = page.add_lines(
                 x=x, top=cursor, lines=heading_lines,
                 size=self.density.section_size, leading=self.density.section_leading,
-                color=INK, content_id=section["id"],
+                color=INK, content_id=section["id"], real_content=False,
             )
             cursor -= used + 3
             page.operations.append({
                 "kind": "line", "x1": x, "y1": cursor,
-                "x2": x + width, "y2": cursor, "color": VIOLET, "width": 0.65,
+                "x2": x + width, "y2": cursor,
+                "color": RULE if sidebar else VIOLET, "width": 0.65,
             })
             cursor -= 7
+            if section["kind"] == "metrics" and sidebar:
+                cursor, page_index = self._draw_metric_grid(
+                    section["entries"], page_index, cursor, x, width, advance,
+                )
+                cursor -= self.density.section_gap
+                continue
             for entry in section["entries"]:
-                minimum = self._entry_minimum_height(entry, width, sidebar)
-                if section["kind"] == "metrics":
-                    total = self._entry_total_height(entry, width - 14, sidebar) + 14
-                    require(total)
-                    self.pages[page_index].operations.append({
-                        "kind": "round_rect", "x": x, "y": cursor - total,
-                        "width": width, "height": total, "radius": 7, "fill": WHITE,
+                minimum = self._entry_minimum_height(entry, width, sidebar, section["kind"])
+                total = self._entry_total_height(entry, width, sidebar, section["kind"]) + 2
+                page_capacity = max(top - CONTENT_BOTTOM for top in self.content_tops)
+                # Keep a normal resume entry intact whenever it can fit on one
+                # page; only an intrinsically over-tall entry may flow.
+                required = total if total <= page_capacity else minimum
+                if cursor - required < CONTENT_BOTTOM:
+                    continuation_title = "Earlier experience" if section["kind"] == "experience" else "Continued"
+                    continuation_lines = wrap_plain(
+                        continuation_title, width, "PPGrafierDisplay-Regular", self.density.section_size,
+                    )
+                    continuation_height = len(continuation_lines) * self.density.section_leading + 10
+                    page_index, cursor = advance(page_index, cursor, required + continuation_height)
+                    page = self.pages[page_index]
+                    used = page.add_lines(
+                        x=x, top=cursor, lines=continuation_lines,
+                        size=self.density.section_size, leading=self.density.section_leading,
+                        color=INK, content_id="section-continuation", real_content=False,
+                    )
+                    cursor -= used + 3
+                    page.operations.append({
+                        "kind": "line", "x1": x, "y1": cursor,
+                        "x2": x + width, "y2": cursor,
+                        "color": RULE if sidebar else VIOLET, "width": 0.65,
                     })
                     cursor -= 7
-                    inner_x, inner_width = x + 7, width - 14
-                    cursor, page_index = self._draw_entry(
-                        entry, page_index, cursor, inner_x, inner_width, sidebar, body_advance,
-                    )
-                    cursor -= 7
                 else:
-                    total = self._entry_total_height(entry, width, sidebar) + 2
-                    page_capacity = max(top - PRINTABLE_BOTTOM for top in self.content_tops)
-                    # Keep a normal resume entry intact whenever it can fit on
-                    # one page; only an intrinsically over-tall entry may flow.
-                    require(total if total <= page_capacity else minimum)
-                    cursor, page_index = self._draw_entry(
-                        entry, page_index, cursor, x, width, sidebar, body_advance,
-                    )
+                    require(required)
+                cursor, page_index = self._draw_entry(
+                    entry, page_index, cursor, x, width, sidebar,
+                    body_advance, section["kind"],
+                )
                 cursor -= self.density.entry_gap
             cursor -= self.density.section_gap
 
-    def _header_measurements(self, entry: dict[str, Any], width: float, sidebar: bool) -> list[tuple[dict[str, Any], list[list[tuple[str, str]]], float, float, str, colors.Color]]:
+    def _header_measurements(
+        self, entry: dict[str, Any], width: float, sidebar: bool,
+        section_kind: str = "custom",
+    ) -> list[tuple[dict[str, Any], list[list[tuple[str, str]]], float, float, str, colors.Color]]:
         result = []
         for index, node in enumerate(entry["header"]):
-            size = self.density.body_size if index == 0 else self.density.support_size
-            leading = self.density.body_leading if index == 0 else self.density.support_leading
-            font = "Inter-Semibold" if index == 0 else "Inter-Regular"
-            if sidebar:
-                size = self.density.support_size if index else self.density.body_size
-            lines = wrap_node(node, width, size, regular_font=font, bold_font="Inter-Semibold")
-            result.append((node, lines, size, leading, font, INK if index == 0 else MUTED))
+            if section_kind == "experience" and not sidebar:
+                size, leading = (9.6, 11.2) if index == 0 else (7.8, 9.5)
+                font = "Inter-Bold" if index == 0 else "Inter-Medium"
+                color = INK if index == 0 else VIOLET_TEXT
+            else:
+                size = self.density.support_size if sidebar else (self.density.body_size if index == 0 else self.density.support_size)
+                leading = self.density.support_leading if sidebar or index else self.density.body_leading
+                font = "Inter-Bold" if index == 0 else "Inter-Regular"
+                color = INK if index == 0 else MUTED
+            lines = wrap_node(node, width, size, regular_font=font, bold_font="Inter-Bold")
+            result.append((node, lines, size, leading, font, color))
         return result
 
     def _body_measurements(self, entry: dict[str, Any], width: float, sidebar: bool) -> list[tuple[dict[str, Any], list[list[tuple[str, str]]], float, float]]:
         size = self.density.support_size if sidebar else self.density.body_size
         leading = self.density.support_leading if sidebar else self.density.body_leading
-        return [(node, wrap_node(node, width - 11, size), size, leading) for node in entry["body"]]
+        body_width = width if sidebar else width - 10
+        return [(node, wrap_node(node, body_width, size), size, leading) for node in entry["body"]]
 
-    def _entry_minimum_height(self, entry: dict[str, Any], width: float, sidebar: bool) -> float:
-        headers = self._header_measurements(entry, width, sidebar)
+    def _entry_minimum_height(self, entry: dict[str, Any], width: float, sidebar: bool, section_kind: str = "custom") -> float:
+        headers = self._header_measurements(entry, width, sidebar, section_kind)
         bodies = self._body_measurements(entry, width, sidebar)
         header_height = sum(len(lines) * leading + 1 for _, lines, _, leading, _, _ in headers)
         first_body = len(bodies[0][1]) * bodies[0][3] + self.density.bullet_gap if bodies else 0
         return header_height + first_body + 2
 
-    def _entry_total_height(self, entry: dict[str, Any], width: float, sidebar: bool) -> float:
-        headers = self._header_measurements(entry, width, sidebar)
+    def _entry_total_height(self, entry: dict[str, Any], width: float, sidebar: bool, section_kind: str = "custom") -> float:
+        headers = self._header_measurements(entry, width, sidebar, section_kind)
         bodies = self._body_measurements(entry, width, sidebar)
         return (
             sum(len(lines) * leading + 1 for _, lines, _, leading, _, _ in headers)
             + sum(len(lines) * leading + self.density.bullet_gap for _, lines, _, leading in bodies)
         )
 
-    def _draw_entry(self, entry, page_index, cursor, x, width, sidebar, advance):
-        headers = self._header_measurements(entry, width, sidebar)
+    def _draw_entry(self, entry, page_index, cursor, x, width, sidebar, advance, section_kind):
+        headers = self._header_measurements(entry, width, sidebar, section_kind)
         bodies = self._body_measurements(entry, width, sidebar)
         for node, lines, size, leading, _font, color in headers:
             used = self.pages[page_index].add_lines(
@@ -781,15 +878,59 @@ class ResumeLayout:
             required = len(lines) * leading + self.density.bullet_gap
             page_index, cursor = advance(page_index, cursor, required)
             page = self.pages[page_index]
-            page.operations.append({
-                "kind": "circle", "x": x + 2.4, "y": cursor - size * 0.55,
-                "radius": 1.8, "fill": ORANGE,
-            })
+            if not sidebar:
+                page.operations.append({
+                    "kind": "circle", "x": x + 2.2, "y": cursor - size * 0.55,
+                    "radius": 1.4, "fill": ORANGE,
+                })
             used = page.add_lines(
-                x=x + 11, top=cursor, lines=lines, size=size, leading=leading,
-                color=INK, content_id=node["id"],
+                x=x if sidebar else x + 10, top=cursor, lines=lines, size=size, leading=leading,
+                color=BODY, content_id=node["id"],
             )
             cursor -= used + self.density.bullet_gap
+        return cursor, page_index
+
+    def _draw_metric_grid(self, entries, page_index, cursor, x, width, advance):
+        gap = 6.0
+        card_width = (width - gap) / 2
+        for row_start in range(0, len(entries), 2):
+            row = entries[row_start:row_start + 2]
+            measurements = []
+            for entry in row:
+                metric_node = entry["header"][0]
+                label_nodes = [*entry["header"][1:], *entry["body"]]
+                metric_lines = wrap_node(
+                    metric_node, card_width - 14, 14.0,
+                    regular_font="Inter-Bold", bold_font="Inter-Bold",
+                )
+                label_lines = [
+                    (node, wrap_node(node, card_width - 14, 7.5), 7.5, 9.0)
+                    for node in label_nodes[:2]
+                ]
+                height = 8 + len(metric_lines) * 15.0 + sum(len(lines) * leading + 1 for _, lines, _, leading in label_lines) + 7
+                measurements.append((entry, metric_node, metric_lines, label_lines, max(42.0, height)))
+            row_height = max(item[4] for item in measurements)
+            page_index, cursor = advance(page_index, cursor, row_height)
+            for column, (_, metric_node, metric_lines, label_lines, _) in enumerate(measurements):
+                card_x = x + column * (card_width + gap)
+                page = self.pages[page_index]
+                page.operations.append({
+                    "kind": "round_rect", "x": card_x, "y": cursor - row_height,
+                    "width": card_width, "height": row_height, "radius": 7, "fill": WHITE,
+                })
+                text_top = cursor - 7
+                used = page.add_lines(
+                    x=card_x + 7, top=text_top, lines=metric_lines, size=14.0, leading=15.0,
+                    color=VIOLET_TEXT, content_id=metric_node["id"],
+                )
+                text_top -= used + 2
+                for node, lines, size, leading in label_lines:
+                    used = page.add_lines(
+                        x=card_x + 7, top=text_top, lines=lines, size=size, leading=leading,
+                        color=BODY, content_id=node["id"],
+                    )
+                    text_top -= used + 1
+            cursor -= row_height + gap
         return cursor, page_index
 
 
@@ -827,7 +968,7 @@ def draw_lockup(canvas: Canvas, x: float, y: float, width: float) -> None:
     canvas.restoreState()
 
 
-def draw_pages(pages: list[PageLayout], practice: bool) -> bytes:
+def draw_pages(pages: list[PageLayout], practice: bool, ast: dict[str, Any]) -> bytes:
     target = io.BytesIO()
     canvas = Canvas(
         target,
@@ -836,7 +977,7 @@ def draw_pages(pages: list[PageLayout], practice: bool) -> bytes:
         invariant=1,
         initialFontName="Inter-Regular",
     )
-    canvas.setTitle("Resume")
+    canvas.setTitle(f"{rendered_text(ast['candidate']['name']['text'])} - Resume")
     canvas.setAuthor("Raydar")
     for page_index, page in enumerate(pages):
         canvas.setFillColor(WHITE)
@@ -871,8 +1012,16 @@ def draw_pages(pages: list[PageLayout], practice: bool) -> bytes:
                     # text blocks (for example, name then headline).
                     text_object.textLine("")
                     canvas.drawText(text_object)
+        canvas.setStrokeColor(RULE)
+        canvas.setLineWidth(0.65)
+        canvas.line(MAIN_X, FOOTER_RULE_Y, PAGE_WIDTH - MAIN_X, FOOTER_RULE_Y)
+        canvas.setFillColor(MUTED)
+        canvas.setFont("Inter-Regular", 6.8)
+        canvas.drawString(MAIN_X, 31.0, "Prepared by Raydar")
+        if len(pages) > 1:
+            canvas.drawRightString(PAGE_WIDTH - MAIN_X, 31.0, f"Page {page_index + 1} of {len(pages)}")
         if practice:
-            canvas.setFont("Inter-Semibold", 7.5)
+            canvas.setFont("Inter-Bold", 7.5)
             canvas.setFillColor(PRACTICE)
             canvas.drawCentredString(PAGE_WIDTH / 2, 18, "PRACTICE - NOT FOR SUBMISSION")
         if page_index < len(pages) - 1:
@@ -914,8 +1063,8 @@ def geometry_preflight(pages: list[PageLayout]) -> dict[str, Any]:
         real = [box for box in page.boxes if box.real_content]
         box_count += len(real)
         clipping = clipping or any(
-            box.x < MARGIN - 0.5 or box.x + box.width > PAGE_WIDTH - MARGIN + 0.5
-            or box.y < PRINTABLE_BOTTOM - 0.5 or box.y + box.height > PRINTABLE_TOP + 0.5
+            box.x < -0.5 or box.x + box.width > PAGE_WIDTH + 0.5
+            or box.y < -0.5 or box.y + box.height > PAGE_HEIGHT + 0.5
             for box in real
         )
         for index, left in enumerate(real):
@@ -935,7 +1084,7 @@ def ats_text(ast: dict[str, Any]) -> str:
     if ast["candidate"]["contact"]:
         lines.append(" | ".join(rendered_text(node["text"]) for node in ast["candidate"]["contact"]))
     if ast["summary"]:
-        lines.extend(["", rendered_text(ast["summary"]["text"])])
+        lines.extend(["", "PROFILE", rendered_text(ast["summary"]["text"])])
     for section in ast["sections"]:
         lines.extend(["", rendered_text(section["title"]).upper()])
         for entry in section["entries"]:
@@ -944,10 +1093,17 @@ def ats_text(ast: dict[str, Any]) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
 
 
-def token_bag(value: str) -> list[tuple[str, int]]:
+def token_bag(value: str, candidate_name: str = "") -> list[tuple[str, int]]:
     normalized = normalize_text(value)
     normalized = re.sub(r"PRACTICE\s*-\s*NOT FOR SUBMISSION", " ", normalized, flags=re.I)
+    normalized = re.sub(r"EARLIER EXPERIENCE\s*\|\s*CONTINUED", " ", normalized, flags=re.I)
+    normalized = re.sub(r"\bEarlier experience\b", " ", normalized, flags=re.I)
+    normalized = re.sub(r"\bContinued\b", " ", normalized, flags=re.I)
+    normalized = re.sub(r"Prepared by Raydar", " ", normalized, flags=re.I)
+    normalized = re.sub(r"Page\s+\d+\s+of\s+\d+", " ", normalized, flags=re.I)
     normalized = re.sub(r"\bRaydar\b", " ", normalized, flags=re.I)
+    if candidate_name:
+        normalized = re.sub(re.escape(rendered_text(candidate_name)), " ", normalized, flags=re.I)
     tokens = re.findall(r"[\w]+(?:[.+#/-][\w]+)*", normalized.casefold(), flags=re.UNICODE)
     counts: dict[str, int] = {}
     for token in tokens:
@@ -985,12 +1141,14 @@ def embedded_fonts(reader: PdfReader) -> tuple[bool, list[str]]:
                 all_embedded = False
     visible_names = {name for name in names if name != "/Times-Roman"}
     brand_fonts = all("Inter" in name or "PPGrafier" in name for name in visible_names)
-    required_faces = ("Inter-Regular", "Inter-Semibold", "PPGrafierDisplay-Regular")
+    required_faces = ("Inter-Regular", "Inter-Medium", "Inter-Bold", "PPGrafierDisplay-Regular")
     faces_present = all(any(face in name for name in visible_names) for face in required_faces)
     return all_embedded and brand_fonts and faces_present, sorted(names)
 
 
-def inspect_pdf(pdf: bytes, ats: str, pages: list[PageLayout], glyphs: list[int]) -> tuple[str, dict[str, Any]]:
+def inspect_pdf(
+    pdf: bytes, ats: str, pages: list[PageLayout], glyphs: list[int], ast: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
     try:
         reader = PdfReader(io.BytesIO(pdf), strict=False)
     except (PdfReadError, ValueError, OSError) as error:
@@ -1002,7 +1160,20 @@ def inspect_pdf(pdf: bytes, ats: str, pages: list[PageLayout], glyphs: list[int]
         raise RenderError("RESUME_PDF_TEXT_EMPTY", "Rendered PDF has no selectable text")
     geometry = geometry_preflight(pages)
     fonts_ok, font_names = embedded_fonts(reader)
-    parity = token_bag(extracted) == token_bag(ats)
+    candidate_name = ast["candidate"]["name"]["text"]
+    parity = token_bag(extracted, candidate_name) == token_bag(ats, candidate_name)
+    first_ops = pages[0].operations
+    geometry_parity = (
+        any(op.get("kind") == "round_rect" and op.get("x") == 0
+            and op.get("y") == PAGE_HEIGHT - TOP_RAIL_HEIGHT
+            and op.get("width") == PAGE_WIDTH and op.get("height") == TOP_RAIL_HEIGHT
+            and op.get("fill") == VIOLET for op in first_ops)
+        and any(op.get("kind") == "round_rect" and op.get("x") == 0
+                and op.get("y") == PAGE_HEIGHT - PAGE_ONE_HEADER_HEIGHT
+                and op.get("width") == PAGE_WIDTH and op.get("fill") == BEIGE for op in first_ops)
+        and any(op.get("kind") == "lockup" and op.get("x") == 477.0
+                and op.get("width") == 92.0 for op in first_ops)
+    )
     preflight = {
         "pageCount": len(reader.pages),
         **geometry,
@@ -1013,6 +1184,7 @@ def inspect_pdf(pdf: bytes, ats: str, pages: list[PageLayout], glyphs: list[int]
         "embeddedFonts": font_names,
         "textSelectable": bool(extracted),
         "atsParity": parity,
+        "templateGeometryParity": geometry_parity,
     }
     failures = []
     for key in ("hasOverflow", "hasClipping", "hasOverlap", "hasMissingGlyphs"):
@@ -1022,6 +1194,8 @@ def inspect_pdf(pdf: bytes, ats: str, pages: list[PageLayout], glyphs: list[int]
         failures.append("fontsEmbedded")
     if not parity:
         failures.append("atsParity")
+    if not geometry_parity:
+        failures.append("templateGeometryParity")
     if failures:
         raise RenderError("RESUME_VISUAL_PREFLIGHT_FAILED", "Rendered resume failed preflight", details={"failures": failures})
     if len(reader.pages) == 2 and preflight["pageOccupancies"][1] < PAGE_TWO_MINIMUM_OCCUPANCY:
@@ -1049,9 +1223,9 @@ def render_resume(ast: dict[str, Any], practice: bool) -> tuple[bytes, str, str,
             layouts, page_count = ResumeLayout(ast, density, maximum_pages).layout()
             if page_count != maximum_pages and maximum_pages == 2:
                 continue
-            pdf = draw_pages(layouts, practice)
+            pdf = draw_pages(layouts, practice, ast)
             ats = ats_text(ast)
-            extracted, preflight = inspect_pdf(pdf, ats, layouts, glyphs)
+            extracted, preflight = inspect_pdf(pdf, ats, layouts, glyphs, ast)
             if page_count != preflight["pageCount"]:
                 raise RenderError("RESUME_PAGE_COUNT_MISMATCH", "PDF page count differs from layout result")
             plan = {

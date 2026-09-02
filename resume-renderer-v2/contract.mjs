@@ -6,33 +6,36 @@ import {
   sha256,
 } from "../api/submissions-v2/_lib/resume/source-bundle.mjs";
 
-export const RESUME_TEMPLATE_VERSION = "raydar-resume-template-v0.1";
-export const RESUME_RENDERER_VERSION = "raydar-resume-renderer-v2.1";
+export const RESUME_TEMPLATE_VERSION = "raydar-resume-template-v0.2";
+export const RESUME_RENDERER_VERSION = "raydar-resume-renderer-v2.2";
 
 export const TEMPLATE_TOKENS = deepFreeze({
   page: {
     size: "US-Letter",
     widthIn: 8.5,
     heightIn: 11,
-    marginIn: 0.55,
+    marginIn: 0.5833,
     maximumPages: 2,
     pageTwoMinimumOccupancy: 0.4,
   },
   typography: {
     displayFamily: "PP Grafier Display",
     bodyFamily: "Inter",
-    primaryBodyPt: 9.2,
-    supportingPt: 7.8,
+    primaryBodyPt: 8.5,
+    supportingPt: 7.5,
     lineHeightRatio: 1.28,
     letterSpacingEm: 0,
   },
   colors: {
-    ink: "#211f26",
-    muted: "#6f6974",
-    beigeHeader: "#f3ede3",
-    warmSidebar: "#faf7f0",
+    ink: "#0f0f0f",
+    body: "#4a4741",
+    muted: "#716d63",
+    beigeHeader: "#f6f3e9",
+    warmSidebar: "#faf9f5",
     violet: "#7f72ff",
-    orange: "#f06f3c",
+    violetText: "#574ea9",
+    orange: "#ff6e00",
+    rule: "#e4dfd1",
     white: "#ffffff",
   },
   brandAssetId: "raydar-official-lockup-black-v1",
@@ -176,12 +179,34 @@ function section(raw, index, context) {
   if (!Array.isArray(raw.entries) || !raw.entries.length || raw.entries.length > 20) {
     throw new ResumeContractError("RESUME_AST_INVALID", `${path}.entries must contain real resume content`, { path });
   }
+  const entries = raw.entries.map((item, entryIndex) => entry(item, `${path}.entries[${entryIndex}]`, context));
+  if (kind === "experience" && placement === "main") {
+    const invalid = entries.find((item) => item.header.length !== 2 || item.body.length > 3);
+    if (invalid) {
+      throw new ResumeContractError(
+        "RESUME_EXPERIENCE_STRUCTURE_INVALID",
+        "Each experience entry requires employer, role and dates, and no more than three accomplishment bullets",
+        { path, entryId: invalid.id },
+      );
+    }
+  }
+  if (kind === "metrics") {
+    const invalid = placement !== "sidebar" || entries.length < 2 || entries.length > 4
+      || entries.some((item) => item.header.length !== 1 || item.body.length !== 1);
+    if (invalid) {
+      throw new ResumeContractError(
+        "RESUME_METRICS_STRUCTURE_INVALID",
+        "Selected Outcomes requires two to four sidebar cards with one metric and one label each",
+        { path },
+      );
+    }
+  }
   return {
     id,
     title,
     kind,
     placement,
-    entries: raw.entries.map((item, entryIndex) => entry(item, `${path}.entries[${entryIndex}]`, context)),
+    entries,
   };
 }
 
@@ -229,8 +254,14 @@ export function assertResumeAst(raw, {
   if (!sections.some((item) => item.placement === "main")) {
     throw new ResumeContractError("RESUME_MAIN_CONTENT_REQUIRED", "Resume requires hiring-manager-facing main content");
   }
-  if (context.emphasisPhrases.length > 8
-    || (context.metrics.emphasisCharacters / Math.max(1, context.metrics.visibleCharacters)) > 0.25) {
+  const experienceEntries = sections
+    .filter((item) => item.kind === "experience" && item.placement === "main")
+    .reduce((count, item) => count + item.entries.length, 0);
+  if (experienceEntries > 10) {
+    throw new ResumeContractError("RESUME_EXPERIENCE_LIMIT_EXCEEDED", "Resume may contain at most ten distinct experience entries");
+  }
+  if (context.emphasisPhrases.length > 18
+    || (context.metrics.emphasisCharacters / Math.max(1, context.metrics.visibleCharacters)) > 0.20) {
     throw new ResumeContractError("RESUME_EMPHASIS_EXCESSIVE", "Resume emphasis must remain restrained");
   }
   if (selectedClaimIds) {
@@ -375,12 +406,17 @@ export function createRenderPlan(ast) {
     });
   }
   const secondPageOccupancy = (roundedUnits - STANDARD_PAGE_UNITS) / STANDARD_PAGE_UNITS;
+  // This heuristic is advisory only: the deterministic PDF renderer owns the
+  // actual page count and its measured occupancy.  Never remove candidate facts
+  // based on a character-count estimate.
   if (secondPageOccupancy < TEMPLATE_TOKENS.page.pageTwoMinimumOccupancy) {
-    throw new ResumeContractError(
-      "RESUME_PAGE_TWO_UNDERFILLED",
-      "Content must be compressed to one page or expanded with relevant evidence before using page two",
-      { estimatedUnits: roundedUnits, secondPageOccupancy },
-    );
+    return deepFreeze({
+      expectedPages: 1,
+      density: "compact",
+      estimatedUnits: roundedUnits,
+      estimatedOccupancies: [1],
+      compressionApplied: true,
+    });
   }
   return deepFreeze({
     expectedPages: 2,
@@ -392,41 +428,10 @@ export function createRenderPlan(ast) {
 }
 
 export function compressUnderfilledResume(rawAst) {
-  let document = structuredClone(rawAst);
-  for (let pass = 0; pass < 100; pass += 1) {
-    const checked = assertResumeAst(document);
-    try {
-      createRenderPlan(checked);
-      return checked;
-    } catch (error) {
-      if (error?.code !== "RESUME_PAGE_TWO_UNDERFILLED") throw error;
-    }
-    let removed = false;
-    for (let sectionIndex = document.sections.length - 1; sectionIndex >= 0 && !removed; sectionIndex -= 1) {
-      const section = document.sections[sectionIndex];
-      for (let entryIndex = section.entries.length - 1; entryIndex >= 0; entryIndex -= 1) {
-        const entry = section.entries[entryIndex];
-        if (entry.body.length) {
-          entry.body.pop();
-          removed = true;
-          break;
-        }
-        if (section.entries.length > 1 || document.sections.length > 1) {
-          section.entries.splice(entryIndex, 1);
-          if (!section.entries.length) document.sections.splice(sectionIndex, 1);
-          removed = true;
-          break;
-        }
-      }
-    }
-    if (!removed && document.summary) {
-      document.summary = null;
-      removed = true;
-    }
-    if (!removed) throw new ResumeContractError("RESUME_PAGE_TWO_UNDERFILLED", "Resume cannot be compressed to one page without removing required identity content");
-    document.page_preference = 1;
-  }
-  throw new ResumeContractError("RESUME_PAGE_TWO_UNDERFILLED", "Resume did not converge on an approved one-page layout");
+  // Retained as a compatibility boundary for the pipeline, but deliberately
+  // non-destructive: the renderer may tighten spacing or use page two, while
+  // only the evidence strategist may decide which grounded facts to omit.
+  return assertResumeAst(rawAst);
 }
 
 export function resumeAstDigest(ast) {
