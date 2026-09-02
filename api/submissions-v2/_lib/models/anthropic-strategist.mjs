@@ -6,7 +6,7 @@ import {
 } from "../resume/source-bundle.mjs";
 import { assertStrictStrategy } from "./contracts.mjs";
 import { ModelProviderError, responseJson } from "./provider-errors.mjs";
-import { assertResumeAst } from "../../../../resume-renderer-v2/contract.mjs";
+import { assertResumeAst, collectContentNodes } from "../../../../resume-renderer-v2/contract.mjs";
 
 export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
@@ -304,14 +304,20 @@ async function callModel(model, payload, {
   };
 }
 
-function checkedResultDocument(result, ledger) {
+function checkedResultStrategy(result, ledger) {
   try {
-    return assertResumeAst(result.strategy.document, {
+    const document = assertResumeAst(result.strategy.document, {
       allowedClaimIds: ledger.claims.map((claim) => claim.claimId),
-      selectedClaimIds: result.strategy.selected_claim_ids,
     });
+    return {
+      ...result.strategy,
+      document,
+      // Selection is redundant model metadata, so derive its canonical value
+      // from the validated visible document instead of failing a valid resume.
+      selected_claim_ids: [...new Set(collectContentNodes(document).flatMap((node) => node.claim_ids))],
+    };
   } catch (cause) {
-    throw new ModelProviderError("STRATEGIST_AST_INVALID", "Anthropic returned an invalid resume document contract", {
+    throw new ModelProviderError(cause?.code || "STRATEGIST_AST_INVALID", "Anthropic returned an invalid resume document contract", {
       retryable: true,
       provider: "anthropic",
       cause,
@@ -346,10 +352,10 @@ export async function runResumeStrategist({
       signal,
       now,
     });
-    const checkedDocument = checkedResultDocument(primary, ledger);
+    const checkedStrategy = checkedResultStrategy(primary, ledger);
     return {
       ...primary,
-      strategy: { ...primary.strategy, document: checkedDocument },
+      strategy: checkedStrategy,
       fallbackReason: null,
       attempts: [...attempts, primary.audit],
     };
@@ -371,10 +377,10 @@ export async function runResumeStrategist({
       signal,
       now,
     });
-    const checkedDocument = checkedResultDocument(fallback, ledger);
+    const checkedStrategy = checkedResultStrategy(fallback, ledger);
     return {
       ...fallback,
-      strategy: { ...fallback.strategy, document: checkedDocument },
+      strategy: checkedStrategy,
       fallbackReason: primaryError.code || "primary_transient_failure",
       attempts: [...attempts, fallback.audit],
     };

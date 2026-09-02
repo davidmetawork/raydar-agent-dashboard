@@ -246,6 +246,22 @@ test("strategist does not fall back on nonretryable authentication failure", asy
   assert.equal(calls, 1);
 });
 
+test("strategist derives selected claim metadata from the validated visible document", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const strategy = strategyFixture();
+  strategy.selected_claim_ids = ["claim-name"];
+  const result = await runResumeStrategist({ bundle, ledger }, {
+    apiKey: "test-key",
+    fetchImpl: async () => response(200, {
+      id: "msg-derived-selection",
+      content: [{ type: "text", text: JSON.stringify(strategy) }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+      stop_reason: "end_turn",
+    }),
+  });
+  assert.deepEqual(result.strategy.selected_claim_ids, ["claim-name", "claim-title", "claim-achievement"]);
+});
+
 test("grounding validator pins GPT-5.4 high, retries invalid output, and never stores the request", async () => {
   const bodies = [];
   const result = await runGroundingValidator(claimPacket(), {
