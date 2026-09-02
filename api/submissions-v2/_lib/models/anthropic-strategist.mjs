@@ -306,7 +306,7 @@ async function callModel(model, payload, {
 
 function checkedResultStrategy(result, ledger) {
   try {
-    const document = assertResumeAst(result.strategy.document, {
+    const document = assertResumeAst(normalizeModelDocument(result.strategy.document), {
       allowedClaimIds: ledger.claims.map((claim) => claim.claimId),
     });
     return {
@@ -323,6 +323,68 @@ function checkedResultStrategy(result, ledger) {
       cause,
     });
   }
+}
+
+function normalizeModelDocument(raw) {
+  const document = structuredClone(raw);
+  const nodes = [];
+  const register = (node, id) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    node.id = id;
+    nodes.push(node);
+  };
+  register(document?.candidate?.name, "candidate-name");
+  register(document?.candidate?.headline, "candidate-headline");
+  if (Array.isArray(document?.candidate?.contact)) {
+    document.candidate.contact.forEach((node, index) => register(node, `candidate-contact-${index + 1}`));
+  }
+  if (document?.summary) register(document.summary, "candidate-summary");
+  if (Array.isArray(document?.sections)) {
+    document.sections.forEach((section, sectionIndex) => {
+      if (!section || typeof section !== "object" || Array.isArray(section)) return;
+      section.id = `section-${sectionIndex + 1}`;
+      if (!Array.isArray(section.entries)) return;
+      section.entries.forEach((entry, entryIndex) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+        entry.id = `section-${sectionIndex + 1}-entry-${entryIndex + 1}`;
+        if (Array.isArray(entry.header)) {
+          entry.header.forEach((node, nodeIndex) => register(
+            node,
+            `section-${sectionIndex + 1}-entry-${entryIndex + 1}-header-${nodeIndex + 1}`,
+          ));
+        }
+        if (Array.isArray(entry.body)) {
+          entry.body.forEach((node, nodeIndex) => register(
+            node,
+            `section-${sectionIndex + 1}-entry-${entryIndex + 1}-body-${nodeIndex + 1}`,
+          ));
+        }
+      });
+    });
+  }
+  const visibleCharacters = nodes.reduce(
+    (sum, node) => sum + normalizeEvidenceText(node.text).length,
+    0,
+  );
+  const emphasisCharacterLimit = Math.floor(visibleCharacters * 0.25);
+  let emphasisCharacters = 0;
+  let emphasisPhrases = 0;
+  for (const node of nodes) {
+    const value = normalizeEvidenceText(node.text);
+    const seen = new Set();
+    node.emphasis = (Array.isArray(node.emphasis) ? node.emphasis : [])
+      .map((phrase) => normalizeEvidenceText(phrase))
+      .filter((phrase) => {
+        if (!phrase || !value.includes(phrase) || seen.has(phrase)) return false;
+        if (seen.size >= 3 || emphasisPhrases >= 8) return false;
+        if (emphasisCharacters + phrase.length > emphasisCharacterLimit) return false;
+        seen.add(phrase);
+        emphasisPhrases += 1;
+        emphasisCharacters += phrase.length;
+        return true;
+      });
+  }
+  return document;
 }
 
 export async function runResumeStrategist({

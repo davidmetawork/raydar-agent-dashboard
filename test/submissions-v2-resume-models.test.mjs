@@ -262,6 +262,26 @@ test("strategist derives selected claim metadata from the validated visible docu
   assert.deepEqual(result.strategy.selected_claim_ids, ["claim-name", "claim-title", "claim-achievement"]);
 });
 
+test("strategist deterministically repairs internal ids and drops invalid visual emphasis", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const strategy = strategyFixture();
+  strategy.document.candidate.name.id = "duplicate id";
+  strategy.document.candidate.headline.id = "duplicate id";
+  strategy.document.sections[0].entries[0].body[0].emphasis = ["not exact source text"];
+  const result = await runResumeStrategist({ bundle, ledger }, {
+    apiKey: "test-key",
+    fetchImpl: async () => response(200, {
+      id: "msg-normalized-presentation",
+      content: [{ type: "text", text: JSON.stringify(strategy) }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+      stop_reason: "end_turn",
+    }),
+  });
+  assert.equal(result.strategy.document.candidate.name.id, "candidate-name");
+  assert.equal(result.strategy.document.candidate.headline.id, "candidate-headline");
+  assert.deepEqual(result.strategy.document.sections[0].entries[0].body[0].emphasis, []);
+});
+
 test("grounding validator pins GPT-5.4 high, retries invalid output, and never stores the request", async () => {
   const bodies = [];
   const result = await runGroundingValidator(claimPacket(), {
