@@ -27,7 +27,7 @@ import {
 } from "../../../../resume-renderer-v2/index.mjs";
 import { createArtifactManifest, assertArtifactReadback } from "../../../../resume-renderer-v2/manifest.mjs";
 import { RESUME_TEMPLATE_VERSION } from "../../../../resume-renderer-v2/contract.mjs";
-import { privatePath, privateReservationId, putPrivateObject, readPrivateObject } from "../blob.mjs";
+import { privatePath, privateReservationId } from "../blob.mjs";
 import { canonicalJson, assertGenerationReady, sha256 } from "./source-bundle.mjs";
 import {
   GENERATION_BUDGET_CENTS,
@@ -88,8 +88,8 @@ export async function runResumePreparation(context, {
   renderer = renderResumeWithService,
   extractPdf = extractPdfWithRenderer,
   processSupplements = processResumeSupplements,
-  putObject = putPrivateObject,
-  readObject = readPrivateObject,
+  putObject = null,
+  readObject = null,
   brandAsset = officialBrandAsset,
   env = process.env,
   fetchImpl = globalThis.fetch,
@@ -97,6 +97,8 @@ export async function runResumePreparation(context, {
   executionFence = null,
 } = {}) {
   if (!store) throw new TypeError("resume pipeline store is required");
+  putObject ||= (pathname, bytes, contentType) => store.putPrivateObject(pathname, bytes, contentType);
+  readObject ||= (pathname) => store.readPrivateObject(pathname);
   executionFence ||= {
     jobId: context?.job?.id,
     workerId: context?.workerId,
@@ -114,12 +116,18 @@ export async function runResumePreparation(context, {
   const triggerKind = ["initial", "regenerate", "retry"].includes(initialCheckpoint.trigger_kind)
     ? initialCheckpoint.trigger_kind
     : "initial";
+  const reusablePipeline = triggerKind === "retry"
+    && !Object.keys(initialCheckpoint.pipeline?.stages || {}).length
+    && typeof store.loadRetryPipeline === "function"
+    ? await store.loadRetryPipeline({ pairId, excludingJobId: context.job.id })
+    : null;
   let checkpoint = {
     ...initialCheckpoint,
     pipeline: {
+      ...(reusablePipeline || {}),
       ...(initialCheckpoint.pipeline || {}),
       schema_version: "raydar.submissions-v2.resume-pipeline-checkpoint.v1",
-      stages: { ...(initialCheckpoint.pipeline?.stages || {}) },
+      stages: { ...(reusablePipeline?.stages || {}), ...(initialCheckpoint.pipeline?.stages || {}) },
     },
   };
   let generation = null;

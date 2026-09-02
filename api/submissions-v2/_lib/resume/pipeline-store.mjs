@@ -112,6 +112,23 @@ export function createResumePipelineStore({
       return { pair, supplements, pendingSupplements, versionInstructions, knownRaydarDigests };
     },
 
+    async loadRetryPipeline({ pairId, excludingJobId }) {
+      const rows = await sql`
+        select checkpoint->'pipeline' as pipeline
+          from submissions_v2.jobs
+         where kind='prepare_resume'
+           and subject_type='pair'
+           and subject_id=${pairId}
+           and id<>${excludingJobId}::uuid
+           and jsonb_typeof(checkpoint->'pipeline'->'stages')='object'
+           and jsonb_object_length(checkpoint->'pipeline'->'stages')>0
+         order by updated_at desc
+         limit 1
+      `;
+      const pipeline = rows[0]?.pipeline;
+      return pipeline && typeof pipeline === "object" ? pipeline : null;
+    },
+
     async saveCheckpoint({ generationId, stage, value, executionFence }) {
       const context = `resume-checkpoint:${generationId}:${stage}`;
       const pathname = privatePath("checkpoints", safeCheckpointId(generationId, stage));

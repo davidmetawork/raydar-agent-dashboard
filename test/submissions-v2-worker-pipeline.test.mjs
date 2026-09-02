@@ -424,6 +424,20 @@ test("initial generation blocks only on a missing candidate-original resume and 
   assert.ok(updates.some((row) => row.stage === "collect"));
 });
 
+test("retry preparation reads the latest reusable pipeline for the exact pair", async () => {
+  const reusable = { active_stage: "archive", stages: { render: { key: "render-checkpoint" } } };
+  let queryValues;
+  const sql = fakeSql(async (query, values) => {
+    assert.match(query, /kind='prepare_resume'/u);
+    assert.match(query, /jsonb_object_length/u);
+    queryValues = values;
+    return [{ pipeline: reusable }];
+  });
+  const store = createResumePipelineStore({ sql, repository: {} });
+  assert.deepEqual(await store.loadRetryPipeline({ pairId: "pair-1", excludingJobId: "00000000-0000-0000-0000-000000000001" }), reusable);
+  assert.deepEqual(queryValues, ["pair-1", "00000000-0000-0000-0000-000000000001"]);
+});
+
 test("resume failure settlement preserves an existing resume on regeneration", async () => {
   const calls = [];
   const store = {
