@@ -1,0 +1,384 @@
+{
+  "schema_version": 1,
+  "roles": {
+    "backend": {
+      "role_id": "role-backend",
+      "company": "Acme Systems",
+      "title": "Backend Engineer",
+      "url": "https://www.paraform.com/browse?role=role-backend"
+    },
+    "product": {
+      "role_id": "role-product",
+      "company": "Orbit Labs",
+      "title": "Product Manager",
+      "url": "https://www.paraform.com/browse?role=role-product"
+    },
+    "sales": {
+      "role_id": "role-sales",
+      "company": "Nova Cloud",
+      "title": "Account Executive",
+      "url": "https://www.paraform.com/browse?role=role-sales"
+    },
+    "design": {
+      "role_id": "role-design",
+      "company": "Pixel Works",
+      "title": "Product Designer",
+      "url": "https://www.paraform.com/browse?role=role-design"
+    }
+  },
+  "cases": [
+    {
+      "id": "interested-explicit",
+      "category": "interested",
+      "reply": "Yes, I am interested in the Backend Engineer role.",
+      "sent_message": "Would you consider the Backend Engineer role?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "interested", "quote": "Yes, I am interested in the Backend Engineer role.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-sounds-great",
+      "category": "interested",
+      "reply": "This sounds great, and I would love to learn more.",
+      "sent_message": "I wanted to share a Backend Engineer match.",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "interested", "quote": "This sounds great, and I would love to learn more.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-submit-me",
+      "category": "interested",
+      "reply": "Please submit me for the Product Manager position.",
+      "sent_message": "Are you interested in this Product Manager position?",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "interested", "quote": "Please submit me for the Product Manager position.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-consideration",
+      "category": "interested",
+      "reply": "I'd love to be considered for this opportunity.",
+      "sent_message": "Nova Cloud is hiring an Account Executive.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "interested", "quote": "I'd love to be considered for this opportunity.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-count-me-in",
+      "category": "interested",
+      "reply": "Count me in for the Product Designer role.",
+      "sent_message": "Would you like to explore the Product Designer role?",
+      "offered_roles": ["design"],
+      "expected": [{ "role": "design", "label": "interested", "quote": "Count me in for the Product Designer role.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-definitely",
+      "category": "interested",
+      "reply": "Definitely interested; please move me forward.",
+      "sent_message": "Can I submit you to Acme Systems?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "interested", "quote": "Definitely interested; please move me forward.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-named-role",
+      "category": "interested",
+      "reply": "The Orbit Labs Product Manager role is exactly what I am looking for.",
+      "sent_message": "I found a role at Orbit Labs.",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "interested", "quote": "The Orbit Labs Product Manager role is exactly what I am looking for.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-eager",
+      "category": "interested",
+      "reply": "I am eager to move forward with Nova Cloud.",
+      "sent_message": "The Nova Cloud team would like to meet you.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "interested", "quote": "I am eager to move forward with Nova Cloud.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "not-interested-explicit",
+      "category": "not_interested",
+      "reply": "I am not interested in this role.",
+      "sent_message": "Would you consider the Backend Engineer role?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "not_interested", "quote": "I am not interested in this role.", "review_reason": null, "negative_reason": "not interested" }]
+    },
+    {
+      "id": "not-interested-remove",
+      "category": "not_interested",
+      "reply": "Please remove me from consideration for Orbit Labs.",
+      "sent_message": "Are you interested in Orbit Labs?",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "not_interested", "quote": "Please remove me from consideration for Orbit Labs.", "review_reason": null, "negative_reason": "remove me from consideration" }]
+    },
+    {
+      "id": "not-interested-pass",
+      "category": "not_interested",
+      "reply": "I will pass on the Account Executive opportunity.",
+      "sent_message": "Nova Cloud has an Account Executive opening.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "not_interested", "quote": "I will pass on the Account Executive opportunity.", "review_reason": null, "negative_reason": "pass on the Account Executive opportunity" }]
+    },
+    {
+      "id": "not-interested-no-thanks",
+      "category": "not_interested",
+      "reply": "No thanks, the Product Designer role is not for me.",
+      "sent_message": "Would you consider this Product Designer role?",
+      "offered_roles": ["design"],
+      "expected": [{ "role": "design", "label": "not_interested", "quote": "No thanks, the Product Designer role is not for me.", "review_reason": null, "negative_reason": "Product Designer role is not for me" }]
+    },
+    {
+      "id": "not-interested-other-offer",
+      "category": "not_interested",
+      "reply": "I accepted another offer, so I am declining this role.",
+      "sent_message": "Can I submit you for the Backend Engineer role?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "not_interested", "quote": "I accepted another offer, so I am declining this role.", "review_reason": null, "negative_reason": "accepted another offer" }]
+    },
+    {
+      "id": "not-interested-not-looking",
+      "category": "not_interested",
+      "reply": "I am not looking to make a move right now.",
+      "sent_message": "Orbit Labs is interested in your profile.",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "not_interested", "quote": "I am not looking to make a move right now.", "review_reason": null, "negative_reason": "not looking to make a move" }]
+    },
+    {
+      "id": "not-interested-compensation",
+      "category": "not_interested",
+      "reply": "The compensation does not work for me, so I am going to decline.",
+      "sent_message": "The Account Executive role pays a competitive base.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "not_interested", "quote": "The compensation does not work for me, so I am going to decline.", "review_reason": null, "negative_reason": "compensation does not work for me" }]
+    },
+    {
+      "id": "not-interested-not-fit",
+      "category": "not_interested",
+      "reply": "This is not a fit for what I want next.",
+      "sent_message": "I wanted to share a Product Designer match.",
+      "offered_roles": ["design"],
+      "expected": [{ "role": "design", "label": "not_interested", "quote": "This is not a fit for what I want next.", "review_reason": null, "negative_reason": "not a fit for what I want next" }]
+    },
+    {
+      "id": "question-compensation",
+      "category": "needs_review_question",
+      "reply": "What is the compensation range for this role?",
+      "sent_message": "Would you consider the Backend Engineer role?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "needs_review", "quote": "What is the compensation range for this role?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "question-remote",
+      "category": "needs_review_question",
+      "reply": "Is the Product Manager position fully remote?",
+      "sent_message": "Orbit Labs has a Product Manager opening.",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "needs_review", "quote": "Is the Product Manager position fully remote?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "question-team",
+      "category": "needs_review_question",
+      "reply": "Who would the Account Executive report to?",
+      "sent_message": "Nova Cloud is hiring an Account Executive.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "needs_review", "quote": "Who would the Account Executive report to?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "question-stack",
+      "category": "needs_review_question",
+      "reply": "Which design tools does the team use?",
+      "sent_message": "Pixel Works is looking for a Product Designer.",
+      "offered_roles": ["design"],
+      "expected": [{ "role": "design", "label": "needs_review", "quote": "Which design tools does the team use?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "question-timeline",
+      "category": "needs_review_question",
+      "reply": "When are they hoping for someone to start?",
+      "sent_message": "Acme Systems would like to consider you.",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "needs_review", "quote": "When are they hoping for someone to start?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "question-company",
+      "category": "needs_review_question",
+      "reply": "Can you tell me more about the company's funding?",
+      "sent_message": "Orbit Labs has a role that may fit.",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "needs_review", "quote": "Can you tell me more about the company's funding?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "conditional-remote",
+      "category": "needs_review_conditional",
+      "reply": "I would be interested if the Backend Engineer role is remote.",
+      "sent_message": "Would you consider the Backend Engineer role?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "needs_review", "quote": "I would be interested if the Backend Engineer role is remote.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "conditional-compensation",
+      "category": "needs_review_conditional",
+      "reply": "I can consider it if the base is above $200,000.",
+      "sent_message": "Nova Cloud would like to meet you.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "needs_review", "quote": "I can consider it if the base is above $200,000.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "unclear-maybe",
+      "category": "needs_review_unclear",
+      "reply": "Maybe, I need to think about it.",
+      "sent_message": "Would you consider the Product Manager role?",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "needs_review", "quote": "Maybe, I need to think about it.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "unclear-potentially",
+      "category": "needs_review_unclear",
+      "reply": "Potentially; I am still deciding what I want next.",
+      "sent_message": "Pixel Works has a Product Designer opening.",
+      "offered_roles": ["design"],
+      "expected": [{ "role": "design", "label": "needs_review", "quote": "Potentially; I am still deciding what I want next.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "unclear-not-sure",
+      "category": "needs_review_unclear",
+      "reply": "I am not sure yet.",
+      "sent_message": "Are you interested in the Backend Engineer role?",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "needs_review", "quote": "I am not sure yet.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "unclear-discuss",
+      "category": "needs_review_unclear",
+      "reply": "Let's discuss before you submit me.",
+      "sent_message": "May I submit you to Orbit Labs?",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "needs_review", "quote": "Let's discuss before you submit me.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "multi-generic-interest",
+      "category": "multiple_roles_unclear",
+      "reply": "Yes, I am interested.",
+      "sent_message": "Would you consider the Backend Engineer or Product Manager role?",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "Yes, I am interested.", "review_reason": "role_unclear", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "Yes, I am interested.", "review_reason": "role_unclear", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-reject-both",
+      "category": "multiple_roles_explicit",
+      "reply": "No thanks to either the Backend Engineer or Product Manager role.",
+      "sent_message": "Would you consider the Backend Engineer or Product Manager role?",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "not_interested", "quote": "No thanks to either the Backend Engineer or Product Manager role.", "review_reason": null, "negative_reason": "No thanks to either" },
+        { "role": "product", "label": "not_interested", "quote": "No thanks to either the Backend Engineer or Product Manager role.", "review_reason": null, "negative_reason": "No thanks to either" }
+      ]
+    },
+    {
+      "id": "multi-named-one",
+      "category": "multiple_roles_named",
+      "reply": "I am interested in the Backend Engineer role at Acme Systems.",
+      "sent_message": "I found Backend Engineer and Product Manager opportunities.",
+      "offered_roles": ["backend", "product"],
+      "expected": [{ "role": "backend", "label": "interested", "quote": "I am interested in the Backend Engineer role at Acme Systems.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "multi-mixed-decision",
+      "category": "multiple_roles_mixed",
+      "reply": "I am not interested in sales, but I would love the Orbit Labs Product Manager role.",
+      "sent_message": "Would you consider Account Executive or Product Manager?",
+      "offered_roles": ["sales", "product"],
+      "expected": [
+        { "role": "sales", "label": "not_interested", "quote": "I am not interested in sales", "review_reason": null, "negative_reason": "not interested in sales" },
+        { "role": "product", "label": "interested", "quote": "I would love the Orbit Labs Product Manager role.", "review_reason": null, "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-explicit-all",
+      "category": "multiple_roles_explicit",
+      "reply": "Both roles sound excellent, and I am interested in both.",
+      "sent_message": "I found Backend Engineer and Product Manager opportunities.",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "interested", "quote": "Both roles sound excellent, and I am interested in both.", "review_reason": null, "negative_reason": null },
+        { "role": "product", "label": "interested", "quote": "Both roles sound excellent, and I am interested in both.", "review_reason": null, "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-question-which",
+      "category": "multiple_roles_unclear",
+      "reply": "Which role are you referring to?",
+      "sent_message": "I have two opportunities that could fit.",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "Which role are you referring to?", "review_reason": "role_unclear", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "Which role are you referring to?", "review_reason": "role_unclear", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-named-question",
+      "category": "multiple_roles_question",
+      "reply": "I like the Product Manager role, but what is its salary range?",
+      "sent_message": "Would you consider Backend Engineer or Product Manager?",
+      "offered_roles": ["backend", "product"],
+      "expected": [{ "role": "product", "label": "needs_review", "quote": "I like the Product Manager role, but what is its salary range?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "multi-negative-and-unclear",
+      "category": "multiple_roles_mixed",
+      "reply": "The Backend Engineer role is not for me; maybe the Product Manager role.",
+      "sent_message": "Would you consider Backend Engineer or Product Manager?",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "not_interested", "quote": "The Backend Engineer role is not for me", "review_reason": null, "negative_reason": "Backend Engineer role is not for me" },
+        { "role": "product", "label": "needs_review", "quote": "maybe the Product Manager role.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-reject-all-three",
+      "category": "multiple_roles_explicit",
+      "reply": "I am declining all three roles.",
+      "sent_message": "I found engineering, product, and sales roles.",
+      "offered_roles": ["backend", "product", "sales"],
+      "expected": [
+        { "role": "backend", "label": "not_interested", "quote": "I am declining all three roles.", "review_reason": null, "negative_reason": "declining all three roles" },
+        { "role": "product", "label": "not_interested", "quote": "I am declining all three roles.", "review_reason": null, "negative_reason": "declining all three roles" },
+        { "role": "sales", "label": "not_interested", "quote": "I am declining all three roles.", "review_reason": null, "negative_reason": "declining all three roles" }
+      ]
+    },
+    {
+      "id": "multi-three-way-mixed",
+      "category": "multiple_roles_mixed",
+      "reply": "I want to pursue Product Designer and Product Manager, but not Account Executive.",
+      "sent_message": "I found design, product, and sales opportunities.",
+      "offered_roles": ["design", "product", "sales"],
+      "expected": [
+        { "role": "design", "label": "interested", "quote": "I want to pursue Product Designer and Product Manager", "review_reason": null, "negative_reason": null },
+        { "role": "product", "label": "interested", "quote": "I want to pursue Product Designer and Product Manager", "review_reason": null, "negative_reason": null },
+        { "role": "sales", "label": "not_interested", "quote": "not Account Executive.", "review_reason": null, "negative_reason": "not Account Executive" }
+      ]
+    },
+    {
+      "id": "multi-generic-exploring",
+      "category": "multiple_roles_unclear",
+      "reply": "Sounds worth exploring.",
+      "sent_message": "I found engineering, product, and sales opportunities.",
+      "offered_roles": ["backend", "product", "sales"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "Sounds worth exploring.", "review_reason": "role_unclear", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "Sounds worth exploring.", "review_reason": "role_unclear", "negative_reason": null },
+        { "role": "sales", "label": "needs_review", "quote": "Sounds worth exploring.", "review_reason": "role_unclear", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-explicit-opposite",
+      "category": "multiple_roles_mixed",
+      "reply": "Move me forward for Orbit Labs, but please pass on Acme Systems.",
+      "sent_message": "Would you consider Acme Systems or Orbit Labs?",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "product", "label": "interested", "quote": "Move me forward for Orbit Labs", "review_reason": null, "negative_reason": null },
+        { "role": "backend", "label": "not_interested", "quote": "please pass on Acme Systems.", "review_reason": null, "negative_reason": "pass on Acme Systems" }
+      ]
+    }
+  ]
+}
