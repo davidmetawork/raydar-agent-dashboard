@@ -197,6 +197,8 @@ grant execute on function submissions_v2.release_source_cursor(text, text, bigin
   to submissions_v2_worker;
 grant execute on function submissions_v2.job_control_enabled(text, submissions_v2.runtime_controls)
   to submissions_v2_worker;
+grant execute on function submissions_v2.source_control_enabled(text, submissions_v2.runtime_controls)
+  to submissions_v2_worker;
 
 grant execute on function submissions_v2.claim_case_purges(text, integer, integer) to submissions_v2_purge;
 grant execute on function submissions_v2.case_purge_plan(uuid, text, bigint) to submissions_v2_purge;

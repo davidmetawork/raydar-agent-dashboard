@@ -26,8 +26,8 @@ function emailHmac(email, env = process.env) {
 export function candidateIndexRow(raw, { env = process.env, confirmedAt = new Date().toISOString(), hasRecordedCall = null } = {}) {
   const row = normalizeCandidateRow(raw || {});
   const id = clean(row?.id || row?.candidate_user_id || row?.candidateUserId, 200);
-  const name = clean(row?.name, 500);
-  if (!id || !name) return null;
+  if (!id) return null;
+  const name = clean(row?.name, 500) || "Candidate name unavailable";
   const linkedin = clean(row?.linkedin_url || row?.linkedin || row?.linkedin_user, 1_000);
   const email = firstEmail(row);
   const hmac = emailHmac(email, env);
