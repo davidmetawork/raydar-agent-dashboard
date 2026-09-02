@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { worst } from "../api/health/_lib/engine.mjs";
 import {
   bookingDoor, beatLane, desktopRunner, vendorApi, seqHealth,
-  googleWorkspace, nativeReminders, neonDb, okTrue, paraaiLane,
+  googleWorkspace, nativeReminders, neonDb, n8nWatchdog, okTrue, paraaiLane,
 } from "../api/health/_lib/evaluators.mjs";
 import { CATALOG, byId, beatLanes } from "../api/health/_lib/catalog.mjs";
 import { uptimeFromTransitions } from "../api/health/tile.mjs";
@@ -17,6 +17,23 @@ test("worst() ranks DOWN above everything and OK below everything", () => {
   assert.equal(worst(["UNKNOWN", "DEGRADED"]), "DEGRADED");
   assert.equal(worst(["DEGRADED", "DOWN", "OK"]), "DOWN");
   assert.equal(worst([]), "OK");
+});
+
+test("n8n watchdog reads the deployed alerted-map state without a false green", () => {
+  const activeFailure = n8nWatchdog({
+    watchdog: {
+      checkedAt: new Date().toISOString(),
+      alerted: { "workflow-123": 3 },
+    },
+  });
+  assert.equal(activeFailure.state, "DEGRADED");
+  assert.equal(activeFailure.metrics.streaks, 1);
+  assert.match(activeFailure.reason, /workflow-123/u);
+
+  const recovered = n8nWatchdog({
+    watchdog: { checkedAt: new Date().toISOString(), alerted: {} },
+  });
+  assert.equal(recovered.state, "OK");
 });
 
 test("booking door: the exact 2026-08-06/07 outage shape reads DOWN", () => {

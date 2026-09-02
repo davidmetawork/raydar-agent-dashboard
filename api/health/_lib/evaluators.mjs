@@ -220,13 +220,22 @@ export function bridgeMachine({ results }) {
 export function n8nWatchdog({ watchdog }) {
   if (!watchdog) return UNK("watchdog state key absent (has /api/ops/n8n-watchdog ever run?)");
   const mins = ageMin(watchdog.at || watchdog.checkedAt);
-  const metrics = { lastRunMin: mins, streaks: (watchdog.streaks || []).length };
+  // The deployed watchdog persists active firing streaks as
+  // { alerted: { workflowId: streak } }. Keep supporting the richer streaks[]
+  // shape, but do not turn the writer's actual state into a false green tile.
+  const streaks = Array.isArray(watchdog.streaks)
+    ? watchdog.streaks
+    : Object.entries(watchdog.alerted && typeof watchdog.alerted === "object"
+      ? watchdog.alerted
+      : {})
+      .filter(([workflowId, streak]) => workflowId && Number.isFinite(Number(streak)) && Number(streak) > 0)
+      .map(([workflowId, streak]) => ({ workflowId, streak: Number(streak) }));
+  const metrics = { lastRunMin: mins, streaks: streaks.length };
   if (mins == null) return UNK("watchdog state has no timestamp", metrics);
   if (mins > 180) return UNK(`watchdog-stale: no run for ${mins}m`, metrics);
   if (watchdog.unreachable || watchdog.error) {
     return DOWN(`n8n unreachable from the watchdog: ${watchdog.error || "unknown"}`, metrics);
   }
-  const streaks = watchdog.streaks || [];
   if (streaks.length) {
     const names = streaks.map((s) => s.workflowName || s.workflowId).slice(0, 4).join(", ");
     return DEG(`failing: ${names}`, metrics);
