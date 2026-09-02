@@ -15,6 +15,7 @@ import {
 import {
   GROUNDING_VALIDATOR_MODEL,
   runGroundingValidator,
+  schemaForOpenAI,
   validateClaimsToCompletion,
 } from "../api/submissions-v2/_lib/models/openai-validator.mjs";
 
@@ -312,6 +313,17 @@ test("grounding validator pins GPT-5.4 high, retries invalid output, and never s
   assert.equal(bodies[0].reasoning.effort, "high");
   assert.equal(bodies[0].text.format.strict, true);
   assert.equal(result.validation.results[0].verdict, "supported");
+});
+
+test("OpenAI receives its supported schema projection while local validation stays strict", () => {
+  const transformed = schemaForOpenAI({
+    type: "array",
+    minItems: 1,
+    maxItems: 3,
+    uniqueItems: true,
+    items: { type: "string", minLength: 1, maxLength: 200 },
+  });
+  assert.deepEqual(transformed, { type: "array", items: { type: "string" } });
 });
 
 test("grounding validator fails closed after bounded invalid responses", async () => {

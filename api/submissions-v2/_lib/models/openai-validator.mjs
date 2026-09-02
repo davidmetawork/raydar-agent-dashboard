@@ -22,6 +22,24 @@ Use supportable_after_narrowing only when a conservative rewrite removes unsuppo
 Use unsupported when candidate evidence does not support the claim or contradicts it.
 Never broaden, infer desired client attributes, invent a compromise, or cite evidence outside the claim packet.`;
 
+const OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
+  "minLength",
+  "maxLength",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+]);
+
+export function schemaForOpenAI(value) {
+  if (Array.isArray(value)) return value.map(schemaForOpenAI);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS.has(key))
+      .map(([key, entry]) => [key, schemaForOpenAI(entry)]),
+  );
+}
+
 function requiredKey(apiKey) {
   const key = String(apiKey || "").trim();
   if (!key) {
@@ -97,7 +115,7 @@ function bodyFor(claims) {
         type: "json_schema",
         name: "raydar_resume_grounding_validation_v1",
         strict: true,
-        schema: VALIDATOR_JSON_SCHEMA,
+        schema: schemaForOpenAI(VALIDATOR_JSON_SCHEMA),
       },
     },
   };
