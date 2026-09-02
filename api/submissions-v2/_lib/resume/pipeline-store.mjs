@@ -121,7 +121,7 @@ export function createResumePipelineStore({
            and subject_id=${pairId}
            and id<>${excludingJobId}::uuid
            and jsonb_typeof(checkpoint->'pipeline'->'stages')='object'
-           and jsonb_object_length(checkpoint->'pipeline'->'stages')>0
+           and checkpoint->'pipeline'->'stages'<>'{}'::jsonb
          order by updated_at desc
          limit 1
       `;

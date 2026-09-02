@@ -429,7 +429,7 @@ test("retry preparation reads the latest reusable pipeline for the exact pair", 
   let queryValues;
   const sql = fakeSql(async (query, values) => {
     assert.match(query, /kind='prepare_resume'/u);
-    assert.match(query, /jsonb_object_length/u);
+    assert.match(query, /<>'\{\}'::jsonb/u);
     queryValues = values;
     return [{ pipeline: reusable }];
   });
