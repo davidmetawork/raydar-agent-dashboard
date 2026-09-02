@@ -217,6 +217,10 @@ test("PDF preflight enforces selectable text, embedded fonts, ATS parity, and pa
     officialBrandAsset: BRAND,
   });
   assert.equal(assertAtsParity(`${render.atsText}\nRaydar`, render.atsText), true);
+  assert.equal(assertAtsParity(
+    `${render.atsText}\nPrepared by Raydar\nPage 1 of 2\nJane Doe\nEARLIER EXPERIENCE | CONTINUED`,
+    render.atsText,
+  ), true);
   const verification = verifyRenderedPdf({
     pdfBytes: Buffer.from("%PDF-1.7\nfixture"),
     pdfExtractedText: render.atsText,
