@@ -127,7 +127,13 @@ export function schemaForAnthropic(value) {
     .map(([key, child]) => [key, schemaForAnthropic(child)]));
 }
 
-export function strategySchemaForAnthropic() {
+export function strategySchemaForAnthropic(allowedClaimIds = []) {
+  const claimId = {
+    type: "string",
+    ...(allowedClaimIds.length && allowedClaimIds.length <= 200
+      ? { enum: [...new Set(allowedClaimIds)] }
+      : {}),
+  };
   const contentNode = {
     type: "object",
     additionalProperties: false,
@@ -135,7 +141,7 @@ export function strategySchemaForAnthropic() {
     properties: {
       id: { type: "string" },
       text: { type: "string" },
-      claim_ids: { type: "array", items: { type: "string" } },
+      claim_ids: { type: "array", items: claimId },
       emphasis: { type: "array", items: { type: "string" } },
     },
   };
@@ -199,7 +205,7 @@ export function strategySchemaForAnthropic() {
       schema_version: { type: "string", const: "raydar.resume.strategy.v1" },
       target_narrative: { type: "string" },
       document: { $ref: "#/$defs/resumeAst" },
-      selected_claim_ids: { type: "array", items: { type: "string" } },
+      selected_claim_ids: { type: "array", items: claimId },
       deliberate_omissions: {
         type: "array",
         items: {
@@ -238,7 +244,9 @@ function bodyFor(model, payload, maxTokens) {
         type: "json_schema",
         // The provider receives the same shape through shared definitions so
         // its grammar stays bounded; the full contract is enforced locally.
-        schema: strategySchemaForAnthropic(),
+        schema: strategySchemaForAnthropic(
+          payload?.evidence_ledger?.claims?.map((claim) => claim.claim_id) || [],
+        ),
       },
     },
   };
@@ -306,8 +314,9 @@ async function callModel(model, payload, {
 
 function checkedResultStrategy(result, ledger) {
   try {
-    const document = assertResumeAst(normalizeModelDocument(result.strategy.document), {
-      allowedClaimIds: ledger.claims.map((claim) => claim.claimId),
+    const allowedClaimIds = ledger.claims.map((claim) => claim.claimId);
+    const document = assertResumeAst(normalizeModelDocument(result.strategy.document, allowedClaimIds), {
+      allowedClaimIds,
     });
     return {
       ...result.strategy,
@@ -325,8 +334,9 @@ function checkedResultStrategy(result, ledger) {
   }
 }
 
-function normalizeModelDocument(raw) {
+function normalizeModelDocument(raw, allowedClaimIds = []) {
   const document = structuredClone(raw);
+  const allowedClaims = new Set(allowedClaimIds);
   const nodes = [];
   const register = (node, id) => {
     if (!node || typeof node !== "object" || Array.isArray(node)) return;
@@ -361,6 +371,26 @@ function normalizeModelDocument(raw) {
         }
       });
     });
+  }
+  for (const node of nodes) {
+    node.claim_ids = (Array.isArray(node.claim_ids) ? node.claim_ids : [])
+      .filter((claimId, index, values) => allowedClaims.has(claimId) && values.indexOf(claimId) === index);
+  }
+  const hasClaims = (node) => Array.isArray(node?.claim_ids) && node.claim_ids.length > 0;
+  if (Array.isArray(document?.candidate?.contact)) {
+    document.candidate.contact = document.candidate.contact.filter(hasClaims);
+  }
+  if (document?.summary && !hasClaims(document.summary)) document.summary = null;
+  if (Array.isArray(document?.sections)) {
+    document.sections = document.sections.map((section) => {
+      if (!Array.isArray(section?.entries)) return section;
+      section.entries = section.entries.map((entry) => {
+        if (Array.isArray(entry?.header)) entry.header = entry.header.filter(hasClaims);
+        if (Array.isArray(entry?.body)) entry.body = entry.body.filter(hasClaims);
+        return entry;
+      }).filter((entry) => Array.isArray(entry?.header) && entry.header.length > 0);
+      return section;
+    }).filter((section) => Array.isArray(section?.entries) && section.entries.length > 0);
   }
   const visibleCharacters = nodes.reduce(
     (sum, node) => sum + normalizeEvidenceText(node.text).length,

@@ -231,6 +231,8 @@ test("Anthropic receives its supported schema projection while local limits rema
   assert.deepEqual(strategySchema.$defs.section.properties.entries.items, { $ref: "#/$defs/entry" });
   assert.equal(JSON.stringify(strategySchema).includes("uniqueItems"), false);
   assert.ok(JSON.stringify(strategySchema).length < 5_000);
+  const constrained = strategySchemaForAnthropic(["claim-name", "claim-title"]);
+  assert.deepEqual(constrained.$defs.contentNode.properties.claim_ids.items.enum, ["claim-name", "claim-title"]);
 });
 
 test("strategist does not fall back on nonretryable authentication failure", async () => {
@@ -267,6 +269,13 @@ test("strategist deterministically repairs internal ids and drops invalid visual
   const strategy = strategyFixture();
   strategy.document.candidate.name.id = "duplicate id";
   strategy.document.candidate.headline.id = "duplicate id";
+  strategy.document.summary = {
+    id: "unsupported-summary",
+    text: "Unsupported summary",
+    claim_ids: ["invented-claim"],
+    emphasis: [],
+  };
+  strategy.document.sections[0].entries[0].body[0].claim_ids = ["claim-achievement", "invented-claim"];
   strategy.document.sections[0].entries[0].body[0].emphasis = ["not exact source text"];
   const result = await runResumeStrategist({ bundle, ledger }, {
     apiKey: "test-key",
@@ -279,6 +288,8 @@ test("strategist deterministically repairs internal ids and drops invalid visual
   });
   assert.equal(result.strategy.document.candidate.name.id, "candidate-name");
   assert.equal(result.strategy.document.candidate.headline.id, "candidate-headline");
+  assert.equal(result.strategy.document.summary, null);
+  assert.deepEqual(result.strategy.document.sections[0].entries[0].body[0].claim_ids, ["claim-achievement"]);
   assert.deepEqual(result.strategy.document.sections[0].entries[0].body[0].emphasis, []);
 });
 
