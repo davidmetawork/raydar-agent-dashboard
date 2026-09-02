@@ -69,6 +69,18 @@ export async function factsFor(cuIds, { readMany = hashGetMany, batch = 200 } = 
   return out;
 }
 
+/** Compact-cache readiness for a set of applicants, with the same bounded
+ * HMGET batches as rule facts so a large backfill cannot create one giant
+ * Upstash command when the button is pressed. */
+export async function cardsFor(cuIds, { readMany = hashGetMany, batch = 200 } = {}) {
+  const unique = [...new Set(cuIds.filter(Boolean))];
+  const out = {};
+  for (let i = 0; i < unique.length; i += batch) {
+    Object.assign(out, await readMany(K.cards, unique.slice(i, i + batch)));
+  }
+  return out;
+}
+
 export async function readDirectories({ readHash = hashGetAllJson } = {}) {
   const [schools, companies] = await Promise.all([
     readHash(K.schools).catch(() => ({})),

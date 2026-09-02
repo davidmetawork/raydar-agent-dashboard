@@ -34,13 +34,14 @@ const row = (cuId, extra = {}) => ({
 });
 
 /** In-memory KV standing in for the apphub namespace. */
-function store({ rules = [], pausedAll = false, queue = [], decisions = {}, facts = {}, counts = null } = {}) {
+function store({ rules = [], pausedAll = false, queue = [], decisions = {}, facts = {}, cards = null, counts = null } = {}) {
   const state = {
     "apphub:rules": { rev: 3, pausedAll, rules, updatedAt: null },
     "apphub:queue": { rows: queue },
     "apphub:counts": counts,
     "apphub:decisions": { ...decisions },
     "apphub:facts": facts,
+    "apphub:cards": cards ?? Object.fromEntries(Object.keys(facts).map((cuId) => [cuId, {}])),
     "apphub:rulestats": {},
     "apphub:ruleruns": {},
     "apphub:schools": { sch_harvard: "Harvard University" },
@@ -231,11 +232,25 @@ test("an off rule never fires and a watching rule only counts", async () => {
 });
 
 test("an applicant with no facts is skipped and counted, never decided", async () => {
-  const s = store({ rules: [HARVARD_RULE], queue: [row("cu1")], facts: {} });
+  const s = store({ rules: [HARVARD_RULE], queue: [row("cu1")], facts: {}, cards: { cu1: {} } });
   const res = response();
   await createTickHandler(s.deps)(request(), res);
   assert.equal(res.body.decided, 0);
   assert.equal(res.body.skipped.no_facts_yet, 1);
+});
+
+test("a rule cannot consider an applicant before its profile card is cached", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+    cards: {},
+  });
+  const res = response();
+  await createTickHandler(s.deps)(request(), res);
+  assert.equal(res.body.decided, 0);
+  assert.equal(res.body.profileCacheWithheld, 1);
+  assert.deepEqual(s.state["apphub:decisions"], {});
 });
 
 test("an Interview rule reports a not-ready applicant without writing a decision", async () => {

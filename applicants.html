@@ -298,6 +298,8 @@
 
     <div class="banner danger" id="trimBanner"><div>●</div><div><strong id="trimTitle">Some applicants are missing from this queue</strong><span id="trimText"></span></div></div>
 
+    <div class="banner" id="cacheBanner"><div>●</div><div><strong id="cacheTitle">Applicant profiles are preparing</strong><span id="cacheText"></span></div></div>
+
     <div class="toolbar">
       <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
@@ -364,6 +366,7 @@ const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
   snapshot: null, decisions: {}, acks: {},
   counts: null,                       // sync's count-drop tripwire doc; .alert set = show the danger banner
+  profileCache: null,                 // fail-closed coverage: rows without a compact cached profile stay hidden
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
@@ -706,6 +709,15 @@ function renderStats() {
     $("trimBanner").classList.add("on");
   } else {
     $("trimBanner").classList.remove("on");
+  }
+  const cache = STATE.profileCache;
+  if (cache?.withheldCandidates > 0) {
+    const n = Number(cache.withheldCandidates).toLocaleString();
+    $("cacheTitle").textContent = n + " applicant profile" + (cache.withheldCandidates === 1 ? " is" : "s are") + " preparing";
+    $("cacheText").textContent = "These applicants are safely held off Review and Stream until their cached Paraform history is ready; they will appear automatically after caching completes.";
+    $("cacheBanner").classList.add("on");
+  } else {
+    $("cacheBanner").classList.remove("on");
   }
   if (!at) { $("updatedText").textContent = "No snapshot yet"; chip.classList.add("amber"); return; }
   const ageH = (Date.now() - at.getTime()) / 3600000;
@@ -1582,6 +1594,7 @@ async function loadFeed(manual = false) {
     STATE.photos = body.photos || {};
     STATE.cards = body.cards || {};
     STATE.counts = body.counts || null;
+    STATE.profileCache = body.profileCache || null;
     STATE.loaded = true;
     reconcileLocal();
     renderAll();

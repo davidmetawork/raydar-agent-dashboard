@@ -6,6 +6,7 @@
 
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
+import { profileCacheGate } from "./_lib/profile-readiness.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -34,13 +35,25 @@ export function createFeedHandler({
       // The queue is stored under its own key (size isolation); merge it back so
       // the page keeps reading one snapshot shape. A queue embedded directly in
       // the snapshot (older publisher) wins only if the split doc is absent.
-      if (snapshot && queueDoc && Array.isArray(queueDoc.rows)) {
-        snapshot.queue = queueDoc.rows;
-      }
+      const joined = snapshot ? {
+        ...snapshot,
+        ...(queueDoc && Array.isArray(queueDoc.rows) ? { queue: queueDoc.rows } : {}),
+      } : null;
+      const gated = profileCacheGate(joined, cards);
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.
-      return res.status(200).json({ ok: true, snapshot, decisions, acks, photos, cards, counts });
+      const { missingCuIds: _privateMissingIds, ...profileCache } = gated.profileCache;
+      return res.status(200).json({
+        ok: true,
+        snapshot: gated.snapshot,
+        decisions,
+        acks,
+        photos,
+        cards,
+        counts,
+        profileCache,
+      });
     } catch (error) {
       return res.status(502).json({
         ok: false,

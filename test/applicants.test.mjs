@@ -243,7 +243,30 @@ test("sync GET preserves legacy approvals and exposes all un-acked Core decision
   assert.deepEqual(res.body.decidedKeys, ["cu1:role1", "cu2:role1", "cu3:role2"]);
 });
 
-function decisionSetup({ ack = null } = {}) {
+test("sync reports authoritative profile-cache coverage without candidate names", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { deps } = fakeStore({
+    "apphub:snapshot": {
+      generatedAt: "2026-08-09T00:00:00.000Z",
+      stream: [
+        { key: "ready00001:role1", cuId: "ready00001", name: "Ready Person" },
+        { key: "missing001:role1", cuId: "missing001", name: "Missing Person" },
+      ],
+    },
+    "apphub:queue": { rows: [{ key: "missing002:role1", cuId: "missing002", name: "Another Person" }] },
+    "apphub:cards": { ready00001: { exp: [], edu: [] } },
+  });
+  const handler = createSyncHandler(deps);
+  const res = response();
+  await handler(request({ method: "GET", body: undefined, query: { profileCache: "1" } }), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.profileCache.missingCuIds, ["missing002", "missing001"]);
+  assert.equal(res.body.profileCache.readyCandidates, 1);
+  assert.equal(res.body.profileCache.withheldCandidates, 2);
+  assert.doesNotMatch(JSON.stringify(res.body), /Person/);
+});
+
+function decisionSetup({ ack = null, queue = [{ key: "cu1:role1", cuId: "cu1" }], card = {} } = {}) {
   const calls = { wrote: [], deleted: [] };
   const handler = createDecisionHandler({
     corsHandler: () => false,
@@ -253,6 +276,8 @@ function decisionSetup({ ack = null } = {}) {
     },
     kvReady: () => true,
     readAck: async () => ack,
+    readQueue: async () => ({ rows: queue }),
+    readCard: async () => card,
     writeDecision: async (key, record) => calls.wrote.push([key, record]),
     deleteDecision: async (key) => calls.deleted.push(key),
     now: () => "2026-08-09T00:00:00.000Z",
@@ -309,6 +334,15 @@ test("undo deletes only while un-acked and answers 409 after an ack", async () =
   assert.equal(undone.statusCode, 200);
   assert.equal(undone.body.undone, true);
   assert.deepEqual(open.calls.deleted, ["cu1:role1"]);
+});
+
+test("decision refuses a hidden applicant until its profile card is cached", async () => {
+  const missing = decisionSetup({ card: null });
+  const res = response();
+  await missing.handler(request({ body: { key: "cu1:role1", action: "pass" } }), res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.error, "profile_cache_not_ready");
+  assert.equal(missing.calls.wrote.length, 0);
 });
 
 test("normalizeAcks reports the first offending key", () => {
@@ -441,7 +475,7 @@ test("feed returns every compact card and photo alongside the snapshot and overl
   const photoUrl = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/cu1abcdef0";
   const { calls, handler } = feedSetup({
     "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
-    "apphub:queue": { generatedAt: "2026-08-09T00:00:00.000Z", rows: [{ key: "cu1abcdef0:role1" }] },
+    "apphub:queue": { generatedAt: "2026-08-09T00:00:00.000Z", rows: [{ key: "cu1abcdef0:role1", cuId: "cu1abcdef0" }] },
     "apphub:decisions": { "cu1abcdef0:role1": { action: "pass" } },
     "apphub:photos": { cu1abcdef0: photoUrl },
     "apphub:cards": { cu1abcdef0: { title: "Founding Engineer", exp: [], edu: [] } },
@@ -452,12 +486,47 @@ test("feed returns every compact card and photo alongside the snapshot and overl
   assert.deepEqual(res.body.photos, { cu1abcdef0: photoUrl });
   assert.deepEqual(res.body.cards, { cu1abcdef0: { title: "Founding Engineer", exp: [], edu: [] } });
   // The pre-photos merge behavior is intact: split queue doc back onto the snapshot.
-  assert.deepEqual(res.body.snapshot.queue, [{ key: "cu1abcdef0:role1" }]);
+  assert.deepEqual(res.body.snapshot.queue, [{ key: "cu1abcdef0:role1", cuId: "cu1abcdef0" }]);
   assert.deepEqual(res.body.decisions, { "cu1abcdef0:role1": { action: "pass" } });
   assert.deepEqual(res.body.acks, {});
   assert.equal(res.headers["cache-control"], "no-store");
   assert.ok(calls.readHash.includes("apphub:photos"));
   assert.ok(calls.readHash.includes("apphub:cards"));
+});
+
+test("feed withholds every row that has no cached profile card", async () => {
+  const { handler } = feedSetup({
+    "apphub:snapshot": {
+      generatedAt: "2026-08-09T00:00:00.000Z",
+      counts: { stream: 2, queue: 2 },
+      stream: [
+        { key: "ready00001:role1", cuId: "ready00001" },
+        { key: "missing001:role1", cuId: "missing001" },
+      ],
+    },
+    "apphub:queue": { rows: [
+      { key: "ready00001:role2", cuId: "ready00001", tier: "C" },
+      { key: "missing002:role2", cuId: "missing002", tier: "unrated" },
+    ] },
+    "apphub:cards": { ready00001: { exp: [], edu: [] } },
+  });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined }), res);
+  assert.deepEqual(res.body.snapshot.stream.map((row) => row.cuId), ["ready00001"]);
+  assert.deepEqual(res.body.snapshot.queue.map((row) => row.cuId), ["ready00001"]);
+  assert.equal(res.body.snapshot.counts.stream, 1);
+  assert.equal(res.body.snapshot.counts.queue, 1);
+  assert.deepEqual(res.body.profileCache, {
+    required: true,
+    totalRows: 4,
+    readyRows: 2,
+    withheldRows: 2,
+    totalCandidates: 3,
+    readyCandidates: 1,
+    withheldCandidates: 2,
+    queue: { total: 2, ready: 1, withheld: 1 },
+    stream: { total: 2, ready: 1, withheld: 1 },
+  });
 });
 
 const BUCKET_PHOTO = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/abcdef1234";

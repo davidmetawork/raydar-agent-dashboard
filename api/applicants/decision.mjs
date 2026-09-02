@@ -8,6 +8,7 @@
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { PASS_REASON_IDS, decisionRecord } from "./_lib/decision-record.mjs";
 import {
+  getJson,
   hashDel,
   hashGetJson,
   hashSetJson,
@@ -25,6 +26,8 @@ export function createDecisionHandler({
   authHandler = requireAuth,
   kvReady = kvConfigured,
   readAck = (key) => hashGetJson(K.acks, key),
+  readQueue = () => getJson(K.queue),
+  readCard = (cuId) => hashGetJson(K.cards, cuId),
   writeDecision = (key, record) => hashSetJson(K.decisions, { [key]: record }),
   deleteDecision = (key) => hashDel(K.decisions, key),
   now = () => new Date().toISOString(),
@@ -51,6 +54,14 @@ export function createDecisionHandler({
         if (ack) return res.status(409).json({ ok: false, error: "already_acked", ack });
         await deleteDecision(key);
         return res.status(200).json({ ok: true, key, undone: true });
+      }
+      const queue = await readQueue();
+      const row = (Array.isArray(queue?.rows) ? queue.rows : []).find((item) => item?.key === key);
+      if (!row?.cuId) {
+        return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
+      }
+      if (!(await readCard(row.cuId))) {
+        return res.status(409).json({ ok: false, error: "profile_cache_not_ready" });
       }
       // Shared with the rules tick so a human decision and an automatic one
       // are the same shape downstream (see _lib/decision-record.mjs).

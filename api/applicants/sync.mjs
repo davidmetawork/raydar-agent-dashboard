@@ -12,6 +12,7 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { directoryFromFacts, factsFromProfile } from "./_lib/facts.mjs";
+import { profileCacheGate } from "./_lib/profile-readiness.mjs";
 import {
   getJson,
   hashDelMany,
@@ -264,6 +265,21 @@ export function createSyncHandler({
 
     try {
       if (req.method === "GET") {
+        if (String(req.query?.profileCache || "") === "1") {
+          const [snapshot, queueDoc, cards] = await Promise.all([
+            readJson(K.snapshot),
+            readJson(K.queue),
+            readHash(K.cards),
+          ]);
+          const joined = snapshot ? {
+            ...snapshot,
+            ...(queueDoc && Array.isArray(queueDoc.rows) ? { queue: queueDoc.rows } : {}),
+          } : null;
+          return res.status(200).json({
+            ok: true,
+            profileCache: profileCacheGate(joined, cards).profileCache,
+          });
+        }
         const [decisions, acks] = await Promise.all([
           readHash(K.decisions),
           readHash(K.acks),

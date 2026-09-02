@@ -43,7 +43,7 @@ import {
   kvConfigured,
 } from "./_lib/kv.mjs";
 import { evaluateRule, inScope } from "./_lib/rules.mjs";
-import { armedRules, factsFor, pendingRows, readRules, watchingRules } from "./_lib/rule-store.mjs";
+import { armedRules, cardsFor, factsFor, pendingRows, readRules, watchingRules } from "./_lib/rule-store.mjs";
 
 export const config = { maxDuration: 120 };
 
@@ -119,9 +119,19 @@ export function createTickHandler({
         readJson(K.queue),
         readHash(K.decisions),
       ]);
-      const rows = pendingRows(queueDoc?.rows ?? [], decisions);
+      const candidates = [...new Set((Array.isArray(queueDoc?.rows) ? queueDoc.rows : [])
+        .map((row) => row?.cuId).filter(Boolean))];
+      const cards = await cardsFor(candidates, { readMany });
+      const rows = pendingRows(queueDoc?.rows ?? [], decisions)
+        .filter((row) => Boolean(cards[row.cuId]));
       if (!rows.length) {
-        return res.status(200).json({ ok: true, at: startedAt, decided: 0, pending: 0 });
+        return res.status(200).json({
+          ok: true,
+          at: startedAt,
+          decided: 0,
+          pending: 0,
+          profileCacheWithheld: candidates.filter((cuId) => !cards[cuId]).length,
+        });
       }
 
       const facts = await factsFor(rows.map((row) => row.cuId), { readMany });
@@ -251,6 +261,7 @@ export function createTickHandler({
         fired,
         wouldFire,
         skipped,
+        profileCacheWithheld: candidates.filter((cuId) => !cards[cuId]).length,
         ...(auditWritten ? {} : { auditWriteFailed: true }),
       });
     } catch (error) {
