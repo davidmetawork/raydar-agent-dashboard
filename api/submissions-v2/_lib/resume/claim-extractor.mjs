@@ -33,17 +33,10 @@ function splitLongSpan(value) {
 }
 
 function sourceSpans(source) {
-  // PDF extraction can place nearly every visual word on a separate line, so
-  // a newline alone is not an evidence boundary; sentence punctuation and the
-  // bounded chunk size retain every exact source character without creating
-  // hundreds of tiny claims that overwhelm the strategist.
-  const clauses = source.normalizedText
-    .split(/(?<=[.!?])\s+|\s+[|;]\s+|\s+—\s+/u)
-    .map((item) => item.replace(/^\s*(?:[-*•▪◦]|\d+[.)])\s*/u, "").trim())
-    .filter(Boolean);
-  const spans = [];
-  for (const clause of clauses) spans.push(...splitLongSpan(clause));
-  return spans;
+  // Extracted PDFs often contain visual line breaks between individual words;
+  // fixed bounded passages preserve the complete exact source while avoiding
+  // hundreds of tiny claims and repeated JSON metadata in the model request.
+  return splitLongSpan(source.normalizedText);
 }
 
 function claimTypeFor(value) {

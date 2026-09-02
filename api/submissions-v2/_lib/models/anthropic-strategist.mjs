@@ -37,7 +37,7 @@ Candidate facts may use only candidate-side evidence and every visible factual t
 Role and intake content is orientation only and can rank or omit candidate evidence but can never prove a candidate fact.
 Do not invent, embellish, compromise between contradictions, or turn a client requirement into candidate history.
 Strongly prefer one US-letter page and never request more than two; compress facts before page two, keep page one independently useful, and use no filler or internal process language.
-Use concise resume text, select only the strongest relevant claims, and return no more than 25 deliberate omissions.
+Use concise resume text, select only the strongest relevant claims, return no more than 25 deliberate omissions, and make selected_claim_ids exactly the unique claim ids cited by visible document nodes.
 The deterministic renderer, not you, controls layout, brand tokens, typography, and PDF generation.`;
 
 function requiredKey(apiKey) {

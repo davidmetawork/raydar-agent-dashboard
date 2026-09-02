@@ -243,7 +243,7 @@ test("deterministic extraction creates bounded exact candidate evidence claims a
   const first = extractCandidateEvidenceClaims(ready);
   const second = extractCandidateEvidenceClaims(ready);
   assert.deepEqual(first, second);
-  assert.ok(first.length >= 4);
+  assert.ok(first.length >= 3);
   assert.equal(first.some((claim) => claim.quote.includes("client wants TypeScript")), false);
   for (const claim of first) {
     const source = ready.sources.find((item) => item.key === claim.sourceKey);
@@ -262,7 +262,7 @@ test("deterministic extraction treats artificial PDF line breaks as layout rathe
   });
   const originalClaims = extractCandidateEvidenceClaims(ready)
     .filter((claim) => claim.sourceKey === "candidate_original_resume");
-  assert.equal(originalClaims.length, 2);
+  assert.equal(originalClaims.length, 1);
   assert.match(originalClaims[0].quote, /Jane\n\nDoe\n\nEngineering\n\nLeader\./u);
   assert.ok(originalClaims.every((claim) => ready.sources[0].normalizedText.includes(claim.quote)));
 });
@@ -270,7 +270,7 @@ test("deterministic extraction treats artificial PDF line breaks as layout rathe
 test("deterministic extraction fails closed instead of silently truncating evidence", () => {
   const ready = bundle({
     candidate_call: {
-      text: Array.from({ length: 120 }, (_, index) => `Candidate fact ${index}.`).join(" "),
+      text: "Candidate evidence ".repeat(4_000),
     },
   });
   assert.throws(
