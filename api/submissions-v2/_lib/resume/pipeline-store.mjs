@@ -373,6 +373,22 @@ export function createResumePipelineStore({
       });
     },
 
+    async abandonGenerationForRetry({ generationId, reasonCode, safeDetail, executionFence }) {
+      return sql.begin(async (tx) => {
+        await assertGenerationFence(tx, executionFence, generationId);
+        const rows = await tx`
+          update submissions_v2.resume_generations
+             set status='failed', stage='retry_scheduled', safe_failure_code=${clean(reasonCode, 120)},
+                 safe_failure_detail=${clean(safeDetail)}, completed_at=clock_timestamp()
+           where id=${generationId} and status in (
+             'queued', 'collecting', 'extracting', 'strategizing', 'validating', 'rendering', 'archiving'
+           ) returning *
+        `;
+        if (!rows.length) throw new ResumePipelineError("generation_fence_lost", "The resume generation changed before its safe retry.");
+        return rows[0];
+      });
+    },
+
     async resumeAfterRecheck({ pairId, expectedPairVersion, actorId = "submissions-v2-worker", executionFence }) {
       return sql.begin(async (tx) => {
         await assertWorkerFence(tx, executionFence, "ingestion");

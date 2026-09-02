@@ -153,8 +153,18 @@ export function createWorkerHandlers({
       if (normalized.code === "execution_fence_lost") throw normalized;
       const terminal = normalized.retryable === false
         || Number(context.job.attempt_count || 0) >= Number(context.job.max_attempts || 3)
-        || ["generation_deadline_exhausted", "generation_budget_exhausted"].includes(normalized.code);
-      if (!terminal) throw normalized;
+        || normalized.code === "generation_budget_exhausted";
+      if (!terminal) {
+        if (normalized.details?.generationId && typeof resumeStore.abandonGenerationForRetry === "function") {
+          await resumeStore.abandonGenerationForRetry({
+            generationId: normalized.details.generationId,
+            reasonCode: normalized.code,
+            safeDetail: normalized.safeMessage,
+            executionFence: executionFence(context),
+          });
+        }
+        throw normalized;
+      }
       await settleResumeFailure(normalized, context, { store: resumeStore, executionFence: executionFence(context) });
       return { checkpoint: { ...(normalized.checkpoint || context.job.checkpoint), terminal_routed: true, safe_failure_code: normalized.code } };
     }

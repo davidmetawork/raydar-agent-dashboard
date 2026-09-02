@@ -229,6 +229,7 @@ export async function runGroundingValidator(claimPackets, {
   for (let attempt = 1; attempt <= attemptsLimit; attempt += 1) {
     if (now() >= deadlineAt) {
       throw new ModelProviderError("VALIDATOR_DEADLINE_EXHAUSTED", "Grounding validation exceeded its deadline", {
+        retryable: true,
         provider: "openai",
       });
     }
@@ -256,7 +257,7 @@ export async function runGroundingValidator(claimPackets, {
   throw new ModelProviderError(
     "VALIDATOR_RETRIES_EXHAUSTED",
     "Pinned grounding validation failed closed after bounded retries",
-    { retryable: false, provider: "openai", cause: lastError },
+    { retryable: lastError?.retryable === true, provider: "openai", cause: lastError },
   );
 }
 

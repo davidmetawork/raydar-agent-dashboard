@@ -69,7 +69,9 @@ export function createGenerationBudget({
 
   function assertTime(minimumRemainingMs = 1) {
     if (!Number.isFinite(deadline) || now() + Math.max(1, minimumRemainingMs) > deadline) {
-      throw new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its five-minute deadline.");
+      throw new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its five-minute deadline.", {
+        retryable: true,
+      });
     }
   }
 

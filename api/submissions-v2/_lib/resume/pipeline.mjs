@@ -134,7 +134,10 @@ export async function runResumePreparation(context, {
 
   const loadStage = async (stage) => {
     const reference = checkpoint.pipeline.stages?.[stage];
-    return reference ? store.loadCheckpoint(reference) : null;
+    if (!reference) return null;
+    const value = await store.loadCheckpoint(reference);
+    const currentContext = `resume-checkpoint:${generation?.id}:${stage}`;
+    return reference.context === currentContext ? value : saveStage(stage, value);
   };
 
   const saveStage = async (stage, value, { costCents = 0 } = {}) => {
@@ -169,7 +172,7 @@ export async function runResumePreparation(context, {
     generation = await store.startGeneration({
       pairId,
       triggerKind,
-      idempotencyKey: `resume-job:${context.job.id}`,
+      idempotencyKey: `resume-job:${context.job.id}:attempt:${Math.max(1, Number(context.job.attempt_count) || 1)}`,
       expectedPairVersion,
       commandId: context.job.command_id || null,
       primaryModelPin: STRATEGIST_PRIMARY_MODEL,
@@ -187,7 +190,7 @@ export async function runResumePreparation(context, {
     const budget = createGenerationBudget({
       deadlineAt,
       budgetCents: generation.budget_cents,
-      spentCents: checkpoint.pipeline.spent_cents ?? generation.spent_cents,
+      spentCents: generation.spent_cents,
       now,
     });
     await publishCheckpoint({ generation_id: generation.id, deadline_at: generation.deadline_at, spent_cents: budget.spentCents });

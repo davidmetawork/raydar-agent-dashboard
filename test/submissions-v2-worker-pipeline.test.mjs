@@ -564,6 +564,25 @@ test("resume worker retries transient failures but routes terminal attempts once
   assert.equal(result.checkpoint.safe_failure_code, "provider_unavailable");
 });
 
+test("resume worker closes only the timed-out generation before an automatic retry", async () => {
+  const failure = Object.assign(
+    new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its five-minute deadline.", { retryable: true }),
+    { details: { generationId: "generation-timeout", triggerKind: "retry", priorArtifactId: null } },
+  );
+  const abandoned = [];
+  const handlers = handlerSet({
+    runResume: async () => { throw failure; },
+    resumeStore: { abandonGenerationForRetry: async (value) => abandoned.push(value) },
+  });
+  await assert.rejects(
+    () => handlers.prepare_resume(context("prepare_resume", { attemptCount: 1, maxAttempts: 3 }).value),
+    (error) => error.code === "generation_deadline_exhausted" && error.retryable === true,
+  );
+  assert.equal(abandoned.length, 1);
+  assert.equal(abandoned[0].generationId, "generation-timeout");
+  assert.equal(abandoned[0].reasonCode, "generation_deadline_exhausted");
+});
+
 test("recheck leaves the pair in review until the candidate-original resume is readable", async () => {
   let resumed = 0;
   const handlers = handlerSet({
