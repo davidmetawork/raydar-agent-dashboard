@@ -365,17 +365,19 @@ export function createService({
       if (action === "regenerate") {
         const pairId = required(body.case_id, "case_id", 100);
         const version = expectedVersion(body.expected_version);
-        const evidenceBasis = required(body.evidence_basis, "evidence_basis", 40);
-        if (!new Set(["sourced", "correction"]).has(evidenceBasis)) throw problem("evidence_basis_invalid", "The evidence basis is invalid.", 400);
-        const sourceNote = required(body.source_note, "source_note", 500);
         const context = clean(body.candidate_context, 12_000);
         const instructions = clean(body.instructions, 4_000);
-        const evidenceEnvelope = context ? encryptJson({ text: context }, { env, context: `supplement:${pairId}:evidence` }) : null;
-        const instructionEnvelope = instructions ? encryptJson({ text: instructions }, { env, context: `supplement:${pairId}:instruction` }) : null;
         const requestedUploads = Array.isArray(body.uploads)
           ? [...new Set(body.uploads.map((value) => required(value, "supplement_id", 100)))]
           : [];
         if (requestedUploads.length > 5) throw problem("supplement_count_exceeded", "Choose at most five evidence files.", 400);
+        const hasEvidenceMetadata = Boolean(clean(body.evidence_basis, 40) || clean(body.source_note, 500));
+        const hasSupplementRequest = Boolean(context || instructions) || requestedUploads.length > 0 || hasEvidenceMetadata;
+        const evidenceBasis = hasSupplementRequest ? required(body.evidence_basis, "evidence_basis", 40) : null;
+        if (evidenceBasis && !new Set(["sourced", "correction"]).has(evidenceBasis)) throw problem("evidence_basis_invalid", "The evidence basis is invalid.", 400);
+        const sourceNote = hasSupplementRequest ? required(body.source_note, "source_note", 500) : null;
+        const evidenceEnvelope = context ? encryptJson({ text: context }, { env, context: `supplement:${pairId}:evidence` }) : null;
+        const instructionEnvelope = instructions ? encryptJson({ text: instructions }, { env, context: `supplement:${pairId}:instruction` }) : null;
         return repository.regenerate({
           actorEmail, idempotencyKey, pairId, expectedVersion: version,
           evidenceEncrypted: evidenceEnvelope ? Buffer.from(JSON.stringify(evidenceEnvelope)) : null,

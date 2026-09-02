@@ -139,7 +139,8 @@ function interestedActions(row) {
   const historyLabel = submitted ? '<span class="submitted-label">SUBMITTED</span>' : "";
   const correct = submitted ? "" : `<button class="button text correct" data-id="${esc(id)}" type="button">Correct</button>`;
   const submit = submitted ? "" : `<button class="button primary submit" data-id="${esc(id)}" type="button">Submit</button>`;
-  return `${historyLabel}${correct}<button class="button secondary download" data-id="${esc(id)}" type="button">Download Resume</button>${cautionButton(row)}<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating ? "disabled" : ""}>↶</button><button class="button secondary duplicate" data-id="${esc(id)}" type="button">Duplicate</button>${submit}`;
+  const rerunIcon = '<svg class="rerun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+  return `${historyLabel}${correct}<button class="button secondary download" data-id="${esc(id)}" type="button">Download Resume</button>${cautionButton(row)}<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating ? "disabled" : ""}>${rerunIcon}</button><button class="button secondary duplicate" data-id="${esc(id)}" type="button">Duplicate</button>${submit}`;
 }
 
 function reviewActions(row) {
@@ -164,7 +165,7 @@ function rowHtml(row) {
 
 function bindRows() {
   document.querySelectorAll(".download").forEach((node) => { node.onclick = () => downloadResume(node.dataset.id); });
-  document.querySelectorAll(".regenerate").forEach((node) => { node.onclick = () => openRegenerate(node.dataset.id); });
+  document.querySelectorAll(".regenerate").forEach((node) => { node.onclick = () => regenerateResume(node.dataset.id); });
   document.querySelectorAll(".duplicate").forEach((node) => { node.onclick = () => openDuplicate(node.dataset.id); });
   document.querySelectorAll(".correct").forEach((node) => { node.onclick = () => openCorrect(node.dataset.id); });
   document.querySelectorAll(".submit").forEach((node) => { node.onclick = () => openSubmit(node.dataset.id); });
@@ -324,7 +325,7 @@ function showPopover(anchor, row, kind) {
   const pop = document.createElement("div");
   const popoverId = `submission-popover-${String(row?.case_id || row?.signal_id || "item").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   pop.id = popoverId; pop.className = "popover"; pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", kind === "caution" ? "Resume source coverage" : "Needs review reasons");
-  pop.innerHTML = `<strong>${kind === "caution" ? "Resume source coverage" : "Needs review"}</strong><ul>${(items || []).map((item) => `<li>${esc(item.label || item.detail || item.code || item)}${item.impact ? ` — ${esc(item.impact)}` : ""}</li>`).join("") || "<li>Review details are unavailable.</li>"}</ul>${kind === "caution" ? `<button class="button secondary popover-context" data-id="${esc(row?.case_id)}" type="button">Add context</button>` : ""}`;
+  pop.innerHTML = `<strong>${kind === "caution" ? "Resume source coverage" : "Needs review"}</strong><ul>${(items || []).map((item) => `<li>${esc(item.label || item.detail || item.code || item)}${item.impact ? ` — ${esc(item.impact)}` : ""}</li>`).join("") || "<li>Review details are unavailable.</li>"}</ul>`;
   STATE.popoverAnchor = anchor;
   anchor.setAttribute("aria-expanded", "true");
   anchor.setAttribute("aria-controls", popoverId);
@@ -332,11 +333,6 @@ function showPopover(anchor, row, kind) {
   pop.onpointerenter = () => clearTimeout(STATE.popoverCloseTimer);
   pop.onpointerleave = schedulePopoverClose;
   pop.onclick = (event) => event.stopPropagation();
-  pop.querySelector(".popover-context")?.addEventListener("click", () => {
-    const id = pop.querySelector(".popover-context")?.dataset.id;
-    closePopover();
-    if (id) openRegenerate(id);
-  });
   const box = anchor.getBoundingClientRect(); const width = Math.min(330, innerWidth - 30);
   pop.style.left = `${Math.max(15, Math.min(innerWidth - width - 15, box.right - width))}px`;
   pop.style.top = `${Math.min(innerHeight - pop.offsetHeight - 15, box.bottom + 7)}px`;
@@ -570,49 +566,21 @@ function openReview(id) {
   };
 }
 
-function openRegenerate(id) {
+async function regenerateResume(id) {
   const row = rowFor(id); if (!row) return;
-  STATE.active = { case_id: id, expected_version: row.state_version };
-  const cautions = (row.resume_cautions || []).map((item) => `<li>${esc(item.label || item.code)}${item.impact ? ` — ${esc(item.impact)}` : ""}</li>`).join("");
-  openDialog({ title: "Regenerate resume", subtitle: `${row.candidate_name} · ${row.company} · ${row.role_title}`, body: `${cautions ? `<div class="coverage"><h3>Source coverage</h3><ul>${cautions}</ul></div>` : ""}<label class="field"><span class="field-label">Evidence basis</span><select id="evidence-basis"><option value="sourced">Candidate-provided or sourced evidence</option><option value="correction">Explicit factual correction</option></select></label><label class="field"><span class="field-label">Source or correction note</span><input id="source-note" maxlength="500" placeholder="Where did this information come from?" /></label><label class="field"><span class="field-label">Additional candidate context</span><textarea id="candidate-context" maxlength="12000"></textarea></label><label class="field upload-box"><span class="field-label">PDF or image evidence</span><input id="context-files" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" multiple /><span class="field-help">Up to five files, 10 MB each, 25 MB total.</span><span class="error-text" id="file-error"></span></label><label class="field"><span class="field-label">Instructions for this version</span><textarea id="version-instructions" maxlength="4000" placeholder="Example: Increase the bottom spacing without adding filler."></textarea><span class="field-help">Instructions guide this version only and never become candidate evidence.</span></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" type="button">Regenerate</button>' });
-  $("dialog-cancel").onclick = closeDialog; $("context-files").onchange = validateFiles;
-  $("dialog-confirm").onclick = async () => {
-    const note = $("source-note").value.trim(); if (!note) return toast("Add the source or correction note.", true); if (!validateFiles()) return;
-    const input = { ...STATE.active, evidence_basis: $("evidence-basis").value, source_note: note, candidate_context: $("candidate-context").value.trim(), instructions: $("version-instructions").value.trim() };
-    const button = $("dialog-confirm"); button.disabled = true; button.textContent = "Regenerating…";
-    try {
-      const uploads = await uploadEvidence([...$("context-files").files], input.evidence_basis, input.source_note);
-      await command("regenerate", { ...input, uploads });
-      STATE.generating.add(String(id));
-      closeDialog(); renderRows(); toast("The resume is being rebuilt.");
-      await loadRows();
-    } catch (error) {
-      STATE.generating.delete(String(id));
-      if (!$("modal").hidden) { button.disabled = false; button.textContent = "Regenerate"; }
-      renderRows(); toast(error.message, true);
-    }
-  };
-}
-
-function validateFiles() {
-  const files = [...($("context-files")?.files || [])]; const error = $("file-error"); if (!error) return true;
-  const allowed = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]); const total = files.reduce((sum, file) => sum + file.size, 0);
-  const message = files.length > 5 ? "Choose at most five files." : files.some((file) => file.size > 10 * 1024 * 1024) ? "Each file must be 10 MB or smaller." : total > 25 * 1024 * 1024 ? "The combined files must be 25 MB or smaller." : files.some((file) => !allowed.has(file.type)) ? "Use PDF, PNG, JPEG, or WebP files." : "";
-  error.textContent = message; return !message;
-}
-
-async function uploadEvidence(files, evidenceBasis, sourceNote) {
-  const uploaded = [];
-  for (const file of files) {
-    const intent = await command("create_upload_intent", { ...STATE.active, filename: file.name, content_type: file.type, size: file.size });
-    const uploadUrl = safeUrl(intent.upload_url, URL_HOSTS.storage);
-    if (!uploadUrl) throw new Error(`Upload destination was invalid for ${file.name}.`);
-    const response = await fetch(uploadUrl, { method: "PUT", headers: intent.upload_headers || { "content-type": file.type }, body: file });
-    if (!response.ok) throw new Error(`Upload failed for ${file.name}.`);
-    const completed = await command("complete_upload", { ...STATE.active, upload_id: intent.upload_id, upload_receipt: response.headers.get("etag") || null, evidence_basis: evidenceBasis, source_note: sourceNote });
-    uploaded.push(completed.supplement_id);
+  const key = String(id);
+  if (STATE.generating.has(key) || isGenerationActive(row)) return;
+  STATE.generating.add(key);
+  renderRows();
+  try {
+    await command("regenerate", { case_id: id, expected_version: row.state_version });
+    toast("The resume is being rebuilt from the same candidate and role sources.");
+    await loadRows();
+  } catch (error) {
+    STATE.generating.delete(key);
+    renderRows();
+    toast(error.message, true);
   }
-  return uploaded;
 }
 
 async function downloadResume(id) {

@@ -79,18 +79,21 @@ test("generation progress survives rendering and remains reduced-motion safe", (
   assert.match(js, /STATE\.generating\.has\(id\)/);
   assert.match(js, /aria-label="\$\{generating \? "Generating resume" : "Regenerate resume"\}"/);
   assert.match(js, /aria-busy="\$\{generating\}"/);
-  assert.match(js, /STATE\.generating\.add\(String\(id\)\)/);
-  assert.match(js, /STATE\.generating\.delete\(String\(id\)\)/);
+  assert.match(js, /STATE\.generating\.add\(key\)/);
+  assert.match(js, /STATE\.generating\.delete\(key\)/);
+  assert.match(js, /class="rerun-icon"/);
+  assert.match(css, /\.icon-button\.regenerate\{border-radius:50%\}/);
+  assert.match(css, /\.rerun-icon\{[^}]*stroke:currentColor/);
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)/);
 });
 
-test("warning details work on hover, focus, and click and can open Add context", () => {
+test("warning details work on hover, focus, and click without opening regeneration", () => {
   assert.match(js, /node\.onpointerenter/);
   assert.match(js, /node\.onfocus/);
   assert.match(js, /node\.onclick/);
   assert.match(js, /aria-haspopup/);
-  assert.match(js, />Add context<\/button>/);
-  assert.match(js, /openRegenerate\(id\)/);
+  assert.doesNotMatch(js, />Add context<\/button>/);
+  assert.doesNotMatch(js, /openRegenerate\(id\)/);
 });
 
 test("Needs Review exposes reason-specific candidate, role, retry, and Signal resolution paths", () => {

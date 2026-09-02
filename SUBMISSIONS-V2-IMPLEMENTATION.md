@@ -17,13 +17,21 @@ while unchanged V1 `/submissions` remains the rollback surface.
 | Renderer | `resume-renderer-v2/` exposes authenticated `/render-v2` and `/extract-v2`, uses the bundled official Raydar lockup, produces selectable ATS-parity PDFs, and avoids request-body logging. |
 | Purge | `submissions-v2-purge/` is a separately credentialed, default-off executor; ordinary API/worker roles have no DELETE grants, every case path is selected through its exact storage owner, and ownerless expired writes are handled only by the isolated routine lane. |
 
+The Interested-row regeneration control is a circular-arrow button that immediately enqueues a new
+version from the same collected candidate, role, intake, call, LinkedIn, and already accepted
+pair-scoped sources. It opens no dialog and requires no supplemental evidence metadata; the icon
+becomes the existing reduced-motion-safe spinner while the immutable replacement is built, and the
+prior validated resume remains downloadable until atomic promotion.
+
 ## End-to-end flow
 
 1. A versioned Master Inbox event, curated-list observation, or deliberate teammate action creates immutable source evidence.
 2. Candidate and role binding resolves exact Paraform identities; ambiguity, questions, unavailable roles, missing original resumes, classifier failures, or preparation failures go to Needs Review.
 3. Clear negative intent creates permanent Not Interested history and a durable Slack outbox event; clear positive intent is hidden in `preparing_resume` while the artifact is built.
 4. Resume preparation collects provenance-tagged sources, extracts claims, chooses the role-specific layout, validates every retained claim, renders and read-backs PDF/ATS/manifest artifacts, then atomically promotes the complete set.
-5. Only the promoted artifact exposes Download Resume; regeneration creates another archived version without replacing the candidate's Paraform resume.
+5. Only the promoted artifact exposes Download Resume; one-click regeneration recollects the same
+   source bundle and creates another archived version without replacing the candidate's Paraform
+   resume.
 6. Submit records the open event and opens the exact stored Paraform role URL; it never submits, attaches a file, sends a message, or spends a Paraform credit.
 7. A later proof job may mark the row submitted only after an authoritative exact candidate-role Paraform application read.
 
