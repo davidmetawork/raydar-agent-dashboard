@@ -77,6 +77,10 @@ export function verifyUploadIntent(value, { actorEmail, env = process.env, now =
 }
 
 function trustedSignalUrl(input) {
+  if (input?.schema_version === "submissions.email_reply.v1" && input?.provider === "gmail"
+    && input?.mailbox_id === "david-raydar-xyz" && /^[a-f0-9]{1,64}$/iu.test(input?.provider_thread_id || "")) {
+    return `https://mail.google.com/mail/?authuser=david%40raydar.xyz#all/${input.provider_thread_id}`;
+  }
   const conversationId = clean(input?.payload?.conversationId ?? input?.conversationId, 500);
   if (!conversationId || !/^[A-Za-z0-9._:~-]{1,500}$/.test(conversationId)) return null;
   return `https://monitor.raydar.xyz/master-inbox#conversation=${encodeURIComponent(conversationId)}`;

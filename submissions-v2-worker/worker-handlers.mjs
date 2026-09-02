@@ -14,6 +14,7 @@ import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pip
 import { runResumePreparation, settleResumePreparationFailure } from "../api/submissions-v2/_lib/resume/pipeline.mjs";
 import { ResumePipelineError, pipelineError } from "../api/submissions-v2/_lib/resume/pipeline-runtime.mjs";
 import { readExactSubmissionProofs } from "./proof-reader.mjs";
+import { reconcileGmailInterviews } from "./gmail-reader.mjs";
 
 export const WORKER_JOB_KINDS = Object.freeze([
   "classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox",
@@ -104,6 +105,7 @@ export function createWorkerHandlers({
   collectSources = collectResumeSourceBundle,
   extractPdf = extractPdfWithRenderer,
   masterInbox = reconcileMasterInbox,
+  gmailInterviews = reconcileGmailInterviews,
   proofReader = readExactSubmissionProofs,
   notify = postSafeNotification,
   fetchImpl = globalThis.fetch,
@@ -296,6 +298,36 @@ export function createWorkerHandlers({
   };
 
   result.reconcile_master_inbox = async (context) => {
+    const reader = env.SUBMISSIONS_V2_EMAIL_READER || "master_inbox";
+    if (!["gmail", "master_inbox"].includes(reader)) throw new ResumePipelineError("email_reader_invalid", "The email reader is not recognized.");
+    // The durable master_inbox control is the existing email-ingress stop control;
+    // retain its epoch/fence semantics when changing only the transport.
+    if (reader === "gmail") {
+      const sourceKey = "master_inbox";
+      await ensureSourceCursor(sql, sourceKey);
+      const claimed = await sourceLease.claimSourceCursor({ sourceKey, workerId: context.workerId, leaseSeconds: 300, controlEpoch: context.controlEpoch }, sql);
+      if (!claimed) return { checkpoint: { stage: "gmail_coalesced" } };
+      try {
+        const reconciled = await gmailInterviews({
+          env, fetchImpl, signal: context.signal, checkpoint: claimed.checkpoint?.gmail || {}, now: now().getTime(),
+          assertCurrent: () => context.checkpoint({ stage: "reading_gmail_interview_replies" }),
+          admit: (event) => service.intakeMasterInbox(event),
+        });
+        const committed = await sourceLease.commitSourceCursor({
+          sourceKey, workerId: context.workerId, fencingToken: claimed.fencing_token, controlEpoch: context.controlEpoch,
+          checkpoint: { ...claimed.checkpoint, gmail: reconciled.checkpoint }, fullSuccess: Boolean(reconciled.caught_up),
+        }, sql);
+        if (!committed) throw new ResumePipelineError("gmail_cursor_fence_lost", "The Gmail reader lost its source cursor fence.");
+        if (reconciled.caught_up) await repository.recordSourceHealth({ sourceKey, enabled: true, success: true });
+        else if (reconciled.completed) await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: "gmail_catching_up", safeDetail: "Gmail replies are being read in order from the approved activation time." });
+        if (reconciled.narrowed) await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: "gmail_window_narrowed", safeDetail: "The reply window exceeded its safe read limit and will resume in smaller batches." });
+        return { checkpoint: { stage: reconciled.narrowed ? "gmail_window_narrowed" : reconciled.completed ? "gmail_interview_window_complete" : "gmail_waiting_for_window", observed: reconciled.observed || 0, accepted: reconciled.accepted || 0 } };
+      } catch (error) {
+        await sourceLease.releaseSourceCursor({ sourceKey, workerId: context.workerId, fencingToken: claimed.fencing_token, controlEpoch: context.controlEpoch }, sql).catch(() => {});
+        await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: clean(error?.code, 120) || "gmail_reader_failed", safeDetail: "Gmail interview-reply intake is delayed; its cursor has not advanced." }).catch(() => {});
+        throw sourceError(error, "gmail_reader_failed");
+      }
+    }
     await context.checkpoint({ ...context.job.checkpoint, stage: "requesting_master_inbox_reconciliation" });
     try {
       const reconciled = await masterInbox({ env, fetchImpl, signal: context.signal });
