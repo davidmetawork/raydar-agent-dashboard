@@ -38,7 +38,7 @@ while unchanged V1 `/submissions` remains the rollback surface.
 
 ## Production activation evidence
 
-- Monitor deployment `dpl_CS1BCemva69nZxquRDLC9uUKxk22` and Master Inbox deployment
+- Monitor deployment `dpl_9Vz5pgH2aK6LHBydmBJdcnp4Q4Qc` and Master Inbox deployment
   `dpl_Jra8kxegMWJdrtktW9tv3SSwZLX3` are Ready and production-aliased.
 - The dedicated worker, V2 renderer, ClamAV scanner, and isolated purge executor pass live health
   checks; the renderer reports exact approved brand/font/template identifiers.
