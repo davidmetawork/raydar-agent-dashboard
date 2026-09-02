@@ -45,6 +45,10 @@ const port = Math.max(1, Number(process.env.PORT) || 8080);
 const controller = new AbortController();
 const options = {
   workerId,
+  // Handlers are executed sequentially, and a Curated batch can legitimately
+  // run for several minutes; claim only the job being actively heartbeated so
+  // later work never ages behind it with an unused lease.
+  limit: 1,
   handlers,
   env: workerEnv,
   readRuntimeControls: () => readRuntimeControls(workerSql),
