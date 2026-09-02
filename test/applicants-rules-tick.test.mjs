@@ -30,7 +30,7 @@ const profile = ({ school = "sch_harvard", degree = "Bachelor of Arts - AB", tit
 const row = (cuId, extra = {}) => ({
   key: `${cuId}:role1`, cuId, roleId: "role1", tier: "C",
   name: "Applicant", roleTitle: "Engineer", company: "Acme Corp",
-  appliedAt: "2026-08-15T00:00:00.000Z", ...extra,
+  appliedAt: "2026-08-15T00:00:00.000Z", interviewAllowed: true, ...extra,
 });
 
 /** In-memory KV standing in for the apphub namespace. */
@@ -50,7 +50,8 @@ function store({ rules = [], pausedAll = false, queue = [], decisions = {}, fact
   return {
     state, writes,
     deps: {
-      isAuthorized: () => true,
+      corsHandler: () => false,
+      authHandler: async (req) => { req.authedEmail = "david@raydar.xyz"; return true; },
       kvReady: () => true,
       readJson: async (key) => state[key] ?? null,
       writeJson: async (key, value) => { state[key] = value; writes.push([key, value]); },
@@ -78,7 +79,7 @@ function response() {
   };
 }
 
-const request = (over = {}) => ({ method: "GET", headers: {}, query: {}, ...over });
+const request = (over = {}) => ({ method: "POST", headers: {}, query: {}, ...over });
 
 // ── the happy path ─────────────────────────────────────────────────────────
 
@@ -237,12 +238,41 @@ test("an applicant with no facts is skipped and counted, never decided", async (
   assert.equal(res.body.skipped.no_facts_yet, 1);
 });
 
+test("an Interview rule reports a not-ready applicant without writing a decision", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1", { interviewAllowed: false })],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+  });
+  const res = response();
+  await createTickHandler(s.deps)(request(), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.decided, 0);
+  assert.equal(res.body.skipped.interview_not_ready, 1);
+  assert.deepEqual(s.state["apphub:decisions"], {});
+});
+
 test("an unauthorized caller gets 401 and changes nothing", async () => {
   const s = store({ rules: [HARVARD_RULE], queue: [row("cu1")] });
-  s.deps.isAuthorized = () => false;
+  s.deps.authHandler = async (_req, res) => { res.status(401).json({ ok: false, error: "auth_required" }); return false; };
   const res = response();
   await createTickHandler(s.deps)(request(), res);
   assert.equal(res.statusCode, 401);
+  assert.equal(s.writes.length, 0);
+});
+
+test("GET and machine-style bearer calls cannot execute rules", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+  });
+  const res = response();
+  await createTickHandler(s.deps)(request({
+    method: "GET",
+    headers: { authorization: "Bearer former-machine-key", "x-vercel-cron": "1" },
+  }), res);
+  assert.equal(res.statusCode, 405);
   assert.equal(s.writes.length, 0);
 });
 

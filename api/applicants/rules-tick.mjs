@@ -1,6 +1,6 @@
-// The engine. Every ten minutes, and again whenever the desktop publisher has
-// just pushed fresh data, armed rules read the pending review queue and write
-// the decisions they match.
+// The engine. It runs only when an authenticated person presses "Run rules
+// now" in the Applicants Rules view, reads the whole pending review queue, and
+// writes the decisions its live rules match.
 //
 // WHAT IT WRITES. Exactly the record a human click writes, into the same
 // apphub:decisions hash, through the same module (_lib/decision-record.mjs).
@@ -31,7 +31,7 @@
 // parks the tick until a healthy publish clears it. This is a data-integrity
 // guard, not a throttle: it never limits a rule that is merely busy.
 
-import { cronAuth } from "../seq/_lib/core.mjs";
+import { cors, requireAuth } from "./_lib/core.mjs";
 import { decisionRecord, ruleActor } from "./_lib/decision-record.mjs";
 import {
   getJson,
@@ -50,18 +50,6 @@ export const config = { maxDuration: 120 };
 /** Audit rows kept. Enough for "the last 10 it hit" on every rule plus room
  *  to answer "why did this person get an email" weeks later. */
 const MAX_AUDIT_ROWS = 4_000;
-
-/**
- * The publisher nudges this endpoint straight after a full publish so a newly
- * armed rule feels immediate. It holds APPHUB_SYNC_KEY already, so it uses
- * that rather than minting it a second credential.
- */
-function authorized(req) {
-  if (cronAuth(req).ok) return true;
-  const secret = process.env.APPHUB_SYNC_KEY || "";
-  if (!secret) return false;
-  return (req.headers?.authorization || "") === `Bearer ${secret}`;
-}
 
 /**
  * Decide one applicant against the armed rules.
@@ -86,7 +74,8 @@ export function decideRow(rules, subject, { now = Date.now() } = {}) {
 }
 
 export function createTickHandler({
-  isAuthorized = authorized,
+  corsHandler = cors,
+  authHandler = requireAuth,
   kvReady = kvConfigured,
   readJson = getJson,
   readHash = hashGetAllJson,
@@ -95,8 +84,10 @@ export function createTickHandler({
   now = () => Date.now(),
 } = {}) {
   return async function handler(req, res) {
+    if (corsHandler(req, res)) return;
     res.setHeader("Cache-Control", "no-store");
-    if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+    if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+    if (!(await authHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
     const startedAt = new Date(now()).toISOString();
@@ -160,6 +151,16 @@ export function createTickHandler({
         const outcome = decideRow(live, subject, { now: stamp });
         for (const reason of outcome.skips) skipped[reason] = (skipped[reason] ?? 0) + 1;
         if (!outcome.action) continue;
+
+        // Pass is always a valid review outcome, but Interview has external
+        // consequences and must use the Core's own readiness bit. A rule may
+        // match a candidate whose resume/projection/identity gates are still
+        // incomplete; report that candidate instead of writing a decision the
+        // Core will reject on its next cycle.
+        if (outcome.action === "interview" && row.interviewAllowed !== true) {
+          skipped.interview_not_ready = (skipped.interview_not_ready ?? 0) + 1;
+          continue;
+        }
 
         const { rule, evidence } = outcome.winner;
         newDecisions[row.key] = decisionRecord({
@@ -242,6 +243,7 @@ export function createTickHandler({
       return res.status(200).json({
         ok: true,
         at: startedAt,
+        by: req.authedEmail || "authenticated-user",
         pending: rows.length,
         considered,
         decided: decidedKeys.length,

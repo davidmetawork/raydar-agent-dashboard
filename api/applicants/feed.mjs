@@ -1,8 +1,8 @@
 // Browser read for the Applicants tab: one call returns the loop's snapshot
 // plus the human-decision and loop-ack overlays, keyed by `<cuId>:<roleId>`,
-// and the photos hash (cuId → public Paraform photo URL) for row avatars.
+// plus the complete compact-card and photos hashes needed to render every row.
 // The UI joins them client-side (decisions overlay the queue, acks flip
-// "Queued to send" to "Emailed").
+// "Queued to send" to "Emailed") and never fetches cards while scrolling.
 
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
@@ -22,12 +22,13 @@ export function createFeedHandler({
     if (!(await authHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
     try {
-      const [snapshot, queueDoc, decisions, acks, photos, counts] = await Promise.all([
+      const [snapshot, queueDoc, decisions, acks, photos, cards, counts] = await Promise.all([
         readJson(K.snapshot),
         readJson(K.queue),
         readHash(K.decisions),
         readHash(K.acks),
         readHash(K.photos),
+        readHash(K.cards),
         readJson(K.counts),
       ]);
       // The queue is stored under its own key (size isolation); merge it back so
@@ -39,7 +40,7 @@ export function createFeedHandler({
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.
-      return res.status(200).json({ ok: true, snapshot, decisions, acks, photos, counts });
+      return res.status(200).json({ ok: true, snapshot, decisions, acks, photos, cards, counts });
     } catch (error) {
       return res.status(502).json({
         ok: false,

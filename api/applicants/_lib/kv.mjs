@@ -12,10 +12,10 @@
 //                              record shape through the same module
 //                              (_lib/decision-record.mjs):
 //                              POST /api/applicants/decision is the human
-//                              click, and GET /api/applicants/rules-tick is
+//                              click, and authenticated POST /api/applicants/rules-tick is
 //                              an armed rule. This is a deliberate widening
 //                              (2026-08-20, Applicant Decision Rules): an
-//                              automatic decision has to be indistinguishable
+//                              manual rule decision has to be indistinguishable
 //                              from a human one downstream, because that is
 //                              what makes it inherit the loop's approval pull,
 //                              every send-time gate, the ack, and Undo without

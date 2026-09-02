@@ -437,24 +437,27 @@ function feedSetup(initial = {}) {
   return { calls, handler };
 }
 
-test("feed returns the photos hash alongside the snapshot and overlays", async () => {
+test("feed returns every compact card and photo alongside the snapshot and overlays", async () => {
   const photoUrl = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/cu1abcdef0";
   const { calls, handler } = feedSetup({
     "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
     "apphub:queue": { generatedAt: "2026-08-09T00:00:00.000Z", rows: [{ key: "cu1abcdef0:role1" }] },
     "apphub:decisions": { "cu1abcdef0:role1": { action: "pass" } },
     "apphub:photos": { cu1abcdef0: photoUrl },
+    "apphub:cards": { cu1abcdef0: { title: "Founding Engineer", exp: [], edu: [] } },
   });
   const res = response();
   await handler(request({ method: "GET", body: undefined }), res);
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.photos, { cu1abcdef0: photoUrl });
+  assert.deepEqual(res.body.cards, { cu1abcdef0: { title: "Founding Engineer", exp: [], edu: [] } });
   // The pre-photos merge behavior is intact: split queue doc back onto the snapshot.
   assert.deepEqual(res.body.snapshot.queue, [{ key: "cu1abcdef0:role1" }]);
   assert.deepEqual(res.body.decisions, { "cu1abcdef0:role1": { action: "pass" } });
   assert.deepEqual(res.body.acks, {});
   assert.equal(res.headers["cache-control"], "no-store");
   assert.ok(calls.readHash.includes("apphub:photos"));
+  assert.ok(calls.readHash.includes("apphub:cards"));
 });
 
 const BUCKET_PHOTO = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/abcdef1234";

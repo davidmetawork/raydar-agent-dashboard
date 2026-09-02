@@ -1,7 +1,7 @@
 // The one shape an `apphub:decisions` field may hold.
 //
 // Two writers produce it — a human click (POST /api/applicants/decision) and
-// an armed rule (GET /api/applicants/rules-tick) — and everything downstream
+// an armed rule (authenticated POST /api/applicants/rules-tick) — and everything downstream
 // must be unable to tell them apart. The desktop invite loop pulls un-acked
 // `interview` decisions, applies every send-time gate, sends, and acks back;
 // it neither knows nor cares which writer produced the field. That is the

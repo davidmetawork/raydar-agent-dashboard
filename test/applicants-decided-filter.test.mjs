@@ -23,10 +23,10 @@ test("the outcome control only appears in Decided and reports live counts", () =
   assert.match(applicants, /option\.textContent = label \+ " \(" \+ counts\[status\] \+ "\)"/);
 });
 
-test("embedded visibility coordinates include the iframe's own scroll offset", () => {
+test("embedded modal coordinates include the iframe's own scroll offset", () => {
   assert.match(
     applicants,
     /return \{ top: window\.scrollY \+ top, bottom: window\.scrollY \+ bottom \}/,
   );
-  assert.match(applicants, /window\.addEventListener\("scroll", scheduleScan/);
+  assert.doesNotMatch(applicants, /scheduleScan|pumpCards|pumpHydration/);
 });

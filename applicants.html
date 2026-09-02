@@ -90,7 +90,11 @@
   /* row list */
   /* row list — LinkedIn-Recruiter-shaped cards: identity + inline history, so
      the queue can be read without opening anybody. */
-  .list { display:flex; flex-direction:column; gap:9px; }
+  .list { position:relative; display:block; height:clamp(440px,66vh,720px); overflow-y:auto; overflow-x:hidden;
+    overscroll-behavior:contain; scrollbar-gutter:stable; }
+  .virtual-space { position:relative; width:100%; }
+  .virtual-window { position:absolute; inset:0 0 auto; display:flex; flex-direction:column; gap:9px; will-change:transform; }
+  .virtual-window .row { box-sizing:border-box; height:260px; overflow:hidden; flex:none; }
   .row { display:flex; align-items:flex-start; gap:13px; background:var(--card); border:1px solid var(--line); border-radius:15px;
     padding:14px 17px; box-shadow:var(--shadow); }
   .row.decided-row { opacity:.82; }
@@ -252,6 +256,7 @@
   .gateerr { color:var(--bad); font-size:12px; margin-top:10px; min-height:15px; }
 
   @media (max-width:820px) {
+    .virtual-window .row { height:360px; }
     .rc-main { flex-direction:column; gap:9px; }
     .rc-right { align-items:center; flex-direction:row; align-self:stretch; justify-content:space-between; }
     /* No room for a label gutter — stack the label above its lines rather than
@@ -299,7 +304,7 @@
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span></button>
       <span class="spacer"></span>
       <span id="toolbarFilters" style="display:contents">
-      <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;STATE.limit=PAGE;renderLists()"><option value="all">All roles</option></select>
+      <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;resetVirtualLists();renderLists()"><option value="all">All roles</option></select>
       <select id="sortOrder" aria-label="Sort by application date" onchange="setSortOrder(this.value)">
         <option value="newest">Newest to oldest</option>
         <option value="oldest">Oldest to newest</option>
@@ -312,7 +317,7 @@
         <option value="emailed">Emailed</option>
         <option value="blocked">Blocked</option>
       </select>
-      <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;STATE.limit=PAGE;renderLists()" />
+      <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;resetVirtualLists();renderLists()" />
       </span>
     </div>
 
@@ -353,9 +358,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 
 const LS_KEY = "apphub-local-decisions-v1";
-// Rows carry inline work history now, so the 2,000-row queue cannot all be in
-// the DOM at once. Render a screenful, grow as the reader reaches the bottom.
-const PAGE = 25;
+// Every compact applicant card arrives in the feed. The browser keeps the
+// complete dataset in memory and only mounts the visible rows into the DOM.
 const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
   snapshot: null, decisions: {}, acks: {},
@@ -363,9 +367,7 @@ const STATE = {
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
-  cards: {},                          // cuId -> compact card (headline, location, top-3 history) for the row
-  expanded: new Set(),                // cuIds whose inline history is showing in full
-  limit: PAGE,                        // rows rendered in the active list; grows as the reader scrolls
+  cards: {},                          // complete cuId -> compact card index from the feed
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "no-linkedin" | "decided"
   role: "all", query: "", sort: loadSortOrder(), decisionStatus: "all",
   checked: new Set(), busy: new Set(),
@@ -384,6 +386,7 @@ function setSortOrder(value) {
   STATE.sort = value === "oldest" ? "oldest" : "newest";
   $("sortOrder").value = STATE.sort;
   try { localStorage.setItem(SORT_KEY, STATE.sort); } catch {}
+  resetVirtualLists();
   renderLists();
 }
 
@@ -823,7 +826,7 @@ function decisionStatus(key, decision) {
 }
 function setDecisionFilter(value) {
   STATE.decisionStatus = ["passed", "queued", "emailed", "blocked"].includes(value) ? value : "all";
-  STATE.limit = PAGE;
+  resetVirtualLists();
   renderLists();
 }
 function renderDecisionFilter(decidedMode) {
@@ -866,8 +869,9 @@ function decidedStatusHtml(key, decision) {
   return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
 }
 /* ---- inline work history: the Recruiter-shaped body every row carries, so a
-   reviewer can judge someone without opening them. Filled from the compact
-   card (prewarmed, batch-fetched); the full profile replaces it on expand. ---- */
+   reviewer can judge someone without opening them. Every compact card was
+   downloaded with the feed; opening the modal is the deliberate full-profile
+   request, never a side effect of scrolling. ---- */
 function expLineHtml(x) {
   const from = x.start ? monthYear(x.start) : "";
   const to = x.current ? "Present" : (x.end ? monthYear(x.end) : "");
@@ -885,30 +889,16 @@ function secHtml(label, lines, extra) {
 }
 function historyHtml(row) {
   const cu = row.cuId;
-  const expanded = STATE.expanded.has(cu);
   const card = STATE.cards[cu];
-  const prof = STATE.profiles[cu];
-  let exps, edus, expTotal, eduTotal;
-  if (prof && (expanded || !card)) {
-    const allExp = (prof.experiences || []).map((x) => ({ role: x.roleTitle, company: x.companyName, start: x.start, end: x.end, current: x.current }));
-    const allEdu = (prof.education || []).map((x) => ({ school: x.school, degree: x.degree, start: x.start, end: x.end }));
-    expTotal = allExp.length; eduTotal = allEdu.length;
-    exps = expanded ? allExp : allExp.slice(0, 3);
-    edus = expanded ? allEdu : allEdu.slice(0, 3);
-  } else if (card) {
-    exps = card.exp || []; edus = card.edu || [];
-    expTotal = card.expCount ?? exps.length; eduTotal = card.eduCount ?? edus.length;
-  } else {
-    // Not hydrated yet — hold the space so the list does not jump when it lands.
-    return secHtml("Experience", '<div class="rc-skel"></div><div class="rc-skel" style="width:62%"></div>');
-  }
+  if (!card) return '<div class="rc-none">No cached profile history is available for this applicant.</div>';
+  const exps = card.exp || [], edus = card.edu || [];
+  const expTotal = card.expCount ?? exps.length, eduTotal = card.eduCount ?? edus.length;
   const hidden = (expTotal - exps.length) + (eduTotal - edus.length);
   const out = [];
   if (exps.length) out.push(secHtml("Experience", exps.map(expLineHtml).join("")));
   if (edus.length) out.push(secHtml("Education", edus.map(eduLineHtml).join("")));
   if (!out.length) return '<div class="rc-none">No work or education history cached in Paraform.</div>';
-  if (expanded) out.push('<button class="rc-more" data-less="' + esc(cu) + '">Show less</button>');
-  else if (hidden > 0) out.push('<button class="rc-more" data-more="' + esc(cu) + '">Show all (' + (expTotal + eduTotal) + ")</button>");
+  if (hidden > 0) out.push('<button class="rc-more" data-more="' + esc(cu) + '">Open full profile (' + (expTotal + eduTotal) + ")</button>");
   return out.join("");
 }
 
@@ -916,13 +906,16 @@ function rowCardHtml(row, mode, decision) {
   const key = row.key;
   const busy = STATE.busy.has(key);
   const card = STATE.cards[row.cuId];
+  const interviewReady = row.interviewAllowed === true;
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
       ? decidedStatusHtml(key, decision)
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
-        '<button class="primary" data-act="interview" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Interview</button></div>");
+        '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
+          (interviewReady ? "Queue interview invite" : "Required profile checks are not ready") + '"' +
+          (busy || !interviewReady ? " disabled" : "") + ">" + (interviewReady ? "Interview" : "Not ready") + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
@@ -1006,27 +999,55 @@ function reviewListRows() {
   return { rows: rows.filter(matchesFilters), decidedMode };
 }
 
-/** Render a screenful and leave a marker; the viewport scan grows the page as
- *  the reader reaches it. Rows carry full work history now, so rendering all
- *  2,000 at once would freeze the tab. */
+/** All rows are already local; this window only limits DOM work, never data. */
+const VIRTUAL_GAP = 9;
+const VIRTUAL_OVERSCAN = 4;
+const virtualRowHeight = () => window.innerWidth <= 820 ? 360 : 260;
+function resetVirtualLists() {
+  for (const id of ["reviewList", "streamList"]) {
+    const list = $(id);
+    if (list) list.scrollTop = 0;
+  }
+}
+function renderVirtual(el) {
+  const spec = el._virtual;
+  if (!spec) return;
+  const rowHeight = virtualRowHeight();
+  const pitch = rowHeight + VIRTUAL_GAP;
+  const total = Math.max(0, spec.rows.length * pitch - VIRTUAL_GAP);
+  if (el.scrollTop > total) el.scrollTop = Math.max(0, total - el.clientHeight);
+  const visible = Math.max(el.clientHeight, 440);
+  const start = Math.max(0, Math.floor(el.scrollTop / pitch) - VIRTUAL_OVERSCAN);
+  const end = Math.min(spec.rows.length, Math.ceil((el.scrollTop + visible) / pitch) + VIRTUAL_OVERSCAN);
+  const shown = spec.rows.slice(start, end);
+  el.innerHTML = '<div class="virtual-space" style="height:' + total + 'px">' +
+    '<div class="virtual-window" style="transform:translateY(' + (start * pitch) + 'px)">' +
+      shown.map(spec.build).join("") +
+    "</div></div>";
+}
 function paintList(el, rows, build) {
-  const shown = rows.slice(0, STATE.limit);
-  const tail = rows.length > shown.length
-    ? '<div class="rc-sentinel" data-sentinel="1">Loading more… <span>' + shown.length + " of " + rows.length + "</span></div>"
-    : (rows.length > PAGE ? '<div class="rc-end">All ' + rows.length + " shown</div>" : "");
-  el.innerHTML = shown.map(build).join("") + tail;
-  scheduleScan();
+  el._virtual = { rows, build };
+  if (!el._virtualBound) {
+    el._virtualBound = true;
+    el.addEventListener("scroll", () => {
+      if (el._virtualFrame) return;
+      el._virtualFrame = requestAnimationFrame(() => { el._virtualFrame = null; renderVirtual(el); });
+    }, { passive: true });
+  }
+  renderVirtual(el);
 }
 
 function renderReview() {
   const list = $("reviewList");
   if (!STATE.loaded) return;
   if (!STATE.snapshot) {
+    list._virtual = null;
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
     return;
   }
   const { rows: filtered, decidedMode } = reviewListRows();
   if (!filtered.length) {
+    list._virtual = null;
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
     if (hasFilters) list.innerHTML = '<div class="empty">No applicants match the current filters.</div>';
     else if (decidedMode) list.innerHTML = '<div class="empty">No decisions yet — Pass or Interview calls land here.</div>';
@@ -1044,12 +1065,14 @@ function renderStream() {
   const list = $("streamList");
   if (!STATE.loaded) return;
   if (!STATE.snapshot) {
+    list._virtual = null;
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
     return;
   }
   const rows = sortByApplicationDate(streamRows());
   const filtered = rows.filter(matchesFilters);
   if (!filtered.length) {
+    list._virtual = null;
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
     list.innerHTML = '<div class="empty">' + (hasFilters ? "No applicants match the current filters." : "No S/A/B applicants in the last 30 days.") + "</div>";
   } else {
@@ -1072,7 +1095,7 @@ function postCounts() {
 /* ---- view + chip switching ---- */
 function setView(view) {
   STATE.view = view;
-  STATE.limit = PAGE;               // each list starts at a screenful again
+  resetVirtualLists();
   $("pillReview").classList.toggle("active", view === "review");
   $("pillStream").classList.toggle("active", view === "stream");
   $("pillRules").classList.toggle("active", view === "rules");
@@ -1088,7 +1111,7 @@ function setView(view) {
 }
 function setChip(chip) {
   STATE.chip = STATE.chip === chip ? "" : chip;   // click the active chip again -> whole pending queue
-  STATE.limit = PAGE;
+  resetVirtualLists();
   clearChecked(false);
   renderLists();
 }
@@ -1165,12 +1188,7 @@ async function decide(key, action, row, silent = false) {
   }
 }
 
-/* ---- what the reader can actually see ----------------------------------
-   Embedded in the Monitor shell, the fixed-height iframe can scroll its own
-   long document while the SHELL can also move or clip that frame. A plain
-   IntersectionObserver cannot express both coordinate systems reliably.
-   Same-origin lets us measure the shell-visible slice and translate it by this
-   document's own scroll offset before driving paging and lazy hydration. */
+/* ---- visible shell band, used only to place the full-profile modal -------- */
 function parentWin() { try { return window.frameElement ? window.parent : null; } catch { return null; } }
 function viewBand() {
   const pw = parentWin();
@@ -1179,110 +1197,14 @@ function viewBand() {
       const rect = window.frameElement.getBoundingClientRect();
       const top = Math.max(0, -rect.top);
       const bottom = Math.max(top, Math.min(rect.height, pw.innerHeight - rect.top));
-      // The shell can clip the frame while the frame also scrolls its own
-      // document once a long archive exceeds the fixed iframe height. `top`
-      // and `bottom` above are frame-viewport coordinates; translate them by
-      // this document's scroll position before comparing them with row
-      // document coordinates. Without this offset, Decided stopped hydrating
-      // and paging after the first frameful.
+      // `top` and `bottom` are frame-viewport coordinates; translate them by
+      // this document's own scroll position for modal placement.
       return { top: window.scrollY + top, bottom: window.scrollY + bottom };
     } catch { /* cross-origin or detached — fall through to our own viewport */ }
   }
   return { top: window.scrollY, bottom: window.scrollY + window.innerHeight };
 }
 
-const HYDRATE = { visible: new Set(), timer: null, inflight: false };
-const CARDS = { want: new Set(), missing: new Set(), timer: null, inflight: false, fails: 0 };
-const SCAN = { queued: false };
-function scheduleScan() {
-  if (SCAN.queued) return;
-  SCAN.queued = true;
-  // rAF alone is not enough: a browser throttles it hard for an iframe that is
-  // offscreen or in a background tab, and this page spends its life inside one.
-  // Without the timer, a reader who opens the tab and does not scroll would sit
-  // and watch skeletons forever. Whichever fires first wins; the flag makes the
-  // other a no-op.
-  const run = () => { if (!SCAN.queued) return; SCAN.queued = false; scanViewport(); };
-  requestAnimationFrame(run);
-  setTimeout(run, 120);
-}
-function scanViewport() {
-  if (!STATE.loaded) return;
-  const band = viewBand();
-  const lo = band.top - 400, hi = band.bottom + 400;
-  const yOf = (el) => el.getBoundingClientRect().top + window.scrollY;
-  HYDRATE.visible.clear();
-  document.querySelectorAll("#reviewList [data-avatar], #streamList [data-avatar]").forEach((el) => {
-    const y = yOf(el);
-    if (y < lo || y > hi) return;
-    const cu = el.dataset.cu;
-    HYDRATE.visible.add(cu);
-    if (!(cu in STATE.cards) && !CARDS.missing.has(cu) && !CARDS.disabled) CARDS.want.add(cu);
-  });
-  // Grow the page when the reader reaches the marker. The re-render schedules
-  // its own scan, so a long scroll walks down in PAGE-sized steps.
-  const sentinel = document.querySelector("[data-sentinel]");
-  if (sentinel && yOf(sentinel) <= band.bottom + 200) {
-    STATE.limit += PAGE;
-    renderLists();
-    return;
-  }
-  pumpCards();
-  pumpHydration();
-}
-
-/* Cards arrive in batches — one request per ~30 visible rows, served from the
-   prewarmed store. Anything the store has never seen falls back to the slow
-   per-profile path below, which also warms it for next time. */
-function pumpCards() {
-  if (CARDS.timer || CARDS.inflight || !CARDS.want.size || CARDS.disabled) return;
-  CARDS.timer = setTimeout(async () => {
-    CARDS.timer = null;
-    const batch = [...CARDS.want].slice(0, 30);
-    batch.forEach((cu) => CARDS.want.delete(cu));
-    if (!batch.length) return;
-    CARDS.inflight = true;
-    try {
-      const response = await fetch("/api/applicants/cards?cus=" + encodeURIComponent(batch.join(",")), { credentials: "same-origin" });
-      if (response.status === 401 || response.status === 403) { showGate(); return; }
-      if (!response.ok) throw new Error("cards");
-      const body = await response.json();
-      const cards = (body && body.cards) || {};
-      CARDS.fails = 0;
-      for (const cu of batch) {
-        if (cards[cu]) { STATE.cards[cu] = cards[cu]; patchRow(cu); }
-        else CARDS.missing.add(cu);
-      }
-    } catch {
-      // Three strikes and the batch path stands down for the session; the
-      // per-profile fallback still fills rows, just slower.
-      CARDS.fails += 1;
-      if (CARDS.fails >= 3) CARDS.disabled = true;
-      batch.forEach((cu) => CARDS.missing.add(cu));
-    } finally {
-      CARDS.inflight = false;
-      if (CARDS.want.size) pumpCards(); else pumpHydration();
-    }
-  }, 40);
-}
-
-/* Fallback for rows the prewarm has not reached: one live profile fetch at a
-   time, 300ms apart, visible rows only — it is slow by design (each one walks
-   Paraform), so it must never run for rows a card already covers. */
-function pumpHydration() {
-  if (HYDRATE.timer || HYDRATE.inflight) return;
-  HYDRATE.timer = setTimeout(async () => {
-    HYDRATE.timer = null;
-    const next = [...HYDRATE.visible].find((cu) => CARDS.missing.has(cu) && !(cu in STATE.profiles));
-    if (!next) return;
-    HYDRATE.inflight = true;
-    try {
-      await fetchProfile(next);
-      patchRow(next);
-    } catch { STATE.profiles[next] = STATE.profiles[next] || null; }
-    finally { HYDRATE.inflight = false; pumpHydration(); }
-  }, 300);
-}
 function applyAvatar(cu) {
   const src = STATE.photos[cu] || STATE.cards[cu]?.photo || STATE.profiles[cu]?.imageSrc || "";
   if (!src) return;
@@ -1494,7 +1416,10 @@ function renderModal() {
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? "" :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
-        '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Interview</button>") +
+        '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
+          (row.interviewAllowed === true ? "Queue interview invite" : "Required profile checks are not ready") + '"' +
+          (busy || row.interviewAllowed !== true ? " disabled" : "") + ">" +
+          (row.interviewAllowed === true ? "Interview" : "Not ready") + "</button>") +
       "</div>");
   }
   $("profileCard").innerHTML = parts.join("");
@@ -1504,18 +1429,6 @@ function renderModal() {
 function makeRuleFrom(cu, key) {
   const row = queueRows().find((r) => r.key === key) || (STATE.modal && STATE.modal.row) || null;
   if (window.RaydarRules) window.RaydarRules.fromApplicant(cu, row);
-}
-function expandRow(cu, on) {
-  if (!on) { STATE.expanded.delete(cu); patchRow(cu); return; }
-  STATE.expanded.add(cu);
-  patchRow(cu);
-  // The full history comes from the profile — prewarmed, so this is usually
-  // already in hand and the row simply fills out.
-  if (!STATE.profiles[cu]) {
-    fetchProfile(cu).then(() => patchRow(cu)).catch(() => {
-      STATE.expanded.delete(cu); patchRow(cu); toast("Could not load the full history.", true);
-    });
-  }
 }
 document.addEventListener("click", async (event) => {
   // With a profile open, a click anywhere off the card closes it — the backdrop,
@@ -1528,9 +1441,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const more = event.target.closest("[data-more]");
-  if (more) { expandRow(more.dataset.more, true); return; }
-  const less = event.target.closest("[data-less]");
-  if (less) { expandRow(less.dataset.less, false); return; }
+  if (more) {
+    const row = rowByCu(more.dataset.more);
+    if (row) openProfile(row.key);
+    return;
+  }
   const act = event.target.closest("[data-act]");
   if (act) {
     const key = act.dataset.key;
@@ -1538,6 +1453,10 @@ document.addEventListener("click", async (event) => {
     // Not a decision: it opens the rule editor seeded from this applicant.
     if (action === "make-rule") { makeRuleFrom(act.dataset.cu, key); return; }
     const row = queueRows().find((r) => r.key === key);
+    if (action === "interview" && row?.interviewAllowed !== true) {
+      toast("This applicant is not ready for an interview invite yet.", true);
+      return;
+    }
     // Deciding from inside the profile hands over the next one, so a reviewer
     // can work the queue without returning to the list between people.
     const advance = !!act.closest("#profileCard") && (action === "pass" || action === "interview") && STATE.modal?.source === "queue";
@@ -1661,6 +1580,7 @@ async function loadFeed(manual = false) {
     STATE.decisions = body.decisions || {};
     STATE.acks = body.acks || {};
     STATE.photos = body.photos || {};
+    STATE.cards = body.cards || {};
     STATE.counts = body.counts || null;
     STATE.loaded = true;
     reconcileLocal();
@@ -1699,19 +1619,12 @@ async function onCredential(response) {
 function startApp() {
   loadFeed();
   if (!startApp.timer) startApp.timer = setInterval(loadFeed, 60000);
-  // Hydration and paging follow both scrollports when embedded (the iframe's
-  // own long document and the shell around it), or just ours when standalone.
-  if (!startApp.scrollBound) {
-    startApp.scrollBound = true;
-    window.addEventListener("scroll", scheduleScan, { passive: true });
-    window.addEventListener("resize", scheduleScan);
-    const pw = parentWin();
-    if (pw) {
-      try {
-        pw.addEventListener("scroll", scheduleScan, { passive: true });
-        pw.addEventListener("resize", scheduleScan);
-      } catch { /* standalone listeners above still cover us */ }
-    }
+  if (!startApp.resizeBound) {
+    startApp.resizeBound = true;
+    window.addEventListener("resize", () => {
+      renderVirtual($("reviewList"));
+      renderVirtual($("streamList"));
+    });
   }
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && AUTH.authenticated) loadFeed(); });

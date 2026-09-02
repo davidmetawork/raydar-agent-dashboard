@@ -23,6 +23,8 @@
     preview: null,            // last preview result for the draft
     previewing: false,
     hits: null,               // { ruleId, rows } while the hits panel is open
+    running: false,
+    lastRun: null,
   };
 
   const el = (id) => document.getElementById(id);
@@ -50,6 +52,10 @@
   .rules-head h2 { margin:0 0 4px; font-size:16px; font-weight:700; }
   .rules-head p { margin:0; font-size:12.5px; color:var(--ink-2); line-height:1.5; max-width:64ch; }
   .rules-actions { display:flex; gap:8px; align-items:center; }
+  .manual-run { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+  .manual-run .note { font-size:10.5px; color:var(--ink-3); }
+  .rule-run-result { margin:-5px 0 14px; padding:10px 13px; border:1px solid var(--line); border-radius:10px;
+    background:var(--cream); color:var(--ink-2); font-size:12px; line-height:1.45; }
   .killswitch { display:inline-flex; align-items:center; gap:8px; font-size:12px; font-weight:600;
     border:1px solid var(--line); background:var(--card); border-radius:999px; padding:7px 13px; cursor:pointer; }
   .killswitch.on { background:var(--bad-bg); border-color:var(--bad); color:var(--bad); }
@@ -251,11 +257,20 @@
     if (!state.loaded) { host.innerHTML = '<div class="empty">Loading rules…</div>'; return; }
 
     const live = state.rules.filter((r) => r.state === "live").length;
+    const watching = state.rules.filter((r) => r.state === "watching").length;
+    const pending = typeof pendingRows === "function" ? pendingRows().length : 0;
+    const result = state.lastRun;
+    const skipped = Object.values(result?.skipped || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+    const resultText = !result ? "" : result.parked
+      ? "Last run did not make decisions: " + result.parked.replaceAll("_", " ") + "."
+      : "Last run checked " + Number(result.considered || result.pending || 0).toLocaleString()
+        + " candidates, made " + Number(result.decided || 0).toLocaleString()
+        + " decisions, and skipped " + skipped.toLocaleString() + ".";
     const head =
       '<div class="rules-head">' +
         '<div class="grow">' +
-          "<h2>Rules act on this queue automatically</h2>" +
-          "<p>A rule presses Interview or Pass for you on C-tier and unrated applicants. " +
+          "<h2>Rules run only when you press this button</h2>" +
+          "<p>Run rules now checks every pending C-tier and unrated applicant in one pass. A Live rule can press Interview or Pass; a Watching rule only counts matches. " +
           "It never touches the S/A/B stream, and it never overrules a decision a person already made. " +
           "<b>About 44% of this queue has no work or education history in Paraform at all</b> — " +
           "no rule can reach those people, so education and experience rules will always skip them.</p>" +
@@ -264,6 +279,10 @@
           '<button class="killswitch' + (state.pausedAll ? " on" : "") + '" id="rulesPause">' +
             (state.pausedAll ? "● All rules paused" : "Pause all rules") + "</button>" +
           '<button class="primary" id="rulesNew">New rule</button>' +
+          '<div class="manual-run"><button class="primary" id="rulesRun"' +
+            (state.running || state.pausedAll || (!live && !watching) ? " disabled" : "") + ">" +
+            (state.running ? "Running…" : "Run rules now") + "</button>" +
+            '<span class="note">' + pending.toLocaleString() + " pending · " + live + " live · " + watching + " watching</span></div>" +
         "</div>" +
       "</div>";
 
@@ -275,15 +294,18 @@
         '<button class="primary" id="rulesNewEmpty">Create the first rule</button></div>';
 
     host.innerHTML = head +
+      (resultText ? '<div class="rule-run-result">' + enc(resultText) + "</div>" : "") +
       (state.pausedAll && state.rules.length
         ? '<div class="banner danger" style="display:flex"><div>●</div><div><strong>Every rule is paused.</strong>' +
-          "<span>Nothing will be actioned automatically until you switch this back on.</span></div></div>"
+          "<span>Nothing will be actioned when you press Run rules now until you switch this back on.</span></div></div>"
         : "") +
       (live && !state.pausedAll ? "" : "") +
       body;
 
     const pause = el("rulesPause");
     if (pause) pause.onclick = togglePause;
+    const run = el("rulesRun");
+    if (run) run.onclick = runRules;
     for (const id of ["rulesNew", "rulesNewEmpty"]) {
       const button = el(id);
       if (button) button.onclick = () => openEditor(null);
@@ -639,8 +661,47 @@
     try {
       await api({ op: "pauseAll", rev: state.rev, paused: !state.pausedAll });
       await load(); render();
-      toast(state.pausedAll ? "All rules paused." : "Rules running again.");
+      toast(state.pausedAll ? "All rules paused." : "Rules enabled for manual runs.");
     } catch (e) { toast(e.message, true); }
+  }
+
+  async function runRules() {
+    if (state.running || state.pausedAll) return;
+    const pending = typeof pendingRows === "function" ? pendingRows().length : 0;
+    const active = state.rules.filter((r) => r.state === "live" || r.state === "watching").length;
+    if (!active) { toast("There are no Live or Watching rules to run.", true); return; }
+    if (!window.confirm("Run " + active + " active rule" + (active === 1 ? "" : "s") + " against all "
+      + pending.toLocaleString() + " pending applicants now?\n\nLive rules may record Interview or Pass decisions; Watching rules never write decisions.")) return;
+    state.running = true;
+    state.lastRun = null;
+    render();
+    try {
+      const response = await fetch("/api/applicants/rules-tick", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        if (typeof showGate === "function") showGate();
+        throw new Error("Signed out — sign in and run again.");
+      }
+      if (!response.ok || payload.ok === false) throw new Error(payload.detail || payload.error || "Rule run failed.");
+      state.lastRun = payload;
+      if (typeof loadFeed === "function") await loadFeed();
+      await load();
+      toast(payload.parked
+        ? "Rules did not run: " + payload.parked.replaceAll("_", " ") + "."
+        : "Rules checked " + Number(payload.considered || payload.pending || 0).toLocaleString()
+          + " applicants and made " + Number(payload.decided || 0).toLocaleString() + " decisions.", Boolean(payload.parked));
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      state.running = false;
+      render();
+      paintBadge();
+    }
   }
 
   async function setRuleState(id, next) {
@@ -649,7 +710,7 @@
     if (next === "live" && rule.action === "interview") {
       const stats = state.stats[id] || {};
       const seen = rule.state === "watching" && stats.wouldFire ? " It has matched " + stats.wouldFire + " so far while watching." : "";
-      if (!window.confirm('Arm "' + rule.name + '"?\n\nMatching applicants will be emailed an interview invite on the loop\'s next cycle.' + seen)) return;
+      if (!window.confirm('Make "' + rule.name + '" Live?\n\nIt will be considered only the next time you press Run rules now; send-ready matches will then be queued for the invite loop.' + seen)) return;
     }
     try {
       await api({ op: "setState", rev: state.rev, id, state: next });
