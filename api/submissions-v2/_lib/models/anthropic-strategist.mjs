@@ -57,13 +57,15 @@ function parseText(response) {
     .filter((item) => item?.type === "text" && typeof item.text === "string")
     .map((item) => item.text.trim())
     .filter(Boolean);
-  if (texts.length !== 1) {
+  if (!texts.length) {
     throw new ModelProviderError("STRATEGIST_RESPONSE_SHAPE_INVALID", "Anthropic returned an invalid strategy payload", {
       retryable: true,
       provider: "anthropic",
     });
   }
-  const text = texts[0];
+  // Structured output can arrive in multiple text blocks; concatenate the
+  // exact bytes and keep the full local contract as the authority.
+  const text = texts.join("");
   const candidates = [text];
   const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)?.[1];
   if (fenced) candidates.push(fenced);

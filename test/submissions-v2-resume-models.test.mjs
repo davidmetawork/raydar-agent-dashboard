@@ -217,6 +217,26 @@ test("strategist accepts an exact JSON object wrapped by harmless provider prose
   assert.equal(result.strategy.document.candidate.name.text, "Jane Doe");
 });
 
+test("strategist accepts one structured JSON object split across provider text blocks", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const json = JSON.stringify(strategyFixture());
+  const midpoint = Math.floor(json.length / 2);
+  const result = await runResumeStrategist({ bundle, ledger }, {
+    apiKey: "test-key",
+    fetchImpl: async () => response(200, {
+      id: "msg-split-json",
+      content: [
+        { type: "text", text: json.slice(0, midpoint) },
+        { type: "text", text: json.slice(midpoint) },
+      ],
+      usage: { input_tokens: 100, output_tokens: 50 },
+      stop_reason: "end_turn",
+    }),
+  });
+  assert.equal(result.fallbackReason, null);
+  assert.equal(result.strategy.document.candidate.name.text, "Jane Doe");
+});
+
 test("strategist input keeps role orientation but does not duplicate candidate evidence", () => {
   const { bundle, ledger } = evidenceFixture();
   const payload = buildResumeStrategistPayload({ bundle, ledger, versionInstructions: "Emphasize systems work." });
