@@ -124,7 +124,7 @@ async function lockPair(tx, pairId, expectedVersion) {
 async function command(tx, input, work) {
   const requiredControls = Array.isArray(input.requiredControls) ? input.requiredControls : ["ui"];
   if (requiredControls.length) {
-    const current = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+    const current = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
     const columns = {
       ui: "ui_enabled",
       ingestion: "ingestion_enabled",
@@ -144,7 +144,7 @@ async function command(tx, input, work) {
 }
 
 async function controls(tx) {
-  const rows = await tx`select * from submissions_v2.runtime_controls where singleton=true for share`;
+  const rows = await tx`select * from submissions_v2.lock_runtime_controls()`;
   if (!rows.length) throw problem("submissions_v2_controls_unavailable", "Submissions V2 controls are unavailable.", 503);
   return rows[0];
 }
@@ -714,7 +714,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
 
     async claimEmailFirstResponse({ eventId, idempotencyKey, candidateId, offeredRoles = [] }) {
       return sql.begin(async (tx) => {
-        const activeControls = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+        const activeControls = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
         if (!activeControls?.ingestion_enabled || !activeControls?.master_inbox_enabled) {
           throw problem("submissions_v2_control_disabled", "Submissions V2 email intake is disabled.", 503);
         }
@@ -849,7 +849,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
 
     async recordEmailSource({ event, safeEnvelope, privateObjectKey, objectReservationId, objectWriteFencingToken, objectDigest, processingState, safeErrorCode = null, safeErrorDetail = null, candidateResolution = null }) {
       return sql.begin(async (tx) => {
-        const activeControls = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+        const activeControls = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
         if (!activeControls?.ingestion_enabled || !activeControls?.master_inbox_enabled) {
           throw problem("submissions_v2_control_disabled", "Submissions V2 email intake is disabled.", 503);
         }

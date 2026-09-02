@@ -400,7 +400,7 @@ export function createResumePipelineStore({
              set intent_state='interested', workflow_state='preparing_resume', state_version=state_version+1
            where id=${pairId} and state_version=${pair.state_version} returning *
         `)[0];
-        const controls = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+        const controls = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
         if (!controls) throw new ResumePipelineError("submissions_v2_controls_unavailable", "Submissions V2 controls are unavailable.");
         const key = `resume:recheck:${pairId}:${updated.state_version}`;
         const inserted = await tx`
