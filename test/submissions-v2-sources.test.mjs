@@ -15,6 +15,13 @@ test("candidate index stores keyed email HMAC but no plaintext email", () => {
   assert.equal(JSON.stringify(row).includes("jane@example.com"), false);
 });
 
+test("candidate index preserves an identified Paraform profile when its display name is blank", () => {
+  const row = candidateIndexRow({ id: "candidate-no-name", name: "" });
+  assert.equal(row.candidate_user_id, "candidate-no-name");
+  assert.equal(row.display_name, "Candidate name unavailable");
+  assert.equal(candidateIndexRow({ name: "No identity" }), null);
+});
+
 test("role index constructs the exact Paraform role destination", () => {
   const row = roleIndexRow({ id: "role-1", company_name: "Acme", title: "Engineer", active: true });
   assert.equal(row.paraform_url, "https://www.paraform.com/browse?role=role-1");

@@ -1,6 +1,8 @@
-# Submissions V2 implementation and local verification
+# Submissions V2 implementation and production verification
 
-Status: this is an isolated local build on `/submissions-v2`; it has not been deployed or activated, V1 remains unchanged, and both the environment and durable Postgres runtime controls default to disabled.
+Status: production-active on Monitor `/submissions-v2` since the forward-only cutoff
+`2026-09-02T02:45:14.308Z`; all five environment ceilings and durable control epoch 1 are enabled,
+while unchanged V1 `/submissions` remains the rollback surface.
 
 ## What is implemented
 
@@ -28,17 +30,32 @@ Status: this is an isolated local build on `/submissions-v2`; it has not been de
 ## Safety and activation model
 
 - Environment flags and the single durable `submissions_v2.runtime_controls` row are ANDed, so either layer being off holds the corresponding UI/source/generation work.
-- Migration `001_foundation.sql` seeds every durable flag false, and `.env.submissions-v2.example` keeps every environment flag false.
+- Migration `001_foundation.sql` and `.env.submissions-v2.example` still default every new installation off; production was explicitly enabled only after deployment and readback.
 - Private source text, supplements, checkpoints, and artifacts are encrypted or stored in private Blob paths; public rows expose only safe projections.
 - Every private path is transactionally bound to one immutable storage owner, legacy 001-010 rows are backfilled before migration 011 activates guards, and generation-owned artifacts/instructions are constrained to the same candidate-role pair.
 - Model work is pinned, bounded to five minutes and $2 per resume, and fails closed before an unbudgeted call.
-- No deployment, production source enablement, live model call, Slack post, candidate action, Paraform write, or runtime-control activation was performed as part of this build.
+- Activation is forward-only and created no source event or candidate-role pair from standing Curated history; Monitor still performs no submission, resume attachment, candidate message, or Paraform credit spend.
+
+## Production activation evidence
+
+- Monitor deployment `dpl_CS1BCemva69nZxquRDLC9uUKxk22` and Master Inbox deployment
+  `dpl_Jra8kxegMWJdrtktW9tv3SSwZLX3` are Ready and production-aliased.
+- The dedicated worker, V2 renderer, ClamAV scanner, and isolated purge executor pass live health
+  checks; the renderer reports exact approved brand/font/template identifiers.
+- Production Neon has migrations 001-013 and scoped API, worker, and purge identities; the two
+  activation-time least-privilege defects were repaired without granting either deployment identity
+  direct runtime-control update authority.
+- Master Inbox reconciliation succeeds without Gmail polling, the initial Curated read seeded 24
+  snapshots with zero historical candidate actions, and Paraform candidate/role indexes populate
+  through paced continuation jobs.
+- No synthetic candidate signal was inserted; the first organic post-cutoff signal remains the
+  production proof for classification through resume download and proof reconciliation.
 
 ## Local verification
 
-The current local verification on 2026-09-01 passes 202/202 focused V2 tests, including both a
+The current local verification on 2026-09-01 passes 205/205 focused V2 tests, including both a
 fresh database and an exact populated 001-010 to 011 upgrade. A clean disposable Postgres database
-applied all eleven migrations twice with digest/idempotence checks, retained every runtime control
+applied all thirteen migrations with digest/idempotence checks, retained every runtime control
 off, and passed the least-privilege role probes. The independent security and data-integrity audit
 passed with no remaining blocker, production dependency audit reports zero vulnerabilities, and the
 production-shaped Vercel build and nested-route smoke tests pass. The frozen unchanged-V1 and
@@ -74,4 +91,6 @@ For a read-only visual shell check, serve the repository and open `/submissions-
 python3 -m http.server 4179
 ```
 
-Before any future launch, rerun the V2 suites, V1 regression suites, dashboard contract check, renderer tests, and a representative source-to-download shadow flow, then require separate approval to configure secrets, deploy services, or enable either control layer.
+For future changes, rerun the V2 and V1 suites, dashboard contract check, renderer tests, and a
+representative source-to-download flow before redeploying; use either environment ceilings or the
+durable controls for immediate rollback.
