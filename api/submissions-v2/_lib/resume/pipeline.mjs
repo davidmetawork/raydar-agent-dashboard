@@ -42,6 +42,28 @@ import { processResumeSupplements } from "./pipeline-supplements.mjs";
 
 const BRAND_ASSET_URL = new URL("../../../../resume-renderer-v2/assets/raydar-lockup.svg", import.meta.url);
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
+const LAYOUT_RETRY_INSTRUCTIONS = Object.freeze({
+  RESUME_PAGE_TWO_UNDERFILLED: "The previous layout left page two underfilled; produce a tighter one-page document by selecting only the strongest role-relevant evidence within the one-page limits.",
+  RESUME_PAGE_LIMIT_EXCEEDED: "The previous layout exceeded two pages; reduce it to the strongest role-relevant evidence and target one page within the one-page limits.",
+});
+
+function layoutRetryCheckpoint(checkpoint, code) {
+  const feedback = LAYOUT_RETRY_INSTRUCTIONS[code];
+  if (!feedback) return null;
+  const stages = checkpoint?.pipeline?.stages || {};
+  return {
+    ...(checkpoint || {}),
+    pipeline: {
+      ...(checkpoint?.pipeline || {}),
+      layout_feedback: code,
+      stages: Object.fromEntries(Object.entries(stages).filter(([stage]) => ["collect", "evidence"].includes(stage))),
+    },
+  };
+}
+
+function effectiveStrategyInstructions(versionInstructions, layoutFeedback) {
+  return [clean(versionInstructions, 8_000), LAYOUT_RETRY_INSTRUCTIONS[layoutFeedback] || ""].filter(Boolean).join("\n\n");
+}
 
 async function officialBrandAsset() {
   const bytes = await readFile(BRAND_ASSET_URL);
@@ -272,10 +294,14 @@ export async function runResumePreparation(context, {
     }
     const bundle = collected.bundle || collected;
     const sourceRecords = await store.persistSources(generation.id, bundle, executionFence);
+    const strategyInstructions = effectiveStrategyInstructions(
+      loaded.versionInstructions,
+      checkpoint.pipeline.layout_feedback,
+    );
     await store.setGenerationDigests({
       generationId: generation.id,
       sourceDigest: bundle.sourceDigest,
-      instructionDigest: loaded.versionInstructions ? sha256(loaded.versionInstructions) : null,
+      instructionDigest: strategyInstructions ? sha256(strategyInstructions) : null,
       executionFence,
     });
     try { assertGenerationReady(bundle); }
@@ -301,7 +327,7 @@ export async function runResumePreparation(context, {
     if (!strategy) {
       const forecast = forecastModelCostCents({
         model: STRATEGIST_PRIMARY_MODEL,
-        input: buildResumeStrategistPayload({ bundle, ledger: evidence.ledger, versionInstructions: loaded.versionInstructions }),
+        input: buildResumeStrategistPayload({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }),
         maximumOutputTokens: STRATEGIST_MAX_OUTPUT_TOKENS,
         attempts: 2,
         env,
@@ -309,7 +335,7 @@ export async function runResumePreparation(context, {
       budget.reserve(forecast, { minimumRemainingMs: 60_000 });
       await publishCheckpoint({ active_stage: "strategy", spent_cents: budget.spentCents });
       await store.updateGeneration({ generationId: generation.id, fromStatuses: ["extracting", "strategizing"], status: "strategizing", stage: "strategy", spentCents: budget.spentCents, executionFence });
-      strategy = await strategist({ bundle, ledger: evidence.ledger, versionInstructions: loaded.versionInstructions }, {
+      strategy = await strategist({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }, {
         env,
         fetchImpl,
         signal: context.signal,
@@ -365,18 +391,31 @@ export async function runResumePreparation(context, {
         officialBrandAsset: await brandAsset(),
         practice: false,
       });
-      const result = await renderer({
-        renderId: `generation-${String(generation.id).replace(/[^A-Za-z0-9._:-]/gu, "-")}`,
-        ast: prepared.ast,
-        validatedClaimIds: selectedClaimIds,
-        expectedAstSha256: resumeAstDigest(prepared.ast),
-        practice: false,
-      }, {
-        env,
-        fetchImpl,
-        signal: context.signal,
-        timeoutMs: Math.min(90_000, Math.max(1_000, deadlineAt - now())),
-      });
+      let result;
+      try {
+        result = await renderer({
+          renderId: `generation-${String(generation.id).replace(/[^A-Za-z0-9._:-]/gu, "-")}`,
+          ast: prepared.ast,
+          validatedClaimIds: selectedClaimIds,
+          expectedAstSha256: resumeAstDigest(prepared.ast),
+          practice: false,
+        }, {
+          env,
+          fetchImpl,
+          signal: context.signal,
+          timeoutMs: Math.min(90_000, Math.max(1_000, deadlineAt - now())),
+        });
+      } catch (error) {
+        const retryCheckpoint = layoutRetryCheckpoint(checkpoint, error?.code);
+        if (!retryCheckpoint) throw error;
+        checkpoint = retryCheckpoint;
+        throw new ResumePipelineError("resume_layout_retry_required", "Resume preparation is retrying automatically with a tighter one-page plan.", {
+          retryable: true,
+          checkpoint,
+          cause: error,
+          details: { layoutError: error.code },
+        });
+      }
       const plan = { ...result.plan, expectedPages: Number(result.preflight?.pageCount) };
       const pdfVerification = verifyRenderedPdf({
         pdfBytes: result.pdfBytes,
@@ -514,4 +553,10 @@ export async function settleResumePreparationFailure(error, context, { store, ex
   return true;
 }
 
-export const resumePipelineInternals = Object.freeze({ artifactMetadata, officialBrandAsset, stageInputDigest });
+export const resumePipelineInternals = Object.freeze({
+  artifactMetadata,
+  effectiveStrategyInstructions,
+  layoutRetryCheckpoint,
+  officialBrandAsset,
+  stageInputDigest,
+});

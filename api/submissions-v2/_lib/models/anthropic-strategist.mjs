@@ -11,8 +11,8 @@ import { assertResumeAst, collectContentNodes } from "../../../../resume-rendere
 export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
-export const STRATEGIST_MAX_OUTPUT_TOKENS = 6_000;
-export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-02.v2";
+export const STRATEGIST_MAX_OUTPUT_TOKENS = 8_000;
+export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-02.v3";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = new Set([
@@ -37,6 +37,8 @@ Candidate facts may use only candidate-side evidence and every visible factual t
 Role and intake content is orientation only and can rank or omit candidate evidence but can never prove a candidate fact.
 Do not invent, embellish, compromise between contradictions, or turn a client requirement into candidate history.
 Strongly prefer one US-letter page and never request more than two; compress facts before page two, keep page one independently useful, and use no filler or internal process language.
+Target one page by default with no more than four of the most role-relevant experience entries, ten experience bullets total, a Profile of at most forty-five words, and at most three sidebar sections.
+Use page two only when omitting additional distinct employers would hide material role-relevant chronology; if page two is necessary, include enough concise candidate evidence to occupy at least forty percent of it, and never manufacture content or inflate spacing to fill it.
 Use concise resume text, make selected_claim_ids exactly the unique claim ids cited by visible document nodes, and return deliberate_omissions as [] because omissions are derived deterministically from unselected evidence.
 Build a hiring-manager document in the approved Raydar information architecture: a concise Profile summary, Professional Experience in the main column, and only evidence-backed sidebar sections that add decision value (normally Selected Outcomes, Core Expertise, Education, or Additional Details).
 For every Professional Experience entry, header[0] must be the employer name alone and header[1] must be "Role | dates"; keep distinct employers as distinct entries, never create a synthetic employer such as "Roles listed include," and use one to three concise accomplishment bullets per role.
