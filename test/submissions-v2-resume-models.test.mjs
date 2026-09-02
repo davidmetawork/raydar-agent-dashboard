@@ -201,6 +201,21 @@ test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable prima
   assert.equal(result.strategy.document.schema_version, "raydar.resume.ast.v1");
 });
 
+test("strategist accepts an exact JSON object wrapped by harmless provider prose", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const result = await runResumeStrategist({ bundle, ledger }, {
+    apiKey: "test-key",
+    fetchImpl: async () => response(200, {
+      id: "msg-wrapped-json",
+      content: [{ type: "text", text: `Here is the requested object:\n${JSON.stringify(strategyFixture())}` }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+      stop_reason: "end_turn",
+    }),
+  });
+  assert.equal(result.fallbackReason, null);
+  assert.equal(result.strategy.document.candidate.name.text, "Jane Doe");
+});
+
 test("strategist input keeps role orientation but does not duplicate candidate evidence", () => {
   const { bundle, ledger } = evidenceFixture();
   const payload = buildResumeStrategistPayload({ bundle, ledger, versionInstructions: "Emphasize systems work." });

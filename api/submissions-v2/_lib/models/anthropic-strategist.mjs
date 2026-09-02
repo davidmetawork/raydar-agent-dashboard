@@ -11,7 +11,7 @@ import { assertResumeAst, collectContentNodes } from "../../../../resume-rendere
 export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
-export const STRATEGIST_MAX_OUTPUT_TOKENS = 9_000;
+export const STRATEGIST_MAX_OUTPUT_TOKENS = 6_000;
 export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-08-31.v1";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
@@ -63,8 +63,18 @@ function parseText(response) {
       provider: "anthropic",
     });
   }
+  const text = texts[0];
+  const candidates = [text];
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)?.[1];
+  if (fenced) candidates.push(fenced);
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(text.slice(firstBrace, lastBrace + 1));
+  for (const candidate of [...new Set(candidates)]) {
+    try { return JSON.parse(candidate); } catch { /* try the next exact JSON envelope */ }
+  }
   try {
-    return JSON.parse(texts[0]);
+    return JSON.parse(text);
   } catch (cause) {
     throw new ModelProviderError("STRATEGIST_RESPONSE_JSON_INVALID", "Anthropic returned invalid strategy JSON", {
       retryable: true,
