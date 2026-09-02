@@ -539,10 +539,11 @@ test("feed withholds every row that has no cached profile card", async () => {
     readyRows: 2,
     withheldRows: 2,
     totalCandidates: 3,
+    unidentifiedRows: 0,
     readyCandidates: 1,
     withheldCandidates: 2,
-    queue: { total: 2, ready: 1, withheld: 1 },
-    stream: { total: 2, ready: 1, withheld: 1 },
+    queue: { total: 2, ready: 1, withheld: 1, unidentified: 0 },
+    stream: { total: 2, ready: 1, withheld: 1, unidentified: 0 },
   });
 });
 

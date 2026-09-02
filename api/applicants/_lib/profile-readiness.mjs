@@ -47,11 +47,22 @@ export function profileCacheGate(snapshot, cards, receipts, { now = Date.now() }
       readyRows: stream.length + queue.length,
       withheldRows: all.length - stream.length - queue.length,
       totalCandidates: candidateIds.size,
+      unidentifiedRows: all.filter((row) => !row?.cuId).length,
       readyCandidates: readyCandidateIds.size,
       withheldCandidates: missingCuIds.length,
       missingCuIds,
-      queue: { total: rawQueue.length, ready: queue.length, withheld: rawQueue.length - queue.length },
-      stream: { total: rawStream.length, ready: stream.length, withheld: rawStream.length - stream.length },
+      queue: {
+        total: rawQueue.length,
+        ready: queue.length,
+        withheld: rawQueue.length - queue.length,
+        unidentified: rawQueue.filter((row) => !row?.cuId).length,
+      },
+      stream: {
+        total: rawStream.length,
+        ready: stream.length,
+        withheld: rawStream.length - stream.length,
+        unidentified: rawStream.filter((row) => !row?.cuId).length,
+      },
     },
   };
 }
