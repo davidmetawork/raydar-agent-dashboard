@@ -73,6 +73,7 @@ function statusFor(value, { failed = null, partial = false, sourceUpdatedAt = nu
 function sourceOutcome({
   key,
   value,
+  normalizedValue = value,
   locator,
   capturedAt,
   failed = null,
@@ -95,8 +96,8 @@ function sourceOutcome({
     capturedAt,
     sourceUpdatedAt,
     content: value == null ? null : value,
-    normalizedText: value == null ? "" : normalizeEvidenceText(
-      typeof value === "string" ? value : deterministicJson(value),
+    normalizedText: normalizedValue == null ? "" : normalizeEvidenceText(
+      typeof normalizedValue === "string" ? normalizedValue : deterministicJson(normalizedValue),
     ),
     accuracyImpact,
     remediation,
@@ -105,6 +106,50 @@ function sourceOutcome({
       ...(failed ? { readFailed: true, safeErrorCode: clean(failed?.code || failed?.message || "read_failed", 120) } : {}),
     },
   };
+}
+
+function usefulText(value, limit = 40_000) {
+  if (value == null) return "";
+  if (typeof value === "string" || typeof value === "number") return clean(value, limit);
+  return "";
+}
+
+function linkedinResumeText(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const lines = [];
+  const add = (label, item, limit = 40_000) => {
+    const text = usefulText(item, limit);
+    if (text) lines.push(`${label}: ${text}`);
+  };
+  add("Name", value.name, 500);
+  add("Location", value.location, 1_000);
+  add("Headline", value.title, 1_000);
+  add("Profile", value.one_liner, 4_000);
+  add("About", value.about, 40_000);
+  add("Profile summary", value.ai_summary, 40_000);
+
+  for (const [index, experience] of (Array.isArray(value.experiences) ? value.experiences : []).entries()) {
+    if (!experience || typeof experience !== "object") continue;
+    lines.push(`Experience ${index + 1}`);
+    add("Company", experience.company_name || experience.company?.name, 1_000);
+    add("Role", experience.role_title, 1_000);
+    add("Employment type", experience.employment_type, 500);
+    add("Location", experience.location, 1_000);
+    add("Start date", experience.start_date, 200);
+    add("End date", experience.end_date, 200);
+    add("Description", experience.description, 40_000);
+  }
+
+  for (const [index, education] of (Array.isArray(value.education) ? value.education : []).entries()) {
+    if (!education || typeof education !== "object") continue;
+    lines.push(`Education ${index + 1}`);
+    add("School", education.school_name || education.school?.name, 1_000);
+    add("Degree", education.degree, 1_000);
+    add("Start date", education.start_date, 200);
+    add("End date", education.end_date, 200);
+    add("Description", education.description, 20_000);
+  }
+  return lines.join("\n") || deterministicJson(value);
 }
 
 function transcriptTurns(record) {
@@ -446,6 +491,7 @@ export async function collectResumeSourceBundle({
     }),
     sourceOutcome({
       key: "candidate_linkedin", value: linkedin.value,
+      normalizedValue: linkedinResumeText(linkedin.value),
       locator: `paraform:candidate:${candidateUserId}:linkedin`, capturedAt, failed: linkedin.error,
       sourceUpdatedAt: linkedinUpdatedAt,
       accuracyImpact: "Recent experience or education may not be represented.",
@@ -506,6 +552,7 @@ export const collectorInternals = Object.freeze({
   deterministicJson,
   failureKind,
   intakeTurns,
+  linkedinResumeText,
   privateAddress,
   resumeIdFrom,
   sourceOutcome,

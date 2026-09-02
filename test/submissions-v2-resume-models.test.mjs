@@ -6,6 +6,7 @@ import { normalizeSourceBundle } from "../api/submissions-v2/_lib/resume/source-
 import {
   STRATEGIST_FALLBACK_MODEL,
   STRATEGIST_PRIMARY_MODEL,
+  buildResumeStrategistPayload,
   runResumeStrategist,
 } from "../api/submissions-v2/_lib/models/anthropic-strategist.mjs";
 import {
@@ -193,6 +194,22 @@ test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable prima
   assert.equal(result.audit.model, STRATEGIST_FALLBACK_MODEL);
   assert.equal(result.fallbackReason, "MODEL_PROVIDER_ERROR");
   assert.equal(result.strategy.document.schema_version, "raydar.resume.ast.v1");
+});
+
+test("strategist input keeps role orientation but does not duplicate candidate evidence", () => {
+  const { bundle, ledger } = evidenceFixture();
+  const payload = buildResumeStrategistPayload({ bundle, ledger, versionInstructions: "Emphasize systems work." });
+  const resume = payload.source_bundle.sources.find((source) => source.key === "candidate_original_resume");
+  const role = payload.source_bundle.sources.find((source) => source.key === "role_context");
+  assert.equal(resume.normalizedText, undefined);
+  assert.match(role.normalizedText, /reliable product engineering/u);
+  assert.deepEqual(payload.evidence_ledger.claims[0], {
+    claim_id: ledger.claims[0].claimId,
+    claim_type: ledger.claims[0].claimType,
+    source_key: ledger.claims[0].sourceKey,
+    exact_quote: ledger.claims[0].quote,
+  });
+  assert.equal(payload.evidence_ledger.clusters.length, 0);
 });
 
 test("strategist does not fall back on nonretryable authentication failure", async () => {

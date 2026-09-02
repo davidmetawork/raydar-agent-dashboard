@@ -57,7 +57,7 @@ function parseText(response) {
   }
 }
 
-function strategistPayload({ bundle, ledger, versionInstructions }) {
+export function buildResumeStrategistPayload({ bundle, ledger, versionInstructions }) {
   if (!ledger || ledger.schemaVersion !== "raydar.submissions-v2.evidence-ledger.v1") {
     throw new ResumeContractError("EVIDENCE_LEDGER_INVALID", "A V2 evidence ledger is required");
   }
@@ -76,21 +76,27 @@ function strategistPayload({ bundle, ledger, versionInstructions }) {
         no_filler: true,
       },
     },
-    source_bundle: sourceBundleForModel(bundle),
+    source_bundle: {
+      ...sourceBundleForModel(bundle),
+      sources: sourceBundleForModel(bundle).sources.map((source) => ({
+        ...source,
+        // Candidate-side wording is already represented once, as exact grounded
+        // claims below; retaining it here duplicates the largest part of the
+        // request and can prevent a valid resume from entering the model at all.
+        normalizedText: source.scope === "client_orientation" || source.key === "candidate_preferences"
+          ? source.normalizedText
+          : undefined,
+      })),
+    },
     evidence_ledger: {
       ledger_digest: ledger.ledgerDigest,
       claims: ledger.claims.map((claim) => ({
         claim_id: claim.claimId,
-        evidence_id: claim.evidenceId,
         claim_type: claim.claimType,
-        subject: claim.subject,
-        value: claim.value,
         source_key: claim.sourceKey,
         exact_quote: claim.quote,
-        locator: claim.locator,
-        trust_rank: claim.trustRank,
       })),
-      clusters: ledger.clusters,
+      clusters: ledger.clusters.filter((cluster) => cluster.claimIds.length > 1 || cluster.hasConflict),
     },
     version_instructions: normalizeEvidenceText(versionInstructions).slice(0, 8_000) || null,
   };
@@ -210,7 +216,7 @@ export async function runResumeStrategist({
       provider: "anthropic",
     });
   }
-  const payload = strategistPayload({ bundle, ledger, versionInstructions });
+  const payload = buildResumeStrategistPayload({ bundle, ledger, versionInstructions });
   const attempts = [];
   try {
     const primary = await callModel(STRATEGIST_PRIMARY_MODEL, payload, {

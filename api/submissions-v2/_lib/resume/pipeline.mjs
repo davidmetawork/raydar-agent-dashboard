@@ -7,6 +7,7 @@ import {
   STRATEGIST_FALLBACK_MODEL,
   STRATEGIST_PRIMARY_MODEL,
   STRATEGIST_PROMPT_VERSION,
+  buildResumeStrategistPayload,
   runResumeStrategist,
 } from "../models/anthropic-strategist.mjs";
 import {
@@ -270,7 +271,7 @@ export async function runResumePreparation(context, {
     if (!strategy) {
       const forecast = forecastModelCostCents({
         model: STRATEGIST_PRIMARY_MODEL,
-        input: { bundle, ledger: evidence.ledger, versionInstructions: loaded.versionInstructions },
+        input: buildResumeStrategistPayload({ bundle, ledger: evidence.ledger, versionInstructions: loaded.versionInstructions }),
         maximumOutputTokens: 12_000,
         attempts: 2,
         env,

@@ -14,6 +14,30 @@ test("collector distinguishes missing, denied, and failed reads", () => {
   assert.equal(collectorInternals.statusFor(null, { failed: new Error("timeout") }), "unreadable");
 });
 
+test("LinkedIn normalization keeps resume facts and removes nested enrichment noise", () => {
+  const text = collectorInternals.linkedinResumeText({
+    name: "Al Morris",
+    location: "New Jersey",
+    one_liner: "Player-coach engineering leader",
+    experiences: [{
+      company_name: "Coverwhale",
+      role_title: "Director of Engineering",
+      start_date: "2025-07-01",
+      description: "Led an international engineering team.",
+      company: { name: "Coverwhale", logo_src: "https://example.test/logo", funding_amount: "999" },
+      candidate_id: "internal-candidate-id",
+    }],
+    education: [{ school_name: "NJIT", degree: "Computer Science", school: { logo_src: "https://example.test/school" } }],
+    last_featurized_at: "2026-01-01",
+  });
+  assert.match(text, /Al Morris/u);
+  assert.match(text, /Coverwhale/u);
+  assert.match(text, /Director of Engineering/u);
+  assert.match(text, /Led an international engineering team/u);
+  assert.match(text, /NJIT/u);
+  assert.doesNotMatch(text, /logo_src|funding_amount|candidate_id|last_featurized_at/u);
+});
+
 test("intake reconstruction prefers the full transcript and labels summary fallback partial", () => {
   const full = collectorInternals.intakeTurns({
     transcription_json: [{ speaker: "HM", words: [{ text: "A".repeat(220) }] }],
