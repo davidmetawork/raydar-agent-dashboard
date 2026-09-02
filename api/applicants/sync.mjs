@@ -30,7 +30,7 @@ export const config = { maxDuration: 30 };
 
 // The loop caps the snapshot on its side (drops per-step detail); this guard
 // keeps a buggy publisher from parking a multi-megabyte blob in KV.
-export const MAX_SNAPSHOT_BYTES = 900_000;
+export const MAX_SNAPSHOT_BYTES = 1_800_000;
 const MAX_QUEUE_BYTES=1_800_000; // complete index plus exact action revisions
 const ACK_STATUSES = new Set(["invited", "blocked"]);
 import {saveApplicantAck} from './_lib/request-safety.mjs';
