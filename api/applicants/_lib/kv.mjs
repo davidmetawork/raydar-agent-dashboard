@@ -40,6 +40,11 @@
 //                              pass, pruned by the same full-publish prune,
 //                              no TTL of its own. GET /api/applicants/cards
 //                              is a reader only, never a writer.
+//   apphub:profile-ready     — POST /api/applicants/sync only (hash: field
+//                              cuId → {cachedAt, expiresAt}). Cards do not
+//                              expire, so this companion receipt is what lets
+//                              the list prove the full 24h profile cache is
+//                              still present before exposing a candidate.
 //   apphub:rank:<companyId>  — GET  /api/applicants/profile only (30d TTL)
 //   apphub:counts            — POST /api/applicants/sync only (tiny doc: the
 //                              queue/stream sizes of the last publish plus a
@@ -170,6 +175,7 @@ export const K = {
   profile: (cuId) => `apphub:profile:${cuId}`,
   photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
   cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
+  profileReady: "apphub:profile-ready", // hash: field cuId → full-profile TTL receipt
   counts: "apphub:counts", // last publish's queue/stream sizes + latched drop alert (see header)
   refresh: "apphub:refresh", // on-demand refresh request from the tab (see header)
   rank: (companyId) => `apphub:rank:${companyId}`,

@@ -17,6 +17,7 @@ import { createFeedHandler } from "../api/applicants/feed.mjs";
 
 const SAVED_SYNC_KEY = process.env.APPHUB_SYNC_KEY;
 const KEY = "apphub-sync-key-0000000000000000001";
+const READY_RECEIPT = { cachedAt: "2026-08-09T00:00:00.000Z", expiresAt: "2026-08-10T00:00:00.000Z" };
 
 test.after(() => {
   if (SAVED_SYNC_KEY === undefined) delete process.env.APPHUB_SYNC_KEY;
@@ -255,6 +256,7 @@ test("sync reports authoritative profile-cache coverage without candidate names"
     },
     "apphub:queue": { rows: [{ key: "missing002:role1", cuId: "missing002", name: "Another Person" }] },
     "apphub:cards": { ready00001: { exp: [], edu: [] } },
+    "apphub:profile-ready": { ready00001: READY_RECEIPT },
   });
   const handler = createSyncHandler(deps);
   const res = response();
@@ -266,7 +268,7 @@ test("sync reports authoritative profile-cache coverage without candidate names"
   assert.doesNotMatch(JSON.stringify(res.body), /Person/);
 });
 
-function decisionSetup({ ack = null, queue = [{ key: "cu1:role1", cuId: "cu1" }], card = {} } = {}) {
+function decisionSetup({ ack = null, queue = [{ key: "cu1:role1", cuId: "cu1" }], card = {}, receipt = READY_RECEIPT } = {}) {
   const calls = { wrote: [], deleted: [] };
   const handler = createDecisionHandler({
     corsHandler: () => false,
@@ -278,6 +280,7 @@ function decisionSetup({ ack = null, queue = [{ key: "cu1:role1", cuId: "cu1" }]
     readAck: async () => ack,
     readQueue: async () => ({ rows: queue }),
     readCard: async () => card,
+    readProfileReceipt: async () => receipt,
     writeDecision: async (key, record) => calls.wrote.push([key, record]),
     deleteDecision: async (key) => calls.deleted.push(key),
     now: () => "2026-08-09T00:00:00.000Z",
@@ -343,6 +346,17 @@ test("decision refuses a hidden applicant until its profile card is cached", asy
   assert.equal(res.statusCode, 409);
   assert.equal(res.body.error, "profile_cache_not_ready");
   assert.equal(missing.calls.wrote.length, 0);
+});
+
+test("decision refuses an applicant whose full profile expired even when its card remains", async () => {
+  const expired = decisionSetup({
+    receipt: { cachedAt: "2026-08-07T00:00:00.000Z", expiresAt: "2026-08-08T00:00:00.000Z" },
+  });
+  const res = response();
+  await expired.handler(request({ body: { key: "cu1:role1", action: "interview" } }), res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.error, "profile_cache_not_ready");
+  assert.equal(expired.calls.wrote.length, 0);
 });
 
 test("normalizeAcks reports the first offending key", () => {
@@ -467,6 +481,7 @@ function feedSetup(initial = {}) {
       calls.readHash.push(key);
       return initial[key] || {};
     },
+    now: () => Date.parse("2026-08-09T01:00:00.000Z"),
   });
   return { calls, handler };
 }
@@ -479,6 +494,7 @@ test("feed returns every compact card and photo alongside the snapshot and overl
     "apphub:decisions": { "cu1abcdef0:role1": { action: "pass" } },
     "apphub:photos": { cu1abcdef0: photoUrl },
     "apphub:cards": { cu1abcdef0: { title: "Founding Engineer", exp: [], edu: [] } },
+    "apphub:profile-ready": { cu1abcdef0: READY_RECEIPT },
   });
   const res = response();
   await handler(request({ method: "GET", body: undefined }), res);
@@ -509,6 +525,7 @@ test("feed withholds every row that has no cached profile card", async () => {
       { key: "missing002:role2", cuId: "missing002", tier: "unrated" },
     ] },
     "apphub:cards": { ready00001: { exp: [], edu: [] } },
+    "apphub:profile-ready": { ready00001: READY_RECEIPT },
   });
   const res = response();
   await handler(request({ method: "GET", body: undefined }), res);
@@ -527,6 +544,21 @@ test("feed withholds every row that has no cached profile card", async () => {
     queue: { total: 2, ready: 1, withheld: 1 },
     stream: { total: 2, ready: 1, withheld: 1 },
   });
+});
+
+test("feed withholds an expired full profile even when its compact card remains", async () => {
+  const { handler } = feedSetup({
+    "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [{ key: "expired001:role1", cuId: "expired001" }] },
+    "apphub:queue": { rows: [] },
+    "apphub:cards": { expired001: { exp: [], edu: [] } },
+    "apphub:profile-ready": {
+      expired001: { cachedAt: "2026-08-07T00:00:00.000Z", expiresAt: "2026-08-08T00:00:00.000Z" },
+    },
+  });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined }), res);
+  assert.deepEqual(res.body.snapshot.stream, []);
+  assert.equal(res.body.profileCache.withheldCandidates, 1);
 });
 
 const BUCKET_PHOTO = "https://storage.googleapis.com/paraform-images/candidate-profile-pictures/abcdef1234";
@@ -683,7 +715,7 @@ test("sync writes the cards hash beside the photos hash in one profiles pass", a
   // Rules). CARD_SOURCE_PROFILE carries a school and a company id, so both
   // directories are written; the foreign-photo profile contributes neither.
   assert.deepEqual(calls.writeHash.map(([key]) => key),
-    ["apphub:photos", "apphub:cards", "apphub:facts", "apphub:schools", "apphub:companies"]);
+    ["apphub:photos", "apphub:cards", "apphub:profile-ready", "apphub:facts", "apphub:schools", "apphub:companies"]);
   const [, cards] = calls.writeHash.find(([key]) => key === "apphub:cards");
   // One HSET for the whole batch, and a card for EVERY profile — including the
   // one whose photo was dropped for living off the bucket.
@@ -691,6 +723,11 @@ test("sync writes the cards hash beside the photos hash in one profiles pass", a
   assert.deepEqual(cards.abcdef1234, cardFromProfile(CARD_SOURCE_PROFILE));
   assert.equal(cards.cmqvf861b00040aksj38cyiwp.photo, null);
   assert.equal(cards.cmqvf861b00040aksj38cyiwp.title, "Designer");
+  const [, receipts] = calls.writeHash.find(([key]) => key === "apphub:profile-ready");
+  assert.deepEqual(receipts, {
+    abcdef1234: READY_RECEIPT,
+    cmqvf861b00040aksj38cyiwp: READY_RECEIPT,
+  });
 });
 
 test("a full publish prunes cards against the same keep-set as photos, using their own keys", async () => {
@@ -700,6 +737,7 @@ test("a full publish prunes cards against the same keep-set as photos, using the
     // `nophotocu1` never had a bucket photo, so it exists only in cards — the
     // case a photos-derived drop list would strand forever.
     "apphub:cards": { keptcu0001: {}, stalecu001: {}, nophotocu1: {} },
+    "apphub:profile-ready": { keptcu0001: READY_RECEIPT, stalecu001: READY_RECEIPT, readyonlycu1: READY_RECEIPT },
     // Same again for facts: `factsonlycu` proves facts is pruned from its own
     // key list rather than from the cards drop list.
     "apphub:facts": { keptcu0001: {}, stalecu001: {}, factsonlycu: {} },
@@ -715,10 +753,11 @@ test("a full publish prunes cards against the same keep-set as photos, using the
   }), ok);
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(ok.body.stored, { snapshot: true, queue: true, acks: 0 });
-  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards", "apphub:facts"]);
+  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards", "apphub:profile-ready", "apphub:facts"]);
   assert.deepEqual(calls.deleteHashFields, [
     ["apphub:photos", ["stalecu001"]],
     ["apphub:cards", ["stalecu001", "nophotocu1"]],
+    ["apphub:profile-ready", ["stalecu001", "readyonlycu1"]],
     ["apphub:facts", ["stalecu001", "factsonlycu"]],
   ]);
 });

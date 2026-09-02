@@ -7,6 +7,7 @@ import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { isRuleActor, ruleIdFromActor } from "../api/applicants/_lib/decision-record.mjs";
 
 const NOW = Date.parse("2026-08-20T12:00:00.000Z");
+const READY_RECEIPT = { cachedAt: "2026-08-20T11:00:00.000Z", expiresAt: "2026-08-21T11:00:00.000Z" };
 
 const HARVARD_RULE = {
   id: "rule-harvard", name: "Harvard undergrads", action: "interview", state: "live",
@@ -34,14 +35,16 @@ const row = (cuId, extra = {}) => ({
 });
 
 /** In-memory KV standing in for the apphub namespace. */
-function store({ rules = [], pausedAll = false, queue = [], decisions = {}, facts = {}, cards = null, counts = null } = {}) {
+function store({ rules = [], pausedAll = false, queue = [], decisions = {}, facts = {}, cards = null, receipts = null, counts = null } = {}) {
+  const availableCards = cards ?? Object.fromEntries(Object.keys(facts).map((cuId) => [cuId, {}]));
   const state = {
     "apphub:rules": { rev: 3, pausedAll, rules, updatedAt: null },
     "apphub:queue": { rows: queue },
     "apphub:counts": counts,
     "apphub:decisions": { ...decisions },
     "apphub:facts": facts,
-    "apphub:cards": cards ?? Object.fromEntries(Object.keys(facts).map((cuId) => [cuId, {}])),
+    "apphub:cards": availableCards,
+    "apphub:profile-ready": receipts ?? Object.fromEntries(Object.keys(availableCards).map((cuId) => [cuId, READY_RECEIPT])),
     "apphub:rulestats": {},
     "apphub:ruleruns": {},
     "apphub:schools": { sch_harvard: "Harvard University" },
@@ -245,6 +248,20 @@ test("a rule cannot consider an applicant before its profile card is cached", as
     queue: [row("cu1")],
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
     cards: {},
+  });
+  const res = response();
+  await createTickHandler(s.deps)(request(), res);
+  assert.equal(res.body.decided, 0);
+  assert.equal(res.body.profileCacheWithheld, 1);
+  assert.deepEqual(s.state["apphub:decisions"], {});
+});
+
+test("a rule cannot consider an applicant after the full profile receipt expires", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+    receipts: { cu1: { cachedAt: "2026-08-18T00:00:00.000Z", expiresAt: "2026-08-19T00:00:00.000Z" } },
   });
   const res = response();
   await createTickHandler(s.deps)(request(), res);

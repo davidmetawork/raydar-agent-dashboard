@@ -16,6 +16,7 @@ export function createFeedHandler({
   kvReady = kvConfigured,
   readJson = getJson,
   readHash = hashGetAllJson,
+  now = Date.now,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -23,13 +24,14 @@ export function createFeedHandler({
     if (!(await authHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
     try {
-      const [snapshot, queueDoc, decisions, acks, photos, cards, counts] = await Promise.all([
+      const [snapshot, queueDoc, decisions, acks, photos, cards, profileReady, counts] = await Promise.all([
         readJson(K.snapshot),
         readJson(K.queue),
         readHash(K.decisions),
         readHash(K.acks),
         readHash(K.photos),
         readHash(K.cards),
+        readHash(K.profileReady),
         readJson(K.counts),
       ]);
       // The queue is stored under its own key (size isolation); merge it back so
@@ -39,7 +41,7 @@ export function createFeedHandler({
         ...snapshot,
         ...(queueDoc && Array.isArray(queueDoc.rows) ? { queue: queueDoc.rows } : {}),
       } : null;
-      const gated = profileCacheGate(joined, cards);
+      const gated = profileCacheGate(joined, cards, profileReady, { now: now() });
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.

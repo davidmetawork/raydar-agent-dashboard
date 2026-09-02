@@ -266,10 +266,11 @@ export function createSyncHandler({
     try {
       if (req.method === "GET") {
         if (String(req.query?.profileCache || "") === "1") {
-          const [snapshot, queueDoc, cards] = await Promise.all([
+          const [snapshot, queueDoc, cards, profileReady] = await Promise.all([
             readJson(K.snapshot),
             readJson(K.queue),
             readHash(K.cards),
+            readHash(K.profileReady),
           ]);
           const joined = snapshot ? {
             ...snapshot,
@@ -277,7 +278,7 @@ export function createSyncHandler({
           } : null;
           return res.status(200).json({
             ok: true,
-            profileCache: profileCacheGate(joined, cards).profileCache,
+            profileCache: profileCacheGate(joined, cards, profileReady, { now: Date.parse(now()) }).profileCache,
           });
         }
         const [decisions, acks] = await Promise.all([
@@ -435,6 +436,8 @@ export function createSyncHandler({
           // exactly the failure semantics it had before cards existed.
           const dropCards = (await readHashKeys(K.cards)).filter((cu) => !keep.has(cu));
           if (dropCards.length) await deleteHashFields(K.cards, dropCards);
+          const dropProfileReady = (await readHashKeys(K.profileReady)).filter((cu) => !keep.has(cu));
+          if (dropProfileReady.length) await deleteHashFields(K.profileReady, dropProfileReady);
           // Facts follow cards exactly: same keep-set, same lifecycle, its own
           // key list. The picker directories are deliberately NOT pruned —
           // a school stays a valid rule target after the last applicant who
@@ -483,8 +486,15 @@ export function createSyncHandler({
           return res.status(400).json({ ok: false, error: "invalid_profile", cu: normalized.badCu });
         }
         const entries = Object.entries(normalized.profiles);
+        const profileReady = {};
         for (const [cu, profile] of entries) {
+          // Stamp immediately before the TTL write, never after the batch:
+          // the receipt may expire a little early, but can never claim the
+          // underlying profile still exists after its real cache key expired.
+          const cachedAt = now();
+          const expiresAt = new Date(Date.parse(cachedAt) + PROFILE_TTL_SECONDS * 1000).toISOString();
           await writeJson(K.profile(cu), profile, PROFILE_TTL_SECONDS);
+          profileReady[cu] = { cachedAt, expiresAt };
         }
         if (Object.keys(normalized.photos).length) {
           await writeHash(K.photos, normalized.photos);
@@ -494,6 +504,9 @@ export function createSyncHandler({
         const cards = Object.fromEntries(entries.map(([cu, profile]) => [cu, cardFromProfile(profile)]));
         if (Object.keys(cards).length) {
           await writeHash(K.cards, cards);
+        }
+        if (Object.keys(profileReady).length) {
+          await writeHash(K.profileReady, profileReady);
         }
         // Evaluation facts ride the same batch (see _lib/facts.mjs). Distinct
         // from cards on purpose: facts keep EVERY school and job plus their

@@ -81,6 +81,16 @@ export async function cardsFor(cuIds, { readMany = hashGetMany, batch = 200 } = 
   return out;
 }
 
+/** Full-profile cache receipts use the same bounded hash batching as cards. */
+export async function profileReceiptsFor(cuIds, { readMany = hashGetMany, batch = 200 } = {}) {
+  const unique = [...new Set((Array.isArray(cuIds) ? cuIds : []).filter(Boolean))];
+  const out = {};
+  for (let i = 0; i < unique.length; i += batch) {
+    Object.assign(out, await readMany(K.profileReady, unique.slice(i, i + batch)));
+  }
+  return out;
+}
+
 export async function readDirectories({ readHash = hashGetAllJson } = {}) {
   const [schools, companies] = await Promise.all([
     readHash(K.schools).catch(() => ({})),

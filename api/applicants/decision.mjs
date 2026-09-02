@@ -16,6 +16,7 @@ import {
   kvConfigured,
   validKey,
 } from "./_lib/kv.mjs";
+import { profileReceiptReady } from "./_lib/profile-readiness.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -28,6 +29,7 @@ export function createDecisionHandler({
   readAck = (key) => hashGetJson(K.acks, key),
   readQueue = () => getJson(K.queue),
   readCard = (cuId) => hashGetJson(K.cards, cuId),
+  readProfileReceipt = (cuId) => hashGetJson(K.profileReady, cuId),
   writeDecision = (key, record) => hashSetJson(K.decisions, { [key]: record }),
   deleteDecision = (key) => hashDel(K.decisions, key),
   now = () => new Date().toISOString(),
@@ -60,7 +62,11 @@ export function createDecisionHandler({
       if (!row?.cuId) {
         return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
       }
-      if (!(await readCard(row.cuId))) {
+      const [card, receipt] = await Promise.all([
+        readCard(row.cuId),
+        readProfileReceipt(row.cuId),
+      ]);
+      if (!card || !profileReceiptReady(receipt, Date.parse(now()))) {
         return res.status(409).json({ ok: false, error: "profile_cache_not_ready" });
       }
       // Shared with the rules tick so a human decision and an automatic one
