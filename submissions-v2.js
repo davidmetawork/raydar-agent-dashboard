@@ -15,7 +15,7 @@ const URL_HOSTS = Object.freeze({
   candidate: ["paraform.com"],
   linkedin: ["linkedin.com"],
   raydar: ["raydar.xyz"],
-  signal: ["raydar.xyz", "paraform.com"],
+  signal: ["raydar.xyz", "paraform.com", "mail.google.com"],
   submit: ["paraform.com"],
   storage: ["vercel-storage.com"],
 });

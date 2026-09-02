@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { database } from "./db.mjs";
 import { beginCommand, completeCommand, failCommand } from "./command-store.mjs";
 import { exactSlackChannel } from "./notifications.mjs";
+import { gmailSignalUrl } from "./presentation.mjs";
 
 const PAGE_STATES = new Set(["interested", "needs_review", "not_interested"]);
 const REVIEW_REASONS = new Set([
@@ -282,7 +283,7 @@ async function queueResume(tx, pair, commandRow, triggerKind = "initial") {
 
 function signalUrlFromEnvelope(envelope = {}) {
   const value = clean(envelope.signal_url, 2_000);
-  return /^https:\/\/monitor\.raydar\.xyz\/master-inbox#conversation=[A-Za-z0-9._~%-]+$/.test(value) ? value : null;
+  return gmailSignalUrl(value) || (/^https:\/\/monitor\.raydar\.xyz\/master-inbox#conversation=[A-Za-z0-9._~%-]+$/.test(value) ? value : null);
 }
 
 async function loadCaseDeletionSnapshot(query, pairId, { lock = false } = {}) {

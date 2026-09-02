@@ -6,6 +6,8 @@ import { normalizeEmailReply } from "../api/submissions-v2/_lib/contracts.mjs";
 import { serviceInternals } from "../api/submissions-v2/_lib/service.mjs";
 import { gmailWindow, reconcileGmailInterviews } from "../submissions-v2-worker/gmail-reader.mjs";
 import { createWorkerHandlers } from "../submissions-v2-worker/worker-handlers.mjs";
+import { rowDto } from "../api/submissions-v2/_lib/presentation.mjs";
+import { repositoryInternals } from "../api/submissions-v2/_lib/repository.mjs";
 
 const env = { SUBMISSIONS_V2_EMAIL_HMAC_KEY: "h".repeat(40), SUBMISSIONS_V2_EMAIL_HMAC_VERSION: "v1", SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: "2026-09-02T22:00:00.000Z", SUBMISSIONS_V2_MASTER_INBOX_WORKER_KEY: "k".repeat(40) };
 const start = Date.parse(env.SUBMISSIONS_V2_GMAIL_ACTIVATED_AT);
@@ -79,6 +81,13 @@ test("mail links are scoped to David and reject injected thread URLs", () => {
   assert.equal(serviceInternals.trustedSignalUrl(event), "https://mail.google.com/mail/?authuser=david%40raydar.xyz#all/ab");
   assert.equal(serviceInternals.trustedSignalUrl({ ...event, provider_thread_id: "ab/../../evil" }), null);
   assert.equal(serviceInternals.trustedSignalUrl({ ...event, mailbox_id: "other" }), null);
+  const signal_url = serviceInternals.trustedSignalUrl(event);
+  assert.equal(rowDto({ signal_url }).signal_url, signal_url);
+  assert.equal(repositoryInternals.signalUrlFromEnvelope({ signal_url }), signal_url);
+  for (const bad of ["https://mail.google.com/other", "https://mail.google.com.evil.example/mail/?authuser=david%40raydar.xyz#all/ab", "https://mail.google.com/mail/?authuser=other#all/ab"]) {
+    assert.equal(rowDto({ signal_url: bad }).signal_url, null);
+    assert.equal(repositoryInternals.signalUrlFromEnvelope({ signal_url: bad }), null);
+  }
 });
 
 test("collector finishes pagination before thread reads, deduplicates and orders replies oldest first", async () => {
