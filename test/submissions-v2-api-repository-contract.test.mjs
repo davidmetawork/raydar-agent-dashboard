@@ -44,4 +44,6 @@ test("API repository and worker share only canonical job kinds", async () => {
     assert.match(`${repository}\n${service}`, new RegExp(`\\b${kind}\\b`));
   }
   assert.doesNotMatch(`${repository}\n${service}`, /resume_prepare|classify_reply|gmail_poll/);
+  assert.doesNotMatch(repository, /from submissions_v2\.(?:candidate_index|role_index)[^`]*for share/iu,
+    "read-only index validation must not request a PostgreSQL write privilege through row locks");
 });

@@ -961,7 +961,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (["resolved", "ignored_later"].includes(source.processing_state)) return { signal_id: signalId, existing: true, pairs: [] };
         const resolvedCandidateId = candidateId || source.envelope?.candidate_resolution?.candidate_user_id || source.envelope?.candidate_resolution?.candidate?.candidate_user_id;
         if (!resolvedCandidateId) throw problem("candidate_not_found", "The candidate has not been resolved.", 409);
-        const candidateRows = await tx`select * from submissions_v2.candidate_index where candidate_user_id=${resolvedCandidateId} and active for share`;
+        const candidateRows = await tx`select * from submissions_v2.candidate_index where candidate_user_id=${resolvedCandidateId} and active`;
         if (!candidateRows.length) throw problem("candidate_not_found", "The candidate is no longer available in Paraform.", 409);
         const offered = await tx`select * from submissions_v2.source_offered_roles where signal_id=${signalId} order by offered_order, role_id`;
         const offeredByRole = new Map(offered.map((role) => [role.role_id, role]));
@@ -1005,7 +1005,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         const appliedRoleIds = [];
         for (const decision of decisions) {
           const role = offeredByRole.get(decision.role_id);
-          const roleRows = await tx`select * from submissions_v2.role_index where role_id=${decision.role_id} for share`;
+          const roleRows = await tx`select * from submissions_v2.role_index where role_id=${decision.role_id}`;
           const roleCurrent = roleRows[0] || null;
           const roleUnavailable = !roleCurrent?.active;
           const effectiveLabel = roleUnavailable && decision.label === "interested" ? "needs_review" : decision.label;
@@ -1277,9 +1277,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           const sourcePair = await tx`select * from submissions_v2.candidate_role_pairs where id=${sourcePairId} and case_hidden_at is null for share`;
           if (!sourcePair.length || sourcePair[0].candidate_user_id !== candidateId) throw problem("duplicate_source_invalid", "The source candidate could not be confirmed.", 409);
         }
-        const candidates = await tx`select * from submissions_v2.candidate_index where candidate_user_id=${candidateId} and active for share`;
+        const candidates = await tx`select * from submissions_v2.candidate_index where candidate_user_id=${candidateId} and active`;
         if (!candidates.length) throw problem("candidate_not_found", "The candidate must already exist in Paraform.", 404);
-        const roles = await tx`select * from submissions_v2.role_index where role_id=${roleId} and active for share`;
+        const roles = await tx`select * from submissions_v2.role_index where role_id=${roleId} and active`;
         if (!roles.length) throw problem("role_unavailable", "The selected Paraform role is not active.", 409);
         await tx`select pg_advisory_xact_lock(hashtextextended(${pairAdvisoryLockKey(candidateId, roleId)}, 0))`;
         const prior = await tx`select * from submissions_v2.candidate_role_pairs where candidate_user_id=${candidateId} and role_id=${roleId} for update`;
@@ -1701,7 +1701,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
         if (current.workflow_state !== "interested") throw problem("pair_not_submit_ready", "Only an Interested candidate with a ready resume can be submitted.", 409, pairCurrent(current));
-        const roles = await tx`select * from submissions_v2.role_index where role_id=${current.role_id} and active for share`;
+        const roles = await tx`select * from submissions_v2.role_index where role_id=${current.role_id} and active`;
         if (!roles.length) throw problem("role_unavailable", "The Paraform role is no longer active.", 409, pairCurrent(current));
         const exactUrl = `https://www.paraform.com/browse?role=${encodeURIComponent(current.role_id)}`;
         if (current.submission_status === "opened") return { case_id: pairId, state_version: Number(current.state_version), redirect_url: exactUrl, submission_status: "opened" };
@@ -2120,7 +2120,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           limit 1
         `;
         if (priorBindings.length) throw problem("source_already_bound", "The source event already has an immutable candidate-role binding.", 409);
-        const candidate = (await tx`select * from submissions_v2.candidate_index where candidate_user_id=${candidateId} and active for share`)[0];
+        const candidate = (await tx`select * from submissions_v2.candidate_index where candidate_user_id=${candidateId} and active`)[0];
         if (!candidate) throw problem("candidate_not_found", "The selected candidate is not active in Paraform.", 404);
         let selectedRoles = [...new Set(roleIds.map((value) => clean(value, 200)).filter(Boolean))].slice(0, 20);
         let offered = await tx`
@@ -2134,7 +2134,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             select role_id, company_name, role_title, destination_url
               from submissions_v2.role_index
              where active and role_id=any(${tx.array(selectedRoles, 25)})
-             order by role_id for share
+             order by role_id
           `;
           if (confirmedRoles.length !== selectedRoles.length) throw problem("role_unavailable", "Every selected role must be active in Paraform.", 409);
           for (const [index, role] of confirmedRoles.entries()) {
