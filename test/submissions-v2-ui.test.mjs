@@ -40,7 +40,7 @@ test("a version conflict refreshes current state before the recruiter retries", 
 });
 
 test("every server-provided destination is constrained to its explicit host family", () => {
-  assert.match(js, /signal: \["raydar\.xyz", "paraform\.com"\]/);
+  assert.match(js, /signal: \["raydar\.xyz", "paraform\.com", "mail\.google\.com"\]/);
   assert.match(js, /submit: \["paraform\.com"\]/);
   assert.match(js, /storage: \["vercel-storage\.com"\]/);
   assert.match(js, /safeUrl\(row\.signal_url, URL_HOSTS\.signal\)/);
