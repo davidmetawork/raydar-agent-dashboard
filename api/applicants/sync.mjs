@@ -31,7 +31,9 @@ export const config = { maxDuration: 30 };
 // The loop caps the snapshot on its side (drops per-step detail); this guard
 // keeps a buggy publisher from parking a multi-megabyte blob in KV.
 export const MAX_SNAPSHOT_BYTES = 900_000;
+const MAX_QUEUE_BYTES=1_800_000; // complete index plus exact action revisions
 const ACK_STATUSES = new Set(["invited", "blocked"]);
+import {saveApplicantAck} from './_lib/request-safety.mjs';
 
 function authed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
@@ -68,6 +70,7 @@ export function normalizeAcks(input, now = () => new Date().toISOString()) {
     acks[key] = {
       status,
       at: String(record?.at || "") || now(),
+      ...(record?.requestId ? {requestId:String(record.requestId).slice(0,80)} : {}),
       ...(record?.reason ? { reason: String(record.reason).slice(0, 200) } : {}),
       ...(record?.inviteId ? { inviteId: String(record.inviteId).slice(0, 100) } : {}),
     };
@@ -358,7 +361,8 @@ export function createSyncHandler({
         }
         const decisionRecords = Object.entries(decisions)
           .filter(([key, decision]) =>
-            ["interview", "pass"].includes(decision?.action) && !acks[key])
+            ["interview", "pass"].includes(decision?.action)
+            && (!acks[key] || (decision.requestId && acks[key].requestId!==decision.requestId)))
           .map(([key, decision]) => ({ key, ...decision }));
         const approvals = decisionRecords.filter(({ action }) => action === "interview");
         // `decisions` is deliberately narrow — un-acked interviews, the only
@@ -432,8 +436,8 @@ export function createSyncHandler({
         }
         const doc = { generatedAt: String(body.snapshot?.generatedAt || now()), rows: body.queue };
         const bytes = Buffer.byteLength(JSON.stringify(doc));
-        if (bytes > MAX_SNAPSHOT_BYTES) {
-          return res.status(413).json({ ok: false, error: "queue_too_large", bytes, max: MAX_SNAPSHOT_BYTES });
+        if (bytes > MAX_QUEUE_BYTES) {
+          return res.status(413).json({ ok: false, error: "queue_too_large", bytes, max: MAX_QUEUE_BYTES });
         }
         await writeJson(K.queue, doc);
         stored.queue = true;
@@ -496,8 +500,12 @@ export function createSyncHandler({
           return res.status(400).json({ ok: false, error: "invalid_ack", key: normalized.badKey });
         }
         if (Object.keys(normalized.acks).length) {
-          await writeHash(K.acks, normalized.acks);
-          stored.acks = Object.keys(normalized.acks).length;
+          stored.acks=0;
+          const entries=Object.entries(normalized.acks);
+          for(let offset=0;offset<entries.length;offset+=25) {
+            const saved=await Promise.all(entries.slice(offset,offset+25).map(([key,ack])=>saveApplicantAck(key,ack)));
+            stored.acks+=saved.filter(Boolean).length;
+          }
         }
       }
       // `stored.profiles` only appears when the field was sent, so responses

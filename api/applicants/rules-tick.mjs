@@ -45,6 +45,8 @@ import {
 import { evaluateRule, inScope } from "./_lib/rules.mjs";
 import { profileReceiptReady } from "./_lib/profile-readiness.mjs";
 import { armedRules, cardsFor, factsFor, pendingRows, profileReceiptsFor, readRules, watchingRules } from "./_lib/rule-store.mjs";
+import {randomUUID} from 'node:crypto';
+import {requireApplicantMutation,saveApplicantRequest} from './_lib/request-safety.mjs';
 
 export const config = { maxDuration: 120 };
 
@@ -76,7 +78,7 @@ export function decideRow(rules, subject, { now = Date.now() } = {}) {
 
 export function createTickHandler({
   corsHandler = cors,
-  authHandler = requireAuth,
+  authHandler = requireApplicantMutation,
   kvReady = kvConfigured,
   readJson = getJson,
   readHash = hashGetAllJson,
@@ -189,6 +191,9 @@ export function createTickHandler({
           name: row.name,
           roleTitle: row.roleTitle,
         });
+        Object.assign(newDecisions[row.key],{requestId:randomUUID(),inputRevision:row.inputRevision,
+          readinessRevision:row.readinessRevision,decisionRevision:Number(row.decisionRevision),status:'pending',
+          ruleVersions:[{id:rule.id,version:rule.version ?? 1}]});
         audit[row.key] = {
           at: new Date(stamp).toISOString(),
           ruleId: rule.id,
@@ -231,8 +236,14 @@ export function createTickHandler({
       // already been made — but a decision written without its audit row is
       // one nobody can explain, so the audit write is not swallowed silently
       // either; it is reported in the response.
-      const decidedKeys = Object.keys(newDecisions);
-      if (decidedKeys.length) await writeHash(K.decisions, newDecisions);
+      const decidedKeys=[];
+      const requests=Object.entries(newDecisions);
+      for(let offset=0;offset<requests.length;offset+=25) {
+        const saved=await Promise.all(requests.slice(offset,offset+25).map(async([key,record])=>[key,await saveApplicantRequest(key,record)]));
+        for(const [key,ok] of saved) {
+          if(ok) decidedKeys.push(key);else{delete audit[key];conceded++;}
+        }
+      }
 
       let auditWritten = true;
       if (decidedKeys.length) {

@@ -17,6 +17,7 @@ import {
   validKey,
 } from "./_lib/kv.mjs";
 import { profileReceiptReady } from "./_lib/profile-readiness.mjs";
+import {requireApplicantMutation,saveApplicantRequest} from './_lib/request-safety.mjs';
 
 export const config = { maxDuration: 30 };
 
@@ -24,13 +25,13 @@ const ACTIONS = new Set(["pass", "interview", "undo"]);
 
 export function createDecisionHandler({
   corsHandler = cors,
-  authHandler = requireAuth,
+  authHandler = requireApplicantMutation,
   kvReady = kvConfigured,
   readAck = (key) => hashGetJson(K.acks, key),
   readQueue = () => getJson(K.queue),
   readCard = (cuId) => hashGetJson(K.cards, cuId),
   readProfileReceipt = (cuId) => hashGetJson(K.profileReady, cuId),
-  writeDecision = (key, record) => hashSetJson(K.decisions, { [key]: record }),
+  writeDecision = (key, record) => saveApplicantRequest(key,record,{allowRejected:true}),
   deleteDecision = (key) => hashDel(K.decisions, key),
   now = () => new Date().toISOString(),
 } = {}) {
@@ -52,16 +53,22 @@ export function createDecisionHandler({
     res.setHeader("Cache-Control", "no-store");
     try {
       if (action === "undo") {
-        const ack = await readAck(key);
-        if (ack) return res.status(409).json({ ok: false, error: "already_acked", ack });
-        await deleteDecision(key);
-        return res.status(200).json({ ok: true, key, undone: true });
+        return res.status(409).json({ok:false,error:'request_may_already_be_processing'});
       }
       const queue = await readQueue();
       const row = (Array.isArray(queue?.rows) ? queue.rows : []).find((item) => item?.key === key);
       const profileKey = row?.profileKey || row?.cuId;
       if (!profileKey) {
         return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
+      }
+      if(!/^[a-z0-9-]{16,80}$/i.test(String(body.requestId || ''))
+        || !row.inputRevision || body.inputRevision!==row.inputRevision
+        || body.readinessRevision!==row.readinessRevision
+        || Number(body.decisionRevision)!==Number(row.decisionRevision)) {
+        return res.status(409).json({ok:false,error:'applicant_changed_refresh_required'});
+      }
+      if(action==='interview' && row.interviewAllowed!==true) {
+        return res.status(409).json({ok:false,error:'interview_not_ready',reason:row.readinessReason});
       }
       const [card, receipt] = await Promise.all([
         readCard(profileKey),
@@ -89,8 +96,10 @@ export function createDecisionHandler({
         roleTitle: body.roleTitle,
         reason,
       });
-      await writeDecision(key, decision);
-      return res.status(200).json({ ok: true, key, decision });
+      Object.assign(decision,{requestId:body.requestId,inputRevision:row.inputRevision,
+        readinessRevision:row.readinessRevision,decisionRevision:Number(row.decisionRevision),status:'pending'});
+      if(!await writeDecision(key, decision)) return res.status(409).json({ok:false,error:'request_already_pending'});
+      return res.status(202).json({ ok: true, key, decision,status:'pending' });
     } catch (error) {
       return res.status(502).json({
         ok: false,

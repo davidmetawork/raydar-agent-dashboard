@@ -302,6 +302,8 @@
 
     <div class="toolbar">
       <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
+      <button class="view-pill" id="pillSetup" onclick="setView('setup')">Needs setup <span class="n" id="setupCount"></span></button>
+      <button class="view-pill" id="pillDelivery" onclick="setView('delivery')">Delivery review <span class="n" id="deliveryCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span></button>
       <span class="spacer"></span>
@@ -315,7 +317,7 @@
       <select id="decisionFilter" class="decision-filter" aria-label="Filter decided applicants by outcome" onchange="setDecisionFilter(this.value)" hidden>
         <option value="all">All decisions</option>
         <option value="passed">Passed</option>
-        <option value="queued">Queued to send</option>
+        <option value="queued">Pending verification</option>
         <option value="emailed">Emailed</option>
         <option value="blocked">Blocked</option>
       </select>
@@ -454,14 +456,18 @@ function reconcileLocal() {
   let changed = false;
   for (const [key, entry] of Object.entries(STATE.local)) {
     if (entry.action === "undo") { if (!STATE.decisions[key]) { delete STATE.local[key]; changed = true; } }
-    else if (STATE.decisions[key]) { delete STATE.local[key]; changed = true; }
+    else if (STATE.decisions[key] && (!entry.requestId || entry.requestId===STATE.decisions[key].requestId)) { delete STATE.local[key]; changed = true; }
   }
   if (changed) saveLocal();
 }
 function effectiveDecision(key) {
   const local = STATE.local[key];
-  if (local) return local.action === "undo" ? null : local;
-  return STATE.decisions[key] || null;
+  const decision=local || STATE.decisions[key] || null;
+  if(decision?.action==='undo') return null;
+  const ack=STATE.acks[key];
+  if(ack?.status==='blocked' && (!decision?.requestId || ack.requestId===decision.requestId)
+    && !['human_pass','interview_dispatch_pending'].includes(ack.reason)) return null;
+  return decision;
 }
 
 /* ---- derived rows ---- */
@@ -790,7 +796,9 @@ function renderStats() {
 }
 
 function renderPills() {
-  $("reviewCount").textContent = STATE.snapshot ? String(pendingRows().length) : "";
+  $("reviewCount").textContent = STATE.snapshot ? String(pendingRows().filter(r=>r.interviewAllowed===true).length) : "";
+  $("setupCount").textContent=String(pendingRows().filter(r=>!r.interviewAllowed && r.readinessState!=='delivery_review').length);
+  $("deliveryCount").textContent=String(pendingRows().filter(r=>r.readinessState==='delivery_review').length);
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
@@ -831,10 +839,14 @@ function renderSortControl() {
 }
 
 /* ---- Review view ---- */
-function ackFor(key) { return STATE.acks[key] || null; }
+function ackFor(key) {
+  const decision=STATE.local[key] || STATE.decisions[key];
+  const ack=STATE.acks[key];
+  return decision?.requestId && ack?.requestId!==decision.requestId ? null : ack || null;
+}
 function decisionStatus(key, decision) {
   const ack = ackFor(key);
-  if (decision?.action === "pass") return "passed";
+  if (decision?.action === "pass" && (!decision.requestId || ack?.reason==='human_pass')) return "passed";
   if (ack?.status === "invited") return "emailed";
   if (ack?.status === "blocked") return "blocked";
   return "queued";
@@ -851,7 +863,7 @@ function renderDecisionFilter(decidedMode) {
   select.value = STATE.decisionStatus;
   const counts = { passed: 0, queued: 0, emailed: 0, blocked: 0 };
   for (const row of decidedRows()) counts[decisionStatus(row.key, effectiveDecision(row.key))] += 1;
-  const labels = { passed: "Passed", queued: "Queued to send", emailed: "Emailed", blocked: "Blocked" };
+  const labels = { passed: "Passed", queued: "Pending verification", emailed: "Emailed", blocked: "Blocked" };
   select.options[0].textContent = "All decisions (" + decidedRows().length + ")";
   for (const [status, label] of Object.entries(labels)) {
     const option = select.querySelector('option[value="' + status + '"]');
@@ -879,8 +891,8 @@ function decidedStatusHtml(key, decision) {
   if (decisionStatus(key, decision) === "passed") chip = '<span class="decided-chip passed">Passed</span>';
   else if (decisionStatus(key, decision) === "emailed") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
   else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">Blocked: ' + esc(ack.reason || "see loop log") + "</span>";
-  else chip = '<span class="decided-chip queued">Queued to send</span>';
-  const undo = !ack ? '<button class="undo" data-act="undo" data-key="' + esc(key) + '">Undo</button>' : "";
+  else chip = '<span class="decided-chip queued">Pending verification</span>';
+  const undo = "";
   return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
 }
 /* ---- inline work history: the Recruiter-shaped body every row carries, so a
@@ -930,7 +942,7 @@ function rowCardHtml(row, mode, decision) {
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
-          (interviewReady ? "Queue interview invite" : "Required profile checks are not ready") + '"' +
+          esc(interviewReady ? "Request interview" : row.readinessReason || "Applicant setup needs attention") + '"' +
           (busy || !interviewReady ? " disabled" : "") + ">" + (interviewReady ? "Interview" : "Not ready") + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
@@ -974,6 +986,7 @@ function rowCardHtml(row, mode, decision) {
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(card?.location || "") + "</div>" +
+        (mode!=='stream' && !interviewReady ? '<div class="rc-none">'+esc(row.readinessReason || 'Applicant setup needs attention')+'</div>' : '') +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
       '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
@@ -1006,6 +1019,9 @@ function reviewListRows() {
   }
   else {
     rows = pendingRows();
+    if(STATE.view==='setup') rows=rows.filter(r=>!r.interviewAllowed && r.readinessState!=='delivery_review');
+    else if(STATE.view==='delivery') rows=rows.filter(r=>r.readinessState==='delivery_review');
+    else rows=rows.filter(r=>r.interviewAllowed===true);
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
     if (STATE.chip === "unrated") rows = rows.filter((r) => r.tier !== "C");
     if (STATE.chip === "no-linkedin") rows = rows.filter(hasNoLinkedin);
@@ -1113,9 +1129,11 @@ function setView(view) {
   STATE.view = view;
   resetVirtualLists();
   $("pillReview").classList.toggle("active", view === "review");
+  $("pillSetup").classList.toggle("active",view==='setup');
+  $("pillDelivery").classList.toggle("active",view==='delivery');
   $("pillStream").classList.toggle("active", view === "stream");
   $("pillRules").classList.toggle("active", view === "rules");
-  $("reviewView").style.display = view === "review" ? "" : "none";
+  $("reviewView").style.display = ['review','setup','delivery'].includes(view) ? "" : "none";
   $("streamView").style.display = view === "stream" ? "" : "none";
   $("rulesView").style.display = view === "rules" ? "" : "none";
   // The toolbar filters belong to the two lists, not to the rules editor.
@@ -1165,10 +1183,11 @@ async function bulkPass() {
 async function decide(key, action, row, silent = false) {
   if (STATE.busy.has(key)) return;
   STATE.busy.add(key);
+  const requestId=crypto.randomUUID();
   const previous = Object.prototype.hasOwnProperty.call(STATE.local, key) ? STATE.local[key] : undefined;
   STATE.local[key] = action === "undo"
     ? { action: "undo", at: new Date().toISOString() }
-    : { action, at: new Date().toISOString(), by: AUTH.email || "you", name: row?.name, roleTitle: row?.roleTitle };
+    : { action,requestId,status:'pending', at: new Date().toISOString(), by: AUTH.email || "you", name: row?.name, roleTitle: row?.roleTitle };
   saveLocal();
   renderLists();
   if (STATE.modal && STATE.modal.key === key) renderModal();
@@ -1176,19 +1195,21 @@ async function decide(key, action, row, silent = false) {
     const response = await fetch("/api/applicants/decision", {
       method: "POST", credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key, action, name: row?.name, roleTitle: row?.roleTitle }),
+      body: JSON.stringify({ key, action,requestId,inputRevision:row?.inputRevision,
+        readinessRevision:row?.readinessRevision,decisionRevision:row?.decisionRevision,
+        name: row?.name, roleTitle: row?.roleTitle }),
     });
     const body = await response.json().catch(() => ({}));
     if (response.status === 401 || response.status === 403) { showGate(); throw new Error("Signed out — sign in and retry."); }
-    if (response.status === 409) throw new Error("The loop already acted on this one — refresh to see the outcome.");
+    if (response.status === 409) throw new Error(body.reason || body.error || "Applicant changed — refresh and retry.");
     if (!response.ok || body.ok === false) throw new Error(body.error || "Saving the decision failed.");
+    if(body.decision){STATE.local[key]=body.decision;saveLocal();}
     if (!silent) {
       // A Pass is the only decision that carries a reason, and the chip row is
       // strictly optional — it appears after the decision is already saved, so
       // ignoring it costs nothing and never slows the queue down.
-      if (action === "pass" && window.RaydarRules) window.RaydarRules.offerReason(key, row);
-      if (action === "pass") toast("Passed " + (row?.name || "applicant") + ".");
-      else if (action === "interview") toast((row?.name || "Applicant") + " queued — the loop emails them next cycle.");
+      if (action === "pass") toast("Pass requested for " + (row?.name || "applicant") + ".");
+      else if (action === "interview") toast((row?.name || "Applicant") + " — interview request pending verification.");
       else toast("Decision undone.");
     }
   } catch (error) {
@@ -1650,7 +1671,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && AU
 /* Views that may be deep-linked. Rules is here so the master criteria page can
    be bookmarked and sent to the team as a plain link, not just reached by
    clicking through Review. */
-const DEEP_LINK_VIEWS = ["review", "stream", "rules"];
+const DEEP_LINK_VIEWS = ["review", "setup", "delivery", "stream", "rules"];
 
 async function init() {
   const landed = location.hash.replace("#", "");

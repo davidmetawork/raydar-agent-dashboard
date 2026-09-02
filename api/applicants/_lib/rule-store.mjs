@@ -56,7 +56,9 @@ export const watchingRules = (doc) => doc.rules.filter((rule) => rule.state === 
  */
 export function pendingRows(snapshotQueue, decisions) {
   const rows = Array.isArray(snapshotQueue) ? snapshotQueue : [];
-  return rows.filter((row) => row?.key && (row?.profileKey || row?.cuId) && !decisions?.[row.key]);
+  return rows.filter((row) => row?.key && (row?.profileKey || row?.cuId) && !decisions?.[row.key]
+    && row.readinessState==='ready' && row.inputRevision && row.readinessRevision
+    && row.assessmentStatus==='current' && ['C','unrated'].includes(row.tier));
 }
 
 /** Facts for a set of applicants, in batches HMGET can carry comfortably. */
