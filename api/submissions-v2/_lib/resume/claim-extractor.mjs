@@ -22,7 +22,8 @@ function splitLongSpan(value) {
   const chunks = [];
   let remaining = value;
   while (remaining.length > MAX_SPAN_CHARACTERS) {
-    let splitAt = remaining.lastIndexOf(" ", MAX_SPAN_CHARACTERS);
+    let splitAt = MAX_SPAN_CHARACTERS;
+    while (splitAt >= Math.floor(MAX_SPAN_CHARACTERS * 0.6) && !/\s/u.test(remaining[splitAt])) splitAt -= 1;
     if (splitAt < Math.floor(MAX_SPAN_CHARACTERS * 0.6)) splitAt = MAX_SPAN_CHARACTERS;
     chunks.push(remaining.slice(0, splitAt).trim());
     remaining = remaining.slice(splitAt).trim();
@@ -32,17 +33,16 @@ function splitLongSpan(value) {
 }
 
 function sourceSpans(source) {
-  const text = source.normalizedText;
+  // PDF extraction can place nearly every visual word on a separate line, so
+  // a newline alone is not an evidence boundary; sentence punctuation and the
+  // bounded chunk size retain every exact source character without creating
+  // hundreds of tiny claims that overwhelm the strategist.
+  const clauses = source.normalizedText
+    .split(/(?<=[.!?])\s+|\s+[|;]\s+|\s+—\s+/u)
+    .map((item) => item.replace(/^\s*(?:[-*•▪◦]|\d+[.)])\s*/u, "").trim())
+    .filter(Boolean);
   const spans = [];
-  for (const line of text.split("\n")) {
-    const cleanLine = line.replace(/^\s*(?:[-*•▪◦]|\d+[.)])\s*/u, "").trim();
-    if (!cleanLine) continue;
-    const clauses = cleanLine
-      .split(/(?<=[.!?])\s+|\s+[|;]\s+|\s+—\s+/u)
-      .map((item) => item.trim())
-      .filter(Boolean);
-    for (const clause of clauses) spans.push(...splitLongSpan(clause));
-  }
+  for (const clause of clauses) spans.push(...splitLongSpan(clause));
   return spans;
 }
 
