@@ -5,7 +5,7 @@ import {
   candidateIndexRow, normalizeSearch, readActiveRoleIndex, readCandidateIndexPage,
   readCuratedCandidate, readCuratedPopulation, roleIndexRow,
 } from "../api/submissions-v2/_lib/paraform-sources.mjs";
-import { notificationText, postSafeNotification } from "../api/submissions-v2/_lib/notifications.mjs";
+import { authorizeNotificationBroker, notificationText, postSafeNotification } from "../api/submissions-v2/_lib/notifications.mjs";
 
 test("normalizes diacritics for local candidate search", () => assert.equal(normalizeSearch("  José  Álvarez "), "jose alvarez"));
 
@@ -72,4 +72,30 @@ test("Slack copy contains no raw quote or email and disables unfurls", async () 
   assert.equal(request.link_names, false);
   assert.doesNotMatch(request.text, /<!channel>|<@U123>/u);
   assert.equal(result.receipt, "1");
+});
+
+test("isolated workers can use the exact Monitor notification broker", async () => {
+  let request;
+  const key = "k".repeat(32);
+  const result = await postSafeNotification("Safe notice", {
+    env: {
+      SUBMISSIONS_V2_NOTIFICATION_BROKER_URL: "https://monitor.raydar.xyz/api/submissions-v2/internal/notification",
+      SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: key,
+    },
+    destinationId: "C123ABC",
+    fetchImpl: async (url, init) => {
+      request = { url, headers: init.headers, body: JSON.parse(init.body) };
+      return { ok: true, json: async () => ({ ok: true, receipt: "2", channel: "C123ABC" }) };
+    },
+  });
+  assert.equal(request.url, "https://monitor.raydar.xyz/api/submissions-v2/internal/notification");
+  assert.equal(request.headers.authorization, `Bearer ${key}`);
+  assert.deepEqual(request.body, { destination_id: "C123ABC", text: "Safe notice" });
+  assert.equal(result.receipt, "2");
+});
+
+test("notification broker requires an exact strong bearer", () => {
+  const key = "k".repeat(32);
+  assert.throws(() => authorizeNotificationBroker({ headers: { authorization: "Bearer wrong" } }, { env: { SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: key } }), (error) => error.code === "notification_broker_auth_required");
+  assert.equal(authorizeNotificationBroker({ headers: { authorization: `Bearer ${key}` } }, { env: { SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: key } }), true);
 });

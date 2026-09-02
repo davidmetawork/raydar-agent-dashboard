@@ -7,6 +7,7 @@ import {
 } from "./http.mjs";
 import { createService } from "./service.mjs";
 import { authorizeBlobBroker, issueWorkerBlobCapability } from "./blob-capabilities.mjs";
+import { authorizeNotificationBroker, postSafeNotification } from "./notifications.mjs";
 
 function routeSegments(req) {
   const captured = req.query?.route;
@@ -90,6 +91,13 @@ export async function routeSubmissionsV2(req, res) {
       authorizeBlobBroker(req);
       const { body } = await parsedBody(req, 10_000);
       return res.status(200).json({ ok: true, ...(await issueWorkerBlobCapability(body)) });
+    }
+    if (key === "internal/notification") {
+      if (!method(req, res, ["POST"])) return;
+      authorizeNotificationBroker(req);
+      const { body } = await parsedBody(req, 10_000);
+      const result = await postSafeNotification(body.text, { destinationId: body.destination_id });
+      return res.status(200).json({ ok: true, receipt: result.receipt, channel: result.channel });
     }
     if (key === "tick") {
       if (!method(req, res, ["POST"]) || !requireCron(req, res)) return;

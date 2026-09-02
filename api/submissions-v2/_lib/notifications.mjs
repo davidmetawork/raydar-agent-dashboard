@@ -1,4 +1,7 @@
+import { timingSafeEqual } from "node:crypto";
+
 const POST_URL = "https://slack.com/api/chat.postMessage";
+const BROKER_PATH = "/api/submissions-v2/internal/notification";
 const clean = (value, limit = 500) => String(value ?? "")
   .replace(/[\r\n]+/g, " ")
   .replace(/</g, "‹")
@@ -29,18 +32,51 @@ export function notificationText(kind, data = {}) {
   return `Submissions notice: ${clean(kind, 100)}; ${link}`;
 }
 
+function equal(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function strong(value) {
+  return Buffer.byteLength(String(value || "").trim(), "utf8") >= 32;
+}
+
+export function authorizeNotificationBroker(req, { env = process.env } = {}) {
+  const expected = String(env.SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY || "").trim();
+  if (!strong(expected)) throw Object.assign(new Error("The notification broker is not configured."), { code: "notification_broker_auth_not_configured", status: 503, deliveryOutcome: "not_sent" });
+  const supplied = String(req?.headers?.authorization || "").replace(/^Bearer\s+/iu, "").trim();
+  if (!equal(supplied, expected)) throw Object.assign(new Error("Notification broker authentication is required."), { code: "notification_broker_auth_required", status: 401, deliveryOutcome: "not_sent" });
+  return true;
+}
+
+function brokerUrl(env) {
+  const raw = String(env.SUBMISSIONS_V2_NOTIFICATION_BROKER_URL || "").trim();
+  if (!raw) return null;
+  let url;
+  try { url = new URL(raw); } catch { return null; }
+  if (url.protocol !== "https:" || url.pathname !== BROKER_PATH || url.search || url.hash) return null;
+  return url.toString();
+}
+
 export async function postSafeNotification(text, { env = process.env, fetchImpl = fetch, destinationId } = {}) {
-  const token = String(env.SUBMISSIONS_V2_SLACK_BOT_TOKEN || "").trim();
+  const token = String(env.SUBMISSIONS_V2_SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN || "").trim();
   const channel = exactSlackChannel(destinationId);
-  if (!token) throw Object.assign(new Error("Slack notification is not configured."), { code: "slack_not_configured", status: 503, deliveryOutcome: "not_sent" });
+  const broker = brokerUrl(env);
+  const brokerKey = String(env.SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY || "").trim();
+  if (!token && (!broker || !strong(brokerKey))) throw Object.assign(new Error("Slack notification is not configured."), { code: "slack_not_configured", status: 503, deliveryOutcome: "not_sent" });
   let response;
   try {
-    response = await fetchImpl(POST_URL, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ channel, text: clean(text, 2_000), mrkdwn: false, link_names: false, unfurl_links: false, unfurl_media: false }), signal: AbortSignal.timeout(10_000) });
+    response = token
+      ? await fetchImpl(POST_URL, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ channel, text: clean(text, 2_000), mrkdwn: false, link_names: false, unfurl_links: false, unfurl_media: false }), signal: AbortSignal.timeout(10_000) })
+      : await fetchImpl(broker, { method: "POST", headers: { authorization: `Bearer ${brokerKey}`, "content-type": "application/json" }, body: JSON.stringify({ destination_id: channel, text: clean(text, 2_000) }), signal: AbortSignal.timeout(10_000) });
   } catch (error) {
     throw Object.assign(new Error("Slack delivery outcome is unknown."), { code: clean(error?.code || "slack_transport_unknown", 100), deliveryOutcome: "unknown" });
   }
   const body = await response.json().catch(() => null);
   if (!body) throw Object.assign(new Error("Slack delivery outcome is unknown."), { code: "slack_receipt_unreadable", deliveryOutcome: "unknown" });
   if (!response.ok || !body.ok) throw Object.assign(new Error("Slack did not accept the notification."), { code: clean(body.error || `slack_http_${response.status}`, 100), deliveryOutcome: "not_sent" });
-  return { receipt: body.ts || null, channel: body.channel || channel };
+  return { receipt: body.receipt || body.ts || null, channel: body.channel || channel };
 }
+
+export const notificationInternals = Object.freeze({ BROKER_PATH, brokerUrl, strong });

@@ -41,6 +41,6 @@ export function serviceConfig(env = process.env) {
     inboxConfigured: strongSecret(env.SUBMISSIONS_V2_INGEST_KEY),
     openaiConfigured: Boolean(env.SUBMISSIONS_V2_OPENAI_API_KEY),
     anthropicConfigured: Boolean(env.SUBMISSIONS_V2_ANTHROPIC_API_KEY),
-    slackConfigured: Boolean(env.SUBMISSIONS_V2_SLACK_CHANNEL_ID && env.SUBMISSIONS_V2_SLACK_BOT_TOKEN),
+    slackConfigured: Boolean(env.SUBMISSIONS_V2_SLACK_CHANNEL_ID && (env.SUBMISSIONS_V2_SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN || (env.SUBMISSIONS_V2_NOTIFICATION_BROKER_URL && env.SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY))),
   };
 }
