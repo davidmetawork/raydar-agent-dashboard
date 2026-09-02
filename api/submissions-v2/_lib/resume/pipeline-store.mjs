@@ -292,12 +292,12 @@ export function createResumePipelineStore({
     async assertExecutionFence({ jobId, workerId, fencingToken, controlEpoch }) {
       const rows = await sql`
         select j.id from submissions_v2.jobs j
-        join submissions_v2.runtime_controls c on c.singleton=true
+        cross join submissions_v2.lock_runtime_controls() c
          where j.id=${jobId} and j.state='running' and j.lease_owner=${workerId}
            and j.fencing_token=${Number(fencingToken)} and j.control_epoch=${Number(controlEpoch)}
            and j.lease_expires_at >= clock_timestamp() and c.control_epoch=${Number(controlEpoch)}
            and submissions_v2.job_control_enabled(j.required_control, c)
-         for share of j, c
+         for share of j
       `;
       if (!rows.length) throw new ResumePipelineError("execution_fence_lost", "Resume preparation stopped because its worker lease or runtime control changed.");
       return true;
@@ -400,7 +400,7 @@ export function createResumePipelineStore({
              set intent_state='interested', workflow_state='preparing_resume', state_version=state_version+1
            where id=${pairId} and state_version=${pair.state_version} returning *
         `)[0];
-        const controls = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+        const controls = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
         if (!controls) throw new ResumePipelineError("submissions_v2_controls_unavailable", "Submissions V2 controls are unavailable.");
         const key = `resume:recheck:${pairId}:${updated.state_version}`;
         const inserted = await tx`

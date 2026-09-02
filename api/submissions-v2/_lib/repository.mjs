@@ -124,7 +124,7 @@ async function lockPair(tx, pairId, expectedVersion) {
 async function command(tx, input, work) {
   const requiredControls = Array.isArray(input.requiredControls) ? input.requiredControls : ["ui"];
   if (requiredControls.length) {
-    const current = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+    const current = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
     const columns = {
       ui: "ui_enabled",
       ingestion: "ingestion_enabled",
@@ -144,7 +144,7 @@ async function command(tx, input, work) {
 }
 
 async function controls(tx) {
-  const rows = await tx`select * from submissions_v2.runtime_controls where singleton=true for share`;
+  const rows = await tx`select * from submissions_v2.lock_runtime_controls()`;
   if (!rows.length) throw problem("submissions_v2_controls_unavailable", "Submissions V2 controls are unavailable.", 503);
   return rows[0];
 }
@@ -159,13 +159,13 @@ export async function assertWorkerFence(tx, execution, requiredControl) {
   }
   const rows = await tx`
     select j.id from submissions_v2.jobs j
-    join submissions_v2.runtime_controls c on c.singleton=true
+    cross join submissions_v2.lock_runtime_controls() c
      where j.id=${jobId} and j.state='running' and j.lease_owner=${workerId}
        and j.fencing_token=${fencingToken} and j.control_epoch=${controlEpoch}
        and j.required_control=${requiredControl}
        and j.lease_expires_at >= clock_timestamp() and c.control_epoch=${controlEpoch}
        and submissions_v2.job_control_enabled(j.required_control, c)
-     for share of j, c
+     for share of j
   `;
   if (!rows.length) throw problem("execution_fence_lost", "The worker lease or runtime control changed before results could be applied.", 409);
   return true;
@@ -182,12 +182,12 @@ export async function assertSourceFence(tx, sourceFence, expectedSourceKey) {
   const rows = await tx`
     select cursor.source_key
       from submissions_v2.source_cursors cursor
-      join submissions_v2.runtime_controls controls on controls.singleton=true
+      cross join submissions_v2.lock_runtime_controls() controls
      where cursor.source_key=${sourceKey} and cursor.lease_owner=${workerId}
        and cursor.fencing_token=${fencingToken} and cursor.control_epoch=${controlEpoch}
        and cursor.lease_expires_at >= clock_timestamp() and controls.control_epoch=${controlEpoch}
        and submissions_v2.source_control_enabled(cursor.source_key, controls)
-     for share of cursor, controls
+     for share of cursor
   `;
   if (!rows.length) throw problem("source_fence_lost", "The source reconciliation lease changed before results could be applied.", 409);
   return true;
@@ -714,7 +714,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
 
     async claimEmailFirstResponse({ eventId, idempotencyKey, candidateId, offeredRoles = [] }) {
       return sql.begin(async (tx) => {
-        const activeControls = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+        const activeControls = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
         if (!activeControls?.ingestion_enabled || !activeControls?.master_inbox_enabled) {
           throw problem("submissions_v2_control_disabled", "Submissions V2 email intake is disabled.", 503);
         }
@@ -849,7 +849,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
 
     async recordEmailSource({ event, safeEnvelope, privateObjectKey, objectReservationId, objectWriteFencingToken, objectDigest, processingState, safeErrorCode = null, safeErrorDetail = null, candidateResolution = null }) {
       return sql.begin(async (tx) => {
-        const activeControls = (await tx`select * from submissions_v2.runtime_controls where singleton=true for share`)[0];
+        const activeControls = (await tx`select * from submissions_v2.lock_runtime_controls()`)[0];
         if (!activeControls?.ingestion_enabled || !activeControls?.master_inbox_enabled) {
           throw problem("submissions_v2_control_disabled", "Submissions V2 email intake is disabled.", 503);
         }
@@ -3002,13 +3002,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         }
         const fencedJobs = await tx`
           select j.* from submissions_v2.jobs j
-          join submissions_v2.runtime_controls c on c.singleton=true
+          cross join submissions_v2.lock_runtime_controls() c
            where j.id=${jobId}::uuid and j.kind='prepare_resume' and j.state='running'
              and j.lease_owner=${workerId} and j.fencing_token=${fencingToken}
              and j.control_epoch=${controlEpoch} and j.lease_expires_at >= clock_timestamp()
              and c.control_epoch=${controlEpoch}
              and submissions_v2.job_control_enabled(j.required_control, c)
-           for update of c, j
+           for update of j
         `;
         if (!fencedJobs.length) throw problem("execution_fence_lost", "Artifact publication stopped because its worker lease or runtime control changed.", 409);
         const generations = await tx`select * from submissions_v2.resume_generations where id=${generationId} for update`;

@@ -172,6 +172,8 @@ grant usage, select on all sequences in schema submissions_v2 to submissions_v2_
 
 grant execute on function submissions_v2.set_runtime_controls(text, text, boolean, boolean, boolean, boolean, boolean)
   to submissions_v2_api;
+grant execute on function submissions_v2.lock_runtime_controls()
+  to submissions_v2_api, submissions_v2_worker;
 grant execute on function submissions_v2.cancel_pair_job(uuid, uuid, timestamptz)
   to submissions_v2_api;
 

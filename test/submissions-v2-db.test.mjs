@@ -120,6 +120,7 @@ test("migrations are digest-checked and idempotent", async () => {
     "009_resilience_and_redemption.sql",
     "010_first_response_privacy_and_audit.sql",
     "011_isolated_routine_object_purge.sql",
+    "012_runtime_control_read_lock.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count
@@ -128,6 +129,7 @@ test("migrations are digest-checked and idempotent", async () => {
   `;
   assert.ok(tables[0].count >= 30);
   assert.equal((await sql`select has_function_privilege('public', 'submissions_v2.set_runtime_controls(text,text,boolean,boolean,boolean,boolean,boolean)', 'EXECUTE') as allowed`)[0].allowed, false);
+  assert.equal((await sql`select has_function_privilege('public', 'submissions_v2.lock_runtime_controls()', 'EXECUTE') as allowed`)[0].allowed, false);
   const purgeRole = (await sql`select 1 as present from pg_roles where rolname='submissions_v2_purge'`)[0];
   if (purgeRole) {
     assert.equal((await sql`select has_function_privilege('submissions_v2_purge', 'submissions_v2.set_runtime_controls(text,text,boolean,boolean,boolean,boolean,boolean)', 'EXECUTE') as allowed`)[0].allowed, false);
