@@ -143,7 +143,13 @@ def normalize_text(value: Any) -> str:
 
 def rendered_text(value: Any) -> str:
     """Use extraction-stable punctuation without changing substantive wording."""
-    return re.sub(r"\s+", " ", normalize_text(value)).replace("–", "-").replace("—", "-").replace("‑", "-")
+    result = normalize_text(value).replace("–", "-").replace("—", "-").replace("‑", "-")
+    # The approved Inter Latin face intentionally stays small and does not
+    # contain arrow glyphs; spell them out so otherwise valid source wording
+    # remains readable, selectable, and ATS-safe instead of failing rendering.
+    for arrow, replacement in (("→", " to "), ("←", " from "), ("↔", " and "), ("⇒", " to ")):
+        result = result.replace(arrow, replacement)
+    return re.sub(r"\s+", " ", result).strip()
 
 
 def exact_keys(value: Any, expected: Iterable[str], path: str) -> dict[str, Any]:

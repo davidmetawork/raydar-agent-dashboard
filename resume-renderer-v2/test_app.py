@@ -369,6 +369,12 @@ class RendererContractTests(unittest.TestCase):
             app.validate_ast(ast, [*claims, "claim-unused"])
         self.assertEqual(caught.exception.code, "RESUME_SELECTED_CLAIMS_MISMATCH")
 
+        arrow_ast = copy.deepcopy(ast)
+        arrow_ast["candidate"]["headline"]["text"] += " Startup → Scale"
+        rendered = app.render_request(request_for(arrow_ast, claims, render_id="arrow-render"))
+        self.assertIn("STARTUP TO SCALE", rendered["pdfExtractedText"])
+        self.assertIn("Startup to Scale", rendered["atsText"])
+
         glyph_ast = copy.deepcopy(ast)
         glyph_ast["candidate"]["headline"]["text"] += " 🧭"
         with self.assertRaises(app.RenderError) as caught:

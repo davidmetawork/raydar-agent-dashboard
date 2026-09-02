@@ -84,13 +84,25 @@ test("generation progress survives rendering and remains reduced-motion safe", (
   assert.match(js, /aria-busy="\$\{generating\}"/);
   assert.match(js, /STATE\.generating\.add\(key\)/);
   assert.match(js, /STATE\.generating\.delete\(key\)/);
-  assert.match(js, /Regeneration started; the circular arrow will spin until the new resume is ready\./);
+  assert.match(js, /Regeneration started; the finished resume will save to Downloads automatically\./);
   assert.match(js, /The new resume is ready to download\./);
   assert.match(js, /error\.code !== "resume_regeneration_in_progress"/);
   assert.match(js, /class="rerun-icon"/);
   assert.match(css, /\.icon-button\.regenerate\{border-radius:50%\}/);
   assert.match(css, /\.rerun-icon\{[^}]*stroke:currentColor/);
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)/);
+});
+
+test("a requested regeneration survives reload and downloads the validated replacement automatically", () => {
+  assert.match(js, /AUTO_DOWNLOAD_STORAGE_KEY/);
+  assert.match(js, /sessionStorage\.setItem\(AUTO_DOWNLOAD_STORAGE_KEY/);
+  assert.match(js, /STATE\.pendingDownloads\.set\(key, String\(row\.current_artifact_id \|\| ""\)\)/);
+  assert.match(js, /row\.current_artifact_id !== priorArtifactId/);
+  assert.match(js, /autoDownloadResume\(row\)/);
+  assert.match(js, /URL\.createObjectURL\(new Blob\(\[bytes\], \{ type: "application\/pdf" \}\)\)/);
+  assert.match(js, /anchor\.download = data\.filename \|\| suggestedResumeFilename\(row\)/);
+  assert.match(js, /Saved \$\{anchor\.download\} to Downloads\./);
+  assert.match(js, /Resume generation is already running; the finished resume will save to Downloads automatically\./);
 });
 
 test("warning details work on hover, focus, and click without opening regeneration", () => {

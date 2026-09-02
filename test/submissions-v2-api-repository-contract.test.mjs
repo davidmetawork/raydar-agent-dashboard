@@ -53,4 +53,6 @@ test("API repository and worker share only canonical job kinds", async () => {
     "a candidate-role pair must reject overlapping paid resume regenerations");
   assert.match(repository, /status in \('queued','collecting','extracting','strategizing','validating','rendering','archiving'\)/);
   assert.match(repository, /state in \('queued','running'\)/);
+  assert.match(repository, /when pending_job\.id is not null then 'queued'/,
+    "row progress must stay active while a retry job is queued between generation attempts");
 });

@@ -63,6 +63,8 @@ export function rowDto(row) {
     primary_action_label: first?.action || null,
     resume_cautions: (row.resume_cautions || []).map((item) => ({ code: text(item.code || item.source_key || item, 100), label: text(item.label || item.safe_detail || item, 300), impact: text(item.impact, 300) || null })),
     generation_status: row.generation_status || null,
+    current_artifact_id: row.current_artifact_id || null,
+    artifact_version: Number(row.artifact_version || 0) || null,
     submission_status: row.submission_status || "none",
     negative_reason: text(row.negative_reason, 500) || null,
     corrected_destination: row.corrected_destination || null,

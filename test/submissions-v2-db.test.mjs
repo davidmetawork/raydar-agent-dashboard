@@ -780,7 +780,7 @@ test("human recovery commands reject terminal sources and non-Interested resume 
   );
 });
 
-test("regeneration rejects an overlapping active generation before another paid job is queued", async () => {
+test("regeneration rejects overlapping work and list progress stays active across retry gaps", async () => {
   const pair = await preparingPair();
   const priorGenerationId = randomUUID();
   await sql`
@@ -834,6 +834,8 @@ test("regeneration rejects an overlapping active generation before another paid 
     )
   `;
   const repository = createRepository({ sql });
+  const activeRows = await repository.list({ page: "interested" });
+  assert.equal(activeRows.rows.find((row) => row.pair_id === pair.id)?.generation_status, "validating");
   await assert.rejects(
     repository.regenerate({
       actorEmail: "admin@raydar.xyz", idempotencyKey: `regenerate:${randomUUID()}`,
@@ -845,6 +847,32 @@ test("regeneration rejects an overlapping active generation before another paid 
     select count(*)::integer as count from submissions_v2.jobs
      where subject_type='pair' and subject_id=${pair.id} and kind='prepare_resume'
   `)[0].count, 0);
+
+  await sql`
+    update submissions_v2.resume_generations
+       set status='failed', stage='retry_scheduled', completed_at=clock_timestamp()
+     where id=${activeGenerationId}
+  `;
+  const retryJobId = randomUUID();
+  await sql`
+    insert into submissions_v2.jobs(
+      id, kind, subject_type, subject_id, idempotency_key, required_control,
+      state, priority, max_attempts, checkpoint, control_epoch
+    ) values (
+      ${retryJobId}, 'prepare_resume', 'pair', ${pair.id}, ${`retry-gap:${retryJobId}`}, 'generation',
+      'queued', 40, 3, '{}'::jsonb,
+      (select control_epoch from submissions_v2.runtime_controls where singleton=true)
+    )
+  `;
+  const retryGapRows = await repository.list({ page: "interested" });
+  assert.equal(retryGapRows.rows.find((row) => row.pair_id === pair.id)?.generation_status, "queued");
+  await assert.rejects(
+    repository.regenerate({
+      actorEmail: "admin@raydar.xyz", idempotencyKey: `regenerate:${randomUUID()}`,
+      pairId: pair.id, expectedVersion: 2, evidenceBasis: null, sourceNote: null,
+    }),
+    (error) => error.code === "resume_regeneration_in_progress" && error.status === 409,
+  );
 });
 
 test("artifact promotion requires the complete validated PDF, ATS, and manifest set", async () => {

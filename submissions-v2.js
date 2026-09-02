@@ -22,12 +22,27 @@ const URL_HOSTS = Object.freeze({
 const ACTIVE_GENERATION_STATES = new Set([
   "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving",
 ]);
+const AUTO_DOWNLOAD_STORAGE_KEY = "raydar.submissions-v2.pending-resume-downloads.v1";
+
+function pendingDownloadsFromSession() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(AUTO_DOWNLOAD_STORAGE_KEY) || "{}");
+    return new Map(Object.entries(parsed).filter(([pairId, artifactId]) => pairId && typeof artifactId === "string"));
+  } catch { return new Map(); }
+}
+
+function persistPendingDownloads() {
+  try { sessionStorage.setItem(AUTO_DOWNLOAD_STORAGE_KEY, JSON.stringify(Object.fromEntries(STATE.pendingDownloads))); }
+  catch { /* A blocked session store must not stop generation or download. */ }
+}
+
 const STATE = {
   page: "interested", query: "", rows: [], nextCursor: null, loading: false,
   totalCount: null, listSequence: 0, listRequest: null, countsRequest: null,
   counts: { interested: 0, needs_review: 0, not_interested: 0, actionable: 0 },
   session: null, authConfig: null, csrf: "", active: null, searchTimer: null, pollTimer: null,
   searchRequests: new Map(), generating: new Set(), dialogReturnFocus: null,
+  pendingDownloads: pendingDownloadsFromSession(), downloadsInFlight: new Set(),
   popoverAnchor: null, popoverCloseTimer: null, signinStarted: false,
 };
 
@@ -259,19 +274,36 @@ async function loadRows({ append = false } = {}) {
     const reportedTotal = Number(data.total_count ?? data.total ?? data.count);
     STATE.totalCount = Number.isFinite(reportedTotal) ? reportedTotal : (STATE.nextCursor ? null : STATE.rows.length);
     let completedRegeneration = false;
+    const completedDownloads = [];
+    let failedRegeneration = false;
     for (const row of STATE.rows) {
       const id = String(row.case_id || "");
       if (!id) continue;
       const wasGenerating = STATE.generating.has(id);
+      const status = String(row.generation_status || "").toLowerCase();
       if (isGenerationActive(row)) STATE.generating.add(id);
       else if (row.generation_status) {
         STATE.generating.delete(id);
-        if (wasGenerating && String(row.generation_status).toLowerCase() === "succeeded") completedRegeneration = true;
+        if (wasGenerating && status === "succeeded") completedRegeneration = true;
+      }
+      if (STATE.pendingDownloads.has(id)) {
+        const priorArtifactId = STATE.pendingDownloads.get(id);
+        if (status === "succeeded" && row.current_artifact_id && row.current_artifact_id !== priorArtifactId) {
+          STATE.pendingDownloads.delete(id);
+          completedDownloads.push(row);
+        } else if (["failed", "cancelled", "held"].includes(status)) {
+          STATE.pendingDownloads.delete(id);
+          failedRegeneration = true;
+        }
       }
     }
+    persistPendingDownloads();
     renderHealth(data.health || {});
     renderRows();
-    if (completedRegeneration) toast("The new resume is ready to download.");
+    if (completedDownloads.length) {
+      for (const row of completedDownloads) autoDownloadResume(row);
+    } else if (failedRegeneration) toast("Resume generation failed safely; no new file was saved.", true);
+    else if (completedRegeneration) toast("The new resume is ready to download.");
   } catch (error) {
     if (error.name === "AbortError") return;
     $("rows").innerHTML = `<div class="empty-state"><strong>Submissions are unavailable</strong>${esc(error.message)}</div>`;
@@ -578,16 +610,55 @@ async function regenerateResume(id) {
   const row = rowFor(id); if (!row) return;
   const key = String(id);
   if (STATE.generating.has(key) || isGenerationActive(row)) return;
+  STATE.pendingDownloads.set(key, String(row.current_artifact_id || ""));
+  persistPendingDownloads();
   STATE.generating.add(key);
   renderRows();
-  toast("Regeneration started; the circular arrow will spin until the new resume is ready.");
+  toast("Regeneration started; the finished resume will save to Downloads automatically.");
   try {
     await command("regenerate", { case_id: id, expected_version: row.state_version });
     await loadRows();
   } catch (error) {
+    if (error.code === "resume_regeneration_in_progress") {
+      STATE.generating.add(key);
+      renderRows();
+      toast("Resume generation is already running; the finished resume will save to Downloads automatically.");
+      return;
+    }
+    STATE.pendingDownloads.delete(key);
+    persistPendingDownloads();
     STATE.generating.delete(key);
     renderRows();
     toast(error.message, true);
+  }
+}
+
+async function autoDownloadResume(row) {
+  const id = String(row?.case_id || "");
+  if (!id || STATE.downloadsInFlight.has(id)) return;
+  STATE.downloadsInFlight.add(id);
+  try {
+    const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/resume/download-ticket`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expected_version: row.state_version }) });
+    const downloadUrl = safeUrl(data.url, URL_HOSTS.storage);
+    if (!downloadUrl) throw new Error("Resume download link was invalid.");
+    const response = await fetch(downloadUrl, { credentials: "same-origin", cache: "no-store" });
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!response.ok || !contentType.startsWith("application/pdf")) throw new Error("The resume file could not be downloaded.");
+    const bytes = await response.arrayBuffer();
+    if (String.fromCharCode(...new Uint8Array(bytes).slice(0, 5)) !== "%PDF-") throw new Error("The resume file was not a valid PDF.");
+    const objectUrl = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = data.filename || suggestedResumeFilename(row);
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    anchor.click();
+    setTimeout(() => { anchor.remove(); URL.revokeObjectURL(objectUrl); }, 1_000);
+    toast(`Saved ${anchor.download} to Downloads.`);
+  } catch (error) {
+    toast(`${error.message || "The resume could not be saved automatically"} Click Download Resume to save it manually.`, true);
+  } finally {
+    STATE.downloadsInFlight.delete(id);
   }
 }
 
