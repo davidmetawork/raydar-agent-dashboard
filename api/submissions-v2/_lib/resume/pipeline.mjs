@@ -137,7 +137,24 @@ export async function runResumePreparation(context, {
     if (!reference) return null;
     const value = await store.loadCheckpoint(reference);
     const currentContext = `resume-checkpoint:${generation?.id}:${stage}`;
-    return reference.context === currentContext ? value : saveStage(stage, value);
+    if (reference.context === currentContext) return value;
+    const cloned = await saveStage(stage, value);
+    const progress = {
+      collect: { fromStatuses: ["queued", "collecting"], status: "collecting", stage: "collect" },
+      evidence: { fromStatuses: ["collecting", "extracting"], status: "extracting", stage: "evidence" },
+      strategy: { fromStatuses: ["extracting", "strategizing"], status: "strategizing", stage: "strategy" },
+      validate: { fromStatuses: ["strategizing", "validating"], status: "validating", stage: "validate" },
+      render: { fromStatuses: ["validating", "rendering"], status: "rendering", stage: "render" },
+    }[stage];
+    if (progress) {
+      await store.updateGeneration({
+        generationId: generation.id,
+        ...progress,
+        spentCents: 0,
+        executionFence,
+      });
+    }
+    return cloned;
   };
 
   const saveStage = async (stage, value, { costCents = 0 } = {}) => {
