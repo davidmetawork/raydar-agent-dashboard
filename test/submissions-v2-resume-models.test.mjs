@@ -231,8 +231,6 @@ test("Anthropic receives its supported schema projection while local limits rema
   assert.deepEqual(strategySchema.$defs.section.properties.entries.items, { $ref: "#/$defs/entry" });
   assert.equal(JSON.stringify(strategySchema).includes("uniqueItems"), false);
   assert.ok(JSON.stringify(strategySchema).length < 5_000);
-  const constrained = strategySchemaForAnthropic(["claim-name", "claim-title"]);
-  assert.deepEqual(constrained.$defs.contentNode.properties.claim_ids.items.enum, ["claim-name", "claim-title"]);
 });
 
 test("strategist does not fall back on nonretryable authentication failure", async () => {

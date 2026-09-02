@@ -127,13 +127,8 @@ export function schemaForAnthropic(value) {
     .map(([key, child]) => [key, schemaForAnthropic(child)]));
 }
 
-export function strategySchemaForAnthropic(allowedClaimIds = []) {
-  const claimId = {
-    type: "string",
-    ...(allowedClaimIds.length && allowedClaimIds.length <= 200
-      ? { enum: [...new Set(allowedClaimIds)] }
-      : {}),
-  };
+export function strategySchemaForAnthropic() {
+  const claimId = { type: "string" };
   const contentNode = {
     type: "object",
     additionalProperties: false,
@@ -244,9 +239,7 @@ function bodyFor(model, payload, maxTokens) {
         type: "json_schema",
         // The provider receives the same shape through shared definitions so
         // its grammar stays bounded; the full contract is enforced locally.
-        schema: strategySchemaForAnthropic(
-          payload?.evidence_ledger?.claims?.map((claim) => claim.claim_id) || [],
-        ),
+        schema: strategySchemaForAnthropic(),
       },
     },
   };
