@@ -30,10 +30,11 @@ test("repository exposes the complete API and worker persistence boundary", () =
 });
 
 test("API repository and worker share only canonical job kinds", async () => {
-  const [repository, service, worker] = await Promise.all([
+  const [repository, service, worker, pipelineStore] = await Promise.all([
     readFile(new URL("../api/submissions-v2/_lib/repository.mjs", import.meta.url), "utf8"),
     readFile(new URL("../api/submissions-v2/_lib/service.mjs", import.meta.url), "utf8"),
     readFile(new URL("../submissions-v2-worker/runner.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../api/submissions-v2/_lib/resume/pipeline-store.mjs", import.meta.url), "utf8"),
   ]);
   const canonical = [
     "classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox", "reconcile_curated",
@@ -46,4 +47,6 @@ test("API repository and worker share only canonical job kinds", async () => {
   assert.doesNotMatch(`${repository}\n${service}`, /resume_prepare|classify_reply|gmail_poll/);
   assert.doesNotMatch(repository, /from submissions_v2\.(?:candidate_index|role_index)[^`]*for share/iu,
     "read-only index validation must not request a PostgreSQL write privilege through row locks");
+  assert.doesNotMatch(`${repository}\n${pipelineStore}`, /\.array\([^\n]*["']uuid["']/u,
+    "Postgres.js array element types must use numeric OIDs so empty UUID arrays serialize as PostgreSQL arrays");
 });

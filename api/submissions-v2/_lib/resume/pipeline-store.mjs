@@ -6,6 +6,7 @@ import { canonicalJson, sha256 } from "./source-bundle.mjs";
 import { ResumePipelineError, checkpointDigest } from "./pipeline-runtime.mjs";
 
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
+const UUID_OID = 2950;
 
 function safeCheckpointId(generationId, stage) {
   return `${String(generationId).replace(/[^a-z0-9_-]/giu, "-")}-${String(stage).replace(/[^a-z0-9_-]/giu, "-")}`;
@@ -73,7 +74,7 @@ export function createResumePipelineStore({
            and (
              text_value_encrypted is not null
              or (scan_state='clean' and parse_state='parsed' and extracted_text_object_key is not null)
-             or id=any(${sql.array(requestedIds, "uuid")})
+             or id=any(${sql.array(requestedIds, UUID_OID)})
            )
          order by created_at, id
       `;

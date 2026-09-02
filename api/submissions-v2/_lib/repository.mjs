@@ -17,6 +17,7 @@ const pairAdvisoryLockKey = (candidateId, roleId) => JSON.stringify([String(cand
 const ACTIVE_GENERATION_STATES = Object.freeze([
   "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving", "held",
 ]);
+const UUID_OID = 2950;
 
 function ownerDisplayName(value) {
   const local = clean(value, 200).split("@", 1)[0];
@@ -1577,7 +1578,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (uploads.length) {
           const valid = await tx`
             select id, size_bytes from submissions_v2.resume_supplements
-             where pair_id=${pairId} and id = any(${tx.array(uploads, "uuid")})
+             where pair_id=${pairId} and id = any(${tx.array(uploads, UUID_OID)})
                and supplement_kind='evidence' and object_key is not null and active
                and quarantined and quarantine_cleanup_state='pending'
              for update
@@ -1587,7 +1588,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           if (totalBytes > 25 * 1024 * 1024) throw problem("supplement_total_size_exceeded", "The combined evidence files must be 25 MB or smaller.", 400);
           const acceptedUploads = await tx`
             update submissions_v2.resume_supplements set quarantined=false
-             where pair_id=${pairId} and id = any(${tx.array(uploads, "uuid")})
+             where pair_id=${pairId} and id = any(${tx.array(uploads, UUID_OID)})
                and active and quarantined and quarantine_cleanup_state='pending'
             returning id
           `;
@@ -2404,14 +2405,14 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                      set finished_at=coalesce(finished_at, clock_timestamp()), outcome=coalesce(outcome, 'held'),
                          safe_error_code=coalesce(safe_error_code, 'role_unavailable'),
                          safe_error_detail=coalesce(safe_error_detail, 'The exact Paraform role became unavailable.')
-                   where job_id=any(${tx.array(activeJobs.map((job) => job.id), "uuid")}) and finished_at is null
+                   where job_id=any(${tx.array(activeJobs.map((job) => job.id), UUID_OID)}) and finished_at is null
                 `;
                 await tx`
                   update submissions_v2.jobs
                      set state='cancelled', completed_at=clock_timestamp(), lease_owner=null, lease_expires_at=null,
                          safe_error_code='role_unavailable', safe_error_detail='The exact Paraform role became unavailable.',
                          hold_reason='role_unavailable'
-                   where id=any(${tx.array(activeJobs.map((job) => job.id), "uuid")})
+                   where id=any(${tx.array(activeJobs.map((job) => job.id), UUID_OID)})
                 `;
               }
               const activeGenerations = await tx`
@@ -2423,13 +2424,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                   update submissions_v2.resume_stage_runs
                      set status='held', completed_at=clock_timestamp(), safe_error_code='role_unavailable',
                          safe_error_detail='The exact Paraform role became unavailable.'
-                   where generation_id=any(${tx.array(activeGenerations.map((generation) => generation.id), "uuid")}) and status='running'
+                   where generation_id=any(${tx.array(activeGenerations.map((generation) => generation.id), UUID_OID)}) and status='running'
                 `;
                 await tx`
                   update submissions_v2.resume_generations
                      set status='cancelled', stage='cancelled', completed_at=clock_timestamp(),
                          safe_failure_code='role_unavailable', safe_failure_detail='The exact Paraform role became unavailable.'
-                   where id=any(${tx.array(activeGenerations.map((generation) => generation.id), "uuid")})
+                   where id=any(${tx.array(activeGenerations.map((generation) => generation.id), UUID_OID)})
                 `;
               }
               const updated = (await tx`
