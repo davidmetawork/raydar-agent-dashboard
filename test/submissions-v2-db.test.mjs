@@ -121,6 +121,7 @@ test("migrations are digest-checked and idempotent", async () => {
     "010_first_response_privacy_and_audit.sql",
     "011_isolated_routine_object_purge.sql",
     "012_runtime_control_read_lock.sql",
+    "013_worker_source_control_check.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count
