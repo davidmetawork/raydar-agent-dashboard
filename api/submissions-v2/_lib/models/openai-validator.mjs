@@ -10,6 +10,7 @@ import { ModelProviderError, responseJson } from "./provider-errors.mjs";
 export const GROUNDING_VALIDATOR_MODEL = "gpt-5.4-2026-03-05";
 export const GROUNDING_VALIDATOR_EFFORT = "high";
 export const GROUNDING_PROMPT_VERSION = "submissions-v2-grounding-validator-2026-08-31.v1";
+export const GROUNDING_VALIDATOR_BATCH_SIZE = 10;
 
 const OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const SYSTEM_PROMPT = `You are an independent factual grounding validator for a resume.
@@ -266,9 +267,20 @@ export async function validateClaimsToCompletion(claimPackets, options = {}) {
   const removed = [];
   const maxRewriteRounds = Math.max(1, Math.min(3, Number(options.maxRewriteRounds) || 2));
   for (let round = 0; round <= maxRewriteRounds; round += 1) {
-    const result = await runGroundingValidator(pending, options);
-    history.push({ round, audit: result.audit, attempts: result.attempts, validation: result.validation });
-    const byId = new Map(result.validation.results.map((item) => [item.claim_id, item]));
+    const batches = [];
+    for (let index = 0; index < pending.length; index += GROUNDING_VALIDATOR_BATCH_SIZE) {
+      batches.push(pending.slice(index, index + GROUNDING_VALIDATOR_BATCH_SIZE));
+    }
+    const batchResults = await Promise.all(batches.map((batch) => runGroundingValidator(batch, options)));
+    batchResults.forEach((result, batch) => history.push({
+      round,
+      batch,
+      audit: result.audit,
+      attempts: result.attempts,
+      validation: result.validation,
+    }));
+    const results = batchResults.flatMap((result) => result.validation.results);
+    const byId = new Map(results.map((item) => [item.claim_id, item]));
     const nextPending = [];
     let rewrites = 0;
     for (const claim of pending) {

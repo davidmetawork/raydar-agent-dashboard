@@ -13,6 +13,7 @@ import {
   strategySchemaForAnthropic,
 } from "../api/submissions-v2/_lib/models/anthropic-strategist.mjs";
 import {
+  GROUNDING_VALIDATOR_BATCH_SIZE,
   GROUNDING_VALIDATOR_MODEL,
   runGroundingValidator,
   schemaForOpenAI,
@@ -372,4 +373,44 @@ test("a narrowing rewrite is independently revalidated before it can survive", a
   assert.equal(result.claims[0].revision, 1);
   assert.deepEqual(result.claims[0].validatedEvidenceIds, ["ev-1"]);
   assert.equal(result.history.length, 2);
+});
+
+test("grounding validation splits large documents into bounded parallel batches", async () => {
+  const claims = Array.from({ length: GROUNDING_VALIDATOR_BATCH_SIZE * 2 + 1 }, (_, index) => ({
+    id: `claim-${index + 1}`,
+    text: `Supported fact ${index + 1}.`,
+    evidence: [{
+      evidenceId: `evidence-${index + 1}`,
+      sourceKey: "candidate_original_resume",
+      sourceId: "resume-1",
+      locator: `fixture:resume-1#${index + 1}`,
+      exactQuote: `Supported fact ${index + 1}.`,
+      trustRank: 500,
+    }],
+  }));
+  let calls = 0;
+  const result = await validateClaimsToCompletion(claims, {
+    apiKey: "test-key",
+    fetchImpl: async (_url, init) => {
+      calls += 1;
+      const body = JSON.parse(init.body);
+      const payload = body.input[1].content[0].text.match(/<UNTRUSTED_CLAIM_PACKETS_JSON>\n([\s\S]+)\n<\/UNTRUSTED_CLAIM_PACKETS_JSON>/u)[1];
+      const batch = JSON.parse(payload).claims;
+      return response(200, {
+        output_text: JSON.stringify({
+          schema_version: "raydar.resume.grounding-validation.v1",
+          results: batch.map((claim) => ({
+            claim_id: claim.id,
+            verdict: "supported",
+            evidence_ids: [claim.evidence[0].evidenceId],
+            rewrite: null,
+            reason_code: "direct_support",
+          })),
+        }),
+      });
+    },
+  });
+  assert.equal(calls, 3);
+  assert.equal(result.claims.length, claims.length);
+  assert.equal(result.history.length, 3);
 });
