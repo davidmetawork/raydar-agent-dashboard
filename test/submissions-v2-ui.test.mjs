@@ -50,6 +50,16 @@ test("every server-provided destination is constrained to its explicit host fami
   assert.match(js, /url\.hostname\.endsWith\(`\.\$\{host\}`\)/);
 });
 
+test("resume download opens a top-level PDF viewer before its asynchronous ticket request", () => {
+  const preopen = js.indexOf('window.open("about:blank", "_blank")');
+  const ticket = js.indexOf("resume/download-ticket", preopen);
+  const navigate = js.indexOf("viewer.location.replace(downloadUrl)", ticket);
+  assert.ok(preopen > -1);
+  assert.ok(ticket > preopen);
+  assert.ok(navigate > ticket);
+  assert.doesNotMatch(js.slice(preopen, navigate), /anchor\.download/u);
+});
+
 test("generation progress survives rendering and remains reduced-motion safe", () => {
   assert.match(js, /ACTIVE_GENERATION_STATES/);
   assert.match(js, /STATE\.generating\.has\(id\)/);

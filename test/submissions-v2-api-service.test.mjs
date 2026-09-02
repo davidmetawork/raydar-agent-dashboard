@@ -282,6 +282,7 @@ test("download broker verifies the archived digest and never exposes a private o
   };
   const service = createService({ repository, env, now: () => 1_800_000_000_000, blob: { readPrivateObject: async () => ({ bytes }) } });
   const issued = await service.issueDownload({ actorEmail: "recruiter@raydar.xyz", idempotencyKey: "download-command-1", pairId: "pair-1", body: { expected_version: 3 } });
+  assert.match(issued.url, /&display=inline$/u);
   assert.match(issued.url, /^\/api\/submissions-v2\/download\?ticket=/);
   assert.equal(issued.url.includes("vercel-storage.com"), false);
   const downloaded = await service.download({ actorEmail: "recruiter@raydar.xyz", ticket: new URL(`https://monitor.raydar.xyz${issued.url}`).searchParams.get("ticket") });

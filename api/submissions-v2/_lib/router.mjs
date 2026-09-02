@@ -142,8 +142,10 @@ export async function routeSubmissionsV2(req, res) {
       if (!identity) return;
       const result = await createService().download({ actorEmail: identity.email, ticket: req.query?.ticket });
       res.setHeader("content-type", result.content_type);
-      res.setHeader("content-disposition", `attachment; filename="${result.filename.replace(/["\\]/gu, "_")}"`);
+      const disposition = req.query?.display === "inline" ? "inline" : "attachment";
+      res.setHeader("content-disposition", `${disposition}; filename="${result.filename.replace(/["\\]/gu, "_")}"`);
       res.setHeader("content-length", String(result.bytes.length));
+      res.setHeader("cache-control", "private, no-store");
       res.setHeader("x-content-type-options", "nosniff");
       return res.status(200).end(result.bytes);
     }

@@ -451,7 +451,7 @@ export function createService({
         pathname: result.artifact.private_object_key, email: actorEmail, expires_at: Date.parse(result.expires_at), disposition: "attachment",
       }, { env });
       return {
-        url: `/api/submissions-v2/download?ticket=${encodeURIComponent(ticket)}`,
+        url: `/api/submissions-v2/download?ticket=${encodeURIComponent(ticket)}&display=inline`,
         filename: safeFilename({ candidateName: result.candidate_name || result.candidate_user_id, companyName: result.company_name, roleTitle: result.role_title, createdAt: result.artifact.created_at, artifactVersion: result.artifact.artifact_version }),
         expires_at: result.expires_at,
       };

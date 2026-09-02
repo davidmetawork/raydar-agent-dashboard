@@ -603,12 +603,15 @@ async function uploadEvidence(files, evidenceBasis, sourceNote) {
 
 async function downloadResume(id) {
   const row = rowFor(id); if (!row) return;
+  const viewer = window.open("about:blank", "_blank");
+  if (viewer) viewer.opener = null;
   try {
     const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/resume/download-ticket`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expected_version: row.state_version }) });
     const downloadUrl = safeUrl(data.url, URL_HOSTS.storage);
     if (!downloadUrl) throw new Error("Resume download link was invalid.");
-    const anchor = document.createElement("a"); anchor.href = downloadUrl; anchor.download = data.filename || "Raydar_Resume.pdf"; anchor.rel = "noopener noreferrer"; document.body.appendChild(anchor); anchor.click(); anchor.remove();
-  } catch (error) { toast(error.message, true); }
+    if (viewer) viewer.location.replace(downloadUrl); else window.location.assign(downloadUrl);
+    toast("The resume opened securely; use the PDF viewer's download button to save it.");
+  } catch (error) { if (viewer) viewer.close(); toast(error.message, true); }
 }
 
 async function openSubmit(id) {
