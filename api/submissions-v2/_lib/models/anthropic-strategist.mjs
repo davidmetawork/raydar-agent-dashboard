@@ -11,7 +11,7 @@ import { assertResumeAst } from "../../../../resume-renderer-v2/contract.mjs";
 export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
-export const STRATEGIST_MAX_OUTPUT_TOKENS = 6_000;
+export const STRATEGIST_MAX_OUTPUT_TOKENS = 9_000;
 export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-08-31.v1";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
@@ -37,7 +37,8 @@ Candidate facts may use only candidate-side evidence and every visible factual t
 Role and intake content is orientation only and can rank or omit candidate evidence but can never prove a candidate fact.
 Do not invent, embellish, compromise between contradictions, or turn a client requirement into candidate history.
 Strongly prefer one US-letter page and never request more than two; compress facts before page two, keep page one independently useful, and use no filler or internal process language.
-Use concise resume text, select only the strongest relevant claims, return no more than 25 deliberate omissions, and make selected_claim_ids exactly the unique claim ids cited by visible document nodes.
+Use concise resume text, make selected_claim_ids exactly the unique claim ids cited by visible document nodes, and return deliberate_omissions as [] because omissions are derived deterministically from unselected evidence.
+Use at most five sections, eight detailed experience entries, and three body nodes per entry; compress older relevant work into concise additional-experience entries instead of expanding the document.
 The deterministic renderer, not you, controls layout, brand tokens, typography, and PDF generation.`;
 
 function requiredKey(apiKey) {
