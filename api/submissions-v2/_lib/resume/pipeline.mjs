@@ -5,6 +5,7 @@ import { extractCandidateEvidenceClaims } from "./claim-extractor.mjs";
 import { buildEvidenceLedger } from "./evidence-ledger.mjs";
 import {
   STRATEGIST_FALLBACK_MODEL,
+  STRATEGIST_MAX_OUTPUT_TOKENS,
   STRATEGIST_PRIMARY_MODEL,
   STRATEGIST_PROMPT_VERSION,
   buildResumeStrategistPayload,
@@ -272,7 +273,7 @@ export async function runResumePreparation(context, {
       const forecast = forecastModelCostCents({
         model: STRATEGIST_PRIMARY_MODEL,
         input: buildResumeStrategistPayload({ bundle, ledger: evidence.ledger, versionInstructions: loaded.versionInstructions }),
-        maximumOutputTokens: 12_000,
+        maximumOutputTokens: STRATEGIST_MAX_OUTPUT_TOKENS,
         attempts: 2,
         env,
       });

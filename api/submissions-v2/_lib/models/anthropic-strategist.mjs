@@ -11,6 +11,7 @@ import { assertResumeAst } from "../../../../resume-renderer-v2/contract.mjs";
 export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
+export const STRATEGIST_MAX_OUTPUT_TOKENS = 6_000;
 export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-08-31.v1";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
@@ -36,6 +37,7 @@ Candidate facts may use only candidate-side evidence and every visible factual t
 Role and intake content is orientation only and can rank or omit candidate evidence but can never prove a candidate fact.
 Do not invent, embellish, compromise between contradictions, or turn a client requirement into candidate history.
 Strongly prefer one US-letter page and never request more than two; compress facts before page two, keep page one independently useful, and use no filler or internal process language.
+Use concise resume text, select only the strongest relevant claims, and return no more than 25 deliberate omissions.
 The deterministic renderer, not you, controls layout, brand tokens, typography, and PDF generation.`;
 
 function requiredKey(apiKey) {
@@ -324,7 +326,7 @@ export async function runResumeStrategist({
   env = process.env,
   apiKey = env.SUBMISSIONS_V2_ANTHROPIC_API_KEY,
   fetchImpl = globalThis.fetch,
-  maxTokens = 12_000,
+  maxTokens = STRATEGIST_MAX_OUTPUT_TOKENS,
   signal,
   now = Date.now,
 } = {}) {

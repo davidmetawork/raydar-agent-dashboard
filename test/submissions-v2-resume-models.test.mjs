@@ -5,6 +5,7 @@ import { buildEvidenceLedger } from "../api/submissions-v2/_lib/resume/evidence-
 import { normalizeSourceBundle } from "../api/submissions-v2/_lib/resume/source-bundle.mjs";
 import {
   STRATEGIST_FALLBACK_MODEL,
+  STRATEGIST_MAX_OUTPUT_TOKENS,
   STRATEGIST_PRIMARY_MODEL,
   buildResumeStrategistPayload,
   runResumeStrategist,
@@ -191,6 +192,7 @@ test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable prima
     },
   });
   assert.equal(bodies[0].model, STRATEGIST_PRIMARY_MODEL);
+  assert.equal(bodies[0].max_tokens, STRATEGIST_MAX_OUTPUT_TOKENS);
   assert.equal(bodies[0].output_config.effort, "high");
   assert.equal(bodies[1].model, STRATEGIST_FALLBACK_MODEL);
   assert.equal(result.audit.model, STRATEGIST_FALLBACK_MODEL);
