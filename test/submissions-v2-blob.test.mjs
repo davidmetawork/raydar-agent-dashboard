@@ -70,6 +70,9 @@ test("broker authentication and worker client never accept a broad or delete cre
   assert.equal(authorizeBlobBroker({ headers: { authorization: `Bearer ${key}` } }, { env: { SUBMISSIONS_V2_BLOB_BROKER_KEY: key } }), true);
   assert.throws(() => authorizeBlobBroker({ headers: {} }, { env: { SUBMISSIONS_V2_BLOB_BROKER_KEY: key } }), (error) => error.code === "blob_broker_auth_required");
   assert.equal(blobBrokerClientInternals.trustedPresignedUrl("https://store.blob.vercel-storage.com/a?signed=1")?.startsWith("https://"), true);
+  assert.equal(blobBrokerClientInternals.trustedPresignedUrl("https://vercel.com/api/blob/?signed=1")?.startsWith("https://"), true);
+  assert.equal(blobBrokerClientInternals.trustedPresignedUrl("https://vercel.com/api/not-blob/?signed=1"), null);
+  assert.equal(blobBrokerClientInternals.trustedPresignedUrl("https://evil.vercel.com/api/blob/?signed=1"), null);
   assert.equal(blobBrokerClientInternals.trustedPresignedUrl("https://example.com/a"), null);
   const requests = [];
   const bytes = Buffer.from("private-data");

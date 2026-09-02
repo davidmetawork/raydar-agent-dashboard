@@ -17,7 +17,9 @@ function trustedPresignedUrl(value) {
   let url;
   try { url = new URL(String(value || "")); } catch { return null; }
   if (url.protocol !== "https:") return null;
-  if (url.hostname !== "blob.vercel-storage.com" && !url.hostname.endsWith(".blob.vercel-storage.com")) return null;
+  const storageHost = url.hostname === "blob.vercel-storage.com" || url.hostname.endsWith(".blob.vercel-storage.com");
+  const currentSdkBroker = url.hostname === "vercel.com" && url.pathname === "/api/blob/";
+  if (!storageHost && !currentSdkBroker) return null;
   return url.toString();
 }
 
