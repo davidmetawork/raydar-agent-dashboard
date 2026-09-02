@@ -22,6 +22,22 @@ test("authenticated history export returns complete decisions and acks with a st
       readHash: async (key) => key === "apphub:decisions"
         ? { "candidate-b:role": { action: "pass" }, "candidate-a:role": { action: "interview" } }
         : { "candidate-a:role": { status: "invited" } },
+      readJson: async (key) => ({
+        "apphub:snapshot": {
+          generatedAt: "2026-09-01T22:59:00.000Z",
+          source: "applicant-core-production",
+          stream: [{ key: "candidate-c:role" }],
+        },
+        "apphub:queue": {
+          generatedAt: "2026-09-01T22:59:00.000Z",
+          rows: [{ key: "candidate-a:role" }, { key: "candidate-b:role" }],
+        },
+        "apphub:counts": {
+          queue: 2,
+          stream: 1,
+          updatedAt: "2026-09-01T22:59:01.000Z",
+        },
+      })[key] || null,
       now: () => "2026-09-01T23:00:00.000Z",
     });
     const req = {
@@ -38,6 +54,16 @@ test("authenticated history export returns complete decisions and acks with a st
     assert.deepEqual(Object.keys(first.body.history.decisions), ["candidate-a:role", "candidate-b:role"]);
     assert.match(first.body.history.digest, /^[a-f0-9]{64}$/);
     assert.equal(first.body.history.digest, second.body.history.digest);
+    assert.deepEqual(first.body.publish.counts, {
+      queue: 2,
+      uniqueQueueKeys: 2,
+      stream: 1,
+      uniqueStreamKeys: 1,
+    });
+    assert.equal(first.body.publish.source, "applicant-core-production");
+    assert.equal(first.body.publish.storedCounts.alert, false);
+    assert.match(first.body.publish.digest, /^[a-f0-9]{64}$/);
+    assert.equal(first.body.publish.digest, second.body.publish.digest);
   } finally {
     if (previous == null) delete process.env.APPHUB_SYNC_KEY;
     else process.env.APPHUB_SYNC_KEY = previous;

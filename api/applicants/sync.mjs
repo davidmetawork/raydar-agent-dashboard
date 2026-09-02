@@ -269,6 +269,17 @@ export function createSyncHandler({
           readHash(K.acks),
         ]);
         if (String(req.query?.history || "") === "1") {
+          const [snapshot, queueDoc, countsDoc] = await Promise.all([
+            readJson(K.snapshot),
+            readJson(K.queue),
+            readJson(K.counts),
+          ]);
+          const queueRows = Array.isArray(queueDoc?.rows)
+            ? queueDoc.rows
+            : Array.isArray(snapshot?.queue) ? snapshot.queue : [];
+          const streamRows = Array.isArray(snapshot?.stream) ? snapshot.stream : [];
+          const queueKeys = queueRows.map((row) => row?.key).filter(Boolean).sort();
+          const streamKeys = streamRows.map((row) => row?.key).filter(Boolean).sort();
           const orderedDecisions = Object.fromEntries(Object.entries(decisions).sort(([a], [b]) => a.localeCompare(b)));
           const orderedAcks = Object.fromEntries(Object.entries(acks).sort(([a], [b]) => a.localeCompare(b)));
           return res.status(200).json({
@@ -282,6 +293,27 @@ export function createSyncHandler({
                 acks: Object.keys(orderedAcks).length,
               },
               digest: stableHash({ decisions: orderedDecisions, acks: orderedAcks }),
+            },
+            publish: {
+              generatedAt: snapshot?.generatedAt || queueDoc?.generatedAt || null,
+              source: snapshot?.source || null,
+              counts: {
+                queue: queueRows.length,
+                uniqueQueueKeys: new Set(queueKeys).size,
+                stream: streamRows.length,
+                uniqueStreamKeys: new Set(streamKeys).size,
+              },
+              storedCounts: countsDoc == null ? null : {
+                queue: countsDoc.queue ?? null,
+                stream: countsDoc.stream ?? null,
+                updatedAt: countsDoc.updatedAt ?? null,
+                alert: Boolean(countsDoc.alert),
+              },
+              digest: stableHash({
+                generatedAt: snapshot?.generatedAt || queueDoc?.generatedAt || null,
+                queueKeys,
+                streamKeys,
+              }),
             },
           });
         }
