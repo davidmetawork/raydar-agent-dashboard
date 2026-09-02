@@ -1,0 +1,4 @@
+reportlab==4.4.3
+pypdf==6.1.1
+fonttools[woff]==4.60.1
+svglib==1.5.1
