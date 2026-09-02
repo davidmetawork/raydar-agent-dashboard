@@ -391,6 +391,44 @@ export function createRenderPlan(ast) {
   });
 }
 
+export function compressUnderfilledResume(rawAst) {
+  let document = structuredClone(rawAst);
+  for (let pass = 0; pass < 100; pass += 1) {
+    const checked = assertResumeAst(document);
+    try {
+      createRenderPlan(checked);
+      return checked;
+    } catch (error) {
+      if (error?.code !== "RESUME_PAGE_TWO_UNDERFILLED") throw error;
+    }
+    let removed = false;
+    for (let sectionIndex = document.sections.length - 1; sectionIndex >= 0 && !removed; sectionIndex -= 1) {
+      const section = document.sections[sectionIndex];
+      for (let entryIndex = section.entries.length - 1; entryIndex >= 0; entryIndex -= 1) {
+        const entry = section.entries[entryIndex];
+        if (entry.body.length) {
+          entry.body.pop();
+          removed = true;
+          break;
+        }
+        if (section.entries.length > 1 || document.sections.length > 1) {
+          section.entries.splice(entryIndex, 1);
+          if (!section.entries.length) document.sections.splice(sectionIndex, 1);
+          removed = true;
+          break;
+        }
+      }
+    }
+    if (!removed && document.summary) {
+      document.summary = null;
+      removed = true;
+    }
+    if (!removed) throw new ResumeContractError("RESUME_PAGE_TWO_UNDERFILLED", "Resume cannot be compressed to one page without removing required identity content");
+    document.page_preference = 1;
+  }
+  throw new ResumeContractError("RESUME_PAGE_TWO_UNDERFILLED", "Resume did not converge on an approved one-page layout");
+}
+
 export function resumeAstDigest(ast) {
   return sha256(canonicalJson(ast));
 }

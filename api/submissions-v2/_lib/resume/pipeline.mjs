@@ -19,6 +19,7 @@ import {
 import {
   applyValidatedClaimsToAst,
   collectContentNodes,
+  compressUnderfilledResume,
   draftClaimsFromAst,
   prepareResumeRender,
   resumeAstDigest,
@@ -348,8 +349,9 @@ export async function runResumePreparation(context, {
       await publishCheckpoint({ active_stage: "render", spent_cents: budget.spentCents });
       await store.updateGeneration({ generationId: generation.id, fromStatuses: ["validating", "rendering"], status: "rendering", stage: "render", spentCents: budget.spentCents, executionFence });
       const allowedClaimIds = evidence.ledger.claims.map((claim) => claim.claimId);
-      const selectedClaimIds = [...new Set(collectContentNodes(validation.ast).flatMap((node) => node.claim_ids))];
-      const prepared = prepareResumeRender(validation.ast, {
+      const renderAst = compressUnderfilledResume(validation.ast);
+      const selectedClaimIds = [...new Set(collectContentNodes(renderAst).flatMap((node) => node.claim_ids))];
+      const prepared = prepareResumeRender(renderAst, {
         allowedClaimIds,
         selectedClaimIds,
         officialBrandAsset: await brandAsset(),

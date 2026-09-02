@@ -16,6 +16,7 @@ import {
   assertResumeAst,
   assertVisualPreflight,
   collectContentNodes,
+  compressUnderfilledResume,
   createArtifactManifest,
   createRenderPlan,
   prepareResumeRender,
@@ -132,6 +133,36 @@ test("renderer rejects filler, internal copy, and documents beyond two pages", (
   }];
   const checked = assertResumeAst(oversized);
   assert.throws(() => createRenderPlan(checked), (error) => error.code === "RESUME_PAGE_LIMIT_EXCEEDED");
+});
+
+test("an underfilled second page is compressed by removing the lowest-priority trailing detail", () => {
+  const underfilled = ast();
+  underfilled.sections = [{
+    id: "section-experience",
+    title: "Experience",
+    kind: "experience",
+    placement: "main",
+    entries: Array.from({ length: 10 }, (_, entryIndex) => ({
+      id: `entry-${entryIndex}`,
+      header: [{
+        id: `header-${entryIndex}`,
+        text: `Engineering role ${entryIndex} at a supported company`,
+        claim_ids: [`claim-header-${entryIndex}`],
+        emphasis: [],
+      }],
+      body: Array.from({ length: 3 }, (_, bodyIndex) => ({
+        id: `body-${entryIndex}-${bodyIndex}`,
+        text: `Delivered a supported technical outcome ${entryIndex}-${bodyIndex} with measurable operational value.`,
+        claim_ids: [`claim-body-${entryIndex}-${bodyIndex}`],
+        emphasis: [],
+      })),
+    })),
+  }];
+  const checked = assertResumeAst(underfilled);
+  assert.throws(() => createRenderPlan(checked), (error) => error.code === "RESUME_PAGE_TWO_UNDERFILLED");
+  const compressed = compressUnderfilledResume(checked);
+  assert.equal(createRenderPlan(compressed).expectedPages, 1);
+  assert.ok(collectContentNodes(compressed).length < collectContentNodes(checked).length);
 });
 
 test("unsupported nodes disappear and validator rewrites flow into the final AST", () => {
