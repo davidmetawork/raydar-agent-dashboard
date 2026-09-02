@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api/submissions-v2/:route*",
+      "destination": "/api/submissions-v2-dispatch?route=:route"
+    },
+    {
       "source": "/login",
       "destination": "/login.html"
     },
@@ -43,6 +47,10 @@
     {
       "source": "/submissions",
       "destination": "/submissions.html"
+    },
+    {
+      "source": "/submissions-v2",
+      "destination": "/submissions-v2.html"
     },
     {
       "source": "/health",
@@ -100,6 +108,9 @@
       "maxDuration": 120
     },
     "api/submissions/*.mjs": {
+      "maxDuration": 300
+    },
+    "api/submissions-v2-dispatch.mjs": {
       "maxDuration": 300
     },
     "api/health/*.mjs": {

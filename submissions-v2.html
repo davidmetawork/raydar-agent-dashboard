@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Raydar · Submissions V2</title>
+  <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+  <link rel="stylesheet" href="/fonts/pp-grafier.css" />
+  <link rel="stylesheet" href="/submissions-v2.css" />
+  <script src="/auth-session.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <main class="shell" id="shell">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Candidate interest</p>
+        <h1>Submissions</h1>
+        <p class="subtitle">Every candidate is tied to one exact role and a grounded signal.</p>
+      </div>
+      <div class="header-actions">
+        <span class="source-health" id="source-health" aria-live="polite">Connecting…</span>
+        <button class="button primary" id="add-candidate" type="button">Add Candidate</button>
+      </div>
+    </header>
+
+    <div class="delay-banner" id="delay-banner" hidden></div>
+
+    <nav class="page-tabs" aria-label="Submission status" role="tablist">
+      <button class="page-tab active" id="tab-interested" data-page="interested" type="button" role="tab" aria-selected="true" aria-controls="rows">
+        Interested <span class="tab-count" id="count-interested">0</span>
+      </button>
+      <button class="page-tab" id="tab-needs-review" data-page="needs_review" type="button" role="tab" aria-selected="false" aria-controls="rows">
+        Needs Review <span class="tab-count review" id="count-needs-review">0</span>
+      </button>
+      <button class="page-tab" id="tab-not-interested" data-page="not_interested" type="button" role="tab" aria-selected="false" aria-controls="rows">
+        Not Interested <span class="tab-count quiet" id="count-not-interested">0</span>
+      </button>
+    </nav>
+
+    <section class="list-panel" aria-labelledby="current-page-title">
+      <div class="list-toolbar">
+        <label class="search-field">
+          <span class="search-mark" aria-hidden="true">⌕</span>
+          <span class="sr-only">Search candidates</span>
+          <input id="candidate-search" type="search" autocomplete="off" placeholder="Search candidate name" />
+        </label>
+        <div class="list-meta"><span id="display-count">0 candidates</span><span id="sort-label">Most recent first</span></div>
+      </div>
+      <h2 class="sr-only" id="current-page-title">Interested candidates</h2>
+      <div class="rows" id="rows" role="tabpanel" aria-labelledby="tab-interested" aria-live="polite" aria-busy="true"><div class="loading-row">Loading submissions…</div></div>
+      <div class="pagination" id="pagination" hidden>
+        <button class="button secondary" id="load-more" type="button">Load more</button>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal" id="modal" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-subtitle" tabindex="-1">
+      <header class="dialog-header">
+        <div><p class="eyebrow" id="dialog-eyebrow">Submissions</p><h2 id="dialog-title">Dialog</h2><p id="dialog-subtitle"></p></div>
+        <button class="icon-button close" id="dialog-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="dialog-body" id="dialog-body"></div>
+      <footer class="dialog-footer" id="dialog-footer"></footer>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <div class="signin" id="signin" role="dialog" aria-modal="true" aria-labelledby="signin-title" hidden>
+    <div class="signin-card">
+      <p class="eyebrow">Raydar</p>
+      <h2 id="signin-title">Sign in to Submissions</h2>
+      <p>Use an approved Raydar Google account.</p>
+      <div id="gsi-button"></div>
+      <p class="signin-error" id="signin-error"></p>
+    </div>
+  </div>
+
+  <script type="module" src="/submissions-v2.js"></script>
+</body>
+</html>
