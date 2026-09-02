@@ -190,6 +190,26 @@ test("unsupported nodes disappear and validator rewrites flow into the final AST
   assert.equal(rewritten.sections[0].entries[0].body[0].text, "Built a scheduling system.");
 });
 
+test("validator removals drop entries whose hiring-manager context is no longer complete", () => {
+  const source = ast();
+  source.sections[0].entries.push({
+    id: "entry-beta",
+    header: [
+      { id: "beta-company", text: "Beta", claim_ids: ["claim-beta-company"], emphasis: [] },
+      { id: "beta-role-dates", text: "Manager | 2019-2021", claim_ids: ["claim-beta-role"], emphasis: [] },
+    ],
+    body: [{ id: "beta-outcome", text: "Led a supported delivery program.", claim_ids: ["claim-beta-outcome"], emphasis: [] }],
+  });
+  const allowed = [...claimIds, "claim-beta-company", "claim-beta-role", "claim-beta-outcome"];
+  const checked = assertResumeAst(source, { allowedClaimIds: allowed });
+  const validation = collectContentNodes(checked)
+    .filter((node) => node.id !== "beta-company")
+    .map((node) => ({ id: node.id, text: node.text }));
+  const rewritten = applyValidatedClaimsToAst(checked, validation);
+  assert.equal(rewritten.sections[0].entries.some((entryItem) => entryItem.id === "entry-beta"), false);
+  assert.equal(rewritten.sections[0].entries.some((entryItem) => entryItem.id === "entry-alpha"), true);
+});
+
 test("PDF preflight enforces selectable text, embedded fonts, ATS parity, and page-two occupancy", () => {
   const render = prepareResumeRender(ast(), {
     allowedClaimIds: claimIds,

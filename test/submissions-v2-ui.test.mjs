@@ -76,11 +76,17 @@ test("resume download falls back to a top-level PDF viewer when the native picke
 
 test("generation progress survives rendering and remains reduced-motion safe", () => {
   assert.match(js, /ACTIVE_GENERATION_STATES/);
+  for (const state of ["queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving"]) {
+    assert.match(js, new RegExp(`"${state}"`));
+  }
   assert.match(js, /STATE\.generating\.has\(id\)/);
   assert.match(js, /aria-label="\$\{generating \? "Generating resume" : "Regenerate resume"\}"/);
   assert.match(js, /aria-busy="\$\{generating\}"/);
   assert.match(js, /STATE\.generating\.add\(key\)/);
   assert.match(js, /STATE\.generating\.delete\(key\)/);
+  assert.match(js, /Regeneration started; the circular arrow will spin until the new resume is ready\./);
+  assert.match(js, /The new resume is ready to download\./);
+  assert.match(js, /error\.code !== "resume_regeneration_in_progress"/);
   assert.match(js, /class="rerun-icon"/);
   assert.match(css, /\.icon-button\.regenerate\{border-radius:50%\}/);
   assert.match(css, /\.rerun-icon\{[^}]*stroke:currentColor/);

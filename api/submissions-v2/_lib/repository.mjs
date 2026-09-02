@@ -1567,6 +1567,18 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
         if (current.workflow_state !== "interested") throw problem("pair_not_resume_ready", "Only an Interested candidate with a ready resume can be regenerated.", 409, pairCurrent(current));
+        const activeRegeneration = await tx`
+          select id::text from submissions_v2.resume_generations
+           where pair_id=${pairId} and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
+          union all
+          select id::text from submissions_v2.jobs
+           where kind='prepare_resume' and subject_type='pair' and subject_id=${pairId}
+             and state in ('queued','running')
+          limit 1
+        `;
+        if (activeRegeneration.length) {
+          throw problem("resume_regeneration_in_progress", "This resume is already being regenerated.", 409, pairCurrent(current));
+        }
         if (evidenceEncrypted) {
           await tx`
             insert into submissions_v2.resume_supplements(

@@ -49,4 +49,8 @@ test("API repository and worker share only canonical job kinds", async () => {
     "read-only index validation must not request a PostgreSQL write privilege through row locks");
   assert.doesNotMatch(`${repository}\n${pipelineStore}`, /\.array\([^\n]*["']uuid["']/u,
     "Postgres.js array element types must use numeric OIDs so empty UUID arrays serialize as PostgreSQL arrays");
+  assert.match(repository, /resume_regeneration_in_progress/,
+    "a candidate-role pair must reject overlapping paid resume regenerations");
+  assert.match(repository, /status in \('queued','collecting','extracting','strategizing','validating','rendering','archiving'\)/);
+  assert.match(repository, /state in \('queued','running'\)/);
 });

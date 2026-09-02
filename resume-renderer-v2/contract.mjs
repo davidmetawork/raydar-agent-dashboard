@@ -338,11 +338,14 @@ export function applyValidatedClaimsToAst(ast, validatedClaims) {
   }
   const sections = ast.sections.map((sectionItem) => ({
     ...sectionItem,
-    entries: sectionItem.entries.map((entryItem) => ({
-      ...entryItem,
-      header: entryItem.header.map((node) => rewrittenNode(node, validated)).filter(Boolean),
-      body: entryItem.body.map((node) => rewrittenNode(node, validated)).filter(Boolean),
-    })).filter((entryItem) => entryItem.header.length || entryItem.body.length),
+    entries: sectionItem.entries.map((entryItem) => {
+      const header = entryItem.header.map((node) => rewrittenNode(node, validated)).filter(Boolean);
+      const body = entryItem.body.map((node) => rewrittenNode(node, validated)).filter(Boolean);
+      const hasRequiredHeaders = sectionItem.kind === "experience" && sectionItem.placement === "main"
+        ? header.length === 2
+        : header.length >= 1;
+      return hasRequiredHeaders ? { ...entryItem, header, body } : null;
+    }).filter(Boolean),
   })).filter((sectionItem) => sectionItem.entries.length);
   const raw = {
     ...ast,

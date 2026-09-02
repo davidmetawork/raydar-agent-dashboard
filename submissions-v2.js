@@ -19,7 +19,9 @@ const URL_HOSTS = Object.freeze({
   submit: ["paraform.com"],
   storage: ["vercel-storage.com"],
 });
-const ACTIVE_GENERATION_STATES = new Set(["active", "queued", "running", "preparing", "generating"]);
+const ACTIVE_GENERATION_STATES = new Set([
+  "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving",
+]);
 const STATE = {
   page: "interested", query: "", rows: [], nextCursor: null, loading: false,
   totalCount: null, listSequence: 0, listRequest: null, countsRequest: null,
@@ -256,14 +258,20 @@ async function loadRows({ append = false } = {}) {
     STATE.nextCursor = data.next_cursor || null;
     const reportedTotal = Number(data.total_count ?? data.total ?? data.count);
     STATE.totalCount = Number.isFinite(reportedTotal) ? reportedTotal : (STATE.nextCursor ? null : STATE.rows.length);
+    let completedRegeneration = false;
     for (const row of STATE.rows) {
       const id = String(row.case_id || "");
       if (!id) continue;
+      const wasGenerating = STATE.generating.has(id);
       if (isGenerationActive(row)) STATE.generating.add(id);
-      else if (row.generation_status) STATE.generating.delete(id);
+      else if (row.generation_status) {
+        STATE.generating.delete(id);
+        if (wasGenerating && String(row.generation_status).toLowerCase() === "succeeded") completedRegeneration = true;
+      }
     }
     renderHealth(data.health || {});
     renderRows();
+    if (completedRegeneration) toast("The new resume is ready to download.");
   } catch (error) {
     if (error.name === "AbortError") return;
     $("rows").innerHTML = `<div class="empty-state"><strong>Submissions are unavailable</strong>${esc(error.message)}</div>`;
@@ -572,9 +580,9 @@ async function regenerateResume(id) {
   if (STATE.generating.has(key) || isGenerationActive(row)) return;
   STATE.generating.add(key);
   renderRows();
+  toast("Regeneration started; the circular arrow will spin until the new resume is ready.");
   try {
     await command("regenerate", { case_id: id, expected_version: row.state_version });
-    toast("The resume is being rebuilt from the same candidate and role sources.");
     await loadRows();
   } catch (error) {
     STATE.generating.delete(key);
@@ -638,8 +646,10 @@ async function command(action, input = {}) {
     if (error.status === 409) {
       closeDialog();
       await Promise.allSettled([loadCounts(), loadRows()]);
-      error.message = "This item changed, so the latest version was refreshed; please try again.";
-      error.code = "state_conflict_refreshed";
+      if (error.code !== "resume_regeneration_in_progress") {
+        error.message = "This item changed, so the latest version was refreshed; please try again.";
+        error.code = "state_conflict_refreshed";
+      }
     }
     throw error;
   }
