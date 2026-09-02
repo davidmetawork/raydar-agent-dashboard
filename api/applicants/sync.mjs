@@ -88,6 +88,7 @@ export function normalizeAcks(input, now = () => new Date().toISOString()) {
 // CU_RE is exported so the read side (api/applicants/cards.mjs) validates
 // cuIds against the exact contract the writer enforces, not a drifting copy.
 export const CU_RE = /^[a-z0-9]{10,40}$/i;
+export const PROFILE_KEY_RE = /^(?:[a-z0-9]{10,40}|core:[a-z0-9]{10,64})$/i;
 export const MAX_PROFILE_BYTES = 30_000;
 const PHOTO_URL_PREFIX = "https://storage.googleapis.com/paraform-images/";
 
@@ -110,6 +111,27 @@ export function normalizeProfiles(input) {
     }
   }
   return { ok: true, profiles, photos };
+}
+
+export function normalizeSourceProfiles(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, badKey: null };
+  }
+  const profiles = {};
+  for (const [rawKey, profile] of Object.entries(input)) {
+    const key = String(rawKey || "").trim();
+    const hasHistory = Array.isArray(profile?.experiences) && profile.experiences.length > 0
+      || Array.isArray(profile?.education) && profile.education.length > 0;
+    if (!PROFILE_KEY_RE.test(key)
+      || !profile || typeof profile !== "object" || Array.isArray(profile)
+      || profile.profileSource !== "applicant_hub"
+      || !hasHistory
+      || Buffer.byteLength(JSON.stringify(profile)) > MAX_PROFILE_BYTES) {
+      return { ok: false, badKey: key || null };
+    }
+    profiles[key] = profile;
+  }
+  return { ok: true, profiles, photos: {} };
 }
 
 // Compact list-row card, derived from the same prewarmed profile that fills
@@ -425,7 +447,7 @@ export function createSyncHandler({
         try {
           const keep = new Set(
             [...(Array.isArray(body.snapshot?.stream) ? body.snapshot.stream : []), ...body.queue]
-              .map((row) => row?.cuId).filter(Boolean),
+              .map((row) => row?.profileKey || row?.cuId).filter(Boolean),
           );
           const drop = (await readHashKeys(K.photos)).filter((cu) => !keep.has(cu));
           if (drop.length) await deleteHashFields(K.photos, drop);
@@ -540,6 +562,31 @@ export function createSyncHandler({
           stored.factsError = String(error?.message || error).slice(0, 120);
         }
         stored.profiles = entries.length;
+      }
+      if (body.sourceProfiles != null) {
+        const normalized = normalizeSourceProfiles(body.sourceProfiles);
+        if (!normalized.ok) {
+          return res.status(400).json({ ok: false, error: "invalid_source_profile", key: normalized.badKey });
+        }
+        const entries = Object.entries(normalized.profiles);
+        const profileReady = {};
+        for (const [key, profile] of entries) {
+          const cachedAt = now();
+          const expiresAt = new Date(Date.parse(cachedAt) + PROFILE_TTL_SECONDS * 1000).toISOString();
+          await writeJson(K.profile(key), profile, PROFILE_TTL_SECONDS);
+          profileReady[key] = { cachedAt, expiresAt, source: "applicant_hub" };
+        }
+        const cards = Object.fromEntries(entries.map(([key, profile]) => [key, cardFromProfile(profile)]));
+        if (Object.keys(cards).length) await writeHash(K.cards, cards);
+        if (Object.keys(profileReady).length) await writeHash(K.profileReady, profileReady);
+        try {
+          const facts = Object.fromEntries(entries.map(([key, profile]) => [key, factsFromProfile(profile)]));
+          await writeHash(K.facts, facts);
+          stored.sourceFacts = entries.length;
+        } catch (error) {
+          stored.sourceFactsError = String(error?.message || error).slice(0, 120);
+        }
+        stored.sourceProfiles = entries.length;
       }
       return res.status(200).json({ ok: true, stored });
     } catch (error) {

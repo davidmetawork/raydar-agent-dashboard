@@ -467,6 +467,7 @@ function effectiveDecision(key) {
 /* ---- derived rows ---- */
 function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
+function profileId(row) { return row?.profileKey || row?.cuId || ""; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
 function hasNoLinkedin(row) {
@@ -479,7 +480,7 @@ function hasNoLinkedin(row) {
    and carries the true totals. A row whose card has not arrived yet is NOT
    counted, because absence of a card is not evidence of absence of history. */
 function hasNoHistory(row) {
-  const card = STATE.cards[row.cuId];
+  const card = STATE.cards[profileId(row)];
   if (!card) return false;
   return !card.expCount && !card.eduCount;
 }
@@ -644,6 +645,7 @@ function liAnchor(value) {
   return '<a class="li-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" title="LinkedIn" onclick="event.stopPropagation()">' + ICON_LI + "</a>";
 }
 function pfAnchor(cuId) {
+  if (!cuId) return "";
   return '<a class="pf-link" href="https://www.paraform.com/calls?candidate_profile_id=' + esc(cuId) + '" target="_blank" rel="noopener" title="Open in Paraform" onclick="event.stopPropagation()">' + ICON_PF + "</a>";
 }
 function nameLinks(row) {
@@ -653,10 +655,11 @@ function initials(name) {
   return String(name || "").split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
 }
 function avatarHtml(row) {
-  const p = STATE.profiles[row.cuId];
-  const src = STATE.photos[row.cuId] || STATE.cards[row.cuId]?.photo || (p && p.imageSrc) || "";
+  const id = profileId(row);
+  const p = STATE.profiles[id];
+  const src = STATE.photos[id] || STATE.cards[id]?.photo || (p && p.imageSrc) || "";
   const img = src ? '<img src="' + esc(src) + '" alt="" loading="lazy" />' : esc(initials(row.name));
-  return '<span class="avatar" data-avatar="' + esc(row.cuId) + '" data-cu="' + esc(row.cuId) + '">' + img + "</span>";
+  return '<span class="avatar" data-avatar="' + esc(id) + '" data-cu="' + esc(id) + '">' + img + "</span>";
 }
 
 function renderStats() {
@@ -714,7 +717,7 @@ function renderStats() {
   if (cache?.withheldCandidates > 0) {
     const n = Number(cache.withheldCandidates).toLocaleString();
     $("cacheTitle").textContent = n + " applicant profile" + (cache.withheldCandidates === 1 ? " is" : "s are") + " preparing";
-    $("cacheText").textContent = "These applicants are safely held off Review and Stream until their cached Paraform history is ready; they will appear automatically after caching completes.";
+    $("cacheText").textContent = "These applicants are safely held off Review and Stream until their cached profile history is ready; they will appear automatically after caching completes.";
     $("cacheBanner").classList.add("on");
   } else {
     $("cacheBanner").classList.remove("on");
@@ -900,7 +903,7 @@ function secHtml(label, lines, extra) {
   return '<div class="rc-sec"><span class="rc-lab">' + label + '</span><div class="rc-lines">' + lines + (extra || "") + "</div></div>";
 }
 function historyHtml(row) {
-  const cu = row.cuId;
+  const cu = profileId(row);
   const card = STATE.cards[cu];
   if (!card) return '<div class="rc-none">No cached profile history is available for this applicant.</div>';
   const exps = card.exp || [], edus = card.edu || [];
@@ -909,7 +912,7 @@ function historyHtml(row) {
   const out = [];
   if (exps.length) out.push(secHtml("Experience", exps.map(expLineHtml).join("")));
   if (edus.length) out.push(secHtml("Education", edus.map(eduLineHtml).join("")));
-  if (!out.length) return '<div class="rc-none">No work or education history cached in Paraform.</div>';
+  if (!out.length) return '<div class="rc-none">No cached work or education history is available.</div>';
   if (hidden > 0) out.push('<button class="rc-more" data-more="' + esc(cu) + '">Open full profile (' + (expTotal + eduTotal) + ")</button>");
   return out.join("");
 }
@@ -917,7 +920,8 @@ function historyHtml(row) {
 function rowCardHtml(row, mode, decision) {
   const key = row.key;
   const busy = STATE.busy.has(key);
-  const card = STATE.cards[row.cuId];
+  const id = profileId(row);
+  const card = STATE.cards[id];
   const interviewReady = row.interviewAllowed === true;
   const right = mode === "stream"
     ? statusPill(row)
@@ -968,9 +972,9 @@ function rowCardHtml(row, mode, decision) {
         '<div class="who"><a class="name" href="' + esc(RaydarNav.href(key)) + '" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></a>" +
           nameLinks(row) + tierPill(row.tier) +
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
-        '<div class="rc-headline" data-headline="' + esc(row.cuId) + '">' + esc(card?.title || "") + "</div>" +
-        '<div class="rc-loc" data-loc="' + esc(row.cuId) + '">' + esc(card?.location || "") + "</div>" +
-        '<div class="rc-body" data-body="' + esc(row.cuId) + '">' + historyHtml(row) + "</div>" +
+        '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(card?.title || "") + "</div>" +
+        '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(card?.location || "") + "</div>" +
+        '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
       '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
     "</div></div>";
@@ -979,7 +983,7 @@ function reviewRowHtml(row, decision) { return rowCardHtml(row, "review", decisi
 
 /** Fill in what a freshly-arrived card knows, without re-rendering the list
  *  under the reader's cursor. */
-function rowByCu(cu) { return queueRows().find((r) => r.cuId === cu) || streamRows().find((r) => r.cuId === cu) || null; }
+function rowByCu(cu) { return queueRows().find((r) => profileId(r) === cu) || streamRows().find((r) => profileId(r) === cu) || null; }
 function patchRow(cu) {
   const card = STATE.cards[cu];
   const sel = CSS.escape(cu);
@@ -1314,7 +1318,8 @@ function lockOuterScroll(on) {
 function openProfile(key) {
   const row = queueRows().find((r) => r.key === key) || streamRows().find((r) => r.key === key);
   if (!row) return;
-  STATE.modal = { cu: row.cuId, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream" };
+  const id = profileId(row);
+  STATE.modal = { cu: id, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream" };
   ensureRoom();
   placeModal();
   $("profileModal").classList.add("open");
@@ -1322,8 +1327,8 @@ function openProfile(key) {
   $("profileCard").scrollTop = 0;
   RaydarNav.open("profile", closeProfile, key);   // one screen back, and addressable
   renderModal();
-  fetchProfile(row.cuId).then(() => { if (STATE.modal && STATE.modal.cu === row.cuId) { renderModal(); applyAvatar(row.cuId); } })
-    .catch(() => { if (STATE.modal && STATE.modal.cu === row.cuId) renderModal(); });
+  fetchProfile(id).then(() => { if (STATE.modal && STATE.modal.cu === id) { renderModal(); applyAvatar(id); } })
+    .catch(() => { if (STATE.modal && STATE.modal.cu === id) renderModal(); });
 }
 function closeProfile() {
   $("profileModal").classList.remove("open");
@@ -1402,7 +1407,7 @@ function renderModal() {
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    (p.updatedAt ? '<div class="p-asof">LinkedIn data as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    (p.updatedAt ? '<div class="p-asof">' + (p.profileSource === "applicant_hub" ? "Application profile" : "LinkedIn data") + " as of " + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
@@ -1420,7 +1425,7 @@ function renderModal() {
     if (Array.isArray(p.education) && p.education.length)
       parts.push('<div class="p-section"><h3>Education</h3>' + p.education.map(educationHtml).join("") + "</div>");
     if (!(p.experiences || []).length && !(p.education || []).length && p.degraded !== "paraform_auth")
-      parts.push('<div class="p-loading">Paraform has no cached work or education history for this applicant.</div>');
+      parts.push('<div class="p-loading">No cached work or education history is available for this applicant.</div>');
   }
   if (modal.source === "queue") {
     parts.push('<div class="p-actions">' +

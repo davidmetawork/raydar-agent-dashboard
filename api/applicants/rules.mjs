@@ -61,12 +61,12 @@ export function createRulesHandler({
     ]);
     const rows = pendingRows(queueDoc?.rows ?? [], decisions);
     const scoped = rows.filter((row) => inScope(rule, row));
-    const facts = await factsFor(scoped.map((row) => row.cuId), { readMany });
+    const facts = await factsFor(scoped.map((row) => row.profileKey || row.cuId), { readMany });
 
     const matched = [];
     const skipped = {};
     for (const row of scoped) {
-      const result = evaluateRule(rule, { row, facts: facts[row.cuId] ?? null });
+      const result = evaluateRule(rule, { row, facts: facts[row.profileKey || row.cuId] ?? null });
       if (result.matched) matched.push({ row, evidence: result.evidence });
       else if (result.skipped) skipped[result.reason] = (skipped[result.reason] ?? 0) + 1;
     }

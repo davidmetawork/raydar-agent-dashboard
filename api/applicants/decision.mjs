@@ -59,14 +59,18 @@ export function createDecisionHandler({
       }
       const queue = await readQueue();
       const row = (Array.isArray(queue?.rows) ? queue.rows : []).find((item) => item?.key === key);
-      if (!row?.cuId) {
+      const profileKey = row?.profileKey || row?.cuId;
+      if (!profileKey) {
         return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
       }
       const [card, receipt] = await Promise.all([
-        readCard(row.cuId),
-        readProfileReceipt(row.cuId),
+        readCard(profileKey),
+        readProfileReceipt(profileKey),
       ]);
-      if (!card || !profileReceiptReady(receipt, Date.parse(now()))) {
+      if (!card
+        || (("expCount" in card || "eduCount" in card)
+          && !(Number(card.expCount) > 0 || Number(card.eduCount) > 0))
+        || !profileReceiptReady(receipt, Date.parse(now()))) {
         return res.status(409).json({ ok: false, error: "profile_cache_not_ready" });
       }
       // Shared with the rules tick so a human decision and an automatic one

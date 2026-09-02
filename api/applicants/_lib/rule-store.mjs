@@ -56,7 +56,7 @@ export const watchingRules = (doc) => doc.rules.filter((rule) => rule.state === 
  */
 export function pendingRows(snapshotQueue, decisions) {
   const rows = Array.isArray(snapshotQueue) ? snapshotQueue : [];
-  return rows.filter((row) => row?.key && row?.cuId && !decisions?.[row.key]);
+  return rows.filter((row) => row?.key && (row?.profileKey || row?.cuId) && !decisions?.[row.key]);
 }
 
 /** Facts for a set of applicants, in batches HMGET can carry comfortably. */

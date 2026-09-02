@@ -45,7 +45,13 @@ export function createFeedHandler({
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.
-      const { missingCuIds: _privateMissingIds, ...profileCache } = gated.profileCache;
+      const {
+        missingCuIds: _privateMissingIds,
+        missingProfileKeys: _privateMissingProfileKeys,
+        upgradeCuIds: _privateUpgradeIds,
+        warmCuIds: _privateWarmIds,
+        ...profileCache
+      } = gated.profileCache;
       return res.status(200).json({
         ok: true,
         snapshot: gated.snapshot,

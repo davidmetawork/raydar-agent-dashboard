@@ -26,10 +26,10 @@ import {
   setJson,
 } from "./_lib/kv.mjs";
 import { hasCookie, isParaformAuthError, sleep, trpcGet } from "./_lib/paraform.mjs";
+import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
 
 export const config = { maxDuration: 60 };
 
-const CU_RE = /^[a-z0-9]{1,64}$/i;
 const RANK_DELAY_MS = 250;
 const MAX_RANK_LOOKUPS = 25; // bounds the serialized walk well under the 60s budget
 
@@ -121,12 +121,14 @@ export default async function handler(req, res) {
   if (!kvConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
   const cu = String(req.query?.cu || "").trim();
-  if (!CU_RE.test(cu)) return res.status(400).json({ ok: false, error: "invalid_cu" });
+  if (!PROFILE_KEY_RE.test(cu)) return res.status(400).json({ ok: false, error: "invalid_cu" });
 
   res.setHeader("Cache-Control", "no-store");
   try {
     const cached = await getJson(K.profile(cu)).catch(() => null);
     if (cached) return res.status(200).json({ ok: true, ...cached });
+
+    if (!CU_RE.test(cu)) return res.status(404).json({ ok: false, error: "profile_cache_miss" });
 
     if (!hasCookie()) return res.status(200).json({ ok: true, degraded: "paraform_auth" });
 

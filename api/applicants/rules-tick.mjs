@@ -121,15 +121,18 @@ export function createTickHandler({
         readHash(K.decisions),
       ]);
       const candidates = [...new Set((Array.isArray(queueDoc?.rows) ? queueDoc.rows : [])
-        .map((row) => row?.cuId).filter(Boolean))];
+        .map((row) => row?.profileKey || row?.cuId).filter(Boolean))];
       const [cards, receipts] = await Promise.all([
         cardsFor(candidates, { readMany }),
         profileReceiptsFor(candidates, { readMany }),
       ]);
       const profileReady = (cuId) => Boolean(cards[cuId]
+        && ((!("expCount" in cards[cuId]) && !("eduCount" in cards[cuId]))
+          || Number(cards[cuId]?.expCount) > 0
+          || Number(cards[cuId]?.eduCount) > 0)
         && profileReceiptReady(receipts[cuId], now()));
       const rows = pendingRows(queueDoc?.rows ?? [], decisions)
-        .filter((row) => profileReady(row.cuId));
+        .filter((row) => profileReady(row.profileKey || row.cuId));
       if (!rows.length) {
         return res.status(200).json({
           ok: true,
@@ -140,7 +143,7 @@ export function createTickHandler({
         });
       }
 
-      const facts = await factsFor(rows.map((row) => row.cuId), { readMany });
+      const facts = await factsFor(rows.map((row) => row.profileKey || row.cuId), { readMany });
       const stamp = now();
 
       const newDecisions = {};
@@ -152,7 +155,7 @@ export function createTickHandler({
 
       for (const row of rows) {
         considered += 1;
-        const subject = { row, facts: facts[row.cuId] ?? null };
+        const subject = { row, facts: facts[row.profileKey || row.cuId] ?? null };
 
         // Watching rules are evaluated on exactly the same subject and never
         // write a decision — that equivalence is what makes Watching a

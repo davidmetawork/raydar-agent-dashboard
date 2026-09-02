@@ -18,7 +18,7 @@ test("scrolling is local DOM virtualization, not data pagination or hydration", 
 });
 
 test("the full profile endpoint is reached only from an explicit profile open", () => {
-  assert.match(applicants, /function openProfile\(key\)[\s\S]*?fetchProfile\(row\.cuId\)/);
+  assert.match(applicants, /function openProfile\(key\)[\s\S]*?fetchProfile\(id\)/);
   assert.match(applicants, /Open full profile/);
 });
 

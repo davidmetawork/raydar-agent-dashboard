@@ -7,5 +7,5 @@ const applicants = readFileSync(resolve("applicants.html"), "utf8");
 
 test("Applicants explains that uncached candidates are held off the page until ready", () => {
   assert.match(applicants, /STATE\.profileCache = body\.profileCache \|\| null/);
-  assert.match(applicants, /safely held off Review and Stream until their cached Paraform history is ready/);
+  assert.match(applicants, /safely held off Review and Stream until their cached profile history is ready/);
 });

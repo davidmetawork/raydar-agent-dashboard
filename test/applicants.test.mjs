@@ -10,6 +10,7 @@ import {
   MAX_SNAPSHOT_BYTES,
   normalizeAcks,
   normalizeProfiles,
+  normalizeSourceProfiles,
 } from "../api/applicants/sync.mjs";
 import { createCardsHandler, MAX_CARD_IDS } from "../api/applicants/cards.mjs";
 import { createDecisionHandler } from "../api/applicants/decision.mjs";
@@ -465,6 +466,67 @@ test("normalizeProfiles reports the offending cuId and filters photos to the buc
   assert.equal(good.ok, true);
   assert.deepEqual(Object.keys(good.profiles), ["abcdef1234", "bcdefa2345"]);
   assert.deepEqual(good.photos, { abcdef1234: bucketUrl });
+});
+
+test("sync caches verified Applicant Hub history under a neutral profile key", async () => {
+  process.env.APPHUB_SYNC_KEY = KEY;
+  const { calls, deps } = fakeStore();
+  const handler = createSyncHandler(deps);
+  const key = "core:1234567890abcdef1234567890abcdef";
+  const profile = {
+    profileSource: "applicant_hub",
+    name: "Applicant",
+    experiences: [{ roleTitle: "Engineer", companyName: "Example" }],
+    education: [],
+  };
+  const res = response();
+  await handler(request({ body: { sourceProfiles: { [key]: profile } } }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.stored.sourceProfiles, 1);
+  assert.deepEqual(calls.writeJson[0], [`apphub:profile:${key}`, profile, PROFILE_TTL_SECONDS]);
+  assert.deepEqual(calls.writeHash.find(([name]) => name === "apphub:profile-ready"), [
+    "apphub:profile-ready",
+    { [key]: {
+      cachedAt: "2026-08-09T00:00:00.000Z",
+      expiresAt: "2026-08-10T00:00:00.000Z",
+      source: "applicant_hub",
+    } },
+  ]);
+});
+
+test("Applicant Hub cache input rejects an empty history", () => {
+  const key = "core:1234567890abcdef1234567890abcdef";
+  assert.deepEqual(normalizeSourceProfiles({
+    [key]: { profileSource: "applicant_hub", experiences: [], education: [] },
+  }), { ok: false, badKey: key });
+});
+
+test("feed permits a no-Paraform-id row only when its source history is cached", async () => {
+  const key = "core:1234567890abcdef1234567890abcdef";
+  const { handler } = feedSetup({
+    "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
+    "apphub:queue": { rows: [{ key, profileKey: key, cuId: null }] },
+    "apphub:cards": { [key]: { exp: [{ role: "Engineer" }], edu: [], expCount: 1, eduCount: 0 } },
+    "apphub:profile-ready": { [key]: READY_RECEIPT },
+  });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined }), res);
+  assert.equal(res.body.snapshot.queue.length, 1);
+  assert.equal(res.body.snapshot.queue[0].profileKey, key);
+  assert.equal(res.body.profileCache.unidentifiedRows, 0);
+});
+
+test("feed withholds a cached card whose work and education history are both empty", async () => {
+  const { handler } = feedSetup({
+    "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
+    "apphub:queue": { rows: [{ key: "empty00001:role1", cuId: "empty00001" }] },
+    "apphub:cards": { empty00001: { exp: [], edu: [], expCount: 0, eduCount: 0 } },
+    "apphub:profile-ready": { empty00001: READY_RECEIPT },
+  });
+  const res = response();
+  await handler(request({ method: "GET", body: undefined }), res);
+  assert.equal(res.body.snapshot.queue.length, 0);
+  assert.equal(res.body.profileCache.withheldCandidates, 1);
 });
 
 function feedSetup(initial = {}) {

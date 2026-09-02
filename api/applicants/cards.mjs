@@ -14,7 +14,7 @@
 
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { hashGetMany, K, kvConfigured } from "./_lib/kv.mjs";
-import { CU_RE } from "./sync.mjs";
+import { PROFILE_KEY_RE } from "./sync.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -27,7 +27,7 @@ export function parseCus(raw) {
   const seen = new Set();
   for (const part of String(raw ?? "").split(",")) {
     const cu = part.trim();
-    if (!cu || !CU_RE.test(cu) || seen.has(cu)) continue;
+    if (!cu || !PROFILE_KEY_RE.test(cu) || seen.has(cu)) continue;
     seen.add(cu);
     if (seen.size >= MAX_CARD_IDS) break;
   }

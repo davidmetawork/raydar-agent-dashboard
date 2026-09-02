@@ -12,17 +12,33 @@ export function profileCacheGate(snapshot, cards, receipts, { now = Date.now() }
   const rawQueue = rows(snapshot?.queue);
   // A card proves the list projection exists; the dated receipt proves the
   // full apphub:profile:<cuId> value has not reached its 24-hour TTL.
-  const ready = (row) => Boolean(row?.cuId && available[row.cuId]
-    && profileReceiptReady(current[row.cuId], now));
+  const profileKey = (row) => row?.profileKey || row?.cuId || null;
+  const cardHasHistory = (card) => Boolean(card && (
+    (!("expCount" in card) && !("eduCount" in card))
+    || Number(card.expCount) > 0
+    || Number(card.eduCount) > 0
+  ));
+  const cacheReady = (key) => Boolean(key && cardHasHistory(available[key])
+    && profileReceiptReady(current[key], now));
+  const ready = (row) => {
+    const key = profileKey(row);
+    return cacheReady(key);
+  };
   const stream = rawStream.filter(ready);
   const queue = rawQueue.filter(ready);
   // Missing ids are returned in this order to the cache warmer: review work
   // first, then the stream, while preserving each publisher's newest-first order.
   const all = [...rawQueue, ...rawStream];
-  const candidateIds = new Set(all.map((row) => row?.cuId).filter(Boolean));
-  const readyCandidateIds = new Set(all.filter(ready).map((row) => row.cuId));
-  const missingCuIds = [...candidateIds].filter((cuId) =>
-    !available[cuId] || !profileReceiptReady(current[cuId], now));
+  const candidateIds = new Set(all.map(profileKey).filter(Boolean));
+  const readyCandidateIds = new Set(all.filter(ready).map(profileKey));
+  const missingProfileKeys = [...candidateIds].filter((key) =>
+    !cacheReady(key));
+  const missingCuIds = [...new Set(all.map((row) => row?.cuId).filter(Boolean))]
+    .filter((cuId) => !cacheReady(cuId));
+  const upgradeCuIds = [...new Set(all.map((row) => row?.cuId).filter(Boolean))]
+    .filter((cuId) => cacheReady(cuId)
+      && current[cuId]?.source === "applicant_hub");
+  const warmCuIds = [...new Set([...missingCuIds, ...upgradeCuIds])];
   const generatedDay = String(snapshot?.generatedAt || "").slice(0, 10);
   const next = snapshot ? {
     ...snapshot,
@@ -47,21 +63,24 @@ export function profileCacheGate(snapshot, cards, receipts, { now = Date.now() }
       readyRows: stream.length + queue.length,
       withheldRows: all.length - stream.length - queue.length,
       totalCandidates: candidateIds.size,
-      unidentifiedRows: all.filter((row) => !row?.cuId).length,
+      unidentifiedRows: all.filter((row) => !profileKey(row)).length,
       readyCandidates: readyCandidateIds.size,
-      withheldCandidates: missingCuIds.length,
+      withheldCandidates: missingProfileKeys.length,
+      missingProfileKeys,
       missingCuIds,
+      upgradeCuIds,
+      warmCuIds,
       queue: {
         total: rawQueue.length,
         ready: queue.length,
         withheld: rawQueue.length - queue.length,
-        unidentified: rawQueue.filter((row) => !row?.cuId).length,
+        unidentified: rawQueue.filter((row) => !profileKey(row)).length,
       },
       stream: {
         total: rawStream.length,
         ready: stream.length,
         withheld: rawStream.length - stream.length,
-        unidentified: rawStream.filter((row) => !row?.cuId).length,
+        unidentified: rawStream.filter((row) => !profileKey(row)).length,
       },
     },
   };
