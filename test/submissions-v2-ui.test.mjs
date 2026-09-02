@@ -50,7 +50,21 @@ test("every server-provided destination is constrained to its explicit host fami
   assert.match(js, /url\.hostname\.endsWith\(`\.\$\{host\}`\)/);
 });
 
-test("resume download opens a top-level PDF viewer before its asynchronous ticket request", () => {
+test("resume download uses a top-level native save picker before fetching the private PDF", () => {
+  const picker = js.indexOf('pickerHost.showSaveFilePicker({');
+  const ticket = js.indexOf("resume/download-ticket", picker);
+  const pdfFetch = js.indexOf("fetch(downloadUrl", ticket);
+  const write = js.indexOf("writable.write(bytes)", pdfFetch);
+  assert.ok(picker > -1);
+  assert.ok(ticket > picker);
+  assert.ok(pdfFetch > ticket);
+  assert.ok(write > pdfFetch);
+  assert.match(js.slice(picker, write), /startIn: "downloads"/u);
+  assert.match(js.slice(pdfFetch, write), /contentType\.startsWith\("application\/pdf"\)/u);
+  assert.match(js.slice(pdfFetch, write), /!== "%PDF-"/u);
+});
+
+test("resume download falls back to a top-level PDF viewer when the native picker is unavailable", () => {
   const preopen = js.indexOf('window.open("about:blank", "_blank")');
   const ticket = js.indexOf("resume/download-ticket", preopen);
   const navigate = js.indexOf("viewer.location.replace(downloadUrl)", ticket);

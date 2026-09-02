@@ -57,6 +57,20 @@ function fmtWhen(value) {
   return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: date.getFullYear() === new Date().getFullYear() ? undefined : "numeric" })} · ${date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
 }
 
+function filenamePart(value, fallback) {
+  return String(value || "").normalize("NFKD").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 120) || fallback;
+}
+
+function suggestedResumeFilename(row) {
+  return `${filenamePart(row.candidate_name || row.provisional_name, "Candidate")}__${filenamePart(row.company, "Company")}__${filenamePart(row.role_title, "Role")}__Raydar__${new Date().toISOString().slice(0, 10)}.pdf`;
+}
+
+function filePickerWindow() {
+  try { if (window.top && window.top.location.origin === location.origin) return window.top; }
+  catch { /* A cross-origin parent cannot provide the picker. */ }
+  return window;
+}
+
 function toast(message, error = false) {
   const node = $("toast");
   node.textContent = message;
@@ -603,6 +617,33 @@ async function uploadEvidence(files, evidenceBasis, sourceNote) {
 
 async function downloadResume(id) {
   const row = rowFor(id); if (!row) return;
+  const pickerHost = filePickerWindow();
+  if (typeof pickerHost.showSaveFilePicker === "function") {
+    try {
+      const handle = await pickerHost.showSaveFilePicker({
+        suggestedName: suggestedResumeFilename(row),
+        startIn: "downloads",
+        types: [{ description: "PDF document", accept: { "application/pdf": [".pdf"] } }],
+      });
+      const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/resume/download-ticket`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expected_version: row.state_version }) });
+      const downloadUrl = safeUrl(data.url, URL_HOSTS.storage);
+      if (!downloadUrl) throw new Error("Resume download link was invalid.");
+      const response = await fetch(downloadUrl, { credentials: "same-origin", cache: "no-store" });
+      const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.startsWith("application/pdf")) throw new Error("The resume file could not be downloaded.");
+      const bytes = await response.arrayBuffer();
+      if (String.fromCharCode(...new Uint8Array(bytes).slice(0, 5)) !== "%PDF-") throw new Error("The resume file was not a valid PDF.");
+      const writable = await handle.createWritable();
+      try { await writable.write(bytes); await writable.close(); }
+      catch (error) { await writable.abort().catch(() => {}); throw error; }
+      toast(`Saved ${handle.name || data.filename || "resume.pdf"}.`);
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      toast(error.message || "The resume could not be saved.", true);
+      return;
+    }
+  }
   const viewer = window.open("about:blank", "_blank");
   if (viewer) viewer.opener = null;
   try {
