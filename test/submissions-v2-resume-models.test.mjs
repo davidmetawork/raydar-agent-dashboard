@@ -8,6 +8,8 @@ import {
   STRATEGIST_PRIMARY_MODEL,
   buildResumeStrategistPayload,
   runResumeStrategist,
+  schemaForAnthropic,
+  strategySchemaForAnthropic,
 } from "../api/submissions-v2/_lib/models/anthropic-strategist.mjs";
 import {
   GROUNDING_VALIDATOR_MODEL,
@@ -210,6 +212,23 @@ test("strategist input keeps role orientation but does not duplicate candidate e
     exact_quote: ledger.claims[0].quote,
   });
   assert.equal(payload.evidence_ledger.clusters.length, 0);
+});
+
+test("Anthropic receives its supported schema projection while local limits remain intact", () => {
+  const transformed = schemaForAnthropic({
+    type: "array",
+    minItems: 1,
+    maxItems: 3,
+    uniqueItems: true,
+    items: { type: "string", minLength: 1, maxLength: 200 },
+  });
+  assert.deepEqual(transformed, { type: "array", items: { type: "string" } });
+  const strategySchema = strategySchemaForAnthropic();
+  assert.deepEqual(strategySchema.properties.document, { $ref: "#/$defs/resumeAst" });
+  assert.deepEqual(strategySchema.$defs.resumeAst.properties.sections.items, { $ref: "#/$defs/section" });
+  assert.deepEqual(strategySchema.$defs.section.properties.entries.items, { $ref: "#/$defs/entry" });
+  assert.equal(JSON.stringify(strategySchema).includes("uniqueItems"), false);
+  assert.ok(JSON.stringify(strategySchema).length < 5_000);
 });
 
 test("strategist does not fall back on nonretryable authentication failure", async () => {
