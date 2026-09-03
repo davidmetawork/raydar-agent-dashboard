@@ -31,7 +31,12 @@ export const config = { maxDuration: 30 };
 // The loop caps the snapshot on its side (drops per-step detail); this guard
 // keeps a buggy publisher from parking a multi-megabyte blob in KV.
 export const MAX_SNAPSHOT_BYTES = 1_800_000;
-const MAX_QUEUE_BYTES=1_800_000; // complete index plus exact action revisions
+// A queue is stored separately from the stream snapshot, but the publisher
+// sends both in one request. Keep the complete review index intact while
+// retaining 500KB below Vercel's 4.5MB function payload ceiling for the JSON
+// envelope, acks, and normal request growth.
+const MAX_QUEUE_BYTES = 3_000_000;
+const MAX_PUBLISH_BYTES = 4_000_000;
 const ACK_STATUSES = new Set(["invited", "blocked"]);
 import {saveApplicantAck} from './_lib/request-safety.mjs';
 
@@ -415,15 +420,44 @@ export function createSyncHandler({
         return res.status(200).json({ ok: true, at: doc.updatedAt, cleared, counts: doc });
       }
 
-      const stored = { snapshot: false, queue: false, acks: 0 };
-      if (body.snapshot != null) {
+      // Validate a snapshot+queue publication as one unit BEFORE either
+      // persistent key changes. The split keys isolate their stored sizes, not
+      // the incoming HTTP request. In particular, rejecting an oversized queue
+      // after writing its snapshot would publish a fresh stream beside a stale
+      // review queue.
+      const hasSnapshot = body.snapshot != null;
+      const hasQueue = body.queue != null;
+      let snapshotBytes = null;
+      let queueDoc = null;
+      let queueBytes = null;
+      if (hasSnapshot) {
         if (typeof body.snapshot !== "object" || Array.isArray(body.snapshot)) {
           return res.status(400).json({ ok: false, error: "invalid_snapshot" });
         }
-        const bytes = Buffer.byteLength(JSON.stringify(body.snapshot));
-        if (bytes > MAX_SNAPSHOT_BYTES) {
-          return res.status(413).json({ ok: false, error: "snapshot_too_large", bytes, max: MAX_SNAPSHOT_BYTES });
+        snapshotBytes = Buffer.byteLength(JSON.stringify(body.snapshot));
+        if (snapshotBytes > MAX_SNAPSHOT_BYTES) {
+          return res.status(413).json({ ok: false, error: "snapshot_too_large", bytes: snapshotBytes, max: MAX_SNAPSHOT_BYTES });
         }
+      }
+      if (hasQueue) {
+        if (!Array.isArray(body.queue)) {
+          return res.status(400).json({ ok: false, error: "invalid_queue" });
+        }
+        queueDoc = { generatedAt: String(body.snapshot?.generatedAt || now()), rows: body.queue };
+        queueBytes = Buffer.byteLength(JSON.stringify(queueDoc));
+        if (queueBytes > MAX_QUEUE_BYTES) {
+          return res.status(413).json({ ok: false, error: "queue_too_large", bytes: queueBytes, max: MAX_QUEUE_BYTES });
+        }
+      }
+      if (hasSnapshot && hasQueue) {
+        const bytes = Buffer.byteLength(JSON.stringify(body));
+        if (bytes > MAX_PUBLISH_BYTES) {
+          return res.status(413).json({ ok: false, error: "publish_too_large", bytes, max: MAX_PUBLISH_BYTES });
+        }
+      }
+
+      const stored = { snapshot: false, queue: false, acks: 0 };
+      if (body.snapshot != null) {
         await writeJson(K.snapshot, body.snapshot);
         stored.snapshot = true;
       }
@@ -431,15 +465,7 @@ export function createSyncHandler({
       // squeeze the stream out of the snapshot cap (each part gets the full
       // budget; the 2026-08-09 seed hit exactly this with 2,151 queue rows).
       if (body.queue != null) {
-        if (!Array.isArray(body.queue)) {
-          return res.status(400).json({ ok: false, error: "invalid_queue" });
-        }
-        const doc = { generatedAt: String(body.snapshot?.generatedAt || now()), rows: body.queue };
-        const bytes = Buffer.byteLength(JSON.stringify(doc));
-        if (bytes > MAX_QUEUE_BYTES) {
-          return res.status(413).json({ ok: false, error: "queue_too_large", bytes, max: MAX_QUEUE_BYTES });
-        }
-        await writeJson(K.queue, doc);
+        await writeJson(K.queue, queueDoc);
         stored.queue = true;
       }
       // Photos/cards hygiene: neither hash has a TTL, so without pruning they
