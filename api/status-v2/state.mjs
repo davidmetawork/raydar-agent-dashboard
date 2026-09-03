@@ -513,11 +513,30 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
         });
         const rest = entries.slice(POOL_TILE_CAP);
         if (rest.length) {
+          // ONE number per tile. "9 Other (3)" printed a summed count and a
+          // number of collapsed reasons side by side on a 22-character line,
+          // which is the most misreadable thing possible on a page whose whole
+          // premise is that every printed number is one published field.
+          const total = rest.reduce((a, e) => a + e.count, 0);
           tiles.push({
             id: "overflow",
-            label: `Other (${rest.length})`,
-            count: rest.reduce((a, e) => a + e.count, 0),
+            label: "Other",
+            count: total,
+            basis: BASIS.measured,
+            ...(poolLink ? { link: poolLink } : {}),
             ...(st.tileAccent ? { accent: st.tileAccent } : {}),
+          });
+          // and the one place the page adds anything up names itself as a
+          // derived total, with the reasons it collapsed, in the drawer.
+          evidence.push({
+            label: `Other (${rest.length} more ${rest.length === 1 ? "reason" : "reasons"})`,
+            value: total,
+            field: `${st.poolKey}[other]`,
+            endpoint: sourceAges[st.step]?.endpoint || null,
+            at: sourceAges[st.step]?.at || null,
+            basis: BASIS.measured,
+            sentence: `A total this page added up from the ${rest.length} smallest reasons, so the tile could stay one line. Every one of them is listed here on its own row.`,
+            code: null,
           });
         }
         out.tiles = tiles;

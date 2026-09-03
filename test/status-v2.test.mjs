@@ -287,8 +287,22 @@ test("R4 pool tiles come only from {code,label,count}, cap six plus Other, no va
   const resolved = flowFor(SYSTEMS[1], { pipeline: pipelineFixture({ holdsByReason: many, holdsTotal: 54 }) }, { nowMs: NOW });
   const pool = resolved.flow.stages.find((s) => s.id === "waiting-you");
   assert.equal(pool.tiles.length, 7);
-  assert.equal(pool.tiles[6].label, "Other (3)");
+  // one number per tile: "9 Other (3)" printed a sum and a reason-count side
+  // by side, two different kinds of number on one 22-character line
+  assert.equal(pool.tiles[6].label, "Other");
   assert.equal(pool.tiles[6].count, 4 + 3 + 2);
+  const drawn = pageRenderer.drawFlow(resolved.flow);
+  assert.match(drawn, />9 Other</);
+  assert.doesNotMatch(drawn, /Other \(\d/);
+  // the only arithmetic the page does names itself in the drawer, with the
+  // reasons it collapsed still listed one row each
+  const derived = resolved.evidence.find((e) => e.field === "pipeline.holdsByReason[other]");
+  assert.equal(derived.value, 9);
+  assert.equal(derived.label, "Other (3 more reasons)");
+  assert.match(derived.sentence, /added up from the 3 smallest reasons/);
+  for (const entry of many.slice(6)) {
+    assert.ok(resolved.evidence.some((e) => e.field === `pipeline.holdsByReason[${entry.code}]`));
+  }
   assert.deepEqual(pool.tiles.slice(0, 6).map((t) => t.label),
     ["Reason 0", "Reason 1", "Reason 2", "Reason 3", "Reason 4", "Reason 5"]);
   for (const row of SYSTEMS) {
