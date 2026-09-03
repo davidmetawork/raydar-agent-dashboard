@@ -19,7 +19,11 @@ const WORKPLACES = new Set(["REMOTE", "HYBRID", "ON_SITE"]);
 const FUNDING_ROUNDS = new Set(["PRE_SEED", "SEED", "SERIES_A", "SERIES_B", "SERIES_C", "SERIES_D_PLUS", "UNKNOWN"]);
 const VISA_AUTHORIZATIONS = new Set(["NO_VISA_AUTHORIZATION_NEEDED", "NEEDS_NEW_VISA_AUTHORIZATION"]);
 
-function config() {
+// Status v2's aggregator reads the same two feeds server-side and must not
+// duplicate the signing logic, so `config` and `upstream` are exported rather
+// than copied (PRD-STATUS-V2 §5.1). Both stay private to this repo's own
+// serverless functions; nothing about the request path changes.
+export function config() {
   try {
     return {
       base: safeUpstreamBase(process.env.POST_CALL_BASE, {
@@ -99,11 +103,11 @@ function validateChanges(action, changes) {
   return true;
 }
 
-async function upstream(path, access, binding = {}, init = {}) {
+export async function upstream(path, access, binding = {}, init = {}, { fetchImpl = fetch } = {}) {
   const { base, key, assertionSecret } = config();
   const rawBody = init.body || "";
   const assertion = issueReviewAssertion({ actorEmail: access.email, method: init.method || "GET", path: canonicalReviewAssertionPath(path), caseId: binding.caseId || null, version: binding.version ?? null, rawBody }, assertionSecret);
-  const response = await fetch(`${base}${path}`, {
+  const response = await fetchImpl(`${base}${path}`, {
     ...init,
     redirect: "error",
     headers: {
@@ -149,9 +153,15 @@ export default async function handler(req, res) {
         const value = safeString(req.query?.[key], key === "search" ? 240 : 254);
         if (value) query.set(key, value);
       }
-      const path = String(req.query?.metrics || "") === "1"
-        ? "/api/v2/reviews/metrics"
-        : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
+      // ?funnel=1 is the same read shape as ?metrics=1: a counts-only
+      // aggregate behind the same signed actor. The endpoint may not exist on
+      // the post-call service yet; its 404/501 is passed straight through and
+      // Status v2 reads that as "no publisher yet" (PRD-STATUS-V2 §5.1).
+      const path = String(req.query?.funnel || "") === "1"
+        ? "/api/v2/reviews/funnel"
+        : String(req.query?.metrics || "") === "1"
+          ? "/api/v2/reviews/metrics"
+          : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
       const { response, body } = await upstream(path, access, { caseId: id || null });
       return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, configured: true, ...body }, access));
     }
