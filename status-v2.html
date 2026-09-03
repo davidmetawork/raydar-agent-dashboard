@@ -367,6 +367,7 @@ function renderStrip(strip){
     <div class="row">${items}${strip.link?`<a href="${esc(strip.link.href)}" target="_top">${esc(strip.link.label)} →</a>`:""}</div>
     ${buckets?`<div class="buckets">${buckets}</div>`:""}
     ${strip.sentence?`<div class="say">${esc(strip.sentence)}</div>`:""}
+    ${strip.incidentsNote?`<div class="alert">${esc(strip.incidentsNote)}</div>`:""}
     ${strip.staleNote?`<div class="stalenote">${esc(strip.staleNote)}</div>`:""}
     ${strip.alert?`<div class="alert">${esc(strip.alert)}</div>`:""}
   </div>`;

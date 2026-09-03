@@ -963,6 +963,18 @@ test("the all-time strip is real on day one, and says Cannot tell when the feed 
   assert.equal(strip.items[0].value, 12);
   assert.equal(strip.buckets.length, 4);
   assert.match(strip.sentence, /half are cleared within/);
+  // the incident count is drawn, not carried and dropped: every number this
+  // page emits is either on the surface or explained
+  assert.equal(strip.incidents, 0);
+  assert.equal(strip.incidentsNote, null, "zero incidents is not a line worth printing");
+  const noisy = allTimeStrip({
+    metrics: { ...metricsFixture(), incidents: [{ id: "a" }, { id: "b" }] }, memo: { dataAt: iso(8e3) }, nowMs: NOW,
+  });
+  assert.equal(noisy.incidents, 2);
+  assert.match(noisy.incidentsNote, /^2 open incidents on the Review data/);
+  assert.match(page, /strip\.incidentsNote\?/);
+  const one = allTimeStrip({ metrics: { ...metricsFixture(), incidents: [{ id: "a" }] }, memo: {}, nowMs: NOW });
+  assert.match(one.incidentsNote, /^1 open incident on/);
   const out = allTimeStrip({ metrics: null, memo: { state: "error" }, nowMs: NOW });
   assert.match(out.cannotTell, /^Cannot tell/);
   assert.deepEqual(out.items, []);

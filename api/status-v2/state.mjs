@@ -923,7 +923,13 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
       { key: "delivery", label: "Delivery unproven", value: num("delivery") },
     ],
     sentence: clearingSentence(metrics.medianResolutionSeconds, metrics.p95ResolutionSeconds),
+    // The Review feed publishes the open incidents as a list; how many there
+    // are is the only thing this strip says about them, and it says it on the
+    // surface rather than carrying a number nothing renders.
     incidents: Array.isArray(metrics.incidents) ? metrics.incidents.length : null,
+    incidentsNote: Array.isArray(metrics.incidents) && metrics.incidents.length
+      ? `${metrics.incidents.length} open ${metrics.incidents.length === 1 ? "incident" : "incidents"} on the Review data — open Review to read them.`
+      : null,
     at,
     when: at ? whenSentence(at, nowMs) : null,
     link: { label: "open Review", href: "/#review" },
