@@ -79,6 +79,10 @@
     {
       "source": "/status",
       "destination": "/status.html"
+    },
+    {
+      "source": "/status-v2",
+      "destination": "/status-v2.html"
     }
   ],
   "redirects": [
@@ -132,6 +136,9 @@
       "maxDuration": 60
     },
     "api/status/*.mjs": {
+      "maxDuration": 30
+    },
+    "api/status-v2/*.mjs": {
       "maxDuration": 30
     }
   },

@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Status v2 · Raydar</title>
+<link rel="icon" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --cream:#F6F3E9; --ink:#16140F; --ink-2:#4A4741; --ink-3:#716D63;
+    --card:#FFFFFF; --line:#E9E3D5; --line-2:#F1ECE0; --muted:#8C877B;
+    --orange:#FF5E00; --good:#119865; --good-bg:#E4F4EC; --bad:#E5484D; --bad-bg:#FBE9E9;
+    --warn:#C7791A; --warn-bg:#FAEEDC; --violet:#7F72FF; --violet-bg:#ECEAFE; --violet-700:#574EA9;
+    --muted-bg:#EFEADE;
+    --shadow:0 1px 2px rgba(20,16,8,.04), 0 8px 24px -12px rgba(20,16,8,.10);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font-family:"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+  .wrap{max-width:980px;margin:0 auto;padding:24px 20px 80px}
+  h1{font-family:"PP Grafier Display",serif;font-weight:600;font-size:28px;margin:0}
+  .sub{color:var(--muted);margin:4px 0 0}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:10px}
+  button.act{font:inherit;border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 11px;cursor:pointer}
+  button.act:hover{border-color:var(--ink)}
+  a{color:var(--orange)}
+
+  /* ── the header freshness line: oldest source wins, and is named ── */
+  .asof{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin-bottom:10px}
+  .asof b{font-weight:600}
+  .linkbtn{font:inherit;font-size:12.5px;background:none;border:0;padding:0;color:var(--orange);cursor:pointer;text-decoration:underline}
+  .srcbox{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:8px 12px;margin:0 0 12px;font-size:12.5px}
+  .srcrow{display:flex;align-items:baseline;gap:10px;padding:3px 0;flex-wrap:wrap}
+  .srcrow .nm{font-weight:600;min-width:190px}
+  .srcrow .dt{color:var(--muted);flex:1;min-width:180px}
+  .tagpill{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:1px 8px;white-space:nowrap}
+  .tag-answered{background:var(--good-bg);color:var(--good)}
+  .tag-no-signal{background:var(--muted-bg);color:var(--ink-2)}
+  .tag-never-registered{background:var(--violet-bg);color:var(--violet-700)}
+
+  /* ── to-do strip: only what David alone can do; hidden when empty ── */
+  .todos{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+  .todohead{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin-bottom:2px}
+  .todo{background:var(--warn-bg);border:1px solid #EEDBB4;border-radius:11px;padding:8px 12px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+  .todo .tl{font-weight:600;font-size:13px}
+  .todo .td{color:var(--ink-2);font-size:12px;flex:1;min-width:220px}
+  .todo button.copy{font:inherit;font-size:12px;border:1px solid #E0CDA6;background:#fff;border-radius:8px;padding:3px 9px;cursor:pointer;white-space:nowrap}
+
+  /* ── one card per system, both always open ── */
+  .card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:14px 16px 12px 18px;margin-bottom:14px;overflow:hidden}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--muted)}
+  .card.tone-good::before{background:var(--good)}
+  .card.tone-warn::before{background:var(--warn)}
+  .card.tone-bad::before{background:var(--bad)}
+  .card.tone-violet::before{background:var(--violet)}
+  .chead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .cname{font-family:"PP Grafier Display",serif;font-weight:600;font-size:19px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:2px 10px;white-space:nowrap}
+  .pill.good{background:var(--good-bg);color:var(--good)}
+  .pill.warn{background:var(--warn-bg);color:var(--warn)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)}
+  .pill.violet{background:var(--violet-bg);color:var(--violet-700)}
+  .cap{color:var(--ink-2);font-size:12.5px;margin:2px 0 0;max-width:76ch}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block;background:currentColor}
+  @keyframes throb{0%{box-shadow:0 0 0 0 rgba(17,152,101,.40)}70%{box-shadow:0 0 0 6px rgba(17,152,101,0)}100%{box-shadow:0 0 0 0 rgba(17,152,101,0)}}
+  .dot.pulse{animation:throb 2.8s ease-out infinite}
+  @media (prefers-reduced-motion: reduce){ .dot.pulse{animation:none} }
+  .csum{color:var(--ink-2);font-size:13px;margin:6px 0 2px;max-width:70ch}
+  .lastgood{color:var(--muted);font-size:12px;margin:2px 0}
+  .warnchip{display:inline-block;background:var(--warn-bg);border:1px solid #EEDBB4;color:var(--warn);border-radius:999px;padding:2px 10px;font-size:12px;margin:6px 6px 2px 0}
+  .lanechip{display:inline-block;background:var(--warn-bg);border:1px solid #EEDBB4;color:var(--warn);border-radius:10px;padding:4px 10px;font-size:12.5px;margin:6px 6px 2px 0}
+  .incident{background:var(--bad-bg);border:1px solid #F3C9CA;color:var(--bad);border-radius:10px;padding:6px 11px;font-size:12.5px;margin:8px 0 2px;font-weight:600}
+  .clock{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:12px 0 2px}
+  .clocknote{color:var(--muted);font-size:11.5px;margin-bottom:2px}
+
+  /* ── the drawing (renderer copied from the Status page) ── */
+  .floww{overflow-x:auto;padding:4px 0 2px;margin:2px 0 4px}
+  /* one line so the drawing scales to the card instead of scrolling */
+  .floww svg{width:100%;height:auto}
+  .fnode{fill:#fff;stroke:var(--line);stroke-width:1.25}
+  .fnode.hot{fill:var(--bad-bg);stroke:#F3C9CA}
+  .fnode.warm{fill:var(--warn-bg);stroke:#EEDBB4}
+  .fcount{font:700 17px "Inter Variable",-apple-system,sans-serif;fill:var(--ink);font-variant-numeric:tabular-nums}
+  .fcount.miss{fill:var(--muted);font-weight:600}
+  .fcount.hotc{fill:var(--bad)}
+  .fcount.warmc{fill:var(--warn)}
+  .flabel{font:500 10.5px "Inter Variable",-apple-system,sans-serif;fill:var(--ink-2)}
+  .flabel.gen{font-size:11px}
+  .fsub{font:500 10px "Inter Variable",-apple-system,sans-serif;fill:var(--muted)}
+  .fedge{fill:none;stroke:#C9C2B2;stroke-width:1.5}
+  .fhead{fill:#C9C2B2}
+  .ftile{fill:#F8F6F0;stroke:var(--line);stroke-width:1}
+  .ftile.warm{fill:var(--warn-bg);stroke:#EEDBB4}
+  .ftile.hot{fill:var(--bad-bg);stroke:#F3C9CA}
+  .ftxt{font:600 10.5px "Inter Variable",-apple-system,sans-serif;fill:var(--ink-2);font-variant-numeric:tabular-nums}
+  .ftxt.miss{fill:var(--muted)}
+  .ftxt.warmc{fill:var(--warn)}
+  .ftxt.hotc{fill:var(--bad)}
+  .funit{font:500 10px "Inter Variable",-apple-system,sans-serif;fill:var(--muted)}
+  .fnote{color:var(--muted);font-size:11.5px;margin:2px 0}
+
+  /* ── the labelled strips under a drawing (each its own clock) ── */
+  .stripbox{background:var(--muted-bg);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:8px 0 4px;font-size:12.5px;color:var(--ink-2)}
+  .stripbox .sl{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:3px}
+  .stripbox b{color:var(--ink);font-variant-numeric:tabular-nums}
+  .stripbox .row{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline}
+  .stripbox .buckets{color:var(--ink-2);margin-top:3px}
+  .stripbox .say{color:var(--ink-2);margin-top:3px}
+  .stripbox .cannot{color:var(--violet-700);font-weight:600}
+  .stripbox .alert{color:var(--warn);margin-top:3px}
+  .stepcap{color:var(--muted);font-size:11.5px}
+
+  .since{border-top:1px solid var(--line-2);margin-top:10px;padding-top:7px;color:var(--ink-2);font-size:12.5px}
+  .ages{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline;color:var(--muted);font-size:11.5px;margin-top:5px}
+  .ages .sp{margin-left:auto}
+  .ev{margin-top:8px;border:1px solid var(--line);border-radius:10px;overflow-x:auto}
+  .ev table{border-collapse:collapse;width:100%;font-size:12px}
+  .ev th,.ev td{text-align:left;padding:5px 9px;border-bottom:1px solid var(--line-2);vertical-align:top}
+  .ev th{color:var(--ink-3);font-weight:700;font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+  .ev td.num{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  .ev code{font-size:11px;color:var(--ink-3)}
+
+  .foot{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:12px 16px;color:var(--ink-2);font-size:12.5px}
+  .foot .fh{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px}
+
+  .err{color:var(--bad)}
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.96);display:none;align-items:flex-start;justify-content:center;flex-direction:column;gap:14px;z-index:20;padding:32px 20px 20px}
+  body.embed header .brand h1, body.embed header .brand .sub{display:none}
+  body.embed header{margin-bottom:8px}
+  body.embed .wrap{padding-top:10px}
+  @media (max-width:700px){
+    .wrap{padding:16px 10px 60px}
+    .card{padding:12px 12px 10px 14px}
+  }
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div style="font-family:'PP Grafier Display',serif;font-size:20px">Sign in to view Raydar status</div>
+  <div id="gsi"></div>
+  <div class="err" id="gateErr"></div>
+</div>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1>Status v2</h1>
+      <div class="sub">The two systems I rebuilt. Everything else is still on the old Status page.</div>
+    </div>
+    <button class="act" id="refresh">Refresh</button>
+  </header>
+
+  <div class="asof" id="asof"></div>
+  <div class="srcbox" id="srcbox" hidden></div>
+  <div class="todos" id="todos" style="display:none"></div>
+  <div id="cards"></div>
+  <div class="foot" id="foot"></div>
+</div>
+<script>
+const $=(id)=>document.getElementById(id);
+const params=new URLSearchParams(location.search);
+if(params.has("embed")) document.body.classList.add("embed");
+const AUTH={required:true,clientId:""};
+const SEEN_KEY="raydar_status_v2_last_seen";
+
+const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// A number that does not exist is an em dash. Never a zero (David's rule).
+const fmt=(n)=>n==null?"—":Number(n).toLocaleString("en-US");
+function ago(iso){
+  const ms=Date.now()-Date.parse(iso||"");
+  if(!isFinite(ms)||ms<0) return "—";
+  const m=Math.round(ms/60000);
+  if(m<1) return "just now";
+  if(m<60) return m+"m ago";
+  if(m<1440) return Math.floor(m/60)+"h ago";
+  return Math.floor(m/1440)+"d ago";
+}
+async function api(path){
+  const r=await fetch(path,{credentials:"same-origin"});
+  if(r.status===401||r.status===403){ showGate(); throw new Error("auth"); }
+  return r.json();
+}
+function seenAt(){ try{ return localStorage.getItem(SEEN_KEY); }catch{ return null; } }
+function markSeen(){ try{ localStorage.setItem(SEEN_KEY,new Date().toISOString()); }catch{} }
+
+// ── the flow diagram ─────────────────────────────────────────────────────────
+// Copied from the Status page's renderer: layered layout by graph depth, nodes
+// stacked inside a column, counts already resolved by the aggregator — a null
+// count draws "—", never zero. One addition: a node may carry a plain `note`
+// line (a caption such as "no-show, broke, too short"), which renders as a
+// small grey line under the label and never as a number.
+function wrapLabel(text,max,maxLines){
+  max=max||18; maxLines=maxLines||3;
+  const words=String(text||"").split(/\s+/).filter(Boolean);
+  const lines=[]; let cur="";
+  for(const w of words){
+    if(!cur) cur=w;
+    else if((cur+" "+w).length<=max) cur+=" "+w;
+    else { lines.push(cur); cur=w; }
+  }
+  if(cur) lines.push(cur);
+  if(lines.length>maxLines){ lines.length=maxLines; lines[maxLines-1]=lines[maxLines-1].slice(0,max-1)+"…"; }
+  return lines;
+}
+function clip(s,max){ s=String(s||""); return s.length>max?s.slice(0,max-1)+"…":s; }
+
+function drawFlow(flow){
+  const stages=flow.stages||[]; if(!stages.length) return "";
+  const edges=(flow.edges||[]).filter((e)=>Array.isArray(e)&&e.length===2);
+  const byId=new Map(stages.map((s)=>[s.id,s]));
+  const depth=new Map(stages.map((s)=>[s.id,0]));
+  for(let i=0;i<stages.length;i++){
+    let changed=false;
+    for(const [a,b] of edges){
+      if(!byId.has(a)||!byId.has(b)) continue;
+      if(depth.get(a)+1>depth.get(b)){ depth.set(b,depth.get(a)+1); changed=true; }
+    }
+    if(!changed) break;
+  }
+  const W=150,GX=54,PADX=6,PADY=6,VGAP=14;
+  const counted=Boolean(flow.counted);
+  const geo=new Map();
+  const TILE_H=20,TILE_GAP=4;
+  for(const s of stages){
+    const lines=wrapLabel(s.label);
+    let h;
+    if(s.tiles){
+      const headH=(s.kind==="pool"?30:8)+lines.length*13;
+      h=s.tiles.length ? headH+4+s.tiles.length*(TILE_H+TILE_GAP)+2 : headH+8;
+    } else {
+      const extra=(s.secondary?1:0)+(s.note?1:0)+((s.subcounts||[]).length);
+      h=counted ? 34+lines.length*13+extra*13+8 : 12+lines.length*14+12;
+    }
+    geo.set(s.id,{lines,h});
+  }
+  const cols=new Map();
+  for(const s of stages){ const d=depth.get(s.id); if(!cols.has(d)) cols.set(d,[]); cols.get(d).push(s.id); }
+  let maxBottom=0;
+  for(const [d,ids] of cols){
+    let y=PADY;
+    for(const id of ids){ const g=geo.get(id); g.x=PADX+d*(W+GX); g.y=y; y+=g.h+VGAP; }
+    maxBottom=Math.max(maxBottom,y-VGAP);
+  }
+  const maxD=Math.max(...stages.map((s)=>depth.get(s.id)));
+  const width=PADX*2+(maxD+1)*W+maxD*GX, height=maxBottom+PADY;
+  const parts=[];
+  for(const [a,b] of edges){
+    const ga=geo.get(a),gb=geo.get(b); if(!ga||!gb) continue;
+    const sx=ga.x+W, sy=ga.y+Math.min(24,ga.h/2), tx=gb.x-7, ty=gb.y+Math.min(24,gb.h/2);
+    const mx=(sx+tx)/2;
+    parts.push(`<path class="fedge" d="M${sx} ${sy} C ${mx} ${sy}, ${mx} ${ty}, ${tx} ${ty}" marker-end="url(#farrow)"/>`);
+  }
+  for(const s of stages){
+    const g=geo.get(s.id);
+    const hot=s.accent==="bad-when-positive"&&(s.count||0)>0;
+    const warm=s.accent==="warn-when-positive"&&(s.count||0)>0;
+    parts.push(`<g transform="translate(${g.x},${g.y})">`);
+    parts.push(`<rect class="fnode${hot?" hot":warm?" warm":""}" width="${W}" height="${g.h}" rx="10"/>`);
+    if(counted&&s.tiles){
+      let ty;
+      if(s.kind==="pool"){
+        const miss=s.count==null;
+        parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
+        ty=40;
+      } else { ty=18; }
+      for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
+      ty+=4;
+      for(const t of s.tiles){
+        const tHot=t.accent==="bad-when-positive"&&(t.count||0)>0;
+        const tWarm=t.accent==="warn-when-positive"&&(t.count||0)>0;
+        parts.push(`<rect class="ftile${tHot?" hot":tWarm?" warm":""}" x="8" y="${ty}" width="${W-16}" height="${TILE_H}" rx="6"/>`);
+        const full=fmt(t.count)+" "+t.label;
+        parts.push(`<text class="ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}" x="14" y="${ty+14}">${esc(clip(full,22))}<title>${esc(full)}</title></text>`);
+        ty+=TILE_H+TILE_GAP;
+      }
+    } else if(counted){
+      const miss=s.count==null;
+      parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
+      let ty=40;
+      for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
+      if(s.note){ parts.push(`<text class="fsub" x="12" y="${ty}">${esc(clip(s.note,24))}<title>${esc(s.note)}</title></text>`); ty+=13; }
+      if(s.secondary){ parts.push(`<text class="fsub" x="12" y="${ty}">${esc(fmt(s.secondary.count))} ${esc(clip(s.secondary.label,20))}</text>`); ty+=13; }
+      for(const sc of (s.subcounts||[])){
+        const full=fmt(sc.count)+" "+sc.label;
+        parts.push(`<text class="fsub" x="12" y="${ty}">${esc(clip(full,24))}<title>${esc(full)}</title></text>`); ty+=13;
+      }
+    } else {
+      let ty=Math.round(g.h/2-((g.lines.length-1)*14)/2)+4;
+      for(const line of g.lines){ parts.push(`<text class="flabel gen" x="${W/2}" y="${ty}" text-anchor="middle">${esc(line)}</text>`); ty+=14; }
+    }
+    parts.push(`</g>`);
+  }
+  return `<div class="floww"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img">`+
+    `<defs><marker id="farrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fhead"/></marker></defs>`+
+    parts.join("")+`</svg></div>`;
+}
+
+// ── the page ─────────────────────────────────────────────────────────────────
+const TAG_WORDS={"answered":"answered","no-signal":"no signal","never-registered":"never registered"};
+
+function renderSources(sources){
+  $("srcbox").innerHTML=(sources||[]).map((s)=>`<div class="srcrow">
+      <span class="nm">${esc(s.name)}</span>
+      <span class="tagpill tag-${esc(s.state)}">${esc(TAG_WORDS[s.state]||s.state)}</span>
+      <span class="dt">${esc(s.when||s.detail||"")}</span>
+    </div>`).join("");
+}
+
+function renderTodos(todos){
+  const box=$("todos");
+  box.style.display=(todos&&todos.length)?"flex":"none";
+  if(!todos||!todos.length){ box.innerHTML=""; return; }
+  box.innerHTML=`<div class="todohead">Only you can do these</div>`+todos.map((t,i)=>`<div class="todo">
+      <span class="tl">${esc(t.label)}</span>
+      <span class="td">${esc(t.detail||"")}</span>
+      ${t.command?`<button class="copy" data-cmd="${esc(t.command)}" id="copy-${i}">copy the command</button>`:""}
+    </div>`).join("");
+  box.querySelectorAll("button.copy").forEach((btn)=>{
+    btn.onclick=async()=>{
+      try{ await navigator.clipboard.writeText(btn.dataset.cmd); btn.textContent="copied"; }
+      catch{ btn.textContent="copy failed — "+btn.dataset.cmd; }
+    };
+  });
+}
+
+function renderStrip(strip){
+  if(!strip) return "";
+  if(strip.cannotTell){
+    return `<div class="stripbox"><div class="sl">${esc(strip.label)} · ${esc(strip.clock)}</div>
+      <div class="cannot">${esc(strip.cannotTell)}</div></div>`;
+  }
+  const items=(strip.items||[]).map((it)=>
+    `<span><b>${esc(fmt(it.value))}</b> ${esc(it.label)}${it.value==null&&it.step?` <span class="stepcap">(no publisher yet — ${esc(it.step)})</span>`:""}</span>`).join("");
+  const buckets=(strip.buckets||[]).filter((b)=>b.value!=null).map((b)=>`${esc(b.label)} <b>${esc(fmt(b.value))}</b>`).join(" · ");
+  return `<div class="stripbox">
+    <div class="sl">${esc(strip.label)} · ${esc(strip.clock)}${strip.when?` · ${esc(strip.when)}`:""}</div>
+    <div class="row">${items}${strip.link?`<a href="${esc(strip.link.href)}" target="_top">${esc(strip.link.label)} →</a>`:""}</div>
+    ${buckets?`<div class="buckets">${buckets}</div>`:""}
+    ${strip.sentence?`<div class="say">${esc(strip.sentence)}</div>`:""}
+    ${strip.alert?`<div class="alert">${esc(strip.alert)}</div>`:""}
+  </div>`;
+}
+
+function sinceLine(system,seen){
+  const events=system.events||[];
+  if(!seen){
+    const cut=Date.now()-24*3600*1000;
+    const recent=events.filter((e)=>Date.parse(e.at)>=cut).map((e)=>e.text);
+    return `First visit on this browser: showing the last 24 hours — ${recent.length?esc(recent.join(" · ")):"nothing moved"}`;
+  }
+  const cut=Date.parse(seen);
+  const fresh=events.filter((e)=>Date.parse(e.at)>cut).map((e)=>e.text);
+  return `Since you last looked (${esc(ago(seen))}): ${fresh.length?esc(fresh.join(" · ")):"nothing moved"}`;
+}
+
+function renderEvidence(system){
+  const rows=(system.evidence||[]).map((row)=>`<tr>
+      <td>${esc(row.label)}${row.sentence?`<div class="stepcap">${esc(row.sentence)}</div>`:""}</td>
+      <td class="num">${esc(fmt(row.value))}${row.value==null&&row.step?`<div class="stepcap">${esc(row.step)}</div>`:""}</td>
+      <td>${esc(row.endpoint||"not published yet")}</td>
+      <td><code>${esc(row.field||"—")}${row.code?` · ${esc(row.code)}`:""}</code></td>
+      <td>${esc(row.at?ago(row.at):"—")}</td>
+      <td>${esc(row.basis||"measured")}</td>
+    </tr>`).join("");
+  return `<div class="ev" id="ev-${esc(system.id)}" hidden><table>
+    <thead><tr><th>What it counts</th><th>Number</th><th>Where it comes from</th><th>Field</th><th>Age</th><th>Measured?</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function renderCard(system,seen){
+  const st=system.state||{};
+  const pending=(system.pending||[]);
+  const pendingNote=pending.length
+    ? pending.map((p)=>`${p.label}${p.note?` (${p.note})`:""}`).join(", ")
+      +" — no publisher yet, "+(pending[0].step||"a later step")+" brings it. An em dash is never a zero."
+    : "";
+  return `<section class="card tone-${esc(system.spineTone||"violet")}">
+    <div class="chead">
+      <div class="cname">${esc(system.name)}</div>
+      <span class="pill ${esc(st.tone||"violet")}"><span class="dot${st.pulse?" pulse":""}"></span>${esc(st.word||"")}</span>
+    </div>
+    <div class="csum">${esc(system.summary)}</div>
+    <div class="cap">${esc(st.caption||"")}</div>
+    ${st.lastGood?`<div class="lastgood">The last check that answered, ${esc(st.lastGood.age||"")} ago, said: ${esc(st.lastGood.word)}.</div>`:""}
+    ${system.warn?`<div class="warnchip">⚠ ${esc(system.warn)}</div>`:""}
+    ${system.incident?`<div class="incident">${esc(system.incident)}</div>`:""}
+    <div class="clock">${esc(system.clockLabel||"")}</div>
+    ${system.clockNote?`<div class="clocknote">${esc(system.clockNote)}</div>`:""}
+    ${system.flow?drawFlow(system.flow):""}
+    ${pendingNote?`<div class="fnote">${esc(pendingNote)}</div>`:""}
+    ${system.flowNote?`<div class="fnote">${esc(system.flowNote)}</div>`:""}
+    ${(system.chips||[]).map((c)=>`<div class="lanechip">${esc(c.word)} — ${esc(c.text)}</div>`).join("")}
+    ${(system.strips||[]).map(renderStrip).join("")}
+    <div class="since">${sinceLine(system,seen)}</div>
+    <div class="ages">
+      ${(system.ages||[]).map((a)=>`<span>${esc(a.name)} ${esc(a.age?a.age:TAG_WORDS[a.state]||"—")}</span>`).join("")}
+      <span class="sp"><button class="linkbtn" data-ev="${esc(system.id)}">where each number comes from</button></span>
+    </div>
+    ${renderEvidence(system)}
+  </section>`;
+}
+
+function render(data){
+  const seen=seenAt();
+  const a=data.asOf;
+  $("asof").innerHTML=(a
+    ? `<span>Data as of <b>${esc(a.when||"")}</b> · oldest: ${esc(a.sourceName)}</span>`
+    : `<span>No source has answered yet.</span>`)
+    +` <button class="linkbtn" id="srctoggle">sources</button>`;
+  renderSources(data.sources);
+  $("srctoggle").onclick=()=>{ $("srcbox").hidden=!$("srcbox").hidden; };
+  renderTodos(data.todos);
+  $("cards").innerHTML=(data.systems||[]).map((s)=>renderCard(s,seen)).join("");
+  $("cards").querySelectorAll("button[data-ev]").forEach((btn)=>{
+    btn.onclick=()=>{ const box=$("ev-"+btn.dataset.ev); box.hidden=!box.hidden; };
+  });
+  const f=data.footer||{};
+  $("foot").innerHTML=`<div class="fh">${esc(f.title||"")}</div>
+    <div>${esc(f.body||"")} ${f.link?`<a href="${esc(f.link.href)}" target="_top">${esc(f.link.label)} →</a>`:""}</div>`;
+  markSeen();
+}
+
+async function load(){
+  try{
+    const data=await api("/api/status-v2/state");
+    if(!data.ok){ $("asof").textContent="Could not load this page: "+(data.error||""); return; }
+    render(data);
+  }catch(e){ if(String(e.message)!=="auth") console.error(e); }
+}
+
+function showGate(){ $("gate").style.display="flex"; }
+async function init(){
+  const cfg=await fetch("/api/auth/config",{credentials:"same-origin"}).then((r)=>r.json()).catch(()=>({}));
+  AUTH.required=cfg.authRequired!==false; AUTH.clientId=cfg.clientId||"";
+  if(!AUTH.required){ load(); setInterval(load,60000); return; }
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(session?.authenticated){ $("gate").style.display="none"; load(); setInterval(load,60000); return; }
+  showGate();
+  (function start(){
+    if(!(window.google&&google.accounts&&google.accounts.id)) return setTimeout(start,150);
+    google.accounts.id.initialize({client_id:AUTH.clientId,callback:onCred});
+    google.accounts.id.renderButton($("gsi"),{theme:"filled_black",size:"large",text:"signin_with",shape:"pill"});
+  })();
+}
+async function onCred(resp){
+  try{
+    await RaydarAuth.signIn(resp.credential);
+    $("gate").style.display="none"; load(); setInterval(load,60000);
+  }catch(e){ $("gateErr").textContent="Sign-in failed. Try again."; }
+}
+$("refresh").onclick=load;
+init();
+</script>
+</body>
+</html>
