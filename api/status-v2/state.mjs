@@ -307,10 +307,14 @@ export function postCallStateFrom({ health, nowMs }) {
 
 /** The applicant card's state. "Not running" needs a second witness (R17). */
 export function applicantStateFrom({ pipeline, counts, nowMs }) {
-  const pipelineAt = isoOrNull(pipeline?.generatedAt);
-  const feedAt = isoOrNull(counts?.updatedAt);
-  const publishAt = pipelineAt || feedAt;
-  const publishSource = pipelineAt ? "the pipeline's publish" : "the tab's own feed";
+  // ONE clock (R2): this card states the applicant PIPELINE publisher's
+  // condition, so it may only ever read that publisher's stamp. The Applicants
+  // tab's own feed is a different system on a different clock; borrowing its
+  // updatedAt made the card say "Sending" for a publisher that has never run,
+  // and made it quote a 3-minute cadence on the strength of someone else's
+  // timestamp. The tab feed's age belongs to the Applicants-tab strip alone.
+  const publishAt = isoOrNull(pipeline?.generatedAt);
+  const publishSource = "the pipeline's publish";
   const laneEnabled = typeof pipeline?.laneEnabled === "boolean" ? pipeline.laneEnabled : null;
   const stopReason = typeof pipeline?.stopReason === "string" && pipeline.stopReason.trim()
     ? pipeline.stopReason.trim() : null;
@@ -322,7 +326,7 @@ export function applicantStateFrom({ pipeline, counts, nowMs }) {
   if (!publishAt) {
     return {
       ...base, stateId: "cannot-tell", reason: "never-published",
-      caption: "nothing has ever published, so I cannot tell whether it is on",
+      caption: "the applicant pipeline has never published here (its publisher arrives in step 3), so I cannot tell whether it is on",
     };
   }
   const ageMs = msSince(publishAt, nowMs);

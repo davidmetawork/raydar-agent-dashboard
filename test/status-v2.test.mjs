@@ -371,6 +371,34 @@ test("R6 a future-dated publish is never fresh, on either clock", () => {
   assert.match(tick.caption, /stamped 30m in the future/);
 });
 
+test("R2 the applicant card reads only the pipeline's own clock, never the tab feed's", () => {
+  // (a) a fresh tab feed must not make a publisher that has never run green
+  const never = applicantStateFrom({
+    pipeline: { laneEnabled: true, captured: 5 },
+    counts: countsDoc({ updatedAt: iso(60e3) }), nowMs: NOW,
+  });
+  assert.equal(never.stateId, "cannot-tell");
+  assert.equal(never.reason, "never-published");
+  assert.equal(never.publishAt, null);
+  assert.match(never.caption, /has never published here/);
+  assert.doesNotMatch(never.caption, /tab's own feed/);
+
+  // (b) an old tab feed must not make the page quote the pipeline's cadence
+  const stale = applicantStateFrom({
+    pipeline: null, counts: countsDoc({ updatedAt: iso(4 * 3600e3 + 12 * 60e3) }), nowMs: NOW,
+  });
+  assert.equal(stale.reason, "never-published");
+  assert.doesNotMatch(stale.caption, /every 3 minutes/);
+  assert.doesNotMatch(stale.caption, /4h 12m/);
+
+  // the sources expander is the honest place for that fact, and already says it
+  const only = applicantStateFrom({
+    pipeline: pipelineFixture({ generatedAt: iso(90e3), laneEnabled: true }), counts: null, nowMs: NOW,
+  });
+  assert.equal(only.stateId, "sending");
+  assert.match(only.caption, /from the pipeline's publish/);
+});
+
 // ── R7: plain words only, from one constant ─────────────────────────────────
 
 test("R7 the five words are the only state vocabulary, and nothing borrows jargon", () => {
