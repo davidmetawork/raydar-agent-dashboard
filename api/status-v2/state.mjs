@@ -59,10 +59,18 @@ export const PIPELINE_KEY = "apphub:pipeline";
 export const WATCHDOG_LANE_ID = "gha-post-call-watchdog";
 
 // ── small shared helpers (ported from api/status/state.mjs) ─────────────────
+// Only a number, or a string that is one, is a published number. Everything
+// else — null, a boolean, an object, an array, "" — is NOT a value (R5).
+// Booleans matter here: Number(false) is 0 and Number(true) is 1, so a
+// wrong-typed `confirmed: false` would otherwise paint a real "0" in a box,
+// which is the exact fake zero this page exists to forbid.
 const finiteOrNull = (value) => {
-  if (value == null || typeof value === "object" || value === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 };
 
 /** Walk a dotted path; return a finite number or null. Never throws. */

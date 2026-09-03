@@ -259,6 +259,10 @@ test("R5 null, empty and wrong-typed payloads resolve to null and never throw", 
     {}, null, undefined, { funnel: null }, { funnel: [] }, { funnel: "nope" },
     { funnel: { callsSeen: "abc", byState: {} } },
     { funnel: { callsSeen: [], byState: [{ code: 1, label: 2, count: "x" }] } },
+    // booleans are not numbers: Number(false) is 0, and a "0" in a box that
+    // nobody published is the fake zero R5 exists to forbid.
+    { funnel: { callsSeen: false, confirmed: true, byState: [{ code: "x", count: true }] } },
+    { pipeline: { captured: false, identified: true, holdsTotal: false } },
     { pipeline: { holdsByReason: "not-a-list", captured: {} } },
     { pipeline: [] },
   ];
@@ -272,6 +276,15 @@ test("R5 null, empty and wrong-typed payloads resolve to null and never throw", 
     }
   }
   assert.equal(resolvePath(null, "a.b"), null);
+  assert.equal(resolvePath({ a: { b: false } }, "a.b"), null, "false is not a published zero");
+  assert.equal(resolvePath({ a: { b: true } }, "a.b"), null, "true is not a published one");
+  assert.equal(resolvePath({ a: { b: 0 } }, "a.b"), 0, "a real zero survives");
+  assert.equal(resolvePath({ a: { b: "12" } }, "a.b"), 12);
+  const booleanPool = flowFor(SYSTEMS[0], {
+    funnel: { callsSeen: false, confirmed: true, byState: [{ code: "review_identity", count: false }] },
+  }, { nowMs: NOW });
+  const boolPool = booleanPool.flow.stages.find((s) => s.id === "waiting-person");
+  assert.deepEqual(boolPool.tiles, [], "a boolean bucket count became a tile");
   assert.equal(resolvePath({ a: { b: "" } }, "a.b"), null);
   assert.equal(resolveList({ a: { b: {} } }, "a.b"), null);
 });
