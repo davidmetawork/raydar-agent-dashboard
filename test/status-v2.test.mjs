@@ -465,6 +465,21 @@ test("R9 every to-do rule is David-only, and the strip hides when nothing fires"
   assert.match(page, /navigator\.clipboard\.writeText/);
 });
 
+test("R9 a page that cannot tell always offers the one check only David can run", async () => {
+  // nothing published at all — a KV outage, or the state before the first sync
+  const blank = await build({ apphub: { getJson: async () => null } });
+  const applicant = systemOf(blank, "applicant");
+  assert.equal(applicant.state.word, STATE_WORDS["cannot-tell"]);
+  assert.deepEqual(blank.todos.map((t) => t.id), ["applicant-job-unclear"]);
+  assert.match(blank.todos[0].command, /^launchctl list \| grep /);
+
+  // and a skewed clock is a silence David can check the same way
+  const skewed = await build({
+    apphub: fakeApphub({ counts: countsDoc(), pipeline: pipelineFixture({ generatedAt: iso(-3 * 3600e3), laneEnabled: true }) }),
+  });
+  assert.deepEqual(skewed.todos.map((t) => t.id), ["applicant-job-unclear"]);
+});
+
 // ── R10: per-source "as of", oldest wins the headline ───────────────────────
 
 test("R10 the headline stamp is the oldest source that answered, and names it", async () => {

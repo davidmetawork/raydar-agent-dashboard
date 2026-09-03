@@ -280,10 +280,15 @@ export const TODO_RULES = [
     id: "applicant-job-unclear",
     onlyDavid: true,
     label: "Check whether the applicant pipeline job is running on your Mac, then reload it or tell me it is paused on purpose.",
-    detail: "Nothing has published for a while and no stop reason was recorded, so I cannot tell a planned stop from a crash.",
+    detail: "Nothing has published that this page can read, and no stop reason was recorded, so I cannot tell a planned stop from a crash.",
     // It only reads: this command says what is true, it changes no job.
     command: "launchctl list | grep com.raydar.applicant-core",
-    when: (ctx) => ctx?.applicant?.stateId === "cannot-tell" && ctx?.applicant?.reason === "stale-publish",
+    // Both silences, not just the stale one: when NOTHING has ever published
+    // (a KV outage, or the state before the first publish) the card also says
+    // Cannot tell, and an empty to-do strip beside it would tell David there
+    // is nothing he can do about the one thing only he can check.
+    when: (ctx) => ctx?.applicant?.stateId === "cannot-tell"
+      && ["stale-publish", "never-published", "clock-skew"].includes(ctx?.applicant?.reason),
   },
   {
     id: "applicant-invite-lane",
