@@ -844,10 +844,42 @@ test("Status v2 is wired into every dashboard registry, and touches no other tab
   assert.equal(vercel.functions["api/status-v2/*.mjs"].maxDuration, 30);
 });
 
-test("the watchdog beat lane is still unregistered, which is why the page names it", async () => {
+test("the watchdog beat lane is registered, and the page reports a real read of it", async () => {
   const { byId } = await import("../api/health/_lib/catalog.mjs");
-  assert.equal(byId.get(WATCHDOG_LANE_ID), undefined,
-    "the beat catalog now has this lane — update the source's copy and this test together");
+  const lane = byId.get(WATCHDOG_LANE_ID);
+  assert.ok(lane, "the beat catalog lost this lane — update the source's copy and this test together");
+  assert.equal(lane.kind, "beat");
+
+  // registered and beating: the row answers, with the beat's own age
+  const beating = await build({
+    healthCatalog: byId,
+    beatRead: async () => ({ at: iso(4 * 60e3), status: "ok" }),
+  });
+  const row = beating.sources.find((s) => s.id === "watchdog-beat");
+  assert.equal(row.state, "answered");
+  assert.equal(row.age, "4m");
+  assert.match(row.when, /^4m ago \(\d+:\d\d [ap]m PT\)$/);
+
+  // registered, warning: the lane's own word, never recoloured into a state
+  const warning = await build({
+    healthCatalog: byId,
+    beatRead: async () => ({ at: iso(60e3), status: "warn" }),
+  });
+  assert.match(warning.sources.find((s) => s.id === "watchdog-beat").detail, /reported: warn/);
+
+  // registered but silent, and a KV read that throws: both are "no signal",
+  // never "answered" and never a claim that the watchdog is down
+  for (const beatRead of [async () => null, async () => { throw new Error("kv gone"); }]) {
+    const silent = await build({ healthCatalog: byId, beatRead });
+    const quiet = silent.sources.find((s) => s.id === "watchdog-beat");
+    assert.equal(quiet.state, "no-signal");
+    assert.equal(quiet.at, null);
+    assert.match(quiet.detail, /registered, but this dashboard holds no check-in/);
+  }
+
+  // and an empty catalog still says the check-in is rejected outright
+  const unregistered = await build({ healthCatalog: new Map() });
+  assert.equal(unregistered.sources.find((s) => s.id === "watchdog-beat").state, "never-registered");
 });
 
 test("times on the surface are an age plus one Pacific clock, never a bare stamp", () => {

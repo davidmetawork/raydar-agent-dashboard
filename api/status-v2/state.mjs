@@ -24,6 +24,7 @@
 //   - applicant bucket labels come only from the payload (R14).
 import { cors, requireAuth } from "../seq/_lib/core.mjs";
 import { byId as healthById } from "../health/_lib/catalog.mjs";
+import { hGet as healthKvGet, K as HEALTH_K } from "../health/_lib/kv.mjs";
 import { getJson as apphubGetJson, K as APPHUB } from "../applicants/_lib/kv.mjs";
 import { upstream as postCallUpstream, config as postCallConfig } from "../post-call/review.mjs";
 import { vGet, vSet, K, MEMO_TTL_S, RING_TTL_S } from "./_lib/kv.mjs";
@@ -53,10 +54,18 @@ const EVENT_CAP = 25;
 // from the `pipeline` field of the Core publish; absent until that publisher
 // ships, which the page renders as "no publisher yet" rather than as zeroes.
 export const PIPELINE_KEY = "apphub:pipeline";
-// The beat lane the post-call watchdog POSTs to every 10 minutes. It is not in
-// the beat catalog, so the beat is rejected and the source has never once
-// answered — the page says exactly that (PRD §5.1).
+// The beat lane the post-call watchdog POSTs to every 10 minutes. Whether it
+// is in the beat catalog decides whether its check-in is accepted at all, so
+// the page reports three different things and never guesses between them:
+// unregistered (the sink 404s it), registered but never heard from, or the
+// age of the beat this dashboard actually holds (PRD §5.1).
 export const WATCHDOG_LANE_ID = "gha-post-call-watchdog";
+
+/** The last beat this dashboard holds for a lane, from our own KV. Never
+ *  throws and never fetches when KV is unconfigured. */
+export async function readBeat(lane) {
+  try { return await healthKvGet(HEALTH_K.beat(lane)); } catch { return null; }
+}
 
 // ── small shared helpers (ported from api/status/state.mjs) ─────────────────
 // Only a number, or a string that is one, is a published number. Everything
@@ -555,6 +564,7 @@ export async function buildState({
   upstreamImpl = postCallUpstream,
   postCallReady = null,
   healthCatalog = healthById,
+  beatRead = readBeat,
   systems = SYSTEMS,
 } = {}) {
   const configured = postCallReady == null
@@ -569,6 +579,7 @@ export async function buildState({
     tolerant(apphub.getJson(APPHUB.counts)),
     tolerant(apphub.getJson(PIPELINE_KEY)),
   ]);
+  const watchdogBeat = await tolerant(Promise.resolve().then(() => beatRead(WATCHDOG_LANE_ID)));
 
   // 2. Refresh whatever is stale. A warm page view fetches nothing at all.
   const [health, metrics, funnel] = await Promise.all([
@@ -630,7 +641,19 @@ export async function buildState({
       ? { state: "answered", at: isoOrNull(pipeline.generatedAt), endpoint: "the applicant pipeline publish" }
       : { state: "never-registered", at: null, endpoint: "the applicant pipeline publish", detail: "no publisher yet — it arrives in step 3" },
     "watchdog-beat": watchdogRegistered
-      ? { state: "no-signal", at: null, endpoint: "the Monitor's beat sink", detail: "registered, but no beat has been read here" }
+      ? (isoOrNull(watchdogBeat?.at)
+        ? {
+          state: "answered",
+          at: isoOrNull(watchdogBeat.at),
+          endpoint: "the Monitor's beat sink",
+          detail: watchdogBeat.status && watchdogBeat.status !== "ok"
+            ? `its last check-in reported: ${String(watchdogBeat.status)}`
+            : "it checks in every 10 minutes",
+        }
+        : {
+          state: "no-signal", at: null, endpoint: "the Monitor's beat sink",
+          detail: "the lane is registered, but this dashboard holds no check-in from it",
+        })
       : { state: "never-registered", at: null, endpoint: "the Monitor's beat sink", detail: "the watchdog's check-in is rejected because this lane is not in the beat catalog — step 2" },
   };
   const sources = SOURCES.map((s) => {
