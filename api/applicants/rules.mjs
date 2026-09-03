@@ -14,8 +14,17 @@ import { randomUUID } from "node:crypto";
 
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { getJson, hashGetAllJson, hashGetMany, K, kvConfigured, setJson } from "./_lib/kv.mjs";
+import {
+  generationManifest,
+  interviewDecisionAllowed,
+  interviewDecisionHold,
+  readActivePublication,
+  readPublishedArtifacts,
+  verifyGeneration,
+} from "./_lib/generation.mjs";
 import { FIELD_GROUPS, evaluateRule, fieldCatalog, inScope, normalizeRule } from "./_lib/rules.mjs";
 import { DEGREE_LEVELS, DEGREE_LEVEL_LABELS } from "./_lib/degree.mjs";
+import { requireApplicantMutation } from "./_lib/request-safety.mjs";
 import {
   MAX_RULES,
   MAX_VERSIONS,
@@ -37,8 +46,11 @@ const clean = (value) => String(value ?? "").trim();
 export function createRulesHandler({
   corsHandler = cors,
   authHandler = requireAuth,
+  mutationAuthHandler = requireApplicantMutation,
   kvReady = kvConfigured,
   readJson = getJson,
+  readActive = () => readActivePublication({ readJson }),
+  readArtifacts = (pointer) => readPublishedArtifacts(pointer, { readJson }),
   writeJson = setJson,
   readHash = hashGetAllJson,
   readMany = hashGetMany,
@@ -54,12 +66,9 @@ export function createRulesHandler({
    * evaluateRule the tick uses — a preview that could disagree with the
    * engine would be worse than no preview.
    */
-  async function runAgainstQueue(rule) {
-    const [queueDoc, decisions] = await Promise.all([
-      readJson(K.queue),
-      readHash(K.decisions),
-    ]);
-    const rows = pendingRows(queueDoc?.rows ?? [], decisions);
+  async function runAgainstQueue(rule, artifacts) {
+    const decisions = await readHash(K.decisions);
+    const rows = pendingRows(artifacts?.queue?.rows ?? [], decisions);
     const scoped = rows.filter((row) => inScope(rule, row));
     const facts = await factsFor(scoped.map((row) => row.profileKey || row.cuId), { readMany });
 
@@ -67,15 +76,30 @@ export function createRulesHandler({
     const skipped = {};
     for (const row of scoped) {
       const result = evaluateRule(rule, { row, facts: facts[row.profileKey || row.cuId] ?? null });
-      if (result.matched) matched.push({ row, evidence: result.evidence });
+      if (result.matched && rule.action === "interview" && !interviewDecisionAllowed(row)) {
+        const hold = interviewDecisionHold(row) || "hard_hold";
+        skipped[hold] = (skipped[hold] ?? 0) + 1;
+      } else if (result.matched) matched.push({ row, evidence: result.evidence });
       else if (result.skipped) skipped[result.reason] = (skipped[result.reason] ?? 0) + 1;
     }
-    return { pending: rows.length, considered: scoped.length, matched, skipped };
+    return {
+      pending: rows.length,
+      considered: scoped.length,
+      matched,
+      skipped,
+      generation: artifacts.pointer,
+      manifest: generationManifest(rows),
+    };
   }
 
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
-    if (!(await authHandler(req, res))) return;
+    if (req.method !== "GET" && req.method !== "POST") {
+      return res.status(405).json({ ok: false, error: "GET or POST only" });
+    }
+    if (req.method === "GET") {
+      if (!(await authHandler(req, res))) return;
+    } else if (!(await mutationAuthHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
     res.setHeader("Cache-Control", "no-store");
 
@@ -83,6 +107,7 @@ export function createRulesHandler({
       if (req.method === "GET") {
         const doc = await loadRules();
         const stats = await readHash(K.rulestats).catch(() => ({}));
+        const publication = await readActive();
         // Directories are thousands of entries; the list view does not need
         // them, only the editor does.
         const directories = clean(req.query?.with) === "directories"
@@ -99,11 +124,15 @@ export function createRulesHandler({
           catalog: fieldCatalog(),
           groups: FIELD_GROUPS,
           degreeLevels: DEGREE_LEVELS.map((id) => ({ id, label: DEGREE_LEVEL_LABELS[id] })),
+          ...(publication ? {
+            generation: {
+              generationId: publication.generationId,
+              digest: publication.digest,
+            },
+          } : {}),
           ...(directories ? { directories } : {}),
         });
       }
-
-      if (req.method !== "POST") return res.status(405).json({ ok: false, error: "GET or POST only" });
 
       let body;
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
@@ -114,15 +143,33 @@ export function createRulesHandler({
 
       // ── preview: never touches stored state ──────────────────────────────
       if (op === "preview") {
+        const publication = await readActive();
+        if (!publication) return res.status(503).json({ ok: false, error: "generation_unavailable" });
+        if (String(body.generationId || "") !== publication.generationId
+          || String(body.generationDigest || "") !== publication.digest) {
+          return res.status(409).json({
+            ok: false,
+            error: "generation_changed_refresh_required",
+            generationId: publication.generationId,
+            generationDigest: publication.digest,
+          });
+        }
+        const artifacts = await readArtifacts(publication);
+        if (!artifacts || !verifyGeneration(artifacts).ok) {
+          return res.status(503).json({ ok: false, error: "generation_unavailable" });
+        }
         const normalized = normalizeRule(body.rule, { now, by });
         if (!normalized.ok) return res.status(400).json({ ok: false, error: "rule_invalid", detail: normalized.error });
-        const run = await runAgainstQueue(normalized.rule);
+        const run = await runAgainstQueue(normalized.rule, artifacts);
         return res.status(200).json({
           ok: true,
           pending: run.pending,
           considered: run.considered,
           matched: run.matched.length,
           skipped: run.skipped,
+          generationId: publication.generationId,
+          generationDigest: publication.digest,
+          manifest: run.manifest,
           samples: run.matched.slice(0, PREVIEW_SAMPLES).map(({ row, evidence }) => ({
             key: row.key, name: row.name, roleTitle: row.roleTitle, evidence,
           })),

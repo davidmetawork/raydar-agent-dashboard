@@ -36,6 +36,9 @@
   const viewIsRules = () => { const s = pageState(); return !!s && s.view === "rules"; };
   const enc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const field = (name) => state.catalog.find((f) => f.name === name) || null;
+  const applicantGeneration = () => typeof window.RaydarApplicantsGeneration === "function"
+    ? window.RaydarApplicantsGeneration()
+    : {};
   /* Directory first (it tracks renames), then the labels the rule was saved
      with, then the bare id. The middle step is what keeps a rule readable when
      it names a school the prewarm has not reached yet. */
@@ -193,6 +196,8 @@
     state.groups = payload.groups || [];
     state.degreeLevels = payload.degreeLevels || [];
     state.directories = payload.directories || { schools: {}, companies: {} };
+    const page = pageState();
+    if (page && payload.generation) page.generation = payload.generation;
     state.loaded = true;
   }
 
@@ -270,10 +275,10 @@
       '<div class="rules-head">' +
         '<div class="grow">' +
           "<h2>Rules run only when you press this button</h2>" +
-          "<p>Run rules now checks every pending C-tier and unrated applicant in one pass. A Live rule can press Interview or Pass; a Watching rule only counts matches. " +
-          "It never touches the S/A/B stream, and it never overrules a decision a person already made. " +
-          "<b>About 44% of this queue has no work or education history in Paraform at all</b> — " +
-          "no rule can reach those people, so education and experience rules will always skip them.</p>" +
+          "<p>Run rules now checks every undecided applicant in the published review queue in one pass. A Live rule can press Interview or Pass; a Watching rule only counts matches. " +
+          "It includes every tier and never overrules a decision a person already made. " +
+          "<b>Some applicants have no work or education history in the provider profile</b> — " +
+          "history conditions skip them, while application conditions still work.</p>" +
         "</div>" +
         '<div class="rules-actions">' +
           '<button class="killswitch' + (state.pausedAll ? " on" : "") + '" id="rulesPause">' +
@@ -375,7 +380,7 @@
       let options = [];
       if (f.kind === "levels") options = state.degreeLevels.map((l) => [l.id, l.label]);
       else if (f.kind === "ranks") options = ["S", "A", "B", "C"].map((r) => [r, r + " tier"]);
-      else if (f.kind === "tiers") options = [["C", "C tier"], ["unrated", "Unrated"]];
+      else if (f.kind === "tiers") options = ["S", "A", "B", "C"].map((r) => [r, r + " tier"]).concat([["unrated", "Unrated"]]);
       else if (f.picker === "schools") options = Object.entries(state.directories.schools);
       else if (f.picker === "companies") options = Object.entries(state.directories.companies);
       else if (f.picker === "roles") options = roleOptions();
@@ -519,7 +524,7 @@
     state.previewing = true;
     repaintPreview();
     try {
-      state.preview = await api({ op: "preview", rule: draft });
+      state.preview = await api({ op: "preview", rule: draft, ...applicantGeneration() });
     } catch { state.preview = null; }
     state.previewing = false;
     repaintPreview();
@@ -680,7 +685,7 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: "{}",
+        body: JSON.stringify(applicantGeneration()),
       });
       const payload = await response.json().catch(() => ({}));
       if (response.status === 401 || response.status === 403) {
@@ -802,10 +807,15 @@
         try {
           // Re-writes the same decision with the reason attached. The record is
           // already saved, so a failure here loses the reason and nothing else.
+          const page = pageState();
+          const existing = page?.local?.[key] || page?.decisions?.[key] || {};
           await fetch("/api/applicants/decision", {
             method: "POST", credentials: "same-origin",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ key, action: "pass", reason, name: row && row.name, roleTitle: row && row.roleTitle }),
+            body: JSON.stringify({ key, action: "pass", reason, ...applicantGeneration(),
+              requestId: existing.requestId, inputRevision: row?.inputRevision,
+              readinessRevision: row?.readinessRevision, decisionRevision: row?.decisionRevision,
+              name: row && row.name, roleTitle: row && row.roleTitle }),
           });
         } catch { /* the pass itself already stands */ }
       };

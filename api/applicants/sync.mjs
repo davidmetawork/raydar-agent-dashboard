@@ -12,16 +12,32 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { directoryFromFacts, factsFromProfile } from "./_lib/facts.mjs";
-import { profileCacheGate } from "./_lib/profile-readiness.mjs";
+import {
+  buildGeneration,
+  coreGenerationDigest,
+  publishGeneration,
+  readActivePublication,
+  readPublishedArtifacts,
+  validDigest,
+  validGenerationId,
+} from "./_lib/generation.mjs";
+import {
+  activeSourceProfileReceiptMismatches,
+  profileCacheSummary,
+  profilePreparingCount,
+} from "./_lib/profile-readiness.mjs";
 import {
   getJson,
   hashDelMany,
   hashGetAllJson,
+  hashGetMany,
   hashKeys,
   hashSetJson,
   K,
+  compareAndSetJson,
   kvConfigured,
   PROFILE_TTL_SECONDS,
+  setJsonIfAbsent,
   setJson,
   validKey,
 } from "./_lib/kv.mjs";
@@ -37,7 +53,26 @@ export const MAX_SNAPSHOT_BYTES = 1_800_000;
 // envelope, acks, and normal request growth.
 const MAX_QUEUE_BYTES = 3_000_000;
 const MAX_PUBLISH_BYTES = 4_000_000;
-const ACK_STATUSES = new Set(["invited", "blocked"]);
+// Delivery is a separate state machine. `blocked` and `invited` are retained
+// for the existing loop; the preparation states make a saved Interview intent
+// visible without pretending that delivery has already happened.
+const ACK_STATUSES = new Set([
+  "requested",
+  "preparing_identity",
+  "preparing_role_agent",
+  "ready_to_schedule",
+  "scheduler_verified",
+  "ready_to_email",
+  "mailroom_accepted",
+  "sendgrid_delivered",
+  "waiting_for_provider",
+  "identity_review",
+  "recipient_review",
+  "delivery_review",
+  "cannot_contact",
+  "invited",
+  "blocked",
+]);
 import {saveApplicantAck} from './_lib/request-safety.mjs';
 
 function authed(req) {
@@ -78,6 +113,9 @@ export function normalizeAcks(input, now = () => new Date().toISOString()) {
       ...(record?.requestId ? {requestId:String(record.requestId).slice(0,80)} : {}),
       ...(record?.reason ? { reason: String(record.reason).slice(0, 200) } : {}),
       ...(record?.inviteId ? { inviteId: String(record.inviteId).slice(0, 100) } : {}),
+      ...(record?.deliveryState ? { deliveryState: String(record.deliveryState).slice(0, 60) } : {}),
+      ...(record?.generationId ? { generationId: String(record.generationId).slice(0, 128) } : {}),
+      ...(record?.generationDigest ? { generationDigest: String(record.generationDigest).slice(0, 64) } : {}),
     };
   }
   return { ok: true, acks };
@@ -98,7 +136,106 @@ export function normalizeAcks(input, now = () => new Date().toISOString()) {
 export const CU_RE = /^[a-z0-9]{10,40}$/i;
 export const PROFILE_KEY_RE = /^(?:[a-z0-9]{10,40}|core:[a-z0-9]{10,64})$/i;
 export const MAX_PROFILE_BYTES = 30_000;
+export const MAX_SOURCE_PROFILE_RECEIPT_QUERY_KEYS = 2_000;
 const PHOTO_URL_PREFIX = "https://storage.googleapis.com/paraform-images/";
+
+function own(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+/**
+ * Core is the source of the publication identity.  Do not accept the former
+ * top-level or artifact-local fallbacks: they let Monitor mint a generation
+ * that Core cannot fence.  Null high-water marks are explicit values; absent
+ * fields are a malformed generation contract.
+ */
+export function normalizeCoreGeneration(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, error: "generation_required" };
+  }
+  const id = input.id;
+  const digest = input.digest;
+  if (!validGenerationId(id) || !validDigest(digest)) {
+    return { ok: false, error: "generation_invalid" };
+  }
+  if (!own(input, "sourceCutoff") || !own(input, "sourceWatermark")) {
+    return { ok: false, error: "generation_high_watermark_required" };
+  }
+  return {
+    ok: true,
+    id,
+    digest,
+    sourceCutoff: input.sourceCutoff ?? null,
+    sourceWatermark: input.sourceWatermark ?? null,
+  };
+}
+
+const CONSERVED_COUNT_ALIASES = {
+  total: ["total", "rowCount", "totalRows", "rows"],
+  stream: ["stream", "streamCount"],
+  queue: ["queue", "queueCount"],
+  profilePreparing: ["profilePreparing", "profilePreparingCount", "preparing", "preparingCount"],
+};
+
+function countValue(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function firstCount(sources, aliases) {
+  for (const source of sources) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const alias of aliases) {
+      if (own(source, alias)) return countValue(source[alias]);
+    }
+  }
+  return null;
+}
+
+/**
+ * Core's conserved population is a publication input, not a count Monitor
+ * derives from whichever arrays survived serialization.  Require the four
+ * declared dimensions, then prove they describe the exact payload received.
+ * The aliases keep the boundary readable while Core moves from rowCount/
+ * queueCount naming to the public total/queue/stream contract.
+ */
+export function normalizeConservedCounts(snapshot, queue, explicitCounts = null) {
+  const snapshotCounts = snapshot?.counts;
+  const sources = [
+    explicitCounts,
+    snapshot?.conservedCounts,
+    snapshotCounts?.conserved,
+    snapshotCounts,
+    snapshot,
+  ];
+  const declared = Object.fromEntries(Object.entries(CONSERVED_COUNT_ALIASES)
+    .map(([key, aliases]) => [key, firstCount(sources, aliases)]));
+  const hasPreparing = sources.some((source) => source && typeof source === "object"
+    && !Array.isArray(source)
+    && CONSERVED_COUNT_ALIASES.profilePreparing.some((alias) => own(source, alias)))
+    || own(snapshot || {}, "profilePreparing");
+  if (declared.profilePreparing == null && own(snapshot || {}, "profilePreparing")) {
+    // Core may publish the immutable preparing partition as rows rather than
+    // repeating its length in the count object.  Count that partition once;
+    // it remains part of the exact snapshot and is never dynamically filtered.
+    declared.profilePreparing = profilePreparingCount(snapshot);
+  }
+  if (!hasPreparing) declared.profilePreparing = null;
+
+  const missing = Object.keys(declared).filter((key) => declared[key] == null);
+  if (missing.length) return { ok: false, error: "conserved_counts_required", missing };
+
+  const actual = {
+    stream: Array.isArray(snapshot?.stream) ? snapshot.stream.length : 0,
+    queue: Array.isArray(queue) ? queue.length : 0,
+    profilePreparing: profilePreparingCount(snapshot),
+  };
+  actual.total = actual.stream + actual.queue + actual.profilePreparing;
+  const mismatches = Object.keys(actual).filter((key) => declared[key] !== actual[key]);
+  if (mismatches.length) {
+    return { ok: false, error: "conserved_counts_mismatch", expected: actual, declared };
+  }
+  return { ok: true, ...declared };
+}
 
 export function normalizeProfiles(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -126,18 +263,37 @@ export function normalizeSourceProfiles(input) {
     return { ok: false, badKey: null };
   }
   const profiles = {};
+  const sourceHistoryStates = new Set(["data", "verified_empty"]);
   for (const [rawKey, profile] of Object.entries(input)) {
     const key = String(rawKey || "").trim();
-    const hasHistory = Array.isArray(profile?.experiences) && profile.experiences.length > 0
-      || Array.isArray(profile?.education) && profile.education.length > 0;
+    const sourceObservationId = String(
+      profile?.sourceObservationId
+      ?? profile?.source_observation_id
+      ?? profile?.sourceObservation?.id
+      ?? "",
+    ).trim();
+    const historyState = String(
+      profile?.historyState
+      ?? profile?.profileHistoryState
+      ?? profile?.history_state
+      ?? "",
+    ).trim().toLowerCase();
+    const hasHistory = (Array.isArray(profile?.experiences) && profile.experiences.length > 0)
+      || (Array.isArray(profile?.education) && profile.education.length > 0);
+    const normalizedProfile = profile && typeof profile === "object" && !Array.isArray(profile)
+      ? { ...profile, profileSource: "applicant_hub", historyState, sourceObservationId }
+      : profile;
     if (!PROFILE_KEY_RE.test(key)
       || !profile || typeof profile !== "object" || Array.isArray(profile)
       || profile.profileSource !== "applicant_hub"
-      || !hasHistory
-      || Buffer.byteLength(JSON.stringify(profile)) > MAX_PROFILE_BYTES) {
+      || !sourceObservationId || sourceObservationId.length > 256
+      || /[\u0000-\u001f\u007f]/.test(sourceObservationId)
+      || !sourceHistoryStates.has(historyState)
+      || (historyState === "verified_empty" && hasHistory)
+      || Buffer.byteLength(JSON.stringify(normalizedProfile)) > MAX_PROFILE_BYTES) {
       return { ok: false, badKey: key || null };
     }
-    profiles[key] = profile;
+    profiles[key] = normalizedProfile;
   }
   return { ok: true, profiles, photos: {} };
 }
@@ -168,6 +324,9 @@ export function cardFromProfile(profile) {
   const source = profile && typeof profile === "object" && !Array.isArray(profile) ? profile : {};
   const experiences = asList(source.experiences);
   const education = asList(source.education);
+  const historyState = String(
+    source.historyState ?? source.profileHistoryState ?? source.history_state ?? "",
+  ).trim().toLowerCase();
   return {
     // Same bucket-prefix rule as the photos hash: foreign hosts and expiring
     // signed URLs are dropped rather than baked into a long-lived card.
@@ -196,6 +355,10 @@ export function cardFromProfile(profile) {
       logo: cardStr(row?.logo),
     })),
     eduCount: education.length,
+    // Source-backed profiles carry an explicit terminal history result. Rich
+    // provider cards keep null here and continue using their count-based TTL
+    // behavior; verified_empty is a real, publishable outcome, not a miss.
+    historyState: ["data", "verified_empty"].includes(historyState) ? historyState : null,
   };
 }
 
@@ -285,7 +448,10 @@ export function createSyncHandler({
   writeJson = setJson,
   readJson = getJson,
   readHashKeys = hashKeys,
+  readHashMany = hashGetMany,
   deleteHashFields = hashDelMany,
+  writeImmutableJson = setJsonIfAbsent,
+  activateGeneration = compareAndSetJson,
   now = () => new Date().toISOString(),
 } = {}) {
   return async function handler(req, res) {
@@ -296,19 +462,35 @@ export function createSyncHandler({
     try {
       if (req.method === "GET") {
         if (String(req.query?.profileCache || "") === "1") {
-          const [snapshot, queueDoc, cards, profileReady] = await Promise.all([
-            readJson(K.snapshot),
-            readJson(K.queue),
-            readHash(K.cards),
-            readHash(K.profileReady),
+          const [publication, sourceProfileReceipts] = await Promise.all([
+            readActivePublication({ readJson }),
+            readHash(K.sourceProfileReady),
           ]);
-          const joined = snapshot ? {
-            ...snapshot,
-            ...(queueDoc && Array.isArray(queueDoc.rows) ? { queue: queueDoc.rows } : {}),
+          const artifacts = publication ? await readPublishedArtifacts(publication, { readJson }) : null;
+          const joined = artifacts ? {
+            ...artifacts.snapshot,
+            ...(Array.isArray(artifacts.queue?.rows) ? { queue: artifacts.queue.rows } : {}),
           } : null;
+          const receiptMismatches = joined
+            ? activeSourceProfileReceiptMismatches(joined, sourceProfileReceipts, { now: Date.parse(now()) })
+            : [];
+          if (publication && receiptMismatches.length) {
+            return res.status(503).json({
+              ok: false,
+              error: "generation_unavailable",
+              reason: "profile_receipt_mismatch",
+              generationId: publication.generationId,
+              profilePreparing: profilePreparingCount(joined),
+            });
+          }
           return res.status(200).json({
             ok: true,
-            profileCache: profileCacheGate(joined, cards, profileReady, { now: Date.parse(now()) }).profileCache,
+            profileCache: profileCacheSummary(joined),
+            ...(publication ? {
+              generationId: publication.generationId,
+              generationDigest: publication.digest,
+              profilePreparing: profilePreparingCount(joined),
+            } : {}),
           });
         }
         const [decisions, acks] = await Promise.all([
@@ -316,14 +498,12 @@ export function createSyncHandler({
           readHash(K.acks),
         ]);
         if (String(req.query?.history || "") === "1") {
-          const [snapshot, queueDoc, countsDoc] = await Promise.all([
-            readJson(K.snapshot),
-            readJson(K.queue),
-            readJson(K.counts),
-          ]);
-          const queueRows = Array.isArray(queueDoc?.rows)
-            ? queueDoc.rows
-            : Array.isArray(snapshot?.queue) ? snapshot.queue : [];
+          const publication = await readActivePublication({ readJson });
+          const artifacts = publication ? await readPublishedArtifacts(publication, { readJson }) : null;
+          const snapshot = artifacts?.snapshot || null;
+          const queueDoc = artifacts?.queue || null;
+          const countsDoc = artifacts?.counts || null;
+          const queueRows = Array.isArray(queueDoc?.rows) ? queueDoc.rows : [];
           const streamRows = Array.isArray(snapshot?.stream) ? snapshot.stream : [];
           const queueKeys = queueRows.map((row) => row?.key).filter(Boolean).sort();
           const streamKeys = streamRows.map((row) => row?.key).filter(Boolean).sort();
@@ -344,6 +524,10 @@ export function createSyncHandler({
             publish: {
               generatedAt: snapshot?.generatedAt || queueDoc?.generatedAt || null,
               source: snapshot?.source || null,
+              generationId: publication?.generationId || null,
+              generationDigest: publication?.digest || null,
+              sourceCutoff: publication?.sourceCutoff || null,
+              sourceWatermark: publication?.sourceWatermark || null,
               counts: {
                 queue: queueRows.length,
                 uniqueQueueKeys: new Set(queueKeys).size,
@@ -357,7 +541,8 @@ export function createSyncHandler({
                 alert: Boolean(countsDoc.alert),
               },
               digest: stableHash({
-                generatedAt: snapshot?.generatedAt || queueDoc?.generatedAt || null,
+                generationId: publication?.generationId || null,
+                generationDigest: publication?.digest || null,
                 queueKeys,
                 streamKeys,
               }),
@@ -400,6 +585,30 @@ export function createSyncHandler({
       let body;
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
       catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
+
+      // Core can verify the durable Hub history receipts for the exact keys it
+      // is about to place in a generation. This is deliberately a read-only
+      // POST because the desktop publisher already uses POST for its shared-
+      // secret channel; returning null explicitly makes missing coverage
+      // distinguishable from a failed/omitted lookup without exposing other
+      // applicants' receipts.
+      if (own(body, "sourceProfileReceiptKeys")) {
+        const rawKeys = body.sourceProfileReceiptKeys;
+        if (!Array.isArray(rawKeys) || rawKeys.length > MAX_SOURCE_PROFILE_RECEIPT_QUERY_KEYS) {
+          return res.status(400).json({ ok: false, error: "invalid_source_profile_receipt_keys" });
+        }
+        const keys = [...new Set(rawKeys.map((rawKey) => String(rawKey ?? "").trim()))];
+        if (keys.some((key) => !PROFILE_KEY_RE.test(key))) {
+          return res.status(400).json({ ok: false, error: "invalid_source_profile_receipt_key" });
+        }
+        const storedReceipts = keys.length
+          ? await readHashMany(K.sourceProfileReady, keys)
+          : {};
+        const sourceProfileReceipts = Object.fromEntries(
+          keys.map((key) => [key, storedReceipts?.[key] ?? null]),
+        );
+        return res.status(200).json({ ok: true, sourceProfileReceipts });
+      }
 
       // ACKNOWLEDGE A LATCHED COUNT-DROP ALERT. Its own branch, and it returns
       // immediately: re-baselining must never ride along with a data publish,
@@ -457,16 +666,120 @@ export function createSyncHandler({
       }
 
       const stored = { snapshot: false, queue: false, acks: 0 };
-      if (body.snapshot != null) {
-        await writeJson(K.snapshot, body.snapshot);
+      let generation = null;
+      let generationCounts = null;
+      if (hasSnapshot && hasQueue) {
+        // A complete pair is the only input allowed to advance the browser's
+        // active view.  The legacy keys remain diagnostic compatibility for
+        // older callers, but no Applicants reader uses them after a pointer
+        // exists; this prevents a partial POST from creating a mixed feed.
+        const sourceGeneration = normalizeCoreGeneration(body.generation);
+        if (!sourceGeneration.ok) {
+          return res.status(400).json({ ok: false, error: sourceGeneration.error });
+        }
+        const logicalDigest = coreGenerationDigest({
+          generationId: sourceGeneration.id,
+          sourceCutoff: sourceGeneration.sourceCutoff,
+          sourceWatermark: sourceGeneration.sourceWatermark,
+          snapshot: body.snapshot,
+          queue: body.queue,
+        });
+        if (sourceGeneration.digest.toLowerCase() !== logicalDigest) {
+          return res.status(400).json({
+            ok: false,
+            error: "generation_digest_mismatch",
+            generation: {
+              id: sourceGeneration.id,
+              digest: sourceGeneration.digest,
+              sourceCutoff: sourceGeneration.sourceCutoff,
+              sourceWatermark: sourceGeneration.sourceWatermark,
+            },
+            logicalDigest,
+          });
+        }
+        const sourceReceipts=await readHash(K.sourceProfileReady);
+        const receiptMismatches=activeSourceProfileReceiptMismatches({
+          ...body.snapshot,
+          queue:body.queue,
+        },sourceReceipts,{now:Date.parse(now())});
+        if (receiptMismatches.length) {
+          return res.status(409).json({
+            ok:false,
+            error:"source_profile_prepublication_incomplete",
+            missing:receiptMismatches.length,
+          });
+        }
+        const conservedCounts = normalizeConservedCounts(body.snapshot, body.queue, body.counts);
+        if (!conservedCounts.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: conservedCounts.error,
+            ...(conservedCounts.missing ? { missing: conservedCounts.missing } : {}),
+            ...(conservedCounts.expected ? {
+              expected: conservedCounts.expected,
+              declared: conservedCounts.declared,
+            } : {}),
+          });
+        }
+        const incomingCounts = {
+          queue: conservedCounts.queue,
+          stream: conservedCounts.stream,
+        };
+        generationCounts = {
+          ...nextCountsDoc(await readJson(K.counts), incomingCounts, now()),
+          total: conservedCounts.total,
+          profilePreparing: conservedCounts.profilePreparing,
+        };
+        generation = buildGeneration({
+          snapshot: body.snapshot,
+          queue: body.queue,
+          counts: generationCounts,
+          generationId: sourceGeneration.id,
+          generationDigest: sourceGeneration.digest,
+          sourceCutoff: sourceGeneration.sourceCutoff,
+          sourceWatermark: sourceGeneration.sourceWatermark,
+          displayDigest: body.profileDisplayDigest || body.snapshot.profileDisplayDigest || null,
+          publishedAt: now(),
+        });
+        const published = await publishGeneration({
+          generation,
+          expectedCounts: conservedCounts,
+          readJson,
+          writeImmutableJson,
+          activate: activateGeneration,
+        });
+        if (!published.ok) {
+          return res.status(409).json({
+            ok: false,
+            error: "generation_changed_retry_publish",
+            generationId: published.current?.generationId || null,
+          });
+        }
         stored.snapshot = true;
-      }
-      // The queue rides its own key so a large review backlog can never
-      // squeeze the stream out of the snapshot cap (each part gets the full
-      // budget; the 2026-08-09 seed hit exactly this with 2,151 queue rows).
-      if (body.queue != null) {
-        await writeJson(K.queue, queueDoc);
         stored.queue = true;
+        stored.generation = {
+          id: generation.pointer.generationId,
+          digest: generation.pointer.digest,
+          sourceCutoff: generation.pointer.sourceCutoff,
+          sourceWatermark: generation.pointer.sourceWatermark,
+          artifactIntegrityDigest: generation.pointer.artifactIntegrityDigest,
+          counts: published.readback.counts,
+        };
+        // Keep the old count tripwire's baseline available to diagnostics and
+        // the next publisher, but never use it as the browser's feed artifact.
+        await writeJson(K.counts, generation.counts).catch(() => {});
+      } else {
+        // Partial legacy writes are intentionally not active publication. They
+        // are retained only for the sync/history compatibility surface while a
+        // publisher rolls forward to the paired generation contract.
+        if (body.snapshot != null) {
+          await writeJson(K.snapshot, body.snapshot);
+          stored.snapshot = true;
+        }
+        if (body.queue != null) {
+          await writeJson(K.queue, queueDoc);
+          stored.queue = true;
+        }
       }
       // Photos/cards hygiene: neither hash has a TTL, so without pruning they
       // grow for every applicant ever seen while feed HGETALLs photos on every
@@ -488,7 +801,9 @@ export function createSyncHandler({
           // exactly the failure semantics it had before cards existed.
           const dropCards = (await readHashKeys(K.cards)).filter((cu) => !keep.has(cu));
           if (dropCards.length) await deleteHashFields(K.cards, dropCards);
-          const dropProfileReady = (await readHashKeys(K.profileReady)).filter((cu) => !keep.has(cu));
+          const readyRecords = await readHash(K.profileReady);
+          const dropProfileReady = Object.keys(readyRecords || {})
+            .filter((cu) => !keep.has(cu) && readyRecords[cu]?.source !== "applicant_hub");
           if (dropProfileReady.length) await deleteHashFields(K.profileReady, dropProfileReady);
           // Facts follow cards exactly: same keep-set, same lifecycle, its own
           // key list. The picker directories are deliberately NOT pruned —
@@ -507,17 +822,21 @@ export function createSyncHandler({
       // array counts as stream 0, because that is what the tab will render.
       if (stored.snapshot || stored.queue) {
         try {
-          const incoming = {
-            ...(stored.queue
-              ? { queue: body.queue.length }
-              : Array.isArray(body.snapshot?.queue)
-                ? { queue: body.snapshot.queue.length }
+          if (generationCounts) {
+            await writeJson(K.counts, generationCounts);
+          } else {
+            const incoming = {
+              ...(stored.queue
+                ? { queue: body.queue.length }
+                : Array.isArray(body.snapshot?.queue)
+                  ? { queue: body.snapshot.queue.length }
+                  : {}),
+              ...(stored.snapshot
+                ? { stream: Array.isArray(body.snapshot.stream) ? body.snapshot.stream.length : 0 }
                 : {}),
-            ...(stored.snapshot
-              ? { stream: Array.isArray(body.snapshot.stream) ? body.snapshot.stream.length : 0 }
-              : {}),
-          };
-          await writeJson(K.counts, nextCountsDoc(await readJson(K.counts), incoming, now()));
+            };
+            await writeJson(K.counts, nextCountsDoc(await readJson(K.counts), incoming, now()));
+          }
         } catch { /* display-only tripwire */ }
       }
       if (body.acks != null) {
@@ -542,8 +861,16 @@ export function createSyncHandler({
           return res.status(400).json({ ok: false, error: "invalid_profile", cu: normalized.badCu });
         }
         const entries = Object.entries(normalized.profiles);
+        // A rich-provider refresh is optional enrichment. It must not replace
+        // the source-owned durable projection or receipt when both channels
+        // happen to use the same profile key.
+        const sourceReceipts = await readHash(K.sourceProfileReady).catch(() => ({}));
+        const sourceOwnedKeys = new Set(Object.entries(sourceReceipts || {})
+          .filter(([, receipt]) => receipt?.source === "applicant_hub")
+          .map(([key]) => key));
+        const richEntries = entries.filter(([key]) => !sourceOwnedKeys.has(key));
         const profileReady = {};
-        for (const [cu, profile] of entries) {
+        for (const [cu, profile] of richEntries) {
           // Stamp immediately before the TTL write, never after the batch:
           // the receipt may expire a little early, but can never claim the
           // underlying profile still exists after its real cache key expired.
@@ -557,7 +884,7 @@ export function createSyncHandler({
         }
         // One card per prewarmed profile, one HSET for the whole batch — the
         // list rows read these instead of fetching a profile each.
-        const cards = Object.fromEntries(entries.map(([cu, profile]) => [cu, cardFromProfile(profile)]));
+        const cards = Object.fromEntries(richEntries.map(([cu, profile]) => [cu, cardFromProfile(profile)]));
         if (Object.keys(cards).length) {
           await writeHash(K.cards, cards);
         }
@@ -575,9 +902,9 @@ export function createSyncHandler({
         // and the rules engine would quietly skip everybody with
         // "no_facts_yet" forever while looking healthy.
         try {
-          const facts = Object.fromEntries(entries.map(([cu, profile]) => [cu, factsFromProfile(profile)]));
+          const facts = Object.fromEntries(richEntries.map(([cu, profile]) => [cu, factsFromProfile(profile)]));
           await writeHash(K.facts, facts);
-          stored.facts = entries.length;
+          stored.facts = richEntries.length;
           // Picker directories, harvested from the same facts. Paraform
           // exposes no school or company search we can call, so the only
           // directory we can offer is the one our own applicants describe.
@@ -595,7 +922,7 @@ export function createSyncHandler({
           // publisher log shows it instead of a silent zero.
           stored.factsError = String(error?.message || error).slice(0, 120);
         }
-        stored.profiles = entries.length;
+        stored.profiles = richEntries.length;
       }
       if (body.sourceProfiles != null) {
         const normalized = normalizeSourceProfiles(body.sourceProfiles);
@@ -606,13 +933,21 @@ export function createSyncHandler({
         const profileReady = {};
         for (const [key, profile] of entries) {
           const cachedAt = now();
-          const expiresAt = new Date(Date.parse(cachedAt) + PROFILE_TTL_SECONDS * 1000).toISOString();
-          await writeJson(K.profile(key), profile, PROFILE_TTL_SECONDS);
-          profileReady[key] = { cachedAt, expiresAt, source: "applicant_hub" };
+          // Hub history is an immutable source projection, not a rich-provider
+          // cache. Keep the payload and its receipt durable; the exact source
+          // observation is the freshness fence for the current queue row.
+          await writeJson(K.sourceProfile(key), profile);
+          profileReady[key] = {
+            cachedAt,
+            source: "applicant_hub",
+            durable: true,
+            historyState: profile.historyState,
+            sourceObservationId: profile.sourceObservationId,
+          };
         }
         const cards = Object.fromEntries(entries.map(([key, profile]) => [key, cardFromProfile(profile)]));
         if (Object.keys(cards).length) await writeHash(K.cards, cards);
-        if (Object.keys(profileReady).length) await writeHash(K.profileReady, profileReady);
+        if (Object.keys(profileReady).length) await writeHash(K.sourceProfileReady, profileReady);
         try {
           const facts = Object.fromEntries(entries.map(([key, profile]) => [key, factsFromProfile(profile)]));
           await writeHash(K.facts, facts);
@@ -622,7 +957,21 @@ export function createSyncHandler({
         }
         stored.sourceProfiles = entries.length;
       }
-      return res.status(200).json({ ok: true, stored });
+      return res.status(200).json({
+        ok: true,
+        stored,
+        ...(generation ? {
+          // Echo Core's tuple exactly. artifactIntegrityDigest remains an internal
+          // Monitor integrity value under `stored.generation`.
+          generation: {
+            id: generation.pointer.generationId,
+            digest: generation.pointer.digest,
+            sourceCutoff: generation.pointer.sourceCutoff,
+            sourceWatermark: generation.pointer.sourceWatermark,
+            counts: published.readback.counts,
+          },
+        } : {}),
+      });
     } catch (error) {
       return res.status(502).json({
         ok: false,
