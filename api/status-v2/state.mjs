@@ -281,14 +281,19 @@ export function postCallStateFrom({ health, nowMs }) {
   }
   const tick = data?.autonomy?.tick || {};
   const tickAgeMs = msSince(tick.lastFinishedAt, nowMs);
-  const warm = tickAgeMs != null && tickAgeMs < TICK_PULSE_MS;
-  const tickAge = humanAge(tickAgeMs);
+  // A stamp in the FUTURE is never fresh. A wrong publisher clock (or one that
+  // stamps its intended next run) would otherwise animate the loudest green
+  // pulse on the page, and humanAge would clamp the skew out of sight.
+  const skewed = tickAgeMs != null && tickAgeMs < 0;
+  const warm = tickAgeMs != null && tickAgeMs >= 0 && tickAgeMs < TICK_PULSE_MS;
+  const tickAge = skewed ? null : humanAge(tickAgeMs);
+  const tickLine = skewed
+    ? ` · its last minute tick is stamped ${humanAge(-tickAgeMs)} in the future, which is a clock somewhere disagreeing with this one`
+    : (warm || !tickAge ? "" : ` · its last minute tick finished ${tickAge} ago`);
   return {
     stateId: "sending",
     reason: "live",
-    caption: warm || !tickAge
-      ? `from the live check, ${readAge} ago`
-      : `from the live check, ${readAge} ago · its last minute tick finished ${tickAge} ago`,
+    caption: `from the live check, ${readAge} ago${tickLine}`,
     pulse: warm,
     // A fault the system reports about ITSELF never recolours the state word
     // (PRD §4.2): green dot, warning chip beside it.
@@ -322,7 +327,15 @@ export function applicantStateFrom({ pipeline, counts, nowMs }) {
   }
   const ageMs = msSince(publishAt, nowMs);
   const clock = pacificClock(publishAt);
-  const fresh = ageMs != null && ageMs < APPLICANT_STALE_MS;
+  // A future-dated publish is not a fresh one. `ageMs < STALE` passes for any
+  // negative age, so a publisher with a wrong clock would render green.
+  if (ageMs != null && ageMs < 0) {
+    return {
+      ...base, stateId: "cannot-tell", reason: "clock-skew",
+      caption: `the last publish is stamped ${humanAge(-ageMs)} in the future${clock ? ` (${clock})` : ""}, so I cannot tell how old it really is`,
+    };
+  }
+  const fresh = ageMs != null && ageMs >= 0 && ageMs < APPLICANT_STALE_MS;
   if (fresh) {
     if (laneEnabled === false) {
       return {

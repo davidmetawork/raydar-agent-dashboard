@@ -350,6 +350,27 @@ test("R6 a stale applicant publish never renders green", () => {
   assert.equal(stale.stateId, "cannot-tell");
 });
 
+test("R6 a future-dated publish is never fresh, on either clock", () => {
+  const ahead = applicantStateFrom({
+    pipeline: pipelineFixture({ generatedAt: iso(-3 * 3600e3), laneEnabled: true }),
+    counts: countsDoc(), nowMs: NOW,
+  });
+  assert.notEqual(ahead.stateId, "sending");
+  assert.equal(ahead.stateId, "cannot-tell");
+  assert.equal(ahead.reason, "clock-skew");
+  assert.match(ahead.caption, /3h in the future/);
+  assert.doesNotMatch(ahead.caption, /0s/);
+
+  const health = healthLive();
+  health.autonomy.tick.lastFinishedAt = iso(-30 * 60e3);
+  const tick = postCallStateFrom({
+    health: { outcome: { at: iso(3e3), ok: true, status: 200 }, reads: [{ ok: true }], data: health, dataAt: iso(3e3) },
+    nowMs: NOW,
+  });
+  assert.equal(tick.pulse, false, "a future tick pulsed green");
+  assert.match(tick.caption, /stamped 30m in the future/);
+});
+
 // ── R7: plain words only, from one constant ─────────────────────────────────
 
 test("R7 the five words are the only state vocabulary, and nothing borrows jargon", () => {
