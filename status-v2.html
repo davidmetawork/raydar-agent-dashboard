@@ -99,6 +99,8 @@
   .ftxt.warmc{fill:var(--warn)}
   .ftxt.hotc{fill:var(--bad)}
   .funit{font:500 10px "Inter Variable",-apple-system,sans-serif;fill:var(--muted)}
+  /* a number the publisher says it worked out rather than counted */
+  .finf{font:700 8.5px "Inter Variable",-apple-system,sans-serif;fill:var(--violet-700);letter-spacing:.05em;text-transform:uppercase}
   .fnote{color:var(--muted);font-size:11.5px;margin:2px 0}
 
   /* ── the labelled strips under a drawing (each its own clock) ── */
@@ -109,6 +111,7 @@
   .stripbox .buckets{color:var(--ink-2);margin-top:3px}
   .stripbox .say{color:var(--ink-2);margin-top:3px}
   .stripbox .cannot{color:var(--violet-700);font-weight:600}
+  .stripbox .inf{color:var(--violet-700);font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
   .stripbox .alert{color:var(--warn);margin-top:3px}
   /* a feed that has stopped publishing: its stored numbers stop reading as
      current, and the strip says since when */
@@ -266,6 +269,7 @@ function drawFlow(flow){
       if(s.kind==="pool"){
         const miss=s.count==null;
         parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
+        if(s.basis==="inferred"&&!miss) parts.push(`<text class="finf" x="${W-10}" y="22" text-anchor="end">inferred</text>`);
         ty=40;
       } else { ty=18; }
       for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
@@ -275,12 +279,14 @@ function drawFlow(flow){
         const tWarm=t.accent==="warn-when-positive"&&(t.count||0)>0;
         parts.push(`<rect class="ftile${tHot?" hot":tWarm?" warm":""}" x="8" y="${ty}" width="${W-16}" height="${TILE_H}" rx="6"/>`);
         const full=fmt(t.count)+" "+t.label;
-        parts.push(`<text class="ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}" x="14" y="${ty+14}">${esc(clip(full,22))}<title>${esc(full)}</title></text>`);
+        parts.push(`<text class="ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}" x="14" y="${ty+14}">${esc(clip(full,22))}<title>${esc(full)}${t.basis==="inferred"?" (inferred)":""}</title></text>`);
+        if(t.basis==="inferred") parts.push(`<text class="finf" x="${W-14}" y="${ty+14}" text-anchor="end">inferred</text>`);
         ty+=TILE_H+TILE_GAP;
       }
     } else if(counted){
       const miss=s.count==null;
       parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
+      if(s.basis==="inferred"&&!miss) parts.push(`<text class="finf" x="${W-10}" y="22" text-anchor="end">inferred</text>`);
       let ty=40;
       for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
       if(s.note){ parts.push(`<text class="fsub" x="12" y="${ty}">${esc(clip(s.note,24))}<title>${esc(s.note)}</title></text>`); ty+=13; }
@@ -343,7 +349,7 @@ function renderStrip(strip){
       <div class="cannot">${esc(strip.cannotTell)}</div></div>`;
   }
   const items=(strip.items||[]).map((it)=>
-    `<span><b>${esc(fmt(it.value))}</b> ${esc(it.label)}${it.value==null&&it.step?` <span class="stepcap">(no publisher yet — ${esc(it.step)})</span>`:""}</span>`).join("");
+    `<span><b>${esc(fmt(it.value))}</b> ${esc(it.label)}${it.basis==="inferred"&&it.value!=null?` <span class="inf">inferred</span>`:""}${it.value==null&&it.step?` <span class="stepcap">(no publisher yet — ${esc(it.step)})</span>`:""}</span>`).join("");
   const buckets=(strip.buckets||[]).filter((b)=>b.value!=null).map((b)=>`${esc(b.label)} <b>${esc(fmt(b.value))}</b>`).join(" · ");
   return `<div class="stripbox${strip.stale?" stale":""}">
     <div class="sl">${esc(strip.label)} · ${esc(strip.clock)}${strip.when?` · ${esc(strip.when)}`:""}</div>

@@ -115,6 +115,33 @@ export const countOrNull = (value) => {
 
 export const UNUSABLE_NEGATIVE = "the publisher sent a negative number, which cannot be a number of people";
 
+/** Walk a dotted path; return the object there, or null. Never throws. */
+function objectAt(obj, path) {
+  let cur = obj;
+  for (const part of String(path || "").split(".").filter(Boolean)) {
+    if (cur == null || typeof cur !== "object") return null;
+    cur = cur[part];
+  }
+  return cur && typeof cur === "object" ? cur : null;
+}
+
+/** Measured unless the PUBLISHER says otherwise (R12). A publisher declares a
+ *  field it worked out rather than counted by putting the field's name in its
+ *  own `basis` map — `funnel.basis.callsSeen: "inferred"`. The page never
+ *  decides this for itself, and defaults to "measured" only when the payload
+ *  says nothing, so the first genuinely inferred number declares itself
+ *  instead of arriving silently dressed as a measurement. */
+export const BASIS = { measured: "measured", inferred: "inferred" };
+export function basisOf(container, field) {
+  return objectAt(container, "basis")?.[field] === "inferred" ? BASIS.inferred : BASIS.measured;
+}
+function basisForPath(ctx, path) {
+  const parts = String(path || "").split(".").filter(Boolean);
+  if (!parts.length) return BASIS.measured;
+  const field = parts.pop();
+  return basisOf(parts.length ? objectAt(ctx, parts.join(".")) : ctx, field);
+}
+
 /** Walk a dotted path; return an array, or null. Never throws. */
 export function resolveList(obj, path) {
   let cur = obj;
@@ -430,10 +457,12 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
     const negative = raw != null && raw < 0;
     const count = negative ? null : raw;
     if (st.onlyWhenPositive && !(count > 0)) continue;
+    const stageBasis = st.countKey ? basisForPath(ctx, st.countKey) : BASIS.measured;
     const out = {
       id: st.id,
       label: st.label,
       count,
+      basis: stageBasis,
       ...(st.accent ? { accent: st.accent } : {}),
       // A box counts people unless it SAYS otherwise (R3).
       ...(st.unit ? { unit: st.unit } : {}),
@@ -447,6 +476,7 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
             code: String(entry?.code ?? ""),
             label: typeof entry?.label === "string" && entry.label.trim() ? entry.label.trim() : null,
             count: finiteOrNull(entry?.count),
+            basis: entry?.basis === "inferred" ? BASIS.inferred : BASIS.measured,
           }))
           .filter((entry) => entry.count != null)
           .sort((a, b) => b.count - a.count);
@@ -466,6 +496,7 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
             id: entry.code || "unknown",
             label,
             count: entry.count,
+            basis: entry.basis,
             ...(st.tileAccent ? { accent: st.tileAccent } : {}),
           };
         });
@@ -487,7 +518,7 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
             field: `${st.poolKey}[${entry.code}]`,
             endpoint: sourceAges[st.step]?.endpoint || null,
             at: sourceAges[st.step]?.at || null,
-            basis: "measured",
+            basis: entry.basis,
             sentence: copy ? copy.sentence : null,
             code: entry.code || null,
             ...(entry.count < 0 ? { step: UNUSABLE_NEGATIVE } : {}),
@@ -513,7 +544,7 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
       field: st.countKey || null,
       endpoint: sourceAges[st.step]?.endpoint || null,
       at: sourceAges[st.step]?.at || null,
-      basis: "measured",
+      basis: stageBasis,
       sentence: null,
       code: null,
       step: negative ? UNUSABLE_NEGATIVE : (count == null ? (st.step || null) : null),
@@ -849,9 +880,9 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
     clock: "from the Review data",
     cannotTell: null,
     items: [
-      { key: "open", label: "Waiting on a person", value: num("open"), basis: "measured" },
-      { key: "overdue", label: "overdue", value: num("overdue"), basis: "measured" },
-      { key: "failed", label: "terminal failures", value: num("failed"), basis: "measured" },
+      { key: "open", label: "Waiting on a person", value: num("open"), basis: basisOf(metrics, "open") },
+      { key: "overdue", label: "overdue", value: num("overdue"), basis: basisOf(metrics, "overdue") },
+      { key: "failed", label: "terminal failures", value: num("failed"), basis: basisOf(metrics, "failed") },
     ],
     buckets: [
       { key: "identityProfile", label: "Identity or profile", value: num("identityProfile") },
@@ -908,10 +939,10 @@ export function applicantsTabStrip({ counts, nowMs }) {
       ? `the tab's own feed has not published since ${whenSentence(at, nowMs)}, so these are the last numbers it stored, not current ones`
       : null,
     items: [
-      { key: "queue", label: "Waiting on you", value: num("queue"), basis: "measured" },
-      { key: "stream", label: "In the invite stream", value: num("stream"), basis: "measured" },
-      { key: "profilePreparing", label: "Profiles preparing", value: num("profilePreparing"), basis: "measured", step: "step 3" },
-      { key: "total", label: "In total", value: num("total"), basis: "measured", step: "step 3" },
+      { key: "queue", label: "Waiting on you", value: num("queue"), basis: basisOf(counts, "queue") },
+      { key: "stream", label: "In the invite stream", value: num("stream"), basis: basisOf(counts, "stream") },
+      { key: "profilePreparing", label: "Profiles preparing", value: num("profilePreparing"), basis: basisOf(counts, "profilePreparing"), step: "step 3" },
+      { key: "total", label: "In total", value: num("total"), basis: basisOf(counts, "total"), step: "step 3" },
     ],
     buckets: [],
     sentence: null,

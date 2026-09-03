@@ -28,6 +28,19 @@ const stateSrc = await readFile(new URL("../api/status-v2/state.mjs", import.met
 const indexHtml = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
 
+// The page's OWN renderer, lifted out of status-v2.html and run for real.
+// Asserting against the aggregator's output alone cannot catch a promise the
+// surface breaks (a clipped label, a chip that has no renderer), so the rules
+// that are about what David SEES are checked against this.
+const pageRenderer = (() => {
+  const start = page.indexOf("const esc=");
+  const end = page.indexOf("// ── the page ─");
+  if (start < 0 || end < 0) throw new Error("status-v2.html no longer exposes its renderer");
+  // eslint-disable-next-line no-new-func
+  return new Function(`${page.slice(start, end)}; return { drawFlow, fmt, clip, wrapLabel };`)();
+})();
+const renderFlow = (row, ctx) => pageRenderer.drawFlow(flowFor(row, ctx, { nowMs: NOW }).flow);
+
 const NOW = Date.parse("2026-09-03T19:36:00.000Z");
 const iso = (msAgo) => new Date(NOW - msAgo).toISOString();
 
@@ -552,6 +565,35 @@ test("R12 every number carries a basis and every state pill carries its signal",
   }
   // day one: nothing on the page is inferred
   assert.ok(state.systems.every((s) => s.evidence.every((r) => r.basis === "measured")));
+});
+
+test("R12 a publisher may declare a number inferred, and the surface says so", () => {
+  const funnel = { ...funnelWireframe(), basis: { callsSeen: "inferred" } };
+  const resolved = flowFor(SYSTEMS[0], { funnel }, { nowMs: NOW });
+  assert.equal(resolved.flow.stages.find((s) => s.id === "calls").basis, "inferred");
+  assert.equal(resolved.flow.stages.find((s) => s.id === "delivered").basis, "measured");
+  assert.equal(resolved.evidence.find((e) => e.field === "funnel.callsSeen").basis, "inferred");
+  // the page has a renderer for it, and it fires — the whole point of the rule
+  const svg = pageRenderer.drawFlow(resolved.flow);
+  assert.match(svg, /<text class="finf"[^>]*>inferred<\/text>/);
+  assert.equal((svg.match(/class="finf"/g) || []).length, 1, "only the declared field is chipped");
+  assert.doesNotMatch(renderFlow(SYSTEMS[0], { funnel: funnelWireframe() }), /class="finf"/);
+
+  // per-bucket, and in the strips
+  const pool = flowFor(SYSTEMS[1], {
+    pipeline: pipelineFixture({ holdsByReason: [{ code: "identity_review", label: "Identity review", count: 41, basis: "inferred" }] }),
+  }, { nowMs: NOW });
+  assert.equal(pool.flow.stages.find((s) => s.id === "waiting-you").tiles[0].basis, "inferred");
+  assert.match(pageRenderer.drawFlow(pool.flow), /class="finf"/);
+  const strip = applicantsTabStrip({ counts: countsDoc({ basis: { queue: "inferred" } }), nowMs: NOW });
+  assert.equal(strip.items[0].basis, "inferred");
+  assert.equal(strip.items[1].basis, "measured");
+  assert.match(page, /class="inf">inferred/);
+  assert.equal(allTimeStrip({ metrics: { ...metricsFixture(), basis: { open: "inferred" } }, memo: { dataAt: iso(8e3) }, nowMs: NOW }).items[0].basis, "inferred");
+
+  // and nothing the page decides for itself is ever inferred
+  const nonsense = flowFor(SYSTEMS[0], { funnel: { ...funnelWireframe(), basis: "not-an-object" } }, { nowMs: NOW });
+  assert.ok(nonsense.evidence.every((e) => e.basis === "measured"));
 });
 
 // ── R13: the person and the decision, never implementation ids ──────────────
