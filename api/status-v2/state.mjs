@@ -281,11 +281,34 @@ export function postCallStateFrom({ health, nowMs }) {
   }
   const data = health.data || {};
   const readAge = humanAge(msSince(outcome.at, nowMs)) || "just now";
+  // The service's OWN self-report. A 200 whose body says ok:false (or
+  // database:false, or carries blockers) is the service telling us it is not
+  // well; rendering green over that would be a louder lie than any missing
+  // number on the page. It never becomes a state word of its own — the words
+  // stay five — it downgrades a live claim to Cannot tell and rides along as
+  // a warn chip everywhere else (PRD §4.5).
+  const blockers = Array.isArray(data.blockers)
+    ? data.blockers.map((b) => String(b || "").trim()).filter(Boolean) : [];
+  const selfReport = data.ok === false
+    ? "the service reports it is not ok"
+    : data.database === false
+      ? "the service reports its database is unreachable"
+      : blockers.length
+        ? `the service reports ${blockers.length === 1 ? "a blocker" : `${blockers.length} blockers`}`
+        : null;
+  const selfWarn = selfReport ? `${selfReport} (self-reported)` : null;
   if (String(data.mode || "") !== "live") {
     return {
       stateId: "not-sending-yet", reason: "mode",
       caption: `from the live check, ${readAge} ago`,
-      pulse: false, warn: null, incident: null, lastGood: null,
+      pulse: false, warn: selfWarn, incident: null, lastGood: null,
+    };
+  }
+  if (selfReport) {
+    return {
+      stateId: "cannot-tell", reason: "self-report",
+      caption: `the live check answered ${readAge} ago, but ${selfReport}. This is not a claim that it is down.`,
+      pulse: false, warn: selfWarn, incident: null, lastGood: null,
     };
   }
   const tick = data?.autonomy?.tick || {};

@@ -701,6 +701,37 @@ test("R17 a degraded self-report keeps the green word and adds a warning chip", 
   assert.match(live.warn, /one source degraded \(self-reported\)/);
 });
 
+test("R6 the page never renders green over the service's own ok:false", () => {
+  const read = (data) => postCallStateFrom({
+    health: { outcome: { at: iso(3e3), ok: true, status: 200 }, reads: [{ ok: true }], data, dataAt: iso(3e3) },
+    nowMs: NOW,
+  });
+  const notOk = read({ ...healthLive(), ok: false, database: false, blockers: ["database_unreachable"] });
+  assert.equal(notOk.stateId, "cannot-tell");
+  assert.equal(notOk.pulse, false);
+  assert.match(notOk.caption, /the service reports it is not ok/);
+  assert.match(notOk.caption, /not a claim that it is down/);
+  assert.match(notOk.warn, /self-reported/);
+
+  const dbOut = read({ ...healthLive(), database: false });
+  assert.equal(dbOut.stateId, "cannot-tell");
+  assert.match(dbOut.caption, /database is unreachable/);
+
+  const blocked = read({ ...healthLive(), blockers: ["source_missing", "epoch_stale"] });
+  assert.equal(blocked.stateId, "cannot-tell");
+  assert.match(blocked.caption, /reports 2 blockers/);
+
+  // an empty blockers array is not a blocker, and a healthy payload is green
+  const fine = read({ ...healthLive(), blockers: [] });
+  assert.equal(fine.stateId, "sending");
+  assert.equal(fine.warn, null);
+
+  // a self-report on a payload that is not live keeps its own word, warned
+  const shadow = read({ ...healthLive(), mode: "shadow", ok: false });
+  assert.equal(shadow.stateId, "not-sending-yet");
+  assert.match(shadow.warn, /is not ok/);
+});
+
 test("R17 a health payload that is not live renders Not sending yet", () => {
   const notLive = postCallStateFrom({
     health: { outcome: { at: iso(3e3), ok: true, status: 200 }, reads: [], data: { ...healthLive(), mode: "shadow" }, dataAt: iso(3e3) },
