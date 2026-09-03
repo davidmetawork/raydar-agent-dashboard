@@ -73,8 +73,8 @@ const finiteOrNull = (value) => {
   return null;
 };
 
-/** Walk a dotted path; return a finite number or null. Never throws. */
-export function resolvePath(obj, path) {
+/** Walk a dotted path; return a finite number (sign and all) or null. */
+function rawNumberAt(obj, path) {
   let cur = obj;
   for (const part of String(path || "").split(".")) {
     if (cur == null || typeof cur !== "object") return null;
@@ -82,6 +82,23 @@ export function resolvePath(obj, path) {
   }
   return finiteOrNull(cur);
 }
+
+/** Walk a dotted path; return a publishable count or null. Never throws.
+ *  A negative count is not a number of people, so it is UNUSABLE: it renders
+ *  "—" and says so in the evidence drawer, rather than printing "-3 people"
+ *  on the drawing (R1, R5). */
+export function resolvePath(obj, path) {
+  const n = rawNumberAt(obj, path);
+  return n != null && n < 0 ? null : n;
+}
+
+/** The same rule for a value already in hand (a tile count, a strip field). */
+export const countOrNull = (value) => {
+  const n = finiteOrNull(value);
+  return n != null && n < 0 ? null : n;
+};
+
+export const UNUSABLE_NEGATIVE = "the publisher sent a negative number, which cannot be a number of people";
 
 /** Walk a dotted path; return an array, or null. Never throws. */
 export function resolveList(obj, path) {
@@ -351,9 +368,12 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
   if (!declared || !Array.isArray(declared.stages)) return null;
   const evidence = [];
   const pending = [];
+  const unusable = [];
   const stages = [];
   for (const st of declared.stages) {
-    const count = st.countKey ? resolvePath(ctx, st.countKey) : null;
+    const raw = st.countKey ? rawNumberAt(ctx, st.countKey) : null;
+    const negative = raw != null && raw < 0;
+    const count = negative ? null : raw;
     if (st.onlyWhenPositive && !(count > 0)) continue;
     const out = {
       id: st.id,
@@ -367,7 +387,7 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
       out.kind = "pool";
       const list = resolveList(ctx, st.poolKey);
       if (list) {
-        const entries = list
+        const all = list
           .map((entry) => ({
             code: String(entry?.code ?? ""),
             label: typeof entry?.label === "string" && entry.label.trim() ? entry.label.trim() : null,
@@ -375,6 +395,12 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
           }))
           .filter((entry) => entry.count != null)
           .sort((a, b) => b.count - a.count);
+        // A negative bucket cannot be a number of people either: it never
+        // becomes a tile, and the evidence drawer names it as unusable.
+        const entries = all.filter((entry) => entry.count >= 0);
+        for (const bad of all.filter((entry) => entry.count < 0)) {
+          unusable.push({ id: `${st.id}:${bad.code || "unknown"}`, label: bad.label || st.label });
+        }
         const tiles = entries.slice(0, POOL_TILE_CAP).map((entry) => {
           // Post-call copy is fixed in this repo because those states are code;
           // applicant copy comes ONLY from the payload (R14). Either way an
@@ -398,17 +424,18 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
           });
         }
         out.tiles = tiles;
-        for (const entry of entries) {
+        for (const entry of all) {
           const copy = st.poolCopy === "review-state" ? reviewStateCopy(entry.code) : null;
           evidence.push({
             label: copy ? copy.tile : (entry.label || reviewStateCopy(entry.code).tile),
-            value: entry.count,
+            value: entry.count < 0 ? null : entry.count,
             field: `${st.poolKey}[${entry.code}]`,
             endpoint: sourceAges[st.step]?.endpoint || null,
             at: sourceAges[st.step]?.at || null,
             basis: "measured",
             sentence: copy ? copy.sentence : null,
             code: entry.code || null,
+            ...(entry.count < 0 ? { step: UNUSABLE_NEGATIVE } : {}),
           });
         }
       } else {
@@ -420,7 +447,9 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
     // too short". drawFlow renders it as a small grey line.
     if (st.note) out.note = st.note;
     stages.push(out);
-    if (count == null) {
+    if (negative) {
+      unusable.push({ id: st.id, label: st.label });
+    } else if (count == null) {
       pending.push({ id: st.id, label: st.label, step: st.step || null, note: st.stepNote || null });
     }
     evidence.push({
@@ -432,12 +461,12 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
       basis: "measured",
       sentence: null,
       code: null,
-      step: count == null ? (st.step || null) : null,
+      step: negative ? UNUSABLE_NEGATIVE : (count == null ? (st.step || null) : null),
     });
   }
   const present = new Set(stages.map((s) => s.id));
   const edges = (declared.edges || []).filter((e) => Array.isArray(e) && present.has(e[0]) && present.has(e[1]));
-  return { flow: { counted: true, stages, edges }, pending, evidence, note: declared.note || null };
+  return { flow: { counted: true, stages, edges }, pending, unusable, evidence, note: declared.note || null };
 }
 
 // ── "since you last looked" (PRD §4.7) ──────────────────────────────────────
@@ -631,7 +660,7 @@ export async function buildState({
       stateId: "cannot-tell", caption: "no signal for this system", pulse: false,
     };
     const resolved = flowFor(row, ctx, { nowMs, sourceAges: stepSources }) || {
-      flow: null, pending: [], evidence: [], note: null,
+      flow: null, pending: [], unusable: [], evidence: [], note: null,
     };
     const chips = [];
     if (row.id === "applicant" && applicantState.laneEnabled === false) {
@@ -667,6 +696,7 @@ export async function buildState({
       flow: resolved.flow,
       flowNote: resolved.note,
       pending: resolved.pending,
+      unusable: resolved.unusable,
       strips,
       links: row.links,
       poolLink: row.poolLink,
@@ -743,7 +773,7 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
       link: { label: "open Review", href: "/#review" },
     };
   }
-  const num = (key) => finiteOrNull(metrics[key]);
+  const num = (key) => countOrNull(metrics[key]);
   return {
     id: "post-call-all-time",
     label: "All time",
@@ -781,7 +811,7 @@ export function applicantsTabStrip({ counts, nowMs }) {
       link: { label: "open Applicants", href: "/#applicants" },
     };
   }
-  const num = (key) => finiteOrNull(counts[key]);
+  const num = (key) => countOrNull(counts[key]);
   return {
     id: "applicants-tab",
     label: "Applicants tab",

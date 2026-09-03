@@ -182,6 +182,39 @@ test("R1 the page never derives a count: every drawn number is one published fie
   assert.doesNotMatch(stateSrc, /resolvePath\([^)]*\)\s*-\s*resolvePath\(/);
 });
 
+test("R1 a negative published count is unusable: it draws a dash, never negative people", () => {
+  const negative = flowFor(SYSTEMS[0], {
+    funnel: {
+      ...funnelWireframe(),
+      callsSeen: -3, delivered: -1, openToday: -2,
+      byState: [{ code: "review_identity", label: "which person is this", count: -4 }],
+    },
+  }, { nowMs: NOW });
+  for (const stage of negative.flow.stages) {
+    assert.ok(stage.count == null || stage.count >= 0, `${stage.id} rendered a negative count`);
+    for (const tile of stage.tiles || []) assert.ok(tile.count >= 0, `${stage.id} tiled a negative count`);
+  }
+  assert.equal(nodeOf({ flow: negative.flow }, "calls").count, null);
+  assert.equal(nodeOf({ flow: negative.flow }, "waiting-person").tiles.length, 0);
+  const ids = negative.unusable.map((u) => u.id);
+  assert.ok(ids.includes("calls") && ids.includes("delivered") && ids.includes("waiting-person"));
+  assert.ok(ids.includes("waiting-person:review_identity"));
+  // nothing unusable is quietly filed as "no publisher yet" instead
+  assert.ok(!negative.pending.some((p) => p.id === "calls"));
+  // and the evidence drawer says why the dash is there
+  const row = negative.evidence.find((e) => e.field === "funnel.callsSeen");
+  assert.equal(row.value, null);
+  assert.match(row.step, /negative number/);
+  const bucket = negative.evidence.find((e) => e.field === "funnel.byState[review_identity]");
+  assert.equal(bucket.value, null);
+  assert.match(bucket.step, /negative number/);
+  // the strips apply the same rule to their own fields
+  assert.equal(allTimeStrip({ metrics: { ...metricsFixture(), open: -5 }, memo: { dataAt: iso(8e3) }, nowMs: NOW }).items[0].value, null);
+  assert.equal(applicantsTabStrip({ counts: countsDoc({ queue: -5 }), nowMs: NOW }).items[0].value, null);
+  // and the page explains the dash rather than leaving it bare
+  assert.match(page, /negative number, which cannot be a number of people/);
+});
+
 test("R1 the wireframe example and the live render both reconcile, with no negative box", () => {
   const f = funnelWireframe();
   assert.equal(f.callsSeen, f.noEmailOwed + f.confirmed);

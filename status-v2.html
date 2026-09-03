@@ -375,6 +375,11 @@ function renderCard(system,seen){
     ? pending.map((p)=>`${p.label}${p.note?` (${p.note})`:""}`).join(", ")
       +" — no publisher yet, "+(pending[0].step||"a later step")+" brings it. An em dash is never a zero."
     : "";
+  const unusable=(system.unusable||[]);
+  const unusableNote=unusable.length
+    ? unusable.map((u)=>u.label).join(", ")
+      +" — the publisher sent a negative number, which cannot be a number of people, so it renders as an em dash."
+    : "";
   return `<section class="card tone-${esc(system.spineTone||"violet")}">
     <div class="chead">
       <div class="cname">${esc(system.name)}</div>
@@ -389,6 +394,7 @@ function renderCard(system,seen){
     ${system.clockNote?`<div class="clocknote">${esc(system.clockNote)}</div>`:""}
     ${system.flow?drawFlow(system.flow):""}
     ${pendingNote?`<div class="fnote">${esc(pendingNote)}</div>`:""}
+    ${unusableNote?`<div class="fnote">${esc(unusableNote)}</div>`:""}
     ${system.flowNote?`<div class="fnote">${esc(system.flowNote)}</div>`:""}
     ${(system.chips||[]).map((c)=>`<div class="lanechip">${esc(c.word)} — ${esc(c.text)}</div>`).join("")}
     ${(system.strips||[]).map(renderStrip).join("")}
