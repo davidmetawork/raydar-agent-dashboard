@@ -110,6 +110,10 @@
   .stripbox .say{color:var(--ink-2);margin-top:3px}
   .stripbox .cannot{color:var(--violet-700);font-weight:600}
   .stripbox .alert{color:var(--warn);margin-top:3px}
+  /* a feed that has stopped publishing: its stored numbers stop reading as
+     current, and the strip says since when */
+  .stripbox.stale b{color:var(--muted);font-weight:600}
+  .stripbox .stalenote{color:var(--violet-700);margin-top:3px}
   .stepcap{color:var(--muted);font-size:11.5px}
 
   .since{border-top:1px solid var(--line-2);margin-top:10px;padding-top:7px;color:var(--ink-2);font-size:12.5px}
@@ -333,11 +337,12 @@ function renderStrip(strip){
   const items=(strip.items||[]).map((it)=>
     `<span><b>${esc(fmt(it.value))}</b> ${esc(it.label)}${it.value==null&&it.step?` <span class="stepcap">(no publisher yet — ${esc(it.step)})</span>`:""}</span>`).join("");
   const buckets=(strip.buckets||[]).filter((b)=>b.value!=null).map((b)=>`${esc(b.label)} <b>${esc(fmt(b.value))}</b>`).join(" · ");
-  return `<div class="stripbox">
+  return `<div class="stripbox${strip.stale?" stale":""}">
     <div class="sl">${esc(strip.label)} · ${esc(strip.clock)}${strip.when?` · ${esc(strip.when)}`:""}</div>
     <div class="row">${items}${strip.link?`<a href="${esc(strip.link.href)}" target="_top">${esc(strip.link.label)} →</a>`:""}</div>
     ${buckets?`<div class="buckets">${buckets}</div>`:""}
     ${strip.sentence?`<div class="say">${esc(strip.sentence)}</div>`:""}
+    ${strip.staleNote?`<div class="stalenote">${esc(strip.staleNote)}</div>`:""}
     ${strip.alert?`<div class="alert">${esc(strip.alert)}</div>`:""}
   </div>`;
 }

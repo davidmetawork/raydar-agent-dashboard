@@ -807,6 +807,29 @@ test("the Applicants-tab strip shows the tab's own four fields, dashing the unpu
   assert.match(alerted.alert, /count warning is on/);
 });
 
+test("the Applicants-tab strip never presents a dead feed's numbers as current", () => {
+  // the feed's own account of a failed generation wins, verbatim, with no numbers
+  const failed = applicantsTabStrip({
+    counts: countsDoc({ verification: "the published generation failed verification" }),
+    nowMs: NOW,
+  });
+  assert.equal(failed.cannotTell, "Cannot tell: the published generation failed verification");
+  assert.deepEqual(failed.items, []);
+
+  // and until the publisher latches that field, age alone stops the numbers
+  // reading as current
+  const stale = applicantsTabStrip({ counts: countsDoc({ updatedAt: iso(4 * 3600e3 + 12 * 60e3) }), nowMs: NOW });
+  assert.equal(stale.stale, true);
+  assert.match(stale.staleNote, /has not published since 4h 12m ago \(\d+:\d\d [ap]m PT\)/);
+  assert.equal(stale.items[0].value, 203, "the stored numbers are still shown, just not as current");
+  const fresh = applicantsTabStrip({ counts: countsDoc(), nowMs: NOW });
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.staleNote, null);
+  // the page greys a stale strip rather than printing it like a live one
+  assert.match(page, /strip\.stale\?" stale":""/);
+  assert.match(page, /\.stripbox\.stale b\{/);
+});
+
 test("the all-time strip is real on day one, and says Cannot tell when the feed is out", () => {
   const strip = allTimeStrip({ metrics: metricsFixture(), memo: { dataAt: iso(8e3) }, nowMs: NOW });
   assert.equal(strip.items[0].value, 12);

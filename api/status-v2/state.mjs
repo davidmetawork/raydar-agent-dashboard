@@ -47,6 +47,12 @@ const FEED_FRESH_MS = 60_000;
 const TICK_PULSE_MS = 2 * 60_000;
 // Twice the applicant pipeline's 180 s interval (PRD §4.5).
 const APPLICANT_STALE_MS = 6 * 60_000;
+// The Applicants-tab feed has no cadence this page can claim, so this is a
+// stated threshold, not an inferred one: past it, the strip stops presenting
+// its stored numbers as current. Without this the strip prints yesterday's
+// "203 Waiting on you" at the very moment the Applicants tab beside it is
+// showing em dashes, and two Raydar surfaces disagree about the same feed.
+export const APPLICANT_FEED_STALE_MS = 60 * 60_000;
 const POOL_TILE_CAP = 6;
 const EVENT_CAP = 25;
 
@@ -864,6 +870,21 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
 /** The Applicants-tab strip — the counts the tab itself reads, its own clock. */
 export function applicantsTabStrip({ counts, nowMs }) {
   const at = isoOrNull(counts?.updatedAt);
+  // The feed's own account of a failed generation, when it latches one. Its
+  // sentence, verbatim, and no numbers beside it — the tab is showing the same
+  // sentence, and the two surfaces must not disagree (PRD §4.5).
+  const verification = typeof counts?.verification === "string" && counts.verification.trim()
+    ? counts.verification.trim() : null;
+  if (verification) {
+    return {
+      id: "applicants-tab",
+      label: "Applicants tab",
+      clock: "from the tab's own feed",
+      cannotTell: `${STATE_WORDS["cannot-tell"]}: ${verification}`,
+      items: [], buckets: [], sentence: null, at, when: at ? whenSentence(at, nowMs) : null,
+      link: { label: "open Applicants", href: "/#applicants" },
+    };
+  }
   if (!counts) {
     return {
       id: "applicants-tab",
@@ -875,11 +896,17 @@ export function applicantsTabStrip({ counts, nowMs }) {
     };
   }
   const num = (key) => countOrNull(counts[key]);
+  const ageMs = msSince(at, nowMs);
+  const stale = ageMs != null && ageMs >= APPLICANT_FEED_STALE_MS;
   return {
     id: "applicants-tab",
     label: "Applicants tab",
     clock: "from the tab's own feed",
     cannotTell: null,
+    stale,
+    staleNote: stale
+      ? `the tab's own feed has not published since ${whenSentence(at, nowMs)}, so these are the last numbers it stored, not current ones`
+      : null,
     items: [
       { key: "queue", label: "Waiting on you", value: num("queue"), basis: "measured" },
       { key: "stream", label: "In the invite stream", value: num("stream"), basis: "measured" },
