@@ -853,6 +853,22 @@ test("since you last looked: a change ring that never invents an event", () => {
   assert.match(page, /nothing moved/);
 });
 
+test("since you last looked: the 60-second refresh is not a look", () => {
+  // render() must not stamp the marker — that is what reset the line every tick
+  const renderBody = page.slice(page.indexOf("function render(data){"), page.indexOf("let looked=false;"));
+  assert.doesNotMatch(renderBody, /stampSeen\(|markSeen\(/,
+    "render() stamps the seen marker, so a background refresh erases the last look");
+  assert.doesNotMatch(renderBody, /const seen=seenAt\(\)/,
+    "render() re-reads the marker, so the line drifts with the auto-refresh");
+  // the marker moves on the three things that ARE looks, and nowhere else
+  assert.match(page, /if\(!looked\)\{ looked=true; stampSeen\(\); \}/);
+  assert.match(page, /addEventListener\("visibilitychange"/);
+  assert.match(page, /\$\("refresh"\)\.onclick=\(\)=>\{ noteLook\(\); load\(\); \}/);
+  assert.equal((page.match(/stampSeen\(\)/g) || []).length, 3,
+    "the seen marker is stamped somewhere new — every stamp must be a real look");
+  assert.match(page, /setInterval\(load,60000\)/);
+});
+
 test("the aggregator survives every source being out, and still renders both cards", async () => {
   const state = await build({
     fetchImpl: fakeFetch(() => { throw new Error("network gone"); }),

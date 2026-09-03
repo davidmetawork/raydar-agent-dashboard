@@ -186,7 +186,7 @@ async function api(path){
   return r.json();
 }
 function seenAt(){ try{ return localStorage.getItem(SEEN_KEY); }catch{ return null; } }
-function markSeen(){ try{ localStorage.setItem(SEEN_KEY,new Date().toISOString()); }catch{} }
+function stampSeen(){ try{ localStorage.setItem(SEEN_KEY,new Date().toISOString()); }catch{} }
 
 // ── the flow diagram ─────────────────────────────────────────────────────────
 // Copied from the Status page's renderer: layered layout by graph depth, nodes
@@ -301,6 +301,14 @@ function drawFlow(flow){
 }
 
 // ── the page ─────────────────────────────────────────────────────────────────
+// "Since you last looked" is about LOOKS, not refreshes. The background tick
+// runs every 60s, so stamping the marker inside render() meant a tab left open
+// for two hours reported "Since you last looked (just now)". The marker moves
+// only on a real look: the first render, coming back to the tab, and Refresh.
+let seen=seenAt();
+let lastData=null;
+function noteLook(){ seen=seenAt()||seen; stampSeen(); }
+
 const TAG_WORDS={"answered":"answered","no-signal":"no signal","never-registered":"never registered"};
 
 function renderSources(sources){
@@ -413,7 +421,7 @@ function renderCard(system,seen){
 }
 
 function render(data){
-  const seen=seenAt();
+  lastData=data;
   const a=data.asOf;
   $("asof").innerHTML=(a
     ? `<span>Data as of <b>${esc(a.when||"")}</b> · oldest: ${esc(a.sourceName)}</span>`
@@ -429,14 +437,16 @@ function render(data){
   const f=data.footer||{};
   $("foot").innerHTML=`<div class="fh">${esc(f.title||"")}</div>
     <div>${esc(f.body||"")} ${f.link?`<a href="${esc(f.link.href)}" target="_top">${esc(f.link.label)} →</a>`:""}</div>`;
-  markSeen();
 }
 
+let looked=false;
 async function load(){
   try{
     const data=await api("/api/status-v2/state");
     if(!data.ok){ $("asof").textContent="Could not load this page: "+(data.error||""); return; }
     render(data);
+    // the first render IS a look; every later background tick is not
+    if(!looked){ looked=true; stampSeen(); }
   }catch(e){ if(String(e.message)!=="auth") console.error(e); }
 }
 
@@ -460,7 +470,15 @@ async function onCred(resp){
     $("gate").style.display="none"; load(); setInterval(load,60000);
   }catch(e){ $("gateErr").textContent="Sign-in failed. Try again."; }
 }
-$("refresh").onclick=load;
+// Coming back to the tab is a look: re-read the marker so the line covers the
+// time you were away, then stamp it forward and redraw with what we have.
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState!=="visible") return;
+  noteLook();
+  if(lastData) render(lastData);
+  load();
+});
+$("refresh").onclick=()=>{ noteLook(); load(); };
 init();
 </script>
 </body>
