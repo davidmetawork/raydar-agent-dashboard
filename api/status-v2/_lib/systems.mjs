@@ -205,6 +205,10 @@ export const SYSTEMS = [
         ["sent", "delivered"],
         ["roles", "waiting-send"],
         ["person", "waiting-person"],
+        // The box whose whole job is to say "these people fell out of every
+        // other box" needs an edge, or the layout gives it depth 0 and stacks
+        // it under "Calls finished" as if it were a sibling of the first stage.
+        ["delivered", "unaccounted"],
       ],
       note: "\"Email sent\" means SendGrid accepted it; \"Delivered\" means a delivery event landed. They are two boxes on purpose.",
     },
@@ -263,6 +267,7 @@ export const SYSTEMS = [
         ["ready", "invited"],
         ["ready", "post-decision"],
         ["invited", "emailed"],
+        ["emailed", "unaccounted"],
       ],
       note: "Your Interview decision moves someone from Waiting on you into Ready to decide; Pass moves them to Passed.",
     },

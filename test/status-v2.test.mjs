@@ -721,6 +721,25 @@ test("R15 a node with no publisher draws a dash and names the step that brings i
   assert.ok(applicant.pending.some((p) => p.id === "emailed" && p.step === "step 3b"));
 });
 
+test("R15 'Not counted anywhere' hangs off the end of the line, not off the start", () => {
+  // it only exists when a publisher reports it, and then it must not read as a
+  // sibling of the first stage — depth 0 would stack it under "Calls finished"
+  for (const [row, ctx, tail] of [
+    [SYSTEMS[0], { funnel: { ...funnelWireframe(), unaccounted: 4 } }, "delivered"],
+    [SYSTEMS[1], { pipeline: pipelineFixture({ unaccounted: 2 }) }, "emailed"],
+  ]) {
+    const resolved = flowFor(row, ctx, { nowMs: NOW });
+    const box = resolved.flow.stages.find((s) => s.id === "unaccounted");
+    assert.ok(box, "the box a publisher asked for is missing");
+    assert.ok(resolved.flow.edges.some(([a, b]) => a === tail && b === "unaccounted"),
+      `${row.id}: the unaccounted box has no edge, so it draws in the first column`);
+    // and it stays absent when nobody reports one
+    const quiet = flowFor(row, row === SYSTEMS[0] ? { funnel: funnelWireframe() } : { pipeline: pipelineFixture() }, { nowMs: NOW });
+    assert.equal(quiet.flow.stages.find((s) => s.id === "unaccounted"), undefined);
+    assert.ok(!quiet.flow.edges.some(([, b]) => b === "unaccounted"), "a dangling edge to a box that is not drawn");
+  }
+});
+
 // ── R16: a send is a send ───────────────────────────────────────────────────
 
 test("R16 'Email sent' reads acceptance, 'Delivered' reads delivery, previews feed nothing", () => {
