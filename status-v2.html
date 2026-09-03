@@ -69,6 +69,7 @@
   @media (prefers-reduced-motion: reduce){ .dot.pulse{animation:none} }
   .csum{color:var(--ink-2);font-size:13px;margin:6px 0 2px;max-width:70ch}
   .lastgood{color:var(--muted);font-size:12px;margin:2px 0}
+  .clinks{font-size:12.5px;margin:2px 0 0}
   .warnchip{display:inline-block;background:var(--warn-bg);border:1px solid #EEDBB4;color:var(--warn);border-radius:999px;padding:2px 10px;font-size:12px;margin:6px 6px 2px 0}
   .lanechip{display:inline-block;background:var(--warn-bg);border:1px solid #EEDBB4;color:var(--warn);border-radius:10px;padding:4px 10px;font-size:12.5px;margin:6px 6px 2px 0}
   .incident{background:var(--bad-bg);border:1px solid #F3C9CA;color:var(--bad);border-radius:10px;padding:6px 11px;font-size:12.5px;margin:8px 0 2px;font-weight:600}
@@ -94,6 +95,8 @@
   .ftile{fill:#F8F6F0;stroke:var(--line);stroke-width:1}
   .ftile.warm{fill:var(--warn-bg);stroke:#EEDBB4}
   .ftile.hot{fill:var(--bad-bg);stroke:#F3C9CA}
+  a.ftilelink{cursor:pointer}
+  a.ftilelink:hover .ftile{stroke:var(--ink)}
   .ftxt{font:600 10.5px "Inter Variable",-apple-system,sans-serif;fill:var(--ink-2);font-variant-numeric:tabular-nums}
   .ftxt.miss{fill:var(--muted)}
   .ftxt.warmc{fill:var(--warn)}
@@ -263,6 +266,11 @@ function drawFlow(flow){
     const hot=s.accent==="bad-when-positive"&&(s.count||0)>0;
     const warm=s.accent==="warn-when-positive"&&(s.count||0)>0;
     parts.push(`<g transform="translate(${g.x},${g.y})">`);
+    // hover on any box for its source and its age (PRD §4.6)
+    const src=s.source&&s.source.endpoint
+      ? `${s.label} · ${s.source.endpoint}${s.source.when?` · ${s.source.when}`:" · no reading yet"}`
+      : `${s.label} · no publisher yet`;
+    parts.push(`<title>${esc(src)}</title>`);
     parts.push(`<rect class="fnode${hot?" hot":warm?" warm":""}" width="${W}" height="${g.h}" rx="10"/>`);
     if(counted&&s.tiles){
       let ty;
@@ -277,10 +285,13 @@ function drawFlow(flow){
       for(const t of s.tiles){
         const tHot=t.accent==="bad-when-positive"&&(t.count||0)>0;
         const tWarm=t.accent==="warn-when-positive"&&(t.count||0)>0;
+        // a tile opens the tab that holds those people
+        if(t.link) parts.push(`<a href="${esc(t.link)}" target="_top" class="ftilelink">`);
         parts.push(`<rect class="ftile${tHot?" hot":tWarm?" warm":""}" x="8" y="${ty}" width="${W-16}" height="${TILE_H}" rx="6"/>`);
         const full=fmt(t.count)+" "+t.label;
         parts.push(`<text class="ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}" x="14" y="${ty+14}">${esc(clip(full,22))}<title>${esc(full)}${t.basis==="inferred"?" (inferred)":""}</title></text>`);
         if(t.basis==="inferred") parts.push(`<text class="finf" x="${W-14}" y="${ty+14}" text-anchor="end">inferred</text>`);
+        if(t.link) parts.push(`</a>`);
         ty+=TILE_H+TILE_GAP;
       }
     } else if(counted){
@@ -405,6 +416,7 @@ function renderCard(system,seen){
       <span class="pill ${esc(st.tone||"violet")}"><span class="dot${st.pulse?" pulse":""}"></span>${esc(st.word||"")}</span>
     </div>
     <div class="csum">${esc(system.summary)}</div>
+    ${(system.links||[]).length?`<div class="clinks">${(system.links||[]).map((l)=>`<a href="${esc(l.href)}" target="_top">${esc(l.label)} →</a>`).join(" · ")}</div>`:""}
     <div class="cap">${esc(st.caption||"")}</div>
     ${st.lastGood?`<div class="lastgood">The last check that answered, ${esc(st.lastGood.age||"")} ago, said: ${esc(st.lastGood.word)}.</div>`:""}
     ${system.warn?`<div class="warnchip">⚠ ${esc(system.warn)}</div>`:""}

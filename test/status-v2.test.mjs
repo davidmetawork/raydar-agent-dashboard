@@ -657,6 +657,38 @@ test("R15 both systems draw at least five stages, with nothing behind a click", 
   assert.doesNotMatch(page, /togglePanel|expand-flow/);
 });
 
+test("R15 every box hovers to its source and age, every bucket opens its tab", () => {
+  const stepSources = {
+    "step 2": { endpoint: "the signed Review feed (funnel)", at: iso(20e3) },
+    "step 3": { endpoint: "the applicant pipeline publish", at: iso(90e3) },
+  };
+  const resolved = flowFor(SYSTEMS[0], { funnel: funnelWireframe() }, { nowMs: NOW, sourceAges: stepSources });
+  const svg = pageRenderer.drawFlow(resolved.flow);
+  const nodes = (svg.match(/<rect class="fnode/g) || []).length;
+  const titles = (svg.match(/<title>[^<]*the signed Review feed \(funnel\)/g) || []).length;
+  assert.ok(nodes > 0);
+  assert.equal(titles, nodes, "a drawn box has no hover naming its source and age");
+  assert.match(svg, /<title>Calls finished · the signed Review feed \(funnel\) · \d+s ago \(\d+:\d\d [ap]m PT\)<\/title>/);
+  // a box with no publisher says that on hover rather than nothing
+  const bare = pageRenderer.drawFlow(flowFor(SYSTEMS[1], { pipeline: pipelineFixture() }, { nowMs: NOW }).flow);
+  assert.match(bare, /<title>Invite emailed · no publisher yet<\/title>/);
+
+  // pool tiles are links to the tab that holds those people
+  const pool = flowFor(SYSTEMS[1], { pipeline: pipelineFixture() }, { nowMs: NOW, sourceAges: stepSources });
+  const tiles = pool.flow.stages.find((s) => s.id === "waiting-you").tiles;
+  assert.ok(tiles.length);
+  assert.ok(tiles.every((t) => t.link === SYSTEMS[1].poolLink));
+  const poolSvg = pageRenderer.drawFlow(pool.flow);
+  assert.equal((poolSvg.match(/<a href="\/#applicants" target="_top" class="ftilelink">/g) || []).length, tiles.length);
+  assert.equal((poolSvg.match(/<\/a>/g) || []).length, tiles.length, "an unclosed tile link would swallow the drawing");
+  assert.match(pageRenderer.drawFlow(flowFor(SYSTEMS[0], { funnel: funnelWireframe() }, { nowMs: NOW }).flow),
+    /<a href="\/#review" target="_top"/);
+
+  // and the card's own links are rendered, not carried and dropped
+  for (const row of SYSTEMS) assert.ok(row.links.length && row.links.every((l) => l.href && l.label));
+  assert.match(page, /\(system\.links\|\|\[\]\)\.map/);
+});
+
 test("R15 a node with no publisher draws a dash and names the step that brings it", async () => {
   const state = await build();
   const postCall = systemOf(state, "post-call");

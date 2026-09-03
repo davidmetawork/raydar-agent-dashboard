@@ -447,6 +447,7 @@ export function applicantStateFrom({ pipeline, counts, nowMs }) {
  *  Never derives one either: every count comes from one published field (R1). */
 export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) {
   const declared = row?.flow;
+  const poolLink = typeof row?.poolLink === "string" && row.poolLink ? row.poolLink : null;
   if (!declared || !Array.isArray(declared.stages)) return null;
   const evidence = [];
   const pending = [];
@@ -458,17 +459,26 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
     const count = negative ? null : raw;
     if (st.onlyWhenPositive && !(count > 0)) continue;
     const stageBasis = st.countKey ? basisForPath(ctx, st.countKey) : BASIS.measured;
+    // Every box carries where it came from and how old it is, so the answer
+    // is one hover away and not only inside the evidence drawer (PRD §4.6).
+    const src = sourceAges[st.step] || null;
+    const srcAge = src?.at ? humanAge(msSince(src.at, nowMs)) : null;
     const out = {
       id: st.id,
       label: st.label,
       count,
       basis: stageBasis,
+      source: src?.endpoint
+        ? { endpoint: src.endpoint, age: srcAge, when: src.at ? whenSentence(src.at, nowMs) : null }
+        : null,
       ...(st.accent ? { accent: st.accent } : {}),
       // A box counts people unless it SAYS otherwise (R3).
       ...(st.unit ? { unit: st.unit } : {}),
     };
     if (st.poolKey) {
       out.kind = "pool";
+      // Clicking a bucket opens the tab that holds those people (PRD §4.6).
+      if (poolLink) out.link = poolLink;
       const list = resolveList(ctx, st.poolKey);
       if (list) {
         const all = list
@@ -497,6 +507,7 @@ export function flowFor(row, ctx, { nowMs = Date.now(), sourceAges = {} } = {}) 
             label,
             count: entry.count,
             basis: entry.basis,
+            ...(poolLink ? { link: poolLink } : {}),
             ...(st.tileAccent ? { accent: st.tileAccent } : {}),
           };
         });
