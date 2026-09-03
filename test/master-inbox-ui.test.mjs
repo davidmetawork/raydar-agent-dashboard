@@ -1,0 +1,46 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const source = fs.readFileSync(new URL("../master-inbox.html", import.meta.url), "utf8");
+const shell = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+test("Master Inbox converts stored participant JSON into a Gmail-style sender label", () => {
+  assert.match(source, /function contacts\(value\)/);
+  assert.match(source, /function firstContact\(value\)/);
+  assert.match(source, /contact\?\.name\|\|contact\?\.address/);
+  assert.doesNotMatch(source, /const name=value=>String\(value\|\|"Unknown sender"\)/);
+});
+
+test("Master Inbox rows and embedded reader have bounded, non-overlapping layout", () => {
+  assert.match(source, /\.who,\.subject,\.snippet\{display:block/);
+  assert.match(source, /\.row>span:nth-child\(3\)\{display:block;min-width:0;overflow:hidden\}/);
+  assert.match(source, /\.embedded \.app\{max-width:none;height:100vh/);
+  assert.match(source, /\.meta strong,\.meta small\{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis\}/);
+});
+
+test("Master Inbox decodes provider text entities before safely rendering previews", () => {
+  assert.match(source, /const displayText=value=>/);
+  assert.match(source, /esc\(displayText\(row\.subject/);
+  assert.match(source, /esc\(displayText\(row\.snippet\)\)/);
+  assert.match(source, /esc\(displayText\(thread\.subject/);
+});
+
+test("Master Inbox composer can close before required fields are filled", () => {
+  assert.match(source, /value="cancel" formnovalidate aria-label="Close"/);
+});
+
+test("Master Inbox collapses RFC-identical mailbox copies only in the read view", () => {
+  assert.match(source, /function logicalMessages\(messages\)/);
+  assert.match(source, /message\.rfc_message_id\?`rfc:/);
+  assert.match(source, /const threadMessages=logicalMessages\(thread\.messages\|\|\[\]\)/);
+  assert.match(source, /const threadTargets=\(STATE\.thread\?\.messages\|\|\[\]\)/);
+});
+
+test("Current dashboard shell keeps its newer routes and uses the refreshed embedded inbox build", () => {
+  assert.match(shell, /id="tab-status-v2"/);
+  assert.match(shell, /frameSrc\("\/submissions-v2","submissions"\)/);
+  assert.match(shell, /frameSrc\("\/review","review"\)/);
+  assert.match(shell, /id="master-inbox-frame"[^>]*height:calc\(100vh - 24px\)/);
+  assert.match(shell, /frameSrc\("\/master-inbox","master-inbox"\)\+"&v=20260903-restore"/);
+});

@@ -3,7 +3,8 @@ import { requireReviewOperator, requireSameOrigin } from "../_lib/operator-acces
 import { safeUpstreamBase } from "../_lib/safe-upstream.mjs";
 import { issueReviewAssertion } from "../_lib/review-assertion.mjs";
 
-const TIMEOUT_MS = 12_000;
+const READ_TIMEOUT_MS = 12_000;
+const ACTION_TIMEOUT_MS = 55_000;
 const ACTIONS = new Set([
   "select_profile", "confirm_absent", "set_field", "set_call_outcome",
   "set_role_verdict", "attach_resume", "retry", "resume", "abandon", "assign", "set_priority",
@@ -25,17 +26,30 @@ const VISA_AUTHORIZATIONS = new Set(["NO_VISA_AUTHORIZATION_NEEDED", "NEEDS_NEW_
 // serverless functions; nothing about the request path changes.
 export function config() {
   try {
+    const feedKey = process.env.POST_CALL_REVIEW_FEED_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "";
+    const actionKey = process.env.POST_CALL_REVIEW_ACTION_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "";
     return {
       base: safeUpstreamBase(process.env.POST_CALL_BASE, {
         allowedOrigins: process.env.POST_CALL_ALLOWED_ORIGINS,
         service: "post_call",
       }),
-      key: process.env.POST_CALL_MONITOR_API_KEY || "",
+      // `key` is kept as the feed credential for Status v2's private import.
+      key: feedKey,
+      feedKey,
+      actionKey,
       assertionSecret: process.env.POST_CALL_REVIEW_ASSERTION_SECRET || "",
       error: null,
     };
   } catch (error) {
-    return { base: "", key: process.env.POST_CALL_MONITOR_API_KEY || "", error: String(error?.message || error) };
+    const feedKey = process.env.POST_CALL_REVIEW_FEED_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "";
+    return {
+      base: "",
+      key: feedKey,
+      feedKey,
+      actionKey: process.env.POST_CALL_REVIEW_ACTION_API_KEY || process.env.POST_CALL_MONITOR_API_KEY || "",
+      assertionSecret: process.env.POST_CALL_REVIEW_ASSERTION_SECRET || "",
+      error: String(error?.message || error),
+    };
   }
 }
 
@@ -98,20 +112,22 @@ function validateChanges(action, changes) {
     else if (field === "workplaces" && !validStringList(value, WORKPLACES)) return false;
     else if (field === "fundingRounds" && !validStringList(value, FUNDING_ROUNDS)) return false;
     else if (field === "visaAuthorization" && !VISA_AUTHORIZATIONS.has(value)) return false;
-    else if (!["fullName", "email", "phone", "linkedinUrl", "locations", "minimumBaseSalary", "workplaces", "fundingRounds", "visaAuthorization"].includes(field)) return false;
+    else if (field === "callTranscript" && !(typeof value === "string" && value.trim().length > 0 && value.length <= 8_000)) return false;
+    else if (!["fullName", "email", "phone", "linkedinUrl", "locations", "minimumBaseSalary", "workplaces", "fundingRounds", "visaAuthorization", "callTranscript"].includes(field)) return false;
   }
   return true;
 }
 
-export async function upstream(path, access, binding = {}, init = {}, { fetchImpl = fetch } = {}) {
+export async function upstream(path, access, binding = {}, init = {}, { fetchImpl = fetch, serviceKey = "", timeoutMs = READ_TIMEOUT_MS } = {}) {
   const { base, key, assertionSecret } = config();
+  const credential = serviceKey || key;
   const rawBody = init.body || "";
   const assertion = issueReviewAssertion({ actorEmail: access.email, method: init.method || "GET", path: canonicalReviewAssertionPath(path), caseId: binding.caseId || null, version: binding.version ?? null, rawBody }, assertionSecret);
   const response = await fetchImpl(`${base}${path}`, {
     ...init,
     redirect: "error",
     headers: {
-      authorization: `Bearer ${key}`,
+      authorization: `Bearer ${credential}`,
       accept: "application/json",
       "content-type": "application/json",
       // Keep the old backend interoperable during the staged deployment. The
@@ -121,7 +137,7 @@ export async function upstream(path, access, binding = {}, init = {}, { fetchImp
       "x-raydar-review-assertion": assertion,
       ...(init.headers || {}),
     },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await response.json().catch(() => ({}));
   return { response, body };
@@ -131,6 +147,18 @@ function withActor(body, access) {
   return { ...body, actor: { email: access.email, role: access.role, capabilities: access.capabilities } };
 }
 
+function sendUpstream(res, response, body, access, extra = {}) {
+  if (response.status === 401 || response.status === 403) {
+    return res.status(502).json(withActor({
+      ok: false,
+      configured: true,
+      error: "post_call_service_authorization_failed",
+      detail: "The Review service could not authorize this request; nothing was changed.",
+    }, access));
+  }
+  return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, ...extra, ...body }, access));
+}
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!requireSameOrigin(req, res)) return;
@@ -138,12 +166,14 @@ export default async function handler(req, res) {
   const access = await requireReviewOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
   if (!access) return;
 
-  const { base, key, error: configError } = config();
-  if (!base || !key) return res.status(503).json({ ok: false, configured: false, error: "post_call_monitor_not_configured", detail: configError || undefined });
+  const { base, feedKey, actionKey, error: configError } = config();
+  const serviceKey = req.method === "GET" ? feedKey : actionKey;
+  if (!base || !serviceKey) return res.status(503).json({ ok: false, configured: false, error: "post_call_monitor_not_configured", detail: configError || undefined });
 
   try {
     if (req.method === "GET") {
       const id = safeString(req.query?.id, 160);
+      const identitySearch = safeString(req.query?.identitySearch, 240);
       const status = OUTCOMES.has(String(req.query?.status || "open")) ? String(req.query.status || "open") : "open";
       const cursor = safeString(req.query?.cursor, 400);
       const limit = Math.max(1, Math.min(50, Number(req.query?.limit) || 50));
@@ -162,8 +192,8 @@ export default async function handler(req, res) {
         ? "/api/v2/reviews/funnel"
         : String(req.query?.metrics || "") === "1"
           ? "/api/v2/reviews/metrics"
-          : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
-      const { response, body } = await upstream(path, access, { caseId: id || null });
+          : id ? `/api/v2/reviews/${encodeURIComponent(id)}${identitySearch ? `?identitySearch=${encodeURIComponent(identitySearch)}` : ""}` : `/api/v2/reviews?${query}`;
+      const { response, body } = await upstream(path, access, { caseId: id || null }, {}, { serviceKey: feedKey });
       // The funnel endpoint (Status v2 build plan step 2) may not exist yet
       // on the upstream post-call service. Treat 404/501 as "no publisher
       // yet" rather than an error — the aggregator renders "—" honestly
@@ -171,7 +201,7 @@ export default async function handler(req, res) {
       if (funnelRequested && (response.status === 404 || response.status === 501)) {
         return res.status(200).json(withActor({ ok: false, configured: true, reason: "not_published" }, access));
       }
-      return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, configured: true, ...body }, access));
+      return sendUpstream(res, response, body, access, { configured: true });
     }
 
     if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method_not_allowed" });
@@ -196,8 +226,8 @@ export default async function handler(req, res) {
         method: "POST",
         headers: { "if-match": `"${version}"` },
         body: JSON.stringify({ schemaVersion: 2, reviewId, fileName, mimeType, sizeBytes, sha256 }),
-      });
-      return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, ...body }, access));
+      }, { serviceKey: actionKey, timeoutMs: ACTION_TIMEOUT_MS });
+      return sendUpstream(res, response, body, access);
     }
 
     if (!ACTIONS.has(action)) return res.status(400).json({ ok: false, error: "review_action_not_allowed" });
@@ -206,6 +236,10 @@ export default async function handler(req, res) {
     }
     if (action === "set_priority" && !access.capabilities.reviewPriority) return res.status(403).json({ ok: false, error: "review_admin_required" });
     if (action === "assign" && !access.capabilities.reviewAssign) return res.status(403).json({ ok: false, error: "review_assignment_forbidden" });
+    const approveSend = payload.approveSend === true;
+    if (approveSend && (action !== "resume" || !access.capabilities.reviewSendApproval)) {
+      return res.status(403).json({ ok: false, error: "review_send_approval_forbidden" });
+    }
     const reason = safeString(payload.reason, 1_000);
     if (!reason) return res.status(400).json({ ok: false, error: "review_reason_required" });
     const bodyOut = { schemaVersion: 2, reviewId, action, reason };
@@ -218,13 +252,14 @@ export default async function handler(req, res) {
     }
     if (!validateChanges(action, changes)) return res.status(400).json({ ok: false, error: "review_value_invalid" });
     if (changes && Object.keys(changes).length) bodyOut.changes = changes;
+    if (approveSend) bodyOut.approveSend = true;
     const path = `/api/v2/reviews/${encodeURIComponent(reviewId)}/actions`;
     const { response, body } = await upstream(path, access, { caseId: reviewId, version }, {
       method: "POST",
       headers: { "if-match": `"${version}"` },
       body: JSON.stringify(bodyOut),
-    });
-    return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, ...body }, access));
+    }, { serviceKey: actionKey, timeoutMs: ACTION_TIMEOUT_MS });
+    return sendUpstream(res, response, body, access);
   } catch (error) {
     return res.status(502).json({ ok: false, configured: true, error: "post_call_proxy_failed", detail: String(error?.message || error).slice(0, 180) });
   }

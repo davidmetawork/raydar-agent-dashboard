@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { operatorAccess } from "../api/_lib/operator-access.mjs";
+import { operatorAccess, reviewAccess } from "../api/_lib/operator-access.mjs";
 
 const index = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const review = await readFile(new URL("../review.html", import.meta.url), "utf8");
@@ -45,27 +45,48 @@ test("Review renders only server-allowlisted actions and fields", () => {
   assert.match(review, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(review, /application\/pdf/);
   assert.match(review, /attach_resume/);
-  assert.match(review, /25 MB maximum/);
+  assert.match(review, /up to 25 MB/);
   assert.match(review, /file\.size>25\*1024\*1024/);
   assert.match(reviewProxy, /sizeBytes > 25 \* 1024 \* 1024/);
-  assert.match(review, /authoritative source/);
-  assert.match(review, /never kept in Monitor browser storage/);
   assert.match(review, /evidence v/);
   assert.match(review, /new URLSearchParams/);
   assert.match(review, /Search candidate, email, LinkedIn, call, or recruiter/);
-  assert.match(review, /Continuing…/);
+  assert.match(review, /The workflow is continuing/);
   assert.match(review, /startContinuingPoll/);
+  assert.match(review, /Approve and send/);
+  assert.match(review, /approveSend:true/);
   assert.match(review, /item\.candidate\?\.displayName/);
-  assert.match(review, /item\.blockers/);
-  assert.match(review, /item\.sourceLinks/);
-  assert.match(review, /Technical evidence/);
-  assert.match(review, /metrics=1/);
+  assert.match(review, /What needs to happen/);
+  assert.match(review, /Save and continue/);
+  assert.match(review, /Upload résumé and continue/);
+  assert.match(review, /item\.identityCandidates/);
+  assert.match(review, /This call is attached/);
+  assert.match(review, /Call attachment not confirmed/);
+  assert.match(review, /Search Paraform by name, email, or LinkedIn/);
+  assert.match(review, /Searching Paraform…/);
+  assert.match(review, /setProfileSearchBusy\(true\)/);
+  assert.match(review, /Paste Paraform profile link/);
+  assert.match(review, /\/assets\/paraform-logo\.svg/);
+  assert.match(review, /paraformProfileUrl/);
+  assert.match(review, /identitySearch=\$\{encodeURIComponent\(query\)\}/);
+  assert.match(review, /profileIdFromLink/);
+  assert.match(review, /runAction\("select_profile",\{candidateUserId\}\)/);
+  assert.doesNotMatch(review, /Technical evidence/);
+  assert.doesNotMatch(review, /Source records/);
+  assert.doesNotMatch(review, /What needs attention/);
+  assert.doesNotMatch(review, /Short audit note/);
+  assert.doesNotMatch(review, /Save assignment/);
+  assert.doesNotMatch(review, /Save priority/);
+  assert.doesNotMatch(review, /Review queue summary/);
+  assert.doesNotMatch(review, /metrics=1/);
   assert.match(review, /All \(90 days\)/);
 });
 
 test("Review proxy owns auth attribution and optimistic concurrency", () => {
   assert.match(reviewProxy, /POST_CALL_BASE/);
   assert.match(reviewProxy, /POST_CALL_MONITOR_API_KEY/);
+  assert.match(reviewProxy, /POST_CALL_REVIEW_FEED_API_KEY/);
+  assert.match(reviewProxy, /POST_CALL_REVIEW_ACTION_API_KEY/);
   assert.match(reviewProxy, /POST_CALL_REVIEW_ASSERTION_SECRET/);
   assert.match(reviewProxy, /"x-raydar-actor-email": access\.email/);
   assert.match(reviewProxy, /"x-raydar-review-assertion": assertion/);
@@ -73,6 +94,15 @@ test("Review proxy owns auth attribution and optimistic concurrency", () => {
   assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/resume-files/);
   assert.match(reviewProxy, /\/api\/v2\/reviews\/\$\{encodeURIComponent\(reviewId\)\}\/actions/);
   assert.match(reviewProxy, /\/api\/v2\/reviews\/metrics/);
+  assert.match(reviewProxy, /\/api\/v2\/reviews\/funnel/);
+  assert.match(reviewProxy, /identitySearch/);
+  assert.match(reviewProxy, /const READ_TIMEOUT_MS = 12_000/);
+  assert.match(reviewProxy, /const ACTION_TIMEOUT_MS = 55_000/);
+  assert.match(reviewProxy, /timeoutMs = READ_TIMEOUT_MS/);
+  assert.match(reviewProxy, /serviceKey: actionKey, timeoutMs: ACTION_TIMEOUT_MS/);
+  assert.match(reviewProxy, /review_send_approval_forbidden/);
+  assert.match(reviewProxy, /bodyOut\.approveSend = true/);
+  assert.match(reviewProxy, /callTranscript/);
   assert.doesNotMatch(reviewProxy, /payload\.actor/);
 });
 
@@ -121,4 +151,20 @@ test("Review permissions separate assistant, recruiter, and high-risk admin powe
   const admin = operatorAccess("david@raydar.xyz", env);
   assert.equal(admin.capabilities.reviewIdentityOverride, true);
   assert.equal(admin.capabilities.reviewPriority, true);
+});
+
+test("Review grants an authenticated viewer only Review resolution capabilities", () => {
+  const viewer = reviewAccess("teammate@raydar.xyz", {});
+  assert.equal(viewer.role, "reviewer");
+  assert.equal(viewer.capabilities.reviewRead, true);
+  assert.equal(viewer.capabilities.reviewWrite, true);
+  assert.equal(viewer.capabilities.reviewIdentityOverride, true);
+  assert.equal(viewer.capabilities.reviewSendApproval, true);
+  assert.equal(viewer.capabilities.mailroomRead, false);
+
+  const readOnly = reviewAccess("teammate@raydar.xyz", { POST_CALL_REVIEW_READ_ONLY: "true" });
+  assert.equal(readOnly.capabilities.reviewRead, true);
+  assert.equal(readOnly.capabilities.reviewWrite, false);
+  assert.equal(readOnly.capabilities.resumeUpload, false);
+  assert.equal(readOnly.capabilities.reviewSendApproval, false);
 });
