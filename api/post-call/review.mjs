@@ -44,6 +44,13 @@ function safeString(value, max = 512) {
   return String(value || "").trim().slice(0, max);
 }
 
+// The post-call verifier binds URL.pathname, never the presentation-only
+// filter query. Keep the query on the upstream fetch but sign the same
+// canonical route that the strict backend verifies.
+export function canonicalReviewAssertionPath(path) {
+  return new URL(String(path || ""), "https://review-proxy.invalid").pathname;
+}
+
 function safeChanges(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const entries = Object.entries(value).slice(0, 24);
@@ -95,7 +102,7 @@ function validateChanges(action, changes) {
 async function upstream(path, access, binding = {}, init = {}) {
   const { base, key, assertionSecret } = config();
   const rawBody = init.body || "";
-  const assertion = issueReviewAssertion({ actorEmail: access.email, method: init.method || "GET", path, caseId: binding.caseId || null, version: binding.version ?? null, rawBody }, assertionSecret);
+  const assertion = issueReviewAssertion({ actorEmail: access.email, method: init.method || "GET", path: canonicalReviewAssertionPath(path), caseId: binding.caseId || null, version: binding.version ?? null, rawBody }, assertionSecret);
   const response = await fetch(`${base}${path}`, {
     ...init,
     redirect: "error",
