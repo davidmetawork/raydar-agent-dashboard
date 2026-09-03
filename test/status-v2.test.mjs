@@ -442,11 +442,19 @@ test("R7 the five words are the only state vocabulary, and nothing borrows jargo
     assert.doesNotMatch(src, /\bRead-only\b/);
     assert.doesNotMatch(src, /"Running"|'Running'|>Running</);
   }
-  // the page renders the word it is handed; it never hard-codes one
-  for (const word of Object.values(STATE_WORDS)) {
-    assert.ok(!page.includes(`"${word}"`) && !page.includes(`>${word}<`),
-      `the page hard-codes the state word "${word}"`);
+  // the page renders the word it is handed; the aggregator composes every
+  // sentence from the constant. Neither may spell a state word itself, or the
+  // five would drift apart the first time one is reworded.
+  // (comment lines may of course quote the words; only the code may not)
+  const codeOnly = (src) => src.split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+  for (const [where, src] of [["the page", codeOnly(page)], ["the aggregator", codeOnly(stateSrc)]]) {
+    for (const word of Object.values(STATE_WORDS)) {
+      assert.ok(!src.includes(`"${word}"`) && !src.includes(`>${word}<`) && !src.includes(`${word}:`),
+        `${where} hard-codes the state word "${word}"`);
+    }
   }
+  assert.match(stateSrc, /STATE_WORDS\["cannot-tell"\]\}: /,
+    "the strips' Cannot tell prefix must come from the constant");
 });
 
 test("R7 an unrecognised reason code names itself instead of borrowing copy", () => {

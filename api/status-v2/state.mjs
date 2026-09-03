@@ -428,7 +428,7 @@ export function applicantStateFrom({ pipeline, counts, nowMs }) {
   if (stopReason) {
     return {
       ...base, stateId: "paused", reason: "stopped-on-purpose",
-      caption: `Paused on purpose · ${stopReason} · since ${clock || "the last publish"}`,
+      caption: `${STATE_WORDS.paused} on purpose · ${stopReason} · since ${clock || "the last publish"}`,
     };
   }
   if (jobLoaded === false) {
@@ -898,9 +898,9 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
       id: "post-call-all-time",
       label: "All time",
       clock: "from the Review data",
-      cannotTell: memo?.state === "unconfigured"
-        ? "Cannot tell: this dashboard has no connection to the post-call service."
-        : "Cannot tell: the Review data did not answer.",
+      cannotTell: `${STATE_WORDS["cannot-tell"]}: ${memo?.state === "unconfigured"
+        ? "this dashboard has no connection to the post-call service."
+        : "the Review data did not answer."}`,
       items: [], buckets: [], sentence: null, at: null, when: null,
       link: { label: "open Review", href: "/#review" },
     };
@@ -953,7 +953,7 @@ export function applicantsTabStrip({ counts, nowMs }) {
       id: "applicants-tab",
       label: "Applicants tab",
       clock: "from the tab's own feed",
-      cannotTell: "Cannot tell: the tab's own feed has not published any counts.",
+      cannotTell: `${STATE_WORDS["cannot-tell"]}: the tab's own feed has not published any counts.`,
       items: [], buckets: [], sentence: null, at: null, when: null,
       link: { label: "open Applicants", href: "/#applicants" },
     };
