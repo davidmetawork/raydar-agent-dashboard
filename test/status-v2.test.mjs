@@ -1120,3 +1120,21 @@ test("times on the surface are an age plus one Pacific clock, never a bare stamp
   assert.match(whenSentence(iso(4 * 3600e3 + 12 * 60e3), NOW), /^4h 12m ago \(\d+:\d\d [ap]m PT\)$/);
   assert.equal(whenSentence("not-a-date", NOW), null);
 });
+
+// ── The four Review buckets are a partial grouping, and the page says so ─────
+// Live on 2026-09-03: 68 open, buckets 7 + 17 + 13 + 0. The endpoint groups
+// only some of the twelve states; the page must not subtract, and must not
+// leave the gap unexplained (R1 + R5: no arithmetic, no unexplained dash).
+test("the all-time strip explains that its four buckets do not cover every state", async () => {
+  const { allTimeStrip } = await import("../api/status-v2/state.mjs");
+  const strip = allTimeStrip({
+    metrics: { open: 68, overdue: 45, failed: 17, identityProfile: 7, missingInformation: 17, matchingCalibration: 13, delivery: 0, medianResolutionSeconds: 780, p95ResolutionSeconds: 63660, incidents: [] },
+    memo: { state: "ok" }, nowMs: Date.parse("2026-09-03T23:00:00Z"),
+  });
+  assert.equal(typeof strip.bucketsNote, "string");
+  assert.match(strip.bucketsNote, /do not add up to the total on purpose/);
+  const sum = strip.buckets.reduce((n, b) => n + (b.value || 0), 0);
+  assert.notEqual(sum, strip.items.find((i) => i.key === "open").value, "fixture must reproduce the gap the note exists for");
+  const page = await readFile(new URL("../status-v2.html", import.meta.url), "utf8");
+  assert.match(page, /strip\.bucketsNote/, "the page renders the note under the buckets");
+});

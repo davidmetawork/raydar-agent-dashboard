@@ -380,6 +380,7 @@ function renderStrip(strip){
     <div class="sl">${esc(strip.label)} · ${esc(strip.clock)}${strip.when?` · ${esc(strip.when)}`:""}</div>
     <div class="row">${items}${strip.link?`<a href="${esc(strip.link.href)}" target="_top">${esc(strip.link.label)} →</a>`:""}</div>
     ${buckets?`<div class="buckets">${buckets}</div>`:""}
+    ${buckets&&strip.bucketsNote?`<div class="fnote">${esc(strip.bucketsNote)}</div>`:""}
     ${strip.sentence?`<div class="say">${esc(strip.sentence)}</div>`:""}
     ${strip.incidentsNote?`<div class="alert">${esc(strip.incidentsNote)}</div>`:""}
     ${strip.staleNote?`<div class="stalenote">${esc(strip.staleNote)}</div>`:""}

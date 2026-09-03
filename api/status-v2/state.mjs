@@ -922,6 +922,11 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
       { key: "matchingCalibration", label: "Matching or calibrating", value: num("matchingCalibration") },
       { key: "delivery", label: "Delivery unproven", value: num("delivery") },
     ],
+    // The Review data groups only some of the twelve states into these four
+    // buckets, so they do not add up to "Waiting on a person" — and the page
+    // never does that subtraction. Say so on the surface (2026-09-03: 68 open,
+    // buckets 7+17+13+0, and David's first question would be "where are the 31").
+    bucketsNote: "these four buckets are the Review data's own grouping and cover only some states, so they do not add up to the total on purpose; the rest are in states it does not group yet",
     sentence: clearingSentence(metrics.medianResolutionSeconds, metrics.p95ResolutionSeconds),
     // The Review feed publishes the open incidents as a list; how many there
     // are is the only thing this strip says about them, and it says it on the
