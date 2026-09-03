@@ -888,6 +888,19 @@ test("the Applicants-tab strip shows the tab's own four fields, dashing the unpu
   ]);
   assert.equal(strip.items[2].step, "step 3");
   assert.equal(strip.cannotTell, null);
+  // no dash on this page is ever unexplained: a count the feed exists to
+  // carry but did not gets its own sentence, not the "no publisher yet" one
+  const partial = applicantsTabStrip({ counts: { updatedAt: iso(120e3) }, nowMs: NOW });
+  for (const item of partial.items) {
+    assert.equal(item.value, null);
+    assert.ok(item.step || item.note, `${item.key}: a bare dash with no caption`);
+  }
+  assert.match(partial.items[0].note, /did not carry this count/);
+  assert.equal(partial.items[2].step, "step 3");
+  assert.match(page, /it\.note\?` <span class="stepcap">/);
+  // and the drawer repeats the reason rather than leaving the row blank
+  const rows = allTimeStrip({ metrics: { incidents: [] }, memo: { dataAt: iso(8e3) }, nowMs: NOW });
+  assert.ok(rows.items.every((i) => i.value == null && i.note));
   const missing = applicantsTabStrip({ counts: null, nowMs: NOW });
   assert.match(missing.cannotTell, /^Cannot tell/);
   assert.deepEqual(missing.items, []);

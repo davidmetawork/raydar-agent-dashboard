@@ -360,7 +360,7 @@ function renderStrip(strip){
       <div class="cannot">${esc(strip.cannotTell)}</div></div>`;
   }
   const items=(strip.items||[]).map((it)=>
-    `<span><b>${esc(fmt(it.value))}</b> ${esc(it.label)}${it.basis==="inferred"&&it.value!=null?` <span class="inf">inferred</span>`:""}${it.value==null&&it.step?` <span class="stepcap">(no publisher yet — ${esc(it.step)})</span>`:""}</span>`).join("");
+    `<span><b>${esc(fmt(it.value))}</b> ${esc(it.label)}${it.basis==="inferred"&&it.value!=null?` <span class="inf">inferred</span>`:""}${it.value==null?(it.step?` <span class="stepcap">(no publisher yet — ${esc(it.step)})</span>`:it.note?` <span class="stepcap">(${esc(it.note)})</span>`:""):""}</span>`).join("");
   const buckets=(strip.buckets||[]).filter((b)=>b.value!=null).map((b)=>`${esc(b.label)} <b>${esc(fmt(b.value))}</b>`).join(" · ");
   return `<div class="stripbox${strip.stale?" stale":""}">
     <div class="sl">${esc(strip.label)} · ${esc(strip.clock)}${strip.when?` · ${esc(strip.when)}`:""}</div>

@@ -53,6 +53,8 @@ const APPLICANT_STALE_MS = 6 * 60_000;
 // "203 Waiting on you" at the very moment the Applicants tab beside it is
 // showing em dashes, and two Raydar surfaces disagree about the same feed.
 export const APPLICANT_FEED_STALE_MS = 60 * 60_000;
+export const FEED_MISSING_COUNT = "the tab's own feed did not carry this count";
+export const REVIEW_MISSING_COUNT = "the Review data did not carry this count";
 const POOL_TILE_CAP = 6;
 const EVENT_CAP = 25;
 
@@ -910,9 +912,9 @@ export function allTimeStrip({ metrics, memo, nowMs }) {
     clock: "from the Review data",
     cannotTell: null,
     items: [
-      { key: "open", label: "Waiting on a person", value: num("open"), basis: basisOf(metrics, "open") },
-      { key: "overdue", label: "overdue", value: num("overdue"), basis: basisOf(metrics, "overdue") },
-      { key: "failed", label: "terminal failures", value: num("failed"), basis: basisOf(metrics, "failed") },
+      { key: "open", label: "Waiting on a person", value: num("open"), basis: basisOf(metrics, "open"), note: REVIEW_MISSING_COUNT },
+      { key: "overdue", label: "overdue", value: num("overdue"), basis: basisOf(metrics, "overdue"), note: REVIEW_MISSING_COUNT },
+      { key: "failed", label: "terminal failures", value: num("failed"), basis: basisOf(metrics, "failed"), note: REVIEW_MISSING_COUNT },
     ],
     buckets: [
       { key: "identityProfile", label: "Identity or profile", value: num("identityProfile") },
@@ -969,8 +971,11 @@ export function applicantsTabStrip({ counts, nowMs }) {
       ? `the tab's own feed has not published since ${whenSentence(at, nowMs)}, so these are the last numbers it stored, not current ones`
       : null,
     items: [
-      { key: "queue", label: "Waiting on you", value: num("queue"), basis: basisOf(counts, "queue") },
-      { key: "stream", label: "In the invite stream", value: num("stream"), basis: basisOf(counts, "stream") },
+      // Every dash on the page is explained. These two exist in today's feed,
+      // so a null is not "no publisher yet" — it is this publish not carrying
+      // the count, which is a different sentence.
+      { key: "queue", label: "Waiting on you", value: num("queue"), basis: basisOf(counts, "queue"), note: FEED_MISSING_COUNT },
+      { key: "stream", label: "In the invite stream", value: num("stream"), basis: basisOf(counts, "stream"), note: FEED_MISSING_COUNT },
       { key: "profilePreparing", label: "Profiles preparing", value: num("profilePreparing"), basis: basisOf(counts, "profilePreparing"), step: "step 3" },
       { key: "total", label: "In total", value: num("total"), basis: basisOf(counts, "total"), step: "step 3" },
     ],
@@ -1000,7 +1005,7 @@ function stripEvidence(strips) {
         basis: item.basis || "measured",
         sentence: null,
         code: null,
-        step: item.value == null ? (item.step || null) : null,
+        step: item.value == null ? (item.step || item.note || null) : null,
       });
     }
   }
