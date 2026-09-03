@@ -1,6 +1,7 @@
 import { cors } from "../seq/_lib/core.mjs";
-import { requireOperator, requireSameOrigin } from "../_lib/operator-access.mjs";
+import { requireReviewOperator, requireSameOrigin } from "../_lib/operator-access.mjs";
 import { safeUpstreamBase } from "../_lib/safe-upstream.mjs";
+import { issueReviewAssertion } from "../_lib/review-assertion.mjs";
 
 const TIMEOUT_MS = 12_000;
 const ACTIONS = new Set([
@@ -26,6 +27,7 @@ function config() {
         service: "post_call",
       }),
       key: process.env.POST_CALL_MONITOR_API_KEY || "",
+      assertionSecret: process.env.POST_CALL_REVIEW_ASSERTION_SECRET || "",
       error: null,
     };
   } catch (error) {
@@ -40,6 +42,13 @@ function parseBody(req) {
 
 function safeString(value, max = 512) {
   return String(value || "").trim().slice(0, max);
+}
+
+// The post-call verifier binds URL.pathname, never the presentation-only
+// filter query. Keep the query on the upstream fetch but sign the same
+// canonical route that the strict backend verifies.
+export function canonicalReviewAssertionPath(path) {
+  return new URL(String(path || ""), "https://review-proxy.invalid").pathname;
 }
 
 function safeChanges(value) {
@@ -90,8 +99,10 @@ function validateChanges(action, changes) {
   return true;
 }
 
-async function upstream(path, access, init = {}) {
-  const { base, key } = config();
+async function upstream(path, access, binding = {}, init = {}) {
+  const { base, key, assertionSecret } = config();
+  const rawBody = init.body || "";
+  const assertion = issueReviewAssertion({ actorEmail: access.email, method: init.method || "GET", path: canonicalReviewAssertionPath(path), caseId: binding.caseId || null, version: binding.version ?? null, rawBody }, assertionSecret);
   const response = await fetch(`${base}${path}`, {
     ...init,
     redirect: "error",
@@ -99,7 +110,11 @@ async function upstream(path, access, init = {}) {
       authorization: `Bearer ${key}`,
       accept: "application/json",
       "content-type": "application/json",
+      // Keep the old backend interoperable during the staged deployment. The
+      // new post-call backend ignores this unauthenticated hint and requires
+      // the bound assertion above.
       "x-raydar-actor-email": access.email,
+      "x-raydar-review-assertion": assertion,
       ...(init.headers || {}),
     },
     signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -116,7 +131,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!requireSameOrigin(req, res)) return;
   res.setHeader("cache-control", "no-store");
-  const access = await requireOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
+  const access = await requireReviewOperator(req, res, req.method === "GET" ? "reviewRead" : "reviewWrite");
   if (!access) return;
 
   const { base, key, error: configError } = config();
@@ -137,7 +152,7 @@ export default async function handler(req, res) {
       const path = String(req.query?.metrics || "") === "1"
         ? "/api/v2/reviews/metrics"
         : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
-      const { response, body } = await upstream(path, access);
+      const { response, body } = await upstream(path, access, { caseId: id || null });
       return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, configured: true, ...body }, access));
     }
 
@@ -158,7 +173,8 @@ export default async function handler(req, res) {
       if (!fileName || /[\\/\0]/.test(fileName) || !FILE_TYPES.has(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 25 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) {
         return res.status(400).json({ ok: false, error: "resume_metadata_invalid" });
       }
-      const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/resume-files`, access, {
+      const path = `/api/v2/reviews/${encodeURIComponent(reviewId)}/resume-files`;
+      const { response, body } = await upstream(path, access, { caseId: reviewId, version }, {
         method: "POST",
         headers: { "if-match": `"${version}"` },
         body: JSON.stringify({ schemaVersion: 2, reviewId, fileName, mimeType, sizeBytes, sha256 }),
@@ -184,7 +200,8 @@ export default async function handler(req, res) {
     }
     if (!validateChanges(action, changes)) return res.status(400).json({ ok: false, error: "review_value_invalid" });
     if (changes && Object.keys(changes).length) bodyOut.changes = changes;
-    const { response, body } = await upstream(`/api/v2/reviews/${encodeURIComponent(reviewId)}/actions`, access, {
+    const path = `/api/v2/reviews/${encodeURIComponent(reviewId)}/actions`;
+    const { response, body } = await upstream(path, access, { caseId: reviewId, version }, {
       method: "POST",
       headers: { "if-match": `"${version}"` },
       body: JSON.stringify(bodyOut),

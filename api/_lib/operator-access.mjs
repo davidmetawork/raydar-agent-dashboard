@@ -68,6 +68,18 @@ export function requireSameOrigin(req, res, env = process.env) {
   return true;
 }
 
+// Review itself is the access boundary: a validated Dashboard session can
+// resolve its displayed case, without a second per-email allowlist.
+export async function requireReviewOperator(req, res, capability) {
+  if (!(await requireAuth(req, res))) return null;
+  if (!req.authedEmail) { res.status(503).json({ ok: false, error: 'operator_auth_not_configured' }); return null; }
+  const readOnly = String(process.env.POST_CALL_REVIEW_READ_ONLY || '').trim().toLowerCase() === 'true';
+  if (capability === 'reviewWrite' && readOnly) { res.status(403).json({ ok: false, error: 'review_read_only' }); return null; }
+  const base = operatorAccess(req.authedEmail);
+  return { ...base, role: base.role === 'viewer' ? 'reviewer' : base.role,
+    capabilities: { ...base.capabilities, reviewRead: true, reviewWrite: !readOnly, resumeUpload: !readOnly, reviewAssign: !readOnly, reviewIdentityOverride: !readOnly, reviewSendApproval: !readOnly } };
+}
+
 export const operatorAccessInternals = { emails, mutationOrigins };
 
 export async function requireOperator(req, res, capability) {
