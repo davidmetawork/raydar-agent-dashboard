@@ -278,6 +278,64 @@ export function acknowledgeCountsDoc(prev, { by, at, note = null }) {
   return { doc, cleared };
 }
 
+// Applicant Pipeline Core's funnel snapshot, riding sync as an optional
+// `pipeline` object (Status v2 build plan step 3). Backward compatible by
+// construction: Core does not send this field today, and every other sync
+// caller's payload is untouched by its absence. All-or-nothing like acks
+// and profiles — a malformed pipeline object rejects the batch before any
+// key is written, never a half-stored funnel.
+//
+// SHARED CONTRACT with the Status v2 page aggregator (dash-plumbing +
+// dash-page builders): counts are integer or null (null = "not computed
+// yet", never a fake 0); `holdsByReason` is the source's own {code,label}
+// list, never a page-side label; `laneEnabled`/`stopReason` are what let the
+// page distinguish "paused on purpose" from "cannot tell why it stopped".
+export const PIPELINE_COUNT_FIELDS = [
+  "captured", "identified", "readyToDecide", "holdsTotal",
+  "passed", "invited", "postDecisionHolds", "unaccounted",
+];
+const MAX_HOLDS_BY_REASON = 32;
+
+const isIntegerOrNull = (value) => value === null || value === undefined || Number.isInteger(value);
+const isIsoString = (value) => typeof value === "string" && value.trim() && !Number.isNaN(Date.parse(value));
+
+export function normalizePipeline(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, reason: "invalid_pipeline" };
+  if (!isIsoString(input.generatedAt)) return { ok: false, reason: "invalid_generatedAt" };
+  const window = input.window;
+  if (!window || typeof window !== "object" || Array.isArray(window) || !Number.isInteger(window.days)) {
+    return { ok: false, reason: "invalid_window" };
+  }
+  if (window.since != null && !isIsoString(window.since)) return { ok: false, reason: "invalid_window_since" };
+  for (const field of PIPELINE_COUNT_FIELDS) {
+    if (!isIntegerOrNull(input[field])) return { ok: false, reason: `invalid_${field}` };
+  }
+  if (!Array.isArray(input.holdsByReason) || input.holdsByReason.length > MAX_HOLDS_BY_REASON) {
+    return { ok: false, reason: "invalid_holdsByReason" };
+  }
+  const holdsByReason = [];
+  for (const row of input.holdsByReason) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return { ok: false, reason: "invalid_holdsByReason_row" };
+    const code = String(row.code || "").trim();
+    const label = String(row.label || "").trim();
+    if (!code || code.length > 80 || !label || label.length > 200) return { ok: false, reason: "invalid_holdsByReason_row" };
+    if (!isIntegerOrNull(row.count)) return { ok: false, reason: "invalid_holdsByReason_count" };
+    holdsByReason.push({ code, label, count: row.count ?? null });
+  }
+  if (typeof input.laneEnabled !== "boolean") return { ok: false, reason: "invalid_laneEnabled" };
+  if (input.stopReason != null && typeof input.stopReason !== "string") return { ok: false, reason: "invalid_stopReason" };
+
+  const pipeline = {
+    generatedAt: input.generatedAt,
+    window: { days: window.days, since: window.since ?? null },
+    holdsByReason,
+    laneEnabled: input.laneEnabled,
+    stopReason: input.stopReason ? String(input.stopReason).slice(0, 500) : null,
+  };
+  for (const field of PIPELINE_COUNT_FIELDS) pipeline[field] = input[field] ?? null;
+  return { ok: true, pipeline };
+}
+
 export function createSyncHandler({
   kvReady = kvConfigured,
   readHash = hashGetAllJson,
@@ -621,6 +679,14 @@ export function createSyncHandler({
           stored.sourceFactsError = String(error?.message || error).slice(0, 120);
         }
         stored.sourceProfiles = entries.length;
+      }
+      if (body.pipeline != null) {
+        const normalized = normalizePipeline(body.pipeline);
+        if (!normalized.ok) {
+          return res.status(400).json({ ok: false, error: "invalid_pipeline", reason: normalized.reason });
+        }
+        await writeJson(K.pipeline, normalized.pipeline);
+        stored.pipeline = true;
       }
       return res.status(200).json({ ok: true, stored });
     } catch (error) {

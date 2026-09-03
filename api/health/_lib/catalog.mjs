@@ -537,6 +537,13 @@ export const CATALOG = [
     // query over past confirmed agent bookings that never dispatched a bot.
     // Born from the 2026-08-19..25 outage that nothing else could see.
     ["gha-dispatch-watch", "Missed-interviewer alarm", 75, 180],
+    // Post-call watchdog (post-call-watchdog.yml): every 10 min, checks the
+    // post-call service's public /api/health and stops the run on trouble.
+    // Was silently 404ing before this row existed — the beat curl had no
+    // --fail, so the run stayed green while the beat sink rejected it
+    // (Status v2 build plan step 2). Windows scaled down from the 30-min
+    // dispatch-watch pair for a 10-min cadence.
+    ["gha-post-call-watchdog", "Post-call watchdog", 25, 60],
   ].map(([lane, name, degradedAfterMin, maxSilenceMin]) => ({
     id: lane,
     name,

@@ -34,13 +34,16 @@ import {
 
 // ── 1. catalog invariants ───────────────────────────────────────────────────
 
-test("47 systems, unique ids, in the four fixed groups", () => {
-  assert.equal(SYSTEMS.length, 47);
-  assert.equal(new Set(SYSTEMS.map((s) => s.id)).size, 47, "duplicate system id");
+test("48 systems, unique ids, in the four fixed groups", () => {
+  // 47 + 1: "applicant-pipeline-core" (Status v2 build plan step 3), the v3
+  // Postgres rebuild of the applicant flow, registered so the health
+  // surfaces stop implying the retired pre-cutover names are its signal.
+  assert.equal(SYSTEMS.length, 48);
+  assert.equal(new Set(SYSTEMS.map((s) => s.id)).size, 48, "duplicate system id");
   const counts = {};
   for (const s of SYSTEMS) counts[s.group] = (counts[s.group] || 0) + 1;
   assert.deepEqual(counts, {
-    "candidate-emails": 17,
+    "candidate-emails": 18,
     "paraform-writes": 10,
     "background-readers": 8,
     "infrastructure": 12,
