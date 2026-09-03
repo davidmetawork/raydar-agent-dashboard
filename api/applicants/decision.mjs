@@ -8,15 +8,20 @@
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { PASS_REASON_IDS, decisionRecord } from "./_lib/decision-record.mjs";
 import {
+  actionabilityFor,
+  interviewDecisionAllowed,
+  interviewDecisionHold,
+  readActivePublication,
+  readPublishedArtifacts,
+  verifyGeneration,
+} from "./_lib/generation.mjs";
+import {
   getJson,
-  hashDel,
   hashGetJson,
-  hashSetJson,
   K,
   kvConfigured,
   validKey,
 } from "./_lib/kv.mjs";
-import { profileReceiptReady } from "./_lib/profile-readiness.mjs";
 import {requireApplicantMutation,saveApplicantRequest} from './_lib/request-safety.mjs';
 
 export const config = { maxDuration: 30 };
@@ -28,11 +33,10 @@ export function createDecisionHandler({
   authHandler = requireApplicantMutation,
   kvReady = kvConfigured,
   readAck = (key) => hashGetJson(K.acks, key),
-  readQueue = () => getJson(K.queue),
-  readCard = (cuId) => hashGetJson(K.cards, cuId),
-  readProfileReceipt = (cuId) => hashGetJson(K.profileReady, cuId),
+  readJson = getJson,
+  readActive = () => readActivePublication({ readJson }),
+  readArtifacts = (pointer) => readPublishedArtifacts(pointer, { readJson }),
   writeDecision = (key, record) => saveApplicantRequest(key,record,{allowRejected:true}),
-  deleteDecision = (key) => hashDel(K.decisions, key),
   now = () => new Date().toISOString(),
 } = {}) {
   return async function handler(req, res) {
@@ -55,8 +59,17 @@ export function createDecisionHandler({
       if (action === "undo") {
         return res.status(409).json({ok:false,error:'request_may_already_be_processing'});
       }
-      const queue = await readQueue();
-      const row = (Array.isArray(queue?.rows) ? queue.rows : []).find((item) => item?.key === key);
+      const generation = await readActive();
+      if (!generation) return res.status(503).json({ ok: false, error: "generation_unavailable" });
+      const artifacts = await readArtifacts(generation);
+      if (!artifacts || !verifyGeneration(artifacts).ok) {
+        return res.status(503).json({ ok: false, error: "generation_unavailable" });
+      }
+      if (String(body.generationId || "") !== generation.generationId
+        || String(body.generationDigest || "") !== generation.digest) {
+        return res.status(409).json({ ok: false, error: "applicant_changed_refresh_required" });
+      }
+      const row = (Array.isArray(artifacts.queue?.rows) ? artifacts.queue.rows : []).find((item) => item?.key === key);
       const profileKey = row?.profileKey || row?.cuId;
       if (!profileKey) {
         return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
@@ -67,18 +80,13 @@ export function createDecisionHandler({
         || Number(body.decisionRevision)!==Number(row.decisionRevision)) {
         return res.status(409).json({ok:false,error:'applicant_changed_refresh_required'});
       }
-      if(action==='interview' && row.interviewAllowed!==true) {
-        return res.status(409).json({ok:false,error:'interview_not_ready',reason:row.readinessReason});
-      }
-      const [card, receipt] = await Promise.all([
-        readCard(profileKey),
-        readProfileReceipt(profileKey),
-      ]);
-      if (!card
-        || (("expCount" in card || "eduCount" in card)
-          && !(Number(card.expCount) > 0 || Number(card.eduCount) > 0))
-        || !profileReceiptReady(receipt, Date.parse(now()))) {
-        return res.status(409).json({ ok: false, error: "profile_cache_not_ready" });
+      const actionability = actionabilityFor(row);
+      if (action === "interview" && !interviewDecisionAllowed(row)) {
+        return res.status(409).json({
+          ok: false,
+          error: "interview_hard_hold",
+          reason: interviewDecisionHold(row),
+        });
       }
       // Shared with the rules tick so a human decision and an automatic one
       // are the same shape downstream (see _lib/decision-record.mjs).
@@ -91,15 +99,38 @@ export function createDecisionHandler({
       const decision = decisionRecord({
         action,
         at: now(),
-        by: req.authedEmail,
-        name: body.name,
-        roleTitle: body.roleTitle,
+        by: req.applicantActor?.email || req.authedEmail,
+        actorType: "human",
+        actorId: req.applicantActor?.id || req.authedEmail,
+        authorizedBy: req.applicantActor?.email || req.authedEmail,
+        name: row.name,
+        roleTitle: row.roleTitle,
         reason,
       });
       Object.assign(decision,{requestId:body.requestId,inputRevision:row.inputRevision,
-        readinessRevision:row.readinessRevision,decisionRevision:Number(row.decisionRevision),status:'pending'});
+        readinessRevision:row.readinessRevision,decisionRevision:Number(row.decisionRevision),status:'pending',
+        ...(action === "interview" ? { deliveryState: "requested" } : {}),
+        generationId: generation.generationId,
+        generationDigest: generation.digest,
+        ...(action === "interview" ? actionability : {}),
+      });
+      // The immutable row and its revisions were checked above, but the
+      // publisher may still have advanced the active pointer while the
+      // request was being assembled. Refuse a write against that stale page.
+      const currentGeneration = await readActive();
+      if (!currentGeneration
+        || currentGeneration.generationId !== generation.generationId
+        || currentGeneration.digest !== generation.digest) {
+        return res.status(409).json({
+          ok: false,
+          error: "applicant_changed_refresh_required",
+          generationId: currentGeneration?.generationId || null,
+          generationDigest: currentGeneration?.digest || null,
+        });
+      }
       if(!await writeDecision(key, decision)) return res.status(409).json({ok:false,error:'request_already_pending'});
-      return res.status(202).json({ ok: true, key, decision,status:'pending' });
+      return res.status(202).json({ ok: true, key, decision,status:'pending',
+        ...(action === "interview" ? { delivery: { state: "requested", label: "Interview requested · preparing" } } : {}) });
     } catch (error) {
       return res.status(502).json({
         ok: false,

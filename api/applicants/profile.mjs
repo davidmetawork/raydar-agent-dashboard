@@ -125,6 +125,11 @@ export default async function handler(req, res) {
 
   res.setHeader("Cache-Control", "no-store");
   try {
+    // Applicant Hub history is the durable source projection. Read it before
+    // the expiring rich-provider cache so a provider refresh cannot hide the
+    // source-backed profile used by the active generation.
+    const sourceCached = await getJson(K.sourceProfile(cu)).catch(() => null);
+    if (sourceCached) return res.status(200).json({ ok: true, ...sourceCached });
     const cached = await getJson(K.profile(cu)).catch(() => null);
     if (cached) return res.status(200).json({ ok: true, ...cached });
 

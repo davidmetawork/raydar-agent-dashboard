@@ -187,13 +187,12 @@ export const FIELDS = {
   //    they work even for the 44% with no profile history ─────────────────
   "application.tier": {
     group: "application", ops: ["any_of"], kind: "tiers", label: "Tier is",
-    // The publisher writes tier "C" or "unrated" on every queue row. An absent
-    // tier is unknown, not unrated — inventing one would let a tier rule fire
-    // on a row we never actually graded.
+    // Every published tier is eligible for an explicit button-run rule; tier
+    // labels inform the rule but never authorize a decision by themselves.
     read: (s) => {
-      const tier = s.row?.tier;
-      if (tier === "C") return "C";
-      return tier ? "unrated" : null;
+      const tier = String(s.row?.tier || "").trim();
+      if (RANKS.includes(tier.toUpperCase())) return tier.toUpperCase();
+      return tier.toLowerCase() === "unrated" ? "unrated" : null;
     },
   },
   "application.roleId": {
@@ -247,7 +246,7 @@ export const FIELD_GROUPS = [
 ];
 
 export const RANKS = ["S", "A", "B", "C"];
-export const TIERS = ["C", "unrated"];
+export const TIERS = ["S", "A", "B", "C", "unrated"];
 
 /** Fields whose group needs a matching row to exist at all. */
 const ROW_GROUPS = { school: "schools", job: "jobs" };

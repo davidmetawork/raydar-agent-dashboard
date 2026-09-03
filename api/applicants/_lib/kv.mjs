@@ -28,7 +28,13 @@
 //                              JSONs), GET /api/applicants/profile remains the
 //                              cache-miss fallback writer. profile.mjs is the
 //                              source of truth for the shape; the loop mirrors
-//                              it field-for-field.
+//                              it field-for-field. This is rich-provider cache
+//                              only; it is never the Hub history authority.
+//   apphub:source-profile:<key> — POST /api/applicants/sync only. Durable
+//                              Applicant Hub source projection, keyed by the
+//                              published profile key and never given a TTL.
+//                              It is separate from the rich cache so a
+//                              provider refresh cannot erase source history.
 //   apphub:photos            — POST /api/applicants/sync only (hash: field
 //                              cuId → JSON string of the photo URL)
 //   apphub:cards             — POST /api/applicants/sync only (hash: field
@@ -45,6 +51,11 @@
 //                              expire, so this companion receipt is what lets
 //                              the list prove the full 24h profile cache is
 //                              still present before exposing a candidate.
+//   apphub:source-profile-ready — POST /api/applicants/sync only (hash: field
+//                              profile key → {cachedAt, source,
+//                              historyState, sourceObservationId}). Durable
+//                              Hub receipt; sourceObservationId is the
+//                              freshness fence for the current queue row.
 //   apphub:rank:<companyId>  — GET  /api/applicants/profile only (30d TTL)
 //   apphub:counts            — POST /api/applicants/sync only (tiny doc: the
 //                              queue/stream sizes of the last publish plus a
@@ -91,6 +102,35 @@ export async function setJson(key, value, ttlSeconds, { kvImpl = kv } = {}) {
   return kvImpl(ttlSeconds
     ? ["SET", key, JSON.stringify(value), "EX", String(ttlSeconds)]
     : ["SET", key, JSON.stringify(value)]);
+}
+
+/** Write-once JSON used for immutable publication artifacts. */
+export async function setJsonIfAbsent(key, value, ttlSeconds, { kvImpl = kv } = {}) {
+  const command = ttlSeconds
+    ? ["SET", key, JSON.stringify(value), "EX", String(ttlSeconds), "NX"]
+    : ["SET", key, JSON.stringify(value), "NX"];
+  return kvImpl(command);
+}
+
+/**
+ * Compare-and-set a JSON pointer by its generation identity.  Comparing the
+ * parsed identity in Redis avoids depending on object-key order in a prior
+ * JSON encoding.  An empty expected generation means "only if absent".
+ */
+export async function compareAndSetJson(key, expected, next, { kvImpl = kv } = {}) {
+  const expectedGeneration = String(expected?.generationId || "");
+  const expectedDigest = String(expected?.digest || "");
+  return Number(await kvImpl(["EVAL", `
+    local raw=redis.call('GET',KEYS[1])
+    if ARGV[1]=='' then
+      if raw then return 0 end
+    else
+      if not raw then return 0 end
+      local ok,current=pcall(cjson.decode,raw)
+      if not ok or current.generationId~=ARGV[1] or current.digest~=ARGV[2] then return 0 end
+    end
+    redis.call('SET',KEYS[1],ARGV[3])
+    return 1`, 1, key, expectedGeneration, expectedDigest, JSON.stringify(next)])) === 1;
 }
 
 // Upstash REST returns HGETALL as a flat [field, value, field, value] array.
@@ -167,15 +207,23 @@ export const K = {
   rules: "apphub:rules",         // doc: {rules[], pausedAll, updatedAt} — writer: /api/applicants/rules only
   rulestats: "apphub:rulestats", // hash: ruleId → {fired, firedAt, ...} — writer: /api/applicants/rules-tick only
   ruleruns: "apphub:ruleruns",   // hash: `<cuId>:<roleId>` → why a rule fired — writer: rules-tick only
+  ruleRun: (ruleRunId) => `apphub:rule-run:${ruleRunId}`, // immutable exact run manifest
 
   snapshot: "apphub:snapshot",
   queue: "apphub:queue", // review-queue rows, split out so backlog size never crowds the stream
+  // Immutable generation artifacts. The active pointer is the only mutable
+  // publication selector; readers must never fall back to the legacy keys when
+  // it exists.
+  activeGeneration: "apphub:active-generation",
+  generation: (generationId, artifact) => `apphub:generation:${generationId}${artifact ? `:${artifact}` : ""}`,
   decisions: "apphub:decisions",
   acks: "apphub:acks",
   profile: (cuId) => `apphub:profile:${cuId}`,
+  sourceProfile: (profileKey) => `apphub:source-profile:${profileKey}`,
   photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
   cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
   profileReady: "apphub:profile-ready", // hash: field cuId → full-profile TTL receipt
+  sourceProfileReady: "apphub:source-profile-ready", // hash: field profile key → durable Hub receipt
   counts: "apphub:counts", // last publish's queue/stream sizes + latched drop alert (see header)
   // Applicant Pipeline Core's own funnel snapshot (Status v2 build plan step
   // 3, PRD-STATUS-V2-2026-09-03.md §5.2/§7): stored verbatim from an

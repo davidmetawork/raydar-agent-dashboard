@@ -279,7 +279,7 @@
         <div>
           <div class="eyebrow">Applicant hub</div>
           <h1>Applicants</h1>
-          <div class="sub">Every inbound applicant on David&rsquo;s roles. S/A/B tiers flow through the invite loop automatically; C-tier and unrated applicants wait here for a human call.</div>
+          <div class="sub">Every inbound applicant on David&rsquo;s roles. Review the person, then choose Pass or Interview; delivery preparation continues after your choice.</div>
         </div>
       </div>
       <button class="refresh-btn" id="refreshBtn" onclick="requestRefresh()">Refresh</button>
@@ -294,6 +294,8 @@
 
     <div class="banner" id="staleBanner"><div>●</div><div><strong id="staleTitle">Snapshot is stale</strong><span id="staleText"></span></div></div>
 
+    <div class="banner danger" id="generationBanner"><div>●</div><div><strong>Applicants are temporarily unavailable</strong><span id="generationText"></span></div></div>
+
     <div class="banner danger" id="countsBanner"><div>●</div><div><strong>Counts dropped sharply since the last snapshot</strong><span id="countsText"></span></div></div>
 
     <div class="banner danger" id="trimBanner"><div>●</div><div><strong id="trimTitle">Some applicants are missing from this queue</strong><span id="trimText"></span></div></div>
@@ -302,7 +304,7 @@
 
     <div class="toolbar">
       <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
-      <button class="view-pill" id="pillSetup" onclick="setView('setup')">Needs setup <span class="n" id="setupCount"></span></button>
+      <button class="view-pill" id="pillRequested" onclick="setView('requested')">Interview requested <span class="n" id="requestedCount"></span></button>
       <button class="view-pill" id="pillDelivery" onclick="setView('delivery')">Delivery review <span class="n" id="deliveryCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span></button>
@@ -317,7 +319,7 @@
       <select id="decisionFilter" class="decision-filter" aria-label="Filter decided applicants by outcome" onchange="setDecisionFilter(this.value)" hidden>
         <option value="all">All decisions</option>
         <option value="passed">Passed</option>
-        <option value="queued">Pending verification</option>
+        <option value="queued">Interview requested</option>
         <option value="emailed">Emailed</option>
         <option value="blocked">Blocked</option>
       </select>
@@ -366,7 +368,7 @@ const LS_KEY = "apphub-local-decisions-v1";
 // complete dataset in memory and only mounts the visible rows into the DOM.
 const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
-  snapshot: null, decisions: {}, acks: {},
+  snapshot: null, decisions: {}, acks: {}, generation: null,
   counts: null,                       // sync's count-drop tripwire doc; .alert set = show the danger banner
   profileCache: null,                 // fail-closed coverage: rows without a compact cached profile stay hidden
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
@@ -378,8 +380,15 @@ const STATE = {
   checked: new Set(), busy: new Set(),
   modal: null,                        // { cu, key, row, source }
   loaded: false,
+  feedUnavailable: null,              // fail closed: never keep rendering an unverified snapshot
 };
 const AUTH = { required: false, clientId: "", authenticated: false, email: "" };
+// The Rules script is loaded after this page script; expose only the current
+// immutable publication identity, never the applicant rows or actor identity.
+window.RaydarApplicantsGeneration = () => ({
+  generationId: STATE.generation?.generationId || "",
+  generationDigest: STATE.generation?.digest || "",
+});
 
 function loadLocal() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch { return {}; } }
 function saveLocal() { try { localStorage.setItem(LS_KEY, JSON.stringify(STATE.local)); } catch {} }
@@ -464,9 +473,10 @@ function effectiveDecision(key) {
   const local = STATE.local[key];
   const decision=local || STATE.decisions[key] || null;
   if(decision?.action==='undo') return null;
-  const ack=STATE.acks[key];
-  if(ack?.status==='blocked' && (!decision?.requestId || ack.requestId===decision.requestId)
-    && !['human_pass','interview_dispatch_pending'].includes(ack.reason)) return null;
+  // A provider hold is delivery state, not erasure of the recruiter's intent.
+  // Keep the Interview visible in Requested/Delivery review until a person
+  // deliberately changes it; otherwise a transient blocker reopens the row
+  // and invites duplicate clicks.
   return decision;
 }
 
@@ -476,6 +486,36 @@ function streamRows() { return STATE.snapshot?.stream || []; }
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
+const HARD_HOLD_STATES = new Set(["identity_review", "recipient_review", "delivery_review", "withdrawn", "privacy_hold", "do_not_process"]);
+const HARD_HOLD_CODES = new Set(["identity_conflict", "cross_person_identity_conflict", "recipient_conflict", "recipient_reserved_other_person", "ambiguous_delivery", "delivery_reconciliation_required", "source_withdrawn", "withdrawn", "privacy_hold", "do_not_process", "protected_person", "processing_basis_restricted"]);
+function normalizedHold(value) { const hold = String(value ?? "").trim().toLowerCase(); return hold || null; }
+function interviewHold(row) {
+  if (!row) return "application_missing";
+  if (row.withdrawn === true || row.privacyHold === true || row.doNotProcess === true
+    || row.protectedPerson === true || row.identityConflict === true || row.recipientConflict === true) {
+    return normalizedHold(row.holdReasonCode || row.reasonCode)
+      || (row.identityConflict ? "identity_conflict" : row.recipientConflict ? "recipient_conflict" : "policy_hold");
+  }
+  const candidates = [
+    row.hardHoldCode, row.hard_hold_code, row.holdType, row.hold_type,
+    row.decisionHoldCode, row.decision_hold_code,
+    row.identityState === "conflict" ? "identity_conflict" : null,
+    row.connectionState === "conflict" ? "identity_conflict" : null,
+    row.readinessState, row.deliveryState, row.status,
+  ].map(normalizedHold).filter(Boolean);
+  return candidates.find((value) => HARD_HOLD_STATES.has(value) || HARD_HOLD_CODES.has(value)) || null;
+}
+function requestedRows() {
+  return queueRows().filter((row) => effectiveDecision(row.key)?.action === "interview");
+}
+function deliveryRows() {
+  return queueRows().filter((row) => {
+    const decision = effectiveDecision(row.key);
+    const ack = ackFor(row.key);
+    return Boolean(interviewHold(row))
+      || (decision?.action === "interview" && ["identity_review", "recipient_review", "delivery_review", "cannot_contact"].includes(String(ack?.status || decision.deliveryState || "")));
+  });
+}
 function hasNoLinkedin(row) {
   return !linkedinProfileUrl(row.linkedin);
 }
@@ -674,9 +714,23 @@ function renderStats() {
   $("statQueue").textContent = STATE.snapshot ? String(pendingRows().length) : (counts.queue ?? "–");
   $("statEmailed").textContent = counts.emailedToday ?? "–";
   const at = parseDate(STATE.snapshot?.generatedAt);
-  const chip = $("updatedChip"), banner = $("staleBanner");
+  const chip = $("updatedChip"), banner = $("staleBanner"), unavailable = $("generationBanner");
   chip.classList.remove("amber", "red");
   banner.classList.remove("on");
+  if (STATE.feedUnavailable) {
+    $("statNew").textContent = "–";
+    $("statQueue").textContent = "–";
+    $("statEmailed").textContent = "–";
+    chip.classList.add("red");
+    $("updatedText").textContent = "Feed unavailable";
+    $("generationText").textContent = STATE.feedUnavailable.reason === "profile_receipt_mismatch"
+      ? "The published generation is missing an exact source-profile receipt. No applicants are shown until the next verified publication."
+      : "The published generation failed verification. No stale applicants are shown; refresh after the source is available.";
+    unavailable.classList.add("on");
+    ["countsBanner", "trimBanner", "cacheBanner"].forEach((id) => $(id).classList.remove("on"));
+    return;
+  }
+  unavailable.classList.remove("on");
   // Count-drop tripwire banner: sync latches an alert in apphub:counts when a
   // publish's queue or stream collapses versus the previous one (the 2026-08-10
   // poisoned-index incident rendered 2,244 → 22 silently). Display-only — the
@@ -723,7 +777,7 @@ function renderStats() {
   if (cache?.withheldCandidates > 0) {
     const n = Number(cache.withheldCandidates).toLocaleString();
     $("cacheTitle").textContent = n + " applicant profile" + (cache.withheldCandidates === 1 ? " is" : "s are") + " preparing";
-    $("cacheText").textContent = "These applicants are safely held off Review and Stream until their cached profile history is ready; they will appear automatically after caching completes.";
+    $("cacheText").textContent = "These applicants are still missing a readable source profile; they remain in Profile preparing until that source history is available.";
     $("cacheBanner").classList.add("on");
   } else {
     $("cacheBanner").classList.remove("on");
@@ -796,9 +850,9 @@ function renderStats() {
 }
 
 function renderPills() {
-  $("reviewCount").textContent = STATE.snapshot ? String(pendingRows().filter(r=>r.interviewAllowed===true).length) : "";
-  $("setupCount").textContent=String(pendingRows().filter(r=>!r.interviewAllowed && r.readinessState!=='delivery_review').length);
-  $("deliveryCount").textContent=String(pendingRows().filter(r=>r.readinessState==='delivery_review').length);
+  $("reviewCount").textContent = STATE.snapshot ? String(pendingRows().length) : "";
+  $("requestedCount").textContent = STATE.snapshot ? String(requestedRows().length) : "";
+  $("deliveryCount").textContent = STATE.snapshot ? String(deliveryRows().length) : "";
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
@@ -847,6 +901,9 @@ function ackFor(key) {
 function decisionStatus(key, decision) {
   const ack = ackFor(key);
   if (decision?.action === "pass" && (!decision.requestId || ack?.reason==='human_pass')) return "passed";
+  if (decision?.action === "interview" && ["invited", "sendgrid_delivered"].includes(ack?.status)) return "emailed";
+  if (decision?.action === "interview" && (ack?.status === "blocked"
+    || ["identity_review", "recipient_review", "delivery_review"].includes(ack?.status))) return "blocked";
   if (ack?.status === "invited") return "emailed";
   if (ack?.status === "blocked") return "blocked";
   return "queued";
@@ -863,7 +920,7 @@ function renderDecisionFilter(decidedMode) {
   select.value = STATE.decisionStatus;
   const counts = { passed: 0, queued: 0, emailed: 0, blocked: 0 };
   for (const row of decidedRows()) counts[decisionStatus(row.key, effectiveDecision(row.key))] += 1;
-  const labels = { passed: "Passed", queued: "Pending verification", emailed: "Emailed", blocked: "Blocked" };
+  const labels = { passed: "Passed", queued: "Interview requested", emailed: "Emailed", blocked: "Held / blocked" };
   select.options[0].textContent = "All decisions (" + decidedRows().length + ")";
   for (const [status, label] of Object.entries(labels)) {
     const option = select.querySelector('option[value="' + status + '"]');
@@ -890,8 +947,9 @@ function decidedStatusHtml(key, decision) {
   let chip;
   if (decisionStatus(key, decision) === "passed") chip = '<span class="decided-chip passed">Passed</span>';
   else if (decisionStatus(key, decision) === "emailed") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
-  else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">Blocked: ' + esc(ack.reason || "see loop log") + "</span>";
-  else chip = '<span class="decided-chip queued">Pending verification</span>';
+  else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">' + (decision.action === "interview" ? "Interview held: " : "Blocked: ") + esc(ack?.reason || interviewHold(queueRows().find((row) => row.key === key)) || "see delivery state") + "</span>";
+  else if (decision.action === "interview") chip = '<span class="decided-chip queued">Interview requested · preparing</span>';
+  else chip = '<span class="decided-chip queued">Pending</span>';
   const undo = "";
   return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
 }
@@ -917,14 +975,19 @@ function secHtml(label, lines, extra) {
 function historyHtml(row) {
   const cu = profileId(row);
   const card = STATE.cards[cu];
-  if (!card) return '<div class="rc-none">No cached profile history is available for this applicant.</div>';
+  if (!card) return '<div class="rc-none">Source profile history is still preparing for this applicant.</div>';
   const exps = card.exp || [], edus = card.edu || [];
   const expTotal = card.expCount ?? exps.length, eduTotal = card.eduCount ?? edus.length;
   const hidden = (expTotal - exps.length) + (eduTotal - edus.length);
   const out = [];
   if (exps.length) out.push(secHtml("Experience", exps.map(expLineHtml).join("")));
   if (edus.length) out.push(secHtml("Education", edus.map(eduLineHtml).join("")));
-  if (!out.length) return '<div class="rc-none">No cached work or education history is available.</div>';
+  if (!out.length) {
+    const state = String(card.historyState || "").trim().toLowerCase();
+    return '<div class="rc-none">' + (state === "verified_empty"
+      ? "The source reported no work or education history."
+      : "No work or education history is listed in this profile.") + "</div>";
+  }
   if (hidden > 0) out.push('<button class="rc-more" data-more="' + esc(cu) + '">Open full profile (' + (expTotal + eduTotal) + ")</button>");
   return out.join("");
 }
@@ -934,7 +997,8 @@ function rowCardHtml(row, mode, decision) {
   const busy = STATE.busy.has(key);
   const id = profileId(row);
   const card = STATE.cards[id];
-  const interviewReady = row.interviewAllowed === true;
+  const hold = interviewHold(row);
+  const interviewReady = !hold;
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
@@ -942,8 +1006,8 @@ function rowCardHtml(row, mode, decision) {
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
-          esc(interviewReady ? "Request interview" : row.readinessReason || "Applicant setup needs attention") + '"' +
-          (busy || !interviewReady ? " disabled" : "") + ">" + (interviewReady ? "Interview" : "Not ready") + "</button></div>");
+          esc(interviewReady ? "Request interview" : "Interview held: " + hold) + '"' +
+          (busy || !interviewReady ? " disabled" : "") + ">" + (interviewReady ? "Interview" : "Interview held") + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
@@ -986,7 +1050,7 @@ function rowCardHtml(row, mode, decision) {
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(card?.location || "") + "</div>" +
-        (mode!=='stream' && !interviewReady ? '<div class="rc-none">'+esc(row.readinessReason || 'Applicant setup needs attention')+'</div>' : '') +
+        (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>' : '') +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
       '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
@@ -1016,17 +1080,21 @@ function reviewListRows() {
     if (STATE.decisionStatus !== "all") {
       rows = rows.filter((row) => decisionStatus(row.key, effectiveDecision(row.key)) === STATE.decisionStatus);
     }
-  }
-  else {
+  } else if (STATE.view === "requested") {
+    rows = requestedRows();
+    rows = sortByDecisionDate(rows);
+  } else if (STATE.view === "delivery") {
+    rows = deliveryRows();
+    rows = sortByApplicationDate(rows);
+  } else {
     rows = pendingRows();
-    if(STATE.view==='setup') rows=rows.filter(r=>!r.interviewAllowed && r.readinessState!=='delivery_review');
-    else if(STATE.view==='delivery') rows=rows.filter(r=>r.readinessState==='delivery_review');
-    else rows=rows.filter(r=>r.interviewAllowed===true);
+    rows = sortByApplicationDate(rows);
+  }
+  if (!decidedMode) {
     if (STATE.chip === "ctier") rows = rows.filter((r) => r.tier === "C");
     if (STATE.chip === "unrated") rows = rows.filter((r) => r.tier !== "C");
     if (STATE.chip === "no-linkedin") rows = rows.filter(hasNoLinkedin);
     if (STATE.chip === "no-history") rows = rows.filter(hasNoHistory);
-    rows = sortByApplicationDate(rows);
   }
   return { rows: rows.filter(matchesFilters), decidedMode };
 }
@@ -1072,6 +1140,12 @@ function paintList(el, rows, build) {
 function renderReview() {
   const list = $("reviewList");
   if (!STATE.loaded) return;
+  if (STATE.feedUnavailable) {
+    list._virtual = null;
+    list.innerHTML = '<div class="empty"><div class="big">Applicants unavailable</div>The published generation failed verification, so no stale queue is shown. Refresh to retry.</div>';
+    renderBulk();
+    return;
+  }
   if (!STATE.snapshot) {
     list._virtual = null;
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
@@ -1083,10 +1157,12 @@ function renderReview() {
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
     if (hasFilters) list.innerHTML = '<div class="empty">No applicants match the current filters.</div>';
     else if (decidedMode) list.innerHTML = '<div class="empty">No decisions yet — Pass or Interview calls land here.</div>';
-    else if (!queueRows().length || !pendingRows().length) list.innerHTML = '<div class="empty"><div class="big">Queue cleared 🎉</div>Every C-tier and unrated applicant has been reviewed. New ones appear as they apply.</div>';
+    else if (STATE.view === "requested") list.innerHTML = '<div class="empty">No Interview requests are waiting or in delivery.</div>';
+    else if (STATE.view === "delivery") list.innerHTML = '<div class="empty">No hard holds need delivery review.</div>';
+    else if (!queueRows().length || !pendingRows().length) list.innerHTML = '<div class="empty"><div class="big">Queue cleared 🎉</div>Every applicant in the published review queue has been reviewed. New ones appear as they apply.</div>';
     else list.innerHTML = '<div class="empty">Nothing in this bucket right now.</div>';
   } else {
-    paintList(list, filtered, (r) => reviewRowHtml(r, decidedMode ? effectiveDecision(r.key) : null));
+    paintList(list, filtered, (r) => reviewRowHtml(r, effectiveDecision(r.key)));
   }
   renderBulk();
 }
@@ -1096,6 +1172,11 @@ function streamRowHtml(row) { return rowCardHtml(row, "stream", null); }
 function renderStream() {
   const list = $("streamList");
   if (!STATE.loaded) return;
+  if (STATE.feedUnavailable) {
+    list._virtual = null;
+    list.innerHTML = '<div class="empty"><div class="big">Applicants unavailable</div>The published generation failed verification, so no stale stream is shown. Refresh to retry.</div>';
+    return;
+  }
   if (!STATE.snapshot) {
     list._virtual = null;
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
@@ -1129,11 +1210,11 @@ function setView(view) {
   STATE.view = view;
   resetVirtualLists();
   $("pillReview").classList.toggle("active", view === "review");
-  $("pillSetup").classList.toggle("active",view==='setup');
+  $("pillRequested").classList.toggle("active", view === "requested");
   $("pillDelivery").classList.toggle("active",view==='delivery');
   $("pillStream").classList.toggle("active", view === "stream");
   $("pillRules").classList.toggle("active", view === "rules");
-  $("reviewView").style.display = ['review','setup','delivery'].includes(view) ? "" : "none";
+  $("reviewView").style.display = ['review','requested','delivery'].includes(view) ? "" : "none";
   $("streamView").style.display = view === "stream" ? "" : "none";
   $("rulesView").style.display = view === "rules" ? "" : "none";
   // The toolbar filters belong to the two lists, not to the rules editor.
@@ -1187,7 +1268,10 @@ async function decide(key, action, row, silent = false) {
   const previous = Object.prototype.hasOwnProperty.call(STATE.local, key) ? STATE.local[key] : undefined;
   STATE.local[key] = action === "undo"
     ? { action: "undo", at: new Date().toISOString() }
-    : { action,requestId,status:'pending', at: new Date().toISOString(), by: AUTH.email || "you", name: row?.name, roleTitle: row?.roleTitle };
+    : { action, requestId, status: "pending", at: new Date().toISOString(), by: AUTH.email || "you",
+      ...(action === "interview" ? { deliveryState: "requested" } : {}),
+      generationId: STATE.generation?.generationId, generationDigest: STATE.generation?.digest,
+      name: row?.name, roleTitle: row?.roleTitle };
   saveLocal();
   renderLists();
   if (STATE.modal && STATE.modal.key === key) renderModal();
@@ -1195,7 +1279,8 @@ async function decide(key, action, row, silent = false) {
     const response = await fetch("/api/applicants/decision", {
       method: "POST", credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key, action,requestId,inputRevision:row?.inputRevision,
+      body: JSON.stringify({ key, action, requestId, generationId: STATE.generation?.generationId,
+        generationDigest: STATE.generation?.digest, inputRevision:row?.inputRevision,
         readinessRevision:row?.readinessRevision,decisionRevision:row?.decisionRevision,
         name: row?.name, roleTitle: row?.roleTitle }),
     });
@@ -1445,19 +1530,24 @@ function renderModal() {
       parts.push('<div class="p-section"><h3>Experience</h3>' + p.experiences.map(experienceHtml).join("") + "</div>");
     if (Array.isArray(p.education) && p.education.length)
       parts.push('<div class="p-section"><h3>Education</h3>' + p.education.map(educationHtml).join("") + "</div>");
-    if (!(p.experiences || []).length && !(p.education || []).length && p.degraded !== "paraform_auth")
-      parts.push('<div class="p-loading">No cached work or education history is available for this applicant.</div>');
+    if (!(p.experiences || []).length && !(p.education || []).length && p.degraded !== "paraform_auth") {
+      const historyState = String(p.historyState || "").trim().toLowerCase();
+      parts.push('<div class="p-loading">' + (historyState === "verified_empty"
+        ? "The source reported no work or education history."
+        : "No work or education history is listed in this profile.") + "</div>");
+    }
   }
   if (modal.source === "queue") {
+    const hold = interviewHold(row);
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Make this a rule</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? "" :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
-          (row.interviewAllowed === true ? "Queue interview invite" : "Required profile checks are not ready") + '"' +
-          (busy || row.interviewAllowed !== true ? " disabled" : "") + ">" +
-          (row.interviewAllowed === true ? "Interview" : "Not ready") + "</button>") +
+          (hold ? "Interview held: " + hold : "Queue interview request") + '"' +
+          (busy || hold ? " disabled" : "") + ">" +
+          (hold ? "Interview held" : "Interview") + "</button>") +
       "</div>");
   }
   $("profileCard").innerHTML = parts.join("");
@@ -1491,8 +1581,8 @@ document.addEventListener("click", async (event) => {
     // Not a decision: it opens the rule editor seeded from this applicant.
     if (action === "make-rule") { makeRuleFrom(act.dataset.cu, key); return; }
     const row = queueRows().find((r) => r.key === key);
-    if (action === "interview" && row?.interviewAllowed !== true) {
-      toast("This applicant is not ready for an interview invite yet.", true);
+    if (action === "interview" && interviewHold(row)) {
+      toast("Interview held: " + interviewHold(row), true);
       return;
     }
     // Deciding from inside the profile hands over the next one, so a reviewer
@@ -1608,12 +1698,40 @@ function endRefreshWatch(ok) {
 }
 
 /* ---- feed ---- */
+function markFeedUnavailable(error) {
+  STATE.feedUnavailable = {
+    status: Number(error?.status) || 0,
+    reason: String(error?.reason || "").trim() || null,
+  };
+  // A failed generation must not leave the previous queue actionable on
+  // screen. Local optimistic decisions remain stored for the normal retry
+  // path, but every server-rendered artifact is discarded until a verified
+  // publication arrives.
+  STATE.snapshot = null;
+  STATE.decisions = {};
+  STATE.acks = {};
+  STATE.photos = {};
+  STATE.cards = {};
+  STATE.counts = null;
+  STATE.profileCache = null;
+  STATE.generation = null;
+  STATE.profiles = {};
+  STATE.checked.clear();
+  resetVirtualLists();
+}
+
 async function loadFeed(manual = false) {
   try {
     const response = await fetch("/api/applicants/feed", { credentials: "same-origin", cache: "no-store" });
     if (response.status === 401 || response.status === 403) { showGate(); return; }
-    const body = await response.json();
-    if (body.ok === false) throw new Error(body.error || "Feed failed");
+    const body = await response.json().catch(() => null);
+    if (!response.ok || body?.ok !== true) {
+      const error = new Error(body?.error || "Feed failed");
+      error.status = response.status;
+      error.reason = body?.reason || body?.error || null;
+      throw error;
+    }
+    STATE.feedUnavailable = null;
     STATE.snapshot = body.snapshot || null;
     STATE.decisions = body.decisions || {};
     STATE.acks = body.acks || {};
@@ -1621,15 +1739,15 @@ async function loadFeed(manual = false) {
     STATE.cards = body.cards || {};
     STATE.counts = body.counts || null;
     STATE.profileCache = body.profileCache || null;
+    STATE.generation = body.generation || null;
     STATE.loaded = true;
     reconcileLocal();
     renderAll();
     if (manual) toast("Refreshed.");
   } catch (error) {
-    if (!STATE.loaded) {
-      STATE.loaded = true;
-      renderAll();   // fall through to the no-snapshot empty states rather than a spinner forever
-    }
+    markFeedUnavailable(error);
+    STATE.loaded = true;
+    renderAll();
     if (manual) toast(error.message || "Could not refresh the feed.", true);
   }
 }
@@ -1671,7 +1789,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && AU
 /* Views that may be deep-linked. Rules is here so the master criteria page can
    be bookmarked and sent to the team as a plain link, not just reached by
    clicking through Review. */
-const DEEP_LINK_VIEWS = ["review", "setup", "delivery", "stream", "rules"];
+const DEEP_LINK_VIEWS = ["review", "requested", "delivery", "stream", "rules"];
 
 async function init() {
   const landed = location.hash.replace("#", "");

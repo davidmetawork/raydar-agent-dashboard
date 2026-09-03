@@ -13,12 +13,11 @@
 // truth: it is always regenerable from the profile, and a bad build is fixed
 // by the next prewarm rather than by a migration.
 //
-// THE HALF THAT ISN'T HERE. 44% of the C-tier and unrated queue has no
-// education AND no experience in Paraform at all — the linked-but-never-
-// featurized import population. For them `hasHistory` is false and every
+// THE HALF THAT ISN'T HERE. Some published applicants have no education AND no
+// experience in the provider profile. For them `hasHistory` is false and every
 // history condition simply cannot be satisfied. That is a fact about the data,
-// not a bug to route around: see FACTS_VERSION's note on fail-closed matching
-// in rules.mjs.
+// not a profile-readiness gate: see FACTS_VERSION's note on fail-closed
+// matching in rules.mjs.
 
 import { degreeLevel } from "./degree.mjs";
 import { schoolInUS } from "./school-us.mjs";

@@ -8,9 +8,15 @@ export async function requireApplicantMutation(req,res) {
   if (!(await requireAuth(req,res))) return false;
   let origin;
   try {origin=new URL(req.headers?.origin || '').host;} catch {}
-  if (!origin || origin!==req.headers?.host || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(req.authedEmail || '')) {
+  const email = String(req.authedEmail || '').trim().toLowerCase();
+  if (!origin || origin!==req.headers?.host || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     res.status(403).json({ok:false,error:'same_origin_signed_in_request_required'});return false;
   }
+  // Downstream decision records must identify the authenticated principal from
+  // this server-side assertion, never from a browser body field. Keep both the
+  // canonical id and email for human/rule authorization audit joins.
+  req.authedEmail = email;
+  req.applicantActor = { type: 'human', id: email, email };
   return true;
 }
 

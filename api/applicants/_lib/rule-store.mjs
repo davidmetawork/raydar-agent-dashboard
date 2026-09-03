@@ -43,22 +43,22 @@ export const armedRules = (doc) => doc.rules.filter((rule) => rule.state === "li
 export const watchingRules = (doc) => doc.rules.filter((rule) => rule.state === "watching");
 
 /**
- * The applicants a rule may consider: queue rows in the C-tier and unrated
- * review queue that no human and no earlier rule has decided.
+ * The applicants a rule may consider: every published queue row that no human
+ * and no earlier rule has decided. Tier is display/diagnostic data here, not a
+ * hidden action gate.
  *
  * THREE EXCLUSIONS, all load-bearing:
  *   1. Anything already in `decisions` — a rule never overrules a human, and
  *      never re-decides its own earlier work (D3).
- *   2. Anything outside the published queue — the S/A/B stream is not in it,
- *      which is how "rules never touch S/A/B" is enforced structurally rather
- *      than by a check somebody could forget (D1).
+ *   2. Anything outside the published queue — the stream is not in it, which
+ *      is how rules stay scoped to the review queue structurally rather than
+ *      by a check somebody could forget (D1).
  *   3. Rows with no key, which cannot carry a decision back anyway.
  */
 export function pendingRows(snapshotQueue, decisions) {
   const rows = Array.isArray(snapshotQueue) ? snapshotQueue : [];
   return rows.filter((row) => row?.key && (row?.profileKey || row?.cuId) && !decisions?.[row.key]
-    && row.readinessState==='ready' && row.inputRevision && row.readinessRevision
-    && row.assessmentStatus==='current' && ['C','unrated'].includes(row.tier));
+    && row.inputRevision);
 }
 
 /** Facts for a set of applicants, in batches HMGET can carry comfortably. */
@@ -83,12 +83,12 @@ export async function cardsFor(cuIds, { readMany = hashGetMany, batch = 200 } = 
   return out;
 }
 
-/** Full-profile cache receipts use the same bounded hash batching as cards. */
+/** Durable Applicant Hub source receipts use the same bounded hash batching as cards. */
 export async function profileReceiptsFor(cuIds, { readMany = hashGetMany, batch = 200 } = {}) {
   const unique = [...new Set((Array.isArray(cuIds) ? cuIds : []).filter(Boolean))];
   const out = {};
   for (let i = 0; i < unique.length; i += batch) {
-    Object.assign(out, await readMany(K.profileReady, unique.slice(i, i + batch)));
+    Object.assign(out, await readMany(K.sourceProfileReady, unique.slice(i, i + batch)));
   }
   return out;
 }
