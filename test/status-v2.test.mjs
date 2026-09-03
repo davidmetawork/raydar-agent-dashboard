@@ -657,6 +657,25 @@ test("R14 a payload carrying the target vocabulary renders it unchanged", () => 
     pipeline: pipelineFixture({ holdsByReason: [{ code: "needs_setup", label: "Needs setup", count: 996 }] }),
   }, { nowMs: NOW });
   assert.equal(today.flow.stages.find((s) => s.id === "waiting-you").tiles[0].label, "Needs setup");
+  // R14 promises the payload's label renders UNCHANGED, so check the surface,
+  // not just the aggregator: a long label wraps onto a second line instead of
+  // losing its words to an ellipsis.
+  const long = "Waiting on a recruiter recipient review";
+  const svg = pageRenderer.drawFlow(flowFor(SYSTEMS[1], {
+    pipeline: pipelineFixture({ holdsByReason: [{ code: "recruiter_recipient_review", label: long, count: 12 }] }),
+  }, { nowMs: NOW }).flow);
+  const drawn = [...svg.matchAll(/<text class="ftxt[^"]*"[^>]*>([^<]*)/g)].map((m) => m[1]);
+  assert.equal(drawn.join(" "), `12 ${long}`, `the tile clipped the payload's own label: ${drawn.join(" | ")}`);
+  assert.doesNotMatch(svg, /…/);
+  // the hover still carries the whole thing, and a short label stays one line
+  assert.ok(svg.includes(`<title>12 ${long}</title>`));
+  const short = pageRenderer.drawFlow(flowFor(SYSTEMS[1], {
+    pipeline: pipelineFixture({ holdsByReason: [{ code: "identity_review", label: "Identity review", count: 41 }] }),
+  }, { nowMs: NOW }).flow);
+  assert.equal((short.match(/class="ftxt/g) || []).length, 1);
+  // and the page's clip() is still the last resort for something absurd
+  assert.equal(pageRenderer.clip("x".repeat(40), 22).length, 22);
+
   // a bucket with no label at all names its code rather than borrowing copy
   const bare = flowFor(SYSTEMS[1], {
     pipeline: pipelineFixture({ holdsByReason: [{ code: "brand_new", count: 4 }] }),

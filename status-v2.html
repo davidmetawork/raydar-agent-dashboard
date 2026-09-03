@@ -231,17 +231,25 @@ function drawFlow(flow){
   const W=150,GX=54,PADX=6,PADY=6,VGAP=14;
   const counted=Boolean(flow.counted);
   const geo=new Map();
-  const TILE_H=20,TILE_GAP=4;
+  // A tile gets a second line rather than losing the payload's own words to an
+  // ellipsis: R14 promises an applicant label renders unchanged, and clipping
+  // "Waiting on a recruiter recipient review" to 22 characters is not that.
+  const TILE_H=20,TILE_GAP=4,TILE_CHARS=22,TILE_LINES=3,TILE_LH=11;
+  const tileText=(t)=>fmt(t.count)+" "+t.label;
+  const tileLinesOf=(s)=>(s.tiles||[]).map((t)=>wrapLabel(tileText(t),TILE_CHARS,TILE_LINES));
+  const tileH=(lines)=>Math.max(TILE_H,9+lines.length*TILE_LH);
   for(const s of stages){
     const lines=wrapLabel(s.label);
     let h;
     if(s.tiles){
+      const tl=tileLinesOf(s);
       const headH=(s.kind==="pool"?30:8)+lines.length*13;
-      h=s.tiles.length ? headH+4+s.tiles.length*(TILE_H+TILE_GAP)+2 : headH+8;
-    } else {
-      const extra=(s.secondary?1:0)+(s.note?1:0)+((s.subcounts||[]).length);
-      h=counted ? 34+lines.length*13+extra*13+8 : 12+lines.length*14+12;
+      h=s.tiles.length ? headH+4+tl.reduce((a,l)=>a+tileH(l)+TILE_GAP,0)+2 : headH+8;
+      geo.set(s.id,{lines,h,tileLines:tl});
+      continue;
     }
+    const extra=(s.secondary?1:0)+(s.note?1:0)+((s.subcounts||[]).length);
+    h=counted ? 34+lines.length*13+extra*13+8 : 12+lines.length*14+12;
     geo.set(s.id,{lines,h});
   }
   const cols=new Map();
@@ -282,18 +290,24 @@ function drawFlow(flow){
       } else { ty=18; }
       for(const line of g.lines){ parts.push(`<text class="flabel" x="12" y="${ty}">${esc(line)}</text>`); ty+=13; }
       ty+=4;
-      for(const t of s.tiles){
+      const tileLines=g.tileLines||tileLinesOf(s);
+      s.tiles.forEach((t,ti)=>{
         const tHot=t.accent==="bad-when-positive"&&(t.count||0)>0;
         const tWarm=t.accent==="warn-when-positive"&&(t.count||0)>0;
         // a tile opens the tab that holds those people
         if(t.link) parts.push(`<a href="${esc(t.link)}" target="_top" class="ftilelink">`);
-        parts.push(`<rect class="ftile${tHot?" hot":tWarm?" warm":""}" x="8" y="${ty}" width="${W-16}" height="${TILE_H}" rx="6"/>`);
-        const full=fmt(t.count)+" "+t.label;
-        parts.push(`<text class="ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}" x="14" y="${ty+14}">${esc(clip(full,22))}<title>${esc(full)}${t.basis==="inferred"?" (inferred)":""}</title></text>`);
+        const tl=tileLines[ti]||[tileText(t)];
+        const h=tileH(tl);
+        parts.push(`<rect class="ftile${tHot?" hot":tWarm?" warm":""}" x="8" y="${ty}" width="${W-16}" height="${h}" rx="6"/>`);
+        const full=tileText(t);
+        const cls=`ftxt${t.count==null?" miss":tHot?" hotc":tWarm?" warmc":""}`;
+        tl.forEach((line,li)=>{
+          parts.push(`<text class="${cls}" x="14" y="${ty+14+li*TILE_LH}">${esc(line)}${li===0?`<title>${esc(full)}${t.basis==="inferred"?" (inferred)":""}</title>`:""}</text>`);
+        });
         if(t.basis==="inferred") parts.push(`<text class="finf" x="${W-14}" y="${ty+14}" text-anchor="end">inferred</text>`);
         if(t.link) parts.push(`</a>`);
-        ty+=TILE_H+TILE_GAP;
-      }
+        ty+=h+TILE_GAP;
+      });
     } else if(counted){
       const miss=s.count==null;
       parts.push(`<text class="fcount${miss?" miss":hot?" hotc":warm?" warmc":""}" x="12" y="24">${esc(fmt(s.count))}${s.unit&&!miss?`<tspan class="funit"> ${esc(s.unit)}</tspan>`:""}</text>`);
