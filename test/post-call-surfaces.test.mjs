@@ -76,6 +76,22 @@ test("Review proxy owns auth attribution and optimistic concurrency", () => {
   assert.doesNotMatch(reviewProxy, /payload\.actor/);
 });
 
+// Status v2 build plan step 2: a `?funnel=1` branch beside `?metrics=1`,
+// proxying GET /api/v2/reviews/funnel with the same signing/assertion. The
+// endpoint may not exist upstream yet — a 404/501 must read as "no
+// publisher yet", not an error, so the Status v2 aggregator can render "—"
+// honestly instead of failing the whole page.
+test("Review proxy's funnel branch mirrors metrics and tolerates an unpublished upstream", () => {
+  assert.match(reviewProxy, /funnelRequested/);
+  assert.match(reviewProxy, /req\.query\?\.funnel.*===\s*"1"/);
+  assert.match(reviewProxy, /\/api\/v2\/reviews\/funnel/);
+  assert.match(reviewProxy, /response\.status === 404 \|\| response\.status === 501/);
+  assert.match(reviewProxy, /"not_published"/);
+  // The funnel path is chosen through the same signed `upstream()` helper as
+  // metrics — no separate fetch, no separate auth path.
+  assert.match(reviewProxy, /funnelRequested\s*\?\s*"\/api\/v2\/reviews\/funnel"/);
+});
+
 test("Review can be deployed read-only without changing its future role model", () => {
   const allowlist = { POST_CALL_REVIEW_ADMIN_EMAILS: "david@raydar.xyz" };
   const normal = operatorAccess("david@raydar.xyz", allowlist);

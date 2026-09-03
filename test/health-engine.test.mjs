@@ -309,6 +309,22 @@ test("catalog is internally consistent", () => {
   assert.ok(beatLanes.has("hm-chase"));
 });
 
+// Status v2 build plan step 1: the watchdog was silently 404ing every 10
+// minutes because "gha-post-call-watchdog" had no catalog row — the beat
+// curl had no --fail, so the workflow run stayed green while the sink
+// rejected every beat. One row fixes it.
+test("gha-post-call-watchdog has a beat row, tier 2, in the actions group", () => {
+  const before = beatLanes.size;
+  assert.ok(beatLanes.has("gha-post-call-watchdog"), "watchdog beat lane missing from beatLanes");
+  assert.equal(before, beatLanes.size, "reading the set must not mutate it");
+  const row = byId.get("gha-post-call-watchdog");
+  assert.ok(row, "catalog row gha-post-call-watchdog missing");
+  assert.equal(row.kind, "beat");
+  assert.equal(row.group, "actions");
+  assert.equal(row.tier, 2);
+  assert.equal(row.probe.lane, "gha-post-call-watchdog");
+});
+
 // ── Regressions found by Drill 1 on 2026-08-07 ────────────────────────────
 // Vercel answers an unknown /api/* path with a JSON error envelope when the
 // caller sends `accept: application/json`. That envelope parses cleanly, says

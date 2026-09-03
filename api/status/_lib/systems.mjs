@@ -234,6 +234,11 @@ export const SYSTEMS = [
     },
     links: { health: HEALTH, emails: EMAILS, registry: null },
     davidAction: null,
+    // "applicants-freshener" and "lane-interview-invites" are RETIRED names
+    // from the pre-cutover applicant flow, not live aliases of this lane —
+    // kept here only so the completeness test still finds an owner for
+    // whatever inventory entries still carry them; do not read them as
+    // signal for this row. The live successor is "applicant-pipeline-core".
     dupes: ["interview-fit", "interview-index", "applicants-freshener", "lane-interview-invites"],
   },
   {
@@ -504,6 +509,32 @@ export const SYSTEMS = [
     davidAction: null,
     dupes: [],
   },
+  {
+    // Status v2 build plan step 3 (docs/PRD-STATUS-V2-2026-09-03.md §5.2,
+    // §7): the v3 Postgres rebuild of the LinkedIn applicant flow, replacing
+    // the old resident Mac worker and its freshener sweep. Registered here
+    // so the health surfaces stop implying the retired pre-cutover names
+    // below are the live signal for this work — see their `dupes` note.
+    // No flow yet: the aggregator has no publisher to draw one from until
+    // Core's monitor-live adapter starts sending `pipeline` on sync.
+    id: "applicant-pipeline-core",
+    name: "Applicant Pipeline Core",
+    summary: "Reads LinkedIn applicants, scores fit, and (once armed) invites them to book an AI interview — the v3 Postgres rebuild of the applicant flow.",
+    group: "candidate-emails",
+    priority: 2,
+    state: "not-yet",
+    stateNote: "The invite lane is disabled — Core reads and scores applicants but does not send email yet.",
+    cadence: "StartInterval desktop job on David's Mac; does not fire while it sleeps.",
+    gmail: { class: "none", note: "invites not yet armed" },
+    paraform: { class: "writes", note: "applicant records and eligibility" },
+    healthIds: [],
+    gap: "No publisher yet — Core does not send a heartbeat or a pipeline snapshot to the Monitor today (Status v2 build plan step 3 wires this).",
+    workflow: null,
+    feed: null,
+    links: { health: null, emails: EMAILS, registry: "/products/applicant-hub/" },
+    davidAction: null,
+    dupes: [],
+  },
 
   // ────────────────────────────────────────────────────────────────────────
   // GROUP 2 — PARAFORM WRITES (no candidate email; they change Paraform state)
@@ -765,6 +796,10 @@ export const SYSTEMS = [
     feed: null,
     links: { health: HEALTH, emails: EMAILS, registry: null },
     davidAction: null,
+    // "applicant-hub-worker" is a RETIRED name — the resident Mac worker this
+    // row describes is the pre-cutover applicant flow; the v3 rebuild is the
+    // separate "applicant-pipeline-core" row above. Kept here only so the
+    // completeness test still finds an owner for lanes.mjs' entry.
     dupes: ["applicant-hub-worker"],
   },
   {

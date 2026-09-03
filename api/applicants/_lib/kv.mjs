@@ -177,6 +177,14 @@ export const K = {
   cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
   profileReady: "apphub:profile-ready", // hash: field cuId → full-profile TTL receipt
   counts: "apphub:counts", // last publish's queue/stream sizes + latched drop alert (see header)
+  // Applicant Pipeline Core's own funnel snapshot (Status v2 build plan step
+  // 3, PRD-STATUS-V2-2026-09-03.md §5.2/§7): stored verbatim from an
+  // optional `pipeline` field on sync's POST body, read back by feed.mjs as
+  // `pipeline` (null when Core has never published one). Shape:
+  // { generatedAt, window:{days,since}, captured, identified, readyToDecide,
+  //   holdsTotal, holdsByReason:[{code,label,count}], passed, invited,
+  //   postDecisionHolds, unaccounted, laneEnabled, stopReason }.
+  pipeline: "apphub:pipeline",
   refresh: "apphub:refresh", // on-demand refresh request from the tab (see header)
   rank: (companyId) => `apphub:rank:${companyId}`,
 };

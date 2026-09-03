@@ -157,12 +157,20 @@ export default async function handler(req, res) {
       // aggregate behind the same signed actor. The endpoint may not exist on
       // the post-call service yet; its 404/501 is passed straight through and
       // Status v2 reads that as "no publisher yet" (PRD-STATUS-V2 §5.1).
-      const path = String(req.query?.funnel || "") === "1"
+      const funnelRequested = String(req.query?.funnel || "") === "1";
+      const path = funnelRequested
         ? "/api/v2/reviews/funnel"
         : String(req.query?.metrics || "") === "1"
           ? "/api/v2/reviews/metrics"
           : id ? `/api/v2/reviews/${encodeURIComponent(id)}` : `/api/v2/reviews?${query}`;
       const { response, body } = await upstream(path, access, { caseId: id || null });
+      // The funnel endpoint (Status v2 build plan step 2) may not exist yet
+      // on the upstream post-call service. Treat 404/501 as "no publisher
+      // yet" rather than an error — the aggregator renders "—" honestly
+      // instead of failing the whole page.
+      if (funnelRequested && (response.status === 404 || response.status === 501)) {
+        return res.status(200).json(withActor({ ok: false, configured: true, reason: "not_published" }, access));
+      }
       return res.status(response.status).json(withActor({ ok: response.ok && body.ok !== false, configured: true, ...body }, access));
     }
 

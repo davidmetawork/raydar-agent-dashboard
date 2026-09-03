@@ -24,7 +24,7 @@ export function createFeedHandler({
     if (!(await authHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
     try {
-      const [snapshot, queueDoc, decisions, acks, photos, cards, profileReady, counts] = await Promise.all([
+      const [snapshot, queueDoc, decisions, acks, photos, cards, profileReady, counts, pipeline] = await Promise.all([
         readJson(K.snapshot),
         readJson(K.queue),
         readHash(K.decisions),
@@ -33,6 +33,9 @@ export function createFeedHandler({
         readHash(K.cards),
         readHash(K.profileReady),
         readJson(K.counts),
+        // Applicant Pipeline Core's funnel snapshot (Status v2 build plan
+        // step 3) — null when Core has never published one; never a fake 0.
+        readJson(K.pipeline),
       ]);
       // The queue is stored under its own key (size isolation); merge it back so
       // the page keeps reading one snapshot shape. A queue embedded directly in
@@ -60,6 +63,7 @@ export function createFeedHandler({
         photos,
         cards,
         counts,
+        pipeline: pipeline ?? null,
         profileCache,
       });
     } catch (error) {
