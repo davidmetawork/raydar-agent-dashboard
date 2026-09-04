@@ -8,7 +8,7 @@ import { cors, requireAuth } from "./_lib/core.mjs";
 import { readActivePublication, readPublishedArtifacts, verifyGeneration } from "./_lib/generation.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
 import {
-  activeSourceProfileReceiptMismatches,
+  partitionByProfileReceipt,
   profileCacheSummary,
   profilePreparingCount,
 } from "./_lib/profile-readiness.mjs";
@@ -58,21 +58,21 @@ export function createFeedHandler({
         // step 3) — null when Core has never published one; never a fake 0.
         readJson(K.pipeline),
       ]);
-      const joined = artifacts.snapshot ? {
+      const published = artifacts.snapshot ? {
         ...artifacts.snapshot,
         ...(Array.isArray(artifacts.queue?.rows) ? { queue: artifacts.queue.rows } : {}),
       } : null;
-      const receiptMismatches = activeSourceProfileReceiptMismatches(joined, sourceProfileReceipts, { now: now() });
-      if (receiptMismatches.length) {
-        res.setHeader("Cache-Control", "no-store");
-        return res.status(503).json({
-          ok: false,
-          error: "generation_unavailable",
-          reason: "profile_receipt_mismatch",
-          generationId: generation.generationId,
-          profilePreparing: profilePreparingCount(joined),
-        });
-      }
+      // ONE STALE ROW MUST NOT BLANK THE TAB (2026-09-04). The publish-time
+      // fence in sync.mjs is what keeps an unbacked generation from ever
+      // becoming active; by the time we read, this generation was already
+      // proved. A receipt can still go stale under a live generation (Hub
+      // re-observes and the observation id moves), and answering 503 for that
+      // made the tab discard the whole feed — 4,345 rows and the reviewer's
+      // local state — over one row. Those rows now move into the same
+      // profile-preparing partition Core already publishes: not rendered, so
+      // not actionable; counted, so never silently gone.
+      const partition = partitionByProfileReceipt(published, sourceProfileReceipts, { now: now() });
+      const joined = partition.snapshot;
       const profileCache = profileCacheSummary(joined);
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
@@ -88,6 +88,9 @@ export function createFeedHandler({
         pipeline: pipeline ?? null,
         profileCache,
         profilePreparing: profilePreparingCount(joined),
+        // Reported separately from Core's own preparing partition so the tab
+        // can say which part of the number this read withheld.
+        profileReceiptWithheld: partition.withheld,
         generation: {
           generationId: generation.generationId,
           digest: generation.digest,

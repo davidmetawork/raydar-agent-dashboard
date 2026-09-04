@@ -56,9 +56,8 @@ export function profileReceiptReady(receipt, now = Date.now(), expectedSourceObs
 
 /**
  * Every row in an active generation must carry an exact durable Hub receipt.
- * This is intentionally separate from profileCacheGate: filtering a broken
- * generation into a smaller, apparently healthy feed would change the work
- * the reviewer sees. Readers fail closed instead.
+ * This is the PUBLISH-TIME fence: sync refuses to activate a generation whose
+ * rows are not all backed, so a bad generation never becomes the active one.
  */
 export function activeSourceProfileReceiptMismatches(snapshot, receipts, { now = Date.now() } = {}) {
   const available = receipts && typeof receipts === "object" && !Array.isArray(receipts) ? receipts : {};
@@ -131,95 +130,48 @@ export function profileCacheSummary(snapshot) {
   };
 }
 
-export function profileCacheGate(snapshot, cards, receipts, { now = Date.now() } = {}) {
-  const available = cards && typeof cards === "object" && !Array.isArray(cards) ? cards : {};
-  const current = receipts && typeof receipts === "object" && !Array.isArray(receipts) ? receipts : {};
-  const rawStream = rows(snapshot?.stream);
-  const rawQueue = rows(snapshot?.queue);
-  // A card proves the list projection exists. A Hub receipt may be durable;
-  // a rich-provider receipt still proves the full profile has not reached its
-  // 24-hour TTL.
-  const profileKey = (row) => row?.profileKey || row?.cuId || null;
-  const cardHasHistory = (card) => Boolean(card && (
-    PROFILE_HISTORY_STATES.has(text(card.historyState))
-    || (
-    (!("expCount" in card) && !("eduCount" in card))
-    || Number(card.expCount) > 0
-    || Number(card.eduCount) > 0
-    )
-  ));
-  const cacheReady = (key, row) => {
-    if (!key || !available[key]) return false;
-    const expectedObservationId = sourceObservationIdFor(row);
-    const receipt = current[key];
-    // A source-backed receipt may be expired or omit an expiry entirely. Its
-    // observation binding is the freshness check. Rich-provider receipts keep
-    // the old card-plus-TTL requirement.
-    if (profileReceiptReady(receipt, now, expectedObservationId)) return true;
-    return cardHasHistory(available[key]) && profileReceiptReady(receipt, now);
-  };
+/**
+ * READ-TIME partition. The publish-time fence above is what keeps a bad
+ * generation off the tab; by the time the browser reads, the generation has
+ * already been proved. A receipt can still go missing afterwards (a Hub
+ * re-observation replaces the observation id under a live generation), and
+ * until 2026-09-04 one such row made the whole feed answer 503 — which the tab
+ * treats as "discard everything", so a single stale row blanked a 4,345-row
+ * queue and wiped the reviewer's local state with it.
+ *
+ * Losing one row is not a reason to lose the other four thousand. A row whose
+ * receipt no longer matches moves into the SAME profile-preparing partition
+ * Core already publishes, and is counted there. It is not rendered, so it
+ * cannot be actioned; it is counted, so it is never silently gone.
+ */
+export function partitionByProfileReceipt(snapshot, receipts, { now = Date.now() } = {}) {
+  if (!snapshot) return { snapshot: null, withheld: 0, preparing: 0, withheldKeys: [] };
+  const available = receipts && typeof receipts === "object" && !Array.isArray(receipts) ? receipts : {};
   const ready = (row) => {
-    const key = profileKey(row);
-    return cacheReady(key, row);
+    const key = row?.profileKey || row?.cuId || null;
+    const expected = sourceObservationIdFor(row);
+    return Boolean(key) && Boolean(expected) && profileReceiptReady(available[key], now, expected);
   };
+  const rawStream = rows(snapshot.stream);
+  const rawQueue = rows(snapshot.queue);
   const stream = rawStream.filter(ready);
   const queue = rawQueue.filter(ready);
-  // Missing ids are returned in this order to the cache warmer: review work
-  // first, then the stream, while preserving each publisher's newest-first order.
-  const all = [...rawQueue, ...rawStream];
-  const candidateIds = new Set(all.map(profileKey).filter(Boolean));
-  const readyCandidateIds = new Set(all.filter(ready).map(profileKey));
-  const missingProfileKeys = [...candidateIds].filter((key) =>
-    !all.some((row) => profileKey(row) === key && cacheReady(key, row)));
-  const missingCuIds = [...new Set(all.map((row) => row?.cuId).filter(Boolean))]
-    .filter((cuId) => !all.some((row) => row?.cuId === cuId && cacheReady(cuId, row)));
-  // Hub source history is durable and must not be sent through the rich
-  // provider warmer merely because its optional cache TTL elapsed.
-  const upgradeCuIds = [];
-  const warmCuIds = [...new Set([...missingCuIds, ...upgradeCuIds])];
-  const generatedDay = String(snapshot?.generatedAt || "").slice(0, 10);
-  const next = snapshot ? {
+  const withheldRows = [...rawStream, ...rawQueue].filter((row) => !ready(row));
+  const withheld = withheldRows.length;
+  const corePreparing = profilePreparingCount(snapshot);
+  const next = {
     ...snapshot,
-    counts: {
-      ...(snapshot.counts || {}),
-      stream: stream.length,
-      queue: queue.length,
-      unrated: queue.filter((row) => row?.tier === "unrated").length,
-      emailedToday: stream.filter((row) =>
-        row?.status === "emailed" && String(row?.addedAt || "").slice(0, 10) === generatedDay).length,
-      newToday: stream.filter((row) =>
-        String(row?.addedAt || "").slice(0, 10) === generatedDay).length,
-    },
-    stream,
-    queue,
-  } : null;
+    ...(Array.isArray(snapshot.stream) ? { stream } : {}),
+    ...(Array.isArray(snapshot.queue) ? { queue } : {}),
+    // One number for the tab: Core's own immutable preparing partition plus
+    // whatever this read had to withhold.
+    profilePreparing: corePreparing + withheld,
+    profileReceiptWithheld: withheld,
+  };
   return {
     snapshot: next,
-    profileCache: {
-      required: true,
-      totalRows: all.length,
-      readyRows: stream.length + queue.length,
-      withheldRows: all.length - stream.length - queue.length,
-      totalCandidates: candidateIds.size,
-      unidentifiedRows: all.filter((row) => !profileKey(row)).length,
-      readyCandidates: readyCandidateIds.size,
-      withheldCandidates: missingProfileKeys.length,
-      missingProfileKeys,
-      missingCuIds,
-      upgradeCuIds,
-      warmCuIds,
-      queue: {
-        total: rawQueue.length,
-        ready: queue.length,
-        withheld: rawQueue.length - queue.length,
-        unidentified: rawQueue.filter((row) => !profileKey(row)).length,
-      },
-      stream: {
-        total: rawStream.length,
-        ready: stream.length,
-        withheld: rawStream.length - stream.length,
-        unidentified: rawStream.filter((row) => !profileKey(row)).length,
-      },
-    },
+    withheld,
+    preparing: corePreparing + withheld,
+    withheldKeys: withheldRows.map((row) => row?.profileKey || row?.cuId || null),
   };
 }
