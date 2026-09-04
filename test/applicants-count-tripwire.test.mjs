@@ -132,6 +132,85 @@ test("a gradual legitimate drain never trips across publishes", () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// A MOVE IS NOT A LOSS (2026-09-04). The receipt cutover relabelled 1,809 rows
+// from Stream to the profile-preparing partition; the two-dimension tripwire
+// read that as a collapse, latched, and parked every saved rule for a day.
+// ---------------------------------------------------------------------------
+
+test("a population moving between partitions never trips", () => {
+  // The exact 2026-09-03 shape: Stream 1,811 -> 2, the same rows reappearing
+  // as profilePreparing, queue untouched, total identical.
+  const prev = { queue: 4345, stream: 1811, profilePreparing: 0, total: 6156, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 4345, stream: 2, profilePreparing: 1809, total: 6156 }, AT);
+  assert.equal(doc.alert, null);
+  assert.equal(doc.stream, 2);
+  assert.equal(doc.profilePreparing, 1809);
+  assert.equal(doc.total, 6156);
+});
+
+test("the same collapse WITHOUT the rows reappearing still trips", () => {
+  const prev = { queue: 4345, stream: 1811, profilePreparing: 0, total: 6156, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 4345, stream: 2, profilePreparing: 0, total: 4347 }, AT);
+  assert.deepEqual(doc.alert, { stream: { baseline: 1811, seen: 2, at: AT } });
+});
+
+test("the conserved total is its own dimension and trips when everyone vanishes", () => {
+  const prev = { queue: 4345, stream: 1811, profilePreparing: 0, total: 6156, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 20, stream: 2, profilePreparing: 0, total: 22 }, AT);
+  assert.deepEqual(doc.alert, {
+    queue: { baseline: 4345, seen: 20, at: AT },
+    stream: { baseline: 1811, seen: 2, at: AT },
+    total: { baseline: 6156, seen: 22, at: AT },
+  });
+});
+
+test("the total is summed from the partitions when a publisher omits it", () => {
+  const prev = { queue: 100, stream: 100, profilePreparing: 0, total: 200, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 20, stream: 20, profilePreparing: 0 }, AT);
+  assert.equal(doc.total, 40);
+  assert.equal(doc.alert.total.baseline, 200);
+});
+
+test("a re-partition CLEARS a partition alert that is already latched", () => {
+  // The latch is one-way against a broken publisher republishing its own
+  // collapsed number. Conservation is different evidence: nobody is missing,
+  // and the moved rows are never coming back to their old partition, so a
+  // latch held against them would park the rules forever.
+  const latched = {
+    queue: 4345, stream: 2, profilePreparing: 1809, total: 6156, updatedAt: AT,
+    alert: { stream: { baseline: 1811, seen: 2, at: AT } },
+  };
+  const doc = nextCountsDoc(latched, { queue: 4345, stream: 2, profilePreparing: 1809, total: 6156 }, AT);
+  assert.equal(doc.alert, null);
+});
+
+test("conservation is only claimed from two known totals", () => {
+  // A doc written before the total existed cannot prove anything, so the
+  // partition drop alerts exactly as it did before this change.
+  const prev = { queue: 4345, stream: 1811, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 4345, stream: 2, profilePreparing: 1809, total: 6156 }, AT);
+  assert.deepEqual(doc.alert, { stream: { baseline: 1811, seen: 2, at: AT } });
+});
+
+test("acknowledging re-baselines all three partitions and the total", () => {
+  const prev = {
+    queue: 4345, stream: 2, profilePreparing: 1809, total: 6156, updatedAt: AT,
+    alert: { stream: { baseline: 1811, seen: 2, at: AT } },
+  };
+  const { doc } = acknowledgeCountsDoc(prev, { by: "david", at: AT, note: "archive cohort retired" });
+  assert.deepEqual(doc.acknowledged.accepted, { queue: 4345, stream: 2, profilePreparing: 1809, total: 6156 });
+  // And the very next genuine collapse trips from the accepted numbers. Losing
+  // the preparing partition is a 4,357 total, still over half of 6,156, so the
+  // total holds while the partition that actually collapsed is named.
+  assert.deepEqual(
+    nextCountsDoc(doc, { queue: 4345, stream: 2, profilePreparing: 10, total: 4357 }, AT).alert,
+    { profilePreparing: { baseline: 1809, seen: 10, at: AT } },
+  );
+  // Everyone vanishing trips the total too.
+  assert.equal(nextCountsDoc(doc, { queue: 20, stream: 2, profilePreparing: 0, total: 22 }, AT).alert.total.baseline, 6156);
+});
+
 test("sync writes the counts doc from a full publish and trips against the stored one", async () => {
   process.env.APPHUB_SYNC_KEY = KEY;
   const stream = Array.from({ length: 380 }, (_, i) => sourceRow(`s${i}`));
@@ -218,7 +297,9 @@ test("acknowledging re-baselines to today's counts and records who accepted what
   assert.deepEqual(doc.acknowledged, {
     at: AT, by: "david", note: "index restored",
     cleared: { queue: { baseline: 2479, seen: 196, at: AT } },
-    accepted: { queue: 1183, stream: 1923 },
+    // Every dimension the tripwire watches, explicit null where this doc
+    // predates it — never a fabricated zero.
+    accepted: { queue: 1183, stream: 1923, profilePreparing: null, total: null },
   });
 });
 

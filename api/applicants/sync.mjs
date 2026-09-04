@@ -425,13 +425,57 @@ export function cardFromProfile(profile) {
 // banner while still rendering the data.
 export const COUNT_DROP_RATIO = 0.5;
 export const COUNT_DROP_FLOOR = 50;
-const COUNT_DIMENSIONS = ["queue", "stream"];
+/** The partitions a row can sit in. Every row is in exactly one of them. */
+export const COUNT_PARTITIONS = ["queue", "stream", "profilePreparing"];
+/** The conserved population: the sum of the three partitions, proved against
+ *  the exact payload by normalizeConservedCounts before it reaches here. */
+export const COUNT_TOTAL = "total";
+const COUNT_DIMENSIONS = [...COUNT_PARTITIONS, COUNT_TOTAL];
 
+/**
+ * A MOVE IS NOT A LOSS (2026-09-04).
+ *
+ * The tripwire above watched two partitions and had no way to tell a deleted
+ * population from a relabelled one. On 2026-09-03 the receipt cutover moved
+ * 1,809 rows out of Stream into the profile-preparing partition; Stream went
+ * 1,811 -> 2, the tripwire latched red, and rules-tick parked every saved rule
+ * for a day over a population that had not lost a single row.
+ *
+ * The fix is the conserved total. Core declares all four numbers and
+ * normalizeConservedCounts proves them against the arrays actually received,
+ * so `total` cannot be forged by a publisher that dropped rows: a publish that
+ * really lost people cannot also report a conserved total. That makes
+ * conservation genuine EVIDENCE, and the rule becomes:
+ *
+ *   - `total` trips like any other dimension. That is the real loss alarm.
+ *   - a PARTITION drop only alerts while the total has fallen too. When the
+ *     total holds, the rows went somewhere else on the same tab and there is
+ *     nothing to warn about — including a partition alert already latched,
+ *     which would otherwise never clear because the moved rows are never
+ *     coming back to their old partition.
+ *
+ * Conservation is only ever claimed from two known totals. An older doc with
+ * no stored total leaves it unknown, and unknown falls back to the pre-2026-09
+ * behaviour: alert.
+ */
 export function nextCountsDoc(prev, incoming, at) {
   const doc = { updatedAt: at, alert: null };
   const alerts = {};
+  // A publisher may declare the total or leave it to be summed from the
+  // partitions it did send; both are the same number by construction.
+  const declaredTotal = typeof incoming?.total === "number"
+    ? incoming.total
+    : (COUNT_PARTITIONS.every((dim) => typeof incoming?.[dim] === "number")
+      ? COUNT_PARTITIONS.reduce((sum, dim) => sum + incoming[dim], 0)
+      : undefined);
+  const resolved = declaredTotal === undefined ? incoming : { ...incoming, total: declaredTotal };
+  const baselineOf = (dim) => {
+    const latched = prev?.alert?.[dim];
+    if (latched) return latched.baseline;
+    return typeof prev?.[dim] === "number" ? prev[dim] : null;
+  };
   for (const dim of COUNT_DIMENSIONS) {
-    const next = incoming[dim];
+    const next = resolved?.[dim];
     const prior = typeof prev?.[dim] === "number" ? prev[dim] : null;
     const latched = prev?.alert?.[dim];
     if (typeof next !== "number") {
@@ -441,12 +485,17 @@ export function nextCountsDoc(prev, incoming, at) {
       continue;
     }
     doc[dim] = next;
-    const baseline = latched ? latched.baseline : prior;
+    const baseline = baselineOf(dim);
     if (typeof baseline === "number" && baseline >= COUNT_DROP_FLOOR
       && next < baseline * COUNT_DROP_RATIO) {
       alerts[dim] = { baseline, seen: next, at: latched?.at || at };
     }
   }
+  const totalBaseline = baselineOf(COUNT_TOTAL);
+  const conserved = typeof doc[COUNT_TOTAL] === "number"
+    && typeof totalBaseline === "number"
+    && doc[COUNT_TOTAL] >= totalBaseline;
+  if (conserved) for (const dim of COUNT_PARTITIONS) delete alerts[dim];
   if (Object.keys(alerts).length) doc.alert = alerts;
   return doc;
 }
@@ -484,7 +533,7 @@ export function acknowledgeCountsDoc(prev, { by, at, note = null }) {
     // The counts this acknowledgement accepts as the new normal. Stored
     // explicitly so a later reader can see what was re-baselined TO, not just
     // what was dismissed.
-    accepted: { queue: prev?.queue ?? null, stream: prev?.stream ?? null },
+    accepted: Object.fromEntries(COUNT_DIMENSIONS.map((dim) => [dim, prev?.[dim] ?? null])),
   };
   return { doc, cleared };
 }
@@ -843,15 +892,15 @@ export function createSyncHandler({
             } : {}),
           });
         }
+        // All four conserved dimensions go to the tripwire, so it can tell a
+        // re-partition from a loss (see nextCountsDoc).
         const incomingCounts = {
           queue: conservedCounts.queue,
           stream: conservedCounts.stream,
-        };
-        generationCounts = {
-          ...nextCountsDoc(await readJson(K.counts), incomingCounts, now()),
-          total: conservedCounts.total,
           profilePreparing: conservedCounts.profilePreparing,
+          total: conservedCounts.total,
         };
+        generationCounts = nextCountsDoc(await readJson(K.counts), incomingCounts, now());
         generation = buildGeneration({
           snapshot: body.snapshot,
           queue: body.queue,
