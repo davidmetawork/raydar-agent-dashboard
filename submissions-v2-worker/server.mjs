@@ -7,6 +7,7 @@ import { createRepository } from "../api/submissions-v2/_lib/repository.mjs";
 import { createService } from "../api/submissions-v2/_lib/service.mjs";
 import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pipeline-store.mjs";
 import { createBlobBrokerClient } from "./blob-broker-client.mjs";
+import { submissionsV2ReleaseManifest } from "../api/submissions-v2/_lib/release-manifest.mjs";
 
 function required(name) {
   const value = String(process.env[name] || "").trim();
@@ -80,7 +81,8 @@ createServer(async (req, res) => {
   res.setHeader("content-type", "application/json");
   res.setHeader("cache-control", "no-store");
   if (req.url === "/health" && req.method === "GET") {
-    res.statusCode = 200; res.end(JSON.stringify({ ok: true, worker: "submissions-v2", cycle_running: cycleRunning, last_cycle_at: lastCycle?.at || null })); return;
+    const { schema_version, algorithm, digest, file_count } = submissionsV2ReleaseManifest();
+    res.statusCode = 200; res.end(JSON.stringify({ ok: true, worker: "submissions-v2", cycle_running: cycleRunning, last_cycle_at: lastCycle?.at || null, release: { schema_version, algorithm, digest, file_count } })); return;
   }
   if (req.url === "/tick" && req.method === "POST") {
     const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");

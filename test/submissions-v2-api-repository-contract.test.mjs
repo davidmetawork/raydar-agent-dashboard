@@ -37,11 +37,11 @@ test("API repository and worker share only canonical job kinds", async () => {
     readFile(new URL("../api/submissions-v2/_lib/resume/pipeline-store.mjs", import.meta.url), "utf8"),
   ]);
   const canonical = [
-    "classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox", "reconcile_curated",
+    "classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox", "reconcile_sequence_inbox", "reconcile_curated",
     "index_candidates", "index_roles", "proof_reconcile", "deliver_notification", "source_health", "daily_digest", "purge",
   ];
   for (const kind of canonical) assert.match(worker, new RegExp(`\\b${kind}\\b`));
-  for (const kind of ["classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox", "reconcile_curated"]) {
+  for (const kind of ["classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox", "reconcile_sequence_inbox", "reconcile_curated"]) {
     assert.match(`${repository}\n${service}`, new RegExp(`\\b${kind}\\b`));
   }
   assert.doesNotMatch(`${repository}\n${service}`, /resume_prepare|classify_reply|gmail_poll/);
@@ -49,4 +49,18 @@ test("API repository and worker share only canonical job kinds", async () => {
     "read-only index validation must not request a PostgreSQL write privilege through row locks");
   assert.doesNotMatch(`${repository}\n${pipelineStore}`, /\.array\([^\n]*["']uuid["']/u,
     "Postgres.js array element types must use numeric OIDs so empty UUID arrays serialize as PostgreSQL arrays");
+  assert.match(repository, /resume_regeneration_in_progress/,
+    "a candidate-role pair must reject overlapping paid resume regenerations");
+  assert.match(repository, /status in \('queued','collecting','extracting','strategizing','validating','rendering','archiving'\)/);
+  assert.match(repository, /state in \('queued','running'\)/);
+  assert.match(repository, /when pending_job\.id is not null then 'queued'/,
+    "row progress must stay active while a retry job is queued between generation attempts");
+  assert.match(repository, /where p\.workflow_state in \('preparing_resume','interested'\) and p\.case_hidden_at is null/,
+    "positive candidates must appear immediately while their first resume is preparing");
+  assert.match(repository, /workflow_state in \('preparing_resume','interested'\).*as interested/s,
+    "the Interested count must use the same positive workflow states as the list");
+  assert.match(repository, /current_artifact\.validation_status='passed'/,
+    "list capabilities must be grounded in a validated current artifact");
+  assert.match(repository, /workflow_state in \('preparing_resume','interested'\) and submission_status <> 'proven'/,
+    "preparing positives must remain represented in the actionable count");
 });

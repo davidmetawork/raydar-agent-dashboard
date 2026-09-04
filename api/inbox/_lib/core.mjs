@@ -2,7 +2,7 @@
 // Raydar separately owns durable Archive/Complete triage state for the
 // authenticated Monitor UI.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   BASE,
   authConfig,
@@ -32,6 +32,7 @@ export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
 export const INBOX_SYNC_BATCH_SIZE = 18;
 export const INBOX_SEQUENCE_STALE_MS = 15 * 60 * 1_000;
+export const INBOX_SUBMISSIONS_PROJECTION_VERSION = 1;
 export const INBOX_TRIAGE_STATUSES = Object.freeze(["archived", "complete"]);
 export const INBOX_EXCLUDED_ADDRESSES = Object.freeze(["david@raydar.xyz"]);
 
@@ -91,9 +92,6 @@ function campaignAccountRows(campaign) {
 
 function campaignSenderAddresses(campaign) {
   return [
-    ...addressFields(campaign),
-    campaign?.send_from_email,
-    campaign?.sender_email,
     ...campaignAccountRows(campaign).flatMap((row) => [
       ...addressFields(row),
       ...addressFields(row?.account),
@@ -108,11 +106,24 @@ function linkedOutreachId(campaign) {
     campaign?.project_id
     || campaign?.linked_project_id
     || campaign?.candidate_project_id
+    || campaign?.linked_outreach_id
     || campaign?.project?.id
     || campaign?.role_id
     || campaign?.role_specific_id
     || campaign?.role?.id,
   );
+}
+
+export function exactCampaignRoleId(campaign) {
+  return stringValue(campaign?.role_id);
+}
+
+function cachedExactCampaignRoleId(campaign) {
+  const direct = exactCampaignRoleId(campaign);
+  if (direct) return direct;
+  return campaign?.exact_role_source === "campaign.role_id"
+    ? stringValue(campaign?.exact_role_id)
+    : "";
 }
 
 function emailTokens(values) {
@@ -139,6 +150,26 @@ export function shouldExcludeInboxReply(reply, addressValues = []) {
   if (emailTokens(addresses).some((token) => (
     DELIVERY_SYSTEM_ADDRESS_RE.test(token)
   ))) {
+    return true;
+  }
+  return DELIVERY_NOTICE_SUBJECT_RE.test(subject)
+    || DELIVERY_NOTICE_TEXT_RE.test(`${subject}\n${snippet}`);
+}
+
+export function shouldExcludeSubmissionsInboxReply(reply) {
+  const subject = stringValue(reply?.subject || reply?.email_subject);
+  const snippet = stringValue(reply?.snippet || reply?.email_snippet);
+  const senderTokens = emailTokens([
+    reply?.candidate_email,
+    reply?.from,
+    reply?.from_email,
+    reply?.sender,
+    reply?.sender_email,
+  ]);
+  if (senderTokens.some((token) => /@(?:raydar\.xyz|heyraydar\.com)$/iu.test(token))) {
+    return true;
+  }
+  if (senderTokens.some((token) => DELIVERY_SYSTEM_ADDRESS_RE.test(token))) {
     return true;
   }
   return DELIVERY_NOTICE_SUBJECT_RE.test(subject)
@@ -247,14 +278,14 @@ export function campaignInboxInput(campaign) {
 }
 
 export function isInboxRoleOutreachCampaign(campaign) {
-  if (!stringValue(campaign?.id) || !linkedOutreachId(campaign)) return false;
-  const senderTokens = emailTokens(campaignSenderAddresses(campaign));
-  return !senderTokens.some((token) => INBOX_EXCLUDED_ADDRESSES.includes(token));
+  // The campaign catalog's `email` is its owner, not a From address.  Sender
+  // exclusion remains a message-level UI concern; submission admission checks
+  // the complete provider message instead.
+  return Boolean(stringValue(campaign?.id) && linkedOutreachId(campaign));
 }
 
 // The five post-call curated-list sequences intentionally have no role or
-// Project link. Admit only their pinned IDs; all other unlinked/admin
-// campaigns keep failing closed through isInboxRoleOutreachCampaign().
+// Project link. Their pinned IDs remain admitted independently of reply counts.
 export function isInboxCuratedListCampaign(campaign) {
   const id = stringValue(campaign?.id);
   return Boolean(id && OUTCOME_SEQUENCE_RULES.some((rule) => rule.id === id));
@@ -264,20 +295,32 @@ function isAdmittedInboxCampaign(campaign) {
   return isInboxRoleOutreachCampaign(campaign) || isInboxCuratedListCampaign(campaign);
 }
 
-export function campaignsToScan(campaigns) {
-  // This is a role-outreach inbox, not an agency-wide Paraform mailbox. Only
-  // sequences positively linked to a role or sourcing Project are admitted.
-  // Generic/admin follow-ups have neither link and therefore fail closed.
-  // Campaign-level sender metadata is checked too, so attaching the primary
-  // Raydar inbox cannot opt a linked sequence back into Monitor ingestion.
-  const valid = arrayValue(campaigns).filter((campaign) => isAdmittedInboxCampaign(campaign));
+function hasCandidateReplies(campaign, recentSequenceIds = new Set()) {
+  const id = stringValue(campaign?.id);
+  if (!id) return false;
+  return Number(campaign?.email_replies) > 0 || recentSequenceIds.has(id);
+}
+
+export function campaignsToScan(campaigns, recentReplies = []) {
+  // Keep the established role/project and curated-list scope, but also retain
+  // any candidate-reply-bearing sequence. The latter must remain visible even
+  // without an exact role; downstream intake routes it to Needs Review.
+  // Campaign-level sender metadata still excludes the primary Raydar inbox.
+  const recentSequenceIds = new Set(arrayValue(recentReplies)
+    .map((reply) => stringValue(reply?.sequence_id)).filter(Boolean));
+  const valid = arrayValue(campaigns).filter((campaign) => (
+    isAdmittedInboxCampaign(campaign) || hasCandidateReplies(campaign, recentSequenceIds)
+  ));
   const hasReplyCounts = valid.length > 0 && valid.every((campaign) => (
     Object.prototype.hasOwnProperty.call(campaign, "email_replies")
     && Number.isFinite(Number(campaign.email_replies))
   ));
   if (!hasReplyCounts) return valid;
   // Disabled sequences still carry historical replies and must remain visible.
-  return valid.filter((campaign) => Number(campaign.email_replies) > 0);
+  return valid.filter((campaign) => (
+    Number(campaign.email_replies) > 0
+    || recentSequenceIds.has(stringValue(campaign?.id))
+  ));
 }
 
 function candidateEmail(lead) {
@@ -326,6 +369,26 @@ function rowDate(row) {
 }
 
 export function flattenCampaignInbox(campaign, inboxData, recentByGmail = new Map()) {
+  return flattenCampaignInboxRows(
+    campaign,
+    inboxData,
+    recentByGmail,
+    shouldExcludeInboxReply,
+    linkedOutreachId,
+  );
+}
+
+export function flattenCampaignInboxForSubmissions(campaign, inboxData, recentByGmail = new Map()) {
+  return flattenCampaignInboxRows(
+    campaign,
+    inboxData,
+    recentByGmail,
+    shouldExcludeSubmissionsInboxReply,
+    exactCampaignRoleId,
+  );
+}
+
+function flattenCampaignInboxRows(campaign, inboxData, recentByGmail, excluded, roleIdForCampaign) {
   const leads = arrayValue(inboxData?.campaign_to_candidate_users);
   const leadById = new Map(leads.map((lead) => [String(lead?.id || ""), lead]));
   const rows = [];
@@ -345,7 +408,7 @@ export function flattenCampaignInbox(campaign, inboxData, recentByGmail = new Ma
         || lead?.candidateUserId
         || lead?.candidate_user?.id,
       );
-    const roleId = linkedOutreachId(campaign);
+    const roleId = roleIdForCampaign(campaign);
     const row = {
       ...(candidateUserId ? { candidate_user_id: candidateUserId } : {}),
       ...(roleId ? { role_id: roleId } : {}),
@@ -378,7 +441,7 @@ export function flattenCampaignInbox(campaign, inboxData, recentByGmail = new Ma
       ...addressFields(recent),
       ...addressFields(lead),
     ];
-    if (!shouldExcludeInboxReply(row, addresses)) rows.push(row);
+    if (!excluded(row, addresses)) rows.push(row);
   }
   return rows;
 }
@@ -468,12 +531,20 @@ export async function mapWithConcurrency(items, limit, worker) {
 
 function publicInboxCampaign(campaign) {
   const emailReplies = Number(campaign?.email_replies);
+  const exactRoleId = cachedExactCampaignRoleId(campaign);
+  const legacyLinkedOutreachId = linkedOutreachId(campaign);
   return {
     id: stringValue(campaign?.id),
     name: stringValue(campaign?.name) || "Untitled sequence",
     kind: stringValue(campaign?.kind || campaign?.recipient_kind),
     can_reply: Boolean(campaign?.can_reply),
     email_replies: Number.isFinite(emailReplies) ? emailReplies : null,
+    linked_outreach_id: legacyLinkedOutreachId || null,
+    ui_admitted: typeof campaign?.ui_admitted === "boolean"
+      ? campaign.ui_admitted
+      : isAdmittedInboxCampaign(campaign),
+    exact_role_id: exactRoleId || null,
+    exact_role_source: exactRoleId ? "campaign.role_id" : null,
   };
 }
 
@@ -493,6 +564,7 @@ function leadCategories(inboxData, relevantLeadIds = new Set()) {
 
 function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt) {
   const campaignId = stringValue(campaign?.id);
+  const exactRoleId = exactCampaignRoleId(campaign);
   const recentLeadIds = new Set(
     [...recentByGmail.values()]
       .filter((reply) => stringValue(reply?.sequence_id) === campaignId)
@@ -501,13 +573,23 @@ function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt)
   );
   return {
     version: 3,
+    submissions_projection_version: INBOX_SUBMISSIONS_PROJECTION_VERSION,
     sequence_id: campaignId,
     sequence_name: stringValue(campaign?.name) || "Untitled sequence",
     email_replies: Number.isFinite(Number(campaign?.email_replies))
       ? Number(campaign.email_replies)
       : null,
+    exact_role_id: exactRoleId || null,
+    exact_role_source: exactRoleId ? "campaign.role_id" : null,
     refreshed_at: refreshedAt,
-    replies: flattenCampaignInbox(campaign, inboxData, recentByGmail),
+    replies: isAdmittedInboxCampaign(campaign)
+      ? flattenCampaignInbox(campaign, inboxData, recentByGmail)
+      : [],
+    submissions_replies: flattenCampaignInboxForSubmissions(
+      campaign,
+      inboxData,
+      recentByGmail,
+    ),
     // Reply rows already carry their category. Keep only lead metadata needed
     // to enrich the bounded recent-reply fallback, not every sequence member.
     lead_categories: leadCategories(inboxData, recentLeadIds),
@@ -547,13 +629,19 @@ export function selectInboxCampaigns(
     const countChanged = snapshot
       && Number.isFinite(currentCount)
       && (!Number.isFinite(storedCount) || currentCount !== storedCount);
+    const projectionUnseeded = snapshot
+      && snapshot.submissions_projection_version !== INBOX_SUBMISSIONS_PROJECTION_VERSION;
     const recent = recentSequenceIds.has(id);
     const stale = snapshot && nowMs - snapshotTime(snapshot) >= staleMs;
     let priority;
     if (!snapshot) priority = 0;
-    else if (countChanged) priority = 1;
-    else if (recent) priority = 2;
-    else if (stale) priority = 3;
+    // A legacy UI snapshot cannot feed Submissions safely. Upgrade it before
+    // mutable reply-count/recent work so a busy catalog cannot starve the
+    // projection-version migration indefinitely.
+    else if (projectionUnseeded) priority = 1;
+    else if (countChanged) priority = 2;
+    else if (recent) priority = 3;
+    else if (stale) priority = 4;
     else continue;
     const lastAttempt = Date.parse(attempts[id] || "");
     eligible.push({
@@ -605,20 +693,25 @@ export async function buildInboxRefresh({
   if (campaignResult.status === "rejected") throw campaignResult.reason;
   const campaignsRaw = campaignResult.value;
   const campaigns = arrayValue(campaignsRaw);
-  const eligibleCampaigns = campaigns.filter((campaign) => isAdmittedInboxCampaign(campaign));
-  const targets = campaignsToScan(campaigns);
-  const targetIds = new Set(
-    targets.map((campaign) => stringValue(campaign?.id)).filter(Boolean),
-  );
-
   const recentError = recentResult.status === "rejected"
     ? recentResult.reason
     : null;
   const recentRepliesRaw = recentResult.status === "fulfilled"
     ? arrayValue(recentResult.value)
     : [];
+  const targets = campaignsToScan(campaigns, recentRepliesRaw);
+  const uiTargets = targets.filter(isAdmittedInboxCampaign);
+  const targetIds = new Set(
+    targets.map((campaign) => stringValue(campaign?.id)).filter(Boolean),
+  );
   const recentReplies = recentRepliesRaw.filter((reply) => (
     targetIds.has(stringValue(reply?.sequence_id))
+  ));
+  const uiTargetIds = new Set(
+    uiTargets.map((campaign) => stringValue(campaign?.id)).filter(Boolean),
+  );
+  const uiRecentReplies = recentRepliesRaw.filter((reply) => (
+    uiTargetIds.has(stringValue(reply?.sequence_id))
   ));
   const recentByGmail = new Map(
     recentReplies
@@ -647,11 +740,18 @@ export async function buildInboxRefresh({
   });
 
   const failures = results.filter((result) => !result.ok);
+  const selectedUiIds = new Set(selected
+    .filter(isAdmittedInboxCampaign)
+    .map((campaign) => stringValue(campaign?.id)));
+  const uiFailures = failures.filter((result) => (
+    selectedUiIds.has(stringValue(result.campaign?.id))
+  ));
   const generatedAt = now().toISOString();
   return {
     generated_at: generatedAt,
     catalog: {
       version: 3,
+      submissions_projection_version: INBOX_SUBMISSIONS_PROJECTION_VERSION,
       refreshed_at: generatedAt,
       campaigns_total: campaigns.length,
       targets: targets.map(publicInboxCampaign),
@@ -675,7 +775,7 @@ export async function buildInboxRefresh({
         },
     scan: {
       campaigns_total: campaigns.length,
-      campaigns_excluded: campaigns.length - eligibleCampaigns.length,
+      campaigns_excluded: campaigns.length - targets.length,
       campaigns_targeted: targets.length,
       campaigns_attempted: selected.length,
       campaigns_deferred: Math.max(0, targets.length - selected.length),
@@ -689,6 +789,19 @@ export async function buildInboxRefresh({
         sequence_name: stringValue(item.campaign?.name) || "Untitled sequence",
         error: stringValue(item.error) || "read_failed",
       })),
+      ui: {
+        campaigns_attempted: selectedUiIds.size,
+        campaigns_deferred: Math.max(0, uiTargets.length - selectedUiIds.size),
+        campaigns_succeeded: selectedUiIds.size - uiFailures.length,
+        campaigns_failed: uiFailures.length,
+        recent_count: uiRecentReplies.length,
+        recent_excluded: recentRepliesRaw.length - uiRecentReplies.length,
+        failures: uiFailures.map((item) => ({
+          sequence_id: stringValue(item.campaign?.id),
+          sequence_name: stringValue(item.campaign?.name) || "Untitled sequence",
+          error: stringValue(item.error) || "read_failed",
+        })),
+      },
     },
   };
 }
@@ -705,7 +818,8 @@ export async function buildInboxFeed(options = {}) {
   const materialized = assembleInboxSnapshotFeed(state, {
     now: options.now || (() => new Date()),
   });
-  const partial = refresh.scan.campaigns_failed > 0
+  const uiScan = refresh.scan.ui || refresh.scan;
+  const partial = uiScan.campaigns_failed > 0
     || refresh.scan.recent_failed;
   return {
     generated_at: refresh.generated_at,
@@ -715,14 +829,18 @@ export async function buildInboxFeed(options = {}) {
     counts: materialized.counts,
     scan: {
       campaigns_total: refresh.scan.campaigns_total,
-      campaigns_excluded: refresh.scan.campaigns_excluded,
-      campaigns_attempted: refresh.scan.campaigns_targeted,
-      campaigns_succeeded: refresh.scan.campaigns_succeeded,
-      campaigns_failed: refresh.scan.campaigns_failed,
-      recent_count: refresh.scan.recent_count,
-      recent_excluded: refresh.scan.recent_excluded,
+      campaigns_excluded: Math.max(
+        0,
+        refresh.scan.campaigns_total
+          - (refresh.catalog.targets.filter((campaign) => campaign.ui_admitted !== false).length),
+      ),
+      campaigns_attempted: uiScan.campaigns_attempted,
+      campaigns_succeeded: uiScan.campaigns_succeeded,
+      campaigns_failed: uiScan.campaigns_failed,
+      recent_count: uiScan.recent_count,
+      recent_excluded: uiScan.recent_excluded,
       recent_failed: refresh.scan.recent_failed,
-      failures: refresh.scan.failures,
+      failures: uiScan.failures,
     },
   };
 }
@@ -767,13 +885,23 @@ function normalizeSequenceSnapshot(value, fieldId) {
   }
   return {
     version: 3,
+    submissions_projection_version: Number(snapshot.submissions_projection_version)
+      === INBOX_SUBMISSIONS_PROJECTION_VERSION
+      ? INBOX_SUBMISSIONS_PROJECTION_VERSION
+      : null,
     sequence_id: sequenceId,
     sequence_name: stringValue(snapshot.sequence_name) || "Untitled sequence",
     email_replies: Number.isFinite(Number(snapshot.email_replies))
       ? Number(snapshot.email_replies)
       : null,
+    exact_role_id: stringValue(snapshot.exact_role_id) || null,
+    exact_role_source: snapshot.exact_role_source === "campaign.role_id"
+      ? "campaign.role_id"
+      : null,
     refreshed_at: stringValue(snapshot.refreshed_at),
     replies: snapshot.replies.filter((reply) => reply && typeof reply === "object"),
+    submissions_replies: arrayValue(snapshot.submissions_replies)
+      .filter((reply) => reply && typeof reply === "object"),
     lead_categories: snapshot.lead_categories,
   };
 }
@@ -800,7 +928,13 @@ export function parseInboxSequenceSnapshots(value, { strict = true } = {}) {
 function normalizeInboxCatalog(value) {
   const catalog = storedObject(value);
   if (!catalog) {
-    return { version: 3, refreshed_at: "", campaigns_total: 0, targets: [] };
+    return {
+      version: 3,
+      submissions_projection_version: null,
+      refreshed_at: "",
+      campaigns_total: 0,
+      targets: [],
+    };
   }
   if (catalog.version !== 3 || !Array.isArray(catalog.targets)) {
     const error = new Error("invalid persisted Inbox catalog");
@@ -809,10 +943,19 @@ function normalizeInboxCatalog(value) {
   }
   return {
     version: 3,
+    submissions_projection_version: Number(catalog.submissions_projection_version)
+      === INBOX_SUBMISSIONS_PROJECTION_VERSION
+      ? INBOX_SUBMISSIONS_PROJECTION_VERSION
+      : null,
     refreshed_at: stringValue(catalog.refreshed_at),
     campaigns_total: Math.max(0, Number(catalog.campaigns_total) || 0),
     targets: catalog.targets
-      .map(publicInboxCampaign)
+      .map((campaign) => publicInboxCampaign({
+        ...campaign,
+        ui_admitted: typeof campaign?.ui_admitted === "boolean"
+          ? campaign.ui_admitted
+          : true,
+      }))
       .filter((campaign) => campaign.id),
   };
 }
@@ -936,6 +1079,20 @@ export function mergeInboxRefreshState(previousState, refresh) {
     && seeded.length === targetIds.size
     && failures.length === 0
     && !refresh?.scan?.recent_failed;
+  const uiTargets = new Set(catalog.targets
+    .filter((campaign) => campaign.ui_admitted !== false)
+    .map((campaign) => campaign.id));
+  const uiSeeded = [...uiTargets].filter((sequenceId) => snapshots.has(sequenceId));
+  const uiStaleCount = uiSeeded.filter((sequenceId) => (
+    currentMs - snapshotTime(snapshots.get(sequenceId)) >= INBOX_SEQUENCE_STALE_MS
+  )).length;
+  const uiScan = refresh?.scan?.ui || null;
+  const uiFailures = uiScan ? arrayValue(uiScan.failures) : failures
+    .filter((failure) => uiTargets.has(stringValue(failure?.sequence_id)));
+  const uiCoverageComplete = Boolean(catalog.refreshed_at)
+    && uiSeeded.length === uiTargets.size
+    && uiFailures.length === 0
+    && !refresh?.scan?.recent_failed;
   const meta = {
     version: 3,
     last_refresh_at: stringValue(refresh?.generated_at),
@@ -956,6 +1113,20 @@ export function mergeInboxRefreshState(previousState, refresh) {
     recent_failed: Boolean(refresh?.scan?.recent_failed),
     failure_error_counts: failureErrorCounts(failures),
     failures,
+    ui_last_complete_at: uiCoverageComplete
+      ? stringValue(refresh?.generated_at)
+      : stringValue(previous.meta?.ui_last_complete_at || previous.meta?.last_complete_at),
+    ui_campaigns_targeted: uiTargets.size,
+    ui_campaigns_attempted: Number(uiScan?.campaigns_attempted) || 0,
+    ui_campaigns_deferred: Number(uiScan?.campaigns_deferred) || 0,
+    ui_campaigns_succeeded: Number(uiScan?.campaigns_succeeded) || 0,
+    ui_campaigns_failed: uiFailures.length,
+    ui_campaigns_seeded: uiSeeded.length,
+    ui_campaigns_missing: Math.max(0, uiTargets.size - uiSeeded.length),
+    ui_campaigns_stale: uiStaleCount,
+    ui_recent_count: Number(uiScan?.recent_count) || 0,
+    ui_recent_excluded: Number(uiScan?.recent_excluded) || 0,
+    ui_failure_error_counts: failureErrorCounts(uiFailures),
     sequence_attempts: sequenceAttempts,
   };
   return { snapshots, catalog, recent, meta };
@@ -1011,7 +1182,8 @@ export function assembleInboxSnapshotFeed(
 ) {
   const snapshotState = state || emptyInboxSnapshotState();
   const targets = arrayValue(snapshotState.catalog?.targets);
-  const targetIds = new Set(targets.map((campaign) => stringValue(campaign?.id)));
+  const uiTargets = targets.filter((campaign) => campaign?.ui_admitted !== false);
+  const targetIds = new Set(uiTargets.map((campaign) => stringValue(campaign?.id)));
   const rows = [];
   const categoryByLead = new Map();
   for (const [sequenceId, snapshot] of snapshotState.snapshots || new Map()) {
@@ -1026,7 +1198,7 @@ export function assembleInboxSnapshotFeed(
   const replies = mergeAndSortReplies(
     rows,
     snapshotState.recent?.replies,
-    targets,
+    uiTargets,
     categoryByLead,
   );
   const currentMs = now().getTime();
@@ -1039,7 +1211,10 @@ export function assembleInboxSnapshotFeed(
   }).length;
   const catalogReady = Boolean(snapshotState.catalog?.refreshed_at);
   const missingCount = Math.max(0, targetIds.size - seededCount);
-  const latestFailures = Number(snapshotState.meta?.campaigns_failed) || 0;
+  const latestFailures = Number(
+    snapshotState.meta?.ui_campaigns_failed
+      ?? snapshotState.meta?.campaigns_failed,
+  ) || 0;
   const stateName = !catalogReady
     ? "unseeded"
     : missingCount > 0
@@ -1061,7 +1236,10 @@ export function assembleInboxSnapshotFeed(
       state: stateName,
       coverage_complete: catalogReady && missingCount === 0,
       last_refresh_at: stringValue(snapshotState.meta?.last_refresh_at),
-      last_complete_at: stringValue(snapshotState.meta?.last_complete_at),
+      last_complete_at: stringValue(
+        snapshotState.meta?.ui_last_complete_at
+        || snapshotState.meta?.last_complete_at,
+      ),
       campaigns_targeted: targetIds.size,
       campaigns_seeded: seededCount,
       campaigns_missing: missingCount,
@@ -1071,18 +1249,92 @@ export function assembleInboxSnapshotFeed(
     scan: {
       campaigns_total: Number(snapshotState.catalog?.campaigns_total) || 0,
       campaigns_targeted: targetIds.size,
-      campaigns_attempted: Number(snapshotState.meta?.campaigns_attempted) || 0,
-      campaigns_deferred: Number(snapshotState.meta?.campaigns_deferred) || 0,
-      campaigns_succeeded: Number(snapshotState.meta?.campaigns_succeeded) || 0,
+      campaigns_attempted: Number(
+        snapshotState.meta?.ui_campaigns_attempted
+          ?? snapshotState.meta?.campaigns_attempted,
+      ) || 0,
+      campaigns_deferred: Number(
+        snapshotState.meta?.ui_campaigns_deferred
+          ?? snapshotState.meta?.campaigns_deferred,
+      ) || 0,
+      campaigns_succeeded: Number(
+        snapshotState.meta?.ui_campaigns_succeeded
+          ?? snapshotState.meta?.campaigns_succeeded,
+      ) || 0,
       campaigns_failed: latestFailures,
       campaigns_seeded: seededCount,
       campaigns_missing: missingCount,
       campaigns_stale: staleCount,
-      recent_count: snapshotState.recent?.replies?.length || 0,
-      recent_excluded: Number(snapshotState.meta?.recent_excluded) || 0,
+      recent_count: Number(
+        snapshotState.meta?.ui_recent_count
+          ?? snapshotState.recent?.replies?.length,
+      ) || 0,
+      recent_excluded: Number(
+        snapshotState.meta?.ui_recent_excluded
+          ?? snapshotState.meta?.recent_excluded,
+      ) || 0,
       recent_failed: Boolean(snapshotState.meta?.recent_failed),
-      failure_error_counts: snapshotState.meta?.failure_error_counts || {},
+      failure_error_counts: snapshotState.meta?.ui_failure_error_counts
+        || snapshotState.meta?.failure_error_counts
+        || {},
     },
+  };
+}
+
+/** Coverage for the Submissions-only projection across every cached target. */
+export function inboxSubmissionsProjectionCoverage(
+  state,
+  { now = () => new Date() } = {},
+) {
+  const snapshotState = state || emptyInboxSnapshotState();
+  const targetIds = new Set(arrayValue(snapshotState.catalog?.targets)
+    .map((campaign) => stringValue(campaign?.id)).filter(Boolean));
+  const currentMs = now().getTime();
+  const snapshots = snapshotState.snapshots || new Map();
+  const seededIds = [...targetIds].filter((sequenceId) => snapshots.has(sequenceId));
+  const staleCount = seededIds.filter((sequenceId) => (
+    currentMs - snapshotTime(snapshots.get(sequenceId)) >= INBOX_SEQUENCE_STALE_MS
+  )).length;
+  const refreshedTimes = seededIds
+    .map((sequenceId) => snapshotTime(snapshots.get(sequenceId)))
+    .filter((value) => value > 0);
+  const catalogReady = Boolean(snapshotState.catalog?.refreshed_at);
+  const missingCount = Math.max(0, targetIds.size - seededIds.length);
+  const latestFailures = Number(snapshotState.meta?.campaigns_failed) || 0;
+  // A cursor is valid only for this exact target set and immutable role
+  // evidence.  Do not let a newly discovered sequence inherit a cursor that
+  // could be later than one of its historical replies.
+  const catalogDigest = createHash("sha256").update(JSON.stringify(
+    [...targetIds].sort().map((sequenceId) => {
+      const campaign = arrayValue(snapshotState.catalog?.targets)
+        .find((item) => stringValue(item?.id) === sequenceId) || {};
+      return [
+        sequenceId,
+        stringValue(campaign.exact_role_id),
+        stringValue(campaign.exact_role_source),
+      ];
+    }),
+  )).digest("hex");
+  return {
+    state: !catalogReady
+      ? "unseeded"
+      : missingCount > 0
+        ? "seeding"
+        : latestFailures > 0 || staleCount > 0
+          ? "degraded"
+          : "ready",
+    coverage_complete: catalogReady && targetIds.size > 0 && missingCount === 0,
+    last_refresh_at: stringValue(snapshotState.meta?.last_refresh_at),
+    last_complete_at: stringValue(snapshotState.meta?.last_complete_at),
+    confirmed_through: targetIds.size > 0 && refreshedTimes.length === targetIds.size
+      ? new Date(Math.min(...refreshedTimes)).toISOString()
+      : null,
+    campaigns_targeted: targetIds.size,
+    campaigns_seeded: seededIds.length,
+    campaigns_missing: missingCount,
+    campaigns_stale: staleCount,
+    latest_failures: latestFailures,
+    catalog_digest: catalogDigest,
   };
 }
 
@@ -1331,7 +1583,11 @@ export function publicMessage(messageRaw) {
     cc: arrayValue(info.cc).map(stringValue).filter(Boolean),
     subject: stringValue(info.subject) || "(no subject)",
     date: stringValue(info.email_date || info.created_at),
-    sent_from_paraform: Boolean(info.sent_from_paraform),
+    // Preserve provider direction as tri-state. A missing value must never be
+    // converted into a candidate-authored (`false`) message downstream.
+    sent_from_paraform: typeof info.sent_from_paraform === "boolean"
+      ? info.sent_from_paraform
+      : null,
     attachment_count: attachments.length,
   };
 }

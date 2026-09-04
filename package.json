@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "migrate:submissions-v2": "node scripts/migrate-submissions-v2.mjs",
+    "submissions-v2:release": "node scripts/submissions-release.mjs --check",
+    "submissions-v2:release:vercel": "node scripts/submissions-release.mjs --check --deployment",
     "test:submissions-v2": "node --test test/submissions-v2-*.test.mjs",
     "test:submissions-v1": "node --test test/submissions-path-a.test.mjs test/submissions-path-b.test.mjs test/submissions-resume.test.mjs",
     "worker:submissions-v2": "node submissions-v2-worker/server.mjs",

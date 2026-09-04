@@ -7,6 +7,7 @@ export const JOB_CONTROLS = Object.freeze({
   index_candidates: "ingestion",
   index_roles: "ingestion",
   reconcile_master_inbox: "master_inbox",
+  reconcile_sequence_inbox: "master_inbox",
   reconcile_curated: "curated",
   classify_email_reply: "master_inbox",
   prepare_resume: "generation",

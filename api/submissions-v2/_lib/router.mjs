@@ -8,6 +8,7 @@ import {
 import { createService } from "./service.mjs";
 import { authorizeBlobBroker, issueWorkerBlobCapability } from "./blob-capabilities.mjs";
 import { authorizeNotificationBroker, postSafeNotification } from "./notifications.mjs";
+import { readSequenceInboxBrokerBatch } from "./sequence-inbox-broker.mjs";
 
 function routeSegments(req) {
   const captured = req.query?.route;
@@ -91,6 +92,13 @@ export async function routeSubmissionsV2(req, res) {
       authorizeBlobBroker(req);
       const { body } = await parsedBody(req, 10_000);
       return res.status(200).json({ ok: true, ...(await issueWorkerBlobCapability(body)) });
+    }
+    if (key === "internal/sequence-inbox-batch") {
+      if (!method(req, res, ["POST"])) return;
+      authorizeBlobBroker(req);
+      const { body } = await parsedBody(req, 10_000);
+      res.setHeader("cache-control", "private, no-store, max-age=0");
+      return res.status(200).json({ ok: true, result: await readSequenceInboxBrokerBatch(body) });
     }
     if (key === "internal/notification") {
       if (!method(req, res, ["POST"])) return;

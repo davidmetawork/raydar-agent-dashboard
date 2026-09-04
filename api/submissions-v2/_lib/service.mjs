@@ -5,6 +5,7 @@ import { classifyReply } from "./classifier.mjs";
 import { createRepository } from "./repository.mjs";
 import { rowDto, publicHealth } from "./presentation.mjs";
 import { decryptJson, encryptJson } from "./private-data.mjs";
+import { submissionsV2ReleaseManifest } from "./release-manifest.mjs";
 import {
   createPresignedUpload, inspectPrivateObject, privatePath, privateReservationId, putPrivateObject,
   readPrivateObject, signDownloadTicket, verifyDownloadTicket,
@@ -77,6 +78,14 @@ export function verifyUploadIntent(value, { actorEmail, env = process.env, now =
 }
 
 function trustedSignalUrl(input) {
+  if (input?.schema_version === "submissions.email_reply.v1" && input?.provider === "gmail"
+    && input?.mailbox_id === "david-raydar-xyz" && /^[a-f0-9]{1,64}$/iu.test(input?.provider_thread_id || "")) {
+    return `https://mail.google.com/mail/?authuser=david%40raydar.xyz#all/${input.provider_thread_id}`;
+  }
+  const sequenceId = clean(input?.source_evidence?.sequence_id, 200);
+  if (input?.adapter_version === "sequence-inbox-v1" && /^[A-Za-z0-9_-]{1,200}$/u.test(sequenceId)) {
+    return `https://www.paraform.com/sequences?detail=${encodeURIComponent(sequenceId)}&sequence_tab=inbox`;
+  }
   const conversationId = clean(input?.payload?.conversationId ?? input?.conversationId, 500);
   if (!conversationId || !/^[A-Za-z0-9._:~-]{1,500}$/.test(conversationId)) return null;
   return `https://monitor.raydar.xyz/master-inbox#conversation=${encodeURIComponent(conversationId)}`;
@@ -185,9 +194,14 @@ export function createService({
       if (providerPrior) return { accepted: true, existing: true, signal_id: providerPrior.id, processing_state: providerPrior.processing_state };
 
       const candidateResolutionRaw = await repository.candidateMatches(event);
+      const forcedCandidateReview = event.adapter_version === "sequence-inbox-v1"
+        && event.source_evidence?.cache_version === 3
+        && event.review_reason_hint === "candidate_ambiguous";
       const candidateResolution = {
-        candidate_user_id: candidateResolutionRaw.candidate?.candidate_user_id || null,
-        ambiguous: Boolean(candidateResolutionRaw.ambiguous),
+        candidate_user_id: forcedCandidateReview
+          ? null
+          : candidateResolutionRaw.candidate?.candidate_user_id || null,
+        ambiguous: forcedCandidateReview || Boolean(candidateResolutionRaw.ambiguous),
       };
       let processingState = "ready";
       let safeErrorCode = null;
@@ -365,17 +379,19 @@ export function createService({
       if (action === "regenerate") {
         const pairId = required(body.case_id, "case_id", 100);
         const version = expectedVersion(body.expected_version);
-        const evidenceBasis = required(body.evidence_basis, "evidence_basis", 40);
-        if (!new Set(["sourced", "correction"]).has(evidenceBasis)) throw problem("evidence_basis_invalid", "The evidence basis is invalid.", 400);
-        const sourceNote = required(body.source_note, "source_note", 500);
         const context = clean(body.candidate_context, 12_000);
         const instructions = clean(body.instructions, 4_000);
-        const evidenceEnvelope = context ? encryptJson({ text: context }, { env, context: `supplement:${pairId}:evidence` }) : null;
-        const instructionEnvelope = instructions ? encryptJson({ text: instructions }, { env, context: `supplement:${pairId}:instruction` }) : null;
         const requestedUploads = Array.isArray(body.uploads)
           ? [...new Set(body.uploads.map((value) => required(value, "supplement_id", 100)))]
           : [];
         if (requestedUploads.length > 5) throw problem("supplement_count_exceeded", "Choose at most five evidence files.", 400);
+        const hasEvidenceMetadata = Boolean(clean(body.evidence_basis, 40) || clean(body.source_note, 500));
+        const hasSupplementRequest = Boolean(context || instructions) || requestedUploads.length > 0 || hasEvidenceMetadata;
+        const evidenceBasis = hasSupplementRequest ? required(body.evidence_basis, "evidence_basis", 40) : null;
+        if (evidenceBasis && !new Set(["sourced", "correction"]).has(evidenceBasis)) throw problem("evidence_basis_invalid", "The evidence basis is invalid.", 400);
+        const sourceNote = hasSupplementRequest ? required(body.source_note, "source_note", 500) : null;
+        const evidenceEnvelope = context ? encryptJson({ text: context }, { env, context: `supplement:${pairId}:evidence` }) : null;
+        const instructionEnvelope = instructions ? encryptJson({ text: instructions }, { env, context: `supplement:${pairId}:instruction` }) : null;
         return repository.regenerate({
           actorEmail, idempotencyKey, pairId, expectedVersion: version,
           evidenceEncrypted: evidenceEnvelope ? Buffer.from(JSON.stringify(evidenceEnvelope)) : null,
@@ -627,9 +643,11 @@ export function createService({
 
     async health() {
       const [health, durable] = await Promise.all([repository.health(), repository.runtimeControls()]);
+      const { schema_version, algorithm, digest, file_count } = submissionsV2ReleaseManifest();
       return {
         health: publicHealth(health), sources: health.sources || {},
         controls: effectiveControls(environmentControls(env), durable),
+        release: { schema_version, algorithm, digest, file_count },
       };
     },
   };

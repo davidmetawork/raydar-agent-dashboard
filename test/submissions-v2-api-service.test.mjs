@@ -112,6 +112,48 @@ test("a later reply is reduced to a privacy-safe metric before private storage o
   assert.equal(classifierCalls, 0);
 });
 
+test("Sequence Inbox identity conflicts are retained in Needs Review without a first-response claim", async () => {
+  let claimed = 0;
+  let recorded;
+  const service = createService({
+    repository: intakeRepository({
+      claimEmailFirstResponse: async () => { claimed += 1; return { eligible_role_ids: [] }; },
+      recordEmailSource: async (input) => {
+        recorded = input;
+        return { existing: false, source: { id: "signal-sequence", processing_state: input.processingState }, job: null };
+      },
+    }),
+    env,
+    blob: { putPrivateObject: async () => {} },
+  });
+  const result = await service.intakeMasterInbox({
+    schema_version: "submissions.email_reply.v1",
+    event_id: "sequence-event-1",
+    source_family: "paraform_sequence_reply",
+    source_family_version: "1",
+    adapter_version: "sequence-inbox-v1",
+    mailbox_id: "noah-heyraydar-com",
+    provider: "gmail",
+    provider_message_id: "message-sequence-1",
+    provider_thread_id: "thread-sequence-1",
+    direction: "inbound",
+    received_at: "2026-09-03T12:00:00.000Z",
+    sender_match_hmac: { key_version: "v1", digest: "candidate-email-hmac" },
+    candidate_authored_text: "Yes, please tell me more.",
+    offered_roles: [{ role_id: "role-1" }],
+    content_digest: "a".repeat(64),
+    idempotency_key: "gmail:noah-heyraydar-com:message-sequence-1",
+    candidate_user_id_hint: "cached-candidate-user",
+    review_reason_hint: "candidate_ambiguous",
+    source_evidence: { cache_version: 3, sequence_id: "sequence-1" },
+  });
+  assert.equal(result.processing_state, "needs_candidate");
+  assert.equal(claimed, 0);
+  assert.equal(recorded.safeErrorCode, "candidate_ambiguous");
+  assert.equal(recorded.candidateResolution.candidate_user_id, null);
+  assert.equal(recorded.safeEnvelope.source_evidence.sequence_id, "sequence-1");
+});
+
 test("Master Inbox private-object replay survives a crash after Blob write and before source commit", async () => {
   let reservation;
   let blobBytes;
@@ -171,6 +213,8 @@ test("unknown Master Inbox contract versions are durably quarantined without a c
 
 test("Signal URL is built only from a trusted conversation identifier", () => {
   assert.equal(serviceInternals.trustedSignalUrl({ payload: { conversationId: "abc:123" } }), "https://monitor.raydar.xyz/master-inbox#conversation=abc%3A123");
+  assert.equal(serviceInternals.trustedSignalUrl({ adapter_version: "sequence-inbox-v1", source_evidence: { sequence_id: "sequence-123" } }), "https://www.paraform.com/sequences?detail=sequence-123&sequence_tab=inbox");
+  assert.equal(serviceInternals.trustedSignalUrl({ adapter_version: "sequence-inbox-v1", source_evidence: { sequence_id: "../bad" } }), null);
   assert.equal(serviceInternals.trustedSignalUrl({ payload: { conversationId: "../bad?value" } }), null);
   assert.equal(serviceInternals.trustedSignalUrl({ payload: { sourceMessageId: "message-only" } }), null);
 });
@@ -294,6 +338,30 @@ test("upload token helpers reject tampering and expiry", () => {
   const token = signUploadIntent({ pathname: "p", pair_id: "pair", email: "a@raydar.xyz", expires_at: 100 }, { env });
   assert.throws(() => verifyUploadIntent(`${token}x`, { actorEmail: "a@raydar.xyz", env, now: 1 }), /invalid/);
   assert.throws(() => verifyUploadIntent(token, { actorEmail: "a@raydar.xyz", env, now: 101 }), /expired/);
+});
+
+test("regeneration can reuse the existing source bundle without supplemental context", async () => {
+  let requested;
+  const service = createService({
+    repository: {
+      runtimeControls,
+      regenerate: async (input) => { requested = input; return { job_id: "job-rerun" }; },
+    },
+    env,
+  });
+  const result = await service.command({
+    actorEmail: "recruiter@raydar.xyz",
+    idempotencyKey: "rerun-existing-sources",
+    body: { action: "regenerate", case_id: "pair-1", expected_version: 4 },
+  });
+  assert.equal(result.job_id, "job-rerun");
+  assert.equal(requested.pairId, "pair-1");
+  assert.equal(requested.expectedVersion, 4);
+  assert.equal(requested.evidenceEncrypted, null);
+  assert.equal(requested.evidenceBasis, null);
+  assert.equal(requested.sourceNote, null);
+  assert.equal(requested.instructionsEncrypted, null);
+  assert.deepEqual(requested.uploads, []);
 });
 
 test("environment and durable controls jointly block direct UI and intake calls while health remains readable", async () => {

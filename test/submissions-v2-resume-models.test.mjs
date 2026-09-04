@@ -129,7 +129,10 @@ function strategyFixture() {
         placement: "main",
         entries: [{
           id: "entry-alpha",
-          header: [{ id: "alpha-role", text: "Engineer — Alpha", claim_ids: ["claim-title"], emphasis: [] }],
+          header: [
+            { id: "alpha-company", text: "Alpha", claim_ids: ["claim-title"], emphasis: [] },
+            { id: "alpha-role", text: "Engineer", claim_ids: ["claim-title"], emphasis: [] },
+          ],
           body: [{
             id: "alpha-outcome",
             text: "Built a scheduling system used by 20 teams.",

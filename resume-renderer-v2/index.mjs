@@ -44,16 +44,27 @@ export function prepareResumeRender(rawAst, {
   });
 }
 
-function substantiveTokens(value) {
-  return normalizeEvidenceText(value)
+function escapedPattern(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function substantiveTokens(value, candidateName = "") {
+  let normalized = normalizeEvidenceText(value)
     .replace(/Practice\s+[—-]\s+not for submission/giu, " ")
-    .toLocaleLowerCase("en-US")
+    .replace(/EARLIER EXPERIENCE\s*\|\s*CONTINUED/giu, " ")
+    .replace(/\bEarlier experience\b/giu, " ")
+    .replace(/\bContinued\b/giu, " ")
+    .replace(/Prepared by Raydar/giu, " ")
+    .replace(/Page\s+\d+\s+of\s+\d+/giu, " ")
+    .replace(/\bRaydar\b/giu, " ");
+  if (candidateName) normalized = normalized.replace(new RegExp(escapedPattern(candidateName), "giu"), " ");
+  return normalized.toLocaleLowerCase("en-US")
     .match(/[\p{L}\p{N}]+(?:[.+#/-][\p{L}\p{N}]+)*/gu) || [];
 }
 
-function tokenBag(value) {
+function tokenBag(value, candidateName = "") {
   const bag = new Map();
-  for (const token of substantiveTokens(value)) bag.set(token, (bag.get(token) || 0) + 1);
+  for (const token of substantiveTokens(value, candidateName)) bag.set(token, (bag.get(token) || 0) + 1);
   return bag;
 }
 
@@ -62,12 +73,9 @@ function sortedBag(bag) {
 }
 
 export function assertAtsParity(pdfExtractedText, atsText) {
-  const pdfBag = tokenBag(pdfExtractedText);
-  const atsBag = tokenBag(atsText);
-  // Some PDF engines expose the lockup's alt text and some keep the image silent.
-  if ((pdfBag.get("raydar") || 0) === (atsBag.get("raydar") || 0) + 1) {
-    pdfBag.set("raydar", (pdfBag.get("raydar") || 0) - 1);
-  }
+  const candidateName = normalizeEvidenceText(atsText).split("\n", 1)[0] || "";
+  const pdfBag = tokenBag(pdfExtractedText, candidateName);
+  const atsBag = tokenBag(atsText, candidateName);
   const normalizedPdfBag = sortedBag(pdfBag);
   const normalizedAtsBag = sortedBag(atsBag);
   if (JSON.stringify(normalizedPdfBag) !== JSON.stringify(normalizedAtsBag)) {
