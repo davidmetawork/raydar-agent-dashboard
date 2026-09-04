@@ -17,7 +17,14 @@ import {
 export const GENERATION_SCHEMA_VERSION = 1;
 export const GENERATION_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
 export const DIGEST_RE = /^[a-f0-9]{64}$/i;
-export const MAX_GENERATION_ARTIFACT_BYTES = 8_000_000;
+// Above every sync.mjs publish cap ON PURPOSE. Stamping a row with its
+// generation id, digest and source tuple costs about 155 bytes per row, which
+// MEASURED at +18.3% on a 9,000,188-byte queue of realistic rows (raw
+// 9,000,188 -> stamped artifact 10,649,972). If this cap sat below the publish
+// cap, an oversized queue would sail past sync's clean 413 and then throw in
+// here, surfacing as a 502 store_unavailable — the wrong error, at the wrong
+// layer, after the snapshot artifact had already been written.
+export const MAX_GENERATION_ARTIFACT_BYTES = 12_000_000;
 
 const GENERATION_FIELDS = new Set([
   "generationId",

@@ -51,10 +51,27 @@ export const MAX_SNAPSHOT_BYTES = 1_800_000;
 // The authenticated publisher uses a bounded gzip+base64 transport envelope
 // once the exact JSON body would exceed Vercel's request ceiling. These are
 // decoded logical limits; the wire envelope has its own smaller cap below.
-const MAX_QUEUE_BYTES = 5_500_000;
-const MAX_PUBLISH_BYTES = 6_500_000;
-const MAX_TRANSPORT_COMPRESSED_BYTES = 2_500_000;
-const MAX_TRANSPORT_DECODED_BYTES = 7_000_000;
+//
+// SIZES ARE MEASURED, NOT GUESSED (2026-09-04). The live queue was 4,345 rows
+// against a 5,500,000-byte cap and growing daily, and Core's cycles were
+// failing HTTP 413 queue_too_large. A 9,000,188-byte synthetic queue of
+// realistically shaped rows (818 bytes/row, 10,997 rows) measures:
+//
+//   gzip level 9      320,862 bytes  — 12.8% of MAX_TRANSPORT_COMPRESSED_BYTES
+//   base64 of that    427,816 chars  — 12.8% of the envelope's char bound
+//   stamped artifact  10,649,972 bytes — +18.3% for the per-row generation stamp
+//
+// So the compressed cap is nowhere near binding at these sizes and stays where
+// it is: it is a real fence against a malicious or runaway envelope, and there
+// is no reason to widen it. The two caps that WERE binding are widened with
+// it, because a fence the payload can never reach is not a fence — it is a
+// trap that fails somewhere else with a worse error. The ordering invariant
+// (transport decoded >= publish >= queue, and the artifact cap above all of
+// them) is pinned by test/applicants-publish-size.test.mjs.
+export const MAX_QUEUE_BYTES = 9_000_000;
+export const MAX_PUBLISH_BYTES = 10_000_000;
+export const MAX_TRANSPORT_COMPRESSED_BYTES = 2_500_000;
+export const MAX_TRANSPORT_DECODED_BYTES = 10_000_000;
 const MONITOR_TRANSPORT_VERSION = "applicant-core-monitor-gzip-v1";
 // Delivery is a separate state machine. `blocked` and `invited` are retained
 // for the existing loop; the preparation states make a saved Interview intent
