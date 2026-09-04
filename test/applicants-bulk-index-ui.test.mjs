@@ -22,8 +22,13 @@ test("the full profile endpoint is reached only from an explicit profile open", 
   assert.match(applicants, /Open full profile/);
 });
 
-test("Interview controls fail closed on the Core readiness bit", () => {
-  assert.match(applicants, /const interviewReady = row\.interviewAllowed === true/);
-  assert.match(applicants, /row\?\.interviewAllowed !== true/);
-  assert.match(applicants, /Required profile checks are not ready/);
+test("Interview controls fail closed on a hard hold, not on a delivery hint", () => {
+  // The gate is the shared hard-hold code list (api/applicants/_lib/
+  // generation.mjs interviewDecisionHold), mirrored into the page as
+  // interviewHold(). `interviewAllowed` is a delivery-readiness hint and is
+  // deliberately NOT a decision gate any more.
+  assert.match(applicants, /const hold = interviewHold\(row\);\s*\n\s*const interviewReady = !hold;/);
+  assert.match(applicants, /function interviewHold\(row\) \{\s*\n\s*if \(!row\) return "application_missing";/);
+  assert.match(applicants, /"Interview held: " \+ hold/);
+  assert.doesNotMatch(applicants, /row\.interviewAllowed === true/);
 });

@@ -97,6 +97,11 @@ export function createTickHandler({
   readMany = hashGetMany,
   writeHash = hashSetJson,
   writeJson = setJson,
+  // The per-key decision write is a Lua CAS across two hashes, so it cannot go
+  // through writeHash. Injectable for the same reason every store call above
+  // is: the concede/overwrite behaviour has to be testable without a live KV.
+  // Production always gets saveApplicantRequest.
+  saveRequest = saveApplicantRequest,
   now = () => Date.now(),
 } = {}) {
   return async function handler(req, res) {
@@ -378,7 +383,7 @@ export function createTickHandler({
             manifest,
           });
         }
-        const saved=await Promise.all(requests.slice(offset,offset+25).map(async([key,record])=>[key,await saveApplicantRequest(key,record)]));
+        const saved=await Promise.all(requests.slice(offset,offset+25).map(async([key,record])=>[key,await saveRequest(key,record)]));
         for(const [key,ok] of saved) {
           if(ok) decidedKeys.push(key);else{delete audit[key];conceded++;}
         }

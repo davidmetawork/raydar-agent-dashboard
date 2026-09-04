@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import { PIPELINE_COUNT_FIELDS, createSyncHandler, normalizePipeline } from "../api/applicants/sync.mjs";
 import { createFeedHandler } from "../api/applicants/feed.mjs";
+import { publishInto } from "./helpers/applicant-generation.mjs";
 
 const SAVED_SYNC_KEY = process.env.APPHUB_SYNC_KEY;
 const KEY = "apphub-sync-key-0000000000000000001";
@@ -139,11 +140,16 @@ test("sync rejects an invalid pipeline before writing anything, and stays silent
 });
 
 test("feed returns pipeline null when Core has never published, and the stored doc when it has", async () => {
+  // The funnel doc is a free-standing key, not a generation artifact — but the
+  // feed still refuses to answer at all without an active publication, so both
+  // halves of this test run against one.
+  const state = {};
+  publishInto(state, { snapshot: { generatedAt: AT, stream: [] }, queue: [] });
   const emptyDeps = {
     corsHandler: () => false,
     authHandler: async () => true,
     kvReady: () => true,
-    readJson: async () => null,
+    readJson: async (key) => state[key] ?? null,
     readHash: async () => ({}),
     now: () => Date.parse(AT),
   };
@@ -155,10 +161,25 @@ test("feed returns pipeline null when Core has never published, and the stored d
   const stored = normalizePipeline(validPipeline()).pipeline;
   const filledDeps = {
     ...emptyDeps,
-    readJson: async (key) => (key === "apphub:pipeline" ? stored : null),
+    readJson: async (key) => (key === "apphub:pipeline" ? stored : state[key] ?? null),
   };
   const filledRes = response();
   await createFeedHandler(filledDeps)(request({ method: "GET" }), filledRes);
   assert.equal(filledRes.statusCode, 200);
   assert.deepEqual(filledRes.body.pipeline, stored);
+});
+
+test("feed refuses to answer when there is no active publication at all", () => {
+  const res = response();
+  return createFeedHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    kvReady: () => true,
+    readJson: async () => null,
+    readHash: async () => ({}),
+    now: () => Date.parse(AT),
+  })(request({ method: "GET" }), res).then(() => {
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.error, "generation_unavailable");
+  });
 });

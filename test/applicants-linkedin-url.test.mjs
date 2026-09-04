@@ -112,7 +112,9 @@ test("row, modal, and No LinkedIn filtering share the canonicalizer", () => {
 });
 
 test("empty cached history is not mislabeled as a missing LinkedIn profile", () => {
-  assert.match(applicants, /No work or education history cached in Paraform\./);
-  assert.match(applicants, /Paraform has no cached work or education history for this applicant\./);
+  // A source that reported an empty history is a real, publishable outcome and
+  // must read differently from a profile we simply have not cached yet.
+  assert.match(applicants, /The source reported no work or education history\./);
+  assert.match(applicants, /No work or education history is listed in this profile\./);
   assert.doesNotMatch(applicants, /No LinkedIn history on file/);
 });

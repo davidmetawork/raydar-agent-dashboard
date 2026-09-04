@@ -558,6 +558,11 @@ export function createSyncHandler({
   deleteHashFields = hashDelMany,
   writeImmutableJson = setJsonIfAbsent,
   activateGeneration = compareAndSetJson,
+  // The ack write is a Lua CAS against two hashes at once, so it cannot go
+  // through writeHash. It is a seam for the same reason every store call above
+  // is one: a test must be able to exercise the ack branch without a live KV.
+  // Production always gets saveApplicantAck.
+  saveAck = saveApplicantAck,
   now = () => new Date().toISOString(),
 } = {}) {
   return async function handler(req, res) {
@@ -965,7 +970,7 @@ export function createSyncHandler({
           stored.acks=0;
           const entries=Object.entries(normalized.acks);
           for(let offset=0;offset<entries.length;offset+=25) {
-            const saved=await Promise.all(entries.slice(offset,offset+25).map(([key,ack])=>saveApplicantAck(key,ack)));
+            const saved=await Promise.all(entries.slice(offset,offset+25).map(([key,ack])=>saveAck(key,ack)));
             stored.acks+=saved.filter(Boolean).length;
           }
         }

@@ -10,7 +10,10 @@ test("Applicants rules have no scheduled trigger", () => {
   assert.equal(vercel.crons.some(({ path }) => path === "/api/applicants/rules-tick"), false);
   assert.doesNotMatch(rulesTick, /cronAuth|APPHUB_SYNC_KEY/);
   assert.match(rulesTick, /req\.method !== "POST"/);
-  assert.match(rulesTick, /authHandler = requireAuth/);
+  // Stronger than requireAuth: requireApplicantMutation additionally demands a
+  // same-origin request from a signed-in browser, so no machine caller can
+  // reach the engine even holding a valid session.
+  assert.match(rulesTick, /authHandler = requireApplicantMutation/);
 });
 
 test("the Rules view owns the only browser execution control", () => {

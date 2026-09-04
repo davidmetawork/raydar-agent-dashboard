@@ -8,7 +8,7 @@ test("Decided exposes filters for every decision lifecycle outcome", () => {
   assert.match(applicants, /id="decisionFilter"[\s\S]*?<option value="all">All decisions<\/option>/);
   for (const [value, label] of [
     ["passed", "Passed"],
-    ["queued", "Queued to send"],
+    ["queued", "Interview requested"],
     ["emailed", "Emailed"],
     ["blocked", "Blocked"],
   ]) {

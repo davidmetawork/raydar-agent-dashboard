@@ -15,6 +15,12 @@ import {
   nextCountsDoc,
 } from "../api/applicants/sync.mjs";
 import { createFeedHandler } from "../api/applicants/feed.mjs";
+import {
+  publicationBody,
+  publishInto,
+  sourceReceiptsFor,
+  sourceRow,
+} from "./helpers/applicant-generation.mjs";
 
 const SAVED_SYNC_KEY = process.env.APPHUB_SYNC_KEY;
 const KEY = "apphub-sync-key-0000000000000000001";
@@ -41,18 +47,35 @@ function response() {
   };
 }
 
-function fakeStore(initial = {}) {
+// A publish is only accepted when every active row already carries a durable
+// source-profile receipt, so the fake store serves the receipts for whatever
+// rows the test is about to publish, and remembers the immutable artifacts the
+// generation writes (a publish reads them straight back).
+function fakeStore(initial = {}, { receipts = {} } = {}) {
   const calls = { writeJson: [], readJson: [] };
+  const written = {};
   return {
     calls,
+    written,
     deps: {
       kvReady: () => true,
-      readHash: async () => ({}),
+      readHash: async (key) => (key === "apphub:source-profile-ready" ? receipts : {}),
       writeHash: async (fields) => Object.keys(fields || {}).length,
-      writeJson: async (key, value, ttlSeconds) => { calls.writeJson.push([key, value, ttlSeconds]); return "OK"; },
-      readJson: async (key) => { calls.readJson.push(key); return initial[key] ?? null; },
+      writeJson: async (key, value, ttlSeconds) => {
+        written[key] = value;
+        calls.writeJson.push([key, value, ttlSeconds]);
+        return "OK";
+      },
+      writeImmutableJson: async (key, value) => { written[key] = value; return "OK"; },
+      activateGeneration: async (key, _previous, next) => { written[key] = next; return true; },
+      readJson: async (key) => {
+        calls.readJson.push(key);
+        if (key in written) return written[key];
+        return initial[key] ?? null;
+      },
       readHashKeys: async () => [],
       deleteHashFields: async () => 0,
+      saveAck: async () => true,
       now: () => AT,
     },
   };
@@ -111,23 +134,31 @@ test("a gradual legitimate drain never trips across publishes", () => {
 
 test("sync writes the counts doc from a full publish and trips against the stored one", async () => {
   process.env.APPHUB_SYNC_KEY = KEY;
+  const stream = Array.from({ length: 380 }, (_, i) => sourceRow(`s${i}`));
+  const queue = Array.from({ length: 22 }, (_, i) => sourceRow(`q${i}`));
   const { calls, deps } = fakeStore({
     "apphub:counts": { queue: 2244, stream: 400, updatedAt: "2026-08-09T21:00:00.000Z", alert: null },
-  });
+  }, { receipts: sourceReceiptsFor([...stream, ...queue]) });
   const handler = createSyncHandler(deps);
   const res = response();
   await handler(request({
-    body: {
-      snapshot: { generatedAt: AT, stream: Array.from({ length: 380 }, (_, i) => ({ key: `cu${i}:r` })) },
-      queue: Array.from({ length: 22 }, (_, i) => ({ key: `cu${i}:r` })),
-    },
+    body: publicationBody({ snapshot: { generatedAt: AT, stream }, queue }),
   }), res);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.stored, { snapshot: true, queue: true, acks: 0 });
-  assert.deepEqual(countsWrite(calls), {
-    updatedAt: AT, queue: 22, stream: 380,
-    alert: { queue: { baseline: 2244, seen: 22, at: AT } },
-  });
+  assert.equal(res.body.stored.snapshot, true);
+  assert.equal(res.body.stored.queue, true);
+  assert.equal(res.body.stored.acks, 0);
+  // The conserved dimensions ride the same doc as the tripwire's own state.
+  const counts = countsWrite(calls);
+  assert.deepEqual(
+    { updatedAt: counts.updatedAt, queue: counts.queue, stream: counts.stream,
+      total: counts.total, profilePreparing: counts.profilePreparing, alert: counts.alert },
+    { updatedAt: AT, queue: 22, stream: 380, total: 402, profilePreparing: 0,
+      alert: { queue: { baseline: 2244, seen: 22, at: AT } } },
+  );
+  // The doc is the generation's own counts artifact, so it carries the
+  // publication stamp beside the tripwire state.
+  assert.equal(counts.generationId, res.body.generation.id);
 });
 
 test("sync counts a snapshot-embedded queue only when no split doc rode the POST", async () => {
@@ -144,12 +175,15 @@ test("sync counts a snapshot-embedded queue only when no split doc rode the POST
 test("a counts-store failure never fails the sync that carried real data", async () => {
   process.env.APPHUB_SYNC_KEY = KEY;
   const { calls, deps } = fakeStore();
+  // A legacy partial publish still exercises the best-effort counts write: it
+  // never advances the active generation, so a dead readJson cannot cost the
+  // snapshot that rode the same POST.
   deps.readJson = async () => { throw new Error("kv down"); };
   const handler = createSyncHandler(deps);
   const res = response();
-  await handler(request({ body: { snapshot: { generatedAt: AT, stream: [] }, queue: [] } }), res);
+  await handler(request({ body: { snapshot: { generatedAt: AT, stream: [] } } }), res);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.stored, { snapshot: true, queue: true, acks: 0 });
+  assert.equal(res.body.stored.snapshot, true);
   assert.equal(countsWrite(calls), undefined);
 });
 
@@ -252,16 +286,25 @@ test("an acknowledge POST never writes the snapshot or queue keys", async () => 
 });
 
 test("feed returns the counts doc alongside the snapshot", async () => {
-  const counts = { queue: 22, stream: 380, updatedAt: AT, alert: { queue: { baseline: 2244, seen: 22, at: AT } } };
+  // The tripwire doc is not a free-standing key any more: it is the counts
+  // artifact of the active generation, so the browser can never read an alert
+  // that belongs to a different publication than the rows beside it.
+  const state = {};
+  const generation = publishInto(state, {
+    snapshot: { generatedAt: AT, stream: [] },
+    queue: [],
+    counts: { updatedAt: AT, alert: { queue: { baseline: 2244, seen: 22, at: AT } } },
+  });
   const handler = createFeedHandler({
     corsHandler: () => false,
     authHandler: async () => true,
     kvReady: () => true,
-    readJson: async (key) => ({ "apphub:counts": counts, "apphub:snapshot": { generatedAt: AT } }[key] ?? null),
+    readJson: async (key) => state[key] ?? null,
     readHash: async () => ({}),
   });
   const res = response();
   await handler(request({ method: "GET" }), res);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.counts, counts);
+  assert.deepEqual(res.body.counts, generation.counts);
+  assert.deepEqual(res.body.counts.alert, { queue: { baseline: 2244, seen: 22, at: AT } });
 });

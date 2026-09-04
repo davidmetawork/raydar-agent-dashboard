@@ -5,9 +5,19 @@ import { createTickHandler, decideRow } from "../api/applicants/rules-tick.mjs";
 import { createRulesHandler } from "../api/applicants/rules.mjs";
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { isRuleActor, ruleIdFromActor } from "../api/applicants/_lib/decision-record.mjs";
+import { generationFence, publishInto } from "./helpers/applicant-generation.mjs";
 
 const NOW = Date.parse("2026-08-20T12:00:00.000Z");
-const READY_RECEIPT = { cachedAt: "2026-08-20T11:00:00.000Z", expiresAt: "2026-08-21T11:00:00.000Z" };
+// The production receipt shape: a durable Hub projection bound to the exact
+// source observation the queue row names. A rule may only consider a row whose
+// receipt still matches that observation.
+const readyReceipt = (cuId) => ({
+  cachedAt: "2026-08-20T11:00:00.000Z",
+  source: "applicant_hub",
+  durable: true,
+  historyState: "data",
+  sourceObservationId: `obs-${cuId}`,
+});
 
 const HARVARD_RULE = {
   id: "rule-harvard", name: "Harvard undergrads", action: "interview", state: "live",
@@ -28,31 +38,46 @@ const profile = ({ school = "sch_harvard", degree = "Bachelor of Arts - AB", tit
   experiences: [{ companyId: "co1", companyName: "Acme", roleTitle: title, current: true }],
 });
 
+// A published queue row. The revision triple is not decoration: pendingRows
+// skips any row without inputRevision, and both writers copy all three into
+// the decision so a later reader can prove which revision was decided.
 const row = (cuId, extra = {}) => ({
   key: `${cuId}:role1`, cuId, roleId: "role1", tier: "C",
   name: "Applicant", roleTitle: "Engineer", company: "Acme Corp",
-  appliedAt: "2026-08-15T00:00:00.000Z", interviewAllowed: true, ...extra,
+  appliedAt: "2026-08-15T00:00:00.000Z", interviewAllowed: true,
+  inputRevision: "rev-input-1", readinessRevision: "rev-ready-1", decisionRevision: 0,
+  sourceObservationId: `obs-${cuId}`,
+  ...extra,
 });
 
-/** In-memory KV standing in for the apphub namespace. */
+/** In-memory KV standing in for the apphub namespace.
+ *
+ *  The queue is not a free-standing key any more: the tick reads the immutable
+ *  ACTIVE PUBLICATION and refuses to run against anything else, so every
+ *  fixture publishes a real generation and every request carries its fence. */
 function store({ rules = [], pausedAll = false, queue = [], decisions = {}, facts = {}, cards = null, receipts = null, counts = null } = {}) {
   const availableCards = cards ?? Object.fromEntries(Object.keys(facts).map((cuId) => [cuId, {}]));
   const state = {
     "apphub:rules": { rev: 3, pausedAll, rules, updatedAt: null },
-    "apphub:queue": { rows: queue },
-    "apphub:counts": counts,
     "apphub:decisions": { ...decisions },
     "apphub:facts": facts,
     "apphub:cards": availableCards,
-    "apphub:profile-ready": receipts ?? Object.fromEntries(Object.keys(availableCards).map((cuId) => [cuId, READY_RECEIPT])),
+    "apphub:source-profile-ready": receipts
+      ?? Object.fromEntries(Object.keys(availableCards).map((cuId) => [cuId, readyReceipt(cuId)])),
     "apphub:rulestats": {},
     "apphub:ruleruns": {},
     "apphub:schools": { sch_harvard: "Harvard University" },
     "apphub:companies": { co1: "Acme" },
   };
+  const generation = publishInto(state, {
+    snapshot: { generatedAt: "2026-08-20T11:00:00.000Z", stream: [] },
+    queue,
+    counts,
+  });
   const writes = [];
   return {
-    state, writes,
+    state, writes, generation,
+    fence: generationFence(generation),
     deps: {
       corsHandler: () => false,
       authHandler: async (req) => { req.authedEmail = "david@raydar.xyz"; return true; },
@@ -69,6 +94,12 @@ function store({ rules = [], pausedAll = false, queue = [], decisions = {}, fact
         state[key] = { ...(state[key] ?? {}), ...fields };
         writes.push([key, fields]);
       },
+      saveRequest: async (key, record) => {
+        if (state["apphub:decisions"][key]) return false;
+        state["apphub:decisions"][key] = record;
+        writes.push(["apphub:decisions", { [key]: record }]);
+        return true;
+      },
       now: () => NOW,
     },
   };
@@ -83,7 +114,11 @@ function response() {
   };
 }
 
-const request = (over = {}) => ({ method: "POST", headers: {}, query: {}, ...over });
+// Every browser write names the publication the reviewer saw; without the
+// fence the tick answers 409 rather than acting on whatever is in KV now.
+const request = (s, over = {}) => ({
+  method: "POST", headers: {}, query: {}, body: { ...(s ? s.fence : {}) }, ...over,
+});
 
 // ── the happy path ─────────────────────────────────────────────────────────
 
@@ -94,7 +129,7 @@ test("an armed rule writes the same decision record a human click writes", async
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.decided, 1);
@@ -102,8 +137,22 @@ test("an armed rule writes the same decision record a human click writes", async
   const decision = s.state["apphub:decisions"]["cu1:role1"];
   assert.equal(decision.action, "interview");
   assert.equal(decision.at, "2026-08-20T12:00:00.000Z");
-  // Same five keys the human path writes — that identity is the integration.
-  assert.deepEqual(Object.keys(decision).sort(), ["action", "at", "by", "name", "roleTitle"]);
+  // The identity that makes this an integration rather than a second pipeline:
+  // every field the human click writes (api/applicants/decision.mjs) is present
+  // and carries the same value, including the revision fence, the generation
+  // stamp and the pending delivery state.
+  for (const field of [
+    "action", "at", "by", "name", "roleTitle", "actorType", "actorId", "authorizedBy",
+    "requestId", "inputRevision", "readinessRevision", "decisionRevision", "status",
+    "deliveryState", "generationId", "generationDigest",
+  ]) assert.ok(field in decision, `human-path field missing: ${field}`);
+  assert.equal(decision.status, "pending");
+  assert.equal(decision.deliveryState, "requested");
+  assert.equal(decision.inputRevision, "rev-input-1");
+  assert.equal(decision.decisionRevision, 0);
+  assert.equal(decision.generationId, s.fence.generationId);
+  // `by` is the only thing that tells the two writers apart.
+  assert.equal(decision.actorType, "rule");
   assert.ok(isRuleActor(decision.by));
   assert.equal(ruleIdFromActor(decision.by), "rule-harvard");
 });
@@ -114,7 +163,7 @@ test("the audit records the rule, its version and the literal fact", async () =>
     queue: [row("cu1")],
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
-  await createTickHandler(s.deps)(request(), response());
+  await createTickHandler(s.deps)(request(s), response());
 
   const audit = s.state["apphub:ruleruns"]["cu1:role1"];
   assert.equal(audit.ruleId, "rule-harvard");
@@ -133,12 +182,12 @@ test("counters accumulate across ticks", async () => {
       cu2: factsFromProfile(profile(), { now: NOW }),
     },
   });
-  await createTickHandler(s.deps)(request(), response());
+  await createTickHandler(s.deps)(request(s), response());
   assert.equal(s.state["apphub:rulestats"]["rule-harvard"].fired, 2);
 
   // Second tick: both are decided now, so nothing new fires and the count holds.
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.decided, 0);
   assert.equal(s.state["apphub:rulestats"]["rule-harvard"].fired, 2);
 });
@@ -154,7 +203,7 @@ test("a tick never overwrites an existing decision", async () => {
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.decided, 0);
   assert.deepEqual(s.state["apphub:decisions"]["cu1:role1"], human, "the human's call must stand");
 });
@@ -182,7 +231,7 @@ test("a human click landing mid-tick still wins", async () => {
     return readHash(key);
   };
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.decided, 1, "only the untouched applicant is decided");
   assert.equal(res.body.concededToHuman, 1);
   assert.equal(s.state["apphub:decisions"]["cu1:role1"].by, "david@raydar.xyz", "the click stands");
@@ -197,7 +246,7 @@ test("the global pause parks the tick", async () => {
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.parked, "all_rules_paused");
   assert.equal(res.body.decided, 0);
   assert.deepEqual(s.state["apphub:decisions"], {});
@@ -211,7 +260,7 @@ test("a latched count-drop tripwire parks the tick", async () => {
     counts: { updatedAt: "2026-08-20T11:00:00.000Z", alert: { queue: { baseline: 2244, seen: 22 } } },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.parked, "snapshot_counts_alert");
   assert.equal(res.body.decided, 0);
   assert.deepEqual(s.state["apphub:decisions"], {});
@@ -227,7 +276,7 @@ test("an off rule never fires and a watching rule only counts", async () => {
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.decided, 0);
   assert.deepEqual(s.state["apphub:decisions"], {});
   assert.equal(res.body.wouldFire["rule-watch"], 1);
@@ -237,7 +286,7 @@ test("an off rule never fires and a watching rule only counts", async () => {
 test("an applicant with no facts is skipped and counted, never decided", async () => {
   const s = store({ rules: [HARVARD_RULE], queue: [row("cu1")], facts: {}, cards: { cu1: {} } });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.decided, 0);
   assert.equal(res.body.skipped.no_facts_yet, 1);
 });
@@ -250,9 +299,13 @@ test("a rule cannot consider an applicant before its profile card is cached", as
     cards: {},
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
-  assert.equal(res.body.decided, 0);
-  assert.equal(res.body.profileCacheWithheld, 1);
+  await createTickHandler(s.deps)(request(s), res);
+  // Fail closed on the whole run, not per row: silently skipping the
+  // uncacheable applicants would hand the reviewer a smaller queue that looks
+  // healthy, which is the failure this fence exists to prevent.
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.error, "generation_unavailable");
+  assert.equal(res.body.reason, "profile_receipt_mismatch");
   assert.deepEqual(s.state["apphub:decisions"], {});
 });
 
@@ -264,23 +317,48 @@ test("a rule cannot consider an applicant after the full profile receipt expires
     receipts: { cu1: { cachedAt: "2026-08-18T00:00:00.000Z", expiresAt: "2026-08-19T00:00:00.000Z" } },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
-  assert.equal(res.body.decided, 0);
-  assert.equal(res.body.profileCacheWithheld, 1);
+  await createTickHandler(s.deps)(request(s), res);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.reason, "profile_receipt_mismatch");
   assert.deepEqual(s.state["apphub:decisions"], {});
 });
 
-test("an Interview rule reports a not-ready applicant without writing a decision", async () => {
+test("a rule cannot consider an applicant whose receipt names an older observation", async () => {
   const s = store({
     rules: [HARVARD_RULE],
-    queue: [row("cu1", { interviewAllowed: false })],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+    receipts: {
+      cu1: {
+        cachedAt: "2026-08-20T11:00:00.000Z",
+        source: "applicant_hub",
+        durable: true,
+        historyState: "data",
+        sourceObservationId: "obs-stale",
+      },
+    },
+  });
+  const res = response();
+  await createTickHandler(s.deps)(request(s), res);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.reason, "profile_receipt_mismatch");
+  assert.deepEqual(s.state["apphub:decisions"], {});
+});
+
+test("an Interview rule reports a hard-held applicant without writing a decision", async () => {
+  // `interviewAllowed` is a delivery hint, not a gate. The gate is the shared
+  // hard-hold code list, and the skip is counted under the hold's own code so
+  // the reason is legible in the response.
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1", { readinessState: "identity_review" })],
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.decided, 0);
-  assert.equal(res.body.skipped.interview_not_ready, 1);
+  assert.equal(res.body.skipped.identity_review, 1);
   assert.deepEqual(s.state["apphub:decisions"], {});
 });
 
@@ -288,7 +366,7 @@ test("an unauthorized caller gets 401 and changes nothing", async () => {
   const s = store({ rules: [HARVARD_RULE], queue: [row("cu1")] });
   s.deps.authHandler = async (_req, res) => { res.status(401).json({ ok: false, error: "auth_required" }); return false; };
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.statusCode, 401);
   assert.equal(s.writes.length, 0);
 });
@@ -300,7 +378,7 @@ test("GET and machine-style bearer calls cannot execute rules", async () => {
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request({
+  await createTickHandler(s.deps)(request(s, {
     method: "GET",
     headers: { authorization: "Bearer former-machine-key", "x-vercel-cron": "1" },
   }), res);
@@ -316,7 +394,7 @@ test("a Pass rule beats an Interview rule and the loser is still recorded", asyn
     queue: [row("cu1")],
     facts: { cu1: factsFromProfile(profile({ title: "Technical Recruiter" }), { now: NOW }) },
   });
-  await createTickHandler(s.deps)(request(), response());
+  await createTickHandler(s.deps)(request(s), response());
 
   assert.equal(s.state["apphub:decisions"]["cu1:role1"].action, "pass");
   const audit = s.state["apphub:ruleruns"]["cu1:role1"];
@@ -338,16 +416,24 @@ test("a rule scoped to another role does not fire", async () => {
     facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
   });
   const res = response();
-  await createTickHandler(s.deps)(request(), res);
+  await createTickHandler(s.deps)(request(s), res);
   assert.equal(res.body.decided, 0);
 });
 
 // ── the rules endpoint ─────────────────────────────────────────────────────
 
 function rulesDeps(s, email = "david@raydar.xyz") {
+  const signedIn = async (req) => {
+    req.authedEmail = email;
+    req.applicantActor = { type: "human", id: email, email };
+    return true;
+  };
   return {
     corsHandler: () => false,
-    authHandler: async (req) => { req.authedEmail = email; return true; },
+    authHandler: signedIn,
+    // Writes go through requireApplicantMutation in production — same session,
+    // plus a same-origin check no machine caller can satisfy.
+    mutationAuthHandler: signedIn,
     kvReady: () => true,
     readJson: s.deps.readJson,
     writeJson: s.deps.writeJson,
@@ -415,7 +501,7 @@ test("preview reports matches and skips without writing anything", async () => {
   const res = response();
   await createRulesHandler(rulesDeps(s))({
     method: "POST", headers: {}, query: {},
-    body: { op: "preview", rule: { name: "Harvard undergrads", action: "interview", conditions: HARVARD_RULE.conditions } },
+    body: { ...s.fence, op: "preview", rule: { name: "Harvard undergrads", action: "interview", conditions: HARVARD_RULE.conditions } },
   }, res);
 
   assert.equal(res.statusCode, 200);
@@ -431,7 +517,7 @@ test("preview refuses an invalid draft instead of previewing nonsense", async ()
   const res = response();
   await createRulesHandler(rulesDeps(s))({
     method: "POST", headers: {}, query: {},
-    body: { op: "preview", rule: { name: "x", action: "interview", conditions: [{ field: "school.mascot", op: "contains", value: "crimson" }] } },
+    body: { ...s.fence, op: "preview", rule: { name: "x", action: "interview", conditions: [{ field: "school.mascot", op: "contains", value: "crimson" }] } },
   }, res);
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.error, "rule_invalid");
@@ -451,11 +537,11 @@ test("pausing everything is one flag, and it survives a stale revision", async (
 test("the list omits directories unless asked, and includes them when asked", async () => {
   const s = store({ rules: [HARVARD_RULE] });
   const plain = response();
-  await createRulesHandler(rulesDeps(s))(request({ method: "GET" }), plain);
+  await createRulesHandler(rulesDeps(s))(request(s, { method: "GET" }), plain);
   assert.equal(plain.body.directories, undefined);
 
   const full = response();
-  await createRulesHandler(rulesDeps(s))(request({ method: "GET", query: { with: "directories" } }), full);
+  await createRulesHandler(rulesDeps(s))(request(s, { method: "GET", query: { with: "directories" } }), full);
   assert.deepEqual(full.body.directories.schools, { sch_harvard: "Harvard University" });
 });
 
