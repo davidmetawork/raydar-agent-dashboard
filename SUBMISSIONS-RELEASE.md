@@ -12,7 +12,7 @@ Monitor and the isolated Fly worker must be released from the same merged source
 
 The digest covers V2 UI/API/worker/renderer/migrations, package pins, and the shared auth, Paraform, and Sequence Inbox modules it directly uses; it does not prove provider credentials, source coverage, or successful resume preparation.
 
-The release guard is also the Vercel project build command so old branches without the guard fail rather than quietly removing V2; do not override or remove it to release unrelated Monitor changes.
+The Vercel project build command is `npm run submissions-v2:release:vercel`, which verifies the deployed UI/API/shared files against the same full committed manifest while permitting only worker, renderer, migration and purge files deliberately excluded by `.vercelignore`; GitHub and local release checks verify the full source set. Old branches without the guard fail rather than quietly removing V2; do not override or remove it for unrelated Monitor changes.
 
 Email scope rollout and bounded recovery are documented in the Raydar completion PRD and source map; apply the Inbox migration before deploying its multi-role producer, preserve the existing Interview cursor, and let the separately scoped Gmail cursor catch up from the existing activation timestamp.
 

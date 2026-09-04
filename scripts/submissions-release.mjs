@@ -23,6 +23,7 @@ const FIXED_FILES = Object.freeze([
   "api/auth/_lib/session.mjs",
   "scripts/migrate-submissions-v2.mjs",
   "scripts/submissions-release.mjs",
+  ".vercelignore",
   "vercel.json",
 ]);
 const FIXED_DIRECTORIES = Object.freeze([
@@ -35,6 +36,11 @@ const FIXED_DIRECTORIES = Object.freeze([
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const normalize = (value) => value.split(sep).join("/");
 const isForbidden = (path) => path.split("/").some((part) => part === ".env" || part.startsWith(".env."));
+const deploymentOmitted = (path) => path === "scripts/migrate-submissions-v2.mjs"
+  || path.startsWith("migrations/submissions-v2/")
+  || path.startsWith("resume-renderer-v2/")
+  || path.startsWith("submissions-v2-purge/")
+  || path.startsWith("submissions-v2-worker/");
 
 async function walk(root, directory, accepts) {
   const absolute = resolve(root, directory);
@@ -63,6 +69,15 @@ export async function buildSubmissionsReleaseManifest({ root = SCRIPT_ROOT } = {
   const files = await Promise.all([...new Set(paths)].sort().map((path) => fileEntry(resolvedRoot, path)));
   const digest = sha256(files.map((file) => `${file.path}\0${file.sha256}\n`).join(""));
   return { schema_version: 1, algorithm: "sha256", file_count: files.length, digest, files };
+}
+
+async function buildDeploymentReleaseFiles({ root = SCRIPT_ROOT } = {}) {
+  const resolvedRoot = resolve(root);
+  const paths = FIXED_FILES.filter((path) => !deploymentOmitted(path));
+  for (const [directory, accepts] of FIXED_DIRECTORIES) {
+    if (!deploymentOmitted(`${directory}/`)) paths.push(...await walk(resolvedRoot, directory, accepts));
+  }
+  return Promise.all([...new Set(paths)].sort().map((path) => fileEntry(resolvedRoot, path)));
 }
 
 function manifestModule(manifest) {
@@ -102,15 +117,41 @@ export async function checkSubmissionsReleaseManifest({ root = SCRIPT_ROOT } = {
   return actual;
 }
 
+/** Checks the reduced Vercel build context against the full committed manifest. */
+export async function checkSubmissionsReleaseDeploymentManifest({ root = SCRIPT_ROOT } = {}) {
+  const resolvedRoot = resolve(root);
+  let expected;
+  try { expected = JSON.parse(await readFile(resolve(resolvedRoot, MANIFEST_JSON), "utf8")); }
+  catch { throw new Error(`Submissions release manifest is missing or invalid; run node scripts/submissions-release.mjs --write`); }
+  let generated;
+  try { generated = await readFile(resolve(resolvedRoot, MANIFEST_MODULE), "utf8"); }
+  catch { throw new Error(`Submissions release manifest module is missing; run node scripts/submissions-release.mjs --write`); }
+  if (generated !== manifestModule(expected)) throw new Error(`Submissions release manifest module is stale; run node scripts/submissions-release.mjs --write`);
+  const actualFiles = await buildDeploymentReleaseFiles({ root: resolvedRoot });
+  const expectedByPath = new Map((expected.files || []).map((file) => [file.path, file.sha256]));
+  for (const file of actualFiles) {
+    if (expectedByPath.get(file.path) !== file.sha256) throw new Error(`Submissions deployment release manifest is stale: ${file.path}`);
+  }
+  const actualPaths = new Set(actualFiles.map((file) => file.path));
+  for (const file of expected.files || []) {
+    if (!actualPaths.has(file.path) && !deploymentOmitted(file.path)) {
+      throw new Error(`Submissions deployment release manifest is missing required file: ${file.path}`);
+    }
+  }
+  return { ...expected, deployed_file_count: actualFiles.length };
+}
+
 async function main(argumentsList) {
   const args = new Set(argumentsList);
   const rootIndex = argumentsList.indexOf("--root");
   const root = rootIndex >= 0 ? argumentsList[rootIndex + 1] : SCRIPT_ROOT;
   if (rootIndex >= 0 && !root) throw new Error("--root requires a directory");
-  if (args.has("--write") === args.has("--check")) throw new Error("Use exactly one of --write or --check");
+  if (args.has("--write") === args.has("--check") || (args.has("--deployment") && !args.has("--check"))) throw new Error("Use --write, --check, or --check --deployment");
   const manifest = args.has("--write")
     ? await writeSubmissionsReleaseManifest({ root })
-    : await checkSubmissionsReleaseManifest({ root });
+    : args.has("--deployment")
+      ? await checkSubmissionsReleaseDeploymentManifest({ root })
+      : await checkSubmissionsReleaseManifest({ root });
   process.stdout.write(`Submissions release manifest ${args.has("--write") ? "sealed" : "matches"}: ${manifest.digest}\n`);
 }
 

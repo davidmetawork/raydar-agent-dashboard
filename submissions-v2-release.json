@@ -1,9 +1,13 @@
 {
   "schema_version": 1,
   "algorithm": "sha256",
-  "file_count": 86,
-  "digest": "0baac8658596ac323fd1ab9b1be4e9eaa4290862b47a0186c75429b0aa40c1b5",
+  "file_count": 87,
+  "digest": "60d49689cba7d664f7200b890c7f6e3dae70db6a97d18545bcca74931ff74a2a",
   "files": [
+    {
+      "path": ".vercelignore",
+      "sha256": "e8189a6e58b3035f98b39daab3448c36a1bdb92884f55cd2a005472ebb907c20"
+    },
     {
       "path": "api/auth/_lib/session.mjs",
       "sha256": "5bf7faade05dd8c3678f23684044f5bcdabdd2107a3292549acfa63ff05a1980"
@@ -238,7 +242,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "a1256d969e5cf1a5f747c71d1f5c836c29d52df25ab3cb8589a4a468e5e5a24c"
+      "sha256": "35090c55e1420eb8b5d4baedbc17cc849f545c77bf594aafe52b59a2830a692e"
     },
     {
       "path": "resume-renderer-v2/Dockerfile",
@@ -282,7 +286,7 @@
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "2261efd7cd1c22e6347152c1a9ec29854cdda32a9ea62d97078bfe50f8a07232"
+      "sha256": "331a000c3cee81b0791af937cb0e837613fd13cde4dd4fb7eb68d4d39b9c7907"
     },
     {
       "path": "submissions-v2-ui-state.mjs",
@@ -346,7 +350,7 @@
     },
     {
       "path": "vercel.json",
-      "sha256": "bfdb11f8da156e26bdd982729601c466f5a349333ff7a4c02d5dc82141ff89bb"
+      "sha256": "c11de02afe78cfb13d062a05c57d56bebdba2fcc846e3dc07e196c4a17ba22b3"
     }
   ]
 }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   buildSubmissionsReleaseManifest,
+  checkSubmissionsReleaseDeploymentManifest,
   checkSubmissionsReleaseManifest,
   writeSubmissionsReleaseManifest,
 } from "../scripts/submissions-release.mjs";
@@ -19,7 +20,7 @@ async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "raydar-submissions-release-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await Promise.all([
-    seed(root, "package.json"), seed(root, "package-lock.json"), seed(root, "scripts/submissions-release.mjs"),
+    seed(root, "package.json"), seed(root, "package-lock.json"), seed(root, ".vercelignore"), seed(root, "scripts/submissions-release.mjs"),
     seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/auth/_lib/session.mjs"),
     seed(root, "api/seq/_lib/core.mjs"), seed(root, "api/seq/_lib/scheduling-links.mjs"), seed(root, "api/sourcing/_lib/store.mjs"), seed(root, "api/roster/_lib/outcome-sequences.mjs"),
     seed(root, "submissions-v2.html"), seed(root, "submissions-v2.css"), seed(root, "submissions-v2.js"), seed(root, "submissions-v2-ui-state.mjs"),
@@ -77,4 +78,33 @@ test("the generated manifest module must match the sealed static manifest", asyn
   await writeSubmissionsReleaseManifest({ root });
   await seed(root, "api/submissions-v2/_lib/release-manifest.mjs", "export const changed = true;\n");
   await assert.rejects(checkSubmissionsReleaseManifest({ root }), /module is stale/);
+});
+
+test("deployment check accepts only Vercel's intentional Submissions omissions", async (t) => {
+  const root = await fixture(t);
+  await writeSubmissionsReleaseManifest({ root });
+  await Promise.all([
+    rm(join(root, "migrations/submissions-v2"), { recursive: true }),
+    rm(join(root, "resume-renderer-v2"), { recursive: true }),
+    rm(join(root, "submissions-v2-worker"), { recursive: true }),
+    rm(join(root, "scripts/migrate-submissions-v2.mjs")),
+  ]);
+  const checked = await checkSubmissionsReleaseDeploymentManifest({ root });
+  assert.ok(checked.deployed_file_count < checked.file_count);
+});
+
+test("deployment check rejects changed or missing API files and unexpected deployed additions", async (t) => {
+  const root = await fixture(t);
+  await writeSubmissionsReleaseManifest({ root });
+  await seed(root, "api/submissions-v2/_lib/service.mjs", "changed");
+  await assert.rejects(checkSubmissionsReleaseDeploymentManifest({ root }), /stale: api\/submissions-v2\/_lib\/service\.mjs/);
+
+  await writeSubmissionsReleaseManifest({ root });
+  await rm(join(root, "api/submissions-v2/_lib/service.mjs"));
+  await assert.rejects(checkSubmissionsReleaseDeploymentManifest({ root }), /required file: api\/submissions-v2\/_lib\/service\.mjs/);
+
+  await seed(root, "api/submissions-v2/_lib/service.mjs");
+  await writeSubmissionsReleaseManifest({ root });
+  await seed(root, "api/submissions-v2/_lib/unexpected.mjs", "export default null;");
+  await assert.rejects(checkSubmissionsReleaseDeploymentManifest({ root }), /stale: api\/submissions-v2\/_lib\/unexpected\.mjs/);
 });
