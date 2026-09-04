@@ -780,6 +780,101 @@ test("human recovery commands reject terminal sources and non-Interested resume 
   );
 });
 
+test("regeneration rejects overlapping work and list progress stays active across retry gaps", async () => {
+  const pair = await preparingPair();
+  const priorGenerationId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, deadline_at, completed_at
+    ) values (
+      ${priorGenerationId}, ${pair.id}, 1, 'initial', ${`generation:${priorGenerationId}`}, 'succeeded', 'complete',
+      1, ${pair.signal}, 'opus-test', 'opus-fallback-test', 'validator-test',
+      'prompt-test', 'template-test', clock_timestamp() + interval '5 minutes', clock_timestamp()
+    )
+  `;
+  const artifactId = randomUUID();
+  const atsArtifactId = randomUUID();
+  const manifestArtifactId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_artifacts(
+      id, pair_id, generation_id, artifact_version, kind, private_object_key,
+      digest, size_bytes, page_count, validation_status, archive_readback_at, archived_at, current_state
+    ) values (
+      ${artifactId}, ${pair.id}, ${priorGenerationId}, 1, 'pdf',
+      ${`submissions/resumes/v2/pdf/${artifactId}`}, ${digest("prior-resume")}, 100, 1,
+      'passed', clock_timestamp(), clock_timestamp(), 'current'
+    ), (
+      ${atsArtifactId}, ${pair.id}, ${priorGenerationId}, 1, 'ats',
+      ${`submissions/resumes/v2/ats/${atsArtifactId}`}, ${digest("prior-ats")}, 100, null,
+      'passed', clock_timestamp(), clock_timestamp(), 'current'
+    ), (
+      ${manifestArtifactId}, ${pair.id}, ${priorGenerationId}, 1, 'manifest',
+      ${`submissions/resumes/v2/manifests/${manifestArtifactId}`}, ${digest("prior-manifest")}, 100, null,
+      'passed', clock_timestamp(), clock_timestamp(), 'current'
+    )
+  `;
+  await sql`
+    update submissions_v2.candidate_role_pairs
+       set workflow_state='interested', current_artifact_id=${artifactId}, resume_ready_at=clock_timestamp(),
+           state_version=state_version+1
+     where id=${pair.id}
+  `;
+  const activeGenerationId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, prior_artifact_id, deadline_at
+    ) values (
+      ${activeGenerationId}, ${pair.id}, 2, 'regenerate', ${`generation:${activeGenerationId}`}, 'validating', 'validate',
+      2, ${pair.signal}, 'opus-test', 'opus-fallback-test', 'validator-test',
+      'prompt-test', 'template-test', ${artifactId}, clock_timestamp() + interval '5 minutes'
+    )
+  `;
+  const repository = createRepository({ sql });
+  const activeRows = await repository.list({ page: "interested" });
+  assert.equal(activeRows.rows.find((row) => row.pair_id === pair.id)?.generation_status, "validating");
+  await assert.rejects(
+    repository.regenerate({
+      actorEmail: "admin@raydar.xyz", idempotencyKey: `regenerate:${randomUUID()}`,
+      pairId: pair.id, expectedVersion: 2, evidenceBasis: null, sourceNote: null,
+    }),
+    (error) => error.code === "resume_regeneration_in_progress" && error.status === 409,
+  );
+  assert.equal((await sql`
+    select count(*)::integer as count from submissions_v2.jobs
+     where subject_type='pair' and subject_id=${pair.id} and kind='prepare_resume'
+  `)[0].count, 0);
+
+  await sql`
+    update submissions_v2.resume_generations
+       set status='failed', stage='retry_scheduled', completed_at=clock_timestamp()
+     where id=${activeGenerationId}
+  `;
+  const retryJobId = randomUUID();
+  await sql`
+    insert into submissions_v2.jobs(
+      id, kind, subject_type, subject_id, idempotency_key, required_control,
+      state, priority, max_attempts, checkpoint, control_epoch
+    ) values (
+      ${retryJobId}, 'prepare_resume', 'pair', ${pair.id}, ${`retry-gap:${retryJobId}`}, 'generation',
+      'queued', 40, 3, '{}'::jsonb,
+      (select control_epoch from submissions_v2.runtime_controls where singleton=true)
+    )
+  `;
+  const retryGapRows = await repository.list({ page: "interested" });
+  assert.equal(retryGapRows.rows.find((row) => row.pair_id === pair.id)?.generation_status, "queued");
+  await assert.rejects(
+    repository.regenerate({
+      actorEmail: "admin@raydar.xyz", idempotencyKey: `regenerate:${randomUUID()}`,
+      pairId: pair.id, expectedVersion: 2, evidenceBasis: null, sourceNote: null,
+    }),
+    (error) => error.code === "resume_regeneration_in_progress" && error.status === 409,
+  );
+});
+
 test("artifact promotion requires the complete validated PDF, ATS, and manifest set", async () => {
   const pair = await preparingPair();
   const generationId = randomUUID();

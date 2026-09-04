@@ -71,7 +71,7 @@ function canonical(input) {
   return {
     event_id: text(input?.event_id, 200),
     schema_version: text(input?.schema_version, 100),
-    adapter_version: text(input?.source_family_version, 100),
+    adapter_version: text(input?.adapter_version ?? input?.source_family_version, 100),
     source_family: text(input?.source_family, 100),
     source_family_version: text(input?.source_family_version, 100),
     mailbox_id: text(input?.mailbox_id, 200),

@@ -16,6 +16,7 @@ import {
 } from "../api/submissions-v2/_lib/resume/pipeline-supplements.mjs";
 import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pipeline-store.mjs";
 import {
+  resumePipelineInternals,
   runResumePreparation,
   settleResumePreparationFailure,
 } from "../api/submissions-v2/_lib/resume/pipeline.mjs";
@@ -143,6 +144,25 @@ test("resume budget and unknown model prices fail closed before a provider call"
     () => forecastModelCostCents({ model: "unapproved-model", input: "x", maximumOutputTokens: 1 }),
     (error) => error.code === "model_price_unconfigured",
   );
+});
+
+test("sparse or overflowing layouts retry with fresh strategy and validation stages", () => {
+  const checkpoint = {
+    pipeline: {
+      stages: {
+        collect: { key: "collect" }, evidence: { key: "evidence" },
+        strategy: { key: "strategy" }, validate: { key: "validate" },
+      },
+    },
+  };
+  const retry = resumePipelineInternals.layoutRetryCheckpoint(checkpoint, "RESUME_PAGE_TWO_UNDERFILLED");
+  assert.deepEqual(Object.keys(retry.pipeline.stages), ["collect", "evidence"]);
+  assert.equal(retry.pipeline.layout_feedback, "RESUME_PAGE_TWO_UNDERFILLED");
+  assert.match(
+    resumePipelineInternals.effectiveStrategyInstructions("Keep the tone direct.", retry.pipeline.layout_feedback),
+    /strongest role-relevant evidence/u,
+  );
+  assert.equal(resumePipelineInternals.layoutRetryCheckpoint(checkpoint, "RESUME_MISSING_GLYPHS"), null);
 });
 
 test("renderer extraction sends the pinned contract and verifies the source digest", async () => {

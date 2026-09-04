@@ -12,6 +12,8 @@ export const REVIEW_REASONS = Object.freeze({
 
 const text = (value, limit = 1_000) => String(value ?? "").trim().slice(0, limit);
 
+export const gmailSignalUrl = (value) => /^https:\/\/mail\.google\.com\/mail\/\?authuser=david%40raydar\.xyz#all\/[a-f0-9]{1,64}$/iu.test(String(value || "")) ? value : null;
+
 export function safeHttps(value, allowedHosts = []) {
   try {
     const url = new URL(text(value, 2_000), "https://monitor.raydar.xyz");
@@ -33,7 +35,7 @@ function reasons(values = []) {
 export function rowDto(row) {
   const reviewReasons = reasons(row.review_reasons || []);
   const first = reviewReasons[0];
-  const signalUrl = safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
+  const signalUrl = gmailSignalUrl(row.signal_url) || safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
   return {
     case_id: row.pair_id || row.case_id || null,
     signal_id: row.signal_id || null,
@@ -63,6 +65,8 @@ export function rowDto(row) {
     primary_action_label: first?.action || null,
     resume_cautions: (row.resume_cautions || []).map((item) => ({ code: text(item.code || item.source_key || item, 100), label: text(item.label || item.safe_detail || item, 300), impact: text(item.impact, 300) || null })),
     generation_status: row.generation_status || null,
+    current_artifact_id: row.current_artifact_id || null,
+    artifact_version: Number(row.artifact_version || 0) || null,
     submission_status: row.submission_status || "none",
     negative_reason: text(row.negative_reason, 500) || null,
     corrected_destination: row.corrected_destination || null,

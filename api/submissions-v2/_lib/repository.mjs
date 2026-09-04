@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { database } from "./db.mjs";
 import { beginCommand, completeCommand, failCommand } from "./command-store.mjs";
 import { exactSlackChannel } from "./notifications.mjs";
+import { gmailSignalUrl } from "./presentation.mjs";
 
 const PAGE_STATES = new Set(["interested", "needs_review", "not_interested"]);
 const REVIEW_REASONS = new Set([
@@ -282,7 +283,7 @@ async function queueResume(tx, pair, commandRow, triggerKind = "initial") {
 
 function signalUrlFromEnvelope(envelope = {}) {
   const value = clean(envelope.signal_url, 2_000);
-  return /^https:\/\/monitor\.raydar\.xyz\/master-inbox#conversation=[A-Za-z0-9._~%-]+$/.test(value) ? value : null;
+  return gmailSignalUrl(value) || (/^https:\/\/monitor\.raydar\.xyz\/master-inbox#conversation=[A-Za-z0-9._~%-]+$/.test(value) ? value : null);
 }
 
 async function loadCaseDeletionSnapshot(query, pairId, { lock = false } = {}) {
@@ -444,7 +445,26 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               from submissions_v2.review_items where pair_id=p.id and action_state='open'
             ) rv on true
             left join lateral (
-              select status from submissions_v2.resume_generations where pair_id=p.id order by generation_version desc limit 1
+              select coalesce(active.id, latest.id) as id,
+                     case when active.status is not null then active.status
+                          when pending_job.id is not null then 'queued'
+                          else latest.status end as status
+                from (select 1) seed
+                left join lateral (
+                  select id, status from submissions_v2.resume_generations
+                   where pair_id=p.id order by generation_version desc limit 1
+                ) latest on true
+                left join lateral (
+                  select id, status from submissions_v2.resume_generations
+                   where pair_id=p.id and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
+                   order by generation_version desc limit 1
+                ) active on true
+                left join lateral (
+                  select id from submissions_v2.jobs
+                   where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
+                     and state in ('queued','running')
+                   order by created_at desc limit 1
+                ) pending_job on true
             ) g on true
             left join lateral (
               select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled
@@ -523,7 +543,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles, se.envelope->>'signal_url' as signal_url,
             p.original_signal_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
             coalesce(caution.cautions, '[]'::jsonb) as resume_cautions, g.status as generation_status,
-            p.submission_status, null::text as negative_reason, null::text as corrected_destination,
+            p.submission_status, p.current_artifact_id, current_artifact.artifact_version,
+            null::text as negative_reason, null::text as corrected_destination,
             r.last_confirmed_at as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
             p.original_signal_at as sort_at, p.id as sort_id,
             count(*) over()::bigint as total_count
@@ -531,7 +552,29 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           left join submissions_v2.candidate_index c on c.candidate_user_id=p.candidate_user_id
           left join submissions_v2.role_index r on r.role_id=p.role_id
           join submissions_v2.source_events se on se.id=p.first_signal_id
-          left join lateral (select id, status from submissions_v2.resume_generations where pair_id=p.id order by generation_version desc limit 1) g on true
+          left join lateral (
+            select coalesce(active.id, latest.id) as id,
+                   case when active.status is not null then active.status
+                        when pending_job.id is not null then 'queued'
+                        else latest.status end as status
+              from (select 1) seed
+              left join lateral (
+                select id, status from submissions_v2.resume_generations
+                 where pair_id=p.id order by generation_version desc limit 1
+              ) latest on true
+              left join lateral (
+                select id, status from submissions_v2.resume_generations
+                 where pair_id=p.id and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
+                 order by generation_version desc limit 1
+              ) active on true
+              left join lateral (
+                select id from submissions_v2.jobs
+                 where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
+                   and state in ('queued','running')
+                 order by created_at desc limit 1
+              ) pending_job on true
+          ) g on true
+          left join submissions_v2.resume_artifacts current_artifact on current_artifact.id=p.current_artifact_id
           left join lateral (
             select jsonb_agg(jsonb_build_object('source_key', source_key, 'safe_detail', remediation, 'impact', accuracy_impact) order by source_key) as cautions
               from submissions_v2.resume_sources where generation_id=g.id and status <> 'present'
@@ -1567,6 +1610,18 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
         if (current.workflow_state !== "interested") throw problem("pair_not_resume_ready", "Only an Interested candidate with a ready resume can be regenerated.", 409, pairCurrent(current));
+        const activeRegeneration = await tx`
+          select id::text from submissions_v2.resume_generations
+           where pair_id=${pairId} and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
+          union all
+          select id::text from submissions_v2.jobs
+           where kind='prepare_resume' and subject_type='pair' and subject_id=${pairId}
+             and state in ('queued','running')
+          limit 1
+        `;
+        if (activeRegeneration.length) {
+          throw problem("resume_regeneration_in_progress", "This resume is already being regenerated.", 409, pairCurrent(current));
+        }
         if (evidenceEncrypted) {
           await tx`
             insert into submissions_v2.resume_supplements(

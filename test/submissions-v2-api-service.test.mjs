@@ -296,6 +296,30 @@ test("upload token helpers reject tampering and expiry", () => {
   assert.throws(() => verifyUploadIntent(token, { actorEmail: "a@raydar.xyz", env, now: 101 }), /expired/);
 });
 
+test("regeneration can reuse the existing source bundle without supplemental context", async () => {
+  let requested;
+  const service = createService({
+    repository: {
+      runtimeControls,
+      regenerate: async (input) => { requested = input; return { job_id: "job-rerun" }; },
+    },
+    env,
+  });
+  const result = await service.command({
+    actorEmail: "recruiter@raydar.xyz",
+    idempotencyKey: "rerun-existing-sources",
+    body: { action: "regenerate", case_id: "pair-1", expected_version: 4 },
+  });
+  assert.equal(result.job_id, "job-rerun");
+  assert.equal(requested.pairId, "pair-1");
+  assert.equal(requested.expectedVersion, 4);
+  assert.equal(requested.evidenceEncrypted, null);
+  assert.equal(requested.evidenceBasis, null);
+  assert.equal(requested.sourceNote, null);
+  assert.equal(requested.instructionsEncrypted, null);
+  assert.deepEqual(requested.uploads, []);
+});
+
 test("environment and durable controls jointly block direct UI and intake calls while health remains readable", async () => {
   let listCalled = false;
   const repository = {

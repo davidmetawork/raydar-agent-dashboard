@@ -66,12 +66,13 @@ test("forbidden resume and Paraform controls do not exist", () => {
   assert.doesNotMatch(surface, /\bGenerate Resume\b/i);
   assert.doesNotMatch(surface, /resume[-_ ]preview|Preview Resume/i);
   assert.doesNotMatch(surface, /contenteditable|resume[-_ ]editor|Edit Resume/i);
-  assert.doesNotMatch(surface, /auto[-_ ]?download/i);
+  assert.match(js, /async function autoDownloadResume\(row\)/);
   assert.doesNotMatch(html, /<form\b|formaction=|action="[^"]*submit/i);
 
-  const regeneration = between(js, "function openRegenerate(id)", "function validateFiles()");
+  const regeneration = between(js, "async function regenerateResume(id)", "async function autoDownloadResume(row)");
   assert.doesNotMatch(regeneration, /downloadResume\(|anchor\.click\(|download-ticket/);
   assert.match(regeneration, /command\("regenerate"/);
+  assert.doesNotMatch(regeneration, /openDialog\(|candidate_context|source_note|uploads/);
 
   const submit = between(js, "async function openSubmit(id)", "async function command(action");
   assert.match(submit, /\/submit-open/);

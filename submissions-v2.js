@@ -15,17 +15,34 @@ const URL_HOSTS = Object.freeze({
   candidate: ["paraform.com"],
   linkedin: ["linkedin.com"],
   raydar: ["raydar.xyz"],
-  signal: ["raydar.xyz", "paraform.com"],
+  signal: ["raydar.xyz", "paraform.com", "mail.google.com"],
   submit: ["paraform.com"],
   storage: ["vercel-storage.com"],
 });
-const ACTIVE_GENERATION_STATES = new Set(["active", "queued", "running", "preparing", "generating"]);
+const ACTIVE_GENERATION_STATES = new Set([
+  "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving",
+]);
+const AUTO_DOWNLOAD_STORAGE_KEY = "raydar.submissions-v2.pending-resume-downloads.v1";
+
+function pendingDownloadsFromSession() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(AUTO_DOWNLOAD_STORAGE_KEY) || "{}");
+    return new Map(Object.entries(parsed).filter(([pairId, artifactId]) => pairId && typeof artifactId === "string"));
+  } catch { return new Map(); }
+}
+
+function persistPendingDownloads() {
+  try { sessionStorage.setItem(AUTO_DOWNLOAD_STORAGE_KEY, JSON.stringify(Object.fromEntries(STATE.pendingDownloads))); }
+  catch { /* A blocked session store must not stop generation or download. */ }
+}
+
 const STATE = {
   page: "interested", query: "", rows: [], nextCursor: null, loading: false,
   totalCount: null, listSequence: 0, listRequest: null, countsRequest: null,
   counts: { interested: 0, needs_review: 0, not_interested: 0, actionable: 0 },
   session: null, authConfig: null, csrf: "", active: null, searchTimer: null, pollTimer: null,
   searchRequests: new Map(), generating: new Set(), dialogReturnFocus: null,
+  pendingDownloads: pendingDownloadsFromSession(), downloadsInFlight: new Set(),
   popoverAnchor: null, popoverCloseTimer: null, signinStarted: false,
 };
 
@@ -139,7 +156,8 @@ function interestedActions(row) {
   const historyLabel = submitted ? '<span class="submitted-label">SUBMITTED</span>' : "";
   const correct = submitted ? "" : `<button class="button text correct" data-id="${esc(id)}" type="button">Correct</button>`;
   const submit = submitted ? "" : `<button class="button primary submit" data-id="${esc(id)}" type="button">Submit</button>`;
-  return `${historyLabel}${correct}<button class="button secondary download" data-id="${esc(id)}" type="button">Download Resume</button>${cautionButton(row)}<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating ? "disabled" : ""}>↶</button><button class="button secondary duplicate" data-id="${esc(id)}" type="button">Duplicate</button>${submit}`;
+  const rerunIcon = '<svg class="rerun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+  return `${historyLabel}${correct}<button class="button secondary download" data-id="${esc(id)}" type="button">Download Resume</button>${cautionButton(row)}<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating ? "disabled" : ""}>${rerunIcon}</button><button class="button secondary duplicate" data-id="${esc(id)}" type="button">Duplicate</button>${submit}`;
 }
 
 function reviewActions(row) {
@@ -164,7 +182,7 @@ function rowHtml(row) {
 
 function bindRows() {
   document.querySelectorAll(".download").forEach((node) => { node.onclick = () => downloadResume(node.dataset.id); });
-  document.querySelectorAll(".regenerate").forEach((node) => { node.onclick = () => openRegenerate(node.dataset.id); });
+  document.querySelectorAll(".regenerate").forEach((node) => { node.onclick = () => regenerateResume(node.dataset.id); });
   document.querySelectorAll(".duplicate").forEach((node) => { node.onclick = () => openDuplicate(node.dataset.id); });
   document.querySelectorAll(".correct").forEach((node) => { node.onclick = () => openCorrect(node.dataset.id); });
   document.querySelectorAll(".submit").forEach((node) => { node.onclick = () => openSubmit(node.dataset.id); });
@@ -255,14 +273,37 @@ async function loadRows({ append = false } = {}) {
     STATE.nextCursor = data.next_cursor || null;
     const reportedTotal = Number(data.total_count ?? data.total ?? data.count);
     STATE.totalCount = Number.isFinite(reportedTotal) ? reportedTotal : (STATE.nextCursor ? null : STATE.rows.length);
+    let completedRegeneration = false;
+    const completedDownloads = [];
+    let failedRegeneration = false;
     for (const row of STATE.rows) {
       const id = String(row.case_id || "");
       if (!id) continue;
+      const wasGenerating = STATE.generating.has(id);
+      const status = String(row.generation_status || "").toLowerCase();
       if (isGenerationActive(row)) STATE.generating.add(id);
-      else if (row.generation_status) STATE.generating.delete(id);
+      else if (row.generation_status) {
+        STATE.generating.delete(id);
+        if (wasGenerating && status === "succeeded") completedRegeneration = true;
+      }
+      if (STATE.pendingDownloads.has(id)) {
+        const priorArtifactId = STATE.pendingDownloads.get(id);
+        if (status === "succeeded" && row.current_artifact_id && row.current_artifact_id !== priorArtifactId) {
+          STATE.pendingDownloads.delete(id);
+          completedDownloads.push(row);
+        } else if (["failed", "cancelled", "held"].includes(status)) {
+          STATE.pendingDownloads.delete(id);
+          failedRegeneration = true;
+        }
+      }
     }
+    persistPendingDownloads();
     renderHealth(data.health || {});
     renderRows();
+    if (completedDownloads.length) {
+      for (const row of completedDownloads) autoDownloadResume(row);
+    } else if (failedRegeneration) toast("Resume generation failed safely; no new file was saved.", true);
+    else if (completedRegeneration) toast("The new resume is ready to download.");
   } catch (error) {
     if (error.name === "AbortError") return;
     $("rows").innerHTML = `<div class="empty-state"><strong>Submissions are unavailable</strong>${esc(error.message)}</div>`;
@@ -324,7 +365,7 @@ function showPopover(anchor, row, kind) {
   const pop = document.createElement("div");
   const popoverId = `submission-popover-${String(row?.case_id || row?.signal_id || "item").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   pop.id = popoverId; pop.className = "popover"; pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", kind === "caution" ? "Resume source coverage" : "Needs review reasons");
-  pop.innerHTML = `<strong>${kind === "caution" ? "Resume source coverage" : "Needs review"}</strong><ul>${(items || []).map((item) => `<li>${esc(item.label || item.detail || item.code || item)}${item.impact ? ` — ${esc(item.impact)}` : ""}</li>`).join("") || "<li>Review details are unavailable.</li>"}</ul>${kind === "caution" ? `<button class="button secondary popover-context" data-id="${esc(row?.case_id)}" type="button">Add context</button>` : ""}`;
+  pop.innerHTML = `<strong>${kind === "caution" ? "Resume source coverage" : "Needs review"}</strong><ul>${(items || []).map((item) => `<li>${esc(item.label || item.detail || item.code || item)}${item.impact ? ` — ${esc(item.impact)}` : ""}</li>`).join("") || "<li>Review details are unavailable.</li>"}</ul>`;
   STATE.popoverAnchor = anchor;
   anchor.setAttribute("aria-expanded", "true");
   anchor.setAttribute("aria-controls", popoverId);
@@ -332,11 +373,6 @@ function showPopover(anchor, row, kind) {
   pop.onpointerenter = () => clearTimeout(STATE.popoverCloseTimer);
   pop.onpointerleave = schedulePopoverClose;
   pop.onclick = (event) => event.stopPropagation();
-  pop.querySelector(".popover-context")?.addEventListener("click", () => {
-    const id = pop.querySelector(".popover-context")?.dataset.id;
-    closePopover();
-    if (id) openRegenerate(id);
-  });
   const box = anchor.getBoundingClientRect(); const width = Math.min(330, innerWidth - 30);
   pop.style.left = `${Math.max(15, Math.min(innerWidth - width - 15, box.right - width))}px`;
   pop.style.top = `${Math.min(innerHeight - pop.offsetHeight - 15, box.bottom + 7)}px`;
@@ -570,49 +606,60 @@ function openReview(id) {
   };
 }
 
-function openRegenerate(id) {
+async function regenerateResume(id) {
   const row = rowFor(id); if (!row) return;
-  STATE.active = { case_id: id, expected_version: row.state_version };
-  const cautions = (row.resume_cautions || []).map((item) => `<li>${esc(item.label || item.code)}${item.impact ? ` — ${esc(item.impact)}` : ""}</li>`).join("");
-  openDialog({ title: "Regenerate resume", subtitle: `${row.candidate_name} · ${row.company} · ${row.role_title}`, body: `${cautions ? `<div class="coverage"><h3>Source coverage</h3><ul>${cautions}</ul></div>` : ""}<label class="field"><span class="field-label">Evidence basis</span><select id="evidence-basis"><option value="sourced">Candidate-provided or sourced evidence</option><option value="correction">Explicit factual correction</option></select></label><label class="field"><span class="field-label">Source or correction note</span><input id="source-note" maxlength="500" placeholder="Where did this information come from?" /></label><label class="field"><span class="field-label">Additional candidate context</span><textarea id="candidate-context" maxlength="12000"></textarea></label><label class="field upload-box"><span class="field-label">PDF or image evidence</span><input id="context-files" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" multiple /><span class="field-help">Up to five files, 10 MB each, 25 MB total.</span><span class="error-text" id="file-error"></span></label><label class="field"><span class="field-label">Instructions for this version</span><textarea id="version-instructions" maxlength="4000" placeholder="Example: Increase the bottom spacing without adding filler."></textarea><span class="field-help">Instructions guide this version only and never become candidate evidence.</span></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" type="button">Regenerate</button>' });
-  $("dialog-cancel").onclick = closeDialog; $("context-files").onchange = validateFiles;
-  $("dialog-confirm").onclick = async () => {
-    const note = $("source-note").value.trim(); if (!note) return toast("Add the source or correction note.", true); if (!validateFiles()) return;
-    const input = { ...STATE.active, evidence_basis: $("evidence-basis").value, source_note: note, candidate_context: $("candidate-context").value.trim(), instructions: $("version-instructions").value.trim() };
-    const button = $("dialog-confirm"); button.disabled = true; button.textContent = "Regenerating…";
-    try {
-      const uploads = await uploadEvidence([...$("context-files").files], input.evidence_basis, input.source_note);
-      await command("regenerate", { ...input, uploads });
-      STATE.generating.add(String(id));
-      closeDialog(); renderRows(); toast("The resume is being rebuilt.");
-      await loadRows();
-    } catch (error) {
-      STATE.generating.delete(String(id));
-      if (!$("modal").hidden) { button.disabled = false; button.textContent = "Regenerate"; }
-      renderRows(); toast(error.message, true);
+  const key = String(id);
+  if (STATE.generating.has(key) || isGenerationActive(row)) return;
+  STATE.pendingDownloads.set(key, String(row.current_artifact_id || ""));
+  persistPendingDownloads();
+  STATE.generating.add(key);
+  renderRows();
+  toast("Regeneration started; the finished resume will save to Downloads automatically.");
+  try {
+    await command("regenerate", { case_id: id, expected_version: row.state_version });
+    await loadRows();
+  } catch (error) {
+    if (error.code === "resume_regeneration_in_progress") {
+      STATE.generating.add(key);
+      renderRows();
+      toast("Resume generation is already running; the finished resume will save to Downloads automatically.");
+      return;
     }
-  };
-}
-
-function validateFiles() {
-  const files = [...($("context-files")?.files || [])]; const error = $("file-error"); if (!error) return true;
-  const allowed = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]); const total = files.reduce((sum, file) => sum + file.size, 0);
-  const message = files.length > 5 ? "Choose at most five files." : files.some((file) => file.size > 10 * 1024 * 1024) ? "Each file must be 10 MB or smaller." : total > 25 * 1024 * 1024 ? "The combined files must be 25 MB or smaller." : files.some((file) => !allowed.has(file.type)) ? "Use PDF, PNG, JPEG, or WebP files." : "";
-  error.textContent = message; return !message;
-}
-
-async function uploadEvidence(files, evidenceBasis, sourceNote) {
-  const uploaded = [];
-  for (const file of files) {
-    const intent = await command("create_upload_intent", { ...STATE.active, filename: file.name, content_type: file.type, size: file.size });
-    const uploadUrl = safeUrl(intent.upload_url, URL_HOSTS.storage);
-    if (!uploadUrl) throw new Error(`Upload destination was invalid for ${file.name}.`);
-    const response = await fetch(uploadUrl, { method: "PUT", headers: intent.upload_headers || { "content-type": file.type }, body: file });
-    if (!response.ok) throw new Error(`Upload failed for ${file.name}.`);
-    const completed = await command("complete_upload", { ...STATE.active, upload_id: intent.upload_id, upload_receipt: response.headers.get("etag") || null, evidence_basis: evidenceBasis, source_note: sourceNote });
-    uploaded.push(completed.supplement_id);
+    STATE.pendingDownloads.delete(key);
+    persistPendingDownloads();
+    STATE.generating.delete(key);
+    renderRows();
+    toast(error.message, true);
   }
-  return uploaded;
+}
+
+async function autoDownloadResume(row) {
+  const id = String(row?.case_id || "");
+  if (!id || STATE.downloadsInFlight.has(id)) return;
+  STATE.downloadsInFlight.add(id);
+  try {
+    const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/resume/download-ticket`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expected_version: row.state_version }) });
+    const downloadUrl = safeUrl(data.url, URL_HOSTS.storage);
+    if (!downloadUrl) throw new Error("Resume download link was invalid.");
+    const response = await fetch(downloadUrl, { credentials: "same-origin", cache: "no-store" });
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!response.ok || !contentType.startsWith("application/pdf")) throw new Error("The resume file could not be downloaded.");
+    const bytes = await response.arrayBuffer();
+    if (String.fromCharCode(...new Uint8Array(bytes).slice(0, 5)) !== "%PDF-") throw new Error("The resume file was not a valid PDF.");
+    const objectUrl = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = data.filename || suggestedResumeFilename(row);
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    anchor.click();
+    setTimeout(() => { anchor.remove(); URL.revokeObjectURL(objectUrl); }, 1_000);
+    toast(`Saved ${anchor.download} to Downloads.`);
+  } catch (error) {
+    toast(`${error.message || "The resume could not be saved automatically"} Click Download Resume to save it manually.`, true);
+  } finally {
+    STATE.downloadsInFlight.delete(id);
+  }
 }
 
 async function downloadResume(id) {
@@ -670,8 +717,10 @@ async function command(action, input = {}) {
     if (error.status === 409) {
       closeDialog();
       await Promise.allSettled([loadCounts(), loadRows()]);
-      error.message = "This item changed, so the latest version was refreshed; please try again.";
-      error.code = "state_conflict_refreshed";
+      if (error.code !== "resume_regeneration_in_progress") {
+        error.message = "This item changed, so the latest version was refreshed; please try again.";
+        error.code = "state_conflict_refreshed";
+      }
     }
     throw error;
   }
