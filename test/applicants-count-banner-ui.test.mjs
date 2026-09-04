@@ -68,8 +68,36 @@ test("a latched counts alert says, in words, that the saved rules are paused", (
   assert.match(applicants, /<div class="banner danger" id="rulesPausedBanner">/);
   assert.match(applicants, /Saved rules are paused while the counts alert is latched/);
   assert.match(applicants, /No saved rule can decide anybody while this alert is latched/);
-  // It names the way out, which is the acknowledgement, not a code change.
-  assert.match(applicants, /Acknowledge the counts alert once the numbers above are verified/);
+});
+
+// THE WAY OUT THE BANNER NAMES MUST EXIST AND MUST WORK (2026-09-04 review).
+//
+// The first draft told the reader to "acknowledge the counts alert ... then
+// run the rules again". Neither half was true:
+//
+//   - no acknowledge control exists on this tab, or anywhere in Raydar. The
+//     only path is an authenticated POST to /api/applicants/sync carrying the
+//     publisher bearer key (sync.mjs, `body.acknowledgeCountsAlert`).
+//   - and it would not lift the park. The ack writes the MUTABLE apphub:counts
+//     doc; rules-tick reads the IMMUTABLE per-generation counts artifact, and
+//     feed.mjs serves that same artifact as this banner's source. Generation
+//     artifacts are written with setJsonIfAbsent and never rewritten.
+//
+// So the banner must name the one thing that does clear it: a new published
+// generation whose total is conserved.
+
+test("the paused banner names a way out that exists and works", () => {
+  assert.match(applicants, /This clears itself on the next published generation whose total is conserved/);
+  assert.match(applicants, /If Core is not publishing, that is the thing to fix/);
+});
+
+test("the paused banner does not tell the reader to acknowledge anything", () => {
+  // Guard, not decoration: if an acknowledge CONTROL is ever added to the tab,
+  // this test fails and forces a decision about the artifact/mutable split
+  // above rather than letting the instruction quietly reappear.
+  const ackControl = /acknowledgeCountsAlert/.test(applicants);
+  assert.equal(ackControl, false, "no acknowledge control on the tab");
+  assert.doesNotMatch(applicants, /Acknowledge the counts alert/);
 });
 
 test("the paused notice is driven by the same alert the counts banner reads", () => {

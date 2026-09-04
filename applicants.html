@@ -778,10 +778,24 @@ function renderStats() {
   // reported a parked run in a place nobody was looking. Rendered from the
   // same STATE.counts.alert the banner above reads, so the two can never
   // disagree, and toggled before the no-snapshot return for the same reason.
+  //
+  // THE COPY NAMES ONLY WHAT A READER OF THIS TAB CAN ACTUALLY DO. An earlier
+  // draft said "acknowledge the counts alert, then run the rules again", and
+  // both halves were wrong. There is no acknowledge control anywhere on the
+  // tab — the only path is an authenticated POST to /api/applicants/sync
+  // carrying the publisher bearer key. And it would not lift the park even if
+  // it were pressed: the ack writes the MUTABLE apphub:counts doc, while
+  // rules-tick reads the IMMUTABLE per-generation counts artifact (and the
+  // feed serves that same artifact to this banner). Generation artifacts are
+  // written with setJsonIfAbsent and never rewritten, so an ack changes
+  // neither the park nor this banner. What clears both is the next published
+  // generation whose total is conserved — which is exactly the thing to go and
+  // fix when Core has stopped publishing.
   const rulesParked = Boolean(drops);
   $("rulesPausedText").textContent = "No saved rule can decide anybody while this alert is latched — "
     + "\u201cRun rules now\u201d will report a parked run. "
-    + "Acknowledge the counts alert once the numbers above are verified, then run the rules again.";
+    + "This clears itself on the next published generation whose total is conserved. "
+    + "If Core is not publishing, that is the thing to fix — the rules cannot resume until it does.";
   $("rulesPausedBanner").classList.toggle("on", rulesParked);
   $("pillRules").classList.toggle("rules-paused", rulesParked);
   $("pillRules").title = rulesParked
