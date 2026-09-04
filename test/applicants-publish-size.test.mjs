@@ -7,12 +7,34 @@
 // that fails later, at a lower layer, with a worse error.
 //
 // The chain a full publish passes through, in order:
+//   0. Core's own encoder    — MONITOR_TRANSPORT_MAX_DECODED_BYTES, in the
+//                              OTHER repo (applicant-core/lib/adapters/
+//                              monitor-live.mjs). Throws
+//                              APPLICANT_CORE_MONITOR_BODY_TOO_LARGE before
+//                              the request is made, so it is FIRST and it
+//                              silently sets the end-to-end ceiling.
 //   1. decodeTransportBody  — MAX_TRANSPORT_COMPRESSED_BYTES (wire, base64)
 //                             MAX_TRANSPORT_DECODED_BYTES (the whole body)
 //   2. the queue check      — MAX_QUEUE_BYTES        -> clean 413
 //   3. the body check       — MAX_PUBLISH_BYTES      -> clean 413
 //   4. publishGeneration    — MAX_GENERATION_ARTIFACT_BYTES, which THROWS
 //                             (502 store_unavailable), so it must be last.
+//
+// STEP 0 IS THE ONE THAT WAS FORGOTTEN. This file's first version raised caps
+// 1-3 to 10/10/9 MB while Core's cap stayed at 7,000,000, which made every one
+// of those raises unreachable: the real ceiling was min(7,000,000; 10,000,000)
+// and the failure mode became a throw inside Core's 180 s cycle with no 413 in
+// this repo's log to point at it — the same outage, harder to diagnose. Core's
+// constant is now 10,000,000 and is mirrored below so this suite goes red if
+// either side moves alone. The Core-side half of the pin is
+// applicant-core/test/unit/adapters.test.mjs.
+
+/** MIRROR of MONITOR_TRANSPORT_MAX_DECODED_BYTES in the Raydar repo,
+ *  applicant-core/lib/adapters/monitor-live.mjs. Two repos, one number: it
+ *  cannot be imported, so it is written down and asserted. It measures the
+ *  same object these caps measure — {snapshot, queue, generation,
+ *  generationId, generationDigest, sourceCutoff, sourceWatermark, acks}. */
+const CORE_TRANSPORT_MAX_DECODED_BYTES = 10_000_000;
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -76,6 +98,12 @@ test("the caps fire in order, so an oversized publish always gets a clean 413", 
   assert.ok(MAX_GENERATION_ARTIFACT_BYTES > MAX_PUBLISH_BYTES,
     "the artifact cap throws, so it must never be the first cap a payload meets");
   assert.ok(MAX_SNAPSHOT_BYTES < MAX_PUBLISH_BYTES);
+  // Step 0, in the other repo. Core's encoder throws, so a Core cap BELOW the
+  // publish cap turns every clean 413 into a silent Core-side exception.
+  assert.ok(CORE_TRANSPORT_MAX_DECODED_BYTES >= MAX_PUBLISH_BYTES,
+    "a body Core will send must be a body Monitor will accept");
+  assert.equal(CORE_TRANSPORT_MAX_DECODED_BYTES, MAX_TRANSPORT_DECODED_BYTES,
+    "Core's decoded cap and Monitor's are the same fence and must be raised together");
 });
 
 test("a 9 MB queue is nowhere near the compressed transport cap", () => {
@@ -103,6 +131,11 @@ test("a 9 MB queue is nowhere near the compressed transport cap", () => {
   // that is the fence to watch as the queue keeps growing.
   assert.ok(bodyBytes <= MAX_TRANSPORT_DECODED_BYTES,
     `a body at the publish cap must still decode: ${bodyBytes} vs ${MAX_TRANSPORT_DECODED_BYTES}`);
+  // And Core has to be willing to SEND it. Before 2026-09-04 this assertion
+  // was true of Monitor and false of Core (7,000,000), so a 9 MB body would
+  // have thrown at the encoder and never reached any of the checks above.
+  assert.ok(bodyBytes <= CORE_TRANSPORT_MAX_DECODED_BYTES,
+    `Core must encode a body the publish cap accepts: ${bodyBytes} vs ${CORE_TRANSPORT_MAX_DECODED_BYTES}`);
 });
 
 test("the generation stamp's per-row cost still fits under the artifact cap", () => {

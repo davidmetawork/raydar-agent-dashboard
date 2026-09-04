@@ -68,6 +68,19 @@ export const MAX_SNAPSHOT_BYTES = 1_800_000;
 // trap that fails somewhere else with a worse error. The ordering invariant
 // (transport decoded >= publish >= queue, and the artifact cap above all of
 // them) is pinned by test/applicants-publish-size.test.mjs.
+//
+// THE FIRST FENCE IS NOT IN THIS REPO. Core caps its own POST body before the
+// request is made — MONITOR_TRANSPORT_MAX_DECODED_BYTES in
+// applicant-core/lib/adapters/monitor-live.mjs, which throws
+// APPLICANT_CORE_MONITOR_BODY_TOO_LARGE — so it silently sets the end-to-end
+// ceiling at min(Core's cap, everything below). It measures the SAME object
+// these caps measure ({snapshot, queue, generation, generationId,
+// generationDigest, sourceCutoff, sourceWatermark, acks}). It sat at 7,000,000
+// while these three were raised, which made all three unreachable and moved
+// the failure from a clean 413 to a JS throw inside the 180 s Core cycle with
+// nothing in this log to point at it. It is now 10,000,000, equal to
+// MAX_TRANSPORT_DECODED_BYTES below, and the publish-size suite pins it as the
+// fourth member of the ordering chain. RAISE THEM TOGETHER OR NOT AT ALL.
 export const MAX_QUEUE_BYTES = 9_000_000;
 export const MAX_PUBLISH_BYTES = 10_000_000;
 export const MAX_TRANSPORT_COMPRESSED_BYTES = 2_500_000;
