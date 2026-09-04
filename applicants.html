@@ -392,6 +392,7 @@ const STATE = {
   snapshot: null, decisions: {}, acks: {}, generation: null,
   counts: null,                       // sync's count-drop tripwire doc; .alert set = show the danger banner
   profileCache: null,                 // fail-closed coverage: rows without a compact cached profile stay hidden
+  profileReceiptWithheld: 0,          // how much of "preparing" THIS read withheld, vs Core's own partition
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
@@ -830,7 +831,22 @@ function renderStats() {
   if (cache?.withheldCandidates > 0) {
     const n = Number(cache.withheldCandidates).toLocaleString();
     $("cacheTitle").textContent = n + " applicant profile" + (cache.withheldCandidates === 1 ? " is" : "s are") + " preparing";
-    $("cacheText").textContent = "These applicants are still missing a readable source profile; they remain in Profile preparing until that source history is available.";
+    // SPLIT THE NUMBER, BECAUSE THE TWO HALVES HAVE DIFFERENT CAUSES. Preparing
+    // is Core's own immutable partition PLUS whatever this read withheld
+    // because a Hub re-observation moved the row's observation id after the
+    // generation was published (api/applicants/feed.mjs reports the second half
+    // as profileReceiptWithheld). One is upstream still working; the other is
+    // this generation ageing out from under a live queue and is fixed by Core
+    // publishing again. On 2026-09-04 the whole 1,808 was read as one thing and
+    // cost a day of guessing which.
+    const withheldNow = Number(STATE.profileReceiptWithheld) || 0;
+    $("cacheText").textContent = "These applicants are still missing a readable source profile; they remain in Profile preparing until that source history is available."
+      + (withheldNow > 0
+        ? " " + Number(withheldNow).toLocaleString() + " of them "
+          + (withheldNow === 1 ? "was" : "were")
+          + " withheld by this read, not by the publisher: the source was re-observed after this "
+          + "generation was published, so they return when Core publishes the next one."
+        : "");
     $("cacheBanner").classList.add("on");
   } else {
     $("cacheBanner").classList.remove("on");
@@ -1875,6 +1891,7 @@ function markFeedUnavailable(error) {
   STATE.cards = {};
   STATE.counts = null;
   STATE.profileCache = null;
+  STATE.profileReceiptWithheld = 0;
   STATE.generation = null;
   STATE.profiles = {};
   STATE.checked.clear();
@@ -1900,6 +1917,7 @@ async function loadFeed(manual = false) {
     STATE.cards = body.cards || {};
     STATE.counts = body.counts || null;
     STATE.profileCache = body.profileCache || null;
+    STATE.profileReceiptWithheld = Number(body.profileReceiptWithheld) || 0;
     STATE.generation = body.generation || null;
     STATE.loaded = true;
     reconcileLocal();
