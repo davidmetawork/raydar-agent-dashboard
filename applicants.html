@@ -102,7 +102,18 @@
     overscroll-behavior:contain; scrollbar-gutter:stable; }
   .virtual-space { position:relative; width:100%; }
   .virtual-window { position:absolute; inset:0 0 auto; display:flex; flex-direction:column; gap:9px; will-change:transform; }
-  .virtual-window .row { box-sizing:border-box; height:260px; overflow:hidden; flex:none; }
+  /* The pitch is uniform by design — that is what keeps the virtual scroll
+     math O(1) — but the NUMBER is measured from the rows actually rendered
+     (see measureVirtualRowHeight) rather than hard-coded, so a page of thin
+     cards does not carry 100px of dead space under every one. The literal
+     here is only the pre-measurement fallback. */
+  .list { --row-h:260px; }
+  .virtual-window .row { box-sizing:border-box; height:var(--row-h); overflow:hidden; flex:none; position:relative; }
+  /* If a card is still taller than the tallest pitch we allow, say so. It used
+     to be silently cut off at the box edge. */
+  .virtual-window .row.row-clipped::after { content:"More in the full profile ↓"; position:absolute;
+    left:0; right:0; bottom:0; padding:14px 17px 6px; font-size:11.5px; color:var(--ink-3); text-align:right;
+    background:linear-gradient(to bottom, rgba(255,255,255,0), var(--card) 55%); pointer-events:none; }
   .row { display:flex; align-items:flex-start; gap:13px; background:var(--card); border:1px solid var(--line); border-radius:15px;
     padding:14px 17px; box-shadow:var(--shadow); }
   .row.decided-row { opacity:.82; }
@@ -264,7 +275,7 @@
   .gateerr { color:var(--bad); font-size:12px; margin-top:10px; min-height:15px; }
 
   @media (max-width:820px) {
-    .virtual-window .row { height:360px; }
+    .list { --row-h:360px; }
     .rc-main { flex-direction:column; gap:9px; }
     .rc-right { align-items:center; flex-direction:row; align-self:stretch; justify-content:space-between; }
     /* No room for a label gutter — stack the label above its lines rather than
@@ -1097,6 +1108,15 @@ function patchRow(cu) {
   const row = rowByCu(cu);
   if (row) document.querySelectorAll('[data-body="' + sel + '"]').forEach((el) => { el.innerHTML = historyHtml(row); });
   applyAvatar(cu);
+  // A card that just gained a headline, a location or a history block can now
+  // be taller than the box it was measured into. Re-mark, do NOT re-measure:
+  // repainting the list here is exactly what this function exists to avoid,
+  // and a visible "more" affordance is enough to keep the growth honest until
+  // the next natural render.
+  for (const id of ["reviewList", "streamList"]) {
+    const list = $(id);
+    if (list && list._virtual) markClippedRows(list);
+  }
 }
 /** The Review list's exact contents and order, in one place — the renderer and
  *  the modal's advance-to-next both read it, so they can never disagree. */
@@ -1130,17 +1150,95 @@ function reviewListRows() {
 /** All rows are already local; this window only limits DOM work, never data. */
 const VIRTUAL_GAP = 9;
 const VIRTUAL_OVERSCAN = 4;
-const virtualRowHeight = () => window.innerWidth <= 820 ? 360 : 260;
+/* THE PITCH IS MEASURED, NOT DECLARED (2026-09-04).
+   Every row was a fixed 260px box (360px under 820px width). Measured live on
+   the Review list, the content wrapper inside it ran 126px to 209px tall, so
+   real cards carried 51px to 134px of dead space each, and anything taller
+   than the box was silently cut off with nothing to say so.
+   The pitch stays UNIFORM — the whole virtual scroll is one multiplication
+   against it, and per-row heights would mean measuring 4,345 rows to know
+   where row 900 starts. What changes is where the number comes from: the rows
+   actually painted are measured, and the pitch is the tallest of them, bounded
+   both ways. The bounds matter — a runaway measurement must never be able to
+   produce a 40,000px virtual-space. */
+const virtualRowFallback = () => window.innerWidth <= 820 ? 360 : 260;
+const virtualRowMin = () => window.innerWidth <= 820 ? 200 : 150;
+const virtualRowMax = () => window.innerWidth <= 820 ? 460 : 340;
+const virtualRowHeight = (el) =>
+  (typeof el?._virtualRowHeight === "number" ? el._virtualRowHeight : virtualRowFallback());
 function resetVirtualLists() {
   for (const id of ["reviewList", "streamList"]) {
     const list = $(id);
-    if (list) list.scrollTop = 0;
+    if (!list) continue;
+    list.scrollTop = 0;
+    // A new filter is a new population, so the pitch is re-measured from
+    // scratch instead of inheriting the tallest card of a set nobody is
+    // looking at any more.
+    list._virtualRowHeight = null;
+    list.style.removeProperty("--row-h");
+  }
+}
+/* The natural height of the tallest painted row.
+   .rc-main is content-sized (its parent .row is align-items:flex-start), so
+   its height does NOT depend on the box height we are choosing. That
+   independence is what makes this converge after one extra paint instead of
+   oscillating between two values forever. */
+function measureVirtualRowHeight(el) {
+  const rows = el.querySelectorAll(".virtual-window > .row");
+  if (!rows.length) return null;
+  let tallest = 0;
+  for (const row of rows) {
+    const style = window.getComputedStyle(row);
+    const chrome = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+      + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+    let content = 0;
+    for (const child of row.children) content = Math.max(content, child.offsetHeight);
+    if (content > 0) tallest = Math.max(tallest, Math.ceil(content + chrome));
+  }
+  if (!tallest) return null;
+  return Math.min(virtualRowMax(), Math.max(virtualRowMin(), tallest));
+}
+/* The breakpoint a measurement belongs to. Crossing it changes the card's
+   whole layout (.rc-main stacks) and the bounds, so a number learned on one
+   side of it is not evidence about the other and must not survive as a floor:
+   a 460px narrow measurement would otherwise stick on a desktop whose ceiling
+   is 340. */
+const virtualRowBasis = () => (window.innerWidth <= 820 ? "narrow" : "wide");
+/* Adopt the measurement, then repaint once at the new pitch. Within one
+   painted population at one breakpoint the pitch only ever GROWS: shrinking it
+   as a shorter card scrolls into view would yank the list out from under the
+   cursor. The sticky floor is still bounded by the ceiling, so growth cannot
+   walk past it one measurement at a time. */
+function tuneVirtualRowHeight(el) {
+  if (el._virtualTuning) return;
+  const measured = measureVirtualRowHeight(el);
+  if (measured == null) return;
+  const basis = virtualRowBasis();
+  const carried = basis === el._virtualRowBasis && typeof el._virtualRowHeight === "number"
+    ? el._virtualRowHeight
+    : 0;
+  el._virtualRowBasis = basis;
+  const target = Math.min(virtualRowMax(), Math.max(measured, carried));
+  const changed = Math.abs(target - virtualRowHeight(el)) >= 2;
+  el._virtualRowHeight = target;
+  el.style.setProperty("--row-h", target + "px");
+  if (changed) {
+    el._virtualTuning = true;
+    try { renderVirtual(el); } finally { el._virtualTuning = false; }
+  }
+  markClippedRows(el);
+}
+/* At the upper bound a card can still be taller than its box. Say so rather
+   than cutting it off in silence. */
+function markClippedRows(el) {
+  for (const row of el.querySelectorAll(".virtual-window > .row")) {
+    row.classList.toggle("row-clipped", row.scrollHeight > row.clientHeight + 1);
   }
 }
 function renderVirtual(el) {
   const spec = el._virtual;
   if (!spec) return;
-  const rowHeight = virtualRowHeight();
+  const rowHeight = virtualRowHeight(el);
   const pitch = rowHeight + VIRTUAL_GAP;
   const total = Math.max(0, spec.rows.length * pitch - VIRTUAL_GAP);
   if (el.scrollTop > total) el.scrollTop = Math.max(0, total - el.clientHeight);
@@ -1152,6 +1250,7 @@ function renderVirtual(el) {
     '<div class="virtual-window" style="transform:translateY(' + (start * pitch) + 'px)">' +
       shown.map(spec.build).join("") +
     "</div></div>";
+  tuneVirtualRowHeight(el);
 }
 function paintList(el, rows, build) {
   el._virtual = { rows, build };
