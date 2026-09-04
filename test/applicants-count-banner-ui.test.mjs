@@ -55,3 +55,48 @@ test("the partial notice is written AFTER the age branches, so age still colours
   assert.ok(partial > ageBranch,
     "partial must come after the age branches — an early return would swallow the red chip");
 });
+
+// ---- saying the rules are off (2026-09-04) ----
+//
+// A latched counts alert makes api/applicants/rules-tick.mjs return
+// parked:"snapshot_counts_alert" and decide nobody. That is the right
+// behaviour — a collapsed queue is not a reason to act on the survivors — but
+// for a day it happened in complete silence: the Rules view still listed live
+// rules and nothing anywhere said they could not fire.
+
+test("a latched counts alert says, in words, that the saved rules are paused", () => {
+  assert.match(applicants, /<div class="banner danger" id="rulesPausedBanner">/);
+  assert.match(applicants, /Saved rules are paused while the counts alert is latched/);
+  assert.match(applicants, /No saved rule can decide anybody while this alert is latched/);
+  // It names the way out, which is the acknowledgement, not a code change.
+  assert.match(applicants, /Acknowledge the counts alert once the numbers above are verified/);
+});
+
+test("the paused notice is driven by the same alert the counts banner reads", () => {
+  assert.match(applicants, /const rulesParked = Boolean\(drops\);/);
+  assert.match(applicants, /\$\("rulesPausedBanner"\)\.classList\.toggle\("on", rulesParked\);/);
+  assert.match(applicants, /\$\("pillRules"\)\.classList\.toggle\("rules-paused", rulesParked\);/);
+});
+
+test("the Rules pill itself carries the paused flag", () => {
+  assert.match(applicants, /<span class="paused-flag" id="rulesPausedFlag">Paused<\/span>/);
+  assert.match(applicants, /\.view-pill\.rules-paused \.paused-flag \{ display:inline-block; \}/);
+});
+
+test("the paused notice is toggled before the no-snapshot early return", () => {
+  // Same reason as the counts banner above it: a snapshot-less feed must not
+  // be able to swallow the notice that every rule is switched off.
+  const body = applicants.slice(applicants.indexOf("function renderStats()"));
+  const toggle = body.indexOf('$("rulesPausedBanner").classList.toggle("on", rulesParked)');
+  const earlyReturn = body.indexOf('$("updatedText").textContent = "No snapshot yet"');
+  assert.ok(toggle > 0 && earlyReturn > 0, "both branches present");
+  assert.ok(toggle < earlyReturn, "paused notice is toggled before the no-snapshot return");
+});
+
+test("an unavailable feed clears the paused notice with the other banners", () => {
+  assert.match(
+    applicants,
+    /\["countsBanner", "rulesPausedBanner", "trimBanner", "cacheBanner"\]\.forEach/,
+  );
+  assert.match(applicants, /\$\("pillRules"\)\.classList\.remove\("rules-paused"\);/);
+});

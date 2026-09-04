@@ -69,6 +69,14 @@
   .view-pill.active { background:var(--ink); border-color:var(--ink); color:var(--cream); }
   .view-pill .n { font-variant-numeric:tabular-nums; font-size:11.5px; color:var(--ink-3); }
   .view-pill.active .n { color:rgba(246,243,233,.72); }
+  /* A latched counts alert parks every saved rule (api/applicants/rules-tick.mjs
+     returns parked:"snapshot_counts_alert"). Until 2026-09-04 nothing on the
+     tab said so, so the rules looked armed while nothing could fire. */
+  .view-pill .paused-flag { display:none; font-size:10.5px; font-weight:700; letter-spacing:.04em;
+    text-transform:uppercase; color:var(--bad); background:var(--bad-bg); border-radius:999px; padding:1px 6px; }
+  .view-pill.rules-paused { border-color:var(--bad); }
+  .view-pill.rules-paused .paused-flag { display:inline-block; }
+  .view-pill.active.rules-paused .paused-flag { color:var(--bad); }
   .toolbar .spacer { flex:1; }
   .toolbar select, .toolbar input[type=text] { border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink);
     padding:9px 11px; font:13px "Inter Variable"; outline:none; }
@@ -298,6 +306,8 @@
 
     <div class="banner danger" id="countsBanner"><div>●</div><div><strong>Counts dropped sharply since the last snapshot</strong><span id="countsText"></span></div></div>
 
+    <div class="banner danger" id="rulesPausedBanner"><div>●</div><div><strong>Saved rules are paused while the counts alert is latched</strong><span id="rulesPausedText"></span></div></div>
+
     <div class="banner danger" id="trimBanner"><div>●</div><div><strong id="trimTitle">Some applicants are missing from this queue</strong><span id="trimText"></span></div></div>
 
     <div class="banner" id="cacheBanner"><div>●</div><div><strong id="cacheTitle">Applicant profiles are preparing</strong><span id="cacheText"></span></div></div>
@@ -307,7 +317,7 @@
       <button class="view-pill" id="pillRequested" onclick="setView('requested')">Interview requested <span class="n" id="requestedCount"></span></button>
       <button class="view-pill" id="pillDelivery" onclick="setView('delivery')">Delivery review <span class="n" id="deliveryCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
-      <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span></button>
+      <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span><span class="paused-flag" id="rulesPausedFlag">Paused</span></button>
       <span class="spacer"></span>
       <span id="toolbarFilters" style="display:contents">
       <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;resetVirtualLists();renderLists()"><option value="all">All roles</option></select>
@@ -727,7 +737,8 @@ function renderStats() {
       ? "The published generation is missing an exact source-profile receipt. No applicants are shown until the next verified publication."
       : "The published generation failed verification. No stale applicants are shown; refresh after the source is available.";
     unavailable.classList.add("on");
-    ["countsBanner", "trimBanner", "cacheBanner"].forEach((id) => $(id).classList.remove("on"));
+    ["countsBanner", "rulesPausedBanner", "trimBanner", "cacheBanner"].forEach((id) => $(id).classList.remove("on"));
+    $("pillRules").classList.remove("rules-paused");
     return;
   }
   unavailable.classList.remove("on");
@@ -748,6 +759,23 @@ function renderStats() {
   } else {
     $("countsBanner").classList.remove("on");
   }
+  // SAY WHEN THE RULES ARE OFF. A latched counts alert makes
+  // api/applicants/rules-tick.mjs return parked:"snapshot_counts_alert" and
+  // decide nobody — the safe behaviour, since a collapsed queue is not a
+  // reason to act on the survivors. Until 2026-09-04 nothing on the tab said
+  // so: the Rules view still listed live rules, and pressing "Run rules now"
+  // reported a parked run in a place nobody was looking. Rendered from the
+  // same STATE.counts.alert the banner above reads, so the two can never
+  // disagree, and toggled before the no-snapshot return for the same reason.
+  const rulesParked = Boolean(drops);
+  $("rulesPausedText").textContent = "No saved rule can decide anybody while this alert is latched — "
+    + "\u201cRun rules now\u201d will report a parked run. "
+    + "Acknowledge the counts alert once the numbers above are verified, then run the rules again.";
+  $("rulesPausedBanner").classList.toggle("on", rulesParked);
+  $("pillRules").classList.toggle("rules-paused", rulesParked);
+  $("pillRules").title = rulesParked
+    ? "Saved rules are paused while the counts alert is latched"
+    : "";
   // Withheld-rows banner. The publisher drops rows when the review queue
   // outgrows the snapshot size limit, and until 2026-08-24 it did so in
   // silence: a steady ~100-row shave is a 4% drop, so the count-drop tripwire
