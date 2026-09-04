@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import { EMAIL_SCHEMA } from "./contracts.mjs";
+import { GMAIL_ROLE_INTEREST_SCOPE, outboundEmailFamily, paraformRoleLink, replySubjectFamily } from "./email-source-policy.mjs";
 
 export const GMAIL_MAILBOX = "david@raydar.xyz";
 export const GMAIL_MAILBOX_ID = "david-raydar-xyz";
@@ -68,18 +69,34 @@ export function offeredRoles(message) {
   const { text, html } = gmailBody(message);
   const found = new Map();
   for (const raw of `${text}\n${html}`.replace(/&amp;/giu, "&").match(/https:\/\/[^\s<>"']+/gu) || []) {
-    let url;
-    try { url = new URL(raw.replace(/[).,;]+$/u, "")); } catch { continue; }
-    const roleId = url.searchParams.get("role");
-    if (!["www.paraform.com", "paraform.com"].includes(url.hostname) || url.pathname !== "/browse"
-      || url.port || url.username || url.password || !/^[a-zA-Z0-9_-]{1,200}$/u.test(roleId || "")) continue;
-    found.set(roleId, { role_id: roleId, company: "", title: "", url: `https://www.paraform.com/browse?role=${encodeURIComponent(roleId)}` });
+    const role = paraformRoleLink(raw);
+    if (role) found.set(role.role_id, role);
   }
   return [...found.values()];
 }
 
+function sentToCandidate(message, sender) {
+  return message?.labelIds?.includes("SENT") && address(header(message, "From")) === GMAIL_MAILBOX
+    && address(header(message, "To")) === sender;
+}
+
+/** Bind only the direct RFC parent, or the final References entry when In-Reply-To is absent. */
+export function outboundParent(messages, reply, sender) {
+  const sent = messages.filter((message) => timestamp(message) < timestamp(reply) && sentToCandidate(message, sender));
+  const directIds = ids(header(reply, "In-Reply-To"));
+  if (directIds.length) {
+    const matches = sent.filter((message) => ids(header(message, "Message-ID")).some((id) => directIds.includes(id)));
+    return matches.length === 1 ? matches[0] : null;
+  }
+  const references = ids(header(reply, "References"));
+  const finalReference = references.at(-1);
+  if (!finalReference) return null;
+  const matches = sent.filter((message) => ids(header(message, "Message-ID")).includes(finalReference));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 /** Pure adapter: exact Gmail evidence in, provider-neutral V2 events out. */
-export function interviewReplyEvents(thread, { after, before, env = process.env } = {}) {
+export function roleInterestReplyEvents(thread, { after, before, env = process.env } = {}) {
   if (!thread?.id || !Array.isArray(thread.messages)) throw fail("gmail_thread_shape_invalid");
   const secret = String(env.SUBMISSIONS_V2_EMAIL_HMAC_KEY || "");
   const version = String(env.SUBMISSIONS_V2_EMAIL_HMAC_VERSION || "");
@@ -89,24 +106,25 @@ export function interviewReplyEvents(thread, { after, before, env = process.env 
   for (const reply of messages) {
     const at = timestamp(reply);
     if (!Number.isFinite(at) || at < after || at >= before || reply.labelIds?.some((label) => ["SENT", "DRAFT", "SPAM", "TRASH"].includes(label))) continue;
-    if (!/\binterview request\b/iu.test(header(reply, "Subject")) || machineMessage(reply)) continue;
+    if (machineMessage(reply)) continue;
     const sender = address(header(reply, "From"));
     if (!sender || sender === GMAIL_MAILBOX || sender.endsWith("@raydar.xyz")) continue;
-    const refs = new Set([...ids(header(reply, "In-Reply-To")), ...ids(header(reply, "References"))]);
-    if (!refs.size) continue; // A matching subject by itself is not a candidate reply.
-    const sent = messages.filter((message) => timestamp(message) < at && message.labelIds?.includes("SENT")
-      && address(header(message, "From")) === GMAIL_MAILBOX && address(header(message, "To")) === sender
-      && /\binterview request\b/iu.test(header(message, "Subject"))
-      && ids(header(message, "Message-ID")).some((id) => refs.has(id))).at(-1);
-    // The original may have been sent by Mailroom instead of Gmail: surface review,
-    // never infer a role from candidate-quoted text or a display-name match.
+    const referenceIds = [...ids(header(reply, "In-Reply-To")), ...ids(header(reply, "References"))];
+    if (!referenceIds.length) continue; // A matching subject by itself is not a candidate reply.
+    const sent = outboundParent(messages, reply, sender);
     const candidateText = authoredReply(reply);
     const sentText = sent ? gmailBody(sent).text : "";
     const offered = sent ? offeredRoles(sent) : [];
+    const family = sent
+      ? outboundEmailFamily({ subject: header(sent, "Subject"), text: authoredReply(sent), roleCount: offered.length })
+      : replySubjectFamily(header(reply, "Subject"));
+    // A known prep/admin parent is not fresh role outreach. When the exact parent is
+    // absent, a supported subject may still enter Needs Review with zero offered roles.
+    if (!family) continue;
     const key = `gmail:${GMAIL_MAILBOX_ID}:${reply.id}`;
     events.push({
       schema_version: EMAIL_SCHEMA, event_id: `gmail_${hash(key).slice(0, 32)}`,
-      source_family: "para_ai_interview_request", source_family_version: "1", adapter_version: "gmail-interview-v1",
+      source_family: family, source_family_version: "2", adapter_version: "gmail-role-interest-v2",
       mailbox_id: GMAIL_MAILBOX_ID, provider: "gmail", provider_message_id: reply.id,
       provider_thread_id: thread.id, outbound_message_id: sent?.id || null, direction: "inbound",
       sent_at: sent ? new Date(timestamp(sent)).toISOString() : null, received_at: new Date(at).toISOString(),
@@ -120,21 +138,28 @@ export function interviewReplyEvents(thread, { after, before, env = process.env 
   return events;
 }
 
+export const interviewReplyEvents = roleInterestReplyEvents;
+
 export function interviewSearch(after, before) {
   if (!Number.isFinite(after) || !Number.isFinite(before) || after >= before) throw fail("gmail_window_invalid");
   // One-second outward rounding; internalDate enforces the exact half-open window.
   return `subject:"Interview Request" -from:${GMAIL_MAILBOX} -in:sent -in:drafts after:${Math.floor(after / 1000) - 1} before:${Math.ceil(before / 1000)}`;
 }
 
+export function roleInterestSearch(after, before) {
+  if (!Number.isFinite(after) || !Number.isFinite(before) || after >= before) throw fail("gmail_window_invalid");
+  return `{subject:"Interview Request" subject:"New Match" subject:"Raydar - 1st Round Interview" "See matches here"} -from:${GMAIL_MAILBOX} -in:sent -in:drafts after:${Math.floor(after / 1000) - 1} before:${Math.ceil(before / 1000)}`;
+}
+
 /** Read all pages before admitting any event, then admit oldest first. */
-export async function collectInterviewWindow({ after, before, client, env, assertCurrent = async () => {}, maxThreads = 12 }) {
-  const query = interviewSearch(after, before);
+export async function collectRoleInterestWindow({ after, before, client, env, assertCurrent = async () => {}, maxThreads = 12 }) {
+  const query = roleInterestSearch(after, before);
   const threads = new Set();
   const pageTokens = new Set();
   let pageToken;
   for (let page = 0; page < 4; page += 1) {
     await assertCurrent();
-    const listed = await client.list({ query, pageToken, maxResults: 100 });
+    const listed = await client.list({ query, pageToken, maxResults: 100, scope: GMAIL_ROLE_INTEREST_SCOPE });
     if (!listed || (listed.messages !== undefined && !Array.isArray(listed.messages))) throw fail("gmail_list_shape_invalid");
     for (const row of listed.messages || []) {
       if (!/^[a-f0-9]+$/iu.test(row.threadId || "")) throw fail("gmail_thread_identity_invalid");
@@ -152,7 +177,11 @@ export async function collectInterviewWindow({ after, before, client, env, asser
     await assertCurrent();
     const thread = await client.thread(threadId);
     if (thread?.id !== threadId) throw fail("gmail_thread_identity_mismatch");
-    for (const event of interviewReplyEvents(thread, { after, before, env })) events.set(event.idempotency_key, event);
+    for (const event of roleInterestReplyEvents(thread, { after, before, env })) events.set(event.idempotency_key, event);
   }
-  return [...events.values()].sort((a, b) => a.received_at.localeCompare(b.received_at) || a.provider_message_id.localeCompare(b.provider_message_id));
+  const ordered = [...events.values()].sort((a, b) => a.received_at.localeCompare(b.received_at) || a.provider_message_id.localeCompare(b.provider_message_id));
+  Object.defineProperty(ordered, "threads_read", { value: threads.size });
+  return ordered;
 }
+
+export const collectInterviewWindow = collectRoleInterestWindow;

@@ -543,7 +543,10 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles, se.envelope->>'signal_url' as signal_url,
             p.original_signal_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
             coalesce(caution.cautions, '[]'::jsonb) as resume_cautions, g.status as generation_status,
-            p.submission_status, p.current_artifact_id, current_artifact.artifact_version,
+            g.stage as generation_stage, g.safe_error_code as preparation_error_code,
+            g.safe_error_detail as preparation_error_detail,
+            p.submission_status, current_artifact.id as current_artifact_id, current_artifact.artifact_version,
+            (current_artifact.id is not null) as artifact_ready, r.active as role_active,
             null::text as negative_reason, null::text as corrected_destination,
             r.last_confirmed_at as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
             p.original_signal_at as sort_at, p.id as sort_id,
@@ -556,31 +559,56 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             select coalesce(active.id, latest.id) as id,
                    case when active.status is not null then active.status
                         when pending_job.id is not null then 'queued'
-                        else latest.status end as status
+                        when latest.status is not null then latest.status
+                        when latest_job.state in ('failed','held','cancelled') then latest_job.state
+                        else null end as status,
+                   case when active.status is not null then active.stage
+                        when pending_job.id is not null then case when pending_job.state='running' then 'starting' else 'queued' end
+                        when latest.status is not null then latest.stage
+                        else latest_job.state end as stage,
+                   case when active.status is not null or pending_job.id is not null then null
+                        when latest.status in ('failed','held','cancelled') then latest.safe_failure_code
+                        when latest_job.state in ('failed','held','cancelled') then coalesce(latest_job.safe_error_code, latest_job.hold_reason)
+                        else null end as safe_error_code,
+                   case when active.status is not null or pending_job.id is not null then null
+                        when latest.status in ('failed','held','cancelled') then latest.safe_failure_detail
+                        when latest_job.state in ('failed','held','cancelled') then latest_job.safe_error_detail
+                        else null end as safe_error_detail
               from (select 1) seed
               left join lateral (
-                select id, status from submissions_v2.resume_generations
+                select id, status, stage, safe_failure_code, safe_failure_detail
+                  from submissions_v2.resume_generations
                  where pair_id=p.id order by generation_version desc limit 1
               ) latest on true
               left join lateral (
-                select id, status from submissions_v2.resume_generations
+                select id, status, stage from submissions_v2.resume_generations
                  where pair_id=p.id and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
                  order by generation_version desc limit 1
               ) active on true
               left join lateral (
-                select id from submissions_v2.jobs
+                select id, state from submissions_v2.jobs
                  where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
                    and state in ('queued','running')
                  order by created_at desc limit 1
               ) pending_job on true
+              left join lateral (
+                select state, safe_error_code, safe_error_detail, hold_reason
+                  from submissions_v2.jobs
+                 where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
+                 order by created_at desc limit 1
+              ) latest_job on true
           ) g on true
-          left join submissions_v2.resume_artifacts current_artifact on current_artifact.id=p.current_artifact_id
+          left join submissions_v2.resume_artifacts current_artifact
+            on current_artifact.id=p.current_artifact_id and current_artifact.pair_id=p.id
+           and current_artifact.kind='pdf' and current_artifact.validation_status='passed'
+           and current_artifact.current_state='current' and current_artifact.deleted_at is null
+           and current_artifact.archived_at is not null and current_artifact.archive_readback_at is not null
           left join lateral (
             select jsonb_agg(jsonb_build_object('source_key', source_key, 'safe_detail', remediation, 'impact', accuracy_impact) order by source_key) as cautions
               from submissions_v2.resume_sources where generation_id=g.id and status <> 'present'
           ) caution on true
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
-          where p.workflow_state='interested' and p.case_hidden_at is null
+          where p.workflow_state in ('preparing_resume','interested') and p.case_hidden_at is null
             and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
             and (${after?.at || null}::timestamptz is null or (p.original_signal_at, p.id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
           order by p.original_signal_at desc, p.id desc limit ${take + 1}
@@ -598,11 +626,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     async counts() {
       const rows = await sql`
         select
-          (select count(*) from submissions_v2.candidate_role_pairs where workflow_state='interested' and case_hidden_at is null)::bigint as interested,
+          (select count(*) from submissions_v2.candidate_role_pairs where workflow_state in ('preparing_resume','interested') and case_hidden_at is null)::bigint as interested,
           ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and case_hidden_at is null)
            + (select count(distinct unresolved_signal_id) from submissions_v2.review_items where unresolved_signal_id is not null and action_state='open'))::bigint as needs_review,
           (select count(*) from submissions_v2.not_interested_entries ni join submissions_v2.candidate_role_pairs p on p.id=ni.pair_id where p.case_hidden_at is null)::bigint as not_interested,
-          ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state='interested' and submission_status <> 'proven' and case_hidden_at is null)
+          ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state in ('preparing_resume','interested') and submission_status <> 'proven' and case_hidden_at is null)
            + (select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and case_hidden_at is null)
            + (select count(distinct unresolved_signal_id) from submissions_v2.review_items where unresolved_signal_id is not null and action_state='open'))::bigint as actionable
       `;
@@ -616,7 +644,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           max(last_success_at) as last_success_at,
           jsonb_object_agg(source_key, jsonb_build_object(
             'enabled', enabled, 'last_success_at', last_success_at, 'delayed_since', delayed_since,
-            'quota_state', quota_state, 'error_class', error_class
+            'quota_state', quota_state, 'error_class', error_class, 'safe_error_detail', safe_error_detail
           ) order by source_key) filter (where source_key is not null) as sources
         from submissions_v2.source_health
       `;
@@ -657,11 +685,15 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                c.linkedin_url, c.raydar_url, r.company_name, r.role_title, r.destination_url,
                r.active as role_active, r.last_confirmed_at as role_last_confirmed_at,
                a.private_object_key as artifact_object_key, a.digest as artifact_digest,
-               a.artifact_version, a.validation_status as artifact_validation_status
+               a.artifact_version, a.validation_status as artifact_validation_status,
+               (a.id is not null) as artifact_ready
           from submissions_v2.candidate_role_pairs p
           left join submissions_v2.candidate_index c on c.candidate_user_id=p.candidate_user_id
           left join submissions_v2.role_index r on r.role_id=p.role_id
-          left join submissions_v2.resume_artifacts a on a.id=p.current_artifact_id
+          left join submissions_v2.resume_artifacts a
+            on a.id=p.current_artifact_id and a.pair_id=p.id and a.kind='pdf'
+           and a.validation_status='passed' and a.current_state='current' and a.deleted_at is null
+           and a.archived_at is not null and a.archive_readback_at is not null
          where p.id=${pairId} and p.case_hidden_at is null
       `;
       return rows[0] || null;
@@ -1609,7 +1641,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         input: { pairId, expectedVersion, evidenceDigest, evidenceBasis, sourceNote, uploads, instructionDigest: instructionsEncrypted ? digest(instructionsEncrypted) : null },
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
-        if (current.workflow_state !== "interested") throw problem("pair_not_resume_ready", "Only an Interested candidate with a ready resume can be regenerated.", 409, pairCurrent(current));
+        if (current.workflow_state !== "interested" || !current.current_artifact_id) throw problem("pair_not_resume_ready", "Only an Interested candidate with a ready resume can be regenerated.", 409, pairCurrent(current));
         const activeRegeneration = await tx`
           select id::text from submissions_v2.resume_generations
            where pair_id=${pairId} and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
@@ -1756,7 +1788,14 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         input: { pairId, expectedVersion },
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
-        if (current.workflow_state !== "interested") throw problem("pair_not_submit_ready", "Only an Interested candidate with a ready resume can be submitted.", 409, pairCurrent(current));
+        if (current.workflow_state !== "interested" || !current.current_artifact_id) throw problem("pair_not_submit_ready", "Only an Interested candidate with a ready resume can be submitted.", 409, pairCurrent(current));
+        const artifacts = await tx`
+          select id from submissions_v2.resume_artifacts
+           where id=${current.current_artifact_id} and pair_id=${pairId} and kind='pdf'
+             and current_state='current' and validation_status='passed' and deleted_at is null
+             and archived_at is not null and archive_readback_at is not null
+        `;
+        if (!artifacts.length) throw problem("pair_not_submit_ready", "The current resume did not pass archive validation.", 409, pairCurrent(current));
         const roles = await tx`select * from submissions_v2.role_index where role_id=${current.role_id} and active`;
         if (!roles.length) throw problem("role_unavailable", "The Paraform role is no longer active.", 409, pairCurrent(current));
         const exactUrl = `https://www.paraform.com/browse?role=${encodeURIComponent(current.role_id)}`;
@@ -2273,6 +2312,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (masterInboxEnabled) jobs.push(await enqueue(tx, {
           kind: "reconcile_master_inbox", subjectType: "source", subjectId: "master_inbox",
           idempotencyKey: `tick:master_inbox:${fiveMinuteKey}`, requiredControl: "master_inbox", priority: 10,
+          checkpoint: { mode: nightlyDue ? "nightly" : "incremental" },
+        }));
+        if (masterInboxEnabled) jobs.push(await enqueue(tx, {
+          kind: "reconcile_sequence_inbox", subjectType: "source", subjectId: "sequence_inbox",
+          idempotencyKey: `tick:sequence_inbox:${fiveMinuteKey}`, requiredControl: "master_inbox", priority: 12,
           checkpoint: { mode: nightlyDue ? "nightly" : "incremental" },
         }));
         if (curatedEnabled) jobs.push(await enqueue(tx, {

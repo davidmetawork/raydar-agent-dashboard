@@ -1,5 +1,7 @@
 "use strict";
 
+import { listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "/submissions-v2-ui-state.mjs";
+
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
   interested: "Interested",
@@ -43,7 +45,7 @@ const STATE = {
   session: null, authConfig: null, csrf: "", active: null, searchTimer: null, pollTimer: null,
   searchRequests: new Map(), generating: new Set(), dialogReturnFocus: null,
   pendingDownloads: pendingDownloadsFromSession(), downloadsInFlight: new Set(),
-  popoverAnchor: null, popoverCloseTimer: null, signinStarted: false,
+  popoverAnchor: null, popoverCloseTimer: null, signinStarted: false, rowActions: new Set(),
 };
 
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
@@ -66,6 +68,25 @@ function safeUrl(value, allowed = [], { sameOrigin = true } = {}) {
 
 function isGenerationActive(row) {
   return ACTIVE_GENERATION_STATES.has(String(row?.generation_status || "").toLowerCase());
+}
+
+function rowActionKey(id, action) { return `${action}:${String(id)}`; }
+function rowActionPending(id, action) { return STATE.rowActions.has(rowActionKey(id, action)); }
+function rowCapability(row, name, fallback) {
+  const value = row?.capabilities?.[name];
+  return typeof value === "boolean" ? value : fallback;
+}
+
+async function withRowAction(id, action, work) {
+  const key = rowActionKey(id, action);
+  if (STATE.rowActions.has(key)) return;
+  STATE.rowActions.add(key);
+  renderRows();
+  try { return await work(); }
+  finally {
+    STATE.rowActions.delete(key);
+    renderRows();
+  }
 }
 
 function fmtWhen(value) {
@@ -149,15 +170,41 @@ function cautionButton(row) {
   return `<button class="icon-button warning caution" type="button" data-id="${esc(row.case_id)}" aria-label="Resume source caution" title="Resume source caution">!</button>`;
 }
 
+function resumeProgressHtml(row) {
+  const resume = resumeUiState(row);
+  if (!resume.preparing && !resume.generating) return "";
+  const labels = {
+    queued: "Resume preparation queued",
+    collecting: "Collecting resume evidence",
+    extracting: "Checking resume details",
+    strategizing: "Planning the role-specific resume",
+    validating: "Validating the resume",
+    rendering: "Rendering the resume",
+    archiving: "Finalizing the resume",
+  };
+  const failed = ["failed", "cancelled", "held"].includes(resume.status);
+  const label = failed ? "Resume preparation needs attention" : (labels[resume.status] || "Preparing resume");
+  const detail = row.preparation_error_detail || (resume.hasArtifact ? "Prior resume is still available." : "Download and Submit unlock when the resume is ready.");
+  return `<div class="resume-progress" role="status"><span class="progress-dot" aria-hidden="true"></span><span>${esc(label)}${resume.hasArtifact ? " · updating" : ""}</span><small>${esc(detail)}</small></div>`;
+}
+
 function interestedActions(row) {
   const id = String(row.case_id || "");
   const submitted = row.submission_status === "proven";
-  const generating = isGenerationActive(row) || STATE.generating.has(id);
+  const resume = resumeUiState(row);
+  const generating = resume.generating || STATE.generating.has(id);
+  const downloading = rowActionPending(id, "download");
+  const submitting = rowActionPending(id, "submit");
+  const canDownload = rowCapability(row, "can_download", resume.hasArtifact);
+  const canSubmit = rowCapability(row, "can_submit", resume.hasArtifact);
+  const canRegenerate = rowCapability(row, "can_regenerate", resume.hasArtifact);
+  const canCorrect = rowCapability(row, "can_correct", !submitted);
+  const canDuplicate = rowCapability(row, "can_duplicate", Boolean(row.candidate_id));
   const historyLabel = submitted ? '<span class="submitted-label">SUBMITTED</span>' : "";
-  const correct = submitted ? "" : `<button class="button text correct" data-id="${esc(id)}" type="button">Correct</button>`;
-  const submit = submitted ? "" : `<button class="button primary submit" data-id="${esc(id)}" type="button">Submit</button>`;
+  const correct = submitted ? "" : `<button class="button text correct" data-id="${esc(id)}" type="button" ${canCorrect ? "" : "disabled"}>Correct</button>`;
+  const submit = submitted ? "" : `<button class="button primary submit" data-id="${esc(id)}" type="button" ${!canSubmit || submitting ? "disabled" : ""} title="${!canSubmit ? "Resume is still being prepared" : ""}">${submitting ? "Opening…" : "Submit"}</button>`;
   const rerunIcon = '<svg class="rerun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
-  return `${historyLabel}${correct}<button class="button secondary download" data-id="${esc(id)}" type="button">Download Resume</button>${cautionButton(row)}<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating ? "disabled" : ""}>${rerunIcon}</button><button class="button secondary duplicate" data-id="${esc(id)}" type="button">Duplicate</button>${submit}`;
+  return `${historyLabel}${correct}<button class="button secondary download" data-id="${esc(id)}" type="button" ${!canDownload || downloading ? "disabled" : ""} title="${!canDownload ? "Resume is still being prepared" : ""}">${downloading ? "Downloading…" : "Download Resume"}</button>${cautionButton(row)}<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating || !canRegenerate ? "disabled" : ""}>${rerunIcon}</button><button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>${submit}`;
 }
 
 function reviewActions(row) {
@@ -177,7 +224,8 @@ function rowHtml(row) {
   const signal = signalUrl ? `<a class="signal-link" href="${esc(signalUrl)}" target="_blank" rel="noopener noreferrer">Signal</a>` : '<span class="role-muted">Signal unavailable</span>';
   const reason = STATE.page === "not_interested" ? `<div class="reason-line">${esc(row.negative_reason || "No reason provided")}</div>` : "";
   const actions = STATE.page === "interested" ? interestedActions(row) : STATE.page === "needs_review" ? reviewActions(row) : negativeActions(row);
-  return `<article class="submission-row${row.submission_status === "proven" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
+  const progress = STATE.page === "interested" ? resumeProgressHtml(row) : "";
+  return `<article class="submission-row${row.submission_status === "proven" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${progress}${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
 }
 
 function bindRows() {
@@ -196,9 +244,10 @@ function renderRows() {
   const container = $("rows");
   if (!STATE.rows.length) container.innerHTML = `<div class="empty-state"><strong>${esc(EMPTY[STATE.page])}</strong>${STATE.query ? "Try another candidate name." : ""}</div>`;
   else if (STATE.page === "interested") {
-    const active = STATE.rows.filter((row) => row.submission_status !== "proven");
+    const preparing = STATE.rows.filter((row) => row.submission_status !== "proven" && resumeUiState(row).preparing);
+    const active = STATE.rows.filter((row) => row.submission_status !== "proven" && !resumeUiState(row).preparing);
     const submitted = STATE.rows.filter((row) => row.submission_status === "proven");
-    container.innerHTML = `${rowGroupHtml("ready", "Ready to submit", active)}${rowGroupHtml("submitted", "Submitted history", submitted)}`;
+    container.innerHTML = `${rowGroupHtml("preparing", "Preparing resumes", preparing)}${rowGroupHtml("ready", "Ready to submit", active)}${rowGroupHtml("submitted", "Submitted history", submitted)}`;
   } else container.innerHTML = STATE.rows.map(rowHtml).join("");
   const total = Number.isFinite(STATE.totalCount) && STATE.totalCount >= STATE.rows.length ? STATE.totalCount : STATE.rows.length;
   $("display-count").textContent = `${STATE.rows.length}${total > STATE.rows.length ? ` of ${total}` : ""} candidate${total === 1 ? "" : "s"}`;
@@ -229,7 +278,7 @@ function renderHealth(health = {}) {
   node.textContent = delayed ? `Updates delayed${health.last_success_at ? ` · last success ${fmtWhen(health.last_success_at)}` : ""}` : "Sources current";
   const banner = $("delay-banner");
   banner.hidden = !delayed;
-  banner.textContent = delayed ? "Updates are delayed, so Raydar is preserving the last confirmed rows and disabling actions that need fresh source data." : "";
+  banner.textContent = delayed ? "Updates are delayed. Raydar is keeping the last confirmed rows visible while source updates recover." : "";
 }
 
 async function loadCounts() {
@@ -249,30 +298,36 @@ async function loadCounts() {
   }
 }
 
-async function loadRows({ append = false } = {}) {
+async function loadRows({ append = false, refresh = false } = {}) {
   if (append && STATE.loading) return;
   STATE.listRequest?.abort();
   const controller = new AbortController();
-  const sequence = ++STATE.listSequence;
-  const page = STATE.page;
-  const query = STATE.query;
-  const cursor = append ? STATE.nextCursor : null;
+  const scope = { sequence: ++STATE.listSequence, page: STATE.page, query: STATE.query };
+  let cursor = append ? STATE.nextCursor : null;
+  const preserveRows = refresh && !append && STATE.rows.length > 0;
+  const minimumRows = preserveRows ? STATE.rows.length : 0;
   STATE.listRequest = controller;
   STATE.loading = true;
   $("rows").setAttribute("aria-busy", "true");
   $("load-more").disabled = true;
   $("load-more").textContent = append ? "Loading…" : "Load more";
-  if (!append) $("rows").innerHTML = '<div class="loading-row">Loading submissions…</div>';
+  if (!append && !preserveRows) $("rows").innerHTML = '<div class="loading-row">Loading submissions…</div>';
   try {
-    const params = new URLSearchParams({ page, limit: "100" });
-    if (query) params.set("q", query);
-    if (cursor) params.set("cursor", cursor);
-    const data = await request(`/api/submissions-v2/list?${params}`, { signal: controller.signal });
-    if (sequence !== STATE.listSequence || page !== STATE.page || query !== STATE.query) return;
-    STATE.rows = append ? [...STATE.rows, ...(data.rows || [])] : (data.rows || []);
-    STATE.nextCursor = data.next_cursor || null;
-    const reportedTotal = Number(data.total_count ?? data.total ?? data.count);
-    STATE.totalCount = Number.isFinite(reportedTotal) ? reportedTotal : (STATE.nextCursor ? null : STATE.rows.length);
+    const pages = [];
+    do {
+      const params = new URLSearchParams({ page: scope.page, limit: "100" });
+      if (scope.query) params.set("q", scope.query);
+      if (cursor) params.set("cursor", cursor);
+      const data = await request(`/api/submissions-v2/list?${params}`, { signal: controller.signal });
+      if (!listScopeIsCurrent(scope, STATE)) return;
+      pages.push(data);
+      cursor = data.next_cursor || null;
+    } while (refresh && !append && cursor && pages.reduce((count, pageData) => count + (pageData.rows || []).length, 0) < minimumRows);
+    if (!listScopeIsCurrent(scope, STATE)) return;
+    const list = reconcileListPages({ pages, append, currentRows: STATE.rows });
+    STATE.rows = list.rows;
+    STATE.nextCursor = list.nextCursor;
+    STATE.totalCount = list.totalCount;
     let completedRegeneration = false;
     const completedDownloads = [];
     let failedRegeneration = false;
@@ -298,7 +353,7 @@ async function loadRows({ append = false } = {}) {
       }
     }
     persistPendingDownloads();
-    renderHealth(data.health || {});
+    renderHealth(pages[0]?.health || {});
     renderRows();
     if (completedDownloads.length) {
       for (const row of completedDownloads) autoDownloadResume(row);
@@ -306,6 +361,13 @@ async function loadRows({ append = false } = {}) {
     else if (completedRegeneration) toast("The new resume is ready to download.");
   } catch (error) {
     if (error.name === "AbortError") return;
+    const failure = listFailureDisposition({ scope, state: STATE, append, refresh });
+    if (failure === "ignore") return;
+    if (failure === "preserve") {
+      $("rows").setAttribute("aria-busy", "false");
+      toast(`${append ? "Could not load more." : "Could not refresh."} Showing the last loaded candidates. ${error.message}`, true);
+      return;
+    }
     $("rows").innerHTML = `<div class="empty-state"><strong>Submissions are unavailable</strong>${esc(error.message)}</div>`;
     $("rows").setAttribute("aria-busy", "false");
   } finally {
@@ -397,6 +459,8 @@ function closeDialog() {
   if (returnFocus?.isConnected) returnFocus.focus();
   reportHeight();
 }
+
+function dialogStillActive(active) { return STATE.active === active && !$("modal").hidden; }
 
 function trapDialogFocus(event) {
   if (event.key !== "Tab" || $("modal").hidden) return;
@@ -491,18 +555,22 @@ function openAddCandidate() {
 }
 
 async function confirmAdd() {
-  const button = $("dialog-confirm"); button.disabled = true; button.textContent = "Preparing…";
+  const button = $("dialog-confirm"), active = STATE.active;
+  if (!button || !dialogStillActive(active) || button.disabled) return;
+  button.disabled = true; button.textContent = "Preparing…";
   try {
-    const result = await command("add_candidate", { candidate_id: STATE.active.candidate_id, role_id: STATE.active.role_id });
-    const candidateLabel = STATE.active.candidate_id_label || "";
-    closeDialog();
-    if (result.existing && PAGE_LABELS[result.state]) {
-      STATE.page = result.state; STATE.query = candidateLabel; $("candidate-search").value = candidateLabel;
-      document.querySelectorAll(".page-tab").forEach((node) => { const active = node.dataset.page === STATE.page; node.classList.toggle("active", active); node.setAttribute("aria-selected", String(active)); });
-      toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
-    } else toast("Preparing resume — the candidate will appear when ready.");
-    await Promise.all([loadCounts(), loadRows()]);
-  } catch (error) { button.disabled = false; button.textContent = "Add Candidate"; toast(error.message, true); }
+    const result = await command("add_candidate", { candidate_id: active.candidate_id, role_id: active.role_id });
+    const candidateLabel = active.candidate_id_label || "";
+    if (dialogStillActive(active)) {
+      closeDialog();
+      if (result.existing && PAGE_LABELS[result.state]) {
+        STATE.page = result.state; STATE.query = candidateLabel; STATE.rows = []; STATE.nextCursor = null; $("candidate-search").value = candidateLabel;
+        document.querySelectorAll(".page-tab").forEach((node) => { const pageActive = node.dataset.page === STATE.page; node.classList.toggle("active", pageActive); node.setAttribute("aria-selected", String(pageActive)); });
+        toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
+      } else toast("Preparing resume — the candidate will appear when ready.");
+    }
+    await Promise.all([loadCounts(), loadRows({ refresh: true })]);
+  } catch (error) { if (dialogStillActive(active)) { button.disabled = false; button.textContent = "Add Candidate"; } toast(error.message, true); }
 }
 
 function openDuplicate(id) {
@@ -511,7 +579,27 @@ function openDuplicate(id) {
   openDialog({ title: "Duplicate Candidate", subtitle: `${row.candidate_name} · choose only the new role.`, body: `<div class="selection-summary"><strong>${esc(row.candidate_name)}</strong><br><span>${esc(row.company)} · ${esc(row.role_title)}</span></div><label class="field"><span class="field-label">New company or role</span><input id="role-query" autocomplete="off" placeholder="Search active Paraform roles" /></label><div class="choice-list" id="role-results"></div>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" type="button" disabled>Duplicate</button>' });
   const query = $("role-query"), results = $("role-results"); query.oninput = () => { clearTimeout(query.timer); query.timer = setTimeout(() => searchIndex("roles", query.value, results), 250); };
   bindSearchSelection(results, "role_id"); $("dialog-cancel").onclick = closeDialog;
-  $("dialog-confirm").onclick = async () => { try { const candidateLabel = STATE.active.candidate_id_label || ""; const result = await command("duplicate", STATE.active); closeDialog(); if (result.existing && PAGE_LABELS[result.state]) { STATE.page = result.state; STATE.query = candidateLabel; $("candidate-search").value = candidateLabel; document.querySelectorAll(".page-tab").forEach((node) => { const active = node.dataset.page === STATE.page; node.classList.toggle("active", active); node.setAttribute("aria-selected", String(active)); }); toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`); } else toast("Preparing the role-specific resume."); await Promise.all([loadCounts(), loadRows()]); } catch (error) { toast(error.message, true); } };
+  $("dialog-confirm").onclick = async () => {
+    const button = $("dialog-confirm"), active = STATE.active;
+    if (!button || !dialogStillActive(active) || button.disabled) return;
+    button.disabled = true; button.textContent = "Preparing…";
+    try {
+      const candidateLabel = active.candidate_id_label || "";
+      const result = await command("duplicate", active);
+      if (dialogStillActive(active)) {
+        closeDialog();
+        if (result.existing && PAGE_LABELS[result.state]) {
+          STATE.page = result.state; STATE.query = candidateLabel; STATE.rows = []; STATE.nextCursor = null; $("candidate-search").value = candidateLabel;
+          document.querySelectorAll(".page-tab").forEach((node) => { const pageActive = node.dataset.page === STATE.page; node.classList.toggle("active", pageActive); node.setAttribute("aria-selected", String(pageActive)); });
+          toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
+        } else toast("Preparing the role-specific resume.");
+      }
+      await Promise.all([loadCounts(), loadRows({ refresh: true })]);
+    } catch (error) {
+      if (dialogStillActive(active)) { button.disabled = false; button.textContent = "Duplicate"; }
+      toast(error.message, true);
+    }
+  };
 }
 
 function openCorrect(id) {
@@ -519,7 +607,20 @@ function openCorrect(id) {
   STATE.active = { case_id: id, expected_version: row.state_version };
   const options = STATE.page === "interested" ? '<option value="needs_review">Needs Review</option><option value="not_interested">Not Interested</option>' : '<option value="interested">Interested</option><option value="needs_review">Needs Review</option>';
   openDialog({ title: "Correct classification", subtitle: `${row.candidate_name} · ${row.company} · ${row.role_title}`, body: `<label class="field"><span class="field-label">Move to</span><select id="correction-destination">${options}</select></label><label class="field"><span class="field-label">Short correction note</span><textarea id="correction-note" maxlength="500" placeholder="Why is this being corrected?"></textarea></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" type="button">Save correction</button>' });
-  $("dialog-cancel").onclick = closeDialog; $("dialog-confirm").onclick = async () => { const note = $("correction-note").value.trim(); if (!note) return toast("Add a short correction note.", true); try { await command("correct", { ...STATE.active, destination: $("correction-destination").value, note }); closeDialog(); await Promise.all([loadCounts(), loadRows()]); } catch (error) { toast(error.message, true); } };
+  $("dialog-cancel").onclick = closeDialog; $("dialog-confirm").onclick = async () => {
+    const button = $("dialog-confirm"), active = STATE.active;
+    const note = $("correction-note").value.trim(); if (!note) return toast("Add a short correction note.", true);
+    if (!button || !dialogStillActive(active) || button.disabled) return;
+    button.disabled = true; button.textContent = "Saving…";
+    try {
+      await command("correct", { ...active, destination: $("correction-destination").value, note });
+      if (dialogStillActive(active)) closeDialog();
+      await Promise.all([loadCounts(), loadRows({ refresh: true })]);
+    } catch (error) {
+      if (dialogStillActive(active)) { button.disabled = false; button.textContent = "Save correction"; }
+      toast(error.message, true);
+    }
+  };
 }
 
 function openReview(id) {
@@ -664,9 +765,11 @@ async function autoDownloadResume(row) {
 
 async function downloadResume(id) {
   const row = rowFor(id); if (!row) return;
-  const pickerHost = filePickerWindow();
-  if (typeof pickerHost.showSaveFilePicker === "function") {
-    try {
+  if (!rowCapability(row, "can_download", Boolean(row.current_artifact_id))) return toast("The resume is still being prepared.", true);
+  return withRowAction(id, "download", async () => {
+    const pickerHost = filePickerWindow();
+    if (typeof pickerHost.showSaveFilePicker === "function") {
+      try {
       const handle = await pickerHost.showSaveFilePicker({
         suggestedName: suggestedResumeFilename(row),
         startIn: "downloads",
@@ -684,30 +787,39 @@ async function downloadResume(id) {
       try { await writable.write(bytes); await writable.close(); }
       catch (error) { await writable.abort().catch(() => {}); throw error; }
       toast(`Saved ${handle.name || data.filename || "resume.pdf"}.`);
-      return;
-    } catch (error) {
-      if (error?.name === "AbortError") return;
-      toast(error.message || "The resume could not be saved.", true);
-      return;
+        return;
+      } catch (error) {
+        if (error?.name === "AbortError") return;
+        toast(error.message || "The resume could not be saved.", true);
+        return;
+      }
     }
-  }
-  const viewer = window.open("about:blank", "_blank");
-  if (viewer) viewer.opener = null;
-  try {
-    const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/resume/download-ticket`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expected_version: row.state_version }) });
-    const downloadUrl = safeUrl(data.url, URL_HOSTS.storage);
-    if (!downloadUrl) throw new Error("Resume download link was invalid.");
-    if (viewer) viewer.location.replace(downloadUrl); else window.location.assign(downloadUrl);
-    toast("The resume opened securely; use the PDF viewer's download button to save it.");
-  } catch (error) { if (viewer) viewer.close(); toast(error.message, true); }
+    const viewer = window.open("about:blank", "_blank");
+    if (viewer) viewer.opener = null;
+    try {
+      const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/resume/download-ticket`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expected_version: row.state_version }) });
+      const downloadUrl = safeUrl(data.url, URL_HOSTS.storage);
+      if (!downloadUrl) throw new Error("Resume download link was invalid.");
+      if (viewer) viewer.location.replace(downloadUrl); else window.location.assign(downloadUrl);
+      toast("The resume opened securely; use the PDF viewer's download button to save it.");
+    } catch (error) { if (viewer) viewer.close(); toast(error.message, true); }
+  });
 }
 
 async function openSubmit(id) {
   const row = rowFor(id); if (!row) return;
-  try {
-    const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/submit-open`, { method: "POST", body: JSON.stringify({ expected_version: row.state_version }) });
-    const url = safeUrl(data.redirect_url, URL_HOSTS.submit); if (!url) throw new Error("Paraform role link was invalid."); window.open(url, "_blank", "noopener,noreferrer"); await loadRows();
-  } catch (error) { toast(error.message, true); }
+  if (!rowCapability(row, "can_submit", Boolean(row.current_artifact_id))) return toast("The resume is still being prepared.", true);
+  const popup = window.open("about:blank", "_blank");
+  if (!popup) return toast("Allow popups to open the Paraform role.", true);
+  popup.opener = null;
+  return withRowAction(id, "submit", async () => {
+    try {
+      const data = await request(`/api/submissions-v2/pairs/${encodeURIComponent(id)}/submit-open`, { method: "POST", body: JSON.stringify({ expected_version: row.state_version }) });
+      const url = safeUrl(data.redirect_url, URL_HOSTS.submit);
+      if (!navigateSubmitPopup(popup, url)) throw new Error("Paraform role link was invalid.");
+      await loadRows({ refresh: true });
+    } catch (error) { popup.close(); toast(error.message, true); }
+  });
 }
 
 async function command(action, input = {}) {
@@ -715,8 +827,7 @@ async function command(action, input = {}) {
     return await request("/api/submissions-v2/command", { method: "POST", body: JSON.stringify({ action, ...input }) });
   } catch (error) {
     if (error.status === 409) {
-      closeDialog();
-      await Promise.allSettled([loadCounts(), loadRows()]);
+      await Promise.allSettled([loadCounts(), loadRows({ refresh: true })]);
       if (error.code !== "resume_regeneration_in_progress") {
         error.message = "This item changed, so the latest version was refreshed; please try again.";
         error.code = "state_conflict_refreshed";
@@ -752,7 +863,7 @@ async function boot() {
     STATE.session = await request("/api/submissions-v2/session"); STATE.csrf = STATE.session.csrf_token || "";
     if (!STATE.session.authenticated) return showSignin();
     await Promise.all([loadCounts(), loadRows()]);
-    STATE.pollTimer = setInterval(() => { loadCounts().catch(() => {}); loadRows().catch(() => {}); }, 30_000);
+    STATE.pollTimer = setInterval(() => { loadCounts().catch(() => {}); loadRows({ refresh: true }).catch(() => {}); }, 30_000);
   } catch (error) {
     if ([401, 403].includes(error.status)) showSignin(); else { $("rows").innerHTML = `<div class="empty-state"><strong>Submissions V2 is not available</strong>${esc(error.message)}</div>`; renderHealth({ delayed: true }); }
   }

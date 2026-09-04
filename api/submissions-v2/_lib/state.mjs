@@ -15,6 +15,11 @@ export const WORKFLOW_STATES = Object.freeze([
 
 export const SUBMISSION_STATUSES = Object.freeze(["none", "opened", "proven"]);
 
+export const INTERESTED_PAGE_WORKFLOW_STATES = Object.freeze([
+  "preparing_resume",
+  "interested",
+]);
+
 const WORKFLOW_TRANSITIONS = Object.freeze({
   classifying: new Set(["classifying", "preparing_resume", "needs_review", "not_interested"]),
   preparing_resume: new Set(["preparing_resume", "interested", "needs_review", "not_interested"]),
@@ -138,7 +143,7 @@ export function nextPairState(current, patch, expectedVersion) {
 
 export function isVisiblePair(state) {
   assertPairState(state);
-  return ["interested", "needs_review", "not_interested"].includes(
+  return [...INTERESTED_PAGE_WORKFLOW_STATES, "needs_review", "not_interested"].includes(
     value(state, "workflow_state", "workflowState"),
   );
 }

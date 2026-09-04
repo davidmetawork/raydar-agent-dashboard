@@ -782,6 +782,14 @@ test("human recovery commands reject terminal sources and non-Interested resume 
 
 test("regeneration rejects overlapping work and list progress stays active across retry gaps", async () => {
   const pair = await preparingPair();
+  const repository = createRepository({ sql });
+  const preparingRows = await repository.list({ page: "interested" });
+  const visiblePreparing = preparingRows.rows.find((row) => row.pair_id === pair.id);
+  assert.equal(visiblePreparing?.workflow_state, "preparing_resume");
+  assert.equal(visiblePreparing?.current_artifact_id, null);
+  const preparingCounts = await repository.counts();
+  assert.ok(Number(preparingCounts.interested) >= 1);
+  assert.ok(Number(preparingCounts.actionable) >= 1);
   const priorGenerationId = randomUUID();
   await sql`
     insert into submissions_v2.resume_generations(
@@ -833,7 +841,6 @@ test("regeneration rejects overlapping work and list progress stays active acros
       'prompt-test', 'template-test', ${artifactId}, clock_timestamp() + interval '5 minutes'
     )
   `;
-  const repository = createRepository({ sql });
   const activeRows = await repository.list({ page: "interested" });
   assert.equal(activeRows.rows.find((row) => row.pair_id === pair.id)?.generation_status, "validating");
   await assert.rejects(
@@ -1399,7 +1406,7 @@ test("scheduler queues every due reconciliation, index, proof, notification, dig
     purgeDue: true,
   });
   assert.deepEqual(new Set(result.jobs.map((job) => job.kind)), new Set([
-    "reconcile_master_inbox", "reconcile_curated", "proof_reconcile", "deliver_notification",
+    "reconcile_master_inbox", "reconcile_sequence_inbox", "reconcile_curated", "proof_reconcile", "deliver_notification",
     "source_health", "index_candidates", "index_roles", "daily_digest", "purge",
   ]));
   await setRuntimeControls({

@@ -15,18 +15,20 @@ test("bootstrap obtains public Google configuration before the protected V2 sess
 });
 
 test("candidate-name filtering and list paging are complete server-side reads", () => {
-  assert.match(js, /new URLSearchParams\(\{ page, limit: "100" \}\)/);
-  assert.match(js, /params\.set\("q", query\)/);
+  assert.match(js, /new URLSearchParams\(\{ page: scope\.page, limit: "100" \}\)/);
+  assert.match(js, /params\.set\("q", scope\.query\)/);
   assert.match(js, /params\.set\("cursor", cursor\)/);
   assert.match(js, /\/api\/submissions-v2\/list\?\$\{params\}/);
   assert.match(js, /data\.next_cursor/);
-  assert.match(js, /data\.total_count \?\? data\.total \?\? data\.count/);
-  assert.match(js, /append \? \[\.\.\.STATE\.rows/);
+  assert.match(js, /reconcileListPages/);
+  assert.match(js, /currentRows: STATE\.rows/);
 });
 
 test("list, count, and picker reads abort superseded work and reject stale list results", () => {
   assert.match(js, /STATE\.listRequest\?\.abort\(\)/);
-  assert.match(js, /sequence !== STATE\.listSequence \|\| page !== STATE\.page \|\| query !== STATE\.query/);
+  assert.match(js, /listScopeIsCurrent\(scope, STATE\)/);
+  assert.match(js, /loadRows\(\{ refresh: true \}\)/);
+  assert.match(js, /reconcileListPages\(\{ pages, append, currentRows: STATE\.rows \}\)/);
   assert.match(js, /STATE\.countsRequest\?\.abort\(\)/);
   assert.match(js, /STATE\.searchRequests\.get\(target\.id\)\?\.abort\(\)/);
   assert.match(js, /error\.name !== "AbortError"/);
@@ -34,7 +36,7 @@ test("list, count, and picker reads abort superseded work and reject stale list 
 
 test("a version conflict refreshes current state before the recruiter retries", () => {
   assert.match(js, /error\.status === 409/);
-  assert.match(js, /Promise\.allSettled\(\[loadCounts\(\), loadRows\(\)\]\)/);
+  assert.match(js, /Promise\.allSettled\(\[loadCounts\(\), loadRows\(\{ refresh: true \}\)\]\)/);
   assert.match(js, /state_conflict_refreshed/);
   assert.match(js, /latest version was refreshed/);
 });
@@ -72,6 +74,16 @@ test("resume download falls back to a top-level PDF viewer when the native picke
   assert.ok(ticket > preopen);
   assert.ok(navigate > ticket);
   assert.doesNotMatch(js.slice(preopen, navigate), /anchor\.download/u);
+});
+
+test("Submit opens a blank popup during the click and only then requests its destination", () => {
+  const submit = js.indexOf("async function openSubmit");
+  const popup = js.indexOf('const popup = window.open("about:blank", "_blank")', submit);
+  const request = js.indexOf("submit-open", submit);
+  assert.ok(popup > submit);
+  assert.ok(request > popup);
+  assert.match(js.slice(submit, request + 500), /navigateSubmitPopup\(popup, url\)/);
+  assert.match(js.slice(submit, request + 500), /popup\.close\(\)/);
 });
 
 test("generation progress survives rendering and remains reduced-motion safe", () => {

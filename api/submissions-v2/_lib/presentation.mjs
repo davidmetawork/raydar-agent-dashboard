@@ -11,12 +11,17 @@ export const REVIEW_REASONS = Object.freeze({
 });
 
 const text = (value, limit = 1_000) => String(value ?? "").trim().slice(0, limit);
+const ACTIVE_GENERATION_STATES = new Set([
+  "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving",
+]);
 
 export const gmailSignalUrl = (value) => /^https:\/\/mail\.google\.com\/mail\/\?authuser=david%40raydar\.xyz#all\/[a-f0-9]{1,64}$/iu.test(String(value || "")) ? value : null;
 
 export function safeHttps(value, allowedHosts = []) {
+  const raw = text(value, 2_000);
+  if (!raw) return null;
   try {
-    const url = new URL(text(value, 2_000), "https://monitor.raydar.xyz");
+    const url = new URL(raw);
     if (url.protocol !== "https:") return null;
     if (allowedHosts.length && !allowedHosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) return null;
     return url.href;
@@ -36,6 +41,14 @@ export function rowDto(row) {
   const reviewReasons = reasons(row.review_reasons || []);
   const first = reviewReasons[0];
   const signalUrl = gmailSignalUrl(row.signal_url) || safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
+  const workflowState = row.workflow_state || "needs_review";
+  const generationStatus = text(row.generation_status, 100).toLowerCase() || null;
+  const artifactReady = row.artifact_ready === true;
+  const currentArtifactId = artifactReady ? row.current_artifact_id || null : null;
+  const submissionStatus = row.submission_status || "none";
+  const identifiedPair = Boolean((row.pair_id || row.case_id) && row.candidate_user_id && row.role_id);
+  const readyWorkflow = workflowState === "interested";
+  const generationActive = ACTIVE_GENERATION_STATES.has(generationStatus);
   return {
     case_id: row.pair_id || row.case_id || null,
     signal_id: row.signal_id || null,
@@ -60,25 +73,50 @@ export function rowDto(row) {
     })).filter((offered) => offered.role_id),
     signal_url: signalUrl,
     signal_at: row.signal_at || null,
-    workflow_state: row.workflow_state || "needs_review",
+    workflow_state: workflowState,
     review_reasons: reviewReasons,
     primary_action_label: first?.action || null,
     resume_cautions: (row.resume_cautions || []).map((item) => ({ code: text(item.code || item.source_key || item, 100), label: text(item.label || item.safe_detail || item, 300), impact: text(item.impact, 300) || null })),
-    generation_status: row.generation_status || null,
-    current_artifact_id: row.current_artifact_id || null,
+    generation_status: generationStatus,
+    generation_stage: text(row.generation_stage, 100) || null,
+    preparation_error_code: text(row.preparation_error_code, 100) || null,
+    preparation_error_detail: text(row.preparation_error_detail, 500) || null,
+    current_artifact_id: currentArtifactId,
     artifact_version: Number(row.artifact_version || 0) || null,
-    submission_status: row.submission_status || "none",
+    artifact_ready: artifactReady,
+    submission_status: submissionStatus,
     negative_reason: text(row.negative_reason, 500) || null,
     corrected_destination: row.corrected_destination || null,
+    role_active: row.role_active === true,
     role_last_confirmed_at: row.role_last_confirmed_at || null,
     source_last_success_at: row.source_last_success_at || null,
+    capabilities: {
+      can_correct: identifiedPair && submissionStatus !== "proven",
+      can_duplicate: identifiedPair,
+      can_download: readyWorkflow && artifactReady,
+      can_regenerate: readyWorkflow && artifactReady && !generationActive,
+      can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven",
+    },
   };
 }
 
 export function publicHealth(row = {}) {
+  const sources = Object.fromEntries(Object.entries(row.sources || {}).map(([rawKey, source]) => {
+    const key = text(rawKey, 100);
+    return [key, {
+      enabled: source?.enabled === true,
+      delayed: Boolean(source?.delayed_since || source?.error_class),
+      last_success_at: source?.last_success_at || null,
+      delayed_since: source?.delayed_since || null,
+      quota_state: text(source?.quota_state, 100) || null,
+      error_class: text(source?.error_class, 100) || null,
+      safe_error_detail: text(source?.safe_error_detail, 500) || null,
+    }];
+  }).filter(([key]) => key));
   return {
     delayed: Boolean(row.delayed),
     last_success_at: row.last_success_at || null,
     database: row.database || "current",
+    sources,
   };
 }

@@ -5,6 +5,7 @@ export const EMAIL_FAMILIES = new Set([
   "para_ai_interview_request",
   "new_match",
   "fit_follow_up_with_matches",
+  "paraform_sequence_reply",
 ]);
 
 const text = (value, limit = 10_000) => String(value ?? "").trim().slice(0, limit);
@@ -33,10 +34,29 @@ function role(raw) {
   };
 }
 
+function sequenceEvidence(value) {
+  if (!value || typeof value !== "object") return null;
+  const cacheVersion = Number(value.cache_version);
+  const sequenceId = text(value.sequence_id, 500);
+  if (cacheVersion !== 3 || !sequenceId) return null;
+  return {
+    cache_version: 3,
+    sequence_id: sequenceId,
+    campaign_to_candidate_user_id: text(value.campaign_to_candidate_user_id, 500) || null,
+    cached_reply_category: text(value.cached_reply_category, 40) || null,
+    exact_role_source: text(value.exact_role_source, 100) || null,
+    role_evidence_locator: text(value.role_evidence_locator, 2_000) || null,
+  };
+}
+
 function currentMasterInbox(input) {
   const family = text(input?.family, 100);
   const payload = input?.payload && typeof input.payload === "object" ? input.payload : {};
-  const offeredRole = role({ roleId: input?.roleId });
+  const rawRoleIds = Array.isArray(input?.roleIds) ? input.roleIds
+    : Array.isArray(payload?.offeredRoleIds) ? payload.offeredRoleIds
+      : input?.roleId ? [input.roleId] : [];
+  const offeredRoles = [...new Map(rawRoleIds.map((roleId) => role({ roleId }))
+    .filter(Boolean).map((item) => [item.role_id, item])).values()];
   return {
     event_id: text(input?.id, 200) || `mi_${digest(input?.eventKey).slice(0, 32)}`,
     schema_version: EMAIL_SCHEMA,
@@ -59,11 +79,14 @@ function currentMasterInbox(input) {
     candidate_authored_text_ref: null,
     candidate_authored_text: text(payload?.candidateText, 100_000),
     sent_message_text: text(payload?.sentMessageText, 100_000),
-    offered_roles: offeredRole ? [offeredRole] : [],
+    offered_roles: offeredRoles,
     machine_message: Boolean(payload?.machineMessage),
     raw_record_ref: text(payload?.sourceMessageId, 1_000) || null,
     content_digest: text(payload?.contentDigest, 200) || digest(payload?.candidateText),
     idempotency_key: text(input?.eventKey, 500),
+    candidate_user_id_hint: null,
+    review_reason_hint: null,
+    source_evidence: null,
   };
 }
 
@@ -95,6 +118,11 @@ function canonical(input) {
     raw_record_ref: text(input?.raw_record_ref, 2_000) || null,
     content_digest: text(input?.content_digest, 200),
     idempotency_key: text(input?.idempotency_key, 500),
+    candidate_user_id_hint: text(input?.candidate_user_id_hint, 500) || null,
+    review_reason_hint: input?.review_reason_hint === "candidate_ambiguous"
+      ? "candidate_ambiguous"
+      : null,
+    source_evidence: sequenceEvidence(input?.source_evidence),
   };
 }
 
@@ -142,6 +170,9 @@ export function safeEventProjection(event) {
     candidate_authored_text_ref: event.candidate_authored_text_ref,
     normalized_sender_email_ref: event.normalized_sender_email_ref,
     raw_record_ref: event.raw_record_ref,
+    candidate_user_id_hint: event.candidate_user_id_hint,
+    review_reason_hint: event.review_reason_hint,
+    source_evidence: event.source_evidence,
   };
 }
 

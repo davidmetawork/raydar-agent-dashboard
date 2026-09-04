@@ -5,12 +5,15 @@ import {
   applyInboxTriage,
   assembleInboxSnapshotFeed,
   buildInboxFeed,
+  buildInboxRefresh,
   campaignInboxInput,
   campaignsToScan,
   countInboxReplies,
   emptyInboxSnapshotState,
   flattenCampaignInbox,
+  flattenCampaignInboxForSubmissions,
   inboxReplyBucket,
+  inboxSubmissionsProjectionCoverage,
   inboxTrpcGet,
   isInboxCuratedListCampaign,
   isInboxRoleOutreachCampaign,
@@ -189,6 +192,22 @@ test("Inbox exclusion removes delay, bounce, and delivery-failure notifications"
   }), false);
 });
 
+test("Submissions projection coverage stays unseeded when the catalog has no targets", () => {
+  const state = emptyInboxSnapshotState();
+  state.catalog = {
+    version: 3,
+    submissions_projection_version: 1,
+    refreshed_at: "2026-09-03T12:00:00.000Z",
+    campaigns_total: 0,
+    targets: [],
+  };
+  const coverage = inboxSubmissionsProjectionCoverage(state, {
+    now: () => new Date("2026-09-03T12:01:00.000Z"),
+  });
+  assert.equal(coverage.coverage_complete, false);
+  assert.equal(coverage.confirmed_through, null);
+});
+
 test("campaign rows and materialized feeds enforce Inbox exclusions before counts", () => {
   const campaign = { id: "sequence-1", name: "Platform search" };
   const inboxData = {
@@ -267,6 +286,32 @@ test("campaign rows and materialized feeds enforce Inbox exclusions before count
   }, new Map());
   assert.deepEqual(cached.replies.map(({ gmail_id }) => gmail_id), ["gmail-real"]);
   assert.equal(cached.counts.total, 1);
+});
+
+test("Submissions projection retains a candidate reply to David without changing Inbox UI rows", () => {
+  const campaign = { id: "sequence-primary", name: "Primary mailbox campaign" };
+  const inboxData = {
+    campaign_to_candidate_users: [{
+      id: "lead-1",
+      candidate_email: "candidate@example.com",
+      candidate_user_id: "candidate-user-1",
+    }],
+    campaign_emails: [{
+      campaign_to_candidate_user_id: "lead-1",
+      email: {
+        gmail_id: "gmail-primary-reply",
+        sent_from_paraform: false,
+        subject: "Re: Role",
+        snippet: "Yes, interested.",
+        to: ["David <david@raydar.xyz>"],
+      },
+    }],
+  };
+  assert.equal(flattenCampaignInbox(campaign, inboxData).length, 0);
+  const projected = flattenCampaignInboxForSubmissions(campaign, inboxData);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].candidate_user_id, "candidate-user-1");
+  assert.equal(projected[0].gmail_id, "gmail-primary-reply");
 });
 
 test("triage overlay assigns one effective bucket and recomputes active counts", () => {
@@ -746,10 +791,11 @@ test("sync selection prioritizes unseeded and changed sequences without starvati
   const nowMs = Date.parse("2026-07-17T18:00:00.000Z");
   const previous = emptyInboxSnapshotState();
   previous.snapshots = new Map([
-    ["changed", { email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
-    ["recent", { email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
-    ["stale", { email_replies: 1, refreshed_at: "2026-07-17T16:00:00.000Z" }],
-    ["fresh", { email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+    ["changed", { submissions_projection_version: 1, email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+    ["recent", { submissions_projection_version: 1, email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+    ["stale", { submissions_projection_version: 1, email_replies: 1, refreshed_at: "2026-07-17T16:00:00.000Z" }],
+    ["fresh", { submissions_projection_version: 1, email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
+    ["legacy-projection", { submissions_projection_version: null, email_replies: 1, refreshed_at: "2026-07-17T17:59:00.000Z" }],
   ]);
   previous.meta = {
     sequence_attempts: {
@@ -763,6 +809,7 @@ test("sync selection prioritizes unseeded and changed sequences without starvati
     { id: "recent", email_replies: 1 },
     { id: "stale", email_replies: 1 },
     { id: "fresh", email_replies: 1 },
+    { id: "legacy-projection", email_replies: 1 },
   ], previous, [{ sequence_id: "recent" }], {
     nowMs,
     batchSize: 4,
@@ -771,8 +818,8 @@ test("sync selection prioritizes unseeded and changed sequences without starvati
   assert.deepEqual(selected.map(({ id }) => id), [
     "missing-new",
     "missing-retried",
+    "legacy-projection",
     "changed",
-    "recent",
   ]);
 });
 
@@ -968,7 +1015,7 @@ test("campaign selection retains disabled reply history when aggregate counts ex
   );
 });
 
-test("Inbox campaign eligibility admits only linked role outreach and excludes the primary mailbox", () => {
+test("Inbox campaign eligibility uses links, never a catalog owner email as sender evidence", () => {
   assert.equal(isInboxRoleOutreachCampaign({
     id: "project-outreach",
     project_id: "project-1",
@@ -987,14 +1034,14 @@ test("Inbox campaign eligibility admits only linked role outreach and excludes t
     id: "linked-primary-mailbox",
     project_id: "project-2",
     campaign_to_accounts: [{ account: { email: "DAVID@RAYDAR.XYZ" } }],
-  }), false);
+  }), true);
   assert.equal(isInboxRoleOutreachCampaign({
     id: "unlinked-generic-sequence",
     campaign_to_accounts: [{ account: { email: "david@heyraydar.com" } }],
   }), false);
 });
 
-test("Inbox admits only the five pinned unlinked curated-list sequences", () => {
+test("Inbox admits pinned curated sequences and reply-bearing unmapped sequences", () => {
   const curatedId = OUTCOME_SEQUENCE_RULES[0].id;
   assert.equal(isInboxCuratedListCampaign({ id: curatedId }), true);
   assert.equal(isInboxCuratedListCampaign({ id: "unlinked-generic-sequence" }), false);
@@ -1003,8 +1050,37 @@ test("Inbox admits only the five pinned unlinked curated-list sequences", () => 
       { id: curatedId, name: "Curated list", email_replies: 3 },
       { id: "unlinked-generic-sequence", email_replies: 4 },
     ]).map(({ id }) => id),
-    [curatedId],
+    [curatedId, "unlinked-generic-sequence"],
   );
+});
+
+test("recent evidence refreshes an unmapped sequence without changing legacy Inbox rows", async () => {
+  const feed = await buildInboxFeed({
+    get: async (procedure) => {
+      if (procedure === "campaigns.getListOfCampaignsOptimized") {
+        return [{
+          id: "sequence-unmapped",
+          name: "Candidate outreach",
+          email_replies: 0,
+        }];
+      }
+      if (procedure === "campaigns.getRecentReplies") {
+        return [{
+          id: "lead-1",
+          sequence_id: "sequence-unmapped",
+          candidate_email: "candidate@example.com",
+          email_date: "2026-09-03T12:00:00.000Z",
+          gmail_id: "gmail-unmapped",
+        }];
+      }
+      assert.equal(procedure, "campaigns.getCampaignInboxData");
+      return { campaign_emails: [], campaign_to_candidate_users: [] };
+    },
+    now: () => new Date("2026-09-03T12:01:00.000Z"),
+  });
+  // The extra target seeds the Submissions-only projection. It is not a
+  // legacy Inbox row because the campaign itself was never UI-admitted.
+  assert.equal(feed.replies.length, 0);
 });
 
 test("Inbox refresh fans out the pinned unlinked curated-list sequence", async () => {
@@ -1234,7 +1310,9 @@ test("feed building bounds fanout and returns partial metadata with recent fallb
   });
 
   assert.equal(maxActive, 2);
-  assert.equal(inboxCalls.length, 3);
+  // Reply-bearing unlinked sequences are refreshed for the Submissions-only
+  // projection, while their rows remain outside the legacy Inbox surface.
+  assert.equal(inboxCalls.length, 4);
   assert.deepEqual(
     inboxCalls.find(({ campaign_id }) => campaign_id === "sequence-recent"),
     { campaign_id: "sequence-recent", audience: "company" },
@@ -1262,7 +1340,7 @@ test("feed building bounds fanout and returns partial metadata with recent fallb
   });
   assert.deepEqual(feed.scan, {
     campaigns_total: 5,
-    campaigns_excluded: 1,
+    campaigns_excluded: 2,
     campaigns_attempted: 3,
     campaigns_succeeded: 2,
     campaigns_failed: 1,

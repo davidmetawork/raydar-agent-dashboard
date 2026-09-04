@@ -14,17 +14,28 @@ import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pip
 import { runResumePreparation, settleResumePreparationFailure } from "../api/submissions-v2/_lib/resume/pipeline.mjs";
 import { ResumePipelineError, pipelineError } from "../api/submissions-v2/_lib/resume/pipeline-runtime.mjs";
 import { readExactSubmissionProofs } from "./proof-reader.mjs";
-import { reconcileGmailInterviews } from "./gmail-reader.mjs";
+import { reconcileGmailRoleInterest } from "./gmail-reader.mjs";
+import { GMAIL_ROLE_INTEREST_SCOPE } from "../api/submissions-v2/_lib/email-source-policy.mjs";
+import { reconcileSequenceInbox } from "./sequence-inbox-reader.mjs";
 
 export const WORKER_JOB_KINDS = Object.freeze([
   "classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox",
-  "reconcile_curated", "index_candidates", "index_roles", "proof_reconcile",
+  "reconcile_sequence_inbox", "reconcile_curated", "index_candidates", "index_roles", "proof_reconcile",
   "deliver_notification", "source_health", "daily_digest", "purge",
 ]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
 const MONITOR_URL = "https://monitor.raydar.xyz/#submissions-v2";
+
+function sequenceInboxHealthDetail(error) {
+  const evidence = error?.details || {};
+  const state = clean(evidence.cache_state, 40) || "unavailable";
+  const completeAt = clean(evidence.cache_last_complete_at, 60) || "unknown";
+  const missing = Math.max(0, Number(evidence.cache_campaigns_missing) || 0);
+  const stale = Math.max(0, Number(evidence.cache_campaigns_stale) || 0);
+  return `Sequence Inbox cache is ${state}; last complete ${completeAt}; ${missing} campaign(s) missing and ${stale} stale. Its cursor has not advanced.`;
+}
 
 function sourceError(error, code) {
   return pipelineError(error, { code, safeMessage: "The source read failed safely and its cursor was not advanced.", retryable: true });
@@ -105,7 +116,8 @@ export function createWorkerHandlers({
   collectSources = collectResumeSourceBundle,
   extractPdf = extractPdfWithRenderer,
   masterInbox = reconcileMasterInbox,
-  gmailInterviews = reconcileGmailInterviews,
+  gmailInterviews = reconcileGmailRoleInterest,
+  sequenceInbox = reconcileSequenceInbox,
   proofReader = readExactSubmissionProofs,
   notify = postSafeNotification,
   fetchImpl = globalThis.fetch,
@@ -308,23 +320,95 @@ export function createWorkerHandlers({
       const claimed = await sourceLease.claimSourceCursor({ sourceKey, workerId: context.workerId, leaseSeconds: 300, controlEpoch: context.controlEpoch }, sql);
       if (!claimed) return { checkpoint: { stage: "gmail_coalesced" } };
       try {
-        const reconciled = await gmailInterviews({
-          env, fetchImpl, signal: context.signal, checkpoint: claimed.checkpoint?.gmail || {}, now: now().getTime(),
-          assertCurrent: () => context.checkpoint({ stage: "reading_gmail_interview_replies" }),
+        const gmailCheckpoint = claimed.checkpoint?.gmail || {};
+        const scopedCheckpoint = gmailCheckpoint?.scopes?.[GMAIL_ROLE_INTEREST_SCOPE] || {};
+        // Keep the pre-existing Gmail cursor as the live lane's seed. The
+        // broad role-interest reader must prove current intake first; its
+        // historical replay is a separate lane so a quota failure cannot erase
+        // or rewind live progress.
+        const legacyThrough = Number(gmailCheckpoint.through);
+        const seededLive = Number.isFinite(legacyThrough)
+          ? { through: legacyThrough }
+          : {};
+        const liveCheckpoint = scopedCheckpoint.live
+          || seededLive;
+        const catchupCheckpoint = scopedCheckpoint.catchup
+          // A predecessor may have stored a scoped activation cursor. Preserve
+          // it only as historical catch-up, never as the live cursor.
+          || (Number.isFinite(Number(scopedCheckpoint.through))
+            ? { through: Number(scopedCheckpoint.through), window_span_ms: scopedCheckpoint.window_span_ms }
+            : {});
+        // Always advance the live lane first. A catch-up error is recorded as
+        // partial after its live result is durably committed below, so the
+        // historical backlog cannot freeze current candidate replies.
+        const live = await gmailInterviews({
+          env, fetchImpl, signal: context.signal, checkpoint: liveCheckpoint, now: now().getTime(),
+          maxThreads: 12,
+          assertCurrent: () => context.checkpoint({ stage: "reading_gmail_role_interest_live" }),
           admit: (event) => service.intakeMasterInbox(event),
         });
+        const nextLive = { ...live.checkpoint, caught_up: Boolean(live.caught_up) };
+        let catchup = null;
+        let catchupFailure = null;
+        const remainingThreads = Math.max(0, 12 - Math.max(0, Number(live.threads_read) || 0));
+        if (nextLive.caught_up && catchupCheckpoint.caught_up !== true && remainingThreads > 0) {
+          try {
+            catchup = await gmailInterviews({
+              env, fetchImpl, signal: context.signal, checkpoint: catchupCheckpoint, now: now().getTime(),
+              maxThreads: remainingThreads,
+              assertCurrent: () => context.checkpoint({ stage: "reading_gmail_role_interest_catchup" }),
+              admit: (event) => service.intakeMasterInbox(event),
+            });
+          } catch (error) {
+            catchupFailure = error;
+          }
+        }
+        if (catchupFailure) {
+          context.signal?.throwIfAborted?.();
+          if (catchupFailure?.name === "AbortError" || /(?:fence|aborted)/iu.test(String(catchupFailure?.code || catchupFailure?.message || ""))) {
+            throw catchupFailure;
+          }
+        }
+        const nextCatchup = catchup
+          ? { ...catchup.checkpoint, caught_up: Boolean(catchup.caught_up) }
+          : catchupCheckpoint;
+        const allCaughtUp = nextLive.caught_up === true && nextCatchup.caught_up === true;
+        const nextScope = {
+          ...scopedCheckpoint,
+          live: nextLive,
+          catchup: nextCatchup,
+        };
         const committed = await sourceLease.commitSourceCursor({
           sourceKey, workerId: context.workerId, fencingToken: claimed.fencing_token, controlEpoch: context.controlEpoch,
-          checkpoint: { ...claimed.checkpoint, gmail: reconciled.checkpoint }, fullSuccess: Boolean(reconciled.caught_up),
+          checkpoint: {
+            ...claimed.checkpoint,
+            gmail: {
+              ...gmailCheckpoint,
+              scopes: { ...(gmailCheckpoint.scopes || {}), [GMAIL_ROLE_INTEREST_SCOPE]: nextScope },
+            },
+          },
+          fullSuccess: allCaughtUp,
         }, sql);
         if (!committed) throw new ResumePipelineError("gmail_cursor_fence_lost", "The Gmail reader lost its source cursor fence.");
-        if (reconciled.caught_up) await repository.recordSourceHealth({ sourceKey, enabled: true, success: true });
-        else if (reconciled.completed) await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: "gmail_catching_up", safeDetail: "Gmail replies are being read in order from the approved activation time." });
-        if (reconciled.narrowed) await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: "gmail_window_narrowed", safeDetail: "The reply window exceeded its safe read limit and will resume in smaller batches." });
-        return { checkpoint: { stage: reconciled.narrowed ? "gmail_window_narrowed" : reconciled.completed ? "gmail_interview_window_complete" : "gmail_waiting_for_window", observed: reconciled.observed || 0, accepted: reconciled.accepted || 0 } };
+        if (allCaughtUp) await repository.recordSourceHealth({ sourceKey, enabled: true, success: true });
+        else await repository.recordSourceHealth({
+          sourceKey,
+          enabled: true,
+          delayed: true,
+          errorClass: clean(catchupFailure?.code, 120) || "gmail_catching_up",
+          safeDetail: catchupFailure
+            ? "Gmail live intake advanced; historical catch-up is delayed and will retry from its saved cursor."
+            : "Gmail live intake is checkpointed separately while historical replies catch up from the approved activation time.",
+        });
+        return { checkpoint: {
+          stage: catchupFailure ? "gmail_catchup_delayed" : live.narrowed ? "gmail_window_narrowed" : live.completed ? "gmail_live_window_complete" : "gmail_waiting_for_window",
+          observed: (live.observed || 0) + (catchup?.observed || 0),
+          accepted: (live.accepted || 0) + (catchup?.accepted || 0),
+          catchup_delayed: Boolean(catchupFailure),
+        } };
       } catch (error) {
         await sourceLease.releaseSourceCursor({ sourceKey, workerId: context.workerId, fencingToken: claimed.fencing_token, controlEpoch: context.controlEpoch }, sql).catch(() => {});
-        await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: clean(error?.code, 120) || "gmail_reader_failed", safeDetail: "Gmail interview-reply intake is delayed; its cursor has not advanced." }).catch(() => {});
+        await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: clean(error?.code, 120) || "gmail_reader_failed", safeDetail: "Gmail role-interest reply intake is delayed; its cursor has not advanced." }).catch(() => {});
         throw sourceError(error, "gmail_reader_failed");
       }
     }
@@ -336,6 +420,82 @@ export function createWorkerHandlers({
     } catch (error) {
       await repository.recordSourceHealth({ sourceKey: "master_inbox", enabled: true, delayed: true, errorClass: clean(error?.code, 120) || "master_inbox_failed", safeDetail: "Master Inbox reconciliation has not completed successfully." }).catch(() => {});
       throw sourceError(error, "master_inbox_reconcile_failed");
+    }
+  };
+
+  result.reconcile_sequence_inbox = async (context) => {
+    const sourceKey = "sequence_inbox";
+    await ensureSourceCursor(sql, sourceKey);
+    const claimed = await sourceLease.claimSourceCursor({
+      sourceKey,
+      workerId: context.workerId,
+      leaseSeconds: 300,
+      controlEpoch: context.controlEpoch,
+    }, sql);
+    if (!claimed) return { checkpoint: { stage: "sequence_inbox_coalesced" } };
+    try {
+      const reconciled = await sequenceInbox({
+        env,
+        signal: context.signal,
+        checkpoint: claimed.checkpoint || {},
+        now,
+        assertCurrent: () => context.checkpoint({
+          ...context.job.checkpoint,
+          stage: "reading_sequence_inbox",
+        }),
+        admit: (event) => service.intakeMasterInbox(event),
+      });
+      const committed = await sourceLease.commitSourceCursor({
+        sourceKey,
+        workerId: context.workerId,
+        fencingToken: claimed.fencing_token,
+        controlEpoch: context.controlEpoch,
+        checkpoint: reconciled.checkpoint,
+        fullSuccess: reconciled.caught_up,
+      }, sql);
+      if (!committed) {
+        throw new ResumePipelineError(
+          "sequence_inbox_cursor_fence_lost",
+          "Sequence Inbox intake lost its source cursor fence.",
+        );
+      }
+      if (reconciled.caught_up) {
+        await repository.recordSourceHealth({ sourceKey, enabled: true, success: true });
+      } else {
+        await repository.recordSourceHealth({
+          sourceKey,
+          enabled: true,
+          delayed: true,
+          errorClass: "sequence_inbox_catching_up",
+          safeDetail: "Sequence Inbox replies are being read in order from the approved activation time.",
+        });
+      }
+      return { checkpoint: {
+        stage: reconciled.caught_up ? "sequence_inbox_complete" : "sequence_inbox_page_complete",
+        observed: reconciled.observed,
+        accepted: reconciled.accepted,
+        existing: reconciled.existing,
+        cache_state: reconciled.cache.state,
+        cache_last_complete_at: reconciled.cache.last_complete_at,
+        cache_campaigns_targeted: reconciled.cache.campaigns_targeted,
+        cache_campaigns_missing: reconciled.cache.campaigns_missing,
+        cache_campaigns_stale: reconciled.cache.campaigns_stale,
+      } };
+    } catch (error) {
+      await sourceLease.releaseSourceCursor({
+        sourceKey,
+        workerId: context.workerId,
+        fencingToken: claimed.fencing_token,
+        controlEpoch: context.controlEpoch,
+      }, sql).catch(() => {});
+      await repository.recordSourceHealth({
+        sourceKey,
+        enabled: true,
+        delayed: true,
+        errorClass: clean(error?.code, 120) || "sequence_inbox_failed",
+        safeDetail: sequenceInboxHealthDetail(error),
+      }).catch(() => {});
+      throw sourceError(error, "sequence_inbox_failed");
     }
   };
 
@@ -564,4 +724,4 @@ const defaultHandlers = () => (defaults ||= createWorkerHandlers());
 // Each kind is explicit so unknown jobs fail closed in runner.mjs.
 export const handlers = Object.freeze(Object.fromEntries(WORKER_JOB_KINDS.map((kind) => [kind, (context) => defaultHandlers()[kind](context)])));
 
-export const workerHandlerInternals = Object.freeze({ dailyDigestText, enqueueInternal, ensureSourceCursor, masterInboxConfig, ownerName, queueOutbox, reconcileMasterInbox });
+export const workerHandlerInternals = Object.freeze({ dailyDigestText, enqueueInternal, ensureSourceCursor, masterInboxConfig, ownerName, queueOutbox, reconcileMasterInbox, sequenceInboxHealthDetail });

@@ -1,4 +1,5 @@
 {
+  "buildCommand": "npm run submissions-v2:release",
   "rewrites": [
     {
       "source": "/api/submissions-v2/:route*",

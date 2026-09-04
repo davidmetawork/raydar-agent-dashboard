@@ -76,7 +76,8 @@ test("forbidden resume and Paraform controls do not exist", () => {
 
   const submit = between(js, "async function openSubmit(id)", "async function command(action");
   assert.match(submit, /\/submit-open/);
-  assert.match(submit, /window\.open\(url/);
+  assert.match(submit, /window\.open\("about:blank", "_blank"\)/);
+  assert.match(submit, /navigateSubmitPopup\(popup, url\)/);
   assert.doesNotMatch(submit, /attachment|resume\/upload|submit_candidate|native/i);
 });
 

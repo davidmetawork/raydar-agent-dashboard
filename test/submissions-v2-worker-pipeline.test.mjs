@@ -506,13 +506,54 @@ test("missing original resume routes to review without the technical-failure Sla
   assert.equal(notificationInserts, 1);
 });
 
-test("worker exposes exactly the twelve canonical job kinds", () => {
+test("worker exposes exactly the thirteen canonical job kinds", () => {
   assert.deepEqual(WORKER_JOB_KINDS, [
     "classify_email_reply", "prepare_resume", "recheck_pair", "reconcile_master_inbox",
-    "reconcile_curated", "index_candidates", "index_roles", "proof_reconcile",
+    "reconcile_sequence_inbox", "reconcile_curated", "index_candidates", "index_roles", "proof_reconcile",
     "deliver_notification", "source_health", "daily_digest", "purge",
   ]);
   assert.deepEqual(Object.keys(handlerSet()).sort(), [...WORKER_JOB_KINDS].sort());
+});
+
+test("Sequence Inbox worker uses an independent source cursor and reports cache freshness", async () => {
+  let claim;
+  let commit;
+  const health = [];
+  const handlers = handlerSet({
+    sequenceInbox: async ({ checkpoint, admit }) => {
+      assert.deepEqual(checkpoint, { cursor: "sequence-cursor-1" });
+      await admit({ idempotency_key: "gmail:noah-heyraydar-com:message-1" });
+      return {
+        checkpoint: { cursor: "sequence-cursor-2", caught_up: true }, caught_up: true,
+        observed: 1, accepted: 1, existing: 0,
+        cache: {
+          state: "ready", last_complete_at: "2026-09-03T12:00:00.000Z",
+          campaigns_targeted: 4, campaigns_missing: 0, campaigns_stale: 0,
+        },
+      };
+    },
+    service: { intakeMasterInbox: async () => ({ accepted: true }) },
+    repository: { recordSourceHealth: async (value) => health.push(value) },
+    sourceLease: {
+      claimSourceCursor: async (value) => {
+        claim = value;
+        return { checkpoint: { cursor: "sequence-cursor-1" }, fencing_token: 9 };
+      },
+      commitSourceCursor: async (value) => { commit = value; return { checkpoint: value.checkpoint }; },
+      releaseSourceCursor: async () => assert.fail("unexpected release"),
+    },
+  });
+  const result = await handlers.reconcile_sequence_inbox(context(
+    "reconcile_sequence_inbox",
+    { subjectType: "source", subjectId: "sequence_inbox" },
+  ).value);
+  assert.equal(claim.sourceKey, "sequence_inbox");
+  assert.equal(commit.sourceKey, "sequence_inbox");
+  assert.deepEqual(commit.checkpoint, { cursor: "sequence-cursor-2", caught_up: true });
+  assert.equal(commit.fullSuccess, true);
+  assert.deepEqual(health, [{ sourceKey: "sequence_inbox", enabled: true, success: true }]);
+  assert.equal(result.checkpoint.cache_state, "ready");
+  assert.equal(result.checkpoint.cache_last_complete_at, "2026-09-03T12:00:00.000Z");
 });
 
 test("candidate-index pages share one durable source-fenced cycle across hourly jobs", async () => {
