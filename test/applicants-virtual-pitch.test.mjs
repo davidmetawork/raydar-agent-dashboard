@@ -181,3 +181,46 @@ test("only the rows in the window are mounted, whatever the pitch", () => {
   const { list } = run({ rows: uniform(5000, 130) });
   assert.ok(list._rows.length < 40, `mounted ${list._rows.length} of 5000`);
 });
+
+// ---------------------------------------------------------------------------
+// THE PITCH IS THE MAP FROM scrollTop TO A ROW INDEX (2026-09-04 review).
+// A fixed pitch could never move a reader; a measured one can, and silently:
+// changing the pitch under a scrolled list re-interprets the SAME scrollTop as
+// a different row. At 190 -> 340 the row at index 900 becomes index 513, with
+// nothing on screen to say the list jumped.
+// ---------------------------------------------------------------------------
+
+test("growing the pitch mid-scroll keeps the reader on the same row", () => {
+  // Thin rows everywhere, a band of tall ones around index 900 — so the pitch
+  // is measured small at the top and only grows once the reader gets there.
+  const rows = uniform(2000, 130);
+  for (let i = 890; i < 910; i += 1) rows[i] = { h: 300 };
+  const { list, api } = run({ rows });
+  assert.equal(api.virtualRowHeight(list), 160, "measured from the thin rows at the top");
+
+  list.scrollTop = 900 * (api.virtualRowHeight(list) + 9);
+  api.renderVirtual(list);
+
+  assert.equal(api.virtualRowHeight(list), 330, "the tall band grew the pitch");
+  assert.equal(Math.round(list.scrollTop / (api.virtualRowHeight(list) + 9)), 900,
+    "still row 900 — not row 435");
+});
+
+test("a list still at the top costs no extra paint when the pitch changes", () => {
+  // The anchor correction is only for a scrolled list. scrollTop 0 maps to
+  // index 0 at every pitch, so the two-paint convergence above is untouched.
+  const { list } = run({ rows: uniform(500, 130) });
+  assert.equal(list.scrollTop, 0);
+  assert.equal(list.paints, 2);
+});
+
+test("a shrinking pitch holds the reader's row too", () => {
+  // The narrow -> wide resize shrinks the pitch by more than 200px. Without
+  // the anchor the reader would be thrown FORWARD instead of back.
+  const rows = uniform(2000, 430);
+  const { list, api, repaint } = run({ rows, innerWidth: 390 });
+  assert.equal(api.virtualRowHeight(list), 460);
+  list.scrollTop = 600 * (api.virtualRowHeight(list) + 9);
+  repaint({ width: 1440 });
+  assert.equal(Math.round(list.scrollTop / (api.virtualRowHeight(list) + 9)), 600);
+});

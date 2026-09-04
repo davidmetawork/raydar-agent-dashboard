@@ -1232,13 +1232,33 @@ function tuneVirtualRowHeight(el) {
     ? el._virtualRowHeight
     : 0;
   el._virtualRowBasis = basis;
+  const previous = virtualRowHeight(el);
   const target = Math.min(virtualRowMax(), Math.max(measured, carried));
-  const changed = Math.abs(target - virtualRowHeight(el)) >= 2;
+  const changed = Math.abs(target - previous) >= 2;
   el._virtualRowHeight = target;
   el.style.setProperty("--row-h", target + "px");
   if (changed) {
+    /* KEEP THE READER ON THE SAME ROW (2026-09-04 review). The pitch is the
+       whole map from scrollTop to a row index, so changing it under a scrolled
+       list moves the reader without touching the scrollbar: a queue paced at
+       190px that meets a taller card and grows to 340 turns the row at index
+       900 into the row at index 513 (MEASURED at 449 in the pitch suite's
+       fixture). A fixed pitch never had this problem, which is exactly why
+       measuring one introduces it.
+       So convert the offset to a row index at the OLD pitch and put that index
+       back at the NEW one. The repaint has to come FIRST — scrollTop cannot be
+       set beyond the virtual-space height that is still on screen — so a list
+       that has been scrolled costs one extra paint. A list still at the top
+       (anchor 0, the common case and every first paint) is unchanged. */
+    const anchor = el.scrollTop / (previous + VIRTUAL_GAP);
     el._virtualTuning = true;
-    try { renderVirtual(el); } finally { el._virtualTuning = false; }
+    try {
+      renderVirtual(el);
+      if (anchor > 0) {
+        el.scrollTop = Math.round(anchor * (target + VIRTUAL_GAP));
+        renderVirtual(el);
+      }
+    } finally { el._virtualTuning = false; }
   }
   markClippedRows(el);
 }
