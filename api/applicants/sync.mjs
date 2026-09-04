@@ -11,6 +11,7 @@
 // 401 carries no detail on purpose.
 
 import { createHash, timingSafeEqual } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { directoryFromFacts, factsFromProfile } from "./_lib/facts.mjs";
 import {
   buildGeneration,
@@ -47,12 +48,14 @@ export const config = { maxDuration: 30 };
 // The loop caps the snapshot on its side (drops per-step detail); this guard
 // keeps a buggy publisher from parking a multi-megabyte blob in KV.
 export const MAX_SNAPSHOT_BYTES = 1_800_000;
-// A queue is stored separately from the stream snapshot, but the publisher
-// sends both in one request. Keep the complete review index intact while
-// retaining 500KB below Vercel's 4.5MB function payload ceiling for the JSON
-// envelope, acks, and normal request growth.
-const MAX_QUEUE_BYTES = 3_000_000;
-const MAX_PUBLISH_BYTES = 4_000_000;
+// The authenticated publisher uses a bounded gzip+base64 transport envelope
+// once the exact JSON body would exceed Vercel's request ceiling. These are
+// decoded logical limits; the wire envelope has its own smaller cap below.
+const MAX_QUEUE_BYTES = 5_500_000;
+const MAX_PUBLISH_BYTES = 6_500_000;
+const MAX_TRANSPORT_COMPRESSED_BYTES = 2_500_000;
+const MAX_TRANSPORT_DECODED_BYTES = 7_000_000;
+const MONITOR_TRANSPORT_VERSION = "applicant-core-monitor-gzip-v1";
 // Delivery is a separate state machine. `blocked` and `invited` are retained
 // for the existing loop; the preparation states make a saved Interview intent
 // visible without pretending that delivery has already happened.
@@ -141,6 +144,51 @@ const PHOTO_URL_PREFIX = "https://storage.googleapis.com/paraform-images/";
 
 function own(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function decodeTransportBody(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || Object.keys(input).length !== 1 || !own(input, "transport")) {
+    return { ok: false, error: "invalid_transport_envelope" };
+  }
+  const transport = input.transport;
+  const expectedKeys = ["codec", "data", "decodedBytes", "decodedSha256", "version"];
+  if (!transport || typeof transport !== "object" || Array.isArray(transport)
+    || JSON.stringify(Object.keys(transport).sort()) !== JSON.stringify(expectedKeys)
+    || transport.version !== MONITOR_TRANSPORT_VERSION
+    || transport.codec !== "gzip-base64"
+    || !Number.isSafeInteger(transport.decodedBytes)
+    || transport.decodedBytes < 2
+    || transport.decodedBytes > MAX_TRANSPORT_DECODED_BYTES
+    || !/^[a-f0-9]{64}$/iu.test(String(transport.decodedSha256 || ""))
+    || typeof transport.data !== "string"
+    || transport.data.length === 0
+    || transport.data.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(transport.data)
+    || transport.data.length > Math.ceil(MAX_TRANSPORT_COMPRESSED_BYTES / 3) * 4 + 4) {
+    return { ok: false, error: "invalid_transport_envelope" };
+  }
+  try {
+    const compressed = Buffer.from(transport.data, "base64");
+    if (compressed.length > MAX_TRANSPORT_COMPRESSED_BYTES
+      || compressed.toString("base64") !== transport.data) {
+      return { ok: false, error: "invalid_transport_envelope" };
+    }
+    const decoded = gunzipSync(compressed, { maxOutputLength: MAX_TRANSPORT_DECODED_BYTES + 1 });
+    if (decoded.length !== transport.decodedBytes
+      || decoded.length > MAX_TRANSPORT_DECODED_BYTES
+      || createHash("sha256").update(decoded).digest("hex") !== transport.decodedSha256) {
+      return { ok: false, error: "invalid_transport_payload" };
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
+    const body = JSON.parse(text);
+    if (!body || typeof body !== "object" || Array.isArray(body) || own(body, "transport")) {
+      return { ok: false, error: "invalid_transport_payload" };
+    }
+    return { ok: true, body };
+  } catch {
+    return { ok: false, error: "invalid_transport_payload" };
+  }
 }
 
 /**
@@ -643,6 +691,11 @@ export function createSyncHandler({
       let body;
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
       catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
+      if (own(body, "transport")) {
+        const decoded = decodeTransportBody(body);
+        if (!decoded.ok) return res.status(400).json({ ok: false, error: decoded.error });
+        body = decoded.body;
+      }
 
       // Core can verify the durable Hub history receipts for the exact keys it
       // is about to place in a generation. This is deliberately a read-only

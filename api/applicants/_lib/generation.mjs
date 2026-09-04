@@ -17,6 +17,7 @@ import {
 export const GENERATION_SCHEMA_VERSION = 1;
 export const GENERATION_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
 export const DIGEST_RE = /^[a-f0-9]{64}$/i;
+export const MAX_GENERATION_ARTIFACT_BYTES = 8_000_000;
 
 const GENERATION_FIELDS = new Set([
   "generationId",
@@ -345,6 +346,16 @@ export async function publishGeneration({
     [`${prefix}:counts`, counts],
     [`${prefix}:meta`, pointer],
   ];
+  for (const [key, value] of artifacts) {
+    const bytes = Buffer.byteLength(JSON.stringify(value));
+    if (bytes > MAX_GENERATION_ARTIFACT_BYTES) {
+      const error = new Error("generation_artifact_too_large");
+      error.artifact = key.split(":").at(-1);
+      error.bytes = bytes;
+      error.max = MAX_GENERATION_ARTIFACT_BYTES;
+      throw error;
+    }
+  }
   for (const [key, value] of artifacts) {
     const result = await writeImmutableJson(key, value);
     // SET NX returns null when a generation id was already used.  Re-reading
