@@ -635,14 +635,20 @@ export function createSyncHandler({
               sourceCutoff: publication?.sourceCutoff || null,
               sourceWatermark: publication?.sourceWatermark || null,
               counts: {
+                total: countsDoc?.total ?? (
+                  queueRows.length + streamRows.length + profilePreparingCount(snapshot)
+                ),
                 queue: queueRows.length,
                 uniqueQueueKeys: new Set(queueKeys).size,
                 stream: streamRows.length,
                 uniqueStreamKeys: new Set(streamKeys).size,
+                profilePreparing: countsDoc?.profilePreparing ?? profilePreparingCount(snapshot),
               },
               storedCounts: countsDoc == null ? null : {
+                total: countsDoc.total ?? null,
                 queue: countsDoc.queue ?? null,
                 stream: countsDoc.stream ?? null,
+                profilePreparing: countsDoc.profilePreparing ?? null,
                 updatedAt: countsDoc.updatedAt ?? null,
                 alert: Boolean(countsDoc.alert),
               },
