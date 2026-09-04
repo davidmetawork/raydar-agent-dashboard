@@ -24,7 +24,8 @@ async function fixture(t) {
     seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/auth/_lib/session.mjs"),
     seed(root, "api/seq/_lib/core.mjs"), seed(root, "api/seq/_lib/scheduling-links.mjs"), seed(root, "api/sourcing/_lib/store.mjs"), seed(root, "api/roster/_lib/outcome-sequences.mjs"),
     seed(root, "submissions-v2.html"), seed(root, "submissions-v2.css"), seed(root, "submissions-v2.js"), seed(root, "submissions-v2-ui-state.mjs"),
-    seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"), seed(root, "vercel.json"),
+    seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"),
+    seed(root, "vercel.json", '{\n  "buildCommand": "node check.mjs",\n  "rewrites": [{ "source": "/submissions-v2", "destination": "/submissions-v2.html" }]\n}\n'),
     seed(root, "api/submissions-v2/_lib/service.mjs"), seed(root, "submissions-v2-worker/server.mjs"), seed(root, "submissions-v2-worker/Dockerfile"), seed(root, "submissions-v2-worker/fly.toml"),
     seed(root, "resume-renderer-v2/app.py"), seed(root, "resume-renderer-v2/requirements.txt"), seed(root, "resume-renderer-v2/assets/raydar-lockup.svg"), seed(root, "resume-renderer-v2/Dockerfile"), seed(root, "resume-renderer-v2/fly.toml"),
     seed(root, "migrations/submissions-v2/001_foundation.sql"),
@@ -91,6 +92,21 @@ test("deployment check accepts only Vercel's intentional Submissions omissions",
   ]);
   const checked = await checkSubmissionsReleaseDeploymentManifest({ root });
   assert.ok(checked.deployed_file_count < checked.file_count);
+});
+
+test("deployment check accepts harmless Vercel JSON serialization but full source check remains byte exact", async (t) => {
+  const root = await fixture(t);
+  await writeSubmissionsReleaseManifest({ root });
+  await seed(root, "vercel.json", '{"rewrites":[{"destination":"/submissions-v2.html","source":"/submissions-v2"}],"buildCommand":"node check.mjs"}');
+  await checkSubmissionsReleaseDeploymentManifest({ root });
+  await assert.rejects(checkSubmissionsReleaseManifest({ root }), /stale/);
+});
+
+test("deployment check rejects changed Vercel configuration semantics", async (t) => {
+  const root = await fixture(t);
+  await writeSubmissionsReleaseManifest({ root });
+  await seed(root, "vercel.json", '{"buildCommand":"node bypass.mjs","rewrites":[{"source":"/submissions-v2","destination":"/submissions-v2.html"}]}');
+  await assert.rejects(checkSubmissionsReleaseDeploymentManifest({ root }), /stale: vercel\.json/);
 });
 
 test("deployment check rejects changed or missing API files and unexpected deployed additions", async (t) => {

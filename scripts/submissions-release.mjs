@@ -42,6 +42,21 @@ const deploymentOmitted = (path) => path === "scripts/migrate-submissions-v2.mjs
   || path.startsWith("submissions-v2-purge/")
   || path.startsWith("submissions-v2-worker/");
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function vercelJsonCanonicalSha256(root) {
+  let config;
+  try { config = JSON.parse(await readFile(resolve(root, "vercel.json"), "utf8")); }
+  catch { throw new Error("Submissions release manifest requires valid vercel.json"); }
+  return sha256(canonicalJson(config));
+}
+
 async function walk(root, directory, accepts) {
   const absolute = resolve(root, directory);
   const entries = await readdir(absolute, { withFileTypes: true });
@@ -68,7 +83,14 @@ export async function buildSubmissionsReleaseManifest({ root = SCRIPT_ROOT } = {
   for (const [directory, accepts] of FIXED_DIRECTORIES) paths.push(...await walk(resolvedRoot, directory, accepts));
   const files = await Promise.all([...new Set(paths)].sort().map((path) => fileEntry(resolvedRoot, path)));
   const digest = sha256(files.map((file) => `${file.path}\0${file.sha256}\n`).join(""));
-  return { schema_version: 1, algorithm: "sha256", file_count: files.length, digest, files };
+  return {
+    schema_version: 2,
+    algorithm: "sha256",
+    file_count: files.length,
+    digest,
+    vercel_json_canonical_sha256: await vercelJsonCanonicalSha256(resolvedRoot),
+    files,
+  };
 }
 
 async function buildDeploymentReleaseFiles({ root = SCRIPT_ROOT } = {}) {
@@ -127,10 +149,17 @@ export async function checkSubmissionsReleaseDeploymentManifest({ root = SCRIPT_
   try { generated = await readFile(resolve(resolvedRoot, MANIFEST_MODULE), "utf8"); }
   catch { throw new Error(`Submissions release manifest module is missing; run node scripts/submissions-release.mjs --write`); }
   if (generated !== manifestModule(expected)) throw new Error(`Submissions release manifest module is stale; run node scripts/submissions-release.mjs --write`);
+  if (typeof expected.vercel_json_canonical_sha256 !== "string") {
+    throw new Error("Submissions release manifest is missing the Vercel config digest; run node scripts/submissions-release.mjs --write");
+  }
   const actualFiles = await buildDeploymentReleaseFiles({ root: resolvedRoot });
   const expectedByPath = new Map((expected.files || []).map((file) => [file.path, file.sha256]));
   for (const file of actualFiles) {
+    if (file.path === "vercel.json") continue;
     if (expectedByPath.get(file.path) !== file.sha256) throw new Error(`Submissions deployment release manifest is stale: ${file.path}`);
+  }
+  if (await vercelJsonCanonicalSha256(resolvedRoot) !== expected.vercel_json_canonical_sha256) {
+    throw new Error("Submissions deployment release manifest is stale: vercel.json");
   }
   const actualPaths = new Set(actualFiles.map((file) => file.path));
   for (const file of expected.files || []) {
