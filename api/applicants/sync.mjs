@@ -471,9 +471,11 @@ const COUNT_DIMENSIONS = [...COUNT_PARTITIONS, COUNT_TOTAL];
  *     which would otherwise never clear because the moved rows are never
  *     coming back to their old partition.
  *
- * Conservation is only ever claimed from two known totals. An older doc with
- * no stored total leaves it unknown, and unknown falls back to the pre-2026-09
- * behaviour: alert.
+ * Conservation is only ever claimed from two known totals, one of them
+ * supplied by THIS publish. An older doc with no stored total leaves the
+ * baseline unknown, and a publish that declared no total (and no full set of
+ * partitions to sum) proves nothing about itself; both fall back to the
+ * pre-2026-09 behaviour: alert.
  */
 export function nextCountsDoc(prev, incoming, at) {
   const doc = { updatedAt: at, alert: null };
@@ -509,7 +511,17 @@ export function nextCountsDoc(prev, incoming, at) {
     }
   }
   const totalBaseline = baselineOf(COUNT_TOTAL);
-  const conserved = typeof doc[COUNT_TOTAL] === "number"
+  // CONSERVATION MUST BE PROVED BY *THIS* PUBLISH, NOT BY A CARRIED NUMBER.
+  // `doc.total` is set either from what this publish declared or, when the
+  // publish omitted it, carried forward from the previous doc. The carried
+  // case compares a stale total against itself (5,800 >= 5,800), which is
+  // always true, and would then delete a partition alert this very call had
+  // just latched: nextCountsDoc({queue:4000,stream:1800,profilePreparing:0,
+  // total:5800}, {queue:2}) would return alert:null and mute a 4,000 -> 2
+  // collapse. Only a total THIS publish supplied is evidence about THIS
+  // publish, so `declaredTotal !== undefined` is part of the test.
+  const conserved = declaredTotal !== undefined
+    && typeof doc[COUNT_TOTAL] === "number"
     && typeof totalBaseline === "number"
     && doc[COUNT_TOTAL] >= totalBaseline;
   if (conserved) for (const dim of COUNT_PARTITIONS) delete alerts[dim];

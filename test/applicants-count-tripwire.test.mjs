@@ -389,3 +389,51 @@ test("feed returns the counts doc alongside the snapshot", async () => {
   assert.deepEqual(res.body.counts, generation.counts);
   assert.deepEqual(res.body.counts.alert, { queue: { baseline: 2244, seen: 22, at: AT } });
 });
+
+// ---------------------------------------------------------------------------
+// A PARTIAL PUBLISH CAN NEVER PROVE CONSERVATION (2026-09-04, review finding).
+// `doc.total` is set from the incoming publish OR carried forward from the
+// previous doc. If the carried number counted as evidence, it would prove
+// conservation against itself and delete a partition alert latched one line
+// earlier — silencing the exact 2,244 -> 22 collapse this tripwire exists for.
+// ---------------------------------------------------------------------------
+
+test("a partial publish can never prove conservation", () => {
+  const prev = { queue: 4000, stream: 1800, profilePreparing: 0, total: 5800, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 2 }, AT);
+  // The carried total is still on the doc — it is the last known number, and
+  // dropping it would lose the baseline for the next full publish.
+  assert.equal(doc.total, 5800);
+  // But it proves nothing: the queue collapse latches.
+  assert.deepEqual(doc.alert, { queue: { baseline: 4000, seen: 2, at: AT } });
+});
+
+test("a partial publish cannot clear an alert a full publish latched", () => {
+  const prev = { queue: 4000, stream: 1800, profilePreparing: 0, total: 5800, updatedAt: AT, alert: null };
+  const latched = nextCountsDoc(prev, { queue: 2, stream: 1800, profilePreparing: 0, total: 1802 }, AT);
+  // The queue collapsed AND the population really did shrink, so both the
+  // partition and the conserved total latch. This is the genuine loss alarm.
+  assert.deepEqual(latched.alert, {
+    queue: { baseline: 4000, seen: 2, at: AT },
+    total: { baseline: 5800, seen: 1802, at: AT },
+  });
+  // A later publish that omits the total (and does not carry all three
+  // partitions) must leave both latches exactly where they are.
+  const held = nextCountsDoc(latched, { stream: 1800 }, "2026-09-04T10:00:00.000Z");
+  assert.deepEqual(held.alert, {
+    queue: { baseline: 4000, seen: 2, at: AT },
+    total: { baseline: 5800, seen: 1802, at: AT },
+  });
+});
+
+test("a full publish that conserves the total still clears a partition alert", () => {
+  // The move-is-not-a-loss path is untouched: the total is declared HERE.
+  const prev = { queue: 4345, stream: 1811, profilePreparing: 0, total: 6156, updatedAt: AT, alert: null };
+  const doc = nextCountsDoc(prev, { queue: 4345, stream: 2, profilePreparing: 1809, total: 6156 }, AT);
+  assert.equal(doc.alert, null);
+  // And summed-from-partitions counts as declared, because it is the same
+  // number by construction.
+  const summed = nextCountsDoc(prev, { queue: 4345, stream: 2, profilePreparing: 1809 }, AT);
+  assert.equal(summed.alert, null);
+  assert.equal(summed.total, 6156);
+});
