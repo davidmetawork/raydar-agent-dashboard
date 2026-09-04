@@ -17,3 +17,5 @@ The Vercel project build command is `npm run submissions-v2:release:vercel`, whi
 Email scope rollout and bounded recovery are documented in the Raydar completion PRD and source map; apply the Inbox migration before deploying its multi-role producer, preserve the existing Interview cursor, and let the separately scoped Gmail cursor catch up from the existing activation timestamp.
 
 The isolated `submissions-v2-worker/repair-role-evidence.mjs` utility is read-only by default and requires `--plan=<absolute-private-plan-path>` with `--apply=<inspected-plan-digest>` for a matching freshly revalidated plan; applying also requires the existing API database principal, preserves source evidence, and queues the ordinary classifier through first-response and Review resolution checks.
+
+The dashboard serves static files from the project root, so `outputDirectory` is explicitly `.` even with the release-check build command; this follows [Vercel’s output-directory configuration](https://vercel.com/docs/builds/configure-a-build#output-directory).

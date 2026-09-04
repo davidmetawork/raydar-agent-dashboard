@@ -1,5 +1,6 @@
 {
   "buildCommand": "npm run submissions-v2:release:vercel",
+  "outputDirectory": ".",
   "rewrites": [
     {
       "source": "/api/submissions-v2/:route*",
