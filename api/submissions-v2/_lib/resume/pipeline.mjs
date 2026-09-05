@@ -8,7 +8,7 @@ import {
   STRATEGIST_MAX_OUTPUT_TOKENS,
   STRATEGIST_PRIMARY_MODEL,
   STRATEGIST_PROMPT_VERSION,
-  buildResumeStrategistPayload,
+  resumeStrategistForecastInput,
   runResumeStrategist,
 } from "../models/anthropic-strategist.mjs";
 import {
@@ -79,6 +79,21 @@ function generationFailureDetails(error, generation, triggerKind) {
     priorArtifactId: generation?.prior_artifact_id || null,
   };
   return error;
+}
+
+function safeFailureDetail(error) {
+  const base = clean(error?.safeMessage || error?.message || "Resume preparation failed safely before publication.");
+  const code = error?.details?.contractCode === "RESUME_FILLER_OR_REPETITION"
+    ? error.details.contractCode
+    : null;
+  const path = String(error?.details?.contractPath || "");
+  const safePath = path.length <= 160
+    && /^document\.(?:candidate\.(?:name|headline|contact\[\d{1,2}\])|summary|sections\[\d{1,2}\]\.entries\[\d{1,2}\]\.(?:header|body)\[\d{1,2}\])$/u.test(path)
+    ? path
+    : null;
+  if (!code) return base;
+  const suffix = `Contract ${code}${safePath ? ` at ${safePath}` : ""}.`;
+  return clean(base.includes(suffix) ? base : `${base} ${suffix}`);
 }
 
 function stageInputDigest(value) {
@@ -330,7 +345,7 @@ export async function runResumePreparation(context, {
     if (!strategy) {
       const forecast = forecastModelCostCents({
         model: STRATEGIST_PRIMARY_MODEL,
-        input: buildResumeStrategistPayload({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }),
+        input: resumeStrategistForecastInput({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }),
         maximumOutputTokens: STRATEGIST_MAX_OUTPUT_TOKENS,
         attempts: 2,
         env,
@@ -536,6 +551,8 @@ export async function runResumePreparation(context, {
       retryable: true,
       checkpoint,
     });
+    normalized.safeMessage = safeFailureDetail(normalized);
+    normalized.message = normalized.safeMessage;
     throw generationFailureDetails(normalized, generation, triggerKind);
   }
 }
@@ -549,9 +566,9 @@ export async function settleResumePreparationFailure(error, context, { store, ex
   const triggerKind = error?.details?.triggerKind || context?.job?.checkpoint?.trigger_kind || "initial";
   const hasPriorArtifact = Boolean(error?.details?.priorArtifactId);
   if (triggerKind === "regenerate" || hasPriorArtifact) {
-    await store.failRegeneration({ generationId, reasonCode, safeDetail: clean(error.safeMessage || error.message), executionFence });
+    await store.failRegeneration({ generationId, reasonCode, safeDetail: safeFailureDetail(error), executionFence });
   } else {
-    await store.failInitialGeneration({ generationId, reasonCode, safeDetail: clean(error.safeMessage || error.message), executionFence });
+    await store.failInitialGeneration({ generationId, reasonCode, safeDetail: safeFailureDetail(error), executionFence });
   }
   return true;
 }
@@ -560,6 +577,7 @@ export const resumePipelineInternals = Object.freeze({
   artifactMetadata,
   effectiveStrategyInstructions,
   layoutRetryCheckpoint,
+  safeFailureDetail,
   officialBrandAsset,
   stageInputDigest,
 });

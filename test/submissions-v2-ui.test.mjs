@@ -165,6 +165,8 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
   assert.match(js, /not_candidate_response/);
   assert.match(js, /irrelevant_notification/);
   assert.match(js, /already_handled/);
+  assert.match(js, /Already handled<\/option>/);
+  assert.doesNotMatch(js, /Already handled on a verified submission/);
   assert.match(js, /title: "Review the candidate signal"/);
   assert.match(js, /Open Signal/);
   assert.match(js, /Original offer/);

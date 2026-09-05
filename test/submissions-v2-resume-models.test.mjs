@@ -7,7 +7,9 @@ import {
   STRATEGIST_FALLBACK_MODEL,
   STRATEGIST_MAX_OUTPUT_TOKENS,
   STRATEGIST_PRIMARY_MODEL,
+  STRATEGIST_PROMPT_VERSION,
   buildResumeStrategistPayload,
+  resumeStrategistForecastInput,
   runResumeStrategist,
   schemaForAnthropic,
   strategySchemaForAnthropic,
@@ -203,6 +205,85 @@ test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable prima
   assert.equal(result.audit.model, STRATEGIST_FALLBACK_MODEL);
   assert.equal(result.fallbackReason, "MODEL_PROVIDER_ERROR");
   assert.equal(result.strategy.document.schema_version, "raydar.resume.ast.v1");
+});
+
+test("strategist gives its existing fallback a bounded diagnostic after repeated visible copy", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const repeated = strategyFixture();
+  repeated.document.sections[0].entries[0].body[0].text = "Alpha";
+  repeated.document.sections[0].entries[0].body[0].emphasis = [];
+  const bodies = [];
+  const result = await runResumeStrategist({ bundle, ledger }, {
+    apiKey: "test-key",
+    fetchImpl: async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      const strategy = bodies.length === 1 ? repeated : strategyFixture();
+      return response(200, {
+        id: `msg-${bodies.length}`,
+        content: [{ type: "text", text: JSON.stringify(strategy) }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+        stop_reason: "end_turn",
+      });
+    },
+  });
+  const firstPayload = JSON.parse(bodies[0].messages[0].content[0].text.match(/<UNTRUSTED_RESUME_INPUT_JSON>\n([\s\S]+)\n<\/UNTRUSTED_RESUME_INPUT_JSON>/u)[1]);
+  const fallbackPayload = JSON.parse(bodies[1].messages[0].content[0].text.match(/<UNTRUSTED_RESUME_INPUT_JSON>\n([\s\S]+)\n<\/UNTRUSTED_RESUME_INPUT_JSON>/u)[1]);
+  assert.equal(bodies.length, 2);
+  assert.equal(firstPayload.version_instructions, null);
+  assert.match(fallbackPayload.version_instructions, /RESUME_FILLER_OR_REPETITION at document\.sections\[0\]\.entries\[0\]\.body\[0\]/u);
+  assert.match(fallbackPayload.version_instructions, /retaining only supported facts/u);
+  assert.match(fallbackPayload.version_instructions, /Never invent, alter, or split candidate history/u);
+  assert.equal(result.fallbackReason, "RESUME_FILLER_OR_REPETITION");
+  assert.equal(result.strategy.document.sections[0].entries[0].body[0].text, "Built a scheduling system used by 20 teams.");
+});
+
+test("strategist preserves only the allowlisted contract code and path when both calls repeat copy", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const repeated = strategyFixture();
+  repeated.document.sections[0].entries[0].body[0].text = "Alpha";
+  repeated.document.sections[0].entries[0].body[0].emphasis = [];
+  let calls = 0;
+  await assert.rejects(
+    () => runResumeStrategist({ bundle, ledger }, {
+      apiKey: "test-key",
+      fetchImpl: async () => {
+        calls += 1;
+        return response(200, {
+          id: `msg-repeated-${calls}`,
+          content: [{ type: "text", text: JSON.stringify(repeated) }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+          stop_reason: "end_turn",
+        });
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "RESUME_FILLER_OR_REPETITION");
+      assert.deepEqual(error.details, {
+        contractCode: "RESUME_FILLER_OR_REPETITION",
+        contractPath: "document.sections[0].entries[0].body[0]",
+      });
+      assert.doesNotMatch(JSON.stringify(error.details), /Alpha|Jane Doe|scheduling system/u);
+      return true;
+    },
+  );
+  assert.equal(calls, 2);
+});
+
+test("strategist forecast reserves the maximum bounded fallback feedback", () => {
+  const { bundle, ledger } = evidenceFixture();
+  const forecastPayload = JSON.parse(resumeStrategistForecastInput({ bundle, ledger, versionInstructions: "Keep it direct." }));
+  assert.match(forecastPayload.version_instructions, /document\.sections\[19\]\.entries\[19\]\.body\[11\]/u);
+  assert.ok(forecastPayload.version_instructions.length <= 8_000);
+  assert.match(STRATEGIST_PROMPT_VERSION, /2026-09-05\.v4$/u);
+});
+
+test("strategist forecast keeps a larger multibyte primary instruction payload", () => {
+  const { bundle, ledger } = evidenceFixture();
+  const versionInstructions = "🔥".repeat(4_000);
+  const primaryPayload = buildResumeStrategistPayload({ bundle, ledger, versionInstructions });
+  const forecastPayload = JSON.parse(resumeStrategistForecastInput({ bundle, ledger, versionInstructions }));
+  assert.equal(forecastPayload.version_instructions, primaryPayload.version_instructions);
+  assert.equal(Buffer.byteLength(forecastPayload.version_instructions, "utf8"), 16_000);
 });
 
 test("strategist accepts an exact JSON object wrapped by harmless provider prose", async () => {

@@ -12,7 +12,12 @@ export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
 export const STRATEGIST_MAX_OUTPUT_TOKENS = 8_000;
-export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-02.v3";
+export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-05.v4";
+
+const RETRYABLE_CONTRACT_CODES = new Set(["RESUME_FILLER_OR_REPETITION"]);
+const CONTRACT_PATH = /^document\.(?:candidate\.(?:name|headline|contact\[\d{1,2}\])|summary|sections\[\d{1,2}\]\.entries\[\d{1,2}\]\.(?:header|body)\[\d{1,2}\])$/u;
+const MAX_VERSION_INSTRUCTIONS = 8_000;
+const FORECAST_CONTRACT_PATH = "document.sections[19].entries[19].body[11]";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = new Set([
@@ -339,12 +344,51 @@ function checkedResultStrategy(result, ledger) {
       selected_claim_ids: [...new Set(collectContentNodes(document).flatMap((node) => node.claim_ids))],
     };
   } catch (cause) {
+    const details = safeContractFailure(cause);
     throw new ModelProviderError(cause?.code || "STRATEGIST_AST_INVALID", "Anthropic returned an invalid resume document contract", {
       retryable: true,
       provider: "anthropic",
       cause,
+      details,
     });
   }
+}
+
+function safeContractFailure(error) {
+  const contractCode = RETRYABLE_CONTRACT_CODES.has(error?.code) ? error.code : null;
+  if (!contractCode) return null;
+  const rawPath = String(error?.details?.path || "");
+  return {
+    contractCode,
+    contractPath: rawPath.length <= 160 && CONTRACT_PATH.test(rawPath) ? rawPath : null,
+  };
+}
+
+function fallbackContractFeedback(error) {
+  const details = error?.details;
+  if (details?.contractCode !== "RESUME_FILLER_OR_REPETITION") return null;
+  const location = details.contractPath ? ` at ${details.contractPath}` : "";
+  return `The prior draft was rejected by the local resume contract with RESUME_FILLER_OR_REPETITION${location}. Produce a fresh document in which every visible text node is unique. Remove or combine repeated visible text, including repeated structural labels, while retaining only supported facts. Never invent, alter, or split candidate history merely to make wording unique.`;
+}
+
+function payloadWithFallbackFeedback(payload, error) {
+  const feedback = fallbackContractFeedback(error);
+  if (!feedback) return payload;
+  const original = String(payload.version_instructions || "").trim();
+  const retained = original.slice(0, Math.max(0, MAX_VERSION_INSTRUCTIONS - feedback.length - 2)).trim();
+  return { ...payload, version_instructions: [retained, feedback].filter(Boolean).join("\n\n") };
+}
+
+export function resumeStrategistForecastInput(input) {
+  const payload = buildResumeStrategistPayload(input);
+  const worstCaseFallback = payloadWithFallbackFeedback(payload, {
+    details: { contractCode: "RESUME_FILLER_OR_REPETITION", contractPath: FORECAST_CONTRACT_PATH },
+  });
+  const primaryInput = canonicalJson(payload);
+  const fallbackInput = canonicalJson(worstCaseFallback);
+  return Buffer.byteLength(primaryInput, "utf8") >= Buffer.byteLength(fallbackInput, "utf8")
+    ? primaryInput
+    : fallbackInput;
 }
 
 function normalizeModelDocument(raw, allowedClaimIds = []) {
@@ -475,7 +519,7 @@ export async function runResumeStrategist({
       retryable: primaryError?.retryable === true,
     });
     if (primaryError?.retryable !== true) throw primaryError;
-    const fallback = await callModel(STRATEGIST_FALLBACK_MODEL, payload, {
+    const fallback = await callModel(STRATEGIST_FALLBACK_MODEL, payloadWithFallbackFeedback(payload, primaryError), {
       apiKey,
       fetchImpl,
       maxTokens,
