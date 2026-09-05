@@ -10,6 +10,7 @@ import {
   normalizeProfiles,
 } from "../api/applicants/sync.mjs";
 import {
+  canonicalSourceProfileJson,
   SOURCE_PROFILE_DIGEST_TEST_VECTOR,
   sourceProfileDigest,
 } from "../api/applicants/_lib/source-profile-digest.mjs";
@@ -96,6 +97,19 @@ test("the photos hash follows the same allowlist as the card", () => {
 
 test("the shared source-profile digest vector hashes to its exact published hex", () => {
   assert.equal(sourceProfileDigest(SOURCE_PROFILE_DIGEST_TEST_VECTOR), VECTOR_DIGEST);
+});
+
+test("a Date updatedAt hashes exactly like the ISO string the Monitor receives", () => {
+  // THE CASE THE PINNED VECTOR HIDES, and the reason this mirror exists. Core
+  // builds updatedAt from a pg timestamptz, so node-pg hands it a JS Date; the
+  // Monitor only ever sees the ISO string JSON.stringify made of it. Both sides
+  // canonicalize the wire form, so the two hash identically — otherwise no
+  // receipt would ever match and Core would republish for ever.
+  const iso = "2026-09-05T00:00:00.000Z";
+  const asDate = { ...SOURCE_PROFILE_DIGEST_TEST_VECTOR, updatedAt: new Date(iso) };
+  assert.equal(sourceProfileDigest(asDate), VECTOR_DIGEST);
+  assert.equal(sourceProfileDigest(JSON.parse(JSON.stringify(asDate))), VECTOR_DIGEST);
+  assert.match(canonicalSourceProfileJson(asDate), new RegExp(`"updatedAt":"${iso}"`));
 });
 
 test("the source-profile receipt records the digest of what was STORED", async () => {
