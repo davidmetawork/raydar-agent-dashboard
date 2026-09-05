@@ -2681,6 +2681,122 @@ test("Review decisions cannot clear a resume-specific blocker through the generi
   }
 });
 
+test("a classifier role-unclear pair can be resolved only with an active exact source offer", async () => {
+  const prior = await readRuntimeControls(sql);
+  const apiDatabase = {
+    begin: (work) => sql.begin(async (apiSql) => {
+      await apiSql.unsafe("set local role submissions_v2_api");
+      return work(apiSql);
+    }),
+  };
+  const repository = createRepository({ sql: apiDatabase });
+  const fixture = async ({ offered = true, candidateActive = true, roleActive = true } = {}) => {
+    const candidateId = `role-unclear-candidate-${randomUUID()}`;
+    const roleId = `role-unclear-role-${randomUUID()}`;
+    const signalId = await sourceEvent({ family: "email", envelope: { candidate_resolution: { candidate_user_id: candidateId } } });
+    const pairId = randomUUID();
+    await sql`
+      insert into submissions_v2.candidate_index(
+        candidate_user_id, display_name, normalized_name, search_key, active,
+        paraform_profile_url, last_confirmed_at, source_digest
+      ) values (
+        ${candidateId}, 'Exact Role Candidate', 'exact role candidate', 'exact role candidate', ${candidateActive},
+        ${`https://www.paraform.com/candidates?candidate=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url, last_confirmed_at, source_digest
+      ) values (
+        ${roleId}, 'Exact Role Company', 'Exact Role Engineer', 'exact role company exact role engineer', ${roleActive},
+        ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
+      )
+    `;
+    if (offered) {
+      await sql`
+        insert into submissions_v2.source_offered_roles(
+          signal_id, role_id, company_snapshot, role_label_snapshot, role_url_snapshot, content_digest
+        ) values (
+          ${signalId}, ${roleId}, 'Exact Role Company', 'Exact Role Engineer',
+          ${`https://www.paraform.com/browse?role=${roleId}`}, ${digest(`offered:${signalId}:${roleId}`)}
+        )
+      `;
+    }
+    await sql.begin(async (tx) => {
+      await tx`
+        insert into submissions_v2.candidate_role_pairs(
+          id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state, original_signal_at, role_state
+        ) values (
+          ${pairId}, ${candidateId}, ${roleId}, ${signalId}, 'unclear', 'needs_review', clock_timestamp(), 'active'
+        )
+      `;
+      await tx`
+        insert into submissions_v2.review_items(pair_id, reason_code, safe_detail, evidence)
+        values (${pairId}, 'role_unclear', 'The exact offered role is known but requires a human decision.', ${tx.json({ signal_id: signalId, role_id: roleId })})
+      `;
+    });
+    return { candidateId, roleId, signalId, pairId };
+  };
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable exact classifier role-unclear resolution regression",
+      ui: true, ingestion: prior.ingestion_enabled, generation: true,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+
+    const matched = await fixture();
+    const idempotencyKey = randomUUID();
+    const resolved = await repository.transition({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, pairId: matched.pairId,
+      expectedVersion: 1, destination: "interested", note: "Candidate selected the exact offered role.", action: "resolve_review",
+    });
+    assert.deepEqual(resolved, { case_id: matched.pairId, state: "preparing_resume", state_version: 2 });
+    assert.deepEqual((await sql`
+      select intent_state, workflow_state, state_version from submissions_v2.candidate_role_pairs where id=${matched.pairId}
+    `)[0], { intent_state: "interested", workflow_state: "preparing_resume", state_version: "2" });
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.review_items where pair_id=${matched.pairId} and action_state='open'
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.jobs where subject_id=${matched.pairId}::text and kind='prepare_resume' and state='queued'
+    `)[0].count, 1);
+    assert.deepEqual(await repository.transition({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, pairId: matched.pairId,
+      expectedVersion: 1, destination: "interested", note: "Candidate selected the exact offered role.", action: "resolve_review",
+    }), { ...resolved, replay: true });
+
+    for (const blocked of [
+      await fixture({ offered: false }),
+      await fixture({ candidateActive: false }),
+      await fixture({ roleActive: false }),
+    ]) {
+      const blockedKey = randomUUID();
+      await assert.rejects(
+        repository.transition({
+          actorEmail: "recruiter@raydar.xyz", idempotencyKey: blockedKey, pairId: blocked.pairId,
+          expectedVersion: 1, destination: "interested", note: "Attempted role-unclear clearance", action: "resolve_review",
+        }),
+        (error) => error.code === "review_resolution_not_eligible" && error.status === 409,
+      );
+      assert.deepEqual((await sql`
+        select intent_state, workflow_state, state_version from submissions_v2.candidate_role_pairs where id=${blocked.pairId}
+      `)[0], { intent_state: "unclear", workflow_state: "needs_review", state_version: "1" });
+      assert.equal((await sql`
+        select count(*)::integer as count from submissions_v2.review_items where pair_id=${blocked.pairId} and action_state='open' and reason_code='role_unclear'
+      `)[0].count, 1);
+      assert.equal((await sql`
+        select count(*)::integer as count from submissions_v2.api_commands where idempotency_key=${blockedKey}
+      `)[0].count, 0);
+    }
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore controls after exact classifier role-unclear resolution regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+});
+
 test("a fenced live role recheck clears only role availability and never invents unclear intent", async () => {
   const prior = await readRuntimeControls(sql);
   const enabled = await setRuntimeControls({
@@ -2815,4 +2931,53 @@ test("a fenced live role recheck clears only role availability and never invents
       masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
     }, sql);
   }
+});
+
+test("explicit role catalog preserves inactive ambiguity and requires only worker read access", async () => {
+  const marker = `named-catalog-${randomUUID()}`;
+  const rollback = new Error("rollback explicit catalog fixtures");
+  await assert.rejects(sql.begin(async (tx) => {
+    await tx`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url,
+        last_confirmed_at, source_digest
+      ) values
+        (${`${marker}-active`}, 'Example Inc', 'AI Engineer', 'example ai engineer', true,
+         'https://www.paraform.com/browse?role=example-active', clock_timestamp(), ${digest("active")}),
+        (${`${marker}-inactive`}, 'Example Inc', 'AI Engineer', 'example ai engineer', false,
+         'https://www.paraform.com/browse?role=example-inactive', clock_timestamp(), ${digest("inactive")})
+    `;
+    await tx.unsafe("set local role submissions_v2_worker");
+    const repository = createRepository({ sql: tx });
+    const catalog = await repository.explicitRoleCatalog();
+    assert.equal(catalog.status, "ready");
+    assert.equal(catalog.complete, true);
+    const matches = catalog.roles.filter((role) => role.role_id.startsWith(marker));
+    assert.equal(matches.length, 2);
+    assert.deepEqual(matches.map((role) => role.active), [true, false]);
+    assert.ok(matches.every((role) => role.last_confirmed_at && role.source_digest));
+    assert.match(catalog.digest, /^[a-f0-9]{64}$/);
+    assert.equal((await repository.explicitRoleCatalog()).digest, catalog.digest);
+    throw rollback;
+  }), (error) => error === rollback);
+});
+
+test("explicit role catalog refuses partial uniqueness beyond its complete-read bound", async () => {
+  const marker = `named-catalog-limit-${randomUUID()}`;
+  const rollback = new Error("rollback oversized catalog fixtures");
+  await assert.rejects(sql.begin(async (tx) => {
+    await tx`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url,
+        last_confirmed_at, source_digest
+      ) select ${marker} || '-' || ordinal, 'Example Inc', 'AI Engineer',
+               'example ai engineer', true,
+               'https://www.paraform.com/browse?role=example-' || ordinal,
+               clock_timestamp(), ${digest("bounded")}
+          from generate_series(1, 5001) as ordinal
+    `;
+    const catalog = await createRepository({ sql: tx }).explicitRoleCatalog();
+    assert.deepEqual(catalog, { status: "unavailable", complete: false, roles: [], digest: null });
+    throw rollback;
+  }), (error) => error === rollback);
 });

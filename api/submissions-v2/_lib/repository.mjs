@@ -740,6 +740,23 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       `;
     },
 
+    async explicitRoleCatalog() {
+      // Uniqueness must be checked against the complete local catalog, including
+      // inactive records. A truncated search result cannot prove an exact match.
+      const rows = await sql`
+        select role_id, company_name, role_title, destination_url, active,
+               last_confirmed_at, source_digest
+          from submissions_v2.role_index
+         order by role_id
+         limit 5001
+      `;
+      if (rows.length > 5000) {
+        return { status: "unavailable", complete: false, roles: [], digest: null };
+      }
+      const roles = Array.from(rows);
+      return { status: "ready", complete: true, roles, digest: digest(JSON.stringify(roles)) };
+    },
+
     async pair(pairId) {
       const rows = await sql`
         select p.*, c.display_name as candidate_name, c.paraform_profile_url as candidate_url,
@@ -1527,13 +1544,37 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
              where pair_id=${pairId} and action_state='open'
              for update
           `;
-          if (!openReviews.length || openReviews.some((row) => !HUMAN_REVIEW_DECISION_REASONS.has(row.reason_code))) {
+          const hasClassifierRoleUnclear = openReviews.some((row) => row.reason_code === "role_unclear");
+          if (!openReviews.length || openReviews.some((row) => row.reason_code !== "role_unclear" && !HUMAN_REVIEW_DECISION_REASONS.has(row.reason_code))) {
             throw problem(
               "review_resolution_not_eligible",
               "Resolve the candidate, role, classifier, or resume blocker with its specific Review action.",
               409,
               pairCurrent(current),
             );
+          }
+          if (hasClassifierRoleUnclear) {
+            const exactRoleEvidence = await tx`
+              select 1
+                from submissions_v2.candidate_index candidate
+                join submissions_v2.role_index role on role.role_id=${current.role_id} and role.active
+               where candidate.candidate_user_id=${current.candidate_user_id}
+                 and candidate.active
+                 and exists (
+                   select 1
+                     from submissions_v2.source_offered_roles offered
+                    where offered.signal_id=${current.first_signal_id}
+                      and offered.role_id=${current.role_id}
+                 )
+            `;
+            if (!exactRoleEvidence.length) {
+              throw problem(
+                "review_resolution_not_eligible",
+                "Resolve the candidate, role, classifier, or resume blocker with its specific Review action.",
+                409,
+                pairCurrent(current),
+              );
+            }
           }
         }
         if (destination === "needs_review") {

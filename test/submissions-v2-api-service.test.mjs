@@ -92,6 +92,128 @@ test("Master Inbox intake encrypts private text, keeps trusted conversation link
   assert.equal(JSON.stringify(recorded.safeEnvelope).includes("Yes, I am interested."), false);
 });
 
+test("missing offered roles use only a complete fresh explicit-role catalog before first-response claiming", async () => {
+  const at = Date.parse("2026-09-05T15:00:00.000Z");
+  let claimed;
+  let recorded;
+  const input = inboxEvent();
+  delete input.roleId;
+  input.family = "fit_follow_up_with_matches";
+  input.payload.candidateText = "Acme Health — Backend Engineer\nI would appreciate an introduction.";
+  input.payload.contentDigest = "b".repeat(64);
+  const repository = intakeRepository({
+    explicitRoleCatalog: async () => ({
+      status: "ready", complete: true, digest: "c".repeat(64),
+      roles: [{
+        role_id: "role-exact", company_name: "Acme Health", role_title: "Backend Engineer",
+        active: true, destination_url: "https://www.paraform.com/browse?role=role-exact",
+        last_confirmed_at: "2026-09-05T14:30:00.000Z",
+      }],
+    }),
+    claimEmailFirstResponse: async (inputValue) => {
+      claimed = inputValue;
+      return { eligible_role_ids: ["role-exact"], dropped_role_count: 0, ignored_later: false };
+    },
+    recordEmailSource: async (inputValue) => {
+      recorded = inputValue;
+      return { existing: false, source: { id: "signal-named", processing_state: inputValue.processingState }, job: { id: "job-named" } };
+    },
+  });
+  const service = createService({
+    repository, env, now: () => at,
+    blob: { putPrivateObject: async () => {} },
+  });
+  const result = await service.intakeMasterInbox(input);
+  assert.equal(result.processing_state, "ready");
+  assert.deepEqual(claimed.offeredRoles.map((role) => role.role_id), ["role-exact"]);
+  assert.equal(recorded.event.content_digest, "b".repeat(64));
+  assert.equal(recorded.event.source_evidence.exact_role_source, "candidate_authored_explicit");
+  assert.equal(recorded.safeEnvelope.source_evidence.resolved_role_count, 1);
+  assert.equal(JSON.stringify(recorded.safeEnvelope).includes("I would appreciate"), false);
+});
+
+test("explicit-role fallback cannot rescue malformed, unsupported-family, or generic replies and never guesses candidate identity", async () => {
+  const base = inboxEvent();
+  delete base.roleId;
+  base.payload.candidateText = "Yes, please.";
+  let catalogReads = 0;
+  const repository = intakeRepository({
+    explicitRoleCatalog: async () => {
+      catalogReads += 1;
+      return { status: "ready", complete: true, digest: "c".repeat(64), roles: [] };
+    },
+  });
+  const service = createService({ repository, env, blob: { putPrivateObject: async () => {} } });
+  const generic = await service.intakeMasterInbox(base);
+  assert.equal(generic.processing_state, "needs_role");
+  assert.equal(catalogReads, 1);
+
+  const malformed = structuredClone(base);
+  malformed.providerMessageId = "message-2";
+  malformed.eventKey = "master-inbox:message-2";
+  malformed.payload.contentDigest = "not-a-digest";
+  await service.intakeMasterInbox(malformed);
+  assert.equal(catalogReads, 1);
+
+  const unsupported = structuredClone(base);
+  unsupported.providerMessageId = "message-3";
+  unsupported.eventKey = "master-inbox:message-3";
+  unsupported.family = "unsupported";
+  await service.intakeMasterInbox(unsupported);
+  assert.equal(catalogReads, 1);
+
+  const ambiguousService = createService({
+    repository: intakeRepository({
+      candidateMatches: async () => ({ candidate: null, ambiguous: true }),
+      explicitRoleCatalog: async () => {
+        catalogReads += 1;
+        return {
+          status: "ready", complete: true, digest: "c".repeat(64),
+          roles: [{
+            role_id: "role-exact", company_name: "Acme", role_title: "Backend Engineer", active: true,
+            destination_url: "https://www.paraform.com/browse?role=role-exact",
+            last_confirmed_at: new Date(Date.now() - 60_000).toISOString(),
+          }],
+        };
+      },
+    }),
+    env,
+    blob: { putPrivateObject: async () => {} },
+  });
+  const ambiguous = structuredClone(base);
+  ambiguous.providerMessageId = "message-4";
+  ambiguous.eventKey = "master-inbox:message-4";
+  ambiguous.payload.candidateText = "Acme — Backend Engineer\nPlease introduce me.";
+  const result = await ambiguousService.intakeMasterInbox(ambiguous);
+  assert.equal(result.processing_state, "needs_candidate");
+  assert.equal(catalogReads, 2);
+});
+
+test("Master Inbox quoted history cannot supply a missing offered role", async () => {
+  let claims = 0;
+  const input = inboxEvent();
+  delete input.roleId;
+  input.payload.candidateText = "Yes, please.\nOn Wed, David wrote:\n> Acme — Backend Engineer";
+  const service = createService({
+    repository: intakeRepository({
+      explicitRoleCatalog: async () => ({
+        status: "ready", complete: true, digest: "c".repeat(64),
+        roles: [{
+          role_id: "role-exact", company_name: "Acme", role_title: "Backend Engineer", active: true,
+          destination_url: "https://www.paraform.com/browse?role=role-exact",
+          last_confirmed_at: new Date(Date.now() - 60_000).toISOString(),
+        }],
+      }),
+      claimEmailFirstResponse: async () => { claims += 1; },
+    }),
+    env,
+    blob: { putPrivateObject: async () => {} },
+  });
+  const result = await service.intakeMasterInbox(input);
+  assert.equal(result.processing_state, "needs_role");
+  assert.equal(claims, 0);
+});
+
 test("a later reply is reduced to a privacy-safe metric before private storage or model work", async () => {
   let privateWrites = 0;
   let classifierCalls = 0;

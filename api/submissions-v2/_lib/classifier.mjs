@@ -43,6 +43,8 @@ const tokenCost = (model, usage = {}) => {
 function validate(result, event) {
   const text = normalize(event.candidate_authored_text);
   const roleIds = new Set(event.offered_roles.map((role) => role.role_id));
+  const candidateBoundRoles = event.source_evidence?.resolution_version === "candidate-explicit-role-v1"
+    && event.source_evidence?.exact_role_source === "candidate_authored_explicit";
   if (!Array.isArray(result?.decisions) || !result.decisions.length) return { ok: false, reason: "decisions_missing" };
   const seen = new Set();
   for (const decision of result.decisions) {
@@ -54,6 +56,7 @@ function validate(result, event) {
     if (decision.label === "needs_review" && !["reply_unclear_or_conditional", "candidate_question", "role_unclear"].includes(decision.review_reason)) return { ok: false, reason: "review_reason_invalid" };
     if (decision.label === "not_interested" && decision.negative_reason && !text.includes(normalize(decision.negative_reason))) return { ok: false, reason: "negative_reason_not_verbatim" };
   }
+  if (candidateBoundRoles && seen.size !== roleIds.size) return { ok: false, reason: "candidate_named_roles_incomplete" };
   return { ok: true };
 }
 
@@ -63,13 +66,28 @@ function prompt(event) {
     rules: [
       "Clear interest is interested.",
       "Clear rejection is not_interested.",
-      "Any question, condition, conflict, meaningful hedge, ambiguity, or weak evidence is needs_review.",
+      "A substantive eligibility or job-terms question or condition, including compensation, work authorization, location, remote status, or unresolved willingness, is needs_review.",
+      "Clear unconditional interest remains interested when followed only by a request for an introduction, next steps, or scheduling.",
+      "A conflict, meaningful hedge, ambiguity, or weak evidence is needs_review.",
       "A generic reply across several offered roles is role_unclear; named roles apply only to those roles; explicit both/all applies to every offered role.",
+      ...(event.source_evidence?.resolution_version === "candidate-explicit-role-v1" ? [
+        "These offered role IDs were deterministically bound from exact company-plus-full-title text or an allowlisted Paraform role URL in the candidate-authored reply because no outbound offered-role list was retained.",
+        "Return one decision for every offered role. A role name or link identifies scope only and is not proof of interest; require separate candidate-authored intent language for a decisive label.",
+        "An exact role URL identifies that role's scope without requiring the candidate to repeat its company or title.",
+        "Collective intent language such as 'these roles' or 'these teams' after an explicit role list applies to every deterministically bound role in that list.",
+      ] : []),
       "Do not infer motive or intent from the outbound message.",
     ],
     sent_message: normalize(event.sent_message_text).slice(0, 3_000),
     candidate_reply: normalize(event.candidate_authored_text).slice(0, 6_000),
     offered_roles: event.offered_roles.map(({ role_id, company, title }) => ({ role_id, company, title })),
+    role_binding_provenance: event.source_evidence?.resolution_version === "candidate-explicit-role-v1"
+      ? {
+          resolution_version: event.source_evidence.resolution_version,
+          exact_role_source: event.source_evidence.exact_role_source,
+          match_kinds: event.source_evidence.match_kinds,
+        }
+      : null,
   });
 }
 
