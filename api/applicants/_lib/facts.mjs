@@ -145,7 +145,9 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
   // capped because existing row-scoped rules depend on that long-standing
   // storage bound; this additive projection carries only the two identity
   // fields needed for exact set membership and therefore remains compact.
-  // Do not deduplicate by name: names are display-only and never identity.
+  // Do not deduplicate by name. A raw name is not identity; when an id is
+  // absent, the rule evaluator may resolve only an exact name that appears in
+  // a separate immutable, provider-wide reviewed bridge.
   const seenCompanies = new Set();
   const allCompanies = [];
   for (const row of list(source.experiences)) {

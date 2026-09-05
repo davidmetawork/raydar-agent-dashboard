@@ -100,6 +100,28 @@ test("a selected id missing from the current directory remains visible and check
   assert.match(html, />Saved School Name</);
 });
 
+test("funded list copy distinguishes verified ids from reviewed exact-name bridges", async () => {
+  const { testApi } = await loadRulesUi(async () => response({ ok: true }));
+  testApi.state.catalog = [{
+    name: "employment.fundedEmployerSnapshot", group: "employment", ops: ["member_of"],
+    kind: "snapshot", label: "Worked at a funded company", picker: null,
+  }];
+  testApi.state.fundedEmployers = {
+    activeSnapshotId: "funded-1",
+    snapshots: [{
+      id: "funded-1", generatedAt: "2026-09-05T10:00:00Z", companyCount: 6300,
+      reviewedParaformIdCount: 359, reviewedSourceNameCount: 211, provider: "Mixed verified sources",
+    }],
+  };
+  const html = testApi.valueControl({
+    field: "employment.fundedEmployerSnapshot", op: "member_of", value: "funded-1",
+  }, 0);
+  assert.match(html, /359 verified company IDs/);
+  assert.match(html, /211 reviewed name bridges/);
+  assert.match(html, /when the source omitted an ID/);
+  assert.match(html, /Ambiguous or unreviewed names cannot match/);
+});
+
 test("Run rules now is a confirmed manual POST and carries the visible generation", async () => {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
@@ -232,7 +254,7 @@ test("fixture preview and run agree about sent and already-decided applicants", 
   assert.equal(state.decisions[platform[0].key].action, "pass");
 });
 
-test("funded fixture preview and manual run share membership beyond the fourteen-job projection", async (t) => {
+test("funded fixture preview and manual run share reviewed name membership beyond the fourteen-job projection", async (t) => {
   const state = createFixtureState();
   const fundedRule = state.rules.find((rule) =>
     rule.conditions.some((condition) => condition.field === "employment.fundedEmployerSnapshot"));
@@ -263,11 +285,13 @@ test("funded fixture preview and manual run share membership beyond the fourteen
   const candidateFacts = factsFromProfile(profile, { now: Date.parse("2026-09-05T16:00:00.000Z") });
   assert.equal(candidateFacts.jobs.length, MAX_JOBS);
   assert.equal(candidateFacts.jobs.some((job) => job.id === "company-orbit-birch"), false);
-  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].id, "company-orbit-birch");
+  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].id, null);
+  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].name, "Orbit Birch");
 
   const rules = await fetch(`${base}/api/applicants/rules`).then((response) => response.json());
   assert.equal(rules.fundedEmployers.snapshots.length, 1);
   assert.equal("entries" in rules.fundedEmployers.snapshots[0], false);
+  assert.equal(rules.fundedEmployers.snapshots[0].reviewedSourceNameCount, 1);
   const preview = await post("/api/applicants/rules", { op: "preview", rule: fundedRule, ...fence });
   assert.equal(preview.matched, 1);
   assert.equal(preview.samples[0].name, "Noor Haddad");

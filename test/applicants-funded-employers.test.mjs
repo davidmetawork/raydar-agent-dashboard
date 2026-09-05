@@ -85,7 +85,9 @@ test("snapshot compiler keeps private provenance and builds only reviewed Parafo
   const { snapshot, metadata } = compileFundedEmployerSnapshot(manifest());
   assert.equal(metadata.companyCount, 1);
   assert.equal(metadata.reviewedParaformIdCount, 1);
+  assert.equal(metadata.reviewedSourceNameCount, 0);
   assert.equal(Object.getPrototypeOf(snapshot.byParaformId), null);
+  assert.equal(Object.getPrototypeOf(snapshot.byReviewedSourceName), null);
   assert.deepEqual(snapshot.byParaformId.pf_acme, { orgId: "org_acme", name: "Acme" });
   assert.equal(snapshot.entries[0].domain, "acme.example");
   assert.equal(metadata.digest, snapshot.digest);
@@ -158,6 +160,111 @@ test("names and domains never substitute for a reviewed Paraform company id", ()
     assert.equal(inherited.matched, false, `${inheritedId} must not resolve through Object.prototype`);
     assert.equal(inherited.skipped, false);
   }
+});
+
+test("an explicit CRM-wide reviewed source-name bridge resolves only a missing company id", () => {
+  const bridged = manifest();
+  bridged.entries[0].reviewedSourceNames = [{
+    name: "Ａcme",
+    paraformCompanyId: "pf_acme",
+    observedAt: "2026-09-05T19:00:00.000Z",
+    searchEndpoint: "candidateUser.searchCRMFilterOptions",
+    searchUniverse: "paraform_recruiter_crm",
+    exactCandidateCount: 1,
+    verifiedDomain: "https://www.acme.example",
+    reviewedBy: "codex",
+  }];
+  const { snapshot, metadata } = compileFundedEmployerSnapshot(bridged);
+  assert.equal(metadata.reviewedSourceNameCount, 1);
+  assert.deepEqual(snapshot.byReviewedSourceName.acme, {
+    orgId: "org_acme",
+    name: "Acme",
+    paraformCompanyId: "pf_acme",
+    sourceName: "Ａcme",
+    observedAt: "2026-09-05T19:00:00.000Z",
+    searchEndpoint: "candidateUser.searchCRMFilterOptions",
+    searchUniverse: "paraform_recruiter_crm",
+    exactCandidateCount: 1,
+    verifiedDomain: "acme.example",
+    reviewedBy: "codex",
+  });
+
+  const nameOnly = evaluateRule(membershipRule, subject([
+    { companyId: null, companyName: "  ACME  " },
+  ], { [SNAPSHOT_ID]: snapshot }));
+  assert.equal(nameOnly.matched, true);
+  assert.deepEqual(nameOnly.evidence[0], {
+    field: "employment.fundedEmployerSnapshot",
+    op: "member_of",
+    matched: "ACME",
+    organizationId: "org_acme",
+    paraformCompanyId: "pf_acme",
+    identityBasis: "reviewed_source_name_bridge",
+    snapshotId: SNAPSHOT_ID,
+  });
+
+  const contradictoryId = evaluateRule(membershipRule, subject([
+    { companyId: "pf_unrelated", companyName: "Acme" },
+  ], { [SNAPSHOT_ID]: snapshot }));
+  assert.equal(contradictoryId.matched, false, "a present id must never fall back to the name bridge");
+  assert.equal(contradictoryId.skipped, false);
+
+  const punctuationVariant = evaluateRule(membershipRule, subject([
+    { companyId: null, companyName: "Acme, Inc." },
+  ], { [SNAPSHOT_ID]: snapshot }));
+  assert.equal(punctuationVariant.matched, false, "the bridge must not strip suffixes or punctuation");
+  assert.equal(punctuationVariant.reason, "employment_company_id_missing");
+
+  const nativeId = evaluateRule(membershipRule, subject([
+    { companyId: "pf_acme", companyName: "Different display name" },
+  ], { [SNAPSHOT_ID]: snapshot }));
+  assert.equal(nativeId.evidence[0].identityBasis, "paraform_company_id");
+  assert.equal(nativeId.evidence[0].paraformCompanyId, "pf_acme");
+});
+
+test("reviewed source-name bridges require the frozen search, identity, and domain proof", () => {
+  const base = {
+    name: "Acme",
+    paraformCompanyId: "pf_acme",
+    observedAt: "2026-09-05T19:00:00.000Z",
+    searchEndpoint: "candidateUser.searchCRMFilterOptions",
+    searchUniverse: "paraform_recruiter_crm",
+    exactCandidateCount: 1,
+    verifiedDomain: "acme.example",
+    reviewedBy: "codex",
+  };
+  for (const change of [
+    { paraformCompanyId: "pf_not_on_entry" },
+    { observedAt: "not-a-date" },
+    { searchEndpoint: "candidateUser.other" },
+    { searchUniverse: "funded_whitelist" },
+    { exactCandidateCount: 2 },
+    { verifiedDomain: "namesake.example" },
+    { reviewedBy: "automatic" },
+  ]) {
+    const invalid = manifest();
+    invalid.entries[0].reviewedSourceNames = [{ ...base, ...change }];
+    assert.throws(() => compileFundedEmployerSnapshot(invalid), /reviewed_source_name_invalid/);
+  }
+});
+
+test("the same reviewed source label cannot identify different funded organizations", () => {
+  const first = manifest().entries[0];
+  first.reviewedSourceNames = [{
+    name: "Acme", paraformCompanyId: "pf_acme", observedAt: "2026-09-05T19:00:00Z",
+    searchEndpoint: "candidateUser.searchCRMFilterOptions", searchUniverse: "paraform_recruiter_crm",
+    exactCandidateCount: 1, verifiedDomain: "acme.example", reviewedBy: "codex",
+  }];
+  const second = structuredClone(first);
+  Object.assign(second, {
+    orgId: "org_namesake", name: "Namesake", domain: "namesake.example",
+    paraformCompanyIds: ["pf_namesake"],
+    reviewedSourceNames: [{
+      ...first.reviewedSourceNames[0], name: "  ACME ", paraformCompanyId: "pf_namesake",
+      verifiedDomain: "namesake.example",
+    }],
+  });
+  assert.throws(() => compileFundedEmployerSnapshot(manifest([first, second])), /source_name_ambiguous/);
 });
 
 test("historical snapshots retain original round codes and funding totals with dated attribution", () => {

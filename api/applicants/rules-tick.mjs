@@ -237,6 +237,7 @@ export function createTickHandler({
           generatedAt: snapshot.generatedAt,
           companyCount: Array.isArray(snapshot.entries) ? snapshot.entries.length : null,
           reviewedParaformIdCount: Object.keys(snapshot.byParaformId || {}).length,
+          reviewedSourceNameCount: Object.keys(snapshot.byReviewedSourceName || {}).length,
         })),
       });
       if (!rows.length) {

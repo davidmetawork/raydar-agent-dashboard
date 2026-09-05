@@ -1,9 +1,10 @@
 // Private immutable funded-employer membership snapshots.
 //
 // The source rows stay in server-only KV. Rules store one snapshot
-// id, and the browser receives metadata only. A profile employer matches only
-// through a reviewed Paraform company id. Company names, domains and LinkedIn
-// URLs are retained as provenance but are never candidate identity signals.
+// id, and the browser receives metadata only. A profile employer matches through
+// its reviewed Paraform company id, or—only when the source omitted an id—an
+// exact source name whose Paraform CRM identity and official domain were
+// separately reviewed. Unreviewed names remain display-only.
 
 import { getJson, K, setJson, setJsonIfAbsent } from "./kv.mjs";
 import { stableDigest } from "./generation.mjs";
@@ -18,6 +19,7 @@ export const QUALIFYING_FROM = "2011-09-05";
 export const QUALIFYING_THROUGH = "2026-09-05";
 export const MINIMUM_TOTAL_FUNDING_USD = 1_000_000;
 export const MAX_SNAPSHOT_ENTRIES = 50_000;
+export const MAX_REVIEWED_SOURCE_NAMES = 50_000;
 
 const text = (value, max = 240) => {
   const out = typeof value === "string" ? value.trim() : "";
@@ -48,6 +50,13 @@ function normalizeDomain(value) {
     const parsed = new URL(raw.includes("://") ? raw : `https://${raw}`);
     return parsed.hostname.toLowerCase().replace(/^www\./, "") || null;
   } catch { return null; }
+}
+
+export function normalizeReviewedSourceName(value) {
+  const raw = text(value, 240);
+  if (!raw) return null;
+  const normalized = raw.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+  return normalized || null;
 }
 
 function qualifyingSearch(value) {
@@ -202,6 +211,37 @@ function normalizedEntry(input, at, sourcesById) {
     throw new Error("funded_employer_paraform_id_invalid");
   }
   const paraformCompanyIds = [...new Set(rawParaformCompanyIds)];
+  const rawReviewedSourceNames = input?.reviewedSourceNames == null ? [] : input.reviewedSourceNames;
+  if (!Array.isArray(rawReviewedSourceNames)) {
+    throw new Error("funded_employer_reviewed_source_names_invalid");
+  }
+  const reviewedSourceNames = rawReviewedSourceNames.map((bridge) => {
+    const bridgeName = text(bridge?.name, 240);
+    const normalizedName = normalizeReviewedSourceName(bridgeName);
+    const paraformCompanyId = text(bridge?.paraformCompanyId, 120);
+    const observedAt = iso(bridge?.observedAt);
+    const verifiedDomain = normalizeDomain(bridge?.verifiedDomain);
+    if (!bridgeName || !normalizedName || !paraformCompanyId || !PROVIDER_ID_RE.test(paraformCompanyId)
+      || !paraformCompanyIds.includes(paraformCompanyId)
+      || !observedAt
+      || bridge?.searchEndpoint !== "candidateUser.searchCRMFilterOptions"
+      || bridge?.searchUniverse !== "paraform_recruiter_crm"
+      || bridge?.exactCandidateCount !== 1
+      || !verifiedDomain || verifiedDomain !== domain
+      || bridge?.reviewedBy !== "codex") {
+      throw new Error("funded_employer_reviewed_source_name_invalid");
+    }
+    return {
+      name: bridgeName,
+      paraformCompanyId,
+      observedAt,
+      searchEndpoint: "candidateUser.searchCRMFilterOptions",
+      searchUniverse: "paraform_recruiter_crm",
+      exactCandidateCount: 1,
+      verifiedDomain,
+      reviewedBy: "codex",
+    };
+  });
   const aliases = [...new Set((Array.isArray(input?.aliases) ? input.aliases : [])
     .map((value) => text(value, 240)).filter(Boolean))];
   return {
@@ -214,6 +254,7 @@ function normalizedEntry(input, at, sourcesById) {
     linkedin: text(input?.linkedin, 500),
     sourceRef,
     paraformCompanyIds,
+    reviewedSourceNames,
     fundingProof: {
       totalFundingUsd,
       totalFundingBasis: text(input?.fundingProof?.totalFundingBasis, 120),
@@ -250,6 +291,8 @@ export function compileFundedEmployerSnapshot(manifest) {
   const entries = entriesInput.map((entry) => normalizedEntry(entry, generatedAt, sourcesById));
   const orgIds = new Set();
   const byParaformId = Object.create(null);
+  const byReviewedSourceName = Object.create(null);
+  let reviewedSourceNameCount = 0;
   for (const entry of entries) {
     if (orgIds.has(entry.orgId)) throw new Error("funded_employer_org_id_duplicate");
     orgIds.add(entry.orgId);
@@ -258,6 +301,31 @@ export function compileFundedEmployerSnapshot(manifest) {
         throw new Error("funded_employer_paraform_id_ambiguous");
       }
       byParaformId[companyId] = { orgId: entry.orgId, name: entry.name };
+    }
+    for (const bridge of entry.reviewedSourceNames) {
+      const key = normalizeReviewedSourceName(bridge.name);
+      const existing = byReviewedSourceName[key];
+      if (existing
+        && (existing.orgId !== entry.orgId || existing.paraformCompanyId !== bridge.paraformCompanyId)) {
+        throw new Error("funded_employer_source_name_ambiguous");
+      }
+      if (existing) continue;
+      byReviewedSourceName[key] = {
+        orgId: entry.orgId,
+        name: entry.name,
+        paraformCompanyId: bridge.paraformCompanyId,
+        sourceName: bridge.name,
+        observedAt: bridge.observedAt,
+        searchEndpoint: bridge.searchEndpoint,
+        searchUniverse: bridge.searchUniverse,
+        exactCandidateCount: bridge.exactCandidateCount,
+        verifiedDomain: bridge.verifiedDomain,
+        reviewedBy: bridge.reviewedBy,
+      };
+      reviewedSourceNameCount += 1;
+      if (reviewedSourceNameCount > MAX_REVIEWED_SOURCE_NAMES) {
+        throw new Error("funded_employer_reviewed_source_names_invalid");
+      }
     }
   }
   const canonical = {
@@ -274,6 +342,7 @@ export function compileFundedEmployerSnapshot(manifest) {
     provenance: { sources },
     entries,
     byParaformId,
+    byReviewedSourceName,
   };
   const digest = stableDigest(canonical);
   return {
@@ -283,6 +352,7 @@ export function compileFundedEmployerSnapshot(manifest) {
       generatedAt,
       companyCount: entries.length,
       reviewedParaformIdCount: Object.keys(byParaformId).length,
+      reviewedSourceNameCount,
       digest,
       provider: sources.every((source) => source.kind === "crunchbase_query_export")
         ? "Crunchbase" : sources.every((source) => source.kind === "public_primary_sources")
@@ -328,6 +398,8 @@ export async function readFundedEmployerCatalog({ readJson = getJson } = {}) {
       companyCount: Number.isInteger(item.companyCount) && item.companyCount >= 0 ? item.companyCount : 0,
       reviewedParaformIdCount: Number.isInteger(item.reviewedParaformIdCount) && item.reviewedParaformIdCount >= 0
         ? item.reviewedParaformIdCount : 0,
+      reviewedSourceNameCount: Number.isInteger(item.reviewedSourceNameCount) && item.reviewedSourceNameCount >= 0
+        ? item.reviewedSourceNameCount : 0,
       digest: String(item.digest).toLowerCase(),
       provider: ["Crunchbase", "Public primary sources", "Crunchbase 2013 Snapshot", "Mixed verified sources"].includes(item.provider)
         ? item.provider : "Verified sources",
@@ -372,8 +444,27 @@ export async function loadFundedEmployerSnapshots(rules, { readJson = getJson } 
 
 export function matchFundedEmployer(company, snapshot) {
   const id = text(company?.id, 120);
-  const index = snapshot?.byParaformId;
-  const matched = id && index && typeof index === "object" && Object.hasOwn(index, id)
-    ? index[id] : null;
-  return matched ? { matched: true, companyName: company?.name || matched.name, orgId: matched.orgId } : null;
+  const idIndex = snapshot?.byParaformId;
+  if (id) {
+    const matched = idIndex && typeof idIndex === "object" && Object.hasOwn(idIndex, id)
+      ? idIndex[id] : null;
+    return matched ? {
+      matched: true,
+      companyName: company?.name || matched.name,
+      orgId: matched.orgId,
+      paraformCompanyId: id,
+      identityBasis: "paraform_company_id",
+    } : null;
+  }
+  const nameKey = normalizeReviewedSourceName(company?.name);
+  const nameIndex = snapshot?.byReviewedSourceName;
+  const matched = nameKey && nameIndex && typeof nameIndex === "object" && Object.hasOwn(nameIndex, nameKey)
+    ? nameIndex[nameKey] : null;
+  return matched ? {
+    matched: true,
+    companyName: company?.name || matched.name,
+    orgId: matched.orgId,
+    paraformCompanyId: matched.paraformCompanyId,
+    identityBasis: "reviewed_source_name_bridge",
+  } : null;
 }

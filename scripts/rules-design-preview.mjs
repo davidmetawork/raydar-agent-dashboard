@@ -58,7 +58,7 @@ function fundedHistoryBeyondRuleCap() {
       start: `${2007 + index}-01-01`, end: `${2007 + index}-10-01`, current: false,
       industry: "Synthetic fixture", talentRank: null,
     })),
-    { companyId: "company-orbit-birch", companyName: "Orbit Birch", roleTitle: "Early Engineer", start: "2006-01-01", end: "2006-12-01", current: false, industry: "Synthetic fixture", talentRank: null },
+    { companyId: null, companyName: "Orbit Birch", roleTitle: "Early Engineer", start: "2006-01-01", end: "2006-12-01", current: false, industry: "Synthetic fixture", talentRank: null },
   ];
 }
 
@@ -157,6 +157,16 @@ const { snapshot: fundedSnapshot, metadata: fundedMetadata } = compileFundedEmpl
     domain: "orbit-birch.invalid",
     sourceRef: "local-public-proof-ledger",
     paraformCompanyIds: ["company-orbit-birch"],
+    reviewedSourceNames: [{
+      name: "Orbit Birch",
+      paraformCompanyId: "company-orbit-birch",
+      observedAt: "2026-09-05T15:15:00.000Z",
+      searchEndpoint: "candidateUser.searchCRMFilterOptions",
+      searchUniverse: "paraform_recruiter_crm",
+      exactCandidateCount: 1,
+      verifiedDomain: "orbit-birch.invalid",
+      reviewedBy: "codex",
+    }],
     fundingProof: {
       totalFundingUsd: 2_000_000,
       totalFundingSourceUrl: "https://orbit-birch.invalid/funding",
@@ -187,7 +197,8 @@ export async function readSyntheticMembership(key) {
 
 const directory = {
   schools: Object.fromEntries(Object.values(profiles).flatMap((p) => p.education).map((s) => [s.schoolId, s.school])),
-  companies: Object.fromEntries(Object.values(profiles).flatMap((p) => p.experiences).map((j) => [j.companyId, j.companyName])),
+  companies: Object.fromEntries(Object.values(profiles).flatMap((p) => p.experiences)
+    .filter((job) => job.companyId).map((job) => [job.companyId, job.companyName])),
 };
 
 const initialRules = [

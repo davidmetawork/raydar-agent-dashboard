@@ -121,9 +121,11 @@
     if (!snapshot) return id || "Snapshot unavailable";
     const day = String(snapshot.generatedAt || "").slice(0, 10);
     const companies = Number(snapshot.companyCount || 0);
-    const employers = Number(snapshot.reviewedParaformIdCount || 0);
+    const ids = Number(snapshot.reviewedParaformIdCount || 0);
+    const bridges = Number(snapshot.reviewedSourceNameCount || 0);
     return companies.toLocaleString() + (companies === 1 ? " company · " : " companies · ")
-      + employers.toLocaleString() + (employers === 1 ? " connected employer · as of " : " connected employers · as of ") + day;
+      + ids.toLocaleString() + (ids === 1 ? " verified company ID · " : " verified company IDs · ")
+      + bridges.toLocaleString() + (bridges === 1 ? " reviewed name bridge · as of " : " reviewed name bridges · as of ") + day;
   }
   function describe(condition, rule) {
     const f = field(condition.field);
@@ -335,7 +337,7 @@
           : '<option value="">No verified snapshot imported</option>') + '</select>' +
         '<details class="hint"><summary>About this list</summary><p>Private verified company research from ' +
         enc((fundedSnapshot(condition.value) || {}).provider || 'verified sources') +
-        '. US, UK and Canada; at least $1m total funding; Seed through Series D round from Sep 5, 2011 through Sep 5, 2026. Only connected employers can match.</p></details></div>';
+        '. US, UK and Canada; at least $1m total funding; Seed through Series D round from Sep 5, 2011 through Sep 5, 2026. Work history matches through a verified Paraform company ID, or—when the source omitted an ID—an exact company name separately checked across Paraform CRM and against the official domain. Ambiguous or unreviewed names cannot match.</p></details></div>';
     }
     if (f.kind === "levels" || f.kind === "ranks" || f.kind === "tiers" || f.kind === "ids") {
       const chosen = Array.isArray(condition.value) ? condition.value : [];

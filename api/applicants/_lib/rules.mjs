@@ -141,8 +141,10 @@ export const FIELDS = {
   },
 
   // Independent of the capped `jobs` projection. This single membership
-  // predicate scans the compact all-employer history and matches only a
-  // reviewed Paraform company id in the referenced immutable snapshot.
+  // predicate scans the compact all-employer history. Native Paraform company
+  // ids are authoritative; a missing id can use only an exact source-name
+  // bridge whose CRM identity and official domain were separately reviewed in
+  // the referenced immutable snapshot.
   "employment.fundedEmployerSnapshot": {
     group: "employment", ops: ["member_of"], kind: "snapshot",
     label: "Worked at a funded company",
@@ -152,7 +154,12 @@ export const FIELDS = {
       const snapshot = snapshots && typeof snapshots === "object" && Object.hasOwn(snapshots, snapshotId)
         ? snapshots[snapshotId] : null;
       const found = matchFundedEmployer(row, snapshot);
-      return found ? { matched: row?.name ?? found.companyName ?? row?.id, orgId: found.orgId } : null;
+      return found ? {
+        matched: row?.name ?? found.companyName ?? row?.id,
+        orgId: found.orgId,
+        paraformCompanyId: found.paraformCompanyId,
+        identityBasis: found.identityBasis,
+      } : null;
     },
   },
 
@@ -328,6 +335,8 @@ function groupMatches(conditions, subject, row, now) {
       // what "why did this fire" renders from.
       matched: String(custom?.matched ?? (field.display ? (field.display(subject, row) ?? actual) : actual)).slice(0, 160),
       ...(custom?.orgId ? { organizationId: custom.orgId } : {}),
+      ...(custom?.paraformCompanyId ? { paraformCompanyId: custom.paraformCompanyId } : {}),
+      ...(custom?.identityBasis ? { identityBasis: custom.identityBasis } : {}),
       ...(field.kind === "snapshot" ? { snapshotId: condition.value } : {}),
     });
   }
