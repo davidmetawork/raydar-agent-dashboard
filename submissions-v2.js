@@ -1,6 +1,6 @@
 "use strict";
 
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "/submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, embeddedModalViewport, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -25,6 +25,7 @@ const ACTIVE_GENERATION_STATES = new Set([
   "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving",
 ]);
 const AUTO_DOWNLOAD_STORAGE_KEY = "raydar.submissions-v2.pending-resume-downloads.v1";
+let embeddedModalViewportCleanup = () => {};
 
 function pendingDownloadsFromSession() {
   try {
@@ -505,6 +506,7 @@ function openDialog({ eyebrow = "Submissions", title, subtitle = "", body, foote
   if ($("modal").hidden) STATE.dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   $("dialog-eyebrow").textContent = eyebrow; $("dialog-title").textContent = title; $("dialog-subtitle").textContent = subtitle;
   $("dialog-body").innerHTML = body; $("dialog-footer").innerHTML = footer; $("modal").hidden = false;
+  updateEmbeddedModalViewport();
   $("shell").inert = true; $("shell").setAttribute("aria-hidden", "true"); document.body.classList.add("modal-open");
   requestAnimationFrame(() => {
     const first = $("dialog-body").querySelector("input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled])") || $("dialog-close");
@@ -1027,7 +1029,56 @@ function showSignin(message = "") {
 }
 
 function reportHeight() {
-  if (window.parent !== window) window.parent.postMessage({ type: "raydar-submissions-v2-height", height: Math.max(document.body.scrollHeight, 620) }, location.origin);
+  if (window.parent !== window) window.parent.postMessage({ type: "raydar-submissions-v2-height", height: Math.max($("shell")?.scrollHeight || 0, 620) }, location.origin);
+}
+
+function updateEmbeddedModalViewport() {
+  const modal = $("modal");
+  if (!document.body.classList.contains("embed") || !modal) return;
+  try {
+    const frame = window.frameElement;
+    const host = window.parent;
+    if (!frame || host === window) return;
+    const frameRect = frame.getBoundingClientRect();
+    const viewport = host.visualViewport;
+    const viewportTop = Number(viewport?.offsetTop) || 0;
+    const viewportHeight = Number(viewport?.height) || Number(host.innerHeight);
+    const bounds = embeddedModalViewport({
+      frameTop: frameRect.top,
+      frameBottom: frameRect.bottom,
+      viewportTop,
+      viewportBottom: viewportTop + viewportHeight,
+    });
+    if (!bounds) return modal.classList.remove("embed-viewport-bound");
+    document.documentElement.style.setProperty("--embed-modal-top", `${bounds.top}px`);
+    document.documentElement.style.setProperty("--embed-modal-height", `${bounds.height}px`);
+    modal.classList.add("embed-viewport-bound");
+  } catch {
+    modal.classList.remove("embed-viewport-bound");
+  }
+}
+
+function watchEmbeddedModalViewport() {
+  if (!document.body.classList.contains("embed")) return;
+  try {
+    const host = window.parent;
+    if (host === window) return;
+    const update = () => updateEmbeddedModalViewport();
+    const visualViewport = host.visualViewport;
+    host.addEventListener("scroll", update, { passive: true });
+    host.addEventListener("resize", update);
+    visualViewport?.addEventListener("scroll", update, { passive: true });
+    visualViewport?.addEventListener("resize", update);
+    window.addEventListener("resize", update);
+    embeddedModalViewportCleanup = () => {
+      host.removeEventListener("scroll", update);
+      host.removeEventListener("resize", update);
+      visualViewport?.removeEventListener("scroll", update);
+      visualViewport?.removeEventListener("resize", update);
+      window.removeEventListener("resize", update);
+    };
+    update();
+  } catch { /* A standalone or cross-origin view retains its own viewport bounds. */ }
 }
 
 async function boot() {
@@ -1053,9 +1104,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { closePopover(); if (!$("modal").hidden) closeDialog(); }
 });
 window.addEventListener("pagehide", () => {
+  embeddedModalViewportCleanup();
   STATE.listRequest?.abort(); STATE.countsRequest?.abort();
   for (const controller of STATE.searchRequests.values()) controller.abort();
   clearInterval(STATE.pollTimer);
 });
 new ResizeObserver(reportHeight).observe(document.body);
+watchEmbeddedModalViewport();
 boot();

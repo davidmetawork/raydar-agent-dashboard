@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 const js = await readFile(new URL("../submissions-v2.js", import.meta.url), "utf8");
 const css = await readFile(new URL("../submissions-v2.css", import.meta.url), "utf8");
 const uiState = await readFile(new URL("../submissions-v2-ui-state.mjs", import.meta.url), "utf8");
+const dashboard = await readFile(new URL("../index.html", import.meta.url), "utf8");
 
 test("bootstrap obtains public Google configuration before the protected V2 session", () => {
   const config = js.indexOf('publicJson("/api/auth/config")');
@@ -108,6 +109,18 @@ test("generation progress survives rendering and remains reduced-motion safe", (
   assert.match(css, /\.icon-button\.regenerate\{border-radius:50%\}/);
   assert.match(css, /\.rerun-icon\{[^}]*stroke:currentColor/);
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)/);
+});
+
+test("the embedded Review dialog measures the outer visible iframe slice", () => {
+  assert.match(js, /window\.frameElement/);
+  assert.match(js, /window\.addEventListener\("resize", update\)/);
+  assert.match(js, /embeddedModalViewportCleanup\(\)/);
+  assert.match(js, /embeddedModalViewport\(\{/);
+  assert.match(js, /embed-viewport-bound/);
+  assert.match(css, /body\.embed \.modal\.embed-viewport-bound/);
+  assert.match(dashboard, /raydar-submissions-v2-height/);
+  assert.match(dashboard, /event\.source!==frame\.contentWindow/);
+  assert.match(dashboard, /submissions-frame.*min-height:900px/);
 });
 
 test("a requested regeneration survives reload and downloads the validated replacement automatically", () => {

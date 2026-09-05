@@ -95,6 +95,16 @@ export function reviewContextCanRender({ request, currentRequest, active, curren
   return request === currentRequest && active === currentActive && modalOpen === true;
 }
 
+export function embeddedModalViewport({ frameTop, frameBottom, viewportTop = 0, viewportBottom, minimumHeight = 280 } = {}) {
+  const values = [frameTop, frameBottom, viewportTop, viewportBottom, minimumHeight];
+  if (!values.every(Number.isFinite)) return null;
+  const visibleTop = Math.max(frameTop, viewportTop);
+  const visibleBottom = Math.min(frameBottom, viewportBottom);
+  const height = visibleBottom - visibleTop;
+  if (height < minimumHeight) return null;
+  return { top: Math.round(visibleTop - frameTop), height: Math.round(height) };
+}
+
 export function listScopeIsCurrent(scope, state) {
   return scope.sequence === state.listSequence && scope.page === state.page && scope.query === state.query;
 }

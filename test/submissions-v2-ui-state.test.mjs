@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, embeddedModalViewport, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -91,6 +91,12 @@ test("a delayed review-context response cannot replace a newer dialog or a close
   assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: secondRequest, active: firstDialog, currentActive: firstDialog, modalOpen: true }), false);
   assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: firstRequest, active: firstDialog, currentActive: secondDialog, modalOpen: true }), false);
   assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: firstRequest, active: firstDialog, currentActive: firstDialog, modalOpen: false }), false);
+});
+
+test("an embedded modal uses only the visible slice of a tall iframe", () => {
+  assert.deepEqual(embeddedModalViewport({ frameTop: 120, frameBottom: 1620, viewportTop: 0, viewportBottom: 936 }), { top: 0, height: 816 });
+  assert.deepEqual(embeddedModalViewport({ frameTop: -240, frameBottom: 1260, viewportTop: 0, viewportBottom: 936 }), { top: 240, height: 936 });
+  assert.equal(embeddedModalViewport({ frameTop: 1000, frameBottom: 1500, viewportTop: 0, viewportBottom: 936 }), null);
 });
 
 test("source health details expose only committed checkpoints and an authoritative retry time", () => {
