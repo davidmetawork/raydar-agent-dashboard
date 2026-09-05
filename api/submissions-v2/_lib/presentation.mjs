@@ -1,4 +1,5 @@
 import { paraformCandidateProfileUrl } from "./paraform-links.mjs";
+import { projectSubmissionPair } from "./domain/projection.mjs";
 
 export const REVIEW_REASONS = Object.freeze({
   candidate_not_found: { label: "Candidate is missing in Paraform", action: "Add in Paraform, then Recheck" },
@@ -57,6 +58,7 @@ function admissionSource(row, signalUrl) {
 }
 
 export function rowDto(row) {
+  const projection = projectSubmissionPair(row);
   const preparationErrorCode = text(row.preparation_error_code, 100) || null;
   const preparationErrorDetail = text(row.preparation_error_detail, 500) || null;
   const preparationReviewCode = preparationErrorCode
@@ -74,11 +76,9 @@ export function rowDto(row) {
   const signalUrl = gmailSignalUrl(row.signal_url) || safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
   const workflowState = row.workflow_state || "needs_review";
   const generationStatus = text(row.generation_status, 100).toLowerCase() || null;
-  const artifactReady = row.artifact_ready === true;
-  const currentArtifactId = artifactReady ? row.current_artifact_id || null : null;
+  const artifactReady = projection.artifact.ready;
+  const currentArtifactId = projection.artifact.id;
   const submissionStatus = row.submission_status || "none";
-  const readyWorkflow = workflowState === "interested";
-  const generationActive = ACTIVE_GENERATION_STATES.has(generationStatus);
   const offeredRoleCount = Number(row.offered_role_count || 0);
   const unresolvedMultipleRoles = !row.pair_id && !row.case_id && offeredRoleCount > 1;
   return {
@@ -126,11 +126,11 @@ export function rowDto(row) {
     role_last_confirmed_at: row.role_last_confirmed_at || null,
     source_last_success_at: row.source_last_success_at || null,
     capabilities: {
-      can_correct: identifiedPair && submissionStatus !== "proven",
-      can_duplicate: identifiedPair,
-      can_download: (readyWorkflow || submissionStatus === "proven") && artifactReady,
-      can_regenerate: (readyWorkflow || (submissionStatus === "proven" && workflowState === "needs_review" && row.intent_state === "interested")) && artifactReady && !generationActive,
-      can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven",
+      can_correct: projection.capabilities.correct_intent,
+      can_duplicate: projection.capabilities.duplicate_pair,
+      can_download: projection.capabilities.download_artifact,
+      can_regenerate: projection.capabilities.retry_preparation,
+      can_submit: projection.capabilities.open_submission_destination,
     },
   };
 }

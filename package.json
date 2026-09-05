@@ -6,10 +6,14 @@
     "migrate:submissions-v2": "node scripts/migrate-submissions-v2.mjs",
     "submissions-v2:release": "node scripts/submissions-release.mjs --check",
     "submissions-v2:release:vercel": "node scripts/submissions-release.mjs --check --deployment",
-    "test:submissions-v2": "node --test test/submissions-v2-*.test.mjs",
+    "test:submissions-v2": "node --test --test-concurrency=1 test/submissions-v2-*.test.mjs",
     "test:submissions-v1": "node --test test/submissions-path-a.test.mjs test/submissions-path-b.test.mjs test/submissions-resume.test.mjs",
     "worker:submissions-v2": "node submissions-v2-worker/server.mjs",
-    "purge:submissions-v2": "node submissions-v2-purge/server.mjs"
+    "purge:submissions-v2": "node submissions-v2-purge/server.mjs",
+    "preview:submissions": "node submissions-preview/cli.mjs start",
+    "preview:submissions:stop": "node submissions-preview/cli.mjs stop",
+    "preview:submissions:status": "node submissions-preview/cli.mjs status",
+    "preview:submissions:reset": "node submissions-preview/cli.mjs reset --confirm=RESET_TEST_DATA"
   },
   "dependencies": {
     "@vercel/blob": "2.8.0",

@@ -25,6 +25,13 @@ export const WORKER_JOB_KINDS = Object.freeze([
   "deliver_notification", "source_health", "daily_digest", "purge",
 ]);
 
+export const SOURCE_PAGE_LIMITS = Object.freeze({
+  candidate_index: 100,
+  curated_candidates: 8,
+  submission_proof: 8,
+  notifications: 5,
+});
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
 const MONITOR_URL = "https://monitor.raydar.xyz/#submissions-v2";
@@ -40,6 +47,42 @@ function sequenceInboxHealthDetail(error) {
 
 function sourceError(error, code) {
   return pipelineError(error, { code, safeMessage: "The source read failed safely and its cursor was not advanced.", retryable: true });
+}
+
+function restoreGmailSourceSession(record) {
+  if (!record) return null;
+  const sourceSession = clean(record.source_session, 100);
+  if (!sourceSession) throw new ResumePipelineError("gmail_source_session_invalid", "The saved Gmail source session is invalid.");
+  return {
+    sourceSession,
+    ...(record.pending_admission && typeof record.pending_admission === "object"
+      ? { pendingAdmission: structuredClone(record.pending_admission) }
+      : {}),
+  };
+}
+
+function storedGmailSourceSession(state) {
+  if (!state) return null;
+  const sourceSession = clean(state.sourceSession, 100);
+  if (!sourceSession) throw new ResumePipelineError("gmail_source_session_invalid", "The Gmail source session is invalid.");
+  const pending = state.pendingAdmission;
+  return {
+    source_session: sourceSession,
+    ...(pending && typeof pending === "object" ? { pending_admission: {
+      schema_version: pending.schema_version,
+      scope: pending.scope,
+      lane: pending.lane,
+      window: { after: pending.window?.after, before: pending.window?.before },
+      event_id: pending.event_id,
+      mailbox_id: pending.mailbox_id,
+      source_family: pending.source_family,
+      provider_message_id: pending.provider_message_id,
+      provider_thread_id: pending.provider_thread_id,
+      idempotency_key: pending.idempotency_key,
+      content_digest: pending.content_digest,
+      request_digest: pending.request_digest,
+    } } : {}),
+  };
 }
 
 function masterInboxConfig(env) {
@@ -256,7 +299,7 @@ export function createWorkerHandlers({
     try {
       do {
         await context.checkpoint({ ...context.job.checkpoint, cursor, cycle_id: cycleId, stage: "reading_candidate_index" });
-        const page = await candidatePage(cursor, 100, { env });
+        const page = await candidatePage(cursor, SOURCE_PAGE_LIMITS.candidate_index, { env });
         await context.checkpoint({ ...context.job.checkpoint, cursor, cycle_id: cycleId, stage: "candidate_index_page_read" });
         const stored = await repository.upsertCandidateIndex(page.rows, {
           cycleId,
@@ -267,7 +310,7 @@ export function createWorkerHandlers({
         cursor = page.next_cursor;
         pages += 1;
         await context.checkpoint({ ...context.job.checkpoint, cursor, cycle_id: cycleId, pages, changed, stage: "candidate_index_checkpoint" });
-      } while (cursor != null && pages < 5 && !context.signal.aborted);
+      } while (cursor != null && pages < 1 && !context.signal.aborted);
       let retired = 0;
       let deactivated = 0;
       if (cursor == null) {
@@ -356,6 +399,18 @@ export function createWorkerHandlers({
       const claimed = await sourceLease.claimSourceCursor({ sourceKey, workerId: context.workerId, leaseSeconds: 300, controlEpoch: context.controlEpoch }, sql);
       if (!claimed) return { checkpoint: { stage: "gmail_coalesced" } };
       try {
+        const persistGmailSession = (lane) => async (state) => {
+          const prior = context.job.checkpoint?.gmail_source_sessions || {};
+          const next = { ...prior };
+          const stored = storedGmailSourceSession(state);
+          if (stored) next[lane] = stored;
+          else delete next[lane];
+          await context.checkpoint({ ...context.job.checkpoint, gmail_source_sessions: next });
+        };
+        const savedGmailSession = (lane) => restoreGmailSourceSession(
+          context.job.checkpoint?.gmail_source_sessions?.[lane],
+        );
+        const checkpointStage = (stage) => context.checkpoint({ ...context.job.checkpoint, stage });
         const gmailCheckpoint = claimed.checkpoint?.gmail || {};
         const scopedCheckpoint = gmailCheckpoint?.scopes?.[GMAIL_ROLE_INTEREST_SCOPE] || {};
         // Keep the pre-existing Gmail cursor as the live lane's seed. The
@@ -379,9 +434,11 @@ export function createWorkerHandlers({
         // historical backlog cannot freeze current candidate replies.
         const live = await gmailInterviews({
           env, fetchImpl, signal: context.signal, checkpoint: liveCheckpoint, now: now().getTime(),
+          checkpointLane: "live",
+          resumeSourceSession: savedGmailSession("live"),
+          onSourceSession: persistGmailSession("live"),
           maxThreads: 12,
-          assertCurrent: () => context.checkpoint({ stage: "reading_gmail_role_interest_live" }),
-          admit: (event) => service.intakeMasterInbox(event),
+          assertCurrent: () => checkpointStage("reading_gmail_role_interest_live"),
         });
         const nextLive = { ...live.checkpoint, caught_up: Boolean(live.caught_up) };
         let catchup = null;
@@ -391,9 +448,11 @@ export function createWorkerHandlers({
           try {
             catchup = await gmailInterviews({
               env, fetchImpl, signal: context.signal, checkpoint: catchupCheckpoint, now: now().getTime(),
+              checkpointLane: "catchup",
+              resumeSourceSession: savedGmailSession("catchup"),
+              onSourceSession: persistGmailSession("catchup"),
               maxThreads: remainingThreads,
-              assertCurrent: () => context.checkpoint({ stage: "reading_gmail_role_interest_catchup" }),
-              admit: (event) => service.intakeMasterInbox(event),
+              assertCurrent: () => checkpointStage("reading_gmail_role_interest_catchup"),
             });
           } catch (error) {
             catchupFailure = error;
@@ -401,7 +460,9 @@ export function createWorkerHandlers({
         }
         if (catchupFailure) {
           context.signal?.throwIfAborted?.();
-          if (catchupFailure?.name === "AbortError" || /(?:fence|aborted)/iu.test(String(catchupFailure?.code || catchupFailure?.message || ""))) {
+          if (context.job.checkpoint?.gmail_source_sessions?.catchup
+            || catchupFailure?.name === "AbortError"
+            || /(?:fence|aborted)/iu.test(String(catchupFailure?.code || catchupFailure?.message || ""))) {
             throw catchupFailure;
           }
         }
@@ -546,7 +607,11 @@ export function createWorkerHandlers({
     try {
       const population = await curatedPopulation();
       const cursor = Number(claimed.checkpoint?.cursor || 0);
-      const plan = curatedBatchPlan(population, { cursor, batchSize: 100, maxBatch: 120 });
+      const plan = curatedBatchPlan(population, {
+        cursor,
+        batchSize: SOURCE_PAGE_LIMITS.curated_candidates,
+        maxBatch: SOURCE_PAGE_LIMITS.curated_candidates,
+      });
       const observedAt = now().toISOString();
       const seed = !claimed.last_full_success_at;
       const observations = [];
@@ -627,7 +692,7 @@ export function createWorkerHandlers({
         }, sql);
         if (!claimed) return { checkpoint: { stage: "proof_coalesced" } };
         page = await repository.pairsForSubmissionProofPage({
-          limit: 8,
+          limit: SOURCE_PAGE_LIMITS.submission_proof,
           cursor: claimed.checkpoint?.cursor || null,
         });
         if (!page || !Array.isArray(page.rows) || typeof page.cycle_complete !== "boolean") {
@@ -685,7 +750,7 @@ export function createWorkerHandlers({
   result.deliver_notification = async (context) => {
     let sent = 0;
     let claimed = 0;
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < SOURCE_PAGE_LIMITS.notifications; index += 1) {
       await context.checkpoint({ ...context.job.checkpoint, stage: "notification_claim", claimed_count: claimed });
       const rows = await repository.claimNotifications({
         workerId: context.workerId,

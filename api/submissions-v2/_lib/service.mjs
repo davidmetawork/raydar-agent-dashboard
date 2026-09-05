@@ -1,3 +1,4 @@
+import { requestDigest, validateEnrichment } from './enrichment.mjs';
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { effectiveControls, environmentControls } from "./config.mjs";
 import { normalizeEmailReply, privateEventPayload, safeEventProjection } from "./contracts.mjs";
@@ -206,7 +207,36 @@ export function createService({
       }) };
     },
 
+    async intakeReceipt(kind, eventId) {
+      if (!['reply','enrichment'].includes(kind) || !eventId) throw problem('receipt_identity_invalid','A valid receipt identity is required.',400);
+      const receipt=await repository.intakeReceipt(kind,eventId);
+      return { received:Boolean(receipt), ...(receipt?{receiptId:receipt.receipt_id,requestDigest:receipt.request_digest,contentDigest:receipt.request_digest}:{}) };
+    },
+
+    async intakeEnrichment(input) {
+      await requireControls('ingestion','master_inbox');
+      validateEnrichment(input);
+      return repository.applySourceEnrichment(input);
+    },
+
     async intakeMasterInbox(input) {
+      const eventId = clean(input?.event_id || input?.id,200);
+      const digest = requestDigest(input);
+      const identity=normalizeEmailReply(input).event;
+      if(!eventId || !identity.mailbox_id || !identity.provider_message_id || !identity.idempotency_key || !identity.received_at) throw problem('source_identity_invalid','The Master Inbox event identity is incomplete.',400);
+      await requireControls('ingestion','master_inbox');
+      await repository.reserveIntakeRequest?.({eventId,mailboxId:identity.mailbox_id,providerMessageId:identity.provider_message_id,digest});
+      const receipt = eventId && await repository.intakeReceipt?.('reply',eventId);
+      if(receipt) {
+        if(receipt.request_digest!==digest) throw problem('intake_replay_conflict','The intake identity was already used with different content.',409);
+        return {...receipt.result,existing:true};
+      }
+      const result = await service.acceptMasterInbox(input,digest);
+      if(eventId && repository.recordIntakeReceipt) await repository.recordIntakeReceipt({kind:'reply',eventId,digest,result});
+      return result;
+    },
+
+    async acceptMasterInbox(input, inputDigest) {
       await requireControls("ingestion", "master_inbox");
       const normalized = normalizeEmailReply(input);
       const contractUnsupported = input?.schema_version === undefined && Number(input?.contractVersion) !== CURRENT_MASTER_INBOX_CONTRACT;
@@ -219,8 +249,10 @@ export function createService({
         throw problem("source_identity_invalid", "The Master Inbox event identity is incomplete.", 400);
       }
       const prior = await repository.sourceByIdempotency(event.idempotency_key);
+      if(prior?.envelope?.request_digest && prior.envelope.request_digest!==inputDigest) throw problem('intake_replay_conflict','The source identity was already used with different content.',409);
       if (prior) return { accepted: true, existing: true, signal_id: prior.id, processing_state: prior.processing_state };
       const providerPrior = await repository.sourceByProvider?.(event.mailbox_id, event.provider_message_id);
+      if(providerPrior?.envelope?.request_digest && providerPrior.envelope.request_digest!==inputDigest) throw problem('intake_replay_conflict','The provider message was already accepted with different content; use enrichment.',409);
       if (providerPrior) return { accepted: true, existing: true, signal_id: providerPrior.id, processing_state: providerPrior.processing_state };
 
       const candidateResolutionRaw = await repository.candidateMatches(event);
@@ -298,6 +330,16 @@ export function createService({
         event.offered_roles = event.offered_roles.filter((role) => eligibleRoleIds.has(role.role_id));
       }
 
+      // Display snapshots fill only labels for the exact contract role IDs.
+      // They never add, reorder, or resolve a role on the candidate's behalf.
+      if (event.offered_roles.length && repository.offeredRoleSnapshots) {
+        const snapshots = new Map((await repository.offeredRoleSnapshots(event.offered_roles.map((item) => item.role_id)))
+          .map((item) => [item.role_id, item]));
+        event.offered_roles = event.offered_roles.map((item) => ({ ...item,
+          company: item.company || snapshots.get(item.role_id)?.company || "",
+          title: item.title || snapshots.get(item.role_id)?.title || "",
+        }));
+      }
       const privatePayload = privateEventPayload(event);
       const encrypted = encryptJson(privatePayload, { env, context: `event:${event.event_id}`, deterministic: true });
       const privateObjectKey = privatePath("events", sha256(event.idempotency_key).slice(0, 48));
@@ -312,6 +354,7 @@ export function createService({
       if (!/^[a-f0-9]{64}$/i.test(event.content_digest)) event.content_digest = sha256(JSON.stringify(privatePayload));
       const safeEnvelope = {
         ...safeEventProjection(event),
+        request_digest: inputDigest,
         signal_url: trustedSignalUrl(input),
       };
       const recorded = await repository.recordEmailSource({

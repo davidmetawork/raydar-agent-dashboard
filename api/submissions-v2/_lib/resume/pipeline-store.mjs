@@ -4,6 +4,7 @@ import { decryptJson, encryptJson } from "../private-data.mjs";
 import { privatePath, privateReservationId, putPrivateObject, readPrivateObject } from "../blob.mjs";
 import { canonicalJson, sha256 } from "./source-bundle.mjs";
 import { ResumePipelineError, checkpointDigest } from "./pipeline-runtime.mjs";
+import { candidateOriginalExtractionRecord } from "./candidate-original-reuse.mjs";
 
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
 const UUID_OID = 2950;
@@ -50,15 +51,98 @@ function sourceRows(bundle) {
   }));
 }
 
+function extractionContext(identity) {
+  return `candidate-original-extraction:${sha256(canonicalJson(identity))}`;
+}
+
 export function createResumePipelineStore({
   sql = database(),
   repository = createRepository({ sql }),
   blobs = { putPrivateObject, readPrivateObject },
   env = process.env,
 } = {}) {
+  const candidateOriginalExtractionCache = {
+    async load(identity) {
+      const rows = await sql`
+        select candidate_user_id, source_id, source_locator, content_digest,
+               normalized_text_encrypted, normalized_text_digest, page_count, captured_at
+          from submissions_v2.candidate_original_extraction_cache
+         where candidate_user_id=${identity.candidate_id}
+           and source_id=${identity.source_id}
+           and source_locator=${identity.source_locator}
+           and content_digest=${identity.content_digest}
+           and expires_at > clock_timestamp()
+      `;
+      const row = rows[0];
+      if (!row) return null;
+      const payload = decryptJson(envelopeFromBytes(row.normalized_text_encrypted), {
+        env,
+        context: extractionContext(identity),
+      });
+      if (sha256(String(payload?.normalized_text || "")) !== row.normalized_text_digest) {
+        throw new ResumePipelineError("candidate_original_cache_digest_mismatch", "Candidate-original extraction cache integrity verification failed.");
+      }
+      return candidateOriginalExtractionRecord(identity, {
+        text: payload?.normalized_text,
+        pageCount: row.page_count,
+      }, { capturedAt: row.captured_at });
+    },
+    async save(record) {
+      const identity = {
+        candidate_id: record.candidate_id,
+        source_id: record.source_id,
+        source_locator: record.source_locator,
+        content_digest: record.content_digest,
+      };
+      const envelope = encryptJson({ normalized_text: record.normalized_text }, {
+        env,
+        context: extractionContext(identity),
+        deterministic: true,
+      });
+      const expiresAt = new Date(Date.parse(record.captured_at) + (31 * 24 * 60 * 60_000)).toISOString();
+      await sql`
+        insert into submissions_v2.candidate_original_extraction_cache(
+          candidate_user_id, source_id, source_locator, content_digest,
+          normalized_text_encrypted, normalized_text_digest, page_count, captured_at, expires_at
+        ) values (
+          ${identity.candidate_id}, ${identity.source_id}, ${identity.source_locator}, ${identity.content_digest},
+          ${Buffer.from(canonicalJson(envelope), "utf8")}, ${record.normalized_text_digest}, ${record.page_count}, ${record.captured_at}, ${expiresAt}
+        ) on conflict (candidate_user_id, source_id, source_locator, content_digest) do update set
+          normalized_text_encrypted=excluded.normalized_text_encrypted,
+          normalized_text_digest=excluded.normalized_text_digest,
+          page_count=excluded.page_count,
+          captured_at=excluded.captured_at,
+          expires_at=excluded.expires_at,
+          updated_at=clock_timestamp()
+      `;
+    },
+  };
   return {
     repository,
     sql,
+    candidateOriginalExtractionCache,
+
+    async purgeExpiredCandidateOriginalExtractions({ limit = 100 } = {}) {
+      const capped = Math.max(1, Math.min(1_000, Number(limit) || 100));
+      const rows = await sql`
+        with expired as (
+          select candidate_user_id, source_id, source_locator, content_digest
+            from submissions_v2.candidate_original_extraction_cache
+           where expires_at <= clock_timestamp()
+           order by expires_at
+           limit ${capped}
+           for update skip locked
+        )
+        delete from submissions_v2.candidate_original_extraction_cache cache
+         using expired
+         where cache.candidate_user_id=expired.candidate_user_id
+           and cache.source_id=expired.source_id
+           and cache.source_locator=expired.source_locator
+           and cache.content_digest=expired.content_digest
+        returning cache.content_digest
+      `;
+      return rows.length;
+    },
 
     async loadPairContext(pairId, checkpoint = {}) {
       const pair = await repository.pair(pairId);
@@ -114,19 +198,21 @@ export function createResumePipelineStore({
 
     async loadRetryPipeline({ pairId, excludingJobId }) {
       const rows = await sql`
-        select checkpoint->'pipeline' as pipeline
+        select checkpoint->'pipeline' as pipeline,
+               checkpoint->>'safe_failure_code' as safe_failure_code
           from submissions_v2.jobs
          where kind='prepare_resume'
            and subject_type='pair'
            and subject_id=${pairId}
            and id<>${excludingJobId}::uuid
-           and jsonb_typeof(checkpoint->'pipeline'->'stages')='object'
-           and checkpoint->'pipeline'->'stages'<>'{}'::jsonb
          order by updated_at desc
          limit 1
       `;
-      const pipeline = rows[0]?.pipeline;
-      return pipeline && typeof pipeline === "object" ? pipeline : null;
+      const latest = rows[0], pipeline = latest?.pipeline;
+      if (latest?.safe_failure_code === "candidate_original_resume_missing") return null;
+      return pipeline && typeof pipeline === "object" && Object.keys(pipeline.stages || {}).length
+        ? pipeline
+        : null;
     },
 
     async saveCheckpoint({ generationId, stage, value, executionFence }) {
@@ -215,24 +301,130 @@ export function createResumePipelineStore({
       });
     },
 
-    async recordStage({ generationId, stage, attempt, inputDigest, outputKey = null, outputDigest = null, objectReservationId = null, objectWriteFencingToken = null, objectDigest = null, status, costCents = 0, errorCode = null, safeDetail = null, executionFence }) {
+    async reserveModelStage({ generationId, stage, attempt, inputDigest, reservedCents, executionFence }) {
       return sql.begin(async (tx) => {
         await assertGenerationFence(tx, executionFence, generationId);
+        const boundedAttempt = Math.max(1, Math.min(3, Number(attempt) || 1));
+        const boundedReserved = Math.max(1, Math.min(200, Number(reservedCents) || 0));
+        let rows = await tx`
+          select * from submissions_v2.resume_stage_runs
+           where generation_id=${generationId} and stage=${stage} and attempt=${boundedAttempt}
+           for update
+        `;
+        const replay = rows.length > 0;
+        if (replay && rows[0].input_digest !== inputDigest) {
+          throw new ResumePipelineError("model_stage_input_conflict", "A model-call reservation was already used for different input.");
+        }
+        if (!replay) rows = await tx`
+          insert into submissions_v2.resume_stage_runs(
+            generation_id, stage, attempt, input_digest, status, cost_cents,
+            reserved_cents, charge_outcome, reservation_at
+          ) values (
+            ${generationId}, ${stage}, ${boundedAttempt}, ${inputDigest}, 'running',
+            ${boundedReserved}, ${boundedReserved}, 'reserved', clock_timestamp()
+          )
+          returning *
+        `;
+        // A surviving reservation cannot prove whether the provider accepted
+        // the request before the worker stopped. Preserve its full forecast as
+        // spent and make the ambiguity explicit instead of sending it again.
+        if (replay && rows[0].charge_outcome === "reserved") rows = await tx`
+          update submissions_v2.resume_stage_runs
+             set charge_outcome='unknown'
+           where id=${rows[0].id}
+          returning *
+        `;
+        // The generation row is what a later job attempt sums. Move its spend
+        // fence in the same transaction as the provider-call reservation so a
+        // process crash cannot make the next generation forget this charge.
+        const total = Number((await tx`
+          select coalesce(sum(reserved_cents), 0)::integer as total
+            from submissions_v2.resume_stage_runs
+           where generation_id=${generationId}
+        `)[0]?.total || 0);
+        const generationRows = await tx`
+          update submissions_v2.resume_generations
+             set spent_cents=greatest(spent_cents, ${total}), updated_at=clock_timestamp()
+           where id=${generationId} and ${total} <= budget_cents
+          returning id
+        `;
+        if (!generationRows.length) {
+          throw new ResumePipelineError("generation_budget_exhausted", "Resume preparation reached its two-dollar model-cost ceiling.");
+        }
+        return { ...rows[0], replay };
+      });
+    },
+
+    async settleModelStage({ generationId, stage, attempt, actualCents = null, executionFence }) {
+      return sql.begin(async (tx) => {
+        await assertGenerationFence(tx, executionFence, generationId);
+        const actual = actualCents == null ? null : Math.max(0, Math.min(200, Math.ceil(Number(actualCents) || 0)));
         const rows = await tx`
+          update submissions_v2.resume_stage_runs
+             set charge_outcome=case when charge_outcome='settled' then 'settled' else ${actual == null ? "unknown" : "settled"} end,
+                 actual_cents=case when charge_outcome='settled' then actual_cents else ${actual} end,
+                 settled_at=case when charge_outcome='settled' or ${actual == null} then settled_at else clock_timestamp() end
+           where generation_id=${generationId} and stage=${stage}
+             and attempt=${Math.max(1, Math.min(3, Number(attempt) || 1))}
+             and reserved_cents > 0
+             and (${actual}::integer is null or ${actual} <= reserved_cents)
+           returning *
+        `;
+        if (!rows.length) throw new ResumePipelineError("model_charge_settlement_invalid", "The model-charge reservation could not be settled safely.");
+        return rows[0];
+      });
+    },
+
+    async recordStage({ generationId, stage, attempt, inputDigest, outputKey = null, outputDigest = null, objectReservationId = null, objectWriteFencingToken = null, objectDigest = null, status, costCents = 0, actualCents = null, errorCode = null, safeDetail = null, executionFence }) {
+      return sql.begin(async (tx) => {
+        await assertGenerationFence(tx, executionFence, generationId);
+        const boundedAttempt = Math.max(1, Math.min(3, Number(attempt) || 1));
+        const boundedCost = Math.max(0, Math.min(200, Number(costCents) || 0));
+        const boundedActual = actualCents == null ? null : Math.max(0, Math.min(200, Math.ceil(Number(actualCents) || 0)));
+        const chargeOutcome = boundedCost > 0 ? (boundedActual == null ? "unknown" : "settled") : "not_called";
+        const reservationAt = boundedCost > 0 ? new Date().toISOString() : null;
+        const settledAt = boundedCost > 0 && boundedActual != null ? new Date().toISOString() : null;
+        const completedAt = status === "running" ? null : new Date().toISOString();
+        // Model-cost reservation creates this stage row before the checkpoint
+        // exists. Updating it first preserves the durable row identity used by
+        // the private-object binding trigger. INSERT ... ON CONFLICT cannot do
+        // that: its BEFORE INSERT trigger would transiently claim the object
+        // path under a new UUID before PostgreSQL reaches conflict resolution.
+        let rows = await tx`
+          update submissions_v2.resume_stage_runs
+             set output_object_key=${outputKey}, output_digest=${outputDigest}, status=${status},
+                 cost_cents=greatest(cost_cents, ${boundedCost}),
+                 actual_cents=coalesce(${boundedActual}, actual_cents),
+                 charge_outcome=case when reserved_cents > 0 and ${boundedActual}::integer is null
+                   then 'unknown' else ${chargeOutcome} end,
+                 settled_at=coalesce(${settledAt}, settled_at), completed_at=${completedAt},
+                 safe_error_code=${errorCode}, safe_error_detail=${safeDetail}
+           where generation_id=${generationId} and stage=${stage} and attempt=${boundedAttempt}
+             and input_digest=${inputDigest}
+          returning *
+        `;
+        if (!rows.length) {
+          const conflicts = await tx`
+            select input_digest from submissions_v2.resume_stage_runs
+             where generation_id=${generationId} and stage=${stage} and attempt=${boundedAttempt}
+          `;
+          if (conflicts.length) {
+            throw new ResumePipelineError("stage_run_input_conflict", "A resume stage attempt was already used for different input.");
+          }
+          rows = await tx`
           insert into submissions_v2.resume_stage_runs(
           generation_id, stage, attempt, input_digest, output_object_key, output_digest,
-          status, cost_cents, completed_at, safe_error_code, safe_error_detail
+          status, cost_cents, reserved_cents, actual_cents, charge_outcome, reservation_at, settled_at,
+          completed_at, safe_error_code, safe_error_detail
         ) values (
-          ${generationId}, ${stage}, ${Math.max(1, Math.min(3, Number(attempt) || 1))}, ${inputDigest},
-          ${outputKey}, ${outputDigest}, ${status}, ${Math.max(0, Math.min(200, Number(costCents) || 0))},
-          ${status === "running" ? null : new Date().toISOString()}, ${errorCode}, ${safeDetail}
-        ) on conflict (generation_id, stage, attempt) do update set
-          output_object_key=excluded.output_object_key, output_digest=excluded.output_digest,
-          status=excluded.status, cost_cents=excluded.cost_cents,
-          completed_at=excluded.completed_at, safe_error_code=excluded.safe_error_code,
-          safe_error_detail=excluded.safe_error_detail
+          ${generationId}, ${stage}, ${boundedAttempt}, ${inputDigest},
+          ${outputKey}, ${outputDigest}, ${status}, ${boundedCost}, ${boundedCost},
+          ${boundedActual}, ${chargeOutcome}, ${reservationAt}, ${settledAt},
+          ${completedAt}, ${errorCode}, ${safeDetail}
+        )
         returning *
         `;
+        }
         if (objectReservationId) {
           const committed = await tx`
           update submissions_v2.private_object_reservations
@@ -443,7 +635,7 @@ export function createResumePipelineStore({
             priority, max_attempts, checkpoint, control_epoch
           ) values (
             'prepare_resume', 'pair', ${pairId}, ${key}, 'generation', 45, 3,
-            ${tx.json({ trigger_kind: "retry", expected_pair_version: Number(updated.state_version) })},
+            ${tx.json({ trigger_kind: "retry", expected_pair_version: Number(updated.state_version), refresh_sources: true })},
             ${controls.control_epoch}
           ) on conflict (kind, idempotency_key) do nothing
           returning *

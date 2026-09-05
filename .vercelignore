@@ -8,3 +8,6 @@ submissions-v2-purge/
 submissions-v2-worker/
 test/fixtures/submissions-v2-classifier-cases.json
 test/submissions-v2-*.test.mjs
+
+submissions-preview/
+scripts/submissions-rebuild-validation.mjs

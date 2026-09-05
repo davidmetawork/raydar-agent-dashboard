@@ -37,6 +37,9 @@ grant select on
   submissions_v2.download_audit,
   submissions_v2.download_tickets,
   submissions_v2.first_response_claims,
+  submissions_v2.intake_receipts,
+  submissions_v2.intake_request_guards,
+  submissions_v2.enrichment_request_keys,
   submissions_v2.job_attempts,
   submissions_v2.jobs,
   submissions_v2.not_interested_entries,
@@ -60,6 +63,7 @@ grant select on
   submissions_v2.source_cursors,
   submissions_v2.source_events,
   submissions_v2.source_health,
+  submissions_v2.source_enrichments,
   submissions_v2.source_offered_roles,
   submissions_v2.source_runs,
   submissions_v2.submission_proofs,
@@ -87,11 +91,15 @@ to submissions_v2_api;
 grant insert on
   submissions_v2.archive_lookup_audit,
   submissions_v2.case_deletion_audit,
+  submissions_v2.intake_receipts,
+  submissions_v2.intake_request_guards,
+  submissions_v2.enrichment_request_keys,
   submissions_v2.jobs,
   submissions_v2.notification_outbox,
   submissions_v2.pair_events,
   submissions_v2.pair_signal_links,
   submissions_v2.privacy_safe_events,
+  submissions_v2.source_enrichments,
   submissions_v2.source_offered_roles
 to submissions_v2_api;
 
@@ -103,6 +111,7 @@ grant select on
   submissions_v2.claim_evidence_links,
   submissions_v2.claim_validations,
   submissions_v2.classification_attempts,
+  submissions_v2.candidate_original_extraction_cache,
   submissions_v2.curated_snapshots,
   submissions_v2.first_response_claims,
   submissions_v2.job_attempts,
@@ -129,12 +138,15 @@ grant select on
   submissions_v2.source_health,
   submissions_v2.source_offered_roles,
   submissions_v2.submission_proofs,
-  submissions_v2.upload_reservations
+  submissions_v2.upload_reservations,
+  submissions_v2.worker_progress,
+  submissions_v2.worker_service_fairness
 to submissions_v2_worker;
 
 grant insert, update on
   submissions_v2.artifact_deletions,
   submissions_v2.candidate_index,
+  submissions_v2.candidate_original_extraction_cache,
   submissions_v2.candidate_role_pairs,
   submissions_v2.curated_snapshots,
   submissions_v2.first_response_claims,
@@ -154,8 +166,10 @@ grant insert, update on
   submissions_v2.source_cursors,
   submissions_v2.source_events,
   submissions_v2.source_health,
-  submissions_v2.upload_reservations
+  submissions_v2.upload_reservations,
+  submissions_v2.worker_progress
 to submissions_v2_worker;
+grant delete on submissions_v2.candidate_original_extraction_cache to submissions_v2_worker;
 grant insert on
   submissions_v2.claim_evidence_links,
   submissions_v2.claim_validations,
@@ -199,6 +213,13 @@ grant execute on function submissions_v2.job_control_enabled(text, submissions_v
   to submissions_v2_worker;
 grant execute on function submissions_v2.source_control_enabled(text, submissions_v2.runtime_controls)
   to submissions_v2_worker;
+grant execute on function submissions_v2.worker_job_service_class(text)
+  to submissions_v2_worker;
+
+grant select, delete on submissions_v2.candidate_original_extraction_cache
+  to submissions_v2_purge;
+
+grant execute on function submissions_v2.purge_candidate_original_extraction_cache(integer) to submissions_v2_purge;
 
 grant execute on function submissions_v2.claim_case_purges(text, integer, integer) to submissions_v2_purge;
 grant execute on function submissions_v2.case_purge_plan(uuid, text, bigint) to submissions_v2_purge;

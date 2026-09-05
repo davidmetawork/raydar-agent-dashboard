@@ -127,6 +127,12 @@ test("migrations are digest-checked and idempotent", async () => {
     "014_api_review_binding_source_offers.sql",
     "015_proof_during_resume_preparation.sql",
     "016_review_submission_proof.sql",
+    "017_worker_progress_and_fairness.sql",
+    "018_candidate_extraction_and_cost.sql",
+    "019_source_enrichment_receipts.sql",
+    "020_intake_request_guards_and_permissions.sql",
+    "021_enrichment_and_cache_purge.sql",
+    "022_enrichment_transport_identity.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count

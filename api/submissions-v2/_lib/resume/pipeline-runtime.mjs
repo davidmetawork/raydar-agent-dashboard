@@ -67,6 +67,23 @@ export function forecastModelCostCents({
   return Math.max(1, Math.ceil(dollarsPerCall * 100 * calls));
 }
 
+// A provider may omit or fail to persist usage after accepting a request. In
+// that case callers must keep their reservation rather than infer a free call.
+export function actualModelCostCents({ model, audits, env = process.env }) {
+  const inputRate = configuredRate(model, "input", env);
+  const outputRate = configuredRate(model, "output", env);
+  if (!inputRate || !outputRate || !Array.isArray(audits) || !audits.length) return null;
+  let micros = 0;
+  for (const audit of audits) {
+    const usage = audit?.usage;
+    const input = Number(usage?.inputTokens);
+    const output = Number(usage?.outputTokens);
+    if (!usage || !Number.isFinite(input) || !Number.isFinite(output) || (input <= 0 && output <= 0)) return null;
+    micros += (Math.max(0, input) * inputRate) + (Math.max(0, output) * outputRate);
+  }
+  return Math.max(1, Math.ceil((micros / 1_000_000) * 100));
+}
+
 export function createGenerationBudget({
   deadlineAt,
   budgetCents = GENERATION_BUDGET_CENTS,

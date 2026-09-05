@@ -110,6 +110,8 @@ function currentMasterInbox(input) {
     candidate_user_id_hint: null,
     review_reason_hint: null,
     source_evidence: null,
+    parent_rfc_message_id: text(payload?.parentRfcMessageId, 500) || null,
+    binding_kind: text(payload?.bindingKind, 100) || null,
   };
 }
 
@@ -146,6 +148,8 @@ function canonical(input) {
       ? "candidate_ambiguous"
       : null,
     source_evidence: sequenceEvidence(input?.source_evidence),
+    parent_rfc_message_id: text(input?.parent_rfc_message_id, 500) || null,
+    binding_kind: text(input?.binding_kind, 100) || null,
   };
 }
 
@@ -196,6 +200,8 @@ export function safeEventProjection(event) {
     candidate_user_id_hint: event.candidate_user_id_hint,
     review_reason_hint: event.review_reason_hint,
     source_evidence: event.source_evidence,
+    parent_rfc_message_id: event.parent_rfc_message_id,
+    binding_kind: event.binding_kind,
   };
 }
 

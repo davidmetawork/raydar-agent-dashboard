@@ -5,13 +5,14 @@ import { GMAIL_ROLE_INTEREST_SCOPE, paraformRoleLink } from "../api/submissions-
 import { authoredReply, collectInterviewWindow, interviewReplyEvents, interviewSearch, offeredRoles, outboundParent, roleInterestSearch } from "../api/submissions-v2/_lib/gmail-interview-source.mjs";
 import { normalizeEmailReply } from "../api/submissions-v2/_lib/contracts.mjs";
 import { serviceInternals } from "../api/submissions-v2/_lib/service.mjs";
-import { gmailWindow, reconcileGmailInterviews } from "../submissions-v2-worker/gmail-reader.mjs";
+import { gmailWindow, reconcileGmailInterviews, sourceAuthorityHeaders } from "../submissions-v2-worker/gmail-reader.mjs";
 import { createWorkerHandlers } from "../submissions-v2-worker/worker-handlers.mjs";
 import { rowDto } from "../api/submissions-v2/_lib/presentation.mjs";
 import { repositoryInternals } from "../api/submissions-v2/_lib/repository.mjs";
 
 const env = { SUBMISSIONS_V2_EMAIL_HMAC_KEY: "h".repeat(40), SUBMISSIONS_V2_EMAIL_HMAC_VERSION: "v1", SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: "2026-09-02T02:45:14.308Z", SUBMISSIONS_V2_MASTER_INBOX_WORKER_KEY: "k".repeat(40) };
 const start = Date.parse(env.SUBMISSIONS_V2_GMAIL_ACTIVATED_AT);
+const sourceSession = "11111111-1111-4111-8111-111111111111";
 function message({ id = "aa", at = start + 1000, from = "Sample Person <person@example.com>", to = "david@raydar.xyz", subject = "Re: 1st Round - Interview Request @ Example", body = "Yes, I am interested.\n\nOn Wed, David wrote:\n> Would you like this role?", labels = ["INBOX"], headers = {}, mime = "text/plain" } = {}) {
   return { id, threadId: "ab", internalDate: String(at), labelIds: labels, payload: { mimeType: mime, headers: Object.entries({ From: from, To: to, Subject: subject, "Message-ID": `<${id}@example.com>`, "In-Reply-To": "<sent@example.com>", ...headers }).map(([name, value]) => ({ name, value })), body: { data: Buffer.from(body).toString("base64url") } } };
 }
@@ -214,44 +215,238 @@ test("a no-window retry preserves a proven live checkpoint without a broker read
 });
 
 test("overflow narrows the window without admitting or skipping messages", async () => {
-  const result = await reconcileGmailInterviews({ env, now: start + 600_000, assertCurrent: async () => {}, admit: async () => assert.fail("must not admit"),
-    fetchImpl: async () => new Response(JSON.stringify({ ok: true, result: { brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: Array.from({ length: 13 }, (_, i) => ({ threadId: i.toString(16) })) } })),
+  const operations = [];
+  const result = await reconcileGmailInterviews({ env, checkpointLane: "live", now: start + 600_000, assertCurrent: async () => {}, admit: async () => assert.fail("must not admit"),
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body); operations.push(request.operation);
+      const resultValue = request.operation === "abort"
+        ? { sourceSession, aborted: true, unsettledAdmissions: 0 }
+        : { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: Array.from({ length: 13 }, (_, i) => ({ threadId: i.toString(16) })) };
+      return new Response(JSON.stringify({ ok: true, result: resultValue }));
+    },
   });
   assert.equal(result.narrowed, true); assert.equal(result.checkpoint.through, start); assert.equal(result.checkpoint.window_span_ms, 240_000);
+  assert.deepEqual(operations, ["list", "abort"]);
 });
 
-test("broker failure admits nothing; successful intake must be acknowledged", async () => {
-  const base = { env, now: start + 600_000, assertCurrent: async () => {}, sleepImpl: async () => {} };
+test("broker failure before admission aborts, while an unacknowledged admission stays pinned without local intake", async () => {
+  const base = { env, checkpointLane: "live", now: start + 600_000, assertCurrent: async () => {}, sleepImpl: async () => {} };
   await assert.rejects(reconcileGmailInterviews({ ...base, admit: async () => assert.fail("must not admit"), fetchImpl: async () => new Response(JSON.stringify({ error: "provider_budget_exhausted" }), { status: 429 }) }), /provider_budget_exhausted/u);
-  let reads = 0;
-  await assert.rejects(reconcileGmailInterviews({ ...base, admit: async () => ({ accepted: false }), fetchImpl: async () => new Response(JSON.stringify({ ok: true, result: { brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...(reads++ ? thread() : { messages: [{ threadId: "ab" }] }) } })) }), /intake_not_acknowledged/u);
-  await assert.rejects(reconcileGmailInterviews({ ...base, admit: async () => ({ accepted: true }), fetchImpl: async () => new Response(JSON.stringify({ ok: true, result: { messages: [] } })) }), /broker_scope_mismatch/u);
+  const requests = [];
+  await assert.rejects(reconcileGmailInterviews({ ...base, admit: async () => assert.fail("authority mode must not call local intake"), fetchImpl: async (_url, init) => {
+    const request = JSON.parse(init.body); requests.push(request);
+    const result = request.operation === "list" ? { messages: [{ threadId: "ab" }] }
+      : request.operation === "thread" ? thread()
+        : request.operation === "admit" ? { accepted: false }
+          : { aborted: true, unsettledAdmissions: 0 };
+    return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...result } }));
+  } }), /intake_not_acknowledged/u);
+  assert.deepEqual(requests.map((request) => request.operation), ["list", "thread", "admit"]);
+  assert.equal(requests[2].sourceSession, sourceSession);
+  assert.equal(requests[2].event.provider_message_id, "aa");
+  await assert.rejects(reconcileGmailInterviews({ ...base, admit: async () => assert.fail("must not admit"), fetchImpl: async () => new Response(JSON.stringify({ ok: true, result: { sourceSession, messages: [] } })) }), /broker_scope_mismatch/u);
 });
 
-test("the Gmail broker receives one approved multi-family scope without changing window controls", async () => {
+test("a broker session change aborts the original session before admission or checkpoint", async () => {
+  const otherSession = "22222222-2222-4222-8222-222222222222";
+  const requests = [];
+  await assert.rejects(reconcileGmailInterviews({
+    env, checkpointLane: "live", now: start + 600_000, assertCurrent: async () => {}, sleepImpl: async () => {},
+    admit: async () => assert.fail("must not call local intake"),
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body); requests.push(request);
+      if (request.operation === "list") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: [{ threadId: "ab" }] } }));
+      if (request.operation === "thread") return new Response(JSON.stringify({ ok: true, result: { sourceSession: otherSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...thread() } }));
+      return new Response(JSON.stringify({ ok: true, result: { sourceSession, aborted: true, unsettledAdmissions: 0 } }));
+    },
+  }), /gmail_source_session_mismatch/u);
+  assert.deepEqual(requests.map((request) => request.operation), ["list", "thread", "abort"]);
+  assert.equal(requests[2].sourceSession, sourceSession);
+});
+
+test("an ambiguous admission persists only a minimal deterministic recovery token", async () => {
+  const states = [];
+  const requests = [];
+  let dispatchedEvent;
+  await assert.rejects(reconcileGmailInterviews({
+    env,
+    checkpointLane: "live",
+    now: start + 600_000,
+    assertCurrent: async () => {},
+    onSourceSession: async (state) => states.push(structuredClone(state)),
+    sleepImpl: async () => {},
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body); requests.push(request);
+      if (request.operation === "list") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: [{ threadId: "ab" }] } }));
+      if (request.operation === "thread") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...thread() } }));
+      if (request.operation === "admit") {
+        dispatchedEvent = request.event;
+        throw Object.assign(new Error("connection reset after dispatch"), { code: "source_admission_uncertain" });
+      }
+      assert.fail("an uncertain admission must not abort or checkpoint");
+    },
+  }), /connection reset after dispatch/u);
+  assert.deepEqual(requests.map((request) => request.operation), ["list", "thread", "admit"]);
+  const saved = states.at(-1);
+  assert.equal(saved.sourceSession, sourceSession);
+  assert.deepEqual(Object.keys(saved.pendingAdmission).sort(), [
+    "content_digest", "event_id", "idempotency_key", "lane", "mailbox_id", "provider_message_id",
+    "provider_thread_id", "request_digest", "schema_version", "scope", "source_family", "window",
+  ]);
+  assert.deepEqual(saved.pendingAdmission.window, { after: start, before: start + 480_000 });
+  assert.equal(saved.pendingAdmission.event_id, dispatchedEvent.event_id);
+  assert.equal(saved.pendingAdmission.content_digest, dispatchedEvent.content_digest);
+  assert.match(saved.pendingAdmission.request_digest, /^[a-f0-9]{64}$/u);
+  assert.doesNotMatch(JSON.stringify(saved), /candidate_authored_text|sent_message_text|Yes, I am interested/u);
+
+  for (const brokerResult of [
+    { accepted: true, existing: false, processing_state: "queued" },
+    { accepted: true, existing: true, reconciled: true },
+  ]) {
+    const recoveryRequests = [];
+    const recoveryStates = [];
+    const result = await reconcileGmailInterviews({
+      env,
+      checkpoint: { through: start + 480_000, caught_up: true },
+      checkpointLane: "live",
+      resumeSourceSession: saved,
+      now: start + 540_000,
+      assertCurrent: async () => {},
+      onSourceSession: async (state) => recoveryStates.push(structuredClone(state)),
+      sleepImpl: async () => {},
+      fetchImpl: async (_url, init) => {
+        const request = JSON.parse(init.body); recoveryRequests.push(request);
+        if (request.operation === "list") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: [{ threadId: "ab" }] } }));
+        if (request.operation === "thread") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...thread() } }));
+        if (request.operation === "admit") return new Response(JSON.stringify({ ok: true, result: { sourceSession, ...brokerResult } }));
+        if (request.operation === "abort") return new Response(JSON.stringify({ ok: true, result: { sourceSession, aborted: true, unsettledAdmissions: 0 } }));
+        assert.fail("a no-window recovery cannot start a replacement scan");
+      },
+    });
+    assert.deepEqual(recoveryRequests.map((request) => request.operation), ["list", "thread", "admit", "abort"]);
+    assert.deepEqual(recoveryRequests[2].event, dispatchedEvent);
+    assert.ok(recoveryRequests.slice(0, 3).every((request) => request.after === start && request.before === start + 480_000));
+    assert.equal(recoveryStates.at(-1), null);
+    assert.equal(result.completed, false);
+    assert.equal(result.caught_up, true);
+  }
+});
+
+test("recovery refuses a changed event and retains the old session without another admission", async () => {
+  const states = [];
+  const original = interviewReplyEvents(thread(), options)[0];
+  const pendingAdmission = {
+    schema_version: 1,
+    scope: GMAIL_ROLE_INTEREST_SCOPE,
+    lane: "live",
+    window: { after: start, before: start + 300_000 },
+    event_id: original.event_id,
+    mailbox_id: original.mailbox_id,
+    source_family: original.source_family,
+    provider_message_id: original.provider_message_id,
+    provider_thread_id: original.provider_thread_id,
+    idempotency_key: original.idempotency_key,
+    content_digest: original.content_digest,
+    request_digest: "0".repeat(64),
+  };
+  const operations = [];
+  await assert.rejects(reconcileGmailInterviews({
+    env,
+    checkpointLane: "live",
+    resumeSourceSession: { sourceSession, pendingAdmission },
+    now: start + 600_000,
+    assertCurrent: async () => {},
+    onSourceSession: async (state) => states.push(state),
+    sleepImpl: async () => {},
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body); operations.push(request.operation);
+      if (request.operation === "list") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: [{ threadId: "ab" }] } }));
+      if (request.operation === "thread") return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...thread() } }));
+      assert.fail("a digest mismatch cannot admit, abort, or checkpoint");
+    },
+  }), /gmail_source_recovery_event_mismatch/u);
+  assert.deepEqual(operations, ["list", "thread"]);
+  assert.deepEqual(states, []);
+});
+
+test("a saved session with no pending admission is closed before any provider read or V2 post", async () => {
+  for (const alreadyClosed of [false, true]) {
+    const operations = [];
+    const states = [];
+    const result = await reconcileGmailInterviews({
+      env,
+      checkpoint: { through: start + 480_000, caught_up: true },
+      checkpointLane: "live",
+      resumeSourceSession: { sourceSession },
+      now: start + 540_000,
+      assertCurrent: async () => {},
+      onSourceSession: async (state) => states.push(state),
+      fetchImpl: async (_url, init) => {
+        const request = JSON.parse(init.body); operations.push(request.operation);
+        assert.equal(request.operation, "abort");
+        return alreadyClosed
+          ? new Response(JSON.stringify({ error: "source_session_lost" }), { status: 409 })
+          : new Response(JSON.stringify({ ok: true, result: { sourceSession, aborted: true, unsettledAdmissions: 0 } }));
+      },
+    });
+    assert.deepEqual(operations, ["abort"]);
+    assert.deepEqual(states, [null]);
+    assert.equal(result.completed, false);
+  }
+});
+
+test("the Gmail broker keeps one source session through the empty window checkpoint", async () => {
   const bodies = [];
-  const result = await reconcileGmailInterviews({ env, now: start + 600_000, assertCurrent: async () => {}, admit: async () => ({ accepted: true }), sleepImpl: async () => {},
+  const result = await reconcileGmailInterviews({ env, checkpointLane: "live", now: start + 600_000, assertCurrent: async () => {}, admit: async () => assert.fail("must not call local intake"), sleepImpl: async () => {},
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(init.body); bodies.push(body);
-      return new Response(JSON.stringify({ ok: true, result: { brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...(body.operation === "list" ? { messages: [] } : thread()) } }));
+      const resultValue = body.operation === "list" ? { messages: [] }
+        : body.operation === "checkpoint" ? { authorized: true, active: false, committed: 0 }
+          : {};
+      return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...resultValue } }));
     },
   });
   assert.equal(result.observed, 0);
-  assert.deepEqual(bodies, [{ after: start, before: start + 480_000, scope: GMAIL_ROLE_INTEREST_SCOPE, operation: "list" }]);
+  assert.deepEqual(bodies.map((body) => body.operation), ["list", "checkpoint"]);
+  assert.equal(bodies[0].sourceSession, undefined);
+  assert.equal(bodies[1].sourceSession, sourceSession);
+  assert.deepEqual(bodies[1].checkpoint, result.checkpoint);
 });
 
-test("worker Gmail mode commits only acknowledged progress under the existing email fence", async () => {
+test("active shared authority travels only by the authenticated broker header and commits before returning progress", async () => {
+  const encoded = Buffer.from(JSON.stringify([{ mailboxId: "david-raydar-xyz", family: "new_match", ownerId: "v2-reader", epoch: 4, fenceToken: "synthetic" }])).toString("base64url");
+  const calls = [];
+  const activeEnv = { ...env, SUBMISSIONS_V2_SOURCE_AUTHORITY_HEADER: encoded };
+  const result = await reconcileGmailInterviews({ env: activeEnv, checkpointLane: "live", now: start + 600_000, assertCurrent: async () => {}, admit: async () => ({ accepted: true }), sleepImpl: async () => {},
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      calls.push({ request, authority: init.headers["x-raydar-source-authority"] });
+      if (request.operation === "checkpoint") return new Response(JSON.stringify({ ok: true, result: { sourceSession, authorized: true, active: true, committed: 1 } }));
+      return new Response(JSON.stringify({ ok: true, result: { sourceSession, brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: [] } }));
+    },
+  });
+  assert.equal(result.checkpoint.through, start + 480_000);
+  assert.deepEqual(calls.map((call) => call.request.operation), ["list", "checkpoint"]);
+  assert.ok(calls.every((call) => call.authority === encoded));
+  assert.deepEqual(calls[1].request.checkpoint, result.checkpoint);
+  assert.equal(calls[1].request.lane, "live");
+  assert.deepEqual(sourceAuthorityHeaders(activeEnv), { "x-raydar-source-authority": encoded });
+  assert.throws(() => sourceAuthorityHeaders({ SUBMISSIONS_V2_SOURCE_AUTHORITY_HEADER: "%%%" }), /gmail_source_authority_invalid/u);
+  await assert.rejects(() => reconcileGmailInterviews({ env: activeEnv, now: start + 600_000, assertCurrent: async () => {}, admit: async () => ({ accepted: true }) }), /checkpoint_lane_invalid/u);
+});
+
+test("worker Gmail mode commits only broker-acknowledged progress under the existing email fence", async () => {
   let committed; let health; let admitted = 0;
   const sql = async () => []; sql.json = (v) => v;
   const handlers = createWorkerHandlers({ env: { ...env, SUBMISSIONS_V2_EMAIL_READER: "gmail" }, sql, resumeStore: {},
     repository: { recordSourceHealth: async (value) => { health = value; } },
     service: { intakeMasterInbox: async () => { admitted += 1; return { accepted: true }; } },
     sourceLease: { claimSourceCursor: async () => ({ fencing_token: 4, checkpoint: { prior: true, gmail: { through: start + 300_000, window_span_ms: 60_000 } } }), commitSourceCursor: async (value) => { committed = value; return {}; }, releaseSourceCursor: async () => {} },
-    gmailInterviews: async ({ admit, checkpoint }) => { assert.deepEqual(checkpoint, { through: start + 300_000 }); await admit({}); return { checkpoint: { through: start + 360_000 }, completed: true, caught_up: true, accepted: 1, observed: 1 }; },
+    gmailInterviews: async ({ admit, checkpoint, checkpointLane }) => { assert.equal(admit, undefined); assert.deepEqual(checkpoint, { through: start + 300_000 }); assert.equal(checkpointLane, "live"); return { checkpoint: { through: start + 360_000 }, completed: true, caught_up: true, accepted: 1, observed: 1 }; },
     masterInbox: async () => assert.fail("not both transports"), now: () => new Date(start + 600_000),
   });
   await handlers.reconcile_master_inbox({ job: {}, workerId: "test", controlEpoch: 5, checkpoint: async () => {}, signal: new AbortController().signal });
-  assert.equal(admitted, 1); assert.equal(committed.sourceKey, "master_inbox"); assert.equal(committed.controlEpoch, 5);
+  assert.equal(admitted, 0); assert.equal(committed.sourceKey, "master_inbox"); assert.equal(committed.controlEpoch, 5);
   assert.equal(committed.checkpoint.prior, true); assert.equal(committed.checkpoint.gmail.through, start + 300_000);
   const scoped = committed.checkpoint.gmail.scopes[GMAIL_ROLE_INTEREST_SCOPE];
   assert.equal(scoped.live.through, start + 360_000);
@@ -282,12 +477,14 @@ test("live Gmail progress commits when bounded catch-up hits provider quota", as
       commitSourceCursor: async (value) => { committed = value; return {}; },
       releaseSourceCursor: async () => assert.fail("live progress must commit"),
     },
-    gmailInterviews: async ({ checkpoint, maxThreads }) => {
+    gmailInterviews: async ({ checkpoint, checkpointLane, maxThreads }) => {
       budgets.push(maxThreads);
       if (calls++ === 0) {
+        assert.equal(checkpointLane, "live");
         assert.equal(checkpoint.through, start + 300_000);
         return { checkpoint: { through: start + 360_000 }, caught_up: true, completed: true, threads_read: 9, accepted: 1, observed: 1 };
       }
+      assert.equal(checkpointLane, "catchup");
       assert.equal(checkpoint.through, start);
       throw Object.assign(new Error("quota"), { code: "provider_budget_exhausted" });
     },
@@ -311,12 +508,14 @@ test("a no-window live retry still advances catch-up within the shared thread bu
       commitSourceCursor: async (value) => { committed = value; return {}; },
       releaseSourceCursor: async () => assert.fail("durable lanes must commit"),
     },
-    gmailInterviews: async ({ checkpoint, maxThreads }) => {
+    gmailInterviews: async ({ checkpoint, checkpointLane, maxThreads }) => {
       budgets.push(maxThreads);
       if (calls++ === 0) {
+        assert.equal(checkpointLane, "live");
         assert.deepEqual(checkpoint, { through: start + 300_000, caught_up: true });
         return { checkpoint, completed: false, caught_up: true, accepted: 0, observed: 0, threads_read: 0 };
       }
+      assert.equal(checkpointLane, "catchup");
       assert.deepEqual(checkpoint, { through: start });
       return { checkpoint: { through: start + 120_000 }, completed: true, caught_up: false, accepted: 0, observed: 0, threads_read: 8 };
     },

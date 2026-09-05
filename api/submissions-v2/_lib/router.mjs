@@ -3,7 +3,7 @@ import { effectiveControls, serviceConfig } from "./config.mjs";
 import { readRuntimeControls } from "./db.mjs";
 import {
   csrfToken, readRawBody, requireAdmin, requireCron, requireHuman,
-  requireIdempotency, sendError, verifyInboxMachine,
+  requireIdempotency, sendError, verifyInboxMachine, verifySignedMachine,
 } from "./http.mjs";
 import { createService } from "./service.mjs";
 import { authorizeBlobBroker, issueWorkerBlobCapability } from "./blob-capabilities.mjs";
@@ -87,6 +87,25 @@ export async function routeSubmissionsV2(req, res) {
   try {
     if (key === "session") return sessionRoute(req, res);
     if (key === "intake/master-inbox") return intakeRoute(req, res);
+    if (key === 'intake/master-inbox-enrichment') {
+      if (!method(req,res,['POST'])) return;
+      const {raw,body}=await parsedBody(req);
+      req.body=raw;
+      const auth=verifySignedMachine(req,res,{secretName:'SUBMISSIONS_V2_INGEST_KEY',scope:'submissions.email_reply.enrichment.v1'});
+      const idempotencyKey=auth && requireIdempotency(req,res);
+      if(!auth || !idempotencyKey) return;
+      if(auth.eventId!==body.enrichmentId || idempotencyKey!==body.eventKey) return res.status(400).json({ok:false,error:'event_identity_mismatch'});
+      return res.status(202).json({ok:true,...await createService().intakeEnrichment(body)});
+    }
+    if(key === 'intake/receipt') {
+      if(!method(req,res,['GET'])) return;
+      const kind=String(req.query?.kind||''),eventId=String(req.query?.eventId||'');
+      req.body=kind;
+      const auth=verifySignedMachine(req,res,{secretName:'SUBMISSIONS_V2_INGEST_KEY',scope:'submissions.receipt.v1'});
+      if(!auth) return;
+      if(auth.eventId!==eventId) return res.status(400).json({ok:false,error:'event_identity_mismatch'});
+      return res.status(200).json({ok:true,...await createService().intakeReceipt(kind,eventId)});
+    }
     if (key === "internal/blob-capability") {
       if (!method(req, res, ["POST"])) return;
       authorizeBlobBroker(req);

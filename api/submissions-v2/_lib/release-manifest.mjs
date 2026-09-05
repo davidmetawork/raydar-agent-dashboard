@@ -2,13 +2,13 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 96,
-  "digest": "fb0d9c8cd22adaea637d8ec56d6f8dc11acd2bfe7d02fa122284ad52147deee5",
+  "file_count": 112,
+  "digest": "80a1dfaff48111aef7dc764fed68eba288a6c90507649b07790c0ddcc17e7717",
   "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
   "files": [
     {
       "path": ".vercelignore",
-      "sha256": "e8189a6e58b3035f98b39daab3448c36a1bdb92884f55cd2a005472ebb907c20"
+      "sha256": "c55103168469609c8e8cd1e8a59054deb4d948e1db22a1835da8596deadcec2e"
     },
     {
       "path": "api/auth/_lib/session.mjs",
@@ -68,7 +68,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/contracts.mjs",
-      "sha256": "c72443fd9e690b2d2a3c2d2040f1c92c8e548afa0f3fa9d534ae1ed3eaf6e2cf"
+      "sha256": "fafe7e9e6c4f49f9fbaa19434a5a00cd7d0e66cf99ee65568aeac7dd9014ae32"
     },
     {
       "path": "api/submissions-v2/_lib/curated.mjs",
@@ -79,8 +79,24 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
       "sha256": "452d9acd6d0980c98df013a34913aa725cdbd5483e54f1b93e96d73580562b01"
     },
     {
+      "path": "api/submissions-v2/_lib/domain/index.mjs",
+      "sha256": "cbcf3173fc106514b6035d488fe3815547bf68cd4526ec7c0d7e6e103e228a77"
+    },
+    {
+      "path": "api/submissions-v2/_lib/domain/preparation.mjs",
+      "sha256": "71c3f9ad6032f1a5d903cc245dc9bed95bee21033b9d9a15cb9390e143f41f01"
+    },
+    {
+      "path": "api/submissions-v2/_lib/domain/projection.mjs",
+      "sha256": "e0eb22c01d132418d9a4c4baeedc0e24ead109126a2a1cc8fbe5becb653bbb9e"
+    },
+    {
       "path": "api/submissions-v2/_lib/email-source-policy.mjs",
       "sha256": "0c48533617c9e9d0f24a842efa8542d69ed324dcd56de9eda833f7539aa0829e"
+    },
+    {
+      "path": "api/submissions-v2/_lib/enrichment.mjs",
+      "sha256": "2633c84ba055c1920ee9c1fd5ce2501e924c6d07d1678b381062fd00d4452484"
     },
     {
       "path": "api/submissions-v2/_lib/explicit-role-resolution.mjs",
@@ -128,7 +144,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/presentation.mjs",
-      "sha256": "dff59866c18cefa02f27721620622965eaa8c027f0ad72a1e4dd15be703c0ac7"
+      "sha256": "d67673b8ffd5f3bc38c25b63d4189c33e2b0b574c1e5af74436e507da46f7c39"
     },
     {
       "path": "api/submissions-v2/_lib/private-data.mjs",
@@ -136,7 +152,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "c3558dad2266ef6c9c798d6c294d2ec15cd19c158d5c1ae6862faea8d71c18da"
+      "sha256": "356e7bf2d0bc3ccacbe8290d140d6ead515d2a8e47636565844c8875cb220fb4"
+    },
+    {
+      "path": "api/submissions-v2/_lib/resume/candidate-original-reuse.mjs",
+      "sha256": "99b4bec035e20431e8199bdf76eda0924fa49af3dc410f46eff81090abc02369"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -144,7 +164,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/resume/collector.mjs",
-      "sha256": "d43cde9068affd33c8064e7b5dd79fb1c49eb40f39ea812b629ee69e52fb2463"
+      "sha256": "a912a9995e525d9ceeed678696a56939e4f08bd1d27a83e2c97938bac11bb1eb"
     },
     {
       "path": "api/submissions-v2/_lib/resume/evidence-ledger.mjs",
@@ -152,7 +172,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/resume/index.mjs",
-      "sha256": "18eda9eec77fffe83d9ad1336eaf7de2a095718c830c9d96915e776e35d2f1fd"
+      "sha256": "e68e59256277b0eaee94164382ab232878a775bbe2a7371ae9bbf1c778b28f06"
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-renderer.mjs",
@@ -160,19 +180,19 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-runtime.mjs",
-      "sha256": "29922b640e9cf0876556678d8084feaf7dd9bc36961bbb5fb8e5a12f267ed0ec"
+      "sha256": "ce7f58278e3a772fa85afca445df64e449094a8a9459ff3ae81e9caea5e020b6"
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-store.mjs",
-      "sha256": "43146089fbc486012c2e101550e081c1d2c99a6debe9730e72ef17783819bf64"
+      "sha256": "f122d5f4c5a718d61890a64e36f4f861923736003e83b733a6b0d420c7b9562c"
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-supplements.mjs",
-      "sha256": "ee2d8a45a2c9289bb2b1a39d842f113629d85535cb8e80532373a7c6a238b5d1"
+      "sha256": "df7f187bd4898bfce7463802e5438da6ac9451249a6ec58c4e02c8bc0b448b49"
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline.mjs",
-      "sha256": "30ac03e1c1a8c0527db88d530756c32b2fb13969b21711b68ad6dd13cad09bbf"
+      "sha256": "1d3fac9aa7dbe05eb6d02acbd0fddf4f99b18be3d9e44932fd26d55c55516487"
     },
     {
       "path": "api/submissions-v2/_lib/resume/source-bundle.mjs",
@@ -184,7 +204,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/router.mjs",
-      "sha256": "58c1f79fb437336e9177978cf8c9add35eb2018d0a75e86ab3ff20d793050a2d"
+      "sha256": "e339a6f83eda3eed9281a488ac0f1473400b5d6aa03d848646c25bf3a62abef8"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",
@@ -196,7 +216,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
-      "sha256": "385df9b57f945eb36b9400ce430f694c0e3207fe595818f93140b15c9e50e80d"
+      "sha256": "5c6d8054e0eeb25297c71c4c602068c47311accadb5fa8ba4bbf279695ba8f7a"
     },
     {
       "path": "api/submissions-v2/_lib/sourcing-role-mappings.mjs",
@@ -271,12 +291,36 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
       "sha256": "3447c937d8336090f3908a98df0ac4580e277b936b79752c24317c3381d6067f"
     },
     {
+      "path": "migrations/submissions-v2/017_worker_progress_and_fairness.sql",
+      "sha256": "cdd5ef3f4f993a6c1b59534bebdc63fcb28deb6910f9b40e3896ed0ef91c99cf"
+    },
+    {
+      "path": "migrations/submissions-v2/018_candidate_extraction_and_cost.sql",
+      "sha256": "84acb011b3e973907ad041082b896f8b6c9a6df3807848000a5ca15034a47845"
+    },
+    {
+      "path": "migrations/submissions-v2/019_source_enrichment_receipts.sql",
+      "sha256": "3b3e42e17c8613818f005744be5dc06b254b6c1c92875648084702e9e7e18cbb"
+    },
+    {
+      "path": "migrations/submissions-v2/020_intake_request_guards_and_permissions.sql",
+      "sha256": "7585ee4406ab8b3570035fcb0e2d19089986c9bfd3f73b3ac39eecd7e353ba29"
+    },
+    {
+      "path": "migrations/submissions-v2/021_enrichment_and_cache_purge.sql",
+      "sha256": "b1046cbe6fb728415f5b21c246434d968cbb0c6324fa9b56992ac1219e3e33b5"
+    },
+    {
+      "path": "migrations/submissions-v2/022_enrichment_transport_identity.sql",
+      "sha256": "5a91ce9ecf3496320f5e4c26e7bd20818c0b3f67f32944720220e302f4301465"
+    },
+    {
       "path": "package-lock.json",
       "sha256": "b7089f5e7b687acc3ac98a23173b6278543b6072aea4a31840e1a28b7aa9add6"
     },
     {
       "path": "package.json",
-      "sha256": "35090c55e1420eb8b5d4baedbc17cc849f545c77bf594aafe52b59a2830a692e"
+      "sha256": "ccc24b723715440226e1245d5decab92d4b63ac77006d2939ea2a0ff8f58b879"
     },
     {
       "path": "resume-renderer-v2/Dockerfile",
@@ -320,11 +364,27 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "scripts/provision-submissions-v2-roles.sql",
-      "sha256": "029397b6a9338df72fb46ca134a30e29bfc467fd4c5df774838377bbb536261b"
+      "sha256": "e0ff39e205df75b6ea75351b8b7bd5eda9402b39c3b850180f38f89d2a3bff77"
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "296cfb12d98879a7b8fe40fc37862b462cd29aaa3f50f9e36080ba3d26ff3acb"
+      "sha256": "17c74bec8bc21041e1a3775fd87a47f47012e83bcb34af692d73da16380eefd2"
+    },
+    {
+      "path": "submissions-v2-purge/Dockerfile",
+      "sha256": "ce7d66118dba550fcae57173bb6dd97aeb6c1a2a214abc6ff321ba8ef13dfcaf"
+    },
+    {
+      "path": "submissions-v2-purge/fly.toml",
+      "sha256": "b12d12a6823126d44c667d5859c2f2ece97f60706c1482daf83c207c8aa2c794"
+    },
+    {
+      "path": "submissions-v2-purge/purge.mjs",
+      "sha256": "35756b5069365309718ef32494176143f9dd105c6d0e2d7d573af092cd4693c8"
+    },
+    {
+      "path": "submissions-v2-purge/server.mjs",
+      "sha256": "5fb73cf1db113f36d5bc5f551c57c9c417032931fa51996f14f4dbfcaff6c86d"
     },
     {
       "path": "submissions-v2-ui-state.mjs",
@@ -340,11 +400,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-worker/fly.toml",
-      "sha256": "453f6e65ae62f8f45035ccdb4aded25449bbc41934d79d975f2142d88535a59d"
+      "sha256": "d8287ebd7e195d622c200ddc6d1e88f82605b35e1ff8b47aa2a6726fa1bc2cd1"
     },
     {
       "path": "submissions-v2-worker/gmail-reader.mjs",
-      "sha256": "0c7819aa2f70160a2ca627a5e5fabc78697be673a6a548a43224bb7af3da6be1"
+      "sha256": "8657b155d428f3919bdbef429ee66dbf9b07f452d629cdbbd853719413ed451d"
     },
     {
       "path": "submissions-v2-worker/proof-reader.mjs",
@@ -356,7 +416,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-worker/runner.mjs",
-      "sha256": "afff28888023473ee86cac9bdf4bb7752ae9e6eb466dd08999f433f1fed61fa0"
+      "sha256": "c742c030dced5ce142f441330ff8804a547600c541e334dd9fcb808f935a3b1a"
     },
     {
       "path": "submissions-v2-worker/sequence-inbox-broker-client.mjs",
@@ -368,11 +428,15 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-worker/server.mjs",
-      "sha256": "9f322c3c51d07d1f7640102943eed4cb44103357ea483955cabb24bc4d758b2b"
+      "sha256": "d8c62b0fa21a9e1dd1d86788dff66460e7cd48443e42edd3bc51e19bdc64f8fc"
     },
     {
       "path": "submissions-v2-worker/worker-handlers.mjs",
-      "sha256": "bd662057624dfef7a8458811394ac5c845f590519ed83c676961c490dbaa4497"
+      "sha256": "6fb71e21ded6aa6365b1848ce21136a1df481103a4a15562b31b33095b3d1791"
+    },
+    {
+      "path": "submissions-v2-worker/worker-progress.mjs",
+      "sha256": "4fb7e48703c94bb0a88bcf3cf739ebe04f8ca0be4702817d011847408ca68c5d"
     },
     {
       "path": "submissions-v2.css",

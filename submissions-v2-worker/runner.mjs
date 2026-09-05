@@ -1,4 +1,5 @@
 import { effectiveControls, environmentControls } from "../api/submissions-v2/_lib/config.mjs";
+import { safeWorkerErrorClass } from "./worker-progress.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const safe = (value, limit = 400) => String(value ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, limit);
@@ -19,7 +20,7 @@ export const JOB_CONTROLS = Object.freeze({
   purge: "always",
 });
 
-function enabledKinds(controls) {
+export function enabledJobKinds(controls) {
   return Object.entries(JOB_CONTROLS).filter(([, control]) => control === "always" || controls[control]).map(([kind]) => kind);
 }
 
@@ -69,6 +70,7 @@ export async function runClaimedJob(job, {
         if (current === null || current?.state === "held") {
           throw Object.assign(new Error("Worker lease or runtime control changed."), { code: "execution_fence_lost", retryable: false, checkpoint: value });
         }
+        context.job.checkpoint = value;
         return current;
       },
     };
@@ -115,13 +117,55 @@ export async function workerCycle({
   const durable = await readRuntimeControls();
   const controls = effectiveControls(environmentControls(env), durable);
   if (!controls.readable) return { ok: false, held: "controls_unavailable", jobs: [] };
-  const kinds = enabledKinds(controls);
+  const kinds = enabledJobKinds(controls);
   if (!kinds.length) return { ok: true, held: "all_controls_disabled", control_epoch: controls.control_epoch, jobs: [] };
   if (typeof scheduleJobs === "function") await scheduleJobs();
   const jobs = await claimJobs({ workerId, kinds, limit, leaseSeconds: 300, controlEpoch: controls.control_epoch });
   const results = [];
   for (const job of jobs) results.push(await runClaimedJob(job, { workerId, controlEpoch: controls.control_epoch, handlers, completeJob, failJob, checkpointJob, heartbeatJob }));
   return { ok: results.every((row) => row.state === "succeeded"), control_epoch: controls.control_epoch, jobs: results };
+}
+
+export async function runWorkerCycleWithProgress(options, {
+  progress,
+  cycleImpl = workerCycle,
+  now = () => new Date(),
+} = {}) {
+  if (!progress || typeof progress.beginCycle !== "function" || typeof progress.finishCycle !== "function") {
+    throw new TypeError("worker cycle progress recorder is required");
+  }
+  const attemptedAt = new Date(now()).toISOString();
+  const cycle = await progress.beginCycle({ attemptedAt });
+  let finishAttempted = false;
+  try {
+    const result = await cycleImpl(options);
+    const ok = result?.ok !== false;
+    const failedJob = result?.jobs?.find((row) => row.state !== "succeeded");
+    finishAttempted = true;
+    await progress.finishCycle({
+      cycleToken: cycle.cycleToken,
+      attemptedAt,
+      completedAt: now(),
+      ok,
+      errorClass: ok ? null : safeWorkerErrorClass(failedJob?.error || result?.held, "worker_cycle_failed"),
+      jobCount: result?.jobs?.length || 0,
+      controlEpoch: result?.control_epoch ?? null,
+    });
+    return { at: attemptedAt, ...result };
+  } catch (error) {
+    if (!finishAttempted) {
+      await progress.finishCycle({
+        cycleToken: cycle.cycleToken,
+        attemptedAt,
+        completedAt: now(),
+        ok: false,
+        errorClass: safeWorkerErrorClass(error),
+        jobCount: 0,
+        controlEpoch: null,
+      }).catch(() => {});
+    }
+    throw error;
+  }
 }
 
 export async function runWorkerLoop(options, { idleMs = 2_000, errorMs = 10_000, signal, cycleImpl = workerCycle } = {}) {

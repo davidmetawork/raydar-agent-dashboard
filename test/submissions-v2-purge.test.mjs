@@ -37,6 +37,7 @@ test("isolated purge deletes only its fresh reference-counted plan before fenced
     restored_manifests_claimed: 0, restored_manifests_purged: 0,
     routine_claimed: 0, routine_purged: 0,
     routine_by_kind: { private_object_reservation: 0, upload_reservation: 0, quarantined_supplement: 0 },
+    candidate_original_cache_purged: 0,
   });
   assert.ok(calls.some(([query]) => query.includes("finalize_case_purge")));
   assert.equal(calls.some(([query]) => query.includes("release_case_purge")), false);
@@ -96,6 +97,20 @@ test("isolated purge owns routine orphan cleanup and fences finalization", async
   assert.equal(calls.some((query) => query.includes("release_routine_object_purge")), false);
 });
 
+test("isolated purge schedules bounded candidate-original cache cleanup", async () => {
+  const calls = [];
+  const sql = fakeSql(async (query, values) => {
+    calls.push([query, values]);
+    if (query.includes("claim_case_purges") || query.includes("claim_restored_manifest_purges") || query.includes("claim_routine_object_purges")) return [];
+    if (query.includes("purge_candidate_original_extraction_cache")) return [{ purged: 7 }];
+    return [{}];
+  });
+  const result = await runPurgeCycle({ env, sql, limit: 3, deleteObject: async () => {} });
+  assert.equal(result.candidate_original_cache_purged, 7);
+  const cleanup = calls.find(([query]) => query.includes("purge_candidate_original_extraction_cache"));
+  assert.deepEqual(cleanup?.[1], [100]);
+});
+
 test("migration exposes purge operations only through the isolated session guard", async () => {
   const source = await readFile(new URL("../migrations/submissions-v2/005_isolated_case_purge.sql", import.meta.url), "utf8");
   assert.match(source, /session_user <> 'submissions_v2_purge'/u);
@@ -112,4 +127,14 @@ test("migration exposes purge operations only through the isolated session guard
   assert.match(routine, /assert_isolated_purge_session/u);
   assert.match(routine, /grant execute on function submissions_v2\.claim_routine_object_purges[^;]+ to submissions_v2_purge/su);
   assert.doesNotMatch(routine, /to submissions_v2_worker/u);
+  const enrichment = await readFile(new URL("../migrations/submissions-v2/021_enrichment_and_cache_purge.sql", import.meta.url), "utf8");
+  assert.match(enrichment, /foreign key \(signal_id\)[\s\S]+on delete cascade/u);
+  assert.match(enrichment, /tg_table_name = 'source_enrichments'[\s\S]+session_user = 'submissions_v2_purge'[\s\S]+approved_purge/u);
+  assert.match(enrichment, /release_private_object_owner\([\s\S]+delete from submissions_v2\.private_object_bindings[\s\S]+reservation_id is null/u);
+  assert.match(enrichment, /guard_case_deletion_private_object_owner\(\)[\s\S]+old\.pair_id is not null[\s\S]+new\.pair_id is null[\s\S]+session_user = 'submissions_v2_purge'/u);
+  assert.match(enrichment, /after delete on submissions_v2\.candidate_role_pairs/u);
+  assert.match(enrichment, /not exists \([\s\S]+candidate_role_pairs remaining[\s\S]+remaining\.candidate_user_id = old\.candidate_user_id/u);
+  assert.match(enrichment, /purge_candidate_original_extraction_cache\(p_limit integer\)[\s\S]+assert_isolated_purge_session/u);
+  assert.match(enrichment, /grant execute on function submissions_v2\.purge_candidate_original_extraction_cache\(integer\)[\s\S]+to submissions_v2_purge/u);
+  assert.doesNotMatch(enrichment, /grant execute on function submissions_v2\.purge_candidate_original_extraction_cache\(integer\)[\s\S]+to submissions_v2_worker/u);
 });

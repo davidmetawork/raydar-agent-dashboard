@@ -11,6 +11,7 @@ import {
   normalizeSourceBundle,
   normalizeEvidenceText,
 } from "./source-bundle.mjs";
+import { reuseCandidateOriginalExtraction } from "./candidate-original-reuse.mjs";
 
 const PARAFORM_API = "https://www.paraform.com/api";
 const MAX_RESUME_BYTES = 15 * 1024 * 1024;
@@ -412,6 +413,7 @@ export async function collectResumeSourceBundle({
   paceMs = 400,
   sleepImpl = sleep,
   now = Date.now,
+  candidateOriginalExtractionCache = null,
 } = {}) {
   const capturedAt = new Date(now()).toISOString();
   const read = pacedGet({ getImpl: trpcGetImpl, paceMs: Math.max(0, Number(paceMs) || 0), sleepImpl });
@@ -430,7 +432,10 @@ export async function collectResumeSourceBundle({
     try {
       const download = downloadResumeImpl || ((id) => downloadCandidateResume(id, { env, fetchImpl }));
       resumeBytes = await download(resumeId);
-      resumeExtract = await extractResumeImpl(resumeBytes);
+      const locator = `paraform:candidate:${candidateUserId}:resume`;
+      resumeExtract = candidateOriginalExtractionCache
+        ? await reuseCandidateOriginalExtraction({ candidateUserId, resumeId, locator, bytes: resumeBytes, extract: () => extractResumeImpl(resumeBytes) }, candidateOriginalExtractionCache)
+        : await extractResumeImpl(resumeBytes);
     } catch (error) { resumeError = error; }
   }
   const call = await candidateCall(candidateUserId, read);

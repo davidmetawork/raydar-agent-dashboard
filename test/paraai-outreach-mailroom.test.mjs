@@ -7,6 +7,7 @@ import {
   mailroomReliefConfirmation,
   mailroomReliefConfig,
   mailroomReliefDedupeKey,
+  mailroomReliefSemanticContract,
   OutreachMailroomError,
   PARAAI_OUTREACH_RELIEF_LANE,
 } from "../api/paraai/_lib/outreach-mailroom.mjs";
@@ -23,6 +24,7 @@ const config = {
   key: "secret",
   lane: PARAAI_OUTREACH_RELIEF_LANE,
   configured: true,
+  semanticContractEnabled: false,
 };
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
@@ -142,6 +144,63 @@ test("mailroom relief enqueues once, drains, and returns the provider receipt", 
   assert.equal(enqueued.dedupeKey, "paraai-outreach:req-1");
   assert.equal(enqueued.to, "candidate@example.com");
   assert.equal(enqueued.subject, message.subject);
+  assert.equal(Object.hasOwn(enqueued, "semanticContract"), false);
+});
+
+const semanticContext = {
+  requests: [
+    { id: "req-z", candidateUserId: "candidate-one", roleId: "role-z" },
+    { id: "req-a", candidateUserId: "candidate-one", roleId: "role-a" },
+  ],
+  actionKey: "bundle:stable",
+  claimedAt: "2026-09-05T10:00:00.000Z",
+};
+
+test("relief contract retains literal offer order and persisted claim identity", () => {
+  const input = { requestId: "bundle-one", ...semanticContext };
+  const contract = mailroomReliefSemanticContract(input);
+  assert.deepEqual(contract.roleIds, ["role-z", "role-a"]);
+  assert.equal(contract.candidateId, "candidate-one");
+  assert.equal(contract.contractKey, "paraai-outreach:bundle-one");
+  assert.equal(contract.createdAt, semanticContext.claimedAt);
+  assert.equal(contract.family, "para_ai_interview_request");
+  assert.deepEqual(contract, mailroomReliefSemanticContract(input));
+  assert.equal(mailroomReliefSemanticContract({ ...input, claimedAt: null }), null);
+  assert.equal(mailroomReliefSemanticContract({ ...input, requests: [
+    semanticContext.requests[0], { ...semanticContext.requests[1], candidateUserId: "different" },
+  ] }), null);
+  assert.equal(mailroomReliefSemanticContract({ ...input, requests: [
+    semanticContext.requests[0], { ...semanticContext.requests[1], roleId: "" },
+  ] }), null);
+});
+
+test("enabled relief publishes metadata only on a new enqueue and never resends a known delivery", async () => {
+  let sent = false;
+  const bodies = [];
+  const fetchImpl = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/status") return json(sent
+      ? { ok: true, found: true, state: "sent", gmail_message_id: "proof-1" }
+      : { ok: true, found: false });
+    if (path === "/api/enqueue") {
+      bodies.push(JSON.parse(init.body));
+      sent = true;
+      return json({ ok: true, id: 88 });
+    }
+    throw new Error(`unexpected ${path}`);
+  };
+  const args = {
+    message, requestId: "bundle-one", semanticContext,
+    config: { ...config, semanticContractEnabled: true }, fetchImpl, triggerWorker: false,
+  };
+  await deliverViaMailroomRelief(args);
+  await deliverViaMailroomRelief({ ...args, semanticContext: { ...semanticContext, claimedAt: "invalid" } });
+  assert.equal(bodies.length, 1);
+  assert.deepEqual(bodies[0].semanticContract, mailroomReliefSemanticContract({
+    requestId: args.requestId, ...semanticContext,
+  }));
+  assert.equal(mailroomReliefConfig({ PARAAI_OUTREACH_SEMANTIC_CONTRACT_ENABLED: "true" }).semanticContractEnabled, true);
+  assert.equal(mailroomReliefConfig({ PARAAI_OUTREACH_SEMANTIC_CONTRACT_ENABLED: "1" }).semanticContractEnabled, false);
 });
 
 test("mailroom relief reconciles an existing sent row without enqueueing", async () => {

@@ -15,7 +15,34 @@ export function mailroomReliefConfig(env = process.env) {
   const base = clean(env.MAILROOM_BASE || DEFAULT_BASE).replace(/\/+$/, "");
   const key = clean(env.MAILROOM_API_KEY);
   const lane = clean(env.PARAAI_OUTREACH_MAILROOM_LANE || PARAAI_OUTREACH_RELIEF_LANE);
-  return { base, key, lane, configured: Boolean(base && key && lane) };
+  return {
+    base, key, lane, configured: Boolean(base && key && lane),
+    semanticContractEnabled: env.PARAAI_OUTREACH_SEMANTIC_CONTRACT_ENABLED === "true",
+  };
+}
+
+// The same persisted claim that authorizes the email supplies the contract's
+// identity and timestamp. Missing facts leave the reply eligible for Review.
+export function mailroomReliefSemanticContract({ requestId, requests, claimedAt, actionKey } = {}) {
+  const rows = Array.isArray(requests) ? requests : [];
+  const candidateId = clean(rows[0]?.candidateUserId);
+  const created = claimedAt ? new Date(claimedAt) : null;
+  if (!clean(requestId) || !clean(actionKey) || !candidateId || !rows.length
+    || !created || !Number.isFinite(created.getTime())
+    || rows.some((row) => !clean(row?.id) || !clean(row?.roleId)
+      || clean(row?.candidateUserId) !== candidateId)) return null;
+  return {
+    schemaVersion: 1,
+    contractKey: mailroomReliefDedupeKey(requestId),
+    family: "para_ai_interview_request",
+    producer: "paraai-outreach",
+    producerVersion: "1",
+    mailboxId: "david-raydar-xyz",
+    candidateId,
+    roleIds: [...new Set(rows.map((row) => clean(row.roleId)))],
+    createdAt: created.toISOString(),
+    evidenceRefs: { actionKey: clean(actionKey), requestIds: rows.map((row) => clean(row.id)) },
+  };
 }
 
 export function mailroomReliefDedupeKey(requestId) {
@@ -139,6 +166,7 @@ export async function deliverViaMailroomRelief({
   message,
   requestId,
   candidateName = null,
+  semanticContext = null,
   config = mailroomReliefConfig(),
   fetchImpl = globalThis.fetch,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -161,6 +189,8 @@ export async function deliverViaMailroomRelief({
 
   let rowId = null;
   if (!status?.found) {
+    const semanticContract = config.semanticContractEnabled
+      ? mailroomReliefSemanticContract({ ...semanticContext, requestId }) : null;
     try {
       const enqueued = await callMailroom("/api/enqueue", {
         ...options,
@@ -173,6 +203,7 @@ export async function deliverViaMailroomRelief({
           subject: message.subject,
           text: message.bodyText,
           html: message.bodyHtml || undefined,
+          ...(semanticContract ? { semanticContract } : {}),
         },
       });
       rowId = enqueued.id ?? null;

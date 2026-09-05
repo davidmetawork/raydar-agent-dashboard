@@ -1,3 +1,4 @@
+import { createEnrichmentRepository } from './enrichment.mjs';
 import { createHash } from "node:crypto";
 import { database } from "./db.mjs";
 import { beginCommand, completeCommand, failCommand } from "./command-store.mjs";
@@ -424,6 +425,12 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     return claim?.event_id === eventId && claim?.source_family === sourceFamily ? claim : null;
   };
   return {
+    ...createEnrichmentRepository({ sql, reserveFirstResponse, enqueue, pairAdvisoryLockKey }),
+    async offeredRoleSnapshots(roleIds) {
+      if (!roleIds.length) return [];
+      return sql`select role_id, company_name as company, role_title as title, destination_url as url
+        from submissions_v2.role_index where role_id=any(${sql.array(roleIds, 25)})`;
+    },
     async list({ page, query = "", cursor = null, limit = 100 }) {
       if (!PAGE_STATES.has(page)) throw problem("page_invalid", "The requested submissions page is invalid.", 400);
       const take = boundedLimit(limit);
@@ -1063,10 +1070,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             ${event.sender_display_name}, ${event.machine_message}, ${event.machine_message ? "machine_message" : null}, ${processingState},
             ${safeErrorCode}, ${safeErrorDetail}, ${event.idempotency_key},
             ${tx.json({ ...safeEnvelope, candidate_resolution: candidateResolution })}
-          ) on conflict (idempotency_key) do nothing returning *
+          ) on conflict do nothing returning *
         `;
-        const source = inserted[0] || (await tx`select * from submissions_v2.source_events where idempotency_key=${event.idempotency_key} for share`)[0];
+        const source = inserted[0] || (await tx`select * from submissions_v2.source_events where idempotency_key=${event.idempotency_key} or (source_family='email' and mailbox_id=${event.mailbox_id} and provider_message_id=${event.provider_message_id}) for share`)[0];
         if (!source) throw problem("source_record_failed", "The source event could not be recorded.", 503);
+        if(!inserted.length && safeEnvelope.request_digest && source.envelope?.request_digest!==safeEnvelope.request_digest) throw problem('intake_replay_conflict','The source identity was already accepted with different content.',409);
         const committed = await tx`
           update submissions_v2.private_object_reservations
            set state='committed', committed_at=coalesce(committed_at, clock_timestamp()),
@@ -1702,6 +1710,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               throw problem("role_recheck_not_eligible", "The role can be rechecked only while this item has an open role-unavailable blocker.", 409, pairCurrent(current));
             }
             throw problem("resume_retry_not_eligible", "Resume preparation can be retried only for an Interested item blocked by a resume issue.", 409, pairCurrent(current));
+          }
+          if (openReviews.some((row) => row.reason_code === "candidate_original_resume_missing")) {
+            checkpoint = { ...checkpoint, refresh_sources: true };
           }
         }
         const job = await enqueue(tx, {

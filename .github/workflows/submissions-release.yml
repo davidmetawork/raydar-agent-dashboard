@@ -23,6 +23,10 @@ jobs:
           --health-retries 10
     env:
       SUBMISSIONS_V2_TEST_DATABASE_URL: postgresql://postgres:submissions-test@localhost:5432/raydar_submissions_v2_test
+      SUBMISSIONS_V2_WORKER_TEST_DATABASE_URL: postgresql://postgres:submissions-test@localhost:5432/raydar_submissions_worker_test
+      SUBMISSIONS_V2_CACHE_TEST_DATABASE_URL: postgresql://postgres:submissions-test@localhost:5432/raydar_submissions_cache_test
+      SUBMISSIONS_V2_ENRICHMENT_TEST_DATABASE_URL: postgresql://postgres:submissions-test@localhost:5432/raydar_submissions_enrichment_test
+      SUBMISSIONS_V2_PURGE_TEST_DATABASE_URL: postgresql://postgres:submissions-test@localhost:5432/raydar_submissions_purge_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,6 +34,12 @@ jobs:
           node-version: 22
       - run: node scripts/submissions-release.mjs --check
       - run: npm ci --ignore-scripts
+      - name: Create independent database fixtures
+        run: |
+          psql "$SUBMISSIONS_V2_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE raydar_submissions_worker_test;'
+          psql "$SUBMISSIONS_V2_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE raydar_submissions_cache_test;'
+          psql "$SUBMISSIONS_V2_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE raydar_submissions_enrichment_test;'
+          psql "$SUBMISSIONS_V2_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE raydar_submissions_purge_test;'
       - run: npm run test:submissions-v2
       - run: npm run test:submissions-v1
       - run: node --test test/inbox.test.mjs test/sourcing-*.test.mjs

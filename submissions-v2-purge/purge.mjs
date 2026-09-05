@@ -38,6 +38,7 @@ export async function runPurgeCycle({
     restored_manifests_claimed: 0, restored_manifests_purged: 0,
     routine_claimed: 0, routine_purged: 0,
     routine_by_kind: { private_object_reservation: 0, upload_reservation: 0, quarantined_supplement: 0 },
+    candidate_original_cache_purged: 0,
   };
   try {
     const claims = await sql`select * from submissions_v2.claim_case_purges(${workerId}, ${Math.max(1, Math.min(20, Number(limit) || 5))}, 1800)`;
@@ -89,6 +90,9 @@ export async function runPurgeCycle({
         await sql`select submissions_v2.release_routine_object_purge(${claim.purge_kind}, ${claim.record_id}, ${workerId}, ${claim.fencing_token})`.catch(() => {});
       }
     }
+    const cacheLimit = Math.max(100, Math.min(1_000, (Number(limit) || 5) * 20));
+    const cacheCleanup = await sql`select submissions_v2.purge_candidate_original_extraction_cache(${cacheLimit}) as purged`;
+    summary.candidate_original_cache_purged = Math.max(0, Number(cacheCleanup[0]?.purged) || 0);
     return summary;
   } finally {
     if (ownSql) await sql.end({ timeout: 5 });

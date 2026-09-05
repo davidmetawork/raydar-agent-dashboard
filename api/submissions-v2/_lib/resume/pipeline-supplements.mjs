@@ -1,10 +1,11 @@
 import { privatePath, privateReservationId, putPrivateObject, readPrivateObject } from "../blob.mjs";
 import { normalizeEvidenceText, sha256 } from "./source-bundle.mjs";
-import { ResumePipelineError, forecastModelCostCents, pipelineError } from "./pipeline-runtime.mjs";
+import { ResumePipelineError, actualModelCostCents, forecastModelCostCents, pipelineError } from "./pipeline-runtime.mjs";
 import { extractPdfWithRenderer } from "./pipeline-renderer.mjs";
 
 const IMAGE_MODEL = "claude-opus-5";
 const IMAGE_MAX_OUTPUT_TOKENS = 4_000;
+const IMAGE_PROMPT_VERSION = "submissions-v2-supplement-image-ocr-2026-09-05.v1";
 const ALLOWED_MIME = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]);
 const SCAN_REQUEST_VERSION = "raydar.malware-scan.request.v1";
 const SCAN_RESULT_VERSION = "raydar.malware-scan.result.v1";
@@ -184,6 +185,8 @@ export async function processResumeSupplements(rows, {
   signal,
   budget,
   onCostReserved = async () => {},
+  reserveModelCall = null,
+  settleModelCall = null,
   attemptCount = 1,
   maxAttempts = 3,
   readObject = readPrivateObject,
@@ -197,6 +200,9 @@ export async function processResumeSupplements(rows, {
 } = {}) {
   if (typeof updateSupplement !== "function") throw new TypeError("supplement update function is required");
   if (typeof reserveObject !== "function") throw new TypeError("private-object reservation function is required");
+  if ((reserveModelCall || settleModelCall) && (typeof reserveModelCall !== "function" || typeof settleModelCall !== "function")) {
+    throw new TypeError("supplement model reservation and settlement functions are both required");
+  }
   const pending = Array.isArray(rows) ? rows : [];
   const processed = [];
   for (const row of pending) {
@@ -220,9 +226,38 @@ export async function processResumeSupplements(rows, {
           attempts: 1,
           env,
         });
-        budget?.reserve?.(forecast, { minimumRemainingMs: 30_000 });
-        await onCostReserved({ supplementId: row.id, costCents: forecast, spentCents: budget?.spentCents ?? forecast });
+        const inputDigest = sha256(Buffer.concat([
+          Buffer.from(`${IMAGE_MODEL}\0${IMAGE_PROMPT_VERSION}\0${mimeType}\0`, "utf8"),
+          bytes,
+        ]));
+        let modelReservation = null;
+        if (reserveModelCall) {
+          modelReservation = await reserveModelCall({
+            supplementId: row.id,
+            model: IMAGE_MODEL,
+            inputDigest,
+            costCents: forecast,
+            minimumRemainingMs: 30_000,
+          });
+        } else {
+          budget?.reserve?.(forecast, { minimumRemainingMs: 30_000 });
+          await onCostReserved({ supplementId: row.id, costCents: forecast, spentCents: budget?.spentCents ?? forecast });
+        }
         extracted = await extractImage(bytes, mimeType, { env, fetchImpl, signal });
+        if (modelReservation) {
+          const usage = extracted?.usage;
+          const actualCents = actualModelCostCents({
+            model: IMAGE_MODEL,
+            audits: [{
+              usage: usage && {
+                inputTokens: Number(usage.input_tokens ?? usage.inputTokens),
+                outputTokens: Number(usage.output_tokens ?? usage.outputTokens),
+              },
+            }],
+            env,
+          });
+          await settleModelCall({ ...modelReservation, actualCents });
+        }
       }
       const text = normalizeEvidenceText(extracted?.text).slice(0, 250_000);
       if (!text) throw new ResumePipelineError("supplement_text_empty", "The uploaded resume context did not contain readable text.", { retryable: false });
@@ -277,6 +312,7 @@ export const pipelineSupplementInternals = Object.freeze({
   ALLOWED_MIME,
   IMAGE_MAX_OUTPUT_TOKENS,
   IMAGE_MODEL,
+  IMAGE_PROMPT_VERSION,
   SCAN_REQUEST_VERSION,
   SCAN_RESULT_VERSION,
   assertSupplementObject,

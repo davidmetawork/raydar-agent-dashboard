@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  actualModelCostCents,
   createGenerationBudget,
   forecastModelCostCents,
   pipelineError,
@@ -146,6 +147,53 @@ test("resume budget and unknown model prices fail closed before a provider call"
     () => forecastModelCostCents({ model: "unapproved-model", input: "x", maximumOutputTokens: 1 }),
     (error) => error.code === "model_price_unconfigured",
   );
+});
+
+test("validator forecasting reserves every retry and rewrite round for every claim batch", () => {
+  const claim = (index) => ({
+    id: `claim-${index}`,
+    text: `Grounded candidate fact ${index}`,
+    evidence: [{
+      evidenceId: `evidence-${index}`,
+      sourceKey: "candidate_original_resume",
+      sourceId: "resume-1",
+      locator: `resume-1#${index}`,
+      exactQuote: `Grounded candidate fact ${index}`,
+      trustRank: 500,
+    }],
+  });
+  const claims = Array.from({ length: 11 }, (_, index) => claim(index));
+  const largestBatch = claims.slice(0, 10);
+  const expected = forecastModelCostCents({
+    model: "gpt-5.4-2026-03-05",
+    input: largestBatch,
+    maximumOutputTokens: 3_000,
+    attempts: 2 * 3 * 3,
+  });
+  assert.equal(resumePipelineInternals.validatorPhaseForecast(claims), expected);
+});
+
+test("validator usage prefers the complete attempt list without counting its success audit twice", () => {
+  const success = { providerRequestId: "request-1", usage: { inputTokens: 10_000, outputTokens: 10_000 } };
+  const noId = { providerRequestId: null, usage: { inputTokens: 20, outputTokens: 5 } };
+  const successOnly = resumePipelineInternals.validatorUsageAudits([{ audit: success, attempts: [success] }]);
+  assert.equal(successOnly.length, 1);
+  assert.equal(
+    actualModelCostCents({ model: "gpt-5.4-2026-03-05", audits: successOnly }),
+    actualModelCostCents({ model: "gpt-5.4-2026-03-05", audits: [success] }),
+  );
+  assert.ok(
+    actualModelCostCents({ model: "gpt-5.4-2026-03-05", audits: [success, success] })
+      > actualModelCostCents({ model: "gpt-5.4-2026-03-05", audits: successOnly }),
+  );
+  const audits = resumePipelineInternals.validatorUsageAudits([
+    { audit: success, attempts: [{ outcome: "failed" }, success] },
+    { audit: noId, attempts: [noId, { ...noId }] },
+    { audit: { providerRequestId: "legacy", usage: { inputTokens: 10, outputTokens: 2 } } },
+  ]);
+  assert.equal(audits.filter((audit) => audit === success).length, 1);
+  assert.equal(audits.filter((audit) => audit.providerRequestId === null).length, 2);
+  assert.equal(audits.length, 5);
 });
 
 test("pipeline error propagation retains only an allowlisted resume-contract diagnostic", () => {
@@ -318,6 +366,79 @@ test("pending image supplements use bounded transcription cost and reach parsed 
   assert.equal(updates[0].parseState, "parsed");
 });
 
+test("image OCR persists its exact reservation before the provider call and settles one usage record", async () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, ...Buffer.from("durable OCR fixture")]);
+  const objects = new Map([["private/durable.jpg", { bytes, content_type: "image/jpeg" }]]);
+  const events = [];
+  const budget = {
+    spentCents: 0,
+    assertTime() {},
+    reserve(value) { this.spentCents += value; },
+  };
+  await processResumeSupplements([{
+    id: "supplement-durable-image",
+    object_key: "private/durable.jpg",
+    mime_type: "image/jpeg",
+    size_bytes: bytes.length,
+    digest: sha256(bytes),
+    scan_state: "pending",
+    parse_state: "pending",
+  }], {
+    budget,
+    readObject: async (key) => objects.get(key),
+    putObject: async (key, value, contentType) => { objects.set(key, { bytes: Buffer.from(value), content_type: contentType }); },
+    scanSupplement: async () => ({ verdict: "clean" }),
+    reserveModelCall: async (charge) => {
+      budget.reserve(charge.costCents);
+      events.push(["reserved", charge]);
+      return { stage: "supplement_ocr:supplement-durable-image", attempt: 1, inputDigest: charge.inputDigest, reservedCents: charge.costCents };
+    },
+    extractImage: async () => {
+      assert.equal(events[0][0], "reserved");
+      events.push(["provider"]);
+      return { text: "Visible durable image context", usage: { input_tokens: 80, output_tokens: 20 } };
+    },
+    settleModelCall: async (charge) => events.push(["settled", charge]),
+    reserveObject: async (input) => ({ id: "reservation-durable-image", write_fencing_token: 1, ...input }),
+    updateSupplement: async () => {},
+  });
+  assert.deepEqual(events.map(([event]) => event), ["reserved", "provider", "settled"]);
+  assert.match(events[0][1].inputDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(events[2][1].actualCents, 1);
+});
+
+test("an unresolved OCR reservation stops replay before a second provider request", async () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, ...Buffer.from("ambiguous OCR fixture")]);
+  let providerCalls = 0;
+  await assert.rejects(
+    () => processResumeSupplements([{
+      id: "supplement-ambiguous-image",
+      object_key: "private/ambiguous.jpg",
+      mime_type: "image/jpeg",
+      size_bytes: bytes.length,
+      digest: sha256(bytes),
+      scan_state: "pending",
+      parse_state: "pending",
+    }], {
+      readObject: async () => ({ bytes, content_type: "image/jpeg" }),
+      scanSupplement: async () => ({ verdict: "clean" }),
+      reserveModelCall: async () => {
+        throw new ResumePipelineError(
+          "provider_outcome_uncertain",
+          "A prior request may have been accepted.",
+          { retryable: true },
+        );
+      },
+      settleModelCall: async () => assert.fail("an unresolved reservation cannot settle"),
+      extractImage: async () => { providerCalls += 1; return { text: "must not run" }; },
+      reserveObject: async (input) => ({ id: "reservation-ambiguous-image", write_fencing_token: 1, ...input }),
+      updateSupplement: async () => assert.fail("a retryable replay must leave the supplement pending"),
+    }),
+    (error) => error.code === "provider_outcome_uncertain" && error.retryable === true,
+  );
+  assert.equal(providerCalls, 0);
+});
+
 test("unsafe supplements are rejected terminally and transient parsing exhausts to failed", async () => {
   const invalid = Buffer.from("not a supported file");
   const rejected = [];
@@ -472,13 +593,25 @@ test("retry preparation reads the latest reusable pipeline for the exact pair", 
   let queryValues;
   const sql = fakeSql(async (query, values) => {
     assert.match(query, /kind='prepare_resume'/u);
-    assert.match(query, /<>'\{\}'::jsonb/u);
+    assert.doesNotMatch(query, /<>'\{\}'::jsonb/u);
     queryValues = values;
-    return [{ pipeline: reusable }];
+    return [{ pipeline: reusable, safe_failure_code: null }];
   });
   const store = createResumePipelineStore({ sql, repository: {} });
   assert.deepEqual(await store.loadRetryPipeline({ pairId: "pair-1", excludingJobId: "00000000-0000-0000-0000-000000000001" }), reusable);
   assert.deepEqual(queryValues, ["pair-1", "00000000-0000-0000-0000-000000000001"]);
+});
+
+test("retry preparation does not fall past the latest missing-original checkpoint", async () => {
+  const sql = fakeSql(async (query) => {
+    assert.doesNotMatch(query, /<>'\{\}'::jsonb/u);
+    return [{
+      pipeline: { active_stage: "collect", stages: { collect: { key: "blocked-collect-checkpoint" } } },
+      safe_failure_code: "candidate_original_resume_missing",
+    }];
+  });
+  const store = createResumePipelineStore({ sql, repository: {} });
+  assert.equal(await store.loadRetryPipeline({ pairId: "pair-1", excludingJobId: "00000000-0000-0000-0000-000000000001" }), null);
 });
 
 test("resume failure settlement preserves an existing resume on regeneration", async () => {
@@ -637,9 +770,9 @@ test("candidate-index pages share one durable source-fenced cycle across hourly 
   const second = context("index_candidates", { subjectType: "source", subjectId: "candidate_index" });
   second.value.job.id = "hourly-cycle-b";
   const secondResult = await handlers.index_candidates(second.value);
-  assert.equal(firstResult.checkpoint.cursor, 5);
+  assert.equal(firstResult.checkpoint.cursor, 1);
   assert.equal(firstResult.checkpoint.cycle_id, "hourly-cycle-a");
-  assert.equal(secondResult.checkpoint.cursor, 10);
+  assert.equal(secondResult.checkpoint.cursor, 2);
   assert.equal(secondResult.checkpoint.cycle_id, "hourly-cycle-a");
   assert.equal(continuationKeys.length, 2);
   assert.notEqual(continuationKeys[0], continuationKeys[1]);
@@ -1118,6 +1251,63 @@ test("Master Inbox worker request is authenticated and requires an explicit succ
     }),
     (error) => error.code === "master_inbox_reconcile_failed",
   );
+});
+
+test("runner carries the minimal Gmail recovery token into retry settlement without private message text", async () => {
+  const sourceSession = "11111111-1111-4111-8111-111111111111";
+  const pendingAdmission = {
+    schema_version: 1,
+    scope: "approved_role_interest_v1",
+    lane: "live",
+    window: { after: 1_788_319_514_308, before: 1_788_319_814_308 },
+    event_id: "gmail_11111111111111111111111111111111",
+    mailbox_id: "david-raydar-xyz",
+    source_family: "new_match",
+    provider_message_id: "aa",
+    provider_thread_id: "ab",
+    idempotency_key: "gmail:david-raydar-xyz:aa",
+    content_digest: "a".repeat(64),
+    request_digest: "b".repeat(64),
+    candidate_authored_text: "private candidate reply must never be checkpointed",
+  };
+  const sql = fakeSql();
+  const handlers = handlerSet({
+    env: { SUBMISSIONS_V2_EMAIL_READER: "gmail" },
+    sql,
+    gmailInterviews: async ({ onSourceSession }) => {
+      await onSourceSession({ sourceSession, pendingAdmission });
+      throw Object.assign(new Error("remote admission outcome is uncertain"), { code: "source_admission_uncertain" });
+    },
+    sourceLease: {
+      claimSourceCursor: async () => ({ fencing_token: 7, checkpoint: {} }),
+      commitSourceCursor: async () => assert.fail("an uncertain admission cannot advance the source cursor"),
+      releaseSourceCursor: async () => ({}),
+    },
+  });
+  const job = {
+    id: "job-gmail-recovery",
+    kind: "reconcile_master_inbox",
+    fencing_token: 9,
+    attempt_count: 1,
+    max_attempts: 3,
+    checkpoint: {},
+  };
+  let failed;
+  const result = await runClaimedJob(job, {
+    workerId: "worker-1",
+    controlEpoch: 5,
+    handlers,
+    checkpointJob: async () => ({}),
+    completeJob: async () => assert.fail("an uncertain admission cannot complete"),
+    failJob: async (value) => { failed = value; },
+  });
+  assert.equal(result.state, "retry");
+  assert.equal(failed.checkpoint.gmail_source_sessions.live.source_session, sourceSession);
+  assert.deepEqual(
+    Object.keys(failed.checkpoint.gmail_source_sessions.live.pending_admission).sort(),
+    ["content_digest", "event_id", "idempotency_key", "lane", "mailbox_id", "provider_message_id", "provider_thread_id", "request_digest", "schema_version", "scope", "source_family", "window"],
+  );
+  assert.doesNotMatch(JSON.stringify(failed.checkpoint), /private candidate reply|candidate_authored_text|pending_event/u);
 });
 
 test("runner treats a lost checkpoint or completion fence as held and never reports success", async () => {

@@ -13,6 +13,7 @@ import {
 } from "../models/anthropic-strategist.mjs";
 import {
   GROUNDING_PROMPT_VERSION,
+  GROUNDING_VALIDATOR_BATCH_SIZE,
   GROUNDING_VALIDATOR_MODEL,
   validateClaimsToCompletion,
 } from "../models/openai-validator.mjs";
@@ -34,11 +35,13 @@ import {
   GENERATION_DEADLINE_MS,
   ResumePipelineError,
   createGenerationBudget,
+  actualModelCostCents,
   forecastModelCostCents,
   pipelineError,
 } from "./pipeline-runtime.mjs";
 import { renderResumeWithService, extractPdfWithRenderer } from "./pipeline-renderer.mjs";
 import { processResumeSupplements } from "./pipeline-supplements.mjs";
+import { createPreparationCommand, preparationResult } from "../domain/preparation.mjs";
 
 const BRAND_ASSET_URL = new URL("../../../../resume-renderer-v2/assets/raydar-lockup.svg", import.meta.url);
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
@@ -100,6 +103,57 @@ function stageInputDigest(value) {
   return sha256(canonicalJson(value));
 }
 
+function validatorPhaseForecast(claims, {
+  env = process.env,
+  maxAttempts = 3,
+  maxRewriteRounds = 2,
+} = {}) {
+  const packets = Array.isArray(claims) ? claims : [];
+  const batches = [];
+  for (let index = 0; index < packets.length; index += GROUNDING_VALIDATOR_BATCH_SIZE) {
+    batches.push(packets.slice(index, index + GROUNDING_VALIDATOR_BATCH_SIZE));
+  }
+  if (!batches.length) {
+    throw new ResumePipelineError("validator_claims_required", "Grounding validation requires candidate claims.");
+  }
+  // Every batch can consume every provider retry in every rewrite round. Use
+  // the largest batch for all possible calls so output allowance and request
+  // overhead scale with batch count before any request leaves the worker.
+  const largestBatch = batches.reduce((largest, batch) => (
+    Buffer.byteLength(canonicalJson(batch), "utf8") > Buffer.byteLength(canonicalJson(largest), "utf8") ? batch : largest
+  ), batches[0]);
+  const calls = batches.length
+    * Math.max(1, Math.min(5, Number(maxAttempts) || 3))
+    * (Math.max(1, Math.min(3, Number(maxRewriteRounds) || 2)) + 1);
+  return forecastModelCostCents({
+    model: GROUNDING_VALIDATOR_MODEL,
+    input: largestBatch,
+    maximumOutputTokens: 3_000,
+    attempts: calls,
+    env,
+  });
+}
+
+function validatorUsageAudits(history) {
+  return (Array.isArray(history) ? history : []).flatMap((round) => {
+    if (Array.isArray(round?.attempts) && round.attempts.length) return round.attempts;
+    return round?.audit ? [round.audit] : [];
+  });
+}
+
+function modelReservationReplayError() {
+  return new ResumePipelineError(
+    "provider_outcome_uncertain",
+    "A prior model request may have been accepted, so resume preparation stopped before sending a duplicate request.",
+    { retryable: true },
+  );
+}
+
+function supplementOcrStage(supplementId) {
+  const key = String(supplementId || "unknown").replace(/[^a-z0-9_-]/giu, "-").slice(0, 160);
+  return `supplement_ocr:${key}`;
+}
+
 function artifactMetadata({ kind, pathname, bytes, digest, pageCount = null, textDigest = null, at, reservationId = null, writeFencingToken = null }) {
   return {
     kind,
@@ -132,6 +186,7 @@ export async function runResumePreparation(context, {
   fetchImpl = globalThis.fetch,
   now = Date.now,
   executionFence = null,
+  candidateOriginalExtractionCache = null,
 } = {}) {
   if (!store) throw new TypeError("resume pipeline store is required");
   putObject ||= (pathname, bytes, contentType) => store.putPrivateObject(pathname, bytes, contentType);
@@ -154,6 +209,7 @@ export async function runResumePreparation(context, {
     ? initialCheckpoint.trigger_kind
     : "initial";
   const reusablePipeline = triggerKind === "retry"
+    && initialCheckpoint.refresh_sources !== true
     && !Object.keys(initialCheckpoint.pipeline?.stages || {}).length
     && typeof store.loadRetryPipeline === "function"
     ? await store.loadRetryPipeline({ pairId, excludingJobId: context.job.id })
@@ -168,6 +224,11 @@ export async function runResumePreparation(context, {
     },
   };
   let generation = null;
+  let command = null;
+  let reservedCents = 0;
+  let pendingModelCharge = null;
+  let actualSpentCents = 0;
+  let actualSpendUnknown = false;
 
   const publishCheckpoint = async (patch = {}) => {
     checkpoint = {
@@ -196,14 +257,13 @@ export async function runResumePreparation(context, {
       await store.updateGeneration({
         generationId: generation.id,
         ...progress,
-        spentCents: 0,
         executionFence,
       });
     }
     return cloned;
   };
 
-  const saveStage = async (stage, value, { costCents = 0 } = {}) => {
+  const saveStage = async (stage, value, { costCents = 0, actualCents = null } = {}) => {
     const reference = await store.saveCheckpoint({ generationId: generation.id, stage, value, executionFence });
     await store.recordStage({
       generationId: generation.id,
@@ -217,6 +277,7 @@ export async function runResumePreparation(context, {
       objectDigest: reference.object_digest,
       status: "succeeded",
       costCents,
+      actualCents,
       executionFence,
     });
     await publishCheckpoint({ stages: { [stage]: reference } });
@@ -225,8 +286,10 @@ export async function runResumePreparation(context, {
 
   try {
     await publishCheckpoint({ active_stage: "starting" });
+    candidateOriginalExtractionCache ||= store.candidateOriginalExtractionCache || null;
     let loaded = await store.loadPairContext(pairId, checkpoint);
     const pair = loaded.pair;
+    command = createPreparationCommand({ pair, job: context.job, checkpoint });
     const expectedPairVersion = Number(checkpoint.expected_pair_version || pair.state_version);
     if (!Number.isInteger(expectedPairVersion) || expectedPairVersion < 1) {
       throw new ResumePipelineError("expected_pair_version_invalid", "The resume job is missing its pair version fence.");
@@ -248,7 +311,12 @@ export async function runResumePreparation(context, {
       priorArtifactId: pair.current_artifact_id || null,
       executionFence,
     });
-    if (generation.status === "succeeded") return { checkpoint, generation_id: generation.id, existing: true };
+    if (generation.status === "succeeded") return {
+      checkpoint,
+      generation_id: generation.id,
+      existing: true,
+      result: preparationResult({ command, outcome: "existing", generationId: generation.id, sourceDigest: generation.source_digest }),
+    };
     if (Number(generation.job_spent_cents || 0) >= GENERATION_BUDGET_CENTS) {
       throw new ResumePipelineError("generation_budget_exhausted", "Resume preparation reached its two-dollar model-cost ceiling.");
     }
@@ -270,7 +338,51 @@ export async function runResumePreparation(context, {
         fetchImpl,
         signal: context.signal,
         budget,
-        onCostReserved: async () => publishCheckpoint({ active_stage: "supplements", spent_cents: budget.spentCents }),
+        reserveModelCall: async ({ supplementId, inputDigest, costCents, minimumRemainingMs }) => {
+          if (typeof store.reserveModelStage !== "function" || typeof store.recordStage !== "function") {
+            throw new ResumePipelineError("model_charge_store_missing", "Resume model-cost accounting is unavailable.");
+          }
+          budget.reserve(costCents, { minimumRemainingMs });
+          reservedCents = budget.spentCents;
+          const charge = {
+            stage: supplementOcrStage(supplementId),
+            attempt: context.job.attempt_count,
+            inputDigest,
+            reservedCents: costCents,
+          };
+          const reservation = await store.reserveModelStage({
+            generationId: generation.id,
+            ...charge,
+            executionFence,
+          });
+          if (reservation?.replay) throw modelReservationReplayError();
+          pendingModelCharge = charge;
+          await publishCheckpoint({ active_stage: "supplements", spent_cents: budget.spentCents });
+          await store.updateGeneration({
+            generationId: generation.id,
+            fromStatuses: ["queued", "collecting"],
+            status: "collecting",
+            stage: "supplements",
+            spentCents: budget.spentCents,
+            executionFence,
+          });
+          return charge;
+        },
+        settleModelCall: async ({ stage, attempt, inputDigest, reservedCents: chargeCents, actualCents }) => {
+          await store.recordStage({
+            generationId: generation.id,
+            stage,
+            attempt,
+            inputDigest,
+            status: "succeeded",
+            costCents: chargeCents,
+            actualCents,
+            executionFence,
+          });
+          if (actualCents == null) actualSpendUnknown = true;
+          else actualSpentCents += actualCents;
+          pendingModelCharge = null;
+        },
         attemptCount: context.job.attempt_count,
         maxAttempts: context.job.max_attempts,
         readObject: (pathname) => store.readPrivateObject(pathname),
@@ -307,6 +419,7 @@ export async function runResumePreparation(context, {
         env,
         fetchImpl,
         now,
+        candidateOriginalExtractionCache,
       });
       collected = await saveStage("collect", { bundle: candidateBundle });
     }
@@ -351,6 +464,19 @@ export async function runResumePreparation(context, {
         env,
       });
       budget.reserve(forecast, { minimumRemainingMs: 60_000 });
+      reservedCents = budget.spentCents;
+      const strategyCharge = {
+        stage: "strategy",
+        attempt: context.job.attempt_count,
+        inputDigest: stageInputDigest({ stage: "strategy", source: generation.source_digest || null }),
+        reservedCents: forecast,
+      };
+      if (typeof store.reserveModelStage !== "function") {
+        throw new ResumePipelineError("model_charge_store_missing", "Resume model-cost accounting is unavailable.");
+      }
+      const strategyReservation = await store.reserveModelStage({ generationId: generation.id, ...strategyCharge, executionFence });
+      if (strategyReservation?.replay) throw modelReservationReplayError();
+      pendingModelCharge = strategyCharge;
       await publishCheckpoint({ active_stage: "strategy", spent_cents: budget.spentCents });
       await store.updateGeneration({ generationId: generation.id, fromStatuses: ["extracting", "strategizing"], status: "strategizing", stage: "strategy", spentCents: budget.spentCents, executionFence });
       strategy = await strategist({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }, {
@@ -359,20 +485,32 @@ export async function runResumePreparation(context, {
         signal: context.signal,
         now,
       });
-      strategy = await saveStage("strategy", strategy, { costCents: forecast });
+      const actualCents = actualModelCostCents({ model: STRATEGIST_PRIMARY_MODEL, audits: strategy.attempts || [strategy.audit], env });
+      if (actualCents == null) actualSpendUnknown = true;
+      else actualSpentCents += actualCents;
+      if (typeof store.settleModelStage === "function") await store.settleModelStage({ generationId: generation.id, stage: "strategy", attempt: context.job.attempt_count, actualCents, executionFence });
+      pendingModelCharge = null;
+      strategy = await saveStage("strategy", strategy, { costCents: forecast, actualCents });
     }
 
     let validation = await loadStage("validate");
     if (!validation) {
       const draftClaims = draftClaimsFromAst(strategy.strategy.document, evidence.ledger);
-      const forecast = forecastModelCostCents({
-        model: GROUNDING_VALIDATOR_MODEL,
-        input: draftClaims,
-        maximumOutputTokens: 3_000,
-        attempts: 9,
-        env,
-      });
+      const forecast = validatorPhaseForecast(draftClaims, { env, maxAttempts: 3, maxRewriteRounds: 2 });
       budget.reserve(forecast, { minimumRemainingMs: 45_000 });
+      reservedCents = budget.spentCents;
+      const validationCharge = {
+        stage: "validate",
+        attempt: context.job.attempt_count,
+        inputDigest: stageInputDigest({ stage: "validate", source: generation.source_digest || null }),
+        reservedCents: forecast,
+      };
+      if (typeof store.reserveModelStage !== "function") {
+        throw new ResumePipelineError("model_charge_store_missing", "Resume model-cost accounting is unavailable.");
+      }
+      const validationReservation = await store.reserveModelStage({ generationId: generation.id, ...validationCharge, executionFence });
+      if (validationReservation?.replay) throw modelReservationReplayError();
+      pendingModelCharge = validationCharge;
       await publishCheckpoint({ active_stage: "validate", spent_cents: budget.spentCents });
       await store.updateGeneration({ generationId: generation.id, fromStatuses: ["strategizing", "validating"], status: "validating", stage: "validate", spentCents: budget.spentCents, executionFence });
       const result = await validator(draftClaims, {
@@ -385,7 +523,13 @@ export async function runResumePreparation(context, {
         now,
       });
       const ast = applyValidatedClaimsToAst(strategy.strategy.document, result.claims);
-      validation = await saveStage("validate", { result, draftClaims, ast }, { costCents: forecast });
+      const validationAudits = validatorUsageAudits(result.history);
+      const actualCents = actualModelCostCents({ model: GROUNDING_VALIDATOR_MODEL, audits: validationAudits, env });
+      if (actualCents == null) actualSpendUnknown = true;
+      else actualSpentCents += actualCents;
+      if (typeof store.settleModelStage === "function") await store.settleModelStage({ generationId: generation.id, stage: "validate", attempt: context.job.attempt_count, actualCents, executionFence });
+      pendingModelCharge = null;
+      validation = await saveStage("validate", { result, draftClaims, ast }, { costCents: forecast, actualCents });
     }
     await store.persistClaims({
       generationId: generation.id,
@@ -544,8 +688,27 @@ export async function runResumePreparation(context, {
       controlEpoch: context.controlEpoch,
     });
     checkpoint = await publishCheckpoint({ active_stage: "complete", promoted: true, spent_cents: budget.spentCents });
-    return { checkpoint, generation_id: generation.id, artifact_version: Number(generation.generation_version), pair_version: Number(promoted.pair.state_version) };
+    return {
+      checkpoint,
+      generation_id: generation.id,
+      artifact_version: Number(generation.generation_version),
+      pair_version: Number(promoted.pair.state_version),
+      result: preparationResult({
+        command,
+        outcome: "prepared",
+        generationId: generation.id,
+        artifactId: promoted.pair.current_artifact_id,
+        sourceDigest: bundle.sourceDigest,
+        reservedCents: budget.spentCents,
+        actualCents: actualSpendUnknown ? null : actualSpentCents,
+      }),
+    };
   } catch (error) {
+    if (pendingModelCharge && generation && typeof store.settleModelStage === "function") {
+      try {
+        await store.settleModelStage({ generationId: generation.id, stage: pendingModelCharge.stage, attempt: pendingModelCharge.attempt, actualCents: null, executionFence });
+      } catch {}
+    }
     const normalized = pipelineError(error, {
       safeMessage: "Resume preparation failed safely before publication.",
       retryable: true,
@@ -553,6 +716,15 @@ export async function runResumePreparation(context, {
     });
     normalized.safeMessage = safeFailureDetail(normalized);
     normalized.message = normalized.safeMessage;
+    if (command) normalized.preparationResult = preparationResult({
+      command,
+      outcome: normalized.code === "generation_execution_fence_lost" ? "superseded" : normalized.code === "provider_outcome_uncertain" ? "uncertain" : "failed",
+      generationId: generation?.id,
+      sourceDigest: generation?.source_digest,
+      reasonCode: normalized.code,
+      safeDetail: normalized.safeMessage,
+      reservedCents: Math.max(Number(generation?.spent_cents) || 0, reservedCents),
+    });
     throw generationFailureDetails(normalized, generation, triggerKind);
   }
 }
@@ -580,4 +752,7 @@ export const resumePipelineInternals = Object.freeze({
   safeFailureDetail,
   officialBrandAsset,
   stageInputDigest,
+  supplementOcrStage,
+  validatorPhaseForecast,
+  validatorUsageAudits,
 });

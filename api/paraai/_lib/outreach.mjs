@@ -1537,6 +1537,11 @@ export async function processMatchRequest(
           message,
           requestId: request.id,
           candidateName: contact.name || request.candidateName,
+          semanticContext: {
+            requests: [request],
+            actionKey: message.actionKey,
+            claimedAt: state.outbox?.[message.actionKey]?.claimedAt,
+          },
         });
       } else {
         const send = deliveryImpl || deliverMessage;
@@ -1902,6 +1907,11 @@ export async function processMatchRequestBundleViaMailroom(
         message,
         requestId: bundleDeliveryRequestId,
         candidateName: contact.name || rows[0].candidateName,
+        semanticContext: {
+          requests: rows,
+          actionKey: bundleActionKey,
+          claimedAt: state.outbox?.[bundleActionKey]?.claimedAt,
+        },
       });
     } catch (error) {
       await saveUncertainOutbox(

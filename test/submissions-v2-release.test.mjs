@@ -27,6 +27,7 @@ async function fixture(t) {
     seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"), seed(root, "scripts/provision-submissions-v2-roles.sql"),
     seed(root, "vercel.json", '{\n  "buildCommand": "node check.mjs",\n  "rewrites": [{ "source": "/submissions-v2", "destination": "/submissions-v2.html" }]\n}\n'),
     seed(root, "api/submissions-v2/_lib/service.mjs"), seed(root, "submissions-v2-worker/server.mjs"), seed(root, "submissions-v2-worker/Dockerfile"), seed(root, "submissions-v2-worker/fly.toml"),
+    seed(root, "submissions-v2-purge/purge.mjs"), seed(root, "submissions-v2-purge/Dockerfile"), seed(root, "submissions-v2-purge/fly.toml"),
     seed(root, "resume-renderer-v2/app.py"), seed(root, "resume-renderer-v2/requirements.txt"), seed(root, "resume-renderer-v2/assets/raydar-lockup.svg"), seed(root, "resume-renderer-v2/Dockerfile"), seed(root, "resume-renderer-v2/fly.toml"),
     seed(root, "migrations/submissions-v2/001_foundation.sql"),
   ]);
@@ -41,6 +42,7 @@ test("release seal is deterministic and check accepts the exact written source s
   assert.deepEqual(written, first);
   assert.deepEqual(checked, first);
   assert.equal(first.files.some((file) => file.path.includes("release-manifest")), false);
+  assert.equal(first.files.some((file) => file.path === "submissions-v2-purge/purge.mjs"), true);
 });
 
 test("release check rejects tampered, added, and missing permitted source files", async (t) => {
@@ -88,6 +90,7 @@ test("deployment check accepts only Vercel's intentional Submissions omissions",
     rm(join(root, "migrations/submissions-v2"), { recursive: true }),
     rm(join(root, "resume-renderer-v2"), { recursive: true }),
     rm(join(root, "submissions-v2-worker"), { recursive: true }),
+    rm(join(root, "submissions-v2-purge"), { recursive: true }),
     rm(join(root, "scripts/migrate-submissions-v2.mjs")),
     rm(join(root, "scripts/provision-submissions-v2-roles.sql")),
   ]);
