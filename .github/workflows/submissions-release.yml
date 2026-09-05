@@ -8,9 +8,28 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: submissions-test
+          POSTGRES_DB: raydar_submissions_v2_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SUBMISSIONS_V2_TEST_DATABASE_URL: postgresql://postgres:submissions-test@localhost:5432/raydar_submissions_v2_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: node scripts/submissions-release.mjs --check
+      - run: npm ci --ignore-scripts
+      - run: npm run test:submissions-v2
+      - run: npm run test:submissions-v1
+      - run: node --test test/inbox.test.mjs test/sourcing-*.test.mjs
