@@ -391,6 +391,7 @@
     <div class="toolbar">
       <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
       <button class="view-pill" id="pillRequested" onclick="setView('requested')">Interview requested <span class="n" id="requestedCount"></span></button>
+      <button class="view-pill" id="pillEmailed" onclick="setView('emailed')">Already emailed <span class="n" id="emailedCount"></span></button>
       <button class="view-pill" id="pillDelivery" onclick="setView('delivery')">Delivery review <span class="n" id="deliveryCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span><span class="paused-flag" id="rulesPausedFlag">Paused</span></button>
@@ -592,9 +593,80 @@ function interviewHold(row) {
   ].map(normalizedHold).filter(Boolean);
   return candidates.find((value) => HARD_HOLD_STATES.has(value) || HARD_HOLD_CODES.has(value)) || null;
 }
-function requestedRows() {
-  return queueRows().filter((row) => effectiveDecision(row.key)?.action === "interview");
+/* ---- already emailed: the one place that decides "the invitation has already
+   left the building" ----
+
+   THE PILL USED TO LIE. "Interview requested" was every queue row with an
+   `interview` decision in apphub:decisions (plus this browser's local
+   overlay), with no regard for whether the email had already gone out. On
+   2026-09-05 that read 319 while 248 of those rows carried a published
+   `invited` ack — i.e. four out of five people on the "still to email" pill
+   had already been emailed, and only 71 were genuinely outstanding. A pill
+   that counts finished work as outstanding work invites exactly the mistake
+   this tab must never make: a second interview email for the same role.
+
+   The evidence is the PUBLISHED ack (apphub:acks, written only by the sending
+   loop after the send was accepted), read through `ackFor` so a stale ack
+   belonging to an older requestId cannot mask a fresh click. `row.status`
+   covers stream-shaped rows, whose lifecycle carries the same fact under a
+   different name.
+
+   `externalPriorSendAt` IS DORMANT TODAY — do not read the clause below as a
+   hole that is already closed. MEASURED against Core on 2026-09-05: the
+   published feed is partitioned by `review_item_id` (present -> queue row,
+   absent -> stream row) and `status` is set on STREAM rows only, so Core's
+   own "a retired sender already emailed this person for this role" fact never
+   reached a Review row; and Core's ack path cannot carry it either, because
+   `dispatchInterviews` walks interview-decided rows, so its
+   `external_prior_send_verified` ack is never minted for the 909 of 911 armed
+   applications that are UNDECIDED. Core commit be4ec712 adds the field to the
+   published queue map (the Monitor passes queue rows through verbatim). Until
+   that lands AND the prior-send import runs, ~904 people with a proven legacy
+   same-role send are NOT in Already emailed and appear in Review as fresh
+   cards. When it does land the clause below is what makes them move, with no
+   further dashboard change; the snake_case twin is only tolerance for a feed
+   that publishes the raw column name.
+
+   WHAT THIS IS NOT: it is not proof that nobody else was ever emailed. A
+   pre-cutover send by a retired lane that never wrote an ack is invisible
+   here, and that population is real (the legacy interview ledger, 2,117
+   step-1 sends). The pill states what Raydar has PUBLISHED evidence for, and
+   the title says so. ---- */
+const SENT_ACK_STATUSES = new Set(["invited", "sendgrid_delivered"]);
+const SENT_ROW_STATUSES = new Set(["emailed", "booked", "replied"]);
+/* Counting a send honestly is only half the job: the Interview button must not
+   still be armed on the row that carries the evidence. A queue row with a sent
+   ack and NO decision renders the full Pass/Interview pair (rowCardHtml's
+   `decision ? decidedStatusHtml(...) : actions`), and that combination is
+   reachable in production today — production-runner.mjs mints
+   `{status:"invited", reason:"historical_send_verified"}` acks for rows Core
+   never asked the Monitor to decide, and sync's saveApplicantAck stores an ack
+   with no requestId even when apphub:decisions holds nothing for the key. Those
+   rows sit in Review, and now also under Already emailed, one click from
+   ordering a second same-role email. Core's invite guard is the backstop; this
+   is the button not being offered in the first place. */
+const ALREADY_EMAILED_ACTION_TITLE =
+  "Already emailed for this role — Raydar has published send evidence for this exact person and role. A second interview email is the one mistake this tab must never make.";
+function alreadyEmailed(row) {
+  if (!row) return false;
+  const ack = ackFor(row.key);
+  if (ack && SENT_ACK_STATUSES.has(String(ack.status || ""))) return true;
+  if (SENT_ROW_STATUSES.has(String(row.status || ""))) return true;
+  if (row.externalPriorSendAt || row.external_prior_send_at) return true;
+  return false;
 }
+function requestedRows() {
+  return queueRows().filter((row) => effectiveDecision(row.key)?.action === "interview" && !alreadyEmailed(row));
+}
+/* Deliberately NOT limited to interview-decided rows: a send is a send, and a
+   row Core emailed without ever writing to apphub:decisions is precisely the
+   one a reviewer must not re-decide. Views on this tab already overlap
+   (Delivery review counts held rows whatever their decision), so this is the
+   established shape, not a new one. */
+function emailedRows() {
+  return queueRows().filter(alreadyEmailed);
+}
+/* ---- end already-emailed block ---- */
 function deliveryRows() {
   return queueRows().filter((row) => {
     const decision = effectiveDecision(row.key);
@@ -787,11 +859,31 @@ function nameLinks(row) {
 function initials(name) {
   return String(name || "").split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
 }
+// A card's picture comes from someone else's CDN and can be withdrawn, moved
+// or 403'd at any moment. Every avatar image therefore carries the initials it
+// would have shown, and restores them on error: a broken-image glyph on a card
+// is worse than the initials it replaced, and (unlike the glyph) initials are
+// never mistaken for "we have their photo".
+//
+// referrerpolicy="no-referrer" keeps the Monitor's own URL out of Google's and
+// Amazon's logs on every card render. Workable photo URLs carry candidate-chosen
+// filenames, so they are PII: never log one, never paste one anywhere.
+function avatarImg(src, name) {
+  return '<img src="' + esc(src) + '" alt="" loading="lazy" decoding="async"'
+    + ' referrerpolicy="no-referrer" data-initials="' + esc(initials(name)) + '"'
+    + ' onerror="avatarFallback(this)" />';
+}
+function avatarFallback(img) {
+  const parent = img.parentNode;
+  if (parent) parent.textContent = img.getAttribute("data-initials") || "?";
+}
 function avatarHtml(row) {
   const id = profileId(row);
   const p = STATE.profiles[id];
+  // Core rows are keyed core:<id>, which the photos hash can never hold; the
+  // card channel is the one that carries their picture.
   const src = STATE.photos[id] || STATE.cards[id]?.photo || (p && p.imageSrc) || "";
-  const img = src ? '<img src="' + esc(src) + '" alt="" loading="lazy" />' : esc(initials(row.name));
+  const img = src ? avatarImg(src, row.name) : esc(initials(row.name));
   return '<span class="avatar" data-avatar="' + esc(id) + '" data-cu="' + esc(id) + '">' + img + "</span>";
 }
 
@@ -986,6 +1078,7 @@ function renderStats() {
 function renderPills() {
   $("reviewCount").textContent = STATE.snapshot ? String(pendingRows().length) : "";
   $("requestedCount").textContent = STATE.snapshot ? String(requestedRows().length) : "";
+  $("emailedCount").textContent = STATE.snapshot ? String(emailedRows().length) : "";
   $("deliveryCount").textContent = STATE.snapshot ? String(deliveryRows().length) : "";
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
@@ -1006,6 +1099,42 @@ function renderPills() {
     ? "Archive of your calls — oldest " + Number(trimmedDecided).toLocaleString() + " trimmed to fit"
     : "Archive of your calls";
   $("chipHint").textContent = STATE.chip === "" ? "" : STATE.chip === "decided" ? decidedHint : "Click again to see the whole queue";
+  describeInterviewPills();
+}
+
+/* Both pills say, on hover and to a screen reader, exactly what they count.
+   The Interview requested title names how many rows it moved out and why; the
+   Delivery review title names the hold codes it is aggregating, which is the
+   question its number always provokes and which nothing on the page answered.
+   Delivery review's PREDICATE is untouched — only its description is new. */
+function describeInterviewPills() {
+  const moved = STATE.snapshot ? emailedRows().filter((row) => effectiveDecision(row.key)?.action === "interview").length : 0;
+  const requestedTitle = "Interview decisions with NO published send yet — the only rows that still owe an email."
+    + (moved ? " " + moved + " interview-decided row" + (moved === 1 ? " is" : "s are") + " not counted here because an ack says the invitation already went out; they are under Already emailed." : "")
+    + " A pre-cutover send by a retired lane that never wrote an ack cannot be seen from this tab.";
+  setPillDescription("pillRequested", "Interview requested", requestedTitle);
+  setPillDescription("pillEmailed", "Already emailed",
+    "Queue rows with published send evidence: an ack of " + [...SENT_ACK_STATUSES].join(" or ")
+    + ", a row status of " + [...SENT_ROW_STATUSES].join(" / ")
+    + ", or a recorded external prior send. Never email these again for the same role.");
+  const holds = {};
+  if (STATE.snapshot) {
+    for (const row of deliveryRows()) {
+      const code = interviewHold(row) || String(ackFor(row.key)?.status || effectiveDecision(row.key)?.deliveryState || "delivery_state");
+      holds[code] = (holds[code] || 0) + 1;
+    }
+  }
+  const present = Object.entries(holds).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([code, n]) => code + " " + n).join(", ");
+  setPillDescription("pillDelivery", "Delivery review",
+    "Hard holds aggregated here right now: " + (present || "none")
+    + ". Hold codes watched: " + [...HARD_HOLD_CODES].join(", ")
+    + ". Hold states watched: " + [...HARD_HOLD_STATES].join(", ") + ".");
+}
+function setPillDescription(id, label, text) {
+  const pill = $(id);
+  if (!pill) return;
+  pill.title = text;
+  pill.setAttribute("aria-label", label + ". " + text);
 }
 
 function renderRoleFilter() {
@@ -1035,10 +1164,10 @@ function ackFor(key) {
 function decisionStatus(key, decision) {
   const ack = ackFor(key);
   if (decision?.action === "pass" && (!decision.requestId || ack?.reason==='human_pass')) return "passed";
-  if (decision?.action === "interview" && ["invited", "sendgrid_delivered"].includes(ack?.status)) return "emailed";
+  if (decision?.action === "interview" && SENT_ACK_STATUSES.has(String(ack?.status || ""))) return "emailed";
   if (decision?.action === "interview" && (ack?.status === "blocked"
     || ["identity_review", "recipient_review", "delivery_review"].includes(ack?.status))) return "blocked";
-  if (ack?.status === "invited") return "emailed";
+  if (SENT_ACK_STATUSES.has(String(ack?.status || ""))) return "emailed";
   if (ack?.status === "blocked") return "blocked";
   return "queued";
 }
@@ -1133,6 +1262,7 @@ function rowCardHtml(row, mode, decision) {
   const card = STATE.cards[id];
   const hold = interviewHold(row);
   const interviewReady = !hold;
+  const sentAlready = !decision && interviewReady && alreadyEmailed(row);
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
@@ -1140,8 +1270,9 @@ function rowCardHtml(row, mode, decision) {
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
-          esc(interviewReady ? "Request interview" : "Interview held: " + hold) + '"' +
-          (busy || !interviewReady ? " disabled" : "") + ">" + (interviewReady ? "Interview" : "Interview held") + "</button></div>");
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : interviewReady ? "Request interview" : "Interview held: " + hold) + '"' +
+          (busy || !interviewReady || sentAlready ? " disabled" : "") + ">" +
+          (sentAlready ? "Already emailed" : interviewReady ? "Interview" : "Interview held") + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
@@ -1184,7 +1315,8 @@ function rowCardHtml(row, mode, decision) {
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(card?.location || "") + "</div>" +
-        (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>' : '') +
+        (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>'
+          : sentAlready ? '<div class="rc-none">Already emailed for this role.</div>' : '') +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
       '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
@@ -1226,6 +1358,9 @@ function reviewListRows() {
   } else if (STATE.view === "requested") {
     rows = requestedRows();
     rows = sortByDecisionDate(rows);
+  } else if (STATE.view === "emailed") {
+    rows = emailedRows();
+    rows = sortByApplicationDate(rows);
   } else if (STATE.view === "delivery") {
     rows = deliveryRows();
     rows = sortByApplicationDate(rows);
@@ -1399,7 +1534,8 @@ function renderReview() {
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
     if (hasFilters) list.innerHTML = '<div class="empty">No applicants match the current filters.</div>';
     else if (decidedMode) list.innerHTML = '<div class="empty">No decisions yet — Pass or Interview calls land here.</div>';
-    else if (STATE.view === "requested") list.innerHTML = '<div class="empty">No Interview requests are waiting or in delivery.</div>';
+    else if (STATE.view === "requested") list.innerHTML = '<div class="empty">No Interview request is still waiting for its email. Anyone already emailed is under Already emailed.</div>';
+    else if (STATE.view === "emailed") list.innerHTML = '<div class="empty">No queue row carries published send evidence.</div>';
     else if (STATE.view === "delivery") list.innerHTML = '<div class="empty">No hard holds need delivery review.</div>';
     else if (!queueRows().length || !pendingRows().length) list.innerHTML = '<div class="empty"><div class="big">Queue cleared 🎉</div>Every applicant in the published review queue has been reviewed. New ones appear as they apply.</div>';
     else list.innerHTML = '<div class="empty">Nothing in this bucket right now.</div>';
@@ -1456,10 +1592,11 @@ function setView(view) {
   resetVirtualLists();
   $("pillReview").classList.toggle("active", view === "review");
   $("pillRequested").classList.toggle("active", view === "requested");
+  $("pillEmailed").classList.toggle("active", view === "emailed");
   $("pillDelivery").classList.toggle("active",view==='delivery');
   $("pillStream").classList.toggle("active", view === "stream");
   $("pillRules").classList.toggle("active", view === "rules");
-  $("reviewView").style.display = ['review','requested','delivery'].includes(view) ? "" : "none";
+  $("reviewView").style.display = ['review','requested','emailed','delivery'].includes(view) ? "" : "none";
   $("streamView").style.display = view === "stream" ? "" : "none";
   $("rulesView").style.display = view === "rules" ? "" : "none";
   // The toolbar filters belong to the two lists, not to the rules editor.
@@ -1575,8 +1712,9 @@ function viewBand() {
 function applyAvatar(cu) {
   const src = STATE.photos[cu] || STATE.cards[cu]?.photo || STATE.profiles[cu]?.imageSrc || "";
   if (!src) return;
+  const name = rowByCu(cu)?.name || "";
   document.querySelectorAll('[data-avatar="' + CSS.escape(cu) + '"]')
-    .forEach((el) => { el.innerHTML = '<img src="' + esc(src) + '" alt="" loading="lazy" />'; });
+    .forEach((el) => { el.innerHTML = avatarImg(src, name); });
 }
 async function fetchProfile(cu) {
   const cached = STATE.profiles[cu];
@@ -1790,15 +1928,18 @@ function renderModal() {
   }
   if (modal.source === "queue") {
     const hold = interviewHold(row);
+    // Same gate as the row card, for the same reason — the modal is the other
+    // way a person reaches this button.
+    const sentAlready = !decision && !hold && alreadyEmailed(row);
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? "" :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
-          (hold ? "Interview held: " + hold : "Queue interview request") + '"' +
-          (busy || hold ? " disabled" : "") + ">" +
-          (hold ? "Interview held" : "Interview") + "</button>") +
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : "Queue interview request") + '"' +
+          (busy || hold || sentAlready ? " disabled" : "") + ">" +
+          (sentAlready ? "Already emailed" : hold ? "Interview held" : "Interview") + "</button>") +
       "</div>");
   }
   $("profileCard").innerHTML = parts.join("");
@@ -2042,7 +2183,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && AU
 /* Views that may be deep-linked. Rules is here so the master criteria page can
    be bookmarked and sent to the team as a plain link, not just reached by
    clicking through Review. */
-const DEEP_LINK_VIEWS = ["review", "requested", "delivery", "stream", "rules"];
+const DEEP_LINK_VIEWS = ["review", "requested", "emailed", "delivery", "stream", "rules"];
 
 async function init() {
   const landed = location.hash.replace("#", "");
