@@ -163,3 +163,50 @@ test("multiple-role validation rejects roles outside the offer and duplicate rol
   assert.equal(validateClassification({ decisions: [{ role_id: "role-sales", ...base }] }, event).reason, "role_outside_offer");
   assert.equal(validateClassification({ decisions: [{ role_id: "role-backend", ...base }, { role_id: "role-backend", ...base }] }, event).reason, "role_outside_offer");
 });
+
+test("candidate-authored role binding requires every bound role and tells the classifier scope is not intent", async () => {
+  const event = {
+    candidate_authored_text: [
+      "Acme Backend Engineer",
+      "Also this: https://www.paraform.com/lists/list-1/role/role-product",
+      "Please introduce me to these teams.",
+    ].join("\n"),
+    sent_message_text: "",
+    offered_roles: [fixtures.roles.backend, fixtures.roles.product],
+    source_evidence: {
+      resolution_version: "candidate-explicit-role-v1",
+      exact_role_source: "candidate_authored_explicit",
+      match_kinds: ["company_full_title"],
+    },
+  };
+  const base = { label: "interested", quote: "Please introduce me to these teams.", review_reason: null, negative_reason: null };
+  assert.equal(
+    validateClassification({ decisions: [{ role_id: "role-backend", ...base }] }, event).reason,
+    "candidate_named_roles_incomplete",
+  );
+
+  let supplied;
+  const result = await classifyReply(event, {
+    env: { SUBMISSIONS_V2_OPENAI_API_KEY: "deterministic-test-key" },
+    fetchImpl: async (_url, init) => {
+      supplied = JSON.parse(JSON.parse(init.body).input[1].content[0].text);
+      return {
+        ok: true,
+        json: async () => ({
+          id: "explicit-role-classification",
+          output_text: JSON.stringify({ decisions: [
+            { role_id: "role-backend", ...base },
+            { role_id: "role-product", ...base },
+          ] }),
+          usage: { input_tokens: 100, output_tokens: 60 },
+        }),
+      };
+    },
+  });
+  assert.equal(result.decisions.length, 2);
+  assert.equal(supplied.role_binding_provenance.exact_role_source, "candidate_authored_explicit");
+  assert.match(supplied.rules.join("\n"), /role name or link identifies scope only and is not proof of interest/iu);
+  assert.match(supplied.rules.join("\n"), /Return one decision for every offered role/iu);
+  assert.match(supplied.rules.join("\n"), /exact role URL identifies that role's scope without requiring.*company or title/iu);
+  assert.match(supplied.rules.join("\n"), /these roles.*these teams.*applies to every deterministically bound role/iu);
+});

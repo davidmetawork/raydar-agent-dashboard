@@ -2,6 +2,8 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { effectiveControls, environmentControls } from "./config.mjs";
 import { normalizeEmailReply, privateEventPayload, safeEventProjection } from "./contracts.mjs";
 import { classifyReply } from "./classifier.mjs";
+import { resolveExplicitCandidateRoles } from "./explicit-role-resolution.mjs";
+import { APPROVED_EMAIL_FAMILIES } from "./email-source-policy.mjs";
 import { createRepository } from "./repository.mjs";
 import { rowDto, publicHealth } from "./presentation.mjs";
 import { reviewContext } from "./review-context.mjs";
@@ -17,6 +19,7 @@ const ALLOWED_UPLOADS = new Set(["application/pdf", "image/png", "image/jpeg", "
 const REVIEW_DISMISSAL_REASONS = new Set([
   "not_candidate_response", "irrelevant_notification", "already_handled",
 ]);
+const APPROVED_EMAIL_FAMILY_SET = new Set(APPROVED_EMAIL_FAMILIES);
 const clean = (value, limit = 500) => String(value ?? "").trim().slice(0, limit);
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -230,6 +233,25 @@ export function createService({
           : candidateResolutionRaw.candidate?.candidate_user_id || null,
         ambiguous: forcedCandidateReview || Boolean(candidateResolutionRaw.ambiguous),
       };
+      if (normalized.errors.length === 1 && normalized.errors[0] === "offered_roles_missing"
+        && !event.machine_message && APPROVED_EMAIL_FAMILY_SET.has(event.source_family)
+        && typeof repository.explicitRoleCatalog === "function") {
+        try {
+          const resolution = resolveExplicitCandidateRoles(
+            event.candidate_authored_text,
+            await repository.explicitRoleCatalog(),
+            { now: Number(now()) },
+          );
+          if (resolution.status === "resolved") {
+            event.offered_roles = resolution.roles;
+            event.source_evidence = resolution.source_evidence;
+            normalized.errors.splice(0, 1);
+          }
+        } catch {
+          // A missing, stale, incomplete, or unreadable local role catalog leaves
+          // the original source in Review. It never becomes an empty success.
+        }
+      }
       let processingState = "ready";
       let safeErrorCode = null;
       let safeErrorDetail = null;

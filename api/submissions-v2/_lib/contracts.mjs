@@ -36,6 +36,29 @@ function role(raw) {
 
 function sequenceEvidence(value) {
   if (!value || typeof value !== "object") return null;
+  if (value.resolution_version === "candidate-explicit-role-v1") {
+    const evidenceDigest = text(value.role_evidence_digest, 200);
+    const catalogDigest = text(value.role_catalog_digest, 200);
+    const matchKinds = Array.isArray(value.match_kinds)
+      ? [...new Set(value.match_kinds.filter((item) => (
+          item === "company_full_title" || item === "paraform_role_url"
+        )))].sort()
+      : [];
+    const resolvedRoleCount = Number(value.resolved_role_count);
+    if (value.exact_role_source !== "candidate_authored_explicit"
+      || !/^[a-f0-9]{64}$/u.test(evidenceDigest)
+      || !/^[a-f0-9]{64}$/u.test(catalogDigest)
+      || !matchKinds.length
+      || !Number.isInteger(resolvedRoleCount) || resolvedRoleCount < 1 || resolvedRoleCount > 20) return null;
+    return {
+      resolution_version: "candidate-explicit-role-v1",
+      exact_role_source: "candidate_authored_explicit",
+      role_evidence_digest: evidenceDigest,
+      role_catalog_digest: catalogDigest,
+      match_kinds: matchKinds,
+      resolved_role_count: resolvedRoleCount,
+    };
+  }
   const cacheVersion = Number(value.cache_version);
   const sequenceId = text(value.sequence_id, 500);
   if (cacheVersion !== 3 || !sequenceId) return null;

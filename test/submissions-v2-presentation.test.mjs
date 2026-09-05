@@ -19,6 +19,25 @@ test("row DTO rejects unsafe Signal destinations", () => {
   });
 });
 
+test("pair-scoped role uncertainty asks for an interest decision without changing unresolved-source selection", () => {
+  const pair = rowDto({
+    pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",
+    workflow_state: "needs_review", review_reasons: ["role_unclear"],
+  });
+  assert.deepEqual(pair.review_reasons, [{
+    code: "role_unclear", label: "Confirm interest for this role", detail: null, action: "Review Signal",
+  }]);
+  assert.equal(pair.primary_action_label, "Review Signal");
+
+  const unresolved = rowDto({
+    signal_id: "signal-1", workflow_state: "needs_review", review_reasons: ["role_unclear"],
+  });
+  assert.deepEqual(unresolved.review_reasons, [{
+    code: "role_unclear", label: "Exact offered role is unclear", detail: null, action: "Select role(s)",
+  }]);
+  assert.equal(unresolved.primary_action_label, "Select role(s)");
+});
+
 test("rows without source evidence hide Signal instead of resolving Monitor root", () => {
   assert.equal(safeHttps(null, ["monitor.raydar.xyz"]), null);
   assert.equal(safeHttps("/master-inbox", ["monitor.raydar.xyz"]), null);

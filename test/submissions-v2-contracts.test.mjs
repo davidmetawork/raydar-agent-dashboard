@@ -80,6 +80,34 @@ test("Sequence Inbox canonical events retain bounded evidence and unmapped roles
   assert.equal(normalized.event.source_evidence.sequence_id, "sequence-1");
 });
 
+test("canonical email events retain only bounded explicit-role resolution provenance", () => {
+  const normalized = normalizeEmailReply({
+    schema_version: "submissions.email_reply.v1", event_id: "evt-explicit", source_family: "new_match",
+    source_family_version: "2", mailbox_id: "box", provider: "gmail", provider_message_id: "msg-explicit",
+    direction: "inbound", received_at: "2026-09-05T15:00:00Z", candidate_authored_text: "Acme — Engineer",
+    sender_match_hmac: { key_version: "v1", digest: "match" }, offered_roles: [role],
+    content_digest: "a".repeat(64), idempotency_key: "stable-explicit-key",
+    source_evidence: {
+      resolution_version: "candidate-explicit-role-v1",
+      exact_role_source: "candidate_authored_explicit",
+      role_evidence_digest: "b".repeat(64),
+      role_catalog_digest: "c".repeat(64),
+      match_kinds: ["company_full_title", "company_full_title"],
+      resolved_role_count: 1,
+      candidate_text: "must not survive normalization",
+    },
+  });
+  assert.deepEqual(normalized.errors, []);
+  assert.deepEqual(normalized.event.source_evidence, {
+    resolution_version: "candidate-explicit-role-v1",
+    exact_role_source: "candidate_authored_explicit",
+    role_evidence_digest: "b".repeat(64),
+    role_catalog_digest: "c".repeat(64),
+    match_kinds: ["company_full_title"],
+    resolved_role_count: 1,
+  });
+});
+
 test("pointer-only candidate text is quarantined before classification until the signed adapter resolves it", () => {
   const normalized = normalizeEmailReply({
     schema_version: "submissions.email_reply.v1", event_id: "evt-pointer", source_family: "new_match",

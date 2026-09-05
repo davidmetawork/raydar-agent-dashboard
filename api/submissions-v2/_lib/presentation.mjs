@@ -62,10 +62,13 @@ export function rowDto(row) {
   const preparationReviewCode = preparationErrorCode
     ? Object.hasOwn(REVIEW_REASONS, preparationErrorCode) ? preparationErrorCode : "resume_preparation_failed"
     : null;
+  const identifiedPair = Boolean((row.pair_id || row.case_id) && row.candidate_user_id && row.role_id);
   const reviewReasons = reasons(row.review_reasons || []).map((reason) => (
-    preparationErrorDetail && reason.code === preparationReviewCode
-      ? { ...reason, detail: preparationErrorDetail }
-      : reason
+    reason.code === "role_unclear" && identifiedPair
+      ? { ...reason, label: "Confirm interest for this role", action: "Review Signal" }
+      : preparationErrorDetail && reason.code === preparationReviewCode
+        ? { ...reason, detail: preparationErrorDetail }
+        : reason
   ));
   const first = reviewReasons[0];
   const signalUrl = gmailSignalUrl(row.signal_url) || safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
@@ -74,7 +77,6 @@ export function rowDto(row) {
   const artifactReady = row.artifact_ready === true;
   const currentArtifactId = artifactReady ? row.current_artifact_id || null : null;
   const submissionStatus = row.submission_status || "none";
-  const identifiedPair = Boolean((row.pair_id || row.case_id) && row.candidate_user_id && row.role_id);
   const readyWorkflow = workflowState === "interested";
   const generationActive = ACTIVE_GENERATION_STATES.has(generationStatus);
   const offeredRoleCount = Number(row.offered_role_count || 0);

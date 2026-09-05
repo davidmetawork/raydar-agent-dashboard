@@ -27,13 +27,23 @@ export function paraformRoleLink(value) {
   } else {
     if (url.search) return null;
     const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length !== 3 || parts[0] !== "share") return null;
-    let slug;
-    try {
-      slug = decodeURIComponent(parts[1]);
-      roleId = decodeURIComponent(parts[2]);
-    } catch { return null; }
-    if (!SHARE_SLUG.test(slug) || !SHARE_ROLE_ID.test(roleId)) return null;
+    if (parts.length === 3 && parts[0] === "share") {
+      let slug;
+      try {
+        slug = decodeURIComponent(parts[1]);
+        roleId = decodeURIComponent(parts[2]);
+      } catch { return null; }
+      if (!SHARE_SLUG.test(slug) || !SHARE_ROLE_ID.test(roleId)) return null;
+    } else if (parts.length === 4 && parts[0] === "lists" && parts[2] === "role") {
+      let listId;
+      try {
+        listId = decodeURIComponent(parts[1]);
+        roleId = decodeURIComponent(parts[3]);
+      } catch { return null; }
+      if (!ROLE_ID.test(listId) || !ROLE_ID.test(roleId)) return null;
+    } else {
+      return null;
+    }
   }
   return {
     role_id: roleId,
