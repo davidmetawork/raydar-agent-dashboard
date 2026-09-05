@@ -13,6 +13,8 @@ import { createFundedEmployersHandler } from "../api/applicants/funded-employers
 
 const NOW = Date.parse("2026-09-05T12:00:00.000Z");
 const SNAPSHOT_ID = "funded-us-gb-ca-2026-09-05";
+const SOURCE_OBSERVATION_ID = "source-observation-current";
+const SOURCE_PAYLOAD_DIGEST = "d".repeat(64);
 
 function manifest(entries = []) {
   return {
@@ -64,10 +66,27 @@ const membershipRule = {
   conditions: [{ field: "employment.fundedEmployerSnapshot", op: "member_of", value: SNAPSHOT_ID }],
 };
 
-function subject(experiences, snapshots) {
+function subject(experiences, snapshots, {
+  rowObservationId = SOURCE_OBSERVATION_ID,
+  factsObservationId = SOURCE_OBSERVATION_ID,
+  factsPayloadDigest = SOURCE_PAYLOAD_DIGEST,
+  receiptObservationId = SOURCE_OBSERVATION_ID,
+  receiptPayloadDigest = SOURCE_PAYLOAD_DIGEST,
+} = {}) {
   return {
-    row: { roleId: "role-1", tier: "C" },
-    facts: factsFromProfile({ experiences, education: [] }, { now: NOW }),
+    row: { roleId: "role-1", tier: "C", sourceObservationId: rowObservationId },
+    facts: factsFromProfile({ experiences, education: [] }, {
+      now: NOW,
+      sourceObservationId: factsObservationId,
+      sourcePayloadDigest: factsPayloadDigest,
+    }),
+    profileReceipt: {
+      source: "applicant_hub",
+      durable: true,
+      historyState: "data",
+      sourceObservationId: receiptObservationId,
+      payloadDigest: receiptPayloadDigest,
+    },
     fundedEmployerSnapshots: snapshots,
   };
 }
@@ -200,6 +219,8 @@ test("an explicit CRM-wide reviewed source-name bridge resolves only a missing c
     organizationId: "org_acme",
     paraformCompanyId: "pf_acme",
     identityBasis: "reviewed_source_name_bridge",
+    sourceObservationId: SOURCE_OBSERVATION_ID,
+    sourcePayloadDigest: SOURCE_PAYLOAD_DIGEST,
     snapshotId: SNAPSHOT_ID,
   });
 
@@ -323,12 +344,38 @@ test("membership scans employment beyond the existing fourteen-job rule cap", ()
     companyId: index === MAX_JOBS + 1 ? "pf_acme" : `pf_other_${index}`,
     companyName: index === MAX_JOBS + 1 ? "Acme" : `Other ${index}`,
   }));
-  const facts = factsFromProfile({ experiences, education: [] }, { now: NOW });
+  const bound = subject(experiences, { [SNAPSHOT_ID]: snapshot });
+  const { facts } = bound;
   assert.equal(facts.jobs.length, MAX_JOBS, "existing row-scoped rule storage stays capped");
   assert.equal(facts.allCompanies.length, MAX_JOBS + 2);
-  assert.equal(evaluateRule(membershipRule, {
-    row: {}, facts, fundedEmployerSnapshots: { [SNAPSHOT_ID]: snapshot },
-  }).matched, true);
+  assert.equal(evaluateRule(membershipRule, bound).matched, true);
+});
+
+test("funded membership refuses stale or unbound facts and accepts the exact source replay", () => {
+  const { snapshot } = compileFundedEmployerSnapshot(manifest());
+  const experiences = [{ companyId: "pf_acme", companyName: "Acme" }];
+  const snapshots = { [SNAPSHOT_ID]: snapshot };
+
+  const staleObservation = evaluateRule(membershipRule, subject(experiences, snapshots, {
+    factsObservationId: "source-observation-old",
+  }));
+  assert.deepEqual({ matched: staleObservation.matched, skipped: staleObservation.skipped, reason: staleObservation.reason }, {
+    matched: false, skipped: true, reason: "employment_facts_source_mismatch",
+  });
+
+  const stalePayload = evaluateRule(membershipRule, subject(experiences, snapshots, {
+    factsPayloadDigest: "e".repeat(64),
+  }));
+  assert.equal(stalePayload.reason, "employment_facts_source_mismatch");
+
+  const unbound = subject(experiences, snapshots);
+  delete unbound.facts.sourceObservationId;
+  delete unbound.facts.sourcePayloadDigest;
+  assert.equal(evaluateRule(membershipRule, unbound).reason, "employment_facts_source_unbound");
+
+  const exactReplay = evaluateRule(membershipRule, subject(experiences, snapshots));
+  assert.equal(exactReplay.matched, true);
+  assert.equal(exactReplay.evidence[0].identityBasis, "paraform_company_id");
 });
 
 test("old additive facts and a missing immutable snapshot both fail closed", () => {
@@ -388,13 +435,17 @@ test("public qualification must carry an in-window qualifying round and primary 
 test("import is immutable and the shared loader detects missing or corrupt snapshots", async () => {
   const state = {};
   const readJson = async (key) => state[key] ?? null;
-  const writeJson = async (key, value) => { state[key] = value; };
   const writeIfAbsent = async (key, value) => {
     if (state[key]) return null;
     state[key] = value;
     return "OK";
   };
-  const first = await importFundedEmployerSnapshot(manifest(), { readJson, writeJson, writeIfAbsent });
+  const updateCatalog = async (metadata) => {
+    const catalog = { activeSnapshotId: metadata.id, snapshots: [metadata], updatedAt: "2026-09-05T12:00:00.000Z" };
+    state[K.fundedEmployerCatalog] = catalog;
+    return catalog;
+  };
+  const first = await importFundedEmployerSnapshot(manifest(), { readJson, writeIfAbsent, updateCatalog });
   assert.equal(first.created, true);
   assert.equal(first.catalog.activeSnapshotId, SNAPSHOT_ID);
   const loaded = await loadFundedEmployerSnapshots([membershipRule], { readJson });
@@ -440,11 +491,15 @@ test("the private import route requires publisher auth and never returns license
     authHandler: (req) => req.headers.authorization === "Bearer test",
     kvReady: () => true,
     readJson: async (key) => state[key] ?? null,
-    writeJson: async (key, value) => { state[key] = value; },
     writeIfAbsent: async (key, value) => {
       if (state[key]) return null;
       state[key] = value;
       return "OK";
+    },
+    updateCatalog: async (metadata) => {
+      const catalog = { activeSnapshotId: metadata.id, snapshots: [metadata], updatedAt: "2026-09-05T12:00:00.000Z" };
+      state[K.fundedEmployerCatalog] = catalog;
+      return catalog;
     },
   };
   const denied = response();

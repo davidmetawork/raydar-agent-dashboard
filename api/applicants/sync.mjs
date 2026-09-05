@@ -1204,7 +1204,10 @@ export function createSyncHandler({
         if (Object.keys(cards).length) await writeHash(K.cards, cards);
         if (Object.keys(profileReady).length) await writeHash(K.sourceProfileReady, profileReady);
         try {
-          const facts = Object.fromEntries(entries.map(([key, profile]) => [key, factsFromProfile(profile)]));
+          const facts = Object.fromEntries(entries.map(([key, profile]) => [key, factsFromProfile(profile, {
+            sourceObservationId: profileReady[key].sourceObservationId,
+            sourcePayloadDigest: profileReady[key].payloadDigest,
+          })]));
           await writeHash(K.facts, facts);
           stored.sourceFacts = entries.length;
         } catch (error) {

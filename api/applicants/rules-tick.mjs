@@ -267,6 +267,7 @@ export function createTickHandler({
         const subject = {
           row,
           facts: facts[row.profileKey || row.cuId] ?? null,
+          profileReceipt: receipts[row.profileKey || row.cuId] ?? null,
           fundedEmployerSnapshots,
         };
 

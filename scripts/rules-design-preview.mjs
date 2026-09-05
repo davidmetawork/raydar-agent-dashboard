@@ -34,6 +34,7 @@ import {
 const ROOT = normalize(join(fileURLToPath(new URL(".", import.meta.url)), ".."));
 const FIXTURE_EMAIL = "local-rules-fixture@raydar.invalid";
 const FUNDED_SNAPSHOT_ID = "local-funded-companies-2026-09-05";
+const SOURCE_PAYLOAD_DIGEST = "f".repeat(64);
 const generation = Object.freeze({
   generationId: "local-rules-design-fixture-v1",
   digest: "local-fixture-no-production-data",
@@ -123,6 +124,7 @@ function row(profileIndex, roleIndex, tier, appliedAt) {
     name: profiles[profileKey].name, roleId, roleTitle, company, tier, appliedAt,
     linkedin: null, inputRevision: `local-input-${profileIndex + 1}`,
     readinessRevision: `local-ready-${profileIndex + 1}`, decisionRevision: 0,
+    sourceObservationId: `local-source-${profileIndex + 1}`,
   };
 }
 
@@ -132,7 +134,18 @@ const cards = Object.fromEntries(Object.entries(profiles).map(([id, profile]) =>
   edu: profile.education.slice(0, 3).map((item) => ({ school: item.school, degree: item.degree, start: item.start, end: item.end })),
   expCount: profile.experiences.length, eduCount: profile.education.length,
 }]));
-const facts = Object.fromEntries(Object.entries(profiles).map(([id, profile]) => [id, factsFromProfile(profile, { now: Date.parse("2026-09-05T16:00:00.000Z") })]));
+const facts = Object.fromEntries(Object.entries(profiles).map(([id, profile], index) => [id, factsFromProfile(profile, {
+  now: Date.parse("2026-09-05T16:00:00.000Z"),
+  sourceObservationId: `local-source-${index + 1}`,
+  sourcePayloadDigest: SOURCE_PAYLOAD_DIGEST,
+})]));
+const profileReceipts = Object.fromEntries(profileIds.map((id, index) => [id, {
+  source: "applicant_hub",
+  durable: true,
+  historyState: "data",
+  sourceObservationId: `local-source-${index + 1}`,
+  payloadDigest: SOURCE_PAYLOAD_DIGEST,
+}]));
 
 const { snapshot: fundedSnapshot, metadata: fundedMetadata } = compileFundedEmployerSnapshot({
   snapshotId: FUNDED_SNAPSHOT_ID,
@@ -245,6 +258,7 @@ function previewRule(rule, state, fundedEmployerSnapshots) {
     const result = evaluateRule(rule, {
       row: candidate,
       facts: facts[candidate.profileKey],
+      profileReceipt: profileReceipts[candidate.profileKey],
       fundedEmployerSnapshots,
     });
     const hold = rule.action === "interview"
@@ -402,6 +416,7 @@ async function runTick(req, res, state, readMembership) {
     const subject = {
       row: candidate,
       facts: facts[candidate.profileKey],
+      profileReceipt: profileReceipts[candidate.profileKey],
       fundedEmployerSnapshots,
     };
     for (const rule of watching) {

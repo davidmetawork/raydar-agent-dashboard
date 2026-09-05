@@ -103,7 +103,10 @@ export function stageSourceFact({
     return { ok: false, reason: "verified_empty_has_history" };
   }
   try {
-    const facts = factsFromProfile(profile);
+    const facts = factsFromProfile(profile, {
+      sourceObservationId: target.observationId,
+      sourcePayloadDigest: receiptDigest,
+    });
     if (!facts || !Array.isArray(facts.allCompanies)) {
       return { ok: false, reason: "facts_invalid" };
     }

@@ -151,6 +151,11 @@ test("the source-profile receipt records the digest of what was STORED", async (
   assert.equal(receipt.historyState, "data");
   assert.equal(receipt.sourceObservationId, "obs-1");
 
+  const facts = calls.writeHash.find(([name]) => name === "apphub:facts")[1][key];
+  assert.equal(facts.sourceObservationId, receipt.sourceObservationId);
+  assert.equal(facts.sourcePayloadDigest, receipt.payloadDigest,
+    "funded-employer facts must be bound to the same exact source payload as the durable receipt");
+
   // And the card written in the same breath carries the photo.
   const cards = calls.writeHash.find(([name]) => name === "apphub:cards")[1];
   assert.equal(cards[key].photo, WORKABLE);

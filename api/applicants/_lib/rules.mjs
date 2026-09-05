@@ -27,6 +27,7 @@
 import { DEGREE_LEVELS, levelMatches } from "./degree.mjs";
 import { FACTS_VERSION } from "./facts.mjs";
 import { matchFundedEmployer, SNAPSHOT_ID_RE } from "./funded-employers.mjs";
+import { profileReceiptReady, sourceObservationIdFor } from "./profile-readiness.mjs";
 
 export const RULE_ACTIONS = ["interview", "pass"];
 export const RULE_STATES = ["off", "watching", "live"];
@@ -159,6 +160,8 @@ export const FIELDS = {
         orgId: found.orgId,
         paraformCompanyId: found.paraformCompanyId,
         identityBasis: found.identityBasis,
+        sourceObservationId: subject.facts?.sourceObservationId,
+        sourcePayloadDigest: subject.facts?.sourcePayloadDigest,
       } : null;
     },
   },
@@ -275,6 +278,29 @@ export const TIERS = ["S", "A", "B", "C", "unrated"];
 
 /** Fields whose group needs a matching row to exist at all. */
 const ROW_GROUPS = { school: "schools", job: "jobs", employment: "allCompanies" };
+const SOURCE_PAYLOAD_DIGEST_RE = /^[a-f0-9]{64}$/;
+
+function employmentFactsSourceStatus(subject, now) {
+  const factsObservationId = sourceObservationIdFor(subject?.facts);
+  const factsPayloadDigest = typeof subject?.facts?.sourcePayloadDigest === "string"
+    ? subject.facts.sourcePayloadDigest : null;
+  if (!factsObservationId || !SOURCE_PAYLOAD_DIGEST_RE.test(factsPayloadDigest || "")) {
+    return "employment_facts_source_unbound";
+  }
+  const expectedObservationId = sourceObservationIdFor(subject?.row);
+  const receipt = subject?.profileReceipt;
+  const receiptObservationId = sourceObservationIdFor(receipt);
+  const receiptPayloadDigest = typeof receipt?.payloadDigest === "string" ? receipt.payloadDigest : null;
+  if (!expectedObservationId
+    || !profileReceiptReady(receipt, now, expectedObservationId)
+    || receiptObservationId !== expectedObservationId
+    || factsObservationId !== expectedObservationId
+    || !SOURCE_PAYLOAD_DIGEST_RE.test(receiptPayloadDigest || "")
+    || factsPayloadDigest !== receiptPayloadDigest) {
+    return "employment_facts_source_mismatch";
+  }
+  return null;
+}
 
 // ── comparison ─────────────────────────────────────────────────────────────
 
@@ -337,6 +363,8 @@ function groupMatches(conditions, subject, row, now) {
       ...(custom?.orgId ? { organizationId: custom.orgId } : {}),
       ...(custom?.paraformCompanyId ? { paraformCompanyId: custom.paraformCompanyId } : {}),
       ...(custom?.identityBasis ? { identityBasis: custom.identityBasis } : {}),
+      ...(custom?.sourceObservationId ? { sourceObservationId: custom.sourceObservationId } : {}),
+      ...(custom?.sourcePayloadDigest ? { sourcePayloadDigest: custom.sourcePayloadDigest } : {}),
       ...(field.kind === "snapshot" ? { snapshotId: condition.value } : {}),
     });
   }
@@ -386,6 +414,10 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       }
       if (!facts.allCompanies.length) {
         return { matched: false, skipped: true, reason: "no_employment_history", evidence: [] };
+      }
+      const sourceError = employmentFactsSourceStatus(subject, now);
+      if (sourceError) {
+        return { matched: false, skipped: true, reason: sourceError, evidence: [] };
       }
       const snapshots = subject.fundedEmployerSnapshots;
       const unavailable = !snapshots || typeof snapshots !== "object"

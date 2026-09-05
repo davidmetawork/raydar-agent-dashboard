@@ -106,7 +106,11 @@ export function experienceMonths(jobs, now = Date.now()) {
  * present, so the evaluator never branches on absence, and a profile that is
  * missing everything yields a record whose conditions simply cannot match.
  */
-export function factsFromProfile(profile, { now = Date.now() } = {}) {
+export function factsFromProfile(profile, {
+  now = Date.now(),
+  sourceObservationId = null,
+  sourcePayloadDigest = null,
+} = {}) {
   const source = profile && typeof profile === "object" && !Array.isArray(profile) ? profile : {};
 
   const schools = list(source.education).slice(0, MAX_SCHOOLS).map((row) => ({
@@ -172,6 +176,11 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
   return {
     v: FACTS_VERSION,
     at: new Date(now).toISOString(),
+    // Present for durable Applicant Hub facts. Funded-employer membership
+    // requires both values to equal the active row and current durable receipt
+    // so an older best-effort facts write can never act on a newer profile.
+    sourceObservationId: str(sourceObservationId),
+    sourcePayloadDigest: str(sourcePayloadDigest)?.toLowerCase() ?? null,
     // The age of the LinkedIn snapshot behind these facts. Surfaced in the
     // audit so a decision made on stale data is visibly made on stale data.
     updatedAt: str(source.updatedAt),

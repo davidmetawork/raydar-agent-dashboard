@@ -33,6 +33,7 @@ import {
   MAX_VERSIONS,
   factsFor,
   pendingRows,
+  profileReceiptsFor,
   readDirectories,
   readRules,
   writeRules,
@@ -78,8 +79,14 @@ export function createRulesHandler({
     ]);
     const rows = pendingRows(artifacts?.queue?.rows ?? [], decisions);
     const scoped = rows.filter((row) => inScope(rule, row));
-    const facts = await factsFor(scoped.map((row) => row.profileKey || row.cuId), { readMany });
-    const fundedEmployerSnapshots = await readMembershipSnapshots([rule]);
+    const profileKeys = scoped.map((row) => row.profileKey || row.cuId);
+    const needsEmploymentSource = (Array.isArray(rule?.conditions) ? rule.conditions : [])
+      .some((condition) => condition?.field === "employment.fundedEmployerSnapshot");
+    const [facts, fundedEmployerSnapshots, profileReceipts] = await Promise.all([
+      factsFor(profileKeys, { readMany }),
+      readMembershipSnapshots([rule]),
+      needsEmploymentSource ? profileReceiptsFor(profileKeys, { readMany }) : Promise.resolve({}),
+    ]);
 
     const matched = [];
     const skipped = {};
@@ -87,6 +94,7 @@ export function createRulesHandler({
       const result = evaluateRule(rule, {
         row,
         facts: facts[row.profileKey || row.cuId] ?? null,
+        profileReceipt: profileReceipts[row.profileKey || row.cuId] ?? null,
         fundedEmployerSnapshots,
       });
       const interviewSkip = result.matched && rule.action === "interview"
