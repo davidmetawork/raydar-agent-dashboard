@@ -722,11 +722,31 @@ function nameLinks(row) {
 function initials(name) {
   return String(name || "").split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
 }
+// A card's picture comes from someone else's CDN and can be withdrawn, moved
+// or 403'd at any moment. Every avatar image therefore carries the initials it
+// would have shown, and restores them on error: a broken-image glyph on a card
+// is worse than the initials it replaced, and (unlike the glyph) initials are
+// never mistaken for "we have their photo".
+//
+// referrerpolicy="no-referrer" keeps the Monitor's own URL out of Google's and
+// Amazon's logs on every card render. Workable photo URLs carry candidate-chosen
+// filenames, so they are PII: never log one, never paste one anywhere.
+function avatarImg(src, name) {
+  return '<img src="' + esc(src) + '" alt="" loading="lazy" decoding="async"'
+    + ' referrerpolicy="no-referrer" data-initials="' + esc(initials(name)) + '"'
+    + ' onerror="avatarFallback(this)" />';
+}
+function avatarFallback(img) {
+  const parent = img.parentNode;
+  if (parent) parent.textContent = img.getAttribute("data-initials") || "?";
+}
 function avatarHtml(row) {
   const id = profileId(row);
   const p = STATE.profiles[id];
+  // Core rows are keyed core:<id>, which the photos hash can never hold; the
+  // card channel is the one that carries their picture.
   const src = STATE.photos[id] || STATE.cards[id]?.photo || (p && p.imageSrc) || "";
-  const img = src ? '<img src="' + esc(src) + '" alt="" loading="lazy" />' : esc(initials(row.name));
+  const img = src ? avatarImg(src, row.name) : esc(initials(row.name));
   return '<span class="avatar" data-avatar="' + esc(id) + '" data-cu="' + esc(id) + '">' + img + "</span>";
 }
 
@@ -1507,8 +1527,9 @@ function viewBand() {
 function applyAvatar(cu) {
   const src = STATE.photos[cu] || STATE.cards[cu]?.photo || STATE.profiles[cu]?.imageSrc || "";
   if (!src) return;
+  const name = rowByCu(cu)?.name || "";
   document.querySelectorAll('[data-avatar="' + CSS.escape(cu) + '"]')
-    .forEach((el) => { el.innerHTML = '<img src="' + esc(src) + '" alt="" loading="lazy" />'; });
+    .forEach((el) => { el.innerHTML = avatarImg(src, name); });
 }
 async function fetchProfile(cu) {
   const cached = STATE.profiles[cu];

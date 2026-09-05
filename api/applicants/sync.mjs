@@ -107,6 +107,7 @@ const ACK_STATUSES = new Set([
   "blocked",
 ]);
 import {saveApplicantAck} from './_lib/request-safety.mjs';
+import { sourceProfileDigest } from "./_lib/source-profile-digest.mjs";
 
 function authed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
@@ -170,7 +171,37 @@ export const CU_RE = /^[a-z0-9]{10,40}$/i;
 export const PROFILE_KEY_RE = /^(?:[a-z0-9]{10,40}|core:[a-z0-9]{10,64})$/i;
 export const MAX_PROFILE_BYTES = 30_000;
 export const MAX_SOURCE_PROFILE_RECEIPT_QUERY_KEYS = 2_000;
-const PHOTO_URL_PREFIX = "https://storage.googleapis.com/paraform-images/";
+// THE PHOTO ALLOWLIST. Positive, exact-prefix, and deliberately short.
+//
+//   [0] Paraform's own public bucket. Paraform's copy of the picture, obtained
+//       by its enrichment vendor, served unsigned to the recruiter who is
+//       already permitted to see that candidate.
+//   [1] The Workable CloudFront uploads path. The candidate uploaded this to
+//       the employer's ATS as part of their own application to a job we
+//       operate; it is already in Raydar's Hub. MEASURED 2026-09-05 over all
+//       1,244 distinct URLs in that corpus: one host, no query strings, no
+//       fragments, anonymous HTTP 200.
+//
+// DO NOT WIDEN THIS LIST. About 17% of Paraform's image_src values are
+// media.licdn.com signed URLs (every one sampled had already expired) and ~6%
+// are a 42-byte 1x1 transparent GIF; adding either "to fix the missing photos"
+// puts a direct LinkedIn CDN request in the reviewer's browser, or renders an
+// invisible avatar instead of falling back to initials. A photo that is not on
+// this list is not a bug — it is a card that shows initials, which is correct.
+const PHOTO_URL_PREFIXES = [
+  "https://storage.googleapis.com/paraform-images/",
+  "https://dvz3vrza543jw.cloudfront.net/uploads/",
+];
+// startsWith on the FULL prefix including the trailing slash, so a look-alike
+// host ("https://storage.googleapis.com/paraform-images.example.com/x") can
+// never satisfy it. Query strings and fragments are refused outright: every
+// signed, expiring URL we have measured carries one.
+export function allowedPhotoUrl(value) {
+  const url = typeof value === "string" ? value.trim() : "";
+  if (!url || url.length > 512 || !url.startsWith("https://")) return null;
+  if (url.includes("?") || url.includes("#")) return null;
+  return PHOTO_URL_PREFIXES.some((prefix) => url.startsWith(prefix)) ? url : null;
+}
 
 function own(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -329,9 +360,8 @@ export function normalizeProfiles(input) {
       return { ok: false, badCu: cu || null };
     }
     profiles[cu] = profile;
-    if (typeof profile.imageSrc === "string" && profile.imageSrc.startsWith(PHOTO_URL_PREFIX)) {
-      photos[cu] = profile.imageSrc;
-    }
+    const photo = allowedPhotoUrl(profile.imageSrc);
+    if (photo) photos[cu] = photo;
   }
   return { ok: true, profiles, photos };
 }
@@ -406,11 +436,12 @@ export function cardFromProfile(profile) {
     source.historyState ?? source.profileHistoryState ?? source.history_state ?? "",
   ).trim().toLowerCase();
   return {
-    // Same bucket-prefix rule as the photos hash: foreign hosts and expiring
-    // signed URLs are dropped rather than baked into a long-lived card.
-    photo: typeof source.imageSrc === "string" && source.imageSrc.startsWith(PHOTO_URL_PREFIX)
-      ? cardStr(source.imageSrc)
-      : null,
+    // Same allowlist as the photos hash: foreign hosts and expiring signed URLs
+    // are dropped rather than baked into a long-lived card. NOT passed through
+    // cardStr -- a URL truncated at CARD_FIELD_MAX is a broken image that looks
+    // like a real one, so an over-long URL is refused by allowedPhotoUrl
+    // instead (measured max in the live corpus: 221 characters).
+    photo: allowedPhotoUrl(source.imageSrc),
     title: cardStr(source.title),
     location: cardStr(source.location),
     updatedAt: cardStr(source.updatedAt),
@@ -1156,6 +1187,17 @@ export function createSyncHandler({
             durable: true,
             historyState: profile.historyState,
             sourceObservationId: profile.sourceObservationId,
+            // What was actually STORED, hashed by the definition mirrored in
+            // applicant-core/lib/source-profile-digest.mjs. The observation id
+            // alone answers "is this the right revision", never "is this the
+            // payload Core would send now", so a card whose only change is a
+            // newly available photograph used to sit invisible until its
+            // applicant happened to move for some other reason. Core treats a
+            // receipt with no digest as stale (not missing) and re-pushes it at
+            // a bounded rate; the field is additive and profileReceiptReady
+            // reads only the named fields above, so the publish fence and the
+            // rules tick are untouched by it.
+            payloadDigest: sourceProfileDigest(profile),
           };
         }
         const cards = Object.fromEntries(entries.map(([key, profile]) => [key, cardFromProfile(profile)]));
