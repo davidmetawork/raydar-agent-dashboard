@@ -544,14 +544,29 @@ function interviewHold(row) {
    loop after the send was accepted), read through `ackFor` so a stale ack
    belonging to an older requestId cannot mask a fresh click. `row.status`
    covers stream-shaped rows, whose lifecycle carries the same fact under a
-   different name. `externalPriorSendAt` is the forward hook for Core's
-   external prior-send store: when Core starts publishing it, a legacy send
-   from a retired lane lands here with no further UI change.
+   different name.
+
+   `externalPriorSendAt` IS DORMANT TODAY — do not read the clause below as a
+   hole that is already closed. MEASURED against Core on 2026-09-05: the
+   published feed is partitioned by `review_item_id` (present -> queue row,
+   absent -> stream row) and `status` is set on STREAM rows only, so Core's
+   own "a retired sender already emailed this person for this role" fact never
+   reached a Review row; and Core's ack path cannot carry it either, because
+   `dispatchInterviews` walks interview-decided rows, so its
+   `external_prior_send_verified` ack is never minted for the 909 of 911 armed
+   applications that are UNDECIDED. Core commit be4ec712 adds the field to the
+   published queue map (the Monitor passes queue rows through verbatim). Until
+   that lands AND the prior-send import runs, ~904 people with a proven legacy
+   same-role send are NOT in Already emailed and appear in Review as fresh
+   cards. When it does land the clause below is what makes them move, with no
+   further dashboard change; the snake_case twin is only tolerance for a feed
+   that publishes the raw column name.
 
    WHAT THIS IS NOT: it is not proof that nobody else was ever emailed. A
    pre-cutover send by a retired lane that never wrote an ack is invisible
-   here, and that population is real (the legacy interview ledger). The pill
-   states what Raydar has PUBLISHED evidence for, and the title says so. ---- */
+   here, and that population is real (the legacy interview ledger, 2,117
+   step-1 sends). The pill states what Raydar has PUBLISHED evidence for, and
+   the title says so. ---- */
 const SENT_ACK_STATUSES = new Set(["invited", "sendgrid_delivered"]);
 const SENT_ROW_STATUSES = new Set(["emailed", "booked", "replied"]);
 function alreadyEmailed(row) {

@@ -135,6 +135,19 @@ test("a stream-shaped row status and an external prior send both count as sent",
   assert.deepEqual(h.emailed(), ["a", "b"]);
 });
 
+test("a legacy send Core does not publish is NOT counted, and the source says so", () => {
+  // The ~904 armed rows as they exist today: undecided (so no ack is ever
+  // minted for them), no stream status (Review rows carry none), and no
+  // published externalPriorSendAt (Core's queue row map omitted it until
+  // be4ec712). They are invisible to this tab, and the comment must keep
+  // saying that rather than describing the clause as a hole already closed.
+  const h = harness({ rows: [row("a")] });
+  assert.deepEqual(h.emailed(), []);
+  assert.deepEqual(h.requested(), []);
+  assert.match(applicants, /`externalPriorSendAt` IS DORMANT TODAY/);
+  assert.doesNotMatch(applicants, /when Core starts publishing it, a legacy send/);
+});
+
 test("a pass decision never appears on either interview pill", () => {
   const h = harness({ rows: [row("a")], decisions: { a: { action: "pass" } } });
   assert.deepEqual(h.requested(), []);
