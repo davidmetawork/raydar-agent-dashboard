@@ -120,8 +120,8 @@
     const snapshot = fundedSnapshot(id);
     if (!snapshot) return id || "Snapshot unavailable";
     const day = String(snapshot.generatedAt || "").slice(0, 10);
-    return Number(snapshot.companyCount || 0).toLocaleString() + " funded employers · " + day
-      + " · " + String(snapshot.digest || "").slice(0, 10);
+    return Number(snapshot.companyCount || 0).toLocaleString() + " companies · "
+      + Number(snapshot.reviewedParaformIdCount || 0).toLocaleString() + " connected employers · as of " + day;
   }
   function describe(condition, rule) {
     const f = field(condition.field);
@@ -331,7 +331,9 @@
         (snapshots.length ? snapshots.map((item) => '<option value="' + enc(item.id) + '"' +
           (condition.value === item.id ? ' selected' : '') + '>' + enc(item.unavailable ? item.id + ' (unavailable)' : fundedSnapshotLabel(item.id)) + '</option>').join('')
           : '<option value="">No verified snapshot imported</option>') + '</select>' +
-        '<div class="hint">Private verified Crunchbase snapshot. Employer names are display-only; matches require reviewed Paraform company IDs.</div></div>';
+        '<details class="hint"><summary>About this list</summary><p>Private verified company research from ' +
+        enc((fundedSnapshot(condition.value) || {}).provider || 'verified sources') +
+        '. US, UK and Canada; at least $1m total funding; Seed through Series D round from Sep 5, 2011 through Sep 5, 2026. Only connected employers can match.</p></details></div>';
     }
     if (f.kind === "levels" || f.kind === "ranks" || f.kind === "tiers" || f.kind === "ids") {
       const chosen = Array.isArray(condition.value) ? condition.value : [];

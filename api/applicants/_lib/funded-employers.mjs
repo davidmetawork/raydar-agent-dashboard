@@ -1,6 +1,6 @@
 // Private immutable funded-employer membership snapshots.
 //
-// The licensed source rows stay in server-only KV. Rules store one snapshot
+// The source rows stay in server-only KV. Rules store one snapshot
 // id, and the browser receives metadata only. A profile employer matches only
 // through a reviewed Paraform company id. Company names, domains and LinkedIn
 // URLs are retained as provenance but are never candidate identity signals.
@@ -57,17 +57,102 @@ function qualifyingSearch(value) {
   return encoded.length <= 20_000 ? value : null;
 }
 
-function normalizedEntry(input, at) {
+const SOURCE_KINDS = new Set(["crunchbase_query_export", "public_primary_sources"]);
+
+function httpsUrl(value) {
+  const raw = text(value, 2_000);
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch { return null; }
+}
+
+function calendarDate(value) {
+  const raw = text(value, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw || "")) return null;
+  const parsed = new Date(`${raw}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === raw ? raw : null;
+}
+
+function normalizedSource(input) {
+  const id = text(input?.id, 120);
+  const kind = text(input?.kind, 80);
+  if (!id || !PROVIDER_ID_RE.test(id) || !SOURCE_KINDS.has(kind)) {
+    throw new Error("funded_employer_source_invalid");
+  }
+  if (kind === "crunchbase_query_export") {
+    const exportedAt = iso(input?.exportedAt);
+    const sourceFileSha256 = text(input?.sourceFileSha256, 64);
+    const query = qualifyingSearch(input?.qualifyingSearch);
+    const queryEvidenceSha256 = text(input?.queryEvidenceSha256, 64);
+    if (!exportedAt || !/^[a-f0-9]{64}$/i.test(sourceFileSha256 || "") || !query
+      || (queryEvidenceSha256 && !/^[a-f0-9]{64}$/i.test(queryEvidenceSha256))) {
+      throw new Error("funded_employer_crunchbase_source_invalid");
+    }
+    return {
+      id, kind, exportedAt,
+      sourceFileSha256: sourceFileSha256.toLowerCase(),
+      qualifyingSearch: query,
+      queryEvidenceSha256: queryEvidenceSha256?.toLowerCase() ?? null,
+    };
+  }
+  const observedAt = iso(input?.observedAt);
+  const ledgerSha256 = text(input?.ledgerSha256, 64);
+  if (!observedAt || (ledgerSha256 && !/^[a-f0-9]{64}$/i.test(ledgerSha256))) {
+    throw new Error("funded_employer_public_source_invalid");
+  }
+  return {
+    id, kind, observedAt,
+    ledgerSha256: ledgerSha256?.toLowerCase() ?? null,
+    label: text(input?.label, 240),
+  };
+}
+
+function normalizedEntry(input, at, sourcesById) {
   const orgId = text(input?.orgId, 120);
   const name = text(input?.name, 240);
   const countryCode = text(input?.countryCode, 2)?.toUpperCase() ?? null;
   const domain = normalizeDomain(input?.domain);
   const totalFundingUsd = Number(input?.fundingProof?.totalFundingUsd);
+  const sourceRef = text(input?.sourceRef, 120);
   if (!orgId || !PROVIDER_ID_RE.test(orgId) || !name) throw new Error("funded_employer_identity_invalid");
   if (!QUALIFYING_COUNTRIES.includes(countryCode)) throw new Error("funded_employer_country_invalid");
   if (!domain) throw new Error("funded_employer_domain_invalid");
   if (!Number.isFinite(totalFundingUsd) || totalFundingUsd < MINIMUM_TOTAL_FUNDING_USD) {
     throw new Error("funded_employer_total_funding_invalid");
+  }
+  const source = sourceRef ? sourcesById.get(sourceRef) : null;
+  if (!source) throw new Error("funded_employer_source_ref_invalid");
+  const qualification = input?.fundingProof?.qualification;
+  let normalizedQualification;
+  let totalFundingSourceUrl = null;
+  if (qualification?.kind === "query_cohort") {
+    if (source.kind !== "crunchbase_query_export" || qualification.sourceRef !== sourceRef) {
+      throw new Error("funded_employer_query_qualification_invalid");
+    }
+    normalizedQualification = { kind: "query_cohort", sourceRef };
+  } else if (qualification?.kind === "explicit_round") {
+    if (source.kind !== "public_primary_sources") {
+      throw new Error("funded_employer_round_source_invalid");
+    }
+    const stage = text(qualification.stage, 40)?.toLowerCase() ?? null;
+    const announcedDate = calendarDate(qualification.announcedDate);
+    const amountUsd = Number(qualification.amountUsd);
+    const primarySourceUrl = httpsUrl(qualification.primarySourceUrl);
+    totalFundingSourceUrl = httpsUrl(input?.fundingProof?.totalFundingSourceUrl);
+    if (!QUALIFYING_ROUND_TYPES.includes(stage)
+      || !announcedDate
+      || announcedDate < QUALIFYING_FROM || announcedDate > QUALIFYING_THROUGH
+      || !Number.isFinite(amountUsd) || amountUsd <= 0 || amountUsd > totalFundingUsd
+      || !primarySourceUrl || !totalFundingSourceUrl) {
+      throw new Error("funded_employer_explicit_round_invalid");
+    }
+    normalizedQualification = {
+      kind: "explicit_round", stage, announcedDate, amountUsd, primarySourceUrl,
+    };
+  } else {
+    throw new Error("funded_employer_qualification_invalid");
   }
   const rawParaformCompanyIds = (Array.isArray(input?.paraformCompanyIds)
     ? input.paraformCompanyIds : []).map((value) => text(value, 120));
@@ -85,15 +170,14 @@ function normalizedEntry(input, at) {
     countryCode,
     domain,
     linkedin: text(input?.linkedin, 500),
+    sourceRef,
     paraformCompanyIds,
     fundingProof: {
       totalFundingUsd,
-      // The Crunchbase company CSV proves the total; the snapshot's separately
-      // retained qualifying-search manifest proves stage/date membership when
-      // that export omits individual round UUIDs and announcement dates.
-      cohortQualifiedByQuery: true,
+      totalFundingSourceUrl,
       sourceRowId: text(input?.fundingProof?.sourceRowId, 160),
       observedAt: iso(input?.fundingProof?.observedAt) ?? at,
+      qualification: normalizedQualification,
     },
   };
 }
@@ -109,25 +193,25 @@ export function compileFundedEmployerSnapshot(manifest) {
   if (!entriesInput?.length || entriesInput.length > MAX_SNAPSHOT_ENTRIES) {
     throw new Error("funded_employer_entries_invalid");
   }
-  const provenance = manifest?.provenance;
-  const query = qualifyingSearch(provenance?.qualifyingSearch);
-  const queryEvidenceSha256 = text(provenance?.queryEvidenceSha256, 64);
-  if (!provenance || provenance.provider !== "crunchbase"
-    || !text(provenance.sourceFileSha256, 64)?.match(/^[a-f0-9]{64}$/i)
-    || !iso(provenance.exportedAt)
-    || !query
-    || (queryEvidenceSha256 && !/^[a-f0-9]{64}$/i.test(queryEvidenceSha256))) {
+  const sourceInputs = Array.isArray(manifest?.provenance?.sources) ? manifest.provenance.sources : null;
+  if (!sourceInputs?.length || sourceInputs.length > 100) {
     throw new Error("funded_employer_provenance_invalid");
   }
+  const sources = sourceInputs.map(normalizedSource);
+  const sourcesById = new Map();
+  for (const source of sources) {
+    if (sourcesById.has(source.id)) throw new Error("funded_employer_source_duplicate");
+    sourcesById.set(source.id, source);
+  }
 
-  const entries = entriesInput.map((entry) => normalizedEntry(entry, generatedAt));
+  const entries = entriesInput.map((entry) => normalizedEntry(entry, generatedAt, sourcesById));
   const orgIds = new Set();
-  const byParaformId = {};
+  const byParaformId = Object.create(null);
   for (const entry of entries) {
     if (orgIds.has(entry.orgId)) throw new Error("funded_employer_org_id_duplicate");
     orgIds.add(entry.orgId);
     for (const companyId of entry.paraformCompanyIds) {
-      if (byParaformId[companyId] && byParaformId[companyId].orgId !== entry.orgId) {
+      if (Object.hasOwn(byParaformId, companyId) && byParaformId[companyId].orgId !== entry.orgId) {
         throw new Error("funded_employer_paraform_id_ambiguous");
       }
       byParaformId[companyId] = { orgId: entry.orgId, name: entry.name };
@@ -144,13 +228,7 @@ export function compileFundedEmployerSnapshot(manifest) {
       qualifyingRoundAnnouncedOnOrAfter: QUALIFYING_FROM,
       qualifyingRoundAnnouncedOnOrBefore: QUALIFYING_THROUGH,
     },
-    provenance: {
-      provider: "crunchbase",
-      exportedAt: new Date(provenance.exportedAt).toISOString(),
-      sourceFileSha256: provenance.sourceFileSha256.toLowerCase(),
-      qualifyingSearch: query,
-      queryEvidenceSha256: queryEvidenceSha256?.toLowerCase() ?? null,
-    },
+    provenance: { sources },
     entries,
     byParaformId,
   };
@@ -163,7 +241,9 @@ export function compileFundedEmployerSnapshot(manifest) {
       companyCount: entries.length,
       reviewedParaformIdCount: Object.keys(byParaformId).length,
       digest,
-      provider: "Crunchbase",
+      provider: sources.every((source) => source.kind === "crunchbase_query_export")
+        ? "Crunchbase" : sources.every((source) => source.kind === "public_primary_sources")
+          ? "Public primary sources" : "Mixed verified sources",
       criteria: manifest.criteria,
     },
   };
@@ -205,7 +285,8 @@ export async function readFundedEmployerCatalog({ readJson = getJson } = {}) {
       reviewedParaformIdCount: Number.isInteger(item.reviewedParaformIdCount) && item.reviewedParaformIdCount >= 0
         ? item.reviewedParaformIdCount : 0,
       digest: String(item.digest).toLowerCase(),
-      provider: item.provider === "Crunchbase" ? "Crunchbase" : "Verified source",
+      provider: ["Crunchbase", "Public primary sources", "Mixed verified sources"].includes(item.provider)
+        ? item.provider : "Verified sources",
       criteria: validateFundedEmployerCriteria(item.criteria) === null ? {
         headquartersCountryCodes: [...QUALIFYING_COUNTRIES],
         minimumTotalFundingUsd: MINIMUM_TOTAL_FUNDING_USD,
@@ -230,7 +311,7 @@ export function fundedEmployerSnapshotIds(rules) {
 }
 
 export async function loadFundedEmployerSnapshots(rules, { readJson = getJson } = {}) {
-  const out = {};
+  const out = Object.create(null);
   await Promise.all(fundedEmployerSnapshotIds(rules).map(async (snapshotId) => {
     let snapshot;
     try { snapshot = await readJson(K.fundedEmployerSnapshot(snapshotId)); }
@@ -247,6 +328,8 @@ export async function loadFundedEmployerSnapshots(rules, { readJson = getJson } 
 
 export function matchFundedEmployer(company, snapshot) {
   const id = text(company?.id, 120);
-  const matched = id ? snapshot?.byParaformId?.[id] : null;
+  const index = snapshot?.byParaformId;
+  const matched = id && index && typeof index === "object" && Object.hasOwn(index, id)
+    ? index[id] : null;
   return matched ? { matched: true, companyName: company?.name || matched.name, orgId: matched.orgId } : null;
 }

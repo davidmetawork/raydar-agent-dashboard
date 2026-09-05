@@ -145,10 +145,12 @@ export const FIELDS = {
   // reviewed Paraform company id in the referenced immutable snapshot.
   "employment.fundedEmployerSnapshot": {
     group: "employment", ops: ["member_of"], kind: "snapshot",
-    label: "Worked at funded employer",
+    label: "Worked at a funded company",
     read: (_subject, row) => row?.id,
     match: (subject, row, snapshotId) => {
-      const snapshot = subject.fundedEmployerSnapshots?.[snapshotId];
+      const snapshots = subject.fundedEmployerSnapshots;
+      const snapshot = snapshots && typeof snapshots === "object" && Object.hasOwn(snapshots, snapshotId)
+        ? snapshots[snapshotId] : null;
       const found = matchFundedEmployer(row, snapshot);
       return found ? { matched: row?.name ?? found.companyName ?? row?.id, orgId: found.orgId } : null;
     },
@@ -376,8 +378,9 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       if (!facts.allCompanies.length) {
         return { matched: false, skipped: true, reason: "no_employment_history", evidence: [] };
       }
-      const unavailable = byGroup.get("employment").some((condition) =>
-        !subject.fundedEmployerSnapshots?.[condition.value]);
+      const snapshots = subject.fundedEmployerSnapshots;
+      const unavailable = !snapshots || typeof snapshots !== "object"
+        || byGroup.get("employment").some((condition) => !Object.hasOwn(snapshots, condition.value));
       if (unavailable) {
         return { matched: false, skipped: true, reason: "membership_snapshot_missing", evidence: [] };
       }
