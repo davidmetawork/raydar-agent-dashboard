@@ -8,9 +8,9 @@ import { sourceObservationIdFor } from "../api/applicants/_lib/profile-readiness
 import { sourceProfileDigest } from "../api/applicants/_lib/source-profile-digest.mjs";
 import {
   FACTS_CAS_LUA,
-  parseArgs,
   rebuildActiveFacts,
-} from "../scripts/rebuild-applicant-facts.mjs";
+} from "../api/applicants/_lib/facts-rebuild.mjs";
+import { parseArgs } from "../scripts/rebuild-applicant-facts.mjs";
 
 const PROFILE_KEY = "core:aaaaaaaaaa";
 const OBSERVATION_ID = "source-observation-1";
@@ -49,9 +49,9 @@ function harness({ mutateOnEval = null } = {}) {
   };
   const generation = buildGeneration({
     generationId: "facts-rebuild-fixture",
-    snapshot: { generatedAt: "2026-09-05T12:00:00.000Z", stream: [row], profilePreparing: 0 },
-    queue: [],
-    counts: { total: 1, stream: 1, queue: 0, profilePreparing: 0 },
+    snapshot: { generatedAt: "2026-09-05T12:00:00.000Z", stream: [], profilePreparing: 0 },
+    queue: [row],
+    counts: { total: 1, stream: 0, queue: 1, profilePreparing: 0 },
     sourceCutoff: "fixture-cutoff",
     sourceWatermark: "fixture-watermark",
     publishedAt: "2026-09-05T12:00:00.000Z",
@@ -128,6 +128,18 @@ test("dry-run stages only guarded active source profiles and performs no write c
   assert.equal(store.commands.some(([operation]) => operation === "EVAL" || operation === "HSET"), false);
   assert.match(report.targetSetDigest, /^[a-f0-9]{64}$/);
   assert.match(report.stagedFactsDigest, /^[a-f0-9]{64}$/);
+});
+
+test("an expected generation mismatch fails before source-profile reads", async () => {
+  const store = harness();
+  await assert.rejects(() => rebuildActiveFacts({
+    apply: false,
+    includeStream: false,
+    expectedGenerationId: "another-generation",
+    kvImpl: store.kvImpl,
+    ...dependencies,
+  }), /expected_generation_mismatch/);
+  assert.deepEqual(store.commands.map(([operation]) => operation), ["GET"]);
 });
 
 test("dry-run skips a source whose observation or stored payload digest is not exact", async (t) => {
