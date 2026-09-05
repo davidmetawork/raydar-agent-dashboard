@@ -6,7 +6,7 @@
 // exact source name whose Paraform CRM identity and official domain were
 // separately reviewed. Unreviewed names remain display-only.
 
-import { getJson, K, setJson, setJsonIfAbsent } from "./kv.mjs";
+import { getJson, K, kv, setJsonIfAbsent } from "./kv.mjs";
 import { stableDigest } from "./generation.mjs";
 
 export const SNAPSHOT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
@@ -20,6 +20,22 @@ export const QUALIFYING_THROUGH = "2026-09-05";
 export const MINIMUM_TOTAL_FUNDING_USD = 1_000_000;
 export const MAX_SNAPSHOT_ENTRIES = 50_000;
 export const MAX_REVIEWED_SOURCE_NAMES = 50_000;
+export const MAX_SNAPSHOT_BYTES = 8_000_000;
+export const MAX_ALIASES_PER_ENTRY = 32;
+export const MAX_PARAFORM_COMPANY_IDS_PER_ENTRY = 32;
+export const MAX_REVIEWED_SOURCE_NAMES_PER_ENTRY = 16;
+const CATALOG_UPDATE_ATTEMPTS = 8;
+
+// Compare the exact stored catalog payload. A generation-style identity CAS is
+// not appropriate here: every import changes the active snapshot and has no
+// stable generation id to compare.
+const CATALOG_CAS_LUA = `
+local current=redis.call('GET',KEYS[1])
+if ARGV[1]=='' then
+  if current then return 0 end
+elseif current~=ARGV[1] then return 0 end
+redis.call('SET',KEYS[1],ARGV[2])
+return 1`;
 
 const text = (value, max = 240) => {
   const out = typeof value === "string" ? value.trim() : "";
@@ -205,14 +221,19 @@ function normalizedEntry(input, at, sourcesById) {
   } else {
     throw new Error("funded_employer_qualification_invalid");
   }
-  const rawParaformCompanyIds = (Array.isArray(input?.paraformCompanyIds)
-    ? input.paraformCompanyIds : []).map((value) => text(value, 120));
+  const inputParaformCompanyIds = Array.isArray(input?.paraformCompanyIds)
+    ? input.paraformCompanyIds : [];
+  if (inputParaformCompanyIds.length > MAX_PARAFORM_COMPANY_IDS_PER_ENTRY) {
+    throw new Error("funded_employer_paraform_id_count_invalid");
+  }
+  const rawParaformCompanyIds = inputParaformCompanyIds.map((value) => text(value, 120));
   if (rawParaformCompanyIds.some((value) => !value || !PROVIDER_ID_RE.test(value))) {
     throw new Error("funded_employer_paraform_id_invalid");
   }
   const paraformCompanyIds = [...new Set(rawParaformCompanyIds)];
   const rawReviewedSourceNames = input?.reviewedSourceNames == null ? [] : input.reviewedSourceNames;
-  if (!Array.isArray(rawReviewedSourceNames)) {
+  if (!Array.isArray(rawReviewedSourceNames)
+    || rawReviewedSourceNames.length > MAX_REVIEWED_SOURCE_NAMES_PER_ENTRY) {
     throw new Error("funded_employer_reviewed_source_names_invalid");
   }
   const reviewedSourceNames = rawReviewedSourceNames.map((bridge) => {
@@ -242,7 +263,11 @@ function normalizedEntry(input, at, sourcesById) {
       reviewedBy: "codex",
     };
   });
-  const aliases = [...new Set((Array.isArray(input?.aliases) ? input.aliases : [])
+  const rawAliases = Array.isArray(input?.aliases) ? input.aliases : [];
+  if (rawAliases.length > MAX_ALIASES_PER_ENTRY) {
+    throw new Error("funded_employer_aliases_invalid");
+  }
+  const aliases = [...new Set(rawAliases
     .map((value) => text(value, 240)).filter(Boolean))];
   return {
     orgId,
@@ -345,8 +370,12 @@ export function compileFundedEmployerSnapshot(manifest) {
     byReviewedSourceName,
   };
   const digest = stableDigest(canonical);
+  const snapshot = { ...canonical, digest };
+  if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > MAX_SNAPSHOT_BYTES) {
+    throw new Error("funded_employer_snapshot_too_large");
+  }
   return {
-    snapshot: { ...canonical, digest },
+    snapshot,
     metadata: {
       id: snapshotId,
       generatedAt,
@@ -363,10 +392,61 @@ export function compileFundedEmployerSnapshot(manifest) {
   };
 }
 
+function parseCatalogRaw(raw) {
+  if (raw == null) return { activeSnapshotId: null, snapshots: [] };
+  if (typeof raw !== "string") throw new Error("funded_employer_catalog_invalid");
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || !Array.isArray(parsed.snapshots)
+      || (parsed.activeSnapshotId != null && !SNAPSHOT_ID_RE.test(String(parsed.activeSnapshotId)))) {
+      throw new Error("invalid");
+    }
+    return parsed;
+  } catch {
+    throw new Error("funded_employer_catalog_invalid");
+  }
+}
+
+function nextCatalog(catalog, metadata, now) {
+  const snapshots = catalog.snapshots;
+  return {
+    activeSnapshotId: metadata.id,
+    snapshots: [...snapshots.filter((item) => item?.id !== metadata.id), metadata]
+      .sort((a, b) => String(b.generatedAt).localeCompare(String(a.generatedAt)))
+      .slice(0, 24),
+    updatedAt: now(),
+  };
+}
+
+/**
+ * Preserve every independently imported immutable snapshot when two trusted
+ * publishers overlap. The snapshot is written first; this atomically advances
+ * only the compact mutable catalog and retries on a concurrent catalog update.
+ */
+export async function updateFundedEmployerCatalog(metadata, {
+  kvImpl = kv,
+  now = () => new Date().toISOString(),
+  attempts = CATALOG_UPDATE_ATTEMPTS,
+} = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const raw = await kvImpl(["GET", K.fundedEmployerCatalog]);
+    const catalog = parseCatalogRaw(raw);
+    const next = nextCatalog(catalog, metadata, now);
+    const result = Number(await kvImpl([
+      "EVAL", CATALOG_CAS_LUA, 1, K.fundedEmployerCatalog,
+      raw == null ? "" : raw,
+      JSON.stringify(next),
+    ]));
+    if (result === 1) return next;
+  }
+  throw new Error("funded_employer_catalog_conflict");
+}
+
 export async function importFundedEmployerSnapshot(manifest, {
   readJson = getJson,
-  writeJson = setJson,
   writeIfAbsent = setJsonIfAbsent,
+  updateCatalog = updateFundedEmployerCatalog,
 } = {}) {
   const compiled = compileFundedEmployerSnapshot(manifest);
   const key = K.fundedEmployerSnapshot(compiled.metadata.id);
@@ -375,17 +455,8 @@ export async function importFundedEmployerSnapshot(manifest, {
     const existing = await readJson(key);
     if (existing?.digest !== compiled.metadata.digest) throw new Error("funded_employer_snapshot_id_conflict");
   }
-  const catalog = await readJson(K.fundedEmployerCatalog);
-  const snapshots = Array.isArray(catalog?.snapshots) ? catalog.snapshots : [];
-  const next = {
-    activeSnapshotId: compiled.metadata.id,
-    snapshots: [...snapshots.filter((item) => item?.id !== compiled.metadata.id), compiled.metadata]
-      .sort((a, b) => String(b.generatedAt).localeCompare(String(a.generatedAt)))
-      .slice(0, 24),
-    updatedAt: new Date().toISOString(),
-  };
-  await writeJson(K.fundedEmployerCatalog, next);
-  return { created: Boolean(created), catalog: next, metadata: compiled.metadata };
+  const catalog = await updateCatalog(compiled.metadata);
+  return { created: Boolean(created), catalog, metadata: compiled.metadata };
 }
 
 export async function readFundedEmployerCatalog({ readJson = getJson } = {}) {

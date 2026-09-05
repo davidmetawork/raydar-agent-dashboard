@@ -3,6 +3,8 @@
 // snapshot metadata; licensed organization rows are never returned.
 
 import { timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 
 import { cors } from "./_lib/core.mjs";
 import {
@@ -14,13 +16,19 @@ import { factsFromProfile } from "./_lib/facts.mjs";
 import {
   importFundedEmployerSnapshot,
   readFundedEmployerCatalog,
+  updateFundedEmployerCatalog,
 } from "./_lib/funded-employers.mjs";
 import { readPublishedArtifacts, validPublication } from "./_lib/generation.mjs";
-import { getJson, K, kv, kvConfigured, setJson, setJsonIfAbsent } from "./_lib/kv.mjs";
+import { getJson, K, kv, kvConfigured, setJsonIfAbsent } from "./_lib/kv.mjs";
 import { sourceObservationIdFor } from "./_lib/profile-readiness.mjs";
 import { sourceProfileDigest } from "./_lib/source-profile-digest.mjs";
 
 export const config = { maxDuration: 60 };
+
+export const MAX_FUNDED_EMPLOYER_IMPORT_COMPRESSED_BYTES = 2_500_000;
+export const MAX_FUNDED_EMPLOYER_IMPORT_DECODED_BYTES = 8_000_000;
+const IMPORT_TRANSPORT_VERSION = "funded-employer-import-gzip-v1";
+const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
 function publisherAuthorized(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
@@ -54,14 +62,65 @@ function expectedGeneration(value) {
   return result && result.length <= 128 ? result : false;
 }
 
+function parseBody(value) {
+  if (typeof value !== "string") return { ok: true, body: value || {} };
+  if (Buffer.byteLength(value, "utf8") > MAX_FUNDED_EMPLOYER_IMPORT_DECODED_BYTES) {
+    return { ok: false, error: "funded_employer_import_too_large" };
+  }
+  try { return { ok: true, body: JSON.parse(value || "{}") }; }
+  catch { return { ok: false, error: "invalid_json" }; }
+}
+
+/** Decode the authenticated, bounded import envelope used above Vercel's JSON-body ceiling. */
+export function decodeFundedEmployerImport(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || JSON.stringify(Object.keys(input).sort()) !== JSON.stringify(["operation", "transport"])
+    || input.operation !== "import_snapshot") {
+    return { ok: false, error: "invalid_import_envelope" };
+  }
+  const transport = input.transport;
+  const keys = ["codec", "data", "decodedBytes", "decodedSha256", "version"];
+  if (!transport || typeof transport !== "object" || Array.isArray(transport)
+    || JSON.stringify(Object.keys(transport).sort()) !== JSON.stringify(keys)
+    || transport.version !== IMPORT_TRANSPORT_VERSION
+    || transport.codec !== "gzip-base64"
+    || !Number.isSafeInteger(transport.decodedBytes)
+    || transport.decodedBytes < 2 || transport.decodedBytes > MAX_FUNDED_EMPLOYER_IMPORT_DECODED_BYTES
+    || !/^[a-f0-9]{64}$/iu.test(String(transport.decodedSha256 || ""))
+    || typeof transport.data !== "string" || !transport.data.length
+    || transport.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(transport.data)
+    || transport.data.length > Math.ceil(MAX_FUNDED_EMPLOYER_IMPORT_COMPRESSED_BYTES / 3) * 4 + 4) {
+    return { ok: false, error: "invalid_import_envelope" };
+  }
+  try {
+    const compressed = Buffer.from(transport.data, "base64");
+    if (compressed.length > MAX_FUNDED_EMPLOYER_IMPORT_COMPRESSED_BYTES
+      || compressed.toString("base64") !== transport.data) {
+      return { ok: false, error: "invalid_import_envelope" };
+    }
+    const decoded = gunzipSync(compressed, { maxOutputLength: MAX_FUNDED_EMPLOYER_IMPORT_DECODED_BYTES + 1 });
+    if (decoded.length !== transport.decodedBytes || decoded.length > MAX_FUNDED_EMPLOYER_IMPORT_DECODED_BYTES
+      || createHash("sha256").update(decoded).digest("hex") !== transport.decodedSha256) {
+      return { ok: false, error: "invalid_import_payload" };
+    }
+    const body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decoded));
+    if (!body || typeof body !== "object" || Array.isArray(body) || own(body, "transport") || own(body, "operation")) {
+      return { ok: false, error: "invalid_import_payload" };
+    }
+    return { ok: true, body };
+  } catch {
+    return { ok: false, error: "invalid_import_payload" };
+  }
+}
+
 export function createFundedEmployersHandler({
   corsHandler = cors,
   authHandler = publisherAuthorized,
   kvReady = kvConfigured,
   readJson = getJson,
-  writeJson = setJson,
   writeIfAbsent = setJsonIfAbsent,
   command = kv,
+  updateCatalog = updateFundedEmployerCatalog,
   loadSourceFactPage = loadActiveSourceFactPage,
   rebuildFacts = rebuildActiveFacts,
 } = {}) {
@@ -101,9 +160,10 @@ export function createFundedEmployersHandler({
         }
         return res.status(200).json({ ok: true, ...(await readFundedEmployerCatalog({ readJson })) });
       }
-      let body;
-      try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
-      catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
+      const parsed = parseBody(req.body);
+      if (!parsed.ok) return res.status(parsed.error === "funded_employer_import_too_large" ? 413 : 400)
+        .json({ ok: false, error: parsed.error });
+      let body = parsed.body;
       if (body?.operation === "rebuild_facts") {
         operationalRequest = true;
         const page = pageOptions(body);
@@ -121,7 +181,16 @@ export function createFundedEmployersHandler({
         });
         return res.status(200).json({ ok: true, dryRun, ...report });
       }
-      const result = await importFundedEmployerSnapshot(body, { readJson, writeJson, writeIfAbsent });
+      if (body?.operation === "import_snapshot") {
+        const decoded = decodeFundedEmployerImport(body);
+        if (!decoded.ok) return res.status(400).json({ ok: false, error: decoded.error });
+        body = decoded.body;
+      }
+      const result = await importFundedEmployerSnapshot(body, {
+        readJson,
+        writeIfAbsent,
+        updateCatalog: (metadata) => updateCatalog(metadata, { kvImpl: command }),
+      });
       return res.status(result.created ? 201 : 200).json({
         ok: true,
         created: result.created,
@@ -142,10 +211,12 @@ export function createFundedEmployersHandler({
       if (operationalRequest) {
         return res.status(502).json({ ok: false, error: "funded_employer_operation_unavailable" });
       }
-      const conflict = detail === "funded_employer_snapshot_id_conflict";
-      return res.status(conflict ? 409 : 400).json({
+      const conflict = detail === "funded_employer_snapshot_id_conflict"
+        || detail === "funded_employer_catalog_conflict";
+      const tooLarge = detail === "funded_employer_snapshot_too_large";
+      return res.status(conflict ? 409 : tooLarge ? 413 : 400).json({
         ok: false,
-        error: conflict ? detail : "funded_employer_snapshot_invalid",
+        error: conflict || tooLarge ? detail : "funded_employer_snapshot_invalid",
         detail,
       });
     }
