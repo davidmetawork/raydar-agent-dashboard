@@ -11,6 +11,12 @@ const REVIEW_REASONS = new Set([
   "candidate_question", "role_unclear", "role_unavailable",
   "candidate_original_resume_missing", "classification_failed", "resume_preparation_failed",
 ]);
+const HUMAN_REVIEW_DECISION_REASONS = new Set([
+  "reply_unclear_or_conditional", "candidate_question",
+]);
+const SIGNAL_DISMISSAL_REASONS = new Set([
+  "not_candidate_response", "irrelevant_notification", "already_handled",
+]);
 
 const clean = (value, limit = 500) => String(value ?? "").trim().slice(0, limit);
 const digest = (value) => createHash("sha256").update(String(value ?? "")).digest("hex");
@@ -442,6 +448,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               p.original_signal_at as signal_at, p.workflow_state,
               coalesce(rv.reasons, '[]'::jsonb) as review_reasons,
               '[]'::jsonb as resume_cautions, g.status as generation_status,
+              g.stage as generation_stage, g.safe_error_code as preparation_error_code,
+              g.safe_error_detail as preparation_error_detail,
+              g.updated_at as generation_updated_at, g.deadline_at as generation_deadline_at,
               p.submission_status, null::text as negative_reason, null::text as corrected_destination,
               r.last_confirmed_at as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
               p.original_signal_at as sort_at, p.id as sort_id
@@ -457,19 +466,26 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               select coalesce(active.id, latest.id) as id,
                      case when active.status is not null then active.status
                           when pending_job.id is not null then 'queued'
-                          else latest.status end as status
+                          else latest.status end as status,
+                     case when active.status is not null then active.stage
+                          when pending_job.id is not null then case when pending_job.state='running' then 'starting' else 'queued' end
+                          else latest.stage end as stage,
+                     case when active.status is not null or pending_job.id is not null then null else latest.safe_failure_code end as safe_error_code,
+                     case when active.status is not null or pending_job.id is not null then null else latest.safe_failure_detail end as safe_error_detail,
+                     coalesce(active.updated_at, pending_job.updated_at, latest.updated_at) as updated_at,
+                     active.deadline_at as deadline_at
                 from (select 1) seed
                 left join lateral (
-                  select id, status from submissions_v2.resume_generations
+                  select id, status, stage, safe_failure_code, safe_failure_detail, updated_at from submissions_v2.resume_generations
                    where pair_id=p.id order by generation_version desc limit 1
                 ) latest on true
                 left join lateral (
-                  select id, status from submissions_v2.resume_generations
+                  select id, status, stage, updated_at, deadline_at from submissions_v2.resume_generations
                    where pair_id=p.id and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
                    order by generation_version desc limit 1
                 ) active on true
                 left join lateral (
-                  select id from submissions_v2.jobs
+                  select id, state, updated_at from submissions_v2.jobs
                    where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
                      and state in ('queued','running')
                    order by created_at desc limit 1
@@ -478,7 +494,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             left join lateral (
               select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled
             ) sh on true
-            where p.workflow_state='needs_review' and p.case_hidden_at is null
+            where p.workflow_state='needs_review' and p.submission_status<>'proven' and p.case_hidden_at is null
               and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
             union all
             select
@@ -492,6 +508,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               se.envelope->>'decisive_status' as decisive_status,
               se.received_at as signal_at, 'needs_review'::text as workflow_state,
               rv.reasons as review_reasons, '[]'::jsonb as resume_cautions, null::text as generation_status,
+              null::text as generation_stage, null::text as preparation_error_code, null::text as preparation_error_detail,
+              null::timestamptz as generation_updated_at, null::timestamptz as generation_deadline_at,
               'none'::text as submission_status, null::text as negative_reason, null::text as corrected_destination,
               null::timestamptz as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
               se.received_at as sort_at, se.id as sort_id
@@ -521,7 +539,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             left join lateral (
               select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled
             ) sh on true
-            where (${needle}='' or lower(coalesce(se.sender_display_name,'')) like ${pattern} escape '\\'
+            where se.processing_state not in ('resolved','ignored_later','ignored_machine')
+              and (${needle}='' or lower(coalesce(se.sender_display_name,'')) like ${pattern} escape '\\'
               or coalesce(matched.search_key,'') like ${pattern} escape '\\')
           ), paged as (
             select *, count(*) over()::bigint as total_count from review_rows
@@ -570,6 +589,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             coalesce(caution.cautions, '[]'::jsonb) as resume_cautions, g.status as generation_status,
             g.stage as generation_stage, g.safe_error_code as preparation_error_code,
             g.safe_error_detail as preparation_error_detail,
+            g.updated_at as generation_updated_at, g.deadline_at as generation_deadline_at,
             p.submission_status, current_artifact.id as current_artifact_id, current_artifact.artifact_version,
             (current_artifact.id is not null) as artifact_ready, r.active as role_active,
             null::text as negative_reason, null::text as corrected_destination,
@@ -598,26 +618,28 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                    case when active.status is not null or pending_job.id is not null then null
                         when latest.status in ('failed','held','cancelled') then latest.safe_failure_detail
                         when latest_job.state in ('failed','held','cancelled') then latest_job.safe_error_detail
-                        else null end as safe_error_detail
+                        else null end as safe_error_detail,
+                   coalesce(active.updated_at, pending_job.updated_at, latest.updated_at, latest_job.updated_at) as updated_at,
+                   active.deadline_at as deadline_at
               from (select 1) seed
               left join lateral (
-                select id, status, stage, safe_failure_code, safe_failure_detail
+                select id, status, stage, safe_failure_code, safe_failure_detail, updated_at
                   from submissions_v2.resume_generations
                  where pair_id=p.id order by generation_version desc limit 1
               ) latest on true
               left join lateral (
-                select id, status, stage from submissions_v2.resume_generations
+                select id, status, stage, updated_at, deadline_at from submissions_v2.resume_generations
                  where pair_id=p.id and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
                  order by generation_version desc limit 1
               ) active on true
               left join lateral (
-                select id, state from submissions_v2.jobs
+                select id, state, updated_at from submissions_v2.jobs
                  where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
                    and state in ('queued','running')
                  order by created_at desc limit 1
               ) pending_job on true
               left join lateral (
-                select state, safe_error_code, safe_error_detail, hold_reason
+                select state, safe_error_code, safe_error_detail, hold_reason, updated_at
                   from submissions_v2.jobs
                  where kind='prepare_resume' and subject_type='pair' and subject_id=p.id::text
                  order by created_at desc limit 1
@@ -633,7 +655,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               from submissions_v2.resume_sources where generation_id=g.id and status <> 'present'
           ) caution on true
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
-          where p.workflow_state in ('preparing_resume','interested') and p.case_hidden_at is null
+          where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
             and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
             and (${after?.at || null}::timestamptz is null or (p.original_signal_at, p.id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
           order by p.original_signal_at desc, p.id desc limit ${take + 1}
@@ -651,13 +673,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     async counts() {
       const rows = await sql`
         select
-          (select count(*) from submissions_v2.candidate_role_pairs where workflow_state in ('preparing_resume','interested') and case_hidden_at is null)::bigint as interested,
-          ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and case_hidden_at is null)
-           + (select count(distinct unresolved_signal_id) from submissions_v2.review_items where unresolved_signal_id is not null and action_state='open'))::bigint as needs_review,
+          (select count(*) from submissions_v2.candidate_role_pairs where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and case_hidden_at is null)::bigint as interested,
+          ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and submission_status<>'proven' and case_hidden_at is null)
+           + (select count(distinct unresolved_signal_id) from submissions_v2.review_items review join submissions_v2.source_events source on source.id=review.unresolved_signal_id where review.action_state='open' and source.processing_state not in ('resolved','ignored_later','ignored_machine')))::bigint as needs_review,
           (select count(*) from submissions_v2.not_interested_entries ni join submissions_v2.candidate_role_pairs p on p.id=ni.pair_id where p.case_hidden_at is null)::bigint as not_interested,
           ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state in ('preparing_resume','interested') and submission_status <> 'proven' and case_hidden_at is null)
-           + (select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and case_hidden_at is null)
-           + (select count(distinct unresolved_signal_id) from submissions_v2.review_items where unresolved_signal_id is not null and action_state='open'))::bigint as actionable
+           + (select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and submission_status<>'proven' and case_hidden_at is null)
+           + (select count(distinct unresolved_signal_id) from submissions_v2.review_items review join submissions_v2.source_events source on source.id=review.unresolved_signal_id where review.action_state='open' and source.processing_state not in ('resolved','ignored_later','ignored_machine')))::bigint as actionable
       `;
       return rows[0] || { interested: 0, needs_review: 0, not_interested: 0, actionable: 0 };
     },
@@ -757,8 +779,17 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     async sourceForReview({ caseId = null, signalId = null }) {
       const rows = await sql`
         select se.id, se.event_id, se.source_family, se.received_at,
-               se.envelope, se.encrypted_body_object_key
+               se.envelope, se.encrypted_body_object_key,
+               coalesce(offered.roles, '[]'::jsonb) as offered_roles
           from submissions_v2.source_events se
+          left join lateral (
+            select jsonb_agg(jsonb_build_object(
+              'role_id', role_id, 'company', company_snapshot,
+              'title', role_label_snapshot
+            ) order by offered_order, role_id) as roles
+              from submissions_v2.source_offered_roles
+             where signal_id=se.id
+          ) offered on true
          where (
            ${caseId}::uuid is not null and exists (
              select 1 from submissions_v2.candidate_role_pairs p
@@ -1487,6 +1518,24 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
         if (current.submission_status === "proven") throw problem("proven_pair_immutable", "A proven submission cannot be reclassified.", 409, pairCurrent(current));
+        if (action === "resolve_review") {
+          if (current.workflow_state !== "needs_review") {
+            throw problem("pair_not_in_review", "The item is no longer in Needs Review.", 409, pairCurrent(current));
+          }
+          const openReviews = await tx`
+            select reason_code from submissions_v2.review_items
+             where pair_id=${pairId} and action_state='open'
+             for update
+          `;
+          if (!openReviews.length || openReviews.some((row) => !HUMAN_REVIEW_DECISION_REASONS.has(row.reason_code))) {
+            throw problem(
+              "review_resolution_not_eligible",
+              "Resolve the candidate, role, classifier, or resume blocker with its specific Review action.",
+              409,
+              pairCurrent(current),
+            );
+          }
+        }
         if (destination === "needs_review") {
           const updated = (await tx`
             update submissions_v2.candidate_role_pairs
@@ -1589,17 +1638,28 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         input: { pairId, expectedVersion, checkpoint },
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
-        if (action === "retry_preparation" || action === "recheck") {
-          const allowedReasons = action === "recheck"
-            ? ["candidate_original_resume_missing"]
-            : ["candidate_original_resume_missing", "resume_preparation_failed"];
+        if (action === "retry_preparation" || action === "recheck" || action === "recheck_role") {
           const openReviews = await tx`
             select reason_code from submissions_v2.review_items
              where pair_id=${pairId} and action_state='open'
              for update
           `;
-          if (current.intent_state !== "interested" || current.workflow_state !== "needs_review"
-            || openReviews.length < 1 || openReviews.some((row) => !allowedReasons.includes(row.reason_code))) {
+          const roleEligible = action === "recheck_role"
+            && current.workflow_state === "needs_review"
+            && current.intent_state !== "not_interested"
+            && openReviews.some((row) => row.reason_code === "role_unavailable");
+          const allowedReasons = action === "recheck"
+            ? ["candidate_original_resume_missing"]
+            : ["candidate_original_resume_missing", "resume_preparation_failed"];
+          const resumeEligible = action !== "recheck_role"
+            && current.intent_state === "interested"
+            && current.workflow_state === "needs_review"
+            && openReviews.length > 0
+            && openReviews.every((row) => allowedReasons.includes(row.reason_code));
+          if (!roleEligible && !resumeEligible) {
+            if (action === "recheck_role") {
+              throw problem("role_recheck_not_eligible", "The role can be rechecked only while this item has an open role-unavailable blocker.", 409, pairCurrent(current));
+            }
             throw problem("resume_retry_not_eligible", "Resume preparation can be retried only for an Interested item blocked by a resume issue.", 409, pairCurrent(current));
           }
         }
@@ -1611,6 +1671,122 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         await pairEvent(tx, current, { actorId: actorEmail, source: action, eventType: `${action}_requested`, idempotencyKey: `pair:${commandRow.id}`, metadata: { job_id: job?.id || null } });
         return { case_id: pairId, state: current.workflow_state, state_version: Number(current.state_version), job_id: job?.id || null };
       }));
+    },
+
+    async applyRoleRecheck({ pairId, expectedPairVersion, role = null, confirmedAt, executionFence }) {
+      return sql.begin(async (tx) => {
+        await assertWorkerFence(tx, executionFence, "ingestion");
+        const eventKey = `pair:role-recheck:${clean(executionFence?.jobId, 100)}`;
+        const replay = (await tx`select pair_id, metadata from submissions_v2.pair_events where idempotency_key=${eventKey}`)[0];
+        if (replay) {
+          const current = (await tx`select * from submissions_v2.candidate_role_pairs where id=${replay.pair_id}`)[0];
+          return {
+            case_id: current.id, state: current.workflow_state, state_version: Number(current.state_version),
+            role_active: current.role_state === "active",
+            ...(replay.metadata?.resumed_job_id ? { prepare_job_id: replay.metadata.resumed_job_id } : {}),
+            replay: true,
+          };
+        }
+        const current = await lockPair(tx, pairId, expectedPairVersion);
+        const openRole = (await tx`
+          select id from submissions_v2.review_items
+           where pair_id=${pairId} and reason_code='role_unavailable' and action_state='open'
+           for update
+        `)[0];
+        if (current.workflow_state !== "needs_review" || !openRole) {
+          throw problem("role_recheck_not_eligible", "The item no longer has an open role-unavailable blocker.", 409, pairCurrent(current));
+        }
+        const checkedAt = new Date(confirmedAt || Date.now()).toISOString();
+        if (role && clean(role.role_id, 200) !== current.role_id) {
+          throw problem("role_recheck_identity_conflict", "The live role read did not match the exact candidate-role item.", 409, pairCurrent(current));
+        }
+        if (role) {
+          await tx`
+            insert into submissions_v2.role_index(
+              role_id, company_name, role_title, search_key, active, destination_url,
+              owner_email, provider_updated_at, last_confirmed_at, source_digest, indexed_at
+            ) values (
+              ${role.role_id}, ${role.company_name}, ${role.role_title}, ${role.search_key}, true,
+              ${role.paraform_url}, ${role.owner_email || null}, ${role.provider_updated_at || null},
+              ${checkedAt}, ${role.source_digest}, clock_timestamp()
+            ) on conflict (role_id) do update set
+              company_name=excluded.company_name, role_title=excluded.role_title,
+              search_key=excluded.search_key, active=true, destination_url=excluded.destination_url,
+              owner_email=excluded.owner_email, provider_updated_at=excluded.provider_updated_at,
+              last_confirmed_at=excluded.last_confirmed_at, source_digest=excluded.source_digest,
+              indexed_at=clock_timestamp()
+          `;
+          await tx`
+            update submissions_v2.review_items
+               set action_state='resolved', resolved_at=clock_timestamp(), resolved_by='submissions-v2-role-rechecker',
+                   resolution_note='A fresh Paraform read confirmed that the exact role is active.'
+             where id=${openRole.id}
+          `;
+          let remaining = Number((await tx`
+            select count(*)::integer as count from submissions_v2.review_items
+             where pair_id=${pairId} and action_state='open'
+          `)[0]?.count || 0);
+          if (current.intent_state !== "interested" && remaining === 0) {
+            await tx`
+              insert into submissions_v2.review_items(pair_id, reason_code, owner_email, safe_detail, evidence)
+              values (
+                ${pairId}, 'reply_unclear_or_conditional', ${current.owner_email},
+                'The exact role is active, but the candidate intent still requires review.',
+                ${tx.json({ role_id: current.role_id, checked_at: checkedAt, source: "role_recheck" })}
+              )
+            `;
+            remaining = 1;
+          }
+          const validArtifact = current.current_artifact_id ? (await tx`
+            select id from submissions_v2.resume_artifacts
+             where id=${current.current_artifact_id} and pair_id=${pairId} and kind='pdf'
+               and validation_status='passed' and archive_readback_at is not null and archived_at is not null
+               and deleted_at is null and current_state='current'
+          `)[0] : null;
+          const nextWorkflow = current.intent_state !== "interested" || remaining > 0
+            ? "needs_review"
+            : validArtifact ? "interested" : "preparing_resume";
+          const updated = (await tx`
+            update submissions_v2.candidate_role_pairs
+               set workflow_state=${nextWorkflow}, role_state='active', role_checked_at=${checkedAt},
+                   state_version=state_version+1
+             where id=${pairId} and state_version=${expectedPairVersion} returning *
+          `)[0];
+          let resumedJob = null;
+          if (nextWorkflow === "preparing_resume") {
+            resumedJob = await enqueue(tx, {
+              kind: "prepare_resume", subjectType: "pair", subjectId: pairId,
+              idempotencyKey: `resume:role-recheck:${executionFence.jobId}`,
+              requiredControl: "generation", priority: 50,
+              checkpoint: { trigger_kind: "retry", expected_pair_version: Number(updated.state_version), role_rechecked: true },
+            });
+          }
+          await pairEvent(tx, updated, {
+            actorType: "worker", actorId: "submissions-v2-role-rechecker", source: "role_recheck",
+            eventType: "role_returned", expectedVersion: Number(expectedPairVersion), previous: current,
+            idempotencyKey: eventKey,
+            metadata: { role_id: current.role_id, active: true, destination: nextWorkflow, resumed_job_id: resumedJob?.id || null },
+          });
+          return { case_id: pairId, state: nextWorkflow, state_version: Number(updated.state_version), role_active: true, prepare_job_id: resumedJob?.id || null };
+        }
+        await tx`
+          update submissions_v2.role_index
+             set active=false, last_confirmed_at=${checkedAt}, indexed_at=clock_timestamp()
+           where role_id=${current.role_id}
+        `;
+        const updated = (await tx`
+          update submissions_v2.candidate_role_pairs
+             set role_state='unavailable', role_checked_at=${checkedAt}, state_version=state_version+1
+           where id=${pairId} and state_version=${expectedPairVersion} returning *
+        `)[0];
+        await pairEvent(tx, updated, {
+          actorType: "worker", actorId: "submissions-v2-role-rechecker", source: "role_recheck",
+          eventType: "role_still_unavailable", expectedVersion: Number(expectedPairVersion), previous: current,
+          reasonCode: "role_unavailable", idempotencyKey: eventKey,
+          metadata: { role_id: current.role_id, active: false },
+        });
+        return { case_id: pairId, state: updated.workflow_state, state_version: Number(updated.state_version), role_active: false };
+      });
     },
 
     async enqueueSignalAction({ actorEmail, idempotencyKey, signalId, action, kind = "classify_email_reply" }) {
@@ -1707,7 +1883,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         input: { pairId, expectedVersion, evidenceDigest, evidenceBasis, sourceNote, uploads, instructionDigest: instructionsEncrypted ? digest(instructionsEncrypted) : null },
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
-        if (current.workflow_state !== "interested" || !current.current_artifact_id) throw problem("pair_not_resume_ready", "Only an Interested candidate with a ready resume can be regenerated.", 409, pairCurrent(current));
+        const regeneratableWorkflow = current.workflow_state === "interested"
+          || (current.workflow_state === "needs_review" && current.submission_status === "proven");
+        if (current.intent_state !== "interested" || !regeneratableWorkflow || !current.current_artifact_id) {
+          throw problem("pair_not_resume_ready", "Only an Interested candidate with a ready resume can be regenerated.", 409, pairCurrent(current));
+        }
         const activeRegeneration = await tx`
           select id::text from submissions_v2.resume_generations
            where pair_id=${pairId} and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
@@ -1767,7 +1947,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         input: { pairId, expectedVersion },
       }, async () => {
         const pair = await lockPair(tx, pairId, expectedVersion);
-        if (pair.workflow_state !== "interested" || !pair.current_artifact_id) throw problem("resume_not_ready", "The current resume is not ready for download.", 409, pairCurrent(pair));
+        const downloadableWorkflow = pair.workflow_state === "interested"
+          || (pair.workflow_state === "needs_review" && pair.submission_status === "proven");
+        if (!downloadableWorkflow || !pair.current_artifact_id) throw problem("resume_not_ready", "The current resume is not ready for download.", 409, pairCurrent(pair));
         const artifacts = await tx`
           select * from submissions_v2.resume_artifacts
            where id=${pair.current_artifact_id} and pair_id=${pairId} and kind='pdf'
@@ -2391,6 +2573,81 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       }));
     },
 
+    async dismissUnresolvedSignal({ actorEmail, idempotencyKey, signalId, dismissalReason, note }) {
+      if (!SIGNAL_DISMISSAL_REASONS.has(dismissalReason)) {
+        throw problem("dismissal_reason_invalid", "Choose a supported Review dismissal reason.", 400);
+      }
+      return sql.begin(async (tx) => command(tx, {
+        actorEmail, action: "dismiss_review", idempotencyKey,
+        input: { signalId, dismissalReason, note },
+      }, async () => {
+        const source = (await tx`
+          select * from submissions_v2.source_events where id=${signalId} for update
+        `)[0];
+        if (!source) throw problem("source_not_found", "The source event was not found.", 404);
+        if (!new Set(["needs_candidate", "needs_role", "quarantined"]).has(source.processing_state)) {
+          throw problem("review_dismiss_not_eligible", "This source is no longer an unresolved Review item.", 409);
+        }
+        const openReviews = await tx`
+          select id from submissions_v2.review_items
+           where unresolved_signal_id=${signalId} and action_state='open'
+           for update
+        `;
+        if (!openReviews.length) {
+          throw problem("review_dismiss_not_eligible", "This source is no longer an unresolved Review item.", 409);
+        }
+        const activeWork = await tx`
+          select id from submissions_v2.jobs
+           where subject_type='signal' and subject_id=${signalId}::text
+             and kind='classify_email_reply' and state in ('queued','running')
+        `;
+        const activeClaims = await tx`
+          select candidate_user_id, role_id from submissions_v2.first_response_claims
+           where released_at is null and (
+             signal_id=${signalId}
+             or (signal_id is null and event_id=${source.event_id})
+           )
+           for update
+        `;
+        const bindings = await tx`
+          select 1 from submissions_v2.signal_role_decisions where signal_id=${signalId}
+          union all
+          select 1 from submissions_v2.pair_signal_links where signal_id=${signalId}
+          union all
+          select 1 from submissions_v2.candidate_role_pairs where first_signal_id=${signalId}
+          limit 1
+        `;
+        if (activeWork.length || activeClaims.length || bindings.length) {
+          throw problem("review_dismiss_not_eligible", "This source has active or committed candidate-role work and cannot be dismissed.", 409);
+        }
+        const dismissed = await tx`
+          update submissions_v2.review_items
+             set action_state='dismissed', resolved_at=clock_timestamp(),
+                 resolved_by=${actorEmail}, resolution_note=${clean(note, 500)}
+           where unresolved_signal_id=${signalId} and action_state='open'
+           returning id
+        `;
+        if (dismissed.length !== openReviews.length) {
+          throw problem("review_dismiss_not_eligible", "The Review item changed before dismissal was saved.", 409);
+        }
+        const updated = await tx`
+          update submissions_v2.source_events
+             set processing_state='ignored_later', processed_at=clock_timestamp(),
+                 safe_error_code='review_dismissed',
+                 safe_error_detail=${`A recruiter dismissed this source as ${dismissalReason.replaceAll("_", " ")}.`}
+           where id=${signalId} and processing_state=${source.processing_state}
+           returning id
+        `;
+        if (updated.length !== 1) {
+          throw problem("review_dismiss_not_eligible", "The source changed before dismissal was saved.", 409);
+        }
+        return {
+          outcome: "dismissed", destination: "removed_from_review",
+          signal_id: signalId, affected_count: dismissed.length,
+        };
+      }));
+    },
+
     async scheduleTick({
       minuteKey,
       fiveMinuteKey = minuteKey,
@@ -2432,6 +2689,97 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         }
         if (purgeDue) jobs.push(await enqueue(tx, { kind: "purge", subjectType: "retention", subjectId: pacificDayKey, idempotencyKey: `tick:purge:${pacificDayKey}`, requiredControl: "always", priority: 90 }));
         return { control_epoch: Number(active.control_epoch), jobs: jobs.filter(Boolean).map((job) => ({ id: job.id, kind: job.kind, state: job.state })) };
+      });
+    },
+
+    async recoverExpiredResumeGenerations({ limit = 20, actorId = "submissions-v2-worker" } = {}) {
+      const take = boundedLimit(limit, 20, 50);
+      return sql.begin(async (tx) => {
+        const controls = await tx`select * from submissions_v2.lock_runtime_controls()`;
+        if (!controls[0]) throw problem("submissions_v2_controls_unavailable", "Submissions V2 controls are unavailable.", 503);
+        if (!controls[0].ui_enabled || !controls[0].generation_enabled) return { recovered: [] };
+        const expired = await tx`
+          select generation.*
+            from submissions_v2.resume_generations generation
+           where generation.status = any(${tx.array(ACTIVE_GENERATION_STATES, 25)})
+             and generation.deadline_at < clock_timestamp()
+             and not exists (
+               select 1 from submissions_v2.jobs job
+                where job.kind='prepare_resume'
+                  and job.subject_type='pair'
+                  and job.subject_id=generation.pair_id::text
+                  and job.state='running'
+                  and job.lease_expires_at >= clock_timestamp()
+             )
+           order by generation.deadline_at, generation.id
+           for update skip locked
+           limit ${take}
+        `;
+        const recovered = [];
+        for (const generation of expired) {
+          const pair = (await tx`
+            select * from submissions_v2.candidate_role_pairs
+             where id=${generation.pair_id} and case_hidden_at is null
+             for update
+          `)[0];
+          await tx`
+            update submissions_v2.resume_stage_runs
+               set status='held', completed_at=clock_timestamp(),
+                   safe_error_code='generation_deadline_exhausted',
+                   safe_error_detail='Resume preparation exceeded its bounded recovery deadline.'
+             where generation_id=${generation.id} and status='running'
+          `;
+          await tx`
+            update submissions_v2.resume_generations
+               set status='failed', stage='recovery_failed',
+                   safe_failure_code='generation_deadline_exhausted',
+                   safe_failure_detail='Resume preparation exceeded its bounded recovery deadline.',
+                   completed_at=clock_timestamp()
+             where id=${generation.id}
+          `;
+          if (!pair || generation.prior_artifact_id || pair.intent_state !== 'interested'
+            || pair.workflow_state !== 'preparing_resume'
+            || Number(pair.state_version) !== Number(generation.expected_pair_version)) {
+            recovered.push({ generation_id: generation.id, pair_id: generation.pair_id, routed_to_review: false });
+            continue;
+          }
+          const updated = (await tx`
+            update submissions_v2.candidate_role_pairs
+               set workflow_state='needs_review', state_version=state_version+1
+             where id=${pair.id} and state_version=${pair.state_version}
+             returning *
+          `)[0];
+          if (!updated) throw problem("stale_pair_version", "The candidate-role item changed before resume recovery.", 409, pairCurrent(pair));
+          const submittedHistory = pair.submission_status === 'proven';
+          if (!submittedHistory) {
+            await tx`
+              insert into submissions_v2.review_items(pair_id, reason_code, safe_detail, evidence)
+              values (
+                ${pair.id}, 'resume_preparation_failed',
+                'Resume preparation exceeded its recovery deadline. Retry preparation starts a new bounded job.',
+                ${tx.json({ generation_id: generation.id, recovery: 'deadline_expired' })}
+              ) on conflict do nothing
+            `;
+            await tx`
+              insert into submissions_v2.notification_outbox(kind, destination_id, safe_payload, dedupe_key, pair_id)
+              values (
+                'resume_preparation_failed', ${notificationDestination()},
+                ${tx.json({ monitor_url: 'https://monitor.raydar.xyz/#submissions-v2' })},
+                ${`resume-orphaned:${generation.id}`}, ${pair.id}
+              ) on conflict do nothing
+            `;
+          }
+          await pairEvent(tx, updated, {
+            actorType: 'worker', actorId, source: 'resume_generation',
+            eventType: submittedHistory ? 'submitted_resume_recovered' : 'resume_recovered',
+            expectedVersion: Number(pair.state_version), previous: pair,
+            reasonCode: submittedHistory ? null : 'resume_preparation_failed',
+            idempotencyKey: `pair:resume-recovered:${generation.id}`,
+            metadata: { generation_id: generation.id, recovery: 'deadline_expired', submitted_history: submittedHistory },
+          });
+          recovered.push({ generation_id: generation.id, pair_id: pair.id, routed_to_review: !submittedHistory });
+        }
+        return { recovered };
       });
     },
 
@@ -2928,7 +3276,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (triggerKind === "initial" && (pair.intent_state !== "interested" || pair.workflow_state !== "preparing_resume")) {
           throw problem("generation_pair_not_eligible", "Initial resume preparation no longer matches the candidate-role state.", 409, pairCurrent(pair));
         }
-        if (triggerKind === "regenerate" && (pair.intent_state !== "interested" || pair.workflow_state !== "interested" || !pair.current_artifact_id)) {
+        const regeneratableWorkflow = pair.workflow_state === "interested"
+          || (pair.workflow_state === "needs_review" && pair.submission_status === "proven");
+        if (triggerKind === "regenerate" && (pair.intent_state !== "interested" || !regeneratableWorkflow || !pair.current_artifact_id)) {
           throw problem("generation_pair_not_eligible", "Resume regeneration requires the current Interested resume.", 409, pairCurrent(pair));
         }
         if (triggerKind === "retry") {
@@ -2947,6 +3297,22 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             throw problem("generation_pair_not_eligible", "Resume retry no longer matches an eligible Interested resume issue.", 409, pairCurrent(pair));
           }
         }
+        // A worker job can reclaim its own checkpointed work after a transient
+        // failure. Keep the model reservation cumulative across those attempts:
+        // the per-generation row is an audit record, while the job is the
+        // complete bounded unit promised to the recruiter.
+        const jobId = clean(executionFence?.jobId, 100);
+        const jobPrefix = `resume-job:${jobId}:attempt:`;
+        const priorSpend = (await tx`
+          select coalesce(sum(spent_cents), 0)::integer as spent_cents
+            from submissions_v2.resume_generations
+           where idempotency_key like ${`${jobPrefix}%`}
+        `)[0];
+        const spentByJob = Math.max(0, Number(priorSpend?.spent_cents) || 0);
+        const remainingBudget = Math.max(1, Math.min(
+          Math.max(1, Number(budgetCents) || 200),
+          200 - spentByJob,
+        ));
         const versions = await tx`select coalesce(max(generation_version),0)::integer + 1 as next from submissions_v2.resume_generations where pair_id=${pairId}`;
         const rows = await tx`
           insert into submissions_v2.resume_generations(
@@ -2956,10 +3322,10 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           ) values (
             ${pairId}, ${versions[0].next}, ${triggerKind}, ${commandId}, ${idempotencyKey},
             ${expectedPairVersion}, ${pair.first_signal_id}, ${primaryModelPin}, ${fallbackModelPin},
-            ${validatorModelPin}, ${promptPin}, ${templatePin}, ${budgetCents}, ${deadlineAt}, ${priorArtifactId}
+            ${validatorModelPin}, ${promptPin}, ${templatePin}, ${remainingBudget}, ${deadlineAt}, ${priorArtifactId}
           ) returning *
         `;
-        return rows[0];
+        return { ...rows[0], job_spent_cents: spentByJob, job_budget_cents: 200 };
       });
     },
 
@@ -3145,7 +3511,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                p.submission_opened_at, p.submission_status, r.destination_url
           from submissions_v2.candidate_role_pairs p
           left join submissions_v2.role_index r on r.role_id=p.role_id
-         where p.submission_status <> 'proven' and p.workflow_state in ('preparing_resume','interested')
+         where p.submission_status <> 'proven' and p.workflow_state in ('preparing_resume','interested','needs_review')
+           and p.intent_state in ('interested','unclear')
            and p.case_hidden_at is null
            and (${after?.at || null}::timestamptz is null
              or (p.original_signal_at, p.id) > (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
@@ -3383,9 +3750,10 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       return sql.begin(async (tx) => {
         await assertWorkerFence(tx, executionFence, "ingestion");
         const pair = (await tx`select * from submissions_v2.candidate_role_pairs where id=${pairId} for update`)[0];
-        if (!pair || pair.case_hidden_at) throw problem("proof_pair_invalid", "Submission proof must bind to a visible Interested candidate-role item.", 409);
+        if (!pair || pair.case_hidden_at) throw problem("proof_pair_invalid", "Submission proof must bind to a visible exact candidate-role item.", 409);
         if (pair.submission_status === "proven") return pair;
-        if (!["preparing_resume", "interested"].includes(pair.workflow_state)) throw problem("proof_pair_invalid", "Submission proof must bind to a visible Interested candidate-role item.", 409);
+        if (!["preparing_resume", "interested", "needs_review"].includes(pair.workflow_state)
+          || !["interested", "unclear"].includes(pair.intent_state)) throw problem("proof_pair_invalid", "Submission proof must bind to a visible exact candidate-role item.", 409);
         const activeGeneration = (await tx`
           select id from submissions_v2.resume_generations
            where pair_id=${pairId}
@@ -3404,7 +3772,15 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                  state_version=state_version+${preserveVersion ? 0 : 1}
            where id=${pairId} and state_version=${pair.state_version} returning *
         `)[0];
-        await pairEvent(tx, updated, { actorType: "worker", actorId, source: "proof_reconcile", eventType: "submission_proven", expectedVersion: preserveVersion ? null : Number(pair.state_version), previous: pair, idempotencyKey: `pair:proof:${pairId}:${applicationId}`, metadata: { application_id: applicationId, authoritative_path: authoritativePath, state_version_unchanged: preserveVersion, active_generation_id: activeGeneration?.id || null } });
+        if (pair.workflow_state === "needs_review") {
+          await tx`
+            update submissions_v2.review_items
+               set action_state='resolved', resolved_at=clock_timestamp(), resolved_by=${actorId},
+                   resolution_note='Exact Paraform application is already submitted; moved to Submitted history without changing candidate intent.'
+             where pair_id=${pairId} and action_state='open'
+          `;
+        }
+        await pairEvent(tx, updated, { actorType: "worker", actorId, source: "proof_reconcile", eventType: "submission_proven", expectedVersion: preserveVersion ? null : Number(pair.state_version), previous: pair, idempotencyKey: `pair:proof:${pairId}:${applicationId}`, metadata: { application_id: applicationId, authoritative_path: authoritativePath, state_version_unchanged: preserveVersion, active_generation_id: activeGeneration?.id || null, review_resolved: pair.workflow_state === "needs_review" } });
         return updated;
       });
     },

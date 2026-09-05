@@ -22,15 +22,30 @@ test("Review context exposes only exact candidate-authored text and fixed source
   assert.deepEqual(result, {
     source_family: "para_ai_interview_request", source_label: "Interview Request reply",
     received_at: "2026-09-04T21:00:00.000Z", candidate_reply_excerpt: "I have a question.\nIs the role remote?",
-    excerpt_truncated: false, evidence_status: "available",
+    excerpt_truncated: false, outbound_offer_excerpt: "private outbound text",
+    outbound_offer_truncated: false, offered_roles: [], evidence_status: "available",
   });
-  assert.equal(JSON.stringify(result).includes("private"), false);
+  assert.equal(JSON.stringify(result).includes("private@example.test"), false);
   const long = reviewContext(source, { candidate_authored_text: "😀".repeat(1201) });
   assert.equal(Array.from(long.candidate_reply_excerpt).length, 1200);
   assert.equal(long.excerpt_truncated, true);
   assert.equal(reviewContext(source, { sent_message_text: "Interested" }).evidence_status, "unavailable");
   assert.equal(reviewContext({ ...source, source_family: "manual" }, { candidate_authored_text: "Untrusted" }).candidate_reply_excerpt, null);
   assert.equal(reviewContext({ ...source, envelope: { source_family: "<script>" } }).source_label, "Candidate signal");
+});
+
+test("Review context includes bounded original-offer evidence and exact retained roles", () => {
+  const result = reviewContext({
+    ...source,
+    offered_roles: [{ role_id: "role-1", company: "Acme", title: "Backend Engineer", url: "https://unreturned.example" }],
+  }, {
+    candidate_authored_text: "Sounds useful.",
+    sent_message_text: "Would you consider the Backend Engineer role?".repeat(100),
+  });
+  assert.equal(Array.from(result.outbound_offer_excerpt).length, 2400);
+  assert.equal(result.outbound_offer_truncated, true);
+  assert.deepEqual(result.offered_roles, [{ role_id: "role-1", company: "Acme", title: "Backend Engineer" }]);
+  assert.equal(JSON.stringify(result).includes("unreturned.example"), false);
 });
 
 test("Review reads a single visible source and decrypts with its immutable event identity", async () => {
@@ -43,7 +58,7 @@ test("Review reads a single visible source and decrypts with its immutable event
   const result = await service.reviewContext({ signal_id: signalId });
   assert.equal(reads, 1);
   assert.equal(result.review_context.candidate_reply_excerpt, "Please explain the hours.");
-  assert.equal(JSON.stringify(result).includes("Private sent"), false);
+  assert.equal(result.review_context.outbound_offer_excerpt, "Private sent message");
 });
 
 test("Review rejects invalid or closed identities before private reads and respects UI controls", async () => {

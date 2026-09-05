@@ -89,6 +89,22 @@ test("only a validated ready artifact enables download, regeneration, and submis
   assert.equal(submitted.capabilities.can_submit, false);
 });
 
+test("Submitted history preserves downloads while regeneration still requires positive intent", () => {
+  const row = {
+    pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",
+    workflow_state: "needs_review", submission_status: "proven", generation_status: "failed",
+    current_artifact_id: "artifact-1", artifact_ready: true,
+  };
+  const positive = rowDto({ ...row, intent_state: "interested" });
+  assert.equal(positive.capabilities.can_download, true);
+  assert.equal(positive.capabilities.can_regenerate, true);
+  const unclear = rowDto({ ...row, intent_state: "unclear" });
+  assert.equal(unclear.capabilities.can_download, true);
+  assert.equal(unclear.capabilities.can_regenerate, false);
+  assert.equal(unclear.capabilities.can_submit, false);
+  assert.equal(rowDto({ ...row, intent_state: "interested", generation_status: "strategizing" }).capabilities.can_regenerate, false);
+});
+
 test("public health preserves safe per-source status for dependency-specific gating", () => {
   const health = publicHealth({
     delayed: true,

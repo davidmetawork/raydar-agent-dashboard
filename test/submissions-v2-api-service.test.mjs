@@ -364,6 +364,60 @@ test("regeneration can reuse the existing source bundle without supplemental con
   assert.deepEqual(requested.uploads, []);
 });
 
+test("Review dismissal requires a controlled reason and a human note", async () => {
+  let dismissed;
+  const service = createService({
+    repository: {
+      runtimeControls,
+      dismissUnresolvedSignal: async (input) => {
+        dismissed = input;
+        return { outcome: "dismissed", destination: "removed_from_review", signal_id: input.signalId, affected_count: 1 };
+      },
+    },
+    env,
+  });
+  const result = await service.command({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: "dismiss-review-1",
+    body: {
+      action: "dismiss_review", signal_id: "11111111-1111-4111-8111-111111111111",
+      dismissal_reason: "irrelevant_notification", note: "Calendar-assistant notification, not a candidate response.",
+    },
+  });
+  assert.equal(result.destination, "removed_from_review");
+  assert.equal(dismissed.dismissalReason, "irrelevant_notification");
+  assert.equal(dismissed.note, "Calendar-assistant notification, not a candidate response.");
+  for (const body of [
+    { action: "dismiss_review", signal_id: "signal", dismissal_reason: "hide_it", note: "Reason" },
+    { action: "dismiss_review", signal_id: "signal", dismissal_reason: "not_candidate_response", note: "" },
+  ]) {
+    await assert.rejects(
+      () => service.command({ actorEmail: "recruiter@raydar.xyz", idempotencyKey: `invalid-${body.dismissal_reason}`, body }),
+      (error) => error.status === 400,
+    );
+  }
+});
+
+test("role recheck queues a live ingestion read for the same pair", async () => {
+  let queued;
+  const service = createService({
+    repository: {
+      runtimeControls,
+      enqueuePairAction: async (input) => { queued = input; return { job_id: "job-role-recheck" }; },
+    },
+    env,
+  });
+  const result = await service.command({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: "recheck-role-1",
+    body: { action: "recheck_role", case_id: "pair-1", expected_version: 7 },
+  });
+  assert.equal(result.job_id, "job-role-recheck");
+  assert.deepEqual(queued, {
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: "recheck-role-1",
+    pairId: "pair-1", expectedVersion: 7, action: "recheck_role",
+    kind: "recheck_pair", requiredControl: "ingestion", checkpoint: { target: "role" },
+  });
+});
+
 test("environment and durable controls jointly block direct UI and intake calls while health remains readable", async () => {
   let listCalled = false;
   const repository = {
@@ -383,7 +437,10 @@ test("environment and durable controls jointly block direct UI and intake calls 
 
 test("scheduler tick supplies five-minute, hourly, Pacific daily, and purge windows", async () => {
   let scheduled;
+  let recoveries = 0;
   const repository = {
+    runtimeControls,
+    recoverExpiredResumeGenerations: async () => { recoveries += 1; return { recovered: [] }; },
     scheduleTick: async (input) => { scheduled = input; return { jobs: [] }; },
   };
   const service = createService({
@@ -391,7 +448,8 @@ test("scheduler tick supplies five-minute, hourly, Pacific daily, and purge wind
     env,
     now: () => Date.parse("2026-09-01T15:07:30.000Z"),
   });
-  await service.tick();
+  await service.tick({ recoverResumes: true });
+  assert.equal(recoveries, 1);
   assert.equal(scheduled.minuteKey, "2026-09-01T15:07");
   assert.equal(scheduled.fiveMinuteKey, "2026-09-01T15:05");
   assert.equal(scheduled.hourKey, "2026-09-01T15");
@@ -402,4 +460,34 @@ test("scheduler tick supplies five-minute, hourly, Pacific daily, and purge wind
   assert.equal(scheduled.controlCeiling.ingestion, true);
   assert.equal(scheduled.controlCeiling.master_inbox, true);
   assert.equal(scheduled.controlCeiling.curated, true);
+});
+
+test("scheduler skips resume recovery while UI or generation is disabled without blocking ordinary jobs", async () => {
+  let recoveries = 0;
+  let scheduled = 0;
+  const repository = {
+    runtimeControls: async () => ({ ...await runtimeControls(), ui_enabled: false }),
+    recoverExpiredResumeGenerations: async () => { recoveries += 1; },
+    scheduleTick: async () => { scheduled += 1; return { jobs: [{ id: "source-job" }] }; },
+  };
+  const service = createService({ repository, env, now: () => Date.parse("2026-09-01T15:07:30.000Z") });
+  const result = await service.tick({ recoverResumes: true });
+  assert.equal(recoveries, 0);
+  assert.equal(scheduled, 1);
+  assert.equal(result.jobs[0].id, "source-job");
+});
+
+test("API scheduler calls never invoke worker-only resume recovery", async () => {
+  let recoveries = 0;
+  const service = createService({
+    repository: {
+      runtimeControls,
+      recoverExpiredResumeGenerations: async () => { recoveries += 1; },
+      scheduleTick: async () => ({ jobs: [] }),
+    },
+    env,
+    now: () => Date.parse("2026-09-01T15:07:30.000Z"),
+  });
+  await service.tick();
+  assert.equal(recoveries, 0);
 });

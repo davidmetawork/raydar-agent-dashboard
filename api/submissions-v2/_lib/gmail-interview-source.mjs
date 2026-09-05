@@ -62,11 +62,14 @@ function machineMessage(message) {
   const auto = header(message, "Auto-Submitted").trim().toLowerCase();
   return (auto && auto !== "no") || /^(?:bulk|list|junk)$/iu.test(header(message, "Precedence").trim())
     || Boolean(header(message, "List-Id")) || /^(?:Auto(?:matic)?\s*(?:reply|response)|Out of office|Delivery Status|Undeliverable)/iu.test(header(message, "Subject"))
+    // Fyxer scheduling notices omit machine headers and reuse the candidate's
+    // thread subject; the observed service sender is never the candidate.
+    || address(header(message, "From")) === "drafts@fyxer.com"
     || /(?:mailer-daemon|postmaster|no-?reply)@/iu.test(header(message, "From"));
 }
 
-export function offeredRoles(message) {
-  const { text, html } = gmailBody(message);
+export function offeredRoles(message, { authoredOnly = false } = {}) {
+  const { text, html } = authoredOnly ? { text: authoredReply(message), html: "" } : gmailBody(message);
   const found = new Map();
   for (const raw of `${text}\n${html}`.replace(/&amp;/giu, "&").match(/https:\/\/[^\s<>"']+/gu) || []) {
     const role = paraformRoleLink(raw);
@@ -114,7 +117,9 @@ export function roleInterestReplyEvents(thread, { after, before, env = process.e
     const sent = outboundParent(messages, reply, sender);
     const candidateText = authoredReply(reply);
     const sentText = sent ? gmailBody(sent).text : "";
-    const offered = sent ? offeredRoles(sent) : [];
+    // A link quoted from an older offer does not make an acknowledgement,
+    // scheduling update, or recruiter follow-up a new role offer.
+    const offered = sent ? offeredRoles(sent, { authoredOnly: true }) : [];
     const family = sent
       ? outboundEmailFamily({ subject: header(sent, "Subject"), text: authoredReply(sent), roleCount: offered.length })
       : replySubjectFamily(header(reply, "Subject"));

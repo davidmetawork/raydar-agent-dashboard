@@ -6,7 +6,7 @@ export const REVIEW_REASONS = Object.freeze({
   reply_unclear_or_conditional: { label: "Reply is unclear, conditional, or conflicting", action: "Review Signal" },
   candidate_question: { label: "Candidate asked a question", action: "Review Signal" },
   role_unclear: { label: "Exact offered role is unclear", action: "Select role(s)" },
-  role_unavailable: { label: "Role is inactive or missing", action: "Inspect role" },
+  role_unavailable: { label: "Role is inactive or missing", action: "Recheck role" },
   candidate_original_resume_missing: { label: "Candidate-original resume is missing or unreadable", action: "Add resume in Paraform, then Recheck" },
   classification_failed: { label: "Both approved classifier paths failed", action: "Retry classification" },
   resume_preparation_failed: { label: "Resume preparation exhausted safe recovery", action: "Retry preparation" },
@@ -68,6 +68,8 @@ export function rowDto(row) {
   const identifiedPair = Boolean((row.pair_id || row.case_id) && row.candidate_user_id && row.role_id);
   const readyWorkflow = workflowState === "interested";
   const generationActive = ACTIVE_GENERATION_STATES.has(generationStatus);
+  const offeredRoleCount = Number(row.offered_role_count || 0);
+  const unresolvedMultipleRoles = !row.pair_id && !row.case_id && offeredRoleCount > 1;
   return {
     case_id: row.pair_id || row.case_id || null,
     signal_id: row.signal_id || null,
@@ -78,12 +80,12 @@ export function rowDto(row) {
     candidate_url: paraformCandidateProfileUrl(row.candidate_user_id),
     linkedin_url: safeHttps(row.linkedin_url, ["linkedin.com"]),
     raydar_url: safeHttps(row.raydar_url, ["monitor.raydar.xyz"]),
-    role_id: row.role_id || null,
-    company: text(row.company_name || row.company, 500) || null,
-    role_title: text(row.role_title, 500) || null,
-    role_label: text(row.role_label, 1_000) || null,
-    role_url: safeHttps(row.role_url, ["paraform.com"]),
-    offered_role_count: Number(row.offered_role_count || 0),
+    role_id: unresolvedMultipleRoles ? null : row.role_id || null,
+    company: unresolvedMultipleRoles ? null : text(row.company_name || row.company, 500) || null,
+    role_title: unresolvedMultipleRoles ? null : text(row.role_title, 500) || null,
+    role_label: unresolvedMultipleRoles ? `${offeredRoleCount} offered roles` : text(row.role_label, 1_000) || null,
+    role_url: unresolvedMultipleRoles ? null : safeHttps(row.role_url, ["paraform.com"]),
+    offered_role_count: offeredRoleCount,
     offered_roles: (Array.isArray(row.offered_roles) ? row.offered_roles : []).map((offered) => ({
       role_id: text(offered?.role_id, 200),
       company: text(offered?.company, 500) || null,
@@ -99,6 +101,8 @@ export function rowDto(row) {
     resume_cautions: (row.resume_cautions || []).map((item) => ({ code: text(item.code || item.source_key || item, 100), label: text(item.label || item.safe_detail || item, 300), impact: text(item.impact, 300) || null })),
     generation_status: generationStatus,
     generation_stage: text(row.generation_stage, 100) || null,
+    generation_updated_at: safeInstant(row.generation_updated_at),
+    generation_deadline_at: safeInstant(row.generation_deadline_at),
     preparation_error_code: text(row.preparation_error_code, 100) || null,
     preparation_error_detail: text(row.preparation_error_detail, 500) || null,
     current_artifact_id: currentArtifactId,
@@ -113,8 +117,8 @@ export function rowDto(row) {
     capabilities: {
       can_correct: identifiedPair && submissionStatus !== "proven",
       can_duplicate: identifiedPair,
-      can_download: readyWorkflow && artifactReady,
-      can_regenerate: readyWorkflow && artifactReady && !generationActive,
+      can_download: (readyWorkflow || submissionStatus === "proven") && artifactReady,
+      can_regenerate: (readyWorkflow || (submissionStatus === "proven" && workflowState === "needs_review" && row.intent_state === "interested")) && artifactReady && !generationActive,
       can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven",
     },
   };

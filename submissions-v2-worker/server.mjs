@@ -58,7 +58,7 @@ const options = {
   failJob: (input) => failJob(input, workerSql),
   checkpointJob: (input) => checkpointJob(input, workerSql),
   heartbeatJob: (input) => heartbeatJob(input, workerSql),
-  scheduleJobs: () => workerService.tick(),
+  scheduleJobs: () => workerService.tick({ recoverResumes: true }),
 };
 let lastCycle = null;
 let cycleRunning = false;

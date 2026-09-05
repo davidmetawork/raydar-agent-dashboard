@@ -42,6 +42,12 @@ test("encoded subjects remain detectable and HTML quoted consent is excluded", (
   assert.equal(authoredReply(message({ mime: "text/html", body: '<div>What salary?</div><div class="gmail_quote">Yes please</div>' })), "What salary?");
 });
 
+test("Fyxer service notices are excluded by exact sender even without machine headers", () => {
+  const notice = message({ from: "Fyxer <drafts@fyxer.com>", subject: "Re: Raydar - 1st Round Interview", body: "We checked your calendar. Create an event now." });
+  assert.deepEqual(interviewReplyEvents({ id: "ab", messages: [notice] }, options), []);
+  assert.equal(interviewReplyEvents(thread([message({ from: "Fyxer <person@example.com>" })]), options).length, 1);
+});
+
 test("first boundary inclusive, last exclusive, and historical replies excluded", () => {
   assert.equal(interviewReplyEvents(thread([message({ at: start - 1 })]), options).length, 0);
   assert.equal(interviewReplyEvents(thread([message({ at: start })]), options).length, 1);
@@ -101,6 +107,20 @@ test("prep parents with real role links and quoted offers cannot turn acknowledg
   ]) {
     assert.deepEqual(interviewReplyEvents(thread([message({ body: "Yes, looks good." })], original), options), []);
   }
+});
+
+test("acknowledgements of recruiter updates do not inherit an older quoted role offer", () => {
+  const oldOffer = "Would you be interested in Engineer? https://www.paraform.com/share/example-company/role-123456";
+  for (const original of [
+    sent({ body: `Glad to hear it! I will get the ball rolling with the team and keep you posted.\n\nOn Wed, Sample wrote:\n> Sounds great.\n> ${oldOffer}` }),
+    sent({ mime: "text/html", body: `<p>I will get the ball rolling and keep you posted.</p><div class="gmail_quote">${oldOffer}</div>` }),
+  ]) {
+    assert.deepEqual(interviewReplyEvents(thread([message({ body: "Sounds great, thanks for the update!" })], original), options), []);
+  }
+  const [realOffer] = interviewReplyEvents(thread([message({ body: "Yes, please." })], sent({
+    body: `Would you be interested in this new role? https://www.paraform.com/share/example-company/role-current\n\nOn Wed, Sample wrote:\n> ${oldOffer}`,
+  })), options);
+  assert.deepEqual(realOffer.offered_roles.map((item) => item.role_id), ["role-current"]);
 });
 
 test("approved New Match and Fit Follow Up parents use their own families", () => {
