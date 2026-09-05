@@ -57,7 +57,16 @@ function admissionSource(row, signalUrl) {
 }
 
 export function rowDto(row) {
-  const reviewReasons = reasons(row.review_reasons || []);
+  const preparationErrorCode = text(row.preparation_error_code, 100) || null;
+  const preparationErrorDetail = text(row.preparation_error_detail, 500) || null;
+  const preparationReviewCode = preparationErrorCode
+    ? Object.hasOwn(REVIEW_REASONS, preparationErrorCode) ? preparationErrorCode : "resume_preparation_failed"
+    : null;
+  const reviewReasons = reasons(row.review_reasons || []).map((reason) => (
+    preparationErrorDetail && reason.code === preparationReviewCode
+      ? { ...reason, detail: preparationErrorDetail }
+      : reason
+  ));
   const first = reviewReasons[0];
   const signalUrl = gmailSignalUrl(row.signal_url) || safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
   const workflowState = row.workflow_state || "needs_review";
@@ -103,8 +112,8 @@ export function rowDto(row) {
     generation_stage: text(row.generation_stage, 100) || null,
     generation_updated_at: safeInstant(row.generation_updated_at),
     generation_deadline_at: safeInstant(row.generation_deadline_at),
-    preparation_error_code: text(row.preparation_error_code, 100) || null,
-    preparation_error_detail: text(row.preparation_error_detail, 500) || null,
+    preparation_error_code: preparationErrorCode,
+    preparation_error_detail: preparationErrorDetail,
     current_artifact_id: currentArtifactId,
     artifact_version: Number(row.artifact_version || 0) || null,
     artifact_ready: artifactReady,
