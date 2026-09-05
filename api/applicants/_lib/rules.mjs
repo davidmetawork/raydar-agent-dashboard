@@ -26,6 +26,7 @@
 
 import { DEGREE_LEVELS, levelMatches } from "./degree.mjs";
 import { FACTS_VERSION } from "./facts.mjs";
+import { matchFundedEmployer, SNAPSHOT_ID_RE } from "./funded-employers.mjs";
 
 export const RULE_ACTIONS = ["interview", "pass"];
 export const RULE_STATES = ["off", "watching", "live"];
@@ -139,6 +140,20 @@ export const FIELDS = {
     read: (_s, row) => row?.current,
   },
 
+  // Independent of the capped `jobs` projection. This single membership
+  // predicate scans the compact all-employer history and matches only a
+  // reviewed Paraform company id in the referenced immutable snapshot.
+  "employment.fundedEmployerSnapshot": {
+    group: "employment", ops: ["member_of"], kind: "snapshot",
+    label: "Worked at funded employer",
+    read: (_subject, row) => row?.id,
+    match: (subject, row, snapshotId) => {
+      const snapshot = subject.fundedEmployerSnapshots?.[snapshotId];
+      const found = matchFundedEmployer(row, snapshot);
+      return found ? { matched: row?.name ?? found.companyName ?? row?.id, orgId: found.orgId } : null;
+    },
+  },
+
   // ── whole-applicant facts, no row scope ─────────────────────────────────
   "applicant.currentCompanyId": {
     group: "applicant", ops: ["any_of"], kind: "ids", label: "Currently works at",
@@ -241,6 +256,7 @@ export function fieldCatalog() {
 export const FIELD_GROUPS = [
   { id: "school", label: "Education", note: "All education conditions must be true of the SAME school." },
   { id: "job", label: "Experience", note: "All experience conditions must be true of the SAME role." },
+  { id: "employment", label: "Employment membership", note: "Checks every known employer using reviewed company IDs." },
   { id: "applicant", label: "The person", note: "" },
   { id: "application", label: "The application", note: "Works even for applicants with no profile history." },
 ];
@@ -249,7 +265,7 @@ export const RANKS = ["S", "A", "B", "C"];
 export const TIERS = ["S", "A", "B", "C", "unrated"];
 
 /** Fields whose group needs a matching row to exist at all. */
-const ROW_GROUPS = { school: "schools", job: "jobs" };
+const ROW_GROUPS = { school: "schools", job: "jobs", employment: "allCompanies" };
 
 // ── comparison ─────────────────────────────────────────────────────────────
 
@@ -300,14 +316,17 @@ function groupMatches(conditions, subject, row, now) {
   for (const condition of conditions) {
     const field = FIELDS[condition.field];
     if (!field) return null;
-    const actual = field.read(subject, row, now);
-    if (!compare(condition.op, actual, condition.value, field.kind)) return null;
+    const custom = field.match ? field.match(subject, row, condition.value, now) : null;
+    const actual = field.read ? field.read(subject, row, now) : null;
+    if (field.match ? !custom : !compare(condition.op, actual, condition.value, field.kind)) return null;
     evidence.push({
       field: condition.field,
       op: condition.op,
       // The literal value the decision rested on, in human terms — this is
       // what "why did this fire" renders from.
-      matched: String(field.display ? (field.display(subject, row) ?? actual) : actual).slice(0, 160),
+      matched: String(custom?.matched ?? (field.display ? (field.display(subject, row) ?? actual) : actual)).slice(0, 160),
+      ...(custom?.orgId ? { organizationId: custom.orgId } : {}),
+      ...(field.kind === "snapshot" ? { snapshotId: condition.value } : {}),
     });
   }
   return evidence;
@@ -350,6 +369,19 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       // The 44%. Not a failure — there is genuinely nothing to judge.
       return { matched: false, skipped: true, reason: "no_profile_history", evidence: [] };
     }
+    if (byGroup.has("employment")) {
+      if (!Array.isArray(facts.allCompanies)) {
+        return { matched: false, skipped: true, reason: "employment_history_not_refreshed", evidence: [] };
+      }
+      if (!facts.allCompanies.length) {
+        return { matched: false, skipped: true, reason: "no_employment_history", evidence: [] };
+      }
+      const unavailable = byGroup.get("employment").some((condition) =>
+        !subject.fundedEmployerSnapshots?.[condition.value]);
+      if (unavailable) {
+        return { matched: false, skipped: true, reason: "membership_snapshot_missing", evidence: [] };
+      }
+    }
   }
 
   const evidence = [];
@@ -369,7 +401,12 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       found = groupMatches(groupConditions, subject, row, now);
       if (found) break;
     }
-    if (!found) return { matched: false, skipped: false, reason: null, evidence: [] };
+    if (!found) {
+      if (group === "employment" && rows.some((row) => !row?.id)) {
+        return { matched: false, skipped: true, reason: "employment_company_id_missing", evidence: [] };
+      }
+      return { matched: false, skipped: false, reason: null, evidence: [] };
+    }
     evidence.push(...found);
   }
 
@@ -394,6 +431,7 @@ const VALUE_CHECK = {
     ? Array.isArray(value) && value.length === 2 && value.every((y) => Number.isInteger(y))
       && value[0] <= value[1]
     : Number.isInteger(value)),
+  snapshot: (value) => typeof value === "string" && SNAPSHOT_ID_RE.test(value),
 };
 
 export function validateCondition(condition) {
@@ -487,7 +525,7 @@ export function inScope(rule, row) {
 const OP_WORDS = {
   any_of: "is one of", contains: "contains", is: "is",
   at_least: "at least", at_most: "at most",
-  after: "after", before: "before", between: "between",
+  after: "after", before: "before", between: "between", member_of: "in snapshot",
 };
 
 /**
@@ -506,6 +544,7 @@ export function describeCondition(condition, names = {}) {
     const rest = shown.length > 3 ? ` and ${shown.length - 3} more` : "";
     return `${field.label} ${head}${rest}`;
   }
+  if (op === "member_of") return `${field.label}: ${names[value] ?? value}`;
   return `${field.label} ${OP_WORDS[op] ?? op} ${value}`;
 }
 

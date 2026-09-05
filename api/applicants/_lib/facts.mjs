@@ -141,6 +141,22 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
     rank: str(row?.talentRank),
   }));
 
+  // Membership predicates need the complete employer history. `jobs` stays
+  // capped because existing row-scoped rules depend on that long-standing
+  // storage bound; this additive projection carries only the two identity
+  // fields needed for exact set membership and therefore remains compact.
+  // Do not deduplicate by name: names are display-only and never identity.
+  const seenCompanies = new Set();
+  const allCompanies = [];
+  for (const row of list(source.experiences)) {
+    const id = str(row?.companyId);
+    const name = str(row?.companyName);
+    const key = `${id ?? ""}\u0000${name ?? ""}`;
+    if ((!id && !name) || seenCompanies.has(key)) continue;
+    seenCompanies.add(key);
+    allCompanies.push({ id, name });
+  }
+
   // `current` is end_date == null on the Paraform feed (is_current is always
   // null there — a documented vendor gotcha). The first current row wins;
   // Paraform orders experiences newest-first.
@@ -170,6 +186,7 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
     // True totals, not the truncated list lengths, so "more than N" is exact.
     schoolCount: list(source.education).length,
     jobs,
+    allCompanies,
     jobCount: list(source.experiences).length,
 
     months,

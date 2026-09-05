@@ -41,6 +41,13 @@ const BLOCK_RULE = {
   version: 1, scope: { roleIds: [] },
   conditions: [{ field: "job.title", op: "contains", value: "Recruiter" }],
 };
+const FUNDED_RULE = {
+  id: "rule-funded", name: "Funded employer history", action: "interview", state: "live",
+  version: 1, scope: { roleIds: [] },
+  conditions: [{
+    field: "employment.fundedEmployerSnapshot", op: "member_of", value: "funded-2026-09-05",
+  }],
+};
 
 const profile = ({ school = "sch_harvard", degree = "Bachelor of Arts - AB", title = "Engineer" } = {}) => ({
   education: [{ schoolId: school, school: "Harvard University", degree, end: "2016-01-01" }],
@@ -181,6 +188,41 @@ test("the audit records the rule, its version and the literal fact", async () =>
   assert.equal(audit.action, "interview");
   assert.deepEqual(audit.evidence.map((e) => e.field), ["school.id", "school.level"]);
   assert.equal(audit.evidence[0].matched, "Harvard University");
+});
+
+test("draft preview and manual tick share funded membership evaluation over full history", async () => {
+  const experiences = Array.from({ length: 16 }, (_, index) => ({
+    companyId: index === 15 ? "pf-funded" : `pf-other-${index}`,
+    companyName: index === 15 ? "Funded Co" : `Other ${index}`,
+    roleTitle: "Engineer",
+  }));
+  const s = store({
+    rules: [FUNDED_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile({ experiences, education: [] }, { now: NOW }) },
+  });
+  const snapshots = {
+    "funded-2026-09-05": {
+      snapshotId: "funded-2026-09-05",
+      byParaformId: { "pf-funded": { orgId: "org-funded", name: "Funded Co" } },
+    },
+  };
+  s.deps.readMembershipSnapshots = async () => snapshots;
+
+  const preview = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule: FUNDED_RULE, ...s.fence } }), preview,
+  );
+  assert.equal(preview.statusCode, 200);
+  assert.equal(preview.body.matched, 1);
+  assert.equal(s.state["apphub:decisions"]["cu1:role1"], undefined);
+
+  const tick = response();
+  await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.statusCode, 200);
+  assert.equal(tick.body.decided, 1);
+  assert.equal(s.state["apphub:decisions"]["cu1:role1"].action, "interview");
+  assert.equal(s.state["apphub:ruleruns"]["cu1:role1"].evidence[0].snapshotId, "funded-2026-09-05");
 });
 
 test("counters accumulate across ticks", async () => {
