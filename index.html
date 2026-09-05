@@ -524,7 +524,7 @@
     </div>
 
     <div id="view-submissions" hidden>
-      <iframe id="submissions-frame" title="Submissions" style="width:100%;border:0;min-height:1500px;background:transparent"></iframe>
+      <iframe id="submissions-frame" title="Submissions" style="width:100%;border:0;min-height:900px;background:transparent"></iframe>
     </div>
 
     <div id="view-review" hidden>
@@ -1372,8 +1372,8 @@
       return `${path}?embed=1&tab=${tab}`+(screen?`&screen=${encodeURIComponent(screen)}`:"");
     }
     window.addEventListener("message",(event)=>{
-      if(event.origin!==location.origin||event.data?.type!=="raydar-submissions-height") return;
       const frame=$("submissions-frame");
+      if(event.origin!==location.origin||event.source!==frame.contentWindow||!["raydar-submissions-height","raydar-submissions-v2-height"].includes(event.data?.type)) return;
       const height=Math.max(900,Math.min(12000,Number(event.data.height)||0));
       frame.style.height=height+"px";
     });

@@ -71,6 +71,23 @@ test("Interested preparation rows expose safe progress without artifact actions"
   });
 });
 
+test("Needs Review shows the latest technical preparation failure without rewriting other blockers", () => {
+  const row = rowDto({
+    pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",
+    workflow_state: "needs_review", submission_status: "none",
+    review_reasons: [
+      { reason_code: "role_unavailable", safe_detail: "The role is still unavailable." },
+      { reason_code: "resume_preparation_failed", safe_detail: "Resume preparation exceeded its recovery deadline." },
+    ],
+    generation_status: "failed", generation_stage: "failed",
+    preparation_error_code: "generation_budget_exhausted",
+    preparation_error_detail: "Resume preparation reached its two-dollar model-cost ceiling.",
+  });
+  assert.equal(row.review_reasons[0].detail, "The role is still unavailable.");
+  assert.equal(row.review_reasons[1].detail, "Resume preparation reached its two-dollar model-cost ceiling.");
+  assert.equal(row.preparation_error_code, "generation_budget_exhausted");
+});
+
 test("only a validated ready artifact enables download, regeneration, and submission", () => {
   const ready = rowDto({
     pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",

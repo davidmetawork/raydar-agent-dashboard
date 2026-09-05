@@ -33,3 +33,9 @@ jobs:
       - run: npm run test:submissions-v2
       - run: npm run test:submissions-v1
       - run: node --test test/inbox.test.mjs test/sourcing-*.test.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r resume-renderer-v2/requirements.txt
+      - run: python -m unittest test_app.py
+        working-directory: resume-renderer-v2

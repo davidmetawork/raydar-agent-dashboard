@@ -231,8 +231,10 @@ test("strategist gives its existing fallback a bounded diagnostic after repeated
   assert.equal(bodies.length, 2);
   assert.equal(firstPayload.version_instructions, null);
   assert.match(fallbackPayload.version_instructions, /RESUME_FILLER_OR_REPETITION at document\.sections\[0\]\.entries\[0\]\.body\[0\]/u);
+  assert.match(fallbackPayload.version_instructions, /same exact organization name may appear exactly twice only when it is header\[0\] once in main Professional Experience and once in Education/u);
   assert.match(fallbackPayload.version_instructions, /retaining only supported facts/u);
   assert.match(fallbackPayload.version_instructions, /Never invent, alter, or split candidate history/u);
+  assert.match(bodies[0].system, /same exact organization name appears exactly twice: once as header\[0\] of a main Professional Experience entry and once as header\[0\] of an Education entry/u);
   assert.equal(result.fallbackReason, "RESUME_FILLER_OR_REPETITION");
   assert.equal(result.strategy.document.sections[0].entries[0].body[0].text, "Built a scheduling system used by 20 teams.");
 });
@@ -274,7 +276,7 @@ test("strategist forecast reserves the maximum bounded fallback feedback", () =>
   const forecastPayload = JSON.parse(resumeStrategistForecastInput({ bundle, ledger, versionInstructions: "Keep it direct." }));
   assert.match(forecastPayload.version_instructions, /document\.sections\[19\]\.entries\[19\]\.body\[11\]/u);
   assert.ok(forecastPayload.version_instructions.length <= 8_000);
-  assert.match(STRATEGIST_PROMPT_VERSION, /2026-09-05\.v4$/u);
+  assert.match(STRATEGIST_PROMPT_VERSION, /2026-09-05\.v5$/u);
 });
 
 test("strategist forecast keeps a larger multibyte primary instruction payload", () => {
