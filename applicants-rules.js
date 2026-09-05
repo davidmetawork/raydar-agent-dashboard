@@ -120,8 +120,10 @@
     const snapshot = fundedSnapshot(id);
     if (!snapshot) return id || "Snapshot unavailable";
     const day = String(snapshot.generatedAt || "").slice(0, 10);
-    return Number(snapshot.companyCount || 0).toLocaleString() + " companies · "
-      + Number(snapshot.reviewedParaformIdCount || 0).toLocaleString() + " connected employers · as of " + day;
+    const companies = Number(snapshot.companyCount || 0);
+    const employers = Number(snapshot.reviewedParaformIdCount || 0);
+    return companies.toLocaleString() + (companies === 1 ? " company · " : " companies · ")
+      + employers.toLocaleString() + (employers === 1 ? " connected employer · as of " : " connected employers · as of ") + day;
   }
   function describe(condition, rule) {
     const f = field(condition.field);

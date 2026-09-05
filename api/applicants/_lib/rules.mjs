@@ -258,7 +258,7 @@ export function fieldCatalog() {
 export const FIELD_GROUPS = [
   { id: "school", label: "Education", note: "All education conditions must be true of the SAME school." },
   { id: "job", label: "Experience", note: "All experience conditions must be true of the SAME role." },
-  { id: "employment", label: "Employment membership", note: "Checks every known employer using reviewed company IDs." },
+  { id: "employment", label: "Employer lists", note: "Checks every available role in their work history." },
   { id: "applicant", label: "The person", note: "" },
   { id: "application", label: "The application", note: "Works even for applicants with no profile history." },
 ];
