@@ -2,6 +2,19 @@ const ACTIVE_GENERATION_STATUSES = new Set([
   "queued", "collecting", "extracting", "strategizing", "validating", "rendering", "archiving",
 ]);
 
+export function commandConflictResolution({ status, code } = {}) {
+  if (Number(status) !== 409 || code !== "stale_pair_version") return { refresh: false };
+  return {
+    refresh: true,
+    code: "state_conflict_refreshed",
+    message: "This item changed, so the latest version was refreshed; please try again.",
+  };
+}
+
+export function commandSuccessMessage(result) {
+  return result?.duplicate === true ? "Already recorded; review item resolved." : "";
+}
+
 export function listScopeIsCurrent(scope, state) {
   return scope.sequence === state.listSequence && scope.page === state.page && scope.query === state.query;
 }

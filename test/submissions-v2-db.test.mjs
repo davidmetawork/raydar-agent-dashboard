@@ -491,6 +491,195 @@ test("the API principal can attest an exact review role without broader offered-
   }
 });
 
+test("the API principal closes an all-existing source binding as an audited duplicate without pair work", async () => {
+  const prior = await readRuntimeControls(sql);
+  const candidateId = `api-duplicate-candidate-${randomUUID()}`;
+  const roleId = `api-duplicate-role-${randomUUID()}`;
+  const priorSignalId = randomUUID();
+  const signalId = randomUUID();
+  const pairId = randomUUID();
+  const priorEventId = `api-duplicate-prior-${randomUUID()}`;
+  const duplicateEventId = `api-duplicate-source-${randomUUID()}`;
+  const idempotencyKey = randomUUID();
+  const note = "Confirmed this source maps to the already-recorded first response.";
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable API-principal duplicate-disposition regression",
+      ui: true, ingestion: true, generation: prior.generation_enabled, masterInbox: true,
+      curated: prior.curated_enabled,
+    }, sql);
+    await sql`
+      insert into submissions_v2.candidate_index(
+        candidate_user_id, display_name, normalized_name, search_key, active,
+        paraform_profile_url, last_confirmed_at, source_digest
+      ) values (
+        ${candidateId}, 'Duplicate Recovery Candidate', 'duplicate recovery candidate', 'duplicate recovery candidate', true,
+        ${`https://www.paraform.com/candidates?candidate=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url, last_confirmed_at, source_digest
+      ) values (
+        ${roleId}, 'Duplicate Recovery Company', 'Duplicate Recovery Engineer', 'duplicate recovery company duplicate recovery engineer', true,
+        ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.source_events(
+        id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+        direction, received_at, content_digest, processing_state, idempotency_key
+      ) values (
+        ${priorSignalId}, 'email', 'submissions.email_reply.v1', ${priorEventId}, 'master_inbox', 'mailbox-test',
+        ${`message-${priorEventId}`}, 'inbound', clock_timestamp(), ${digest(priorSignalId)}, 'resolved', ${`source:${priorSignalId}`}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.candidate_role_pairs(
+        id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+        original_signal_at, role_state, submission_status
+      ) values (
+        ${pairId}, ${candidateId}, ${roleId}, ${priorSignalId}, 'interested', 'preparing_resume',
+        clock_timestamp(), 'active', 'none'
+      )
+    `;
+    await sql`
+      insert into submissions_v2.first_response_claims(
+        candidate_user_id, role_id, event_id, source_family, signal_id, committed_at
+      ) values (${candidateId}, ${roleId}, ${priorEventId}, 'email', ${priorSignalId}, clock_timestamp())
+    `;
+    await sql`
+      insert into submissions_v2.source_events(
+        id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+        direction, received_at, content_digest, processing_state, safe_error_code,
+        safe_error_detail, idempotency_key, envelope
+      ) values (
+        ${signalId}, 'email', 'submissions.email_reply.v1', ${duplicateEventId}, 'master_inbox', 'mailbox-test',
+        ${`message-${duplicateEventId}`}, 'inbound', clock_timestamp(), ${digest(signalId)}, 'needs_role',
+        'role_unclear', 'The exact offered role was not present in the source contract.',
+        ${`source:${signalId}`}, ${sql.json({ candidate_resolution: { candidate_user_id: candidateId } })}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail)
+      values (${signalId}, 'role_unclear', 'Select the exact role confirmed from the source email.')
+    `;
+    const beforePair = await sql`
+      select id, intent_state, workflow_state, state_version, submission_status, first_signal_id
+        from submissions_v2.candidate_role_pairs where id=${pairId}
+    `;
+    const beforeClaim = await sql`
+      select candidate_user_id, role_id, event_id, source_family, signal_id, committed_at, released_at
+        from submissions_v2.first_response_claims where candidate_user_id=${candidateId} and role_id=${roleId}
+    `;
+    const apiDatabase = {
+      begin: (work) => sql.begin(async (apiSql) => {
+        await apiSql.unsafe("set local role submissions_v2_api");
+        return work(apiSql);
+      }),
+    };
+    const repository = createRepository({ sql: apiDatabase });
+    const result = await repository.bindUnresolvedSignal({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, signalId,
+      candidateId, roleIds: [roleId], note,
+    });
+    assert.deepEqual(result, {
+      signal_id: signalId, candidate_id: candidateId, role_ids: [roleId],
+      duplicate: true, existing_pair_ids: [pairId], job_id: null,
+    });
+    const replay = await repository.bindUnresolvedSignal({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, signalId,
+      candidateId, roleIds: [roleId], note,
+    });
+    assert.deepEqual(replay, { ...result, replay: true });
+    assert.deepEqual(await sql`
+      select id, intent_state, workflow_state, state_version, submission_status, first_signal_id
+        from submissions_v2.candidate_role_pairs where id=${pairId}
+    `, beforePair);
+    assert.deepEqual(await sql`
+      select candidate_user_id, role_id, event_id, source_family, signal_id, committed_at, released_at
+        from submissions_v2.first_response_claims where candidate_user_id=${candidateId} and role_id=${roleId}
+    `, beforeClaim);
+    assert.equal((await sql`
+      select processing_state from submissions_v2.source_events where id=${signalId}
+    `)[0].processing_state, "ignored_later");
+    const review = (await sql`
+      select action_state, resolved_by, resolution_note
+        from submissions_v2.review_items where unresolved_signal_id=${signalId}
+    `)[0];
+    assert.deepEqual(review, { action_state: "resolved", resolved_by: "recruiter@raydar.xyz", resolution_note: note });
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.source_offered_roles
+       where signal_id=${signalId} and role_id=${roleId}
+    `)[0].count, 1);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.jobs where subject_id=${signalId}::text
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.signal_role_decisions where signal_id=${signalId}
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.pair_signal_links where signal_id=${signalId}
+    `)[0].count, 0);
+
+    const mixedRoleId = `api-duplicate-mixed-role-${randomUUID()}`;
+    const mixedSignalId = randomUUID();
+    await sql`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url, last_confirmed_at, source_digest
+      ) values (
+        ${mixedRoleId}, 'Duplicate Recovery Company', 'Second Exact Role', 'duplicate recovery company second exact role', true,
+        ${`https://www.paraform.com/browse?role=${mixedRoleId}`}, clock_timestamp(), ${digest(mixedRoleId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.source_events(
+        id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+        direction, received_at, content_digest, processing_state, safe_error_code,
+        safe_error_detail, idempotency_key, envelope
+      ) values (
+        ${mixedSignalId}, 'email', 'submissions.email_reply.v1', ${`api-duplicate-mixed-${randomUUID()}`}, 'master_inbox', 'mailbox-test',
+        ${`message-${mixedSignalId}`}, 'inbound', clock_timestamp(), ${digest(mixedSignalId)}, 'needs_role',
+        'role_unclear', 'The exact offered role was not present in the source contract.',
+        ${`source:${mixedSignalId}`}, ${sql.json({ candidate_resolution: { candidate_user_id: candidateId } })}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail)
+      values (${mixedSignalId}, 'role_unclear', 'Select the exact role confirmed from the source email.')
+    `;
+    await assert.rejects(
+      repository.bindUnresolvedSignal({
+        actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), signalId: mixedSignalId,
+        candidateId, roleIds: [roleId, mixedRoleId], note,
+      }),
+      (error) => error?.code === "mixed_existing_pairs",
+    );
+    assert.equal((await sql`
+      select processing_state from submissions_v2.source_events where id=${mixedSignalId}
+    `)[0].processing_state, "needs_role");
+    assert.equal((await sql`
+      select action_state from submissions_v2.review_items where unresolved_signal_id=${mixedSignalId}
+    `)[0].action_state, "open");
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.source_offered_roles where signal_id=${mixedSignalId}
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.first_response_claims
+       where candidate_user_id=${candidateId} and role_id=${mixedRoleId}
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.jobs where subject_id=${mixedSignalId}::text
+    `)[0].count, 0);
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore controls after API-principal duplicate-disposition regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+});
+
 test("a multi-role reply releases unmentioned roles for their later first response", async () => {
   const repository = createRepository({ sql });
   const prior = await readRuntimeControls(sql);

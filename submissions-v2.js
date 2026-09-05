@@ -1,6 +1,6 @@
 "use strict";
 
-import { listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "/submissions-v2-ui-state.mjs";
+import { commandConflictResolution, commandSuccessMessage, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -116,6 +116,14 @@ function toast(message, error = false) {
   node.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { node.hidden = true; }, 6000);
+}
+
+function clearToast() {
+  const node = $("toast");
+  clearTimeout(toast.timer);
+  node.textContent = "";
+  node.className = "toast";
+  node.hidden = true;
 }
 
 async function request(path, options = {}) {
@@ -526,11 +534,15 @@ function updateReviewConfirmState() {
 
 async function runReviewAction(action, input, pendingLabel) {
   const button = $("dialog-confirm");
+  clearToast();
   if (button) { button.disabled = true; button.textContent = pendingLabel; }
   try {
-    await command(action, input);
+    const result = await command(action, input);
+    clearToast();
     closeDialog();
-    await Promise.all([loadCounts(), loadRows()]);
+    await Promise.all([loadCounts(), loadRows({ refresh: true })]);
+    const message = commandSuccessMessage(result);
+    if (message) toast(message);
   } catch (error) {
     if (button && !$("modal").hidden) { button.disabled = false; button.textContent = button.dataset.label || "Try again"; }
     toast(error.message, true);
@@ -826,12 +838,11 @@ async function command(action, input = {}) {
   try {
     return await request("/api/submissions-v2/command", { method: "POST", body: JSON.stringify({ action, ...input }) });
   } catch (error) {
-    if (error.status === 409) {
+    const conflict = commandConflictResolution(error);
+    if (conflict.refresh) {
       await Promise.allSettled([loadCounts(), loadRows({ refresh: true })]);
-      if (error.code !== "resume_regeneration_in_progress") {
-        error.message = "This item changed, so the latest version was refreshed; please try again.";
-        error.code = "state_conflict_refreshed";
-      }
+      error.message = conflict.message;
+      error.code = conflict.code;
     }
     throw error;
   }
