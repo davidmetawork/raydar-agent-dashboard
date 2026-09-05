@@ -1,0 +1,1136 @@
+/* Applicants Rules is deliberately a quieter surface than the review queue.
+   Every selector is scoped to the Rules view or its editor overlay so this
+   stylesheet cannot restyle applicant cards, profile drawers, or the shell. */
+
+#rulesView {
+  color: var(--ink);
+}
+
+#rulesView button,
+#ruleEditor button,
+#rulesView select,
+#ruleEditor select,
+#ruleEditor input,
+#ruleEditor textarea {
+  font: inherit;
+}
+
+#rulesView button,
+#ruleEditor button,
+#ruleEditor summary,
+#ruleEditor select,
+#ruleEditor input,
+#ruleEditor textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+#rulesView button:focus-visible,
+#ruleEditor button:focus-visible,
+#ruleEditor summary:focus-visible,
+#ruleEditor select:focus-visible,
+#ruleEditor input:focus-visible,
+#ruleEditor textarea:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--orange) 38%, transparent);
+  outline-offset: 2px;
+}
+
+/* ── saved rules ─────────────────────────────────────────────────────── */
+
+#rulesView .rules-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 8px 1px 15px;
+}
+
+#rulesView .rules-head .grow {
+  min-width: 0;
+}
+
+#rulesView .rules-eyebrow {
+  margin: 0 0 6px;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+#rulesView .rules-head h2 {
+  margin: 0;
+  font-family: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 22px;
+  font-weight: 680;
+  letter-spacing: -.035em;
+  line-height: 1.1;
+}
+
+#rulesView .rules-head p {
+  margin: 6px 0 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+#rulesView .rules-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+#rulesView button.primary,
+#ruleEditor button.primary {
+  min-height: 36px;
+  border: 1px solid var(--ink);
+  border-radius: 9px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  transition: background .14s ease, border-color .14s ease, opacity .14s ease;
+}
+
+#rulesView button.primary:hover:not(:disabled),
+#ruleEditor button.primary:hover:not(:disabled) {
+  border-color: #39352c;
+  background: #39352c;
+  filter: none;
+  transform: none;
+}
+
+#rulesView button.primary:disabled,
+#ruleEditor button.primary:disabled {
+  cursor: not-allowed;
+  opacity: .42;
+}
+
+#rulesView button.ghost,
+#ruleEditor button.ghost {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 650;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+
+#rulesView button.ghost:hover,
+#ruleEditor button.ghost:hover {
+  border-color: #cfc7b8;
+  background: #fdfcf9;
+  color: var(--ink);
+  filter: none;
+  transform: none;
+}
+
+#rulesView .rules-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 38px;
+  margin: 0 0 12px;
+  padding: 10px 13px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .54);
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+#rulesView .rules-pause {
+  flex: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  padding: 1px 0;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+#rulesView .rules-pause:hover {
+  border-bottom-color: currentColor;
+  color: var(--ink);
+}
+
+#rulesView .rule-run-result {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfaf6;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#rulesView .rule-run-result button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#rulesView .rules-list {
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(20, 16, 8, .025);
+}
+
+#rulesView .rule-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 17px 18px;
+  background: #fff;
+}
+
+#rulesView .rule-card:first-child { border-radius: 13px 13px 0 0; }
+#rulesView .rule-card:last-child { border-radius: 0 0 13px 13px; }
+#rulesView .rule-card:only-child { border-radius: 13px; }
+
+#rulesView .rule-card + .rule-card {
+  border-top: 1px solid var(--line-2);
+}
+
+#rulesView .rule-card.paused {
+  background: #fdfcf9;
+}
+
+#rulesView .rule-main {
+  min-width: 0;
+  flex: 1;
+}
+
+#rulesView .rule-title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#rulesView .rule-name {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink);
+  font-family: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -.015em;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#rulesView .rule-act {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 20px;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: .055em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+#rulesView .rule-act.interview {
+  background: var(--good-bg);
+  color: var(--good);
+}
+
+#rulesView .rule-act.pass {
+  background: var(--muted-bg);
+  color: var(--ink-2);
+}
+
+#rulesView .rule-summary {
+  margin: 8px 0 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+#rulesView .rule-and {
+  display: inline-block;
+  margin: 0 4px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+#rulesView .rule-approx {
+  margin-left: 2px;
+  color: var(--warn);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+#rulesView .rule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  margin-top: 9px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+#rulesView .rule-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+}
+
+#rulesView .rule-state {
+  min-height: 31px;
+  width: 132px;
+  max-width: 132px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 25px 5px 9px;
+  background-color: #fff;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+#rulesView .rule-edit {
+  min-height: 31px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 10px;
+  background: #fff;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+#rulesView .rule-edit:hover,
+#rulesView .rule-state:hover {
+  border-color: #cfc7b8;
+  color: var(--ink);
+}
+
+#rulesView .rule-more {
+  position: relative;
+  flex: none;
+}
+
+#rulesView .rule-more > summary {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 13px;
+  letter-spacing: 1px;
+  line-height: 1;
+  list-style: none;
+}
+
+#rulesView .rule-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+#rulesView .rule-more > summary:hover,
+#rulesView .rule-more[open] > summary {
+  border-color: var(--line);
+  background: #fbfaf6;
+  color: var(--ink);
+}
+
+#rulesView .rule-menu {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 5px);
+  right: 0;
+  display: grid;
+  width: 155px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(20, 16, 8, .13);
+}
+
+#rulesView .rule-menu button {
+  border: 0;
+  padding: 9px 10px;
+  background: #fff;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: left;
+}
+
+#rulesView .rule-menu button:hover {
+  background: #fbfaf6;
+  color: var(--ink);
+}
+
+#rulesView .rule-menu .danger:hover {
+  color: var(--bad);
+}
+
+#rulesView .rules-empty {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  border: 1px dashed #d9d1c2;
+  border-radius: 13px;
+  padding: 34px 24px;
+  background: rgba(255, 255, 255, .58);
+  color: var(--ink-2);
+  text-align: center;
+}
+
+#rulesView .rules-empty-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--ink-3);
+  font-size: 16px;
+}
+
+#rulesView .rules-empty h3 {
+  margin: 2px 0 0;
+  font-family: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -.015em;
+}
+
+#rulesView .rules-empty p {
+  max-width: 48ch;
+  margin: 0 0 8px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+#rulesView .rules-help {
+  margin: 14px 2px 0;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+#rulesView .rules-help summary {
+  width: max-content;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+#rulesView .rules-help p {
+  max-width: 78ch;
+  margin: 8px 0 0;
+}
+
+#rulesView .rules-help b {
+  color: var(--ink-2);
+}
+
+/* ── rule editor ─────────────────────────────────────────────────────── */
+
+#ruleEditor.redit {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  overflow: hidden;
+  background: rgba(22, 20, 15, .42);
+}
+
+#ruleEditor.redit.on {
+  display: flex;
+}
+
+#ruleEditor.redit.embedded {
+  position: absolute;
+  right: 0;
+  bottom: auto;
+  left: 0;
+}
+
+#ruleEditor .redit-card {
+  display: flex;
+  width: min(720px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(231, 227, 213, .88);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 70px -22px rgba(20, 16, 8, .42);
+}
+
+#ruleEditor .redit-head {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 21px 16px;
+  border-bottom: 1px solid var(--line-2);
+}
+
+#ruleEditor .rules-eyebrow {
+  margin: 0 0 6px;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+#ruleEditor h3,
+#ruleEditor h4 {
+  margin: 0;
+  font-family: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: -.025em;
+}
+
+#ruleEditor .redit-head h3 {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+#ruleEditor .redit-close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+#ruleEditor .redit-close:hover {
+  border-color: var(--line);
+  background: #fbfaf6;
+  color: var(--ink);
+}
+
+#ruleEditor .redit-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 18px 21px 22px;
+}
+
+#ruleEditor .rule-step + .rule-step {
+  margin-top: 22px;
+}
+
+#ruleEditor .rule-step-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#ruleEditor .rule-step-title > span {
+  display: grid;
+  width: 19px;
+  height: 19px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+#ruleEditor .rule-step h4 {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#ruleEditor .hint {
+  margin: 5px 0 11px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+#ruleEditor .rule-start {
+  margin: 11px 0;
+  padding: 13px;
+  border: 1px dashed #d8d0c2;
+  border-radius: 10px;
+  background: #fbfaf6;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#ruleEditor .cgroup {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fdfcf9;
+}
+
+#ruleEditor .cgroup h4 {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+#ruleEditor .cgroup .note {
+  margin: 3px 0 10px;
+  color: var(--warn);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+#ruleEditor .cond {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.15fr) minmax(100px, .82fr) minmax(150px, 1.35fr) 30px;
+  gap: 7px;
+  align-items: start;
+}
+
+#ruleEditor .cond + .cond {
+  margin-top: 8px;
+}
+
+#ruleEditor select,
+#ruleEditor input[type="text"],
+#ruleEditor textarea {
+  width: 100%;
+  min-height: 35px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+#ruleEditor select {
+  cursor: pointer;
+}
+
+#ruleEditor input::placeholder,
+#ruleEditor textarea::placeholder {
+  color: #aaa496;
+}
+
+#ruleEditor textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+#ruleEditor .cond .v {
+  min-width: 0;
+}
+
+#ruleEditor .cond .x {
+  display: grid;
+  width: 30px;
+  height: 35px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0;
+  background: #fff;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+#ruleEditor .cond .x:hover {
+  border-color: #edc1c2;
+  background: #fffafa;
+  color: var(--bad);
+}
+
+#ruleEditor .multi {
+  max-height: 132px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  background: #fff;
+  scrollbar-color: #c7c0b3 transparent;
+  scrollbar-width: thin;
+}
+
+#ruleEditor .multi[hidden] {
+  display: none;
+}
+
+#ruleEditor .multi label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 27px;
+  border-radius: 5px;
+  padding: 3px 5px;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 11.5px;
+  line-height: 1.25;
+}
+
+#ruleEditor .multi label:hover {
+  background: #f7f4ed;
+  color: var(--ink);
+}
+
+#ruleEditor .multi input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+#ruleEditor .picksearch {
+  margin: 0 0 5px;
+}
+
+#ruleEditor .pickmore {
+  padding: 5px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+#ruleEditor .addcond {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 10px;
+  border: 1px dashed #cbc3b4;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+#ruleEditor .addcond:hover {
+  border-color: var(--ink-3);
+  background: #fbfaf6;
+  color: var(--ink);
+}
+
+#ruleEditor .rule-outcomes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#ruleEditor .rule-outcome {
+  display: grid;
+  gap: 2px;
+  min-height: 60px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 11px;
+  background: #fff;
+  color: var(--ink-2);
+  cursor: pointer;
+  text-align: left;
+}
+
+#ruleEditor .rule-outcome b {
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+#ruleEditor .rule-outcome span {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+#ruleEditor .rule-outcome:hover {
+  border-color: #cfc7b8;
+  background: #fdfcf9;
+}
+
+#ruleEditor .rule-outcome.selected {
+  border-color: var(--ink);
+  background: #f7f5ef;
+}
+
+#ruleEditor .preview {
+  margin-top: 16px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfaf6;
+  color: var(--ink-2);
+}
+
+#ruleEditor .preview-error {
+  border-color: #edc1c2;
+  background: #fffafa;
+  color: var(--bad);
+}
+
+#ruleEditor .preview-error .sub {
+  color: var(--bad);
+}
+
+#ruleEditor .preview-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--ink);
+}
+
+#ruleEditor .preview-heading .n {
+  font-size: 21px;
+  font-weight: 720;
+  letter-spacing: -.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+#ruleEditor .preview-heading span:last-child {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+#ruleEditor .preview .sub {
+  margin-top: 5px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+#ruleEditor .skips {
+  margin-top: 9px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+#ruleEditor .skips summary {
+  cursor: pointer;
+}
+
+#ruleEditor .skips p {
+  margin: 5px 0 0;
+}
+
+#ruleEditor .samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+#ruleEditor .samples span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 10.5px;
+}
+
+#ruleEditor .rule-settings {
+  margin-top: 18px;
+  border-top: 1px solid var(--line-2);
+  padding-top: 14px;
+}
+
+#ruleEditor .rule-settings > summary {
+  width: max-content;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+#ruleEditor .rule-settings-body {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+#ruleEditor .rule-settings-body > label {
+  margin-top: 7px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+
+#ruleEditor .rule-settings-body > label span {
+  color: var(--ink-3);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+#ruleEditor .rule-settings-body .hint {
+  margin: 0;
+}
+
+#ruleEditor #ruleScopeChoices {
+  margin-top: 2px;
+}
+
+#ruleEditor .redit-foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 21px;
+  border-top: 1px solid var(--line-2);
+  background: #fff;
+}
+
+#ruleEditor .redit-foot-note {
+  min-width: 0;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+#ruleEditor .redit-err {
+  display: block;
+  margin-top: 3px;
+  color: var(--bad);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+#ruleEditor .redit-foot .spacer {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+#ruleEditor .hits-list {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+#ruleEditor .hits-list li {
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line-2);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#ruleEditor .hits-list li:last-child {
+  border-bottom: 0;
+}
+
+#ruleEditor .hits-list b {
+  color: var(--ink);
+}
+
+#ruleEditor .hits-list .why {
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+/* History uses the same card without the editor's head/body wrappers. */
+#ruleEditor .redit-card > h3 {
+  flex: none;
+  padding: 20px 21px 0;
+}
+
+#ruleEditor .redit-card > .hint {
+  flex: none;
+  margin: 5px 21px 14px;
+}
+
+#ruleEditor .redit-card > .hits-list {
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0 21px;
+}
+
+#ruleEditor .redit-card > .rules-empty {
+  margin: 0 21px;
+}
+
+#ruleEditor .redit-card > .redit-foot {
+  margin-top: auto;
+}
+
+#ruleEditor .rules-empty {
+  border: 1px dashed #d9d1c2;
+  border-radius: 10px;
+  padding: 18px;
+  background: #fbfaf6;
+  color: var(--ink-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+#ruleEditor .rules-empty p {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  #rulesView .rules-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 13px;
+  }
+
+  #rulesView .rules-actions {
+    width: 100%;
+  }
+
+  #rulesView .rules-actions button {
+    flex: 1;
+  }
+
+  #rulesView .rules-context {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  #rulesView .rule-card {
+    flex-direction: column;
+    gap: 13px;
+    padding: 15px;
+  }
+
+  #rulesView .rule-controls {
+    width: 100%;
+  }
+
+  #rulesView .rule-state {
+    flex: 1;
+    max-width: none;
+  }
+
+  #ruleEditor.redit {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  #ruleEditor .redit-card {
+    width: 100%;
+    max-height: min(92%, 760px);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 16px 16px 0 0;
+  }
+
+  #ruleEditor.redit.embedded {
+    align-items: flex-end;
+  }
+
+  #ruleEditor .redit-head,
+  #ruleEditor .redit-body,
+  #ruleEditor .redit-foot {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  #ruleEditor .cond {
+    grid-template-columns: minmax(0, 1fr) 30px;
+  }
+
+  #ruleEditor .cond .f,
+  #ruleEditor .cond .o,
+  #ruleEditor .cond .v {
+    grid-column: 1;
+  }
+
+  #ruleEditor .cond .x {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  #ruleEditor .rule-outcomes {
+    grid-template-columns: 1fr;
+  }
+
+  #ruleEditor .redit-foot {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  #ruleEditor .redit-foot .spacer {
+    width: 100%;
+  }
+
+  #ruleEditor .redit-foot .spacer button {
+    flex: 1;
+  }
+}
+
+/* Values stay concise until the reviewer chooses to change them. */
+#ruleEditor .cond .rule-fixed-op { flex: 0 0 62px; min-width: 62px; padding-top: 10px; text-align: center; color: var(--ink-3); font-size: 12px; }
+#ruleEditor .rule-picker { border: 1px solid var(--line); border-radius: 9px; background: #fff; min-width: 0; }
+#ruleEditor .rule-picker > summary { cursor: pointer; padding: 9px 10px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+#ruleEditor .rule-picker[open] > summary { border-bottom: 1px solid var(--line-2); }
+#ruleEditor .rule-picker-body { padding: 7px; }
+#ruleEditor .rule-picker .multi { border: 0; border-radius: 0; padding: 0; }
+@media (max-width: 640px) { #ruleEditor .cond .rule-fixed-op { grid-column: 1; min-width: 0; padding: 5px 0; text-align: left; } }
+/* The host page hides its own .sub in embedded mode; preview copy still matters. */
+#ruleEditor .preview .sub { display: block; }
+#ruleFactChooser .rf-head h2 { font-family: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 21px; font-weight: 650; letter-spacing: -.025em; }
+#ruleFactChooser button.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+#ruleFactChooser button.primary:hover:not(:disabled) { background: #34312b; }
+@media (max-width: 640px) { #ruleEditor .cond .rule-fixed-op { display: none; } }

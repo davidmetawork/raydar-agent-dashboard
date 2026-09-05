@@ -24,6 +24,7 @@
     previewing: false,
     hits: null,               // { ruleId, rows } while the hits panel is open
     running: false,
+    loadError: null, previewError: null, previewSerial: 0, editorRev: 0, staleDraft: false, saving: false, returnFocus: null, scopeSelected: false, modalSerial: 0,
     lastRun: null,
   };
 
@@ -50,98 +51,6 @@
 
   /* ── styles ──────────────────────────────────────────────────────────── */
   const CSS = `
-  .rules-head { display:flex; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:16px; }
-  .rules-head .grow { flex:1; min-width:240px; }
-  .rules-head h2 { margin:0 0 4px; font-size:16px; font-weight:700; }
-  .rules-head p { margin:0; font-size:12.5px; color:var(--ink-2); line-height:1.5; max-width:64ch; }
-  .rules-actions { display:flex; gap:8px; align-items:center; }
-  .manual-run { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
-  .manual-run .note { font-size:10.5px; color:var(--ink-3); }
-  .rule-run-result { margin:-5px 0 14px; padding:10px 13px; border:1px solid var(--line); border-radius:10px;
-    background:var(--cream); color:var(--ink-2); font-size:12px; line-height:1.45; }
-  .killswitch { display:inline-flex; align-items:center; gap:8px; font-size:12px; font-weight:600;
-    border:1px solid var(--line); background:var(--card); border-radius:999px; padding:7px 13px; cursor:pointer; }
-  .killswitch.on { background:var(--bad-bg); border-color:var(--bad); color:var(--bad); }
-  .rule-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px;
-    margin-bottom:10px; box-shadow:var(--shadow); }
-  .rule-card.paused { opacity:.62; }
-  .rule-top { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-  .rule-name { font-weight:700; font-size:14.5px; }
-  .rule-act { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
-    padding:3px 9px; border-radius:999px; }
-  .rule-act.interview { background:var(--good-bg); color:var(--good); }
-  .rule-act.pass { background:var(--muted-bg); color:var(--ink-2); }
-  .rule-states { margin-left:auto; display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
-  .rule-states button { border:0; background:transparent; font:600 11.5px "Inter Variable",sans-serif;
-    padding:6px 12px; cursor:pointer; color:var(--ink-3); }
-  .rule-states button.on { background:var(--ink); color:var(--cream); }
-  .rule-states button.on[data-rule-state="live"] { background:var(--good); color:#fff; }
-  .rule-conds { margin:10px 0 0; padding:0; list-style:none; display:flex; flex-wrap:wrap; gap:6px; }
-  .rule-conds li { font-size:12px; background:var(--muted-bg); color:var(--ink-2); border-radius:7px; padding:4px 9px; }
-  .rule-conds li.approx::after { content:" ~"; color:var(--warn); font-weight:700; }
-  .rule-note { margin:9px 0 0; font-size:12.5px; color:var(--ink-2); font-style:italic; }
-  .rule-meta { margin-top:11px; padding-top:10px; border-top:1px solid var(--line-2);
-    display:flex; gap:16px; flex-wrap:wrap; font-size:11.5px; color:var(--ink-3); align-items:center; }
-  .rule-meta b { color:var(--ink-2); font-variant-numeric:tabular-nums; }
-  .rule-meta .spacer { margin-left:auto; display:flex; gap:8px; }
-  .rule-meta button { border:1px solid var(--line); background:var(--card); border-radius:8px;
-    font:600 11.5px "Inter Variable",sans-serif; padding:4px 10px; cursor:pointer; color:var(--ink-2); }
-  .rule-meta button:hover { color:var(--ink); }
-  .rule-meta button.danger:hover { color:var(--bad); border-color:var(--bad); }
-
-  .rules-empty { background:var(--card); border:1px dashed var(--line); border-radius:14px;
-    padding:34px 24px; text-align:center; color:var(--ink-2); }
-  .rules-empty h3 { margin:0 0 6px; font-size:15px; color:var(--ink); }
-  .rules-empty p { margin:0 auto 16px; font-size:13px; max-width:52ch; line-height:1.55; }
-
-  .redit { position:fixed; inset:0; background:rgba(20,16,8,.34); display:none; z-index:60;
-    align-items:flex-start; justify-content:center; padding:34px 16px; overflow:auto; }
-  .redit.on { display:flex; }
-  .redit-card { background:var(--card); border-radius:18px; width:min(720px,100%); box-shadow:0 24px 60px -20px rgba(20,16,8,.4);
-    padding:22px 24px 20px; }
-  .redit h3 { margin:0 0 3px; font-size:16px; }
-  .redit .hint { font-size:12px; color:var(--ink-3); margin:0 0 16px; }
-  .redit label { display:block; font-size:11px; font-weight:700; text-transform:uppercase;
-    letter-spacing:.06em; color:var(--ink-3); margin:0 0 5px; }
-  .redit input[type=text], .redit textarea, .redit select {
-    width:100%; border:1px solid var(--line); border-radius:9px; padding:8px 10px;
-    font:400 13px "Inter Variable",sans-serif; background:var(--cream); color:var(--ink); }
-  .redit textarea { resize:vertical; min-height:52px; }
-  .redit .row { display:flex; gap:10px; margin-bottom:14px; }
-  .redit .row > div { flex:1; }
-  .cgroup { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:10px; background:var(--cream); }
-  .cgroup h4 { margin:0 0 2px; font-size:12.5px; font-weight:700; }
-  .cgroup .note { margin:0 0 10px; font-size:11.5px; color:var(--warn); line-height:1.45; }
-  .cond { display:flex; gap:8px; align-items:flex-start; margin-bottom:8px; }
-  .cond select, .cond input { font-size:12.5px; }
-  .cond .f { flex:1.4; } .cond .o { flex:.8; } .cond .v { flex:1.6; }
-  .cond .x { border:1px solid var(--line); background:var(--card); border-radius:8px; cursor:pointer;
-    width:30px; height:34px; color:var(--ink-3); font-size:14px; flex:none; }
-  .cond .x:hover { color:var(--bad); border-color:var(--bad); }
-  .multi { border:1px solid var(--line); border-radius:9px; background:var(--cream); padding:6px; max-height:132px; overflow:auto; }
-  .multi label { display:flex; gap:7px; align-items:center; text-transform:none; letter-spacing:0;
-    font-size:12.5px; font-weight:400; color:var(--ink); margin:0; padding:3px 4px; cursor:pointer; }
-  .multi input { width:auto; }
-  .picksearch { width:100%; margin-bottom:5px; }
-  .pickmore { font-size:11.5px; color:var(--ink-3); padding:4px 4px 2px; }
-  .addcond { border:1px dashed var(--line); background:transparent; border-radius:9px; width:100%;
-    padding:8px; font:600 12px "Inter Variable",sans-serif; color:var(--ink-2); cursor:pointer; }
-  .addcond:hover { color:var(--ink); border-color:var(--ink-3); }
-  .preview { border:1px solid var(--line); border-radius:12px; padding:13px 15px; margin:14px 0 4px; background:var(--cream); }
-  .preview .n { font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; }
-  .preview .sub { font-size:12px; color:var(--ink-2); margin-top:3px; line-height:1.5; }
-  .preview .skips { font-size:11.5px; color:var(--ink-3); margin-top:6px; }
-  .preview .samples { margin-top:9px; display:flex; flex-wrap:wrap; gap:5px; }
-  .preview .samples span { font-size:11.5px; background:var(--card); border:1px solid var(--line);
-    border-radius:7px; padding:3px 8px; color:var(--ink-2); }
-  .redit-foot { display:flex; gap:9px; align-items:center; margin-top:16px; }
-  .redit-foot .spacer { margin-left:auto; display:flex; gap:9px; }
-  .redit-err { color:var(--bad); font-size:12.5px; font-weight:600; }
-  .hits-list { margin:0; padding:0; list-style:none; }
-  .hits-list li { border-bottom:1px solid var(--line-2); padding:9px 0; font-size:12.5px; }
-  .hits-list li:last-child { border-bottom:0; }
-  .hits-list .why { color:var(--ink-3); font-size:11.5px; margin-top:2px; }
-
   .reasonbar { position:fixed; left:50%; transform:translateX(-50%) translateY(10px); bottom:70px;
     background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow);
     padding:11px 14px; z-index:55; display:none; opacity:0; transition:opacity .16s ease, transform .16s ease;
@@ -179,8 +88,9 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (response.status === 409 && payload.error === "rules_changed") {
+      state.staleDraft = Boolean(state.draft);
       await load();
-      throw new Error("Somebody else changed the rules while you were editing. Reloaded — try again.");
+      throw new Error("Rules changed elsewhere; close and reopen this rule to review the latest version.");
     }
     if (!response.ok || payload.ok === false) throw new Error(payload.detail || payload.error || "Request failed.");
     return payload;
@@ -199,6 +109,7 @@
     const page = pageState();
     if (page && payload.generation) page.generation = payload.generation;
     state.loaded = true;
+    state.loadError = null;
   }
 
   /* ── rendering the list ──────────────────────────────────────────────── */
@@ -219,119 +130,137 @@
     return f.label + " " + (words[condition.op] || condition.op) + " " + value;
   }
 
+  const stateLabel = (value) => ({ live: "Ready", watching: "Preview only", off: "Off" }[value] || "Off");
+  function stateOptions(value) {
+    return ["live", "watching", "off"].map((item) => '<option value="' + item + '"' +
+      (value === item ? " selected" : "") + '>' + stateLabel(item) + '</option>').join("");
+  }
+  function scopeLabel(rule) {
+    const ids = rule.scope?.roleIds || [];
+    if (!ids.length) return "All roles";
+    const names = Object.fromEntries(roleOptions());
+    return ids.map((id) => names[id] || rule.labels?.[id] || id).join(", ");
+  }
   function ruleCardHtml(rule) {
     const stats = state.stats[rule.id] || {};
-    const paused = state.pausedAll || rule.state === "off";
-    const conds = (rule.conditions || []).map((c) => {
-      const f = field(c.field);
-      return '<li class="' + (f && f.approximate ? "approx" : "") + '">' + enc(describe(c, rule)) + "</li>";
-    }).join("");
-    const scope = (rule.scope && rule.scope.roleIds && rule.scope.roleIds.length)
-      ? rule.scope.roleIds.length + " role" + (rule.scope.roleIds.length === 1 ? "" : "s")
-      : "All roles";
-    return '<div class="rule-card' + (paused ? " paused" : "") + '">' +
-      '<div class="rule-top">' +
-        '<span class="rule-name">' + enc(rule.name) + "</span>" +
-        '<span class="rule-act ' + enc(rule.action) + '">' + (rule.action === "interview" ? "Interview" : "Pass") + "</span>" +
-        '<span class="rule-states">' +
-          ["off", "watching", "live"].map((s) =>
-            '<button data-rule-state="' + s + '" data-id="' + enc(rule.id) + '" class="' + (rule.state === s ? "on" : "") + '">' +
-            (s === "off" ? "Off" : s === "watching" ? "Watching" : "Live") + "</button>").join("") +
-        "</span>" +
-      "</div>" +
-      '<ul class="rule-conds">' + conds + "</ul>" +
-      (rule.note ? '<p class="rule-note">' + enc(rule.note) + "</p>" : "") +
-      '<div class="rule-meta">' +
-        "<span>" + enc(scope) + "</span>" +
-        "<span>Actioned <b>" + (stats.fired || 0) + "</b></span>" +
-        (rule.state === "watching" ? "<span>Would have actioned <b>" + (stats.wouldFire || 0) + "</b></span>" : "") +
-        "<span>" + (stats.firedAt ? "Last fired " + enc(window.relTime ? window.relTime(stats.firedAt) : stats.firedAt) : "Never fired") + "</span>" +
-        '<span class="spacer">' +
-          '<button data-rule-hits="' + enc(rule.id) + '">Last 10 it hit</button>' +
-          '<button data-rule-edit="' + enc(rule.id) + '">Edit</button>' +
-          '<button data-rule-dupe="' + enc(rule.id) + '">Duplicate</button>' +
-          '<button class="danger" data-rule-del="' + enc(rule.id) + '">Delete</button>' +
-        "</span>" +
-      "</div>" +
-    "</div>";
+    const id = enc(rule.id);
+    const conditions = (rule.conditions || []).map((condition) => enc(describe(condition, rule)) +
+      (field(condition.field)?.approximate ? ' <span class="rule-approx">' + (field(condition.field)?.kind === 'text' ? 'text match' : 'estimate') + '</span>' : "")).join(' <span class="rule-and">and</span> ');
+    return '<article class="rule-card' + (rule.state === "off" ? ' paused' : '') + '">' +
+      '<div class="rule-main"><div class="rule-title-line"><span class="rule-act ' + enc(rule.action) + '">' +
+      (rule.action === "interview" ? 'Interview' : 'Pass') + '</span><h3 class="rule-name">' + enc(rule.name) + '</h3></div>' +
+      '<p class="rule-summary">' + conditions + '</p><div class="rule-meta"><span>' + enc(scopeLabel(rule)) + '</span><span>' +
+      Number(stats.fired || 0).toLocaleString() + ' decisions' +
+      (rule.state === "watching" ? ' · ' + Number(stats.wouldFire || 0).toLocaleString() + ' preview matches' : '') +
+      '</span></div></div><div class="rule-controls"><select class="rule-state" data-rule-mode="' + id +
+      '" aria-label="Run mode for ' + enc(rule.name) + '">' + stateOptions(rule.state) + '</select>' +
+      '<button class="rule-edit" data-rule-edit="' + id + '" aria-label="Edit ' + enc(rule.name) + '">Edit</button>' +
+      '<details class="rule-more"><summary aria-label="More options for ' + enc(rule.name) + '">•••</summary><div class="rule-menu">' +
+      '<button data-rule-hits="' + id + '">View history</button><button data-rule-dupe="' + id + '">Duplicate rule</button>' +
+      '<button class="danger" data-rule-del="' + id + '">Delete rule</button></div></details></div></article>';
   }
 
   function render() {
     const host = el("rulesView");
     if (!host) return;
-    if (!state.loaded) { host.innerHTML = '<div class="empty">Loading rules…</div>'; return; }
-
+    if (!state.loaded) {
+      host.innerHTML = '<div class="rules-empty" role="status">' + (state.loadError ?
+        '<h3>Rules couldn’t load</h3><p>' + enc(state.loadError) + '</p><button class="ghost" id="rulesRetry">Try again</button>' : 'Loading rules…') + '</div>';
+      if (el("rulesRetry")) el("rulesRetry").onclick = () => window.RaydarRules.show();
+      return;
+    }
     const live = state.rules.filter((r) => r.state === "live").length;
     const watching = state.rules.filter((r) => r.state === "watching").length;
-    const pending = typeof pendingRows === "function" ? pendingRows().length : 0;
+    const pending = pageState()?.snapshot && typeof pendingRows === "function" ? pendingRows().length : null;
     const result = state.lastRun;
     const skipped = Object.values(result?.skipped || {}).reduce((sum, n) => sum + Number(n || 0), 0);
     const resultText = !result ? "" : result.parked
-      ? "Last run did not make decisions: " + result.parked.replaceAll("_", " ") + "."
-      : "Last run checked " + Number(result.considered || result.pending || 0).toLocaleString()
-        + " candidates, made " + Number(result.decided || 0).toLocaleString()
-        + " decisions, and skipped " + skipped.toLocaleString() + ".";
-    const head =
-      '<div class="rules-head">' +
-        '<div class="grow">' +
-          "<h2>Rules run only when you press this button</h2>" +
-          "<p>Run rules now checks every undecided applicant in the published review queue in one pass. A Live rule can press Interview or Pass; a Watching rule only counts matches. " +
-          "It includes every tier and never overrules a decision a person already made. " +
-          "<b>Some applicants have no work or education history in the provider profile</b> — " +
-          "history conditions skip them, while application conditions still work.</p>" +
-        "</div>" +
-        '<div class="rules-actions">' +
-          '<button class="killswitch' + (state.pausedAll ? " on" : "") + '" id="rulesPause">' +
-            (state.pausedAll ? "● All rules paused" : "Pause all rules") + "</button>" +
-          '<button class="primary" id="rulesNew">New rule</button>' +
-          '<div class="manual-run"><button class="primary" id="rulesRun"' +
-            (state.running || state.pausedAll || (!live && !watching) ? " disabled" : "") + ">" +
-            (state.running ? "Running…" : "Run rules now") + "</button>" +
-            '<span class="note">' + pending.toLocaleString() + " pending · " + live + " live · " + watching + " watching</span></div>" +
-        "</div>" +
-      "</div>";
-
-    const body = state.rules.length
-      ? state.rules.map(ruleCardHtml).join("")
-      : '<div class="rules-empty"><h3>No rules yet</h3>' +
-        "<p>Start one from scratch, or open any applicant and use <b>Make this a rule</b> to build one " +
-        "from their real background.</p>" +
-        '<button class="primary" id="rulesNewEmpty">Create the first rule</button></div>';
-
-    host.innerHTML = head +
-      (resultText ? '<div class="rule-run-result">' + enc(resultText) + "</div>" : "") +
-      (state.pausedAll && state.rules.length
-        ? '<div class="banner danger" style="display:flex"><div>●</div><div><strong>Every rule is paused.</strong>' +
-          "<span>Nothing will be actioned when you press Run rules now until you switch this back on.</span></div></div>"
-        : "") +
-      (live && !state.pausedAll ? "" : "") +
-      body;
-
-    const pause = el("rulesPause");
-    if (pause) pause.onclick = togglePause;
-    const run = el("rulesRun");
-    if (run) run.onclick = runRules;
-    for (const id of ["rulesNew", "rulesNewEmpty"]) {
-      const button = el(id);
-      if (button) button.onclick = () => openEditor(null);
-    }
+      ? "No decisions made: " + result.parked.replaceAll("_", " ") + "."
+      : Number(result.considered ?? result.pending ?? 0).toLocaleString() + " applicants checked · " + Number(result.decided || 0).toLocaleString() + " decisions · " + skipped.toLocaleString() + " rule checks skipped";
+    host.innerHTML = '<div class="rules-head"><div class="grow"><div class="rules-eyebrow">Manual only</div>' +
+      '<h2>Rules</h2><p>Choose what matters. Run when you’re ready.</p></div><div class="rules-actions">' +
+      '<button class="ghost" id="rulesNew">＋ New rule</button><button class="primary" id="rulesRun"' +
+      (state.running || state.pausedAll || state.loadError || pending === null || (!live && !watching) ? ' disabled' : '') + '>' +
+      (state.running ? 'Running…' : 'Run rules now') + '</button></div></div>' +
+      '<div class="rules-context"><span>' + (pending === null ? 'Waiting for applicants…' : pending.toLocaleString() + ' awaiting review') +
+      ' <span aria-hidden="true">·</span> ' + live + ' ready' + (watching ? ' · ' + watching + ' preview only' : '') +
+      '</span><button class="rules-pause" id="rulesPause">' + (state.pausedAll ? 'Resume rules' : 'Pause all') + '</button></div>' +
+      (state.loadError ? '<div class="rule-run-result" role="alert">Rules could not refresh: ' + enc(state.loadError) + ' <button id="rulesRetry">Try again</button></div>' : '') +
+      (resultText ? '<div class="rule-run-result" role="status">' + enc(resultText) + '</div>' : '') +
+      (state.pausedAll ? '<div class="rule-run-result">All rules are paused; resume them when you’re ready to run.</div>' : '') +
+      (state.rules.length ? '<div class="rules-list">' + state.rules.map(ruleCardHtml).join('') + '</div>' :
+        '<div class="rules-empty"><div class="rules-empty-icon" aria-hidden="true">＋</div><h3>Your judgment, saved.</h3><p>Create a rule here, or choose a school, company, or other fact in an applicant’s profile.</p><button class="ghost" id="rulesNewEmpty">Create a rule</button></div>') +
+      '<details class="rules-help"><summary>How rules work</summary><p>Rules run only when you press this button: <b>Run rules now</b>. Saving or changing a rule never runs it. Ready rules make decisions; Preview only rules count matches.</p><p>Rules check all undecided applicants in the published review queue, across every tier, and leave existing decisions alone. Interview rules skip applicants already emailed for that role. Missing facts are skipped. If rules disagree, Pass takes priority.</p><p>Interview decisions enter the existing invitation process and can be held by its checks; a match is not proof of an email being sent.</p></details>';
+    el("rulesPause").onclick = togglePause;
+    el("rulesRun").onclick = runRules;
+    if (el("rulesRetry")) el("rulesRetry").onclick = () => window.RaydarRules.show();
+    for (const id of ["rulesNew", "rulesNewEmpty"]) if (el(id)) el(id).onclick = () => openEditor(null);
+    host.querySelectorAll('[data-rule-mode]').forEach((select) => {
+      select.onchange = () => setRuleState(select.dataset.ruleMode, select.value);
+    });
+    paintBadge();
   }
 
   /* ── the editor ──────────────────────────────────────────────────────── */
   function blankRule() {
-    return { id: null, name: "", note: "", action: "interview", state: "off", scope: { roleIds: [] }, conditions: [] };
+    return { id: null, name: "", note: "", action: "interview", state: "live", scope: { roleIds: [] }, conditions: [] };
   }
 
   function openEditor(rule) {
+    if (state.running) return;
+    if (!state.loaded || state.loadError) { toast("Reload Rules before editing.", true); return; }
+    state.modalSerial += 1;
+    state.returnFocus = document.activeElement;
     state.draft = rule ? JSON.parse(JSON.stringify(rule)) : blankRule();
+    state.editorRev = state.rev;
+    state.scopeSelected = Boolean(state.draft.scope?.roleIds?.length);
+    state.staleDraft = false;
     state.preview = null;
+    state.previewError = null;
     renderEditor();
-    el("ruleEditor").classList.add("on");
+    showEditor();
     schedulePreview();
   }
+  function showEditor() {
+    if (typeof ensureRoom === "function") ensureRoom();
+    el("ruleEditor").classList.add("on");
+    placeEditor();
+    if (typeof lockOuterScroll === "function") lockOuterScroll(true);
+    el("ruleEditorCard").focus();
+  }
+  function placeEditor() {
+    const overlay = el("ruleEditor");
+    if (!overlay?.classList.contains("on")) return;
+    const embedded = typeof parentWin === "function" && parentWin();
+    const band = typeof viewBand === "function" ? viewBand() : null;
+    overlay.classList.toggle("embedded", Boolean(embedded));
+    overlay.style.top = embedded && band ? band.top + 'px' : '';
+    overlay.style.height = embedded && band ? Math.max(0, band.bottom - band.top) + 'px' : '';
+  }
   function closeEditor() {
+    if (state.saving) return;
+    state.modalSerial += 1;
+    state.previewSerial += 1;
+    clearTimeout(previewTimer);
     state.draft = null;
+    state.previewing = false;
     el("ruleEditor").classList.remove("on");
+    if (typeof lockOuterScroll === "function") lockOuterScroll(false);
+    if (typeof OVERLAY !== "undefined" && OVERLAY.restoreScroll != null) {
+      try { parentWin()?.scrollTo({ top: OVERLAY.restoreScroll, behavior: "auto" }); } catch {}
+      OVERLAY.restoreScroll = null;
+    }
+    if (state.returnFocus?.isConnected && state.returnFocus.getClientRects().length) state.returnFocus.focus();
+    else (viewIsRules() ? el("rulesNew") : el("pillRules"))?.focus();
+  }
+  function suggestedName(draft) {
+    return (draft.conditions || []).map((c) => describe(c, draft)).join(' + ').slice(0, 80) || "New rule";
+  }
+  function modeSummary(value) {
+    return value === 'off' ? 'Saved as Off.' : value === 'watching' ? 'Preview only on your next run.' : 'Ready for your next manual run.';
+  }
+  function preparedDraft(draft) {
+    return { ...draft, name: draft.name.trim() || suggestedName(draft), labels: labelsForDraft(draft) };
   }
 
   /* THE PICKER RENDERS A WINDOW OVER THE DIRECTORY, AND THE FILTER SEARCHES
@@ -367,11 +296,18 @@
     return labels;
   }
 
+  function pickerSummary(condition, options) {
+    const chosen = Array.isArray(condition.value) ? condition.value : [];
+    if (!chosen.length) return 'Choose…';
+    const labels = Object.fromEntries(options);
+    return chosen.slice(0, 2).map((id) => labels[id] || nameFor(id, state.draft)).join(', ') + (chosen.length > 2 ? ' + ' + (chosen.length - 2) + ' more' : '');
+  }
+
   function valueControl(condition, index) {
     const f = field(condition.field);
     if (!f) return "";
     if (f.kind === "bool") {
-      return '<select class="v" data-ci="' + index + '" data-part="value">' +
+      return '<select class="v" data-ci="' + index + '" data-part="value" aria-label="Condition value">' +
         '<option value="true"' + (condition.value === true ? " selected" : "") + ">Yes</option>" +
         '<option value="false"' + (condition.value === false ? " selected" : "") + ">No</option></select>";
     }
@@ -388,25 +324,27 @@
       // Directories run to thousands, so a picker over one gets a filter box.
       // Chosen entries are pinned to the top so an edit never hides its own
       // selection behind a search term.
+      for (const id of chosen) if (!options.some(([key]) => key === id)) options.push([id, nameFor(id, state.draft)]);
       const big = options.length > 12;
       options.sort((a, b) => {
         const pick = chosen.includes(b[0]) - chosen.includes(a[0]);
         return pick || String(a[1]).localeCompare(String(b[1]));
       });
       pickOptions[index] = options;
-      return '<div class="v">' +
-        (big ? '<input class="picksearch" type="text" placeholder="Search all ' + options.length + '…" data-ci="' + index + '" data-part="filter">' : "") +
+      return '<div class="v"><details class="rule-picker"' + (chosen.length ? '' : ' open') + '><summary data-pick-summary="' + index + '">' +
+        enc(pickerSummary(condition, options)) + '</summary><div class="rule-picker-body">' +
+        (big ? '<input class="picksearch" type="text" placeholder="Search all ' + options.length + '…" data-ci="' + index + '" data-part="filter" aria-label="Search choices">' : "") +
         '<div class="multi" data-ci="' + index + '">' + pickListHtml(options, chosen, index, "") +
-        "</div></div>";
+        "</div></div></details></div>";
     }
     if (condition.op === "between") {
       const v = Array.isArray(condition.value) ? condition.value : ["", ""];
       return '<div class="v" style="display:flex;gap:6px">' +
-        '<input type="text" inputmode="numeric" value="' + enc(v[0]) + '" data-ci="' + index + '" data-part="from" placeholder="from">' +
-        '<input type="text" inputmode="numeric" value="' + enc(v[1]) + '" data-ci="' + index + '" data-part="to" placeholder="to"></div>';
+        '<input type="text" inputmode="numeric" value="' + enc(v[0]) + '" data-ci="' + index + '" data-part="from" placeholder="from" aria-label="From">' +
+        '<input type="text" inputmode="numeric" value="' + enc(v[1]) + '" data-ci="' + index + '" data-part="to" placeholder="to" aria-label="To"></div>';
     }
     return '<input class="v" type="text" value="' + enc(condition.value == null ? "" : condition.value) + '" ' +
-      'data-ci="' + index + '" data-part="value" placeholder="' + (f.kind === "number" || f.kind === "year" ? "number" : "text") + '">';
+      'data-ci="' + index + '" data-part="value" aria-label="Condition value" placeholder="' + (f.kind === "number" || f.kind === "year" ? "number" : "text") + '">';
   }
 
   function roleOptions() {
@@ -422,13 +360,13 @@
     const group = f ? f.group : "applicant";
     const choices = state.catalog.filter((c) => c.group === group);
     return '<div class="cond">' +
-      '<select class="f" data-ci="' + index + '" data-part="field">' +
+      '<select class="f" data-ci="' + index + '" data-part="field" aria-label="Condition field">' +
         choices.map((c) => '<option value="' + enc(c.name) + '"' + (c.name === condition.field ? " selected" : "") + ">" + enc(c.label) + "</option>").join("") +
       "</select>" +
-      '<select class="o" data-ci="' + index + '" data-part="op">' +
+      (f?.ops.length === 1 ? '<span class="o rule-fixed-op">' + enc({ any_of: 'is', contains: 'contains', is: 'is' }[condition.op] || condition.op) + '</span>' : '<select class="o" data-ci="' + index + '" data-part="op" aria-label="Comparison">' +
         (f ? f.ops : []).map((o) => '<option value="' + enc(o) + '"' + (o === condition.op ? " selected" : "") + ">" +
           enc({ any_of: "is one of", contains: "contains", is: "is", at_least: "at least", at_most: "at most", after: "after", before: "before", between: "between" }[o] || o) + "</option>").join("") +
-      "</select>" +
+      "</select>") +
       valueControl(condition, index) +
       '<button class="x" data-ci="' + index + '" data-part="remove" aria-label="Remove condition">✕</button>' +
     "</div>";
@@ -460,74 +398,75 @@
         .map((c) => '<option value="' + enc(c.name) + '">' + enc(c.label) + "</option>").join("") +
       "</optgroup>").join("");
 
+    const scoped = draft.scope?.roleIds || [];
+    const scopedMode = state.scopeSelected || scoped.length > 0;
+    const roles = roleOptions();
+    for (const id of scoped) if (!roles.some(([key]) => key === id)) roles.push([id, draft.labels?.[id] || id]);
     el("ruleEditorCard").innerHTML =
-      "<h3>" + (draft.id ? "Edit rule" : "New rule") + "</h3>" +
-      '<p class="hint">Every condition must be true for the rule to act.</p>' +
-      '<div class="row">' +
-        '<div style="flex:2"><label for="ruleName">Name</label>' +
-          '<input id="ruleName" type="text" maxlength="80" value="' + enc(draft.name) + '" placeholder="Harvard undergrads"></div>' +
-        '<div><label for="ruleAction">Then</label><select id="ruleAction">' +
-          '<option value="interview"' + (draft.action === "interview" ? " selected" : "") + ">Interview them</option>" +
-          '<option value="pass"' + (draft.action === "pass" ? " selected" : "") + ">Pass on them</option>" +
-        "</select></div>" +
-      "</div>" +
-      '<div class="row"><div><label for="ruleNote">Why this exists (optional)</label>' +
-        '<textarea id="ruleNote" maxlength="400" placeholder="So the rest of the team knows what this is for.">' + enc(draft.note) + "</textarea></div></div>" +
-      (groups || '<div class="cgroup"><p class="note" style="color:var(--ink-3)">No conditions yet — add one below.</p></div>') +
-      '<select class="addcond" id="ruleAddCond"><option value="">+ Add a condition…</option>' + addOptions + "</select>" +
+      '<div class="redit-head"><div><div class="rules-eyebrow">' + (draft.id ? 'Saved rule' : 'New rule') + '</div><h3 id="ruleEditorTitle">' +
+      (draft.id ? enc(draft.name) : 'What should we look for?') + '</h3></div><button class="redit-close" id="ruleClose" aria-label="Close rule editor">✕</button></div>' +
+      '<div class="redit-body"><section class="rule-step"><div class="rule-step-title"><span>1</span><h4>Match these conditions</h4></div><p class="hint">All conditions must match the same applicant.</p>' +
+      (groups || '<div class="rule-start">Choose a fact below to begin, such as a school or job title.</div>') +
+      '<select class="addcond" id="ruleAddCond" aria-label="Add a condition"><option value="">＋ Add a condition</option>' + addOptions + '</select></section>' +
+      '<section class="rule-step"><div class="rule-step-title"><span>2</span><h4>Choose what happens</h4></div><div class="rule-outcomes">' +
+      ['interview', 'pass'].map((action) => '<button type="button" data-draft-action="' + action + '" aria-pressed="' + (draft.action === action) + '" class="rule-outcome' + (draft.action === action ? ' selected' : '') + '"><b>' +
+      (action === 'interview' ? 'Interview' : 'Pass') + '</b><span>' + (action === 'interview' ? 'Request an invitation' : 'Move out of review') + '</span></button>').join('') + '</div></section>' +
       previewHtml() +
-      '<div class="redit-foot">' +
-        '<span class="redit-err" id="ruleErr"></span>' +
-        '<span class="spacer">' +
-          '<button class="ghost" id="ruleCancel">Cancel</button>' +
-          '<button class="primary" id="ruleSave">Save rule</button>' +
-        "</span>" +
-      "</div>";
+      '<details class="rule-settings"' + (scopedMode ? ' open' : '') + '><summary>Name, scope & settings</summary><div class="rule-settings-body">' +
+      '<label for="ruleName">Rule name</label><input id="ruleName" type="text" maxlength="80" value="' + enc(draft.name) + '" placeholder="' + enc(suggestedName(draft)) + '">' +
+      '<p class="hint">Leave blank to name it from your conditions.</p>' +
+      '<label for="ruleScopeMode">Applies to</label><select id="ruleScopeMode"><option value="all"' + (!scopedMode ? ' selected' : '') + '>All roles</option><option value="selected"' + (scopedMode ? ' selected' : '') + '>Selected roles</option></select>' +
+      '<div id="ruleScopeChoices" class="multi"' + (!scopedMode ? ' hidden' : '') + '>' + roles.map(([id,label]) => '<label><input type="checkbox" data-rule-scope="' + enc(id) + '"' + (scoped.includes(id) ? ' checked' : '') + '><span>' + enc(label) + '</span></label>').join('') + '</div>' +
+      '<label for="ruleMode">When I run rules</label><select id="ruleMode">' + stateOptions(draft.state) + '</select>' +
+      '<label for="ruleNote">Note <span>(optional)</span></label><textarea id="ruleNote" maxlength="400" placeholder="Why this rule matters">' + enc(draft.note) + '</textarea></div></details></div>' +
+      '<div class="redit-foot"><div class="redit-foot-note"><span id="ruleModeSummary">' + modeSummary(draft.state) + '</span><br>Saving never runs a rule.<span class="redit-err" id="ruleErr" role="alert"></span></div><div class="spacer"><button class="ghost" id="ruleCancel">Cancel</button><button class="primary" id="ruleSave">Save rule</button></div></div>';
 
     wireEditor();
   }
 
   function previewHtml() {
-    if (state.previewing) return '<div class="preview"><div class="sub">Checking who this would match…</div></div>';
+    if (state.previewing) return '<div class="preview" role="status"><div class="sub">Checking matches…</div></div>';
+    if (state.previewError) return '<div class="preview preview-error" role="status"><b>Preview unavailable</b><div class="sub">' + enc(state.previewError) + '</div></div>';
     const preview = state.preview;
-    if (!preview) return '<div class="preview"><div class="sub">Add a condition to see who this matches.</div></div>';
+    if (!preview) return '<div class="preview" role="status"><div class="sub">Your matching applicants will appear here.</div></div>';
     const skips = Object.entries(preview.skipped || {});
-    // Complete predicates, not fragments: "12 with not yet prewarmed" is what
-    // you get when the sentence is assembled from a shared connective.
-    const words = {
-      no_profile_history: "with no work or education history in Paraform",
-      no_facts_yet: "not yet prewarmed",
-      facts_version_stale: "awaiting a fresh prewarm",
-      unknown_field: "blocked by an unknown field",
-      rule_has_no_conditions: "skipped: the rule has no conditions",
-    };
-    return '<div class="preview">' +
-      '<div class="n">' + preview.matched + " of " + preview.considered + "</div>" +
-      '<div class="sub">applicants awaiting review would be <b>' +
-        (state.draft.action === "interview" ? "interviewed" : "passed") + "</b> by this rule.</div>" +
-      (skips.length ? '<div class="skips">Skipped: ' +
-        skips.map(([reason, count]) => count + " " + (words[reason] || reason)).join(", ") + ".</div>" : "") +
-      (preview.samples && preview.samples.length
-        ? '<div class="samples">' + preview.samples.map((s) => "<span>" + enc(s.name || s.key) + "</span>").join("") + "</div>"
-        : "") +
-    "</div>";
+    const behavior = state.draft.state === 'off' ? 'This rule is Off and will be skipped when you run rules.' : state.draft.state === 'watching' ? 'Preview only counts these matches when you run rules; it makes no decisions.' : (state.draft.action === 'interview' ? 'These applicants would get an interview request when you run rules.' : 'These applicants would be passed when you run rules.');
+    const words = { already_emailed: 'already emailed for this role', no_profile_history: 'missing work or education history', no_facts_yet: 'waiting for profile data', facts_version_stale: 'waiting for updated profile data' };
+    return '<div class="preview" role="status"><div class="preview-heading"><span class="n">' + Number(preview.matched).toLocaleString() + '</span><span>matching applicant' + (preview.matched === 1 ? '' : 's') + '</span></div>' +
+      '<div class="sub">Out of ' + Number(preview.considered).toLocaleString() + ' awaiting review in this rule’s scope. ' + behavior + '</div>' +
+      (skips.length ? '<details class="skips"><summary>' + skips.reduce((sum, [,n]) => sum + Number(n), 0).toLocaleString() + ' skipped for missing facts or other checks</summary><p>' +
+        skips.map(([reason,count]) => Number(count).toLocaleString() + ' ' + enc(words[reason] || reason.replaceAll('_', ' '))).join('<br>') + '</p></details>' : '') +
+      (preview.samples?.length ? '<div class="samples">' + preview.samples.map((sample) => '<span>' + enc(sample.name || sample.key) + '</span>').join('') + '</div>' : '') + '</div>';
   }
 
   let previewTimer = null;
   function schedulePreview() {
     clearTimeout(previewTimer);
+    state.previewSerial += 1;
+    state.preview = null;
+    state.previewError = null;
+    state.previewing = Boolean(state.draft?.conditions.length);
+    repaintPreview();
     previewTimer = setTimeout(runPreview, 420);
   }
   async function runPreview() {
     const draft = state.draft;
-    if (!draft || !draft.conditions.length || !draft.name.trim()) { state.preview = null; repaintPreview(); return; }
-    state.previewing = true;
-    repaintPreview();
+    const serial = state.previewSerial;
+    if (!draft || !draft.conditions.length) { state.previewing = false; repaintPreview(); return; }
+    if (state.scopeSelected && !draft.scope?.roleIds?.length) {
+      state.previewing = false; state.previewError = 'Choose at least one role, or use All roles.'; repaintPreview(); return;
+    }
+    const request = { op: 'preview', rule: preparedDraft(draft), ...applicantGeneration() };
     try {
-      state.preview = await api({ op: "preview", rule: draft, ...applicantGeneration() });
-    } catch { state.preview = null; }
-    state.previewing = false;
-    repaintPreview();
+      const preview = await api(request);
+      if (serial !== state.previewSerial || state.draft !== draft) return;
+      state.preview = preview;
+    } catch (error) {
+      if (serial !== state.previewSerial || state.draft !== draft) return;
+      state.previewError = error.message === 'generation_changed_refresh_required'
+        ? 'The applicant list changed; close this editor, refresh Applicants, and try again.' : error.message;
+    }
+    if (serial === state.previewSerial && state.draft === draft) { state.previewing = false; repaintPreview(); }
   }
   function repaintPreview() {
     const host = el("ruleEditorCard");
@@ -542,7 +481,7 @@
   function defaultValueFor(f) {
     if (f.kind === "bool") return true;
     if (["ids", "levels", "ranks", "tiers"].includes(f.kind)) return [];
-    if (f.kind === "number" || f.kind === "year") return 0;
+    if (f.kind === "number" || f.kind === "year") return "";
     return "";
   }
 
@@ -554,6 +493,8 @@
     if (e.target.checked && at < 0) list.push(e.target.value);
     if (!e.target.checked && at >= 0) list.splice(at, 1);
     condition.value = list;
+    const summary = el("ruleEditorCard")?.querySelector('[data-pick-summary="' + e.target.dataset.ci + '"]');
+    if (summary) summary.textContent = pickerSummary(condition, pickOptions[e.target.dataset.ci] || []);
     schedulePreview();
   };
 
@@ -567,7 +508,23 @@
     const draft = state.draft;
     el("ruleName").oninput = (e) => { draft.name = e.target.value; schedulePreview(); };
     el("ruleNote").oninput = (e) => { draft.note = e.target.value; };
-    el("ruleAction").onchange = (e) => { draft.action = e.target.value; repaintPreview(); };
+    el("ruleClose").onclick = closeEditor;
+    el("ruleMode").onchange = (e) => { draft.state = e.target.value; if (el("ruleModeSummary")) el("ruleModeSummary").textContent = modeSummary(draft.state); repaintPreview(); };
+    el("ruleScopeMode").onchange = (e) => {
+      state.scopeSelected = e.target.value === 'selected';
+      el("ruleScopeChoices").hidden = !state.scopeSelected;
+      if (e.target.value === 'all') { draft.scope = { roleIds: [] }; el("ruleScopeChoices").querySelectorAll('input').forEach((box) => { box.checked = false; }); }
+      schedulePreview();
+    };
+    el("ruleEditorCard").querySelectorAll('[data-rule-scope]').forEach((box) => { box.onchange = () => {
+      draft.scope = { roleIds: [...el("ruleScopeChoices").querySelectorAll('input:checked')].map((node) => node.dataset.ruleScope) };
+      schedulePreview();
+    }; });
+    el("ruleEditorCard").querySelectorAll('[data-draft-action]').forEach((button) => { button.onclick = () => {
+      draft.action = button.dataset.draftAction;
+      el("ruleEditorCard").querySelectorAll('[data-draft-action]').forEach((other) => { const selected = other === button; other.classList.toggle('selected', selected); other.setAttribute('aria-pressed', String(selected)); });
+      schedulePreview();
+    }; });
     el("ruleCancel").onclick = closeEditor;
     el("ruleSave").onclick = saveDraft;
     el("ruleAddCond").onchange = (e) => {
@@ -596,6 +553,7 @@
         node.onchange = (e) => {
           condition.op = e.target.value;
           if (condition.op === "between") condition.value = ["", ""];
+          else if (Array.isArray(condition.value)) condition.value = defaultValueFor(field(condition.field));
           renderEditor(); schedulePreview();
         };
       } else if (part === "pick") {
@@ -613,7 +571,7 @@
       } else if (part === "from" || part === "to") {
         node.oninput = () => {
           const inputs = card.querySelectorAll('[data-ci="' + index + '"][data-part="from"], [data-ci="' + index + '"][data-part="to"]');
-          condition.value = [Number(inputs[0].value) || 0, Number(inputs[1].value) || 0];
+          condition.value = [...inputs].map((input) => input.value.trim() === "" ? "" : Number(input.value));
           schedulePreview();
         };
       } else if (part === "value") {
@@ -621,7 +579,7 @@
         node.oninput = node.onchange = (e) => {
           const raw = e.target.value;
           condition.value = f.kind === "bool" ? raw === "true"
-            : (f.kind === "number" || f.kind === "year") ? (Number(raw) || 0)
+            : (f.kind === "number" || f.kind === "year") ? (raw.trim() === "" ? "" : Number(raw))
               : raw;
           schedulePreview();
         };
@@ -640,29 +598,38 @@
           : Object.fromEntries(roleOptions());
       for (const id of condition.value) if (source[id]) labels[id] = source[id];
     }
+    const roles = Object.fromEntries(roleOptions());
+    for (const id of draft.scope?.roleIds || []) if (roles[id]) labels[id] = roles[id];
     return labels;
   }
 
   async function saveDraft() {
+    if (state.saving || !state.draft) return;
     const error = el("ruleErr");
     error.textContent = "";
+    if (state.staleDraft) { error.textContent = 'Rules changed elsewhere; close and reopen this rule to review the latest version.'; return; }
+    if (el("ruleScopeMode").value === 'selected' && !state.draft.scope?.roleIds?.length) { error.textContent = 'Choose at least one role, or use All roles.'; return; }
+    state.saving = true;
     el("ruleSave").disabled = true;
     try {
-      await api({ op: "save", rev: state.rev, rule: { ...state.draft, labels: labelsForDraft(state.draft) } });
-      await load();
+      await api({ op: "save", rev: state.editorRev, rule: preparedDraft(state.draft) });
+      state.saving = false;
       closeEditor();
-      render();
-      toast("Rule saved.");
+      try { await load(); } catch (refreshError) { state.loadError = refreshError.message; }
+      render(); paintBadge();
+      toast("Rule saved; it will only run when you choose Run rules now.");
     } catch (e) {
       error.textContent = e.message;
     } finally {
+      state.saving = false;
       const save = el("ruleSave");
-      if (save) save.disabled = false;
+      if (save) save.disabled = state.staleDraft;
     }
   }
 
   /* ── list actions ────────────────────────────────────────────────────── */
   async function togglePause() {
+    if (state.running) return;
     try {
       await api({ op: "pauseAll", rev: state.rev, paused: !state.pausedAll });
       await load(); render();
@@ -671,12 +638,12 @@
   }
 
   async function runRules() {
-    if (state.running || state.pausedAll) return;
+    if (state.running || state.pausedAll || state.loadError || !pageState()?.snapshot) return;
     const pending = typeof pendingRows === "function" ? pendingRows().length : 0;
     const active = state.rules.filter((r) => r.state === "live" || r.state === "watching").length;
-    if (!active) { toast("There are no Live or Watching rules to run.", true); return; }
+    if (!active) { toast("There are no Ready or Preview only rules to run.", true); return; }
     if (!window.confirm("Run " + active + " active rule" + (active === 1 ? "" : "s") + " against all "
-      + pending.toLocaleString() + " pending applicants now?\n\nLive rules may record Interview or Pass decisions; Watching rules never write decisions.")) return;
+      + pending.toLocaleString() + " pending applicants now?\n\nReady rules may record Interview or Pass decisions; Preview only rules never write decisions.")) return;
     state.running = true;
     state.lastRun = null;
     render();
@@ -711,19 +678,15 @@
 
   async function setRuleState(id, next) {
     const rule = state.rules.find((r) => r.id === id);
-    if (!rule || rule.state === next) return;
-    if (next === "live" && rule.action === "interview") {
-      const stats = state.stats[id] || {};
-      const seen = rule.state === "watching" && stats.wouldFire ? " It has matched " + stats.wouldFire + " so far while watching." : "";
-      if (!window.confirm('Make "' + rule.name + '" Live?\n\nIt will be considered only the next time you press Run rules now; send-ready matches will then be queued for the invite loop.' + seen)) return;
-    }
+    if (!rule || rule.state === next || state.running) { render(); return; }
     try {
       await api({ op: "setState", rev: state.rev, id, state: next });
       await load(); render();
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { render(); toast(e.message, true); }
   }
 
   async function deleteRule(id) {
+    if (state.running) return;
     const rule = state.rules.find((r) => r.id === id);
     if (!rule || !window.confirm('Delete "' + rule.name + '"? Decisions it already made are not affected.')) return;
     try {
@@ -734,57 +697,41 @@
   }
 
   async function showHits(id) {
+    const serial = ++state.modalSerial;
     const rule = state.rules.find((r) => r.id === id);
     try {
       const payload = await api({ op: "hits", id });
+      if (serial !== state.modalSerial) return;
       state.draft = null;
       el("ruleEditorCard").innerHTML =
-        "<h3>" + enc(rule ? rule.name : "Rule") + "</h3>" +
-        '<p class="hint">The last applicants this rule actioned, newest first.</p>' +
+        '<h3 id="ruleEditorTitle">' + enc(rule ? rule.name : "Rule") + "</h3>" +
+        '<p class="hint">Recent decisions made by this rule, newest first; preview matches do not appear here.</p>' +
         (payload.hits.length
           ? '<ul class="hits-list">' + payload.hits.map((hit) =>
             "<li><b>" + enc(hit.name || hit.key) + "</b> · " + enc(hit.roleTitle || "") +
             ' <span style="color:var(--ink-3)">' + enc(hit.at ? hit.at.slice(0, 16).replace("T", " ") : "") + "</span>" +
             '<div class="why">' + enc((hit.evidence || []).map((e) => e.matched).join(" · ")) + "</div></li>").join("") + "</ul>"
-          : '<div class="rules-empty" style="padding:20px"><p>This rule has not actioned anybody yet.</p></div>') +
+          : '<div class="rules-empty" style="padding:20px"><p>This rule has not made any decisions yet.</p></div>') +
         '<div class="redit-foot"><span class="spacer"><button class="ghost" id="ruleCancel">Close</button></span></div>';
       el("ruleCancel").onclick = closeEditor;
-      el("ruleEditor").classList.add("on");
+      state.returnFocus = document.activeElement;
+      showEditor();
     } catch (e) { toast(e.message, true); }
   }
 
   /* ── "Make this a rule" from an open profile ─────────────────────────── */
-  function fromApplicant(cuId, row) {
-    const s = pageState();
-    const profile = (s && s.profiles[cuId]) || {};
-    const draft = blankRule();
-    draft.name = "";
-    const schools = (profile.education || []).filter((e) => e.schoolId);
-    if (schools.length) {
-      draft.conditions.push({ field: "school.id", op: "any_of", value: [schools[0].schoolId] });
-      draft.conditions.push({ field: "school.level", op: "any_of", value: [] });
-    }
-    const jobs = (profile.experiences || []).filter((e) => e.companyId);
-    if (jobs.length) draft.conditions.push({ field: "job.companyId", op: "any_of", value: [jobs[0].companyId] });
-    if (!draft.conditions.length && row && row.roleId) {
-      draft.conditions.push({ field: "application.roleId", op: "any_of", value: [row.roleId] });
-    }
-    // The directory is built from prewarmed profiles, so a school this person
-    // has may not be in it yet. Seed it from what we are looking at rather than
-    // showing an id the reader cannot recognise.
-    for (const school of schools) if (school.schoolId) state.directories.schools[school.schoolId] = school.school || school.schoolId;
-    for (const job of jobs) if (job.companyId) state.directories.companies[job.companyId] = job.companyName || job.companyId;
-
-    if (typeof window.dismissProfile === "function") window.dismissProfile();
-    window.setView("rules");
-    setTimeout(() => {
-      state.draft = draft;
-      state.preview = null;
-      renderEditor();
-      el("ruleEditor").classList.add("on");
-      const name = el("ruleName");
-      if (name) name.focus();
-    }, 0);
+  async function fromApplicant(cuId, row, seed) {
+    mount();
+    try {
+      await load();
+      if (!seed?.conditions?.length) {
+        if (window.RaydarRuleFacts) window.RaydarRuleFacts.start(cuId, row);
+        return;
+      }
+      const draft = { ...blankRule(), ...seed, id: null };
+      if (typeof dismissProfile === 'function') dismissProfile();
+      openEditor(draft);
+    } catch (error) { toast(error.message, true); }
   }
 
   /* ── the optional reason chip row after a Pass ───────────────────────── */
@@ -840,16 +787,29 @@
     const overlay = document.createElement("div");
     overlay.className = "redit";
     overlay.id = "ruleEditor";
-    overlay.innerHTML = '<div class="redit-card" id="ruleEditorCard"></div>';
+    overlay.innerHTML = '<div class="redit-card" id="ruleEditorCard" role="dialog" aria-modal="true" aria-labelledby="ruleEditorTitle" tabindex="-1"></div>';
     overlay.addEventListener("click", (e) => { if (e.target === overlay) closeEditor(); });
     document.body.appendChild(overlay);
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && overlay.classList.contains("on")) closeEditor();
+      if (!overlay.classList.contains("on")) return;
+      if (e.key === "Escape") { e.stopImmediatePropagation(); closeEditor(); }
+      if (e.key === "Tab") {
+        const items = [...overlay.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary')].filter((item) => item.getClientRects().length);
+        const first = items[0], last = items[items.length - 1];
+        if (!first) return;
+        if (e.shiftKey && (document.activeElement === first || document.activeElement === el("ruleEditorCard"))) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && (document.activeElement === last || document.activeElement === el("ruleEditorCard"))) { e.preventDefault(); first.focus(); }
+      }
     });
 
+    window.addEventListener("resize", placeEditor);
+    window.addEventListener("scroll", placeEditor, { passive: true });
+    try { if (typeof parentWin === "function") { const pw = parentWin(); pw?.addEventListener("resize", placeEditor); pw?.addEventListener("scroll", placeEditor, { passive: true }); } } catch {}
     document.addEventListener("click", (e) => {
+      document.querySelectorAll('#rulesView .rule-more[open]').forEach((menu) => { if (!menu.contains(e.target)) menu.open = false; });
       const node = e.target.closest ? e.target.closest("[data-rule-state],[data-rule-edit],[data-rule-del],[data-rule-hits],[data-rule-dupe]") : null;
       if (!node) return;
+      const menu = node.closest(".rule-more"); if (menu) menu.open = false;
       if (node.dataset.ruleState) return setRuleState(node.dataset.id, node.dataset.ruleState);
       if (node.dataset.ruleEdit) return openEditor(state.rules.find((r) => r.id === node.dataset.ruleEdit));
       if (node.dataset.ruleDupe) {
@@ -879,11 +839,12 @@
       // this tab sits open — and a stale rule list is the one thing that would
       // make somebody arm a duplicate or assume a rule is off when it is live.
       if (!state.loaded) render();
-      try { await load(); } catch (e) { if (!state.loaded) toast(e.message, true); }
+      try { await load(); } catch (e) { state.loadError = e.message; }
       render();
       paintBadge();
     },
     fromApplicant,
+    refreshView: () => { if (viewIsRules()) render(); },
     offerReason,
     /** Name for a rule id, so an automatic decision's byline reads in words.
      *  Null until the Rules view has been opened at least once this session. */
@@ -908,7 +869,7 @@
         paintBadge();
         if (viewIsRules()) render();
       })
-      .catch(() => { if (viewIsRules()) render(); });
+      .catch((error) => { state.loadError = error.message; if (viewIsRules()) render(); });
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", boot);
   else boot();

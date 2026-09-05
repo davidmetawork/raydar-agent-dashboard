@@ -5,6 +5,15 @@ import { createTickHandler, decideRow } from "../api/applicants/rules-tick.mjs";
 import { createRulesHandler } from "../api/applicants/rules.mjs";
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { isRuleActor, ruleIdFromActor } from "../api/applicants/_lib/decision-record.mjs";
+import {
+  RULE_INTERVIEW_ALREADY_EMAILED,
+  currentApplicantAck,
+  ruleInterviewSkipReason,
+} from "../api/applicants/_lib/rule-interview-eligibility.mjs";
+import {
+  APPLICANT_REQUEST_ALREADY_EMAILED,
+  saveApplicantRequest,
+} from "../api/applicants/_lib/request-safety.mjs";
 import { generationFence, publishInto } from "./helpers/applicant-generation.mjs";
 
 const NOW = Date.parse("2026-08-20T12:00:00.000Z");
@@ -55,11 +64,12 @@ const row = (cuId, extra = {}) => ({
  *  The queue is not a free-standing key any more: the tick reads the immutable
  *  ACTIVE PUBLICATION and refuses to run against anything else, so every
  *  fixture publishes a real generation and every request carries its fence. */
-function store({ rules = [], pausedAll = false, queue = [], decisions = {}, facts = {}, cards = null, receipts = null, counts = null } = {}) {
+function store({ rules = [], pausedAll = false, queue = [], decisions = {}, acks = {}, facts = {}, cards = null, receipts = null, counts = null } = {}) {
   const availableCards = cards ?? Object.fromEntries(Object.keys(facts).map((cuId) => [cuId, {}]));
   const state = {
     "apphub:rules": { rev: 3, pausedAll, rules, updatedAt: null },
     "apphub:decisions": { ...decisions },
+    "apphub:acks": { ...acks },
     "apphub:facts": facts,
     "apphub:cards": availableCards,
     "apphub:source-profile-ready": receipts
@@ -208,6 +218,94 @@ test("a tick never overwrites an existing decision", async () => {
   assert.deepEqual(s.state["apphub:decisions"]["cu1:role1"], human, "the human's call must stand");
 });
 
+test("Rules use the same current-ack requestId semantics as the Applicants UI", () => {
+  const sentAck = { status: "invited", requestId: "request-old" };
+  assert.equal(currentApplicantAck(null, sentAck), sentAck, "without a decision, the durable ack is send evidence");
+  assert.equal(
+    ruleInterviewSkipReason(row("cu1"), { ack: sentAck }),
+    RULE_INTERVIEW_ALREADY_EMAILED,
+    "a historical sent ack does not need a current decision",
+  );
+  assert.equal(
+    currentApplicantAck({ requestId: "request-new" }, sentAck),
+    null,
+    "an older request's ack cannot mask a newer request",
+  );
+  assert.equal(
+    ruleInterviewSkipReason(row("cu1"), {
+      decision: { requestId: "request-new" },
+      ack: sentAck,
+    }),
+    null,
+    "the stale ack does not block that newer request",
+  );
+  assert.equal(
+    currentApplicantAck({ requestId: "request-old" }, sentAck),
+    sentAck,
+    "a matching request keeps its ack",
+  );
+});
+
+test("Interview preview, Watching counters, and live tick all exclude already-emailed rows", async () => {
+  const queue = [
+    row("cu-ack"),
+    row("cu-emailed", { status: "emailed" }),
+    row("cu-booked", { status: "booked" }),
+    row("cu-replied", { status: "replied" }),
+    row("cu-external", { externalPriorSendAt: "2026-08-19T10:00:00.000Z" }),
+    row("cu-external-snake", { external_prior_send_at: "2026-08-19T10:00:00.000Z" }),
+    row("cu-eligible"),
+  ];
+  const facts = Object.fromEntries(queue.map(({ cuId }) => [cuId, factsFromProfile(profile(), { now: NOW })]));
+  const acks = { "cu-ack:role1": { status: "sendgrid_delivered" } };
+
+  const previewStore = store({ queue, facts, acks });
+  const preview = response();
+  await createRulesHandler(rulesDeps(previewStore))({
+    method: "POST", headers: {}, query: {},
+    body: { ...previewStore.fence, op: "preview", rule: { ...HARVARD_RULE, id: undefined } },
+  }, preview);
+  assert.equal(preview.statusCode, 200);
+  assert.equal(preview.body.matched, 1);
+  assert.equal(preview.body.skipped.already_emailed, 6);
+  assert.deepEqual(preview.body.samples.map(({ key }) => key), ["cu-eligible:role1"]);
+
+  const watchingStore = store({ rules: [{ ...HARVARD_RULE, state: "watching" }], queue, facts, acks });
+  const watching = response();
+  await createTickHandler(watchingStore.deps)(request(watchingStore), watching);
+  assert.equal(watching.body.wouldFire[HARVARD_RULE.id], 1);
+  assert.equal(watching.body.skipped.already_emailed, 6);
+  assert.deepEqual(watchingStore.state["apphub:decisions"], {});
+
+  const liveStore = store({ rules: [HARVARD_RULE], queue, facts, acks });
+  const live = response();
+  await createTickHandler(liveStore.deps)(request(liveStore), live);
+  assert.equal(live.body.decided, 1);
+  assert.equal(live.body.skipped.already_emailed, 6);
+  assert.equal(liveStore.state["apphub:decisions"]["cu-eligible:role1"].action, "interview");
+  assert.equal(liveStore.state["apphub:decisions"]["cu-ack:role1"], undefined);
+});
+
+test("Pass remains allowed when the row has already-email evidence", async () => {
+  const s = store({
+    rules: [BLOCK_RULE],
+    queue: [row("cu1", { status: "emailed" })],
+    acks: { "cu1:role1": { status: "invited" } },
+    facts: { cu1: factsFromProfile(profile({ title: "Technical Recruiter" }), { now: NOW }) },
+  });
+  let options;
+  const saveRequest = s.deps.saveRequest;
+  s.deps.saveRequest = async (key, record, passedOptions) => {
+    options = passedOptions;
+    return saveRequest(key, record);
+  };
+  const res = response();
+  await createTickHandler(s.deps)(request(s), res);
+  assert.equal(res.body.decided, 1);
+  assert.equal(s.state["apphub:decisions"]["cu1:role1"].action, "pass");
+  assert.equal(options.rejectSentAck, false, "the atomic sent-ack fence is Interview-only");
+});
+
 test("a human click landing mid-tick still wins", async () => {
   const s = store({
     rules: [HARVARD_RULE],
@@ -237,6 +335,118 @@ test("a human click landing mid-tick still wins", async () => {
   assert.equal(s.state["apphub:decisions"]["cu1:role1"].by, "david@raydar.xyz", "the click stands");
   assert.equal(s.state["apphub:decisions"]["cu2:role1"].action, "interview");
   assert.ok(!s.state["apphub:ruleruns"]["cu1:role1"], "no audit row for a conceded key");
+});
+
+test("an ack landing after the final re-read is rejected by the atomic Rules write", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+  });
+  s.deps.saveRequest = async (key, _record, options) => {
+    assert.equal(options.rejectSentAck, true);
+    s.state["apphub:acks"][key] = { status: "invited" };
+    return APPLICANT_REQUEST_ALREADY_EMAILED;
+  };
+  const res = response();
+  await createTickHandler(s.deps)(request(s), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.decided, 0);
+  assert.equal(res.body.skipped.already_emailed, 1);
+  assert.equal(res.body.fired[HARVARD_RULE.id], undefined, "a rejected request is not counted as fired");
+  assert.equal(res.body.concededToHuman, undefined, "send evidence is not reported as a human decision race");
+  assert.deepEqual(s.state["apphub:decisions"], {});
+  assert.equal(s.state["apphub:ruleruns"]["cu1:role1"], undefined);
+});
+
+test("an ack landing during evaluation is removed by the final re-read", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+  });
+  let ackReads = 0;
+  const readHash = s.deps.readHash;
+  s.deps.readHash = async (key) => {
+    if (key === "apphub:acks" && ++ackReads === 2) {
+      s.state["apphub:acks"]["cu1:role1"] = { status: "invited" };
+    }
+    return readHash(key);
+  };
+  let saveCalled = false;
+  s.deps.saveRequest = async () => { saveCalled = true; return true; };
+  const res = response();
+  await createTickHandler(s.deps)(request(s), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.decided, 0);
+  assert.equal(res.body.skipped.already_emailed, 1);
+  assert.equal(res.body.fired[HARVARD_RULE.id], undefined);
+  assert.equal(saveCalled, false, "the candidate is removed before request creation");
+});
+
+test("a final ack read failure fails closed before Rules create a request", async () => {
+  const s = store({
+    rules: [HARVARD_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+  });
+  let ackReads = 0;
+  const readHash = s.deps.readHash;
+  s.deps.readHash = async (key) => {
+    if (key === "apphub:acks" && ++ackReads === 2) throw new Error("acks unavailable");
+    return readHash(key);
+  };
+  const res = response();
+  await createTickHandler(s.deps)(request(s), res);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.error, "tick_failed");
+  assert.match(res.body.detail, /acks unavailable/);
+  assert.deepEqual(s.state["apphub:decisions"], {});
+});
+
+test("the request CAS exposes an opt-in atomic sent-ack result after idempotent replay", async () => {
+  const calls = [];
+  const result = await saveApplicantRequest("cu1:role1", {
+    action: "interview",
+    requestId: "request-new",
+  }, {
+    rejectSentAck: true,
+    kvImpl: async (command) => { calls.push(command); return -1; },
+  });
+  assert.equal(result, APPLICANT_REQUEST_ALREADY_EMAILED);
+  assert.equal(calls[0][2], 2);
+  assert.deepEqual(calls[0].slice(3, 5), ["apphub:decisions", "apphub:acks"]);
+  assert.equal(calls[0].at(-1), "1", "Rules opt into the ack guard through the final Lua argument");
+  const script = calls[0][1];
+  assert.ok(
+    script.indexOf("if old.requestId==ARGV[3] then return 1 end")
+      < script.indexOf("if ARGV[5]=='1' then"),
+    "same-request replay remains idempotent before the new rejection check",
+  );
+  assert.match(script, /ack\.status=='invited' or ack\.status=='sendgrid_delivered'/);
+
+  const manual = await saveApplicantRequest("cu1:role1", {
+    action: "interview",
+    requestId: "request-manual",
+  }, {
+    kvImpl: async (command) => {
+      assert.equal(command.at(-1), "0", "existing manual callers keep the guard disabled by default");
+      return 1;
+    },
+  });
+  assert.equal(manual, true);
+
+  const pass = await saveApplicantRequest("cu1:role1", {
+    action: "pass",
+    requestId: "request-pass",
+  }, {
+    rejectSentAck: true,
+    kvImpl: async (command) => {
+      assert.equal(command.at(-1), "0", "even an opted-in caller cannot apply the ack fence to Pass");
+      return 1;
+    },
+  });
+  assert.equal(pass, true);
 });
 
 test("the global pause parks the tick", async () => {
@@ -510,6 +720,28 @@ test("preview reports matches and skips without writing anything", async () => {
   assert.equal(res.body.skipped.no_profile_history, 1, "the empty record is reported, not hidden");
   assert.equal(res.body.samples[0].key, "cu1:role1");
   assert.equal(s.writes.length, 0, "preview must never write");
+});
+
+test("preview fails closed when acknowledgements cannot be read", async () => {
+  const s = store({
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile(profile(), { now: NOW }) },
+  });
+  const deps = rulesDeps(s);
+  const readHash = deps.readHash;
+  deps.readHash = async (key) => {
+    if (key === "apphub:acks") throw new Error("acks unavailable");
+    return readHash(key);
+  };
+  const res = response();
+  await createRulesHandler(deps)({
+    method: "POST", headers: {}, query: {},
+    body: { ...s.fence, op: "preview", rule: { ...HARVARD_RULE, id: undefined } },
+  }, res);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.error, "rules_unavailable");
+  assert.match(res.body.detail, /acks unavailable/);
+  assert.equal(s.writes.length, 0);
 });
 
 test("preview refuses an invalid draft instead of previewing nonsense", async () => {

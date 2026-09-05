@@ -6,6 +6,7 @@
 <title>Raydar · Applicants</title>
 <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<link rel="stylesheet" href="/applicants-rules.css" />
 <script src="/auth-session.js"></script>
 <script src="/nav-history.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -238,6 +239,10 @@
   .p-applied { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--line-2); border-radius:12px; padding:11px 13px;
     margin:16px 0 0; font-size:12.5px; color:var(--ink-2); }
   .p-applied b { color:var(--ink); }
+  .rule-use { appearance:none; border:1px solid var(--line); background:#fff; color:var(--ink-2); border-radius:999px;
+    min-height:32px; padding:5px 10px; font:650 11px "Inter Variable"; cursor:pointer; white-space:nowrap; }
+  .rule-use:hover, .rule-use:focus-visible { color:var(--orange); border-color:var(--orange); outline:none; }
+  .p-applied .rule-use { margin-left:auto; }
   .p-degraded { display:flex; gap:10px; background:var(--warn-bg); color:var(--warn); border-radius:11px; padding:10px 12px; margin-top:14px; font-size:12px; line-height:1.45; }
   .p-section { margin-top:22px; }
   .p-section h3 { font-size:16px; margin:0 0 10px; padding-bottom:7px; border-bottom:1px solid var(--line-2); }
@@ -247,6 +252,7 @@
     border:1px solid var(--line-2); object-fit:contain; background:#fff; }
   .xp.no-logo { padding-left:0; }
   .xp .xp-top { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .xp .xp-top .rule-use { margin-left:auto; }
   .xp .xp-role { font-weight:700; letter-spacing:-.01em; }
   .xp .xp-co { color:var(--ink-2); font-size:13px; }
   .xp .xp-dates { font-size:11.5px; color:var(--ink-3); }
@@ -263,6 +269,65 @@
   .p-actions { display:flex; align-items:center; justify-content:flex-end; gap:9px; margin-top:22px; padding-top:16px; border-top:1px solid var(--line-2); }
   .p-actions .p-decided { margin-right:auto; }
   .p-loading { color:var(--ink-3); font-size:12.5px; padding:20px 0; text-align:center; }
+
+  /* Profile fact chooser. It only creates an unsaved rule draft; the Rules
+     editor remains the sole place that can save it, and Run rules now remains
+     the sole execution control. */
+  .rf-overlay { position:fixed; inset:0; z-index:65; display:none; align-items:center; justify-content:center;
+    padding:20px; background:rgba(22,20,15,.48); overflow:hidden; }
+  .rf-overlay.open { display:flex; }
+  .rf-overlay.embedded { position:absolute; inset:auto 0 auto 0; }
+  .rf-card { width:min(560px,100%); max-height:100%; display:flex; flex-direction:column; background:#fff;
+    border-radius:20px; box-shadow:0 24px 90px rgba(0,0,0,.28); overflow:hidden; }
+  .rf-head { display:flex; align-items:flex-start; gap:16px; padding:22px 24px 14px; }
+  .rf-head-copy { flex:1; min-width:0; }
+  .rf-eyebrow { margin-bottom:4px; color:var(--orange); font-size:10.5px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+  .rf-head h2 { margin:0; font-size:23px; }
+  .rf-head p { margin:6px 0 0; color:var(--ink-2); font-size:12.5px; line-height:1.45; }
+  .rf-close { appearance:none; flex:none; width:34px; height:34px; border:0; border-radius:50%; background:var(--line-2);
+    color:var(--ink-2); font-size:15px; cursor:pointer; }
+  .rf-body { padding:2px 24px 20px; overflow:auto; overscroll-behavior:contain; }
+  .rf-list { display:flex; flex-direction:column; gap:8px; }
+  .rf-source { appearance:none; width:100%; min-height:58px; display:flex; align-items:center; gap:12px; padding:11px 13px;
+    border:1px solid var(--line); border-radius:13px; background:#fff; color:var(--ink); text-align:left; cursor:pointer; }
+  .rf-source:hover, .rf-source:focus-visible { border-color:var(--orange); outline:none; }
+  .rf-source-kind { flex:none; width:78px; color:var(--ink-3); font-size:10px; font-weight:750; letter-spacing:.06em; text-transform:uppercase; }
+  .rf-source-copy { flex:1; min-width:0; }
+  .rf-source-copy b, .rf-source-copy span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rf-source-copy b { font-size:13px; }
+  .rf-source-copy span { margin-top:3px; color:var(--ink-3); font-size:11.5px; }
+  .rf-source-arrow { flex:none; color:var(--ink-3); font-size:17px; }
+  .rf-back { appearance:none; min-height:40px; margin:0 0 8px -8px; border:0; background:transparent; color:var(--ink-2);
+    padding:6px 8px; font:650 12px "Inter Variable"; cursor:pointer; }
+  .rf-back:hover, .rf-back:focus-visible { color:var(--orange); outline:none; }
+  .rf-chosen { margin-bottom:12px; padding:12px 14px; border-radius:12px; background:var(--line-2); }
+  .rf-chosen b, .rf-chosen span { display:block; }
+  .rf-chosen span { margin-top:3px; color:var(--ink-3); font-size:11.5px; }
+  .rf-facts { display:flex; flex-direction:column; gap:8px; }
+  .rf-fact { min-height:56px; display:flex; align-items:flex-start; gap:11px; padding:11px 13px; border:1px solid var(--line);
+    border-radius:12px; cursor:pointer; }
+  .rf-fact:has(input:checked) { border-color:var(--ink); background:#FBFAF6; }
+  .rf-fact input { flex:none; width:17px; height:17px; margin:2px 0 0; accent-color:var(--ink); }
+  .rf-fact-copy { min-width:0; }
+  .rf-fact-copy b, .rf-fact-copy span { display:block; }
+  .rf-fact-copy b { font-size:12.5px; line-height:1.35; overflow-wrap:anywhere; }
+  .rf-fact-copy span { margin-top:3px; color:var(--ink-3); font-size:11px; line-height:1.35; }
+  .rf-approx { color:var(--warn); font-weight:700; }
+  .rf-empty { padding:28px 10px; color:var(--ink-3); font-size:12.5px; line-height:1.5; text-align:center; }
+  .rf-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 24px 20px;
+    border-top:1px solid var(--line-2); }
+  .rf-foot-note { color:var(--ink-3); font-size:11px; line-height:1.35; }
+  .rf-foot-actions { display:flex; gap:8px; }
+  .rf-foot button { min-height:42px; }
+  @media (max-width:560px) {
+    .rf-overlay { align-items:flex-end; padding:10px; }
+    .rf-card { max-height:92%; border-radius:18px; }
+    .rf-head { padding:18px 18px 12px; }
+    .rf-body { padding:2px 18px 16px; }
+    .rf-foot { padding:13px 18px 16px; align-items:flex-end; }
+    .rf-source-kind { width:70px; }
+    .rule-use { min-height:36px; }
+  }
 
   /* toast + gate */
   .toast { position:fixed; right:22px; bottom:22px; max-width:390px; padding:13px 15px; background:var(--ink); color:#fff;
@@ -1509,6 +1574,9 @@ function renderStream() {
 function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); postCounts(); }
 function renderAll() {
   renderStats(); renderRoleFilter(); renderLists();
+  // Rules can load before the applicant feed. Refresh its visible pending count
+  // after every feed paint so the first render never freezes at zero.
+  window.RaydarRules?.refreshView?.();
   // A profile link opened in a new tab: rebuild it now that the feed can
   // resolve the key. Fires once; a miss just leaves the list showing.
   RaydarNav.restore((key) => openProfile(key));
@@ -1752,6 +1820,9 @@ function openProfile(key) {
     .catch(() => { if (STATE.modal && STATE.modal.cu === id) renderModal(); });
 }
 function closeProfile() {
+  // Browser Back can close the profile while its fact chooser is open. Close
+  // the child dialog first so it cannot be orphaned over the Applicants page.
+  window.RaydarRuleFacts?.close?.();
   $("profileModal").classList.remove("open");
   lockOuterScroll(false);
   STATE.modal = null;
@@ -1791,22 +1862,24 @@ function logoHtml(item) {
   // Paraform's own company/school logo when it has one; broken URLs hide themselves.
   return item.logo ? '<img class="xp-logo" src="' + esc(item.logo) + '" alt="" loading="lazy" onerror="this.remove()" />' : "";
 }
-function experienceHtml(xp, index) {
+function experienceHtml(xp, index, allowRuleFacts) {
   const dates = (xp.start ? monthYear(xp.start) : "") + " – " + (xp.current ? "Present" : xp.end ? monthYear(xp.end) : "") ;
   const span = duration(xp.start, xp.end, xp.current);
   const desc = String(xp.description || "").trim();
   const long = desc.length > 180 || desc.split("\n").length > 3;
   return '<div class="xp' + (xp.logo ? "" : " no-logo") + '">' + logoHtml(xp) +
-    '<div class="xp-top"><span class="xp-role">' + esc(xp.roleTitle || "Role") + '</span><span class="xp-co">' + esc(xp.companyName || "") + "</span></div>" +
+    '<div class="xp-top"><span class="xp-role">' + esc(xp.roleTitle || "Role") + '</span><span class="xp-co">' + esc(xp.companyName || "") + "</span>" +
+    (allowRuleFacts && (xp.companyId || xp.roleTitle) ? '<button type="button" class="rule-use" data-rule-fact-kind="experience" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
     '<div class="xp-dates">' + esc(dates) + (span ? " · " + esc(span) : "") + (xp.location ? " · " + esc(xp.location) : "") + "</div>" +
     (desc ? '<div class="xp-desc" id="xpDesc' + index + '">' + esc(desc) + "</div>" +
       (long ? '<button class="xp-more" data-expand="xpDesc' + index + '">Show more</button>' : "") : "") +
     chipRowHtml(xp) + "</div>";
 }
-function educationHtml(ed) {
+function educationHtml(ed, index, allowRuleFacts) {
   const dates = [ed.start ? monthYear(ed.start) : "", ed.end ? monthYear(ed.end) : ""].filter(Boolean).join(" – ");
   return '<div class="xp' + (ed.logo ? "" : " no-logo") + '">' + logoHtml(ed) +
-    '<div class="xp-top"><span class="xp-role">' + esc(ed.school || "School") + '</span><span class="xp-co">' + esc(ed.degree || "") + "</span></div>" +
+    '<div class="xp-top"><span class="xp-role">' + esc(ed.school || "School") + '</span><span class="xp-co">' + esc(ed.degree || "") + "</span>" +
+    (allowRuleFacts && (ed.schoolId || ed.degree) ? '<button type="button" class="rule-use" data-rule-fact-kind="education" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
     (dates ? '<div class="xp-dates">' + esc(dates) + "</div>" : "") + chipRowHtml(ed) + "</div>";
 }
 function renderModal() {
@@ -1832,7 +1905,8 @@ function renderModal() {
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
-    (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") + "</div>");
+    (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") +
+    (modal.source === "queue" && row.roleId ? '<button type="button" class="rule-use" data-rule-fact-kind="application" data-rule-fact-index="0">Use in rule</button>' : "") + "</div>");
   if (p.degraded === "paraform_auth") {
     parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform session expired on the desktop.</strong> Showing cached LinkedIn data only — refresh the cookie to pull fresh profiles.</div></div>');
   }
@@ -1842,9 +1916,9 @@ function renderModal() {
     parts.push('<div class="p-loading">Profile unavailable right now — LinkedIn and resume links above still work.</div>');
   } else {
     if (Array.isArray(p.experiences) && p.experiences.length)
-      parts.push('<div class="p-section"><h3>Experience</h3>' + p.experiences.map(experienceHtml).join("") + "</div>");
+      parts.push('<div class="p-section"><h3>Experience</h3>' + p.experiences.map((xp, index) => experienceHtml(xp, index, modal.source === "queue")).join("") + "</div>");
     if (Array.isArray(p.education) && p.education.length)
-      parts.push('<div class="p-section"><h3>Education</h3>' + p.education.map(educationHtml).join("") + "</div>");
+      parts.push('<div class="p-section"><h3>Education</h3>' + p.education.map((ed, index) => educationHtml(ed, index, modal.source === "queue")).join("") + "</div>");
     if (!(p.experiences || []).length && !(p.education || []).length && p.degraded !== "paraform_auth") {
       const historyState = String(p.historyState || "").trim().toLowerCase();
       parts.push('<div class="p-loading">' + (historyState === "verified_empty"
@@ -1858,7 +1932,7 @@ function renderModal() {
     // way a person reaches this button.
     const sentAlready = !decision && !hold && alreadyEmailed(row);
     parts.push('<div class="p-actions">' +
-      '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Make this a rule</button>' +
+      '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? "" :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
@@ -1896,7 +1970,7 @@ document.addEventListener("click", async (event) => {
   if (act) {
     const key = act.dataset.key;
     const action = act.dataset.act;
-    // Not a decision: it opens the rule editor seeded from this applicant.
+    // Not a decision: it opens a chooser over the facts in this profile.
     if (action === "make-rule") { makeRuleFrom(act.dataset.cu, key); return; }
     const row = queueRows().find((r) => r.key === key);
     if (action === "interview" && interviewHold(row)) {
@@ -2134,6 +2208,7 @@ async function init() {
 }
 init();
 </script>
+<script src="/applicants-rule-facts.js"></script>
 <script src="/applicants-rules.js"></script>
 </body>
 </html>
