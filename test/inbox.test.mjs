@@ -14,6 +14,7 @@ import {
   flattenCampaignInboxForSubmissions,
   inboxReplyBucket,
   inboxSubmissionsProjectionCoverage,
+  INBOX_SNAPSHOT_SCAN_COUNT,
   inboxTrpcGet,
   isInboxCuratedListCampaign,
   isInboxRoleOutreachCampaign,
@@ -100,9 +101,87 @@ test("Inbox snapshot reads expose only fixed failure causes", async () => {
 
   const snapshot = await readInboxSnapshotState({
     configured: true,
-    pipelineImpl: async () => [["sequence-1", "not-json"], null, null, null],
+    pipelineImpl: async (commands) => (commands[0][0] === "HSCAN"
+      ? [["0", ["sequence-1", "not-json"]]]
+      : [null, null, null]),
   });
   assert.deepEqual(snapshot, { status: "error", cause: "snapshot_invalid", value: null });
+});
+
+test("Inbox snapshot state pages the hash without changing assembled legacy rows", async () => {
+  const snapshot = (sequenceId, gmailId) => JSON.stringify({
+    version: 3,
+    sequence_id: sequenceId,
+    sequence_name: `Sequence ${sequenceId}`,
+    refreshed_at: "2026-09-04T00:00:00.000Z",
+    replies: [{
+      sequence_id: sequenceId,
+      gmail_id: gmailId,
+      ccu_id: `ccu-${sequenceId}`,
+      candidate_name: "Ada",
+      subject: "Re: role",
+      date: "2026-09-04T00:00:00.000Z",
+    }],
+    submissions_replies: [],
+    lead_categories: {},
+  });
+  const calls = [];
+  const loaded = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async (commands) => {
+      calls.push(commands);
+      if (commands[0][0] !== "HSCAN") {
+        return [{
+          version: 3,
+          refreshed_at: "2026-09-04T00:00:00.000Z",
+          targets: [{ id: "sequence-1", name: "Sequence sequence-1", ui_admitted: true }],
+        }, { version: 3, refreshed_at: "2026-09-04T00:00:00.000Z", replies: [] }, { version: 3 }];
+      }
+      const cursor = commands[0][2];
+      assert.equal(commands[0][4], String(INBOX_SNAPSHOT_SCAN_COUNT));
+      return cursor === "0"
+        ? [["9", ["sequence-1", snapshot("sequence-1", "gmail-1")]]]
+        : [["0", ["sequence-2", snapshot("sequence-2", "gmail-2")]]];
+    },
+  });
+  assert.equal(loaded.status, "ready");
+  assert.equal(calls.filter((commands) => commands[0][0] === "HSCAN").length, 2);
+  assert.deepEqual(assembleInboxSnapshotFeed(loaded.value).replies.map((reply) => reply.gmail_id), ["gmail-1"]);
+});
+
+test("Inbox snapshot scan fails closed on a cursor loop or its bounded budget", async () => {
+  const loop = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async (commands) => (commands[0][0] === "HSCAN"
+      ? [["1", []]]
+      : [null, null, null]),
+  });
+  assert.deepEqual(loop, { status: "error", cause: "scan_cursor_loop", value: null });
+
+  let now = 0;
+  const exhausted = await readInboxSnapshotState({
+    configured: true,
+    now: () => now,
+    scanBudgetMs: 1,
+    pipelineImpl: async (commands) => {
+      if (commands[0][0] === "HSCAN") now = 1;
+      return commands[0][0] === "HSCAN" ? [["0", []]] : [null, null, null];
+    },
+  });
+  assert.deepEqual(exhausted, { status: "error", cause: "scan_budget_exhausted", value: null });
+
+  const pageTooLarge = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async (commands) => {
+      if (commands[0][0] !== "HSCAN") return [null, null, null];
+      throw Object.assign(new Error("opaque"), { code: "STATE_STORE_PIPELINE_COMMAND_0_SIZE_LIMITED" });
+    },
+  });
+  assert.deepEqual(pageTooLarge, {
+    status: "error",
+    cause: "scan_pipeline_command_0_size_limited",
+    value: null,
+  });
 });
 
 test("Inbox health exposes a fixed snapshot failure and is not healthy", async () => {
