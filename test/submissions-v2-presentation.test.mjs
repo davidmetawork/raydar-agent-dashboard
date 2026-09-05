@@ -83,3 +83,22 @@ test("public health preserves safe per-source status for dependency-specific gat
   assert.equal(health.sources.candidate_index.safe_error_detail, "Candidate cache is delayed.");
   assert.equal(health.sources.role_index.delayed, false);
 });
+
+test("health separates live and history coverage from successful checks without exposing cursors", () => {
+  const health = publicHealth({ sources: { master_inbox: {
+    enabled: true, last_success_at: "2026-09-01T00:00:00Z", quota_retry_at: "invalid",
+    last_complete_at: null, coverage: {
+      live_through: Date.parse("2026-09-04T21:00:00Z"), history_through: Date.parse("2026-09-02T05:00:00Z"),
+      live_caught_up: true, history_caught_up: false, cursor: "opaque-private-cursor", provider_id: "private-id",
+    },
+  }, sequence_inbox: { coverage: { cache_confirmed_through: "2026-09-04T20:00:00Z", caught_up: false } } } });
+  assert.deepEqual(health.sources.master_inbox.coverage, {
+    live_through: "2026-09-04T21:00:00.000Z", history_through: "2026-09-02T05:00:00.000Z",
+    live_caught_up: true, history_caught_up: false, cache_confirmed_through: null, caught_up: null,
+  });
+  assert.equal(health.sources.master_inbox.last_complete_at, null);
+  assert.equal(health.sources.master_inbox.retry_at, null);
+  assert.equal(health.sources.sequence_inbox.coverage.cache_confirmed_through, "2026-09-04T20:00:00.000Z");
+  assert.equal(health.sources.sequence_inbox.coverage.caught_up, false);
+  assert.equal(JSON.stringify(health).includes("private"), false);
+});

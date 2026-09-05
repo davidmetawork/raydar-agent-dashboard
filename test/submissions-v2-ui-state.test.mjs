@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { commandConflictResolution, commandSuccessMessage, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -17,6 +17,47 @@ test("duplicate review dispositions receive a recruiter-facing success message",
   assert.equal(commandSuccessMessage({ duplicate: true }), "Already recorded; review item resolved.");
   assert.equal(commandSuccessMessage({ duplicate: false }), "");
   assert.equal(commandSuccessMessage({}), "");
+});
+
+test("review evidence only renders an explicitly available bounded excerpt", () => {
+  const available = reviewContextPresentation({
+    evidence_status: "available", source_label: "Gmail reply", source_family: "master inbox",
+    received_at: "2026-09-04T12:00:00.000Z", candidate_reply_excerpt: "Yes\nI am interested.",
+  });
+  assert.equal(available.available, true);
+  assert.equal(available.excerpt, "Yes\nI am interested.");
+  assert.equal(available.sourceLabel, "Gmail reply");
+  assert.equal(available.sourceFamily, "master inbox");
+  assert.equal(available.receivedAt, "2026-09-04T12:00:00.000Z");
+  const unavailable = reviewContextPresentation({ evidence_status: "unavailable", candidate_reply_excerpt: "Do not show me" });
+  assert.equal(unavailable.available, false);
+  assert.equal(unavailable.excerpt, "");
+  const exact = reviewContextPresentation({ evidence_status: "available", candidate_reply_excerpt: "🙂".repeat(1200) });
+  assert.equal(Array.from(exact.excerpt).length, 1200);
+  assert.equal(exact.excerptTruncated, false);
+  const clipped = reviewContextPresentation({ evidence_status: "available", candidate_reply_excerpt: "🙂".repeat(1201) });
+  assert.equal(Array.from(clipped.excerpt).length, 1200);
+  assert.equal(clipped.excerptTruncated, true);
+});
+
+test("a delayed review-context response cannot replace a newer dialog or a closed modal", () => {
+  const firstRequest = {}, secondRequest = {}, firstDialog = {}, secondDialog = {};
+  assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: firstRequest, active: firstDialog, currentActive: firstDialog, modalOpen: true }), true);
+  assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: secondRequest, active: firstDialog, currentActive: firstDialog, modalOpen: true }), false);
+  assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: firstRequest, active: firstDialog, currentActive: secondDialog, modalOpen: true }), false);
+  assert.equal(reviewContextCanRender({ request: firstRequest, currentRequest: firstRequest, active: firstDialog, currentActive: firstDialog, modalOpen: false }), false);
+});
+
+test("source health details expose only committed checkpoints and an authoritative retry time", () => {
+  const details = healthCoverageDetails({
+    master_inbox: { enabled: true, delayed: true, safe_error_detail: "The Gmail cursor is paused.", last_complete_at: "2026-09-04T12:01:00.000Z", coverage: { live_through: "2026-09-04T12:00:00.000Z", history_through: "2026-09-03T12:00:00.000Z", live_caught_up: true, history_caught_up: false } },
+    sequence_inbox: { enabled: true, delayed: false, retry_at: "2026-09-04T12:20:00.000Z", coverage: { cache_confirmed_through: "2026-09-04T11:55:00.000Z", caught_up: true } },
+  });
+  assert.deepEqual(details.map(({ key, label, liveThrough, historyThrough, cacheConfirmedThrough, retryAt, liveCaughtUp, historyCaughtUp, caughtUp }) => ({ key, label, liveThrough, historyThrough, cacheConfirmedThrough, retryAt, liveCaughtUp, historyCaughtUp, caughtUp })), [
+    { key: "master_inbox", label: "Gmail", liveThrough: "2026-09-04T12:00:00.000Z", historyThrough: "2026-09-03T12:00:00.000Z", cacheConfirmedThrough: null, retryAt: null, liveCaughtUp: true, historyCaughtUp: false, caughtUp: null },
+    { key: "sequence_inbox", label: "Sequence Inbox", liveThrough: null, historyThrough: null, cacheConfirmedThrough: "2026-09-04T11:55:00.000Z", retryAt: "2026-09-04T12:20:00.000Z", liveCaughtUp: null, historyCaughtUp: null, caughtUp: true },
+  ]);
+  assert.equal(details[0].safeErrorDetail, "The Gmail cursor is paused.");
 });
 
 test("a background refresh keeps all already loaded pages and removes a repeated cursor row", () => {

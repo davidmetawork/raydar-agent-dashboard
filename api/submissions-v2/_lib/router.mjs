@@ -158,6 +158,12 @@ export async function routeSubmissionsV2(req, res) {
       return res.status(200).end(result.bytes);
     }
 
+    if (key === "review-context") {
+      res.setHeader("cache-control", "private, no-store, max-age=0");
+      if (!method(req, res, ["GET"]) || !requireHuman(req, res)) return;
+      return res.status(200).json({ ok: true, ...(await createService().reviewContext(queryWithoutRoute(req))) });
+    }
+
     if (["list", "counts", "health"].includes(key)) {
       if (!method(req, res, ["GET"]) || !requireHuman(req, res)) return;
       const result = key === "list"

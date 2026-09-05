@@ -1,6 +1,6 @@
 "use strict";
 
-import { commandConflictResolution, commandSuccessMessage, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "/submissions-v2-ui-state.mjs";
+import { commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -46,6 +46,7 @@ const STATE = {
   searchRequests: new Map(), generating: new Set(), dialogReturnFocus: null,
   pendingDownloads: pendingDownloadsFromSession(), downloadsInFlight: new Set(),
   popoverAnchor: null, popoverCloseTimer: null, signinStarted: false, rowActions: new Set(),
+  reviewContextRequest: null,
 };
 
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
@@ -220,6 +221,15 @@ function reviewActions(row) {
   return `<div class="review-actions"><span class="review-age${ageHours >= 24 ? " old" : ""}">${ageHours >= 24 ? `${Math.floor(ageHours)}h` : ""}</span><button class="icon-button review-triangle review-reasons" data-id="${esc(row.case_id || row.signal_id)}" type="button" aria-label="Needs review" title="Needs review"></button><button class="button secondary review-action" data-id="${esc(row.case_id || row.signal_id)}" type="button">${esc(row.primary_action_label || "Review")}</button></div>`;
 }
 
+function reviewSummaryHtml(row) {
+  if (STATE.page !== "needs_review") return "";
+  const reason = Array.isArray(row.review_reasons) ? row.review_reasons[0] : null;
+  const label = reason?.label || "Review needed";
+  const detail = reason?.detail || "The source needs a deliberate recruiter decision.";
+  const next = row.primary_action_label || "Review Signal";
+  return `<div class="review-summary"><span class="review-summary-label">Reason</span><strong>${esc(label)}</strong><span>${esc(detail)}</span><span class="review-summary-next">Next: ${esc(next)}</span></div>`;
+}
+
 function negativeActions(row) {
   return row.corrected_destination
     ? `<span class="submitted-label">Corrected to ${esc(PAGE_LABELS[row.corrected_destination] || row.corrected_destination)}</span>`
@@ -233,7 +243,7 @@ function rowHtml(row) {
   const reason = STATE.page === "not_interested" ? `<div class="reason-line">${esc(row.negative_reason || "No reason provided")}</div>` : "";
   const actions = STATE.page === "interested" ? interestedActions(row) : STATE.page === "needs_review" ? reviewActions(row) : negativeActions(row);
   const progress = STATE.page === "interested" ? resumeProgressHtml(row) : "";
-  return `<article class="submission-row${row.submission_status === "proven" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${progress}${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
+  return `<article class="submission-row${row.submission_status === "proven" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${reviewSummaryHtml(row)}${progress}${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
 }
 
 function bindRows() {
@@ -283,10 +293,26 @@ function renderHealth(health = {}) {
   const node = $("source-health");
   const delayed = health.delayed || health.database === "unavailable";
   node.className = `source-health ${delayed ? "delayed" : "current"}`;
-  node.textContent = delayed ? `Updates delayed${health.last_success_at ? ` · last success ${fmtWhen(health.last_success_at)}` : ""}` : "Sources current";
+  node.textContent = delayed ? `Updates delayed${health.last_success_at ? ` · last success ${fmtWhen(health.last_success_at)}` : ""}` : "No reported delays";
   const banner = $("delay-banner");
   banner.hidden = !delayed;
   banner.textContent = delayed ? "Updates are delayed. Raydar is keeping the last confirmed rows visible while source updates recover." : "";
+  const details = $("source-health-details");
+  const sourceDetails = healthCoverageDetails(health.sources);
+  details.hidden = sourceDetails.length === 0;
+  $("source-health-detail-list").innerHTML = sourceDetails.map((source) => {
+    const checkpoint = (label, value, caughtUp) => value
+      ? `<li><span>${esc(label)}</span><strong>${esc(fmtWhen(value))}${caughtUp === true ? " · caught up" : caughtUp === false ? " · not caught up" : ""}</strong></li>`
+      : "";
+    const status = source.delayed ? "Reported delay" : source.enabled ? "No reported delay" : "Not enabled";
+    const delayDetail = source.delayed && source.safeErrorDetail ? `<p class="source-health-detail">${esc(source.safeErrorDetail)}</p>` : "";
+    const checkpoints = source.key === "sequence_inbox"
+      ? checkpoint("Cache confirmed through", source.cacheConfirmedThrough, source.caughtUp)
+      : `${checkpoint("Live committed through", source.liveThrough, source.liveCaughtUp)}${checkpoint("History committed through", source.historyThrough, source.historyCaughtUp)}`;
+    const complete = source.lastCompleteAt ? `<li><span>Last complete scan</span><strong>${esc(fmtWhen(source.lastCompleteAt))}</strong></li>` : "";
+    const retry = source.retryAt ? `<li><span>Retry time</span><strong>${esc(fmtWhen(source.retryAt))}</strong></li>` : "";
+    return `<section class="source-health-source"><h3>${esc(source.label)}</h3><p>${esc(status)}</p>${delayDetail}${checkpoints || complete || retry ? `<ul>${checkpoints}${complete}${retry}</ul>` : ""}</section>`;
+  }).join("");
 }
 
 async function loadCounts() {
@@ -462,6 +488,7 @@ function openDialog({ eyebrow = "Submissions", title, subtitle = "", body, foote
 }
 function closeDialog() {
   if ($("modal").hidden) return;
+  STATE.reviewContextRequest?.abort(); STATE.reviewContextRequest = null;
   $("modal").hidden = true; STATE.active = null; $("shell").inert = false; $("shell").removeAttribute("aria-hidden"); document.body.classList.remove("modal-open");
   const returnFocus = STATE.dialogReturnFocus; STATE.dialogReturnFocus = null;
   if (returnFocus?.isConnected) returnFocus.focus();
@@ -526,6 +553,41 @@ function reviewReasonCodes(row) {
   return new Set((row?.review_reasons || []).map((reason) => String(reason.code || "")));
 }
 
+function reviewEvidenceHtml(row) {
+  const signalUrl = safeUrl(row.signal_url, URL_HOSTS.signal);
+  return `<section class="review-evidence" id="review-evidence" aria-live="polite"><h3>Original reply</h3><p class="review-evidence-loading">Loading verified source details…</p>${signalUrl ? `<a class="button secondary inline-action" href="${esc(signalUrl)}" target="_blank" rel="noopener noreferrer">Open Signal</a>` : '<p class="field-help">The original Signal link is unavailable.</p>'}</section>`;
+}
+
+function renderReviewContext(context) {
+  const node = $("review-evidence"); if (!node) return;
+  const evidence = reviewContextPresentation(context);
+  const source = evidence.sourceLabel || "Verified source details unavailable";
+  const received = evidence.receivedAt ? fmtWhen(evidence.receivedAt) : "Date unavailable";
+  const excerpt = evidence.available
+    ? `<blockquote>${esc(evidence.excerpt).replace(/\n/g, "<br>")}${evidence.excerptTruncated ? "…" : ""}</blockquote>`
+    : '<p class="field-help">The candidate reply is not available in this Review item.</p>';
+  const signal = node.querySelector("a, .field-help")?.outerHTML || "";
+  node.innerHTML = `<h3>Original reply</h3><dl class="review-evidence-meta"><div><dt>Source</dt><dd>${esc(source)}</dd></div><div><dt>Received</dt><dd>${esc(received)}</dd></div></dl>${excerpt}${signal}`;
+}
+
+async function loadReviewContext(active) {
+  const identifier = active?.case_id ? ["case_id", active.case_id] : active?.signal_id ? ["signal_id", active.signal_id] : null;
+  if (!identifier) return;
+  STATE.reviewContextRequest?.abort();
+  const controller = new AbortController();
+  STATE.reviewContextRequest = controller;
+  const params = new URLSearchParams({ [identifier[0]]: identifier[1] });
+  try {
+    const data = await request(`/api/submissions-v2/review-context?${params}`, { signal: controller.signal });
+    if (!reviewContextCanRender({ request: controller, currentRequest: STATE.reviewContextRequest, active, currentActive: STATE.active, modalOpen: !$("modal").hidden })) return;
+    renderReviewContext(data.review_context);
+  } catch (error) {
+    if (error.name !== "AbortError" && reviewContextCanRender({ request: controller, currentRequest: STATE.reviewContextRequest, active, currentActive: STATE.active, modalOpen: !$("modal").hidden })) renderReviewContext({ evidence_status: "unavailable" });
+  } finally {
+    if (STATE.reviewContextRequest === controller) STATE.reviewContextRequest = null;
+  }
+}
+
 function updateReviewConfirmState() {
   const button = $("dialog-confirm");
   if (!button || STATE.active?.mode !== "review_binding") return;
@@ -579,7 +641,7 @@ async function confirmAdd() {
         STATE.page = result.state; STATE.query = candidateLabel; STATE.rows = []; STATE.nextCursor = null; $("candidate-search").value = candidateLabel;
         document.querySelectorAll(".page-tab").forEach((node) => { const pageActive = node.dataset.page === STATE.page; node.classList.toggle("active", pageActive); node.setAttribute("aria-selected", String(pageActive)); });
         toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
-      } else toast("Preparing resume — the candidate will appear when ready.");
+      } else toast("Candidate added; resume preparation has started.");
     }
     await Promise.all([loadCounts(), loadRows({ refresh: true })]);
   } catch (error) { if (dialogStillActive(active)) { button.disabled = false; button.textContent = "Add Candidate"; } toast(error.message, true); }
@@ -642,6 +704,7 @@ function openReview(id) {
   const reasons = (row.review_reasons || []).map((reason) => `<li><strong>${esc(reason.label || reason.code)}</strong>${reason.detail ? ` — ${esc(reason.detail)}` : ""}</li>`).join("");
   const header = `<div class="coverage"><h3>Open reasons</h3><ul>${reasons || "<li>Review details unavailable.</li>"}</ul></div>`;
   const subtitle = `${row.candidate_name || row.provisional_name || "Unknown candidate"} · ${row.company || "Role not identified"}`;
+  const evidence = reviewEvidenceHtml(row);
 
   if (!row.case_id && (codes.has("candidate_not_found") || codes.has("candidate_ambiguous") || codes.has("role_unclear"))) {
     const needsCandidate = !row.candidate_id || codes.has("candidate_not_found") || codes.has("candidate_ambiguous");
@@ -660,7 +723,8 @@ function openReview(id) {
         ? `<div class="field"><span class="field-label">Exact offered role or roles</span><div class="choice-list" id="role-results">${offeredChoices}</div><p class="field-help">Select only roles offered in the original sent message.</p></div>`
         : `<label class="field"><span class="field-label">Confirmed active Paraform role</span><input id="review-role-query" autocomplete="off" placeholder="Search company or role" /></label><div class="choice-list" id="role-results"></div><p class="field-help">Use the source email and choose the exact role you confirmed.</p>`
       : "";
-    openDialog({ title: "Match the signal", subtitle, body: `${header}${candidatePicker}${rolePicker}<label class="field"><span class="field-label">Resolution note</span><textarea id="review-note" maxlength="500" placeholder="What did you confirm?"></textarea></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Continue" type="button" disabled>Continue</button>' });
+    openDialog({ title: "Match the signal", subtitle, body: `${header}${evidence}${candidatePicker}${rolePicker}<label class="field"><span class="field-label">Resolution note</span><textarea id="review-note" maxlength="500" placeholder="What did you confirm?"></textarea></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Continue" type="button" disabled>Continue</button>' });
+    void loadReviewContext(STATE.active);
     if (needsCandidate) {
       const query = $("candidate-query"), results = $("candidate-results");
       query.oninput = () => { clearTimeout(query.timer); query.timer = setTimeout(() => searchIndex("candidates", query.value, results), 250); };
@@ -682,21 +746,24 @@ function openReview(id) {
 
   if (codes.has("candidate_original_resume_missing")) {
     const candidateUrl = safeUrl(row.candidate_url, URL_HOSTS.candidate);
-    openDialog({ title: "Add the original resume", subtitle, body: `${header}<p>Add the candidate-original resume in Paraform, then recheck this item.</p>${candidateUrl ? `<a class="button secondary inline-action" href="${esc(candidateUrl)}" target="_blank" rel="noopener noreferrer">Open candidate in Paraform</a>` : ""}`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Recheck" type="button">Recheck</button>' });
+    openDialog({ title: "Add the original resume", subtitle, body: `${header}${evidence}<p>Add the candidate-original resume in Paraform, then recheck this item.</p>${candidateUrl ? `<a class="button secondary inline-action" href="${esc(candidateUrl)}" target="_blank" rel="noopener noreferrer">Open candidate in Paraform</a>` : ""}`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Recheck" type="button">Recheck</button>' });
+    void loadReviewContext(STATE.active);
     $("dialog-cancel").onclick = closeDialog;
     $("dialog-confirm").onclick = () => runReviewAction("recheck", STATE.active, "Rechecking…");
     return;
   }
 
   if (codes.has("classification_failed")) {
-    openDialog({ title: "Retry classification", subtitle, body: `${header}<p>The approved classifier paths failed safely, so no interest decision was guessed.</p>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Retry classification" type="button">Retry classification</button>' });
+    openDialog({ title: "Retry classification", subtitle, body: `${header}${evidence}<p>The approved classifier paths failed safely, so no interest decision was guessed.</p>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Retry classification" type="button">Retry classification</button>' });
+    void loadReviewContext(STATE.active);
     $("dialog-cancel").onclick = closeDialog;
     $("dialog-confirm").onclick = () => runReviewAction("retry_classification", { signal_id: row.signal_id }, "Retrying…");
     return;
   }
 
   if (codes.has("resume_preparation_failed")) {
-    openDialog({ title: "Retry resume preparation", subtitle, body: `${header}<p>Resume preparation exhausted its safe retries and can be started again.</p>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Retry preparation" type="button">Retry preparation</button>' });
+    openDialog({ title: "Retry resume preparation", subtitle, body: `${header}${evidence}<p>Resume preparation exhausted its safe retries and can be started again.</p>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Retry preparation" type="button">Retry preparation</button>' });
+    void loadReviewContext(STATE.active);
     $("dialog-cancel").onclick = closeDialog;
     $("dialog-confirm").onclick = () => runReviewAction("retry_preparation", STATE.active, "Retrying…");
     return;
@@ -704,18 +771,20 @@ function openReview(id) {
 
   if (codes.has("role_unavailable")) {
     const roleUrl = safeUrl(row.role_url, URL_HOSTS.submit);
-    openDialog({ title: "Role is unavailable", subtitle, body: `${header}<p>Positive intent is preserved, but this role cannot be prepared until its Paraform state is resolved.</p>${roleUrl ? `<a class="button secondary inline-action" href="${esc(roleUrl)}" target="_blank" rel="noopener noreferrer">Inspect role in Paraform</a>` : ""}`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Duplicate to another role" type="button">Duplicate to another role</button>' });
+    openDialog({ title: "Role is unavailable", subtitle, body: `${header}${evidence}<p>Positive intent is preserved, but this role cannot be prepared until its Paraform state is resolved.</p>${roleUrl ? `<a class="button secondary inline-action" href="${esc(roleUrl)}" target="_blank" rel="noopener noreferrer">Inspect role in Paraform</a>` : ""}`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Duplicate to another role" type="button">Duplicate to another role</button>' });
+    void loadReviewContext(STATE.active);
     $("dialog-cancel").onclick = closeDialog;
     $("dialog-confirm").onclick = () => { closeDialog(); openDuplicate(row.case_id); };
     return;
   }
 
-  const signalUrl = safeUrl(row.signal_url, URL_HOSTS.signal);
-  openDialog({ title: "Review the candidate signal", subtitle, body: `${header}${signalUrl ? `<a class="button secondary inline-action" href="${esc(signalUrl)}" target="_blank" rel="noopener noreferrer">Open Signal</a>` : '<p class="field-help">The original Signal link is unavailable.</p>'}<label class="field"><span class="field-label">Decision</span><select id="review-decision"><option value="interested">Interested</option><option value="not_interested">Not Interested</option><option value="needs_review">Keep in Needs Review</option></select></label><label class="field"><span class="field-label">Resolution note</span><textarea id="review-note" maxlength="500"></textarea></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Resolve" type="button">Resolve</button>' });
+  openDialog({ title: "Review the candidate signal", subtitle, body: `${header}${evidence}<label class="field"><span class="field-label">Decision</span><select id="review-decision"><option value="" selected disabled>Choose a decision</option><option value="interested">Interested</option><option value="not_interested">Not Interested</option><option value="needs_review">Keep in Needs Review</option></select></label><label class="field"><span class="field-label">Resolution note</span><textarea id="review-note" maxlength="500"></textarea></label>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Resolve" type="button">Resolve</button>' });
+  void loadReviewContext(STATE.active);
   $("dialog-cancel").onclick = closeDialog;
   $("dialog-confirm").onclick = () => {
     const note = $("review-note").value.trim(); if (!note) return toast("Add a short resolution note.", true);
-    return runReviewAction("resolve_review", { ...STATE.active, destination: $("review-decision").value, note }, "Saving…");
+    const destination = $("review-decision").value; if (!destination) return toast("Choose a decision before resolving this signal.", true);
+    return runReviewAction("resolve_review", { ...STATE.active, destination, note }, "Saving…");
   };
 }
 

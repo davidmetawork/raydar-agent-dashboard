@@ -132,6 +132,14 @@ function cachedExactCampaignRoleId(campaign) {
     : "";
 }
 
+function cachedExactCampaignProjectId(campaign) {
+  const direct = stringValue(campaign?.project_id);
+  if (direct) return direct;
+  return campaign?.exact_project_source === "campaign.project_id"
+    ? stringValue(campaign?.exact_project_id)
+    : "";
+}
+
 function emailTokens(values) {
   return arrayValue(values).flatMap((value) => (
     String(value || "").toLowerCase().match(EMAIL_TOKEN_RE) || []
@@ -538,6 +546,7 @@ export async function mapWithConcurrency(items, limit, worker) {
 function publicInboxCampaign(campaign) {
   const emailReplies = Number(campaign?.email_replies);
   const exactRoleId = cachedExactCampaignRoleId(campaign);
+  const exactProjectId = cachedExactCampaignProjectId(campaign);
   const legacyLinkedOutreachId = linkedOutreachId(campaign);
   return {
     id: stringValue(campaign?.id),
@@ -551,6 +560,10 @@ function publicInboxCampaign(campaign) {
       : isAdmittedInboxCampaign(campaign),
     exact_role_id: exactRoleId || null,
     exact_role_source: exactRoleId ? "campaign.role_id" : null,
+    // Kept only in the Submissions cache contract. Legacy Inbox rows continue
+    // to use linked_outreach_id and retain their existing public shape.
+    exact_project_id: exactProjectId || null,
+    exact_project_source: exactProjectId ? "campaign.project_id" : null,
   };
 }
 
@@ -571,6 +584,7 @@ function leadCategories(inboxData, relevantLeadIds = new Set()) {
 function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt) {
   const campaignId = stringValue(campaign?.id);
   const exactRoleId = exactCampaignRoleId(campaign);
+  const exactProjectId = stringValue(campaign?.project_id);
   const recentLeadIds = new Set(
     [...recentByGmail.values()]
       .filter((reply) => stringValue(reply?.sequence_id) === campaignId)
@@ -587,6 +601,8 @@ function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt)
       : null,
     exact_role_id: exactRoleId || null,
     exact_role_source: exactRoleId ? "campaign.role_id" : null,
+    exact_project_id: exactProjectId || null,
+    exact_project_source: exactProjectId ? "campaign.project_id" : null,
     refreshed_at: refreshedAt,
     replies: isAdmittedInboxCampaign(campaign)
       ? flattenCampaignInbox(campaign, inboxData, recentByGmail)
@@ -903,6 +919,10 @@ function normalizeSequenceSnapshot(value, fieldId) {
     exact_role_id: stringValue(snapshot.exact_role_id) || null,
     exact_role_source: snapshot.exact_role_source === "campaign.role_id"
       ? "campaign.role_id"
+      : null,
+    exact_project_id: stringValue(snapshot.exact_project_id) || null,
+    exact_project_source: snapshot.exact_project_source === "campaign.project_id"
+      ? "campaign.project_id"
       : null,
     refreshed_at: stringValue(snapshot.refreshed_at),
     replies: snapshot.replies.filter((reply) => reply && typeof reply === "object"),
@@ -1404,6 +1424,8 @@ export function inboxSubmissionsProjectionCoverage(
         sequenceId,
         stringValue(campaign.exact_role_id),
         stringValue(campaign.exact_role_source),
+        stringValue(campaign.exact_project_id),
+        stringValue(campaign.exact_project_source),
       ];
     }),
   )).digest("hex");

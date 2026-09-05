@@ -100,6 +100,14 @@ export function rowDto(row) {
   };
 }
 
+function safeInstant(value) {
+  if (value == null || value === "" || typeof value === "boolean") return null;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : null;
+}
+
+const nullableBoolean = (value) => typeof value === "boolean" ? value : null;
+
 export function publicHealth(row = {}) {
   const sources = Object.fromEntries(Object.entries(row.sources || {}).map(([rawKey, source]) => {
     const key = text(rawKey, 100);
@@ -111,6 +119,16 @@ export function publicHealth(row = {}) {
       quota_state: text(source?.quota_state, 100) || null,
       error_class: text(source?.error_class, 100) || null,
       safe_error_detail: text(source?.safe_error_detail, 500) || null,
+      retry_at: safeInstant(source?.quota_retry_at),
+      last_complete_at: safeInstant(source?.last_complete_at),
+      coverage: {
+        live_through: safeInstant(source?.coverage?.live_through),
+        history_through: safeInstant(source?.coverage?.history_through),
+        live_caught_up: nullableBoolean(source?.coverage?.live_caught_up),
+        history_caught_up: nullableBoolean(source?.coverage?.history_caught_up),
+        cache_confirmed_through: safeInstant(source?.coverage?.cache_confirmed_through),
+        caught_up: nullableBoolean(source?.coverage?.caught_up),
+      },
     }];
   }).filter(([key]) => key));
   return {
