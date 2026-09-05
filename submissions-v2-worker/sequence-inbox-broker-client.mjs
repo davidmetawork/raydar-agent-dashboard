@@ -32,10 +32,10 @@ export async function readSequenceInboxBrokerBatch({
   caughtUp = false,
   catalogDigest = null,
   watermark = null,
-  limit = 12,
+  limit = 8,
 } = {}) {
   const config = sequenceInboxBrokerConfiguration(env);
-  const boundedLimit = Math.max(1, Math.min(12, Number(limit) || 12));
+  const boundedLimit = Math.max(1, Math.min(8, Number(limit) || 8));
   const response = await fetchImpl(config.url, {
     method: "POST",
     redirect: "error",
@@ -53,7 +53,7 @@ export async function readSequenceInboxBrokerBatch({
     }),
     signal: AbortSignal.any([
       signal || new AbortController().signal,
-      AbortSignal.timeout(180_000),
+      AbortSignal.timeout(110_000),
     ]),
   });
   const body = await response.json().catch(() => null);

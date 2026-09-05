@@ -2,8 +2,8 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 87,
-  "digest": "c8c56aa5eea43ebef24585d15f736fecc953c0c51e169770dfe5dceac6098f28",
+  "file_count": 88,
+  "digest": "be9c264fd381dc3035beb88b8f204183b3a234de6a84664437afb86b1e9d7084",
   "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
   "files": [
     {
@@ -124,7 +124,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "03a14788e1029d9453e4f76cb18a99280fd906b86dc0bcf136a17eebffb5da38"
+      "sha256": "718289faf564a23706d0a37a9d55cb3a8623ebf391bb2fd4c89aef55549757a6"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -172,11 +172,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",
-      "sha256": "dcf4780bb4527d856c3ebcb41c9b205e2d4f667e4797877cc5dd81df28aa6f17"
+      "sha256": "7266072de976e4a467b303bd41b16865e1d0726d1b72fed4ee930368a9699c93"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-source.mjs",
-      "sha256": "e5ed2c9cfc2543327661692f94802a80a7c98b9149f9f3dd7fd7d713e392ede2"
+      "sha256": "3f46e9d39fe92288bbec8c9f586f1c229683d60078cfb47485985d3ff67dc64f"
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
@@ -237,6 +237,10 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     {
       "path": "migrations/submissions-v2/013_worker_source_control_check.sql",
       "sha256": "3a7d713bd125977c68013d8b1258ab42db9699e5a6e55b14fb4200efe71f7ce7"
+    },
+    {
+      "path": "migrations/submissions-v2/014_api_review_binding_source_offers.sql",
+      "sha256": "81b2c147ec97b9dc192671edbd2f25f8ab1c21e58ed3b78234b0f246cc0762d8"
     },
     {
       "path": "package-lock.json",
@@ -324,11 +328,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-worker/sequence-inbox-broker-client.mjs",
-      "sha256": "9f4fb35f9298efd99bc4b8da4ba3da8f164ad0c2f86bd1060f5e793734647921"
+      "sha256": "f278754c6434b18719a5bb2302863ff8d8557267bde8c5dd560e9f1c6147e0f0"
     },
     {
       "path": "submissions-v2-worker/sequence-inbox-reader.mjs",
-      "sha256": "7c45f43cceb68f449ff86f34cd3e36ebb0c36c69ca9ef4bee0d1a2d5ea96367f"
+      "sha256": "b885ce4777a6f4866b39938bcefe1a222684ef999901ad033b871b1d6d34c9b1"
     },
     {
       "path": "submissions-v2-worker/server.mjs",

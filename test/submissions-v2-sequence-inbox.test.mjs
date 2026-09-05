@@ -10,7 +10,14 @@ import {
 } from "../api/submissions-v2/_lib/sequence-inbox-source.mjs";
 import {
   SEQUENCE_INBOX_ACTIVATION_AT,
+  SEQUENCE_INBOX_BATCH_LIMIT,
+  SEQUENCE_INBOX_BROKER_DEADLINE_MS,
+  SEQUENCE_INBOX_POINT_READ_PACE_MS,
+  SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS,
+  SEQUENCE_INBOX_REFRESH_BUDGET_MS,
+  readSequenceInboxBrokerBatch,
   sequenceInboxActivation,
+  validateSequenceInboxBatchRequest,
 } from "../api/submissions-v2/_lib/sequence-inbox-broker.mjs";
 import { publicMessage } from "../api/inbox/_lib/core.mjs";
 import { reconcileSequenceInbox } from "../submissions-v2-worker/sequence-inbox-reader.mjs";
@@ -189,6 +196,79 @@ test("approved activation is exact and missing provider direction stays unknown"
   assert.equal(publicMessage({ email_info: {} }).sent_from_paraform, null);
 });
 
+test("broker holds the shared lock for at most its conservative refresh and point-read budget", async () => {
+  assert.equal(SEQUENCE_INBOX_BATCH_LIMIT, 8);
+  assert.equal(SEQUENCE_INBOX_REFRESH_BUDGET_MS + (SEQUENCE_INBOX_BATCH_LIMIT * SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS) + ((SEQUENCE_INBOX_BATCH_LIMIT - 1) * SEQUENCE_INBOX_POINT_READ_PACE_MS), 82_000);
+  assert.equal(SEQUENCE_INBOX_BROKER_DEADLINE_MS, 100_000);
+  let clock = 0;
+  let released = false;
+  const timeouts = [];
+  const state = {};
+  const result = await readSequenceInboxBrokerBatch({}, {
+    env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+    now: () => new Date("2026-09-04T00:00:00.000Z"),
+    clock: () => clock,
+    acquireLock: async () => ({ status: "acquired", token: "lock" }),
+    releaseLock: async () => { released = true; },
+    readState: async () => ({ status: "ready", value: state }),
+    buildRefresh: async ({ budgetMs }) => {
+      assert.equal(budgetMs, SEQUENCE_INBOX_REFRESH_BUDGET_MS);
+      clock += budgetMs;
+      return {};
+    },
+    writeState: async () => state,
+    sleepImpl: async (milliseconds) => { clock += milliseconds; },
+    readBatch: async ({ limit, readMessage }) => {
+      assert.equal(limit, SEQUENCE_INBOX_BATCH_LIMIT);
+      for (let index = 0; index < SEQUENCE_INBOX_BATCH_LIMIT; index += 1) {
+        await readMessage(`message-${index}`);
+      }
+      return { records: [], deferred: [], checkpoint_cursor: null, coverage: {} };
+    },
+    readMessage: async (_gmailId, { timeoutMs }) => {
+      timeouts.push(timeoutMs);
+      clock += timeoutMs;
+      return { complete: true, message: {} };
+    },
+  });
+  assert.equal(released, true);
+  assert.deepEqual(timeouts, Array(SEQUENCE_INBOX_BATCH_LIMIT).fill(SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS));
+  assert.equal(clock, 82_000);
+  assert.deepEqual(result.records, []);
+});
+
+test("broker deadline releases the lock and leaves the page resumable", async () => {
+  let clock = 0;
+  let released = false;
+  await assert.rejects(
+    readSequenceInboxBrokerBatch({}, {
+      env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+      now: () => new Date("2026-09-04T00:00:00.000Z"),
+      clock: () => clock,
+      acquireLock: async () => ({ status: "acquired", token: "lock" }),
+      releaseLock: async () => { released = true; },
+      readState: async () => ({ status: "ready", value: {} }),
+      buildRefresh: async () => { clock = SEQUENCE_INBOX_BROKER_DEADLINE_MS - SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS; return {}; },
+      writeState: async () => ({}),
+      readBatch: async ({ readMessage }) => readMessage("message-1"),
+      readMessage: async () => assert.fail("deadline must prevent point read"),
+    }),
+    (error) => error.code === "sequence_inbox_broker_deadline",
+  );
+  assert.equal(released, true);
+});
+
+test("legacy broker request limits through twelve execute at the eight-record cap", () => {
+  for (const limit of [9, 10, 11, 12]) {
+    assert.equal(validateSequenceInboxBatchRequest({ limit }).limit, SEQUENCE_INBOX_BATCH_LIMIT);
+  }
+  assert.equal(validateSequenceInboxBatchRequest({ limit: 8 }).limit, 8);
+  assert.throws(
+    () => validateSequenceInboxBatchRequest({ limit: 13 }),
+    (error) => error.code === "sequence_inbox_batch_limit_invalid",
+  );
+});
+
 test("cached reader is bounded, stable, full-detail only, and exposes checkpoint safety", async () => {
   const cachedReplies = [
     reply({ gmail_id: "message-1", date: "2026-09-03T12:00:00.000Z" }),
@@ -342,7 +422,7 @@ test("worker reader paces a bounded page and advances only its Sequence Inbox cu
     readBatch: async ({ cursor, cursorOverlapMs, limit }) => {
       assert.equal(cursor, "prior-sequence-cursor");
       assert.equal(cursorOverlapMs, 0);
-      assert.equal(limit, 12);
+      assert.equal(limit, 8);
       return {
         records: [{ event: { idempotency_key: "event-1" } }, { event: { idempotency_key: "event-2" } }],
         deferred: [],
