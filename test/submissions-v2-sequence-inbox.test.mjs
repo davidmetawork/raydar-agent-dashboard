@@ -258,6 +258,20 @@ test("broker deadline releases the lock and leaves the page resumable", async ()
   assert.equal(released, true);
 });
 
+test("broker exposes only the fixed cache failure cause", async () => {
+  await assert.rejects(
+    readSequenceInboxBrokerBatch({}, {
+      env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+      now: () => new Date("2026-09-04T00:00:00.000Z"),
+      acquireLock: async () => ({ status: "acquired", token: "lock" }),
+      releaseLock: async () => {},
+      readState: async () => ({ status: "error", cause: "pipeline_wrongtype", value: null }),
+    }),
+    (error) => error.code === "sequence_inbox_cache_unavailable"
+      && error.message === "The Sequence Inbox cache is unavailable (pipeline_wrongtype).",
+  );
+});
+
 test("legacy broker request limits through twelve execute at the eight-record cap", () => {
   for (const limit of [9, 10, 11, 12]) {
     assert.equal(validateSequenceInboxBatchRequest({ limit }).limit, SEQUENCE_INBOX_BATCH_LIMIT);

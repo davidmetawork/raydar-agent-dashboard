@@ -30,6 +30,11 @@ const fail = (code, message, status = 400) => Object.assign(new Error(message), 
   retryable: status >= 500,
 });
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const cacheUnavailable = (stage) => fail(
+  "sequence_inbox_cache_unavailable",
+  `The Sequence Inbox cache is unavailable (${stage}).`,
+  503,
+);
 
 export function sequenceInboxActivation({ env = process.env, now = Date.now() } = {}) {
   const expected = Date.parse(SEQUENCE_INBOX_ACTIVATION_AT);
@@ -109,11 +114,10 @@ export async function readSequenceInboxBrokerBatch(input, {
   const activationAt = sequenceInboxActivation({ env, now: now().getTime() });
   const lock = await acquireLock();
   if (lock?.status !== "acquired") {
-    throw fail(
-      lock?.status === "busy" ? "sequence_inbox_refresh_busy" : "sequence_inbox_cache_unavailable",
-      "The bounded Sequence Inbox cache refresh is unavailable.",
-      503,
-    );
+    if (lock?.status === "busy") {
+      throw fail("sequence_inbox_refresh_busy", "The bounded Sequence Inbox cache refresh is unavailable.", 503);
+    }
+    throw cacheUnavailable("lock_unavailable");
   }
   let batch;
   const deadline = clock() + SEQUENCE_INBOX_BROKER_DEADLINE_MS;
@@ -130,7 +134,7 @@ export async function readSequenceInboxBrokerBatch(input, {
   try {
     const loaded = await readState();
     if (loaded?.status !== "ready" || !loaded.value) {
-      throw fail("sequence_inbox_cache_unavailable", "The Sequence Inbox cache is unavailable.", 503);
+      throw cacheUnavailable(loaded?.cause || "state_unavailable");
     }
     // Refresh only at the beginning of a scan or after the prior watermark is
     // complete.  Refreshing every page moves the watermark and would force a

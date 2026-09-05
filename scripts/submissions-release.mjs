@@ -15,6 +15,7 @@ const FIXED_FILES = Object.freeze([
   "submissions-v2-ui-state.mjs",
   "api/submissions-v2-dispatch.mjs",
   "api/inbox/_lib/core.mjs",
+  "api/inbox/health.mjs",
   "api/seq/_lib/core.mjs",
   "api/seq/_lib/scheduling-links.mjs",
   "api/sourcing/_lib/store.mjs",

@@ -21,6 +21,7 @@ import {
   mergeInboxRefreshState,
   normalizeReplyCategory,
   parseInboxTriage,
+  readInboxSnapshotState,
   readInboxTriage,
   selectInboxCampaigns,
   shouldExcludeInboxReply,
@@ -37,6 +38,9 @@ import {
 import {
   createInboxSyncHandler,
 } from "../api/inbox/sync.mjs";
+import {
+  createInboxHealthHandler,
+} from "../api/inbox/health.mjs";
 
 function mockResponse() {
   return {
@@ -56,6 +60,55 @@ function mockResponse() {
     },
   };
 }
+
+test("Inbox snapshot reads expose only fixed failure causes", async () => {
+  const timeout = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => { throw Object.assign(new Error("provider detail"), { name: "TimeoutError" }); },
+  });
+  assert.deepEqual(timeout, { status: "error", cause: "pipeline_timeout", value: null });
+
+  const wrongType = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => { throw new Error("WRONGTYPE opaque provider text"); },
+  });
+  assert.deepEqual(wrongType, { status: "error", cause: "pipeline_wrongtype", value: null });
+
+  const http = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => { throw new Error("state store HTTP 503"); },
+  });
+  assert.deepEqual(http, { status: "error", cause: "pipeline_http_503", value: null });
+
+  const snapshot = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => [["sequence-1", "not-json"], null, null, null],
+  });
+  assert.deepEqual(snapshot, { status: "error", cause: "snapshot_invalid", value: null });
+});
+
+test("Inbox health exposes a fixed snapshot failure and is not healthy", async () => {
+  const res = mockResponse();
+  await createInboxHealthHandler({
+    corsHandler: () => false,
+    healthReader: async () => ({ paraform: "live" }),
+    snapshotReader: async () => ({ status: "error", cause: "pipeline_wrongtype", value: null }),
+    configured: () => true,
+    auth: () => ({ authRequired: true }),
+    cookieSet: () => true,
+  })({ method: "GET" }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    ok: false,
+    cookieSet: true,
+    cacheConfigured: true,
+    stateStoreConfigured: true,
+    authRequired: true,
+    snapshotState: "error",
+    snapshotCause: "pipeline_wrongtype",
+    paraform: "live",
+  });
+});
 
 test("live campaign inbox rows keep only nested inbound email and join lead metadata", () => {
   const rows = flattenCampaignInbox(

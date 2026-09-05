@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 88,
-  "digest": "be9c264fd381dc3035beb88b8f204183b3a234de6a84664437afb86b1e9d7084",
+  "file_count": 89,
+  "digest": "a1554abc853e3a949d3b1727b835ea307a7e00e26553f2eae9238389d2c77055",
   "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
   "files": [
     {
@@ -15,7 +15,11 @@
     },
     {
       "path": "api/inbox/_lib/core.mjs",
-      "sha256": "701543f6e96b06e084fb841d1903d9c8709fe407afe1eccade2f5bd62c114c0c"
+      "sha256": "1ce5dd8587c9a64a975dee021d33f758733d2ddd0b6ba52465df1f76085744d4"
+    },
+    {
+      "path": "api/inbox/health.mjs",
+      "sha256": "9e8065d1ee3b602e23239571ab898fd67ddff05ad3f97a3347d181f4c00b4fbf"
     },
     {
       "path": "api/paraai/_lib/core.mjs",
@@ -171,7 +175,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",
-      "sha256": "7266072de976e4a467b303bd41b16865e1d0726d1b72fed4ee930368a9699c93"
+      "sha256": "88e1f74a2f39f64898cef0cea3111e519d55143496d89eafbd275cfcfbde7ea8"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-source.mjs",
@@ -291,7 +295,7 @@
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "5a1ba1fb26434415b41111677dea8d062f0d2ed5e453c1bdb4124fbb1cbb3c10"
+      "sha256": "2c57bd6e079bd206ba7e5bc56b6f2578050b8ceb54726a9e1cdf6ba10ecb4ce6"
     },
     {
       "path": "submissions-v2-ui-state.mjs",
