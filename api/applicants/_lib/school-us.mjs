@@ -80,6 +80,8 @@ const COUNTRIES = new Set([
   "thailand", "tunisia", "turkey", "türkiye", "uganda", "ukraine", "united arab emirates",
   "united kingdom", "england", "scotland", "wales", "northern ireland", "uruguay",
   "uzbekistan", "venezuela", "vietnam", "yemen", "zambia", "zimbabwe",
+  // Common full and abbreviated forms in provider school locations.
+  "uae", "u.a.e", "state of qatar",
 ]);
 
 /** True when the website's hostname ends in `.edu` — never a substring. */

@@ -1,0 +1,397 @@
+{
+  "version": 1,
+  "createdAt": "2026-09-05T22:42:00Z",
+  "purpose": "Read-only country evidence. Each entry proves only United States geography for the whole named institution/system. It deliberately does not resolve a source education row to an IPEDS campus UNITID or any Paraform school ID.",
+  "matchingPolicy": [
+    "Use preserve-every-word normalization only: case, accents, punctuation and whitespace may fold; parentheses and all terms remain.",
+    "The literal school must exactly match the reviewed alias after that normalization.",
+    "Any literal containing additional campus, country, or parenthetical words does not use this map. It remains unresolved unless separately reviewed.",
+    "The evidence is country-only; `selectedUnitid` is null for every system alias so campus distinctions stay intact."
+  ],
+  "aliases": [
+    {
+      "literalSchool": "Georgia Institute of Technology",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "139755"
+      ],
+      "officialEvidenceUrl": "https://www.gatech.edu/about/campus-location",
+      "officialEvidence": "Official page names Georgia Institute of Technology and Atlanta, GA.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Washington",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "236948",
+        "377555",
+        "377564"
+      ],
+      "officialEvidenceUrl": "https://www.washington.edu/about/",
+      "officialEvidence": "Official page identifies Seattle, Bothell and Tacoma campuses in Washington; no campus is selected from the generic source name.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Purdue University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "243780",
+        "151102",
+        "489779",
+        "490805"
+      ],
+      "officialEvidenceUrl": "https://www.purdue.edu/campus_map/",
+      "officialEvidence": "Official Purdue campus map gives West Lafayette, Indiana; source name does not select a campus.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Pennsylvania State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "214777"
+      ],
+      "officialEvidenceUrl": "https://www.psu.edu/academics/campuses/university-park",
+      "officialEvidence": "Official page identifies The Pennsylvania State University, University Park, PA and separately documents the multi-campus system.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Cincinnati",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "201885",
+        "201946",
+        "201955"
+      ],
+      "officialEvidenceUrl": "https://www.uc.edu/about",
+      "officialEvidence": "Official page identifies University of Cincinnati in Cincinnati, Ohio; no campus is selected from generic source text.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Virginia",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "234076",
+        "233897"
+      ],
+      "officialEvidenceUrl": "https://www.virginia.edu/",
+      "officialEvidence": "Official university domain; IPEDS directory distinguishes main and Wise campuses, so no campus is selected.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Wright State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "206604",
+        "206613"
+      ],
+      "officialEvidenceUrl": "https://www.wright.edu/about/quick-facts",
+      "officialEvidence": "Official page identifies Dayton and Lake campuses in Ohio; generic source name is country-only.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Ohio State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "204796",
+        "204671",
+        "204680",
+        "204699",
+        "204705",
+        "204662"
+      ],
+      "officialEvidenceUrl": "https://www.osu.edu/acrossthestate",
+      "officialEvidence": "Official page lists Ohio State campuses in Ohio; source name does not choose one.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "The Ohio State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "204796",
+        "204671",
+        "204680",
+        "204699",
+        "204705",
+        "204662"
+      ],
+      "officialEvidenceUrl": "https://www.osu.edu/about/columbus/visits",
+      "officialEvidence": "Official page identifies The Ohio State University in Columbus, Ohio and the broader official campus list preserves no selection here.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Michigan",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "170976",
+        "171137",
+        "171146"
+      ],
+      "officialEvidenceUrl": "https://umich.edu/schools-colleges/",
+      "officialEvidence": "Official page distinguishes Ann Arbor, Dearborn, and Flint campuses in Michigan; generic source name is country-only.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Arizona State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "104151",
+        "483124"
+      ],
+      "officialEvidenceUrl": "https://www.asu.edu/about",
+      "officialEvidence": "Official page describes Arizona State University and Arizona/U.S. impact; campus selection is intentionally absent.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "North Carolina State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "199193"
+      ],
+      "officialEvidenceUrl": "https://brand.ncsu.edu/editorial-style/north-carolina-state-university/",
+      "officialEvidence": "Official brand guidance says North Carolina State University at Raleigh is the full official name and shows Raleigh, NC.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Rutgers University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "186371",
+        "186380",
+        "186399"
+      ],
+      "officialEvidenceUrl": "https://www.rutgers.edu/about-rutgers",
+      "officialEvidence": "Official page identifies New Brunswick, Newark and Camden, New Jersey; generic source text selects no campus.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Illinois at Chicago",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "145600"
+      ],
+      "officialEvidenceUrl": "https://www.uic.edu/",
+      "officialEvidence": "Official UIC domain; IPEDS HD2024 lists University of Illinois Chicago in Chicago, IL. Alias is reviewed manually because IPEDS omits `at`.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Illinois at Urbana-Champaign",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "145637"
+      ],
+      "officialEvidenceUrl": "https://illinois.edu/",
+      "officialEvidence": "Official Illinois domain; IPEDS HD2024 lists University of Illinois Urbana-Champaign in Champaign, IL. Alias is reviewed manually because IPEDS omits `at`.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Kent State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "203447",
+        "203456",
+        "203465",
+        "203474",
+        "203483",
+        "203492",
+        "203517",
+        "203526"
+      ],
+      "officialEvidenceUrl": "https://www.kent.edu/about",
+      "officialEvidence": "Official page calls Kent State an eight-campus system in Ohio.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Southern Arkansas University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "107983",
+        "107992"
+      ],
+      "officialEvidenceUrl": "https://web.saumag.edu/",
+      "officialEvidence": "Official Southern Arkansas University domain; IPEDS distinguishes main and Tech campuses in Arkansas.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Phoenix",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "484613",
+        "484631",
+        "484710",
+        "484756",
+        "420042"
+      ],
+      "officialEvidenceUrl": "https://www.phoenix.edu/about/campus-locations.html",
+      "officialEvidence": "Official page identifies its Phoenix, Arizona campus; source name remains country-only across its US locations.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Indiana Wesleyan University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "151801",
+        "488679"
+      ],
+      "officialEvidenceUrl": "https://www.indwes.edu/about/student-consumer-information/",
+      "officialEvidence": "Official page identifies Indiana Wesleyan University as a legal entity in Indiana and distinguishes residential, regional, and online provision.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "California State University",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "110501"
+      ],
+      "officialEvidenceUrl": "https://www.calstate.edu/csu-system/about-the-csu/Pages/default.aspx",
+      "officialEvidence": "Official page identifies California State University as a 22-university system across California; source name selects no campus.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Colorado",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "126562",
+        "126580",
+        "126614",
+        "128300"
+      ],
+      "officialEvidenceUrl": "https://www.cu.edu/about-cu-system",
+      "officialEvidence": "Official page identifies the University of Colorado four-campus system in Colorado; source name selects no campus.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Minnesota",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "174066",
+        "174075",
+        "174233",
+        "174251",
+        "174358"
+      ],
+      "officialEvidenceUrl": "https://system.umn.edu/campuses",
+      "officialEvidence": "Official page identifies five University of Minnesota System campuses serving Minnesota; source name selects no campus.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "University of Pittsburgh",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "215293",
+        "215266",
+        "215275",
+        "215284",
+        "215309"
+      ],
+      "officialEvidenceUrl": "https://www.pitt.edu/about",
+      "officialEvidence": "Official page identifies Pitt as a public institution in Pennsylvania and distinguishes regional Pennsylvania campuses.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    },
+    {
+      "literalSchool": "Baruch College",
+      "country": "United States",
+      "geographyStatus": "us_state_or_dc",
+      "scope": "country_only_no_campus_resolution",
+      "selectedUnitid": null,
+      "candidateIpedsUnitids": [
+        "190512"
+      ],
+      "officialEvidenceUrl": "https://www.baruch.cuny.edu/welcome-to-baruch/",
+      "officialEvidence": "Official page identifies Baruch College at 55 Lexington Avenue, New York, NY.",
+      "ipedsEvidenceUrl": "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+      "reviewedAt": "2026-09-05"
+    }
+  ]
+}

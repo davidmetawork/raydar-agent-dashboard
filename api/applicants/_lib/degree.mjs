@@ -78,7 +78,9 @@ export function normalizeDegree(raw) {
     .replace(/[‘’ʼ´`]/g, "'")
     .normalize("NFD").replace(/[̀-ͯ]/g, "")
     .toLowerCase()
-    .replace(/[^a-z0-9' ]+/g, " ")
+    // Retain Han characters for exact, reviewed credential titles. All fuzzy
+    // matching remains ASCII and word-bounded below.
+    .replace(/[^a-z0-9'\u3400-\u9fff ]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -98,7 +100,12 @@ const SPELLED = [
 
   ["bachelors", /\b(bachelor|bachelors|undergraduate|undergrad|licenciatura)\b/],
 
-  ["secondary", /\b(high ?school|senior secondary|secondary|matriculation|bachillerato|intermediate|10th|11th|12th|grade 1[012]|class 1[012])\b/],
+  // "Secondary in Computer Science" is a field of study, not a secondary
+  // credential. In particular, LinkedIn can record "A.B. Physics, with
+  // Secondary in Computer Science" in one degree field. Let that explicit
+  // bachelor's abbreviation reach pass 2; true credentials such as "Senior
+  // Secondary" and "Secondary Education" still match here.
+  ["secondary", /\b(high ?school|senior secondary|secondary(?!\s+in\b)|matriculation|bachillerato|intermediate|10th|11th|12th|grade 1[012]|class 1[012])\b/],
 
   // Degree phrasing only. "Associate Risk Mgmt", "Associate Director" and
   // every other job-title use of the word falls through, which is correct.
@@ -112,7 +119,7 @@ const SPELLED = [
 const ABBREVIATED = [
   ["doctorate", /\b(m ?d|j ?d|ed ?d|d ?b ?a|dvm|dds|pharm ?d|sc ?d)\b/],
 
-  ["masters", /\b(m ?s|m ?sc|m ?a|mba|emba|m ?eng|m ?tech|m ?c ?a|m ?p ?h|ll ?m|m ?f ?a|msba|pgd)\b/],
+  ["masters", /\b(m ?s|m ?sc|m ?a|m ?b ?a|emba|m ?eng|m ?tech|m ?c ?a|m ?p ?h|ll ?m|m ?f ?a|msba|pgd)\b/],
 
   ["bachelors", /\b(b ?s|b ?a|b ?sc|b ?e|b ?tech|b ?b ?a|b ?a ?sc|b ?eng|b ?com|b ?c ?a|a ?b|s ?b)\b/],
 
@@ -125,6 +132,33 @@ const ABBREVIATED = [
   ["certificate", /\b(diploma|chfc|clu|cfa|cpa|pmp|ryt|arm|cissp|course|training|series [0-9]+)\b/],
 ];
 
+// These are complete credential tokens seen at the start of a degree field.
+// Keeping the short aliases anchored avoids turning ordinary prose containing
+// "me" or "mse" into a master's degree.
+const EXPLICIT_PREFIX = [
+  ["masters", /^(ed ?m|m ?e|m ?ed|m ?l ?s|m ?p ?s|m ?s ?a ?i|m ?s ?e ?e|m ?s ?e)\b/],
+  ["bachelors", /^(b ?f ?a|b ?arch|b ?des|bsba|bchelor|laurea triennale|sarjana komputer)\b/],
+  ["bachelors", /^理学学士学位/],
+];
+
+// Source degree fields also carry clear Associate credentials without the
+// word `degree`: `Associate's — Computer Science`, `Associates of Arts`, and
+// bare `Associate` all occur in the current corpus. Keep this anchored to the
+// complete field and require either credential grammar or an explicit typed
+// separator. Job titles such as `Associate Professor`, `Research Associate`,
+// and `Associate Director` therefore remain unknown.
+const EXPLICIT_ASSOCIATE_PREFIX = /^associate(?:'s|s)?(?:\s+(?:degree|of|in)\b|$)/;
+const EXPLICIT_ASSOCIATE_SEPARATOR = /^associate(?:['’ʼ´`]?s)?\s*(?:—|–)\s*\S/i;
+
+// Workable projects a separate field of study into the same string as the
+// credential. "Secondary Education" can therefore describe the subject of a
+// BS or MS. Honor only an explicit leading credential; true "Senior
+// Secondary" and bare "Secondary Education" still reach the secondary rule.
+const SECONDARY_EDUCATION_PREFIX = [
+  ["masters", /^(m ?s|m ?sc|m ?a)\b.*\bsecondary education\b/],
+  ["bachelors", /^(b ?s|b ?sc|b ?a|a ?b|s ?b)\b.*\bsecondary education\b/],
+];
+
 /**
  * One of DEGREE_LEVELS, or "unknown". Never throws: a null, a number and an
  * object all answer "unknown" rather than failing a whole facts build.
@@ -132,9 +166,66 @@ const ABBREVIATED = [
 export function degreeLevel(raw) {
   const text = normalizeDegree(raw);
   if (!text) return "unknown";
-  for (const [level, pattern] of SPELLED) if (pattern.test(text)) return level;
+  for (const [level, pattern] of SPELLED) {
+    // This override belongs at the secondary step: a spelled-out doctorate or
+    // master's elsewhere in the same string must still win first.
+    if (level === "secondary") {
+      for (const [prefixLevel, prefixPattern] of SECONDARY_EDUCATION_PREFIX) {
+        if (prefixPattern.test(text)) return prefixLevel;
+      }
+    }
+    if (pattern.test(text)) return level;
+  }
   for (const [level, pattern] of ABBREVIATED) if (pattern.test(text)) return level;
+  // Every existing spelled-out and abbreviated credential has had a chance
+  // to win by strength before a new exact alias fills an unknown.
+  for (const [level, pattern] of EXPLICIT_PREFIX) if (pattern.test(text)) return level;
+  if (EXPLICIT_ASSOCIATE_PREFIX.test(text)
+    || EXPLICIT_ASSOCIATE_SEPARATOR.test(String(raw ?? "").trim())) return "associate";
   return "unknown";
+}
+
+// A scalar remains the compatibility contract above: the strongest level
+// wins. Consumers that explicitly support a combined credential can use this
+// array. Both degree tokens must sit directly on opposite sides of a clear
+// connector; words such as "coursework" or a trailing place abbreviation do
+// not create an extra level.
+const DUAL_TEXT = (raw) => String(raw ?? "")
+  .replace(/[‘’ʼ´`]/g, "'")
+  .normalize("NFD").replace(/[̀-ͯ]/g, "")
+  .toLowerCase()
+  .replace(/\./g, "");
+const BACHELOR_TOKEN = String.raw`\b(?:b\.?\s*(?:a|s|sc|f\.?\s*a|arch|des)\.?|bsba|a\.?\s*b\.?|s\.?\s*b\.?|bachelor(?:'?s)?(?:\s+of\s+(?:arts|science))?)\b`;
+const MASTER_TOKEN = String.raw`\b(?:m\.?\s*(?:a|s|sc|ba)\.?|master(?:'?s)?(?:\s+of\s+(?:arts|science|business administration))?)\b`;
+const DUAL_CONNECTOR = String.raw`(?:\/|&|\+|\band\b)`;
+const EXPLICIT_BACHELOR_MASTER = new RegExp(
+  String.raw`(?:${BACHELOR_TOKEN}\s*${DUAL_CONNECTOR}\s*${MASTER_TOKEN}|${MASTER_TOKEN}\s*${DUAL_CONNECTOR}\s*${BACHELOR_TOKEN})`,
+  "i",
+);
+const FULL_BACHELOR_TOKEN = String.raw`\bbachelor(?:'?s)?(?:\s+of\s+(?:arts|science))?\b`;
+const FULL_MASTER_TOKEN = String.raw`\bmaster(?:'?s)?(?:\s+of\s+(?:arts|science|business administration))?\b`;
+const EXPLICIT_FULL_TITLES_COMMA = new RegExp(
+  String.raw`(?:${FULL_BACHELOR_TOKEN}\s*,\s*${FULL_MASTER_TOKEN}|${FULL_MASTER_TOKEN}\s*,\s*${FULL_BACHELOR_TOKEN})`,
+  "i",
+);
+const HAS_BACHELOR_TOKEN = new RegExp(BACHELOR_TOKEN, "i");
+const HAS_MASTER_TOKEN = new RegExp(MASTER_TOKEN, "i");
+const EXPLICIT_DUAL_DEGREE = /\bdual\s+degree\b/i;
+
+export function degreeLevels(raw) {
+  const strongest = degreeLevel(raw);
+  if (strongest === "unknown") return [];
+  const dualText = DUAL_TEXT(raw);
+  const hasBachelorAndMaster = EXPLICIT_BACHELOR_MASTER.test(dualText)
+    || EXPLICIT_FULL_TITLES_COMMA.test(dualText)
+    || (EXPLICIT_DUAL_DEGREE.test(dualText)
+      && HAS_BACHELOR_TOKEN.test(dualText)
+      && HAS_MASTER_TOKEN.test(dualText));
+  if (hasBachelorAndMaster) {
+    const found = new Set([strongest, "masters", "bachelors"]);
+    return DEGREE_LEVELS.filter((level) => found.has(level));
+  }
+  return [strongest];
 }
 
 /**
@@ -143,7 +234,9 @@ export function degreeLevel(raw) {
  * through here rather than comparing strings at the call site.
  */
 export function levelMatches(level, wanted) {
-  if (!level || level === "unknown") return false;
-  const list = Array.isArray(wanted) ? wanted : [wanted];
-  return list.includes(level);
+  const actual = (Array.isArray(level) ? level : [level])
+    .filter((item) => item && item !== "unknown");
+  if (!actual.length) return false;
+  const requested = Array.isArray(wanted) ? wanted : [wanted];
+  return actual.some((item) => requested.includes(item));
 }

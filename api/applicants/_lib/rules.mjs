@@ -64,7 +64,7 @@ export const FIELDS = {
   },
   "school.level": {
     group: "school", ops: ["any_of"], kind: "levels", label: "Degree level is",
-    read: (_s, row) => row?.level, display: (_s, row) => row?.degree ?? row?.level,
+    read: (_s, row) => row?.levels ?? row?.level, display: (_s, row) => row?.degree ?? row?.level,
   },
   "school.degreeText": {
     group: "school", ops: ["contains"], kind: "text", label: "Degree text",
@@ -76,7 +76,12 @@ export const FIELDS = {
   },
   "school.inUS": {
     group: "school", ops: ["is"], kind: "bool", label: "School is in the US",
-    read: (_s, row) => row?.inUS,
+    read: (_s, row) => {
+      const status = row?.countryEvidence?.status;
+      if (status === "us" && row?.inUS === true) return true;
+      if (status === "foreign" && row?.inUS === false) return false;
+      return null;
+    },
     display: (_s, row) => row?.location ?? row?.name ?? null,
   },
   "school.location": {
@@ -446,6 +451,16 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       if (found) break;
     }
     if (!found) {
+      // A relevant degree with unverified school geography is missing evidence,
+      // not evidence of a foreign school. Keep the decision fail-closed while
+      // making that gap visible in the same preview/manual-run counters.
+      if (group === "school" && groupConditions.some((condition) => condition.field === "school.inUS")) {
+        const otherConditions = groupConditions.filter((condition) => condition.field !== "school.inUS");
+        if (rows.some((row) => FIELDS["school.inUS"].read(subject, row) == null
+          && groupMatches(otherConditions, subject, row, now))) {
+          return { matched: false, skipped: true, reason: "school_country_unverified", evidence: [] };
+        }
+      }
       if (group === "employment" && rows.some((row) => !row?.id)) {
         return { matched: false, skipped: true, reason: "employment_company_id_missing", evidence: [] };
       }

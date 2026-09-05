@@ -6,6 +6,7 @@ import {
   DEGREE_LEVELS,
   DEGREE_LEVEL_LABELS,
   degreeLevel,
+  degreeLevels,
   levelMatches,
   normalizeDegree,
 } from "../api/applicants/_lib/degree.mjs";
@@ -54,6 +55,99 @@ test("a bachelor's that mentions a certificate is still a bachelor's", () => {
 test("a high school diploma is secondary, not a certificate", () => {
   assert.equal(degreeLevel("High School Diploma"), "secondary");
   assert.equal(degreeLevel("High School American Diploma & Colombian Bachillerato"), "secondary");
+  assert.equal(degreeLevel("Senior Secondary Science and Maths"), "secondary");
+  assert.equal(degreeLevel("Secondary Education CBSE"), "secondary");
+});
+
+test("an explicit bachelor's beats a secondary field of study", () => {
+  for (const degree of [
+    "A.B. Physics, with Secondary in Computer Science",
+    "B.A. Mathematics with Secondary in Economics",
+    "S.B. Computer Science, Secondary in Statistics",
+    "BSc Physics with Secondary in Data Science",
+  ]) {
+    assert.equal(degreeLevel(degree), "bachelors", degree);
+  }
+  assert.equal(degreeLevel("Secondary in Computer Science"), "unknown");
+});
+
+test("an explicit credential beats the projected Secondary Education subject", () => {
+  assert.equal(degreeLevel("BS — Secondary Education"), "bachelors");
+  assert.equal(degreeLevel("MS — Secondary Education: Pedagogy and Practice"), "masters");
+  assert.equal(degreeLevel("Senior Secondary Science and Maths"), "secondary");
+  assert.equal(degreeLevel("Secondary Education CBSE"), "secondary");
+});
+
+test("reviewed explicit bachelor's aliases do not require subject inference", () => {
+  for (const degree of [
+    "BFA — Graphic Design",
+    "B.F.A. — Communication Design",
+    "B.Arch — Architecture",
+    "B.Des. — Knitwear Design & Technology",
+    "BDes — Interior Design",
+    "BSBA — Business Management",
+    "Bchelor — Business Administration",
+    "Laurea triennale — Disegno di moda/abbigliamento",
+    "Sarjana Komputer — Double Degree Program",
+    "理学学士学位 — 计算机与科学",
+  ]) {
+    assert.equal(degreeLevel(degree), "bachelors", degree);
+  }
+  assert.equal(degreeLevel("BachelorTechnology"), "unknown", "unreviewed glued text stays unknown");
+  assert.equal(degreeLevel("Engineering Degree — Computer Science"), "unknown");
+});
+
+test("reviewed explicit master's aliases cannot become bachelor's", () => {
+  for (const degree of [
+    "M.B.A.",
+    "PGDBM, (M.B.A.) — IT Business Management",
+    "Ed.M. — Education Policy",
+    "M.E. — Engineering Management",
+    "M.Ed — Educational Technology",
+    "M.L.S. — Legal Studies",
+    "ME — Industrial Engineering",
+    "MPS — Information Science",
+    "MSAI — Artificial Intelligence",
+    "MSE — Bioengineering",
+    "MSEE — Electrical Engineering",
+  ]) {
+    assert.equal(degreeLevel(degree), "masters", degree);
+  }
+});
+
+test("explicit dual credentials expose both levels without changing the scalar", () => {
+  for (const degree of [
+    "B.A./M.A. — Motion Media Design",
+    "B.S. and M.S. — Engineering",
+    "M.S. & B.S. — Engineering Mechanics",
+    "Master’s and Bachelor of Science — Economics",
+    "BS/MS dual — Electrical Engineering",
+    "Dual Degree: BS MS — Electrical Engineering",
+    "Bachelor of Arts, Master of Arts",
+  ]) {
+    assert.equal(degreeLevel(degree), "masters", degree);
+    assert.deepEqual(degreeLevels(degree), ["masters", "bachelors"], degree);
+  }
+});
+
+test("multiple-level detection requires explicit credential tokens around a connector", () => {
+  assert.deepEqual(degreeLevels("Bachelor of Science, Boston MA"), ["bachelors"]);
+  assert.deepEqual(degreeLevels("Bachelor of Arts, MA"), ["bachelors"]);
+  assert.deepEqual(degreeLevels("BSc, MSc — Computer Science"), ["masters"]);
+  assert.deepEqual(degreeLevels("B A, MBA — Human Resources"), ["masters"]);
+  assert.deepEqual(degreeLevels("Bachelor of Science with master's coursework"), ["masters"]);
+  assert.deepEqual(degreeLevels("MBA / MA Dual Degree"), ["masters"]);
+  assert.deepEqual(degreeLevels("INTEGRATED DUAL DEGREE — Computer Science"), []);
+  assert.deepEqual(degreeLevels(null), []);
+});
+
+test("new exact aliases cannot outrank a stronger explicit credential", () => {
+  assert.equal(degreeLevel("BFA / Master of Science"), "masters");
+  assert.deepEqual(degreeLevels("BFA / Master of Science"), ["masters", "bachelors"]);
+  assert.equal(degreeLevel("M.E. — Doctor of Philosophy"), "doctorate");
+  assert.deepEqual(degreeLevels("M.E. — Doctor of Philosophy"), ["doctorate"]);
+  assert.equal(degreeLevel("BA/MA/PhD"), "doctorate");
+  assert.deepEqual(degreeLevels("BA/MA/PhD"), ["doctorate", "masters", "bachelors"]);
 });
 
 test("an Indian post graduate diploma is a master's, but a graduate certificate is not", () => {
@@ -66,6 +160,41 @@ test("a professional designation containing 'Associate' is not an associate degr
   assert.equal(degreeLevel("ARM - Associate Risk Mgmt"), "certificate");
   assert.equal(degreeLevel("Associate's degree Business Administration"), "associate");
   assert.equal(degreeLevel("Associate of Applied Science in Nursing"), "associate");
+});
+
+test("clear Associate degree prefixes cover current source spellings", () => {
+  for (const degree of [
+    "Associate",
+    "Associate's — Computer Science",
+    "Associate — Graphic Design",
+    "Associates — Applied Science",
+    "Associates Degree — Communications",
+    "Associate of Fine Arts",
+    "Associate of Economics — Consumer Behavior",
+    "Associates of Science — Computer Information Technology",
+    "Associates in Arts — Computer Science",
+  ]) {
+    assert.equal(degreeLevel(degree), "associate", degree);
+  }
+});
+
+test("Associate job titles remain unknown", () => {
+  for (const title of [
+    "Associate Professor",
+    "Research Associate",
+    "Associate Director",
+    "Associate - Director",
+    "Associate: Director",
+    "Associate Product Manager",
+    "Assistant Associate Professor",
+  ]) {
+    assert.equal(degreeLevel(title), "unknown", title);
+  }
+  assert.equal(
+    degreeLevel("Associate — Business Administration and Entrepreneurial Certificate"),
+    "certificate",
+    "the explicit certificate remains the stronger credential",
+  );
 });
 
 test("a spelled-out credential beats a two-letter token elsewhere in the string", () => {
@@ -131,4 +260,9 @@ test("levelMatches accepts a bare level or a list", () => {
   assert.equal(levelMatches("bachelors", ["masters", "bachelors"]), true);
   assert.equal(levelMatches("bachelors", ["masters"]), false);
   assert.equal(levelMatches("bachelors", []), false);
+  assert.equal(levelMatches(["masters", "bachelors"], "bachelors"), true);
+  assert.equal(levelMatches(["masters", "bachelors"], ["doctorate", "masters"]), true);
+  assert.equal(levelMatches(["masters"], "bachelors"), false);
+  assert.equal(levelMatches([], "bachelors"), false);
+  assert.equal(levelMatches(["unknown"], "unknown"), false);
 });
