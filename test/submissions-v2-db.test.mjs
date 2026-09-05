@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { after, before, test } from "node:test";
 
 import {
@@ -64,6 +65,7 @@ async function preparingPair({ candidate = `candidate-${randomUUID()}`, role = `
 before(async () => {
   await runMigrations({ databaseUrl, logger: { info() {} } });
   sql = createDatabase({ databaseUrl, max: 8 });
+  await sql.unsafe(await readFile(new URL("../scripts/provision-submissions-v2-roles.sql", import.meta.url), "utf8"));
   await sql.unsafe(`
     truncate table
       submissions_v2.private_object_bindings,

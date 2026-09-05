@@ -23,6 +23,7 @@ const FIXED_FILES = Object.freeze([
   "api/paraai/_lib/core.mjs",
   "api/auth/_lib/session.mjs",
   "scripts/migrate-submissions-v2.mjs",
+  "scripts/provision-submissions-v2-roles.sql",
   "scripts/submissions-release.mjs",
   ".vercelignore",
   "vercel.json",
@@ -38,6 +39,7 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const normalize = (value) => value.split(sep).join("/");
 const isForbidden = (path) => path.split("/").some((part) => part === ".env" || part.startsWith(".env."));
 const deploymentOmitted = (path) => path === "scripts/migrate-submissions-v2.mjs"
+  || path === "scripts/provision-submissions-v2-roles.sql"
   || path.startsWith("migrations/submissions-v2/")
   || path.startsWith("resume-renderer-v2/")
   || path.startsWith("submissions-v2-purge/")

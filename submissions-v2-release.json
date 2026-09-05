@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 89,
-  "digest": "e91d16e419d7208dfaee8a2a91d106805e9c16d6004472cc18968ac800e53aff",
+  "file_count": 90,
+  "digest": "10d596396b083975dc6131d6ef4b6553e47bdc428b016798923f76b72bfd1166",
   "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
   "files": [
     {
@@ -294,8 +294,12 @@
       "sha256": "ad66f3575b4718b12d8cf63180791b49d60ac1edb7a31da23a87aaaf5189d34a"
     },
     {
+      "path": "scripts/provision-submissions-v2-roles.sql",
+      "sha256": "029397b6a9338df72fb46ca134a30e29bfc467fd4c5df774838377bbb536261b"
+    },
+    {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "2c57bd6e079bd206ba7e5bc56b6f2578050b8ceb54726a9e1cdf6ba10ecb4ce6"
+      "sha256": "296cfb12d98879a7b8fe40fc37862b462cd29aaa3f50f9e36080ba3d26ff3acb"
     },
     {
       "path": "submissions-v2-ui-state.mjs",
