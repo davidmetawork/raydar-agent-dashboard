@@ -126,6 +126,7 @@ test("migrations are digest-checked and idempotent", async () => {
     "013_worker_source_control_check.sql",
     "014_api_review_binding_source_offers.sql",
     "015_proof_during_resume_preparation.sql",
+    "016_review_submission_proof.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count
@@ -270,6 +271,158 @@ test("authoritative submission proof may persist while resume preparation remain
       assert.equal(Number((await tx`
         select expected_pair_version from submissions_v2.resume_generations where id=${activeGenerationId}
       `)[0].expected_pair_version), 1);
+
+      for (const intent of ["interested", "unclear"]) {
+        const reviewPairId = randomUUID();
+        await tx`
+          insert into submissions_v2.candidate_role_pairs(
+            id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state, original_signal_at
+          ) values (${reviewPairId}, ${`review-candidate-${reviewPairId}`}, 'review-role', ${sourceId},
+                    ${intent}, 'needs_review', clock_timestamp())
+        `;
+        await tx`
+          insert into submissions_v2.review_items(pair_id, reason_code)
+          values (${reviewPairId}, ${intent === 'interested' ? 'resume_preparation_failed' : 'candidate_question'})
+        `;
+        const proof = await repository.applySubmissionProof({
+          pairId: reviewPairId, applicationId: `review-application-${reviewPairId}`,
+          authoritativePath: "application.getRecruiterApplicationData", evidenceDigest: "c".repeat(64),
+          observedAt: new Date().toISOString(), checkedAt: new Date().toISOString(),
+          executionFence: { jobId: proofJobId, workerId: "proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+        });
+        assert.equal(proof.submission_status, "proven");
+        assert.equal(proof.intent_state, intent, "provider proof never manufactures positive interest");
+        assert.equal(proof.first_signal_id, sourceId);
+        assert.equal(proof.current_artifact_id, null);
+        assert.equal(Number(proof.state_version), 2);
+        assert.equal((await tx`select count(*)::integer as count from submissions_v2.review_items where pair_id=${reviewPairId} and action_state='open'`)[0].count, 0);
+        assert.equal((await tx`select count(*)::integer as count from submissions_v2.jobs where subject_id=${reviewPairId}`)[0].count, 0);
+        assert.ok(!(await repository.list({ page: "needs_review" })).rows.some((row) => row.pair_id === reviewPairId));
+        assert.ok((await repository.list({ page: "interested" })).rows.some((row) => row.pair_id === reviewPairId));
+      }
+
+      const provenResumePair = async (intent) => {
+        const pairId = randomUUID();
+        const generationId = randomUUID();
+        const artifactId = randomUUID();
+        await tx`
+          insert into submissions_v2.candidate_role_pairs(
+            id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state, original_signal_at
+          ) values (
+            ${pairId}, ${`proven-resume-${intent}-${pairId}`}, ${`proven-role-${intent}`}, ${sourceId},
+            ${intent}, 'needs_review', clock_timestamp()
+          )
+        `;
+        await tx`
+          insert into submissions_v2.review_items(pair_id, reason_code)
+          values (${pairId}, ${intent === "interested" ? "resume_preparation_failed" : "candidate_question"})
+        `;
+        await tx`
+          insert into submissions_v2.resume_generations(
+            id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+            expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+            validator_model_pin, prompt_pin, template_pin, deadline_at, completed_at
+          ) values (
+            ${generationId}, ${pairId}, 1, 'initial', ${`proven-resume-generation:${generationId}`},
+            'succeeded', 'complete', 1, ${sourceId}, 'primary-test', 'fallback-test',
+            'validator-test', 'prompt-test', 'template-test', clock_timestamp(), clock_timestamp()
+          )
+        `;
+        await tx`
+          insert into submissions_v2.resume_artifacts(
+            id, pair_id, generation_id, artifact_version, kind, private_object_key,
+            digest, size_bytes, page_count, validation_status, archive_readback_at, archived_at, current_state
+          ) values (
+            ${artifactId}, ${pairId}, ${generationId}, 1, 'pdf',
+            ${`submissions/resumes/v2/pdf/${artifactId}`}, ${digest(`proven-resume:${artifactId}`)},
+            100, 1, 'passed', clock_timestamp(), clock_timestamp(), 'current'
+          )
+        `;
+        await tx`
+          update submissions_v2.candidate_role_pairs
+             set current_artifact_id=${artifactId}, resume_ready_at=clock_timestamp(),
+                 state_version=state_version+1
+           where id=${pairId}
+        `;
+        const proof = await repository.applySubmissionProof({
+          pairId, applicationId: `proven-resume-application-${pairId}`,
+          authoritativePath: "application.getRecruiterApplicationData",
+          evidenceDigest: digest(`proof:${pairId}`), observedAt: new Date().toISOString(), checkedAt: new Date().toISOString(),
+          executionFence: { jobId: proofJobId, workerId: "proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+        });
+        assert.equal(proof.workflow_state, "needs_review");
+        assert.equal(proof.submission_status, "proven");
+        assert.equal(proof.intent_state, intent);
+        assert.equal(proof.current_artifact_id, artifactId);
+        return { pairId, generationId, artifactId, version: Number(proof.state_version) };
+      };
+
+      const interestedProof = await provenResumePair("interested");
+      const interestedDownload = await repository.issueDownload({
+        actorEmail: "admin@raydar.xyz", idempotencyKey: `proven-download:${randomUUID()}`,
+        pairId: interestedProof.pairId, expectedVersion: interestedProof.version,
+        ticketId: randomUUID(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      assert.equal(interestedDownload.artifact.id, interestedProof.artifactId);
+      const regeneration = await repository.regenerate({
+        actorEmail: "admin@raydar.xyz", idempotencyKey: `proven-regenerate:${randomUUID()}`,
+        pairId: interestedProof.pairId, expectedVersion: interestedProof.version,
+        evidenceEncrypted: null, evidenceDigest: null, evidenceBasis: null, sourceNote: null,
+        instructionsEncrypted: null, uploads: [],
+      });
+      assert.ok(regeneration.job_id);
+      await tx`
+        update submissions_v2.jobs
+           set state='running', lease_owner='proven-regeneration-worker',
+               lease_expires_at=clock_timestamp() + interval '2 minutes', fencing_token=1,
+               attempt_count=1, started_at=clock_timestamp()
+         where id=${regeneration.job_id}
+      `;
+      const started = await repository.startResumeGeneration({
+        pairId: interestedProof.pairId, triggerKind: "regenerate",
+        idempotencyKey: `resume-job:${regeneration.job_id}:attempt:1`,
+        expectedPairVersion: interestedProof.version, commandId: null,
+        primaryModelPin: "primary-test", fallbackModelPin: "fallback-test",
+        validatorModelPin: "validator-test", promptPin: "prompt-test", templatePin: "template-test",
+        deadlineAt: new Date(Date.now() + 60_000).toISOString(), priorArtifactId: interestedProof.artifactId,
+        executionFence: {
+          jobId: regeneration.job_id, workerId: "proven-regeneration-worker", fencingToken: 1,
+          controlEpoch: Number(enabled.control_epoch),
+        },
+      });
+      assert.equal(started.pair_id, interestedProof.pairId);
+      assert.equal(started.trigger_kind, "regenerate");
+      assert.deepEqual((await tx`
+        select intent_state, workflow_state, submission_status, current_artifact_id
+          from submissions_v2.candidate_role_pairs where id=${interestedProof.pairId}
+      `)[0], {
+        intent_state: "interested", workflow_state: "needs_review", submission_status: "proven",
+        current_artifact_id: interestedProof.artifactId,
+      });
+
+      const unclearProof = await provenResumePair("unclear");
+      const unclearDownload = await repository.issueDownload({
+        actorEmail: "admin@raydar.xyz", idempotencyKey: `unclear-proven-download:${randomUUID()}`,
+        pairId: unclearProof.pairId, expectedVersion: unclearProof.version,
+        ticketId: randomUUID(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      assert.equal(unclearDownload.artifact.id, unclearProof.artifactId);
+      await assert.rejects(
+        repository.regenerate({
+          actorEmail: "admin@raydar.xyz", idempotencyKey: `unclear-proven-regenerate:${randomUUID()}`,
+          pairId: unclearProof.pairId, expectedVersion: unclearProof.version,
+          evidenceEncrypted: null, evidenceDigest: null, evidenceBasis: null, sourceNote: null,
+          instructionsEncrypted: null, uploads: [],
+        }),
+        (error) => error.code === "pair_not_resume_ready",
+      );
+      assert.equal((await tx`
+        select count(*)::integer as count from submissions_v2.jobs
+         where kind='prepare_resume' and subject_id=${unclearProof.pairId}::text
+      `)[0].count, 0);
+      await tx`set constraints submissions_v2.candidate_role_pairs_review_consistency,
+        submissions_v2.review_items_pair_consistency, submissions_v2.candidate_role_pairs_proof_consistency,
+        submissions_v2.submission_proofs_pair_consistency immediate`;
       throw rollback;
     }), (error) => error === rollback);
   } finally {
@@ -324,7 +477,7 @@ test("the pure state contract rejects invalid and stale pair transitions", () =>
   assert.throws(() => nextPairState(provenReady, {
     intent_state: "not_interested",
     workflow_state: "not_interested",
-  }, 7), /positive intent|cannot be reclassified/);
+  }, 7), /candidate intent|cannot be reclassified/);
 });
 
 test("source evidence is replay-safe and immutable while processing state may advance", async () => {
@@ -1898,6 +2051,180 @@ test("scheduler queues every due reconciliation, index, proof, notification, dig
   }, sql);
 });
 
+test("expired resume generations recover to Retry preparation without touching a live worker lease", async () => {
+  const prior = await readRuntimeControls(sql);
+  await setRuntimeControls({ actorEmail: 'test@raydar.xyz', reason: 'Enable orphan recovery regression',
+    ui: true, generation: true, ingestion: prior.ingestion_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled }, sql);
+  const pair = await preparingPair();
+  const generationId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, spent_cents, deadline_at
+    ) values (
+      ${generationId}, ${pair.id}, 1, 'initial', ${`resume-job:expired:attempt:1`}, 'strategizing', 'strategy',
+      1, ${pair.signal}, 'opus-test', 'opus-fallback-test', 'validator-test',
+      'prompt-test', 'template-test', 87, clock_timestamp() - interval '1 minute'
+    )
+  `;
+  await sql`
+    insert into submissions_v2.resume_stage_runs(generation_id, stage, attempt, input_digest, status)
+    values (${generationId}, 'strategy', 1, ${digest('expired-stage')}, 'running')
+  `;
+  const submittedPair = await preparingPair();
+  const submittedGenerationId = randomUUID();
+  const submittedApplicationId = `application-${randomUUID()}`;
+  const submittedEvidenceDigest = digest(`submitted-proof:${submittedPair.id}`);
+  await sql.begin(async (tx) => {
+    await tx`
+      insert into submissions_v2.submission_proofs(
+        pair_id, application_id, authoritative_path, evidence_digest, observed_at, source_checked_at
+      ) values (
+        ${submittedPair.id}, ${submittedApplicationId}, 'application.getRecruiterApplicationData',
+        ${submittedEvidenceDigest}, clock_timestamp(), clock_timestamp()
+      )
+    `;
+    await tx`
+      update submissions_v2.candidate_role_pairs
+         set submission_status='proven', submission_proven_at=clock_timestamp(),
+             submission_application_id=${submittedApplicationId},
+             submission_authoritative_path='application.getRecruiterApplicationData',
+             submission_evidence_digest=${submittedEvidenceDigest}
+       where id=${submittedPair.id}
+    `;
+  });
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, deadline_at
+    ) values (
+      ${submittedGenerationId}, ${submittedPair.id}, 1, 'initial', ${`resume-job:submitted-expired:attempt:1`},
+      'strategizing', 'strategy', 1, ${submittedPair.signal}, 'opus-test', 'opus-fallback-test',
+      'validator-test', 'prompt-test', 'template-test', clock_timestamp() - interval '1 minute'
+    )
+  `;
+  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: 'C01234567' } });
+  const recovered = await repository.recoverExpiredResumeGenerations();
+  assert.deepEqual(
+    [...recovered.recovered].sort((left, right) => left.generation_id.localeCompare(right.generation_id)),
+    [
+      { generation_id: generationId, pair_id: pair.id, routed_to_review: true },
+      { generation_id: submittedGenerationId, pair_id: submittedPair.id, routed_to_review: false },
+    ].sort((left, right) => left.generation_id.localeCompare(right.generation_id)),
+  );
+  assert.deepEqual((await sql`select workflow_state, state_version from submissions_v2.candidate_role_pairs where id=${pair.id}`)[0], {
+    workflow_state: 'needs_review', state_version: '2',
+  });
+  assert.deepEqual((await sql`select status, stage, safe_failure_code from submissions_v2.resume_generations where id=${generationId}`)[0], {
+    status: 'failed', stage: 'recovery_failed', safe_failure_code: 'generation_deadline_exhausted',
+  });
+  assert.equal((await sql`select status from submissions_v2.resume_stage_runs where generation_id=${generationId}`)[0].status, 'held');
+  assert.equal((await sql`select count(*)::integer as count from submissions_v2.review_items where pair_id=${pair.id} and reason_code='resume_preparation_failed' and action_state='open'`)[0].count, 1);
+  assert.deepEqual((await sql`
+    select intent_state, workflow_state, submission_status, state_version
+      from submissions_v2.candidate_role_pairs where id=${submittedPair.id}
+  `)[0], {
+    intent_state: 'interested', workflow_state: 'needs_review', submission_status: 'proven', state_version: '2',
+  });
+  assert.deepEqual((await sql`
+    select status, stage, safe_failure_code from submissions_v2.resume_generations where id=${submittedGenerationId}
+  `)[0], { status: 'failed', stage: 'recovery_failed', safe_failure_code: 'generation_deadline_exhausted' });
+  assert.equal((await sql`
+    select count(*)::integer as count from submissions_v2.review_items where pair_id=${submittedPair.id}
+  `)[0].count, 0);
+  assert.equal((await sql`
+    select count(*)::integer as count from submissions_v2.notification_outbox where pair_id=${submittedPair.id}
+  `)[0].count, 0);
+  await setRuntimeControls({ actorEmail: 'test@raydar.xyz', reason: 'Restore orphan recovery controls',
+    ui: prior.ui_enabled, generation: prior.generation_enabled, ingestion: prior.ingestion_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled }, sql);
+});
+
+test("expired resume recovery never overtakes a live preparation-job lease", async () => {
+  const pair = await preparingPair();
+  const generationId = randomUUID();
+  const jobId = randomUUID();
+  const prior = await readRuntimeControls(sql);
+  const controls = await setRuntimeControls({ actorEmail: 'test@raydar.xyz', reason: 'Enable live lease recovery guard regression',
+    ui: true, generation: true, ingestion: prior.ingestion_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled }, sql);
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, deadline_at
+    ) values (
+      ${generationId}, ${pair.id}, 1, 'initial', ${`resume-job:${jobId}:attempt:1`}, 'strategizing', 'strategy',
+      1, ${pair.signal}, 'opus-test', 'opus-fallback-test', 'validator-test',
+      'prompt-test', 'template-test', clock_timestamp() - interval '1 minute'
+    )
+  `;
+  await sql`
+    insert into submissions_v2.jobs(
+      id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+      state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+    ) values (
+      ${jobId}, 'prepare_resume', 'pair', ${pair.id}, ${`resume-fixture:${jobId}`}, 'generation', ${controls.control_epoch},
+      'running', 'live-resume-worker', clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+    )
+  `;
+  const recovered = await createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: 'C01234567' } }).recoverExpiredResumeGenerations();
+  assert.deepEqual(recovered.recovered, []);
+  assert.equal((await sql`select status from submissions_v2.resume_generations where id=${generationId}`)[0].status, 'strategizing');
+  assert.equal((await sql`select workflow_state from submissions_v2.candidate_role_pairs where id=${pair.id}`)[0].workflow_state, 'preparing_resume');
+  await setRuntimeControls({ actorEmail: 'test@raydar.xyz', reason: 'Restore live lease recovery guard controls',
+    ui: prior.ui_enabled, generation: prior.generation_enabled, ingestion: prior.ingestion_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled }, sql);
+});
+
+test("a resumed worker job receives only its unspent two-dollar model reserve", async () => {
+  const pair = await preparingPair();
+  const prior = await readRuntimeControls(sql);
+  const controls = await setRuntimeControls({
+    actorEmail: 'test@raydar.xyz', reason: 'Enable bounded resume budget regression',
+    ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: true,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+  const jobId = randomUUID();
+  await sql`
+    insert into submissions_v2.jobs(
+      id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+      state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+    ) values (
+      ${jobId}, 'prepare_resume', 'pair', ${pair.id}, ${`resume-fixture:${jobId}`}, 'generation', ${controls.control_epoch},
+      'running', 'resume-budget-worker', clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+    )
+  `;
+  await sql`
+    insert into submissions_v2.resume_generations(
+      pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, spent_cents, deadline_at, completed_at
+    ) values (
+      ${pair.id}, 1, 'initial', ${`resume-job:${jobId}:attempt:1`}, 'failed', 'retry_scheduled',
+      1, ${pair.signal}, 'opus-test', 'opus-fallback-test', 'validator-test',
+      'prompt-test', 'template-test', 183, clock_timestamp() + interval '5 minutes', clock_timestamp()
+    )
+  `;
+  const repository = createRepository({ sql });
+  const generation = await repository.startResumeGeneration({
+    pairId: pair.id, triggerKind: 'initial', idempotencyKey: `resume-job:${jobId}:attempt:2`, expectedPairVersion: 1,
+    primaryModelPin: 'claude-opus-5', fallbackModelPin: 'claude-opus-4-8', validatorModelPin: 'gpt-5.4-2026-03-05',
+    promptPin: 'test', templatePin: 'test', deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    executionFence: { jobId, workerId: 'resume-budget-worker', fencingToken: 1, controlEpoch: Number(controls.control_epoch) },
+  });
+  assert.equal(Number(generation.job_spent_cents), 183);
+  assert.equal(Number(generation.budget_cents), 17);
+  await setRuntimeControls({
+    actorEmail: 'test@raydar.xyz', reason: 'Restore controls after bounded resume budget regression',
+    ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+});
+
 test("administrator case deletion is hidden, encrypted-manifest-backed, fenced, recoverable, and append-only audited", async () => {
   const repository = createRepository({ sql });
   const pair = await preparingPair();
@@ -2209,4 +2536,283 @@ test("quarantined upload cleanup returns only 24-hour-old objects and marks DB s
   );
   assert.equal((await sql`select count(*)::integer as count from submissions_v2.pair_events where idempotency_key=${`supplement-quarantine-purge:${oldId}`}`)[0].count, 1);
   assert.equal((await sql`select count(*)::integer as count from submissions_v2.resume_supplements where id=${youngId}`)[0].count, 1);
+});
+
+test("the API principal dismisses only an idle unresolved signal with an idempotent audited command", async () => {
+  const prior = await readRuntimeControls(sql);
+  const signalId = randomUUID();
+  const eventId = `dismiss-review-${randomUUID()}`;
+  const idempotencyKey = randomUUID();
+  const staleKey = randomUUID();
+  const note = "Confirmed this was a calendar-service notification, not a candidate response.";
+  const apiDatabase = {
+    begin: (work) => sql.begin(async (apiSql) => {
+      await apiSql.unsafe("set local role submissions_v2_api");
+      return work(apiSql);
+    }),
+  };
+  const repository = createRepository({ sql: apiDatabase });
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable Review dismissal regression",
+      ui: true, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+    await sql`
+      insert into submissions_v2.source_events(
+        id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+        direction, received_at, content_digest, processing_state, safe_error_code,
+        safe_error_detail, idempotency_key, envelope, sender_display_name
+      ) values (
+        ${signalId}, 'email', 'submissions.email_reply.v1', ${eventId}, 'gmail', 'david-raydar-xyz',
+        ${`message-${eventId}`}, 'inbound', clock_timestamp(), ${digest(signalId)}, 'needs_role',
+        'role_unclear', 'The exact offered role was not present in the source contract.',
+        ${`source:${signalId}`}, ${sql.json({ source_family: 'fit_follow_up_with_matches' })}, 'Calendar assistant'
+      )
+    `;
+    await sql`
+      insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail)
+      values (${signalId}, 'role_unclear', 'Select the exact role confirmed from the source email.')
+    `;
+    const result = await repository.dismissUnresolvedSignal({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, signalId,
+      dismissalReason: "irrelevant_notification", note,
+    });
+    assert.deepEqual(result, {
+      outcome: "dismissed", destination: "removed_from_review",
+      signal_id: signalId, affected_count: 1,
+    });
+    assert.deepEqual([...(await sql`
+      select processing_state, safe_error_code from submissions_v2.source_events where id=${signalId}
+    `)], [{ processing_state: "ignored_later", safe_error_code: "review_dismissed" }]);
+    assert.deepEqual([...(await sql`
+      select action_state, resolved_by, resolution_note from submissions_v2.review_items where unresolved_signal_id=${signalId}
+    `)], [{ action_state: "dismissed", resolved_by: "recruiter@raydar.xyz", resolution_note: note }]);
+    const audit = (await sql`
+      select action, status, result from submissions_v2.api_commands
+       where actor_email='recruiter@raydar.xyz' and idempotency_key=${idempotencyKey}
+    `)[0];
+    assert.equal(audit.action, "dismiss_review");
+    assert.equal(audit.status, "succeeded");
+    assert.deepEqual(audit.result, result);
+    assert.deepEqual(await repository.dismissUnresolvedSignal({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, signalId,
+      dismissalReason: "irrelevant_notification", note,
+    }), { ...result, replay: true });
+    await assert.rejects(
+      repository.dismissUnresolvedSignal({
+        actorEmail: "recruiter@raydar.xyz", idempotencyKey: staleKey, signalId,
+        dismissalReason: "irrelevant_notification", note,
+      }),
+      (error) => error.code === "review_dismiss_not_eligible" && error.status === 409,
+    );
+    const untouched = (await sql`
+      select
+        (select count(*)::integer from submissions_v2.candidate_role_pairs where first_signal_id=${signalId}) as pairs,
+        (select count(*)::integer from submissions_v2.first_response_claims where signal_id=${signalId}) as claims,
+        (select count(*)::integer from submissions_v2.jobs where subject_id=${signalId}::text) as jobs,
+        (select count(*)::integer from submissions_v2.signal_role_decisions where signal_id=${signalId}) as decisions,
+        (select count(*)::integer from submissions_v2.pair_signal_links where signal_id=${signalId}) as links,
+        (select count(*)::integer from submissions_v2.api_commands where idempotency_key=${staleKey}) as rolled_back_commands
+    `)[0];
+    assert.deepEqual(untouched, { pairs: 0, claims: 0, jobs: 0, decisions: 0, links: 0, rolled_back_commands: 0 });
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore controls after Review dismissal regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+});
+
+test("Review decisions cannot clear a resume-specific blocker through the generic resolution path", async () => {
+  const prior = await readRuntimeControls(sql);
+  const pair = await preparingPair();
+  const idempotencyKey = randomUUID();
+  const apiDatabase = {
+    begin: (work) => sql.begin(async (apiSql) => {
+      await apiSql.unsafe("set local role submissions_v2_api");
+      return work(apiSql);
+    }),
+  };
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable Review action-precondition regression",
+      ui: true, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+    const current = await sql.begin(async (tx) => {
+      const updated = (await tx`
+        update submissions_v2.candidate_role_pairs
+           set workflow_state='needs_review', state_version=state_version+1
+         where id=${pair.id} returning *
+      `)[0];
+      await tx`
+        insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+        values (${pair.id}, 'candidate_original_resume_missing', 'The candidate-original resume is unavailable.')
+      `;
+      return updated;
+    });
+    const repository = createRepository({ sql: apiDatabase });
+    await assert.rejects(
+      repository.transition({
+        actorEmail: "recruiter@raydar.xyz", idempotencyKey, pairId: pair.id,
+        expectedVersion: Number(current.state_version), destination: "interested",
+        note: "Attempted generic clearance", action: "resolve_review",
+      }),
+      (error) => error.code === "review_resolution_not_eligible" && error.status === 409,
+    );
+    assert.deepEqual([...(await sql`
+      select workflow_state, state_version from submissions_v2.candidate_role_pairs where id=${pair.id}
+    `)], [{ workflow_state: "needs_review", state_version: current.state_version }]);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.review_items
+       where pair_id=${pair.id} and reason_code='candidate_original_resume_missing' and action_state='open'
+    `)[0].count, 1);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.api_commands where idempotency_key=${idempotencyKey}
+    `)[0].count, 0);
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore controls after Review action-precondition regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+});
+
+test("a fenced live role recheck clears only role availability and never invents unclear intent", async () => {
+  const prior = await readRuntimeControls(sql);
+  const enabled = await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Enable exact role-recheck regression",
+    ui: true, ingestion: true, generation: true,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+  const repository = createRepository({ sql });
+  try {
+    const interested = await preparingPair();
+    await sql`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url,
+        last_confirmed_at, source_digest
+      ) values (
+        ${interested.role}, 'Acme', 'Engineer', 'acme engineer', false,
+        ${`https://www.paraform.com/browse?role=${interested.role}`},
+        clock_timestamp() - interval '1 day', ${digest(`inactive:${interested.role}`)}
+      )
+    `;
+    const reviewed = await sql.begin(async (tx) => {
+      const updated = (await tx`
+        update submissions_v2.candidate_role_pairs
+           set workflow_state='needs_review', role_state='unavailable', state_version=state_version+1
+         where id=${interested.id} returning *
+      `)[0];
+      await tx`
+        insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+        values (${interested.id}, 'role_unavailable', 'The exact role is unavailable.')
+      `;
+      return updated;
+    });
+    const jobId = randomUUID();
+    await sql`
+      insert into submissions_v2.jobs(
+        id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+        state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+      ) values (
+        ${jobId}, 'recheck_pair', 'pair', ${interested.id}::text, ${`role-recheck:${jobId}`},
+        'ingestion', ${enabled.control_epoch}, 'running', 'role-worker',
+        clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+      )
+    `;
+    const liveRole = {
+      role_id: interested.role, company_name: "Acme", role_title: "Engineer",
+      search_key: "acme engineer", paraform_url: `https://www.paraform.com/browse?role=${interested.role}`,
+      owner_email: null, provider_updated_at: null, source_digest: digest(`active:${interested.role}`),
+    };
+    const fence = {
+      jobId, workerId: "role-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch),
+    };
+    const active = await repository.applyRoleRecheck({
+      pairId: interested.id, expectedPairVersion: Number(reviewed.state_version),
+      role: liveRole, confirmedAt: new Date().toISOString(), executionFence: fence,
+    });
+    assert.equal(active.role_active, true);
+    assert.equal(active.state, "preparing_resume");
+    assert.ok(active.prepare_job_id);
+    assert.deepEqual((await sql`
+      select workflow_state, role_state, state_version from submissions_v2.candidate_role_pairs where id=${interested.id}
+    `)[0], { workflow_state: "preparing_resume", role_state: "active", state_version: "3" });
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.review_items
+       where pair_id=${interested.id} and action_state='open'
+    `)[0].count, 0);
+    assert.deepEqual(await repository.applyRoleRecheck({
+      pairId: interested.id, expectedPairVersion: Number(reviewed.state_version),
+      role: liveRole, confirmedAt: new Date().toISOString(), executionFence: fence,
+    }), { ...active, replay: true });
+
+    const unclearSignal = await sourceEvent();
+    const unclearPairId = randomUUID();
+    const unclearRoleId = `role-${randomUUID()}`;
+    await sql.begin(async (tx) => {
+      await tx`
+        insert into submissions_v2.role_index(
+          role_id, company_name, role_title, search_key, active, destination_url,
+          last_confirmed_at, source_digest
+        ) values (
+          ${unclearRoleId}, 'Beta', 'Designer', 'beta designer', false,
+          ${`https://www.paraform.com/browse?role=${unclearRoleId}`}, clock_timestamp(),
+          ${digest(`inactive:${unclearRoleId}`)}
+        )
+      `;
+      await tx`
+        insert into submissions_v2.candidate_role_pairs(
+          id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+          original_signal_at, role_state
+        ) values (
+          ${unclearPairId}, ${`candidate-${randomUUID()}`}, ${unclearRoleId}, ${unclearSignal},
+          'unclear', 'needs_review', clock_timestamp(), 'unavailable'
+        )
+      `;
+      await tx`
+        insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+        values (${unclearPairId}, 'role_unavailable', 'The exact role is unavailable.')
+      `;
+    });
+    const unclearJobId = randomUUID();
+    await sql`
+      insert into submissions_v2.jobs(
+        id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+        state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+      ) values (
+        ${unclearJobId}, 'recheck_pair', 'pair', ${unclearPairId}::text, ${`role-recheck:${unclearJobId}`},
+        'ingestion', ${enabled.control_epoch}, 'running', 'role-worker-unclear',
+        clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+      )
+    `;
+    const unclear = await repository.applyRoleRecheck({
+      pairId: unclearPairId, expectedPairVersion: 1,
+      role: {
+        role_id: unclearRoleId, company_name: "Beta", role_title: "Designer",
+        search_key: "beta designer", paraform_url: `https://www.paraform.com/browse?role=${unclearRoleId}`,
+        owner_email: null, provider_updated_at: null, source_digest: digest(`active:${unclearRoleId}`),
+      },
+      confirmedAt: new Date().toISOString(),
+      executionFence: { jobId: unclearJobId, workerId: "role-worker-unclear", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+    });
+    assert.equal(unclear.state, "needs_review");
+    assert.equal(unclear.prepare_job_id, null);
+    assert.deepEqual([...(await sql`
+      select reason_code from submissions_v2.review_items where pair_id=${unclearPairId} and action_state='open'
+    `)], [{ reason_code: "reply_unclear_or_conditional" }]);
+    assert.deepEqual((await sql`
+      select intent_state, workflow_state, role_state from submissions_v2.candidate_role_pairs where id=${unclearPairId}
+    `)[0], { intent_state: "unclear", workflow_state: "needs_review", role_state: "active" });
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore controls after exact role-recheck regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
 });

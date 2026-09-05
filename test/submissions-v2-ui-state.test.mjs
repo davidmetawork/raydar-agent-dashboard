@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -15,6 +15,7 @@ test("only stale pair versions refresh into the retry guidance", () => {
 
 test("duplicate review dispositions receive a recruiter-facing success message", () => {
   assert.equal(commandSuccessMessage({ duplicate: true }), "Already recorded; review item resolved.");
+  assert.equal(commandSuccessMessage({ outcome: "dismissed", destination: "removed_from_review" }), "Removed from Needs Review.");
   assert.equal(commandSuccessMessage({ duplicate: false }), "");
   assert.equal(commandSuccessMessage({}), "");
 });
@@ -36,6 +37,12 @@ test("review evidence only renders an explicitly available bounded excerpt", () 
   assert.equal(available.sourceLabel, "Gmail reply");
   assert.equal(available.sourceFamily, "master inbox");
   assert.equal(available.receivedAt, "2026-09-04T12:00:00.000Z");
+  const offer = reviewContextPresentation({
+    outbound_offer_excerpt: "Would you like to discuss the Engineer role?",
+    offered_roles: [{ role_id: "role-1", company: "Acme", title: "Engineer" }],
+  });
+  assert.equal(offer.outboundOffer, "Would you like to discuss the Engineer role?");
+  assert.deepEqual(offer.offeredRoles, [{ roleId: "role-1", company: "Acme", title: "Engineer" }]);
   const unavailable = reviewContextPresentation({ evidence_status: "unavailable", candidate_reply_excerpt: "Do not show me" });
   assert.equal(unavailable.available, false);
   assert.equal(unavailable.excerpt, "");
@@ -45,6 +52,37 @@ test("review evidence only renders an explicitly available bounded excerpt", () 
   const clipped = reviewContextPresentation({ evidence_status: "available", candidate_reply_excerpt: "🙂".repeat(1201) });
   assert.equal(Array.from(clipped.excerpt).length, 1200);
   assert.equal(clipped.excerptTruncated, true);
+});
+
+test("review rows identify the next required action without exposing a reason code", () => {
+  assert.deepEqual(reviewRowPresentation({
+    review_reasons: [
+      { code: "role_unclear", label: "Exact offered role is unclear", detail: "Confirm the exact role from the source email." },
+      { code: "candidate_ambiguous", label: "More than one Paraform candidate matches" },
+    ],
+  }), {
+    label: "Role unclear",
+    detail: "Confirm the exact role from the source email.",
+    action: "Select role",
+    additionalReasons: 1,
+    reasonCount: 2,
+  });
+  assert.equal(reviewRowPresentation({ review_reasons: [{ code: "classification_failed" }], primary_action_label: "Retry now" }).action, "Retry now");
+});
+
+test("an active review generation presents actual progress and blocks another retry", () => {
+  assert.deepEqual(reviewProgressPresentation({
+    generation_status: "strategizing", generation_stage: "strategy", generation_updated_at: "2026-09-05T03:25:00.000Z",
+    generation_deadline_at: "2026-09-05T03:30:00.000Z", preparation_error_detail: "A prior attempt timed out safely.",
+  }), {
+    active: true,
+    status: "strategizing",
+    statusLabel: "Planning the role-specific resume",
+    stage: "strategy",
+    detail: "A prior attempt timed out safely.",
+    updatedAt: "2026-09-05T03:25:00.000Z",
+    deadlineAt: "2026-09-05T03:30:00.000Z",
+  });
 });
 
 test("a delayed review-context response cannot replace a newer dialog or a closed modal", () => {
@@ -111,6 +149,18 @@ test("preparing candidates cannot use an absent artifact while regeneration reta
   assert.deepEqual(resumeUiState({ workflow_state: "interested", generation_status: "archiving", current_artifact_id: "artifact-1" }), {
     hasArtifact: true, preparing: false, generating: true, status: "archiving",
   });
+});
+
+test("a proven submission in review remains history instead of appearing to prepare a resume", () => {
+  assert.deepEqual(resumeUiState({ workflow_state: "needs_review", submission_status: "proven", generation_status: "strategizing" }), {
+    hasArtifact: false, preparing: false, generating: false, status: "strategizing",
+  });
+});
+
+test("role-unavailable review rows expose a same-pair role recheck", () => {
+  assert.equal(reviewRowPresentation({
+    review_reasons: [{ code: "role_unavailable", detail: "Role is inactive." }],
+  }).action, "Recheck role");
 });
 
 test("submit popup only navigates when a validated destination is available and closes on failure", () => {

@@ -14,6 +14,9 @@ import {
 
 const CURRENT_MASTER_INBOX_CONTRACT = 1;
 const ALLOWED_UPLOADS = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]);
+const REVIEW_DISMISSAL_REASONS = new Set([
+  "not_candidate_response", "irrelevant_notification", "already_handled",
+]);
 const clean = (value, limit = 500) => String(value ?? "").trim().slice(0, limit);
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -386,13 +389,28 @@ export function createService({
         if (body.destination === "needs_review") return repository.keepReview({ actorEmail, idempotencyKey, pairId, expectedVersion: version, note });
         return repository.transition({ actorEmail, idempotencyKey, pairId, expectedVersion: version, destination: required(body.destination, "destination", 40), note, action });
       }
-      if (["recheck", "retry_preparation"].includes(action)) {
+      if (action === "dismiss_review") {
+        const dismissalReason = required(body.dismissal_reason, "dismissal_reason", 80);
+        if (!REVIEW_DISMISSAL_REASONS.has(dismissalReason)) {
+          throw problem("dismissal_reason_invalid", "Choose a supported Review dismissal reason.", 400);
+        }
+        return repository.dismissUnresolvedSignal({
+          actorEmail, idempotencyKey,
+          signalId: required(body.signal_id, "signal_id", 100),
+          dismissalReason,
+          note: required(body.note, "note", 500),
+        });
+      }
+      if (["recheck", "recheck_role", "retry_preparation"].includes(action)) {
+        const roleRecheck = action === "recheck_role";
         return repository.enqueuePairAction({
           actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100),
           expectedVersion: expectedVersion(body.expected_version), action,
-          kind: action === "recheck" ? "recheck_pair" : "prepare_resume",
-          requiredControl: action === "recheck" ? "ingestion" : "generation",
-          checkpoint: { trigger_kind: action === "retry_preparation" ? "retry" : undefined },
+          kind: action === "retry_preparation" ? "prepare_resume" : "recheck_pair",
+          requiredControl: action === "retry_preparation" ? "generation" : "ingestion",
+          checkpoint: roleRecheck
+            ? { target: "role" }
+            : { trigger_kind: action === "retry_preparation" ? "retry" : undefined },
         });
       }
       if (action === "retry_classification") {
@@ -645,7 +663,7 @@ export function createService({
       return { durable, effective: effectiveControls(environmentControls(env), durable) };
     },
 
-    async tick() {
+    async tick({ recoverResumes = false } = {}) {
       const instant = new Date(now());
       const minuteKey = instant.toISOString().slice(0, 16);
       const fiveMinuteKey = `${minuteKey.slice(0, 15)}${Math.floor(Number(minuteKey.slice(15, 16)) / 5) * 5}`;
@@ -656,6 +674,11 @@ export function createService({
       }).formatToParts(instant).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
       const pacificDayKey = `${pacific.year}-${pacific.month}-${pacific.day}`;
       const pacificHour = Number(pacific.hour);
+      const durable = await repository.runtimeControls();
+      const effective = effectiveControls(environmentControls(env), durable);
+      if (recoverResumes && effective.ui && effective.generation) {
+        await repository.recoverExpiredResumeGenerations();
+      }
       return repository.scheduleTick({
         minuteKey, fiveMinuteKey, hourKey, pacificDayKey,
         dailyDigestDue: pacificHour >= 8,

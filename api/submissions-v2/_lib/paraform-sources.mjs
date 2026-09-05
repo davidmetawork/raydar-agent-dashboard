@@ -115,6 +115,26 @@ export async function readActiveRoleIndex({ trpcGetImpl = trpcGet } = {}) {
   return { rows: normalized.filter((row) => row.active), confirmed_at: confirmedAt };
 }
 
+export async function readExactRole(roleId, { trpcGetImpl = trpcGet } = {}) {
+  const requestedId = clean(roleId, 200);
+  if (!requestedId) throw sourceShapeError("role_id_required", "The exact Paraform role id is required.");
+  const raw = await trpcGetImpl("role.getRoleByIdSimple", { role_id: requestedId, id: requestedId });
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw sourceShapeError("role_recheck_shape_invalid", "Paraform returned an unrecognized exact-role response.");
+  }
+  const returnedId = clean(raw.id || raw.role_id || raw.roleId, 200);
+  if (returnedId !== requestedId) {
+    throw sourceShapeError("role_recheck_identity_conflict", "Paraform returned a different role than the exact role requested.");
+  }
+  const status = clean(raw.status, 100).toUpperCase();
+  if (!status) throw sourceShapeError("role_recheck_status_missing", "Paraform omitted the exact role status.");
+  const confirmedAt = new Date().toISOString();
+  if (status !== "ACTIVE") return { role: null, confirmed_at: confirmedAt, active: false };
+  const role = roleIndexRow({ ...raw, active: true }, { confirmedAt });
+  if (!role) throw sourceShapeError("role_recheck_shape_invalid", "Paraform returned an incomplete active-role response.");
+  return { role: { ...role, active: true }, confirmed_at: confirmedAt, active: true };
+}
+
 export async function readCuratedPopulation({ listImpl = null, trpcGetImpl = trpcGet } = {}) {
   if (listImpl) {
     const normalized = await listImpl();

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { claimSourceCursor, commitSourceCursor, database, releaseSourceCursor } from "../api/submissions-v2/_lib/db.mjs";
 import { createRepository } from "../api/submissions-v2/_lib/repository.mjs";
 import { createService } from "../api/submissions-v2/_lib/service.mjs";
-import { exactCuratedListSource, readActiveRoleIndex, readCandidateIndexPage, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList } from "../api/submissions-v2/_lib/paraform-sources.mjs";
+import { exactCuratedListSource, readActiveRoleIndex, readCandidateIndexPage, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList, readExactRole } from "../api/submissions-v2/_lib/paraform-sources.mjs";
 import { paraformCuratedListUrl } from "../api/submissions-v2/_lib/paraform-links.mjs";
 import { curatedBatchPlan } from "../api/submissions-v2/_lib/curated.mjs";
 import { notificationText, postSafeNotification } from "../api/submissions-v2/_lib/notifications.mjs";
@@ -112,6 +112,7 @@ export function createWorkerHandlers({
   settleResumeFailure = settleResumePreparationFailure,
   candidatePage = readCandidateIndexPage,
   activeRoles = readActiveRoleIndex,
+  exactRole = readExactRole,
   curatedPopulation = readCuratedPopulation,
   curatedCandidate = readCuratedCandidate,
   curatedRoleList = readCuratedRoleList,
@@ -181,13 +182,46 @@ export function createWorkerHandlers({
         }
         throw normalized;
       }
-      await settleResumeFailure(normalized, context, { store: resumeStore, executionFence: executionFence(context) });
+      const settled = await settleResumeFailure(normalized, context, { store: resumeStore, executionFence: executionFence(context) });
+      if (!settled) {
+        throw new ResumePipelineError(
+          "resume_failure_unroutable",
+          "Resume preparation could not be settled safely; the job remains recoverable.",
+          { retryable: false, checkpoint: normalized.checkpoint || context.job.checkpoint, cause: normalized },
+        );
+      }
       return { checkpoint: { ...(normalized.checkpoint || context.job.checkpoint), terminal_routed: true, safe_failure_code: normalized.code } };
     }
   };
 
   result.recheck_pair = async (context) => {
     const pairId = String(context.job.subject_id || "");
+    if (context.job.checkpoint?.target === "role") {
+      const pair = await repository.pair(pairId);
+      if (!pair) throw new ResumePipelineError("pair_not_found", "The candidate-role item was not found.", { retryable: false });
+      await context.checkpoint({ ...context.job.checkpoint, stage: "reading_exact_role" });
+      let liveRole;
+      try {
+        liveRole = await exactRole(pair.role_id);
+      } catch (error) {
+        throw sourceError(error, "role_recheck_failed");
+      }
+      const loaded = await repository.applyRoleRecheck({
+        pairId,
+        expectedPairVersion: Number(context.job.checkpoint?.expected_pair_version),
+        role: liveRole.role,
+        confirmedAt: liveRole.confirmed_at,
+        executionFence: executionFence(context),
+      });
+      return {
+        checkpoint: {
+          ...context.job.checkpoint,
+          stage: loaded.role_active ? "role_recheck_active" : "role_recheck_unavailable",
+          role_active: loaded.role_active,
+          prepare_job_id: loaded.prepare_job_id || null,
+        },
+      };
+    }
     const loaded = await resumeStore.loadPairContext(pairId, context.job.checkpoint || {});
     await context.checkpoint({ ...context.job.checkpoint, stage: "rechecking_original_resume" });
     const bundle = await collectSources({ candidateUserId: loaded.pair.candidate_user_id, roleId: loaded.pair.role_id, supplements: [], knownRaydarDigests: loaded.knownRaydarDigests }, {

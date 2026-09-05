@@ -89,8 +89,9 @@ export function assertPairState(state) {
     throw new PairStateError("invalid_pair_state", "needs_review cannot retain negative intent");
   }
   if (submission === "proven"
-    && (intent !== "interested" || !["preparing_resume", "interested", "needs_review"].includes(workflow))) {
-    throw new PairStateError("invalid_pair_state", "proven submission must retain positive intent through the resume lifecycle");
+    && !((intent === "interested" && ["preparing_resume", "interested", "needs_review"].includes(workflow))
+      || (intent === "unclear" && workflow === "needs_review"))) {
+    throw new PairStateError("invalid_pair_state", "proven submission must preserve the independently recorded candidate intent");
   }
   return state;
 }

@@ -100,6 +100,7 @@ function handlerSet(overrides = {}) {
     settleResumeFailure: async () => true,
     candidatePage: async () => ({ rows: [], next_cursor: null }),
     activeRoles: async () => ({ rows: [], confirmed_at: NOW.toISOString() }),
+    exactRole: async () => ({ role: null, active: false, confirmed_at: NOW.toISOString() }),
     curatedPopulation: async () => [],
     curatedCandidate: async () => [],
     collectSources: async () => ({ schemaVersion: "raydar.submissions-v2.source-bundle.v1", sourceDigest: "digest", readiness: { canGenerate: false } }),
@@ -639,6 +640,18 @@ test("resume worker retries transient failures but routes terminal attempts once
   assert.equal(result.checkpoint.safe_failure_code, "provider_unavailable");
 });
 
+test("resume worker never completes a terminal job when no generation was durably settled", async () => {
+  const failure = new ResumePipelineError("generation_conflict", "The active generation could not be claimed.", { retryable: false });
+  const handlers = handlerSet({
+    runResume: async () => { throw failure; },
+    settleResumeFailure: async () => false,
+  });
+  await assert.rejects(
+    () => handlers.prepare_resume(context("prepare_resume", { attemptCount: 3, maxAttempts: 3 }).value),
+    (error) => error.code === "resume_failure_unroutable" && error.retryable === false,
+  );
+});
+
 test("resume worker closes only the timed-out generation before an automatic retry", async () => {
   const failure = Object.assign(
     new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its five-minute deadline.", { retryable: true }),
@@ -674,6 +687,53 @@ test("recheck leaves the pair in review until the candidate-original resume is r
   const result = await handlers.recheck_pair(context("recheck_pair", { checkpoint: { expected_pair_version: 2 } }).value);
   assert.equal(result.checkpoint.stage, "original_resume_still_missing");
   assert.equal(resumed, 0);
+});
+
+test("role recheck reads the live active-role source and applies only the exact pair role", async () => {
+  let applied;
+  const handlers = handlerSet({
+    repository: {
+      pair: async () => ({ id: "pair-1", role_id: "role-2", state_version: 4 }),
+      applyRoleRecheck: async (input) => {
+        applied = input;
+        return { role_active: true, state: "preparing_resume", state_version: 5, prepare_job_id: "prepare-1" };
+      },
+    },
+    exactRole: async (roleId) => {
+      assert.equal(roleId, "role-2");
+      return { confirmed_at: NOW.toISOString(), active: true, role: { role_id: "role-2", role_title: "Exact role" } };
+    },
+  });
+  const ctx = context("recheck_pair", { checkpoint: { target: "role", expected_pair_version: 4 } });
+  const result = await handlers.recheck_pair(ctx.value);
+  assert.equal(applied.pairId, "pair-1");
+  assert.equal(applied.expectedPairVersion, 4);
+  assert.deepEqual(applied.role, { role_id: "role-2", role_title: "Exact role" });
+  assert.deepEqual(applied.executionFence, {
+    jobId: "job-recheck_pair", workerId: "worker-1", fencingToken: 8, controlEpoch: 12,
+  });
+  assert.equal(result.checkpoint.stage, "role_recheck_active");
+  assert.equal(result.checkpoint.prepare_job_id, "prepare-1");
+});
+
+test("role recheck retains the blocker when the exact role is absent from the live active-role source", async () => {
+  let applied;
+  const handlers = handlerSet({
+    repository: {
+      pair: async () => ({ id: "pair-1", role_id: "role-missing", state_version: 4 }),
+      applyRoleRecheck: async (input) => {
+        applied = input;
+        return { role_active: false, state: "needs_review", state_version: 5 };
+      },
+    },
+    exactRole: async (roleId) => {
+      assert.equal(roleId, "role-missing");
+      return { confirmed_at: NOW.toISOString(), active: false, role: null };
+    },
+  });
+  const result = await handlers.recheck_pair(context("recheck_pair", { checkpoint: { target: "role", expected_pair_version: 4 } }).value);
+  assert.equal(applied.role, null);
+  assert.equal(result.checkpoint.stage, "role_recheck_unavailable");
 });
 
 test("curated reconciliation uses a leased, paced population batch and advances only after apply", async () => {

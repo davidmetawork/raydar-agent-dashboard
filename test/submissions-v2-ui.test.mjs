@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const js = await readFile(new URL("../submissions-v2.js", import.meta.url), "utf8");
 const css = await readFile(new URL("../submissions-v2.css", import.meta.url), "utf8");
+const uiState = await readFile(new URL("../submissions-v2-ui-state.mjs", import.meta.url), "utf8");
 
 test("bootstrap obtains public Google configuration before the protected V2 session", () => {
   const config = js.indexOf('publicJson("/api/auth/config")');
@@ -150,10 +151,24 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
   assert.match(js, /searchIndex\("roles", roleQuery\.value/u);
   assert.match(js, /command\(action, input\)/);
   assert.match(js, /runReviewAction\("recheck"/);
+  assert.match(js, /runReviewAction\("recheck_role"/);
+  assert.match(js, /data-label="Recheck role"/);
   assert.match(js, /runReviewAction\("retry_classification"/);
   assert.match(js, /runReviewAction\("retry_preparation"/);
+  assert.match(js, /reviewProgressPresentation\(row\)/);
+  assert.match(js, /View progress/);
+  assert.match(js, /Retry is unavailable while this job is active/);
+  assert.match(uiState, /generation_updated_at/);
+  assert.match(uiState, /generation_deadline_at/);
+  assert.match(js, /runReviewAction\("recheck_role"/);
+  assert.match(js, /dismiss_review/);
+  assert.match(js, /not_candidate_response/);
+  assert.match(js, /irrelevant_notification/);
+  assert.match(js, /already_handled/);
   assert.match(js, /title: "Review the candidate signal"/);
   assert.match(js, /Open Signal/);
+  assert.match(js, /Original offer/);
+  assert.match(js, /Offered roles/);
   assert.match(js, /review-context\?\$\{params\}/);
   assert.match(js, /reviewContextCanRender\(\{ request: controller/);
   assert.match(js, /Choose a decision/);
@@ -161,6 +176,12 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
   assert.match(css, /\.review-evidence\{/);
   assert.match(js, /const source = evidence\.sourceLabel \|\| "Verified source details unavailable"/);
   assert.match(js, /Candidate added; resume preparation has started\./);
+  assert.match(js, /reviewRowPresentation\(row\)/);
+  assert.doesNotMatch(js, /review-triangle/);
+  assert.match(js, /Next step:/);
+  assert.match(css, /container-type:inline-size/);
+  assert.match(css, /@container \(max-width:1040px\)/);
+  assert.match(js, /const noun = STATE\.page === "needs_review" \? "review item" : "candidate"/);
 });
 
 test("a proven submission remains explicit while a resume issue stays actionable", () => {

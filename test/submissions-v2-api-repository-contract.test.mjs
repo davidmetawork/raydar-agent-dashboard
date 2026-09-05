@@ -23,7 +23,7 @@ test("repository exposes the complete API and worker persistence boundary", () =
   const repository = createRepository({ sql: {} });
   const expected = [
     "list", "counts", "health", "searchCandidates", "searchRoles", "pair", "jobs", "sourceForReview",
-    "recordEmailSource", "applyClassifiedSignal", "routeClassificationFailure", "bindUnresolvedSignal",
+    "recordEmailSource", "applyClassifiedSignal", "routeClassificationFailure", "bindUnresolvedSignal", "dismissUnresolvedSignal",
     "addCandidate", "transition", "keepReview", "enqueuePairAction", "enqueueSignalAction",
     "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "archive",
     "upsertCandidateIndex", "upsertRoleIndex", "curatedSnapshots", "applyCuratedObservations",
@@ -32,7 +32,7 @@ test("repository exposes the complete API and worker persistence boundary", () =
     "persistClaimEvidenceLinks", "persistClaimValidations", "updateSupplementProcessing",
     "promoteResumeArtifacts", "failResumeGeneration", "pairsForSubmissionProofPage", "applySubmissionProof",
     "recordSourceHealth", "claimNotifications", "settleNotification", "deliverNotification", "duePurges", "markArtifactPurged",
-    "runtimeControls", "setControls", "scheduleTick", "candidateMatches", "reservePrivateObject",
+    "runtimeControls", "setControls", "scheduleTick", "recoverExpiredResumeGenerations", "candidateMatches", "reservePrivateObject",
     "renewPrivateObjectWrite", "commitPrivateObjectReservation", "reserveUploadIntent", "redeemDownloadTicket", "auditDownloadFailure",
     "finalizeCandidateIndexCycle", "retirePreviousCandidateHmac", "duePrivateObjectReservations",
     "markPrivateObjectReservationPurged", "releasePrivateObjectReservationCleanup", "dueUploadReservations", "markUploadReservationPurged", "releaseUploadReservationCleanup",
@@ -68,7 +68,8 @@ test("submission proof selection pages every visible positive pair with a stable
     id: rows[7].id,
   });
   assert.match(query, /submission_status <> 'proven'/u);
-  assert.match(query, /workflow_state in \('preparing_resume','interested'\)/u);
+  assert.match(query, /workflow_state in \('preparing_resume','interested','needs_review'\)/u);
+  assert.match(query, /intent_state in \('interested','unclear'\)/u);
   assert.equal(values.at(-1), 9, "an eight-pair page reads only one lookahead row");
 });
 
@@ -98,7 +99,7 @@ test("API repository and worker share only canonical job kinds", async () => {
   assert.match(repository, /state in \('queued','running'\)/);
   assert.match(repository, /when pending_job\.id is not null then 'queued'/,
     "row progress must stay active while a retry job is queued between generation attempts");
-  assert.match(repository, /where p\.workflow_state in \('preparing_resume','interested'\) and p\.case_hidden_at is null/,
+  assert.match(repository, /where \(p\.workflow_state in \('preparing_resume','interested'\) or p\.submission_status='proven'\) and p\.case_hidden_at is null/,
     "positive candidates must appear immediately while their first resume is preparing");
   assert.match(repository, /workflow_state in \('preparing_resume','interested'\).*as interested/s,
     "the Interested count must use the same positive workflow states as the list");

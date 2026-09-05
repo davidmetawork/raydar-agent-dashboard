@@ -234,6 +234,9 @@ export async function runResumePreparation(context, {
       executionFence,
     });
     if (generation.status === "succeeded") return { checkpoint, generation_id: generation.id, existing: true };
+    if (Number(generation.job_spent_cents || 0) >= GENERATION_BUDGET_CENTS) {
+      throw new ResumePipelineError("generation_budget_exhausted", "Resume preparation reached its two-dollar model-cost ceiling.");
+    }
     const deadlineAt = Date.parse(generation.deadline_at);
     const budget = createGenerationBudget({
       deadlineAt,

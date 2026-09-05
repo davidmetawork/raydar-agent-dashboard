@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { curatedBatchPlan, diffCuratedSnapshots } from "../api/submissions-v2/_lib/curated.mjs";
 import {
   candidateIndexRow, normalizeSearch, readActiveRoleIndex, readCandidateIndexPage,
-  exactCuratedListSource, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList, roleIndexRow,
+  exactCuratedListSource, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList, readExactRole, roleIndexRow,
 } from "../api/submissions-v2/_lib/paraform-sources.mjs";
 import { paraformCuratedListUrl } from "../api/submissions-v2/_lib/paraform-links.mjs";
 import { authorizeNotificationBroker, notificationText, postSafeNotification } from "../api/submissions-v2/_lib/notifications.mjs";
@@ -28,6 +28,27 @@ test("role index constructs the exact Paraform role destination", () => {
   const row = roleIndexRow({ id: "role-1", company_name: "Acme", title: "Engineer", active: true });
   assert.equal(row.paraform_url, "https://www.paraform.com/browse?role=role-1");
   assert.equal(row.active, true);
+});
+
+test("exact role recheck uses the uncached point read and requires an ACTIVE status", async () => {
+  const calls = [];
+  const active = await readExactRole("role-1", {
+    trpcGetImpl: async (procedure, input) => {
+      calls.push({ procedure, input });
+      return { id: "role-1", status: "ACTIVE", company: { name: "Acme" }, name: "Engineer" };
+    },
+  });
+  assert.equal(active.active, true);
+  assert.equal(active.role.role_id, "role-1");
+  assert.deepEqual(calls, [{ procedure: "role.getRoleByIdSimple", input: { role_id: "role-1", id: "role-1" } }]);
+  const inactive = await readExactRole("role-1", {
+    trpcGetImpl: async () => ({ id: "role-1", status: "CLOSED" }),
+  });
+  assert.deepEqual({ active: inactive.active, role: inactive.role }, { active: false, role: null });
+  await assert.rejects(
+    () => readExactRole("role-1", { trpcGetImpl: async () => ({ id: "role-2", status: "ACTIVE", name: "Wrong role" }) }),
+    (error) => error.code === "role_recheck_identity_conflict",
+  );
 });
 
 test("malformed successful Paraform index payloads fail closed instead of becoming authoritative empty sets", async () => {
