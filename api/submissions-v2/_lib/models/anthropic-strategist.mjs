@@ -12,7 +12,7 @@ export const STRATEGIST_PRIMARY_MODEL = "claude-opus-5";
 export const STRATEGIST_FALLBACK_MODEL = "claude-opus-4-8";
 export const STRATEGIST_EFFORT = "high";
 export const STRATEGIST_MAX_OUTPUT_TOKENS = 8_000;
-export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-05.v4";
+export const STRATEGIST_PROMPT_VERSION = "submissions-v2-resume-strategist-2026-09-05.v5";
 
 const RETRYABLE_CONTRACT_CODES = new Set(["RESUME_FILLER_OR_REPETITION"]);
 const CONTRACT_PATH = /^document\.(?:candidate\.(?:name|headline|contact\[\d{1,2}\])|summary|sections\[\d{1,2}\]\.entries\[\d{1,2}\]\.(?:header|body)\[\d{1,2}\])$/u;
@@ -47,6 +47,7 @@ Use page two only when omitting additional distinct employers would hide materia
 Use concise resume text, make selected_claim_ids exactly the unique claim ids cited by visible document nodes, and return deliberate_omissions as [] because omissions are derived deterministically from unselected evidence.
 Build a hiring-manager document in the approved Raydar information architecture: a concise Profile summary, Professional Experience in the main column, and only evidence-backed sidebar sections that add decision value (normally Selected Outcomes, Core Expertise, Education, or Additional Details).
 For every Professional Experience entry, header[0] must be the employer name alone and header[1] must be "Role | dates"; keep distinct employers as distinct entries, never create a synthetic employer such as "Roles listed include," and use one to three concise accomplishment bullets per role.
+Every visible text node must be unique except when the same exact organization name appears exactly twice: once as header[0] of a main Professional Experience entry and once as header[0] of an Education entry. Never apply this exception to roles, dates, bullets, labels, metrics, contact details, or any other text.
 Use at most five sections and ten distinct experience entries; on a two-page resume retain the candidate's real chronology with older roles shortened instead of merging employers or inventing an "additional experience" umbrella.
 If at least two strong quantified outcomes are supported, put up to four in a sidebar metrics section titled Selected Outcomes; each metric entry uses header[0] for the short metric and body[0] for its plain-language label.
 Use inline emphasis selectively for the most scan-worthy truthful outcomes, technical terms, and leadership scope, with no more than eighteen phrases and no more than twenty percent of visible characters emphasized.
@@ -368,7 +369,7 @@ function fallbackContractFeedback(error) {
   const details = error?.details;
   if (details?.contractCode !== "RESUME_FILLER_OR_REPETITION") return null;
   const location = details.contractPath ? ` at ${details.contractPath}` : "";
-  return `The prior draft was rejected by the local resume contract with RESUME_FILLER_OR_REPETITION${location}. Produce a fresh document in which every visible text node is unique. Remove or combine repeated visible text, including repeated structural labels, while retaining only supported facts. Never invent, alter, or split candidate history merely to make wording unique.`;
+  return `The prior draft was rejected by the local resume contract with RESUME_FILLER_OR_REPETITION${location}. Produce a fresh document in which every visible text node is unique except for the narrow contract allowance: the same exact organization name may appear exactly twice only when it is header[0] once in main Professional Experience and once in Education. Remove or combine every other repeated visible text while retaining only supported facts. Never invent, alter, or split candidate history merely to make wording unique.`;
 }
 
 function payloadWithFallbackFeedback(payload, error) {
