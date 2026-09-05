@@ -57,7 +57,7 @@ function qualifyingSearch(value) {
   return encoded.length <= 20_000 ? value : null;
 }
 
-const SOURCE_KINDS = new Set(["crunchbase_query_export", "public_primary_sources"]);
+const SOURCE_KINDS = new Set(["crunchbase_query_export", "public_primary_sources", "crunchbase_2013_snapshot"]);
 
 function httpsUrl(value) {
   const raw = text(value, 2_000);
@@ -97,6 +97,25 @@ function normalizedSource(input) {
       queryEvidenceSha256: queryEvidenceSha256?.toLowerCase() ?? null,
     };
   }
+  if (kind === "crunchbase_2013_snapshot") {
+    const observedAt = iso(input?.observedAt);
+    const sourceFileSha256 = text(input?.sourceFileSha256, 64);
+    const datasetUrl = httpsUrl(input?.datasetUrl);
+    const attribution = text(input?.attribution, 160);
+    if (!observedAt || !/^[a-f0-9]{64}$/i.test(sourceFileSha256 || "") || !datasetUrl
+      || attribution !== "Crunchbase 2013 Snapshot © 2013") {
+      throw new Error("funded_employer_historical_source_invalid");
+    }
+    return {
+      id, kind, observedAt, sourceFileSha256: sourceFileSha256.toLowerCase(), datasetUrl, attribution,
+      snapshotAsOf: "2013-12-31",
+      licenseUrl: "https://data.crunchbase.com/docs/license-agreement",
+      // The dated historical source can include companies that later exited.
+      // Omit the first boundary month because source dates can be imputed.
+      qualifyingFrom: "2011-10-01",
+      qualifyingThrough: "2013-12-31",
+    };
+  }
   const observedAt = iso(input?.observedAt);
   const ledgerSha256 = text(input?.ledgerSha256, 64);
   if (!observedAt || (ledgerSha256 && !/^[a-f0-9]{64}$/i.test(ledgerSha256))) {
@@ -118,12 +137,15 @@ function normalizedEntry(input, at, sourcesById) {
   const sourceRef = text(input?.sourceRef, 120);
   if (!orgId || !PROVIDER_ID_RE.test(orgId) || !name) throw new Error("funded_employer_identity_invalid");
   if (!QUALIFYING_COUNTRIES.includes(countryCode)) throw new Error("funded_employer_country_invalid");
-  if (!domain) throw new Error("funded_employer_domain_invalid");
   if (!Number.isFinite(totalFundingUsd) || totalFundingUsd < MINIMUM_TOTAL_FUNDING_USD) {
     throw new Error("funded_employer_total_funding_invalid");
   }
   const source = sourceRef ? sourcesById.get(sourceRef) : null;
   if (!source) throw new Error("funded_employer_source_ref_invalid");
+  if (!domain && (source.kind !== "crunchbase_2013_snapshot"
+    || (Array.isArray(input?.paraformCompanyIds) && input.paraformCompanyIds.length))) {
+    throw new Error("funded_employer_domain_invalid");
+  }
   const qualification = input?.fundingProof?.qualification;
   let normalizedQualification;
   let totalFundingSourceUrl = null;
@@ -132,6 +154,26 @@ function normalizedEntry(input, at, sourcesById) {
       throw new Error("funded_employer_query_qualification_invalid");
     }
     normalizedQualification = { kind: "query_cohort", sourceRef };
+  } else if (qualification?.kind === "historical_round") {
+    const stage = text(qualification.stage, 40)?.toLowerCase() ?? null;
+    const announcedDate = calendarDate(qualification.announcedDate);
+    const sourceRoundId = text(qualification.sourceRoundId, 120);
+    const sourceObjectId = text(qualification.sourceObjectId, 120);
+    const rawCode = text(qualification.rawRoundCode, 20)?.toLowerCase() ?? null;
+    const codeToStage = { seed: "seed", a: "series_a", b: "series_b", c: "series_c", d: "series_d" };
+    const amountUsd = qualification.amountUsd == null ? null : Number(qualification.amountUsd);
+    if (source.kind !== "crunchbase_2013_snapshot" || !sourceRoundId || !sourceObjectId
+      || !Object.hasOwn(codeToStage, rawCode) || codeToStage[rawCode] !== stage
+      || !announcedDate || announcedDate < source.qualifyingFrom || announcedDate > source.qualifyingThrough
+      || (amountUsd != null && (!Number.isFinite(amountUsd) || amountUsd < 0))) {
+      throw new Error("funded_employer_historical_round_invalid");
+    }
+    totalFundingSourceUrl = source.datasetUrl;
+    normalizedQualification = {
+      kind: "historical_round", stage, announcedDate, amountUsd, sourceRoundId, sourceObjectId,
+      rawRoundCode: rawCode, rawRoundType: text(qualification.rawRoundType, 80),
+      sourceUrl: text(qualification.sourceUrl, 2000),
+    };
   } else if (qualification?.kind === "explicit_round") {
     if (source.kind !== "public_primary_sources") {
       throw new Error("funded_employer_round_source_invalid");
@@ -174,6 +216,7 @@ function normalizedEntry(input, at, sourcesById) {
     paraformCompanyIds,
     fundingProof: {
       totalFundingUsd,
+      totalFundingBasis: text(input?.fundingProof?.totalFundingBasis, 120),
       totalFundingSourceUrl,
       sourceRowId: text(input?.fundingProof?.sourceRowId, 160),
       observedAt: iso(input?.fundingProof?.observedAt) ?? at,
@@ -243,7 +286,8 @@ export function compileFundedEmployerSnapshot(manifest) {
       digest,
       provider: sources.every((source) => source.kind === "crunchbase_query_export")
         ? "Crunchbase" : sources.every((source) => source.kind === "public_primary_sources")
-          ? "Public primary sources" : "Mixed verified sources",
+          ? "Public primary sources" : sources.every((source) => source.kind === "crunchbase_2013_snapshot")
+            ? "Crunchbase 2013 Snapshot" : "Mixed verified sources",
       criteria: manifest.criteria,
     },
   };
@@ -285,7 +329,7 @@ export async function readFundedEmployerCatalog({ readJson = getJson } = {}) {
       reviewedParaformIdCount: Number.isInteger(item.reviewedParaformIdCount) && item.reviewedParaformIdCount >= 0
         ? item.reviewedParaformIdCount : 0,
       digest: String(item.digest).toLowerCase(),
-      provider: ["Crunchbase", "Public primary sources", "Mixed verified sources"].includes(item.provider)
+      provider: ["Crunchbase", "Public primary sources", "Crunchbase 2013 Snapshot", "Mixed verified sources"].includes(item.provider)
         ? item.provider : "Verified sources",
       criteria: validateFundedEmployerCriteria(item.criteria) === null ? {
         headquartersCountryCodes: [...QUALIFYING_COUNTRIES],

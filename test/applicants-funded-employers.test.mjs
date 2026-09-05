@@ -72,6 +72,15 @@ function subject(experiences, snapshots) {
   };
 }
 
+function response() {
+  return {
+    statusCode: null, body: null, headers: {},
+    setHeader(key, value) { this.headers[key.toLowerCase()] = value; },
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+}
+
 test("snapshot compiler keeps private provenance and builds only reviewed Paraform id membership", () => {
   const { snapshot, metadata } = compileFundedEmployerSnapshot(manifest());
   assert.equal(metadata.companyCount, 1);
@@ -149,6 +158,56 @@ test("names and domains never substitute for a reviewed Paraform company id", ()
     assert.equal(inherited.matched, false, `${inheritedId} must not resolve through Object.prototype`);
     assert.equal(inherited.skipped, false);
   }
+});
+
+test("historical snapshots retain original round codes and funding totals with dated attribution", () => {
+  const history = manifest();
+  history.provenance.sources = [{
+    id: "cb-2013", kind: "crunchbase_2013_snapshot", observedAt: "2026-09-05T18:00:00Z",
+    sourceFileSha256: "d".repeat(64), datasetUrl: "https://www.kaggle.com/datasets/justinas/startup-investments",
+    attribution: "Crunchbase 2013 Snapshot © 2013",
+  }];
+  history.entries[0].sourceRef = "cb-2013";
+  history.entries[0].fundingProof = {
+    totalFundingUsd: 2_500_000, totalFundingBasis: "historical_dataset_reported_total",
+    qualification: {
+      kind: "historical_round", stage: "seed", announcedDate: "2012-04-16",
+      amountUsd: 500_000, sourceRoundId: "round_1", sourceObjectId: "c:123",
+      rawRoundCode: "seed", rawRoundType: "series-a",
+    },
+  };
+  const { snapshot, metadata } = compileFundedEmployerSnapshot(history);
+  assert.equal(metadata.provider, "Crunchbase 2013 Snapshot");
+  assert.equal(snapshot.provenance.sources[0].attribution, "Crunchbase 2013 Snapshot © 2013");
+  assert.equal(snapshot.entries[0].fundingProof.qualification.stage, "seed");
+  assert.equal(snapshot.entries[0].fundingProof.qualification.amountUsd, 500_000,
+    "the threshold applies to total funding, not the individual qualifying round");
+  assert.equal(snapshot.entries[0].fundingProof.qualification.rawRoundType, "series-a");
+  assert.equal(snapshot.entries[0].fundingProof.totalFundingBasis, "historical_dataset_reported_total");
+
+  for (const changes of [
+    { announcedDate: "2011-09-30" },
+    { announcedDate: "2014-01-01" },
+    { announcedDate: "2012-02-30" },
+    { stage: "series_d", rawRoundCode: "e" },
+    { stage: "series_b", rawRoundCode: "seed" },
+  ]) {
+    const invalid = structuredClone(history);
+    Object.assign(invalid.entries[0].fundingProof.qualification, changes);
+    assert.throws(() => compileFundedEmployerSnapshot(invalid), /historical_round_invalid/);
+  }
+  const unattributed = structuredClone(history);
+  unattributed.provenance.sources[0].attribution = "Crunchbase";
+  assert.throws(() => compileFundedEmployerSnapshot(unattributed), /historical_source_invalid/);
+
+  const unresolved = structuredClone(history);
+  unresolved.entries[0].domain = null;
+  unresolved.entries[0].paraformCompanyIds = [];
+  const pending = compileFundedEmployerSnapshot(unresolved);
+  assert.equal(pending.metadata.companyCount, 1, "historical list coverage is retained");
+  assert.equal(pending.metadata.reviewedParaformIdCount, 0, "missing identity cannot create a match");
+  unresolved.entries[0].paraformCompanyIds = ["pf_acme"];
+  assert.throws(() => compileFundedEmployerSnapshot(unresolved), /domain_invalid/);
 });
 
 test("membership scans employment beyond the existing fourteen-job rule cap", () => {
@@ -269,12 +328,6 @@ test("only a bounded immutable snapshot id is valid for the compact condition", 
 
 test("the private import route requires publisher auth and never returns licensed rows", async () => {
   const state = {};
-  const response = () => ({
-    statusCode: null, body: null, headers: {},
-    setHeader(key, value) { this.headers[key.toLowerCase()] = value; },
-    status(code) { this.statusCode = code; return this; },
-    json(body) { this.body = body; return this; },
-  });
   const deps = {
     corsHandler: () => false,
     authHandler: (req) => req.headers.authorization === "Bearer test",
@@ -300,4 +353,130 @@ test("the private import route requires publisher auth and never returns license
   assert.equal(imported.body.snapshot.companyCount, 1);
   assert.equal("entries" in imported.body.snapshot, false);
   assert.equal(JSON.stringify(imported.body).includes("Acme Labs"), false);
+});
+
+test("the authenticated company catalog is bounded and returns company aggregates only", async () => {
+  let loaded = 0;
+  const handler = createFundedEmployersHandler({
+    corsHandler: () => false,
+    authHandler: (req) => req.headers.authorization === "Bearer test",
+    kvReady: () => true,
+    loadSourceFactPage: async (options) => {
+      loaded += 1;
+      assert.equal(options.offset, 20);
+      assert.equal(options.limit, 40);
+      assert.equal(options.includeStream, false);
+      assert.equal(options.expectedGenerationId, "active-generation");
+      return {
+        pointer: { generationId: "active-generation" },
+        selected: { targets: Array.from({ length: 75 }) },
+        offset: 20,
+        nextOffset: 60,
+        targets: Array.from({ length: 40 }),
+        skipped: { observation_mismatch: 1 },
+        staged: [{
+          key: "core:privateperson",
+          rawProfile: JSON.stringify({ name: "Private Applicant", email: "private@example.com" }),
+          factsRaw: JSON.stringify({
+            allCompanies: [
+              { id: "company-exact", name: "Exact Company" },
+              { id: "company-exact", name: "Exact Company" },
+              { id: null, name: "Unidentified Employer" },
+            ],
+          }),
+        }],
+      };
+    },
+  });
+
+  const denied = response();
+  await handler({ method: "GET", headers: {}, query: { companyCatalog: "1" } }, denied);
+  assert.equal(denied.statusCode, 401);
+  assert.equal(loaded, 0);
+
+  const invalid = response();
+  await handler({
+    method: "GET", headers: { authorization: "Bearer test" },
+    query: { companyCatalog: "1", limit: "101" },
+  }, invalid);
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(loaded, 0);
+
+  const catalog = response();
+  await handler({
+    method: "GET", headers: { authorization: "Bearer test" },
+    query: {
+      companyCatalog: "1", offset: "20", limit: "40",
+      expectedGenerationId: "active-generation",
+    },
+  }, catalog);
+  assert.equal(catalog.statusCode, 200);
+  assert.equal(catalog.body.generationId, "active-generation");
+  assert.equal(catalog.body.totalProfiles, 75);
+  assert.equal(catalog.body.nextOffset, 60);
+  assert.deepEqual(catalog.body.companies, [{ companyId: "company-exact", name: "Exact Company" }]);
+  assert.equal(catalog.body.companyRowsWithoutId, 1);
+  const wire = JSON.stringify(catalog.body);
+  assert.equal(wire.includes("Private Applicant"), false);
+  assert.equal(wire.includes("private@example.com"), false);
+  assert.equal(wire.includes("rawProfile"), false);
+});
+
+test("rebuild_facts defaults dry and applies only for literal false", async () => {
+  const calls = [];
+  const handler = createFundedEmployersHandler({
+    corsHandler: () => false,
+    authHandler: () => true,
+    kvReady: () => true,
+    rebuildFacts: async (options) => {
+      calls.push(options);
+      return {
+        mode: options.apply ? "apply" : "dry-run",
+        generationId: "active-generation",
+        totalProfiles: 10,
+        offset: options.offset,
+        nextOffset: null,
+        targetCount: 10,
+        eligibleCount: 10,
+        skipped: {},
+        targetSetDigest: "a".repeat(64),
+        stagedFactsDigest: "b".repeat(64),
+        attemptedCount: options.apply ? 10 : 0,
+        writtenCount: options.apply ? 10 : 0,
+        sourceRaceCount: 0,
+        generationRaceCount: 0,
+        readbackVerifiedCount: options.apply ? 10 : 0,
+        readbackMismatchCount: 0,
+      };
+    },
+  });
+  const call = async (body) => {
+    const res = response();
+    await handler({ method: "POST", headers: {}, body }, res);
+    assert.equal(res.statusCode, 200);
+    return res.body;
+  };
+
+  assert.equal((await call({ operation: "rebuild_facts" })).dryRun, true);
+  assert.equal(calls.at(-1).apply, false);
+  assert.equal((await call({ operation: "rebuild_facts", dryRun: "false" })).dryRun, true);
+  assert.equal(calls.at(-1).apply, false);
+  const applied = await call({
+    operation: "rebuild_facts", dryRun: false, offset: 5, limit: 25,
+    expectedGenerationId: "active-generation",
+  });
+  assert.equal(applied.dryRun, false);
+  assert.equal(calls.at(-1).apply, true);
+  assert.equal(calls.at(-1).offset, 5);
+  assert.equal(calls.at(-1).limit, 25);
+  assert.equal(calls.at(-1).includeStream, false);
+  assert.equal(calls.at(-1).expectedGenerationId, "active-generation");
+
+  const invalid = response();
+  await handler({
+    method: "POST", headers: {},
+    body: { operation: "rebuild_facts", dryRun: false, expectedGenerationId: { unsafe: true } },
+  }, invalid);
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(calls.length, 3);
 });
