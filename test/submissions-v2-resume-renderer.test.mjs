@@ -137,6 +137,78 @@ test("renderer rejects filler, internal copy, and documents beyond two pages", (
   assert.throws(() => createRenderPlan(checked), (error) => error.code === "RESUME_PAGE_LIMIT_EXCEEDED");
 });
 
+test("renderer permits one grounded employer-school label overlap and still rejects every other repeated visible node", () => {
+  const repeatedOrganization = ast();
+  repeatedOrganization.sections[0].entries[0].header[0] = {
+    id: "uconn-employer", text: "University of Connecticut", claim_ids: ["claim-uconn-employer"], emphasis: [],
+  };
+  repeatedOrganization.sections.push({
+    id: "section-education",
+    title: "Education",
+    kind: "education",
+    placement: "sidebar",
+    entries: [{
+      id: "entry-uconn-degree",
+      header: [
+        { id: "uconn-school", text: "University of Connecticut", claim_ids: ["claim-uconn-education"], emphasis: [] },
+        { id: "uconn-degree", text: "B.S. Computer Science | 2021", claim_ids: ["claim-uconn-degree"], emphasis: [] },
+      ],
+      body: [],
+    }],
+  });
+  const groundedClaims = [...claimIds, "claim-uconn-employer", "claim-uconn-education", "claim-uconn-degree"];
+  const accepted = assertResumeAst(repeatedOrganization, { allowedClaimIds: groundedClaims });
+  assert.equal(accepted.sections[0].entries[0].header[0].text, "University of Connecticut");
+  assert.equal(accepted.sections[2].entries[0].header[0].text, "University of Connecticut");
+  const reverseOrder = structuredClone(repeatedOrganization);
+  [reverseOrder.sections[0], reverseOrder.sections[2]] = [reverseOrder.sections[2], reverseOrder.sections[0]];
+  assert.doesNotThrow(() => assertResumeAst(reverseOrder, { allowedClaimIds: groundedClaims }));
+
+  const repeatedExperience = structuredClone(repeatedOrganization);
+  repeatedExperience.sections[0].entries.push({
+    id: "entry-uconn-second-role",
+    header: [
+      { id: "uconn-second-employer", text: "University of Connecticut", claim_ids: ["claim-uconn-second-employer"], emphasis: [] },
+      { id: "uconn-second-role", text: "Researcher | 2019–2020", claim_ids: ["claim-uconn-second-role"], emphasis: [] },
+    ],
+    body: [],
+  });
+  assert.throws(
+    () => assertResumeAst(repeatedExperience, { allowedClaimIds: [...groundedClaims, "claim-uconn-second-employer", "claim-uconn-second-role"] }),
+    (error) => error.code === "RESUME_FILLER_OR_REPETITION",
+  );
+
+  const repeatedBody = structuredClone(repeatedOrganization);
+  repeatedBody.sections[1].entries[0].body.push({
+    id: "skills-repeat", text: "University of Connecticut", claim_ids: ["claim-uconn-body"], emphasis: [],
+  });
+  assert.throws(
+    () => assertResumeAst(repeatedBody, { allowedClaimIds: [...groundedClaims, "claim-uconn-body"] }),
+    (error) => error.code === "RESUME_FILLER_OR_REPETITION",
+  );
+
+  const repeatedSecondHeader = structuredClone(repeatedOrganization);
+  repeatedSecondHeader.sections[2].entries[0].header[1].text = repeatedSecondHeader.sections[0].entries[0].header[1].text;
+  assert.throws(
+    () => assertResumeAst(repeatedSecondHeader, { allowedClaimIds: groundedClaims }),
+    (error) => error.code === "RESUME_FILLER_OR_REPETITION",
+  );
+
+  const thirdOrganization = structuredClone(repeatedOrganization);
+  thirdOrganization.sections[2].entries.push({
+    id: "entry-uconn-certificate",
+    header: [
+      { id: "uconn-certificate-school", text: "University of Connecticut", claim_ids: ["claim-uconn-certificate"], emphasis: [] },
+      { id: "uconn-certificate", text: "Certificate | 2022", claim_ids: ["claim-uconn-certificate-detail"], emphasis: [] },
+    ],
+    body: [],
+  });
+  assert.throws(
+    () => assertResumeAst(thirdOrganization, { allowedClaimIds: [...groundedClaims, "claim-uconn-certificate", "claim-uconn-certificate-detail"] }),
+    (error) => error.code === "RESUME_FILLER_OR_REPETITION",
+  );
+});
+
 test("estimated pagination never deletes validated candidate facts", () => {
   const underfilled = ast();
   underfilled.sections = [{

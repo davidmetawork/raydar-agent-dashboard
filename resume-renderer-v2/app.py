@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parent
 FONT_DIR = ROOT / "fonts" if (ROOT / "fonts").exists() else ROOT.parent / "fonts"
 LOCKUP_PATH = ROOT / "assets" / "raydar-lockup.svg"
 
-RENDERER_VERSION = "raydar-resume-renderer-v2.2"
+RENDERER_VERSION = "raydar-resume-renderer-v2.3"
 TEMPLATE_VERSION = "raydar-resume-template-v0.2"
 BRAND_ASSET_ID = "raydar-official-lockup-black-v1"
 RENDER_REQUEST_VERSION = "raydar.resume.render-request.v1"
@@ -195,7 +195,7 @@ def identifier(value: Any, path: str) -> str:
 @dataclass
 class AstContext:
     ids: set[str] = field(default_factory=set)
-    visible_copy: set[str] = field(default_factory=set)
+    visible_copy: dict[str, list[str | None]] = field(default_factory=dict)
     validated_claim_ids: set[str] = field(default_factory=set)
     used_claim_ids: set[str] = field(default_factory=set)
     emphasis_count: int = 0
@@ -204,7 +204,39 @@ class AstContext:
     node_count: int = 0
 
 
-def content_node(raw: Any, path: str, maximum: int, context: AstContext) -> dict[str, Any]:
+def structural_organization_label(
+    section_kind: str | None,
+    section_placement: str | None,
+    entry_header_index: int | None,
+) -> str | None:
+    if entry_header_index != 0:
+        return None
+    if section_kind == "experience" and section_placement == "main":
+        return "employer"
+    if section_kind == "education":
+        return "school"
+    return None
+
+
+def permitted_organization_repeat(previous: list[str | None], current: str | None) -> bool:
+    return (
+        len(previous) == 1
+        and current is not None
+        and previous[0] is not None
+        and {previous[0], current} == {"employer", "school"}
+    )
+
+
+def content_node(
+    raw: Any,
+    path: str,
+    maximum: int,
+    context: AstContext,
+    *,
+    section_kind: str | None = None,
+    section_placement: str | None = None,
+    entry_header_index: int | None = None,
+) -> dict[str, Any]:
     item = exact_keys(raw, ("id", "text", "claim_ids", "emphasis"), path)
     node_id = identifier(item["id"], f"{path}.id")
     if node_id in context.ids:
@@ -232,9 +264,11 @@ def content_node(raw: Any, path: str, maximum: int, context: AstContext) -> dict
     if any(ranges[index][0] < ranges[index - 1][1] for index in range(1, len(ranges))):
         raise RenderError("RESUME_EMPHASIS_OVERLAP", f"{path}.emphasis phrases overlap")
     key = value.casefold()
-    if key in context.visible_copy:
+    prior_occurrences = context.visible_copy.get(key, [])
+    organization_label = structural_organization_label(section_kind, section_placement, entry_header_index)
+    if prior_occurrences and not permitted_organization_repeat(prior_occurrences, organization_label):
         raise RenderError("RESUME_FILLER_OR_REPETITION", "Resume content repeats the same visible copy", details={"path": path})
-    context.visible_copy.add(key)
+    context.visible_copy[key] = [*prior_occurrences, organization_label]
     context.used_claim_ids.update(claims)
     context.emphasis_count += len(emphasis)
     context.emphasis_characters += sum(len(phrase) for phrase in emphasis)
@@ -301,11 +335,17 @@ def validate_ast(raw: Any, validated_claim_ids: Any) -> dict[str, Any]:
             entries.append({
                 "id": entry_id,
                 "header": [
-                    content_node(node, f"{entry_path}.header[{index}]", 500, context)
+                    content_node(
+                        node, f"{entry_path}.header[{index}]", 500, context,
+                        section_kind=kind, section_placement=placement, entry_header_index=index,
+                    )
                     for index, node in enumerate(entry["header"])
                 ],
                 "body": [
-                    content_node(node, f"{entry_path}.body[{index}]", 1_200, context)
+                    content_node(
+                        node, f"{entry_path}.body[{index}]", 1_200, context,
+                        section_kind=kind, section_placement=placement, entry_header_index=None,
+                    )
                     for index, node in enumerate(entry["body"])
                 ],
             })
@@ -363,9 +403,13 @@ def validate_ast(raw: Any, validated_claim_ids: Any) -> dict[str, Any]:
 
 def materialize_font(source: Path, target: Path, weight: int, family: str, style: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    font = FontToolsTTFont(str(source))
+    # FontTools updates head.modified on save by default. That makes a fresh
+    # font cache produce different embedded font bytes, and therefore a
+    # different otherwise-identical PDF, on each container start.
+    font = FontToolsTTFont(str(source), recalcTimestamp=False)
     if "fvar" in font:
         font = instantiateVariableFont(font, {"wght": weight}, inplace=False)
+    font.recalcTimestamp = False
     # ReportLab keys embedded faces by the font's internal names, not only by
     # the pdfmetrics registration name.  Give each static instance a distinct,
     # deterministic identity so regular and semibold cannot collapse together.
@@ -393,20 +437,20 @@ def materialize_font(source: Path, target: Path, weight: int, family: str, style
 
 
 def ensure_fonts() -> tuple[dict[str, Path], dict[str, set[int]]]:
-    output = Path(tempfile.gettempdir()) / "raydar-resume-fonts-v2"
+    output = Path(tempfile.gettempdir()) / "raydar-resume-fonts-v2.3"
     specifications = {
         "PPGrafierDisplay-Regular": (
             FONT_DIR / "pp-grafier-display-variable.woff2",
-            output / "PPGrafierDisplay-Regular-v2.ttf", 400, "PP Grafier Display", "Regular",
+            output / "PPGrafierDisplay-Regular-v2.3.ttf", 400, "PP Grafier Display", "Regular",
         ),
         "Inter-Regular": (
-            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Regular-v2.ttf", 400, "Inter", "Regular",
+            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Regular-v2.3.ttf", 400, "Inter", "Regular",
         ),
         "Inter-Medium": (
-            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Medium-v2.ttf", 500, "Inter", "Medium",
+            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Medium-v2.3.ttf", 500, "Inter", "Medium",
         ),
         "Inter-Bold": (
-            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Bold-v2.ttf", 700, "Inter", "Bold",
+            FONT_DIR / "inter-latin-var.woff2", output / "Inter-Bold-v2.3.ttf", 700, "Inter", "Bold",
         ),
     }
     paths: dict[str, Path] = {}

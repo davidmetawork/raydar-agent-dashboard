@@ -3,12 +3,15 @@ import copy
 import io
 import json
 import os
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from unittest import mock
 
+from fontTools.ttLib.tables import _h_e_a_d as font_head
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.pagesizes import LETTER
 from reportlab.pdfgen.canvas import Canvas
@@ -18,8 +21,8 @@ import app
 
 AUTH_KEY = "renderer-test-key-that-is-longer-than-thirty-two-characters"
 OFFICIAL_LOCKUP_SHA256 = "0a87dff42d8fa82f2968dd691e469f0e785da3c0daa6737fb3146f6b782d4e83"
-GOLDEN_ONE_PAGE_SHA256 = "402e616ab90c372040fb2c002d69a50c44b0551d18493a813f73f73f0b36846c"
-GOLDEN_TWO_PAGE_SHA256 = "47e6b8ee2acacd358876d85ca5e9779c1419121da8a13fc58d6e19f4af7b14a4"
+GOLDEN_ONE_PAGE_SHA256 = "4a899dcf62e8498a77abdc3ee2c04e15f9e090e336dd89e49457f587ec1dc711"
+GOLDEN_TWO_PAGE_SHA256 = "56cfc4fddd9337bf6d6c1a027ff6c801ff535d3178e3129890473899ff605a0a"
 
 
 class AstBuilder:
@@ -205,6 +208,25 @@ class RendererContractTests(unittest.TestCase):
         self.assertEqual(app.LOCKUP_SHA256, OFFICIAL_LOCKUP_SHA256)
         self.assertEqual(app.sha256(app.LOCKUP_PATH.read_bytes()), OFFICIAL_LOCKUP_SHA256)
 
+    def test_materialized_variable_fonts_ignore_wall_clock_timestamp(self):
+        source = app.FONT_DIR / "inter-latin-var.woff2"
+        source_font = app.FontToolsTTFont(str(source))
+        with tempfile.TemporaryDirectory() as directory:
+            first = os.path.join(directory, "first.ttf")
+            second = os.path.join(directory, "second.ttf")
+            with mock.patch.object(font_head, "timestampNow", return_value=3_700_000_000):
+                app.materialize_font(source, app.Path(first), 400, "Inter", "Regular")
+            with mock.patch.object(font_head, "timestampNow", return_value=3_800_000_000):
+                app.materialize_font(source, app.Path(second), 400, "Inter", "Regular")
+
+            first_font = app.FontToolsTTFont(first)
+            second_font = app.FontToolsTTFont(second)
+            self.assertEqual(app.Path(first).read_bytes(), app.Path(second).read_bytes())
+            self.assertEqual(first_font["head"].modified, source_font["head"].modified)
+            self.assertEqual(second_font["head"].modified, source_font["head"].modified)
+            self.assertEqual(first_font.getGlyphOrder(), second_font.getGlyphOrder())
+            self.assertEqual(first_font["hmtx"].metrics, second_font["hmtx"].metrics)
+
     def test_render_is_deterministic_selectable_embedded_and_ats_safe(self):
         ast, claims = compact_ast()
         payload = request_for(ast, claims)
@@ -230,7 +252,7 @@ class RendererContractTests(unittest.TestCase):
         self.assertIn("Jordan Avery", first["pdfExtractedText"])
         self.assertNotIn("why this candidate", first["pdfExtractedText"].lower())
         self.assertEqual(len(PdfReader(io.BytesIO(first_pdf)).pages), 1)
-        self.assertEqual(first["rendererVersion"], "raydar-resume-renderer-v2.2")
+        self.assertEqual(first["rendererVersion"], "raydar-resume-renderer-v2.3")
         self.assertEqual(first["templateVersion"], "raydar-resume-template-v0.2")
 
     def test_golden_template_geometry_and_minimum_type_are_locked(self):
@@ -352,6 +374,67 @@ class RendererContractTests(unittest.TestCase):
         with self.assertRaises(app.RenderError) as caught:
             app.render_request(request_for(ast, claims, render_id="overlong-render"))
         self.assertEqual(caught.exception.code, "RESUME_PAGE_LIMIT_EXCEEDED")
+
+    def test_exact_employer_school_label_overlap_is_allowed_once_and_other_repetition_fails(self):
+        ast, claims = compact_ast()
+        ast["sections"][0]["entries"][0]["header"][0]["text"] = "University of Connecticut"
+        ast["sections"][2]["entries"][0]["header"][0]["text"] = "University of Connecticut"
+        ast["sections"][2]["entries"][0]["header"][1]["text"] = "B.S. Computer Science | 2021"
+        self.assertEqual(
+            app.validate_ast(ast, claims)["sections"][2]["entries"][0]["header"][0]["text"],
+            "University of Connecticut",
+        )
+
+        reversed_sections = copy.deepcopy(ast)
+        reversed_sections["sections"][0], reversed_sections["sections"][2] = (
+            reversed_sections["sections"][2], reversed_sections["sections"][0]
+        )
+        self.assertEqual(
+            app.validate_ast(reversed_sections, claims)["sections"][0]["entries"][0]["header"][0]["text"],
+            "University of Connecticut",
+        )
+
+        repeated_experience = copy.deepcopy(ast)
+        repeated_experience["sections"][0]["entries"].append({
+            "id": "uconn-second-role",
+            "header": [
+                {"id": "uconn-second-employer", "text": "University of Connecticut", "claim_ids": ["claim-uconn-second-employer"], "emphasis": []},
+                {"id": "uconn-second-role-title", "text": "Researcher | 2019-2020", "claim_ids": ["claim-uconn-second-role-title"], "emphasis": []},
+            ],
+            "body": [],
+        })
+        with self.assertRaises(app.RenderError) as caught:
+            app.validate_ast(repeated_experience, [*claims, "claim-uconn-second-employer", "claim-uconn-second-role-title"])
+        self.assertEqual(caught.exception.code, "RESUME_FILLER_OR_REPETITION")
+
+        third_occurrence = copy.deepcopy(ast)
+        third_occurrence["sections"][2]["entries"].append({
+            "id": "uconn-certificate",
+            "header": [
+                {"id": "uconn-certificate-school", "text": "University of Connecticut", "claim_ids": ["claim-uconn-certificate-school"], "emphasis": []},
+                {"id": "uconn-certificate-detail", "text": "Certificate | 2022", "claim_ids": ["claim-uconn-certificate-detail"], "emphasis": []},
+            ],
+            "body": [],
+        })
+        with self.assertRaises(app.RenderError) as caught:
+            app.validate_ast(third_occurrence, [*claims, "claim-uconn-certificate-school", "claim-uconn-certificate-detail"])
+        self.assertEqual(caught.exception.code, "RESUME_FILLER_OR_REPETITION")
+
+        repeated_body = copy.deepcopy(ast)
+        repeated_body["sections"][1]["entries"][0]["body"].append(
+            {"id": "uconn-body", "text": "University of Connecticut", "claim_ids": ["claim-uconn-body"], "emphasis": []}
+        )
+        with self.assertRaises(app.RenderError) as caught:
+            app.validate_ast(repeated_body, [*claims, "claim-uconn-body"])
+        self.assertEqual(caught.exception.code, "RESUME_FILLER_OR_REPETITION")
+
+        repeated_second_header = copy.deepcopy(ast)
+        repeated_second_header["sections"][2]["entries"][0]["header"][1]["text"] = (
+            repeated_second_header["sections"][0]["entries"][0]["header"][1]["text"]
+        )
+        with self.assertRaises(app.RenderError) as caught:
+            app.validate_ast(repeated_second_header, claims)
+        self.assertEqual(caught.exception.code, "RESUME_FILLER_OR_REPETITION")
 
     def test_ast_rejects_filler_unknown_unused_claims_and_missing_glyphs(self):
         ast, claims = compact_ast()

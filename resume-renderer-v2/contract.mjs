@@ -7,7 +7,7 @@ import {
 } from "../api/submissions-v2/_lib/resume/source-bundle.mjs";
 
 export const RESUME_TEMPLATE_VERSION = "raydar-resume-template-v0.2";
-export const RESUME_RENDERER_VERSION = "raydar-resume-renderer-v2.2";
+export const RESUME_RENDERER_VERSION = "raydar-resume-renderer-v2.3";
 
 export const TEMPLATE_TOKENS = deepFreeze({
   page: {
@@ -110,6 +110,21 @@ function registerId(id, ids, path) {
   ids.add(id);
 }
 
+function structuralOrganizationLabel(context) {
+  if (context.entryHeaderIndex !== 0) return null;
+  if (context.sectionKind === "experience" && context.sectionPlacement === "main") return "employer";
+  if (context.sectionKind === "education") return "school";
+  return null;
+}
+
+function permittedOrganizationRepeat(previous, current) {
+  return previous.length === 1
+    && current !== null
+    && previous[0] !== null
+    && new Set([previous[0], current]).size === 2
+    && [previous[0], current].every((value) => value === "employer" || value === "school");
+}
+
 function contentNode(raw, path, context) {
   exactKeys(raw, ["id", "text", "claim_ids", "emphasis"], path);
   const id = identifier(raw.id, `${path}.id`);
@@ -139,13 +154,15 @@ function contentNode(raw, path, context) {
   context.metrics.emphasisCharacters += emphasis.reduce((sum, phrase) => sum + phrase.length, 0);
   context.metrics.visibleCharacters += value.length;
   const dedupeKey = value.toLocaleLowerCase("en-US");
-  if (context.visibleCopy.has(dedupeKey)) {
+  const priorOccurrences = context.visibleCopy.get(dedupeKey) || [];
+  const organizationLabel = structuralOrganizationLabel(context);
+  if (priorOccurrences.length && !permittedOrganizationRepeat(priorOccurrences, organizationLabel)) {
     throw new ResumeContractError("RESUME_FILLER_OR_REPETITION", "Resume content repeats the same visible copy", {
       path,
       textSha256: sha256(value),
     });
   }
-  context.visibleCopy.add(dedupeKey);
+  context.visibleCopy.set(dedupeKey, [...priorOccurrences, organizationLabel]);
   const node = { id, text: value, claim_ids: claimIds, emphasis };
   context.nodes.push(node);
   return node;
@@ -160,8 +177,12 @@ function entry(raw, path, context) {
   }
   return {
     id,
-    header: raw.header.map((node, index) => contentNode(node, `${path}.header[${index}]`, { ...context, nodeTextLimit: 500 })),
-    body: raw.body.map((node, index) => contentNode(node, `${path}.body[${index}]`, { ...context, nodeTextLimit: 1_200 })),
+    header: raw.header.map((node, index) => contentNode(node, `${path}.header[${index}]`, {
+      ...context, nodeTextLimit: 500, entryHeaderIndex: index,
+    })),
+    body: raw.body.map((node, index) => contentNode(node, `${path}.body[${index}]`, {
+      ...context, nodeTextLimit: 1_200, entryHeaderIndex: null,
+    })),
   };
 }
 
@@ -179,7 +200,9 @@ function section(raw, index, context) {
   if (!Array.isArray(raw.entries) || !raw.entries.length || raw.entries.length > 20) {
     throw new ResumeContractError("RESUME_AST_INVALID", `${path}.entries must contain real resume content`, { path });
   }
-  const entries = raw.entries.map((item, entryIndex) => entry(item, `${path}.entries[${entryIndex}]`, context));
+  const entries = raw.entries.map((item, entryIndex) => entry(item, `${path}.entries[${entryIndex}]`, {
+    ...context, sectionKind: kind, sectionPlacement: placement,
+  }));
   if (kind === "experience" && placement === "main") {
     const invalid = entries.find((item) => item.header.length !== 2 || item.body.length > 3);
     if (invalid) {
@@ -226,7 +249,7 @@ export function assertResumeAst(raw, {
     allowedClaimIds: allowedClaimIds ? new Set(allowedClaimIds) : null,
     usedClaimIds: new Set(),
     nodes: [],
-    visibleCopy: new Set(),
+    visibleCopy: new Map(),
     metrics: { visibleCharacters: 0, emphasisCharacters: 0 },
     emphasisPhrases: [],
     nodeTextLimit: 2_000,
