@@ -1,6 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { commandConflictResolution, commandSuccessMessage, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, resumeUiState } from "../submissions-v2-ui-state.mjs";
+
+test("only stale pair versions refresh into the retry guidance", () => {
+  assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
+    refresh: true,
+    code: "state_conflict_refreshed",
+    message: "This item changed, so the latest version was refreshed; please try again.",
+  });
+  assert.deepEqual(commandConflictResolution({ status: 409, code: "first_response_already_recorded" }), { refresh: false });
+  assert.deepEqual(commandConflictResolution({ status: 409, code: "source_not_unresolved" }), { refresh: false });
+  assert.deepEqual(commandConflictResolution({ status: 503, code: "stale_pair_version" }), { refresh: false });
+});
+
+test("duplicate review dispositions receive a recruiter-facing success message", () => {
+  assert.equal(commandSuccessMessage({ duplicate: true }), "Already recorded; review item resolved.");
+  assert.equal(commandSuccessMessage({ duplicate: false }), "");
+  assert.equal(commandSuccessMessage({}), "");
+});
 
 test("a background refresh keeps all already loaded pages and removes a repeated cursor row", () => {
   const result = reconcileListPages({

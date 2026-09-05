@@ -24,7 +24,7 @@ async function fixture(t) {
     seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/inbox/health.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/auth/_lib/session.mjs"),
     seed(root, "api/seq/_lib/core.mjs"), seed(root, "api/seq/_lib/scheduling-links.mjs"), seed(root, "api/sourcing/_lib/store.mjs"), seed(root, "api/roster/_lib/outcome-sequences.mjs"),
     seed(root, "submissions-v2.html"), seed(root, "submissions-v2.css"), seed(root, "submissions-v2.js"), seed(root, "submissions-v2-ui-state.mjs"),
-    seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"),
+    seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"), seed(root, "scripts/provision-submissions-v2-roles.sql"),
     seed(root, "vercel.json", '{\n  "buildCommand": "node check.mjs",\n  "rewrites": [{ "source": "/submissions-v2", "destination": "/submissions-v2.html" }]\n}\n'),
     seed(root, "api/submissions-v2/_lib/service.mjs"), seed(root, "submissions-v2-worker/server.mjs"), seed(root, "submissions-v2-worker/Dockerfile"), seed(root, "submissions-v2-worker/fly.toml"),
     seed(root, "resume-renderer-v2/app.py"), seed(root, "resume-renderer-v2/requirements.txt"), seed(root, "resume-renderer-v2/assets/raydar-lockup.svg"), seed(root, "resume-renderer-v2/Dockerfile"), seed(root, "resume-renderer-v2/fly.toml"),
@@ -89,6 +89,7 @@ test("deployment check accepts only Vercel's intentional Submissions omissions",
     rm(join(root, "resume-renderer-v2"), { recursive: true }),
     rm(join(root, "submissions-v2-worker"), { recursive: true }),
     rm(join(root, "scripts/migrate-submissions-v2.mjs")),
+    rm(join(root, "scripts/provision-submissions-v2-roles.sql")),
   ]);
   const checked = await checkSubmissionsReleaseDeploymentManifest({ root });
   assert.ok(checked.deployed_file_count < checked.file_count);

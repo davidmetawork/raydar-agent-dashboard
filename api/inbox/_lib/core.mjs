@@ -32,6 +32,12 @@ export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
 export const INBOX_SYNC_BATCH_SIZE = 18;
 export const INBOX_SEQUENCE_STALE_MS = 15 * 60 * 1_000;
+// HGETALL can exceed the KV response cap once every Inbox shard is seeded.
+// Keep each HSCAN page small and its complete read inside the broker's 38s KV
+// allowance beneath the fixed 120s shared lock.
+export const INBOX_SNAPSHOT_SCAN_COUNT = 8;
+export const INBOX_SNAPSHOT_SCAN_MAX_PAGES = 64;
+export const INBOX_SNAPSHOT_SCAN_BUDGET_MS = 12_000;
 export const INBOX_SUBMISSIONS_PROJECTION_VERSION = 1;
 export const INBOX_TRIAGE_STATUSES = Object.freeze(["archived", "complete"]);
 export const INBOX_EXCLUDED_ADDRESSES = Object.freeze(["david@raydar.xyz"]);
@@ -1026,34 +1032,90 @@ function inboxPipelineCause(error) {
   return "pipeline_unavailable";
 }
 
+function inboxScanPage(value) {
+  if (!Array.isArray(value) || value.length !== 2 || !Array.isArray(value[1])) return null;
+  const cursor = String(value[0]);
+  if (!/^\d+$/u.test(cursor) || value[1].length % 2 !== 0) return null;
+  return { cursor, entries: value[1] };
+}
+
+async function readInboxSequenceSnapshots({
+  pipelineImpl,
+  now,
+  scanCount,
+  scanMaxPages,
+  scanBudgetMs,
+}) {
+  const startedAt = now();
+  const timedOut = () => now() - startedAt >= scanBudgetMs;
+  const scan = async (cursor) => {
+    if (timedOut()) return { error: "scan_budget_exhausted" };
+    let values;
+    try {
+      values = await pipelineImpl([[
+        "HSCAN", INBOX_SEQUENCE_SNAPSHOTS_KEY, cursor, "COUNT", String(scanCount),
+      ]]);
+    } catch (error) {
+      return { error: `scan_${inboxPipelineCause(error)}` };
+    }
+    if (timedOut()) return { error: "scan_budget_exhausted" };
+    if (!Array.isArray(values) || values.length !== 1) return { error: "scan_response_invalid" };
+    const page = inboxScanPage(values[0]);
+    return page ? { page } : { error: "scan_response_invalid" };
+  };
+
+  const entries = [];
+  const seen = new Set(["0"]);
+  let pages = 0;
+  let cursor = "0";
+  do {
+    if (pages >= scanMaxPages) return { error: "scan_page_limit" };
+    if (pages > 0 && seen.has(cursor)) return { error: "scan_cursor_loop" };
+    seen.add(cursor);
+    const result = await scan(cursor);
+    if (result.error) return result;
+    entries.push(...result.page.entries);
+    cursor = result.page.cursor;
+    pages += 1;
+  } while (cursor !== "0");
+  return { entries };
+}
+
 export async function readInboxSnapshotState({
   pipelineImpl = pipeline,
   configured = storeConfigured(),
+  now = Date.now,
+  scanCount = INBOX_SNAPSHOT_SCAN_COUNT,
+  scanMaxPages = INBOX_SNAPSHOT_SCAN_MAX_PAGES,
+  scanBudgetMs = INBOX_SNAPSHOT_SCAN_BUDGET_MS,
 } = {}) {
   if (!configured) return { status: "unavailable", value: null };
   let values;
   try {
     values = await pipelineImpl([
-      ["HGETALL", INBOX_SEQUENCE_SNAPSHOTS_KEY],
       ["GET", INBOX_CATALOG_KEY],
       ["GET", INBOX_RECENT_KEY],
       ["GET", INBOX_REFRESH_META_KEY],
     ]);
   } catch (error) { return inboxSnapshotReadError(inboxPipelineCause(error)); }
-  if (!Array.isArray(values) || values.length !== 4) {
+  if (!Array.isArray(values) || values.length !== 3) {
     return inboxSnapshotReadError("pipeline_response_invalid");
   }
+  const scanned = await readInboxSequenceSnapshots({
+    pipelineImpl, now, scanCount, scanMaxPages, scanBudgetMs,
+  });
+  if (scanned.error) return inboxSnapshotReadError(scanned.error);
   let snapshots;
-  try { snapshots = parseInboxSequenceSnapshots(values[0]); }
+  try { snapshots = parseInboxSequenceSnapshots(scanned.entries); }
   catch { return inboxSnapshotReadError("snapshot_invalid"); }
   let catalog;
-  try { catalog = normalizeInboxCatalog(values[1]); }
+  try { catalog = normalizeInboxCatalog(values[0]); }
   catch { return inboxSnapshotReadError("catalog_invalid"); }
   let recent;
-  try { recent = normalizeInboxRecent(values[2]); }
+  try { recent = normalizeInboxRecent(values[1]); }
   catch { return inboxSnapshotReadError("recent_invalid"); }
   let meta;
-  try { meta = normalizeInboxRefreshMeta(values[3]); }
+  try { meta = normalizeInboxRefreshMeta(values[2]); }
   catch { return inboxSnapshotReadError("refresh_meta_invalid"); }
   return {
     status: "ready",

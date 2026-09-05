@@ -34,11 +34,15 @@ test("list, count, and picker reads abort superseded work and reject stale list 
   assert.match(js, /error\.name !== "AbortError"/);
 });
 
-test("a version conflict refreshes current state before the recruiter retries", () => {
-  assert.match(js, /error\.status === 409/);
+test("only stale pair versions refresh current state before the recruiter retries", () => {
+  assert.match(js, /commandConflictResolution\(error\)/);
   assert.match(js, /Promise\.allSettled\(\[loadCounts\(\), loadRows\(\{ refresh: true \}\)\]\)/);
-  assert.match(js, /state_conflict_refreshed/);
-  assert.match(js, /latest version was refreshed/);
+  assert.match(js, /await Promise\.all\(\[loadCounts\(\), loadRows\(\{ refresh: true \}\)\]\)/);
+  assert.match(js, /clearToast\(\);\n    closeDialog\(\);/);
+});
+
+test("a duplicate source disposition confirms that the existing response was retained", () => {
+  assert.match(js, /commandSuccessMessage\(result\)/);
 });
 
 test("every server-provided destination is constrained to its explicit host family", () => {
@@ -98,7 +102,6 @@ test("generation progress survives rendering and remains reduced-motion safe", (
   assert.match(js, /STATE\.generating\.delete\(key\)/);
   assert.match(js, /Regeneration started; the finished resume will save to Downloads automatically\./);
   assert.match(js, /The new resume is ready to download\./);
-  assert.match(js, /error\.code !== "resume_regeneration_in_progress"/);
   assert.match(js, /class="rerun-icon"/);
   assert.match(css, /\.icon-button\.regenerate\{border-radius:50%\}/);
   assert.match(css, /\.rerun-icon\{[^}]*stroke:currentColor/);

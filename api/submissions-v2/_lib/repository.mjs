@@ -2256,13 +2256,44 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (selectedRoles.some((roleId) => !offeredIds.has(roleId))) {
           throw problem("role_outside_offer", "Select only roles offered in the original sent message.", 409);
         }
+        const existingPairs = [];
         for (const roleId of selectedRoles) {
           await tx`select pg_advisory_xact_lock(hashtextextended(${pairAdvisoryLockKey(candidateId, roleId)}, 0))`;
           const priorPair = (await tx`
             select id from submissions_v2.candidate_role_pairs
              where candidate_user_id=${candidateId} and role_id=${roleId} for update
           `)[0];
-          if (priorPair) throw problem("first_response_already_recorded", "This candidate-role item already has its first response.", 409);
+          if (priorPair) existingPairs.push(priorPair.id);
+        }
+        if (existingPairs.length) {
+          if (existingPairs.length !== selectedRoles.length) {
+            throw problem("mixed_existing_pairs", "Some selected candidate-role items already have a first response; resolve all selections separately.", 409);
+          }
+          const resolved = await tx`
+            update submissions_v2.review_items
+               set action_state='resolved', resolved_at=clock_timestamp(), resolved_by=${actorEmail},
+                   resolution_note=${clean(note, 500)}
+             where unresolved_signal_id=${signalId} and action_state='open'
+               and reason_code=any(${tx.array(allowedReasons, 25)})
+             returning id
+          `;
+          if (resolved.length !== unresolved.length) {
+            throw problem("source_not_unresolved", "The source review item changed before its duplicate disposition was saved.", 409);
+          }
+          const ignored = await tx`
+            update submissions_v2.source_events
+               set processing_state='ignored_later', processed_at=clock_timestamp(),
+                   safe_error_code=null, safe_error_detail=null
+             where id=${signalId} and processing_state=${source.processing_state}
+             returning id
+          `;
+          if (ignored.length !== 1) throw problem("source_not_unresolved", "The source event changed before its duplicate disposition was saved.", 409);
+          return {
+            signal_id: signalId, candidate_id: candidateId, role_ids: selectedRoles,
+            duplicate: true, existing_pair_ids: existingPairs, job_id: null,
+          };
+        }
+        for (const roleId of selectedRoles) {
           const claim = await reserveFirstResponse(tx, {
             candidateId, roleId, eventId: source.event_id, sourceFamily: "email",
           });
