@@ -191,3 +191,37 @@ test("fixture preview, save, pause, delete, hits, and tick mutate memory only", 
   assert.equal(deleted.status, 200);
   assert.equal(deleted.body.rules.some((rule) => rule.id === savedId), false);
 });
+
+test("fixture preview and run agree about sent and already-decided applicants", async (t) => {
+  const state = createFixtureState();
+  const server = createFixtureServer({ state });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) => fetch(`${base}${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((response) => response.json());
+  const fence = { generationId: "local-rules-design-fixture-v1", generationDigest: "local-fixture-no-production-data" };
+  const feed = await fetch(`${base}/api/applicants/feed`).then((response) => response.json());
+  const platform = feed.snapshot.queue.filter((row) => row.roleId === "role-platform");
+  assert.equal(platform.length, 3);
+  state.acks[platform[0].key] = { status: "invited" };
+  state.decisions[platform[1].key] = { action: "pass", requestId: "existing-local-decision" };
+  const rule = { id: "local-eligibility", name: "Platform", action: "interview", state: "live", scope: { roleIds: [] },
+    conditions: [{ field: "application.roleId", op: "any_of", value: ["role-platform"] }] };
+  state.rules = [rule];
+  const preview = await post("/api/applicants/rules", { op: "preview", rule, ...fence });
+  assert.equal(preview.pending, 5);
+  assert.equal(preview.matched, 1);
+  assert.equal(preview.skipped.already_emailed, 1);
+  const run = await post("/api/applicants/rules-tick", fence);
+  assert.equal(run.decided, preview.matched);
+  assert.equal(run.skipped.already_emailed, 1);
+  assert.equal(state.decisions[platform[0].key], undefined);
+  rule.action = "pass";
+  const passPreview = await post("/api/applicants/rules", { op: "preview", rule, ...fence });
+  assert.equal(passPreview.matched, 1);
+  const passRun = await post("/api/applicants/rules-tick", fence);
+  assert.equal(passRun.decided, 1);
+  assert.equal(state.decisions[platform[0].key].action, "pass");
+});

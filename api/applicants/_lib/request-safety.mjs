@@ -1,6 +1,11 @@
 import {requireAuth} from './core.mjs';
 import {kv,K} from './kv.mjs';
 
+// Falsy so a future boolean-style caller cannot mistake an ack rejection for
+// a saved request; Rules uses strict equality to distinguish it from `false`
+// (an existing decision).
+export const APPLICANT_REQUEST_ALREADY_EMAILED = 0;
+
 export async function requireApplicantMutation(req,res) {
   if (process.env.AUTH_DISABLED==='1' || process.env.AUTH_DISABLED==='true') {
     res.status(503).json({ok:false,error:'applicant_auth_unavailable'});return false;
@@ -22,8 +27,9 @@ export async function requireApplicantMutation(req,res) {
 
 // One atomic applicant-key write: parallel rules/clicks cannot overwrite an
 // unacknowledged request, and retrying the same request is idempotent.
-export async function saveApplicantRequest(key,record,{allowRejected=false}={}) {
-  return Number(await kv(['EVAL',`
+export async function saveApplicantRequest(key,record,{allowRejected=false,rejectSentAck=false,kvImpl=kv}={}) {
+  const rejectSentAckForInterview=rejectSentAck && record?.action==='interview';
+  const result=Number(await kvImpl(['EVAL',`
     local raw=redis.call('HGET',KEYS[1],ARGV[1])
     if raw then
       local old=cjson.decode(raw)
@@ -34,8 +40,17 @@ export async function saveApplicantRequest(key,record,{allowRejected=false}={}) 
       if old.requestId and ack.requestId~=old.requestId then return 0 end
       if ack.status~='blocked' or ack.reason=='human_pass' or ack.reason=='interview_dispatch_pending' then return 0 end
     end
+    if ARGV[5]=='1' then
+      local ackraw=redis.call('HGET',KEYS[2],ARGV[1])
+      if ackraw then
+        local ack=cjson.decode(ackraw)
+        if ack.status=='invited' or ack.status=='sendgrid_delivered' then return -1 end
+      end
+    end
     redis.call('HSET',KEYS[1],ARGV[1],ARGV[2])
-    return 1`,2,K.decisions,K.acks,key,JSON.stringify(record),record.requestId,allowRejected?'1':'0']))===1;
+    return 1`,2,K.decisions,K.acks,key,JSON.stringify(record),record.requestId,allowRejected?'1':'0',rejectSentAckForInterview?'1':'0']));
+  if (rejectSentAckForInterview && result===-1) return APPLICANT_REQUEST_ALREADY_EMAILED;
+  return result===1;
 }
 
 export async function saveApplicantAck(key,ack) {

@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 
 import { DEGREE_LEVELS, DEGREE_LEVEL_LABELS } from "../api/applicants/_lib/degree.mjs";
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
+import { ruleInterviewSkipReason } from "../api/applicants/_lib/rule-interview-eligibility.mjs";
 import {
   FIELD_GROUPS,
   evaluateRule,
@@ -149,16 +150,20 @@ export function createFixtureState() {
   };
 }
 
-function previewRule(rule) {
+function previewRule(rule, state) {
   const matched = [];
   const skipped = {};
-  const scoped = rows.filter((candidate) => inScope(rule, candidate));
+  const pending = pendingRows(state);
+  const scoped = pending.filter((candidate) => inScope(rule, candidate));
   for (const candidate of scoped) {
     const result = evaluateRule(rule, { row: candidate, facts: facts[candidate.profileKey] });
-    if (result.matched) matched.push({ candidate, evidence: result.evidence });
+    const hold = rule.action === "interview"
+      ? ruleInterviewSkipReason(candidate, { decision: state.decisions[candidate.key], ack: state.acks[candidate.key] }) : null;
+    if (result.matched && hold) skipped[hold] = (skipped[hold] || 0) + 1;
+    else if (result.matched) matched.push({ candidate, evidence: result.evidence });
     else if (result.skipped) skipped[result.reason] = (skipped[result.reason] || 0) + 1;
   }
-  return { pending: rows.length, considered: scoped.length, matched, skipped };
+  return { pending: pending.length, considered: scoped.length, matched, skipped };
 }
 
 function pendingRows(state) {
@@ -228,7 +233,7 @@ async function rulesApi(req, res, url, state) {
     if (!generationMatches(body)) return json(res, 409, { ok: false, error: "generation_changed_refresh_required", generationId: generation.generationId, generationDigest: generation.digest });
     const normalized = normalizeRule(body.rule, { by: FIXTURE_EMAIL });
     if (!normalized.ok) return json(res, 400, { ok: false, error: "rule_invalid", detail: normalized.error });
-    const result = previewRule(normalized.rule);
+    const result = previewRule(normalized.rule, state);
     return json(res, 200, {
       ok: true, pending: result.pending, considered: result.considered,
       matched: result.matched.length, skipped: result.skipped,
@@ -300,7 +305,11 @@ async function runTick(req, res, state) {
   for (const candidate of pending) {
     const subject = { row: candidate, facts: facts[candidate.profileKey] };
     for (const rule of watching) {
-      if (inScope(rule, candidate) && evaluateRule(rule, subject).matched) wouldFire[rule.id] = (wouldFire[rule.id] || 0) + 1;
+      if (!inScope(rule, candidate) || !evaluateRule(rule, subject).matched) continue;
+      const hold = rule.action === "interview"
+        ? ruleInterviewSkipReason(candidate, { decision: state.decisions[candidate.key], ack: state.acks[candidate.key] }) : null;
+      if (hold) skipped[hold] = (skipped[hold] || 0) + 1;
+      else wouldFire[rule.id] = (wouldFire[rule.id] || 0) + 1;
     }
     const matches = [];
     for (const rule of live) {
@@ -311,6 +320,9 @@ async function runTick(req, res, state) {
     }
     if (!matches.length) continue;
     const winner = matches.find(({ rule }) => rule.action === "pass") || matches[0];
+    const hold = winner.rule.action === "interview"
+      ? ruleInterviewSkipReason(candidate, { decision: state.decisions[candidate.key], ack: state.acks[candidate.key] }) : null;
+    if (hold) { skipped[hold] = (skipped[hold] || 0) + 1; continue; }
     const decision = {
       action: winner.rule.action, at: stamp, by: `rule:${winner.rule.id}`,
       actorType: "rule", actorId: winner.rule.id, authorizedBy: FIXTURE_EMAIL,

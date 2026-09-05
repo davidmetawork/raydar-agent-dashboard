@@ -16,12 +16,11 @@ import { cors, requireAuth } from "./_lib/core.mjs";
 import { getJson, hashGetAllJson, hashGetMany, K, kvConfigured, setJson } from "./_lib/kv.mjs";
 import {
   generationManifest,
-  interviewDecisionAllowed,
-  interviewDecisionHold,
   readActivePublication,
   readPublishedArtifacts,
   verifyGeneration,
 } from "./_lib/generation.mjs";
+import { ruleInterviewSkipReason } from "./_lib/rule-interview-eligibility.mjs";
 import { FIELD_GROUPS, evaluateRule, fieldCatalog, inScope, normalizeRule } from "./_lib/rules.mjs";
 import { DEGREE_LEVELS, DEGREE_LEVEL_LABELS } from "./_lib/degree.mjs";
 import { requireApplicantMutation } from "./_lib/request-safety.mjs";
@@ -67,7 +66,10 @@ export function createRulesHandler({
    * engine would be worse than no preview.
    */
   async function runAgainstQueue(rule, artifacts) {
-    const decisions = await readHash(K.decisions);
+    const [decisions, acks] = await Promise.all([
+      readHash(K.decisions),
+      readHash(K.acks),
+    ]);
     const rows = pendingRows(artifacts?.queue?.rows ?? [], decisions);
     const scoped = rows.filter((row) => inScope(rule, row));
     const facts = await factsFor(scoped.map((row) => row.profileKey || row.cuId), { readMany });
@@ -76,9 +78,11 @@ export function createRulesHandler({
     const skipped = {};
     for (const row of scoped) {
       const result = evaluateRule(rule, { row, facts: facts[row.profileKey || row.cuId] ?? null });
-      if (result.matched && rule.action === "interview" && !interviewDecisionAllowed(row)) {
-        const hold = interviewDecisionHold(row) || "hard_hold";
-        skipped[hold] = (skipped[hold] ?? 0) + 1;
+      const interviewSkip = result.matched && rule.action === "interview"
+        ? ruleInterviewSkipReason(row, { decision: decisions[row.key], ack: acks[row.key] })
+        : null;
+      if (interviewSkip) {
+        skipped[interviewSkip] = (skipped[interviewSkip] ?? 0) + 1;
       } else if (result.matched) matched.push({ row, evidence: result.evidence });
       else if (result.skipped) skipped[result.reason] = (skipped[result.reason] ?? 0) + 1;
     }

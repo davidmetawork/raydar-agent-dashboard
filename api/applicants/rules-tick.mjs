@@ -36,12 +36,14 @@ import { decisionRecord, ruleActor } from "./_lib/decision-record.mjs";
 import {
   actionabilityFor,
   generationManifest,
-  interviewDecisionAllowed,
-  interviewDecisionHold,
   readActivePublication,
   readPublishedArtifacts,
   verifyGeneration,
 } from "./_lib/generation.mjs";
+import {
+  RULE_INTERVIEW_ALREADY_EMAILED,
+  ruleInterviewSkipReason,
+} from "./_lib/rule-interview-eligibility.mjs";
 import {
   hashDelMany,
   hashGetAllJson,
@@ -56,7 +58,11 @@ import { evaluateRule, inScope } from "./_lib/rules.mjs";
 import { profileReceiptReady, sourceObservationIdFor } from "./_lib/profile-readiness.mjs";
 import { armedRules, cardsFor, factsFor, pendingRows, profileReceiptsFor, readRules, watchingRules } from "./_lib/rule-store.mjs";
 import {randomUUID} from 'node:crypto';
-import {requireApplicantMutation,saveApplicantRequest} from './_lib/request-safety.mjs';
+import {
+  APPLICANT_REQUEST_ALREADY_EMAILED,
+  requireApplicantMutation,
+  saveApplicantRequest,
+} from './_lib/request-safety.mjs';
 
 export const config = { maxDuration: 120 };
 
@@ -176,9 +182,10 @@ export function createTickHandler({
         });
       }
 
-      const [queueDoc, decisions] = await Promise.all([
+      const [queueDoc, decisions, acks] = await Promise.all([
         Promise.resolve(artifacts.queue),
         readHash(K.decisions),
+        readHash(K.acks),
       ]);
       const pendingQueueRows = pendingRows(queueDoc?.rows ?? [], decisions);
       const candidates = [...new Set(pendingQueueRows
@@ -254,7 +261,11 @@ export function createTickHandler({
         for (const rule of watching) {
           if (!inScope(rule, row)) continue;
           const result = evaluateRule(rule, subject, { now: stamp });
-          if (result.matched) wouldFire[rule.id] = (wouldFire[rule.id] ?? 0) + 1;
+          const interviewSkip = result.matched && rule.action === "interview"
+            ? ruleInterviewSkipReason(row, { decision: decisions[row.key], ack: acks[row.key] })
+            : null;
+          if (interviewSkip) skipped[interviewSkip] = (skipped[interviewSkip] ?? 0) + 1;
+          else if (result.matched) wouldFire[rule.id] = (wouldFire[rule.id] ?? 0) + 1;
         }
 
         if (!live.length) continue;
@@ -262,15 +273,13 @@ export function createTickHandler({
         for (const reason of outcome.skips) skipped[reason] = (skipped[reason] ?? 0) + 1;
         if (!outcome.action) continue;
 
-        // Only an Interview rule is subject to a genuine safety hold. Pass is
-        // always a valid, side-effect-free review outcome. Technical
-        // preparation flags (resume, role agent, LinkedIn proof, or stale
-        // delivery projection) intentionally do not enter this predicate;
-        // those states belong to the pending-delivery acknowledgement after
-        // an Interview intent.
-        if (outcome.action === "interview" && !interviewDecisionAllowed(row)) {
-          const hold = interviewDecisionHold(row) || "hard_hold";
-          skipped[hold] = (skipped[hold] ?? 0) + 1;
+        // Pass is always a valid, side-effect-free review outcome. Interview
+        // also requires no hard hold and no published same-role send evidence.
+        const interviewSkip = outcome.action === "interview"
+          ? ruleInterviewSkipReason(row, { decision: decisions[row.key], ack: acks[row.key] })
+          : null;
+        if (interviewSkip) {
+          skipped[interviewSkip] = (skipped[interviewSkip] ?? 0) + 1;
           continue;
         }
 
@@ -328,21 +337,40 @@ export function createTickHandler({
         fired[rule.id] = (fired[rule.id] ?? 0) + 1;
       }
 
-      // LAST-MOMENT RE-READ. Everything above ran against the decisions hash
-      // as it was when the tick started, and a person reviewing the queue can
-      // click during that window. HSET would overwrite their call, which is
-      // exactly what D3 forbids — so re-read and drop any key that gained a
-      // decision while we were thinking. This narrows the race to the width of
-      // a single HSET rather than the width of a whole tick; it cannot close
-      // it completely without a lock, and a lock on the hash a human clicks
-      // into is a worse trade.
+      // LAST-MOMENT RE-READ. A person can decide a row, or published send
+      // evidence can arrive, while rules are evaluating it. Both hashes are
+      // required reads: an unavailable ack store must fail closed before a
+      // request is created. saveApplicantRequest repeats the sent-ack check in
+      // its Lua CAS to close the remaining gap between this read and HSET.
       let conceded = 0;
-      const fresh = await readHash(K.decisions).catch(() => decisions);
-      for (const key of Object.keys(newDecisions)) {
-        if (!fresh?.[key]) continue;
+      const [freshDecisions, freshAcks] = await Promise.all([
+        readHash(K.decisions),
+        readHash(K.acks),
+      ]);
+      const rowsByKey = new Map(rows.map((row) => [row.key, row]));
+      const dropCandidate = (key) => {
+        const ruleId = audit[key]?.ruleId;
+        if (ruleId && fired[ruleId]) {
+          fired[ruleId] -= 1;
+          if (!fired[ruleId]) delete fired[ruleId];
+        }
         delete newDecisions[key];
         delete audit[key];
-        conceded += 1;
+      };
+      for (const key of Object.keys(newDecisions)) {
+        if (freshDecisions?.[key]) {
+          dropCandidate(key);
+          conceded += 1;
+          continue;
+        }
+        if (newDecisions[key].action !== "interview") continue;
+        const reason = ruleInterviewSkipReason(rowsByKey.get(key), {
+          decision: freshDecisions?.[key],
+          ack: freshAcks?.[key],
+        });
+        if (!reason) continue;
+        dropCandidate(key);
+        skipped[reason] = (skipped[reason] ?? 0) + 1;
       }
 
       // Decisions first: they are the real effect. Audit and counters are
@@ -383,9 +411,20 @@ export function createTickHandler({
             manifest,
           });
         }
-        const saved=await Promise.all(requests.slice(offset,offset+25).map(async([key,record])=>[key,await saveRequest(key,record)]));
-        for(const [key,ok] of saved) {
-          if(ok) decidedKeys.push(key);else{delete audit[key];conceded++;}
+        const saved=await Promise.all(requests.slice(offset,offset+25).map(async([key,record])=>[
+          key,
+          await saveRequest(key,record,{rejectSentAck:record.action==="interview"}),
+        ]));
+        for(const [key,result] of saved) {
+          if(result===true) {
+            decidedKeys.push(key);
+          } else if(result===APPLICANT_REQUEST_ALREADY_EMAILED) {
+            dropCandidate(key);
+            skipped[RULE_INTERVIEW_ALREADY_EMAILED] = (skipped[RULE_INTERVIEW_ALREADY_EMAILED] ?? 0) + 1;
+          } else {
+            dropCandidate(key);
+            conceded++;
+          }
         }
       }
 

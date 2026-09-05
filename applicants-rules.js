@@ -190,7 +190,7 @@
       (state.pausedAll ? '<div class="rule-run-result">All rules are paused; resume them when you’re ready to run.</div>' : '') +
       (state.rules.length ? '<div class="rules-list">' + state.rules.map(ruleCardHtml).join('') + '</div>' :
         '<div class="rules-empty"><div class="rules-empty-icon" aria-hidden="true">＋</div><h3>Your judgment, saved.</h3><p>Create a rule here, or choose a school, company, or other fact in an applicant’s profile.</p><button class="ghost" id="rulesNewEmpty">Create a rule</button></div>') +
-      '<details class="rules-help"><summary>How rules work</summary><p>Rules run only when you press this button: <b>Run rules now</b>. Saving or changing a rule never runs it. Ready rules make decisions; Preview only rules count matches.</p><p>Rules check all undecided applicants in the published review queue, across every tier, and leave existing decisions alone. Missing facts are skipped. If rules disagree, Pass takes priority.</p><p>Interview decisions enter the existing invitation process and can be held by its checks; a match is not proof of an email being sent.</p></details>';
+      '<details class="rules-help"><summary>How rules work</summary><p>Rules run only when you press this button: <b>Run rules now</b>. Saving or changing a rule never runs it. Ready rules make decisions; Preview only rules count matches.</p><p>Rules check all undecided applicants in the published review queue, across every tier, and leave existing decisions alone. Interview rules skip applicants already emailed for that role. Missing facts are skipped. If rules disagree, Pass takes priority.</p><p>Interview decisions enter the existing invitation process and can be held by its checks; a match is not proof of an email being sent.</p></details>';
     el("rulesPause").onclick = togglePause;
     el("rulesRun").onclick = runRules;
     if (el("rulesRetry")) el("rulesRetry").onclick = () => window.RaydarRules.show();
@@ -431,7 +431,7 @@
     if (!preview) return '<div class="preview" role="status"><div class="sub">Your matching applicants will appear here.</div></div>';
     const skips = Object.entries(preview.skipped || {});
     const behavior = state.draft.state === 'off' ? 'This rule is Off and will be skipped when you run rules.' : state.draft.state === 'watching' ? 'Preview only counts these matches when you run rules; it makes no decisions.' : (state.draft.action === 'interview' ? 'These applicants would get an interview request when you run rules.' : 'These applicants would be passed when you run rules.');
-    const words = { no_profile_history: 'missing work or education history', no_facts_yet: 'waiting for profile data', facts_version_stale: 'waiting for updated profile data' };
+    const words = { already_emailed: 'already emailed for this role', no_profile_history: 'missing work or education history', no_facts_yet: 'waiting for profile data', facts_version_stale: 'waiting for updated profile data' };
     return '<div class="preview" role="status"><div class="preview-heading"><span class="n">' + Number(preview.matched).toLocaleString() + '</span><span>matching applicant' + (preview.matched === 1 ? '' : 's') + '</span></div>' +
       '<div class="sub">Out of ' + Number(preview.considered).toLocaleString() + ' awaiting review in this rule’s scope. ' + behavior + '</div>' +
       (skips.length ? '<details class="skips"><summary>' + skips.reduce((sum, [,n]) => sum + Number(n), 0).toLocaleString() + ' skipped for missing facts or other checks</summary><p>' +
