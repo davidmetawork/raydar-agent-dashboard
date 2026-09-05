@@ -214,3 +214,25 @@ test("the descriptions are refreshed on every render, not written once at load",
   const call = body.indexOf("describeInterviewPills();");
   assert.ok(call > 0 && call < body.indexOf("function describeInterviewPills"), "renderPills calls it");
 });
+
+/* ---- the button that would undo all of it ---- */
+
+test("a row with published send evidence and no decision cannot be sent again from either control", () => {
+  // rowCardHtml renders Pass/Interview for every UNDECIDED row, so the ~904
+  // rows the prior-send field will move into Already emailed — and the
+  // historical_send_verified acks already reachable today — would each carry a
+  // live Interview button under a pill that says they were already emailed.
+  // `interviewReady` keeps its exact old meaning (hard hold only); the send
+  // evidence is a separate, additional gate.
+  assert.match(applicants, /const hold = interviewHold\(row\);\s*\n\s*const interviewReady = !hold;\s*\n\s*const sentAlready = !decision && interviewReady && alreadyEmailed\(row\);/);
+  assert.match(applicants, /\(busy \|\| !interviewReady \|\| sentAlready \? " disabled" : ""\)/);
+  // and the profile modal, the other way to that button
+  assert.match(applicants, /const sentAlready = !decision && !hold && alreadyEmailed\(row\);/);
+  assert.match(applicants, /\(busy \|\| hold \|\| sentAlready \? " disabled" : ""\)/);
+});
+
+test("the disabled button says why, on its face and on hover", () => {
+  assert.match(applicants, /const ALREADY_EMAILED_ACTION_TITLE =\s*\n\s*"Already emailed for this role — /);
+  assert.match(applicants, /\(sentAlready \? "Already emailed" : interviewReady \? "Interview" : "Interview held"\)/);
+  assert.match(applicants, /sentAlready \? '<div class="rc-none">Already emailed for this role\.<\/div>' : ''/);
+});
