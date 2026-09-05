@@ -1,11 +1,12 @@
 export class ModelProviderError extends Error {
-  constructor(code, message, { retryable = false, status = null, provider = null, cause = null } = {}) {
+  constructor(code, message, { retryable = false, status = null, provider = null, cause = null, details = null } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = "ModelProviderError";
     this.code = code;
     this.retryable = retryable;
     this.status = status;
     this.provider = provider;
+    if (details && typeof details === "object") this.details = details;
   }
 }
 

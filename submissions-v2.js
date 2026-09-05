@@ -744,7 +744,7 @@ function openDismissReview(row) {
   openDialog({
     title: "Remove from Needs Review",
     subtitle,
-    body: `${reviewEvidenceHtml(row)}<p>This removes an irrelevant or non-candidate signal from Needs Review. It does not change a candidate or role.</p><label class="field"><span class="field-label">Reason</span><select id="dismissal-reason"><option value="not_candidate_response">Not a candidate response</option><option value="irrelevant_notification">Irrelevant notification</option><option value="already_handled">Already handled on a verified submission</option></select></label><label class="field"><span class="field-label">Resolution note</span><textarea id="dismissal-note" maxlength="500" placeholder="What did you verify?"></textarea></label>`,
+    body: `${reviewEvidenceHtml(row)}<p>This removes an irrelevant or non-candidate signal from Needs Review. It does not change a candidate or role.</p><label class="field"><span class="field-label">Reason</span><select id="dismissal-reason"><option value="not_candidate_response">Not a candidate response</option><option value="irrelevant_notification">Irrelevant notification</option><option value="already_handled">Already handled</option></select></label><label class="field"><span class="field-label">Resolution note</span><textarea id="dismissal-note" maxlength="500" placeholder="What did you verify?"></textarea></label>`,
     footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button danger" id="dialog-confirm" data-label="Remove from review" type="button">Remove from review</button>',
   });
   void loadReviewContext(STATE.active);

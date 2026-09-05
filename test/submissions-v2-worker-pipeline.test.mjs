@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createGenerationBudget,
   forecastModelCostCents,
+  pipelineError,
   ResumePipelineError,
 } from "../api/submissions-v2/_lib/resume/pipeline-runtime.mjs";
 import {
@@ -145,6 +146,27 @@ test("resume budget and unknown model prices fail closed before a provider call"
     () => forecastModelCostCents({ model: "unapproved-model", input: "x", maximumOutputTokens: 1 }),
     (error) => error.code === "model_price_unconfigured",
   );
+});
+
+test("pipeline error propagation retains only an allowlisted resume-contract diagnostic", () => {
+  const normalized = pipelineError({
+    code: "RESUME_FILLER_OR_REPETITION",
+    retryable: true,
+    details: {
+      contractCode: "RESUME_FILLER_OR_REPETITION",
+      contractPath: "document.sections[0].entries[0].body[0]",
+      rawDraft: "candidate private text",
+    },
+  });
+  assert.deepEqual(normalized.details, {
+    contractCode: "RESUME_FILLER_OR_REPETITION",
+    contractPath: "document.sections[0].entries[0].body[0]",
+  });
+  assert.equal(pipelineError({
+    code: "STRATEGIST_AST_INVALID",
+    retryable: true,
+    details: { contractCode: "UNSAFE_UNKNOWN_CODE", contractPath: "candidate private text" },
+  }).details, undefined);
 });
 
 test("sparse or overflowing layouts retry with fresh strategy and validation stages", () => {
@@ -471,6 +493,31 @@ test("resume failure settlement preserves an existing resume on regeneration", a
   assert.equal(await settleResumePreparationFailure(error, {}, { store }), true);
   assert.equal(calls[0][0], "regenerate");
   assert.equal(calls[0][1].reasonCode, "resume_preparation_failed");
+});
+
+test("resume failure settlement retains a safe contract code and path for Review", async () => {
+  const calls = [];
+  const store = {
+    failInitialGeneration: async (value) => calls.push(value),
+    failRegeneration: async () => assert.fail("initial failure should not use regeneration settlement"),
+  };
+  const error = new ResumePipelineError(
+    "RESUME_FILLER_OR_REPETITION",
+    "Resume preparation failed safely before publication.",
+    {
+      details: {
+        generationId: "generation-repeat",
+        triggerKind: "initial",
+        priorArtifactId: null,
+        contractCode: "RESUME_FILLER_OR_REPETITION",
+        contractPath: "document.sections[0].entries[0].header[1]",
+      },
+    },
+  );
+  assert.equal(await settleResumePreparationFailure(error, {}, { store }), true);
+  assert.equal(calls[0].reasonCode, "resume_preparation_failed");
+  assert.match(calls[0].safeDetail, /Contract RESUME_FILLER_OR_REPETITION at document\.sections\[0\]\.entries\[0\]\.header\[1\]\./u);
+  assert.doesNotMatch(calls[0].safeDetail, /candidate|Alpha|Jane/u);
 });
 
 test("missing original resume routes to review without the technical-failure Slack alert", async () => {

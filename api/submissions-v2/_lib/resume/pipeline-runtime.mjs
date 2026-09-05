@@ -10,6 +10,16 @@ const DEFAULT_RATES = Object.freeze({
 });
 
 const clean = (value, limit = 500) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
+const CONTRACT_PATH = /^document\.(?:candidate\.(?:name|headline|contact\[\d{1,2}\])|summary|sections\[\d{1,2}\]\.entries\[\d{1,2}\]\.(?:header|body)\[\d{1,2}\])$/u;
+
+function safeContractDetails(error) {
+  if (error?.details?.contractCode !== "RESUME_FILLER_OR_REPETITION") return undefined;
+  const path = String(error.details.contractPath || "");
+  return {
+    contractCode: "RESUME_FILLER_OR_REPETITION",
+    contractPath: path.length <= 160 && CONTRACT_PATH.test(path) ? path : null,
+  };
+}
 
 export class ResumePipelineError extends Error {
   constructor(code, safeMessage, {
@@ -121,7 +131,8 @@ export function pipelineError(error, {
     retryable: error?.retryable !== false && retryable,
     checkpoint,
     cause: error,
+    details: safeContractDetails(error),
   });
 }
 
-export const pipelineRuntimeInternals = Object.freeze({ DEFAULT_RATES, configuredRate, clean });
+export const pipelineRuntimeInternals = Object.freeze({ DEFAULT_RATES, configuredRate, clean, safeContractDetails });
