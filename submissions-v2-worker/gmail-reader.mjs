@@ -28,7 +28,17 @@ export function gmailWindow(checkpoint, { activationAt, now }) {
 export async function reconcileGmailRoleInterest({ env, fetchImpl = fetch, signal, checkpoint = {}, assertCurrent, admit, maxThreads = 12, now = Date.now(), sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const activationAt = approvedGmailActivation(env);
   const range = gmailWindow(checkpoint, { activationAt, now });
-  if (!range) return { checkpoint, completed: false, accepted: 0 };
+  // A retry can land inside the deliberate two-minute live lag.  It has no
+  // new safe window to read, but it must not erase a previously confirmed
+  // live lane and thereby pause the independent historical catch-up lane.
+  if (!range) return {
+    checkpoint,
+    completed: false,
+    caught_up: checkpoint?.caught_up === true,
+    accepted: 0,
+    observed: 0,
+    threads_read: 0,
+  };
   const key = String(env.SUBMISSIONS_V2_MASTER_INBOX_WORKER_KEY || "");
   if (key.length < 32) throw error("gmail_read_broker_not_configured");
   let readCount = 0;

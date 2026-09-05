@@ -176,6 +176,23 @@ test("windows are activation-clamped, bounded, overlap one minute, and lag two m
   assert.match(roleInterestSearch(start, start + 300_000), /"See matches here"/u);
 });
 
+test("a no-window retry preserves a proven live checkpoint without a broker read", async () => {
+  let called = false;
+  const checkpoint = { through: start + 300_000, caught_up: true };
+  const result = await reconcileGmailInterviews({
+    env,
+    checkpoint,
+    now: start + 360_000,
+    assertCurrent: async () => {},
+    admit: async () => assert.fail("must not admit without a live window"),
+    fetchImpl: async () => { called = true; throw new Error("must not read"); },
+  });
+  assert.equal(called, false);
+  assert.equal(result.checkpoint, checkpoint);
+  assert.equal(result.caught_up, true);
+  assert.equal(result.threads_read, 0);
+});
+
 test("overflow narrows the window without admitting or skipping messages", async () => {
   const result = await reconcileGmailInterviews({ env, now: start + 600_000, assertCurrent: async () => {}, admit: async () => assert.fail("must not admit"),
     fetchImpl: async () => new Response(JSON.stringify({ ok: true, result: { brokerScope: GMAIL_ROLE_INTEREST_SCOPE, messages: Array.from({ length: 13 }, (_, i) => ({ threadId: i.toString(16) })) } })),
@@ -262,6 +279,36 @@ test("live Gmail progress commits when bounded catch-up hits provider quota", as
   assert.equal(committed.checkpoint.gmail.scopes[GMAIL_ROLE_INTEREST_SCOPE].catchup.through, start);
   assert.equal(health.errorClass, "provider_budget_exhausted");
   assert.equal(result.checkpoint.catchup_delayed, true);
+});
+
+test("a no-window live retry still advances catch-up within the shared thread budget", async () => {
+  let committed; let health; const budgets = []; let calls = 0;
+  const sql = async () => []; sql.json = (value) => value;
+  const handlers = createWorkerHandlers({ env: { ...env, SUBMISSIONS_V2_EMAIL_READER: "gmail" }, sql, resumeStore: {}, service: { intakeMasterInbox: async () => ({ accepted: true }) },
+    repository: { recordSourceHealth: async (value) => { health = value; } },
+    sourceLease: {
+      claimSourceCursor: async () => ({ fencing_token: 9, checkpoint: { gmail: { scopes: { [GMAIL_ROLE_INTEREST_SCOPE]: { live: { through: start + 300_000, caught_up: true }, catchup: { through: start } } } } } }),
+      commitSourceCursor: async (value) => { committed = value; return {}; },
+      releaseSourceCursor: async () => assert.fail("durable lanes must commit"),
+    },
+    gmailInterviews: async ({ checkpoint, maxThreads }) => {
+      budgets.push(maxThreads);
+      if (calls++ === 0) {
+        assert.deepEqual(checkpoint, { through: start + 300_000, caught_up: true });
+        return { checkpoint, completed: false, caught_up: true, accepted: 0, observed: 0, threads_read: 0 };
+      }
+      assert.deepEqual(checkpoint, { through: start });
+      return { checkpoint: { through: start + 120_000 }, completed: true, caught_up: false, accepted: 0, observed: 0, threads_read: 8 };
+    },
+    now: () => new Date(start + 360_000),
+  });
+  const result = await handlers.reconcile_master_inbox({ job: {}, workerId: "test", controlEpoch: 5, checkpoint: async () => {}, signal: new AbortController().signal });
+  assert.deepEqual(budgets, [12, 12]);
+  const scoped = committed.checkpoint.gmail.scopes[GMAIL_ROLE_INTEREST_SCOPE];
+  assert.deepEqual(scoped.live, { through: start + 300_000, caught_up: true });
+  assert.deepEqual(scoped.catchup, { through: start + 120_000, caught_up: false });
+  assert.equal(health.errorClass, "gmail_catching_up");
+  assert.equal(result.checkpoint.catchup_delayed, false);
 });
 
 test("aborted catch-up never commits a live checkpoint", async () => {
