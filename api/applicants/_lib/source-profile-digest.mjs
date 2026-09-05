@@ -66,7 +66,20 @@ function canonical(value) {
 }
 
 export function canonicalSourceProfileJson(profile) {
-  return JSON.stringify(canonical(normalizedSourceProfile(profile)));
+  const normalized = normalizedSourceProfile(profile);
+  // Canonicalize the WIRE form, never the object one side happens to hold.
+  // Core reads updatedAt straight out of Postgres, where a timestamptz arrives
+  // as a JS Date (node-pg parses it and lib/db.mjs installs no type parser);
+  // the Monitor only ever sees what JSON.stringify made of it — the ISO string.
+  // canonical() walks Object.keys, which is EMPTY on a Date, so hashing the
+  // in-memory object would give {} where the Monitor hashes the string, and no
+  // receipt could ever match for any profile with a non-null updatedAt — which
+  // is every profile. One JSON round trip puts both sides on the same bytes,
+  // for Dates and for anything else carrying a toJSON.
+  const wire = normalized && typeof normalized === "object"
+    ? JSON.parse(JSON.stringify(normalized))
+    : normalized;
+  return JSON.stringify(canonical(wire));
 }
 
 export function sourceProfileDigest(profile) {
