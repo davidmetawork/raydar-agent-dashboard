@@ -108,6 +108,10 @@ const ACK_STATUSES = new Set([
 ]);
 import {saveApplicantAck} from './_lib/request-safety.mjs';
 import { sourceProfileDigest } from "./_lib/source-profile-digest.mjs";
+import {
+  normalizeRichProfile, richBindingsForSnapshot, richCardFromProfile,
+  richProfileMatches, RICH_PROFILE_RETENTION_SECONDS,
+} from "./_lib/rich-profile.mjs";
 
 function authed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
@@ -394,6 +398,7 @@ export function normalizeSourceProfiles(input) {
     if (!PROFILE_KEY_RE.test(key)
       || !profile || typeof profile !== "object" || Array.isArray(profile)
       || profile.profileSource !== "applicant_hub"
+      || own(profile, "paraformProfile")
       || !sourceObservationId || sourceObservationId.length > 256
       || /[\u0000-\u001f\u007f]/.test(sourceObservationId)
       || !sourceHistoryStates.has(historyState)
@@ -854,6 +859,63 @@ export function createSyncHandler({
         return res.status(200).json({ ok: true, sourceProfileReceipts });
       }
 
+      if (own(body, "richProfileReceiptKeys")) {
+        const rawKeys = body.richProfileReceiptKeys;
+        if (!Array.isArray(rawKeys) || rawKeys.length > MAX_SOURCE_PROFILE_RECEIPT_QUERY_KEYS
+          || rawKeys.some((key) => typeof key !== "string" || !PROFILE_KEY_RE.test(key))) {
+          return res.status(400).json({ ok: false, error: "invalid_rich_profile_receipt_keys" });
+        }
+        const keys = [...new Set(rawKeys)];
+        const receipts = keys.length ? await readHashMany(K.richProfileReady, keys) : {};
+        return res.status(200).json({ ok: true, richProfileReceipts: Object.fromEntries(
+          keys.map((key) => [key, receipts?.[key] ?? null]),
+        ) });
+      }
+
+      // A separate display-only request: no canonical source, facts, queue,
+      // ack, or decision writer can ride along with optional enrichment.
+      if (own(body, "richProfiles")) {
+        if (Object.keys(body).some((key) => key !== "richProfiles")
+          || !body.richProfiles || typeof body.richProfiles !== "object" || Array.isArray(body.richProfiles)
+          || Object.keys(body.richProfiles).length > 100) {
+          return res.status(400).json({ ok: false, error: "invalid_rich_profiles" });
+        }
+        const publication = await readActivePublication({ readJson });
+        const artifacts = publication ? await readPublishedArtifacts(publication, { readJson }) : null;
+        if (!artifacts) return res.status(409).json({ ok: false, error: "generation_unavailable" });
+        const bindings = richBindingsForSnapshot({ ...artifacts.snapshot, queue: artifacts.queue.rows });
+        const profiles = {};
+        const rejected = {};
+        const cachedAt = now();
+        for (const [key, input] of Object.entries(body.richProfiles)) {
+          if (!PROFILE_KEY_RE.test(key)) return res.status(400).json({ ok: false, error: "invalid_rich_profile_key" });
+          const profile = normalizeRichProfile(input, { cachedAt });
+          if (!profile) return res.status(400).json({ ok: false, error: "invalid_rich_profile", key });
+          if (!richProfileMatches(bindings.get(key), profile, { now: Date.parse(cachedAt) })) {
+            rejected[key] = "current_binding_mismatch";
+            continue;
+          }
+          profiles[key] = profile;
+        }
+        const cards = {};
+        const receipts = {};
+        for (const [key, profile] of Object.entries(profiles)) {
+          await writeJson(K.richProfile(key), profile, RICH_PROFILE_RETENTION_SECONDS);
+          cards[key] = richCardFromProfile(profile);
+          receipts[key] = {
+            source: "paraform", sourceObservationId: profile.sourceObservationId,
+            candidateUserId: profile.candidateUserId, connectionReceiptId: profile.connectionReceiptId,
+            profileEnrichedAt: profile.profileEnrichedAt, cachedAt,
+            expiresAt: profile.richProfileRefreshDueAt,
+            richProfileRetainedUntil: profile.richProfileRetainedUntil,
+          };
+        }
+        if (Object.keys(cards).length) await writeHash(K.richCards, cards);
+        // Write last: a fresh receipt means both display projections landed.
+        if (Object.keys(receipts).length) await writeHash(K.richProfileReady, receipts);
+        return res.status(200).json({ ok: true, stored: { richProfiles: Object.keys(profiles).length }, rejected });
+      }
+
       // ACKNOWLEDGE A LATCHED COUNT-DROP ALERT. Its own branch, and it returns
       // immediately: re-baselining must never ride along with a data publish,
       // because the whole point is that someone VERIFIED the new counts are
@@ -1056,6 +1118,13 @@ export function createSyncHandler({
           // break every rule that referenced it.
           const dropFacts = (await readHashKeys(K.facts)).filter((cu) => !keep.has(cu));
           if (dropFacts.length) await deleteHashFields(K.facts, dropFacts);
+          for (const hash of [K.richCards, K.richProfileReady]) {
+            const records = await readHash(hash);
+            const stale = Object.keys(records || {}).filter((key) => !keep.has(key)
+              || !Number.isFinite(Date.parse(records[key]?.richProfileRetainedUntil))
+              || Date.parse(records[key].richProfileRetainedUntil) <= Date.parse(now()));
+            if (stale.length) await deleteHashFields(hash, stale);
+          }
         } catch { /* hygiene only */ }
       }
       // Count tripwire (see nextCountsDoc above). Best-effort like the prune:

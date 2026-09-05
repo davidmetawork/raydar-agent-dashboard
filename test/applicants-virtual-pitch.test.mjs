@@ -82,7 +82,9 @@ function run({ rows, innerWidth = 1440, clientHeight = 640 } = {}) {
   const list = fakeList({ viewport, clientHeight });
   const api = runInNewContext(
     `${source}; ({ paintList, renderVirtual, virtualRowHeight })`,
-    { window: viewport, requestAnimationFrame: (fn) => fn(), $: () => null },
+    // Viewport enrichment is deliberately fire-and-forget after a paint; the
+    // pitch harness has no feed state and only exercises virtual geometry.
+    { window: viewport, requestAnimationFrame: (fn) => fn(), requestVisibleRichCards: () => {}, $: () => null },
   );
   const build = (row) => `<row h=${row.h}>`;
   api.paintList(list, rows, build);

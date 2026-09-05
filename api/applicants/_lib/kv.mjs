@@ -225,6 +225,11 @@ export const K = {
   acks: "apphub:acks",
   profile: (cuId) => `apphub:profile:${cuId}`,
   sourceProfile: (profileKey) => `apphub:source-profile:${profileKey}`,
+  // Optional display enrichment; sync is the sole writer. These never feed
+  // source readiness, decision rules, identity resolution, or delivery.
+  richProfile: (profileKey) => `apphub:rich-profile:${profileKey}`, // 30d TTL
+  richCards: "apphub:rich-cards", // pruned with full publications
+  richProfileReady: "apphub:rich-profile-ready", // refresh receipt, not a gate
   photos: "apphub:photos", // hash: field cuId → JSON string of the photo URL
   cards: "apphub:cards", // hash: field cuId → JSON compact card (see header)
   profileReady: "apphub:profile-ready", // hash: field cuId → full-profile TTL receipt

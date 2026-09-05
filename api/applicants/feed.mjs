@@ -7,6 +7,7 @@
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { readActivePublication, readPublishedArtifacts, verifyGeneration } from "./_lib/generation.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
+import { sourceCardsOnly } from "./_lib/rich-profile.mjs";
 import {
   partitionByProfileReceipt,
   profileCacheSummary,
@@ -83,7 +84,7 @@ export function createFeedHandler({
         decisions,
         acks,
         photos,
-        cards,
+        cards: sourceCardsOnly(cards),
         counts: artifacts.counts,
         pipeline: pipeline ?? null,
         profileCache,

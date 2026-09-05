@@ -13,8 +13,10 @@
 // an error, so unknown and invalid ids never fail the batch.
 
 import { cors, requireAuth } from "./_lib/core.mjs";
-import { hashGetMany, K, kvConfigured } from "./_lib/kv.mjs";
+import { getJson, hashGetMany, K, kvConfigured } from "./_lib/kv.mjs";
 import { PROFILE_KEY_RE } from "./sync.mjs";
+import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
+import { attachRichCards } from "./_lib/rich-profile.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -39,6 +41,8 @@ export function createCardsHandler({
   authHandler = requireAuth,
   kvReady = kvConfigured,
   readHashMany = hashGetMany,
+  readJson = getJson,
+  now = Date.now,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -54,6 +58,42 @@ export function createCardsHandler({
 
     try {
       const cards = await readHashMany(K.cards, ids);
+      // Rich rows are a bounded viewport read, never thousands of nested
+      // profiles added to the feed body. The generation fence prevents an
+      // asynchronous response attaching a newer identity to an older page.
+      if (req.query?.rich === "1") {
+        const pointer = await readActivePublication({ readJson });
+        if (!pointer || req.query.generationId !== pointer.generationId
+          || req.query.generationDigest !== pointer.digest) {
+          return res.status(409).json({ ok: false, error: "generation_changed" });
+        }
+        const artifacts = await readPublishedArtifacts(pointer, { readJson });
+        if (!artifacts) return res.status(409).json({ ok: false, error: "generation_unavailable" });
+        const wanted = new Set(ids);
+        const [richCards, sourceReceipts] = await Promise.all([
+          readHashMany(K.richCards, ids).catch(() => ({})),
+          readHashMany(K.sourceProfileReady, ids).catch(() => ({})),
+        ]);
+        const currentSource = (row) => {
+          const key = row.profileKey || row.cuId;
+          const receipt = sourceReceipts[key];
+          return wanted.has(key) && receipt?.source === "applicant_hub"
+            && receipt.sourceObservationId === row.sourceObservationId;
+        };
+        const snapshot = {
+          queue: artifacts.queue.rows.filter(currentSource),
+          stream: (artifacts.snapshot.stream || []).filter(currentSource),
+        };
+        const current = await readActivePublication({ readJson });
+        if (current?.generationId !== pointer.generationId || current?.digest !== pointer.digest) {
+          return res.status(409).json({ ok: false, error: "generation_changed" });
+        }
+        return res.status(200).json({
+          ok: true,
+          cards: attachRichCards(cards, richCards, snapshot, { now: now() }),
+          generation: { generationId: pointer.generationId, digest: pointer.digest },
+        });
+      }
       return res.status(200).json({ ok: true, cards });
     } catch (error) {
       return res.status(502).json({

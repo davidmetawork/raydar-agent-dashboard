@@ -159,6 +159,15 @@
   .rc-line { font-size:12.5px; color:var(--ink-2); line-height:1.45; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .rc-line b { color:var(--ink); font-weight:650; }
   .rc-line i { font-style:italic; color:var(--ink-3); }
+  .rc-entity { display:inline-flex; align-items:center; gap:6px; min-width:0; max-width:100%; }
+  .entity-logo { width:18px; height:18px; display:inline-grid; place-items:center; flex:none; overflow:hidden; border:1px solid var(--line-2); border-radius:5px; background:#fff; color:var(--ink-3); vertical-align:-4px; }
+  .entity-logo img { width:100%; height:100%; display:block; object-fit:contain; }
+  .entity-logo.missing { background:var(--line-2); }
+  .entity-logo svg { width:11px; height:11px; fill:currentColor; }
+  .rc-entity-rank { display:inline-flex; align-items:center; flex:none; border-radius:999px; padding:1px 5px; background:var(--live-bg); color:#6658DA; font-size:9.5px; line-height:1.35; font-weight:750; letter-spacing:.01em; }
+  .rc-paraform { display:flex; align-items:center; gap:6px; margin-top:5px; font-size:10.5px; color:var(--ink-3); }
+  .rc-paraform .label { font-weight:700; letter-spacing:.035em; text-transform:uppercase; }
+  .rc-paraform .value { color:var(--ink-2); }
   .rc-more { appearance:none; border:0; background:none; padding:2px 0; text-align:left; width:fit-content;
     font:650 11.5px "Inter Variable"; color:var(--ink-3); cursor:pointer; }
   .rc-more:hover { color:var(--orange); }
@@ -236,6 +245,17 @@
     font-size:15px; cursor:pointer; flex:none; }
   .p-close:hover { background:var(--muted-bg); color:var(--ink); }
   .p-asof { font-size:11px; color:var(--ink-3); margin-top:10px; }
+  .p-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:15px; }
+  .p-fact { min-width:0; padding:10px 11px; border:1px solid var(--line-2); border-radius:11px; background:#FCFBF8; }
+  .p-fact .label { display:block; color:var(--ink-3); font-size:10px; line-height:1.25; font-weight:750; letter-spacing:.06em; text-transform:uppercase; }
+  .p-fact .value { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px; color:var(--ink); font-size:13px; font-weight:700; }
+  .p-fact .value.unknown { color:var(--ink-3); font-weight:500; }
+  .p-facts-note { margin:8px 0 0; color:var(--ink-3); font-size:11px; line-height:1.4; }
+  .p-source { margin-top:18px; border:1px solid var(--line-2); border-radius:12px; background:#FCFBF8; }
+  .p-source summary { cursor:pointer; padding:11px 13px; color:var(--ink-2); font-size:12px; font-weight:700; }
+  .p-source summary span { color:var(--ink-3); font-weight:500; }
+  .p-source .p-source-body { padding:0 13px 10px; }
+  .p-source .p-section { margin-top:10px; }
   .p-applied { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--line-2); border-radius:12px; padding:11px 13px;
     margin:16px 0 0; font-size:12.5px; color:var(--ink-2); }
   .p-applied b { color:var(--ink); }
@@ -248,9 +268,11 @@
   .p-section h3 { font-size:16px; margin:0 0 10px; padding-bottom:7px; border-bottom:1px solid var(--line-2); }
   .xp { display:flex; flex-direction:column; gap:3px; padding:11px 0 11px 46px; position:relative; border-bottom:1px solid var(--line-2); }
   .xp:last-child { border-bottom:0; }
-  .xp .xp-logo { position:absolute; left:0; top:12px; width:34px; height:34px; border-radius:8px;
-    border:1px solid var(--line-2); object-fit:contain; background:#fff; }
-  .xp.no-logo { padding-left:0; }
+  .xp .xp-logo { position:absolute; left:0; top:12px; width:34px; height:34px; display:grid; place-items:center; overflow:hidden; border-radius:8px;
+    border:1px solid var(--line-2); background:#fff; color:var(--ink-3); }
+  .xp .xp-logo img { width:100%; height:100%; display:block; object-fit:contain; }
+  .xp .xp-logo.missing { background:var(--line-2); }
+  .xp .xp-logo svg { width:17px; height:17px; fill:currentColor; }
   .xp .xp-top { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
   .xp .xp-top .rule-use { margin-left:auto; }
   .xp .xp-role { font-weight:700; letter-spacing:-.01em; }
@@ -350,6 +372,7 @@
     .stats { gap:16px; }
     .updated { margin-left:0; width:100%; }
     .modal { padding:10px; } .modal-card { padding:20px; }
+    .p-facts { grid-template-columns:1fr; }
   }
 </style>
 </head>
@@ -451,8 +474,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
 
 const LS_KEY = "apphub-local-decisions-v1";
-// Every compact applicant card arrives in the feed. The browser keeps the
-// complete dataset in memory and only mounts the visible rows into the DOM.
+// The feed supplies only the application-derived compact card. Rich cached
+// provider history is fetched separately for the rows presently on screen.
 const SORT_KEY = "apphub-sort-order-v1";
 const STATE = {
   snapshot: null, decisions: {}, acks: {}, generation: null,
@@ -469,6 +492,13 @@ const STATE = {
   modal: null,                        // { cu, key, row, source }
   loaded: false,
   feedUnavailable: null,              // fail closed: never keep rendering an unverified snapshot
+};
+// Rich Paraform history is intentionally absent from the feed: thousands of
+// compact overlays would put the response over the function body cap. Keep it
+// in a generation-scoped viewport cache instead. A response can only paint if
+// it names the same immutable generation that requested it.
+const RICH_CARDS = {
+  generationKey: "", cards: {}, loaded: new Set(), inflight: new Set(), refreshing: false,
 };
 const AUTH = { required: false, clientId: "", authenticated: false, email: "" };
 // The Rules script is loaded after this page script; expose only the current
@@ -572,6 +602,72 @@ function effectiveDecision(key) {
 function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
+function richGenerationKey(generation = STATE.generation) {
+  const id = String(generation?.generationId || "");
+  const digest = String(generation?.digest || "");
+  return id && digest ? id + ":" + digest : "";
+}
+function resetRichCards() {
+  RICH_CARDS.generationKey = richGenerationKey();
+  RICH_CARDS.cards = {};
+  RICH_CARDS.loaded.clear();
+  RICH_CARDS.inflight.clear();
+}
+function syncRichGeneration() {
+  const key = richGenerationKey();
+  if (RICH_CARDS.generationKey !== key) resetRichCards();
+  return key;
+}
+function cardFor(cu) {
+  const source = STATE.cards[cu] || null;
+  const rich = RICH_CARDS.generationKey === richGenerationKey() ? RICH_CARDS.cards[cu] : null;
+  return rich ? { ...source, ...rich } : source;
+}
+function requestVisibleRichCards(rows) {
+  const requestKey = syncRichGeneration();
+  if (!requestKey || !rows?.length) return;
+  const ids = [...new Set(rows.map(profileId).filter((id) => id && STATE.cards[id]
+    && !RICH_CARDS.loaded.has(id) && !RICH_CARDS.inflight.has(id)))].slice(0, 60);
+  if (!ids.length) return;
+  ids.forEach((id) => RICH_CARDS.inflight.add(id));
+  const generationId = String(STATE.generation?.generationId || "");
+  const generationDigest = String(STATE.generation?.digest || "");
+  const query = new URLSearchParams({ rich: "1", cus: ids.join(","), generationId, generationDigest });
+  fetch("/api/applicants/cards?" + query, { credentials: "same-origin", cache: "no-store" })
+    .then(async (response) => {
+      const body = await response.json().catch(() => null);
+      if (response.status === 401 || response.status === 403) { showGate(); throw new Error("auth"); }
+      if (!response.ok || body?.ok !== true) {
+        const error = new Error(body?.error || "Rich cards unavailable");
+        error.status = response.status;
+        throw error;
+      }
+      if (body.generation?.generationId !== generationId || body.generation?.digest !== generationDigest) {
+        const error = new Error("generation_changed");
+        error.status = 409;
+        throw error;
+      }
+      if (RICH_CARDS.generationKey !== requestKey || richGenerationKey() !== requestKey) return;
+      const received = body.cards && typeof body.cards === "object" ? body.cards : {};
+      for (const id of ids) {
+        RICH_CARDS.loaded.add(id); // an absent overlay is a completed lookup, not a retry loop
+        if (received[id] && typeof received[id] === "object") RICH_CARDS.cards[id] = received[id];
+        patchRow(id); // patch only mounted rows; never repaint or move the reader
+      }
+    })
+    .catch((error) => {
+      if (Number(error?.status) !== 409 || RICH_CARDS.generationKey !== requestKey) return;
+      resetRichCards();
+      if (RICH_CARDS.refreshing) return;
+      RICH_CARDS.refreshing = true;
+      loadFeed().finally(() => { RICH_CARDS.refreshing = false; });
+    })
+    .finally(() => {
+      // A new generation may already be fetching these same ids. An old
+      // request must never clear its in-flight dedupe markers.
+      if (RICH_CARDS.generationKey === requestKey) ids.forEach((id) => RICH_CARDS.inflight.delete(id));
+    });
+}
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
 const HARD_HOLD_STATES = new Set(["identity_review", "recipient_review", "delivery_review", "withdrawn", "privacy_hold", "do_not_process"]);
@@ -876,6 +972,50 @@ function avatarImg(src, name) {
 function avatarFallback(img) {
   const parent = img.parentNode;
   if (parent) parent.textContent = img.getAttribute("data-initials") || "?";
+}
+/* The rich Paraform overlay is deliberately a second, attributed source. The
+   application profile remains the authority for identity and rules; these
+   helpers never guess a tier or convert a numeric score to one. */
+const PARAFORM_TIERS = new Set(["S", "A", "B", "C"]);
+const PARAFORM_LOGO_PREFIX = "https://storage.googleapis.com/paraform-company-logo-urls/company-logos/";
+function explicitParaformTier(value, source) {
+  const tier = typeof value === "string" ? value.trim().toUpperCase() : "";
+  return source === "paraform" && PARAFORM_TIERS.has(tier) ? tier : null;
+}
+function paraformScore(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function allowedParaformLogo(value) {
+  const url = typeof value === "string" ? value.trim() : "";
+  if (!url || url.length > 512 || !url.startsWith(PARAFORM_LOGO_PREFIX)) return "";
+  if (!url.startsWith("https://") || url.includes("?") || url.includes("#")) return "";
+  return url;
+}
+const ICON_COMPANY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V5c0-1.1.9-2 2-2h7c1.1 0 2 .9 2 2v4h3c1.1 0 2 .9 2 2v10h1v2H3v-2h1Zm3-14v2h2V7H7Zm0 5v2h2v-2H7Zm0 5v2h2v-2H7Zm5-10v2h2V7h-2Zm0 5v2h2v-2h-2Zm0 5v2h2v-2h-2Zm5-4v8h2v-8h-2Z"/></svg>';
+const ICON_SCHOOL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 10 5-10 5L2 8l10-5Zm-6 9.5v4.2c0 1.7 2.7 3.3 6 3.3s6-1.6 6-3.3v-4.2l-6 3-6-3Z"/></svg>';
+function entityLogoFallback(img) {
+  const mark = img.parentNode;
+  if (!mark) return;
+  mark.classList.add("missing");
+  mark.innerHTML = mark.dataset.kind === "school" ? ICON_SCHOOL : ICON_COMPANY;
+}
+function entityLogoHtml(item, kind, className = "entity-logo") {
+  const logo = allowedParaformLogo(item?.logo);
+  const icon = kind === "school" ? ICON_SCHOOL : ICON_COMPANY;
+  const label = kind === "school" ? "School logo unavailable" : "Company logo unavailable";
+  return '<span class="' + className + (logo ? "" : " missing") + '" role="img" aria-label="' + label + '" data-kind="' + kind + '">'
+    + (logo ? '<img src="' + esc(logo) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="entityLogoFallback(this)" />' : icon)
+    + "</span>";
+}
+function entityTierHtml(item, className = "rc-entity-rank") {
+  const tier = explicitParaformTier(item?.talentRank, "paraform");
+  return tier ? '<span class="' + className + '" title="Paraform tier">Paraform ' + tier + "</span>" : "";
+}
+function richProfile(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function visibleCardProfile(card) {
+  return richProfile(card?.paraformProfile) || card || {};
 }
 function avatarHtml(row) {
   const id = profileId(row);
@@ -1216,20 +1356,22 @@ function decidedStatusHtml(key, decision) {
   const undo = "";
   return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
 }
-/* ---- inline work history: the Recruiter-shaped body every row carries, so a
-   reviewer can judge someone without opening them. Every compact card was
-   downloaded with the feed; opening the modal is the deliberate full-profile
-   request, never a side effect of scrolling. ---- */
-function expLineHtml(x) {
+/* ---- inline work history: the application compact card arrives with the
+   feed and any cached provider overlay is fetched only for visible rows.
+   Opening the modal is still the deliberate full-profile request, never a
+   side effect of scrolling. ---- */
+function expLineHtml(x, showParaformTier = false) {
   const from = x.start ? monthYear(x.start) : "";
   const to = x.current ? "Present" : (x.end ? monthYear(x.end) : "");
   const when = from && to ? from + " — " + to : (from || to);
-  return '<div class="rc-line"><b>' + esc(x.role || "Role") + "</b>" + (x.company ? " at " + esc(x.company) : "") +
+  return '<div class="rc-line"><span class="rc-entity">' + entityLogoHtml(x, "company") + '<b>' + esc(x.role || "Role") + "</b>" +
+    (x.company ? " at " + esc(x.company) : "") + (showParaformTier ? entityTierHtml(x) : "") + "</span>" +
     (when ? ' · <i>' + esc(when) + "</i>" : "") + "</div>";
 }
-function eduLineHtml(x) {
+function eduLineHtml(x, showParaformTier = false) {
   const when = x.end ? monthYear(x.end) : (x.start ? monthYear(x.start) : "");
-  return '<div class="rc-line"><b>' + esc(x.school || "School") + "</b>" + (x.degree ? ", " + esc(x.degree) : "") +
+  return '<div class="rc-line"><span class="rc-entity">' + entityLogoHtml(x, "school") + '<b>' + esc(x.school || "School") + "</b>" +
+    (x.degree ? ", " + esc(x.degree) : "") + (showParaformTier ? entityTierHtml(x) : "") + "</span>" +
     (when ? ' · <i>' + esc(when) + "</i>" : "") + "</div>";
 }
 function secHtml(label, lines, extra) {
@@ -1237,14 +1379,17 @@ function secHtml(label, lines, extra) {
 }
 function historyHtml(row) {
   const cu = profileId(row);
-  const card = STATE.cards[cu];
+  const card = cardFor(cu);
   if (!card) return '<div class="rc-none">Source profile history is still preparing for this applicant.</div>';
-  const exps = card.exp || [], edus = card.edu || [];
-  const expTotal = card.expCount ?? exps.length, eduTotal = card.eduCount ?? edus.length;
+  const provider = richProfile(card.paraformProfile);
+  const display = visibleCardProfile(card);
+  const exps = display.exp || [], edus = display.edu || [];
+  const expTotal = display.expCount ?? exps.length, eduTotal = display.eduCount ?? edus.length;
   const hidden = (expTotal - exps.length) + (eduTotal - edus.length);
   const out = [];
-  if (exps.length) out.push(secHtml("Experience", exps.map(expLineHtml).join("")));
-  if (edus.length) out.push(secHtml("Education", edus.map(eduLineHtml).join("")));
+  if (provider) out.push('<div class="rc-paraform"><span class="label">Cached LinkedIn profile</span><span class="value">' + (explicitParaformTier(provider.paraformTier, provider.paraformTierSource) ? "Paraform " + explicitParaformTier(provider.paraformTier, provider.paraformTierSource) + " tier" : "Tier not provided") + "</span></div>");
+  if (exps.length) out.push(secHtml("Experience", exps.map((item) => expLineHtml(item, Boolean(provider))).join("")));
+  if (edus.length) out.push(secHtml("Education", edus.map((item) => eduLineHtml(item, Boolean(provider))).join("")));
   if (!out.length) {
     const state = String(card.historyState || "").trim().toLowerCase();
     return '<div class="rc-none">' + (state === "verified_empty"
@@ -1259,7 +1404,8 @@ function rowCardHtml(row, mode, decision) {
   const key = row.key;
   const busy = STATE.busy.has(key);
   const id = profileId(row);
-  const card = STATE.cards[id];
+  const card = cardFor(id);
+  const displayCard = visibleCardProfile(card);
   const hold = interviewHold(row);
   const interviewReady = !hold;
   const sentAlready = !decision && interviewReady && alreadyEmailed(row);
@@ -1313,8 +1459,8 @@ function rowCardHtml(row, mode, decision) {
         '<div class="who"><a class="name" href="' + esc(RaydarNav.href(key)) + '" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></a>" +
           nameLinks(row) + tierPill(row.tier) +
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
-        '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(card?.title || "") + "</div>" +
-        '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(card?.location || "") + "</div>" +
+        '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(displayCard.title || card?.title || "") + "</div>" +
+        '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(displayCard.location || card?.location || "") + "</div>" +
         (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>'
           : sentAlready ? '<div class="rc-none">Already emailed for this role.</div>' : '') +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
@@ -1328,10 +1474,11 @@ function reviewRowHtml(row, decision) { return rowCardHtml(row, "review", decisi
  *  under the reader's cursor. */
 function rowByCu(cu) { return queueRows().find((r) => profileId(r) === cu) || streamRows().find((r) => profileId(r) === cu) || null; }
 function patchRow(cu) {
-  const card = STATE.cards[cu];
+  const card = cardFor(cu);
+  const display = visibleCardProfile(card);
   const sel = CSS.escape(cu);
-  document.querySelectorAll('[data-headline="' + sel + '"]').forEach((el) => { el.textContent = card?.title || ""; });
-  document.querySelectorAll('[data-loc="' + sel + '"]').forEach((el) => { el.textContent = card?.location || ""; });
+  document.querySelectorAll('[data-headline="' + sel + '"]').forEach((el) => { el.textContent = display.title || card?.title || ""; });
+  document.querySelectorAll('[data-loc="' + sel + '"]').forEach((el) => { el.textContent = display.location || card?.location || ""; });
   const row = rowByCu(cu);
   if (row) document.querySelectorAll('[data-body="' + sel + '"]').forEach((el) => { el.innerHTML = historyHtml(row); });
   applyAvatar(cu);
@@ -1501,6 +1648,7 @@ function renderVirtual(el) {
       shown.map(spec.build).join("") +
     "</div></div>";
   tuneVirtualRowHeight(el);
+  requestVisibleRichCards(shown);
 }
 function paintList(el, rows, build) {
   el._virtual = { rows, build };
@@ -1719,18 +1867,23 @@ function applyAvatar(cu) {
 async function fetchProfile(cu) {
   const cached = STATE.profiles[cu];
   if (cached) return cached;
+  // A modal request has no generation parameter, so fence its async paint on
+  // the immutable feed identity captured before the request begins. A newer
+  // feed may describe a revised application under the same candidate id.
+  const generationKey = richGenerationKey();
   try {
     const response = await fetch("/api/applicants/profile?cu=" + encodeURIComponent(cu), { credentials: "same-origin" });
     if (response.status === 401 || response.status === 403) { showGate(); throw new Error("auth"); }
     if (!response.ok) throw new Error("Profile fetch failed");
     const body = await response.json();
     const profile = body.profile || body;
+    if (richGenerationKey() !== generationKey) return null;
     STATE.profiles[cu] = profile;
     return profile;
   } catch (err) {
     // Record the miss so the modal leaves its loading state ("unavailable"
     // instead of a forever-spinner); null is falsy, so a reopen retries.
-    STATE.profiles[cu] = STATE.profiles[cu] || null;
+    if (richGenerationKey() === generationKey) STATE.profiles[cu] = STATE.profiles[cu] || null;
     throw err;
   }
 }
@@ -1850,37 +2003,57 @@ function advanceFrom(key, indexBefore) {
   if (next.key === key) return;                    // the write failed and the row stayed — hold position
   openProfile(next.key);
 }
-function chipRowHtml(item) {
+function chipRowHtml(item, isParaformProfile = false) {
   const chips = [];
-  const rank = String(item.talentRank || "").toUpperCase();
-  if (rank === "S" || rank === "A") chips.push('<span class="tag talent">' + rank + " Tier Talent</span>");
+  if (isParaformProfile) {
+    const tier = explicitParaformTier(item?.talentRank, "paraform");
+    if (tier) chips.push('<span class="tag talent">Paraform ' + tier + " tier</span>");
+  }
   const industry = item.industry || (Array.isArray(item.aiTags) ? item.aiTags[0] : "");
   if (industry) chips.push('<span class="tag industry">' + esc(industry) + "</span>");
   return chips.length ? '<div class="xp-chips">' + chips.join("") + "</div>" : "";
 }
-function logoHtml(item) {
-  // Paraform's own company/school logo when it has one; broken URLs hide themselves.
-  return item.logo ? '<img class="xp-logo" src="' + esc(item.logo) + '" alt="" loading="lazy" onerror="this.remove()" />' : "";
-}
-function experienceHtml(xp, index, allowRuleFacts) {
+function experienceHtml(xp, index, allowRuleFacts, isParaformProfile = false) {
   const dates = (xp.start ? monthYear(xp.start) : "") + " – " + (xp.current ? "Present" : xp.end ? monthYear(xp.end) : "") ;
   const span = duration(xp.start, xp.end, xp.current);
   const desc = String(xp.description || "").trim();
   const long = desc.length > 180 || desc.split("\n").length > 3;
-  return '<div class="xp' + (xp.logo ? "" : " no-logo") + '">' + logoHtml(xp) +
+  return '<div class="xp">' + entityLogoHtml(xp, "company", "xp-logo") +
     '<div class="xp-top"><span class="xp-role">' + esc(xp.roleTitle || "Role") + '</span><span class="xp-co">' + esc(xp.companyName || "") + "</span>" +
     (allowRuleFacts && (xp.companyId || xp.roleTitle) ? '<button type="button" class="rule-use" data-rule-fact-kind="experience" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
     '<div class="xp-dates">' + esc(dates) + (span ? " · " + esc(span) : "") + (xp.location ? " · " + esc(xp.location) : "") + "</div>" +
     (desc ? '<div class="xp-desc" id="xpDesc' + index + '">' + esc(desc) + "</div>" +
       (long ? '<button class="xp-more" data-expand="xpDesc' + index + '">Show more</button>' : "") : "") +
-    chipRowHtml(xp) + "</div>";
+    chipRowHtml(xp, isParaformProfile) + "</div>";
 }
-function educationHtml(ed, index, allowRuleFacts) {
+function educationHtml(ed, index, allowRuleFacts, isParaformProfile = false) {
   const dates = [ed.start ? monthYear(ed.start) : "", ed.end ? monthYear(ed.end) : ""].filter(Boolean).join(" – ");
-  return '<div class="xp' + (ed.logo ? "" : " no-logo") + '">' + logoHtml(ed) +
+  return '<div class="xp">' + entityLogoHtml(ed, "school", "xp-logo") +
     '<div class="xp-top"><span class="xp-role">' + esc(ed.school || "School") + '</span><span class="xp-co">' + esc(ed.degree || "") + "</span>" +
     (allowRuleFacts && (ed.schoolId || ed.degree) ? '<button type="button" class="rule-use" data-rule-fact-kind="education" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
-    (dates ? '<div class="xp-dates">' + esc(dates) + "</div>" : "") + chipRowHtml(ed) + "</div>";
+    (dates ? '<div class="xp-dates">' + esc(dates) + "</div>" : "") + chipRowHtml(ed, isParaformProfile) + "</div>";
+}
+function profileFactHtml(label, value) {
+  const unknown = value == null || value === "";
+  return '<div class="p-fact"><span class="label">' + esc(label) + '</span><span class="value' + (unknown ? " unknown" : "") + '">' + esc(unknown ? "Not provided" : value) + "</span></div>";
+}
+function profileFactsHtml(provider) {
+  if (!provider) return '<div class="p-facts">' + profileFactHtml("Paraform tier", null) + profileFactHtml("Paraform score", null) +
+    '</div><p class="p-facts-note">No cached LinkedIn profile is available for these Paraform details.</p>';
+  const tier = explicitParaformTier(provider.paraformTier, provider.paraformTierSource);
+  const score = paraformScore(provider.densityScore);
+  return '<div class="p-facts">' + profileFactHtml("Paraform tier", tier ? tier + " tier" : null) + profileFactHtml("Paraform score", score) +
+    '</div>' + (!tier && score == null ? '<p class="p-facts-note">This cached LinkedIn profile did not include a Paraform rating.</p>' : "");
+}
+function historySectionsHtml(profile, { allowRuleFacts = false, isParaformProfile = false } = {}) {
+  const parts = [];
+  if (Array.isArray(profile?.experiences) && profile.experiences.length) {
+    parts.push('<div class="p-section"><h3>Experience</h3>' + profile.experiences.map((xp, index) => experienceHtml(xp, index, allowRuleFacts, isParaformProfile)).join("") + "</div>");
+  }
+  if (Array.isArray(profile?.education) && profile.education.length) {
+    parts.push('<div class="p-section"><h3>Education</h3>' + profile.education.map((ed, index) => educationHtml(ed, index, allowRuleFacts, isParaformProfile)).join("") + "</div>");
+  }
+  return parts.join("");
 }
 function renderModal() {
   const modal = STATE.modal;
@@ -1889,19 +2062,21 @@ function renderModal() {
   const profile = STATE.profiles[modal.cu];
   const loading = !(modal.cu in STATE.profiles);
   const p = profile || {};
+  const provider = richProfile(p.paraformProfile);
+  const displayProfile = provider || p;
   const linkedin = preferredLinkedinProfileUrl(p.linkedin, row.linkedin);
   const decision = modal.source === "queue" ? effectiveDecision(modal.key) : null;
   const busy = STATE.busy.has(modal.key);
   const parts = [];
   parts.push('<div class="p-head">' + avatarHtml(row) +
     '<div class="p-id"><h2 id="profileName">' + esc(p.name || row.name || "Unknown") + "</h2>" +
-    (p.title ? '<div class="headline">' + esc(p.title) + "</div>" : "") +
+    (displayProfile.title || p.title ? '<div class="headline">' + esc(displayProfile.title || p.title) + "</div>" : "") +
     '<div class="meta">' +
-    (p.location ? "<span>" + esc(p.location) + "</span>" : "") +
+    (displayProfile.location || p.location ? "<span>" + esc(displayProfile.location || p.location) + "</span>" : "") +
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    (p.updatedAt ? '<div class="p-asof">' + (p.profileSource === "applicant_hub" ? "Application profile" : "LinkedIn data") + " as of " + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    ((provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
@@ -1915,11 +2090,16 @@ function renderModal() {
   } else if (!profile) {
     parts.push('<div class="p-loading">Profile unavailable right now — LinkedIn and resume links above still work.</div>');
   } else {
-    if (Array.isArray(p.experiences) && p.experiences.length)
-      parts.push('<div class="p-section"><h3>Experience</h3>' + p.experiences.map((xp, index) => experienceHtml(xp, index, modal.source === "queue")).join("") + "</div>");
-    if (Array.isArray(p.education) && p.education.length)
-      parts.push('<div class="p-section"><h3>Education</h3>' + p.education.map((ed, index) => educationHtml(ed, index, modal.source === "queue")).join("") + "</div>");
-    if (!(p.experiences || []).length && !(p.education || []).length && p.degraded !== "paraform_auth") {
+    parts.push(profileFactsHtml(provider));
+    const primaryHistory = historySectionsHtml(displayProfile, { allowRuleFacts: !provider && modal.source === "queue", isParaformProfile: Boolean(provider) });
+    if (primaryHistory) parts.push(primaryHistory);
+    if (provider) {
+      const applicationHistory = historySectionsHtml(p, { allowRuleFacts: modal.source === "queue" });
+      if (applicationHistory) {
+        parts.push('<details class="p-source"><summary>Application profile <span>source record</span></summary><div class="p-source-body">' + applicationHistory + "</div></details>");
+      }
+    }
+    if (!primaryHistory && !(provider && ((p.experiences || []).length || (p.education || []).length)) && p.degraded !== "paraform_auth") {
       const historyState = String(p.historyState || "").trim().toLowerCase();
       parts.push('<div class="p-loading">' + (historyState === "verified_empty"
         ? "The source reported no work or education history."
@@ -2108,6 +2288,7 @@ function markFeedUnavailable(error) {
   STATE.profileCache = null;
   STATE.profileReceiptWithheld = 0;
   STATE.generation = null;
+  resetRichCards();
   STATE.profiles = {};
   STATE.checked.clear();
   resetVirtualLists();
@@ -2124,6 +2305,7 @@ async function loadFeed(manual = false) {
       error.reason = body?.reason || body?.error || null;
       throw error;
     }
+    const previousGenerationKey = richGenerationKey();
     STATE.feedUnavailable = null;
     STATE.snapshot = body.snapshot || null;
     STATE.decisions = body.decisions || {};
@@ -2134,6 +2316,11 @@ async function loadFeed(manual = false) {
     STATE.profileCache = body.profileCache || null;
     STATE.profileReceiptWithheld = Number(body.profileReceiptWithheld) || 0;
     STATE.generation = body.generation || null;
+    syncRichGeneration();
+    // Full profiles are deliberately scoped to the feed generation too. Keep
+    // them through ordinary polls of the same publication, but do not let an
+    // old modal response or cached profile describe the new generation.
+    if (previousGenerationKey !== richGenerationKey()) STATE.profiles = {};
     STATE.loaded = true;
     reconcileLocal();
     renderAll();

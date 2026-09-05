@@ -27,6 +27,8 @@ import {
 } from "./_lib/kv.mjs";
 import { hasCookie, isParaformAuthError, sleep, trpcGet } from "./_lib/paraform.mjs";
 import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
+import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
+import { richBindingsForSnapshot, richProfileMatches } from "./_lib/rich-profile.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -114,11 +116,15 @@ function mapEducation(row, ranks) {
   };
 }
 
-export default async function handler(req, res) {
-  if (cors(req, res)) return;
+export function createProfileHandler({
+  corsHandler = cors, authHandler = requireAuth, kvReady = kvConfigured,
+  readJson = getJson, now = Date.now,
+} = {}) {
+return async function handler(req, res) {
+  if (corsHandler(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
-  if (!(await requireAuth(req, res))) return;
-  if (!kvConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
+  if (!(await authHandler(req, res))) return;
+  if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
   const cu = String(req.query?.cu || "").trim();
   if (!PROFILE_KEY_RE.test(cu)) return res.status(400).json({ ok: false, error: "invalid_cu" });
@@ -128,9 +134,24 @@ export default async function handler(req, res) {
     // Applicant Hub history is the durable source projection. Read it before
     // the expiring rich-provider cache so a provider refresh cannot hide the
     // source-backed profile used by the active generation.
-    const sourceCached = await getJson(K.sourceProfile(cu)).catch(() => null);
-    if (sourceCached) return res.status(200).json({ ok: true, ...sourceCached });
-    const cached = await getJson(K.profile(cu)).catch(() => null);
+    const sourceCached = await readJson(K.sourceProfile(cu)).catch(() => null);
+    if (sourceCached) {
+      const { paraformProfile: _unboundProviderProfile, ...sourceProfile } = sourceCached;
+      let paraformProfile = null;
+      try {
+        const publication = await readActivePublication({ readJson });
+        const artifacts = publication ? await readPublishedArtifacts(publication, { readJson }) : null;
+        const binding = artifacts ? richBindingsForSnapshot({ ...artifacts.snapshot, queue: artifacts.queue.rows }).get(cu) : null;
+        if (binding && binding.sourceObservationId === sourceCached.sourceObservationId) {
+          const rich = await readJson(K.richProfile(cu));
+          const current = await readActivePublication({ readJson });
+          if (current?.generationId === publication.generationId && current?.digest === publication.digest
+            && richProfileMatches(binding, rich, { now: now() })) paraformProfile = rich;
+        }
+      } catch { /* Optional provider state cannot prevent opening the source profile. */ }
+      return res.status(200).json({ ok: true, ...sourceProfile, ...(paraformProfile ? { paraformProfile } : {}) });
+    }
+    const cached = await readJson(K.profile(cu)).catch(() => null);
     if (cached) return res.status(200).json({ ok: true, ...cached });
 
     if (!CU_RE.test(cu)) return res.status(404).json({ ok: false, error: "profile_cache_miss" });
@@ -200,4 +221,7 @@ export default async function handler(req, res) {
       detail: String(error?.message || error).slice(0, 180),
     });
   }
+};
 }
+
+export default createProfileHandler();
