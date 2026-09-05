@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -17,6 +17,13 @@ test("duplicate review dispositions receive a recruiter-facing success message",
   assert.equal(commandSuccessMessage({ duplicate: true }), "Already recorded; review item resolved.");
   assert.equal(commandSuccessMessage({ duplicate: false }), "");
   assert.equal(commandSuccessMessage({}), "");
+});
+
+test("admission source text and links are server-provided rather than derived from candidate identity", () => {
+  assert.deepEqual(admissionSourcePresentation({ label: "Email reply", url: "https://mail.google.com/mail/u/0/#all/abc" }), {
+    label: "Email reply", url: "https://mail.google.com/mail/u/0/#all/abc",
+  });
+  assert.deepEqual(admissionSourcePresentation({ candidate_id: "candidate-1" }), { label: "", url: "" });
 });
 
 test("review evidence only renders an explicitly available bounded excerpt", () => {

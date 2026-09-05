@@ -15,6 +15,12 @@ export function commandSuccessMessage(result) {
   return result?.duplicate === true ? "Already recorded; review item resolved." : "";
 }
 
+export function admissionSourcePresentation(source = {}) {
+  const label = typeof source?.label === "string" ? source.label.trim().slice(0, 160) : "";
+  const url = typeof source?.url === "string" ? source.url.trim() : "";
+  return { label, url };
+}
+
 export function reviewContextPresentation(context = {}) {
   const available = context?.evidence_status === "available";
   const excerptPoints = available && typeof context.candidate_reply_excerpt === "string"

@@ -88,8 +88,9 @@ export function assertPairState(state) {
   if (workflow === "needs_review" && intent === "not_interested") {
     throw new PairStateError("invalid_pair_state", "needs_review cannot retain negative intent");
   }
-  if (submission === "proven" && workflow !== "interested") {
-    throw new PairStateError("invalid_pair_state", "proven submission must remain in Interested history");
+  if (submission === "proven"
+    && (intent !== "interested" || !["preparing_resume", "interested", "needs_review"].includes(workflow))) {
+    throw new PairStateError("invalid_pair_state", "proven submission must retain positive intent through the resume lifecycle");
   }
   return state;
 }
@@ -121,9 +122,13 @@ export function assertPairTransition(current, next, expectedVersion) {
     throw new PairStateError("invalid_pair_transition", `${currentSubmission} cannot transition to ${nextSubmission}`, current);
   }
   if (currentSubmission === "proven") {
-    const changed = value(current, "intent_state", "intentState") !== value(next, "intent_state", "intentState")
-      || currentWorkflow !== nextWorkflow;
-    if (changed) {
+    const intentChanged = value(current, "intent_state", "intentState") !== value(next, "intent_state", "intentState");
+    const proofLifecycle = {
+      preparing_resume: new Set(["preparing_resume", "interested", "needs_review"]),
+      needs_review: new Set(["needs_review", "preparing_resume", "interested"]),
+      interested: new Set(["interested"]),
+    };
+    if (intentChanged || !proofLifecycle[currentWorkflow]?.has(nextWorkflow)) {
       throw new PairStateError("invalid_pair_transition", "A proven submission cannot be reclassified", current);
     }
   }

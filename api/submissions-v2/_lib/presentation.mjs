@@ -1,3 +1,5 @@
+import { paraformCandidateProfileUrl } from "./paraform-links.mjs";
+
 export const REVIEW_REASONS = Object.freeze({
   candidate_not_found: { label: "Candidate is missing in Paraform", action: "Add in Paraform, then Recheck" },
   candidate_ambiguous: { label: "More than one Paraform candidate matches", action: "Select candidate" },
@@ -37,6 +39,23 @@ function reasons(values = []) {
   }).filter(Boolean);
 }
 
+function admissionSource(row, signalUrl) {
+  const emailLabels = {
+    para_ai_interview_request: "Interview Request reply",
+    new_match: "New Match reply",
+    fit_follow_up_with_matches: "Fit Follow Up reply",
+    paraform_sequence_reply: "Sequence reply",
+  };
+  let label = "Candidate signal";
+  if (row.source_family === "curated") {
+    label = row.decisive_status === "APPLIED_TO_ROLE" ? "Curated List interest"
+      : row.decisive_status === "NOT_INTERESTED" ? "Curated List decline" : "Curated List response";
+  } else if (row.source_family === "email") {
+    label = Object.hasOwn(emailLabels, row.email_source_family) ? emailLabels[row.email_source_family] : "Email reply";
+  } else if (row.source_family === "manual") label = "Added by recruiter";
+  return { label, url: signalUrl };
+}
+
 export function rowDto(row) {
   const reviewReasons = reasons(row.review_reasons || []);
   const first = reviewReasons[0];
@@ -56,7 +75,7 @@ export function rowDto(row) {
     candidate_id: row.candidate_user_id || null,
     candidate_name: text(row.candidate_name, 500) || null,
     provisional_name: text(row.provisional_name, 500) || null,
-    candidate_url: safeHttps(row.candidate_url, ["paraform.com"]),
+    candidate_url: paraformCandidateProfileUrl(row.candidate_user_id),
     linkedin_url: safeHttps(row.linkedin_url, ["linkedin.com"]),
     raydar_url: safeHttps(row.raydar_url, ["monitor.raydar.xyz"]),
     role_id: row.role_id || null,
@@ -72,6 +91,7 @@ export function rowDto(row) {
       url: safeHttps(offered?.url, ["paraform.com"]),
     })).filter((offered) => offered.role_id),
     signal_url: signalUrl,
+    admission_source: admissionSource(row, signalUrl),
     signal_at: row.signal_at || null,
     workflow_state: workflowState,
     review_reasons: reviewReasons,

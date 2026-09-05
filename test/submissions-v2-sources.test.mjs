@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { curatedBatchPlan, diffCuratedSnapshots } from "../api/submissions-v2/_lib/curated.mjs";
 import {
   candidateIndexRow, normalizeSearch, readActiveRoleIndex, readCandidateIndexPage,
-  readCuratedCandidate, readCuratedPopulation, roleIndexRow,
+  exactCuratedListSource, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList, roleIndexRow,
 } from "../api/submissions-v2/_lib/paraform-sources.mjs";
+import { paraformCuratedListUrl } from "../api/submissions-v2/_lib/paraform-links.mjs";
 import { authorizeNotificationBroker, notificationText, postSafeNotification } from "../api/submissions-v2/_lib/notifications.mjs";
 
 test("normalizes diacritics for local candidate search", () => assert.equal(normalizeSearch("  José  Álvarez "), "jose alvarez"));
@@ -19,6 +20,7 @@ test("candidate index preserves an identified Paraform profile when its display 
   const row = candidateIndexRow({ id: "candidate-no-name", name: "" });
   assert.equal(row.candidate_user_id, "candidate-no-name");
   assert.equal(row.display_name, "Candidate name unavailable");
+  assert.equal(row.paraform_url, "https://www.paraform.com/candidates?candidate_profile_id=candidate-no-name");
   assert.equal(candidateIndexRow({ name: "No identity" }), null);
 });
 
@@ -53,6 +55,30 @@ test("malformed successful Paraform index payloads fail closed instead of becomi
   assert.deepEqual(await readCuratedPopulation({ trpcGetImpl: async () => [] }), []);
   assert.deepEqual(await readCuratedCandidate("candidate-1", { trpcGetImpl: async () => [] }), []);
   assert.throws(() => curatedBatchPlan(null), (error) => error.code === "curated_population_shape_invalid");
+});
+
+test("curated list provenance uses the candidate user id and only links an exact role", async () => {
+  const calls = [];
+  const list = await readCuratedRoleList("candidate-user-1", {
+    trpcGetImpl: async (path, input) => {
+      calls.push({ path, input });
+      return { id: "list-1", roles: [{ id: "role-1" }] };
+    },
+  });
+  assert.deepEqual(calls, [{
+    path: "curatedRoleList.getCandidateCuratedRoleList",
+    input: { candidate_id: "candidate-user-1" },
+  }]);
+  assert.deepEqual(exactCuratedListSource(list, "role-1", { listUrl: paraformCuratedListUrl }), {
+    signal_url: "https://www.paraform.com/lists/list-1",
+    source_link_kind: "curated_list_exact",
+  });
+  assert.equal(exactCuratedListSource(list, "role-other", { listUrl: paraformCuratedListUrl }), null);
+  assert.equal(await readCuratedRoleList("candidate-user-1", { trpcGetImpl: async () => null }), null);
+  await assert.rejects(
+    () => readCuratedRoleList("candidate-user-1", { trpcGetImpl: async () => ({ id: "list-1", roles: [{}] }) }),
+    (error) => error.code === "curated_role_list_shape_invalid",
+  );
 });
 
 test("first curated sight seeds without action and later decisive transition acts once", () => {

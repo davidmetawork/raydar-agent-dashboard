@@ -50,6 +50,7 @@ test("every server-provided destination is constrained to its explicit host fami
   assert.match(js, /submit: \["paraform\.com"\]/);
   assert.match(js, /storage: \["vercel-storage\.com"\]/);
   assert.match(js, /safeUrl\(row\.signal_url, URL_HOSTS\.signal\)/);
+  assert.match(js, /safeUrl\(source\.url, URL_HOSTS\.signal\)/);
   assert.match(js, /safeUrl\(data\.redirect_url, URL_HOSTS\.submit\)/);
   assert.match(js, /safeUrl\(data\.url, URL_HOSTS\.storage\)/);
   assert.match(js, /url\.protocol !== "https:"/);
@@ -125,8 +126,20 @@ test("warning details work on hover, focus, and click without opening regenerati
   assert.match(js, /node\.onfocus/);
   assert.match(js, /node\.onclick/);
   assert.match(js, /aria-haspopup/);
+  assert.match(js, /Resume note/);
+  assert.match(js, /Resume notes \(\$\{cautions\.length\}\)/);
+  assert.doesNotMatch(js, /Resume source caution">!<\/button>/);
   assert.doesNotMatch(js, />Add context<\/button>/);
   assert.doesNotMatch(js, /openRegenerate\(id\)/);
+});
+
+test("rows show a verified admission label and link without fabricating candidate or provider URLs", () => {
+  assert.match(js, /admissionSourcePresentation\(row\.admission_source\)/);
+  assert.match(js, /admission-source/);
+  assert.match(js, /Source link/);
+  assert.doesNotMatch(js, /candidate_id.*paraform.*candidate/i);
+  assert.match(css, /\.admission-source\{/);
+  assert.match(css, /\.caution-control\{/);
 });
 
 test("Needs Review exposes reason-specific candidate, role, retry, and Signal resolution paths", () => {
@@ -148,6 +161,12 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
   assert.match(css, /\.review-evidence\{/);
   assert.match(js, /const source = evidence\.sourceLabel \|\| "Verified source details unavailable"/);
   assert.match(js, /Candidate added; resume preparation has started\./);
+});
+
+test("a proven submission remains explicit while a resume issue stays actionable", () => {
+  assert.match(js, /row\.submission_status === "proven" \? '<span class="submitted-label">SUBMITTED<\/span>' : ""/);
+  assert.match(js, /The submission is recorded; download unlocks when the resume is ready\./);
+  assert.match(js, /runReviewAction\("retry_preparation"/);
 });
 
 test("source health distinguishes reported delays from committed Gmail and Sequence checkpoints", () => {

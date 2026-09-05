@@ -4,77 +4,90 @@ import { canonicalJson, sha256 } from "../api/submissions-v2/_lib/resume/source-
 const clean = (value, limit = 500) => String(value ?? "").trim().slice(0, limit);
 const explicit = (value, keys) => keys.map((key) => clean(value?.[key])).find(Boolean) || null;
 const sourceShapeError = (code, message) => Object.assign(new Error(message), { code, retryable: true });
+const instant = (value) => Number.isFinite(Date.parse(String(value || "")))
+  ? new Date(value).toISOString()
+  : null;
+const MAX_EXACT_ROLE_APPLICATIONS = 3;
 
-function mondayPacific(now = new Date()) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit", weekday: "short",
-  }).formatToParts(now).map((part) => [part.type, part.value]));
-  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts.weekday);
-  const local = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) - ((weekday + 6) % 7), 12));
-  // Noon UTC pins the local calendar date; resolve midnight using the current PST/PDT offset.
-  const probe = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), 12));
-  const hour = Number(Object.fromEntries(new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles", hour: "2-digit", hourCycle: "h23",
-  }).formatToParts(probe).map((part) => [part.type, part.value])).hour);
-  return new Date(probe.getTime() - hour * 60 * 60 * 1_000).toISOString();
-}
+const SUBMITTED_STATES = new Set([
+  "SUBMITTED", "INTERVIEWING", "INTERVIEW", "ACCEPTED", "REJECTED", "HIRED", "OFFER", "OFFERED",
+]);
 
-function facts(row, { allowTopLevelId = false } = {}) {
-  const candidate = row?.candidate_user || row?.candidateUser || row?.candidate || {};
-  const role = row?.role || row?.candidate_to_approved_role || row?.candidateToApprovedRole || {};
-  return {
-    applicationId: explicit(row, allowTopLevelId ? ["application_id", "applicationId", "id"] : ["application_id", "applicationId"]),
-    candidateUserId: explicit(row, ["candidate_user_id", "candidateUserId"]) || explicit(candidate, ["candidate_user_id", "candidateUserId", "id"]),
-    roleId: explicit(row, ["role_id", "roleId"]) || explicit(role, ["role_id", "roleId", "id"]),
-    status: clean(row?.status || row?.state, 100).toUpperCase(),
-    observedAt: clean(row?.submitted_at || row?.submittedAt || row?.created_at || row?.createdAt, 100) || null,
-  };
-}
-
-function ledgerRows(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw sourceShapeError("submission_ledger_shape_invalid", "Paraform submission ledger returned an unrecognized success payload.");
-  const hasLatest = Object.prototype.hasOwnProperty.call(value, "latestSingleSubmissions");
-  const hasRecent = Object.prototype.hasOwnProperty.call(value, "allRecentSingleSubmissions");
-  if ((!hasLatest && !hasRecent)
-    || (hasLatest && !Array.isArray(value.latestSingleSubmissions))
-    || (hasRecent && !Array.isArray(value.allRecentSingleSubmissions))) {
-    throw sourceShapeError("submission_ledger_shape_invalid", "Paraform submission ledger returned an unrecognized success payload.");
+function candidateApplicationRows(value, scopedCandidateUserId) {
+  if (!Array.isArray(value)) {
+    throw sourceShapeError("candidate_applications_shape_invalid", "Paraform candidate applications returned an unrecognized success payload.");
   }
-  const rows = [...(value.latestSingleSubmissions || []), ...(value.allRecentSingleSubmissions || [])];
-  if (rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) throw sourceShapeError("submission_ledger_row_invalid", "Paraform submission ledger returned an invalid row.");
-  return rows.map((row) => facts(row, { allowTopLevelId: true }));
+  return value.map((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw sourceShapeError("candidate_application_row_invalid", "Paraform candidate applications returned an invalid row.");
+    }
+    const candidateUser = row.candidate_user || row.candidateUser || {};
+    const candidateUserId = explicit(row, ["candidate_user_id", "candidateUserId"])
+      || explicit(candidateUser, ["candidate_user_id", "candidateUserId", "id"]);
+    if (candidateUserId && candidateUserId !== scopedCandidateUserId) {
+      throw sourceShapeError("candidate_application_scope_conflict", "Paraform candidate applications returned a row for a conflicting candidate identity.");
+    }
+    const role = row.role || {};
+    const applicationId = explicit(row, ["id", "application_id", "applicationId"]);
+    const roleId = explicit(row, ["role_id", "roleId"]) || explicit(role, ["role_id", "roleId", "id"]);
+    if (!applicationId || !roleId) {
+      throw sourceShapeError("candidate_application_row_incomplete", "Paraform candidate applications returned a row without exact application and role identifiers.");
+    }
+    return {
+      applicationId,
+      roleId,
+      observedAt: instant(explicit(row, ["submitted_at", "submittedAt", "submittedOn", "created_at", "createdAt"])),
+    };
+  });
 }
 
-function historyRows(value) {
-  const rows = Array.isArray(value) ? value
-    : value && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.requests) ? value.requests
-      : null;
-  if (!rows) throw sourceShapeError("submission_history_shape_invalid", "Paraform submission history returned an unrecognized success payload.");
-  if (rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) throw sourceShapeError("submission_history_row_invalid", "Paraform submission history returned an invalid row.");
-  return rows.map(facts);
+function applicationFacts(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw sourceShapeError("submission_application_detail_shape_invalid", "Paraform application detail returned an unrecognized success payload.");
+  }
+  const candidateUser = value.candidate_user || value.candidateUser || {};
+  const candidateToApprovedRole = value.candidate_to_approved_role || value.candidateToApprovedRole || {};
+  const result = {
+    applicationId: explicit(value, ["id", "application_id", "applicationId"]),
+    candidateUserId: explicit(value, ["candidate_user_id", "candidateUserId"])
+      || explicit(candidateUser, ["candidate_user_id", "candidateUserId", "id"]),
+    roleId: explicit(value, ["role_id", "roleId"])
+      || explicit(candidateToApprovedRole, ["role_id", "roleId"]),
+    status: clean(value.status || value.state, 100).toUpperCase(),
+    observedAt: instant(explicit(value, ["submitted_at", "submittedAt", "submittedOn", "created_at", "createdAt", "updated_at", "lastUpdated"])),
+  };
+  if (!result.applicationId || !result.candidateUserId || !result.roleId || !result.status) {
+    throw sourceShapeError("submission_application_detail_incomplete", "Paraform application detail omitted an exact identifier or status.");
+  }
+  return result;
 }
 
-const SUBMITTED_STATES = new Set(["SUBMITTED", "INTERVIEWING", "INTERVIEW", "ACCEPTED", "REJECTED", "HIRED", "OFFER", "OFFERED"]);
+function exactRoleApplications(rows, roleId) {
+  const exact = rows.filter((row) => row.roleId === roleId).sort((left, right) => {
+    const leftTime = Date.parse(left.observedAt || "") || 0;
+    const rightTime = Date.parse(right.observedAt || "") || 0;
+    return rightTime - leftTime || right.applicationId.localeCompare(left.applicationId);
+  });
+  if (exact.length > MAX_EXACT_ROLE_APPLICATIONS) {
+    throw sourceShapeError("candidate_application_role_ambiguous", "Paraform returned too many applications for one exact candidate-role pair to inspect safely in a bounded run.");
+  }
+  return exact;
+}
 
-function proofForPair(pair, ledger, history, now) {
-  const exact = (row) => row.applicationId
-    && row.candidateUserId === pair.candidate_user_id
-    && row.roleId === pair.role_id;
-  // Membership in Paraform's single-submission ledger is itself submitted
-  // evidence; current rows do not consistently repeat a status field.
-  const ledgerMatch = ledger.find((row) => exact(row) && (!row.status || SUBMITTED_STATES.has(row.status)));
-  const historyMatch = history.find((row) => exact(row) && SUBMITTED_STATES.has(row.status));
-  const match = ledgerMatch || historyMatch;
-  if (!match) return null;
-  const authoritativePath = ledgerMatch
-    ? "roleSlots.getMySingleSubmissionData"
-    : "submissionRequest.getRecruiterSubmissionRequestHistory";
+function proofForApplication(pair, located, application, now) {
+  if (application.applicationId !== located.applicationId
+    || application.candidateUserId !== pair.candidate_user_id
+    || application.roleId !== pair.role_id) {
+    throw sourceShapeError("submission_application_identity_conflict", "Paraform application detail did not match the exact candidate, role, and application requested.");
+  }
+  if (!SUBMITTED_STATES.has(application.status)) return null;
+  const authoritativePath = "application.getRecruiterApplicationData";
   return {
     pairId: pair.id,
-    applicationId: match.applicationId,
+    applicationId: application.applicationId,
     authoritativePath,
-    evidenceDigest: sha256(canonicalJson({ authoritativePath, ...match })),
-    observedAt: match.observedAt || new Date(now).toISOString(),
+    evidenceDigest: sha256(canonicalJson({ authoritativePath, ...application })),
+    observedAt: application.observedAt || located.observedAt || new Date(now).toISOString(),
     checkedAt: new Date(now).toISOString(),
   };
 }
@@ -85,17 +98,38 @@ export async function readExactSubmissionProofs(pairs, {
 } = {}) {
   const requested = Array.isArray(pairs) ? pairs.filter(Boolean) : [];
   if (!requested.length) return [];
-  const [ledger, history] = await Promise.all([
-    trpcGetImpl("roleSlots.getMySingleSubmissionData", { weekStart: mondayPacific(now) }),
-    trpcGetImpl("submissionRequest.getRecruiterSubmissionRequestHistory", { agencyView: false, recruiterFilter: [] }),
-  ]);
-  const normalizedLedger = ledgerRows(ledger);
-  const normalizedHistory = historyRows(history);
-  return requested.map((pair) => proofForPair(pair, normalizedLedger, normalizedHistory, now)).filter(Boolean);
+  if (requested.some((pair) => !clean(pair.id) || !clean(pair.candidate_user_id) || !clean(pair.role_id))) {
+    throw sourceShapeError("submission_proof_pair_incomplete", "Submission proof selection omitted an exact pair, candidate, or role identifier.");
+  }
+
+  const rowsByCandidate = new Map();
+  for (const candidateUserId of new Set(requested.map((pair) => clean(pair.candidate_user_id)).filter(Boolean))) {
+    const value = await trpcGetImpl("candidateUser.getCandidateUserApplications", { candidate_user_id: candidateUserId });
+    rowsByCandidate.set(candidateUserId, candidateApplicationRows(value, candidateUserId));
+  }
+
+  const proofs = [];
+  for (const pair of requested) {
+    const locatedRows = exactRoleApplications(rowsByCandidate.get(pair.candidate_user_id) || [], pair.role_id);
+    for (const located of locatedRows) {
+      const value = await trpcGetImpl("application.getRecruiterApplicationData", { application_id: located.applicationId });
+      const proof = proofForApplication(pair, located, applicationFacts(value), now);
+      if (proof) {
+        proofs.push(proof);
+        break;
+      }
+    }
+  }
+  return proofs;
 }
 
 export async function readExactSubmissionProof(pair, options = {}) {
   return (await readExactSubmissionProofs([pair], options))[0] || null;
 }
 
-export const proofReaderInternals = Object.freeze({ facts, historyRows, ledgerRows, mondayPacific, proofForPair });
+export const proofReaderInternals = Object.freeze({
+  applicationFacts,
+  candidateApplicationRows,
+  exactRoleApplications,
+  proofForApplication,
+});

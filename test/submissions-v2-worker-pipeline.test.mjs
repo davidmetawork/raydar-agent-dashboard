@@ -679,9 +679,12 @@ test("recheck leaves the pair in review until the candidate-original resume is r
 test("curated reconciliation uses a leased, paced population batch and advances only after apply", async () => {
   const order = [];
   let commit;
+  let applied;
+  let listReads = 0;
   const repository = {
     applyCuratedObservations: async (observations, options) => {
       order.push("apply");
+      applied = observations;
       assert.equal(options.seed, true);
       assert.equal(observations.length, 2);
       return observations.map(() => ({ applied: true }));
@@ -692,6 +695,7 @@ test("curated reconciliation uses a leased, paced population batch and advances 
     repository,
     curatedPopulation: async () => [{ candidateUserId: "candidate-b" }, { candidateUserId: "candidate-a" }],
     curatedCandidate: async (candidateUserId) => [{ role_id: "role-1", status: candidateUserId === "candidate-a" ? "APPLIED_TO_ROLE" : "NOT_INTERESTED" }],
+    curatedRoleList: async () => { listReads += 1; return { id: "unexpected", roles: [{ id: "role-1" }] }; },
     sourceLease: {
       claimSourceCursor: async () => ({ checkpoint: { cursor: 0 }, fencing_token: 7, last_full_success_at: null }),
       commitSourceCursor: async (value) => { order.push("commit"); commit = value; return { ok: true }; },
@@ -704,6 +708,155 @@ test("curated reconciliation uses a leased, paced population batch and advances 
   assert.equal(commit.checkpoint.cursor, 0);
   assert.equal(commit.fullSuccess, true);
   assert.equal(result.checkpoint.observation_count, 2);
+  assert.equal(listReads, 0, "seed rows must not spend a provenance read");
+  assert.deepEqual(applied.map((observation) => observation.signal_url), [undefined, undefined]);
+});
+
+test("curated provenance reads only fresh decisive transitions and fails open for admission", async () => {
+  const applied = [];
+  let listReads = 0;
+  const snapshotReads = [];
+  const handlers = handlerSet({
+    repository: {
+      applyCuratedObservations: async (observations) => {
+        applied.push(...observations);
+        return observations.map(() => ({ applied: true }));
+      },
+      curatedSnapshots: async (candidateUserId) => {
+        snapshotReads.push(candidateUserId);
+        if (candidateUserId === "candidate-new") return [{ role_id: "role-1", resolved: true, last_confirmed_status: "PENDING" }];
+        if (candidateUserId === "candidate-unchanged") return [{ role_id: "role-1", resolved: true, last_confirmed_status: "APPLIED_TO_ROLE" }];
+        assert.fail("pending rows must not query snapshots");
+      },
+    },
+    curatedPopulation: async () => [
+      { candidateUserId: "candidate-new" },
+      { candidateUserId: "candidate-unchanged" },
+      { candidateUserId: "candidate-pending" },
+    ],
+    curatedCandidate: async (candidateUserId) => [{
+      role_id: "role-1",
+      status: candidateUserId === "candidate-pending" ? "PENDING" : "APPLIED_TO_ROLE",
+    }],
+    curatedRoleList: async (candidateUserId) => {
+      listReads += 1;
+      assert.equal(candidateUserId, "candidate-new");
+      return { id: "list-new", roles: [{ id: "role-1" }] };
+    },
+    sourceLease: {
+      claimSourceCursor: async () => ({ checkpoint: { cursor: 0 }, fencing_token: 7, last_full_success_at: NOW.toISOString() }),
+      commitSourceCursor: async () => ({ ok: true }),
+      releaseSourceCursor: async () => assert.fail("optional provenance work must not release the source cursor"),
+    },
+  });
+  await handlers.reconcile_curated(context("reconcile_curated", { subjectType: "source", subjectId: "curated" }).value);
+  assert.equal(listReads, 1);
+  assert.deepEqual(snapshotReads.sort(), ["candidate-new", "candidate-unchanged"]);
+  assert.equal(applied.length, 3);
+  assert.equal(applied.find((row) => row.candidate_user_id === "candidate-new").signal_url, "https://www.paraform.com/lists/list-new");
+  assert.equal(applied.find((row) => row.candidate_user_id === "candidate-unchanged").signal_url, undefined);
+  assert.equal(applied.find((row) => row.candidate_user_id === "candidate-pending").signal_url, undefined);
+});
+
+test("curated snapshot and provenance errors retain decisive observations without a link", async () => {
+  const applied = [];
+  const handlers = handlerSet({
+    repository: {
+      applyCuratedObservations: async (observations) => {
+        applied.push(...observations);
+        return observations.map(() => ({ applied: true }));
+      },
+      curatedSnapshots: async () => { throw new Error("snapshot unavailable"); },
+    },
+    curatedPopulation: async () => [{ candidateUserId: "candidate-decisive" }],
+    curatedCandidate: async () => [{ role_id: "role-1", status: "APPLIED_TO_ROLE" }],
+    curatedRoleList: async () => assert.fail("list must not be read without trusted snapshots"),
+    sourceLease: {
+      claimSourceCursor: async () => ({ checkpoint: { cursor: 0 }, fencing_token: 7, last_full_success_at: NOW.toISOString() }),
+      commitSourceCursor: async () => ({ ok: true }),
+      releaseSourceCursor: async () => assert.fail("optional provenance failures must not release the source cursor"),
+    },
+  });
+  await handlers.reconcile_curated(context("reconcile_curated", { subjectType: "source", subjectId: "curated" }).value);
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0].signal_url, undefined);
+});
+
+test("submission proof reconciliation advances its leased bounded page only after proofs apply", async () => {
+  const order = [];
+  let selected;
+  let committed;
+  const pair = { id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1", workflow_state: "preparing_resume" };
+  const handlers = handlerSet({
+    repository: {
+      pairsForSubmissionProofPage: async (input) => {
+        selected = input;
+        return { rows: [pair], next_cursor: "cursor-next", cycle_complete: false };
+      },
+      applySubmissionProof: async (proof) => { order.push("apply"); assert.equal(proof.pairId, pair.id); },
+    },
+    proofReader: async () => [{
+      pairId: pair.id,
+      applicationId: "application-1",
+      authoritativePath: "application.getRecruiterApplicationData",
+      evidenceDigest: "a".repeat(64),
+      observedAt: NOW.toISOString(),
+      checkedAt: NOW.toISOString(),
+    }],
+    sourceLease: {
+      claimSourceCursor: async () => ({ checkpoint: { cursor: "cursor-before" }, fencing_token: 17 }),
+      commitSourceCursor: async (value) => { order.push("commit"); committed = value; return { ok: true }; },
+      releaseSourceCursor: async () => assert.fail("unexpected release"),
+    },
+  });
+  const result = await handlers.proof_reconcile(context("proof_reconcile", { subjectType: "source", subjectId: "submission_proof" }).value);
+  assert.deepEqual(selected, { limit: 8, cursor: "cursor-before" });
+  assert.deepEqual(order, ["apply", "commit"]);
+  assert.equal(committed.fencingToken, 17);
+  assert.deepEqual(committed.checkpoint, { cursor: "cursor-next" });
+  assert.equal(committed.fullSuccess, false);
+  assert.equal(result.checkpoint.stage, "proof_batch_complete");
+  assert.equal(result.checkpoint.checked_count, 1);
+});
+
+test("submission proof source cursor is released and never advanced after an exact read fails", async () => {
+  let released = 0;
+  let committed = 0;
+  const handlers = handlerSet({
+    repository: {
+      pairsForSubmissionProofPage: async () => ({
+        rows: [{ id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1" }],
+        next_cursor: "cursor-next",
+        cycle_complete: false,
+      }),
+    },
+    proofReader: async () => { throw Object.assign(new Error("identity mismatch"), { code: "submission_application_identity_conflict" }); },
+    sourceLease: {
+      claimSourceCursor: async () => ({ checkpoint: { cursor: null }, fencing_token: 19 }),
+      commitSourceCursor: async () => { committed += 1; },
+      releaseSourceCursor: async () => { released += 1; },
+    },
+  });
+  await assert.rejects(
+    () => handlers.proof_reconcile(context("proof_reconcile", { subjectType: "source", subjectId: "submission_proof" }).value),
+    (error) => error.code === "submission_application_identity_conflict" && error.retryable === true,
+  );
+  assert.equal(committed, 0);
+  assert.equal(released, 1);
+});
+
+test("a delayed targeted proof job skips a pair that is already proven", async () => {
+  let reads = 0;
+  const handlers = handlerSet({
+    repository: {
+      pair: async () => ({ id: "pair-1", submission_status: "proven", workflow_state: "needs_review" }),
+    },
+    proofReader: async () => { reads += 1; return []; },
+  });
+  const result = await handlers.proof_reconcile(context("proof_reconcile").value);
+  assert.equal(reads, 0);
+  assert.equal(result.checkpoint.checked_count, 0);
+  assert.equal(result.checkpoint.proven_count, 0);
 });
 
 test("proof reads require exact candidate and role ids and retain an evidence digest", async () => {
@@ -713,78 +866,78 @@ test("proof reads require exact candidate and role ids and retain an evidence di
     now: new Date("2026-07-29T12:00:00.000Z"),
     trpcGetImpl: async (path, input) => {
       calls.push([path, input]);
-      if (path === "roleSlots.getMySingleSubmissionData") return {
-        latestSingleSubmissions: [
-          { applicationId: "wrong-role", candidateUserId: "candidate-1", roleId: "role-2", status: "SUBMITTED" },
-          { applicationId: "application-1", candidateUserId: "candidate-1", roleId: "role-1", status: "SUBMITTED", submittedAt: "2026-07-28T18:00:00.000Z" },
-        ],
+      if (path === "candidateUser.getCandidateUserApplications") return [{
+        id: "application-1",
+        role_id: "role-1",
+        role: { id: "role-1", name: "Exact role" },
+        candidate_to_application: { name: "Candidate" },
+        created_at: "2026-07-28T18:00:00.000Z",
+      }];
+      return {
+        id: "application-1",
+        candidate_user_id: "candidate-1",
+        candidate_id: "domain-candidate-id-must-not-be-used-as-user-id",
+        role_id: "role-1",
+        candidate_to_approved_role_id: "prepared-row-1",
+        status: "SUBMITTED",
+        createdAt: "2026-07-28T17:59:00.000Z",
+        submittedOn: "2026-07-28T18:00:00.000Z",
+        lastUpdated: "2026-07-28T18:01:00.000Z",
+        updated_at: "2026-07-28T18:01:00.000Z",
       };
-      return [];
     },
   });
-  assert.equal(calls[0][1].weekStart, "2026-07-27T07:00:00.000Z");
+  assert.deepEqual(calls, [
+    ["candidateUser.getCandidateUserApplications", { candidate_user_id: "candidate-1" }],
+    ["application.getRecruiterApplicationData", { application_id: "application-1" }],
+  ]);
   assert.equal(proof.applicationId, "application-1");
-  assert.equal(proof.authoritativePath, "roleSlots.getMySingleSubmissionData");
+  assert.equal(proof.authoritativePath, "application.getRecruiterApplicationData");
+  assert.equal(proof.observedAt, "2026-07-28T18:00:00.000Z");
   assert.match(proof.evidenceDigest, /^[a-f0-9]{64}$/u);
 
   const noFuzzyProof = await readExactSubmissionProof(pair, {
-    trpcGetImpl: async (path) => path === "roleSlots.getMySingleSubmissionData"
-      ? { latestSingleSubmissions: [{ applicationId: "application-2", candidateUserId: "candidate-1", roleId: "role-other", status: "SUBMITTED" }] }
-      : [],
+    trpcGetImpl: async () => [{ id: "application-2", role_id: "role-other" }],
   });
   assert.equal(noFuzzyProof, null);
 
   const exactButUnsubmitted = await readExactSubmissionProof(pair, {
-    trpcGetImpl: async (path) => path === "roleSlots.getMySingleSubmissionData"
-      ? { latestSingleSubmissions: [{ applicationId: "application-pending", candidateUserId: "candidate-1", roleId: "role-1", status: "PENDING", createdAt: "2026-07-28T18:00:00.000Z" }] }
-      : [],
+    trpcGetImpl: async (path) => path === "candidateUser.getCandidateUserApplications"
+      ? [{ id: "application-pending", role_id: "role-1" }]
+      : { id: "application-pending", candidate_user_id: "candidate-1", role_id: "role-1", status: "PENDING" },
   });
   assert.equal(exactButUnsubmitted, null);
 
-  const requestWithoutApplication = await readExactSubmissionProof(pair, {
-    trpcGetImpl: async (path) => path === "submissionRequest.getRecruiterSubmissionRequestHistory"
-      ? [{ id: "request-not-application", state: "SUBMITTED", created_at: "2026-07-28T18:00:00.000Z", candidate: { candidate_user_id: "candidate-1" }, role: { id: "role-1" } }]
-      : { latestSingleSubmissions: [], allRecentSingleSubmissions: [] },
-  });
-  assert.equal(requestWithoutApplication, null);
-
   await assert.rejects(
     () => readExactSubmissionProofs([pair], { trpcGetImpl: async () => null }),
-    (error) => error.code === "submission_ledger_shape_invalid",
+    (error) => error.code === "candidate_applications_shape_invalid",
   );
   await assert.rejects(
     () => readExactSubmissionProofs([pair], {
-      trpcGetImpl: async (path) => path === "roleSlots.getMySingleSubmissionData"
-        ? { latestSingleSubmissions: [] }
-        : {},
+      trpcGetImpl: async (path) => path === "candidateUser.getCandidateUserApplications"
+        ? [{ id: "application-conflict", role_id: "role-1" }]
+        : { id: "application-conflict", candidate_user_id: "candidate-other", role_id: "role-1", status: "SUBMITTED" },
     }),
-    (error) => error.code === "submission_history_shape_invalid",
+    (error) => error.code === "submission_application_identity_conflict",
   );
 });
 
-test("Pacific week start is correct in both daylight and standard time", () => {
-  assert.equal(proofReaderInternals.mondayPacific(new Date("2026-07-29T12:00:00.000Z")), "2026-07-27T07:00:00.000Z");
-  assert.equal(proofReaderInternals.mondayPacific(new Date("2026-01-07T12:00:00.000Z")), "2026-01-05T08:00:00.000Z");
-});
-
-test("submission proof reconciliation reads both authoritative Paraform surfaces only once per batch", async () => {
+test("submission proof reconciliation shares candidate-scoped locators and point-reads exact applications", async () => {
   let calls = 0;
   const proofs = await readExactSubmissionProofs([
     { id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1" },
-    { id: "pair-2", candidate_user_id: "candidate-2", role_id: "role-2" },
+    { id: "pair-2", candidate_user_id: "candidate-1", role_id: "role-2" },
   ], {
-    trpcGetImpl: async (path) => {
+    trpcGetImpl: async (path, input) => {
       calls += 1;
-      if (path === "roleSlots.getMySingleSubmissionData") return {
-        latestSingleSubmissions: [
-          { id: "application-1", candidateUserId: "candidate-1", roleId: "role-1" },
-          { id: "application-2", candidateUserId: "candidate-2", roleId: "role-2" },
-        ],
-      };
-      return [];
+      if (path === "candidateUser.getCandidateUserApplications") return [
+        { id: "application-1", role_id: "role-1" },
+        { id: "application-2", role_id: "role-2" },
+      ];
+      return { id: input.application_id, candidate_user_id: "candidate-1", role_id: input.application_id === "application-1" ? "role-1" : "role-2", status: "SUBMITTED" };
     },
   });
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.deepEqual(proofs.map((proof) => proof.pairId), ["pair-1", "pair-2"]);
 });
 
