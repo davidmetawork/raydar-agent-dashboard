@@ -86,6 +86,22 @@ test("facts carry the school's location and its US verdict, per school row", () 
   assert.equal(facts.schools[1].location, "Austin, Texas, United States");
 });
 
+test("row-bound US metadata wins over a name-only global collision", () => {
+  const verifiedUS = factsFromProfile({
+    education: [{ school: "University of Georgia", degree: "Bachelor of Science",
+      schoolWebsite: "https://www.uga.edu/" }],
+  });
+  assert.equal(verifiedUS.schools[0].inUS, true);
+  assert.equal(verifiedUS.schools[0].countryEvidence.source, "profile_location_or_website");
+
+  const explicitForeign = factsFromProfile({
+    education: [{ school: "University of Georgia", degree: "Bachelor of Science",
+      schoolLocation: "Tbilisi, Georgia", schoolWebsite: "https://www.uga.edu/" }],
+  });
+  assert.equal(explicitForeign.schools[0].inUS, false);
+  assert.equal(explicitForeign.schools[0].countryEvidence.source, "profile_location");
+});
+
 test("a profile written before the fields existed yields inUS false, never a match", () => {
   const facts = factsFromProfile({
     education: [{ school: "Unknown Example Institute", degree: "Bachelor's degree Computer Science", end: "2023-05-01" }],
