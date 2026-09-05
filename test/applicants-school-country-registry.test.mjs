@@ -13,7 +13,7 @@ test("resolves exact active IPEDS institutions deterministically", () => {
     match: "ipeds_exact_name",
     sourceURL: "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
     sourceVersion: "IPEDS HD2024",
-    evidence: "NCES IPEDS Directory information exact normalized institution name or whole official alias",
+    evidence: "NCES IPEDS Directory information exact normalized institution name or non-acronym whole official alias",
     nameNormalized: "university of utah",
     unitid: "230764",
     name: "University of Utah",
@@ -46,6 +46,17 @@ test("whole official aliases match, while ambiguous aliases fail closed", () => 
   // HD2024 has both Missouri and Pennsylvania institutions named Westminster
   // College. An unqualified typed name cannot select either one.
   assert.equal(resolveSchoolCountryEvidence({ name: "Westminster College" }), null);
+  assert.equal(resolveSchoolCountryEvidence({ name: "UAB" }), null, "a bare IPEDS acronym is not country evidence");
+  assert.equal(resolveSchoolCountryEvidence({ name: "NU" }), null, "a bare IPEDS acronym is not country evidence");
+});
+
+test("known non-US global name collisions hold exact and alias matches", () => {
+  assert.equal(resolveSchoolCountryEvidence({ name: "National University" }), null);
+  assert.equal(resolveSchoolCountryEvidence({ name: "Trinity College" }), null);
+  // ROR also records an Indian St. Joseph's College. It must not acquire a
+  // US result from a near spelling or a future broad alias matcher.
+  assert.equal(resolveSchoolCountryEvidence({ name: "St Joseph's College" }), null);
+  assert.equal(resolveSchoolCountryEvidence({ name: "University of Georgia" }), null);
 });
 
 test("foreign country text vetoes an otherwise exact US name or website", () => {
@@ -58,7 +69,7 @@ test("foreign country text vetoes an otherwise exact US name or website", () => 
     name: "University of Utah", location: "India", website: "https://pes.edu/",
   }), null, "a bare foreign country vetoes the exact US name and .edu");
   assert.equal(resolveSchoolCountryEvidence({
-    name: "University of Georgia", location: "Georgia", website: "https://www.uga.edu/",
+    name: "University of Utah", location: "Georgia", website: "https://www.utah.edu/",
   })?.country, "United States", "a bare Georgia remains the ambiguous state form, not a foreign veto");
 });
 

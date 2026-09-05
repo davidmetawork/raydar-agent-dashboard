@@ -6,6 +6,7 @@
 // it with the existing per-profile location/site evidence conservatively.
 
 import DATA from "./school-country-registry-data.json" with { type: "json" };
+import GLOBAL_COLLISION_HOLDS from "./school-country-global-collision-holds.json" with { type: "json" };
 import { locationNamesForeignCountry } from "./school-us.mjs";
 
 /**
@@ -40,6 +41,19 @@ for (const alias of DATA.reviewedCountryOnlyAliases) {
   const candidates = reviewedByNormalizedName.get(alias.nameNormalized) ?? [];
   candidates.push(alias);
   reviewedByNormalizedName.set(alias.nameNormalized, candidates);
+}
+
+// ROR is deliberately used only as a one-way safety check. A listed foreign
+// organization proves that an unqualified name is unsafe; a missing record
+// does not prove that the name is globally unique.
+const globalCollisionHolds = new Set(
+  GLOBAL_COLLISION_HOLDS.holds.map((hold) => hold.nameNormalized),
+);
+
+function safeWholeAlias(normalized) {
+  // IPEDS aliases include many bare acronyms (UAB, NU, CU) and a few bare
+  // words. They are not identity evidence without a location or website.
+  return normalized.split(" ").filter(Boolean).length >= 2;
 }
 
 function locationExplicitlyNamesForeignCountry(location) {
@@ -80,14 +94,17 @@ export function resolveSchoolCountryEvidence({ name = null, location = null, web
   const nameNormalized = normalizeSchoolCountryName(name);
   if (!nameNormalized) return null;
 
+  if (globalCollisionHolds.has(nameNormalized)) return null;
+
   const institution = uniqueInstitution(nameNormalized);
   if (institution) {
+    if (institution.nameNormalized !== nameNormalized && !safeWholeAlias(nameNormalized)) return null;
     return {
       country: "United States",
       match: institution.nameNormalized === nameNormalized ? "ipeds_exact_name" : "ipeds_whole_alias",
       sourceURL: DATA.provenance.sourceURL,
       sourceVersion: "IPEDS HD2024",
-      evidence: "NCES IPEDS Directory information exact normalized institution name or whole official alias",
+      evidence: "NCES IPEDS Directory information exact normalized institution name or non-acronym whole official alias",
       nameNormalized,
       unitid: institution.unitid,
       name: institution.name,
