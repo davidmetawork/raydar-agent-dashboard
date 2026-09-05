@@ -48,6 +48,9 @@ test("an explicit foreign country beats a .edu, because legacy .edu holders exis
   // Indian B.Tech holder whose master's was American, which is the exact
   // person these rules exist to distinguish.
   assert.equal(schoolInUS({ website: "http://pes.edu/", location: "Bengaluru, Karnataka, India" }), false);
+  assert.equal(schoolInUS({ website: "https://www.aus.edu/", location: "Sharjah, UAE" }), false);
+  assert.equal(schoolInUS({ website: "https://www.aus.edu/", location: "Sharjah, U.A.E." }), false);
+  assert.equal(schoolInUS({ website: "https://www.aus.edu/", location: "Doha, State of Qatar" }), false);
   assert.equal(locationNamesForeignCountry("Bengaluru, Karnataka, India"), true);
   // The veto needs a real country name, so a US school with a street address
   // or a state-only location still gets its .edu answered.
@@ -85,10 +88,11 @@ test("facts carry the school's location and its US verdict, per school row", () 
 
 test("a profile written before the fields existed yields inUS false, never a match", () => {
   const facts = factsFromProfile({
-    education: [{ school: "Wagner College", degree: "Bachelor's degree Computer Science", end: "2023-05-01" }],
+    education: [{ school: "Unknown Example Institute", degree: "Bachelor's degree Computer Science", end: "2023-05-01" }],
   });
   assert.equal(facts.schools[0].inUS, false);
   assert.equal(facts.schools[0].location, null);
+  assert.equal(facts.schools[0].countryEvidence.status, "unknown");
   assert.equal(facts.v, 1, "the version must NOT bump — a bump takes every live rule off the air");
 });
 
