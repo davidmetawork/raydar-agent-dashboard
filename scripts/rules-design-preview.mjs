@@ -106,6 +106,39 @@ const profiles = {
   },
 };
 
+// Synthetic only: the application record stays at the top level while the
+// cache-derived LinkedIn record is explicitly nested. This lets the preview
+// exercise provenance, unknown values, and the C-tier case without reading a
+// provider or resembling a production applicant.
+const paraformOverlays = {
+  "core:local0000000000000000000000000001": {
+    title: "Infrastructure engineer building developer platforms",
+    location: "San Francisco, CA", densityScore: 88, paraformTier: "S", paraformTierSource: "paraform",
+    paraformUpdatedAt: "2026-09-04T18:00:00.000Z", profileEnrichedAt: "2026-09-05T15:00:00.000Z",
+    experiences: [{ companyName: "Stripe", roleTitle: "Staff Infrastructure Engineer", start: "2021-02-01", end: null, current: true, industry: "Financial technology", talentRank: "S", logo: null }],
+    education: [{ school: "University of California, Berkeley", degree: "B.S. Computer Science", start: "2013-08-01", end: "2017-05-01", talentRank: "S", logo: null }],
+  },
+  "core:local0000000000000000000000000002": {
+    title: "Product designer for early-stage teams", location: "Brooklyn, NY", densityScore: 73, paraformTier: "A", paraformTierSource: "paraform",
+    paraformUpdatedAt: "2026-09-03T12:00:00.000Z", profileEnrichedAt: "2026-09-05T15:00:00.000Z",
+    experiences: [{ companyName: "Figma", roleTitle: "Product Designer", start: "2020-01-01", end: "2024-03-01", current: false, industry: "Design software", talentRank: "A", logo: null }],
+    education: [{ school: "Rhode Island School of Design", degree: "BFA Graphic Design", start: "2012-08-01", end: "2016-05-01", talentRank: "A", logo: null }],
+  },
+  "core:local0000000000000000000000000003": {
+    title: "Recruiting operations leader", location: "Austin, TX", densityScore: 66, paraformTier: null, paraformTierSource: null,
+    paraformUpdatedAt: "2026-09-04T09:30:00.000Z", profileEnrichedAt: "2026-09-05T15:00:00.000Z",
+    experiences: [{ companyName: "Rippling", roleTitle: "Recruiting Operations Manager", start: "2019-06-01", end: null, current: true, industry: "HR technology", talentRank: "B", logo: null }],
+    education: [{ school: "University of Michigan", degree: "Bachelor of Arts", start: "2011-09-01", end: "2015-05-01", talentRank: "A", logo: null }],
+  },
+  "core:local0000000000000000000000000004": {
+    title: "Software engineer focused on commerce systems", location: "Toronto, Canada", densityScore: 59, paraformTier: "C", paraformTierSource: "paraform",
+    paraformUpdatedAt: "2026-09-02T15:00:00.000Z", profileEnrichedAt: "2026-09-05T15:00:00.000Z",
+    experiences: [{ companyName: "Shopify", roleTitle: "Software Engineer", start: "2022-01-01", end: null, current: true, industry: "Commerce", talentRank: "C", logo: null }],
+    education: [{ school: "University of Waterloo", degree: "Bachelor of Computer Science", start: "2017-09-01", end: "2021-05-01", talentRank: "A", logo: null }],
+  },
+};
+for (const [profileKey, overlay] of Object.entries(paraformOverlays)) profiles[profileKey].paraformProfile = overlay;
+
 const profileIds = Object.keys(profiles);
 const rows = [
   row(0, 0, "S", "2026-09-05T14:20:00.000Z"),
@@ -128,12 +161,30 @@ function row(profileIndex, roleIndex, tier, appliedAt) {
   };
 }
 
+function compactParaformProfile(profile) {
+  const overlay = profile.paraformProfile;
+  if (!overlay) return null;
+  return {
+    title: overlay.title, location: overlay.location, updatedAt: overlay.paraformUpdatedAt,
+    paraformTier: overlay.paraformTier, paraformTierSource: overlay.paraformTierSource,
+    densityScore: overlay.densityScore, profileEnrichedAt: overlay.profileEnrichedAt,
+    exp: overlay.experiences.slice(0, 3).map((item) => ({ role: item.roleTitle, company: item.companyName, start: item.start, end: item.end, current: item.current, logo: item.logo, talentRank: item.talentRank })),
+    edu: overlay.education.slice(0, 3).map((item) => ({ school: item.school, degree: item.degree, start: item.start, end: item.end, logo: item.logo, talentRank: item.talentRank })),
+    expCount: overlay.experiences.length, eduCount: overlay.education.length,
+  };
+}
 const cards = Object.fromEntries(Object.entries(profiles).map(([id, profile]) => [id, {
   title: profile.title, location: profile.location, photo: null,
   exp: profile.experiences.slice(0, 3).map((item) => ({ role: item.roleTitle, company: item.companyName, start: item.start, end: item.end })),
   edu: profile.education.slice(0, 3).map((item) => ({ school: item.school, degree: item.degree, start: item.start, end: item.end })),
   expCount: profile.experiences.length, eduCount: profile.education.length,
 }]));
+// Match production: feed cards stay small. The cached provider history is a
+// generation-fenced viewport request from the rendered list rows.
+const richCards = Object.fromEntries(Object.entries(profiles).flatMap(([id, profile]) => {
+  const paraformProfile = compactParaformProfile(profile);
+  return paraformProfile ? [[id, { paraformProfile }]] : [];
+}));
 const facts = Object.fromEntries(Object.entries(profiles).map(([id, profile], index) => [id, factsFromProfile(profile, {
   now: Date.parse("2026-09-05T16:00:00.000Z"),
   sourceObservationId: `local-source-${index + 1}`,
@@ -531,7 +582,15 @@ export function createFixtureServer({
       if (url.pathname === "/api/auth/google") return json(res, 200, { ok: true, authenticated: true, email: FIXTURE_EMAIL });
       if (url.pathname === "/api/auth/logout") return json(res, 200, { ok: true });
       if (url.pathname === "/api/applicants/feed") return req.method === "GET" ? json(res, 200, feedPayload(state)) : json(res, 405, { ok: false, error: "GET only" });
-      if (url.pathname === "/api/applicants/cards") return req.method === "GET" ? json(res, 200, { ok: true, cards }) : json(res, 405, { ok: false, error: "GET only" });
+      if (url.pathname === "/api/applicants/cards") {
+        if (req.method !== "GET") return json(res, 405, { ok: false, error: "GET only" });
+        const ids = [...new Set((url.searchParams.get("cus") || "").split(",").map((id) => id.trim()).filter(Boolean))].slice(0, 60);
+        if (url.searchParams.get("rich") !== "1") return json(res, 200, { ok: true, cards: Object.fromEntries(ids.filter((id) => cards[id]).map((id) => [id, cards[id]])) });
+        if (url.searchParams.get("generationId") !== generation.generationId || url.searchParams.get("generationDigest") !== generation.digest) {
+          return json(res, 409, { ok: false, error: "generation_changed" });
+        }
+        return json(res, 200, { ok: true, cards: Object.fromEntries(ids.filter((id) => cards[id]).map((id) => [id, { ...cards[id], ...(richCards[id] || {}) }])), generation: { generationId: generation.generationId, digest: generation.digest } });
+      }
       if (url.pathname === "/api/applicants/profile") {
         if (req.method !== "GET") return json(res, 405, { ok: false, error: "GET only" });
         const profile = profiles[url.searchParams.get("cu") || ""];
