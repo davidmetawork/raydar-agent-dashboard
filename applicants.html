@@ -569,6 +569,19 @@ function interviewHold(row) {
    the title says so. ---- */
 const SENT_ACK_STATUSES = new Set(["invited", "sendgrid_delivered"]);
 const SENT_ROW_STATUSES = new Set(["emailed", "booked", "replied"]);
+/* Counting a send honestly is only half the job: the Interview button must not
+   still be armed on the row that carries the evidence. A queue row with a sent
+   ack and NO decision renders the full Pass/Interview pair (rowCardHtml's
+   `decision ? decidedStatusHtml(...) : actions`), and that combination is
+   reachable in production today — production-runner.mjs mints
+   `{status:"invited", reason:"historical_send_verified"}` acks for rows Core
+   never asked the Monitor to decide, and sync's saveApplicantAck stores an ack
+   with no requestId even when apphub:decisions holds nothing for the key. Those
+   rows sit in Review, and now also under Already emailed, one click from
+   ordering a second same-role email. Core's invite guard is the backstop; this
+   is the button not being offered in the first place. */
+const ALREADY_EMAILED_ACTION_TITLE =
+  "Already emailed for this role — Raydar has published send evidence for this exact person and role. A second interview email is the one mistake this tab must never make.";
 function alreadyEmailed(row) {
   if (!row) return false;
   const ack = ackFor(row.key);
@@ -1184,6 +1197,7 @@ function rowCardHtml(row, mode, decision) {
   const card = STATE.cards[id];
   const hold = interviewHold(row);
   const interviewReady = !hold;
+  const sentAlready = !decision && interviewReady && alreadyEmailed(row);
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
@@ -1191,8 +1205,9 @@ function rowCardHtml(row, mode, decision) {
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
-          esc(interviewReady ? "Request interview" : "Interview held: " + hold) + '"' +
-          (busy || !interviewReady ? " disabled" : "") + ">" + (interviewReady ? "Interview" : "Interview held") + "</button></div>");
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : interviewReady ? "Request interview" : "Interview held: " + hold) + '"' +
+          (busy || !interviewReady || sentAlready ? " disabled" : "") + ">" +
+          (sentAlready ? "Already emailed" : interviewReady ? "Interview" : "Interview held") + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
@@ -1235,7 +1250,8 @@ function rowCardHtml(row, mode, decision) {
           '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(card?.location || "") + "</div>" +
-        (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>' : '') +
+        (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>'
+          : sentAlready ? '<div class="rc-none">Already emailed for this role.</div>' : '') +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
       '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
@@ -1838,15 +1854,18 @@ function renderModal() {
   }
   if (modal.source === "queue") {
     const hold = interviewHold(row);
+    // Same gate as the row card, for the same reason — the modal is the other
+    // way a person reaches this button.
+    const sentAlready = !decision && !hold && alreadyEmailed(row);
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Make this a rule</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? "" :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
-          (hold ? "Interview held: " + hold : "Queue interview request") + '"' +
-          (busy || hold ? " disabled" : "") + ">" +
-          (hold ? "Interview held" : "Interview") + "</button>") +
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : "Queue interview request") + '"' +
+          (busy || hold || sentAlready ? " disabled" : "") + ">" +
+          (sentAlready ? "Already emailed" : hold ? "Interview held" : "Interview") + "</button>") +
       "</div>");
   }
   $("profileCard").innerHTML = parts.join("");
