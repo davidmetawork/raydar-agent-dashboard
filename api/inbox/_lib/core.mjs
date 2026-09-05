@@ -1003,33 +1003,56 @@ export function emptyInboxSnapshotState() {
   };
 }
 
+function inboxSnapshotReadError(cause) {
+  return { status: "error", cause, value: null };
+}
+
+function inboxPipelineCause(error) {
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+    return "pipeline_timeout";
+  }
+  const message = String(error?.message || "");
+  if (/\bWRONGTYPE\b/iu.test(message)) return "pipeline_wrongtype";
+  const status = message.match(/^state store HTTP (\d{3})$/u)?.[1];
+  if (status) return `pipeline_http_${status}`;
+  if (error instanceof TypeError) return "pipeline_network";
+  return "pipeline_unavailable";
+}
+
 export async function readInboxSnapshotState({
   pipelineImpl = pipeline,
   configured = storeConfigured(),
 } = {}) {
   if (!configured) return { status: "unavailable", value: null };
+  let values;
   try {
-    const values = await pipelineImpl([
+    values = await pipelineImpl([
       ["HGETALL", INBOX_SEQUENCE_SNAPSHOTS_KEY],
       ["GET", INBOX_CATALOG_KEY],
       ["GET", INBOX_RECENT_KEY],
       ["GET", INBOX_REFRESH_META_KEY],
     ]);
-    if (!Array.isArray(values) || values.length !== 4) {
-      throw new Error("Inbox snapshot read returned an invalid response");
-    }
-    return {
-      status: "ready",
-      value: {
-        snapshots: parseInboxSequenceSnapshots(values[0]),
-        catalog: normalizeInboxCatalog(values[1]),
-        recent: normalizeInboxRecent(values[2]),
-        meta: normalizeInboxRefreshMeta(values[3]),
-      },
-    };
-  } catch {
-    return { status: "error", value: null };
+  } catch (error) { return inboxSnapshotReadError(inboxPipelineCause(error)); }
+  if (!Array.isArray(values) || values.length !== 4) {
+    return inboxSnapshotReadError("pipeline_response_invalid");
   }
+  let snapshots;
+  try { snapshots = parseInboxSequenceSnapshots(values[0]); }
+  catch { return inboxSnapshotReadError("snapshot_invalid"); }
+  let catalog;
+  try { catalog = normalizeInboxCatalog(values[1]); }
+  catch { return inboxSnapshotReadError("catalog_invalid"); }
+  let recent;
+  try { recent = normalizeInboxRecent(values[2]); }
+  catch { return inboxSnapshotReadError("recent_invalid"); }
+  let meta;
+  try { meta = normalizeInboxRefreshMeta(values[3]); }
+  catch { return inboxSnapshotReadError("refresh_meta_invalid"); }
+  return {
+    status: "ready",
+    cause: null,
+    value: { snapshots, catalog, recent, meta },
+  };
 }
 
 function failureErrorCounts(failures) {
