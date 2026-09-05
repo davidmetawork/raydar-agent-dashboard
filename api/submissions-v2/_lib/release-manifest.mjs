@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 89,
-  "digest": "cffbb637b1e20e9b1c42ac61c8f1735158494dad72dd4063c9a139669d454c7d",
+  "digest": "e91d16e419d7208dfaee8a2a91d106805e9c16d6004472cc18968ac800e53aff",
   "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
   "files": [
     {
@@ -16,7 +16,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/inbox/_lib/core.mjs",
-      "sha256": "b8ecfa60ce56764941f9ee225401d537964f600f0584e433c98fb5f4170309c9"
+      "sha256": "a6532267938fcb06df0f005ca5fdff14ad2072c70a50c527e180446fb7fd4fe0"
     },
     {
       "path": "api/inbox/health.mjs",
@@ -128,7 +128,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "718289faf564a23706d0a37a9d55cb3a8623ebf391bb2fd4c89aef55549757a6"
+      "sha256": "402b0ee7efbf1b1b53091ebf2f3b139ffd0e2d72c64d911df3a6cf47f5bf550a"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -300,7 +300,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-ui-state.mjs",
-      "sha256": "510af79dfdd8b2322fedda7a42426e7ab3bca02e498e5cbe030b53b17584a386"
+      "sha256": "ce2526b0ccf7708c7b9bf2e71b5ff42b0a6690c7208bac782cfcb6c1f897a56f"
     },
     {
       "path": "submissions-v2-worker/Dockerfile",
@@ -356,7 +356,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "eb34e51626204f4a44d6bc8e3de80c357686f5b9e850193a9a62527c6b6c805e"
+      "sha256": "c8d7400af25c9e2455844e9b249434a9d6854d473d97730d473afd6db9d36d3f"
     },
     {
       "path": "vercel.json",
