@@ -4,6 +4,10 @@ import {
 } from "./sequence-inbox-source.mjs";
 import { SUBMISSIONS_V2_APPROVED_ACTIVATION_AT } from "./email-source-policy.mjs";
 import {
+  readSourcingSequenceRoleMappings,
+  sourcingRoleMappingInternals,
+} from "./sourcing-role-mappings.mjs";
+import {
   acquireInboxSyncLock,
   buildInboxRefresh,
   readInboxSnapshotState,
@@ -109,9 +113,32 @@ export async function readSequenceInboxBrokerBatch(input, {
   releaseLock = releaseInboxSyncLock,
   sleepImpl = wait,
   clock = () => Date.now(),
+  readRoleMappings = readSourcingSequenceRoleMappings,
 } = {}) {
   const request = validateSequenceInboxBatchRequest(input);
   const activationAt = sequenceInboxActivation({ env, now: now().getTime() });
+  // Optional evidence is read before taking the shared Inbox lease. An
+  // unavailable/incomplete lookup returns a fixed empty-set digest, so literal
+  // campaign roles keep flowing while a mapping appearance/disappearance still
+  // fences the persisted page cursor.
+  let savedRoleMappingState;
+  try {
+    const loadedMappings = await readRoleMappings({ env });
+    savedRoleMappingState = loadedMappings?.status === "ready"
+      && Array.isArray(loadedMappings.mappings)
+      && /^[a-f0-9]{64}$/u.test(String(loadedMappings.digest || ""))
+      ? loadedMappings
+      : null;
+  } catch {
+    savedRoleMappingState = null;
+  }
+  if (!savedRoleMappingState) {
+    savedRoleMappingState = {
+      status: "unavailable",
+      mappings: [],
+      digest: sourcingRoleMappingInternals.UNAVAILABLE_DIGEST,
+    };
+  }
   const lock = await acquireLock();
   if (lock?.status !== "acquired") {
     if (lock?.status === "busy") {
@@ -156,6 +183,9 @@ export async function readSequenceInboxBrokerBatch(input, {
       cursorOverlapMs: request.caughtUp ? 5 * 60_000 : 0,
       expectedCatalogDigest: request.catalogDigest,
       expectedWatermark: request.watermark,
+      savedRoleMappings: savedRoleMappingState.mappings,
+      savedRoleMappingDigest: savedRoleMappingState.digest,
+      savedRoleMappingStatus: savedRoleMappingState.status,
       limit: request.limit,
       now,
       readState: async () => ({ status: "ready", value: refreshedState }),

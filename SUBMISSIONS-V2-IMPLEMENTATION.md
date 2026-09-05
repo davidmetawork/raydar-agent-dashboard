@@ -27,7 +27,7 @@ prior validated resume remains downloadable until atomic promotion.
 
 1. A versioned Master Inbox event, curated-list observation, or deliberate teammate action creates immutable source evidence.
 2. Candidate and role binding resolves exact Paraform identities; ambiguity, questions, unavailable roles, missing original resumes, classifier failures, or preparation failures go to Needs Review.
-3. Clear negative intent creates permanent Not Interested history and a durable Slack outbox event; clear positive intent is hidden in `preparing_resume` while the artifact is built.
+3. Clear negative intent creates permanent Not Interested history and a durable Slack outbox event; clear positive intent appears immediately in Interested with `preparing_resume` progress while the artifact is built.
 4. Resume preparation collects provenance-tagged sources, extracts claims, chooses the role-specific layout, validates every retained claim, renders and read-backs PDF/ATS/manifest artifacts, then atomically promotes the complete set.
 5. Only the promoted artifact exposes Download Resume; one-click regeneration recollects the same
    source bundle and creates another archived version without replacing the candidate's Paraform

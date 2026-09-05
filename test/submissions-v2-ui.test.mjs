@@ -141,4 +141,21 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
   assert.match(js, /runReviewAction\("retry_preparation"/);
   assert.match(js, /title: "Review the candidate signal"/);
   assert.match(js, /Open Signal/);
+  assert.match(js, /review-context\?\$\{params\}/);
+  assert.match(js, /reviewContextCanRender\(\{ request: controller/);
+  assert.match(js, /Choose a decision/);
+  assert.match(js, /reviewSummaryHtml\(row\)/);
+  assert.match(css, /\.review-evidence\{/);
+  assert.match(js, /const source = evidence\.sourceLabel \|\| "Verified source details unavailable"/);
+  assert.match(js, /Candidate added; resume preparation has started\./);
+});
+
+test("source health distinguishes reported delays from committed Gmail and Sequence checkpoints", () => {
+  assert.match(js, /"No reported delays"/);
+  assert.match(js, /healthCoverageDetails\(health\.sources\)/);
+  assert.match(js, /Live committed through/);
+  assert.match(js, /History committed through/);
+  assert.match(js, /Cache confirmed through/);
+  assert.match(js, /source\.safeErrorDetail/);
+  assert.match(css, /\.source-health-details\{/);
 });

@@ -21,6 +21,11 @@ import {
 } from "../api/submissions-v2/_lib/sequence-inbox-broker.mjs";
 import { publicMessage } from "../api/inbox/_lib/core.mjs";
 import { reconcileSequenceInbox } from "../submissions-v2-worker/sequence-inbox-reader.mjs";
+import {
+  normalizeSourcingRoleMappingRecord,
+  readSourcingSequenceRoleMappings,
+  sourcingRoleMappingInternals,
+} from "../api/submissions-v2/_lib/sourcing-role-mappings.mjs";
 
 const activationAt = "2026-09-02T02:45:14.308Z";
 const env = {
@@ -161,6 +166,156 @@ test("an exact outbound recipient mapping can bind multiple roles and an approve
   assert.equal(record.source_evidence.role_evidence_locator, "mailroom:outbound-contract-1");
 });
 
+test("a known-created Sourcing mapping binds one exact active role without manufacturing an outbound id", () => {
+  const record = adaptSequenceInboxReply({
+    reply: reply(),
+    campaign: {
+      id: "sequence-1",
+      exact_project_id: "project-1",
+      exact_project_source: "campaign.project_id",
+    },
+    detail: detail(), activationAt, env,
+    savedRoleMappings: [{
+      sequence_id: "sequence-1",
+      role_id: "role-1",
+      project_id: "project-1",
+      attested_at: "2026-09-03T11:00:00.000Z",
+      sequence_created: true,
+      active: true,
+      valid: true,
+      evidence_locator: "sourcing:v1:role:role-1#digest",
+    }],
+  });
+  assert.equal(record.route, "classify");
+  assert.deepEqual(record.event.offered_roles.map((role) => role.role_id), ["role-1"]);
+  assert.equal(record.source_evidence.exact_role_source, "sourcing.role_state.mapping");
+  assert.equal(record.event.outbound_message_id, null);
+});
+
+test("saved role mappings fail closed on literal conflict, project mismatch, reuse, or post-reply attestation", () => {
+  const mapping = {
+    sequence_id: "sequence-1", role_id: "role-2", project_id: "project-1",
+    attested_at: "2026-09-03T11:00:00.000Z", sequence_created: true,
+    active: true, valid: true, evidence_locator: "sourcing:v1:role:role-2#digest",
+  };
+  const base = { reply: reply(), detail: detail(), activationAt, env };
+  const conflict = adaptSequenceInboxReply({
+    ...base,
+    campaign: {
+      id: "sequence-1", exact_role_id: "role-1", exact_role_source: "campaign.role_id",
+      exact_project_id: "project-1", exact_project_source: "campaign.project_id",
+    },
+    savedRoleMappings: [mapping],
+  });
+  assert.equal(conflict.route, "needs_review");
+  assert.deepEqual(conflict.event.offered_roles, []);
+
+  for (const changed of [
+    { project_id: "project-other" },
+    { sequence_created: false },
+    { attested_at: "2026-09-03T13:00:00.000Z" },
+    { active: false },
+  ]) {
+    const result = adaptSequenceInboxReply({
+      ...base,
+      campaign: {
+        id: "sequence-1", exact_project_id: "project-1",
+        exact_project_source: "campaign.project_id",
+      },
+      savedRoleMappings: [{ ...mapping, ...changed }],
+    });
+    assert.equal(result.route, "needs_review");
+    assert.deepEqual(result.event.offered_roles, []);
+  }
+
+  const activeInactiveCollision = adaptSequenceInboxReply({
+    ...base,
+    campaign: {
+      id: "sequence-1", exact_project_id: "project-1",
+      exact_project_source: "campaign.project_id",
+    },
+    savedRoleMappings: [mapping, {
+      ...mapping,
+      role_id: "role-inactive",
+      active: false,
+      valid: false,
+      evidence_locator: "sourcing:v1:role:role-inactive#digest",
+    }],
+  });
+  assert.equal(activeInactiveCollision.route, "needs_review");
+  assert.deepEqual(activeInactiveCollision.event.offered_roles, []);
+});
+
+test("saved Sourcing state requires exact identity, creation provenance, timestamp, and active role", () => {
+  const raw = {
+    key: "sourcing:v1:role:role-1",
+    stateRoleId: "role-1",
+    mappingRoleId: "role-1",
+    sequenceId: "sequence-1",
+    reviewProjectId: "project-1",
+    preparedAt: "2026-09-03T11:00:00.000Z",
+    sequenceCreated: true,
+  };
+  assert.equal(normalizeSourcingRoleMappingRecord(raw, new Set(["role-1"])).valid, true);
+  assert.equal(normalizeSourcingRoleMappingRecord({ ...raw, sequenceCreated: false }, new Set(["role-1"])).valid, false);
+  assert.equal(normalizeSourcingRoleMappingRecord({ ...raw, preparedAt: null }, new Set(["role-1"])).valid, false);
+  assert.equal(normalizeSourcingRoleMappingRecord({ ...raw, mappingRoleId: "role-2" }, new Set(["role-1"])).valid, false);
+  assert.equal(normalizeSourcingRoleMappingRecord(raw, new Set()).valid, false);
+  assert.equal(normalizeSourcingRoleMappingRecord({ ...raw, key: "sourcing:v1:role:role-1:runs" }, new Set(["role-1"])), null);
+});
+
+test("bounded Sourcing mapping inventory rejects partial state and never returns partial mappings", async () => {
+  const compact = JSON.stringify({
+    key: "sourcing:v1:role:role-1", stateRoleId: "role-1", mappingRoleId: "role-1",
+    sequenceId: "sequence-1", reviewProjectId: "project-1",
+    preparedAt: "2026-09-03T11:00:00.000Z", sequenceCreated: true,
+  });
+  let calls = 0;
+  const loaded = await readSourcingSequenceRoleMappings({
+    command: async (args) => {
+      calls += 1;
+      return args[0] === "SCAN"
+        ? ["0", ["sourcing:v1:role:role-1", "sourcing:v1:role:role-1:runs"]]
+        : [compact];
+    },
+    activeRoleIds: async () => new Set(["role-1"]),
+  });
+  assert.equal(calls, 4);
+  assert.equal(loaded.status, "ready");
+  assert.equal(loaded.mappings.length, 1);
+  assert.equal(loaded.mappings[0].valid, true);
+
+  const incomplete = await readSourcingSequenceRoleMappings({
+    command: async () => ["next", []],
+    activeRoleIds: async () => new Set(["role-1"]),
+  });
+  assert.equal(incomplete.status, "unavailable");
+  assert.deepEqual(incomplete.mappings, []);
+  assert.equal(incomplete.digest, sourcingRoleMappingInternals.UNAVAILABLE_DIGEST);
+});
+
+test("a changed Sourcing mapping inventory is unavailable rather than partially admitted", async () => {
+  const compact = (roleId) => JSON.stringify({
+    key: `sourcing:v1:role:${roleId}`, stateRoleId: roleId, mappingRoleId: roleId,
+    sequenceId: "sequence-1", reviewProjectId: "project-1",
+    preparedAt: "2026-09-03T11:00:00.000Z", sequenceCreated: true,
+  });
+  let scan = 0;
+  const loaded = await readSourcingSequenceRoleMappings({
+    command: async (args) => {
+      if (args[0] === "SCAN") {
+        scan += 1;
+        return ["0", [`sourcing:v1:role:role-${scan}`]];
+      }
+      return [compact(`role-${scan}`)];
+    },
+    activeRoleIds: async () => new Set(["role-1", "role-2"]),
+  });
+  assert.equal(loaded.status, "unavailable");
+  assert.deepEqual(loaded.mappings, []);
+  assert.equal(loaded.digest, sourcingRoleMappingInternals.UNAVAILABLE_DIGEST);
+});
+
 test("full detail, activation, direction, sender, and identity conflicts fail closed", () => {
   const base = { reply: reply(), campaign: { id: "sequence-1" }, activationAt, env };
   assert.equal(adaptSequenceInboxReply({ ...base, detail: { message: detail().message } }).reason, "full_message_unavailable");
@@ -218,8 +373,14 @@ test("broker holds the shared lock for at most its conservative refresh and poin
     },
     writeState: async () => state,
     sleepImpl: async (milliseconds) => { clock += milliseconds; },
-    readBatch: async ({ limit, readMessage }) => {
+    readRoleMappings: async () => ({
+      status: "ready", digest: "a".repeat(64), mappings: [{ valid: true, role_id: "role-1" }],
+    }),
+    readBatch: async ({ limit, readMessage, savedRoleMappings, savedRoleMappingDigest, savedRoleMappingStatus }) => {
       assert.equal(limit, SEQUENCE_INBOX_BATCH_LIMIT);
+      assert.equal(savedRoleMappingStatus, "ready");
+      assert.equal(savedRoleMappingDigest, "a".repeat(64));
+      assert.equal(savedRoleMappings[0].role_id, "role-1");
       for (let index = 0; index < SEQUENCE_INBOX_BATCH_LIMIT; index += 1) {
         await readMessage(`message-${index}`);
       }
@@ -315,6 +476,23 @@ test("cached reader is bounded, stable, full-detail only, and exposes checkpoint
   assert.equal(second.coverage.full_success, true);
 });
 
+test("optional saved-role lookup unavailability preserves literal campaign role intake", async () => {
+  const result = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: state([reply()]) }),
+    readMessage: async () => detail(),
+    activationAt, env,
+    savedRoleMappingStatus: "unavailable",
+    savedRoleMappings: [{ valid: true, role_id: "unsafe-partial-role" }],
+    savedRoleMappingDigest: sourcingRoleMappingInternals.UNAVAILABLE_DIGEST,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(result.records.length, 1);
+  assert.deepEqual(result.records[0].event.offered_roles.map((role) => role.role_id), ["role-1"]);
+  assert.equal(result.coverage.sourcing_role_mapping_status, "unavailable");
+  assert.equal(result.coverage.sourcing_role_mapping_inventory_count, 0);
+  assert.equal(result.coverage.sourcing_role_mapping_valid_record_count, 0);
+});
+
 test("cached reader reports incomplete evidence and never substitutes a snippet", async () => {
   const result = await readCachedSequenceReplyBatch({
     readState: async () => ({ status: "ready", value: state([reply()]) }),
@@ -386,6 +564,17 @@ test("catalog changes reset safely, watermark advances continue, and conflicting
   assert.equal(changed.coverage.catalog_changed, true);
   assert.equal(changed.records.length, 0);
 
+  const mappingChanged = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => assert.fail("must not read after mapping digest change"),
+    activationAt, env,
+    expectedCatalogDigest: stable.coverage.catalog_digest,
+    savedRoleMappingDigest: "a".repeat(64),
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(mappingChanged.coverage.catalog_changed, true);
+  assert.equal(mappingChanged.records.length, 0);
+
   const conflicting = state([
     reply({ gmail_id: "same-message", sequence_id: "sequence-1" }),
     reply({ gmail_id: "same-message", sequence_id: "sequence-2", candidate_user_id: "candidate-user-2" }),
@@ -445,6 +634,8 @@ test("worker reader paces a bounded page and advances only its Sequence Inbox cu
           checkpoint_safe: true, full_success: false, page_size: 2,
           cache_state: "ready", cache_last_complete_at: "2026-09-03T12:00:00.000Z",
           cache_campaigns_targeted: 2, cache_campaigns_missing: 0, cache_campaigns_stale: 0,
+          sourcing_role_mapping_status: "ready", sourcing_role_mapping_inventory_count: 4,
+          sourcing_role_mapping_valid_record_count: 3,
         },
       };
     },
@@ -460,6 +651,9 @@ test("worker reader paces a bounded page and advances only its Sequence Inbox cu
   assert.equal(result.caught_up, false);
   assert.equal(result.accepted, 1);
   assert.equal(result.existing, 1);
+  assert.equal(result.cache.sourcing_role_mapping_status, "ready");
+  assert.equal(result.cache.sourcing_role_mapping_inventory_count, 4);
+  assert.equal(result.cache.sourcing_role_mapping_valid_record_count, 3);
 });
 
 test("worker reader rejects an incomplete page without advancing its cursor", async () => {

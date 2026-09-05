@@ -92,6 +92,44 @@ function exactCampaignRole(campaign) {
   } : null;
 }
 
+function exactSavedCampaignMapping(reply, campaign, mappings) {
+  const sequenceId = text(reply?.sequence_id, 500);
+  const projectId = campaign?.exact_project_source === "campaign.project_id"
+    ? text(campaign?.exact_project_id, 500)
+    : "";
+  const receivedAt = timestamp(reply?.date);
+  const candidates = list(mappings).filter((mapping) => (
+    text(mapping?.sequence_id, 500) === sequenceId
+  ));
+  if (!candidates.length) return { mapping: null, unverifiable: false };
+  // One retained role-state key per role means any reverse-map multiplicity is
+  // ambiguous, including an inactive or malformed sibling. Never let filtering
+  // choose the apparently better row.
+  if (candidates.length > 1) return { mapping: null, conflict: true, unverifiable: false };
+  const verified = candidates.filter((mapping) => {
+    const attestedAt = timestamp(mapping?.attested_at);
+    return mapping?.valid === true
+      && mapping?.active === true
+      && mapping?.sequence_created === true
+      && projectId
+      && text(mapping?.project_id, 500) === projectId
+      && receivedAt !== null
+      && attestedAt !== null
+      && attestedAt <= receivedAt
+      && text(mapping?.role_id, 200)
+      && text(mapping?.evidence_locator, 2_000);
+  });
+  const roleIds = new Set(verified.map((mapping) => text(mapping.role_id, 200)));
+  if (roleIds.size > 1) return { mapping: null, conflict: true, unverifiable: false };
+  return {
+    mapping: verified.sort((left, right) => (
+      text(left.evidence_locator, 2_000).localeCompare(text(right.evidence_locator, 2_000))
+    ))[0] || null,
+    conflict: false,
+    unverifiable: verified.length === 0,
+  };
+}
+
 function exactOutboundMappings(reply, mappings) {
   return list(mappings).filter((mapping) => {
     if (text(mapping?.sequence_id, 500) !== text(reply?.sequence_id, 500)) return false;
@@ -123,8 +161,14 @@ function mappedRoles(mapping) {
   return [...found.values()].sort((left, right) => left.role_id.localeCompare(right.role_id));
 }
 
-function roleResolution(reply, campaign, mappings) {
+function roleResolution(reply, campaign, mappings, savedRoleMappings) {
   const campaignRole = exactCampaignRole(campaign);
+  const saved = exactSavedCampaignMapping(reply, campaign, savedRoleMappings);
+  if (saved.conflict) return { roles: [], error: "role_mapping_conflict" };
+  const savedRoleId = text(saved.mapping?.role_id, 200);
+  if (campaignRole && savedRoleId && campaignRole.role_id !== savedRoleId) {
+    return { roles: [], error: "role_mapping_conflict" };
+  }
   const exactMappings = exactOutboundMappings(reply, mappings);
   const mapped = exactMappings.map((mapping) => ({ mapping, roles: mappedRoles(mapping) }))
     .filter((item) => item.roles.length);
@@ -132,6 +176,9 @@ function roleResolution(reply, campaign, mappings) {
   if (signatures.size > 1) return { roles: [], error: "role_mapping_conflict" };
   const chosen = mapped[0] || null;
   if (campaignRole && chosen && !chosen.roles.some((role) => role.role_id === campaignRole.role_id)) {
+    return { roles: [], error: "role_mapping_conflict" };
+  }
+  if (savedRoleId && chosen && !chosen.roles.some((role) => role.role_id === savedRoleId)) {
     return { roles: [], error: "role_mapping_conflict" };
   }
   if (chosen) {
@@ -146,9 +193,36 @@ function roleResolution(reply, campaign, mappings) {
         : SEQUENCE_REPLY_FAMILY,
     };
   }
-  return campaignRole
-    ? { roles: [campaignRole], source: "campaign.role_id", family: SEQUENCE_REPLY_FAMILY }
-    : { roles: [], error: "role_unmapped", family: SEQUENCE_REPLY_FAMILY };
+  if (campaignRole) {
+    return { roles: [campaignRole], source: "campaign.role_id", family: SEQUENCE_REPLY_FAMILY };
+  }
+  if (saved.mapping) {
+    return {
+      roles: mappedRoles({ role_ids: [savedRoleId] }),
+      source: "sourcing.role_state.mapping",
+      evidence_locator: text(saved.mapping.evidence_locator, 2_000),
+      family: SEQUENCE_REPLY_FAMILY,
+    };
+  }
+  if (saved.unverifiable) {
+    return { roles: [], error: "role_mapping_unverifiable", family: SEQUENCE_REPLY_FAMILY };
+  }
+  return { roles: [], error: "role_unmapped", family: SEQUENCE_REPLY_FAMILY };
+}
+
+function savedRoleMappingCoverage(status, mappings) {
+  const ready = status === "ready";
+  const inventory = ready ? list(mappings) : [];
+  return {
+    sourcing_role_mapping_status: ready ? "ready" : "unavailable",
+    sourcing_role_mapping_inventory_count: inventory.length,
+    // This is a record validation count only. It does not imply that a row was
+    // admitted: sequence collisions, project mismatch, and reply time still
+    // fail closed in roleResolution.
+    sourcing_role_mapping_valid_record_count: inventory.filter((mapping) => (
+      mapping?.valid === true
+    )).length,
+  };
 }
 
 function senderIdentity(message) {
@@ -181,6 +255,7 @@ export function adaptSequenceInboxReply({
   detail,
   activationAt,
   outboundMappings = [],
+  savedRoleMappings = [],
   forceNeutral = false,
   env = process.env,
 } = {}) {
@@ -221,7 +296,7 @@ export function adaptSequenceInboxReply({
 
   const resolution = forceNeutral
     ? { roles: [], error: "role_unmapped", family: SEQUENCE_REPLY_FAMILY }
-    : roleResolution(reply, campaign, outboundMappings);
+    : roleResolution(reply, campaign, outboundMappings, savedRoleMappings);
   const cachedCandidateEmail = forceNeutral ? null : emails(reply.candidate_email)[0] || null;
   const candidateConflict = Boolean(cachedCandidateEmail && cachedCandidateEmail !== sender);
   const idempotencyKey = `gmail:${mailbox.id}:${reply.gmail_id}`;
@@ -347,6 +422,9 @@ export async function readCachedSequenceReplyBatch({
   readMessage,
   activationAt,
   outboundMappings = [],
+  savedRoleMappings = [],
+  savedRoleMappingDigest = null,
+  savedRoleMappingStatus = "unavailable",
   env = process.env,
   limit = 25,
   cursor = null,
@@ -385,6 +463,7 @@ export async function readCachedSequenceReplyBatch({
         cache_campaigns_missing: Number(projectionCoverage.campaigns_missing) || 0,
         cache_campaigns_stale: Number(projectionCoverage.campaigns_stale) || 0,
         catalog_digest: projectionCoverage.catalog_digest || null,
+        ...savedRoleMappingCoverage(savedRoleMappingStatus, savedRoleMappings),
         watermark: projectionCoverage.confirmed_through || null,
         cached_replies: 0,
         before_activation: 0,
@@ -398,7 +477,22 @@ export async function readCachedSequenceReplyBatch({
       },
     };
   }
-  const currentDigest = text(projectionCoverage.catalog_digest, 128) || null;
+  const baseCatalogDigest = text(projectionCoverage.catalog_digest, 128) || null;
+  const mappingDigest = text(savedRoleMappingDigest, 128)
+    || sha256(JSON.stringify(list(savedRoleMappings).map((mapping) => ({
+      sequence_id: text(mapping?.sequence_id, 500),
+      role_id: text(mapping?.role_id, 200),
+      project_id: text(mapping?.project_id, 500),
+      attested_at: text(mapping?.attested_at, 100),
+      evidence_locator: text(mapping?.evidence_locator, 2_000),
+      sequence_created: mapping?.sequence_created === true,
+      active: mapping?.active === true,
+      valid: mapping?.valid === true,
+    })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))));
+  const currentDigest = sha256(JSON.stringify({
+    cache_catalog_digest: baseCatalogDigest,
+    sourcing_role_mapping_digest: mappingDigest,
+  }));
   const currentWatermark = projectionCoverage.confirmed_through || null;
   const expectedWatermarkAt = expectedWatermark == null
     ? null
@@ -426,6 +520,7 @@ export async function readCachedSequenceReplyBatch({
         cache_campaigns_missing: Number(projectionCoverage.campaigns_missing) || 0,
         cache_campaigns_stale: Number(projectionCoverage.campaigns_stale) || 0,
         catalog_digest: currentDigest,
+        ...savedRoleMappingCoverage(savedRoleMappingStatus, savedRoleMappings),
         watermark: currentWatermark,
         catalog_changed: catalogChanged,
         watermark_changed: watermarkRegressed,
@@ -525,6 +620,7 @@ export async function readCachedSequenceReplyBatch({
       detail,
       activationAt,
       outboundMappings,
+      savedRoleMappings,
       forceNeutral: reply.projection_identity_conflict === true,
       env,
     });
@@ -567,6 +663,7 @@ export async function readCachedSequenceReplyBatch({
       cache_campaigns_missing: Number(projectionCoverage.campaigns_missing) || 0,
       cache_campaigns_stale: Number(projectionCoverage.campaigns_stale) || 0,
       catalog_digest: currentDigest,
+      ...savedRoleMappingCoverage(savedRoleMappingStatus, savedRoleMappings),
       watermark: currentWatermark,
       catalog_changed: false,
       watermark_changed: false,

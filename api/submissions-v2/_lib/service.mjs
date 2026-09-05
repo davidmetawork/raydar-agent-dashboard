@@ -4,6 +4,7 @@ import { normalizeEmailReply, privateEventPayload, safeEventProjection } from ".
 import { classifyReply } from "./classifier.mjs";
 import { createRepository } from "./repository.mjs";
 import { rowDto, publicHealth } from "./presentation.mjs";
+import { reviewContext } from "./review-context.mjs";
 import { decryptJson, encryptJson } from "./private-data.mjs";
 import { submissionsV2ReleaseManifest } from "./release-manifest.mjs";
 import {
@@ -130,6 +131,29 @@ export function createService({
   }
 
   const service = {
+    async reviewContext(input = {}) {
+      await requireControls("ui");
+      const caseId = clean(input.case_id, 100) || null;
+      const signalId = clean(input.signal_id, 100) || null;
+      if (Boolean(caseId) === Boolean(signalId)
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(caseId || signalId)) {
+        throw problem("review_identity_invalid", "Choose one current Review item.", 400);
+      }
+      const source = await repository.sourceForReview({ caseId, signalId });
+      if (!source) throw problem("review_item_not_found", "This item is no longer in Needs Review.", 404);
+      let payload = null;
+      if (source.source_family === "email" && source.encrypted_body_object_key) {
+        try {
+          const stored = await blobs.readPrivateObject(source.encrypted_body_object_key, { env });
+          payload = decryptJson(JSON.parse(stored.bytes.toString("utf8")), { env, context: `event:${source.event_id}` });
+        } catch {
+          // A private-object failure must not leak raw provider errors or replace
+          // candidate evidence with outbound text or a classifier paraphrase.
+        }
+      }
+      return { review_context: reviewContext(source, payload) };
+    },
+
     async list(input = {}) {
       await requireControls("ui");
       const result = await repository.list({

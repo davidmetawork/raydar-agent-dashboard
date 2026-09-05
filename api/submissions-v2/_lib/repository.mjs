@@ -473,9 +473,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
             union all
             select
-              null::uuid as pair_id, se.id as signal_id, 0::bigint as state_version, null::text as candidate_user_id,
-              null::text as candidate_name, se.sender_display_name as provisional_name,
-              null::text as candidate_url, null::text as linkedin_url, null::text as raydar_url,
+              null::uuid as pair_id, se.id as signal_id, 0::bigint as state_version, matched.candidate_user_id,
+              matched.display_name as candidate_name, se.sender_display_name as provisional_name,
+              matched.paraform_profile_url as candidate_url, matched.linkedin_url, matched.raydar_url,
               offered.role_id, offered.company_snapshot as company_name, offered.role_label_snapshot as role_title,
               offered.role_label_snapshot as role_label, offered.role_url_snapshot as role_url,
               offered.count as offered_role_count, offered.roles as offered_roles, se.envelope->>'signal_url' as signal_url,
@@ -485,6 +485,15 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               null::timestamptz as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
               se.received_at as sort_at, se.id as sort_id
             from submissions_v2.source_events se
+            left join submissions_v2.candidate_index matched
+              on matched.candidate_user_id=se.envelope->'candidate_resolution'->>'candidate_user_id'
+             and matched.active=true
+             and coalesce(se.envelope->'candidate_resolution'->>'ambiguous','false')='false'
+             and not exists (
+               select 1 from submissions_v2.review_items identity_review
+                where identity_review.unresolved_signal_id=se.id and identity_review.action_state='open'
+                  and identity_review.reason_code in ('candidate_not_found','candidate_ambiguous')
+             )
             join lateral (
               select min(role_id) as role_id, min(company_snapshot) as company_snapshot,
                      min(role_label_snapshot) as role_label_snapshot, min(role_url_snapshot) as role_url_snapshot,
@@ -501,7 +510,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             left join lateral (
               select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled
             ) sh on true
-            where (${needle}='' or lower(coalesce(se.sender_display_name,'')) like ${pattern} escape '\\')
+            where (${needle}='' or lower(coalesce(se.sender_display_name,'')) like ${pattern} escape '\\'
+              or coalesce(matched.search_key,'') like ${pattern} escape '\\')
           ), paged as (
             select *, count(*) over()::bigint as total_count from review_rows
              where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
@@ -640,13 +650,27 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     async health() {
       const rows = await sql`
         select
-          coalesce(bool_or(enabled and (delayed_since is not null or error_class is not null)), false) as delayed,
-          max(last_success_at) as last_success_at,
-          jsonb_object_agg(source_key, jsonb_build_object(
-            'enabled', enabled, 'last_success_at', last_success_at, 'delayed_since', delayed_since,
-            'quota_state', quota_state, 'error_class', error_class, 'safe_error_detail', safe_error_detail
-          ) order by source_key) filter (where source_key is not null) as sources
-        from submissions_v2.source_health
+          coalesce(bool_or(h.enabled and (h.delayed_since is not null or h.error_class is not null)), false) as delayed,
+          max(h.last_success_at) as last_success_at,
+          jsonb_object_agg(h.source_key, jsonb_build_object(
+            'enabled', h.enabled, 'last_success_at', h.last_success_at, 'delayed_since', h.delayed_since,
+            'quota_state', h.quota_state, 'quota_retry_at', h.quota_retry_at,
+            'error_class', h.error_class, 'safe_error_detail', h.safe_error_detail,
+            'last_complete_at', c.last_full_success_at,
+            'coverage', case
+              when h.source_key='master_inbox' then jsonb_build_object(
+                'live_through', c.checkpoint #> '{gmail,scopes,approved_role_interest_v1,live,through}',
+                'history_through', c.checkpoint #> '{gmail,scopes,approved_role_interest_v1,catchup,through}',
+                'live_caught_up', c.checkpoint #> '{gmail,scopes,approved_role_interest_v1,live,caught_up}',
+                'history_caught_up', c.checkpoint #> '{gmail,scopes,approved_role_interest_v1,catchup,caught_up}'
+              )
+              when h.source_key='sequence_inbox' then jsonb_build_object(
+                'cache_confirmed_through', c.checkpoint->'watermark', 'caught_up', c.checkpoint->'caught_up'
+              )
+              else '{}'::jsonb end
+          ) order by h.source_key) filter (where h.source_key is not null) as sources
+        from submissions_v2.source_health h
+        left join submissions_v2.source_cursors c on c.source_key=h.source_key
       `;
       return { ...(rows[0] || {}), database: "current" };
     },
@@ -713,6 +737,33 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
            ))
          order by j.created_at desc, j.id desc limit ${boundedLimit(limit, 50, 100)}
       `;
+    },
+
+    async sourceForReview({ caseId = null, signalId = null }) {
+      const rows = await sql`
+        select se.id, se.event_id, se.source_family, se.received_at,
+               se.envelope, se.encrypted_body_object_key
+          from submissions_v2.source_events se
+         where (
+           ${caseId}::uuid is not null and exists (
+             select 1 from submissions_v2.candidate_role_pairs p
+              where p.id=${caseId}::uuid and p.first_signal_id=se.id
+                and p.case_hidden_at is null and p.workflow_state='needs_review'
+           )
+         ) or (
+           ${signalId}::uuid is not null and se.id=${signalId}::uuid
+           and exists (
+             select 1 from submissions_v2.review_items ri
+              where ri.unresolved_signal_id=se.id and ri.action_state='open'
+           )
+           and not exists (
+             select 1 from submissions_v2.candidate_role_pairs hidden
+              where hidden.first_signal_id=se.id and hidden.case_hidden_at is not null
+           )
+         )
+         limit 1
+      `;
+      return rows[0] || null;
     },
 
     async sourceByIdempotency(idempotencyKey) {

@@ -15,6 +15,61 @@ export function commandSuccessMessage(result) {
   return result?.duplicate === true ? "Already recorded; review item resolved." : "";
 }
 
+export function reviewContextPresentation(context = {}) {
+  const available = context?.evidence_status === "available";
+  const excerptPoints = available && typeof context.candidate_reply_excerpt === "string"
+    ? Array.from(context.candidate_reply_excerpt.trim())
+    : [];
+  const excerpt = excerptPoints.slice(0, 1200).join("");
+  return {
+    available: Boolean(available && excerpt),
+    excerpt,
+    excerptTruncated: Boolean(context?.excerpt_truncated) || excerptPoints.length > 1200,
+    sourceLabel: typeof context?.source_label === "string" ? context.source_label.trim().slice(0, 160) : "",
+    sourceFamily: typeof context?.source_family === "string" ? context.source_family.trim().slice(0, 80) : "",
+    receivedAt: typeof context?.received_at === "string" ? context.received_at : "",
+  };
+}
+
+const HEALTH_SOURCE_LABELS = Object.freeze({
+  master_inbox: "Gmail",
+  sequence_inbox: "Sequence Inbox",
+  candidate_index: "Candidate index",
+  role_index: "Role index",
+  curated: "Curated candidates",
+  submission_proof: "Submission proof",
+});
+
+function safeHealthInstant(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+export function healthCoverageDetails(sources = {}) {
+  return Object.entries(sources || {}).flatMap(([key, source]) => {
+    if (!source || typeof source !== "object") return [];
+    const coverage = source.coverage && typeof source.coverage === "object" ? source.coverage : {};
+    return [{
+      key,
+      label: HEALTH_SOURCE_LABELS[key] || key.replace(/[_-]+/g, " "),
+      enabled: source.enabled === true,
+      delayed: source.delayed === true,
+      safeErrorDetail: typeof source.safe_error_detail === "string" ? Array.from(source.safe_error_detail.trim()).slice(0, 500).join("") : "",
+      lastCompleteAt: safeHealthInstant(source.last_complete_at),
+      retryAt: safeHealthInstant(source.retry_at),
+      liveThrough: safeHealthInstant(coverage.live_through),
+      historyThrough: safeHealthInstant(coverage.history_through),
+      liveCaughtUp: typeof coverage.live_caught_up === "boolean" ? coverage.live_caught_up : null,
+      historyCaughtUp: typeof coverage.history_caught_up === "boolean" ? coverage.history_caught_up : null,
+      cacheConfirmedThrough: safeHealthInstant(coverage.cache_confirmed_through),
+      caughtUp: typeof coverage.caught_up === "boolean" ? coverage.caught_up : null,
+    }];
+  });
+}
+
+export function reviewContextCanRender({ request, currentRequest, active, currentActive, modalOpen } = {}) {
+  return request === currentRequest && active === currentActive && modalOpen === true;
+}
+
 export function listScopeIsCurrent(scope, state) {
   return scope.sequence === state.listSequence && scope.page === state.page && scope.query === state.query;
 }

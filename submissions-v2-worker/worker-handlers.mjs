@@ -480,6 +480,9 @@ export function createWorkerHandlers({
         cache_campaigns_targeted: reconciled.cache.campaigns_targeted,
         cache_campaigns_missing: reconciled.cache.campaigns_missing,
         cache_campaigns_stale: reconciled.cache.campaigns_stale,
+        sourcing_role_mapping_status: reconciled.cache.sourcing_role_mapping_status,
+        sourcing_role_mapping_inventory_count: reconciled.cache.sourcing_role_mapping_inventory_count,
+        sourcing_role_mapping_valid_record_count: reconciled.cache.sourcing_role_mapping_valid_record_count,
       } };
     } catch (error) {
       await sourceLease.releaseSourceCursor({

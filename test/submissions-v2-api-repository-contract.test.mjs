@@ -7,7 +7,7 @@ import { createRepository } from "../api/submissions-v2/_lib/repository.mjs";
 test("repository exposes the complete API and worker persistence boundary", () => {
   const repository = createRepository({ sql: {} });
   const expected = [
-    "list", "counts", "health", "searchCandidates", "searchRoles", "pair", "jobs",
+    "list", "counts", "health", "searchCandidates", "searchRoles", "pair", "jobs", "sourceForReview",
     "recordEmailSource", "applyClassifiedSignal", "routeClassificationFailure", "bindUnresolvedSignal",
     "addCandidate", "transition", "keepReview", "enqueuePairAction", "enqueueSignalAction",
     "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "archive",

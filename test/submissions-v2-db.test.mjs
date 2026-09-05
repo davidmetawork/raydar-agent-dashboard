@@ -30,18 +30,18 @@ const databaseUrl = process.env.SUBMISSIONS_V2_TEST_DATABASE_URL
 const digest = (value) => createHash("sha256").update(String(value)).digest("hex");
 let sql;
 
-async function sourceEvent({ family = "manual", key = randomUUID(), receivedAt = new Date() } = {}) {
+async function sourceEvent({ family = "manual", key = randomUUID(), receivedAt = new Date(), envelope = {}, senderDisplayName = null } = {}) {
   const id = randomUUID();
   const isEmail = family === "email";
   await sql`
     insert into submissions_v2.source_events (
       id, source_family, source_version, event_id, provider, mailbox_id,
-      provider_message_id, direction, received_at, content_digest, idempotency_key
+      provider_message_id, direction, received_at, content_digest, idempotency_key, envelope, sender_display_name
     ) values (
       ${id}, ${family}, ${isEmail ? "submissions.email_reply.v1" : "manual.v1"}, ${`event-${key}`},
       ${isEmail ? "gmail" : null}, ${isEmail ? "mailbox-test" : null},
       ${isEmail ? `message-${key}` : null}, ${isEmail ? "inbound" : "manual"},
-      ${receivedAt}, ${digest(key)}, ${`source:${key}`}
+      ${receivedAt}, ${digest(key)}, ${`source:${key}`}, ${sql.json(envelope)}, ${senderDisplayName}
     )
   `;
   return id;
@@ -395,6 +395,43 @@ test("human review can bind a missing-role signal to an exact active Paraform ro
     ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
     masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
   }, sql);
+});
+
+test("the API principal reads evidence only for visible Review and reuses only verified active identity", async () => {
+  const candidateId = `review-evidence-${randomUUID()}`;
+  const signalId = await sourceEvent({ family: "email", senderDisplayName: "Source Alias",
+    envelope: { candidate_resolution: { candidate_user_id: candidateId, ambiguous: false } } });
+  const unrelatedId = await sourceEvent({ family: "email" });
+  await sql`
+    insert into submissions_v2.candidate_index(candidate_user_id, display_name, normalized_name, search_key, active, paraform_profile_url, last_confirmed_at, source_digest)
+    values (${candidateId}, 'Canonical Evidence Person', 'canonical evidence person', 'canonical evidence person', true,
+      ${`https://www.paraform.com/candidates/${candidateId}`}, clock_timestamp(), ${digest(candidateId)})
+  `;
+  await sql`insert into submissions_v2.review_items(unresolved_signal_id, reason_code) values (${signalId}, 'role_unclear')`;
+  const asApi = async (fn) => sql.begin(async (tx) => {
+    await tx`set local role submissions_v2_api`;
+    return fn(createRepository({ sql: tx }));
+  });
+  assert.equal((await asApi((repo) => repo.sourceForReview({ signalId }))).id, signalId);
+  assert.equal(await asApi((repo) => repo.sourceForReview({ signalId: unrelatedId })), null);
+  const matched = (await asApi((repo) => repo.list({ page: 'needs_review', query: 'canonical evidence' }))).rows;
+  assert.equal(matched.length, 1);
+  assert.equal(matched[0].candidate_user_id, candidateId);
+  assert.equal((await asApi((repo) => repo.list({ page: 'needs_review', query: 'Source Alias' }))).rows[0].candidate_user_id, candidateId);
+  await sql`insert into submissions_v2.review_items(unresolved_signal_id, reason_code) values (${signalId}, 'candidate_ambiguous')`;
+  assert.equal((await asApi((repo) => repo.list({ page: 'needs_review', query: 'Source Alias' }))).rows[0].candidate_user_id, null);
+  await sql`update submissions_v2.review_items set action_state='resolved', resolved_at=clock_timestamp(), resolved_by='test@raydar.xyz' where unresolved_signal_id=${signalId}`;
+  assert.equal(await asApi((repo) => repo.sourceForReview({ signalId })), null);
+  const pair = await preparingPair();
+  await sql.begin(async (tx) => {
+    await tx`update submissions_v2.candidate_role_pairs set workflow_state='needs_review', state_version=state_version+1 where id=${pair.id}`;
+    await tx`insert into submissions_v2.review_items(pair_id, reason_code) values (${pair.id}, 'candidate_original_resume_missing')`;
+  });
+  assert.equal((await asApi((repo) => repo.sourceForReview({ caseId: pair.id }))).id, pair.signal);
+  await sql`update submissions_v2.candidate_role_pairs set case_hidden_at=clock_timestamp(), state_version=state_version+1 where id=${pair.id}`;
+  assert.equal(await asApi((repo) => repo.sourceForReview({ caseId: pair.id })), null);
+  const health = await asApi((repo) => repo.health());
+  assert.equal(health.database, 'current');
 });
 
 test("the API principal can attest an exact review role without broader offered-role mutation rights", async () => {

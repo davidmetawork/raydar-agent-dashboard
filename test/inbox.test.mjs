@@ -1233,6 +1233,33 @@ test("recent evidence refreshes an unmapped sequence without changing legacy Inb
   assert.equal(feed.replies.length, 0);
 });
 
+test("Submissions cache retains exact campaign Project evidence without exposing a legacy Inbox row", async () => {
+  const refresh = await buildInboxRefresh({
+    get: async (procedure) => {
+      if (procedure === "campaigns.getListOfCampaignsOptimized") {
+        return [{
+          id: "sequence-project-only",
+          name: "Project-linked outreach",
+          project_id: "project-1",
+          email_replies: 1,
+        }];
+      }
+      if (procedure === "campaigns.getRecentReplies") return [];
+      assert.equal(procedure, "campaigns.getCampaignInboxData");
+      return { campaign_emails: [], campaign_to_candidate_users: [] };
+    },
+    now: () => new Date("2026-09-03T12:01:00.000Z"),
+  });
+  assert.equal(refresh.catalog.targets[0].exact_project_id, "project-1");
+  assert.equal(refresh.catalog.targets[0].exact_project_source, "campaign.project_id");
+  assert.equal(refresh.snapshots[0].exact_project_id, "project-1");
+
+  const merged = mergeInboxRefreshState(emptyInboxSnapshotState(), refresh);
+  assert.equal(merged.catalog.targets[0].exact_project_id, "project-1");
+  assert.equal(merged.snapshots.get("sequence-project-only").exact_project_id, "project-1");
+  assert.equal(assembleInboxSnapshotFeed(merged).replies.length, 0);
+});
+
 test("Inbox refresh fans out the pinned unlinked curated-list sequence", async () => {
   const curatedId = OUTCOME_SEQUENCE_RULES[0].id;
   const inboxCalls = [];

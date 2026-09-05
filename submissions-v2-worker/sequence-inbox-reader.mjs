@@ -35,6 +35,11 @@ export async function reconcileSequenceInbox({
   });
   signal?.throwIfAborted?.();
   await assertCurrent();
+  const mappingCoverage = {
+    sourcing_role_mapping_status: batch.coverage.sourcing_role_mapping_status === "ready" ? "ready" : "unavailable",
+    sourcing_role_mapping_inventory_count: Math.max(0, Math.min(500, Number(batch.coverage.sourcing_role_mapping_inventory_count) || 0)),
+    sourcing_role_mapping_valid_record_count: Math.max(0, Math.min(500, Number(batch.coverage.sourcing_role_mapping_valid_record_count) || 0)),
+  };
   if (batch.coverage.catalog_changed || batch.coverage.watermark_changed) {
     // The cache gained an unscanned target or advanced its conservative
     // per-sequence watermark. Restart from the approved activation boundary;
@@ -52,6 +57,7 @@ export async function reconcileSequenceInbox({
       accepted: 0,
       existing: 0,
       cache: {
+        ...mappingCoverage,
         state: batch.coverage.cache_state,
         last_complete_at: batch.coverage.cache_last_complete_at,
         campaigns_targeted: batch.coverage.cache_campaigns_targeted,
@@ -85,6 +91,7 @@ export async function reconcileSequenceInbox({
       {
         retryable: true,
         details: {
+          ...mappingCoverage,
           cache_state: batch.coverage.cache_state || "unavailable",
           cache_last_complete_at: batch.coverage.cache_last_complete_at || null,
           cache_campaigns_targeted: Number(batch.coverage.cache_campaigns_targeted) || 0,
@@ -119,6 +126,7 @@ export async function reconcileSequenceInbox({
     accepted,
     existing,
     cache: {
+      ...mappingCoverage,
       state: batch.coverage.cache_state,
       last_complete_at: batch.coverage.cache_last_complete_at,
       campaigns_targeted: batch.coverage.cache_campaigns_targeted,
