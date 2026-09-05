@@ -19,9 +19,10 @@
 // not a profile-readiness gate: see FACTS_VERSION's note on fail-closed
 // matching in rules.mjs.
 
-import { degreeLevel } from "./degree.mjs";
+import { degreeLevel, degreeLevels } from "./degree.mjs";
 import { schoolInUS } from "./school-us.mjs";
 import { topSchoolGroup } from "./school-top.mjs";
+import { resolveSchoolCountryEvidence, locationExplicitlyNamesForeignCountry } from "./school-country-registry.mjs";
 
 /**
  * Bump when the shape changes in a way a stored rule could misread. The tick
@@ -29,6 +30,9 @@ import { topSchoolGroup } from "./school-top.mjs";
  * older shape, and the next prewarm rebuilds it.
  */
 export const FACTS_VERSION = 1;
+// NOT bumped for the additive countryEvidence/levels fields. The country
+// reader requires consistent, recognized evidence and skips old rows until
+// they are rebuilt; the degree reader still accepts a legacy scalar level.
 // NOT bumped when `location`/`inUS` were added on 2026-08-25. A bump makes the
 // tick skip EVERY stored record until the whole queue is re-warmed, which at
 // the measured 8-12 profiles per cycle would have taken the existing live rule
@@ -52,6 +56,21 @@ const str = (value) => {
 };
 
 const list = (value) => (Array.isArray(value) ? value : []);
+
+function schoolCountry(row) {
+  const location = row?.schoolLocation;
+  const foreign = locationExplicitlyNamesForeignCountry(location);
+  if (foreign) return { inUS: false, countryEvidence: { status: "foreign", source: "profile_location" } };
+  if (schoolInUS({ website: row?.schoolWebsite, location })) {
+    return { inUS: true, countryEvidence: { status: "us", source: "profile_location_or_website" } };
+  }
+  const evidence = resolveSchoolCountryEvidence({ name: row?.school, location, website: row?.schoolWebsite });
+  return evidence ? {
+    inUS: true,
+    countryEvidence: { status: "us", source: evidence.sourceURL, version: evidence.sourceVersion,
+      match: evidence.match, unitid: evidence.unitid },
+  } : { inUS: false, countryEvidence: { status: "unknown", source: null } };
+}
 
 /** Paraform dates are ISO strings or null. Returns epoch ms, or null. */
 const ms = (value) => {
@@ -118,6 +137,7 @@ export function factsFromProfile(profile, {
     name: str(row?.school),
     // Classified once, here, rather than once per rule per tick.
     level: degreeLevel(row?.degree),
+    levels: degreeLevels(row?.degree),
     degree: str(row?.degree),
     endYear: yearOf(row?.end),
     rank: str(row?.talentRank),
@@ -125,9 +145,10 @@ export function factsFromProfile(profile, {
     // Classified here for the same reason `level` is: once per profile rather
     // than once per rule per tick, and by ONE function so the preview, the
     // tick and the audit can never disagree about what "American" means.
-    // A school whose record carries neither a location nor a website is
-    // `false`, not unknown — see school-us.mjs on the tail that leaves.
-    inUS: schoolInUS({ website: row?.schoolWebsite, location: row?.schoolLocation }),
+    // A missing location/website can be resolved from the public institution
+    // registry; otherwise countryEvidence stays unknown and neither country
+    // condition can match it.
+    ...schoolCountry(row),
     // Which curated top-university list this school is on, or null. Derived
     // from the NAME (the one deliberate exception to id matching — see
     // school-top.mjs for why ids cannot express a world ranking).

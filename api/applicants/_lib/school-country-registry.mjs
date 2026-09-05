@@ -56,7 +56,7 @@ function safeWholeAlias(normalized) {
   return normalized.split(" ").filter(Boolean).length >= 2;
 }
 
-function locationExplicitlyNamesForeignCountry(location) {
+export function locationExplicitlyNamesForeignCountry(location) {
   const text = String(location ?? "").trim();
   if (!text) return false;
   // `locationNamesForeignCountry` intentionally requires a comma-delimited
