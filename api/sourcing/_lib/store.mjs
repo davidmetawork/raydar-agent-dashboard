@@ -18,6 +18,17 @@ const sourceCacheKey = (key) => `${PREFIX}:source:${key}`;
 const roleReadWindowKey = `${PREFIX}:paraform-role-read:window`;
 const mutationLockKey = (scope, id) => `${PREFIX}:lock:${scope}:${id}`;
 
+function pipelineErrorCategory(value) {
+  const text = String(value?.message || value?.code || value || "").toLowerCase();
+  if (/(?:quota|rate.?limit|throttl|too many requests)/u.test(text)) return "quota_limited";
+  if (/(?:request|response|payload).{0,80}(?:too large|size|max)|max(?:imum)?.{0,80}(?:request|response|size)/u.test(text)) return "size_limited";
+  if (/(?:noauth|unauth|auth(?:entication|orization)?|permission|forbidden|denied)/u.test(text)) return "auth_denied";
+  if (/(?:out of.{0,40}(?:memory|storage)|\boom\b|memory exhausted|storage exhausted|capacity)/u.test(text)) return "storage_exhausted";
+  if (/(?:read.?only|disabled|unsupported|unknown command|command not allowed)/u.test(text)) return "command_unsupported";
+  if (/(?:json|parse|malformed|invalid.{0,40}(?:format|response|shape))/u.test(text)) return "response_invalid";
+  return "command_rejected";
+}
+
 async function request(path, body) {
   if (!storeConfigured()) throw new Error("sourcing state store not configured");
   const response = await fetch(`${KV_URL}${path}`, {
@@ -27,7 +38,13 @@ async function request(path, body) {
     signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) throw new Error(`state store HTTP ${response.status}`);
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    const error = new Error("state store response was unreadable");
+    error.code = "STATE_STORE_RESPONSE_JSON_INVALID";
+    throw error;
+  }
 }
 
 export async function kv(args) {
@@ -39,8 +56,17 @@ export async function kv(args) {
 export async function pipeline(commands) {
   if (!commands.length) return [];
   const body = await request("/pipeline", commands);
-  return body.map((item) => {
-    if (item?.error) throw new Error(item.error);
+  if (!Array.isArray(body)) {
+    const error = new Error("state store pipeline response was invalid");
+    error.code = "STATE_STORE_PIPELINE_RESPONSE_SHAPE_INVALID";
+    throw error;
+  }
+  return body.map((item, index) => {
+    if (item?.error) {
+      const error = new Error("state store pipeline command was rejected");
+      error.code = `STATE_STORE_PIPELINE_COMMAND_${index}_${pipelineErrorCategory(item.error).toUpperCase()}`;
+      throw error;
+    }
     return item?.result ?? null;
   });
 }
