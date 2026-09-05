@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import { normalizeCandidateRow, trpcGet } from "../../paraai/_lib/core.mjs";
+import { paraformCandidateProfileUrl } from "./paraform-links.mjs";
 
 const clean = (value, limit = 1_000) => String(value ?? "").trim().slice(0, limit);
 const sourceShapeError = (code, message) => Object.assign(new Error(message), { code, retryable: true });
@@ -36,7 +37,7 @@ export function candidateIndexRow(raw, { env = process.env, confirmedAt = new Da
     candidate_id: clean(row?.candidate_id, 200) || null,
     display_name: name,
     search_key: normalizeSearch(name),
-    paraform_url: `https://www.paraform.com/candidates?candidate=${encodeURIComponent(id)}`,
+    paraform_url: paraformCandidateProfileUrl(id),
     linkedin_url: linkedin ? (linkedin.startsWith("http") ? linkedin : `https://www.linkedin.com/in/${encodeURIComponent(linkedin.replace(/^\/?in\//, ""))}`) : null,
     raydar_url: `/applicants?candidate=${encodeURIComponent(id)}`,
     owner_email: clean(row?.recruiter_email || row?.owner_email, 320).toLowerCase() || null,
@@ -154,6 +155,34 @@ export async function readCuratedCandidate(candidateUserId, { statusImpl = null,
   const rows = Object.entries(statuses).map(([role_id, status]) => ({ role_id: clean(role_id, 200), status: clean(status, 100).toUpperCase() }));
   if (rows.some((row) => !row.role_id || !row.status)) throw sourceShapeError("curated_status_row_invalid", "Paraform curated statuses returned a row without its required identity.");
   return rows;
+}
+
+// This read is intentionally separate from status collection: a candidate can have
+// several recruiter lists in the population response, while this endpoint proves
+// the one list that currently contains a particular role. The endpoint's
+// candidate_id field takes the recruiter-owned candidate user id.
+export async function readCuratedRoleList(candidateUserId, { listImpl = null, trpcGetImpl = trpcGet } = {}) {
+  const raw = listImpl
+    ? await listImpl(candidateUserId)
+    : await trpcGetImpl("curatedRoleList.getCandidateCuratedRoleList", { candidate_id: candidateUserId });
+  if (raw === null) return null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !clean(raw.id, 200)
+    || !Array.isArray(raw.roles)
+    || raw.roles.some((row) => !row || typeof row !== "object" || Array.isArray(row) || !clean(row.id || row.role_id || row.roleId, 200))) {
+    throw sourceShapeError("curated_role_list_shape_invalid", "Paraform curated role-list read returned an unrecognized success payload.");
+  }
+  return {
+    id: clean(raw.id, 200),
+    roles: raw.roles.map((row) => ({ id: clean(row.id || row.role_id || row.roleId, 200) })),
+  };
+}
+
+export function exactCuratedListSource(list, roleId, { listUrl } = {}) {
+  const requiredRoleId = clean(roleId, 200);
+  if (!list || !requiredRoleId || !Array.isArray(list.roles)
+    || !list.roles.some((row) => clean(row?.id, 200) === requiredRoleId)) return null;
+  const signalUrl = typeof listUrl === "function" ? listUrl(clean(list.id, 200)) : null;
+  return signalUrl ? { signal_url: signalUrl, source_link_kind: "curated_list_exact" } : null;
 }
 
 export async function readSelectableMeetings(candidateUserId, { trpcGetImpl = trpcGet } = {}) {

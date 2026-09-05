@@ -30,6 +30,27 @@ test("safe URL allowlist includes exact trusted subdomains only", () => {
   assert.equal(safeHttps("https://paraform.com.attacker.example/", ["paraform.com"]), null);
 });
 
+test("profile links immediately repair cached routes using resolved candidate user identity", () => {
+  const row = rowDto({ candidate_user_id: "candidate-user-1", candidate_id: "domain-candidate-2", candidate_url: "https://www.paraform.com/candidates?candidate=old" });
+  assert.equal(row.candidate_url, "https://www.paraform.com/candidates?candidate_profile_id=candidate-user-1");
+  assert.equal(rowDto({ provisional_name: "Same name", candidate_id: "domain-candidate-2" }).candidate_url, null);
+  assert.equal(rowDto({ candidate_user_id: "candidate&another=value" }).candidate_url, null);
+});
+
+test("admission sources identify the stored event and link only retained safe evidence", () => {
+  const signal_url = "https://www.paraform.com/lists/list-1";
+  assert.deepEqual(rowDto({ source_family: "curated", decisive_status: "APPLIED_TO_ROLE", signal_url }).admission_source,
+    { label: "Curated List interest", url: signal_url });
+  assert.deepEqual(rowDto({ source_family: "curated", decisive_status: "NOT_INTERESTED" }).admission_source,
+    { label: "Curated List decline", url: null });
+  assert.deepEqual(rowDto({ source_family: "email", email_source_family: "new_match", signal_url: "javascript:alert(1)" }).admission_source,
+    { label: "New Match reply", url: null });
+  assert.equal(rowDto({ source_family: "email", email_source_family: "para_ai_interview_request" }).admission_source.label, "Interview Request reply");
+  assert.equal(rowDto({ source_family: "email", email_source_family: "fit_follow_up_with_matches" }).admission_source.label, "Fit Follow Up reply");
+  assert.equal(rowDto({ source_family: "email", email_source_family: "paraform_sequence_reply" }).admission_source.label, "Sequence reply");
+  assert.deepEqual(rowDto({ source_family: "manual" }).admission_source, { label: "Added by recruiter", url: null });
+});
+
 test("Interested preparation rows expose safe progress without artifact actions", () => {
   const row = rowDto({
     pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",

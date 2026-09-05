@@ -3,6 +3,7 @@ import { database } from "./db.mjs";
 import { beginCommand, completeCommand, failCommand } from "./command-store.mjs";
 import { exactSlackChannel } from "./notifications.mjs";
 import { gmailSignalUrl } from "./presentation.mjs";
+import { isParaformCuratedListUrl } from "./paraform-links.mjs";
 
 const PAGE_STATES = new Set(["interested", "needs_review", "not_interested"]);
 const REVIEW_REASONS = new Set([
@@ -281,6 +282,12 @@ async function queueResume(tx, pair, commandRow, triggerKind = "initial") {
   });
 }
 
+function curatedSignalUrlFromObservation(observation = {}) {
+  if (clean(observation.source_link_kind, 100) !== "curated_list_exact") return null;
+  const value = clean(observation.signal_url, 2_000);
+  return isParaformCuratedListUrl(value) ? value : null;
+}
+
 function signalUrlFromEnvelope(envelope = {}) {
   const value = clean(envelope.signal_url, 2_000);
   return gmailSignalUrl(value) || (/^https:\/\/monitor\.raydar\.xyz\/master-inbox#conversation=[A-Za-z0-9._~%-]+$/.test(value) ? value : null);
@@ -430,6 +437,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               concat_ws(' · ', r.company_name, r.role_title) as role_label,
               r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles,
               se.envelope->>'signal_url' as signal_url,
+              se.source_family, se.envelope->>'source_family' as email_source_family,
+              se.envelope->>'decisive_status' as decisive_status,
               p.original_signal_at as signal_at, p.workflow_state,
               coalesce(rv.reasons, '[]'::jsonb) as review_reasons,
               '[]'::jsonb as resume_cautions, g.status as generation_status,
@@ -479,6 +488,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               offered.role_id, offered.company_snapshot as company_name, offered.role_label_snapshot as role_title,
               offered.role_label_snapshot as role_label, offered.role_url_snapshot as role_url,
               offered.count as offered_role_count, offered.roles as offered_roles, se.envelope->>'signal_url' as signal_url,
+              se.source_family, se.envelope->>'source_family' as email_source_family,
+              se.envelope->>'decisive_status' as decisive_status,
               se.received_at as signal_at, 'needs_review'::text as workflow_state,
               rv.reasons as review_reasons, '[]'::jsonb as resume_cautions, null::text as generation_status,
               'none'::text as submission_status, null::text as negative_reason, null::text as corrected_destination,
@@ -526,6 +537,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             c.paraform_profile_url as candidate_url, c.linkedin_url, c.raydar_url,
             p.role_id, r.company_name, r.role_title, concat_ws(' · ', r.company_name, r.role_title) as role_label,
             r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles, se.envelope->>'signal_url' as signal_url,
+              se.source_family, se.envelope->>'source_family' as email_source_family,
+              se.envelope->>'decisive_status' as decisive_status,
             ni.original_negative_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
             '[]'::jsonb as resume_cautions, null::text as generation_status, p.submission_status,
             ni.grounded_reason as negative_reason, ni.corrected_destination,
@@ -551,6 +564,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             c.paraform_profile_url as candidate_url, c.linkedin_url, c.raydar_url,
             p.role_id, r.company_name, r.role_title, concat_ws(' · ', r.company_name, r.role_title) as role_label,
             r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles, se.envelope->>'signal_url' as signal_url,
+              se.source_family, se.envelope->>'source_family' as email_source_family,
+              se.envelope->>'decisive_status' as decisive_status,
             p.original_signal_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
             coalesce(caution.cautions, '[]'::jsonb) as resume_cautions, g.status as generation_status,
             g.stage as generation_stage, g.safe_error_code as preparation_error_code,
@@ -1839,6 +1854,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         input: { pairId, expectedVersion },
       }, async (commandRow) => {
         const current = await lockPair(tx, pairId, expectedVersion);
+        if (current.submission_status === "proven") throw problem("proven_pair_immutable", "This candidate-role submission is already proven.", 409, pairCurrent(current));
         if (current.workflow_state !== "interested" || !current.current_artifact_id) throw problem("pair_not_submit_ready", "Only an Interested candidate with a ready resume can be submitted.", 409, pairCurrent(current));
         const artifacts = await tx`
           select id from submissions_v2.resume_artifacts
@@ -2797,6 +2813,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             results.push({ candidate_user_id: observation.candidate_user_id, role_id: observation.role_id, applied: false, existing_claim: true });
             continue;
           }
+          const curatedSignalUrl = curatedSignalUrlFromObservation(observation);
           const source = (await tx`
             insert into submissions_v2.source_events(
               source_family, source_version, event_id, provider, direction, received_at,
@@ -2805,7 +2822,12 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               'curated', 'submissions.curated.v1', ${curatedEventId},
               'paraform', 'observed', ${pendingObservedAt}, ${pendingDigest}, 'resolved', clock_timestamp(),
               ${`curated:${observation.candidate_user_id}:${observation.role_id}:${pendingDigest}`},
-              ${tx.json({ prior_status: prior.last_confirmed_status, decisive_status: pendingStatus })}
+              ${tx.json({
+                prior_status: prior.last_confirmed_status, decisive_status: pendingStatus,
+                ...(curatedSignalUrl
+                  ? { signal_url: curatedSignalUrl, source_link_kind: "curated_list_exact" }
+                  : {}),
+              })}
             ) returning *
           `)[0];
           await tx`
@@ -3115,16 +3137,29 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       });
     },
 
-    async openedPairsForProof({ limit = 100, before = null } = {}) {
-      return sql`
-        select p.id, p.candidate_user_id, p.role_id, p.state_version, p.submission_opened_at,
-               p.submission_status, r.destination_url
+    async pairsForSubmissionProofPage({ limit = 8, cursor = null } = {}) {
+      const take = boundedLimit(limit, 8, 8);
+      const after = decodeCursor(cursor);
+      const rows = await sql`
+        select p.id, p.candidate_user_id, p.role_id, p.state_version, p.original_signal_at,
+               p.submission_opened_at, p.submission_status, r.destination_url
           from submissions_v2.candidate_role_pairs p
           left join submissions_v2.role_index r on r.role_id=p.role_id
-         where p.submission_status='opened' and p.workflow_state='interested' and p.case_hidden_at is null
-           and (${before}::timestamptz is null or p.submission_opened_at < ${before}::timestamptz)
-         order by p.submission_opened_at, p.id limit ${boundedLimit(limit, 100, 100)}
+         where p.submission_status <> 'proven' and p.workflow_state in ('preparing_resume','interested')
+           and p.case_hidden_at is null
+           and (${after?.at || null}::timestamptz is null
+             or (p.original_signal_at, p.id) > (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
+         order by p.original_signal_at, p.id limit ${take + 1}
       `;
+      const hasMore = rows.length > take;
+      const visible = rows.slice(0, take);
+      return {
+        rows: visible,
+        next_cursor: hasMore && visible.length
+          ? encodeCursor({ sort_at: visible.at(-1).original_signal_at, sort_id: visible.at(-1).id })
+          : null,
+        cycle_complete: !hasMore,
+      };
     },
 
     async updateResumeGeneration({ generationId, fromStatuses = [], status, stage, spentCents = null, safeFailureCode = null, safeFailureDetail = null, executionFence }) {
@@ -3348,8 +3383,15 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       return sql.begin(async (tx) => {
         await assertWorkerFence(tx, executionFence, "ingestion");
         const pair = (await tx`select * from submissions_v2.candidate_role_pairs where id=${pairId} for update`)[0];
-        if (!pair || pair.workflow_state !== "interested" || pair.case_hidden_at) throw problem("proof_pair_invalid", "Submission proof must bind to a visible Interested candidate-role item.", 409);
+        if (!pair || pair.case_hidden_at) throw problem("proof_pair_invalid", "Submission proof must bind to a visible Interested candidate-role item.", 409);
         if (pair.submission_status === "proven") return pair;
+        if (!["preparing_resume", "interested"].includes(pair.workflow_state)) throw problem("proof_pair_invalid", "Submission proof must bind to a visible Interested candidate-role item.", 409);
+        const activeGeneration = (await tx`
+          select id from submissions_v2.resume_generations
+           where pair_id=${pairId}
+             and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
+        `)[0];
+        const preserveVersion = pair.workflow_state === "preparing_resume" || Boolean(activeGeneration);
         await tx`
           insert into submissions_v2.submission_proofs(pair_id, application_id, authoritative_path, evidence_digest, observed_at, source_checked_at)
           values (${pairId}, ${applicationId}, ${authoritativePath}, ${evidenceDigest}, ${observedAt}, ${checkedAt})
@@ -3358,10 +3400,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         const updated = (await tx`
           update submissions_v2.candidate_role_pairs
              set submission_status='proven', submission_proven_at=${observedAt}, submission_application_id=${applicationId},
-                 submission_authoritative_path=${authoritativePath}, submission_evidence_digest=${evidenceDigest}, state_version=state_version+1
+                 submission_authoritative_path=${authoritativePath}, submission_evidence_digest=${evidenceDigest},
+                 state_version=state_version+${preserveVersion ? 0 : 1}
            where id=${pairId} and state_version=${pair.state_version} returning *
         `)[0];
-        await pairEvent(tx, updated, { actorType: "worker", actorId, source: "proof_reconcile", eventType: "submission_proven", expectedVersion: Number(pair.state_version), previous: pair, idempotencyKey: `pair:proof:${pairId}:${applicationId}`, metadata: { application_id: applicationId, authoritative_path: authoritativePath } });
+        await pairEvent(tx, updated, { actorType: "worker", actorId, source: "proof_reconcile", eventType: "submission_proven", expectedVersion: preserveVersion ? null : Number(pair.state_version), previous: pair, idempotencyKey: `pair:proof:${pairId}:${applicationId}`, metadata: { application_id: applicationId, authoritative_path: authoritativePath, state_version_unchanged: preserveVersion, active_generation_id: activeGeneration?.id || null } });
         return updated;
       });
     },
@@ -3650,5 +3693,5 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
 }
 
 export const repositoryInternals = Object.freeze({
-  boundedLimit, deletionSnapshot, sameSnapshot, signalUrlFromEnvelope, pairAdvisoryLockKey, REVIEW_REASONS,
+  boundedLimit, curatedSignalUrlFromObservation, deletionSnapshot, sameSnapshot, signalUrlFromEnvelope, pairAdvisoryLockKey, REVIEW_REASONS,
 });

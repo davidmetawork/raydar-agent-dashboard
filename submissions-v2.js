@@ -1,6 +1,6 @@
 "use strict";
 
-import { commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "/submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, resumeUiState } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -176,7 +176,8 @@ function rowIdentity(row) {
 function cautionButton(row) {
   const cautions = Array.isArray(row.resume_cautions) ? row.resume_cautions : [];
   if (!cautions.length) return "";
-  return `<button class="icon-button warning caution" type="button" data-id="${esc(row.case_id)}" aria-label="Resume source caution" title="Resume source caution">!</button>`;
+  const label = cautions.length === 1 ? "Resume note" : `Resume notes (${cautions.length})`;
+  return `<button class="button text caution caution-control" type="button" data-id="${esc(row.case_id)}" aria-label="${esc(label)}" title="${esc(label)}">${esc(label)}</button>`;
 }
 
 function resumeProgressHtml(row) {
@@ -193,7 +194,9 @@ function resumeProgressHtml(row) {
   };
   const failed = ["failed", "cancelled", "held"].includes(resume.status);
   const label = failed ? "Resume preparation needs attention" : (labels[resume.status] || "Preparing resume");
-  const detail = row.preparation_error_detail || (resume.hasArtifact ? "Prior resume is still available." : "Download and Submit unlock when the resume is ready.");
+  const detail = row.preparation_error_detail || (resume.hasArtifact ? "Prior resume is still available."
+    : row.submission_status === "proven" ? "The submission is recorded; download unlocks when the resume is ready."
+      : "Download and Submit unlock when the resume is ready.");
   return `<div class="resume-progress" role="status"><span class="progress-dot" aria-hidden="true"></span><span>${esc(label)}${resume.hasArtifact ? " · updating" : ""}</span><small>${esc(detail)}</small></div>`;
 }
 
@@ -218,7 +221,8 @@ function interestedActions(row) {
 
 function reviewActions(row) {
   const ageHours = Math.max(0, (Date.now() - Date.parse(row.signal_at || "")) / 3600000);
-  return `<div class="review-actions"><span class="review-age${ageHours >= 24 ? " old" : ""}">${ageHours >= 24 ? `${Math.floor(ageHours)}h` : ""}</span><button class="icon-button review-triangle review-reasons" data-id="${esc(row.case_id || row.signal_id)}" type="button" aria-label="Needs review" title="Needs review"></button><button class="button secondary review-action" data-id="${esc(row.case_id || row.signal_id)}" type="button">${esc(row.primary_action_label || "Review")}</button></div>`;
+  const submitted = row.submission_status === "proven" ? '<span class="submitted-label">SUBMITTED</span>' : "";
+  return `<div class="review-actions">${submitted}<span class="review-age${ageHours >= 24 ? " old" : ""}">${ageHours >= 24 ? `${Math.floor(ageHours)}h` : ""}</span><button class="icon-button review-triangle review-reasons" data-id="${esc(row.case_id || row.signal_id)}" type="button" aria-label="Needs review" title="Needs review"></button><button class="button secondary review-action" data-id="${esc(row.case_id || row.signal_id)}" type="button">${esc(row.primary_action_label || "Review")}</button></div>`;
 }
 
 function reviewSummaryHtml(row) {
@@ -230,6 +234,18 @@ function reviewSummaryHtml(row) {
   return `<div class="review-summary"><span class="review-summary-label">Reason</span><strong>${esc(label)}</strong><span>${esc(detail)}</span><span class="review-summary-next">Next: ${esc(next)}</span></div>`;
 }
 
+function admissionSourceHtml(row) {
+  const source = admissionSourcePresentation(row.admission_source);
+  const href = safeUrl(source.url, URL_HOSTS.signal);
+  if (source.label) return href
+    ? `<a class="signal-link admission-source" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(source.label)}</a>`
+    : `<span class="admission-source unavailable">${esc(source.label)}</span>`;
+  const legacyHref = safeUrl(row.signal_url, URL_HOSTS.signal);
+  return legacyHref
+    ? `<a class="signal-link admission-source" href="${esc(legacyHref)}" target="_blank" rel="noopener noreferrer">Source link</a>`
+    : '<span class="role-muted">Source unavailable</span>';
+}
+
 function negativeActions(row) {
   return row.corrected_destination
     ? `<span class="submitted-label">Corrected to ${esc(PAGE_LABELS[row.corrected_destination] || row.corrected_destination)}</span>`
@@ -238,8 +254,7 @@ function negativeActions(row) {
 
 function rowHtml(row) {
   const role = row.company && row.role_title ? `${row.company} · ${row.role_title}` : row.role_label || (row.offered_role_count > 1 ? "Multiple offered roles" : "Role not identified");
-  const signalUrl = safeUrl(row.signal_url, URL_HOSTS.signal);
-  const signal = signalUrl ? `<a class="signal-link" href="${esc(signalUrl)}" target="_blank" rel="noopener noreferrer">Signal</a>` : '<span class="role-muted">Signal unavailable</span>';
+  const signal = admissionSourceHtml(row);
   const reason = STATE.page === "not_interested" ? `<div class="reason-line">${esc(row.negative_reason || "No reason provided")}</div>` : "";
   const actions = STATE.page === "interested" ? interestedActions(row) : STATE.page === "needs_review" ? reviewActions(row) : negativeActions(row);
   const progress = STATE.page === "interested" ? resumeProgressHtml(row) : "";

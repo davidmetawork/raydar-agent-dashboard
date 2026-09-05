@@ -125,6 +125,7 @@ test("migrations are digest-checked and idempotent", async () => {
     "012_runtime_control_read_lock.sql",
     "013_worker_source_control_check.sql",
     "014_api_review_binding_source_offers.sql",
+    "015_proof_during_resume_preparation.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count
@@ -137,6 +138,150 @@ test("migrations are digest-checked and idempotent", async () => {
   const purgeRole = (await sql`select 1 as present from pg_roles where rolname='submissions_v2_purge'`)[0];
   if (purgeRole) {
     assert.equal((await sql`select has_function_privilege('submissions_v2_purge', 'submissions_v2.set_runtime_controls(text,text,boolean,boolean,boolean,boolean,boolean)', 'EXECUTE') as allowed`)[0].allowed, false);
+  }
+});
+
+test("authoritative submission proof may persist while resume preparation remains fenced", async () => {
+  const prior = await readRuntimeControls(sql);
+  const enabled = await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz",
+    reason: "Enable focused submission-proof lifecycle regression",
+    ui: true,
+    ingestion: true,
+    generation: true,
+    masterInbox: prior.master_inbox_enabled,
+    curated: prior.curated_enabled,
+  }, sql);
+  const rollback = new Error("rollback focused proof fixture");
+  try {
+    await assert.rejects(sql.begin(async (tx) => {
+      const sourceId = randomUUID();
+      const pairId = randomUUID();
+      const proofJobId = randomUUID();
+      const initialGenerationId = randomUUID();
+      const transactionSql = (strings, ...values) => tx(strings, ...values);
+      transactionSql.begin = async (callback) => callback(transactionSql);
+      transactionSql.json = tx.json;
+      transactionSql.array = tx.array;
+      const repository = createRepository({ sql: transactionSql });
+      await tx`
+        insert into submissions_v2.source_events(
+          id, source_family, source_version, event_id, received_at, content_digest, idempotency_key, envelope
+        ) values (
+          ${sourceId}, 'manual', 'manual.v1', ${`event-${sourceId}`}, clock_timestamp(),
+          ${digest(sourceId)}, ${`source:${sourceId}`}, '{}'::jsonb
+        )
+      `;
+      await tx`
+        insert into submissions_v2.jobs(
+          id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+          state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+        ) values (
+          ${proofJobId}, 'proof_reconcile', 'source', 'submission_proof', ${`proof:${proofJobId}`}, 'ingestion',
+          ${enabled.control_epoch}, 'running', 'proof-worker', clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+        )
+      `;
+      await tx`
+        insert into submissions_v2.candidate_role_pairs(
+          id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state, original_signal_at
+        ) values (
+          ${pairId}, 'candidate-proof-preparing', 'role-proof-preparing', ${sourceId},
+          'interested', 'preparing_resume', clock_timestamp()
+        )
+      `;
+      await tx`
+        insert into submissions_v2.resume_generations(
+          id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+          expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+          validator_model_pin, prompt_pin, template_pin, deadline_at
+        ) values (
+          ${initialGenerationId}, ${pairId}, 1, 'initial', ${`generation:${initialGenerationId}`},
+          'validating', 'validate', 1, ${sourceId}, 'primary-test', 'fallback-test',
+          'validator-test', 'prompt-test', 'template-test', clock_timestamp() + interval '5 minutes'
+        )
+      `;
+      const updated = await repository.applySubmissionProof({
+        pairId,
+        applicationId: "application-proof-preparing",
+        authoritativePath: "application.getRecruiterApplicationData",
+        evidenceDigest: "a".repeat(64),
+        observedAt: new Date().toISOString(),
+        checkedAt: new Date().toISOString(),
+        executionFence: { jobId: proofJobId, workerId: "proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+      });
+      assert.equal(updated.workflow_state, "preparing_resume");
+      assert.equal(updated.submission_status, "proven");
+      assert.equal(Number(updated.state_version), 1);
+
+      const failed = await repository.failResumeGeneration({
+        generationId: initialGenerationId,
+        reasonCode: "candidate_original_resume_missing",
+        safeDetail: "Focused proof lifecycle fixture.",
+      });
+      assert.equal(failed.workflow_state, "needs_review");
+      assert.equal(failed.submission_status, "proven");
+      assert.equal(Number(failed.state_version), 2);
+      const retry = await repository.enqueuePairAction({
+        actorEmail: "admin@raydar.xyz",
+        idempotencyKey: `proof-retry:${randomUUID()}`,
+        pairId,
+        expectedVersion: 2,
+        action: "retry_preparation",
+        kind: "prepare_resume",
+        requiredControl: "generation",
+        checkpoint: { trigger_kind: "retry" },
+      });
+      assert.ok(retry.job_id);
+      assert.equal((await repository.pair(pairId)).submission_status, "proven");
+
+      const regeneratingPairId = randomUUID();
+      const activeGenerationId = randomUUID();
+      await tx`
+        insert into submissions_v2.candidate_role_pairs(
+          id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+          original_signal_at, current_artifact_id, resume_ready_at
+        ) values (
+          ${regeneratingPairId}, 'candidate-proof-regenerating', 'role-proof-regenerating', ${sourceId},
+          'interested', 'interested', clock_timestamp(), ${randomUUID()}, clock_timestamp()
+        )
+      `;
+      await tx`
+        insert into submissions_v2.resume_generations(
+          id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+          expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+          validator_model_pin, prompt_pin, template_pin, deadline_at
+        ) values (
+          ${activeGenerationId}, ${regeneratingPairId}, 1, 'regenerate', ${`generation:${activeGenerationId}`},
+          'validating', 'validate', 1, ${sourceId}, 'primary-test', 'fallback-test',
+          'validator-test', 'prompt-test', 'template-test', clock_timestamp() + interval '5 minutes'
+        )
+      `;
+      const regenerating = await repository.applySubmissionProof({
+        pairId: regeneratingPairId,
+        applicationId: "application-proof-regenerating",
+        authoritativePath: "application.getRecruiterApplicationData",
+        evidenceDigest: "b".repeat(64),
+        observedAt: new Date().toISOString(),
+        checkedAt: new Date().toISOString(),
+        executionFence: { jobId: proofJobId, workerId: "proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+      });
+      assert.equal(Number(regenerating.state_version), 1);
+      assert.equal(regenerating.submission_status, "proven");
+      assert.equal(Number((await tx`
+        select expected_pair_version from submissions_v2.resume_generations where id=${activeGenerationId}
+      `)[0].expected_pair_version), 1);
+      throw rollback;
+    }), (error) => error === rollback);
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz",
+      reason: "Restore controls after focused submission-proof lifecycle regression",
+      ui: prior.ui_enabled,
+      ingestion: prior.ingestion_enabled,
+      generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled,
+      curated: prior.curated_enabled,
+    }, sql);
   }
 });
 
@@ -166,12 +311,20 @@ test("the pure state contract rejects invalid and stale pair transitions", () =>
     ...current,
     workflow_state: "interested",
   }), /current artifact/);
-  assert.throws(() => assertPairState({
-    ...next,
-    submission_status: "proven",
-    workflow_state: "needs_review",
-    intent_state: "unclear",
-  }), /proven submission/);
+  const provenPreparing = { ...current, submission_status: "proven" };
+  assertPairState(provenPreparing);
+  const provenReview = nextPairState(provenPreparing, { workflow_state: "needs_review" }, 4);
+  const provenRetry = nextPairState(provenReview, { workflow_state: "preparing_resume" }, 5);
+  const provenReady = nextPairState(provenRetry, {
+    workflow_state: "interested",
+    current_artifact_id: randomUUID(),
+    resume_ready_at: new Date().toISOString(),
+  }, 6);
+  assert.equal(provenReady.submission_status, "proven");
+  assert.throws(() => nextPairState(provenReady, {
+    intent_state: "not_interested",
+    workflow_state: "not_interested",
+  }, 7), /positive intent|cannot be reclassified/);
 });
 
 test("source evidence is replay-safe and immutable while processing state may advance", async () => {

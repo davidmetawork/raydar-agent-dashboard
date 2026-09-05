@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 92,
-  "digest": "293e1d3709285ee88666c7fa1fe05c968f8fc787c6c9630506e12ac662cc0096",
+  "file_count": 94,
+  "digest": "969c2eac045aab8e7bd819ee63d0c58395daae95d06603f58a3570ed05d7b2f9",
   "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
   "files": [
     {
@@ -114,12 +114,16 @@
       "sha256": "6c2debebd8ce80b75dcb3ad59db1e3fe98c670be3a99448ff3d26b6f967ddf31"
     },
     {
+      "path": "api/submissions-v2/_lib/paraform-links.mjs",
+      "sha256": "a162628ca51b50b3ec0a90ca252321427d4fe60d4bf73f668088a79cd1e045a5"
+    },
+    {
       "path": "api/submissions-v2/_lib/paraform-sources.mjs",
-      "sha256": "5b262426a1fab5a6a98f61caad020ad92abe026d5f313d040a3a8e404d1967f2"
+      "sha256": "8a1b366a978682d4ae9e49685c93bd09253df1f38c954ea90520fef97a026fb5"
     },
     {
       "path": "api/submissions-v2/_lib/presentation.mjs",
-      "sha256": "c5dc8676de6dc7a3f0975400a1c5cdc81fd05b6535354e73b27ffbc5ec40d01c"
+      "sha256": "b0c1e5113552432c2710fa0ea5c3bca21cbfa7886c75b885030dbc7f07e05ea6"
     },
     {
       "path": "api/submissions-v2/_lib/private-data.mjs",
@@ -127,7 +131,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "e2eb44ef607be6afba76233dda9c8a9f33cb4ebd5fd0b1cd8293fb575feaaf6d"
+      "sha256": "2e96aeca19d556f599778709e739a7e2ba92bc5f2ca86be3e240693aee5cad19"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -195,7 +199,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/state.mjs",
-      "sha256": "7008fd2b0b06fb3a1985c72f9c6bb1b95d0bc1b3f1f14eeefc4361f6b5dd4a25"
+      "sha256": "9a87195ad6ed6e62c91535c9aea4fa0b23b5109bc244a1b079bf17824e7d608c"
     },
     {
       "path": "migrations/submissions-v2/001_foundation.sql",
@@ -252,6 +256,10 @@
     {
       "path": "migrations/submissions-v2/014_api_review_binding_source_offers.sql",
       "sha256": "81b2c147ec97b9dc192671edbd2f25f8ab1c21e58ed3b78234b0f246cc0762d8"
+    },
+    {
+      "path": "migrations/submissions-v2/015_proof_during_resume_preparation.sql",
+      "sha256": "2bb043f9b0cbc0745b5a7a3e3be6ee6e83cefe7a9cb9dd32bc73d10b9b5824d8"
     },
     {
       "path": "package-lock.json",
@@ -311,7 +319,7 @@
     },
     {
       "path": "submissions-v2-ui-state.mjs",
-      "sha256": "ea68752c2f7912c68de28b6a302e20b89aeb2bf81de1cf0351d5ac462673dbd1"
+      "sha256": "bb25d85f0c6458021144990afc999bf5eb772ab1abff346676397878382cdf1f"
     },
     {
       "path": "submissions-v2-worker/Dockerfile",
@@ -331,7 +339,7 @@
     },
     {
       "path": "submissions-v2-worker/proof-reader.mjs",
-      "sha256": "dbc04b0f32af95052761783df5dfda0a2044add767a52b25c1d8db6364051496"
+      "sha256": "71fa62637dc014171c0ccc05399c7ffad16da42cc0aefd345a47204c10690475"
     },
     {
       "path": "submissions-v2-worker/repair-role-evidence.mjs",
@@ -355,11 +363,11 @@
     },
     {
       "path": "submissions-v2-worker/worker-handlers.mjs",
-      "sha256": "3da74a322396f3ed19236ebab6c9b756c1774b5341d36439cca3fb471a5378a6"
+      "sha256": "642b7e927d73eb276c93d09474aa0da370182f3881b7ede7dd90592ed814f83e"
     },
     {
       "path": "submissions-v2.css",
-      "sha256": "944f1645d815b50dd5c0f659b2da7bdc04d9b75e040b1f5e8a3222a73486964e"
+      "sha256": "6272448dc9940cd1ccd6c96177bdf5921d71ca506227273a5f1402136f30f964"
     },
     {
       "path": "submissions-v2.html",
@@ -367,7 +375,7 @@
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "496da0a51a3c676d3d35d1eaf70d97bc91fc1539af117867d923b9c438ac0364"
+      "sha256": "95fc9ab71915dd4e5d5b8ec9af31d2839c22f0b0723f127f9358b8e5cff79e9e"
     },
     {
       "path": "vercel.json",

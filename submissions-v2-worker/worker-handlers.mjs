@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { claimSourceCursor, commitSourceCursor, database, releaseSourceCursor } from "../api/submissions-v2/_lib/db.mjs";
 import { createRepository } from "../api/submissions-v2/_lib/repository.mjs";
 import { createService } from "../api/submissions-v2/_lib/service.mjs";
-import { readActiveRoleIndex, readCandidateIndexPage, readCuratedCandidate, readCuratedPopulation } from "../api/submissions-v2/_lib/paraform-sources.mjs";
+import { exactCuratedListSource, readActiveRoleIndex, readCandidateIndexPage, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList } from "../api/submissions-v2/_lib/paraform-sources.mjs";
+import { paraformCuratedListUrl } from "../api/submissions-v2/_lib/paraform-links.mjs";
 import { curatedBatchPlan } from "../api/submissions-v2/_lib/curated.mjs";
 import { notificationText, postSafeNotification } from "../api/submissions-v2/_lib/notifications.mjs";
 import { exactSlackChannel } from "../api/submissions-v2/_lib/notifications.mjs";
@@ -113,6 +114,7 @@ export function createWorkerHandlers({
   activeRoles = readActiveRoleIndex,
   curatedPopulation = readCuratedPopulation,
   curatedCandidate = readCuratedCandidate,
+  curatedRoleList = readCuratedRoleList,
   collectSources = collectResumeSourceBundle,
   extractPdf = extractPdfWithRenderer,
   masterInbox = reconcileMasterInbox,
@@ -512,17 +514,47 @@ export function createWorkerHandlers({
       const cursor = Number(claimed.checkpoint?.cursor || 0);
       const plan = curatedBatchPlan(population, { cursor, batchSize: 100, maxBatch: 120 });
       const observedAt = now().toISOString();
+      const seed = !claimed.last_full_success_at;
       const observations = [];
       for (const [index, candidate] of plan.rows.entries()) {
         if (index) await sleepImpl(1_500);
         await context.checkpoint({ ...context.job.checkpoint, stage: "curated_read", cursor, batch_offset: index });
         const candidateUserId = String(candidate.candidateUserId);
         const statuses = await curatedCandidate(candidateUserId);
-        for (const status of statuses) observations.push({ candidate_user_id: candidateUserId, role_id: status.role_id, status: status.status, observed_at: observedAt, digest: createHash("sha256").update(`${candidateUserId}:${status.role_id}:${status.status}:${observedAt}`).digest("hex") });
+        const decisive = statuses.some((status) => ["APPLIED_TO_ROLE", "NOT_INTERESTED"].includes(status.status));
+        let freshlyDecisiveRoleIds = new Set();
+        let curatedList = null;
+        if (!seed && decisive) {
+          // A list link is optional provenance. Do not spend another provider read
+          // for seeded, unchanged, or historical-pending status rows.
+          const snapshots = await repository.curatedSnapshots(candidateUserId).catch(() => null);
+          if (Array.isArray(snapshots)) {
+            const priorByRole = new Map(snapshots.map((snapshot) => [String(snapshot?.role_id || ""), snapshot]));
+            freshlyDecisiveRoleIds = new Set(statuses.filter((status) => {
+              const prior = priorByRole.get(status.role_id);
+              return ["APPLIED_TO_ROLE", "NOT_INTERESTED"].includes(status.status)
+                && prior?.resolved === true && prior.last_confirmed_status !== status.status;
+            }).map((status) => status.role_id));
+            if (freshlyDecisiveRoleIds.size) {
+              // A failed detail read never blocks decisive-status admission.
+              curatedList = await curatedRoleList(candidateUserId).catch(() => null);
+            }
+          }
+        }
+        for (const status of statuses) {
+          const exactSource = freshlyDecisiveRoleIds.has(status.role_id)
+            ? exactCuratedListSource(curatedList, status.role_id, { listUrl: paraformCuratedListUrl })
+            : null;
+          observations.push({
+            candidate_user_id: candidateUserId, role_id: status.role_id, status: status.status, observed_at: observedAt,
+            digest: createHash("sha256").update(`${candidateUserId}:${status.role_id}:${status.status}:${observedAt}`).digest("hex"),
+            ...(exactSource || {}),
+          });
+        }
       }
       await context.checkpoint({ ...context.job.checkpoint, stage: "curated_read_complete", cursor, observation_count: observations.length });
       const applied = await repository.applyCuratedObservations(observations, {
-        seed: !claimed.last_full_success_at,
+        seed,
         executionFence: executionFence(context),
         sourceFence: sourceFence(context, sourceKey, claimed),
       });
@@ -539,16 +571,38 @@ export function createWorkerHandlers({
   };
 
   result.proof_reconcile = async (context) => {
-    const pairs = context.job.subject_type === "pair"
-      ? [await repository.pair(context.job.subject_id)].filter(Boolean)
-      : await repository.openedPairsForProof({ limit: 100 });
-    if (!pairs.length) {
-      await repository.recordSourceHealth({ sourceKey: "submission_proof", enabled: true, success: true });
-      return { checkpoint: { stage: "proof_complete", checked_count: 0, proven_count: 0 } };
-    }
+    const sourceKey = "submission_proof";
+    const targeted = context.job.subject_type === "pair";
+    let claimed = null;
     try {
+      let page;
+      if (targeted) {
+        const pair = await repository.pair(context.job.subject_id);
+        page = {
+          rows: [pair].filter((row) => row && row.submission_status !== "proven"),
+          next_cursor: null,
+          cycle_complete: false,
+        };
+      } else {
+        await ensureSourceCursor(sql, sourceKey);
+        claimed = await sourceLease.claimSourceCursor({
+          sourceKey,
+          workerId: context.workerId,
+          leaseSeconds: 300,
+          controlEpoch: context.controlEpoch,
+        }, sql);
+        if (!claimed) return { checkpoint: { stage: "proof_coalesced" } };
+        page = await repository.pairsForSubmissionProofPage({
+          limit: 8,
+          cursor: claimed.checkpoint?.cursor || null,
+        });
+        if (!page || !Array.isArray(page.rows) || typeof page.cycle_complete !== "boolean") {
+          throw new ResumePipelineError("submission_proof_page_shape_invalid", "Submission proof selection did not return a valid bounded page.");
+        }
+      }
+      const pairs = page.rows;
       await context.checkpoint({ ...context.job.checkpoint, stage: "proof_read", pair_count: pairs.length });
-      const proofs = await proofReader(pairs, { now: now(), env });
+      const proofs = pairs.length ? await proofReader(pairs, { now: now(), env }) : [];
       if (!Array.isArray(proofs)) throw new ResumePipelineError("submission_proof_shape_invalid", "Submission proof reconciliation did not return an authoritative result.");
       await context.checkpoint({ ...context.job.checkpoint, stage: "proof_read_complete", pair_count: pairs.length, proof_count: proofs.length });
       let proven = 0;
@@ -557,10 +611,39 @@ export function createWorkerHandlers({
         await repository.applySubmissionProof({ ...proof, executionFence: executionFence(context) });
         proven += 1;
       }
-      await repository.recordSourceHealth({ sourceKey: "submission_proof", enabled: true, success: true });
-      return { checkpoint: { stage: "proof_complete", checked_count: pairs.length, proven_count: proven } };
+      if (claimed) {
+        const nextCheckpoint = { cursor: page.next_cursor || null };
+        const committed = await sourceLease.commitSourceCursor({
+          sourceKey,
+          workerId: context.workerId,
+          fencingToken: claimed.fencing_token,
+          controlEpoch: context.controlEpoch,
+          checkpoint: nextCheckpoint,
+          fullSuccess: page.cycle_complete,
+        }, sql);
+        if (!committed) throw new ResumePipelineError("submission_proof_cursor_fence_lost", "Submission proof reconciliation lost its source cursor fence.");
+        if (page.cycle_complete) {
+          await repository.recordSourceHealth({ sourceKey, enabled: true, success: true });
+        }
+      }
+      return {
+        checkpoint: {
+          stage: targeted ? "proof_complete" : "proof_batch_complete",
+          checked_count: pairs.length,
+          proven_count: proven,
+          ...(targeted ? {} : { cursor: page.next_cursor || null, cycle_complete: page.cycle_complete }),
+        },
+      };
     } catch (error) {
-      await repository.recordSourceHealth({ sourceKey: "submission_proof", enabled: true, delayed: true, errorClass: clean(error?.code, 120) || "submission_proof_failed", safeDetail: "Submission proof reconciliation has not completed successfully." }).catch(() => {});
+      if (claimed) {
+        await sourceLease.releaseSourceCursor({
+          sourceKey,
+          workerId: context.workerId,
+          fencingToken: claimed.fencing_token,
+          controlEpoch: context.controlEpoch,
+        }, sql).catch(() => {});
+      }
+      await repository.recordSourceHealth({ sourceKey, enabled: true, delayed: true, errorClass: clean(error?.code, 120) || "submission_proof_failed", safeDetail: "Submission proof reconciliation has not completed successfully." }).catch(() => {});
       throw sourceError(error, "submission_proof_reconcile_failed");
     }
   };
