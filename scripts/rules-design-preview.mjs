@@ -15,7 +15,13 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import { DEGREE_LEVELS, DEGREE_LEVEL_LABELS } from "../api/applicants/_lib/degree.mjs";
+import {
+  compileFundedEmployerSnapshot,
+  loadFundedEmployerSnapshots,
+  readFundedEmployerCatalog,
+} from "../api/applicants/_lib/funded-employers.mjs";
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
+import { K } from "../api/applicants/_lib/kv.mjs";
 import { ruleInterviewSkipReason } from "../api/applicants/_lib/rule-interview-eligibility.mjs";
 import {
   FIELD_GROUPS,
@@ -27,6 +33,8 @@ import {
 
 const ROOT = normalize(join(fileURLToPath(new URL(".", import.meta.url)), ".."));
 const FIXTURE_EMAIL = "local-rules-fixture@raydar.invalid";
+const FUNDED_SNAPSHOT_ID = "local-funded-companies-2026-09-05";
+const SOURCE_PAYLOAD_DIGEST = "f".repeat(64);
 const generation = Object.freeze({
   generationId: "local-rules-design-fixture-v1",
   digest: "local-fixture-no-production-data",
@@ -40,6 +48,20 @@ const roles = Object.freeze([
   ["role-product", "Product Designer", "Cinder Studio"],
   ["role-ops", "Recruiting Operations Lead", "Juniper Health"],
 ]);
+
+function fundedHistoryBeyondRuleCap() {
+  return [
+    { companyId: "company-anthropic", companyName: "Anthropic", roleTitle: "Machine Learning Engineer", start: "2022-04-01", end: null, current: true, industry: "Artificial intelligence", talentRank: "S" },
+    ...Array.from({ length: 14 }, (_, index) => ({
+      companyId: `company-synthetic-${index + 1}`,
+      companyName: `Synthetic Past Company ${index + 1}`,
+      roleTitle: "Software Engineer",
+      start: `${2007 + index}-01-01`, end: `${2007 + index}-10-01`, current: false,
+      industry: "Synthetic fixture", talentRank: null,
+    })),
+    { companyId: null, companyName: "Orbit Birch", roleTitle: "Early Engineer", start: "2006-01-01", end: "2006-12-01", current: false, industry: "Synthetic fixture", talentRank: null },
+  ];
+}
 
 const profiles = {
   "core:local0000000000000000000000000001": {
@@ -79,7 +101,7 @@ const profiles = {
     name: "Noor Haddad", title: "ML infrastructure engineer", location: "Seattle, WA",
     about: "Production ML systems.", linkedin: null, updatedAt: "2026-09-04T19:00:00.000Z",
     densityScore: 91, possibleFake: false, resumeUrl: "local-fixture-resume",
-    experiences: [{ companyId: "company-anthropic", companyName: "Anthropic", roleTitle: "Machine Learning Engineer", start: "2022-04-01", end: null, current: true, industry: "Artificial intelligence", talentRank: "S" }],
+    experiences: fundedHistoryBeyondRuleCap(),
     education: [{ schoolId: "school-cmu", school: "Carnegie Mellon University", degree: "M.S. Machine Learning", start: "2018-08-01", end: "2020-05-01", schoolLocation: "Pittsburgh, Pennsylvania, United States", schoolWebsite: "cmu.edu", talentRank: "S" }],
   },
 };
@@ -102,6 +124,7 @@ function row(profileIndex, roleIndex, tier, appliedAt) {
     name: profiles[profileKey].name, roleId, roleTitle, company, tier, appliedAt,
     linkedin: null, inputRevision: `local-input-${profileIndex + 1}`,
     readinessRevision: `local-ready-${profileIndex + 1}`, decisionRevision: 0,
+    sourceObservationId: `local-source-${profileIndex + 1}`,
   };
 }
 
@@ -111,11 +134,84 @@ const cards = Object.fromEntries(Object.entries(profiles).map(([id, profile]) =>
   edu: profile.education.slice(0, 3).map((item) => ({ school: item.school, degree: item.degree, start: item.start, end: item.end })),
   expCount: profile.experiences.length, eduCount: profile.education.length,
 }]));
-const facts = Object.fromEntries(Object.entries(profiles).map(([id, profile]) => [id, factsFromProfile(profile, { now: Date.parse("2026-09-05T16:00:00.000Z") })]));
+const facts = Object.fromEntries(Object.entries(profiles).map(([id, profile], index) => [id, factsFromProfile(profile, {
+  now: Date.parse("2026-09-05T16:00:00.000Z"),
+  sourceObservationId: `local-source-${index + 1}`,
+  sourcePayloadDigest: SOURCE_PAYLOAD_DIGEST,
+})]));
+const profileReceipts = Object.fromEntries(profileIds.map((id, index) => [id, {
+  source: "applicant_hub",
+  durable: true,
+  historyState: "data",
+  sourceObservationId: `local-source-${index + 1}`,
+  payloadDigest: SOURCE_PAYLOAD_DIGEST,
+}]));
+
+const { snapshot: fundedSnapshot, metadata: fundedMetadata } = compileFundedEmployerSnapshot({
+  snapshotId: FUNDED_SNAPSHOT_ID,
+  generatedAt: "2026-09-05T15:30:00.000Z",
+  criteria: {
+    headquartersCountryCodes: ["US", "GB", "CA"],
+    minimumTotalFundingUsd: 1_000_000,
+    qualifyingFundingRoundTypes: ["seed", "series_a", "series_b", "series_c", "series_d"],
+    qualifyingRoundAnnouncedOnOrAfter: "2011-09-05",
+    qualifyingRoundAnnouncedOnOrBefore: "2026-09-05",
+  },
+  provenance: { sources: [{
+    id: "local-public-proof-ledger",
+    kind: "public_primary_sources",
+    observedAt: "2026-09-05T15:00:00.000Z",
+    label: "Synthetic fixture evidence",
+  }] },
+  entries: [{
+    orgId: "org-orbit-birch",
+    name: "Orbit Birch",
+    countryCode: "US",
+    domain: "orbit-birch.invalid",
+    sourceRef: "local-public-proof-ledger",
+    paraformCompanyIds: ["company-orbit-birch"],
+    reviewedSourceNames: [{
+      name: "Orbit Birch",
+      paraformCompanyId: "company-orbit-birch",
+      observedAt: "2026-09-05T15:15:00.000Z",
+      searchEndpoint: "candidateUser.searchCRMFilterOptions",
+      searchUniverse: "paraform_recruiter_crm",
+      exactCandidateCount: 1,
+      verifiedDomain: "orbit-birch.invalid",
+      reviewedBy: "codex",
+    }],
+    fundingProof: {
+      totalFundingUsd: 2_000_000,
+      totalFundingSourceUrl: "https://orbit-birch.invalid/funding",
+      qualification: {
+        kind: "explicit_round",
+        stage: "seed",
+        announcedDate: "2024-06-15",
+        amountUsd: 2_000_000,
+        primarySourceUrl: "https://orbit-birch.invalid/funding",
+      },
+    },
+  }],
+});
+
+const syntheticMembershipDocuments = new Map([
+  [K.fundedEmployerCatalog, {
+    activeSnapshotId: FUNDED_SNAPSHOT_ID,
+    snapshots: [fundedMetadata],
+    updatedAt: "2026-09-05T15:30:00.000Z",
+  }],
+  [K.fundedEmployerSnapshot(FUNDED_SNAPSHOT_ID), fundedSnapshot],
+]);
+
+export async function readSyntheticMembership(key) {
+  const value = syntheticMembershipDocuments.get(key);
+  return value == null ? null : structuredClone(value);
+}
 
 const directory = {
   schools: Object.fromEntries(Object.values(profiles).flatMap((p) => p.education).map((s) => [s.schoolId, s.school])),
-  companies: Object.fromEntries(Object.values(profiles).flatMap((p) => p.experiences).map((j) => [j.companyId, j.companyName])),
+  companies: Object.fromEntries(Object.values(profiles).flatMap((p) => p.experiences)
+    .filter((job) => job.companyId).map((job) => [job.companyId, job.companyName])),
 };
 
 const initialRules = [
@@ -127,6 +223,9 @@ const initialRules = [
     { field: "job.title", op: "contains", value: "engineer" },
     { field: "application.roleId", op: "any_of", value: ["role-platform"] },
   ], { "role-platform": "Senior Platform Engineer" }),
+  demoRule("demo-funded", "Worked at a funded company", "interview", "watching", [
+    { field: "employment.fundedEmployerSnapshot", op: "member_of", value: FUNDED_SNAPSHOT_ID },
+  ]),
   demoRule("demo-no-resume", "No resume attached", "pass", "off", [
     { field: "applicant.hasResume", op: "is", value: false },
   ]),
@@ -150,13 +249,18 @@ export function createFixtureState() {
   };
 }
 
-function previewRule(rule, state) {
+function previewRule(rule, state, fundedEmployerSnapshots) {
   const matched = [];
   const skipped = {};
   const pending = pendingRows(state);
   const scoped = pending.filter((candidate) => inScope(rule, candidate));
   for (const candidate of scoped) {
-    const result = evaluateRule(rule, { row: candidate, facts: facts[candidate.profileKey] });
+    const result = evaluateRule(rule, {
+      row: candidate,
+      facts: facts[candidate.profileKey],
+      profileReceipt: profileReceipts[candidate.profileKey],
+      fundedEmployerSnapshots,
+    });
     const hold = rule.action === "interview"
       ? ruleInterviewSkipReason(candidate, { decision: state.decisions[candidate.key], ack: state.acks[candidate.key] }) : null;
     if (result.matched && hold) skipped[hold] = (skipped[hold] || 0) + 1;
@@ -170,11 +274,12 @@ function pendingRows(state) {
   return rows.filter((candidate) => !state.decisions[candidate.key]);
 }
 
-function rulesPayload(state, withDirectories = false) {
+function rulesPayload(state, withDirectories = false, fundedEmployers = { activeSnapshotId: null, snapshots: [] }) {
   return {
     ok: true, rev: state.rev, pausedAll: state.pausedAll,
     rules: state.rules, stats: state.stats, catalog: fieldCatalog(), groups: FIELD_GROUPS,
     degreeLevels: DEGREE_LEVELS.map((id) => ({ id, label: DEGREE_LEVEL_LABELS[id] })),
+    fundedEmployers,
     generation: { generationId: generation.generationId, digest: generation.digest },
     ...(withDirectories ? { directories: directory } : {}),
   };
@@ -222,8 +327,11 @@ function generationMatches(body) {
     && String(body.generationDigest || "") === generation.digest;
 }
 
-async function rulesApi(req, res, url, state) {
-  if (req.method === "GET") return json(res, 200, rulesPayload(state, url.searchParams.get("with") === "directories"));
+async function rulesApi(req, res, url, state, readMembership) {
+  if (req.method === "GET") {
+    const fundedEmployers = await readFundedEmployerCatalog({ readJson: readMembership });
+    return json(res, 200, rulesPayload(state, url.searchParams.get("with") === "directories", fundedEmployers));
+  }
   if (req.method !== "POST") return json(res, 405, { ok: false, error: "GET or POST only" });
   let body;
   try { body = await bodyJson(req); } catch (error) { return json(res, 400, { ok: false, error: String(error.message) === "request_too_large" ? "request_too_large" : "invalid_json" }); }
@@ -233,7 +341,8 @@ async function rulesApi(req, res, url, state) {
     if (!generationMatches(body)) return json(res, 409, { ok: false, error: "generation_changed_refresh_required", generationId: generation.generationId, generationDigest: generation.digest });
     const normalized = normalizeRule(body.rule, { by: FIXTURE_EMAIL });
     if (!normalized.ok) return json(res, 400, { ok: false, error: "rule_invalid", detail: normalized.error });
-    const result = previewRule(normalized.rule, state);
+    const fundedEmployerSnapshots = await loadFundedEmployerSnapshots([normalized.rule], { readJson: readMembership });
+    const result = previewRule(normalized.rule, state, fundedEmployerSnapshots);
     return json(res, 200, {
       ok: true, pending: result.pending, considered: result.considered,
       matched: result.matched.length, skipped: result.skipped,
@@ -286,7 +395,7 @@ async function rulesApi(req, res, url, state) {
   return json(res, 400, { ok: false, error: "unsupported_op" });
 }
 
-async function runTick(req, res, state) {
+async function runTick(req, res, state, readMembership) {
   if (req.method !== "POST") return json(res, 405, { ok: false, error: "POST only" });
   let body;
   try { body = await bodyJson(req); } catch { return json(res, 400, { ok: false, error: "invalid_json" }); }
@@ -302,8 +411,14 @@ async function runTick(req, res, state) {
   const skipped = {};
   let decided = 0;
   const pending = pendingRows(state);
+  const fundedEmployerSnapshots = await loadFundedEmployerSnapshots([...live, ...watching], { readJson: readMembership });
   for (const candidate of pending) {
-    const subject = { row: candidate, facts: facts[candidate.profileKey] };
+    const subject = {
+      row: candidate,
+      facts: facts[candidate.profileKey],
+      profileReceipt: profileReceipts[candidate.profileKey],
+      fundedEmployerSnapshots,
+    };
     for (const rule of watching) {
       if (!inScope(rule, candidate) || !evaluateRule(rule, subject).matched) continue;
       const hold = rule.action === "interview"
@@ -396,7 +511,10 @@ async function staticFile(req, res, url) {
   }
 }
 
-export function createFixtureServer({ state = createFixtureState() } = {}) {
+export function createFixtureServer({
+  state = createFixtureState(),
+  readMembership = readSyntheticMembership,
+} = {}) {
   return createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
     try {
@@ -419,8 +537,8 @@ export function createFixtureServer({ state = createFixtureState() } = {}) {
         const profile = profiles[url.searchParams.get("cu") || ""];
         return profile ? json(res, 200, { ok: true, ...profile }) : json(res, 404, { ok: false, error: "profile_cache_miss" });
       }
-      if (url.pathname === "/api/applicants/rules") return rulesApi(req, res, url, state);
-      if (url.pathname === "/api/applicants/rules-tick") return runTick(req, res, state);
+      if (url.pathname === "/api/applicants/rules") return rulesApi(req, res, url, state, readMembership);
+      if (url.pathname === "/api/applicants/rules-tick") return runTick(req, res, state, readMembership);
       if (url.pathname === "/api/applicants/decision") return decisionApi(req, res, state);
       if (url.pathname === "/api/applicants/refresh") return json(res, 200, { ok: true, queued: false, localFixture: true });
       if (url.pathname.startsWith("/api/")) return json(res, 404, { ok: false, error: "local_fixture_only", detail: "No remote proxy or provider calls are available." });

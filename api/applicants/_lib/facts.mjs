@@ -106,7 +106,11 @@ export function experienceMonths(jobs, now = Date.now()) {
  * present, so the evaluator never branches on absence, and a profile that is
  * missing everything yields a record whose conditions simply cannot match.
  */
-export function factsFromProfile(profile, { now = Date.now() } = {}) {
+export function factsFromProfile(profile, {
+  now = Date.now(),
+  sourceObservationId = null,
+  sourcePayloadDigest = null,
+} = {}) {
   const source = profile && typeof profile === "object" && !Array.isArray(profile) ? profile : {};
 
   const schools = list(source.education).slice(0, MAX_SCHOOLS).map((row) => ({
@@ -141,6 +145,24 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
     rank: str(row?.talentRank),
   }));
 
+  // Membership predicates need the complete employer history. `jobs` stays
+  // capped because existing row-scoped rules depend on that long-standing
+  // storage bound; this additive projection carries only the two identity
+  // fields needed for exact set membership and therefore remains compact.
+  // Do not deduplicate by name. A raw name is not identity; when an id is
+  // absent, the rule evaluator may resolve only an exact name that appears in
+  // a separate immutable, provider-wide reviewed bridge.
+  const seenCompanies = new Set();
+  const allCompanies = [];
+  for (const row of list(source.experiences)) {
+    const id = str(row?.companyId);
+    const name = str(row?.companyName);
+    const key = `${id ?? ""}\u0000${name ?? ""}`;
+    if ((!id && !name) || seenCompanies.has(key)) continue;
+    seenCompanies.add(key);
+    allCompanies.push({ id, name });
+  }
+
   // `current` is end_date == null on the Paraform feed (is_current is always
   // null there — a documented vendor gotcha). The first current row wins;
   // Paraform orders experiences newest-first.
@@ -154,6 +176,11 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
   return {
     v: FACTS_VERSION,
     at: new Date(now).toISOString(),
+    // Present for durable Applicant Hub facts. Funded-employer membership
+    // requires both values to equal the active row and current durable receipt
+    // so an older best-effort facts write can never act on a newer profile.
+    sourceObservationId: str(sourceObservationId),
+    sourcePayloadDigest: str(sourcePayloadDigest)?.toLowerCase() ?? null,
     // The age of the LinkedIn snapshot behind these facts. Surfaced in the
     // audit so a decision made on stale data is visibly made on stale data.
     updatedAt: str(source.updatedAt),
@@ -170,6 +197,7 @@ export function factsFromProfile(profile, { now = Date.now() } = {}) {
     // True totals, not the truncated list lengths, so "more than N" is exact.
     schoolCount: list(source.education).length,
     jobs,
+    allCompanies,
     jobCount: list(source.experiences).length,
 
     months,

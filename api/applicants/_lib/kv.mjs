@@ -68,6 +68,9 @@
 //                              desktop refresh listener only ever READS it and
 //                              keeps its own served-watermark on disk, which is
 //                              what keeps the on-demand path idempotent.)
+//   apphub:funded-employers:* — POST /api/applicants/funded-employers only.
+//                              Immutable licensed snapshots plus a metadata-
+//                              only catalog; Rules endpoints are readers.
 
 const KV_URL = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
@@ -208,6 +211,8 @@ export const K = {
   rulestats: "apphub:rulestats", // hash: ruleId → {fired, firedAt, ...} — writer: /api/applicants/rules-tick only
   ruleruns: "apphub:ruleruns",   // hash: `<cuId>:<roleId>` → why a rule fired — writer: rules-tick only
   ruleRun: (ruleRunId) => `apphub:rule-run:${ruleRunId}`, // immutable exact run manifest
+  fundedEmployerCatalog: "apphub:funded-employers:catalog",
+  fundedEmployerSnapshot: (snapshotId) => `apphub:funded-employers:snapshot:${snapshotId}`,
 
   snapshot: "apphub:snapshot",
   queue: "apphub:queue", // review-queue rows, split out so backlog size never crowds the stream

@@ -3,7 +3,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-import { createFixtureServer, createFixtureState } from "../scripts/rules-design-preview.mjs";
+import { MAX_JOBS, factsFromProfile } from "../api/applicants/_lib/facts.mjs";
+import { K } from "../api/applicants/_lib/kv.mjs";
+import {
+  createFixtureServer,
+  createFixtureState,
+  readSyntheticMembership,
+} from "../scripts/rules-design-preview.mjs";
 
 const sourcePath = new URL("../applicants-rules.js", import.meta.url);
 
@@ -92,6 +98,28 @@ test("a selected id missing from the current directory remains visible and check
   const html = testApi.valueControl(testApi.state.draft.conditions[0], 0);
   assert.match(html, /value="school-not-in-directory" checked/);
   assert.match(html, />Saved School Name</);
+});
+
+test("funded list copy distinguishes verified ids from reviewed exact-name bridges", async () => {
+  const { testApi } = await loadRulesUi(async () => response({ ok: true }));
+  testApi.state.catalog = [{
+    name: "employment.fundedEmployerSnapshot", group: "employment", ops: ["member_of"],
+    kind: "snapshot", label: "Worked at a funded company", picker: null,
+  }];
+  testApi.state.fundedEmployers = {
+    activeSnapshotId: "funded-1",
+    snapshots: [{
+      id: "funded-1", generatedAt: "2026-09-05T10:00:00Z", companyCount: 6300,
+      reviewedParaformIdCount: 359, reviewedSourceNameCount: 211, provider: "Mixed verified sources",
+    }],
+  };
+  const html = testApi.valueControl({
+    field: "employment.fundedEmployerSnapshot", op: "member_of", value: "funded-1",
+  }, 0);
+  assert.match(html, /359 verified company IDs/);
+  assert.match(html, /211 reviewed name bridges/);
+  assert.match(html, /when the source omitted an ID/);
+  assert.match(html, /Ambiguous or unreviewed names cannot match/);
 });
 
 test("Run rules now is a confirmed manual POST and carries the visible generation", async () => {
@@ -224,4 +252,53 @@ test("fixture preview and run agree about sent and already-decided applicants", 
   const passRun = await post("/api/applicants/rules-tick", fence);
   assert.equal(passRun.decided, 1);
   assert.equal(state.decisions[platform[0].key].action, "pass");
+});
+
+test("funded fixture preview and manual run share reviewed name membership beyond the fourteen-job projection", async (t) => {
+  const state = createFixtureState();
+  const fundedRule = state.rules.find((rule) =>
+    rule.conditions.some((condition) => condition.field === "employment.fundedEmployerSnapshot"));
+  assert.ok(fundedRule);
+  fundedRule.state = "live";
+  state.rules = [fundedRule];
+
+  const membershipReads = [];
+  const server = createFixtureServer({
+    state,
+    readMembership: async (key) => {
+      membershipReads.push(key);
+      return readSyntheticMembership(key);
+    },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) => fetch(`${base}${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((response) => response.json());
+  const fence = { generationId: "local-rules-design-fixture-v1", generationDigest: "local-fixture-no-production-data" };
+
+  const feed = await fetch(`${base}/api/applicants/feed`).then((response) => response.json());
+  const candidate = feed.snapshot.queue.find((row) => row.name === "Noor Haddad");
+  const profile = await fetch(`${base}/api/applicants/profile?cu=${encodeURIComponent(candidate.profileKey)}`)
+    .then((response) => response.json());
+  const candidateFacts = factsFromProfile(profile, { now: Date.parse("2026-09-05T16:00:00.000Z") });
+  assert.equal(candidateFacts.jobs.length, MAX_JOBS);
+  assert.equal(candidateFacts.jobs.some((job) => job.id === "company-orbit-birch"), false);
+  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].id, null);
+  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].name, "Orbit Birch");
+
+  const rules = await fetch(`${base}/api/applicants/rules`).then((response) => response.json());
+  assert.equal(rules.fundedEmployers.snapshots.length, 1);
+  assert.equal("entries" in rules.fundedEmployers.snapshots[0], false);
+  assert.equal(rules.fundedEmployers.snapshots[0].reviewedSourceNameCount, 1);
+  const preview = await post("/api/applicants/rules", { op: "preview", rule: fundedRule, ...fence });
+  assert.equal(preview.matched, 1);
+  assert.equal(preview.samples[0].name, "Noor Haddad");
+  const run = await post("/api/applicants/rules-tick", fence);
+  assert.equal(run.decided, preview.matched);
+  assert.equal(run.fired[fundedRule.id], preview.matched);
+  assert.equal(state.decisions[candidate.key].actorId, fundedRule.id);
+  assert.ok(membershipReads.includes(K.fundedEmployerCatalog));
+  assert.ok(membershipReads.includes(K.fundedEmployerSnapshot(fundedRule.conditions[0].value)));
 });

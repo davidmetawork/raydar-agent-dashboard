@@ -19,6 +19,7 @@
     loaded: false, rev: 0, pausedAll: false,
     rules: [], stats: {}, catalog: [], groups: [], degreeLevels: [],
     directories: { schools: {}, companies: {} },
+    fundedEmployers: { activeSnapshotId: null, snapshots: [] },
     draft: null,              // the rule being edited, or null
     preview: null,            // last preview result for the draft
     previewing: false,
@@ -106,6 +107,7 @@
     state.groups = payload.groups || [];
     state.degreeLevels = payload.degreeLevels || [];
     state.directories = payload.directories || { schools: {}, companies: {} };
+    state.fundedEmployers = payload.fundedEmployers || { activeSnapshotId: null, snapshots: [] };
     const page = pageState();
     if (page && payload.generation) page.generation = payload.generation;
     state.loaded = true;
@@ -113,12 +115,25 @@
   }
 
   /* ── rendering the list ──────────────────────────────────────────────── */
+  const fundedSnapshot = (id) => (state.fundedEmployers.snapshots || []).find((item) => item.id === id) || null;
+  function fundedSnapshotLabel(id) {
+    const snapshot = fundedSnapshot(id);
+    if (!snapshot) return id || "Snapshot unavailable";
+    const day = String(snapshot.generatedAt || "").slice(0, 10);
+    const companies = Number(snapshot.companyCount || 0);
+    const ids = Number(snapshot.reviewedParaformIdCount || 0);
+    const bridges = Number(snapshot.reviewedSourceNameCount || 0);
+    return companies.toLocaleString() + (companies === 1 ? " company · " : " companies · ")
+      + ids.toLocaleString() + (ids === 1 ? " verified company ID · " : " verified company IDs · ")
+      + bridges.toLocaleString() + (bridges === 1 ? " reviewed name bridge · as of " : " reviewed name bridges · as of ") + day;
+  }
   function describe(condition, rule) {
     const f = field(condition.field);
     if (!f) return "(unknown condition)";
     const value = condition.value;
     if (condition.op === "is") return f.label + (value ? ": yes" : ": no");
     if (condition.op === "between") return f.label + " between " + value[0] + " and " + value[1];
+    if (condition.op === "member_of") return f.label + ": " + fundedSnapshotLabel(value);
     if (condition.op === "any_of") {
       const shown = (Array.isArray(value) ? value : [value]).map((v) => {
         if (f.kind === "levels") return (state.degreeLevels.find((l) => l.id === v) || {}).label || v;
@@ -311,6 +326,19 @@
         '<option value="true"' + (condition.value === true ? " selected" : "") + ">Yes</option>" +
         '<option value="false"' + (condition.value === false ? " selected" : "") + ">No</option></select>";
     }
+    if (f.kind === "snapshot") {
+      const snapshots = [...(state.fundedEmployers.snapshots || [])];
+      if (condition.value && !snapshots.some((item) => item.id === condition.value)) {
+        snapshots.push({ id: condition.value, unavailable: true });
+      }
+      return '<div class="v"><select data-ci="' + index + '" data-part="value" aria-label="Funded employer snapshot">' +
+        (snapshots.length ? snapshots.map((item) => '<option value="' + enc(item.id) + '"' +
+          (condition.value === item.id ? ' selected' : '') + '>' + enc(item.unavailable ? item.id + ' (unavailable)' : fundedSnapshotLabel(item.id)) + '</option>').join('')
+          : '<option value="">No verified snapshot imported</option>') + '</select>' +
+        '<details class="hint"><summary>About this list</summary><p>Private verified company research from ' +
+        enc((fundedSnapshot(condition.value) || {}).provider || 'verified sources') +
+        '. US, UK and Canada; at least $1m total funding; Seed through Series D round from Sep 5, 2011 through Sep 5, 2026. Work history matches through a verified Paraform company ID, or—when the source omitted an ID—an exact company name separately checked across Paraform CRM and against the official domain. Ambiguous or unreviewed names cannot match.</p></details></div>';
+    }
     if (f.kind === "levels" || f.kind === "ranks" || f.kind === "tiers" || f.kind === "ids") {
       const chosen = Array.isArray(condition.value) ? condition.value : [];
       let options = [];
@@ -363,9 +391,9 @@
       '<select class="f" data-ci="' + index + '" data-part="field" aria-label="Condition field">' +
         choices.map((c) => '<option value="' + enc(c.name) + '"' + (c.name === condition.field ? " selected" : "") + ">" + enc(c.label) + "</option>").join("") +
       "</select>" +
-      (f?.ops.length === 1 ? '<span class="o rule-fixed-op">' + enc({ any_of: 'is', contains: 'contains', is: 'is' }[condition.op] || condition.op) + '</span>' : '<select class="o" data-ci="' + index + '" data-part="op" aria-label="Comparison">' +
+      (f?.ops.length === 1 ? '<span class="o rule-fixed-op">' + enc({ any_of: 'is', contains: 'contains', is: 'is', member_of: 'in verified list' }[condition.op] || condition.op) + '</span>' : '<select class="o" data-ci="' + index + '" data-part="op" aria-label="Comparison">' +
         (f ? f.ops : []).map((o) => '<option value="' + enc(o) + '"' + (o === condition.op ? " selected" : "") + ">" +
-          enc({ any_of: "is one of", contains: "contains", is: "is", at_least: "at least", at_most: "at most", after: "after", before: "before", between: "between" }[o] || o) + "</option>").join("") +
+          enc({ any_of: "is one of", contains: "contains", is: "is", at_least: "at least", at_most: "at most", after: "after", before: "before", between: "between", member_of: "in verified list" }[o] || o) + "</option>").join("") +
       "</select>") +
       valueControl(condition, index) +
       '<button class="x" data-ci="' + index + '" data-part="remove" aria-label="Remove condition">✕</button>' +
@@ -431,7 +459,7 @@
     if (!preview) return '<div class="preview" role="status"><div class="sub">Your matching applicants will appear here.</div></div>';
     const skips = Object.entries(preview.skipped || {});
     const behavior = state.draft.state === 'off' ? 'This rule is Off and will be skipped when you run rules.' : state.draft.state === 'watching' ? 'Preview only counts these matches when you run rules; it makes no decisions.' : (state.draft.action === 'interview' ? 'These applicants would get an interview request when you run rules.' : 'These applicants would be passed when you run rules.');
-    const words = { already_emailed: 'already emailed for this role', no_profile_history: 'missing work or education history', no_facts_yet: 'waiting for profile data', facts_version_stale: 'waiting for updated profile data' };
+    const words = { already_emailed: 'already emailed for this role', no_profile_history: 'missing work or education history', no_facts_yet: 'waiting for profile data', facts_version_stale: 'waiting for updated profile data', employment_history_not_refreshed: 'waiting for full employer history refresh', no_employment_history: 'missing employment history', employment_facts_source_unbound: 'waiting for source-bound employer facts', employment_facts_source_mismatch: 'employer facts belong to another source revision', employment_company_id_missing: 'employer has no reviewed identity', membership_snapshot_missing: 'verified employer snapshot unavailable' };
     return '<div class="preview" role="status"><div class="preview-heading"><span class="n">' + Number(preview.matched).toLocaleString() + '</span><span>matching applicant' + (preview.matched === 1 ? '' : 's') + '</span></div>' +
       '<div class="sub">Out of ' + Number(preview.considered).toLocaleString() + ' awaiting review in this rule’s scope. ' + behavior + '</div>' +
       (skips.length ? '<details class="skips"><summary>' + skips.reduce((sum, [,n]) => sum + Number(n), 0).toLocaleString() + ' skipped for missing facts or other checks</summary><p>' +
@@ -480,6 +508,7 @@
 
   function defaultValueFor(f) {
     if (f.kind === "bool") return true;
+    if (f.kind === "snapshot") return state.fundedEmployers.activeSnapshotId || "";
     if (["ids", "levels", "ranks", "tiers"].includes(f.kind)) return [];
     if (f.kind === "number" || f.kind === "year") return "";
     return "";

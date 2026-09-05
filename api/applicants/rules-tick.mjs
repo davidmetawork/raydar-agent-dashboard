@@ -55,6 +55,7 @@ import {
   setJson,
 } from "./_lib/kv.mjs";
 import { evaluateRule, inScope } from "./_lib/rules.mjs";
+import { loadFundedEmployerSnapshots } from "./_lib/funded-employers.mjs";
 import { profileReceiptReady, sourceObservationIdFor } from "./_lib/profile-readiness.mjs";
 import { armedRules, cardsFor, factsFor, pendingRows, profileReceiptsFor, readRules, watchingRules } from "./_lib/rule-store.mjs";
 import {randomUUID} from 'node:crypto';
@@ -109,6 +110,7 @@ export function createTickHandler({
   // Production always gets saveApplicantRequest.
   saveRequest = saveApplicantRequest,
   now = () => Date.now(),
+  readMembershipSnapshots = (rules) => loadFundedEmployerSnapshots(rules, { readJson }),
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -218,6 +220,7 @@ export function createTickHandler({
       }
       const rows = pendingQueueRows;
       manifest = generationManifest(rows);
+      const fundedEmployerSnapshots = await readMembershipSnapshots([...live, ...watching]);
       await writeJson(K.ruleRun(ruleRunId), {
         ruleRunId,
         trigger:"run_rules_now",
@@ -228,6 +231,14 @@ export function createTickHandler({
         generationDigest:generation.digest,
         manifest,
         ruleVersions:[...live,...watching].map((rule)=>({id:rule.id,version:rule.version ?? 1})),
+        fundedEmployerSnapshots: Object.values(fundedEmployerSnapshots).map((snapshot) => ({
+          id: snapshot.snapshotId,
+          digest: snapshot.digest,
+          generatedAt: snapshot.generatedAt,
+          companyCount: Array.isArray(snapshot.entries) ? snapshot.entries.length : null,
+          reviewedParaformIdCount: Object.keys(snapshot.byParaformId || {}).length,
+          reviewedSourceNameCount: Object.keys(snapshot.byReviewedSourceName || {}).length,
+        })),
       });
       if (!rows.length) {
         return res.status(200).json({
@@ -253,7 +264,12 @@ export function createTickHandler({
 
       for (const row of rows) {
         considered += 1;
-        const subject = { row, facts: facts[row.profileKey || row.cuId] ?? null };
+        const subject = {
+          row,
+          facts: facts[row.profileKey || row.cuId] ?? null,
+          profileReceipt: receipts[row.profileKey || row.cuId] ?? null,
+          fundedEmployerSnapshots,
+        };
 
         // Watching rules are evaluated on exactly the same subject and never
         // write a decision — that equivalence is what makes Watching a

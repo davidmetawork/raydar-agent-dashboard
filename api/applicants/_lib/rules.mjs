@@ -26,6 +26,8 @@
 
 import { DEGREE_LEVELS, levelMatches } from "./degree.mjs";
 import { FACTS_VERSION } from "./facts.mjs";
+import { matchFundedEmployer, SNAPSHOT_ID_RE } from "./funded-employers.mjs";
+import { profileReceiptReady, sourceObservationIdFor } from "./profile-readiness.mjs";
 
 export const RULE_ACTIONS = ["interview", "pass"];
 export const RULE_STATES = ["off", "watching", "live"];
@@ -139,6 +141,31 @@ export const FIELDS = {
     read: (_s, row) => row?.current,
   },
 
+  // Independent of the capped `jobs` projection. This single membership
+  // predicate scans the compact all-employer history. Native Paraform company
+  // ids are authoritative; a missing id can use only an exact source-name
+  // bridge whose CRM identity and official domain were separately reviewed in
+  // the referenced immutable snapshot.
+  "employment.fundedEmployerSnapshot": {
+    group: "employment", ops: ["member_of"], kind: "snapshot",
+    label: "Worked at a funded company",
+    read: (_subject, row) => row?.id,
+    match: (subject, row, snapshotId) => {
+      const snapshots = subject.fundedEmployerSnapshots;
+      const snapshot = snapshots && typeof snapshots === "object" && Object.hasOwn(snapshots, snapshotId)
+        ? snapshots[snapshotId] : null;
+      const found = matchFundedEmployer(row, snapshot);
+      return found ? {
+        matched: row?.name ?? found.companyName ?? row?.id,
+        orgId: found.orgId,
+        paraformCompanyId: found.paraformCompanyId,
+        identityBasis: found.identityBasis,
+        sourceObservationId: subject.facts?.sourceObservationId,
+        sourcePayloadDigest: subject.facts?.sourcePayloadDigest,
+      } : null;
+    },
+  },
+
   // ── whole-applicant facts, no row scope ─────────────────────────────────
   "applicant.currentCompanyId": {
     group: "applicant", ops: ["any_of"], kind: "ids", label: "Currently works at",
@@ -241,6 +268,7 @@ export function fieldCatalog() {
 export const FIELD_GROUPS = [
   { id: "school", label: "Education", note: "All education conditions must be true of the SAME school." },
   { id: "job", label: "Experience", note: "All experience conditions must be true of the SAME role." },
+  { id: "employment", label: "Employer lists", note: "Checks every available role in their work history." },
   { id: "applicant", label: "The person", note: "" },
   { id: "application", label: "The application", note: "Works even for applicants with no profile history." },
 ];
@@ -249,7 +277,30 @@ export const RANKS = ["S", "A", "B", "C"];
 export const TIERS = ["S", "A", "B", "C", "unrated"];
 
 /** Fields whose group needs a matching row to exist at all. */
-const ROW_GROUPS = { school: "schools", job: "jobs" };
+const ROW_GROUPS = { school: "schools", job: "jobs", employment: "allCompanies" };
+const SOURCE_PAYLOAD_DIGEST_RE = /^[a-f0-9]{64}$/;
+
+function employmentFactsSourceStatus(subject, now) {
+  const factsObservationId = sourceObservationIdFor(subject?.facts);
+  const factsPayloadDigest = typeof subject?.facts?.sourcePayloadDigest === "string"
+    ? subject.facts.sourcePayloadDigest : null;
+  if (!factsObservationId || !SOURCE_PAYLOAD_DIGEST_RE.test(factsPayloadDigest || "")) {
+    return "employment_facts_source_unbound";
+  }
+  const expectedObservationId = sourceObservationIdFor(subject?.row);
+  const receipt = subject?.profileReceipt;
+  const receiptObservationId = sourceObservationIdFor(receipt);
+  const receiptPayloadDigest = typeof receipt?.payloadDigest === "string" ? receipt.payloadDigest : null;
+  if (!expectedObservationId
+    || !profileReceiptReady(receipt, now, expectedObservationId)
+    || receiptObservationId !== expectedObservationId
+    || factsObservationId !== expectedObservationId
+    || !SOURCE_PAYLOAD_DIGEST_RE.test(receiptPayloadDigest || "")
+    || factsPayloadDigest !== receiptPayloadDigest) {
+    return "employment_facts_source_mismatch";
+  }
+  return null;
+}
 
 // ── comparison ─────────────────────────────────────────────────────────────
 
@@ -300,14 +351,21 @@ function groupMatches(conditions, subject, row, now) {
   for (const condition of conditions) {
     const field = FIELDS[condition.field];
     if (!field) return null;
-    const actual = field.read(subject, row, now);
-    if (!compare(condition.op, actual, condition.value, field.kind)) return null;
+    const custom = field.match ? field.match(subject, row, condition.value, now) : null;
+    const actual = field.read ? field.read(subject, row, now) : null;
+    if (field.match ? !custom : !compare(condition.op, actual, condition.value, field.kind)) return null;
     evidence.push({
       field: condition.field,
       op: condition.op,
       // The literal value the decision rested on, in human terms — this is
       // what "why did this fire" renders from.
-      matched: String(field.display ? (field.display(subject, row) ?? actual) : actual).slice(0, 160),
+      matched: String(custom?.matched ?? (field.display ? (field.display(subject, row) ?? actual) : actual)).slice(0, 160),
+      ...(custom?.orgId ? { organizationId: custom.orgId } : {}),
+      ...(custom?.paraformCompanyId ? { paraformCompanyId: custom.paraformCompanyId } : {}),
+      ...(custom?.identityBasis ? { identityBasis: custom.identityBasis } : {}),
+      ...(custom?.sourceObservationId ? { sourceObservationId: custom.sourceObservationId } : {}),
+      ...(custom?.sourcePayloadDigest ? { sourcePayloadDigest: custom.sourcePayloadDigest } : {}),
+      ...(field.kind === "snapshot" ? { snapshotId: condition.value } : {}),
     });
   }
   return evidence;
@@ -350,6 +408,24 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       // The 44%. Not a failure — there is genuinely nothing to judge.
       return { matched: false, skipped: true, reason: "no_profile_history", evidence: [] };
     }
+    if (byGroup.has("employment")) {
+      if (!Array.isArray(facts.allCompanies)) {
+        return { matched: false, skipped: true, reason: "employment_history_not_refreshed", evidence: [] };
+      }
+      if (!facts.allCompanies.length) {
+        return { matched: false, skipped: true, reason: "no_employment_history", evidence: [] };
+      }
+      const sourceError = employmentFactsSourceStatus(subject, now);
+      if (sourceError) {
+        return { matched: false, skipped: true, reason: sourceError, evidence: [] };
+      }
+      const snapshots = subject.fundedEmployerSnapshots;
+      const unavailable = !snapshots || typeof snapshots !== "object"
+        || byGroup.get("employment").some((condition) => !Object.hasOwn(snapshots, condition.value));
+      if (unavailable) {
+        return { matched: false, skipped: true, reason: "membership_snapshot_missing", evidence: [] };
+      }
+    }
   }
 
   const evidence = [];
@@ -369,7 +445,12 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       found = groupMatches(groupConditions, subject, row, now);
       if (found) break;
     }
-    if (!found) return { matched: false, skipped: false, reason: null, evidence: [] };
+    if (!found) {
+      if (group === "employment" && rows.some((row) => !row?.id)) {
+        return { matched: false, skipped: true, reason: "employment_company_id_missing", evidence: [] };
+      }
+      return { matched: false, skipped: false, reason: null, evidence: [] };
+    }
     evidence.push(...found);
   }
 
@@ -394,6 +475,7 @@ const VALUE_CHECK = {
     ? Array.isArray(value) && value.length === 2 && value.every((y) => Number.isInteger(y))
       && value[0] <= value[1]
     : Number.isInteger(value)),
+  snapshot: (value) => typeof value === "string" && SNAPSHOT_ID_RE.test(value),
 };
 
 export function validateCondition(condition) {
@@ -487,7 +569,7 @@ export function inScope(rule, row) {
 const OP_WORDS = {
   any_of: "is one of", contains: "contains", is: "is",
   at_least: "at least", at_most: "at most",
-  after: "after", before: "before", between: "between",
+  after: "after", before: "before", between: "between", member_of: "in snapshot",
 };
 
 /**
@@ -506,6 +588,7 @@ export function describeCondition(condition, names = {}) {
     const rest = shown.length > 3 ? ` and ${shown.length - 3} more` : "";
     return `${field.label} ${head}${rest}`;
   }
+  if (op === "member_of") return `${field.label}: ${names[value] ?? value}`;
   return `${field.label} ${OP_WORDS[op] ?? op} ${value}`;
 }
 

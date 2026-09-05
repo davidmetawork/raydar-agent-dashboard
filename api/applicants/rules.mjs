@@ -22,6 +22,10 @@ import {
 } from "./_lib/generation.mjs";
 import { ruleInterviewSkipReason } from "./_lib/rule-interview-eligibility.mjs";
 import { FIELD_GROUPS, evaluateRule, fieldCatalog, inScope, normalizeRule } from "./_lib/rules.mjs";
+import {
+  loadFundedEmployerSnapshots,
+  readFundedEmployerCatalog,
+} from "./_lib/funded-employers.mjs";
 import { DEGREE_LEVELS, DEGREE_LEVEL_LABELS } from "./_lib/degree.mjs";
 import { requireApplicantMutation } from "./_lib/request-safety.mjs";
 import {
@@ -29,6 +33,7 @@ import {
   MAX_VERSIONS,
   factsFor,
   pendingRows,
+  profileReceiptsFor,
   readDirectories,
   readRules,
   writeRules,
@@ -55,6 +60,8 @@ export function createRulesHandler({
   readMany = hashGetMany,
   now = () => new Date().toISOString(),
   newId = () => `rule-${randomUUID()}`,
+  readMembershipSnapshots = (rules) => loadFundedEmployerSnapshots(rules, { readJson }),
+  readMembershipCatalog = () => readFundedEmployerCatalog({ readJson }),
 } = {}) {
   const loadRules = () => readRules({ readJson });
   const saveRules = (doc) => writeRules(doc, { writeJson });
@@ -72,12 +79,24 @@ export function createRulesHandler({
     ]);
     const rows = pendingRows(artifacts?.queue?.rows ?? [], decisions);
     const scoped = rows.filter((row) => inScope(rule, row));
-    const facts = await factsFor(scoped.map((row) => row.profileKey || row.cuId), { readMany });
+    const profileKeys = scoped.map((row) => row.profileKey || row.cuId);
+    const needsEmploymentSource = (Array.isArray(rule?.conditions) ? rule.conditions : [])
+      .some((condition) => condition?.field === "employment.fundedEmployerSnapshot");
+    const [facts, fundedEmployerSnapshots, profileReceipts] = await Promise.all([
+      factsFor(profileKeys, { readMany }),
+      readMembershipSnapshots([rule]),
+      needsEmploymentSource ? profileReceiptsFor(profileKeys, { readMany }) : Promise.resolve({}),
+    ]);
 
     const matched = [];
     const skipped = {};
     for (const row of scoped) {
-      const result = evaluateRule(rule, { row, facts: facts[row.profileKey || row.cuId] ?? null });
+      const result = evaluateRule(rule, {
+        row,
+        facts: facts[row.profileKey || row.cuId] ?? null,
+        profileReceipt: profileReceipts[row.profileKey || row.cuId] ?? null,
+        fundedEmployerSnapshots,
+      });
       const interviewSkip = result.matched && rule.action === "interview"
         ? ruleInterviewSkipReason(row, { decision: decisions[row.key], ack: acks[row.key] })
         : null;
@@ -110,8 +129,11 @@ export function createRulesHandler({
     try {
       if (req.method === "GET") {
         const doc = await loadRules();
-        const stats = await readHash(K.rulestats).catch(() => ({}));
-        const publication = await readActive();
+        const [stats, publication, fundedEmployers] = await Promise.all([
+          readHash(K.rulestats).catch(() => ({})),
+          readActive(),
+          readMembershipCatalog().catch(() => ({ activeSnapshotId: null, snapshots: [] })),
+        ]);
         // Directories are thousands of entries; the list view does not need
         // them, only the editor does.
         const directories = clean(req.query?.with) === "directories"
@@ -128,6 +150,7 @@ export function createRulesHandler({
           catalog: fieldCatalog(),
           groups: FIELD_GROUPS,
           degreeLevels: DEGREE_LEVELS.map((id) => ({ id, label: DEGREE_LEVEL_LABELS[id] })),
+          fundedEmployers,
           ...(publication ? {
             generation: {
               generationId: publication.generationId,

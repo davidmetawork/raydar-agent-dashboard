@@ -17,6 +17,7 @@ import {
 import { generationFence, publishInto } from "./helpers/applicant-generation.mjs";
 
 const NOW = Date.parse("2026-08-20T12:00:00.000Z");
+const SOURCE_PAYLOAD_DIGEST = "a".repeat(64);
 // The production receipt shape: a durable Hub projection bound to the exact
 // source observation the queue row names. A rule may only consider a row whose
 // receipt still matches that observation.
@@ -26,6 +27,7 @@ const readyReceipt = (cuId) => ({
   durable: true,
   historyState: "data",
   sourceObservationId: `obs-${cuId}`,
+  payloadDigest: SOURCE_PAYLOAD_DIGEST,
 });
 
 const HARVARD_RULE = {
@@ -40,6 +42,13 @@ const BLOCK_RULE = {
   id: "rule-block", name: "No staffing agencies", action: "pass", state: "live",
   version: 1, scope: { roleIds: [] },
   conditions: [{ field: "job.title", op: "contains", value: "Recruiter" }],
+};
+const FUNDED_RULE = {
+  id: "rule-funded", name: "Funded employer history", action: "interview", state: "live",
+  version: 1, scope: { roleIds: [] },
+  conditions: [{
+    field: "employment.fundedEmployerSnapshot", op: "member_of", value: "funded-2026-09-05",
+  }],
 };
 
 const profile = ({ school = "sch_harvard", degree = "Bachelor of Arts - AB", title = "Engineer" } = {}) => ({
@@ -181,6 +190,96 @@ test("the audit records the rule, its version and the literal fact", async () =>
   assert.equal(audit.action, "interview");
   assert.deepEqual(audit.evidence.map((e) => e.field), ["school.id", "school.level"]);
   assert.equal(audit.evidence[0].matched, "Harvard University");
+});
+
+test("draft preview and manual tick share funded membership evaluation over full history", async () => {
+  const experiences = Array.from({ length: 16 }, (_, index) => ({
+    companyId: index === 15 ? "pf-funded" : `pf-other-${index}`,
+    companyName: index === 15 ? "Funded Co" : `Other ${index}`,
+    roleTitle: "Engineer",
+  }));
+  const s = store({
+    rules: [FUNDED_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile({ experiences, education: [] }, {
+      now: NOW,
+      sourceObservationId: "obs-cu1",
+      sourcePayloadDigest: SOURCE_PAYLOAD_DIGEST,
+    }) },
+  });
+  const snapshots = {
+    "funded-2026-09-05": {
+      snapshotId: "funded-2026-09-05",
+      byParaformId: { "pf-funded": { orgId: "org-funded", name: "Funded Co" } },
+    },
+  };
+  s.deps.readMembershipSnapshots = async () => snapshots;
+
+  const preview = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule: FUNDED_RULE, ...s.fence } }), preview,
+  );
+  assert.equal(preview.statusCode, 200);
+  assert.equal(preview.body.matched, 1);
+  assert.equal(s.state["apphub:decisions"]["cu1:role1"], undefined);
+
+  const tick = response();
+  await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.statusCode, 200);
+  assert.equal(tick.body.decided, 1);
+  assert.equal(s.state["apphub:decisions"]["cu1:role1"].action, "interview");
+  assert.equal(s.state["apphub:ruleruns"]["cu1:role1"].evidence[0].snapshotId, "funded-2026-09-05");
+});
+
+test("funded preview and tick reject stale facts until an exact source-bound replay", async () => {
+  const experiences = [{ companyId: "pf-funded", companyName: "Funded Co", roleTitle: "Engineer" }];
+  const s = store({
+    rules: [FUNDED_RULE],
+    queue: [row("cu1")],
+    facts: { cu1: factsFromProfile({ experiences, education: [] }, {
+      now: NOW,
+      sourceObservationId: "obs-cu1",
+      sourcePayloadDigest: "b".repeat(64),
+    }) },
+  });
+  s.deps.readMembershipSnapshots = async () => ({
+    "funded-2026-09-05": {
+      snapshotId: "funded-2026-09-05",
+      byParaformId: { "pf-funded": { orgId: "org-funded", name: "Funded Co" } },
+    },
+  });
+
+  const stalePreview = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule: FUNDED_RULE, ...s.fence } }), stalePreview,
+  );
+  assert.equal(stalePreview.body.matched, 0);
+  assert.equal(stalePreview.body.skipped.employment_facts_source_mismatch, 1);
+
+  const staleTick = response();
+  await createTickHandler(s.deps)(request(s), staleTick);
+  assert.equal(staleTick.body.decided, 0);
+  assert.equal(staleTick.body.skipped.employment_facts_source_mismatch, 1);
+  assert.deepEqual(s.state["apphub:decisions"], {});
+
+  s.state["apphub:facts"].cu1 = factsFromProfile({ experiences, education: [] }, {
+    now: NOW,
+    sourceObservationId: "obs-cu1",
+    sourcePayloadDigest: SOURCE_PAYLOAD_DIGEST,
+  });
+  const replayPreview = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule: FUNDED_RULE, ...s.fence } }), replayPreview,
+  );
+  assert.equal(replayPreview.body.matched, 1);
+
+  const replayTick = response();
+  await createTickHandler(s.deps)(request(s), replayTick);
+  assert.equal(replayTick.body.decided, 1);
+  assert.equal(s.state["apphub:decisions"]["cu1:role1"].action, "interview");
+  const evidence = s.state["apphub:ruleruns"]["cu1:role1"].evidence[0];
+  assert.equal(evidence.sourceObservationId, "obs-cu1");
+  assert.equal(evidence.sourcePayloadDigest, SOURCE_PAYLOAD_DIGEST);
 });
 
 test("counters accumulate across ticks", async () => {
