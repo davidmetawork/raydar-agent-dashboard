@@ -122,6 +122,7 @@ test("migrations are digest-checked and idempotent", async () => {
     "011_isolated_routine_object_purge.sql",
     "012_runtime_control_read_lock.sql",
     "013_worker_source_control_check.sql",
+    "014_api_review_binding_source_offers.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count
@@ -392,6 +393,102 @@ test("human review can bind a missing-role signal to an exact active Paraform ro
     ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
     masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
   }, sql);
+});
+
+test("the API principal can attest an exact review role without broader offered-role mutation rights", async () => {
+  const prior = await readRuntimeControls(sql);
+  const candidateId = `api-role-candidate-${randomUUID()}`;
+  const roleId = `api-role-${randomUUID()}`;
+  const signalId = randomUUID();
+  const eventId = `api-role-event-${randomUUID()}`;
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable API-principal review-binding regression",
+      ui: true, ingestion: true, generation: prior.generation_enabled, masterInbox: true,
+      curated: prior.curated_enabled,
+    }, sql);
+    await sql`
+      insert into submissions_v2.candidate_index(
+        candidate_user_id, display_name, normalized_name, search_key, active,
+        paraform_profile_url, last_confirmed_at, source_digest
+      ) values (
+        ${candidateId}, 'API Role Candidate', 'api role candidate', 'api role candidate', true,
+        ${`https://www.paraform.com/candidates?candidate=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url, last_confirmed_at, source_digest
+      ) values (
+        ${roleId}, 'API Role Company', 'API Role Engineer', 'api role company api role engineer', true,
+        ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.source_events(
+        id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+        direction, received_at, content_digest, processing_state, safe_error_code,
+        safe_error_detail, idempotency_key, envelope
+      ) values (
+        ${signalId}, 'email', 'submissions.email_reply.v1', ${eventId}, 'master_inbox', 'mailbox-test',
+        ${`message-${eventId}`}, 'inbound', clock_timestamp(), ${digest(signalId)}, 'needs_role',
+        'role_unclear', 'The exact offered role was not present in the source contract.',
+        ${`source:${signalId}`}, ${sql.json({ candidate_resolution: { candidate_user_id: candidateId } })}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail)
+      values (${signalId}, 'role_unclear', 'Select the exact role confirmed from the source email.')
+    `;
+
+    let privileges;
+    const apiDatabase = {
+      begin: (work) => sql.begin(async (apiSql) => {
+        await apiSql.unsafe("set local role submissions_v2_api");
+        privileges = (await apiSql`
+          select
+            current_user as role_name,
+            has_table_privilege(current_user, 'submissions_v2.source_offered_roles', 'select') as can_select,
+            has_table_privilege(current_user, 'submissions_v2.source_offered_roles', 'insert') as can_insert,
+            has_table_privilege(current_user, 'submissions_v2.source_offered_roles', 'update') as can_update,
+            has_table_privilege(current_user, 'submissions_v2.source_offered_roles', 'delete') as can_delete,
+            has_table_privilege(current_user, 'submissions_v2.source_offered_roles', 'truncate') as can_truncate
+        `)[0];
+        assert.equal(privileges.role_name, "submissions_v2_api");
+        assert.equal(privileges.can_select, true);
+        assert.equal(privileges.can_insert, true);
+        assert.equal(privileges.can_update, false);
+        assert.equal(privileges.can_delete, false);
+        assert.equal(privileges.can_truncate, false);
+        await apiSql`select 1 from submissions_v2.source_offered_roles where false`;
+        return work(apiSql);
+      }),
+    };
+    const result = await createRepository({ sql: apiDatabase }).bindUnresolvedSignal({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), signalId,
+      candidateId, roleIds: [roleId], note: "Exact role confirmed from immutable source evidence.",
+    });
+
+    assert.deepEqual(result.role_ids, [roleId]);
+    assert.ok(result.job_id);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.source_offered_roles
+       where signal_id=${signalId} and role_id=${roleId}
+    `)[0].count, 1);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.jobs
+       where id=${result.job_id} and kind='classify_email_reply' and state='queued'
+    `)[0].count, 1);
+    assert.equal((await sql`
+      select processing_state from submissions_v2.source_events where id=${signalId}
+    `)[0].processing_state, "ready");
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore controls after API-principal review-binding regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
 });
 
 test("a multi-role reply releases unmentioned roles for their later first response", async () => {

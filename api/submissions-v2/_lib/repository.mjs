@@ -2221,7 +2221,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         let offered = await tx`
           select role_id, company_snapshot, role_label_snapshot, role_url_snapshot
             from submissions_v2.source_offered_roles
-           where signal_id=${signalId} order by offered_order, role_id for share
+           where signal_id=${signalId} order by offered_order, role_id
         `;
         if (source.processing_state === "needs_role") {
           if (!selectedRoles.length) throw problem("role_selection_required", "Select at least one exact active Paraform role.", 409);
@@ -2247,7 +2247,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           offered = await tx`
             select role_id, company_snapshot, role_label_snapshot, role_url_snapshot
               from submissions_v2.source_offered_roles
-             where signal_id=${signalId} order by offered_order, role_id for share
+             where signal_id=${signalId} order by offered_order, role_id
           `;
         }
         if (!offered.length) throw problem("role_selection_required", "Select at least one exact role.", 409);

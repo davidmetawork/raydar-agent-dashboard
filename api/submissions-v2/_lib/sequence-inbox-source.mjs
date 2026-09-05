@@ -304,14 +304,12 @@ export function adaptSequenceInboxReply({
 /** Existing Paraform point read, shared with Sequence Inbox message view. */
 export async function readCompleteSequenceInboxMessage(
   gmailId,
-  { get = inboxTrpcGet } = {},
+  { get = inboxTrpcGet, timeoutMs } = {},
 ) {
   if (!validInboxGmailId(gmailId)) throw fail("provider_message_id_invalid");
-  const message = await get(
-    "campaigns.getCampaignEmail",
-    { gmail_id: gmailId },
-    1,
-  );
+  const args = ["campaigns.getCampaignEmail", { gmail_id: gmailId }, 1];
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) args.push(Math.floor(timeoutMs));
+  const message = await get(...args);
   if (!message || typeof message !== "object") throw fail("full_message_unavailable");
   return { complete: true, message: publicMessage(message) };
 }

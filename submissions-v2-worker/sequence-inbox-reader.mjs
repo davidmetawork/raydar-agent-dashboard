@@ -12,7 +12,7 @@ export async function reconcileSequenceInbox({
   assertCurrent = async () => {},
   admit,
   readBatch = readSequenceInboxBrokerBatch,
-  limit = 12,
+  limit = 8,
 } = {}) {
   if (typeof admit !== "function") {
     throw new ResumePipelineError(
@@ -31,7 +31,7 @@ export async function reconcileSequenceInbox({
     cursorOverlapMs: checkpoint.caught_up === true ? 5 * 60_000 : 0,
     catalogDigest: checkpoint.catalog_digest || null,
     watermark: checkpoint.watermark || null,
-    limit: Math.max(1, Math.min(12, Number(limit) || 12)),
+    limit: Math.max(1, Math.min(8, Number(limit) || 8)),
   });
   signal?.throwIfAborted?.();
   await assertCurrent();

@@ -12,10 +12,17 @@ import {
 } from "../../inbox/_lib/core.mjs";
 
 export const SEQUENCE_INBOX_ACTIVATION_AT = SUBMISSIONS_V2_APPROVED_ACTIVATION_AT;
-export const SEQUENCE_INBOX_BATCH_LIMIT = 12;
-// 60s cache refresh + at most twelve 6s point reads and eleven 1s pacing
-// gaps stays below the worker's 180s client timeout and Vercel's 300s limit.
-export const SEQUENCE_INBOX_REFRESH_BUDGET_MS = 60_000;
+// The shared Inbox lock has a fixed 120-second TTL. Keep the whole broker
+// well below it: 35s refresh + (8 × 5s point reads) + (7 × 1s pacing) = 82s,
+// preserving 38s for KV/read-state/write-state and runtime overhead.
+export const SEQUENCE_INBOX_BATCH_LIMIT = 8;
+// Deployed workers may still request the former 12-record page. Accept that
+// wire contract during rollout, but never let it increase broker work.
+export const SEQUENCE_INBOX_REQUEST_LIMIT_MAX = 12;
+export const SEQUENCE_INBOX_REFRESH_BUDGET_MS = 35_000;
+export const SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS = 5_000;
+export const SEQUENCE_INBOX_POINT_READ_PACE_MS = 1_000;
+export const SEQUENCE_INBOX_BROKER_DEADLINE_MS = 100_000;
 
 const fail = (code, message, status = 400) => Object.assign(new Error(message), {
   code,
@@ -53,8 +60,8 @@ export function validateSequenceInboxBatchRequest(input = {}) {
   if (input.caught_up != null && typeof input.caught_up !== "boolean") {
     throw fail("sequence_inbox_caught_up_invalid", "The Sequence Inbox catch-up marker is invalid.");
   }
-  const limit = input.limit == null ? SEQUENCE_INBOX_BATCH_LIMIT : Number(input.limit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > SEQUENCE_INBOX_BATCH_LIMIT) {
+  const requestedLimit = input.limit == null ? SEQUENCE_INBOX_BATCH_LIMIT : Number(input.limit);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > SEQUENCE_INBOX_REQUEST_LIMIT_MAX) {
     throw fail("sequence_inbox_batch_limit_invalid", "The Sequence Inbox batch exceeds its safe limit.");
   }
   const catalogDigest = input.catalog_digest == null ? null : String(input.catalog_digest).trim();
@@ -65,7 +72,13 @@ export function validateSequenceInboxBatchRequest(input = {}) {
   if (watermark !== null && (!watermark || !Number.isFinite(Date.parse(watermark)))) {
     throw fail("sequence_inbox_watermark_invalid", "The Sequence Inbox watermark is invalid.");
   }
-  return { cursor, caughtUp: input.caught_up === true, limit, catalogDigest, watermark };
+  return {
+    cursor,
+    caughtUp: input.caught_up === true,
+    limit: Math.min(requestedLimit, SEQUENCE_INBOX_BATCH_LIMIT),
+    catalogDigest,
+    watermark,
+  };
 }
 
 function safeDeferred(record) {
@@ -90,6 +103,7 @@ export async function readSequenceInboxBrokerBatch(input, {
   writeState = writeInboxRefreshState,
   releaseLock = releaseInboxSyncLock,
   sleepImpl = wait,
+  clock = () => Date.now(),
 } = {}) {
   const request = validateSequenceInboxBatchRequest(input);
   const activationAt = sequenceInboxActivation({ env, now: now().getTime() });
@@ -102,6 +116,17 @@ export async function readSequenceInboxBrokerBatch(input, {
     );
   }
   let batch;
+  const deadline = clock() + SEQUENCE_INBOX_BROKER_DEADLINE_MS;
+  const remaining = () => deadline - clock();
+  const requireBudget = (minimumMs = 0) => {
+    if (remaining() <= minimumMs) {
+      throw fail(
+        "sequence_inbox_broker_deadline",
+        "The bounded Sequence Inbox page ran out of its shared-lock budget.",
+        503,
+      );
+    }
+  };
   try {
     const loaded = await readState();
     if (loaded?.status !== "ready" || !loaded.value) {
@@ -111,12 +136,14 @@ export async function readSequenceInboxBrokerBatch(input, {
     // complete.  Refreshing every page moves the watermark and would force a
     // safe restart before a large cache can ever be consumed.
     const shouldRefresh = request.caughtUp || (!request.cursor && !request.watermark);
+    if (shouldRefresh) requireBudget(1_000);
     const refreshedState = shouldRefresh
       ? await writeState(loaded.value, await buildRefresh({
-        previousState: loaded.value,
-        budgetMs: SEQUENCE_INBOX_REFRESH_BUDGET_MS,
+          previousState: loaded.value,
+          budgetMs: Math.min(SEQUENCE_INBOX_REFRESH_BUDGET_MS, remaining()),
       }))
       : loaded.value;
+    requireBudget(SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS);
     let reads = 0;
     batch = await readBatch({
       activationAt,
@@ -129,9 +156,12 @@ export async function readSequenceInboxBrokerBatch(input, {
       now,
       readState: async () => ({ status: "ready", value: refreshedState }),
       readMessage: async (gmailId) => {
-        if (reads > 0) await sleepImpl(1_000);
+        if (reads > 0) await sleepImpl(SEQUENCE_INBOX_POINT_READ_PACE_MS);
+        requireBudget(SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS);
         reads += 1;
-        return readMessage(gmailId);
+        return readMessage(gmailId, {
+          timeoutMs: Math.min(SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS, remaining()),
+        });
       },
     });
   } finally {
