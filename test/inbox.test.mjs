@@ -80,6 +80,24 @@ test("Inbox snapshot reads expose only fixed failure causes", async () => {
   });
   assert.deepEqual(http, { status: "error", cause: "pipeline_http_503", value: null });
 
+  const command = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => { throw Object.assign(new Error("opaque"), { code: "STATE_STORE_PIPELINE_COMMAND_0_QUOTA_LIMITED" }); },
+  });
+  assert.deepEqual(command, { status: "error", cause: "pipeline_command_0_quota_limited", value: null });
+
+  const denied = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => { throw Object.assign(new Error("opaque"), { code: "STATE_STORE_PIPELINE_COMMAND_1_AUTH_DENIED" }); },
+  });
+  assert.deepEqual(denied, { status: "error", cause: "pipeline_command_1_auth_denied", value: null });
+
+  const unreadable = await readInboxSnapshotState({
+    configured: true,
+    pipelineImpl: async () => { throw Object.assign(new Error("opaque"), { code: "STATE_STORE_RESPONSE_JSON_INVALID" }); },
+  });
+  assert.deepEqual(unreadable, { status: "error", cause: "pipeline_response_json_invalid", value: null });
+
   const snapshot = await readInboxSnapshotState({
     configured: true,
     pipelineImpl: async () => [["sequence-1", "not-json"], null, null, null],

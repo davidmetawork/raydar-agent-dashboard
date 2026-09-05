@@ -1011,9 +1011,16 @@ function inboxPipelineCause(error) {
   if (error?.name === "TimeoutError" || error?.name === "AbortError") {
     return "pipeline_timeout";
   }
+  if (error?.code === "STATE_STORE_RESPONSE_JSON_INVALID") return "pipeline_response_json_invalid";
+  if (error?.code === "STATE_STORE_PIPELINE_RESPONSE_SHAPE_INVALID") return "pipeline_response_shape_invalid";
+  const command = String(error?.code || "").match(/^STATE_STORE_PIPELINE_COMMAND_([0-3])_(QUOTA_LIMITED|SIZE_LIMITED|AUTH_DENIED|STORAGE_EXHAUSTED|COMMAND_UNSUPPORTED|RESPONSE_INVALID|COMMAND_REJECTED)$/u);
+  if (command) return `pipeline_command_${command[1]}_${command[2].toLowerCase()}`;
   const message = String(error?.message || "");
   if (/\bWRONGTYPE\b/iu.test(message)) return "pipeline_wrongtype";
   const status = message.match(/^state store HTTP (\d{3})$/u)?.[1];
+  if (status === "401" || status === "403") return "pipeline_http_auth_denied";
+  if (status === "413" || status === "414") return "pipeline_http_size_limited";
+  if (status === "429") return "pipeline_http_quota_limited";
   if (status) return `pipeline_http_${status}`;
   if (error instanceof TypeError) return "pipeline_network";
   return "pipeline_unavailable";
