@@ -12,7 +12,7 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[character]));
 const helpers = runInNewContext(
-  `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, formatParaformScore, allowedParaformLogo, entityLogoHtml, entityTierHtml, richProfile, presentText, hasProviderProfile, hasProviderHistory, hasProviderContent, paraformRatingText, visibleCardProfile, profileFactsHtml })`,
+  `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, formatParaformScore, allowedParaformLogo, entityLogoHtml, entityLogoFallback, entityTierHtml, richProfile, presentText, hasProviderProfile, hasProviderHistory, hasProviderContent, paraformRatingText, visibleCardProfile, profileFactsHtml })`,
   { esc },
 );
 
@@ -55,6 +55,27 @@ test("only the confirmed public Paraform company-logo origin can render", () => 
   assert.match(html, /referrerpolicy="no-referrer"/);
   assert.match(html, /onerror="entityLogoFallback\(this\)"/);
   assert.match(helpers.entityLogoHtml({ logo: "https://media.licdn.com/x.png" }, "school"), /School logo unavailable/);
+});
+
+test("logo accessible names describe loaded entities and become unavailable on image failure", () => {
+  const publicLogo = "https://storage.googleapis.com/paraform-company-logo-urls/company-logos/synthetic.png";
+  const company = helpers.entityLogoHtml({ logo: publicLogo, companyName: "A & <B>" }, "company");
+  assert.match(company, /aria-label="A &amp; &lt;B&gt; company logo"/);
+  assert.doesNotMatch(company, /logo unavailable/);
+  assert.match(helpers.entityLogoHtml({ logo: publicLogo, school: "State University" }, "school"), /aria-label="State University school logo"/);
+  assert.match(helpers.entityLogoHtml({ logo: publicLogo }, "school"), /aria-label="School logo"/);
+
+  const attributes = new Map();
+  const parent = {
+    dataset: { kind: "company" },
+    classList: { add: (name) => attributes.set("class", name) },
+    setAttribute: (name, value) => attributes.set(name, value),
+    innerHTML: "",
+  };
+  helpers.entityLogoFallback({ parentNode: parent });
+  assert.equal(attributes.get("class"), "missing");
+  assert.equal(attributes.get("aria-label"), "Company logo unavailable");
+  assert.match(parent.innerHTML, /<svg/);
 });
 
 test("the compact overlay is used only for meaningful provider content", () => {
