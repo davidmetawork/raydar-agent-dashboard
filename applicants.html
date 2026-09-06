@@ -1081,13 +1081,20 @@ function entityLogoFallback(img) {
   const mark = img.parentNode;
   if (!mark) return;
   mark.classList.add("missing");
+  mark.setAttribute("aria-label", mark.dataset.kind === "school" ? "School logo unavailable" : "Company logo unavailable");
   mark.innerHTML = mark.dataset.kind === "school" ? ICON_SCHOOL : ICON_COMPANY;
+}
+function entityLogoName(item, kind) {
+  const fields = kind === "school" ? [item?.school, item?.schoolName] : [item?.company, item?.companyName];
+  return fields.find((value) => typeof value === "string" && value.trim())?.trim() || "";
 }
 function entityLogoHtml(item, kind, className = "entity-logo") {
   const logo = allowedParaformLogo(item?.logo);
   const icon = kind === "school" ? ICON_SCHOOL : ICON_COMPANY;
-  const label = kind === "school" ? "School logo unavailable" : "Company logo unavailable";
-  return '<span class="' + className + (logo ? "" : " missing") + '" role="img" aria-label="' + label + '" data-kind="' + kind + '">'
+  const kindLabel = kind === "school" ? "School" : "Company";
+  const name = entityLogoName(item, kind);
+  const label = logo ? (name ? name + " " + kindLabel.toLowerCase() + " logo" : kindLabel + " logo") : kindLabel + " logo unavailable";
+  return '<span class="' + className + (logo ? "" : " missing") + '" role="img" aria-label="' + esc(label) + '" data-kind="' + kind + '">'
     + (logo ? '<img src="' + esc(logo) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="entityLogoFallback(this)" />' : icon)
     + "</span>";
 }
