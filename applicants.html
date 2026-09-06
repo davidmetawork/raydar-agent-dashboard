@@ -253,8 +253,9 @@
   .p-facts-note { margin:8px 0 0; color:var(--ink-3); font-size:11px; line-height:1.4; }
   .p-source { margin-top:18px; border:1px solid var(--line-2); border-radius:12px; background:#FCFBF8; }
   .p-source summary { cursor:pointer; padding:11px 13px; color:var(--ink-2); font-size:12px; font-weight:700; }
-  .p-source summary span { color:var(--ink-3); font-weight:500; }
+  .p-source summary span, .p-source-title span { color:var(--ink-3); font-weight:500; }
   .p-source .p-source-body { padding:0 13px 10px; }
+  .p-source-title { padding-top:11px; color:var(--ink-2); font-size:12px; font-weight:700; }
   .p-source .p-section { margin-top:10px; }
   .p-applied { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--line-2); border-radius:12px; padding:11px 13px;
     margin:16px 0 0; font-size:12.5px; color:var(--ink-2); }
@@ -1014,8 +1015,34 @@ function entityTierHtml(item, className = "rc-entity-rank") {
 function richProfile(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
+function presentText(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+/* A provider envelope can be exact and retained while containing only its
+   binding identity or a timestamp. Those fields prove cache eligibility, not
+   a LinkedIn profile. Keep profile text, history, and Paraform ratings as
+   separate display decisions so a sparse envelope cannot eclipse source data. */
+function hasProviderProfile(provider) {
+  return Boolean(provider && (presentText(provider.title) || presentText(provider.location)));
+}
+function hasProviderHistory(provider) {
+  return Boolean(provider && [provider.exp, provider.edu, provider.experiences, provider.education]
+    .some((items) => Array.isArray(items) && items.length > 0));
+}
+function hasProviderContent(provider) {
+  return hasProviderProfile(provider) || hasProviderHistory(provider);
+}
+function paraformRatingText(provider) {
+  const tier = explicitParaformTier(provider?.paraformTier, provider?.paraformTierSource);
+  const score = paraformScore(provider?.densityScore);
+  const values = [];
+  if (tier) values.push(tier + " tier");
+  if (score != null) values.push("score " + score);
+  return values.join(" · ");
+}
 function visibleCardProfile(card) {
-  return richProfile(card?.paraformProfile) || card || {};
+  const provider = richProfile(card?.paraformProfile);
+  return hasProviderContent(provider) ? provider : (card || {});
 }
 function avatarHtml(row) {
   const id = profileId(row);
@@ -1382,14 +1409,20 @@ function historyHtml(row) {
   const card = cardFor(cu);
   if (!card) return '<div class="rc-none">Source profile history is still preparing for this applicant.</div>';
   const provider = richProfile(card.paraformProfile);
-  const display = visibleCardProfile(card);
+  const providerHistory = hasProviderHistory(provider);
+  const display = providerHistory ? provider : card;
   const exps = display.exp || [], edus = display.edu || [];
   const expTotal = display.expCount ?? exps.length, eduTotal = display.eduCount ?? edus.length;
   const hidden = (expTotal - exps.length) + (eduTotal - edus.length);
   const out = [];
-  if (provider) out.push('<div class="rc-paraform"><span class="label">Cached LinkedIn profile</span><span class="value">' + (explicitParaformTier(provider.paraformTier, provider.paraformTierSource) ? "Paraform " + explicitParaformTier(provider.paraformTier, provider.paraformTierSource) + " tier" : "Tier not provided") + "</span></div>");
-  if (exps.length) out.push(secHtml("Experience", exps.map((item) => expLineHtml(item, Boolean(provider))).join("")));
-  if (edus.length) out.push(secHtml("Education", edus.map((item) => eduLineHtml(item, Boolean(provider))).join("")));
+  const rating = paraformRatingText(provider);
+  if (providerHistory) out.push('<div class="rc-paraform"><span class="label">Cached LinkedIn profile</span></div>');
+  if (!providerHistory && (exps.length || edus.length)) {
+    out.push('<div class="rc-paraform"><span class="label">Application profile</span><span class="value">source record</span></div>');
+  }
+  if (rating) out.push('<div class="rc-paraform"><span class="label">Paraform rating</span><span class="value">Paraform ' + esc(rating) + "</span></div>");
+  if (exps.length) out.push(secHtml("Experience", exps.map((item) => expLineHtml(item, providerHistory)).join("")));
+  if (edus.length) out.push(secHtml("Education", edus.map((item) => eduLineHtml(item, providerHistory)).join("")));
   if (!out.length) {
     const state = String(card.historyState || "").trim().toLowerCase();
     return '<div class="rc-none">' + (state === "verified_empty"
@@ -2038,12 +2071,13 @@ function profileFactHtml(label, value) {
   return '<div class="p-fact"><span class="label">' + esc(label) + '</span><span class="value' + (unknown ? " unknown" : "") + '">' + esc(unknown ? "Not provided" : value) + "</span></div>";
 }
 function profileFactsHtml(provider) {
-  if (!provider) return '<div class="p-facts">' + profileFactHtml("Paraform tier", null) + profileFactHtml("Paraform score", null) +
-    '</div><p class="p-facts-note">No cached LinkedIn profile is available for these Paraform details.</p>';
-  const tier = explicitParaformTier(provider.paraformTier, provider.paraformTierSource);
-  const score = paraformScore(provider.densityScore);
-  return '<div class="p-facts">' + profileFactHtml("Paraform tier", tier ? tier + " tier" : null) + profileFactHtml("Paraform score", score) +
-    '</div>' + (!tier && score == null ? '<p class="p-facts-note">This cached LinkedIn profile did not include a Paraform rating.</p>' : "");
+  const tier = explicitParaformTier(provider?.paraformTier, provider?.paraformTierSource);
+  const score = paraformScore(provider?.densityScore);
+  if (!tier && score == null) return "";
+  return '<div class="p-facts">' +
+    (tier ? profileFactHtml("Paraform tier", tier + " tier") : "") +
+    (score != null ? profileFactHtml("Paraform score", score) : "") +
+    "</div>";
 }
 function historySectionsHtml(profile, { allowRuleFacts = false, isParaformProfile = false } = {}) {
   const parts = [];
@@ -2063,7 +2097,10 @@ function renderModal() {
   const loading = !(modal.cu in STATE.profiles);
   const p = profile || {};
   const provider = richProfile(p.paraformProfile);
-  const displayProfile = provider || p;
+  const providerProfile = hasProviderProfile(provider);
+  const providerHistory = hasProviderHistory(provider);
+  const providerContent = hasProviderContent(provider);
+  const displayProfile = providerProfile ? provider : p;
   const linkedin = preferredLinkedinProfileUrl(p.linkedin, row.linkedin);
   const decision = modal.source === "queue" ? effectiveDecision(modal.key) : null;
   const busy = STATE.busy.has(modal.key);
@@ -2076,14 +2113,15 @@ function renderModal() {
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    ((provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    (providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
     (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") +
     (modal.source === "queue" && row.roleId ? '<button type="button" class="rule-use" data-rule-fact-kind="application" data-rule-fact-index="0">Use in rule</button>' : "") + "</div>");
   if (p.degraded === "paraform_auth") {
-    parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform session expired on the desktop.</strong> Showing cached LinkedIn data only — refresh the cookie to pull fresh profiles.</div></div>');
+    parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform session expired on the desktop.</strong> ' +
+      (providerContent ? "Showing cached LinkedIn data only — refresh the cookie to pull fresh profiles." : "Showing source profile details — refresh the cookie to pull fresh profiles.") + "</div></div>");
   }
   if (loading) {
     parts.push('<div class="p-loading">Pulling the LinkedIn profile…</div>');
@@ -2091,15 +2129,18 @@ function renderModal() {
     parts.push('<div class="p-loading">Profile unavailable right now — LinkedIn and resume links above still work.</div>');
   } else {
     parts.push(profileFactsHtml(provider));
-    const primaryHistory = historySectionsHtml(displayProfile, { allowRuleFacts: !provider && modal.source === "queue", isParaformProfile: Boolean(provider) });
-    if (primaryHistory) parts.push(primaryHistory);
-    if (provider) {
+    const primaryProfile = providerHistory ? provider : p;
+    const primaryHistory = historySectionsHtml(primaryProfile, { allowRuleFacts: !providerHistory && modal.source === "queue", isParaformProfile: providerHistory });
+    if (primaryHistory) {
+      parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">Application profile <span>source record</span></div>' + primaryHistory + "</div></div>");
+    }
+    if (providerHistory) {
       const applicationHistory = historySectionsHtml(p, { allowRuleFacts: modal.source === "queue" });
       if (applicationHistory) {
         parts.push('<details class="p-source"><summary>Application profile <span>source record</span></summary><div class="p-source-body">' + applicationHistory + "</div></details>");
       }
     }
-    if (!primaryHistory && !(provider && ((p.experiences || []).length || (p.education || []).length)) && p.degraded !== "paraform_auth") {
+    if (!primaryHistory && !(providerHistory && ((p.experiences || []).length || (p.education || []).length)) && p.degraded !== "paraform_auth") {
       const historyState = String(p.historyState || "").trim().toLowerCase();
       parts.push('<div class="p-loading">' + (historyState === "verified_empty"
         ? "The source reported no work or education history."
