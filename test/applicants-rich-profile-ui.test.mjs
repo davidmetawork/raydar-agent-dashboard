@@ -12,7 +12,7 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[character]));
 const helpers = runInNewContext(
-  `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, allowedParaformLogo, entityLogoHtml, entityTierHtml, richProfile, visibleCardProfile, profileFactsHtml })`,
+  `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, allowedParaformLogo, entityLogoHtml, entityTierHtml, richProfile, presentText, hasProviderProfile, hasProviderHistory, hasProviderContent, paraformRatingText, visibleCardProfile, profileFactsHtml })`,
   { esc },
 );
 
@@ -43,24 +43,114 @@ test("only the confirmed public Paraform company-logo origin can render", () => 
   assert.match(helpers.entityLogoHtml({ logo: "https://media.licdn.com/x.png" }, "school"), /School logo unavailable/);
 });
 
-test("the compact overlay wins for display without replacing the application profile", () => {
+test("the compact overlay is used only for meaningful provider content", () => {
   const source = { title: "Application title", exp: [], edu: [] };
   const overlay = { title: "Cached LinkedIn headline", exp: [], edu: [], paraformTier: "C", paraformTierSource: "paraform" };
-  assert.equal(helpers.visibleCardProfile({ ...source, paraformProfile: overlay }), overlay);
+  const sparse = { paraformTier: "A", paraformTierSource: "paraform", densityScore: .71, updatedAt: "2026-09-01T00:00:00Z" };
+  const overlayCard = { ...source, paraformProfile: overlay };
+  const sparseCard = { ...source, paraformProfile: sparse };
+  assert.equal(helpers.visibleCardProfile(overlayCard), overlay);
+  assert.equal(helpers.visibleCardProfile(sparseCard), sparseCard);
+  assert.equal(helpers.hasProviderProfile(sparse), false);
+  assert.equal(helpers.hasProviderHistory(sparse), false);
+  assert.equal(helpers.hasProviderContent(sparse), false);
+  assert.equal(helpers.paraformRatingText(sparse), "A tier · score 0.71");
   assert.equal(helpers.visibleCardProfile(source), source);
   assert.match(helpers.entityTierHtml({ talentRank: "B" }), /Paraform B/);
   assert.equal(helpers.entityTierHtml({ talentRank: 3 }), "");
   assert.match(helpers.profileFactsHtml(overlay), /C tier/);
-  assert.match(helpers.profileFactsHtml(null), /No cached LinkedIn profile is available/);
+  assert.equal(helpers.profileFactsHtml({ updatedAt: "2026-09-01T00:00:00Z" }), "");
+  assert.equal(helpers.profileFactsHtml(null), "");
+});
+
+const modalEnd = applicants.indexOf("/* ---- event delegation", start);
+assert.ok(modalEnd > start, "modal rendering helpers are extractable from the shipped page");
+
+function renderHarness({ card, profile, provider = null, source = "queue" }) {
+  const profileCard = { innerHTML: "" };
+  const row = { key: "row-one", profileKey: "core:one", cuId: "candidate-one", name: "Source Applicant", roleTitle: "Engineer", company: "Example Co", roleId: "role-one" };
+  const STATE = {
+    cards: { [row.profileKey]: card },
+    photos: {},
+    profiles: { [row.profileKey]: { ...profile, ...(provider ? { paraformProfile: provider } : {}) } },
+    modal: { cu: row.profileKey, key: row.key, row, source },
+    busy: new Set(),
+  };
+  const context = {
+    STATE, esc,
+    profileId: (value) => value?.profileKey || value?.cuId || "",
+    cardFor: (cu) => STATE.cards[cu] || null,
+    initials: () => "SA", avatarImg: () => "<img>",
+    preferredLinkedinProfileUrl: () => "", liAnchor: () => "", pfAnchor: () => "", tierPill: () => "",
+    monthYear: () => "September 2026", shortDate: () => "September 1", relTime: () => "now",
+    duration: () => "", effectiveDecision: () => null, interviewHold: () => "", alreadyEmailed: () => false,
+    ALREADY_EMAILED_ACTION_TITLE: "", $: (id) => id === "profileCard" ? profileCard : null,
+  };
+  const rendered = runInNewContext(`${applicants.slice(start, modalEnd)}; ({ historyHtml, renderModal })`, context);
+  rendered.renderModal();
+  return { card: rendered.historyHtml(row), modal: profileCard.innerHTML };
+}
+
+test("tier-only and identity-only overlays keep source card and modal history primary", () => {
+  const sourceCard = { exp: [{ role: "Source card role", company: "Source Co" }], edu: [] };
+  const sourceProfile = { name: "Source Applicant", title: "Application headline", updatedAt: "2026-09-01T00:00:00Z", experiences: [{ roleTitle: "Source modal role", companyName: "Source Co" }], education: [] };
+  const tierOnly = { paraformTier: "A", paraformTierSource: "paraform", densityScore: .71, updatedAt: "2026-09-02T00:00:00Z" };
+  const tier = renderHarness({ card: { ...sourceCard, paraformProfile: tierOnly }, profile: sourceProfile, provider: tierOnly });
+  assert.match(tier.card, /Application profile/);
+  assert.match(tier.card, /source record/);
+  assert.match(tier.card, /Paraform rating/);
+  assert.match(tier.card, /Paraform A tier · score 0.71/);
+  assert.match(tier.card, /Source card role/);
+  assert.doesNotMatch(tier.card, /Cached LinkedIn profile/);
+  assert.match(tier.modal, /Paraform tier/);
+  assert.match(tier.modal, /A tier/);
+  assert.match(tier.modal, /Paraform score/);
+  assert.match(tier.modal, /0.71/);
+  assert.match(tier.modal, /Application profile <span>source record<\/span>/);
+  assert.match(tier.modal, /Source modal role/);
+  assert.doesNotMatch(tier.modal, /Cached LinkedIn profile/);
+  assert.doesNotMatch(tier.modal, /<details class="p-source">/);
+
+  const identityOnly = renderHarness({ card: { ...sourceCard, paraformProfile: { updatedAt: "2026-09-02T00:00:00Z" } }, profile: sourceProfile, provider: { updatedAt: "2026-09-02T00:00:00Z" } });
+  assert.match(identityOnly.card, /Application profile.*source record/);
+  assert.match(identityOnly.card, /Source card role/);
+  assert.doesNotMatch(identityOnly.card, /Cached LinkedIn profile|Paraform rating/);
+  assert.match(identityOnly.modal, /Application profile <span>source record<\/span>/);
+  assert.match(identityOnly.modal, /Source modal role/);
+  assert.match(identityOnly.modal, /Application profile as of/);
+  assert.doesNotMatch(identityOnly.modal, /Cached LinkedIn profile|Paraform tier|Paraform score/);
+});
+
+test("headline-only overlays keep source history primary and real provider history stays read-only", () => {
+  const sourceCard = { exp: [{ role: "Source card role", company: "Source Co" }], edu: [] };
+  const sourceProfile = { name: "Source Applicant", title: "Application headline", experiences: [{ roleTitle: "Source modal role", companyName: "Source Co" }], education: [] };
+  const headlineOnly = { title: "Cached LinkedIn headline", exp: [], edu: [], updatedAt: "2026-09-02T00:00:00Z" };
+  const headline = renderHarness({ card: { ...sourceCard, paraformProfile: headlineOnly }, profile: sourceProfile, provider: headlineOnly });
+  assert.match(headline.card, /Application profile.*source record/);
+  assert.match(headline.card, /Source card role/);
+  assert.doesNotMatch(headline.card, /Cached LinkedIn profile|Tier not provided/);
+  assert.match(headline.modal, /Cached LinkedIn headline/);
+  assert.match(headline.modal, /Cached LinkedIn profile · as of/);
+  assert.match(headline.modal, /Application profile <span>source record<\/span>/);
+  assert.match(headline.modal, /Source modal role/);
+  assert.match(headline.modal, /data-rule-fact-kind="experience"/);
+  assert.doesNotMatch(headline.modal, /<details class="p-source">/);
+
+  const rich = { title: "Cached LinkedIn headline", experiences: [{ roleTitle: "Provider role", companyName: "Provider Co" }], education: [] };
+  const full = renderHarness({ card: { ...sourceCard, paraformProfile: { title: rich.title, exp: [{ role: "Provider card role", company: "Provider Co" }], edu: [] } }, profile: sourceProfile, provider: rich });
+  assert.match(full.modal, /Provider role/);
+  assert.match(full.modal, /<details class="p-source">/);
+  assert.match(full.modal, /Source modal role/);
+  assert.doesNotMatch(full.modal.slice(0, full.modal.indexOf('<details class="p-source">')), /data-rule-fact-kind="experience"/);
 });
 
 test("the page preserves provenance and keeps rules on application history only", () => {
   assert.match(applicants, /const provider = richProfile\(p\.paraformProfile\);/);
-  assert.match(applicants, /const displayProfile = provider \|\| p;/);
-  assert.match(applicants, /Cached LinkedIn profile · as of/);
-  assert.match(applicants, /<details class="p-source"><summary>Application profile/);
+  assert.match(applicants, /const providerProfile = hasProviderProfile\(provider\);/);
+  assert.match(applicants, /const providerHistory = hasProviderHistory\(provider\);/);
+  assert.match(applicants, /const primaryProfile = providerHistory \? provider : p;/);
+  assert.match(applicants, /historySectionsHtml\(primaryProfile, \{ allowRuleFacts: !providerHistory && modal\.source === "queue", isParaformProfile: providerHistory \}\)/);
   assert.match(applicants, /historySectionsHtml\(p, \{ allowRuleFacts: modal\.source === "queue" \}\)/);
-  assert.match(applicants, /historySectionsHtml\(displayProfile, \{ allowRuleFacts: !provider && modal\.source === "queue", isParaformProfile: Boolean\(provider\) \}\)/);
   assert.match(applicants, /displayProfile\.title \|\| p\.title/);
   assert.doesNotMatch(applicants.slice(start, end), /paraformProfile\?\./);
 });
