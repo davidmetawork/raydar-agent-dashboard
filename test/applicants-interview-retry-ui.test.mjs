@@ -10,7 +10,7 @@ const retryEnd = applicants.indexOf("function requestedRows", retryStart);
 assert.ok(retryStart >= 0 && retryEnd > retryStart, "retry eligibility helpers are extractable from the shipped page");
 
 function retryHarness() {
-  const STATE = { acks: {}, decisions: {} };
+  const STATE = { acks: {}, decisions: {}, snapshot: {} };
   const helpers = runInNewContext(
     `${applicants.slice(retryStart, retryEnd)}; ({ hasRawInterviewSendEvidence, isRuleInterviewDecision, retryableInterviewRequest })`,
     {
@@ -62,6 +62,53 @@ test("retry eligibility is limited to the two matching terminal technical failur
 
   STATE.acks[row.key] = { requestId: "other-request", status: "sendgrid_delivered", reason: "22P02" };
   assert.equal(helpers.hasRawInterviewSendEvidence(row), true, "a mismatched raw sent ack still blocks retry");
+});
+
+test("source-stale retries require accepted provenance and a newer published input revision", () => {
+  const { STATE, helpers } = retryHarness();
+  const row = { key: "candidate:role", inputRevision: "current-input" };
+  const baseDecision = {
+    action: "interview",
+    requestId: "old-request",
+    inputRevision: "previous-input",
+    at: "2026-09-05T20:00:00.000Z",
+  };
+  STATE.snapshot.generatedAt = "2026-09-05T20:03:00.000Z";
+  STATE.acks[row.key] = {
+    requestId: "old-request",
+    status: "blocked",
+    reason: "APPLICANT_CORE_DECISION_SOURCE_REVISION_STALE",
+    at: "2026-09-05T20:02:00.000Z",
+  };
+
+  for (const decision of [
+    { ...baseDecision, actorType: "human", by: "reviewer@example.test" },
+    { ...baseDecision, actorType: "rule", by: "rule:current" },
+    { ...baseDecision, by: "reviewer@example.test" },
+    { ...baseDecision, by: "rule:legacy" },
+  ]) assert.equal(helpers.retryableInterviewRequest(row, decision), "old-request");
+
+  for (const decision of [
+    { ...baseDecision, actorType: "migration", by: "reviewer@example.test" },
+    { ...baseDecision },
+  ]) assert.equal(helpers.retryableInterviewRequest(row, decision), null, "unaccepted provenance");
+
+  assert.equal(helpers.retryableInterviewRequest({ ...row, inputRevision: "previous-input" }, {
+    ...baseDecision, actorType: "human",
+  }), null, "the same stale source cannot retry");
+  assert.equal(helpers.retryableInterviewRequest({ ...row, inputRevision: "" }, {
+    ...baseDecision, actorType: "human",
+  }), null, "the current revision must be present");
+
+  STATE.snapshot.generatedAt = STATE.acks[row.key].at;
+  assert.equal(helpers.retryableInterviewRequest(row, { ...baseDecision, actorType: "human" }), null,
+    "the publication must be after the rejection");
+  STATE.snapshot.generatedAt = "invalid";
+  assert.equal(helpers.retryableInterviewRequest(row, { ...baseDecision, actorType: "human" }), null,
+    "missing trustworthy publication time fails closed");
+  STATE.snapshot.generatedAt = "2026-09-05T20:03:00Z";
+  assert.equal(helpers.retryableInterviewRequest(row, { ...baseDecision, actorType: "human" }), null,
+    "non-canonical timestamps cannot be ordered by the atomic retry check");
 });
 
 test("eligible decided cards and profiles render one retry control carrying the prior request id", () => {

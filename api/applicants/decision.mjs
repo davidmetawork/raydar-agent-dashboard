@@ -22,7 +22,12 @@ import {
   kvConfigured,
   validKey,
 } from "./_lib/kv.mjs";
-import {requireApplicantMutation,saveApplicantRequest,retryableInterviewRequest} from './_lib/request-safety.mjs';
+import {
+  requireApplicantMutation,
+  saveApplicantRequest,
+  retryableInterviewRequest,
+  SOURCE_STALE_INTERVIEW_FAILURE,
+} from './_lib/request-safety.mjs';
 
 export const config = { maxDuration: 30 };
 
@@ -99,16 +104,24 @@ export function createDecisionHandler({
       }
       let retryDecision = null;
       let retryAck = null;
+      let retryPublicationAt = null;
       if (retryRequested) {
         [retryDecision,retryAck] = await Promise.all([readDecision(key),readAck(key)]);
         if (retryDecision?.action === 'interview' && retryDecision.requestId === body.requestId
-          && retryDecision.recovery?.kind === 'technical_admission_retry'
+          && ['technical_admission_retry','source_revision_retry'].includes(retryDecision.recovery?.kind)
           && retryDecision.recovery.previousRequestId === retryOfRequestId
           && retryDecision.actorId === (req.applicantActor?.id || req.authedEmail)) {
           return res.status(202).json({ok:true,key,decision:retryDecision,
             status:retryDecision.status || 'pending',idempotent:true});
         }
-        if (!retryableInterviewRequest(retryDecision,retryAck,retryOfRequestId)) {
+        const snapshotGeneratedAt = String(artifacts.snapshot?.generatedAt || '');
+        const queueGeneratedAt = String(artifacts.queue?.generatedAt || '');
+        retryPublicationAt = snapshotGeneratedAt && snapshotGeneratedAt === queueGeneratedAt
+          ? snapshotGeneratedAt : null;
+        if (!retryableInterviewRequest(retryDecision,retryAck,retryOfRequestId,{
+          currentInputRevision:row.inputRevision,
+          currentPublicationAt:retryPublicationAt,
+        })) {
           return res.status(409).json({ok:false,error:'interview_retry_unavailable'});
         }
         if (row.externalPriorSendAt || row.external_prior_send_at
@@ -142,13 +155,19 @@ export function createDecisionHandler({
         generationDigest: generation.digest,
         ...(action === "interview" ? actionability : {}),
         ...(retryRequested ? {recovery:{
-          kind:'technical_admission_retry',
+          kind:retryAck.reason === SOURCE_STALE_INTERVIEW_FAILURE
+            ? 'source_revision_retry' : 'technical_admission_retry',
           previousRequestId:retryOfRequestId,
           failureReason:retryAck.reason,
           previousActorType:retryDecision.actorType || null,
           previousActorId:retryDecision.actorId || retryDecision.by || null,
           previousDecisionAt:retryDecision.at || null,
           previousRuleRunId:retryDecision.ruleRun?.id || null,
+          ...(retryAck.reason === SOURCE_STALE_INTERVIEW_FAILURE ? {
+            previousInputRevision:retryDecision.inputRevision,
+            currentInputRevision:row.inputRevision,
+            sourcePublicationAt:retryPublicationAt,
+          } : {}),
         }} : {}),
       });
       // The immutable row and its revisions were checked above, but the
@@ -167,6 +186,13 @@ export function createDecisionHandler({
       }
       const writeOptions = retryRequested ? {
         retryOfRequestId,retryFailureReason:retryAck.reason,rejectSentAck:true,
+        ...(retryAck.reason === SOURCE_STALE_INTERVIEW_FAILURE ? {
+          retryCurrentInputRevision:row.inputRevision,
+          retryPublicationAt,
+          retryPreviousInputRevision:retryDecision.inputRevision,
+          retryDecisionAt:retryDecision.at,
+          retryAckAt:retryAck.at,
+        } : {}),
       } : {};
       if(!await writeDecision(key, decision, writeOptions)) {
         return res.status(409).json({ok:false,error:retryRequested

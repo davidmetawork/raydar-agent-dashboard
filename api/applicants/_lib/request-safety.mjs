@@ -12,15 +12,42 @@ export const RETRYABLE_INTERVIEW_ADMISSION_FAILURES = new Set([
   'APPLICANT_CORE_RULE_RUN_IDEMPOTENCY_CONFLICT',
   '22P02',
 ]);
+export const SOURCE_STALE_INTERVIEW_FAILURE = 'APPLICANT_CORE_DECISION_SOURCE_REVISION_STALE';
+export const RETRYABLE_INTERVIEW_FAILURES = new Set([
+  ...RETRYABLE_INTERVIEW_ADMISSION_FAILURES,
+  SOURCE_STALE_INTERVIEW_FAILURE,
+]);
 
-export function retryableInterviewRequest(decision, ack, expectedRequestId) {
+function validTime(value) {
+  const raw = String(value || '');
+  const time = Date.parse(raw);
+  return Number.isFinite(time) && new Date(time).toISOString() === raw ? time : null;
+}
+
+export function retryableInterviewRequest(decision, ack, expectedRequestId, {
+  currentInputRevision=null,
+  currentPublicationAt=null,
+}={}) {
   const ruleDecision = decision?.actorType === 'rule'
     || (!decision?.actorType && String(decision?.by || '').startsWith('rule:'));
-  return Boolean(expectedRequestId && decision?.action === 'interview'
-    && ruleDecision
+  const by = String(decision?.by || '').trim().toLowerCase();
+  const humanOrRuleDecision = decision?.actorType === 'human' || decision?.actorType === 'rule'
+    || (!decision?.actorType && (by.startsWith('rule:') || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(by)));
+  const exactFailedRequest = Boolean(expectedRequestId && decision?.action === 'interview'
     && decision.requestId === expectedRequestId
-    && ack?.requestId === expectedRequestId && ack.status === 'blocked'
-    && RETRYABLE_INTERVIEW_ADMISSION_FAILURES.has(ack.reason));
+    && ack?.requestId === expectedRequestId && ack.status === 'blocked');
+  if (!exactFailedRequest) return false;
+  if (RETRYABLE_INTERVIEW_ADMISSION_FAILURES.has(ack.reason)) return ruleDecision;
+  if (ack.reason !== SOURCE_STALE_INTERVIEW_FAILURE || !humanOrRuleDecision) return false;
+  const previousInputRevision = String(decision?.inputRevision || '');
+  const nextInputRevision = String(currentInputRevision || '');
+  const publicationAt = validTime(currentPublicationAt);
+  const decisionAt = validTime(decision?.at);
+  const ackAt = validTime(ack?.at);
+  return Boolean(previousInputRevision && nextInputRevision
+    && previousInputRevision !== nextInputRevision
+    && publicationAt != null && decisionAt != null && ackAt != null
+    && publicationAt > decisionAt && publicationAt > ackAt);
 }
 
 export async function requireApplicantMutation(req,res) {
@@ -46,11 +73,26 @@ export async function requireApplicantMutation(req,res) {
 // unacknowledged request, and retrying the same request is idempotent.
 export async function saveApplicantRequest(key,record,{
   allowRejected=false,rejectSentAck=false,kvImpl=kv,
-  retryOfRequestId=null,retryFailureReason=null,
+  retryOfRequestId=null,retryFailureReason=null,retryCurrentInputRevision=null,
+  retryPublicationAt=null,retryPreviousInputRevision=null,retryDecisionAt=null,retryAckAt=null,
 }={}) {
   const scopedRetry = retryOfRequestId != null;
   if (scopedRetry && (!retryOfRequestId || record?.action !== 'interview'
-    || !RETRYABLE_INTERVIEW_ADMISSION_FAILURES.has(retryFailureReason))) return false;
+    || !RETRYABLE_INTERVIEW_FAILURES.has(retryFailureReason))) return false;
+  const sourceStaleRetry = scopedRetry && retryFailureReason === SOURCE_STALE_INTERVIEW_FAILURE;
+  if (sourceStaleRetry && (!retryCurrentInputRevision || !retryPreviousInputRevision
+    || record?.inputRevision !== retryCurrentInputRevision
+    || retryCurrentInputRevision === retryPreviousInputRevision
+    || record?.recovery?.kind !== 'source_revision_retry'
+    || record.recovery.previousRequestId !== retryOfRequestId
+    || record.recovery.failureReason !== SOURCE_STALE_INTERVIEW_FAILURE
+    || record.recovery.previousInputRevision !== retryPreviousInputRevision
+    || record.recovery.currentInputRevision !== retryCurrentInputRevision
+    || record.recovery.sourcePublicationAt !== retryPublicationAt
+    || validTime(retryPublicationAt) == null || validTime(retryDecisionAt) == null
+    || validTime(retryAckAt) == null
+    || validTime(retryPublicationAt) <= validTime(retryDecisionAt)
+    || validTime(retryPublicationAt) <= validTime(retryAckAt))) return false;
   const rejectSentAckForInterview=rejectSentAck && record?.action==='interview';
   const result=Number(await kvImpl(['EVAL',`
     local raw=redis.call('HGET',KEYS[1],ARGV[1])
@@ -61,9 +103,27 @@ export async function saveApplicantRequest(key,record,{
       if (ARGV[6] or '')~='' then
         if old.action~='interview' or old.requestId~=ARGV[6] or not ackraw then return 0 end
         local legacyRule=(not old.actorType or old.actorType==cjson.null or old.actorType=='') and string.sub(tostring(old.by or ''),1,5)=='rule:'
-        if old.actorType~='rule' and not legacyRule then return 0 end
         local retryAck=cjson.decode(ackraw)
         if retryAck.requestId~=ARGV[6] or retryAck.status~='blocked' or retryAck.reason~=ARGV[7] then return 0 end
+        if ARGV[7]=='APPLICANT_CORE_DECISION_SOURCE_REVISION_STALE' then
+          local legacyActor=not old.actorType or old.actorType==cjson.null or old.actorType==''
+          local legacyBy=string.lower(tostring(old.by or ''))
+          local legacyHuman=legacyActor and string.match(legacyBy,'^[^%s@]+@[^%s@]+%.[^%s@]+$')~=nil
+          if old.actorType~='human' and old.actorType~='rule' and not legacyRule and not legacyHuman then return 0 end
+          local next=cjson.decode(ARGV[2])
+          if type(old.inputRevision)~='string' or old.inputRevision==''
+            or type(next.inputRevision)~='string' or next.inputRevision==''
+            or old.inputRevision~=ARGV[10] or next.inputRevision~=ARGV[8]
+            or old.inputRevision==next.inputRevision then return 0 end
+          if type(next.recovery)~='table' or next.recovery.kind~='source_revision_retry'
+            or next.recovery.previousRequestId~=ARGV[6] or next.recovery.failureReason~=ARGV[7]
+            or next.recovery.previousInputRevision~=ARGV[10]
+            or next.recovery.currentInputRevision~=ARGV[8]
+            or next.recovery.sourcePublicationAt~=ARGV[9] then return 0 end
+          if type(old.at)~='string' or old.at=='' or type(retryAck.at)~='string' or retryAck.at==''
+            or old.at~=ARGV[11] or retryAck.at~=ARGV[12]
+            or ARGV[9]=='' or ARGV[9]<=old.at or ARGV[9]<=retryAck.at then return 0 end
+        elseif old.actorType~='rule' and not legacyRule then return 0 end
       end
       if ARGV[4]~='1' or not ackraw then return 0 end
       local ack=cjson.decode(ackraw)
@@ -81,7 +141,10 @@ export async function saveApplicantRequest(key,record,{
     end
     redis.call('HSET',KEYS[1],ARGV[1],ARGV[2])
     return 1`,2,K.decisions,K.acks,key,JSON.stringify(record),record.requestId,allowRejected?'1':'0',rejectSentAckForInterview?'1':'0',
-    ...(scopedRetry ? [retryOfRequestId,retryFailureReason] : [])]));
+    ...(scopedRetry ? [retryOfRequestId,retryFailureReason,
+      sourceStaleRetry ? retryCurrentInputRevision : '',sourceStaleRetry ? retryPublicationAt : '',
+      sourceStaleRetry ? retryPreviousInputRevision : '',sourceStaleRetry ? retryDecisionAt : '',
+      sourceStaleRetry ? retryAckAt : ''] : [])]));
   if (rejectSentAckForInterview && result===-1) return APPLICANT_REQUEST_ALREADY_EMAILED;
   return result===1;
 }

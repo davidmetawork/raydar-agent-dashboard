@@ -756,6 +756,7 @@ const RETRYABLE_INTERVIEW_ACK_REASONS = new Set([
   "APPLICANT_CORE_RULE_RUN_IDEMPOTENCY_CONFLICT",
   "22P02",
 ]);
+const SOURCE_STALE_INTERVIEW_ACK_REASON = "APPLICANT_CORE_DECISION_SOURCE_REVISION_STALE";
 /* A retry is a fresh human request for one narrowly failed rule request.  The
    raw ack matters here: ackFor deliberately hides an ack whose requestId does
    not match the current decision, but even mismatched published send evidence
@@ -771,14 +772,41 @@ function isRuleInterviewDecision(decision) {
   if (decision?.actorType) return decision.actorType === "rule";
   return String(decision?.by || "").startsWith("rule:");
 }
+function isHumanOrRuleInterviewDecision(decision) {
+  if (decision?.actorType) return decision.actorType === "human" || decision.actorType === "rule";
+  const by = String(decision?.by || "").trim().toLowerCase();
+  return by.startsWith("rule:") || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(by);
+}
+function canonicalRetryTime(value) {
+  const raw = String(value || "");
+  const time = Date.parse(raw);
+  return Number.isFinite(time) && new Date(time).toISOString() === raw ? time : null;
+}
+function sourceRevisionAdvancedForRetry(row, decision, ack) {
+  const previousInputRevision = String(decision?.inputRevision || "");
+  const currentInputRevision = String(row?.inputRevision || "");
+  const publicationAt = canonicalRetryTime(STATE.snapshot?.generatedAt);
+  const decisionAt = canonicalRetryTime(decision?.at);
+  const ackAt = canonicalRetryTime(ack?.at);
+  return Boolean(previousInputRevision && currentInputRevision
+    && previousInputRevision !== currentInputRevision
+    && publicationAt != null && decisionAt != null && ackAt != null
+    && publicationAt > decisionAt && publicationAt > ackAt);
+}
 function retryableInterviewRequest(row, decision = effectiveDecision(row?.key), expectedRequestId = null) {
-  if (!row || decision?.action !== "interview" || !isRuleInterviewDecision(decision)
+  if (!row || decision?.action !== "interview"
     || interviewHold(row) || hasRawInterviewSendEvidence(row)) return null;
   const requestId = String(decision.requestId || "");
   const ack = STATE.acks[row.key];
   if (!requestId || (expectedRequestId != null && requestId !== String(expectedRequestId))) return null;
   if (String(ack?.requestId || "") !== requestId || String(ack?.status || "") !== "blocked") return null;
-  if (!RETRYABLE_INTERVIEW_ACK_REASONS.has(String(ack?.reason || ""))) return null;
+  const failureReason = String(ack?.reason || "");
+  if (RETRYABLE_INTERVIEW_ACK_REASONS.has(failureReason)) {
+    if (!isRuleInterviewDecision(decision)) return null;
+  } else if (failureReason === SOURCE_STALE_INTERVIEW_ACK_REASON) {
+    if (!isHumanOrRuleInterviewDecision(decision)
+      || !sourceRevisionAdvancedForRetry(row, decision, ack)) return null;
+  } else return null;
   return requestId;
 }
 function requestedRows() {
