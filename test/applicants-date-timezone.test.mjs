@@ -29,14 +29,46 @@ function extractHelpers() {
   assert.ok(parse, "parseDate not found");
   const short = /function shortDate\(v\) \{.*?\n/.exec(source);
   assert.ok(short, "shortDate not found");
+  const calendarDate = /const ISO_CALENDAR_DATE = \/\^.*?\$\//.exec(source);
+  assert.ok(calendarDate, "ISO calendar-date guard not found");
+  const calendarYearMonth = /function calendarYearMonth\(v\) \{[\s\S]*?\n\}/.exec(source);
+  assert.ok(calendarYearMonth, "calendarYearMonth not found");
+  const monthYear = /function monthYear\(v\) \{[\s\S]*?\n\}/.exec(source);
+  assert.ok(monthYear, "monthYear not found");
+  const duration = /function duration\(startV, endV, current\) \{[\s\S]*?\n\}/.exec(source);
+  assert.ok(duration, "duration not found");
   const months = /const MONTHS = \[[^\]]*\];/.exec(source);
   assert.ok(months, "MONTHS not found");
-  return [months[0], dateOnly[0], parse[0], short[0]].join("\n");
+  return [months[0], dateOnly[0], calendarDate[0], parse[0], short[0], calendarYearMonth[0], monthYear[0], duration[0]].join("\n");
 }
 
 /** Evaluate the page's own helpers under a given TZ, in a child process. */
 function renderIn(timeZone, value) {
   const script = `${extractHelpers()}\nprocess.stdout.write(String(shortDate(${JSON.stringify(value)})));`;
+  return execFileSync(process.execPath, ["-e", script], {
+    env: { ...process.env, TZ: timeZone },
+    encoding: "utf8",
+  });
+}
+
+function renderMonthIn(timeZone, value) {
+  const script = `${extractHelpers()}\nprocess.stdout.write(String(monthYear(${JSON.stringify(value)})));`;
+  return execFileSync(process.execPath, ["-e", script], {
+    env: { ...process.env, TZ: timeZone },
+    encoding: "utf8",
+  });
+}
+
+function renderMonthExpressionIn(timeZone, expression) {
+  const script = `${extractHelpers()}\nprocess.stdout.write(String(monthYear(${expression})));`;
+  return execFileSync(process.execPath, ["-e", script], {
+    env: { ...process.env, TZ: timeZone },
+    encoding: "utf8",
+  });
+}
+
+function renderDurationIn(timeZone, start, end, current, now = "2023-07-01T00:30:00.000Z") {
+  const script = `${extractHelpers()}\nconst RealDate = Date; globalThis.Date = class Date extends RealDate { constructor(value) { super(arguments.length ? value : ${JSON.stringify(now)}); } static UTC = RealDate.UTC; static parse = RealDate.parse; };\nprocess.stdout.write(String(duration(${JSON.stringify(start)}, ${JSON.stringify(end)}, ${JSON.stringify(current)})));`;
   return execFileSync(process.execPath, ["-e", script], {
     env: { ...process.env, TZ: timeZone },
     encoding: "utf8",
@@ -60,6 +92,44 @@ test("a real timestamp is still an instant and is NOT shifted", () => {
   // MUST still render as that previous day. This is the case a blanket
   // "always parse as local" fix would have broken.
   assert.equal(renderIn("America/Los_Angeles", "2026-08-25T03:00:00.000Z"), "Aug 24");
+});
+
+test("profile-history month/year uses its ISO calendar month in every timezone", () => {
+  for (const tz of ["America/Los_Angeles", "UTC", "Asia/Tokyo"]) {
+    assert.equal(renderMonthIn(tz, "2023-06-01T00:00:00.000Z"), "Jun 2023", tz);
+    assert.equal(renderMonthIn(tz, "1970-01-01T00:00:00.000Z"), "Jan 1970", tz);
+  }
+});
+
+test("profile-history month/year omits absent and invalid dates", () => {
+  for (const value of [null, undefined, "", "not-a-date", "2023-13-01", "2023-02-30T00:00:00.000Z"]) {
+    assert.equal(renderMonthIn("America/Los_Angeles", value), "", String(value));
+  }
+});
+
+test("profile-history month/year retains legacy non-string fallback inputs", () => {
+  assert.equal(renderMonthExpressionIn("UTC", "2023"), "Jan 2023");
+  assert.equal(renderMonthExpressionIn("America/Los_Angeles", "2023"), "Dec 2022");
+  for (const tz of ["America/Los_Angeles", "UTC", "Asia/Tokyo"]) {
+    assert.equal(renderMonthExpressionIn(tz, 'new Date("2023-06-15T12:00:00.000Z")'), "Jun 2023", tz);
+  }
+});
+
+test("profile-history duration uses the same calendar months as its labels", () => {
+  for (const tz of ["America/Los_Angeles", "UTC", "Asia/Tokyo"]) {
+    assert.equal(renderDurationIn(tz, "2023-06-01T00:00:00.000Z", "2023-07-02T00:00:00.000Z", false), "1 mo", tz);
+    assert.equal(renderDurationIn(tz, "1970-01-01T00:00:00.000Z", "1970-02-02T00:00:00.000Z", false), "1 mo", `epoch ${tz}`);
+  }
+});
+
+test("profile-history duration omits undated completed roles and uses the local current month", () => {
+  for (const tz of ["America/Los_Angeles", "UTC", "Asia/Tokyo"]) {
+    assert.equal(renderDurationIn(tz, "2023-06-01T00:00:00.000Z", null, false), "", `missing end ${tz}`);
+    assert.equal(renderDurationIn(tz, "not-a-date", "2023-07-02T00:00:00.000Z", false), "", `invalid start ${tz}`);
+  }
+  assert.equal(renderDurationIn("America/Los_Angeles", "2023-05-02T00:00:00.000Z", null, true), "1 mo", "Pacific current month is June at the mocked instant");
+  assert.equal(renderDurationIn("UTC", "2023-05-02T00:00:00.000Z", null, true), "2 mo", "UTC current month is July at the mocked instant");
+  assert.equal(renderDurationIn("Asia/Tokyo", "2023-05-02T00:00:00.000Z", null, true), "2 mo", "Tokyo current month is July at the mocked instant");
 });
 
 test("the guard is in the file, so a simplification back to new Date(v) fails here", () => {

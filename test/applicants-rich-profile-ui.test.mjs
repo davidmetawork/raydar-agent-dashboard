@@ -12,7 +12,7 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[character]));
 const helpers = runInNewContext(
-  `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, allowedParaformLogo, entityLogoHtml, entityTierHtml, richProfile, presentText, hasProviderProfile, hasProviderHistory, hasProviderContent, paraformRatingText, visibleCardProfile, profileFactsHtml })`,
+  `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, formatParaformScore, allowedParaformLogo, entityLogoHtml, entityTierHtml, richProfile, presentText, hasProviderProfile, hasProviderHistory, hasProviderContent, paraformRatingText, visibleCardProfile, profileFactsHtml })`,
   { esc },
 );
 
@@ -24,8 +24,22 @@ test("rich profile tiers are explicit provider letters; numbers never become a l
     assert.equal(helpers.explicitParaformTier(value, value === "S" ? "application" : "paraform"), null, String(value));
   }
   assert.equal(helpers.paraformScore(0.73), 0.73);
+  assert.equal(helpers.paraformScore(0), 0);
   assert.equal(helpers.paraformScore("0.73"), null);
   assert.equal(helpers.paraformScore(Infinity), null);
+});
+
+test("Paraform scores are rounded only when displayed", () => {
+  assert.equal(helpers.formatParaformScore(0), "0");
+  assert.equal(helpers.formatParaformScore(0.3033333333333333), "0.3");
+  assert.equal(helpers.formatParaformScore(12.345), "12.35");
+  assert.equal(helpers.formatParaformScore(null), "");
+  assert.equal(helpers.formatParaformScore(NaN), "");
+  assert.equal(helpers.formatParaformScore(Infinity), "");
+  const provider = { paraformTier: "A", paraformTierSource: "paraform", densityScore: 0.3033333333333333 };
+  assert.equal(helpers.paraformRatingText(provider), "A tier · score 0.3");
+  assert.match(helpers.profileFactsHtml(provider), /Paraform score<\/span><span class="value">0\.3<\/span>/);
+  assert.equal(provider.densityScore, 0.3033333333333333, "rendering never changes the cached numeric score");
 });
 
 test("only the confirmed public Paraform company-logo origin can render", () => {

@@ -546,6 +546,7 @@ const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov
    and keep their existing UTC-correct behaviour — the regex deliberately does
    not match anything carrying a time. */
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_CALENDAR_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/;
 function parseDate(v) {
   if (!v) return null;
   const s = String(v);
@@ -560,7 +561,26 @@ function timeOfDay(v) {
   const d = parseDate(v); if (!d) return "";
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
-function monthYear(v) { const d = parseDate(v); return d ? MONTHS[d.getMonth()] + " " + d.getFullYear() : String(v || ""); }
+/* Employment and education dates are calendar fields, even when the provider
+   serializes them as UTC-midnight timestamps. Keep their written month/year:
+   rendering that instant locally turns the first of a month into the prior
+   month west of UTC. */
+function calendarYearMonth(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  const calendar = ISO_CALENDAR_DATE.exec(s);
+  if (calendar) {
+    const year = Number(calendar[1]), month = Number(calendar[2]), day = Number(calendar[3]);
+    const check = new Date(Date.UTC(year, month - 1, day));
+    if (month < 1 || month > 12 || check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day || !parseDate(s)) return null;
+    return { year, month };
+  }
+  const d = parseDate(v);
+  return d ? { year: d.getFullYear(), month: d.getMonth() + 1 } : null;
+}
+function monthYear(v) {
+  const calendar = calendarYearMonth(v);
+  return calendar ? MONTHS[calendar.month - 1] + " " + calendar.year : "";
+}
 function relTime(v) {
   const d = parseDate(v); if (!d) return "";
   const mins = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
@@ -570,9 +590,11 @@ function relTime(v) {
   return Math.round(hours / 24) + "d ago";
 }
 function duration(startV, endV, current) {
-  const start = parseDate(startV); if (!start) return "";
-  const end = current ? new Date() : (parseDate(endV) || new Date());
-  let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  const start = calendarYearMonth(startV); if (!start) return "";
+  const now = current ? new Date() : null;
+  const end = current ? { year: now.getFullYear(), month: now.getMonth() + 1 } : calendarYearMonth(endV);
+  if (!end) return "";
+  let months = (end.year - start.year) * 12 + (end.month - start.month);
   if (months < 1) months = 1;
   const y = Math.floor(months / 12), m = months % 12;
   return (y ? y + " yr " : "") + (m ? m + " mo" : y ? "" : "1 mo");
@@ -1015,6 +1037,10 @@ function explicitParaformTier(value, source) {
 function paraformScore(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
+function formatParaformScore(value) {
+  const score = paraformScore(value);
+  return score == null ? "" : String(Number((score + (score < 0 ? -Number.EPSILON : Number.EPSILON)).toFixed(2)));
+}
 function allowedParaformLogo(value) {
   const url = typeof value === "string" ? value.trim() : "";
   if (!url || url.length > 512 || !url.startsWith(PARAFORM_LOGO_PREFIX)) return "";
@@ -1066,7 +1092,7 @@ function paraformRatingText(provider) {
   const score = paraformScore(provider?.densityScore);
   const values = [];
   if (tier) values.push(tier + " tier");
-  if (score != null) values.push("score " + score);
+  if (score != null) values.push("score " + formatParaformScore(score));
   return values.join(" · ");
 }
 function visibleCardProfile(card) {
@@ -2119,7 +2145,7 @@ function profileFactsHtml(provider) {
   if (!tier && score == null) return "";
   return '<div class="p-facts">' +
     (tier ? profileFactHtml("Paraform tier", tier + " tier") : "") +
-    (score != null ? profileFactHtml("Paraform score", score) : "") +
+    (score != null ? profileFactHtml("Paraform score", formatParaformScore(score)) : "") +
     "</div>";
 }
 function historySectionsHtml(profile, { allowRuleFacts = false, isParaformProfile = false } = {}) {
