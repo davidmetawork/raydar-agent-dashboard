@@ -22,7 +22,7 @@ import {
   kvConfigured,
   validKey,
 } from "./_lib/kv.mjs";
-import {requireApplicantMutation,saveApplicantRequest} from './_lib/request-safety.mjs';
+import {requireApplicantMutation,saveApplicantRequest,retryableInterviewRequest} from './_lib/request-safety.mjs';
 
 export const config = { maxDuration: 30 };
 
@@ -33,10 +33,11 @@ export function createDecisionHandler({
   authHandler = requireApplicantMutation,
   kvReady = kvConfigured,
   readAck = (key) => hashGetJson(K.acks, key),
+  readDecision = (key) => hashGetJson(K.decisions, key),
   readJson = getJson,
   readActive = () => readActivePublication({ readJson }),
   readArtifacts = (pointer) => readPublishedArtifacts(pointer, { readJson }),
-  writeDecision = (key, record) => saveApplicantRequest(key,record,{allowRejected:true}),
+  writeDecision = (key, record, options = {}) => saveApplicantRequest(key,record,{allowRejected:true,...options}),
   now = () => new Date().toISOString(),
 } = {}) {
   return async function handler(req, res) {
@@ -53,6 +54,14 @@ export function createDecisionHandler({
     const action = String(body.action || "");
     if (!validKey(key)) return res.status(400).json({ ok: false, error: "invalid_key" });
     if (!ACTIONS.has(action)) return res.status(400).json({ ok: false, error: "unsupported_action" });
+    const retryRequested = Object.prototype.hasOwnProperty.call(body, 'retryOfRequestId');
+    const retryOfRequestId = retryRequested ? body.retryOfRequestId : null;
+    if (retryRequested && (action !== 'interview'
+      || typeof retryOfRequestId !== 'string'
+      || !/^[a-z0-9-]{16,80}$/i.test(retryOfRequestId)
+      || retryOfRequestId === body.requestId)) {
+      return res.status(400).json({ok:false,error:'invalid_retry_request'});
+    }
 
     res.setHeader("Cache-Control", "no-store");
     try {
@@ -88,6 +97,25 @@ export function createDecisionHandler({
           reason: interviewDecisionHold(row),
         });
       }
+      let retryDecision = null;
+      let retryAck = null;
+      if (retryRequested) {
+        [retryDecision,retryAck] = await Promise.all([readDecision(key),readAck(key)]);
+        if (retryDecision?.action === 'interview' && retryDecision.requestId === body.requestId
+          && retryDecision.recovery?.kind === 'technical_admission_retry'
+          && retryDecision.recovery.previousRequestId === retryOfRequestId
+          && retryDecision.actorId === (req.applicantActor?.id || req.authedEmail)) {
+          return res.status(202).json({ok:true,key,decision:retryDecision,
+            status:retryDecision.status || 'pending',idempotent:true});
+        }
+        if (!retryableInterviewRequest(retryDecision,retryAck,retryOfRequestId)) {
+          return res.status(409).json({ok:false,error:'interview_retry_unavailable'});
+        }
+        if (row.externalPriorSendAt || row.external_prior_send_at
+          || ['emailed','booked','replied'].includes(String(row.status || ''))) {
+          return res.status(409).json({ok:false,error:'already_emailed_for_role'});
+        }
+      }
       // Shared with the rules tick so a human decision and an automatic one
       // are the same shape downstream (see _lib/decision-record.mjs).
       // A reason only makes sense on a Pass, and only from the fixed list.
@@ -113,6 +141,15 @@ export function createDecisionHandler({
         generationId: generation.generationId,
         generationDigest: generation.digest,
         ...(action === "interview" ? actionability : {}),
+        ...(retryRequested ? {recovery:{
+          kind:'technical_admission_retry',
+          previousRequestId:retryOfRequestId,
+          failureReason:retryAck.reason,
+          previousActorType:retryDecision.actorType || null,
+          previousActorId:retryDecision.actorId || retryDecision.by || null,
+          previousDecisionAt:retryDecision.at || null,
+          previousRuleRunId:retryDecision.ruleRun?.id || null,
+        }} : {}),
       });
       // The immutable row and its revisions were checked above, but the
       // publisher may still have advanced the active pointer while the
@@ -128,7 +165,13 @@ export function createDecisionHandler({
           generationDigest: currentGeneration?.digest || null,
         });
       }
-      if(!await writeDecision(key, decision)) return res.status(409).json({ok:false,error:'request_already_pending'});
+      const writeOptions = retryRequested ? {
+        retryOfRequestId,retryFailureReason:retryAck.reason,rejectSentAck:true,
+      } : {};
+      if(!await writeDecision(key, decision, writeOptions)) {
+        return res.status(409).json({ok:false,error:retryRequested
+          ? 'applicant_request_changed_refresh_required' : 'request_already_pending'});
+      }
       return res.status(202).json({ ok: true, key, decision,status:'pending',
         ...(action === "interview" ? { delivery: { state: "requested", label: "Interview requested · preparing" } } : {}) });
     } catch (error) {

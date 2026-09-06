@@ -752,6 +752,35 @@ function alreadyEmailed(row) {
   if (row.externalPriorSendAt || row.external_prior_send_at) return true;
   return false;
 }
+const RETRYABLE_INTERVIEW_ACK_REASONS = new Set([
+  "APPLICANT_CORE_RULE_RUN_IDEMPOTENCY_CONFLICT",
+  "22P02",
+]);
+/* A retry is a fresh human request for one narrowly failed rule request.  The
+   raw ack matters here: ackFor deliberately hides an ack whose requestId does
+   not match the current decision, but even mismatched published send evidence
+   must keep this button unavailable. */
+function hasRawInterviewSendEvidence(row) {
+  if (!row) return false;
+  const rawAck = STATE.acks[row.key];
+  return SENT_ACK_STATUSES.has(String(rawAck?.status || ""))
+    || SENT_ROW_STATUSES.has(String(row.status || ""))
+    || Boolean(row.externalPriorSendAt || row.external_prior_send_at);
+}
+function isRuleInterviewDecision(decision) {
+  if (decision?.actorType) return decision.actorType === "rule";
+  return String(decision?.by || "").startsWith("rule:");
+}
+function retryableInterviewRequest(row, decision = effectiveDecision(row?.key), expectedRequestId = null) {
+  if (!row || decision?.action !== "interview" || !isRuleInterviewDecision(decision)
+    || interviewHold(row) || hasRawInterviewSendEvidence(row)) return null;
+  const requestId = String(decision.requestId || "");
+  const ack = STATE.acks[row.key];
+  if (!requestId || (expectedRequestId != null && requestId !== String(expectedRequestId))) return null;
+  if (String(ack?.requestId || "") !== requestId || String(ack?.status || "") !== "blocked") return null;
+  if (!RETRYABLE_INTERVIEW_ACK_REASONS.has(String(ack?.reason || ""))) return null;
+  return requestId;
+}
 function requestedRows() {
   return queueRows().filter((row) => effectiveDecision(row.key)?.action === "interview" && !alreadyEmailed(row));
 }
@@ -1383,6 +1412,13 @@ function decidedStatusHtml(key, decision) {
   const undo = "";
   return '<div class="decided-stack">' + chip + '<span class="decided-meta">' + esc(by) + (when ? " · " + esc(when) : "") + "</span>" + undo + "</div>";
 }
+function retryInterviewButtonHtml(row, decision, busy = false) {
+  const retryOfRequestId = retryableInterviewRequest(row, decision);
+  if (!retryOfRequestId) return "";
+  return '<button class="primary" data-act="retry-interview" data-key="' + esc(row.key) +
+    '" data-retry-of-request-id="' + esc(retryOfRequestId) + '" title="Retry this failed interview request"' +
+    (busy ? " disabled" : "") + ">Retry interview request</button>";
+}
 /* ---- inline work history: the application compact card arrives with the
    feed and any cached provider overlay is fetched only for visible rows.
    Opening the modal is still the deliberate full-profile request, never a
@@ -1445,7 +1481,7 @@ function rowCardHtml(row, mode, decision) {
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
-      ? decidedStatusHtml(key, decision)
+      ? decidedStatusHtml(key, decision) + retryInterviewButtonHtml(row, decision, busy)
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
@@ -1824,8 +1860,14 @@ async function bulkPass() {
 }
 
 /* ---- decisions (optimistic write-through) ---- */
-async function decide(key, action, row, silent = false) {
+async function decide(key, action, row, silent = false, { retryOfRequestId = null } = {}) {
   if (STATE.busy.has(key)) return;
+  if (retryOfRequestId && !retryableInterviewRequest(row, effectiveDecision(key), retryOfRequestId)) {
+    const error = new Error("Retry is no longer available — refresh and check this applicant.");
+    toast(error.message, true);
+    if (silent) throw error;
+    return;
+  }
   STATE.busy.add(key);
   const requestId=crypto.randomUUID();
   const previous = Object.prototype.hasOwnProperty.call(STATE.local, key) ? STATE.local[key] : undefined;
@@ -1845,7 +1887,8 @@ async function decide(key, action, row, silent = false) {
       body: JSON.stringify({ key, action, requestId, generationId: STATE.generation?.generationId,
         generationDigest: STATE.generation?.digest, inputRevision:row?.inputRevision,
         readinessRevision:row?.readinessRevision,decisionRevision:row?.decisionRevision,
-        name: row?.name, roleTitle: row?.roleTitle }),
+        name: row?.name, roleTitle: row?.roleTitle,
+        ...(retryOfRequestId ? { retryOfRequestId } : {}) }),
     });
     const body = await response.json().catch(() => ({}));
     if (response.status === 401 || response.status === 403) { showGate(); throw new Error("Signed out — sign in and retry."); }
@@ -2155,7 +2198,7 @@ function renderModal() {
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
-      (decision ? "" :
+      (decision ? retryInterviewButtonHtml(row, decision, busy) :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
           esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : "Queue interview request") + '"' +
@@ -2190,10 +2233,26 @@ document.addEventListener("click", async (event) => {
   const act = event.target.closest("[data-act]");
   if (act) {
     const key = act.dataset.key;
-    const action = act.dataset.act;
+    const requestedAction = act.dataset.act;
     // Not a decision: it opens a chooser over the facts in this profile.
-    if (action === "make-rule") { makeRuleFrom(act.dataset.cu, key); return; }
+    if (requestedAction === "make-rule") { makeRuleFrom(act.dataset.cu, key); return; }
     const row = queueRows().find((r) => r.key === key);
+    if (requestedAction === "retry-interview") {
+      const retryOfRequestId = retryableInterviewRequest(
+        row,
+        effectiveDecision(key),
+        act.dataset.retryOfRequestId,
+      );
+      if (!retryOfRequestId) {
+        toast("Retry is no longer available — refresh and check this applicant.", true);
+        renderLists();
+        if (STATE.modal && STATE.modal.key === key) renderModal();
+        return;
+      }
+      await decide(key, "interview", row, false, { retryOfRequestId });
+      return;
+    }
+    const action = requestedAction;
     if (action === "interview" && interviewHold(row)) {
       toast("Interview held: " + interviewHold(row), true);
       return;

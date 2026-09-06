@@ -6,6 +6,23 @@ import {kv,K} from './kv.mjs';
 // (an existing decision).
 export const APPLICANT_REQUEST_ALREADY_EMAILED = 0;
 
+// These failures occur before Core admits the decision. Delivery/identity
+// holds and ambiguous provider outcomes must never use this retry path.
+export const RETRYABLE_INTERVIEW_ADMISSION_FAILURES = new Set([
+  'APPLICANT_CORE_RULE_RUN_IDEMPOTENCY_CONFLICT',
+  '22P02',
+]);
+
+export function retryableInterviewRequest(decision, ack, expectedRequestId) {
+  const ruleDecision = decision?.actorType === 'rule'
+    || (!decision?.actorType && String(decision?.by || '').startsWith('rule:'));
+  return Boolean(expectedRequestId && decision?.action === 'interview'
+    && ruleDecision
+    && decision.requestId === expectedRequestId
+    && ack?.requestId === expectedRequestId && ack.status === 'blocked'
+    && RETRYABLE_INTERVIEW_ADMISSION_FAILURES.has(ack.reason));
+}
+
 export async function requireApplicantMutation(req,res) {
   if (process.env.AUTH_DISABLED==='1' || process.env.AUTH_DISABLED==='true') {
     res.status(503).json({ok:false,error:'applicant_auth_unavailable'});return false;
@@ -27,7 +44,13 @@ export async function requireApplicantMutation(req,res) {
 
 // One atomic applicant-key write: parallel rules/clicks cannot overwrite an
 // unacknowledged request, and retrying the same request is idempotent.
-export async function saveApplicantRequest(key,record,{allowRejected=false,rejectSentAck=false,kvImpl=kv}={}) {
+export async function saveApplicantRequest(key,record,{
+  allowRejected=false,rejectSentAck=false,kvImpl=kv,
+  retryOfRequestId=null,retryFailureReason=null,
+}={}) {
+  const scopedRetry = retryOfRequestId != null;
+  if (scopedRetry && (!retryOfRequestId || record?.action !== 'interview'
+    || !RETRYABLE_INTERVIEW_ADMISSION_FAILURES.has(retryFailureReason))) return false;
   const rejectSentAckForInterview=rejectSentAck && record?.action==='interview';
   const result=Number(await kvImpl(['EVAL',`
     local raw=redis.call('HGET',KEYS[1],ARGV[1])
@@ -35,10 +58,19 @@ export async function saveApplicantRequest(key,record,{allowRejected=false,rejec
       local old=cjson.decode(raw)
       if old.requestId==ARGV[3] then return 1 end
       local ackraw=redis.call('HGET',KEYS[2],ARGV[1])
+      if (ARGV[6] or '')~='' then
+        if old.action~='interview' or old.requestId~=ARGV[6] or not ackraw then return 0 end
+        local legacyRule=(not old.actorType or old.actorType==cjson.null or old.actorType=='') and string.sub(tostring(old.by or ''),1,5)=='rule:'
+        if old.actorType~='rule' and not legacyRule then return 0 end
+        local retryAck=cjson.decode(ackraw)
+        if retryAck.requestId~=ARGV[6] or retryAck.status~='blocked' or retryAck.reason~=ARGV[7] then return 0 end
+      end
       if ARGV[4]~='1' or not ackraw then return 0 end
       local ack=cjson.decode(ackraw)
       if old.requestId and ack.requestId~=old.requestId then return 0 end
       if ack.status~='blocked' or ack.reason=='human_pass' or ack.reason=='interview_dispatch_pending' then return 0 end
+    elseif (ARGV[6] or '')~='' then
+      return 0
     end
     if ARGV[5]=='1' then
       local ackraw=redis.call('HGET',KEYS[2],ARGV[1])
@@ -48,7 +80,8 @@ export async function saveApplicantRequest(key,record,{allowRejected=false,rejec
       end
     end
     redis.call('HSET',KEYS[1],ARGV[1],ARGV[2])
-    return 1`,2,K.decisions,K.acks,key,JSON.stringify(record),record.requestId,allowRejected?'1':'0',rejectSentAckForInterview?'1':'0']));
+    return 1`,2,K.decisions,K.acks,key,JSON.stringify(record),record.requestId,allowRejected?'1':'0',rejectSentAckForInterview?'1':'0',
+    ...(scopedRetry ? [retryOfRequestId,retryFailureReason] : [])]));
   if (rejectSentAckForInterview && result===-1) return APPLICANT_REQUEST_ALREADY_EMAILED;
   return result===1;
 }
