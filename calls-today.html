@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Calls Today · Raydar</title>
+<link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{--cream:#F6F3E9;--ink:#16140F;--ink2:#57534A;--ink3:#8C877B;--card:#fff;--line:#E9E3D5;--soft:#EFEADE;--orange:#FF5E00;--good:#119865;--goodbg:#E4F4EC;--warn:#B66A10;--warnbg:#FAEEDC;--bad:#D84242;--badbg:#FBE9E9;--violet:#6658DA;--violetbg:#ECEAFE;--muted:#8C877B;--mutedbg:#EFEADE;--shadow:0 1px 2px rgba(20,16,8,.04),0 12px 30px -18px rgba(20,16,8,.22)}
+  *{box-sizing:border-box}html,body{margin:0}body{background:var(--cream);color:var(--ink);font:14px "Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;padding:28px clamp(14px,3.5vw,46px) 80px}body.embed{padding-top:8px}.wrap{max-width:1240px;margin:0 auto}h1,h2,h3{font-family:"PP Grafier Display",Georgia,serif;font-weight:400}a{color:inherit}.eyebrow{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--orange)}
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:16px}h1{font-size:36px;line-height:1;margin:4px 0 0}.sub{color:var(--ink2);margin:8px 0 0;max-width:720px}body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:9px}
+  .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.button{appearance:none;border:0;border-radius:10px;padding:9px 13px;font:750 12px "Inter Variable";cursor:pointer}.button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .fresh{display:flex;align-items:center;gap:7px;color:var(--ink3);font-size:12px}.fresh .dot{width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px var(--goodbg)}.fresh .dot.stale{background:var(--warn);box-shadow:0 0 0 3px var(--warnbg)}
+  .banner{display:none;border-radius:11px;padding:11px 13px;margin-bottom:14px}.banner.on{display:block}.banner.bad{background:var(--badbg);color:var(--bad)}.banner.warn{background:var(--warnbg);color:var(--warn)}.banner.good{background:var(--goodbg);color:var(--good)}
+  .sec-head{display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 12px}.sec-head h2{font-size:22px;margin:0}.sec-head span{font-size:12px;color:var(--ink3)}
+  section+section{margin-top:26px}
+  .list{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+  .row{display:grid;grid-template-columns:1.35fr .95fr .85fr 1.55fr auto;gap:14px;align-items:center;padding:13px 16px;border-top:1px solid var(--soft)}
+  .row:first-child{border-top:none}
+  .row .who{font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .who .sub{display:block;font-weight:500;font-size:11.5px;color:var(--ink3);margin-top:2px}
+  .row .when,.row .type{font-size:12.5px;color:var(--ink2)}
+  .row .what{font-size:12.5px;color:var(--ink2)}
+  .row .what .detail{display:block;color:var(--ink3);margin-top:2px}
+  .row .links{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+  .row .links a{font-size:11.5px;font-weight:750;color:var(--violet);text-decoration:none;white-space:nowrap}
+  .row .links a:hover{text-decoration:underline}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;font-size:12px;font-weight:650;white-space:nowrap}
+  .pill .d{width:7px;height:7px;border-radius:50%;flex:none}
+  .pill.good{background:var(--goodbg);color:var(--good)}.pill.good .d{background:var(--good)}
+  .pill.bad{background:var(--badbg);color:var(--bad)}.pill.bad .d{background:var(--bad)}
+  .pill.warn{background:var(--warnbg);color:var(--warn)}.pill.warn .d{background:var(--warn)}
+  .pill.muted{background:var(--mutedbg);color:var(--muted)}.pill.muted .d{background:var(--muted)}
+  .pill.violet{background:var(--violetbg);color:var(--violet)}.pill.violet .d{background:var(--violet)}
+  .empty{padding:26px;text-align:center;color:var(--ink3)}
+  .note{font-size:11.5px;color:var(--ink3);margin:8px 2px 0}
+  .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);display:none;align-items:flex-start;justify-content:center;flex-direction:column;gap:14px;z-index:40;padding:32px 20px 20px}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  @media(max-width:900px){.row{grid-template-columns:1fr auto;row-gap:6px}.row .when,.row .type,.row .what,.row .links{grid-column:1/-1}.row .links{justify-content:flex-start}.pill{white-space:normal;overflow-wrap:anywhere;max-width:100%}}
+  @media(max-width:520px){body{padding:16px 10px 60px}header{align-items:stretch}}
+</style>
+</head>
+<body>
+<div class="gate" id="gate"><div style="font:26px 'PP Grafier Display',serif">Sign in to see today's calls</div><div id="gsi"></div><div id="gate-error" style="color:var(--bad)"></div></div>
+<main class="wrap">
+  <header>
+    <div><div class="eyebrow">Live</div><h1>Calls Today</h1><p class="sub">Every call today (and recent days) with what came of it, plus what's coming up next.</p></div>
+    <div class="actions"><span class="fresh" id="fresh"><span class="dot" id="fdot"></span><span id="ftxt">loading…</span></span><button class="button ghost" id="refresh">Refresh</button></div>
+  </header>
+  <div class="banner" id="banner" role="status" aria-live="polite"></div>
+
+  <section aria-label="Today's calls">
+    <div class="sec-head"><h2>Today</h2><span id="today-count"></span></div>
+    <div class="list" id="today"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section aria-label="Upcoming calls">
+    <div class="sec-head"><h2>Upcoming</h2><span id="upcoming-count"></span></div>
+    <div class="list" id="upcoming"><div class="empty">Loading…</div></div>
+    <p class="note">Only calls the screener agent booked appear here. Human or connector calls booked directly on Paraform aren't in this feed yet.</p>
+  </section>
+
+  <section aria-label="Earlier calls">
+    <div class="sec-head"><h2>Earlier</h2><span id="earlier-count"></span></div>
+    <div class="list" id="earlier"><div class="empty">Loading…</div></div>
+  </section>
+</main>
+<script>
+const $=(id)=>document.getElementById(id);
+const params=new URLSearchParams(location.search);if(params.has("embed"))document.body.classList.add("embed");
+const STATE={config:null,actor:null,refreshTimer:null,generatedAt:null};
+const PACIFIC="America/Los_Angeles";
+const esc=(value)=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const label=(value)=>String(value||"").replace(/[_-]+/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+
+function showBanner(message,kind="warn"){const el=$("banner");el.className=`banner on ${kind}`;el.textContent=message}
+function clearBanner(){$("banner").className="banner"}
+function setConn(ok){$("fdot").className="dot"+(ok?"":" stale")}
+
+async function api(url){
+  const response=await fetch(url,{credentials:"same-origin",cache:"no-store",headers:{"content-type":"application/json"}});
+  const body=await response.json().catch(()=>({}));
+  if(response.status===401){showGate();const error=new Error("auth");error.status=401;throw error}
+  if(response.status===403){const error=new Error(body.detail||body.error||"Access denied");error.status=403;throw error}
+  return {status:response.status,body};
+}
+
+// Pacific-day bucketing: the calendar day a timestamp falls on in America/Los_Angeles.
+function pacificDateKey(iso){
+  if(!iso)return null;
+  const d=new Date(iso);
+  if(Number.isNaN(d.getTime()))return null;
+  return new Intl.DateTimeFormat("en-CA",{timeZone:PACIFIC,year:"numeric",month:"2-digit",day:"2-digit"}).format(d);
+}
+function pacificTime(iso){
+  if(!iso)return "Unknown time";
+  const d=new Date(iso);
+  if(Number.isNaN(d.getTime()))return "Unknown time";
+  const now=new Date();
+  const sameDay=pacificDateKey(iso)===pacificDateKey(now.toISOString());
+  const time=new Intl.DateTimeFormat("en-US",{timeZone:PACIFIC,hour:"numeric",minute:"2-digit"}).format(d);
+  const day=sameDay?"":new Intl.DateTimeFormat("en-US",{timeZone:PACIFIC,month:"short",day:"numeric"}).format(d)+" ";
+  return `${day}${time} PT`;
+}
+
+function callTypeLabel(call){
+  const mode=String(call.callMode||"").toLowerCase(),purpose=String(call.callPurpose||"").toLowerCase();
+  if(mode==="connector")return "Connector";
+  if(mode==="human")return purpose==="role_specific"?"Human · role":"Human";
+  if(mode==="agent")return purpose==="role_specific"?"Agent · role":"Agent";
+  return "Unknown";
+}
+
+function paraformCallUrl(meetingId){
+  return meetingId?`https://www.paraform.com/calls?detail=${encodeURIComponent(meetingId)}`:null;
+}
+
+function resultPill(call){
+  const result=call.result;
+  if(!result)return `<span class="pill muted"><span class="d"></span>Unknown</span>`;
+  const tone=["good","warn","bad","muted"].includes(result.tone)?result.tone:"muted";
+  return `<span class="pill ${tone}"><span class="d"></span>${esc(result.label)}</span>`;
+}
+
+function callRow(call){
+  const name=call.candidateName||"Candidate";
+  const recruiter=call.assignedRecruiter?`<span class="sub" title="Assigned recruiter of record — not necessarily who hosted the call">Assigned: ${esc(call.assignedRecruiter)}</span>`:"";
+  const detail=call.result?.detail?`<span class="detail">${esc(call.result.detail)}</span>`:"";
+  const paraformUrl=paraformCallUrl(call.meetingId);
+  const links=[
+    paraformUrl?`<a href="${esc(paraformUrl)}" target="_blank" rel="noopener noreferrer">Paraform call ↗</a>`:"",
+    call.reviewId?`<a href="/#review" target="_blank" rel="noopener noreferrer" title="Open the Review board (no direct deep link to this item yet)">Review board ↗</a>`:"",
+  ].filter(Boolean).join("");
+  return `<div class="row">
+    <div class="who">${esc(name)}${recruiter}</div>
+    <div class="when">${esc(pacificTime(call.callTimeIso))}</div>
+    <div class="type">${esc(callTypeLabel(call))}</div>
+    <div class="what">${resultPill(call)}${detail}</div>
+    <div class="links">${links||'<span class="sub" style="color:var(--ink3)">—</span>'}</div>
+  </div>`;
+}
+
+// Same plain-language map the existing Agent Calls tab uses (index.html), so
+// a live call reads as "Live now" here too instead of a raw enum value.
+const UPCOMING_STATUS={
+  queued:"Bot ready",ready_to_join:"Bot ready",
+  joining_call:"Joining…",waiting_room:"Joining…",
+  in_call_recording:"Live now",in_call_not_recording:"Live now",
+};
+function upcomingStatusLabel(status){
+  return UPCOMING_STATUS[status]||label(status||"Scheduled");
+}
+
+function upcomingRow(item){
+  const name=item.candidate||"Candidate";
+  const sourceNote=item.source==="raydar-scheduler"?"Scheduler booking":item.source==="paraform-reconciliation"?"Paraform (reconciled)":"Agent booking";
+  const paraformUrl=paraformCallUrl(item.meeting);
+  const links=paraformUrl?`<a href="${esc(paraformUrl)}" target="_blank" rel="noopener noreferrer">Paraform call ↗</a>`:'<span class="sub" style="color:var(--ink3)">—</span>';
+  return `<div class="row">
+    <div class="who">${esc(name)}<span class="sub">${esc(sourceNote)}</span></div>
+    <div class="when">${esc(pacificTime(item.join_at))}</div>
+    <div class="type">Upcoming</div>
+    <div class="what"><span class="pill violet"><span class="d"></span>${esc(upcomingStatusLabel(item.status))}</span></div>
+    <div class="links">${links}</div>
+  </div>`;
+}
+
+function renderList(elId,rows,emptyText){
+  $(elId).innerHTML=rows.length?rows.join(""):`<div class="empty">${esc(emptyText)}</div>`;
+}
+
+async function loadCalls(){
+  const to=new Date();
+  const from=new Date(to.getTime()-4*24*60*60*1000); // 4 days back covers Today + a few Earlier days
+  try{
+    const {status,body}=await api(`/api/post-call/calls-summary?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&limit=200`);
+    STATE.actor=body.actor||STATE.actor;
+    if(status===503||body.configured===false){
+      renderList("today",[],"Calls Today isn't configured on this dashboard yet.");
+      renderList("earlier",[],"Calls Today isn't configured on this dashboard yet.");
+      $("today-count").textContent="";$("earlier-count").textContent="";
+      return "unconfigured";
+    }
+    if(body.reason==="not_published"){
+      renderList("today",[],"The Calls Today feed hasn't been published by the post-call service yet.");
+      renderList("earlier",[],"The Calls Today feed hasn't been published by the post-call service yet.");
+      $("today-count").textContent="";$("earlier-count").textContent="";
+      return "not_published";
+    }
+    if(status!==200||body.ok!==true||!Array.isArray(body.calls)){
+      renderList("today",[],"Couldn't load today's calls; retrying automatically.");
+      renderList("earlier",[],"Couldn't load today's calls; retrying automatically.");
+      $("today-count").textContent="";$("earlier-count").textContent="";
+      return "error";
+    }
+    STATE.generatedAt=body.generatedAt||STATE.generatedAt;
+    const calls=body.calls;
+    const todayKey=pacificDateKey(new Date().toISOString());
+    const today=[],earlier=[];
+    for(const call of calls){
+      const key=pacificDateKey(call.callTimeIso);
+      (key===todayKey?today:earlier).push(call);
+    }
+    const byTimeDesc=(a,b)=>Date.parse(b.callTimeIso||0)-Date.parse(a.callTimeIso||0);
+    today.sort(byTimeDesc);earlier.sort(byTimeDesc);
+    renderList("today",today.map(callRow),"No calls yet today.");
+    renderList("earlier",earlier.map(callRow),"No earlier calls in this window.");
+    $("today-count").textContent=today.length?`${today.length} today`:"";
+    $("earlier-count").textContent=earlier.length?`${earlier.length} in the last few days`:"";
+    return "ok";
+  }catch(error){
+    if(error.status===401)return "auth";
+    renderList("today",[],"Couldn't load today's calls; retrying automatically.");
+    renderList("earlier",[],"Couldn't load today's calls; retrying automatically.");
+    return "error";
+  }
+}
+
+async function loadUpcoming(){
+  try{
+    const response=await fetch("https://webview-lake.vercel.app/api/status",{cache:"no-store"});
+    const body=await response.json().catch(()=>({}));
+    const rows=(Array.isArray(body.upcoming)?body.upcoming:[]).slice().sort((a,b)=>Date.parse(a.join_at||0)-Date.parse(b.join_at||0)).slice(0,100);
+    renderList("upcoming",rows.map(upcomingRow),"No upcoming calls scheduled.");
+    $("upcoming-count").textContent=rows.length?`${rows.length} scheduled`:"";
+    return true;
+  }catch(error){
+    renderList("upcoming",[],"Couldn't load upcoming calls; retrying automatically.");
+    return false;
+  }
+}
+
+async function load(){
+  clearBanner();
+  $("ftxt").textContent="Refreshing…";
+  const [callsState,upcomingOk]=await Promise.all([loadCalls(),loadUpcoming()]);
+  if(callsState==="auth"){clearInterval(STATE.refreshTimer);STATE.refreshTimer=null;return}
+  setConn(callsState==="ok"&&upcomingOk);
+  if(callsState==="unconfigured")showBanner("The Calls Today feed isn't configured on this dashboard yet.","warn");
+  else if(callsState==="not_published")showBanner("The post-call service hasn't published the Calls Today feed yet — Upcoming still updates below.","warn");
+  else if(callsState==="error"||!upcomingOk)showBanner("Some data couldn't be loaded; this page keeps retrying automatically.","warn");
+  const stampDate=STATE.generatedAt&&!Number.isNaN(Date.parse(STATE.generatedAt))?new Date(STATE.generatedAt):new Date();
+  const stamp=new Intl.DateTimeFormat("en-US",{timeZone:PACIFIC,hour:"numeric",minute:"2-digit"}).format(stampDate);
+  $("ftxt").textContent=`Updated ${stamp} PT · refreshes every 30s`;
+  reportHeight();
+}
+
+function reportHeight(){if(window.parent!==window)window.parent.postMessage({type:"raydar-calls-today-height",height:Math.max(document.body.scrollHeight,900)},location.origin)}
+function showGate(){$("gate").style.display="flex";startGsi()}
+function startGsi(){if(!STATE.config?.clientId)return;(function wait(){if(!(window.google&&google.accounts?.id))return setTimeout(wait,150);google.accounts.id.initialize({client_id:STATE.config.clientId,callback:onCredential});google.accounts.id.renderButton($("gsi"),{theme:"filled_black",size:"large",text:"signin_with",shape:"pill"})})()}
+function startRefresh(){clearInterval(STATE.refreshTimer);STATE.refreshTimer=setInterval(load,30000)}
+async function onCredential(response){try{await RaydarAuth.signIn(response.credential);$("gate").style.display="none";await load();startRefresh()}catch{$("gate-error").textContent="Sign-in failed. Try again."}}
+
+async function init(){
+  STATE.config=await fetch("/api/auth/config",{cache:"no-store"}).then(r=>r.json()).catch(()=>({}));
+  if(STATE.config.authRequired===false){$("gate").style.display="flex";$("gate-error").textContent="Google sign-in is not configured, so Calls Today is fail-closed.";return}
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(!session?.authenticated)return showGate();
+  await load();
+  startRefresh();
+}
+$("refresh").onclick=load;
+window.addEventListener("resize",reportHeight);
+init();
+</script>
+</body>
+</html>
