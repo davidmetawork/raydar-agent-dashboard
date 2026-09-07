@@ -1585,6 +1585,11 @@ function historyHtml(row) {
   return out.join("");
 }
 
+function appliedCompany(row) {
+  const company = String(row?.company || "").trim();
+  return company || "Unknown company";
+}
+
 function rowCardHtml(row, mode, decision) {
   const key = row.key;
   const busy = STATE.busy.has(key);
@@ -1643,7 +1648,7 @@ function rowCardHtml(row, mode, decision) {
       '<div class="rc-id">' +
         '<div class="who"><a class="name" href="' + esc(RaydarNav.href(key)) + '" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></a>" +
           nameLinks(row) + tierPill(row.tier) +
-          '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
+          '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(appliedCompany(row)) + "</span></div>" +
         '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(displayCard.title || card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(displayCard.location || card?.location || "") + "</div>" +
         (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>'
@@ -1945,7 +1950,7 @@ function processingDisplay(row) {
 }
 function processingRowHtml(row) {
   const role = row.roleTitle || "Role still resolving";
-  const company = row.company ? " @ " + esc(row.company) : "";
+  const company = " @ " + esc(appliedCompany(row));
   // `receivedAt` is the source arrival time when Core has it. Older stubs
   // carry only the Hub ingestion time or a date-only application record; use
   // each one with its real label rather than inventing a received timestamp.
@@ -2378,7 +2383,7 @@ function renderModal() {
     (providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
-  parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
+  parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(appliedCompany(row)) +
     (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") +
     (modal.source === "queue" && row.roleId ? '<button type="button" class="rule-use" data-rule-fact-kind="application" data-rule-fact-index="0">Use in rule</button>' : "") + "</div>");
   if (p.degraded === "paraform_auth") {

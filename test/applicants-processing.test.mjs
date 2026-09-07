@@ -6,6 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { runInNewContext } from "node:vm";
 
 import { createFeedHandler } from "../api/applicants/feed.mjs";
 import { publishInto } from "./helpers/applicant-generation.mjs";
@@ -132,4 +133,20 @@ test("Processing is read-only and never requests cards or exposes actions", () =
   assert.match(applicants, /paintList\(list, rows, processingRowHtml, \{ requestRichCards: false \}\)/);
   const processing = applicants.slice(applicants.indexOf("function processingRowHtml"), applicants.indexOf("function renderLists"));
   assert.doesNotMatch(processing, /data-act=|openProfile\(|rowCardHtml\(|requestVisibleRichCards\(|Source observation:|Profile key:/);
+});
+
+test("every Applicants view labels a missing applied-to company explicitly", () => {
+  const applicants = readFileSync(resolve("applicants.html"), "utf8");
+  const helperStart = applicants.indexOf("function appliedCompany(row)");
+  const helperEnd = applicants.indexOf("function rowCardHtml", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, "applied-company helper is extractable");
+  const appliedCompany = runInNewContext(`${applicants.slice(helperStart, helperEnd)}; appliedCompany`);
+
+  assert.equal(appliedCompany({ company: "  Acme Labs  " }), "Acme Labs");
+  assert.equal(appliedCompany({ company: "   " }), "Unknown company");
+  assert.equal(appliedCompany({}), "Unknown company");
+
+  assert.match(applicants, /rc-applied[^\n]+esc\(appliedCompany\(row\)\)/);
+  assert.match(applicants, /const company = " @ " \+ esc\(appliedCompany\(row\)\);/);
+  assert.match(applicants, /p-applied[^\n]+esc\(appliedCompany\(row\)\)/);
 });
