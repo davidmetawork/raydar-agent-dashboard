@@ -500,8 +500,12 @@ const STATE = {
 // in a generation-scoped viewport cache instead. A response can only paint if
 // it names the same immutable generation that requested it.
 const RICH_CARDS = {
-  generationKey: "", cards: {}, loaded: new Set(), inflight: new Set(), refreshing: false,
+  generationKey: "", cards: {}, loaded: new Set(), retryAt: new Map(), inflight: new Set(), refreshing: false,
 };
+const RICH_RETRY_MS = 60_000;
+// Full-profile responses can arrive before Core's separate rich-profile push.
+// Keep the source response visible, but periodically let a reopen ask again.
+const PROFILE_RETRY_AT = new Map();
 const AUTH = { required: false, clientId: "", authenticated: false, email: "" };
 // The Rules script is loaded after this page script; expose only the current
 // immutable publication identity, never the applicant rows or actor identity.
@@ -635,6 +639,7 @@ function resetRichCards() {
   RICH_CARDS.generationKey = richGenerationKey();
   RICH_CARDS.cards = {};
   RICH_CARDS.loaded.clear();
+  RICH_CARDS.retryAt.clear();
   RICH_CARDS.inflight.clear();
 }
 function syncRichGeneration() {
@@ -650,8 +655,10 @@ function cardFor(cu) {
 function requestVisibleRichCards(rows) {
   const requestKey = syncRichGeneration();
   if (!requestKey || !rows?.length) return;
+  const requestedAt = Date.now();
   const ids = [...new Set(rows.map(profileId).filter((id) => id && STATE.cards[id]
-    && !RICH_CARDS.loaded.has(id) && !RICH_CARDS.inflight.has(id)))].slice(0, 60);
+    && !RICH_CARDS.loaded.has(id) && (RICH_CARDS.retryAt.get(id) || 0) <= requestedAt
+    && !RICH_CARDS.inflight.has(id)))].slice(0, 60);
   if (!ids.length) return;
   ids.forEach((id) => RICH_CARDS.inflight.add(id));
   const generationId = String(STATE.generation?.generationId || "");
@@ -674,13 +681,40 @@ function requestVisibleRichCards(rows) {
       if (RICH_CARDS.generationKey !== requestKey || richGenerationKey() !== requestKey) return;
       const received = body.cards && typeof body.cards === "object" ? body.cards : {};
       for (const id of ids) {
-        RICH_CARDS.loaded.add(id); // an absent overlay is a completed lookup, not a retry loop
-        if (received[id] && typeof received[id] === "object") RICH_CARDS.cards[id] = received[id];
+        const card = received[id] && typeof received[id] === "object" ? received[id] : null;
+        const provider = richProfile(card?.paraformProfile);
+        if (provider) {
+          // The generation-fenced feed remains the only source-card owner.
+          // This side channel may add the nested provider overlay, never replace
+          // application history with a separately timed cards-hash read.
+          RICH_CARDS.cards[id] = { paraformProfile: provider };
+          if (hasProviderHistory(provider)) {
+            RICH_CARDS.loaded.add(id);
+            RICH_CARDS.retryAt.delete(id);
+          } else {
+            // Keep a real headline/rating visible while checking periodically
+            // for the work or education history a later warm can add.
+            RICH_CARDS.loaded.delete(id);
+            RICH_CARDS.retryAt.set(id, Date.now() + RICH_RETRY_MS);
+          }
+        } else {
+          // Core warms and publishes provider overlays after the source
+          // generation is active. An absent overlay is therefore a temporary
+          // negative, not a generation-long fact.
+          delete RICH_CARDS.cards[id];
+          RICH_CARDS.retryAt.set(id, Date.now() + RICH_RETRY_MS);
+        }
         patchRow(id); // patch only mounted rows; never repaint or move the reader
       }
     })
     .catch((error) => {
-      if (Number(error?.status) !== 409 || RICH_CARDS.generationKey !== requestKey) return;
+      if (RICH_CARDS.generationKey !== requestKey) return;
+      if (Number(error?.status) !== 409) {
+        // A transient API/store failure keeps the source card and receives the
+        // same bounded retry as a cache miss; scrolling cannot create a loop.
+        ids.forEach((id) => RICH_CARDS.retryAt.set(id, Date.now() + RICH_RETRY_MS));
+        return;
+      }
       resetRichCards();
       if (RICH_CARDS.refreshing) return;
       RICH_CARDS.refreshing = true;
@@ -2004,7 +2038,9 @@ function applyAvatar(cu) {
 }
 async function fetchProfile(cu) {
   const cached = STATE.profiles[cu];
-  if (cached) return cached;
+  if (hasProviderHistory(richProfile(cached?.paraformProfile))) return cached;
+  if (Object.prototype.hasOwnProperty.call(STATE.profiles, cu)
+    && (PROFILE_RETRY_AT.get(cu) || 0) > Date.now()) return cached;
   // A modal request has no generation parameter, so fence its async paint on
   // the immutable feed identity captured before the request begins. A newer
   // feed may describe a revised application under the same candidate id.
@@ -2017,11 +2053,16 @@ async function fetchProfile(cu) {
     const profile = body.profile || body;
     if (richGenerationKey() !== generationKey) return null;
     STATE.profiles[cu] = profile;
+    if (hasProviderHistory(richProfile(profile?.paraformProfile))) PROFILE_RETRY_AT.delete(cu);
+    else PROFILE_RETRY_AT.set(cu, Date.now() + RICH_RETRY_MS);
     return profile;
   } catch (err) {
     // Record the miss so the modal leaves its loading state ("unavailable"
-    // instead of a forever-spinner); null is falsy, so a reopen retries.
-    if (richGenerationKey() === generationKey) STATE.profiles[cu] = STATE.profiles[cu] || null;
+    // instead of a forever-spinner); a reopen retries after the shared bound.
+    if (richGenerationKey() === generationKey) {
+      if (!Object.prototype.hasOwnProperty.call(STATE.profiles, cu)) STATE.profiles[cu] = null;
+      PROFILE_RETRY_AT.set(cu, Date.now() + RICH_RETRY_MS);
+    }
     throw err;
   }
 }
@@ -2460,6 +2501,7 @@ function markFeedUnavailable(error) {
   STATE.generation = null;
   resetRichCards();
   STATE.profiles = {};
+  PROFILE_RETRY_AT.clear();
   STATE.checked.clear();
   resetVirtualLists();
 }
@@ -2490,7 +2532,10 @@ async function loadFeed(manual = false) {
     // Full profiles are deliberately scoped to the feed generation too. Keep
     // them through ordinary polls of the same publication, but do not let an
     // old modal response or cached profile describe the new generation.
-    if (previousGenerationKey !== richGenerationKey()) STATE.profiles = {};
+    if (previousGenerationKey !== richGenerationKey()) {
+      STATE.profiles = {};
+      PROFILE_RETRY_AT.clear();
+    }
     STATE.loaded = true;
     reconcileLocal();
     renderAll();
