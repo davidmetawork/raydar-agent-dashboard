@@ -23,6 +23,12 @@
   };
 
   const text = (value, max = 160) => String(value ?? "").trim().slice(0, max);
+  const schoolName = (value) => {
+    const name = typeof value === "string" ? value.trim() : "";
+    // The cache caps names at 160 characters. Never make an equality rule
+    // from a prefix that could already have been truncated.
+    return name && name.length < 160 ? name : null;
+  };
   const validId = (value) => {
     const id = text(value, 81);
     return id && id.length <= 80 ? id : null;
@@ -155,6 +161,14 @@
         condition: { field: "school.id", op: "any_of", value: [id] },
         labels: { [id]: school },
       });
+      else if (schoolName(record.school)) facts.push({
+        id: "education-school-name",
+        title: `Attended ${schoolName(record.school)}`,
+        detail: "Full university name match · no verified school ID",
+        checked: true,
+        condition: { field: "school.name", op: "equals", value: schoolName(record.school) },
+        labels: {},
+      });
       if (degree) facts.push({
         id: "education-degree",
         title: `Degree text contains “${degree}”`,
@@ -184,7 +198,7 @@
         ? `${text(record.companyName) || "Selected company"} experience`
         : `${text(record.roleTitle) || "Selected"} job titles`).slice(0, 80);
     }
-    const usesSchool = selectedFacts.some((fact) => fact.id === "education-school");
+    const usesSchool = selectedFacts.some((fact) => fact.id === "education-school" || fact.id === "education-school-name");
     return (usesSchool
       ? `${text(record.school) || "Selected school"} education`
       : `${text(record.degree) || "Selected"} degrees`).slice(0, 80);
@@ -264,10 +278,16 @@
 
   function detailHtml(source) {
     const facts = factsFor(source);
-    const missingIdentity = source.kind === "experience" && !validId(source.record?.companyId) ? "company" : source.kind === "education" && !validId(source.record?.schoolId) ? "university" : null;
+    const missingIdentity = source.kind === "experience" && !validId(source.record?.companyId) ? "company" : null;
+    const schoolNameNote = source.kind === "education" && !validId(source.record?.schoolId)
+      ? schoolName(source.record?.school)
+        ? "Matches the full university name, ignoring case and spacing; degree is optional."
+        : "A complete university name under 160 characters is needed for a university rule."
+      : null;
     return '<button type="button" class="rf-back" id="rfBack">‹ Choose a different detail</button>' +
       '<div class="rf-chosen"><span>' + enc(kindLabel(source)) + '</span><b>' + enc(source.title) + '</b><span>' + enc(source.subtitle) + '</span></div>' +
       (missingIdentity ? '<p class="rf-empty">An exact ' + missingIdentity + ' rule is unavailable because this record has no verified ' + missingIdentity + ' ID. Any text option below matches only that text.</p>' : '') +
+      (schoolNameNote ? '<p class="rf-empty">' + enc(schoolNameNote) + '</p>' : '') +
       '<div class="rf-facts">' + facts.map((fact) =>
         '<label class="rf-fact"><input type="checkbox" data-rf-fact="' + enc(fact.id) + '"' +
           (chooser.selected.has(fact.id) ? " checked" : "") + '><span class="rf-fact-copy"><b>' + enc(fact.title) +

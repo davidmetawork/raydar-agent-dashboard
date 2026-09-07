@@ -4,9 +4,9 @@
 // projection: they truncate to the first three jobs and schools and carry no
 // stable ids. Measured on the live queue (2026-08-20) experience rows run to a
 // median of 2 but a p90 of 9 and a max of 23, so a card-based rule would
-// silently miss a quarter of people's history — and with no school id it could
-// only match institutions by typed text, which cannot tell Harvard College
-// from Harvard Business School. Rules need every row and every id.
+// silently miss a quarter of people's history. Rules retain rows and stable
+// ids; a missing school id may instead use labelled whole-name equality,
+// preserving campus qualifiers without resolving institution identity.
 //
 // SOURCE. Derived from the prewarmed profile as it lands in sync, exactly the
 // way cardFromProfile derives a card from the same object. Never a source of

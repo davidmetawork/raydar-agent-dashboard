@@ -141,7 +141,7 @@
       });
       return f.label + " " + shown.slice(0, 3).join(", ") + (shown.length > 3 ? " and " + (shown.length - 3) + " more" : "");
     }
-    const words = { contains: "contains", at_least: "at least", at_most: "at most", after: "after", before: "before" };
+    const words = { contains: "contains", equals: "is exactly", at_least: "at least", at_most: "at most", after: "after", before: "before" };
     return f.label + " " + (words[condition.op] || condition.op) + " " + value;
   }
 
@@ -391,9 +391,9 @@
       '<select class="f" data-ci="' + index + '" data-part="field" aria-label="Condition field">' +
         choices.map((c) => '<option value="' + enc(c.name) + '"' + (c.name === condition.field ? " selected" : "") + ">" + enc(c.label) + "</option>").join("") +
       "</select>" +
-      (f?.ops.length === 1 ? '<span class="o rule-fixed-op">' + enc({ any_of: 'is', contains: 'contains', is: 'is', member_of: 'in verified list' }[condition.op] || condition.op) + '</span>' : '<select class="o" data-ci="' + index + '" data-part="op" aria-label="Comparison">' +
+      (f?.ops.length === 1 ? '<span class="o rule-fixed-op">' + enc({ any_of: 'is', contains: 'contains', equals: 'is exactly', is: 'is', member_of: 'in verified list' }[condition.op] || condition.op) + '</span>' : '<select class="o" data-ci="' + index + '" data-part="op" aria-label="Comparison">' +
         (f ? f.ops : []).map((o) => '<option value="' + enc(o) + '"' + (o === condition.op ? " selected" : "") + ">" +
-          enc({ any_of: "is one of", contains: "contains", is: "is", at_least: "at least", at_most: "at most", after: "after", before: "before", between: "between", member_of: "in verified list" }[o] || o) + "</option>").join("") +
+          enc({ any_of: "is one of", contains: "contains", equals: "is exactly", is: "is", at_least: "at least", at_most: "at most", after: "after", before: "before", between: "between", member_of: "in verified list" }[o] || o) + "</option>").join("") +
       "</select>") +
       valueControl(condition, index) +
       '<button class="x" data-ci="' + index + '" data-part="remove" aria-label="Remove condition">✕</button>' +

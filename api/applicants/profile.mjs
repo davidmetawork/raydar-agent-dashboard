@@ -76,8 +76,9 @@ function mapExperience(row, ranks) {
   const companyId = row?.company_id ?? row?.company?.id ?? null;
   return {
     // The stable Paraform id. Added 2026-08-20 for Applicant Decision Rules:
-    // rules match companies and schools by id, never by typed text, because
-    // name matching cannot tell Harvard College from Harvard Business School.
+    // company identity rules match this id. School rules also prefer ids;
+    // missing school ids may use explicitly labelled whole-name equality,
+    // which compares literal names without resolving institution identity.
     // MIRROR THIS IN src/interviews/publish.mjs — that file is the other
     // writer of apphub:profile:* and any drift is a bug in both.
     companyId: companyId == null ? null : String(companyId),

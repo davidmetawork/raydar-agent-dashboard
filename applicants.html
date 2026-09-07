@@ -2171,7 +2171,7 @@ function educationHtml(ed, index, allowRuleFacts, isParaformProfile = false) {
   const dates = [ed.start ? monthYear(ed.start) : "", ed.end ? monthYear(ed.end) : ""].filter(Boolean).join(" – ");
   return '<div class="xp">' + entityLogoHtml(ed, "school", "xp-logo") +
     '<div class="xp-top"><span class="xp-role">' + esc(ed.school || "School") + '</span><span class="xp-co">' + esc(ed.degree || "") + "</span>" +
-    (allowRuleFacts && (ed.schoolId || ed.school || ed.degree) ? '<button type="button" class="rule-use" data-rule-fact-kind="education" data-rule-fact-source="' + factSource + '" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
+    (allowRuleFacts && (ed.schoolId || ed.school || ed.degree) ? '<button type="button" class="rule-use" data-rule-fact-kind="education" data-rule-fact-source="' + factSource + '" data-rule-fact-index="' + index + '">' + (ed.schoolId || ed.school ? 'Use university in rule' : 'Use education in rule') + '</button>' : "") + "</div>" +
     (dates ? '<div class="xp-dates">' + esc(dates) + "</div>" : "") + chipRowHtml(ed, isParaformProfile) + "</div>";
 }
 function profileFactHtml(label, value) {

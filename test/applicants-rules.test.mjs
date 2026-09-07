@@ -386,3 +386,36 @@ test("labels are sanitised and never unbounded", () => {
   });
   assert.deepEqual(saved.rule.labels, { good: "Fine" });
 });
+
+
+test("university name equality keeps the complete name and accepts only untruncated values", () => {
+  const condition = (value) => ({ field: "school.name", op: "equals", value });
+  const matches = (actual, expected) => evaluateRule(rule([condition(expected)]), subject({ education: [{ school: actual }] })).matched;
+  assert.equal(validateCondition(condition("University of Central Missouri")), null);
+  assert.ok(validateCondition({ ...condition("Missouri"), op: "contains" }));
+  assert.ok(validateCondition(condition(" ")));
+  assert.equal(matches("  University  of Central Missouri ", "university of central missouri"), true);
+  assert.equal(matches("San José State University", "San Jose\u0301 State University"), true);
+  for (const [actual, expected] of [
+    ["University of Michigan-Dearborn", "University of Michigan"],
+    ["Carnegie Mellon University (Qatar)", "Carnegie Mellon University"],
+    ["Harvard Business School", "Harvard University"],
+    ["San José State University", "San Jose State University"],
+    ["The New School", "New School"],
+    [null, "University"],
+  ]) assert.equal(matches(actual, expected), false, `${actual} must not become ${expected}`);
+  for (const length of [159, 160, 161]) {
+    const name = "x".repeat(length);
+    assert.equal(validateCondition(condition(name)) === null, length < 160);
+    assert.equal(matches(name, name), length < 160);
+  }
+  assert.equal(matches("x".repeat(161), "x".repeat(160)), false, "truncated stored prefixes never match");
+});
+
+test("university name and degree must match the same education row", () => {
+  const nameRule = rule([{ field: "school.name", op: "equals", value: "Harvard University" },
+    { field: "school.level", op: "any_of", value: ["bachelors"] }]);
+  const withoutIds = (profile) => ({ ...profile, education: profile.education.map(({ schoolId, ...row }) => row) });
+  assert.equal(evaluateRule(nameRule, subject(withoutIds(HARVARD_MBA))).matched, false);
+  assert.equal(evaluateRule(nameRule, subject(withoutIds(HARVARD_UNDERGRAD))).matched, true);
+});
