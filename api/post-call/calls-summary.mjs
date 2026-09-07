@@ -84,6 +84,36 @@ const REASON_WORDS = {
   review_abandoned: "Stopped from the Review board",
   abandoned: "Stopped from the Review board",
 };
+// Workflow states are internal tokens; the board says what the lane is
+// waiting on. Unknown states are humanized, never shown raw.
+const STEP_WORDS = {
+  observed: "Call recorded, starting the follow-up",
+  call_settling: "Waiting for Paraform to finish the call record",
+  call_verified: "Call confirmed, resolving the candidate",
+  identity_resolved: "Candidate identified, linking the CRM record",
+  crm_bound: "Reading the Paraform profile",
+  profile_hydrated: "Checking preferences",
+  preferences_ready: "Checking Talent Network",
+  talent_network_pending: "Waiting on Talent Network confirmation",
+  talent_network_ready: "Finding matches",
+  matches_generating: "Finding matches",
+  match_snapshot_ready: "Checking fit for each role",
+  calibrating: "Checking fit for each role",
+  calibration_complete: "Choosing the email",
+  curated_readback: "Confirming the curated list",
+  role_verdict_ready: "Choosing the email",
+  routed: "Preparing the email",
+  thread_resolved: "Preparing the email",
+  waiting_send_window: "Waiting for the send window",
+};
+function stepSentence(step) {
+  const key = safeText(step, 120);
+  if (!key) return null;
+  if (STEP_WORDS[key]) return STEP_WORDS[key];
+  const words = key.replace(/[_:]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : null;
+}
+
 function reasonSentence(reason) {
   const key = safeText(reason, 120);
   if (!key) return null;
@@ -100,13 +130,17 @@ function detailSentenceFor(bucket, detail) {
   if (!detail || typeof detail !== "object") return null;
   if (bucket === "sent") {
     const count = Number.isFinite(detail.rolesInEmail) ? detail.rolesInEmail : null;
-    return count != null ? `${count} role${count === 1 ? "" : "s"} in email` : null;
+    if (count == null) return null;
+    // A follow-up with no roles is the "nothing to show you yet" variant
+    // (bad-fit interview or no matches), never "0 roles".
+    if (count === 0) return "No matching roles yet";
+    return `${count} role${count === 1 ? "" : "s"} in email`;
   }
   if (bucket === "in_review") {
     return safeText(detail.why, 300);
   }
   if (bucket === "still_working") {
-    return safeText(detail.step, 120);
+    return stepSentence(detail.step);
   }
   return reasonSentence(detail.reason);
 }
