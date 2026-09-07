@@ -205,6 +205,7 @@ export const K = {
   // regenerable from the prewarmed profiles. Losing them costs a tick, never
   // data. rules/rulestats/ruleruns are the real state.
   facts: "apphub:facts",         // hash: cuId → evaluation facts (see _lib/facts.mjs)
+  richRuleFacts: "apphub:rich-rule-facts", // hash: profile key → exact-bound Paraform rule projection
   schools: "apphub:schools",     // hash: schoolId → school name (picker directory)
   companies: "apphub:companies", // hash: companyId → company name (picker directory)
   rules: "apphub:rules",         // doc: {rules[], pausedAll, updatedAt} — writer: /api/applicants/rules only

@@ -22,6 +22,8 @@ import {
 } from "../api/applicants/_lib/funded-employers.mjs";
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { K } from "../api/applicants/_lib/kv.mjs";
+import { normalizeRichProfile, richProfileMatches } from "../api/applicants/_lib/rich-profile.mjs";
+import { richProfileForRules, richRuleFactsFromProfile, richReceiptMatches, ruleNeedsProfileFacts, selectRuleFacts } from "../api/applicants/_lib/rich-rule-facts.mjs";
 import { ruleInterviewSkipReason } from "../api/applicants/_lib/rule-interview-eligibility.mjs";
 import {
   FIELD_GROUPS,
@@ -113,10 +115,10 @@ const profiles = {
 const paraformOverlays = {
   "core:local0000000000000000000000000001": {
     title: "Infrastructure engineer building developer platforms",
-    location: "San Francisco, CA", densityScore: 88, paraformTier: "S", paraformTierSource: "paraform",
+    location: "Seattle, WA", densityScore: 88, paraformTier: "S", paraformTierSource: "paraform",
     paraformUpdatedAt: "2026-09-04T18:00:00.000Z", profileEnrichedAt: "2026-09-05T15:00:00.000Z",
-    experiences: [{ companyName: "Stripe", roleTitle: "Staff Infrastructure Engineer", start: "2021-02-01", end: null, current: true, industry: "Financial technology", talentRank: "S", logo: null }],
-    education: [{ school: "University of California, Berkeley", degree: "B.S. Computer Science", start: "2013-08-01", end: "2017-05-01", talentRank: "S", logo: null }],
+    experiences: [{ companyId: "company-databricks", companyName: "Databricks", roleTitle: "Staff Infrastructure Engineer", start: "2021-02-01", end: null, current: true, industry: "Data infrastructure", talentRank: "S", logo: null }],
+    education: [{ schoolId: "school-harvard", school: "Harvard University", degree: "A.B. Computer Science", start: "2013-08-01", end: "2017-05-01", talentRank: "S", logo: null }],
   },
   "core:local0000000000000000000000000002": {
     title: "Product designer for early-stage teams", location: "Brooklyn, NY", densityScore: 73, paraformTier: "A", paraformTierSource: "paraform",
@@ -148,6 +150,23 @@ const rows = [
   row(4, 1, "unrated", "2026-09-04T17:30:00.000Z"),
   row(5, 0, "S", "2026-09-04T16:10:00.000Z"),
 ];
+
+// Exercise the real cache identity checks with wholly synthetic bindings.
+const fixtureNow = Date.now();
+for (const candidate of rows) {
+  const raw = profiles[candidate.profileKey].paraformProfile;
+  if (!raw) continue;
+  candidate.richProfileBinding = {
+    sourceObservationId: candidate.sourceObservationId,
+    candidateUserId: `candidate-${candidate.inputRevision}`,
+    connectionReceiptId: `connection-${candidate.inputRevision}`,
+  };
+  profiles[candidate.profileKey].paraformProfile = normalizeRichProfile({
+    ...raw, ...candidate.richProfileBinding,
+    updatedAt: raw.paraformUpdatedAt,
+    paraformTierObservedAt: raw.profileEnrichedAt,
+  }, { cachedAt: new Date(fixtureNow).toISOString() });
+}
 
 function row(profileIndex, roleIndex, tier, appliedAt) {
   const profileKey = profileIds[profileIndex];
@@ -197,6 +216,27 @@ const profileReceipts = Object.fromEntries(profileIds.map((id, index) => [id, {
   sourceObservationId: `local-source-${index + 1}`,
   payloadDigest: SOURCE_PAYLOAD_DIGEST,
 }]));
+const richFacts = {};
+const richReceipts = {};
+for (const candidate of rows) {
+  const profile = profiles[candidate.profileKey].paraformProfile;
+  if (!profile) continue;
+  richFacts[candidate.profileKey] = richRuleFactsFromProfile(profile, { now: fixtureNow, receiptVersion: 1 });
+  richReceipts[candidate.profileKey] = {
+    ...candidate.richProfileBinding, source: "paraform", v: 1,
+    profileEnrichedAt: profile.profileEnrichedAt,
+    richProfileRetainedUntil: profile.richProfileRetainedUntil,
+  };
+}
+
+function ruleSubject(candidate, fundedEmployerSnapshots) {
+  const selected = selectRuleFacts({
+    row: candidate, sourceFacts: facts[candidate.profileKey],
+    richFacts: richFacts[candidate.profileKey], richReceipt: richReceipts[candidate.profileKey], now: fixtureNow,
+  });
+  return { row: candidate, facts: selected.facts, profileFactsPending: selected.projectionPending,
+    richEligible: selected.richEligible, profileReceipt: profileReceipts[candidate.profileKey], fundedEmployerSnapshots };
+}
 
 const { snapshot: fundedSnapshot, metadata: fundedMetadata } = compileFundedEmployerSnapshot({
   snapshotId: FUNDED_SNAPSHOT_ID,
@@ -260,8 +300,9 @@ export async function readSyntheticMembership(key) {
 }
 
 const directory = {
-  schools: Object.fromEntries(Object.values(profiles).flatMap((p) => p.education).map((s) => [s.schoolId, s.school])),
-  companies: Object.fromEntries(Object.values(profiles).flatMap((p) => p.experiences)
+  schools: Object.fromEntries(Object.values(profiles).flatMap((p) => [...p.education, ...(p.paraformProfile?.education || [])])
+    .filter((school) => school.schoolId).map((s) => [s.schoolId, s.school])),
+  companies: Object.fromEntries(Object.values(profiles).flatMap((p) => [...p.experiences, ...(p.paraformProfile?.experiences || [])])
     .filter((job) => job.companyId).map((job) => [job.companyId, job.companyName])),
 };
 
@@ -305,20 +346,21 @@ function previewRule(rule, state, fundedEmployerSnapshots) {
   const skipped = {};
   const pending = pendingRows(state);
   const scoped = pending.filter((candidate) => inScope(rule, candidate));
+  const profileFactsCoverage = { required: 0, ready: 0, pending: 0 };
   for (const candidate of scoped) {
-    const result = evaluateRule(rule, {
-      row: candidate,
-      facts: facts[candidate.profileKey],
-      profileReceipt: profileReceipts[candidate.profileKey],
-      fundedEmployerSnapshots,
-    });
+    const subject = ruleSubject(candidate, fundedEmployerSnapshots);
+    if (ruleNeedsProfileFacts(rule) && subject.richEligible) {
+      profileFactsCoverage.required += 1;
+      profileFactsCoverage[subject.profileFactsPending ? "pending" : "ready"] += 1;
+    }
+    const result = evaluateRule(rule, subject);
     const hold = rule.action === "interview"
       ? ruleInterviewSkipReason(candidate, { decision: state.decisions[candidate.key], ack: state.acks[candidate.key] }) : null;
     if (result.matched && hold) skipped[hold] = (skipped[hold] || 0) + 1;
     else if (result.matched) matched.push({ candidate, evidence: result.evidence });
     else if (result.skipped) skipped[result.reason] = (skipped[result.reason] || 0) + 1;
   }
-  return { pending: pending.length, considered: scoped.length, matched, skipped };
+  return { pending: pending.length, considered: scoped.length, matched, skipped, profileFactsCoverage };
 }
 
 function pendingRows(state) {
@@ -397,6 +439,7 @@ async function rulesApi(req, res, url, state, readMembership) {
     return json(res, 200, {
       ok: true, pending: result.pending, considered: result.considered,
       matched: result.matched.length, skipped: result.skipped,
+      profileFactsCoverage: result.profileFactsCoverage,
       generationId: generation.generationId, generationDigest: generation.digest,
       manifest: { count: result.considered, digest: "local-preview-manifest" },
       samples: result.matched.slice(0, 8).map(({ candidate, evidence }) => ({ key: candidate.key, name: candidate.name, roleTitle: candidate.roleTitle, evidence })),
@@ -464,12 +507,7 @@ async function runTick(req, res, state, readMembership) {
   const pending = pendingRows(state);
   const fundedEmployerSnapshots = await loadFundedEmployerSnapshots([...live, ...watching], { readJson: readMembership });
   for (const candidate of pending) {
-    const subject = {
-      row: candidate,
-      facts: facts[candidate.profileKey],
-      profileReceipt: profileReceipts[candidate.profileKey],
-      fundedEmployerSnapshots,
-    };
+    const subject = ruleSubject(candidate, fundedEmployerSnapshots);
     for (const rule of watching) {
       if (!inScope(rule, candidate) || !evaluateRule(rule, subject).matched) continue;
       const hold = rule.action === "interview"
@@ -594,7 +632,12 @@ export function createFixtureServer({
       if (url.pathname === "/api/applicants/profile") {
         if (req.method !== "GET") return json(res, 405, { ok: false, error: "GET only" });
         const profile = profiles[url.searchParams.get("cu") || ""];
-        return profile ? json(res, 200, { ok: true, ...profile }) : json(res, 404, { ok: false, error: "profile_cache_miss" });
+        const candidate = rows.find((item) => item.profileKey === url.searchParams.get("cu"));
+        const eligible = richProfileMatches(candidate?.richProfileBinding, profile?.paraformProfile, { now: fixtureNow })
+          && richReceiptMatches(candidate?.richProfileBinding, richReceipts[candidate?.profileKey], { now: fixtureNow });
+        return profile ? json(res, 200, { ok: true, ...profile,
+          ...(eligible ? { paraformProfile: { ...richProfileForRules(profile.paraformProfile), ruleFactsEligible: true } } : {}),
+        }) : json(res, 404, { ok: false, error: "profile_cache_miss" });
       }
       if (url.pathname === "/api/applicants/rules") return rulesApi(req, res, url, state, readMembership);
       if (url.pathname === "/api/applicants/rules-tick") return runTick(req, res, state, readMembership);

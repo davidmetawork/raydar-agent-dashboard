@@ -38,6 +38,7 @@ function fixture() {
     activateGeneration: async (key, expected, value) => { state[key] = value; return true; },
     readHashKeys: async (key) => Object.keys(state[key] || {}),
     deleteHashFields: async (key, ids) => { for (const id of ids) delete state[key][id]; return ids.length; }, now: () => AT };
+  deps.readMany = deps.readHashMany;
   return { row, state, writes, deps };
 }
 async function post(f, body) { const res = response(); await createSyncHandler(f.deps)({ method: "POST", headers: { authorization: `Bearer ${secret}` }, body }, res); return res; }
@@ -45,13 +46,13 @@ async function feed(f, extra = {}) { const res = response(); await createFeedHan
 async function profile(f, extra = {}) { const res = response(); await createProfileHandler({ ...f.deps, now: () => Date.parse(AT), corsHandler: () => false, authHandler: async () => true, ...extra })({ method: "GET", query: { cu: KEY } }, res); return res; }
 async function cards(f, extra = {}, query = {}) { const res = response(); const p = f.state[K.activeGeneration]; await createCardsHandler({ ...f.deps, now: () => Date.parse(AT), corsHandler: () => false, authHandler: async () => true, ...extra })({ method: "GET", query: { rich: "1", cus: KEY, generationId: p.generationId, generationDigest: p.digest, ...query } }, res); return res; }
 
-test("rich publication lands only in three display stores and both reads preserve source identity", async () => {
+test("rich publication writes derived stores before its receipt and preserves source identity", async () => {
   const f = fixture();
   const sourceBefore = structuredClone(f.state[K.sourceProfile(KEY)]);
   const res = await post(f, { richProfiles: { [KEY]: RICH } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.stored.richProfiles, 1);
-  assert.deepEqual(f.writes.map(([key]) => key), [K.richProfile(KEY), K.richCards, K.richProfileReady]);
+  assert.deepEqual(f.writes.map(([key]) => key), [K.richProfile(KEY), K.richRuleFacts, K.schools, K.companies, K.richCards, K.richProfileReady]);
   assert.equal(f.writes[0][2], 30 * 24 * 60 * 60);
   assert.deepEqual(f.state[K.sourceProfile(KEY)], sourceBefore);
   assert.deepEqual(f.state[K.facts], { sentinel: "source facts" });
@@ -73,6 +74,7 @@ test("rich publication lands only in three display stores and both reads preserv
   assert.equal(modal.body.title, SOURCE.title);
   assert.equal(modal.body.paraformProfile.experiences[0].roleTitle, "Engineer");
   assert.equal(modal.body.paraformProfile.name, undefined);
+  assert.equal(modal.body.paraformProfile.ruleFactsEligible, true);
 });
 
 for (const field of Object.keys(BINDING)) test(`a changed ${field} rejects the overlay without changing the application`, async () => {
@@ -176,10 +178,12 @@ test("a full publication prunes expired rich hashes even while the application s
   const expired = "2026-09-04T00:00:00Z";
   f.state[K.richCards][KEY].richProfileRetainedUntil = expired;
   f.state[K.richProfileReady][KEY].richProfileRetainedUntil = expired;
+  f.state[K.richRuleFacts][KEY].richProfileRetainedUntil = expired;
   const res = await post(f, publicationBody({ generationId: "prune-generation", snapshot: { generatedAt: AT, stream: [] }, queue: [f.row] }));
   assert.equal(res.statusCode, 200);
   assert.equal(f.state[K.richCards][KEY], undefined);
   assert.equal(f.state[K.richProfileReady][KEY], undefined);
+  assert.equal(f.state[K.richRuleFacts][KEY], undefined);
   assert.equal(f.state[K.cards][KEY].title, SOURCE.title);
 });
 

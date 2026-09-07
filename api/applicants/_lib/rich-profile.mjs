@@ -1,4 +1,5 @@
-// Optional Paraform display cache: never a source-history receipt or rule fact.
+// Optional Paraform cache. Rules use a separately bound compact projection;
+// this cache never substitutes for a durable source-history receipt.
 export const RICH_PROFILE_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 export const RICH_PROFILE_REFRESH_SECONDS = 24 * 60 * 60;
 const FIELDS = ["sourceObservationId", "candidateUserId", "connectionReceiptId"];

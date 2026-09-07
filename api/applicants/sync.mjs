@@ -112,6 +112,10 @@ import {
   normalizeRichProfile, richBindingsForSnapshot, richCardFromProfile,
   richProfileMatches, RICH_PROFILE_RETENTION_SECONDS,
 } from "./_lib/rich-profile.mjs";
+import {
+  RICH_PROFILE_RECEIPT_VERSION,
+  richRuleFactsFromProfile,
+} from "./_lib/rich-rule-facts.mjs";
 
 function authed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
@@ -898,11 +902,21 @@ export function createSyncHandler({
           profiles[key] = profile;
         }
         const cards = {};
+        const ruleFacts = {};
         const receipts = {};
+        const richSchools = {};
+        const richCompanies = {};
         for (const [key, profile] of Object.entries(profiles)) {
           await writeJson(K.richProfile(key), profile, RICH_PROFILE_RETENTION_SECONDS);
           cards[key] = richCardFromProfile(profile);
+          ruleFacts[key] = richRuleFactsFromProfile(profile, {
+            now: Date.parse(cachedAt), receiptVersion: RICH_PROFILE_RECEIPT_VERSION,
+          });
+          const directory = directoryFromFacts(ruleFacts[key]);
+          Object.assign(richSchools, directory.schools);
+          Object.assign(richCompanies, directory.companies);
           receipts[key] = {
+            v: RICH_PROFILE_RECEIPT_VERSION,
             source: "paraform", sourceObservationId: profile.sourceObservationId,
             candidateUserId: profile.candidateUserId, connectionReceiptId: profile.connectionReceiptId,
             profileEnrichedAt: profile.profileEnrichedAt, cachedAt,
@@ -910,8 +924,11 @@ export function createSyncHandler({
             richProfileRetainedUntil: profile.richProfileRetainedUntil,
           };
         }
+        if (Object.keys(ruleFacts).length) await writeHash(K.richRuleFacts, ruleFacts);
+        if (Object.keys(richSchools).length) await writeHash(K.schools, richSchools);
+        if (Object.keys(richCompanies).length) await writeHash(K.companies, richCompanies);
         if (Object.keys(cards).length) await writeHash(K.richCards, cards);
-        // Write last: a fresh receipt means both display projections landed.
+        // Write last: a fresh receipt means every display and rule projection landed.
         if (Object.keys(receipts).length) await writeHash(K.richProfileReady, receipts);
         return res.status(200).json({ ok: true, stored: { richProfiles: Object.keys(profiles).length }, rejected });
       }
@@ -1118,7 +1135,7 @@ export function createSyncHandler({
           // break every rule that referenced it.
           const dropFacts = (await readHashKeys(K.facts)).filter((cu) => !keep.has(cu));
           if (dropFacts.length) await deleteHashFields(K.facts, dropFacts);
-          for (const hash of [K.richCards, K.richProfileReady]) {
+          for (const hash of [K.richCards, K.richProfileReady, K.richRuleFacts]) {
             const records = await readHash(hash);
             const stale = Object.keys(records || {}).filter((key) => !keep.has(key)
               || !Number.isFinite(Date.parse(records[key]?.richProfileRetainedUntil))
@@ -1279,6 +1296,15 @@ export function createSyncHandler({
           })]));
           await writeHash(K.facts, facts);
           stored.sourceFacts = entries.length;
+          const schools = {};
+          const companies = {};
+          for (const record of Object.values(facts)) {
+            const directory = directoryFromFacts(record);
+            Object.assign(schools, directory.schools);
+            Object.assign(companies, directory.companies);
+          }
+          if (Object.keys(schools).length) await writeHash(K.schools, schools);
+          if (Object.keys(companies).length) await writeHash(K.companies, companies);
         } catch (error) {
           stored.sourceFactsError = String(error?.message || error).slice(0, 120);
         }

@@ -19,6 +19,7 @@
 import { cors, requireAuth } from "./_lib/core.mjs";
 import {
   getJson,
+  hashGetMany,
   K,
   kvConfigured,
   PROFILE_TTL_SECONDS,
@@ -29,6 +30,7 @@ import { hasCookie, isParaformAuthError, sleep, trpcGet } from "./_lib/paraform.
 import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
 import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
 import { richBindingsForSnapshot, richProfileMatches } from "./_lib/rich-profile.mjs";
+import { richProfileForRules, richReceiptMatches } from "./_lib/rich-rule-facts.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -118,7 +120,7 @@ function mapEducation(row, ranks) {
 
 export function createProfileHandler({
   corsHandler = cors, authHandler = requireAuth, kvReady = kvConfigured,
-  readJson = getJson, now = Date.now,
+  readJson = getJson, readMany = hashGetMany, now = Date.now,
 } = {}) {
 return async function handler(req, res) {
   if (corsHandler(req, res)) return;
@@ -144,9 +146,15 @@ return async function handler(req, res) {
         const binding = artifacts ? richBindingsForSnapshot({ ...artifacts.snapshot, queue: artifacts.queue.rows }).get(cu) : null;
         if (binding && binding.sourceObservationId === sourceCached.sourceObservationId) {
           const rich = await readJson(K.richProfile(cu));
+          const receipt = (await readMany(K.richProfileReady, [cu]))?.[cu] ?? null;
           const current = await readActivePublication({ readJson });
           if (current?.generationId === publication.generationId && current?.digest === publication.digest
-            && richProfileMatches(binding, rich, { now: now() })) paraformProfile = rich;
+            && richProfileMatches(binding, rich, { now: now() })
+            && richReceiptMatches(binding, receipt, { now: now() })
+            && receipt.profileEnrichedAt === rich.profileEnrichedAt
+            && receipt.richProfileRetainedUntil === rich.richProfileRetainedUntil) {
+            paraformProfile = { ...richProfileForRules(rich), ruleFactsEligible: true };
+          }
         }
       } catch { /* Optional provider state cannot prevent opening the source profile. */ }
       return res.status(200).json({ ok: true, ...sourceProfile, ...(paraformProfile ? { paraformProfile } : {}) });

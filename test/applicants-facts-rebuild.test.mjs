@@ -172,7 +172,7 @@ test("apply writes only facts and reads back the complete allCompanies projectio
   assert.equal(report.readbackVerifiedCount, 1);
   assert.equal(report.sourceRaceCount, 0);
   const written = JSON.parse(store.facts.get(PROFILE_KEY));
-  assert.equal(written.jobs.length, 14);
+  assert.equal(written.jobs.length, 16);
   assert.equal(written.allCompanies.length, 16);
   assert.equal(written.sourceObservationId, OBSERVATION_ID);
   assert.equal(written.sourcePayloadDigest, store.receipt.payloadDigest);

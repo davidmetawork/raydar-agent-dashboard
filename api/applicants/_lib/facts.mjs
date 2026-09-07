@@ -41,12 +41,11 @@ export const FACTS_VERSION = 1;
 // so a rule asking for a US school simply does not match that person until
 // their next prewarm. Bump only for a change a stored rule could MISREAD.
 
-// Caps exist so one 23-role profile cannot bloat the hash the tick reads in
-// batches. Both sit comfortably above the observed p99 (jobs p90 = 9, max 23;
-// education p90 = 3, max 4), and the true totals ride alongside as counts so a
-// "more than N roles" condition stays exact even when the list is trimmed.
-export const MAX_JOBS = 14;
-export const MAX_SCHOOLS = 8;
+// Keep retained work and education history available to identity rules while
+// bounding each projection. True totals survive trimming; selectors mark any
+// incomplete history so a missing match is visible as a coverage gap.
+export const MAX_JOBS = 60;
+export const MAX_SCHOOLS = 30;
 const FIELD_MAX = 160;
 
 const str = (value) => {
@@ -129,10 +128,13 @@ export function factsFromProfile(profile, {
   now = Date.now(),
   sourceObservationId = null,
   sourcePayloadDigest = null,
+  maxJobs = MAX_JOBS,
+  maxSchools = MAX_SCHOOLS,
+  preserveUnknownCurrent = false,
 } = {}) {
   const source = profile && typeof profile === "object" && !Array.isArray(profile) ? profile : {};
 
-  const schools = list(source.education).slice(0, MAX_SCHOOLS).map((row) => ({
+  const schools = list(source.education).slice(0, maxSchools).map((row) => ({
     id: str(row?.schoolId),
     name: str(row?.school),
     // Classified once, here, rather than once per rule per tick.
@@ -155,13 +157,13 @@ export function factsFromProfile(profile, {
     top: topSchoolGroup(row?.school),
   }));
 
-  const jobs = list(source.experiences).slice(0, MAX_JOBS).map((row) => ({
+  const jobs = list(source.experiences).slice(0, maxJobs).map((row) => ({
     id: str(row?.companyId),
     name: str(row?.companyName),
     title: str(row?.roleTitle),
     startYear: yearOf(row?.start),
     endYear: yearOf(row?.end),
-    current: Boolean(row?.current),
+    current: preserveUnknownCurrent && typeof row?.current !== "boolean" ? null : Boolean(row?.current),
     industry: str(row?.industry),
     rank: str(row?.talentRank),
   }));
