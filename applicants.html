@@ -263,6 +263,7 @@
   .rule-use { appearance:none; border:1px solid var(--line); background:#fff; color:var(--ink-2); border-radius:999px;
     min-height:32px; padding:5px 10px; font:650 11px "Inter Variable"; cursor:pointer; white-space:nowrap; }
   .rule-use:hover, .rule-use:focus-visible { color:var(--orange); border-color:var(--orange); outline:none; }
+  .p-id .rule-use { margin-left:8px; vertical-align:middle; }
   .p-applied .rule-use { margin-left:auto; }
   .p-degraded { display:flex; gap:10px; background:var(--warn-bg); color:var(--warn); border-radius:11px; padding:10px 12px; margin-top:14px; font-size:12px; line-height:1.45; }
   .p-section { margin-top:22px; }
@@ -2151,23 +2152,26 @@ function chipRowHtml(item, isParaformProfile = false) {
   return chips.length ? '<div class="xp-chips">' + chips.join("") + "</div>" : "";
 }
 function experienceHtml(xp, index, allowRuleFacts, isParaformProfile = false) {
+  const factSource = isParaformProfile ? "paraform" : "source";
+  const descriptionId = "xpDesc-" + factSource + "-" + index;
   const dates = (xp.start ? monthYear(xp.start) : "") + " – " + (xp.current ? "Present" : xp.end ? monthYear(xp.end) : "") ;
   const span = duration(xp.start, xp.end, xp.current);
   const desc = String(xp.description || "").trim();
   const long = desc.length > 180 || desc.split("\n").length > 3;
   return '<div class="xp">' + entityLogoHtml(xp, "company", "xp-logo") +
     '<div class="xp-top"><span class="xp-role">' + esc(xp.roleTitle || "Role") + '</span><span class="xp-co">' + esc(xp.companyName || "") + "</span>" +
-    (allowRuleFacts && (xp.companyId || xp.roleTitle) ? '<button type="button" class="rule-use" data-rule-fact-kind="experience" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
+    (allowRuleFacts && (xp.companyId || xp.companyName || xp.roleTitle) ? '<button type="button" class="rule-use" data-rule-fact-kind="experience" data-rule-fact-source="' + factSource + '" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
     '<div class="xp-dates">' + esc(dates) + (span ? " · " + esc(span) : "") + (xp.location ? " · " + esc(xp.location) : "") + "</div>" +
-    (desc ? '<div class="xp-desc" id="xpDesc' + index + '">' + esc(desc) + "</div>" +
-      (long ? '<button class="xp-more" data-expand="xpDesc' + index + '">Show more</button>' : "") : "") +
+    (desc ? '<div class="xp-desc" id="' + descriptionId + '">' + esc(desc) + "</div>" +
+      (long ? '<button class="xp-more" data-expand="' + descriptionId + '">Show more</button>' : "") : "") +
     chipRowHtml(xp, isParaformProfile) + "</div>";
 }
 function educationHtml(ed, index, allowRuleFacts, isParaformProfile = false) {
+  const factSource = isParaformProfile ? "paraform" : "source";
   const dates = [ed.start ? monthYear(ed.start) : "", ed.end ? monthYear(ed.end) : ""].filter(Boolean).join(" – ");
   return '<div class="xp">' + entityLogoHtml(ed, "school", "xp-logo") +
     '<div class="xp-top"><span class="xp-role">' + esc(ed.school || "School") + '</span><span class="xp-co">' + esc(ed.degree || "") + "</span>" +
-    (allowRuleFacts && (ed.schoolId || ed.degree) ? '<button type="button" class="rule-use" data-rule-fact-kind="education" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
+    (allowRuleFacts && (ed.schoolId || ed.school || ed.degree) ? '<button type="button" class="rule-use" data-rule-fact-kind="education" data-rule-fact-source="' + factSource + '" data-rule-fact-index="' + index + '">Use in rule</button>' : "") + "</div>" +
     (dates ? '<div class="xp-dates">' + esc(dates) + "</div>" : "") + chipRowHtml(ed, isParaformProfile) + "</div>";
 }
 function profileFactHtml(label, value) {
@@ -2201,19 +2205,24 @@ function renderModal() {
   const loading = !(modal.cu in STATE.profiles);
   const p = profile || {};
   const provider = richProfile(p.paraformProfile);
-  const providerProfile = hasProviderProfile(provider);
   const providerHistory = hasProviderHistory(provider);
   const providerContent = hasProviderContent(provider);
-  const displayProfile = providerProfile ? provider : p;
+  const locationSource = presentText(provider?.location) ? "paraform" : "source";
+  const headlineSource = presentText(provider?.title) ? "paraform" : "source";
+  const displayedLocation = locationSource === "paraform" ? provider.location : p.location;
+  const displayedHeadline = headlineSource === "paraform" ? provider.title : p.title;
+  const canUseFact = (source) => modal.source === "queue" && (source === "source" || provider?.ruleFactsEligible === true);
   const linkedin = preferredLinkedinProfileUrl(p.linkedin, row.linkedin);
   const decision = modal.source === "queue" ? effectiveDecision(modal.key) : null;
   const busy = STATE.busy.has(modal.key);
   const parts = [];
   parts.push('<div class="p-head">' + avatarHtml(row) +
     '<div class="p-id"><h2 id="profileName">' + esc(p.name || row.name || "Unknown") + "</h2>" +
-    (displayProfile.title || p.title ? '<div class="headline">' + esc(displayProfile.title || p.title) + "</div>" : "") +
+    (displayedHeadline ? '<div class="headline">' + esc(displayedHeadline) +
+      (canUseFact(headlineSource) ? '<button type="button" class="rule-use" data-rule-fact-kind="headline" data-rule-fact-source="' + headlineSource + '">Use in rule</button>' : '') + "</div>" : "") +
     '<div class="meta">' +
-    (displayProfile.location || p.location ? "<span>" + esc(displayProfile.location || p.location) + "</span>" : "") +
+    (displayedLocation ? "<span>" + esc(displayedLocation) +
+      (canUseFact(locationSource) ? '<button type="button" class="rule-use" data-rule-fact-kind="location" data-rule-fact-source="' + locationSource + '">Use in rule</button>' : '') + "</span>" : "") +
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
@@ -2234,7 +2243,7 @@ function renderModal() {
   } else {
     parts.push(profileFactsHtml(provider));
     const primaryProfile = providerHistory ? provider : p;
-    const primaryHistory = historySectionsHtml(primaryProfile, { allowRuleFacts: !providerHistory && modal.source === "queue", isParaformProfile: providerHistory });
+    const primaryHistory = historySectionsHtml(primaryProfile, { allowRuleFacts: canUseFact(providerHistory ? "paraform" : "source"), isParaformProfile: providerHistory });
     if (primaryHistory) {
       parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">Application profile <span>source record</span></div>' + primaryHistory + "</div></div>");
     }

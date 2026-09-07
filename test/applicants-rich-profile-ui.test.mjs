@@ -179,15 +179,30 @@ test("headline-only overlays keep source history primary and real provider histo
   assert.doesNotMatch(full.modal.slice(0, full.modal.indexOf('<details class="p-source">')), /data-rule-fact-kind="experience"/);
 });
 
-test("the page preserves provenance and keeps rules on application history only", () => {
+test("the page offers verified rich facts and source facts with separate provenance", () => {
   assert.match(applicants, /const provider = richProfile\(p\.paraformProfile\);/);
-  assert.match(applicants, /const providerProfile = hasProviderProfile\(provider\);/);
   assert.match(applicants, /const providerHistory = hasProviderHistory\(provider\);/);
   assert.match(applicants, /const primaryProfile = providerHistory \? provider : p;/);
-  assert.match(applicants, /historySectionsHtml\(primaryProfile, \{ allowRuleFacts: !providerHistory && modal\.source === "queue", isParaformProfile: providerHistory \}\)/);
+  assert.match(applicants, /historySectionsHtml\(primaryProfile, \{ allowRuleFacts: canUseFact\(providerHistory \? "paraform" : "source"\), isParaformProfile: providerHistory \}\)/);
   assert.match(applicants, /historySectionsHtml\(p, \{ allowRuleFacts: modal\.source === "queue" \}\)/);
-  assert.match(applicants, /displayProfile\.title \|\| p\.title/);
+  assert.match(applicants, /provider\?\.ruleFactsEligible === true/);
   assert.doesNotMatch(applicants.slice(start, end), /paraformProfile\?\./);
+});
+
+test("verified rich profile controls point to rich rows while source controls remain separate", () => {
+  const profile = { title: "Source headline", location: "Source City", experiences: [{ companyId: "source-co", companyName: "Source Co", roleTitle: "Source role" }], education: [] };
+  const provider = { ruleFactsEligible: true, location: "Rich City", title: "Rich headline", experiences: [{ companyId: "rich-co", companyName: "Rich Co", roleTitle: "Rich role" }], education: [{ schoolId: "rich-school", school: "Rich University" }] };
+  const { modal } = renderHarness({ card: {}, profile, provider });
+  const split = modal.indexOf('<details class="p-source">');
+  assert.ok(split > 0);
+  assert.match(modal.slice(0, split), /data-rule-fact-kind="experience" data-rule-fact-source="paraform" data-rule-fact-index="0"/);
+  assert.match(modal.slice(0, split), /data-rule-fact-kind="education" data-rule-fact-source="paraform"/);
+  assert.match(modal.slice(split), /data-rule-fact-kind="experience" data-rule-fact-source="source" data-rule-fact-index="0"/);
+  assert.match(modal, /Rich City<button[^>]+data-rule-fact-kind="location" data-rule-fact-source="paraform"/);
+  const stream = renderHarness({ card: {}, profile, provider, source: "stream" }).modal;
+  assert.doesNotMatch(stream, /data-rule-fact-kind/);
+  const fallback = renderHarness({ card: {}, profile, provider: { ...provider, location: null } }).modal;
+  assert.match(fallback, /Source City<button[^>]+data-rule-fact-kind="location" data-rule-fact-source="source"/);
 });
 
 const richStart = applicants.indexOf("const RICH_CARDS");

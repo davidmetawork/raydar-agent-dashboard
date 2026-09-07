@@ -71,6 +71,24 @@ export async function factsFor(cuIds, { readMany = hashGetMany, batch = 200 } = 
   return out;
 }
 
+export async function richRuleFactsFor(cuIds, { readMany = hashGetMany, batch = 200 } = {}) {
+  const unique = [...new Set((Array.isArray(cuIds) ? cuIds : []).filter(Boolean))];
+  const out = {};
+  for (let i = 0; i < unique.length; i += batch) {
+    Object.assign(out, await readMany(K.richRuleFacts, unique.slice(i, i + batch)));
+  }
+  return out;
+}
+
+export async function richProfileReceiptsFor(cuIds, { readMany = hashGetMany, batch = 200 } = {}) {
+  const unique = [...new Set((Array.isArray(cuIds) ? cuIds : []).filter(Boolean))];
+  const out = {};
+  for (let i = 0; i < unique.length; i += batch) {
+    Object.assign(out, await readMany(K.richProfileReady, unique.slice(i, i + batch)));
+  }
+  return out;
+}
+
 /** Compact-cache readiness for a set of applicants, with the same bounded
  * HMGET batches as rule facts so a large backfill cannot create one giant
  * Upstash command when the button is pressed. */

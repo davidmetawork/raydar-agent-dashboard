@@ -1,8 +1,8 @@
 /* Profile-side entry into Applicant Rules.
  *
- * This chooser deliberately knows only four facts that are already visible on
- * one profile row: stable school/company/role ids, plus the literal job-title
- * or degree text. It never classifies a degree, saves a rule, changes a rule's
+ * This chooser uses facts already visible on one verified profile row: stable
+ * school/company/role ids, current-role status, and literal profile text.
+ * It never classifies a degree, saves a rule, changes a rule's
  * state, or runs rules. Its only output is an unsaved structured seed handed to
  * applicants-rules.js, whose server catalog, preview and validation remain the
  * authority.
@@ -32,45 +32,73 @@
   }[character]));
   const pageState = () => (typeof STATE === "undefined" ? null : STATE);
 
-  function profileSources(cuId, row) {
-    const profile = pageState()?.profiles?.[cuId] || {};
+  function profileSources(cuId, row, profile = pageState()?.profiles?.[cuId] || {}) {
     const sources = [];
+    // This flag is added only by the authenticated profile endpoint after its
+    // identity and retention checks. Array positions are scoped to this source.
+    const provider = profile.paraformProfile;
+    const verifiedProvider = provider?.ruleFactsEligible === true;
+    for (const field of ["location", "title"]) {
+      const fromProvider = Boolean(text(provider?.[field]));
+      if (fromProvider && !verifiedProvider) continue;
+      const value = text((fromProvider ? provider : profile)?.[field], 120);
+      if (!value) continue;
+      sources.push({
+        kind: field === "title" ? "headline" : "location", source: fromProvider ? "paraform" : "source",
+        index: 0, record: { value }, title: value,
+        subtitle: field === "title" ? "Profile headline" : "Applicant location",
+      });
+    }
     const roleId = validId(row?.roleId);
     if (roleId) {
       sources.push({
         kind: "application",
+        source: "source",
         index: 0,
         record: row,
         title: text(row?.roleTitle) || "This role",
         subtitle: text(row?.company) || "Applied role",
       });
     }
-    (Array.isArray(profile.experiences) ? profile.experiences : []).forEach((record, index) => {
-      if (!validId(record?.companyId) && !text(record?.roleTitle, 120)) return;
-      sources.push({
-        kind: "experience",
-        index,
-        record,
-        title: text(record?.roleTitle) || "Role",
-        subtitle: text(record?.companyName) || "Experience",
+    for (const [origin, details] of [...(verifiedProvider ? [["paraform", provider]] : []), ["source", profile]]) {
+      (Array.isArray(details.experiences) ? details.experiences : []).forEach((record, index) => {
+        if (!validId(record?.companyId) && !text(record?.companyName) && !text(record?.roleTitle, 120)) return;
+        sources.push({
+          kind: "experience",
+          source: origin,
+          index,
+          record,
+          title: text(record?.roleTitle) || "Role",
+          subtitle: text(record?.companyName) || "Experience",
+        });
       });
-    });
-    (Array.isArray(profile.education) ? profile.education : []).forEach((record, index) => {
-      if (!validId(record?.schoolId) && !text(record?.degree, 120)) return;
-      sources.push({
-        kind: "education",
-        index,
-        record,
-        title: text(record?.school) || "School",
-        subtitle: text(record?.degree) || "Education",
+      (Array.isArray(details.education) ? details.education : []).forEach((record, index) => {
+        if (!validId(record?.schoolId) && !text(record?.school) && !text(record?.degree, 120)) return;
+        sources.push({
+          kind: "education",
+          source: origin,
+          index,
+          record,
+          title: text(record?.school) || "School",
+          subtitle: text(record?.degree) || "Education",
+        });
       });
-    });
+    }
     return sources;
   }
 
   function factsFor(source) {
     if (!source) return [];
     const record = source.record || {};
+    if (source.kind === "location" || source.kind === "headline") {
+      const value = text(record.value, 120);
+      if (!value) return [];
+      return [{
+        id: `applicant-${source.kind}`, title: `${source.kind === "location" ? "Location" : "Headline"} contains “${value}”`,
+        detail: "Text match · approximate", approximate: true, checked: true,
+        condition: { field: source.kind === "location" ? "applicant.location" : "applicant.headline", op: "contains", value }, labels: {},
+      }];
+    }
     if (source.kind === "application") {
       const id = validId(record.roleId);
       if (!id) return [];
@@ -102,9 +130,15 @@
         title: `Job title contains “${title}”`,
         detail: "Text match · approximate",
         approximate: true,
-        checked: !id,
+        checked: false,
         condition: { field: "job.title", op: "contains", value: title },
         labels: {},
+      });
+      if (typeof record.current === "boolean") facts.push({
+        id: "experience-current",
+        title: record.current ? "Only current roles" : "Only past roles",
+        detail: "Applies to this same job", checked: false,
+        condition: { field: "job.current", op: "is", value: record.current }, labels: {},
       });
       return facts;
     }
@@ -126,7 +160,7 @@
         title: `Degree text contains “${degree}”`,
         detail: "Text match · approximate",
         approximate: true,
-        checked: !id,
+        checked: false,
         condition: { field: "school.degreeText", op: "contains", value: degree },
         labels: {},
       });
@@ -138,9 +172,14 @@
   function suggestedName(source, selectedFacts) {
     if (!source) return "New rule";
     const record = source.record || {};
+    if (source.kind === "location") return `${text(record.value) || "Selected location"} applicants`.slice(0, 80);
+    if (source.kind === "headline") return `${text(record.value) || "Selected"} headlines`.slice(0, 80);
     if (source.kind === "application") return `${text(record.roleTitle) || "Role"} applicants`.slice(0, 80);
     if (source.kind === "experience") {
       const usesCompany = selectedFacts.some((fact) => fact.id === "experience-company");
+      if (selectedFacts.length === 1 && selectedFacts[0].id === "experience-current") {
+        return record.current ? "Current job history" : "Past job history";
+      }
       return (usesCompany
         ? `${text(record.companyName) || "Selected company"} experience`
         : `${text(record.roleTitle) || "Selected"} job titles`).slice(0, 80);
@@ -169,7 +208,8 @@
   }
 
   function kindLabel(source) {
-    return source.kind === "application" ? "Applied role" : source.kind === "experience" ? "Experience" : "Education";
+    const kind = { application: "Applied role", experience: "Experience", education: "Education", location: "Location", headline: "Headline" }[source.kind];
+    return kind + (source.kind === "application" ? "" : source.source === "paraform" ? " · Cached LinkedIn" : " · Application profile");
   }
 
   function mount() {
@@ -212,7 +252,7 @@
 
   function listHtml() {
     if (!chooser.sources.length) {
-      return '<div class="rf-empty">This profile has no school, company, job title, degree text, or applied role that can become an exact rule condition.</div>';
+      return '<div class="rf-empty">This profile has no verified location, company, university, job title, degree text, or applied role available for a rule.</div>';
     }
     return '<div class="rf-list">' + chooser.sources.map((source, index) =>
       '<button type="button" class="rf-source" data-rf-source="' + index + '">' +
@@ -224,8 +264,10 @@
 
   function detailHtml(source) {
     const facts = factsFor(source);
+    const missingIdentity = source.kind === "experience" && !validId(source.record?.companyId) ? "company" : source.kind === "education" && !validId(source.record?.schoolId) ? "university" : null;
     return '<button type="button" class="rf-back" id="rfBack">‹ Choose a different detail</button>' +
-      '<div class="rf-chosen"><b>' + enc(source.title) + '</b><span>' + enc(source.subtitle) + '</span></div>' +
+      '<div class="rf-chosen"><span>' + enc(kindLabel(source)) + '</span><b>' + enc(source.title) + '</b><span>' + enc(source.subtitle) + '</span></div>' +
+      (missingIdentity ? '<p class="rf-empty">An exact ' + missingIdentity + ' rule is unavailable because this record has no verified ' + missingIdentity + ' ID. Any text option below matches only that text.</p>' : '') +
       '<div class="rf-facts">' + facts.map((fact) =>
         '<label class="rf-fact"><input type="checkbox" data-rf-fact="' + enc(fact.id) + '"' +
           (chooser.selected.has(fact.id) ? " checked" : "") + '><span class="rf-fact-copy"><b>' + enc(fact.title) +
@@ -243,7 +285,7 @@
         '<h2 id="rfTitle">' + (detail ? "What should match?" : `Choose a fact from ${enc(person)}`) + '</h2>' +
         '<p>' + (detail
           ? "Choose which details should match; you can refine the rule next."
-          : "Choose a school, a past role, or the role they applied for.") + '</p></div>' +
+          : "Choose a location, company, university, or another profile detail.") + '</p></div>' +
         '<button type="button" class="rf-close" id="rfClose" aria-label="Close fact chooser">✕</button></div>' +
       '<div class="rf-body">' + (detail ? detailHtml(chooser.source) : listHtml()) + '</div>' +
       '<div class="rf-foot"><span class="rf-foot-note">Nothing is saved or run here.</span><span class="rf-foot-actions">' +
@@ -303,7 +345,7 @@
     }
     if (target?.kind) {
       const index = Number(target.index || 0);
-      const found = chooser.sources.find((source) => source.kind === target.kind && source.index === index);
+      const found = chooser.sources.find((source) => source.kind === target.kind && source.index === index && source.source === (target.source || "source"));
       if (found) selectSource(found);
     }
     if (!chooser.source) render();
@@ -351,6 +393,7 @@
     event.stopPropagation();
     start(modal.cu, modal.row, {
       kind: button.dataset.ruleFactKind,
+      source: button.dataset.ruleFactSource || "source",
       index: Number(button.dataset.ruleFactIndex || 0),
     });
   });
@@ -377,5 +420,5 @@
     }
   }, true);
 
-  window.RaydarRuleFacts = Object.freeze({ start, close, createSeed, factsFor });
+  window.RaydarRuleFacts = Object.freeze({ start, close, createSeed, factsFor, profileSources });
 })();

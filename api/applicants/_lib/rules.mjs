@@ -28,6 +28,7 @@ import { DEGREE_LEVELS, levelMatches } from "./degree.mjs";
 import { FACTS_VERSION } from "./facts.mjs";
 import { matchFundedEmployer, SNAPSHOT_ID_RE } from "./funded-employers.mjs";
 import { profileReceiptReady, sourceObservationIdFor } from "./profile-readiness.mjs";
+import { ruleNeedsProfileFacts } from "./rich-rule-facts.mjs";
 
 export const RULE_ACTIONS = ["interview", "pass"];
 export const RULE_STATES = ["off", "watching", "live"];
@@ -362,6 +363,12 @@ function groupMatches(conditions, subject, row, now) {
     evidence.push({
       field: condition.field,
       op: condition.op,
+      source: row?.source
+        ?? (condition.field === "employment.fundedEmployerSnapshot" ? "source" : subject.facts?.provenance?.[
+          ({ "applicant.headline": "title", "applicant.years": "months" })[condition.field]
+            ?? condition.field.replace(/^applicant\./, "")
+        ])
+        ?? "source",
       // The literal value the decision rested on, in human terms — this is
       // what "why did this fire" renders from.
       matched: String(custom?.matched ?? (field.display ? (field.display(subject, row) ?? actual) : actual)).slice(0, 160),
@@ -403,6 +410,9 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
   // Any condition that reads the profile needs facts of a shape we understand.
   const needsFacts = [...byGroup.keys()].some((group) => group !== "application");
   if (needsFacts) {
+    if (subject.profileFactsPending && ruleNeedsProfileFacts(rule)) {
+      return { matched: false, skipped: true, reason: "rich_profile_facts_pending", evidence: [] };
+    }
     const facts = subject.facts;
     if (!facts) return { matched: false, skipped: true, reason: "no_facts_yet", evidence: [] };
     if (facts.v !== FACTS_VERSION) {
@@ -451,6 +461,9 @@ export function evaluateRule(rule, subject, { now = Date.now() } = {}) {
       if (found) break;
     }
     if (!found) {
+      if (subject.facts?.historyIncomplete?.[rowsKey]) {
+        return { matched: false, skipped: true, reason: "profile_history_incomplete", evidence: [] };
+      }
       // A relevant degree with unverified school geography is missing evidence,
       // not evidence of a foreign school. Keep the decision fail-closed while
       // making that gap visible in the same preview/manual-run counters.

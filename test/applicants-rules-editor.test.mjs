@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-import { MAX_JOBS, factsFromProfile } from "../api/applicants/_lib/facts.mjs";
+import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { K } from "../api/applicants/_lib/kv.mjs";
 import {
   createFixtureServer,
@@ -31,7 +31,7 @@ function element(id = "") {
 
 async function loadRulesUi(fetchImpl) {
   let source = await readFile(sourcePath, "utf8");
-  const hook = "globalThis.__rulesTest = { state, valueControl, runPreview, schedulePreview, runRules, openEditor, preparedDraft };";
+  const hook = "globalThis.__rulesTest = { state, valueControl, previewHtml, runPreview, schedulePreview, runRules, openEditor, preparedDraft };";
   const close = source.lastIndexOf("})();");
   assert.ok(close > 0, "rules source remains a classic-script closure");
   source = `${source.slice(0, close)}\n${hook}\n${source.slice(close)}`;
@@ -98,6 +98,17 @@ test("a selected id missing from the current directory remains visible and check
   const html = testApi.valueControl(testApi.state.draft.conditions[0], 0);
   assert.match(html, /value="school-not-in-directory" checked/);
   assert.match(html, />Saved School Name</);
+});
+
+test("a preview waiting for verified rich facts labels its match count incomplete", async () => {
+  const { testApi } = await loadRulesUi(async () => response({ ok: true }));
+  testApi.state.draft = { state: "live", action: "pass" };
+  testApi.state.preview = { matched: 0, considered: 5, profileFactsCoverage: { required: 5, ready: 2, pending: 3 }, skipped: { rich_profile_facts_pending: 3 } };
+  const pending = testApi.previewHtml();
+  assert.match(pending, /3 applicants are waiting for verified profile facts; this match count is incomplete/);
+  assert.doesNotMatch(pending, /rich_profile_facts_pending/);
+  testApi.state.preview = { matched: 0, considered: 5, profileFactsCoverage: { required: 5, ready: 5, pending: 0 }, skipped: {} };
+  assert.doesNotMatch(testApi.previewHtml(), /count is incomplete/);
 });
 
 test("funded list copy distinguishes verified ids from reviewed exact-name bridges", async () => {
@@ -282,11 +293,11 @@ test("funded fixture preview and manual run share reviewed name membership beyon
   const candidate = feed.snapshot.queue.find((row) => row.name === "Noor Haddad");
   const profile = await fetch(`${base}/api/applicants/profile?cu=${encodeURIComponent(candidate.profileKey)}`)
     .then((response) => response.json());
-  const candidateFacts = factsFromProfile(profile, { now: Date.parse("2026-09-05T16:00:00.000Z") });
-  assert.equal(candidateFacts.jobs.length, MAX_JOBS);
+  const candidateFacts = factsFromProfile(profile, { now: Date.parse("2026-09-05T16:00:00.000Z"), maxJobs: 14 });
+  assert.equal(candidateFacts.jobs.length, 14);
   assert.equal(candidateFacts.jobs.some((job) => job.id === "company-orbit-birch"), false);
-  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].id, null);
-  assert.equal(candidateFacts.allCompanies[MAX_JOBS + 1].name, "Orbit Birch");
+  assert.equal(candidateFacts.allCompanies[15].id, null);
+  assert.equal(candidateFacts.allCompanies[15].name, "Orbit Birch");
 
   const rules = await fetch(`${base}/api/applicants/rules`).then((response) => response.json());
   assert.equal(rules.fundedEmployers.snapshots.length, 1);
@@ -301,4 +312,52 @@ test("funded fixture preview and manual run share reviewed name membership beyon
   assert.equal(state.decisions[candidate.key].actorId, fundedRule.id);
   assert.ok(membershipReads.includes(K.fundedEmployerCatalog));
   assert.ok(membershipReads.includes(K.fundedEmployerSnapshot(fundedRule.conditions[0].value)));
+});
+
+test("profile chooser seeds reach the shared evaluator with the exact rich or source row and preserve preview/manual parity", async (t) => {
+  const state = createFixtureState();
+  const server = createFixtureServer({ state });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) => fetch(`${base}${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((response) => response.json());
+  const fence = { generationId: "local-rules-design-fixture-v1", generationDigest: "local-fixture-no-production-data" };
+  const feed = await fetch(`${base}/api/applicants/feed`).then((response) => response.json());
+  const candidate = feed.snapshot.queue.find((row) => row.name === "Maya Chen");
+  const profile = await fetch(`${base}/api/applicants/profile?cu=${encodeURIComponent(candidate.profileKey)}`).then((response) => response.json());
+  assert.equal(profile.paraformProfile.ruleFactsEligible, true);
+  const chooserContext = { document: { addEventListener() {} } };
+  chooserContext.window = chooserContext;
+  vm.runInNewContext(await readFile(new URL("../applicants-rule-facts.js", import.meta.url), "utf8"), chooserContext);
+  const chooser = chooserContext.RaydarRuleFacts;
+  const sources = chooser.profileSources(candidate.profileKey, candidate, profile);
+  let finalRule;
+  for (const [kind, origin, selectedId, expectedCount] of [
+    ["location", "paraform", "applicant-location", 2],
+    ["experience", "source", "experience-company", 1],
+    ["experience", "paraform", "experience-company", 1],
+    ["education", "source", "education-school", 1],
+    ["education", "paraform", "education-school", 1],
+  ]) {
+    const detail = sources.find((item) => item.kind === kind && item.source === origin);
+    assert.ok(detail);
+    const rule = { ...chooser.createSeed(detail, [selectedId]), id: "fixture-profile-rule", action: "pass", state: "live", scope: { roleIds: [] } };
+    const preview = await post("/api/applicants/rules", { op: "preview", rule, ...fence });
+    assert.equal(preview.matched, expectedCount, `${kind} ${origin}`);
+    assert.equal(preview.samples[0].name, "Maya Chen");
+    assert.equal(preview.samples[0].evidence[0].source, origin);
+    assert.equal(preview.profileFactsCoverage.pending, 0);
+    if (kind === "education" && origin === "paraform") finalRule = rule;
+  }
+  const unrelatedDegree = await post("/api/applicants/rules", { op: "preview", ...fence,
+    rule: { ...finalRule, conditions: [...finalRule.conditions, { field: "school.degreeText", op: "contains", value: "B.S." }] } });
+  assert.equal(unrelatedDegree.matched, 0, "source Berkeley degree cannot be joined to rich Harvard identity");
+  assert.deepEqual(state.decisions, {}, "all previews leave decisions untouched");
+  state.rules = [finalRule];
+  const run = await post("/api/applicants/rules-tick", fence);
+  assert.equal(run.decided, 1);
+  assert.deepEqual(Object.keys(state.decisions), [candidate.key]);
+  assert.equal(state.hits[finalRule.id][0].evidence[0].source, "paraform");
 });

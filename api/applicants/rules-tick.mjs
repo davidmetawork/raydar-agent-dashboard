@@ -57,7 +57,9 @@ import {
 import { evaluateRule, inScope } from "./_lib/rules.mjs";
 import { loadFundedEmployerSnapshots } from "./_lib/funded-employers.mjs";
 import { profileReceiptReady, sourceObservationIdFor } from "./_lib/profile-readiness.mjs";
-import { armedRules, cardsFor, factsFor, pendingRows, profileReceiptsFor, readRules, watchingRules } from "./_lib/rule-store.mjs";
+import { armedRules, cardsFor, factsFor, pendingRows, profileReceiptsFor, richRuleFactsFor, richProfileReceiptsFor, readRules, watchingRules } from "./_lib/rule-store.mjs";
+import { richBindingsForSnapshot } from "./_lib/rich-profile.mjs";
+import { richRuleFactsMatch, ruleNeedsProfileFacts, selectRuleFacts } from "./_lib/rich-rule-facts.mjs";
 import {randomUUID} from 'node:crypto';
 import {
   APPLICANT_REQUEST_ALREADY_EMAILED,
@@ -252,8 +254,17 @@ export function createTickHandler({
         });
       }
 
-      const facts = await factsFor(rows.map((row) => row.profileKey || row.cuId), { readMany });
+      const profileKeys = rows.map((row) => row.profileKey || row.cuId);
+      const needsRich = [...live, ...watching].some(ruleNeedsProfileFacts);
+      const bindings = richBindingsForSnapshot({ ...artifacts.snapshot, queue: artifacts.queue.rows });
+      const [facts, richFacts, richReceipts] = await Promise.all([
+        factsFor(profileKeys, { readMany }),
+        needsRich ? richRuleFactsFor(profileKeys, { readMany }) : {},
+        needsRich ? richProfileReceiptsFor(profileKeys, { readMany }) : {},
+      ]);
       const stamp = now();
+      const selections = new Map();
+      const profileFactsCoverage = { required: 0, ready: 0, pending: 0 };
 
       const newDecisions = {};
       const audit = {};
@@ -264,9 +275,18 @@ export function createTickHandler({
 
       for (const row of rows) {
         considered += 1;
+        const key = row.profileKey || row.cuId;
+        const selected = selectRuleFacts({ row, sourceFacts: facts[key], richFacts: richFacts[key],
+          richReceipt: richReceipts[key], bindings, now: stamp });
+        selections.set(key, selected);
+        if (selected.richEligible && [...live, ...watching].some((rule) => inScope(rule, row) && ruleNeedsProfileFacts(rule))) {
+          profileFactsCoverage.required += 1;
+          profileFactsCoverage[selected.projectionPending ? "pending" : "ready"] += 1;
+        }
         const subject = {
           row,
-          facts: facts[row.profileKey || row.cuId] ?? null,
+          facts: selected.facts,
+          profileFactsPending: selected.projectionPending,
           profileReceipt: receipts[row.profileKey || row.cuId] ?? null,
           fundedEmployerSnapshots,
         };
@@ -427,7 +447,21 @@ export function createTickHandler({
             manifest,
           });
         }
-        const saved=await Promise.all(requests.slice(offset,offset+25).map(async([key,record])=>[
+        const batch = requests.slice(offset, offset + 25);
+        const needsRichRecheck = (record) => live.some((rule) => rule.id === record.actorId && ruleNeedsProfileFacts(rule));
+        const richKeys = [...new Set(batch.filter(([, record]) => needsRichRecheck(record)).map(([key]) => rowsByKey.get(key)?.profileKey || rowsByKey.get(key)?.cuId)
+          .filter((key) => selections.get(key)?.richEligible))];
+        const freshRichReceipts = await richProfileReceiptsFor(richKeys, { readMany });
+        for (const [key, record] of batch) {
+          const profileKey = rowsByKey.get(key)?.profileKey || rowsByKey.get(key)?.cuId;
+          if (needsRichRecheck(record) && selections.get(profileKey)?.richEligible && !richRuleFactsMatch({
+            binding: bindings.get(profileKey), facts: richFacts[profileKey], receipt: freshRichReceipts[profileKey], now: now(),
+          })) {
+            dropCandidate(key);
+            skipped.rich_profile_facts_changed = (skipped.rich_profile_facts_changed || 0) + 1;
+          }
+        }
+        const saved=await Promise.all(batch.filter(([key]) => newDecisions[key]).map(async([key,record])=>[
           key,
           await saveRequest(key,record,{rejectSentAck:record.action==="interview"}),
         ]));
@@ -486,6 +520,8 @@ export function createTickHandler({
         fired,
         wouldFire,
         skipped,
+        profileFactsCoverage,
+        projectionPending: profileFactsCoverage.pending,
         profileCacheWithheld: 0,
         ...(auditWritten ? {} : { auditWriteFailed: true }),
       });

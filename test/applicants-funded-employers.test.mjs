@@ -216,6 +216,7 @@ test("an explicit CRM-wide reviewed source-name bridge resolves only a missing c
     field: "employment.fundedEmployerSnapshot",
     op: "member_of",
     matched: "ACME",
+    source: "source",
     organizationId: "org_acme",
     paraformCompanyId: "pf_acme",
     identityBasis: "reviewed_source_name_bridge",

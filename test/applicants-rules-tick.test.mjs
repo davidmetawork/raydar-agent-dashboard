@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 
 import { createTickHandler, decideRow } from "../api/applicants/rules-tick.mjs";
 import { createRulesHandler } from "../api/applicants/rules.mjs";
+import { normalizeRichProfile } from "../api/applicants/_lib/rich-profile.mjs";
+import { richRuleFactsFromProfile } from "../api/applicants/_lib/rich-rule-facts.mjs";
+import { K } from "../api/applicants/_lib/kv.mjs";
 import { factsFromProfile } from "../api/applicants/_lib/facts.mjs";
 import { isRuleActor, ruleIdFromActor } from "../api/applicants/_lib/decision-record.mjs";
 import {
@@ -15,6 +18,107 @@ import {
   saveApplicantRequest,
 } from "../api/applicants/_lib/request-safety.mjs";
 import { generationFence, publishInto } from "./helpers/applicant-generation.mjs";
+
+function richStore({ prepared = true, receiptVersion = 1 } = {}) {
+  const binding = { sourceObservationId: "obs-cu1", candidateUserId: "candidate-1", connectionReceiptId: "rich-receipt-1" };
+  const s = store({ rules: [HARVARD_RULE], queue: [row("cu1", { richProfileBinding: binding })],
+    facts: { cu1: factsFromProfile(profile({ school: "different-school" }), { now: NOW }) } });
+  const rich = normalizeRichProfile({ ...binding, profileEnrichedAt: new Date(NOW).toISOString(),
+    location: "Seattle", ...profile() }, { cachedAt: new Date(NOW).toISOString() });
+  s.state[K.richProfile("cu1")] = rich;
+  s.state[K.richProfileReady] = { cu1: { ...binding, source: "paraform", v: receiptVersion,
+    profileEnrichedAt: rich.profileEnrichedAt, richProfileRetainedUntil: rich.richProfileRetainedUntil } };
+  s.state[K.richRuleFacts] = prepared ? { cu1: richRuleFactsFromProfile(rich, { now: NOW, receiptVersion }) } : {};
+  return s;
+}
+
+async function richPreview(s) {
+  const res = response();
+  await createRulesHandler(rulesDeps(s))({ method: "POST", body: { ...s.fence, op: "preview", rule: HARVARD_RULE } }, res);
+  return res;
+}
+
+test("verified rich university preview and manual run agree without preview writes", async () => {
+  const s = richStore();
+  const preview = await richPreview(s);
+  assert.equal(preview.statusCode, 200); assert.equal(preview.body.matched, 1);
+  assert.equal(preview.body.samples[0].evidence[0].source, "paraform");
+  assert.deepEqual(preview.body.profileFactsCoverage, { required: 1, ready: 1, pending: 0 });
+  assert.equal(s.writes.length, 0);
+  const tick = response(); await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.statusCode, 200); assert.equal(tick.body.decided, 1);
+  assert.deepEqual(tick.body.profileFactsCoverage, preview.body.profileFactsCoverage);
+});
+
+test("missing rich projection is visible in both preview and manual run", async () => {
+  const s = richStore({ prepared: false });
+  const preview = await richPreview(s);
+  assert.equal(preview.body.matched, 0); assert.equal(preview.body.projectionPending, 1);
+  assert.equal(preview.body.skipped.rich_profile_facts_pending, 1);
+  const tick = response(); await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.body.decided, 0); assert.equal(tick.body.skipped.rich_profile_facts_pending, 1);
+  assert.deepEqual(s.state[K.decisions], {});
+});
+
+test("manual run rejects a rich receipt changed after evaluation", async () => {
+  const s = richStore(); const readMany = s.deps.readMany; let receiptReads = 0;
+  s.deps.readMany = async (key, fields) => {
+    if (key === K.richProfileReady && ++receiptReads === 2) s.state[key].cu1.profileEnrichedAt = "2026-08-20T12:01:00Z";
+    return readMany(key, fields);
+  };
+  const tick = response(); await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.body.decided, 0); assert.equal(tick.body.skipped.rich_profile_facts_changed, 1);
+  assert.deepEqual(s.state[K.decisions], {});
+});
+
+test("an application-only winning rule remains independent of a pending rich projection", async () => {
+  const s = richStore({ prepared: false });
+  s.state[K.rules].rules.push({ ...BLOCK_RULE, conditions: [{ field: "application.roleId", op: "any_of", value: ["role1"] }] });
+  const tick = response(); await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.body.decided, 1); assert.equal(s.state[K.decisions]["cu1:role1"].action, "pass");
+});
+
+async function prepareRich(s, extra = {}, overrides = {}) {
+  const res = response();
+  await createRulesHandler({ ...rulesDeps(s), writeHash: s.deps.writeHash, ...overrides })({ method: "POST", body: { ...s.fence, op: "prepareProfileFacts", batchSize: 1, ...extra } }, res);
+  return res;
+}
+
+test("cache preparation supports legacy receipts, verifies readback and writes no candidate or rule state", async () => {
+  const s = richStore({ prepared: false, receiptVersion: 0 });
+  const result = await prepareRich(s);
+  assert.equal(result.statusCode, 200); assert.equal(result.body.coverage.projected, 1);
+  assert.equal(result.body.coverage.readbackVerified, 1); assert.equal(result.body.coverage.errors, 0);
+  assert.equal(result.body.nextCursor, null);
+  assert.deepEqual(s.writes.map(([key]) => key), [K.richRuleFacts, K.schools, K.companies]);
+  assert.equal(s.state[K.richProfileReady].cu1.v, 0);
+  assert.equal((await richPreview(s)).body.matched, 1);
+  const repeat = await prepareRich(s);
+  assert.equal(repeat.body.coverage.alreadyReady, 1); assert.equal(s.writes.length, 3);
+});
+
+test("cache preparation refuses a stale generation or an oversized page before writes", async () => {
+  for (const [extra, status] of [[{ generationId: "old-generation" }, 409], [{ batchSize: 51 }, 400]]) {
+    const s = richStore({ prepared: false });
+    assert.equal((await prepareRich(s, extra)).statusCode, status); assert.equal(s.writes.length, 0);
+  }
+});
+
+test("cache preparation exposes a receipt race or failed readback instead of claiming ready", async () => {
+  const raced = richStore({ prepared: false }); const readJson = raced.deps.readJson;
+  raced.deps.readJson = async (key) => {
+    const value = await readJson(key);
+    if (key === K.richProfile("cu1")) raced.state[K.richProfileReady].cu1.connectionReceiptId = "new-receipt";
+    return value;
+  };
+  const result = await prepareRich(raced);
+  assert.equal(result.body.coverage.projected, 0); assert.equal(result.body.unavailable[0].reason, "rich_profile_receipt_changed");
+  assert.equal(raced.writes.length, 0);
+  const lost = richStore({ prepared: false });
+  const failed = await prepareRich(lost, {}, { writeHash: async () => {} });
+  assert.equal(failed.body.coverage.readbackVerified, 0); assert.equal(failed.body.coverage.errors, 1);
+  assert.equal((await richPreview(lost)).body.projectionPending, 1);
+});
 
 const NOW = Date.parse("2026-08-20T12:00:00.000Z");
 const SOURCE_PAYLOAD_DIGEST = "a".repeat(64);
