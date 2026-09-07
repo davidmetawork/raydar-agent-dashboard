@@ -16,6 +16,12 @@ import { requireAuth } from "../api/seq/_lib/core.mjs";
 import googleHandler from "../api/auth/google.mjs";
 import sessionHandler from "../api/auth/session.mjs";
 import logoutHandler from "../api/auth/logout.mjs";
+import {
+  checkLoginRateLimit,
+  LOGIN_RATE_LIMIT,
+  LOGIN_RATE_WINDOW_SECONDS,
+  loginRateLimitInternals,
+} from "../api/auth/_lib/login-rate-limit.mjs";
 
 const SECRET = "test-secret-that-is-long-and-random-enough-for-hmac";
 const NOW = Date.UTC(2026, 6, 16, 21, 0, 0);
@@ -98,6 +104,227 @@ test("protected APIs accept the shared session without another Google lookup", a
   }
 });
 
+test("protected APIs fail closed without Google auth and preserve verified bearer fallback without durable sessions", async () => {
+  const old = {
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    secret: process.env.AUTH_SESSION_SECRET,
+  };
+  const oldFetch = globalThis.fetch;
+  try {
+    process.env.GOOGLE_CLIENT_ID = "";
+    process.env.AUTH_SESSION_SECRET = SECRET;
+    const missingGoogle = responseRecorder();
+    assert.equal(await requireAuth({ headers: {} }, missingGoogle), false);
+    assert.equal(missingGoogle.statusCode, 503);
+    assert.equal(missingGoogle.body.error, "auth_not_configured");
+
+    process.env.GOOGLE_CLIENT_ID = "google-client-id";
+    process.env.AUTH_SESSION_SECRET = "";
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      aud: "google-client-id",
+      email: "david@raydargroup.com",
+      email_verified: "true",
+      exp: String(Math.floor(Date.now() / 1000) + 3_600),
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    const bearer = responseRecorder();
+    const request = { headers: { authorization: "Bearer verified-google-token" } };
+    assert.equal(await requireAuth(request, bearer), true);
+    assert.equal(request.authedEmail, "david@raydargroup.com");
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (old.clientId === undefined) delete process.env.GOOGLE_CLIENT_ID;
+    else process.env.GOOGLE_CLIENT_ID = old.clientId;
+    if (old.secret === undefined) delete process.env.AUTH_SESSION_SECRET;
+    else process.env.AUTH_SESSION_SECRET = old.secret;
+  }
+});
+
+test("Google login rate limiting uses the platform client address and a bounded fallback", async () => {
+  loginRateLimitInternals.resetMemory();
+  const env = { AUTH_SESSION_SECRET: SECRET, VERCEL: "1" };
+  const req = {
+    headers: {
+      "x-vercel-forwarded-for": "2001:db8::1",
+      "x-forwarded-for": "198.51.100.10",
+    },
+  };
+  for (let attempt = 1; attempt <= LOGIN_RATE_LIMIT; attempt += 1) {
+    const result = await checkLoginRateLimit(req, { env, nowMs: NOW });
+    assert.equal(result.allowed, true);
+    assert.equal(result.count, attempt);
+  }
+  const blocked = await checkLoginRateLimit(req, { env, nowMs: NOW });
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.retryAfterSeconds, 300);
+  assert.equal(loginRateLimitInternals.trustedClientAddress(req, env), "2001:db8::1");
+  assert.equal(loginRateLimitInternals.memorySize(), 1);
+});
+
+test("Google login rate limiting uses the shared store when available and ignores spoofable forwarding headers", async () => {
+  loginRateLimitInternals.resetMemory();
+  let command;
+  const result = await checkLoginRateLimit({
+    headers: { "x-forwarded-for": "198.51.100.10" },
+    socket: { remoteAddress: "192.0.2.20" },
+  }, {
+    env: {
+      AUTH_SESSION_SECRET: SECRET,
+      KV_REST_API_URL: "https://kv.invalid",
+      KV_REST_API_TOKEN: "test-token",
+    },
+    fetchImpl: async (_url, init) => {
+      command = JSON.parse(init.body);
+      return new Response(JSON.stringify({ result: [LOGIN_RATE_LIMIT + 1, 123] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.distributed, true);
+  assert.equal(result.retryAfterSeconds, 123);
+  assert.equal(command[0], "EVAL");
+  assert.match(command[1], /if ttl == -1 then[\s\S]*EXPIRE[\s\S]*TTL/u);
+  assert.equal(loginRateLimitInternals.trustedClientAddress({
+    headers: { "x-forwarded-for": "198.51.100.10" },
+    socket: { remoteAddress: "192.0.2.20" },
+  }, {}), "192.0.2.20");
+
+  assert.equal(loginRateLimitInternals.trustedClientAddress({
+    headers: { "x-vercel-forwarded-for": "2001:db8::1" },
+    socket: { remoteAddress: "192.0.2.20" },
+  }, {}), "192.0.2.20");
+
+  for (let index = 0; index < 2_100; index += 1) {
+    loginRateLimitInternals.memoryLimit(`key-${index}`, NOW);
+  }
+  assert.equal(loginRateLimitInternals.memorySize(), 2_048);
+});
+
+test("Google login limiter accepts zero TTL and falls back on missing, malformed, or negative TTL", async () => {
+  const req = { headers: {}, socket: { remoteAddress: "192.0.2.30" } };
+  const env = {
+    AUTH_SESSION_SECRET: SECRET,
+    KV_REST_API_URL: "https://kv.invalid",
+    KV_REST_API_TOKEN: "test-token",
+  };
+  const run = async (result) => {
+    loginRateLimitInternals.resetMemory();
+    return checkLoginRateLimit(req, {
+      env,
+      nowMs: NOW,
+      fetchImpl: async () => new Response(JSON.stringify({ result }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+  };
+
+  const zero = await run([1, 0]);
+  assert.equal(zero.distributed, true);
+  assert.equal(zero.retryAfterSeconds, 1);
+  assert.equal(loginRateLimitInternals.memorySize(), 0);
+
+  for (const result of [[1], [1, "0"], [1, -1], [1, null]]) {
+    const fallback = await run(result);
+    assert.equal(fallback.distributed, false, JSON.stringify(result));
+    assert.equal(fallback.count, 1);
+    assert.equal(loginRateLimitInternals.memorySize(), 1);
+  }
+});
+
+test("Google login limiter resumes the shared budget after an outage without merging fallback attempts", async () => {
+  loginRateLimitInternals.resetMemory();
+  const req = { headers: {}, socket: { remoteAddress: "192.0.2.40" } };
+  const env = {
+    AUTH_SESSION_SECRET: SECRET,
+    KV_REST_API_URL: "https://kv.invalid",
+    KV_REST_API_TOKEN: "test-token",
+  };
+  let recovered = false;
+  const fetchImpl = async () => {
+    if (!recovered) throw new Error("store unavailable");
+    return new Response(JSON.stringify({ result: [1, LOGIN_RATE_WINDOW_SECONDS] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  let fallback;
+  for (let attempt = 1; attempt <= LOGIN_RATE_LIMIT + 1; attempt += 1) {
+    fallback = await checkLoginRateLimit(req, { env, nowMs: NOW, fetchImpl });
+  }
+  assert.equal(fallback.allowed, false);
+  assert.equal(fallback.distributed, false);
+  assert.equal(fallback.count, LOGIN_RATE_LIMIT + 1);
+
+  recovered = true;
+  const shared = await checkLoginRateLimit(req, { env, nowMs: NOW, fetchImpl });
+  assert.equal(shared.allowed, true);
+  assert.equal(shared.distributed, true);
+  assert.equal(shared.count, 1, "fallback attempts are deliberately not claimed as one distributed budget");
+});
+
+test("Google login rejects malformed or oversized request envelopes before token verification", async () => {
+  const keys = [
+    "GOOGLE_CLIENT_ID",
+    "AUTH_SESSION_SECRET",
+    "ALLOWED_DOMAINS",
+    "KV_REST_API_URL",
+    "KV_REST_API_TOKEN",
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const previousFetch = globalThis.fetch;
+  let tokeninfoCalls = 0;
+  try {
+    process.env.GOOGLE_CLIENT_ID = "google-client-id";
+    process.env.AUTH_SESSION_SECRET = SECRET;
+    process.env.ALLOWED_DOMAINS = "raydar.xyz";
+    delete process.env.KV_REST_API_URL;
+    delete process.env.KV_REST_API_TOKEN;
+    loginRateLimitInternals.resetMemory();
+    globalThis.fetch = async () => {
+      tokeninfoCalls += 1;
+      return new Response(JSON.stringify({
+        aud: "google-client-id",
+        email: "david@raydar.xyz",
+        email_verified: "true",
+        hd: "raydar.xyz",
+        exp: String(Math.floor(Date.now() / 1000) + 3_600),
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    for (const body of [null, "null", [], "[]", "{", { credential: "x".repeat(8_193) }]) {
+      const res = responseRecorder();
+      await googleHandler({ method: "POST", body }, res);
+      assert.equal(res.statusCode, 400, JSON.stringify(body)?.slice(0, 80));
+      assert.deepEqual(res.body, { ok: false, error: "invalid_request" });
+    }
+
+    for (const body of [
+      { credential: "token", extra: "x".repeat(17_000) },
+      JSON.stringify({ credential: "token", extra: "x".repeat(17_000) }),
+    ]) {
+      const res = responseRecorder();
+      await googleHandler({ method: "POST", body }, res);
+      assert.equal(res.statusCode, 413);
+      assert.deepEqual(res.body, { ok: false, error: "request_too_large" });
+    }
+    assert.equal(tokeninfoCalls, 0);
+
+    const valid = responseRecorder();
+    await googleHandler({ method: "POST", body: { credential: "google-id-token", extra: "allowed" } }, valid);
+    assert.equal(valid.statusCode, 200);
+    assert.equal(tokeninfoCalls, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
 test("Google exchange, restore, rolling renewal, and logout form one complete cookie flow", async () => {
   const old = {
     clientId: process.env.GOOGLE_CLIENT_ID,
@@ -108,6 +335,7 @@ test("Google exchange, restore, rolling renewal, and logout form one complete co
   process.env.GOOGLE_CLIENT_ID = "google-client-id";
   process.env.AUTH_SESSION_SECRET = SECRET;
   process.env.ALLOWED_DOMAINS = "raydar.xyz";
+  loginRateLimitInternals.resetMemory();
   globalThis.fetch = async () => new Response(JSON.stringify({
     aud: "google-client-id",
     email: "david@raydargroup.com",

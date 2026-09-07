@@ -79,7 +79,13 @@ export function authConfig() {
 // supported as a rollout fallback and are still verified server-side with Google.
 export async function requireAuth(req, res) {
   const config = authConfig();
-  if (!config.authRequired) return true; // auth not configured yet -> open (warn in logs)
+  // API routes are excluded from the page middleware, so this helper is their
+  // actual authentication boundary. A missing Google client id must never turn
+  // a deployment mistake into anonymous access to candidate or operator data.
+  if (!config.authRequired) {
+    res.status(503).json({ ok: false, error: "auth_not_configured" });
+    return false;
+  }
   const session = sessionFromRequest(req);
   if (session) {
     req.authedEmail = session.email;

@@ -2,17 +2,25 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 96,
-  "digest": "fb0d9c8cd22adaea637d8ec56d6f8dc11acd2bfe7d02fa122284ad52147deee5",
-  "vercel_json_canonical_sha256": "5925d8848fdc05f9ef4e98ed5e94aa095f15e7fd627122024590858661433719",
+  "file_count": 98,
+  "digest": "573b7bd47f619aa9af6879eeed75a19d243af66394a518617cd44a36b96d4baf",
+  "vercel_json_canonical_sha256": "493a0f6a192a362ff8a61b0844de75b3a947915fdf5480353905e07ac12942c1",
   "files": [
     {
       "path": ".vercelignore",
       "sha256": "e8189a6e58b3035f98b39daab3448c36a1bdb92884f55cd2a005472ebb907c20"
     },
     {
+      "path": "api/auth/_lib/login-rate-limit.mjs",
+      "sha256": "eed703ce44f67b315ee645babba74994676c755a36757c03a2555c1dbd8e3ea8"
+    },
+    {
       "path": "api/auth/_lib/session.mjs",
       "sha256": "5bf7faade05dd8c3678f23684044f5bcdabdd2107a3292549acfa63ff05a1980"
+    },
+    {
+      "path": "api/auth/google.mjs",
+      "sha256": "07c6b45f96e294af858b6ca08b0ea58948b87d1c0bbe689406756086bbdcae03"
     },
     {
       "path": "api/inbox/_lib/core.mjs",
@@ -32,7 +40,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/seq/_lib/core.mjs",
-      "sha256": "b8034cfd911120ca8356fae855ffe11600d682f8ca01c70d7a71093303d05f99"
+      "sha256": "b49fa690fc5942eb98134a4a9ba54fe91aa7b2dfc9b080d6ba5d6f73dc322c8a"
     },
     {
       "path": "api/seq/_lib/scheduling-links.mjs",
@@ -324,7 +332,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "296cfb12d98879a7b8fe40fc37862b462cd29aaa3f50f9e36080ba3d26ff3acb"
+      "sha256": "f3e52ec5678436224bcbbd7fe9cc296a828bc7ae553d4111ec6a8a2f16b8bdd7"
     },
     {
       "path": "submissions-v2-ui-state.mjs",
@@ -388,7 +396,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "vercel.json",
-      "sha256": "df058fa50a737ef4f8ecebfde9577a44f1cec02cdb28a5ce3b320f51b75bc578"
+      "sha256": "a4af866532f33fd69599fa8fb94e1aa927cce0dd3d360206931048ace14f7d45"
     }
   ]
 });
