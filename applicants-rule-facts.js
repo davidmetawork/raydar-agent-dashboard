@@ -29,6 +29,15 @@
     // from a prefix that could already have been truncated.
     return name && name.length < 160 ? name : null;
   };
+  const companyName = (value) => {
+    const name = typeof value === "string" ? value.trim() : "";
+    // Names at the cache limit may already be truncated. Placeholder text
+    // cannot identify an employer for a name rule.
+    const normalized = name.normalize("NFC").replace(/\s+/gu, " ").toLowerCase();
+    return name && value.length < 160 && /[\p{L}\p{N}]/u.test(name)
+      && !["n/a", "na", "none", "null", "undefined", "unknown", "unknown company", "not provided", "not available"].includes(normalized)
+      && !/(?:\.{3}|…)/u.test(name) ? name : null;
+  };
   const validId = (value) => {
     const id = text(value, 81);
     return id && id.length <= 80 ? id : null;
@@ -131,6 +140,14 @@
         condition: { field: "job.companyId", op: "any_of", value: [id] },
         labels: { [id]: company },
       });
+      else if (companyName(record.companyName)) facts.push({
+        id: "experience-company-name",
+        title: `Worked at ${companyName(record.companyName)}`,
+        detail: "Full company name match",
+        checked: true,
+        condition: { field: "job.companyName", op: "equals", value: companyName(record.companyName) },
+        labels: {},
+      });
       if (title) facts.push({
         id: "experience-title",
         title: `Job title contains “${title}”`,
@@ -190,7 +207,7 @@
     if (source.kind === "headline") return `${text(record.value) || "Selected"} headlines`.slice(0, 80);
     if (source.kind === "application") return `${text(record.roleTitle) || "Role"} applicants`.slice(0, 80);
     if (source.kind === "experience") {
-      const usesCompany = selectedFacts.some((fact) => fact.id === "experience-company");
+      const usesCompany = selectedFacts.some((fact) => fact.id === "experience-company" || fact.id === "experience-company-name");
       if (selectedFacts.length === 1 && selectedFacts[0].id === "experience-current") {
         return record.current ? "Current job history" : "Past job history";
       }
@@ -278,7 +295,11 @@
 
   function detailHtml(source) {
     const facts = factsFor(source);
-    const missingIdentity = source.kind === "experience" && !validId(source.record?.companyId) ? "company" : null;
+    const companyNameNote = source.kind === "experience" && !validId(source.record?.companyId)
+      ? companyName(source.record?.companyName)
+        ? "Matches the full company name, ignoring case and spacing; job title is optional."
+        : "A complete company name under 160 characters is needed for a company rule."
+      : null;
     const schoolNameNote = source.kind === "education" && !validId(source.record?.schoolId)
       ? schoolName(source.record?.school)
         ? "Matches the full university name, ignoring case and spacing; degree is optional."
@@ -286,7 +307,7 @@
       : null;
     return '<button type="button" class="rf-back" id="rfBack">‹ Choose a different detail</button>' +
       '<div class="rf-chosen"><span>' + enc(kindLabel(source)) + '</span><b>' + enc(source.title) + '</b><span>' + enc(source.subtitle) + '</span></div>' +
-      (missingIdentity ? '<p class="rf-empty">An exact ' + missingIdentity + ' rule is unavailable because this record has no verified ' + missingIdentity + ' ID. Any text option below matches only that text.</p>' : '') +
+      (companyNameNote ? '<p class="rf-empty">' + enc(companyNameNote) + '</p>' : '') +
       (schoolNameNote ? '<p class="rf-empty">' + enc(schoolNameNote) + '</p>' : '') +
       '<div class="rf-facts">' + facts.map((fact) =>
         '<label class="rf-fact"><input type="checkbox" data-rf-fact="' + enc(fact.id) + '"' +
