@@ -33,8 +33,10 @@ test('the whole published cohort reconciles without counting missing evidence as
   assert.deepEqual(report.counts, { total: 8, profilePreparing: 1, totalIncludingPreparing: 9, bound: 6, unbound: 1, sourceUnavailable: 1,
     available: 3, missing: 1, bindingMismatch: 1, expired: 1, withHistory: 2, sparse: 1, withLogos: 2, withRatings: 2 });
   assert.equal(report.bindings.length, 6);
+  assert.deepEqual(report.repairProfileKeys, queue.slice(2, 5).map(item => item.profileKey));
   assert.equal(report.counts.total, report.counts.bound + report.counts.unbound + report.counts.sourceUnavailable);
   assert.equal(report.counts.bound, report.counts.available + report.counts.missing + report.counts.bindingMismatch + report.counts.expired);
+  assert.equal(report.repairProfileKeys.length, report.counts.missing + report.counts.bindingMismatch + report.counts.expired);
 });
 
 test('conflicting application bindings and changed source receipts cannot become work', () => {
@@ -69,13 +71,33 @@ test('a partial card write without its exact completion receipt is never availab
   const cards = { [selected.profileKey]: card(selected) };
   const report = receipts => richProfileWork({ queue: [selected] }, sourceReceipts, cards, receipts, { now: Date.parse(AT) });
   assert.equal(report({}).counts.missing, 1);
+  assert.deepEqual(report({}).repairProfileKeys, [selected.profileKey]);
   for (const field of ['candidateUserId', 'sourceObservationId', 'connectionReceiptId', 'profileEnrichedAt', 'richProfileRetainedUntil']) {
     const receipts = ready(cards);
     receipts[selected.profileKey][field] = 'different';
     assert.equal(report(receipts).counts.bindingMismatch, 1, field);
     assert.equal(report(receipts).counts.available, 0, field);
+    assert.deepEqual(report(receipts).repairProfileKeys, [selected.profileKey], field);
   }
   assert.equal(report(ready(cards)).counts.available, 1);
+  assert.deepEqual(report(ready(cards)).repairProfileKeys, []);
+});
+
+test('an old fresh completion receipt repairs only its partial write', () => {
+  const partial = row(1);
+  const healthy = row(2);
+  const queue = [partial, healthy];
+  const cards = Object.fromEntries(queue.map(item => [item.profileKey, card(item)]));
+  const receipts = ready(cards);
+  receipts[partial.profileKey].profileEnrichedAt = '2026-09-06T18:00:00.000Z';
+
+  const report = richProfileWork({ queue }, sourceReceiptsFor(queue), cards, receipts, { now: Date.parse(AT) });
+  assert.equal(report.counts.bindingMismatch, 1);
+  assert.equal(report.counts.available, 1);
+  assert.deepEqual(report.repairProfileKeys, [partial.profileKey]);
+  assert.equal(report.repairProfileKeys.length, report.counts.missing + report.counts.bindingMismatch + report.counts.expired);
+  assert.ok(report.bindings.some(binding => binding.profileKey === report.repairProfileKeys[0]));
+  assert.equal(report.repairProfileKeys.includes(healthy.profileKey), false);
 });
 
 const secret = 'synthetic-profile-maintenance-key';
@@ -108,6 +130,7 @@ test('authenticated work read uses current generation and never reads decisions 
   assert.equal(response.body.generation.generationId, f.state[K.activeGeneration].generationId);
   assert.equal(response.body.observedAt, AT);
   assert.equal(response.body.counts.missing, 1);
+  assert.deepEqual(response.body.repairProfileKeys, [f.queue[0].profileKey]);
   assert.deepEqual(response.body.bindings[0], { profileKey: f.queue[0].profileKey, ...f.queue[0].richProfileBinding });
   assert.equal(f.reads.includes(K.decisions), false);
   assert.equal(f.reads.includes(K.acks), false);
