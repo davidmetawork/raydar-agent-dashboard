@@ -128,9 +128,8 @@
     background:var(--warn-bg); color:var(--warn); font-size:10.5px; font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
   .processing-job { margin-top:9px; color:var(--ink-2); font-size:12.5px; line-height:1.45; }
   .processing-job b { color:var(--ink); }
-  .processing-ids { display:flex; flex-wrap:wrap; gap:6px 12px; margin-top:10px; color:var(--ink-3); font:11px ui-monospace,SFMono-Regular,Menlo,monospace; }
-  .processing-ids span { overflow-wrap:anywhere; }
-  .processing-reason { margin-top:9px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
+  .processing-meta { margin-top:9px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
+  .processing-reason { margin-top:6px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
   .row input[type=checkbox] { width:15px; height:15px; margin:4px 0 0; accent-color:var(--ink); cursor:pointer; flex:none; }
   .avatar { width:48px; height:48px; border-radius:50%; overflow:hidden; display:grid; place-items:center;
     background:var(--live-bg); color:#6658DA; font-weight:700; font-size:15px; flex:none; }
@@ -1689,11 +1688,18 @@ const VIRTUAL_OVERSCAN = 4;
    actually painted are measured, and the pitch is the tallest of them, bounded
    both ways. The bounds matter — a runaway measurement must never be able to
    produce a 40,000px virtual-space. */
-const virtualRowFallback = () => window.innerWidth <= 820 ? 360 : 260;
-const virtualRowMin = () => window.innerWidth <= 820 ? 200 : 150;
-const virtualRowMax = () => window.innerWidth <= 820 ? 460 : 340;
+const isProcessingList = (el) => el?.id === "processingList";
+const virtualRowFallback = (el) => isProcessingList(el)
+  ? (window.innerWidth <= 820 ? 200 : 160)
+  : (window.innerWidth <= 820 ? 360 : 260);
+const virtualRowMin = (el) => isProcessingList(el)
+  ? (window.innerWidth <= 820 ? 150 : 130)
+  : (window.innerWidth <= 820 ? 200 : 150);
+const virtualRowMax = (el) => isProcessingList(el)
+  ? (window.innerWidth <= 820 ? 260 : 210)
+  : (window.innerWidth <= 820 ? 460 : 340);
 const virtualRowHeight = (el) =>
-  (typeof el?._virtualRowHeight === "number" ? el._virtualRowHeight : virtualRowFallback());
+  (typeof el?._virtualRowHeight === "number" ? el._virtualRowHeight : virtualRowFallback(el));
 function resetVirtualLists() {
   for (const id of ["reviewList", "streamList", "processingList"]) {
     const list = $(id);
@@ -1724,7 +1730,7 @@ function measureVirtualRowHeight(el) {
     if (content > 0) tallest = Math.max(tallest, Math.ceil(content + chrome));
   }
   if (!tallest) return null;
-  return Math.min(virtualRowMax(), Math.max(virtualRowMin(), tallest));
+  return Math.min(virtualRowMax(el), Math.max(virtualRowMin(el), tallest));
 }
 /* The breakpoint a measurement belongs to. Crossing it changes the card's
    whole layout (.rc-main stacks) and the bounds, so a number learned on one
@@ -1747,7 +1753,7 @@ function tuneVirtualRowHeight(el) {
     : 0;
   el._virtualRowBasis = basis;
   const previous = virtualRowHeight(el);
-  const target = Math.min(virtualRowMax(), Math.max(measured, carried));
+  const target = Math.min(virtualRowMax(el), Math.max(measured, carried));
   const changed = Math.abs(target - previous) >= 2;
   el._virtualRowHeight = target;
   el.style.setProperty("--row-h", target + "px");
@@ -1877,19 +1883,19 @@ function renderStream() {
 function processingRowHtml(row) {
   const role = row.roleTitle || "Role still resolving";
   const company = row.company ? " @ " + esc(row.company) : "";
-  const ids = [
-    "Profile key: " + (row.profileKey || "pending"),
-    "Source observation: " + (row.sourceObservationId || "not assigned yet"),
-    ...(row.sourceJobId ? ["Source job: " + row.sourceJobId] : []),
-    ...(row.roleId ? ["Paraform role: " + row.roleId] : []),
-  ];
+  // `receivedAt` is the source arrival time when Core has it. Older stubs
+  // carry only the Hub ingestion time or a date-only application record; use
+  // each one with its real label rather than inventing a received timestamp.
+  const receivedAt = row.receivedAt || row.addedAt || row.appliedAt || null;
+  const receivedLabel = row.receivedAt ? "Received" : row.addedAt ? "Added" : "Applied";
+  const reason = String(row.reason || "Preparing source profile").replace(/[_-]+/g, " ");
   return '<div class="row processing-row" data-processing-key="' + esc(row.key || row.profileKey || "") + '">' +
     '<div class="rc-main"><div class="rc-id">' +
       '<div class="who"><span class="name"><span>' + esc(row.name || "Applicant identity pending") + '</span></span>' +
         '<span class="processing-state">Profile preparing</span></div>' +
       '<div class="processing-job">Job: <b>' + esc(role) + "</b>" + company + "</div>" +
-      '<div class="processing-ids">' + ids.map((value) => "<span>" + esc(value) + "</span>").join("") + "</div>" +
-      (row.reason ? '<div class="processing-reason">' + esc(row.reason) + "</div>" : "") +
+      (receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
+      '<div class="processing-reason">' + esc(reason) + "</div>" +
     "</div></div></div>";
 }
 function renderProcessing() {

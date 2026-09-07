@@ -41,6 +41,7 @@ test("feed projects Core preparation stubs separately from actionable snapshot r
         company: "Raydar Client",
         appliedAt: "2026-09-07",
         addedAt: AT,
+        receivedAt: "2026-09-07T11:58:00.000Z",
         reason: "source_profile_pending",
         interviewAllowed: true,
         privateUnexpectedField: "must not reach the browser",
@@ -75,6 +76,7 @@ test("feed projects Core preparation stubs separately from actionable snapshot r
     company: "Raydar Client",
     appliedAt: "2026-09-07",
     addedAt: AT,
+    receivedAt: "2026-09-07T11:58:00.000Z",
     reason: "source_profile_pending",
     interviewAllowed: false,
   }]);
@@ -88,9 +90,9 @@ test("Processing is read-only and never requests cards or exposes actions", () =
   assert.match(applicants, /id="pillProcessing"/);
   assert.match(applicants, /id="processingView"/);
   assert.match(applicants, /function processingRowHtml\(row\)/);
-  assert.match(applicants, /Profile key:/);
-  assert.match(applicants, /Source observation:/);
+  assert.match(applicants, /const receivedAt = row\.receivedAt \|\| row\.addedAt \|\| row\.appliedAt \|\| null;/);
+  assert.match(applicants, /const receivedLabel = row\.receivedAt \? "Received" : row\.addedAt \? "Added" : "Applied";/);
   assert.match(applicants, /paintList\(list, rows, processingRowHtml, \{ requestRichCards: false \}\)/);
   const processing = applicants.slice(applicants.indexOf("function processingRowHtml"), applicants.indexOf("function renderLists"));
-  assert.doesNotMatch(processing, /data-act=|openProfile\(|rowCardHtml\(|requestVisibleRichCards\(/);
+  assert.doesNotMatch(processing, /data-act=|openProfile\(|rowCardHtml\(|requestVisibleRichCards\(|Source observation:|Profile key:/);
 });

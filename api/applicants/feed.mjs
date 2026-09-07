@@ -41,6 +41,7 @@ function profilePreparingRows(snapshot) {
       company: text(row.company),
       appliedAt: text(row.appliedAt),
       addedAt: text(row.addedAt),
+      receivedAt: text(row.receivedAt),
       reason: text(row.reason),
       // A preparation stub is never actionable even if an upstream writer
       // regresses. Expose the fact as false rather than the upstream value.
