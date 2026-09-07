@@ -131,6 +131,10 @@
   .processing-job b { color:var(--ink); }
   .processing-meta { margin-top:9px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
   .processing-reason { margin-top:6px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
+  .processing-source-details { margin-top:10px; padding:9px 10px; border-radius:8px; background:var(--surface-2); border:1px solid var(--line); color:var(--ink-2); font-size:11.5px; line-height:1.45; }
+  .processing-source-details b { color:var(--ink); }
+  .processing-source-history { margin-top:5px; color:var(--ink-3); }
+  .processing-source-history span + span::before { content:" · "; }
   .problem-row { min-height:112px; border-left:4px solid var(--warn); }
   .problem-row .problem-code { margin-top:8px; color:var(--ink-2); font-size:12px; font-weight:700; }
   .problem-row .problem-meta { margin-top:5px; color:var(--ink-3); font-size:11.5px; }
@@ -2082,6 +2086,20 @@ function processingDisplay(row) {
     : needsAttention ? "Source preparation needs attention." : "Preparing the source profile.";
   return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention, reason };
 }
+function processingSourceDetailsHtml(details) {
+  if (!details || details.state !== "pending_source_review" || details.provenance !== "applicant_hub"
+    || details.verification !== "unverified_source" || details.ruleEligible !== false) return "";
+  const history = details.profile && typeof details.profile === "object" ? details.profile : {};
+  const roles = (Array.isArray(history.experiences) ? history.experiences : []).slice(0, 3)
+    .map((item) => [item.roleTitle, item.companyName].filter(Boolean).join(" at ")).filter(Boolean);
+  const education = (Array.isArray(history.education) ? history.education : []).slice(0, 2)
+    .map((item) => [item.school, item.degree].filter(Boolean).join(" — ")).filter(Boolean);
+  const title = [history.title, history.location].filter(Boolean).join(" · ");
+  const lines = [title, ...roles, ...education].filter(Boolean).slice(0, 5);
+  return '<div class="processing-source-details"><b>Source details pending review</b><div>Applicant Hub source history. It is not a verified Paraform or resume profile and is not used by Rules.</div>' +
+    (lines.length ? '<div class="processing-source-history">' + lines.map((line) => '<span>' + esc(line) + '</span>').join("") + '</div>' : "") +
+    '</div>';
+}
 function processingRowHtml(row) {
   const role = row.roleTitle || "Role still resolving";
   const company = " @ " + esc(appliedCompany(row));
@@ -2098,6 +2116,7 @@ function processingRowHtml(row) {
       '<div class="processing-job">Job: <b>' + esc(role) + "</b>" + company + "</div>" +
       (receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
       '<div class="processing-reason">' + esc(display.reason) + "</div>" +
+      processingSourceDetailsHtml(row.sourceDetails) +
     "</div></div></div>";
 }
 function renderProcessing() {

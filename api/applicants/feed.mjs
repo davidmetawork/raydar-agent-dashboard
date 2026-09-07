@@ -26,6 +26,34 @@ const text = (value) => {
   return result || null;
 };
 
+function sourceDetails(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || text(value.state) !== "pending_source_review"
+    || text(value.provenance) !== "applicant_hub"
+    || text(value.verification) !== "unverified_source"
+    || !value.profile || typeof value.profile !== "object" || Array.isArray(value.profile)) return null;
+  const history = value.profile;
+  const experiences = (Array.isArray(history.experiences) ? history.experiences : []).slice(0, 12)
+    .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => ({ roleTitle: text(row.roleTitle), companyName: text(row.companyName),
+      start: text(row.start), end: text(row.end), current: row.current === true }))
+    .filter((row) => row.roleTitle || row.companyName);
+  const education = (Array.isArray(history.education) ? history.education : []).slice(0, 12)
+    .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => ({ school: text(row.school), degree: text(row.degree), start: text(row.start), end: text(row.end) }))
+    .filter((row) => row.school || row.degree);
+  return Object.freeze({
+    state: "pending_source_review",
+    label: "Source details pending review",
+    provenance: "applicant_hub",
+    verification: "unverified_source",
+    ruleEligible: false,
+    sourceObservationId: text(value.sourceObservationId), observedAt: text(value.observedAt),
+    historyState: text(value.historyState),
+    profile: Object.freeze({ title: text(history.title), location: text(history.location), experiences, education }),
+  });
+}
+
 function profilePreparingRows(snapshot) {
   if (!Array.isArray(snapshot?.profilePreparing)) return [];
   return snapshot.profilePreparing
@@ -44,6 +72,7 @@ function profilePreparingRows(snapshot) {
       addedAt: text(row.addedAt),
       receivedAt: text(row.receivedAt),
       reason: text(row.reason),
+      ...(sourceDetails(row.sourceDetails) ? { sourceDetails: sourceDetails(row.sourceDetails) } : {}),
       // A preparation stub is never actionable even if an upstream writer
       // regresses. Expose the fact as false rather than the upstream value.
       interviewAllowed: false,

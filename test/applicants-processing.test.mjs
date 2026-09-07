@@ -86,6 +86,36 @@ test("feed projects Core preparation stubs separately from actionable snapshot r
   assert.deepEqual(res.body.snapshot.stream, []);
 });
 
+test("feed passes only an explicitly unverified pending source-details projection", async () => {
+  const state = {};
+  publishInto(state, {
+    snapshot: { generatedAt: AT, stream: [], profilePreparing: [{
+      key: "held-source", profileKey: "core:held-source", state: "needs_review",
+      name: "Morgan Example", reason: "source_import_needs_review", interviewAllowed: true,
+      sourceDetails: {
+        state: "pending_source_review", label: "unexpected", provenance: "applicant_hub",
+        verification: "unverified_source", ruleEligible: true, sourceObservationId: "source-1", observedAt: AT,
+        historyState: "data", profile: {
+          title: "Source title", location: "Austin",
+          experiences: [{ roleTitle: "Source role", companyName: "Source company", description: "drop this" }],
+          education: [{ school: "Source school", degree: "BA", description: "drop this" }],
+        }, privateUnexpectedField: "drop this",
+      },
+    }] }, queue: [],
+  });
+  const res = response();
+  await createFeedHandler({ corsHandler: () => false, authHandler: async () => true, kvReady: () => true,
+    readJson: async (key) => state[key] ?? null, readHash: async () => ({}), now: () => Date.parse(AT),
+  })({ method: "GET", headers: {}, query: {} }, res);
+  const details = res.body.profilePreparingRows[0].sourceDetails;
+  assert.equal(details.label, "Source details pending review");
+  assert.equal(details.ruleEligible, false);
+  assert.equal(details.profile.experiences[0].description, undefined);
+  assert.equal(details.profile.education[0].description, undefined);
+  assert.equal(details.privateUnexpectedField, undefined);
+  assert.equal(res.body.profilePreparingRows[0].interviewAllowed, false);
+});
+
 test("feed preserves Core's terminal preparation state for the read-only view", async () => {
   const state = {};
   publishInto(state, {
@@ -127,6 +157,9 @@ test("Processing is read-only and never requests cards or exposes actions", () =
   assert.match(applicants, /const PROCESSING_REVIEW_STATES = new Set/);
   assert.match(applicants, /"Needs attention"/);
   assert.match(applicants, /"Preparing application"/);
+  assert.match(applicants, /function processingSourceDetailsHtml\(details\)/);
+  assert.match(applicants, /Source details pending review/);
+  assert.match(applicants, /not used by Rules/);
   assert.match(applicants, /source_import_needs_review: "Source import needs review\."/);
   assert.match(applicants, /const receivedAt = row\.receivedAt \|\| row\.addedAt \|\| row\.appliedAt \|\| null;/);
   assert.match(applicants, /const receivedLabel = row\.receivedAt \? "Received" : row\.addedAt \? "Added" : "Applied";/);
