@@ -21,6 +21,7 @@ export function richProfileWork(snapshot, sourceReceipts, cards, richReceipts, {
     withHistory: 0, sparse: 0, withLogos: 0, withRatings: 0,
   };
   const bindings = [];
+  const repairProfileKeys = [];
   for (const [profileKey, rows] of groups) {
     const receipt = sourceReceipts?.[profileKey];
     if (receipt?.source !== 'applicant_hub' || receipt.durable !== true || !profileHistoryState(receipt) || rows.some(row =>
@@ -34,14 +35,19 @@ export function richProfileWork(snapshot, sourceReceipts, cards, richReceipts, {
     bindings.push({ profileKey, ...binding });
     const card = cards?.[profileKey];
     const richReceipt = richReceipts?.[profileKey];
-    if (!card || !richReceipt) { counts.missing++; continue; }
+    if (!card || !richReceipt) { counts.missing++; repairProfileKeys.push(profileKey); continue; }
     if (card.profileSource !== 'paraform' || richReceipt.source !== 'paraform' ||
       ['sourceObservationId', 'candidateUserId', 'connectionReceiptId'].some(field => card[field] !== binding[field] || richReceipt[field] !== binding[field]) ||
       card.profileEnrichedAt !== richReceipt.profileEnrichedAt || card.richProfileRetainedUntil !== richReceipt.richProfileRetainedUntil) {
       counts.bindingMismatch++;
+      repairProfileKeys.push(profileKey);
       continue;
     }
-    if (!richProfileReadyMatches(binding, card, richReceipt, { now })) { counts.expired++; continue; }
+    if (!richProfileReadyMatches(binding, card, richReceipt, { now })) {
+      counts.expired++;
+      repairProfileKeys.push(profileKey);
+      continue;
+    }
     counts.available++;
     const jobs = Array.isArray(card.exp) ? card.exp : [];
     const schools = Array.isArray(card.edu) ? card.edu : [];
@@ -51,5 +57,9 @@ export function richProfileWork(snapshot, sourceReceipts, cards, richReceipts, {
     if (card.paraformTier || Number.isFinite(card.densityScore) ||
       [...jobs, ...schools].some(row => row.talentRank)) counts.withRatings++;
   }
-  return { counts, bindings: bindings.sort((a, b) => a.profileKey.localeCompare(b.profileKey)) };
+  return {
+    counts,
+    bindings: bindings.sort((a, b) => a.profileKey.localeCompare(b.profileKey)),
+    repairProfileKeys: repairProfileKeys.sort((a, b) => a.localeCompare(b)),
+  };
 }
