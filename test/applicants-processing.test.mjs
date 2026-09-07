@@ -85,11 +85,48 @@ test("feed projects Core preparation stubs separately from actionable snapshot r
   assert.deepEqual(res.body.snapshot.stream, []);
 });
 
+test("feed preserves Core's terminal preparation state for the read-only view", async () => {
+  const state = {};
+  publishInto(state, {
+    snapshot: {
+      generatedAt: AT,
+      stream: [],
+      profilePreparing: [{
+        key: "app-review",
+        profileKey: "core:app-review",
+        state: "needs_review",
+        name: "Taylor Example",
+        roleTitle: "Researcher",
+        reason: "source_import_needs_review",
+      }],
+    },
+    queue: [],
+  });
+  const res = response();
+  await createFeedHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    kvReady: () => true,
+    readJson: async (key) => state[key] ?? null,
+    readHash: async () => ({}),
+    now: () => Date.parse(AT),
+  })({ method: "GET", headers: {}, query: {} }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.profilePreparingRows[0].state, "needs_review");
+  assert.equal(res.body.profilePreparingRows[0].reason, "source_import_needs_review");
+  assert.equal(res.body.profilePreparingRows[0].interviewAllowed, false);
+});
+
 test("Processing is read-only and never requests cards or exposes actions", () => {
   const applicants = readFileSync(resolve("applicants.html"), "utf8");
   assert.match(applicants, /id="pillProcessing"/);
   assert.match(applicants, /id="processingView"/);
   assert.match(applicants, /function processingRowHtml\(row\)/);
+  assert.match(applicants, /const PROCESSING_REVIEW_STATES = new Set/);
+  assert.match(applicants, /"Needs attention"/);
+  assert.match(applicants, /"Preparing application"/);
+  assert.match(applicants, /source_import_needs_review: "Source import needs review\."/);
   assert.match(applicants, /const receivedAt = row\.receivedAt \|\| row\.addedAt \|\| row\.appliedAt \|\| null;/);
   assert.match(applicants, /const receivedLabel = row\.receivedAt \? "Received" : row\.addedAt \? "Added" : "Applied";/);
   assert.match(applicants, /paintList\(list, rows, processingRowHtml, \{ requestRichCards: false \}\)/);

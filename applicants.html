@@ -126,6 +126,7 @@
   .processing-row .rc-main { display:block; }
   .processing-state { display:inline-flex; align-items:center; border-radius:999px; padding:4px 8px;
     background:var(--warn-bg); color:var(--warn); font-size:10.5px; font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
+  .processing-state.needs-attention { background:var(--bad-bg); color:var(--bad); }
   .processing-job { margin-top:9px; color:var(--ink-2); font-size:12.5px; line-height:1.45; }
   .processing-job b { color:var(--ink); }
   .processing-meta { margin-top:9px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
@@ -1880,6 +1881,34 @@ function renderStream() {
    These are Core's minimal preparation stubs. Keep this renderer deliberately
    separate from rowCardHtml: it has no profile link, avatar, cards request,
    modal, decision overlay, Rules membership, checkbox, or action button. */
+const PROCESSING_REVIEW_STATES = new Set([
+  "review", "needs_review", "terminal_needs_review", "terminal-review",
+]);
+const PROCESSING_REASONS = Object.freeze({
+  source_profile_preparing: "Preparing the source profile.",
+  source_profile_pending: "Preparing the source profile.",
+  source_import_needs_review: "Source import needs review.",
+  APPLICANT_CORE_GRAPH_WORK_LEASE_EXHAUSTED: "Source preparation stopped after repeated retries and needs attention.",
+  APPLICANT_CORE_GRAPH_SOURCE_HEAD_MISSING: "The source application is no longer available and needs attention.",
+});
+function processingDisplay(row) {
+  const state = String(row?.state || "profile_preparing").trim().toLowerCase();
+  const needsAttention = PROCESSING_REVIEW_STATES.has(state);
+  const rawReason = String(row?.reason || "").trim();
+  if (PROCESSING_REASONS[rawReason]) {
+    return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention,
+      reason: PROCESSING_REASONS[rawReason] };
+  }
+  // Core reasons are machine-safe codes, but they are not useful UI copy. Do
+  // not surface any ids embedded in an unexpected source string.
+  const plain = rawReason.replace(/\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b/ig, "")
+    .replace(/\bcore:[a-z0-9]+\b/ig, "").replace(/\bapp(?:lication)?[_ -]?id[:=]?\S*/ig, "")
+    .replace(/^APPLICANT_CORE_/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  const reason = plain
+    ? plain.charAt(0).toUpperCase() + plain.slice(1).toLowerCase() + (/[.!?]$/.test(plain) ? "" : ".")
+    : needsAttention ? "Source preparation needs attention." : "Preparing the source profile.";
+  return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention, reason };
+}
 function processingRowHtml(row) {
   const role = row.roleTitle || "Role still resolving";
   const company = row.company ? " @ " + esc(row.company) : "";
@@ -1888,14 +1917,14 @@ function processingRowHtml(row) {
   // each one with its real label rather than inventing a received timestamp.
   const receivedAt = row.receivedAt || row.addedAt || row.appliedAt || null;
   const receivedLabel = row.receivedAt ? "Received" : row.addedAt ? "Added" : "Applied";
-  const reason = String(row.reason || "Preparing source profile").replace(/[_-]+/g, " ");
+  const display = processingDisplay(row);
   return '<div class="row processing-row" data-processing-key="' + esc(row.key || row.profileKey || "") + '">' +
     '<div class="rc-main"><div class="rc-id">' +
       '<div class="who"><span class="name"><span>' + esc(row.name || "Applicant identity pending") + '</span></span>' +
-        '<span class="processing-state">Profile preparing</span></div>' +
+        '<span class="processing-state' + (display.needsAttention ? ' needs-attention' : '') + '">' + esc(display.label) + '</span></div>' +
       '<div class="processing-job">Job: <b>' + esc(role) + "</b>" + company + "</div>" +
       (receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
-      '<div class="processing-reason">' + esc(reason) + "</div>" +
+      '<div class="processing-reason">' + esc(display.reason) + "</div>" +
     "</div></div></div>";
 }
 function renderProcessing() {
