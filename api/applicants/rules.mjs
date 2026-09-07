@@ -28,12 +28,9 @@ import {
 } from "./_lib/funded-employers.mjs";
 import { DEGREE_LEVELS, DEGREE_LEVEL_LABELS } from "./_lib/degree.mjs";
 import { requireApplicantMutation } from "./_lib/request-safety.mjs";
-import { directoryFromFacts } from "./_lib/facts.mjs";
-import { richBindingsForSnapshot, richProfileMatches } from "./_lib/rich-profile.mjs";
+import { prepareRichRuleFacts } from "./_lib/rich-rule-facts-rebuild.mjs";
+import { richBindingsForSnapshot } from "./_lib/rich-profile.mjs";
 import {
-  richReceiptMatches,
-  richRuleFactsFromProfile,
-  richRuleFactsMatch,
   selectRuleFacts,
   ruleNeedsProfileFacts,
 } from "./_lib/rich-rule-facts.mjs";
@@ -240,116 +237,8 @@ export function createRulesHandler({
       }
 
       if (op === "prepareProfileFacts") {
-        const publication = await readActive();
-        if (!publication) return res.status(503).json({ ok: false, error: "generation_unavailable" });
-        if (String(body.generationId || "") !== publication.generationId
-          || String(body.generationDigest || "") !== publication.digest) {
-          return res.status(409).json({ ok: false, error: "generation_changed_refresh_required",
-            generationId: publication.generationId, generationDigest: publication.digest });
-        }
-        const artifacts = await readArtifacts(publication);
-        if (!artifacts || !verifyGeneration(artifacts).ok) {
-          return res.status(503).json({ ok: false, error: "generation_unavailable" });
-        }
-        const cursor = Number(body.cursor ?? 0);
-        const batchSize = Number(body.batchSize ?? 25);
-        if (!Number.isSafeInteger(cursor) || cursor < 0
-          || !Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 50) {
-          return res.status(400).json({ ok: false, error: "invalid_prepare_profile_facts_page" });
-        }
-        const snapshot = { ...artifacts.snapshot, queue: artifacts.queue.rows };
-        const bindings = richBindingsForSnapshot(snapshot);
-        const keys = [...new Set((artifacts.queue?.rows || [])
-          .map((row) => row?.profileKey || row?.cuId).filter((key) => bindings.has(key)))].sort();
-        const page = keys.slice(cursor, cursor + batchSize);
-        const [receipts, storedFacts] = await Promise.all([
-          richProfileReceiptsFor(page, { readMany }),
-          richRuleFactsFor(page, { readMany }),
-        ]);
-        const preparedAt = Date.parse(now());
-        const projected = {};
-        const schools = {};
-        const companies = {};
-        const unavailable = [];
-        const errors = [];
-        let alreadyReady = 0;
-        const prepareOne = async (key) => {
-          const binding = bindings.get(key);
-          const receipt = receipts[key];
-          if (!richReceiptMatches(binding, receipt, { now: preparedAt })) {
-            unavailable.push({ key, reason: "rich_profile_receipt_unavailable" });
-            return;
-          }
-          if (richRuleFactsMatch({ binding, facts: storedFacts[key], receipt, now: preparedAt })) {
-            alreadyReady += 1;
-            return;
-          }
-          try {
-            const profile = await readJson(K.richProfile(key));
-            if (!richProfileMatches(binding, profile, { now: preparedAt })
-              || profile.profileEnrichedAt !== receipt.profileEnrichedAt
-              || profile.richProfileRetainedUntil !== receipt.richProfileRetainedUntil) {
-              unavailable.push({ key, reason: "rich_profile_cache_unavailable" });
-              return;
-            }
-            const factsRow = richRuleFactsFromProfile(profile, {
-              now: preparedAt, receiptVersion: Number(receipt.v) || 0,
-            });
-            if (!factsRow) {
-              unavailable.push({ key, reason: "rich_profile_cache_invalid" });
-              return;
-            }
-            projected[key] = factsRow;
-          } catch (error) {
-            errors.push({ key, reason: String(error?.message || error).slice(0, 120) });
-          }
-        };
-        for (let offset = 0; offset < page.length; offset += 5) {
-          await Promise.all(page.slice(offset, offset + 5).map(prepareOne));
-        }
-        const freshReceipts = await richProfileReceiptsFor(Object.keys(projected), { readMany });
-        for (const key of Object.keys(projected)) {
-          if (!richRuleFactsMatch({ binding: bindings.get(key), facts: projected[key], receipt: freshReceipts[key], now: Date.parse(now()) })) {
-            delete projected[key];
-            unavailable.push({ key, reason: "rich_profile_receipt_changed" });
-          }
-        }
-        const current = await readActive();
-        if (!current || current.generationId !== publication.generationId || current.digest !== publication.digest) {
-          return res.status(409).json({ ok: false, error: "generation_changed_refresh_required",
-            generationId: current?.generationId || null, generationDigest: current?.digest || null });
-        }
-        if (Object.keys(projected).length) await writeHash(K.richRuleFacts, projected);
-        const [readback, finalReceipts, finalPublication] = await Promise.all([
-          richRuleFactsFor(Object.keys(projected), { readMany }),
-          richProfileReceiptsFor(Object.keys(projected), { readMany }), readActive(),
-        ]);
-        if (finalPublication?.generationId !== publication.generationId || finalPublication?.digest !== publication.digest) {
-          return res.status(409).json({ ok: false, error: "generation_changed_refresh_required",
-            generationId: finalPublication?.generationId || null, generationDigest: finalPublication?.digest || null });
-        }
-        let verified = 0;
-        for (const key of Object.keys(projected)) {
-          if (!richRuleFactsMatch({ binding: bindings.get(key), facts: readback[key], receipt: finalReceipts[key], now: Date.parse(now()) })) {
-            errors.push({ key, reason: "rich_profile_projection_readback_failed" });
-            continue;
-          }
-          verified += 1;
-          const directory = directoryFromFacts(readback[key]);
-          Object.assign(schools, directory.schools);
-          Object.assign(companies, directory.companies);
-        }
-        if (Object.keys(schools).length) await writeHash(K.schools, schools);
-        if (Object.keys(companies).length) await writeHash(K.companies, companies);
-        const nextCursor = cursor + page.length < keys.length ? cursor + page.length : null;
-        return res.status(200).json({
-          ok: true, generationId: publication.generationId, generationDigest: publication.digest,
-          cursor, nextCursor,
-          coverage: { total: keys.length, processed: page.length, projected: Object.keys(projected).length,
-            alreadyReady, readbackVerified: verified, unavailable: unavailable.length, errors: errors.length,
-            remaining: Math.max(0, keys.length - cursor - page.length), complete: nextCursor == null },
-          unavailable, errors,
-        });
+        const result = await prepareRichRuleFacts(body, { readJson, readActive, readArtifacts, readMany, writeHash, now });
+        return res.status(result.status).json(result.body);
       }
 
       // Every mutating op is guarded by the revision the browser read.

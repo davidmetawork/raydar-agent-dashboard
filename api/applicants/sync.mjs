@@ -117,6 +117,8 @@ import {
   richRuleFactsFromProfile,
 } from "./_lib/rich-rule-facts.mjs";
 
+import { prepareRichRuleFacts } from "./_lib/rich-rule-facts-rebuild.mjs";
+
 function authed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
   if (!secret) return false;
@@ -837,6 +839,19 @@ export function createSyncHandler({
         const decoded = decodeTransportBody(body);
         if (!decoded.ok) return res.status(400).json({ ok: false, error: decoded.error });
         body = decoded.body;
+      }
+
+      // The existing publisher may derive compact facts from retained caches.
+      // This isolated operation cannot carry profile, rule or decision writes.
+      if (own(body, "prepareRichRuleFacts")) {
+        if (Object.keys(body).length !== 1 || !body.prepareRichRuleFacts
+          || typeof body.prepareRichRuleFacts !== "object" || Array.isArray(body.prepareRichRuleFacts)) {
+          return res.status(400).json({ ok: false, error: "invalid_rich_rule_facts_prepare_request" });
+        }
+        const result = await prepareRichRuleFacts(body.prepareRichRuleFacts, {
+          readJson, readMany: readHashMany, writeHash, now,
+        });
+        return res.status(result.status).json(result.body);
       }
 
       // Core can verify the durable Hub history receipts for the exact keys it

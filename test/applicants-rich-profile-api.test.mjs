@@ -151,6 +151,26 @@ test("rich writes reject mixed mutation channels and invalid payloads before any
   ]) { const f = fixture(); assert.equal((await post(f, body)).statusCode, 400); assert.deepEqual(f.writes, []); }
 });
 
+test("publisher can prepare retained legacy caches without replacing the receipt or accepting mixed writes", async () => {
+  const f = fixture(); await post(f, { richProfiles: { [KEY]: RICH } });
+  delete f.state[K.richRuleFacts][KEY]; delete f.state[K.richProfileReady][KEY].v;
+  f.writes.length = 0;
+  const before = structuredClone(f.state[K.richProfileReady]);
+  const pointer = f.state[K.activeGeneration];
+  const page = { generationId: pointer.generationId, generationDigest: pointer.digest, cursor: 0, batchSize: 1 };
+  const result = await post(f, { prepareRichRuleFacts: page });
+  assert.equal(result.statusCode, 200); assert.equal(result.body.coverage.readbackVerified, 1);
+  assert.deepEqual(f.writes.map(([key]) => key), [K.richRuleFacts, K.schools, K.companies]);
+  assert.deepEqual(f.state[K.richProfileReady], before);
+  f.writes.length = 0;
+  assert.equal((await post(f, { prepareRichRuleFacts: page, decisions: {} })).statusCode, 400);
+  assert.equal((await post(f, { prepareRichRuleFacts: { ...page, generationId: "old-generation" } })).statusCode, 409);
+  const unauthenticated = response();
+  await createSyncHandler(f.deps)({ method: "POST", headers: {}, body: { prepareRichRuleFacts: page } }, unauthenticated);
+  assert.equal(unauthenticated.statusCode, 401);
+  assert.deepEqual(f.writes, []);
+});
+
 test("refresh receipts are read-only, explicit for absent keys, and written only after projections", async () => {
   const f = fixture(); await post(f, { richProfiles: { [KEY]: RICH } });
   const before = f.writes.length;
