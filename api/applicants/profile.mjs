@@ -29,8 +29,8 @@ import {
 import { hasCookie, isParaformAuthError, sleep, trpcGet } from "./_lib/paraform.mjs";
 import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
 import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
-import { richBindingsForSnapshot, richProfileMatches } from "./_lib/rich-profile.mjs";
-import { richProfileForRules, richReceiptMatches } from "./_lib/rich-rule-facts.mjs";
+import { richBindingsForSnapshot, richProfileReadyMatches } from "./_lib/rich-profile.mjs";
+import { richProfileForRules } from "./_lib/rich-rule-facts.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -150,10 +150,7 @@ return async function handler(req, res) {
           const receipt = (await readMany(K.richProfileReady, [cu]))?.[cu] ?? null;
           const current = await readActivePublication({ readJson });
           if (current?.generationId === publication.generationId && current?.digest === publication.digest
-            && richProfileMatches(binding, rich, { now: now() })
-            && richReceiptMatches(binding, receipt, { now: now() })
-            && receipt.profileEnrichedAt === rich.profileEnrichedAt
-            && receipt.richProfileRetainedUntil === rich.richProfileRetainedUntil) {
+            && richProfileReadyMatches(binding, rich, receipt, { now: now() })) {
             paraformProfile = { ...richProfileForRules(rich), ruleFactsEligible: true };
           }
         }

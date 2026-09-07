@@ -70,9 +70,10 @@ export function createCardsHandler({
         const artifacts = await readPublishedArtifacts(pointer, { readJson });
         if (!artifacts) return res.status(409).json({ ok: false, error: "generation_unavailable" });
         const wanted = new Set(ids);
-        const [richCards, sourceReceipts] = await Promise.all([
+        const [richCards, sourceReceipts, richReceipts] = await Promise.all([
           readHashMany(K.richCards, ids).catch(() => ({})),
           readHashMany(K.sourceProfileReady, ids).catch(() => ({})),
+          readHashMany(K.richProfileReady, ids).catch(() => ({})),
         ]);
         const currentSource = (row) => {
           const key = row.profileKey || row.cuId;
@@ -90,7 +91,7 @@ export function createCardsHandler({
         }
         return res.status(200).json({
           ok: true,
-          cards: attachRichCards(cards, richCards, snapshot, { now: now() }),
+          cards: attachRichCards(cards, richCards, snapshot, { now: now(), receipts: richReceipts }),
           generation: { generationId: pointer.generationId, digest: pointer.digest },
         });
       }

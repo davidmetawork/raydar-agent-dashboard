@@ -34,6 +34,17 @@ export function richProfileMatches(binding, profile, { now = Date.now() } = {}) 
     && date(profile.richProfileRetainedUntil) && Date.parse(profile.richProfileRetainedUntil) > now);
 }
 
+// The receipt is written last, after both card and full-profile projections.
+// A matching card alone can be the partial result of an interrupted publish.
+export function richProfileReadyMatches(binding, profile, receipt, options = {}) {
+  return Boolean(richProfileMatches(binding, profile, options)
+    && receipt?.source === 'paraform'
+    && FIELDS.every(field => binding[field] === receipt[field])
+    && date(receipt.profileEnrichedAt)
+    && receipt.profileEnrichedAt === profile.profileEnrichedAt
+    && receipt.richProfileRetainedUntil === profile.richProfileRetainedUntil);
+}
+
 // Company/school logos use their own verified bucket, not the photo allowlist.
 export function richProfileLogo(value) {
   if (typeof value !== "string" || value.length > 1000) return null;
@@ -102,7 +113,7 @@ export function attachRichCards(cards, richCards, snapshot, options) {
   const result = sourceCardsOnly(cards);
   for (const [key, binding] of richBindingsForSnapshot(snapshot)) {
     const profile = richCards?.[key];
-    if (richProfileMatches(binding, profile, options)) result[key] = { ...result[key], paraformProfile: profile };
+    if (richProfileReadyMatches(binding, profile, options?.receipts?.[key], options)) result[key] = { ...result[key], paraformProfile: profile };
   }
   return result;
 }
