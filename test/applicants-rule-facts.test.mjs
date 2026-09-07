@@ -120,17 +120,37 @@ test("company matching includes past and current jobs unless a current-role refi
   assert.equal(facts.factsFor({ kind: "experience", record: { companyId: "co_acme", current: null } }).some((item) => item.id === "experience-current"), false);
 });
 
-test("missing company IDs do not silently substitute title text", () => {
+test("missing company IDs default to the full company name with title and current role optional", () => {
   const facts = loadFactsModule();
-  for (const row of [
-    { kind: "experience", record: { companyName: "Unidentified Co", roleTitle: "Engineer" } },
-  ]) {
-    const offered = facts.factsFor(row);
-    assert.equal(offered.length, 1);
-    assert.equal(offered[0].approximate, true);
-    assert.equal(offered[0].checked, false);
-    assert.equal(facts.createSeed(row, []).conditions.length, 0);
+  const row = { kind: "experience", record: { companyName: "North Oak Holdings", roleTitle: "Revenue Advisor", current: true } };
+  const offered = facts.factsFor(row);
+  assert.deepEqual(Array.from(offered, ({ id, checked }) => ({ id, checked })), [
+    { id: "experience-company-name", checked: true },
+    { id: "experience-title", checked: false },
+    { id: "experience-current", checked: false },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(facts.createSeed(row, ["experience-company-name"]))), {
+    name: "North Oak Holdings experience",
+    conditions: [{ field: "job.companyName", op: "equals", value: "North Oak Holdings" }], labels: {},
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(facts.createSeed(row, ["experience-company-name", "experience-title", "experience-current"]).conditions)), [
+    { field: "job.companyName", op: "equals", value: "North Oak Holdings" },
+    { field: "job.title", op: "contains", value: "Revenue Advisor" },
+    { field: "job.current", op: "is", value: true },
+  ]);
+  assert.equal(facts.createSeed(row, []).conditions.length, 0);
+});
+
+test("company-name choices require a complete non-placeholder name", () => {
+  const facts = loadFactsModule();
+  for (const companyName of [null, "", "  ", "—", "N/A", "na", "none", "null", "undefined", "UNKNOWN", "Unknown   Company", "not provided", "Not Available", "Acme…", "Acme...Labs", "x".repeat(160), "x".repeat(161)]) {
+    const row = { kind: "experience", record: { companyName, roleTitle: "Engineer" } };
+    assert.deepEqual(Array.from(facts.factsFor(row), (item) => item.id), ["experience-title"], String(companyName));
+    assert.equal(facts.createSeed(row, ["experience-company-name"]).conditions.length, 0);
   }
+  const longName = "x".repeat(159);
+  const offered = facts.factsFor({ kind: "experience", record: { companyName: longName } });
+  assert.equal(offered[0].condition.value, longName);
 });
 
 test("the chooser can only create an unsaved seed", () => {
