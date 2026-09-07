@@ -468,6 +468,8 @@ export function interviewDecisionHold(row) {
     return normalizedHold(row.holdReasonCode || row.reasonCode)
       || (row.identityConflict ? "identity_conflict" : row.recipientConflict ? "recipient_conflict" : "policy_hold");
   }
+  if (["hard_hold","stopped"].includes(row.decisionEligibility)) return normalizedHold(row.hardHoldCode)||row.decisionEligibility;
+  if (row.decisionEligibility === "unknown") return "applicant_readiness_pending";
   const candidates = [
     row.hardHoldCode,
     row.hard_hold_code,

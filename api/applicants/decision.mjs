@@ -15,6 +15,7 @@ import {
   readPublishedArtifacts,
   verifyGeneration,
 } from "./_lib/generation.mjs";
+import { applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
 import {
   getJson,
   hashGetJson,
@@ -88,18 +89,42 @@ export function createDecisionHandler({
       if (!profileKey) {
         return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
       }
-      if(!/^[a-z0-9-]{16,80}$/i.test(String(body.requestId || ''))
-        || !row.inputRevision || body.inputRevision!==row.inputRevision
-        || body.readinessRevision!==row.readinessRevision
-        || Number(body.decisionRevision)!==Number(row.decisionRevision)) {
-        return res.status(409).json({ok:false,error:'applicant_changed_refresh_required'});
+      const profileV2 = applicantRowsV2FromSnapshot(artifacts.snapshot)[key] ?? null;
+      const v2Actionability = profileV2?.actionability ?? null;
+      const currentInputRevision = profileV2?.inputRevision || row.inputRevision;
+      const currentReadinessRevision = v2Actionability?.readinessRevision || row.readinessRevision;
+      const currentDecisionRevision = profileV2?.decisionRevision ?? row.decisionRevision;
+      const requestRevisionMismatch = !/^[a-z0-9-]{16,80}$/i.test(String(body.requestId || ''))
+        || !currentInputRevision || body.inputRevision !== currentInputRevision
+        || body.readinessRevision !== currentReadinessRevision
+        || Number(body.decisionRevision) !== Number(currentDecisionRevision);
+      const v2IdentityMismatch = profileV2 && (
+        !profileV2.inputRevision || profileV2.decisionRevision == null || !v2Actionability?.readinessRevision
+        || String(body.applicationId || "") !== profileV2.application.applicationId
+        || String(body.sourceObservationId || "") !== profileV2.application.sourceObservationId
+        || String(body.rowRevision || "") !== String(profileV2.application.rowRevision || "")
+      );
+      if (requestRevisionMismatch || v2IdentityMismatch) {
+        return res.status(409).json({ ok: false, error: "applicant_changed_refresh_required" });
       }
-      const actionability = actionabilityFor(row);
-      if (action === "interview" && !interviewDecisionAllowed(row)) {
+      const actionability = {
+        ...actionabilityFor(row),
+        ...(v2Actionability ? {
+          eligibility: v2Actionability.eligibility,
+          readinessRevision: v2Actionability.readinessRevision,
+          approvalState: v2Actionability.approvalState,
+          canCreateApproval: v2Actionability.canCreateApproval,
+        } : {}),
+      };
+      const v2InterviewAllowed = !v2Actionability || v2Actionability.eligibility === "ready"
+        || (v2Actionability.eligibility === "waiting"
+          && v2Actionability.canCreateApproval === true
+          && v2Actionability.approvalState === "required");
+      if (action === "interview" && (!interviewDecisionAllowed(row) || !v2InterviewAllowed)) {
         return res.status(409).json({
           ok: false,
           error: "interview_hard_hold",
-          reason: interviewDecisionHold(row),
+          reason: v2Actionability?.reasons?.[0] || interviewDecisionHold(row) || "applicant_readiness_pending",
         });
       }
       let retryDecision = null;
@@ -119,7 +144,7 @@ export function createDecisionHandler({
         retryPublicationAt = snapshotGeneratedAt && snapshotGeneratedAt === queueGeneratedAt
           ? snapshotGeneratedAt : null;
         if (!retryableInterviewRequest(retryDecision,retryAck,retryOfRequestId,{
-          currentInputRevision:row.inputRevision,
+          currentInputRevision,
           currentPublicationAt:retryPublicationAt,
         })) {
           return res.status(409).json({ok:false,error:'interview_retry_unavailable'});
@@ -148,9 +173,17 @@ export function createDecisionHandler({
         roleTitle: row.roleTitle,
         reason,
       });
-      Object.assign(decision,{requestId:body.requestId,inputRevision:row.inputRevision,
-        readinessRevision:row.readinessRevision,decisionRevision:Number(row.decisionRevision),status:'pending',
-        ...(action === "interview" ? { deliveryState: "requested" } : {}),
+      Object.assign(decision,{requestId:body.requestId,inputRevision:currentInputRevision,
+        readinessRevision:currentReadinessRevision,decisionRevision:Number(currentDecisionRevision),status:'pending',
+        ...(action === "interview" ? {
+          deliveryState: "requested",
+          ...(v2Actionability?.eligibility === "waiting" ? { requestMode: "when_ready" } : {}),
+          ...(profileV2 ? { application: {
+            id: profileV2.application.applicationId,
+            sourceObservationId: profileV2.application.sourceObservationId,
+            rowRevision: profileV2.application.rowRevision,
+          } } : {}),
+        } : {}),
         generationId: generation.generationId,
         generationDigest: generation.digest,
         ...(action === "interview" ? actionability : {}),
@@ -165,7 +198,7 @@ export function createDecisionHandler({
           previousRuleRunId:retryDecision.ruleRun?.id || null,
           ...(retryAck.reason === SOURCE_STALE_INTERVIEW_FAILURE ? {
             previousInputRevision:retryDecision.inputRevision,
-            currentInputRevision:row.inputRevision,
+            currentInputRevision,
             sourcePublicationAt:retryPublicationAt,
           } : {}),
         }} : {}),
@@ -187,7 +220,7 @@ export function createDecisionHandler({
       const writeOptions = retryRequested ? {
         retryOfRequestId,retryFailureReason:retryAck.reason,rejectSentAck:true,
         ...(retryAck.reason === SOURCE_STALE_INTERVIEW_FAILURE ? {
-          retryCurrentInputRevision:row.inputRevision,
+          retryCurrentInputRevision:currentInputRevision,
           retryPublicationAt,
           retryPreviousInputRevision:retryDecision.inputRevision,
           retryDecisionAt:retryDecision.at,

@@ -275,7 +275,8 @@
     return value === 'off' ? 'Saved as Off.' : value === 'watching' ? 'Preview only on your next run.' : 'Ready for your next manual run.';
   }
   function preparedDraft(draft) {
-    return { ...draft, name: draft.name.trim() || suggestedName(draft), labels: labelsForDraft(draft) };
+    const { profileFactSeed: _profileFactSeed, ...rule } = draft || {};
+    return { ...rule, name: rule.name.trim() || suggestedName(rule), labels: labelsForDraft(rule) };
   }
 
   /* THE PICKER RENDERS A WINDOW OVER THE DIRECTORY, AND THE FILTER SEARCHES
@@ -494,7 +495,8 @@
     if (state.scopeSelected && !draft.scope?.roleIds?.length) {
       state.previewing = false; state.previewError = 'Choose at least one role, or use All roles.'; repaintPreview(); return;
     }
-    const request = { op: 'preview', rule: preparedDraft(draft), ...applicantGeneration() };
+    const request = { op: 'preview', rule: preparedDraft(draft), ...applicantGeneration(),
+      ...(draft.profileFactSeed ? { profileFactSeed: draft.profileFactSeed } : {}) };
     try {
       const preview = await api(request);
       if (serial !== state.previewSerial || state.draft !== draft) return;
@@ -651,7 +653,8 @@
     state.saving = true;
     el("ruleSave").disabled = true;
     try {
-      await api({ op: "save", rev: state.editorRev, rule: preparedDraft(state.draft) });
+      await api({ op: "save", rev: state.editorRev, rule: preparedDraft(state.draft),
+        ...(state.draft.profileFactSeed ? { profileFactSeed: state.draft.profileFactSeed, ...applicantGeneration() } : {}) });
       state.saving = false;
       closeEditor();
       try { await load(); } catch (refreshError) { state.loadError = refreshError.message; }

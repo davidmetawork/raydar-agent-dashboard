@@ -35,6 +35,11 @@ import {
   ruleNeedsProfileFacts,
 } from "./_lib/rich-rule-facts.mjs";
 import {
+  applicantRowsV2ForArtifacts,
+  ruleSubjectFromApplicantV2,
+} from "./_lib/rule-run-v2.mjs";
+import { validateProfileV2RuleSeed } from "./_lib/profile-v2-rule-seed.mjs";
+import {
   MAX_RULES,
   MAX_VERSIONS,
   factsFor,
@@ -87,13 +92,16 @@ export function createRulesHandler({
       readHash(K.acks),
     ]);
     const rows = pendingRows(artifacts?.queue?.rows ?? [], decisions);
-    const scoped = rows.filter((row) => inScope(rule, row));
+    const applicantRowsV2 = applicantRowsV2ForArtifacts(artifacts);
+    const v2Mode = Object.keys(applicantRowsV2).length > 0;
+    const scoped = v2Mode ? rows : rows.filter((row) => inScope(rule, row));
     const profileKeys = scoped.map((row) => row.profileKey || row.cuId);
     const needsEmploymentSource = (Array.isArray(rule?.conditions) ? rule.conditions : [])
       .some((condition) => condition?.field === "employment.fundedEmployerSnapshot");
     const needsRich = ruleNeedsProfileFacts(rule);
     const bindings = richBindingsForSnapshot({ ...artifacts.snapshot, queue: artifacts.queue.rows });
-    const evaluatedAt = Date.parse(now());
+    const clockValue = now();
+    const evaluatedAt = typeof clockValue === "number" ? clockValue : Date.parse(clockValue);
     const [facts, richFacts, richReceipts, fundedEmployerSnapshots, profileReceipts] = await Promise.all([
       factsFor(profileKeys, { readMany }),
       needsRich ? richRuleFactsFor(profileKeys, { readMany }) : {},
@@ -105,9 +113,21 @@ export function createRulesHandler({
     const matched = [];
     const skipped = {};
     const profileFactsCoverage = { required: 0, ready: 0, pending: 0 };
+    let considered = 0;
     for (const row of scoped) {
       const key = row.profileKey || row.cuId;
-      const selected = selectRuleFacts({
+      const v2Subject = v2Mode
+        ? ruleSubjectFromApplicantV2(row, applicantRowsV2[row.key], { now: evaluatedAt })
+        : null;
+      if (v2Mode && !v2Subject) {
+        skipped.profile_v2_fact_set_missing = (skipped.profile_v2_fact_set_missing ?? 0) + 1;
+        continue;
+      }
+      if (!inScope(rule, v2Subject?.row || row)) continue;
+      considered += 1;
+      const selected = v2Subject ? {
+        facts: v2Subject.facts, richEligible: true, projectionPending: false,
+      } : selectRuleFacts({
         row, sourceFacts: facts[key], richFacts: richFacts[key], richReceipt: richReceipts[key],
         bindings, now: evaluatedAt,
       });
@@ -115,13 +135,14 @@ export function createRulesHandler({
         profileFactsCoverage.required += 1;
         profileFactsCoverage[selected.projectionPending ? "pending" : "ready"] += 1;
       }
-      const result = evaluateRule(rule, {
+      const subject = v2Subject ? { ...v2Subject, fundedEmployerSnapshots } : {
         row,
         facts: selected.facts,
         profileFactsPending: selected.projectionPending,
         profileReceipt: profileReceipts[row.profileKey || row.cuId] ?? null,
         fundedEmployerSnapshots,
-      }, { now: evaluatedAt });
+      };
+      const result = evaluateRule(rule, subject, { now: evaluatedAt });
       const interviewSkip = result.matched && rule.action === "interview"
         ? ruleInterviewSkipReason(row, { decision: decisions[row.key], ack: acks[row.key] })
         : null;
@@ -132,7 +153,7 @@ export function createRulesHandler({
     }
     return {
       pending: rows.length,
-      considered: scoped.length,
+      considered,
       matched,
       skipped,
       profileFactsCoverage,
@@ -213,6 +234,11 @@ export function createRulesHandler({
         }
         const normalized = normalizeRule(body.rule, { now, by });
         if (!normalized.ok) return res.status(400).json({ ok: false, error: "rule_invalid", detail: normalized.error });
+        const profileSeed = validateProfileV2RuleSeed(body.profileFactSeed, normalized.rule, artifacts, {
+          now: Date.parse(String(now())) || Date.now(),
+        });
+        if (!profileSeed.ok) return res.status(409).json({ ok: false, error: profileSeed.error,
+          generationId: publication.generationId, generationDigest: publication.digest });
         const run = await runAgainstQueue(normalized.rule, artifacts);
         const latest = await readActive();
         if (latest?.generationId !== publication.generationId || latest?.digest !== publication.digest) {
@@ -277,6 +303,28 @@ export function createRulesHandler({
       if (op === "save") {
         const normalized = normalizeRule(body.rule, { now, by });
         if (!normalized.ok) return res.status(400).json({ ok: false, error: "rule_invalid", detail: normalized.error });
+        if (body.profileFactSeed) {
+          const publication = await readActive();
+          if (!publication || String(body.generationId || "") !== publication.generationId
+            || String(body.generationDigest || "") !== publication.digest) {
+            return res.status(409).json({ ok: false, error: "generation_changed_refresh_required",
+              generationId: publication?.generationId || null, generationDigest: publication?.digest || null });
+          }
+          const artifacts = await readArtifacts(publication);
+          if (!artifacts || !verifyGeneration(artifacts).ok) {
+            return res.status(503).json({ ok: false, error: "generation_unavailable" });
+          }
+          const profileSeed = validateProfileV2RuleSeed(body.profileFactSeed, normalized.rule, artifacts, {
+            now: Date.parse(String(now())) || Date.now(),
+          });
+          if (!profileSeed.ok) return res.status(409).json({ ok: false, error: profileSeed.error,
+            generationId: publication.generationId, generationDigest: publication.digest });
+          const latest = await readActive();
+          if (latest?.generationId !== publication.generationId || latest?.digest !== publication.digest) {
+            return res.status(409).json({ ok: false, error: "generation_changed_refresh_required",
+              generationId: latest?.generationId || null, generationDigest: latest?.digest || null });
+          }
+        }
         const incoming = normalized.rule;
         const index = incoming.id ? doc.rules.findIndex((rule) => rule.id === incoming.id) : -1;
 

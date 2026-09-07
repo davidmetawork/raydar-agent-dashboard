@@ -8,6 +8,7 @@ import { cors, requireAuth } from "./_lib/core.mjs";
 import { readActivePublication, readPublishedArtifacts, verifyGeneration } from "./_lib/generation.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
 import { sourceCardsOnly } from "./_lib/rich-profile.mjs";
+import { applicantProblemsV2, applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
 import {
   partitionByProfileReceipt,
   profileCacheSummary,
@@ -99,6 +100,10 @@ export function createFeedHandler({
         ...(Array.isArray(artifacts.queue?.rows) ? { queue: artifacts.queue.rows } : {}),
       } : null;
       const preparingRows = profilePreparingRows(published);
+      // V2 is an additive Core-owned read projection. Legacy snapshot rows stay
+      // authoritative for every existing screen until Core publishes it.
+      const applicantRowsV2 = applicantRowsV2FromSnapshot(published);
+      const problems = applicantProblemsV2(applicantRowsV2, published?.problems);
       // ONE STALE ROW MUST NOT BLANK THE TAB (2026-09-04). The publish-time
       // fence in sync.mjs is what keeps an unbacked generation from ever
       // becoming active; by the time we read, this generation was already
@@ -121,6 +126,8 @@ export function createFeedHandler({
         acks,
         photos,
         cards: sourceCardsOnly(cards),
+        applicantRowsV2,
+        problems,
         counts: artifacts.counts,
         pipeline: pipeline ?? null,
         profileCache,

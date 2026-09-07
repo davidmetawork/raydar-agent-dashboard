@@ -10,6 +10,9 @@
 (function () {
   "use strict";
 
+  const PROFILE_V2_RULE_SEED_VERSION = "applicant-profile-v2-rule-seed-v1";
+  const SHA256 = /^[a-f0-9]{64}$/iu;
+
   const chooser = {
     open: false,
     cuId: null,
@@ -47,7 +50,45 @@
   }[character]));
   const pageState = () => (typeof STATE === "undefined" ? null : STATE);
 
+  function profileV2(row, profile) {
+    const selected = profile?.profileV2 || pageState()?.applicantRowsV2?.[row?.key] || null;
+    if (!selected || typeof selected !== "object" || !SHA256.test(String(selected.factSetDigest || ""))
+      || selected.factsCurrent !== true || !selected.application?.applicationId
+      || selected.inputRevision !== String(row?.inputRevision || "")
+      || Number(selected.decisionRevision) !== Number(row?.decisionRevision)) return null;
+    return selected;
+  }
+
+  function profileV2Sources(row, projection) {
+    const facts = projection?.profile?.facts || {};
+    const source = (kind, index, record, title, subtitle) => ({
+      kind, source: "v2", index, record, title, subtitle, projection, key: row?.key || null,
+    });
+    const sources = [];
+    const usable = (fact) => fact?.state !== "unavailable" && text(fact?.value, 120);
+    if (usable(facts.title)) sources.push(source("headline", 0, { value: facts.title.value }, usable(facts.title), "Versioned profile headline"));
+    if (usable(facts.location)) sources.push(source("location", 0, { value: facts.location.value }, usable(facts.location), "Versioned applicant location"));
+    const appliedTo = projection.application?.appliedTo || {};
+    if (validId(appliedTo.roleId)) sources.push(source("application", 0, { roleId: appliedTo.roleId, roleTitle: text(appliedTo.title, 120) }, text(appliedTo.title, 120) || "Applied role", "Exact applied role"));
+    const append = (kind, records) => (Array.isArray(records) ? records : []).forEach((record, index) => {
+      if (record?.state === "unavailable") return;
+      if (kind === "experience" && !validId(record?.companyId) && !text(record?.companyName) && !text(record?.roleTitle, 120)) return;
+      if (kind === "education" && !validId(record?.schoolId) && !text(record?.school) && !text(record?.degree, 120)) return;
+      sources.push(source(kind, index, record, kind === "experience" ? text(record?.roleTitle, 120) || "Role" : text(record?.school, 120) || "School", kind === "experience" ? text(record?.companyName, 120) || "Experience" : text(record?.degree, 120) || "Education"));
+    });
+    append("experience", facts.experiences?.entries);
+    append("education", facts.education?.entries);
+    return sources;
+  }
+
   function profileSources(cuId, row, profile = pageState()?.profiles?.[cuId] || {}) {
+    // Core's selected V2 projection wins outright. Its source rows can differ
+    // from the convenience source cache shown below, so those cache details
+    // never become Rules inputs while a V2 projection exists.
+    if (profile?.profileV2 || pageState()?.applicantRowsV2?.[row?.key]) {
+      const projection = profileV2(row, profile);
+      return projection ? profileV2Sources(row, projection) : [];
+    }
     const sources = [];
     // This flag is added only by the authenticated profile endpoint after its
     // identity and retention checks. Array positions are scoped to this source.
@@ -227,7 +268,7 @@
     const facts = factsFor(source).filter((fact) => selected.has(fact.id));
     const labels = {};
     for (const fact of facts) Object.assign(labels, fact.labels);
-    return {
+    const seed = {
       name: suggestedName(source, facts),
       conditions: facts.map((fact) => ({
         field: fact.condition.field,
@@ -236,11 +277,29 @@
       })),
       labels,
     };
+    if (source?.source === "v2" && source.projection) {
+      const application = source.projection.application || {};
+      seed.profileFactSeed = {
+        version: PROFILE_V2_RULE_SEED_VERSION,
+        key: text(chooser.row?.key || source.key, 240), applicationId: text(application.applicationId, 80),
+        sourceObservationId: text(application.sourceObservationId, 180), rowRevision: text(application.rowRevision, 180),
+        inputRevision: text(source.projection.inputRevision, 180), decisionRevision: Number(source.projection.decisionRevision),
+        factSetDigest: String(source.projection.factSetDigest || "").toLowerCase(),
+        selection: { kind: source.kind, index: source.index, recordId: text(source.record?.recordId, 180), selectedFactIds: facts.map((fact) => fact.id) },
+      };
+    }
+    return seed;
   }
 
   function kindLabel(source) {
     const kind = { application: "Applied role", experience: "Experience", education: "Education", location: "Location", headline: "Headline" }[source.kind];
-    return kind + (source.kind === "application" ? "" : source.source === "paraform" ? " · Cached LinkedIn" : " · Application profile");
+    const field = source.kind === "headline" ? "title" : source.kind;
+    const provenance = source.source === "v2"
+      ? source.record?.source || source.projection?.profile?.facts?.[field]?.source
+      : source.source;
+    return kind + (source.kind === "application" ? ""
+      : ["paraform", "paraform_linkedin"].includes(provenance) ? " · Cached LinkedIn"
+      : provenance === "resume" ? " · Resume fallback" : " · Application profile");
   }
 
   function mount() {
