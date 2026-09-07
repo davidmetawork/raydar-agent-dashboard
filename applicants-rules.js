@@ -321,6 +321,11 @@
   function valueControl(condition, index) {
     const f = field(condition.field);
     if (!f) return "";
+    if (f.kind === "company_name") {
+      return '<div class="v"><input type="text" maxlength="159" value="' + enc(condition.value ?? "") + '" ' +
+        'data-ci="' + index + '" data-part="value" aria-label="Company name" placeholder="Full company name">' +
+        '<p class="hint">Matches the full company name, ignoring case and spacing.</p></div>';
+    }
     if (f.kind === "bool") {
       return '<select class="v" data-ci="' + index + '" data-part="value" aria-label="Condition value">' +
         '<option value="true"' + (condition.value === true ? " selected" : "") + ">Yes</option>" +

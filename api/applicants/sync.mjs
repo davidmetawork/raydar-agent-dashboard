@@ -118,6 +118,7 @@ import {
 } from "./_lib/rich-rule-facts.mjs";
 
 import { prepareRichRuleFacts } from "./_lib/rich-rule-facts-rebuild.mjs";
+import { richProfileWork } from "./_lib/rich-profile-work.mjs";
 
 function authed(req) {
   const secret = process.env.APPHUB_SYNC_KEY || "";
@@ -705,6 +706,32 @@ export function createSyncHandler({
 
     try {
       if (req.method === "GET") {
+        if (String(req.query?.richProfileWork || "") === "1") {
+          const publication = await readActivePublication({ readJson });
+          const artifacts = publication ? await readPublishedArtifacts(publication, { readJson }) : null;
+          if (!artifacts) return res.status(503).json({ ok: false, error: "generation_unavailable" });
+          const [sourceReceipts, richCards, richReceipts] = await Promise.all([
+            readHash(K.sourceProfileReady), readHash(K.richCards), readHash(K.richProfileReady),
+          ]);
+          // A store outage is not evidence of an empty enrichment backlog.
+          for (const value of [sourceReceipts, richCards, richReceipts]) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) {
+              return res.status(503).json({ ok: false, error: "rich_profile_work_unavailable" });
+            }
+          }
+          const observedAt = now();
+          const work = richProfileWork({ ...artifacts.snapshot, queue: artifacts.queue.rows },
+            sourceReceipts, richCards, richReceipts, { now: Date.parse(observedAt) });
+          const current = await readActivePublication({ readJson });
+          if (current?.generationId !== publication.generationId || current?.digest !== publication.digest) {
+            return res.status(409).json({ ok: false, error: "generation_changed" });
+          }
+          return res.status(200).json({
+            ok: true, observedAt,
+            generation: { generationId: publication.generationId, digest: publication.digest },
+            ...work,
+          });
+        }
         if (String(req.query?.profileCache || "") === "1") {
           const [publication, sourceProfileReceipts] = await Promise.all([
             readActivePublication({ readJson }),

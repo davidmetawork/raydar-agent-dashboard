@@ -136,6 +136,12 @@ export const FIELDS = {
     picker: "companies", read: (_s, row) => row?.id,
     display: (_s, row) => row?.name ?? row?.id,
   },
+  "job.companyName": {
+    group: "job", ops: ["equals"], kind: "company_name", label: "Company name",
+    // Whole source-name equality works without a verified company ID. Names
+    // at the cache limit or with visible truncation are not complete evidence.
+    read: (_s, row) => completeCompanyName(row?.name) ? row.name : null,
+  },
   "job.title": {
     group: "job", ops: ["contains"], kind: "text", label: "Job title",
     read: (_s, row) => row?.title,
@@ -317,15 +323,24 @@ function employmentFactsSourceStatus(subject, now) {
 // ── comparison ─────────────────────────────────────────────────────────────
 
 const completeSchoolName = (value) => typeof value === "string" && value.trim().length > 0 && value.length < 160;
-const normalizeSchoolName = (value) => value.normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase();
+const normalizeName = (value) => value.normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase();
+const COMPANY_NAME_PLACEHOLDERS = new Set([
+  "n/a", "na", "none", "null", "undefined", "unknown", "unknown company", "not provided", "not available",
+]);
+const completeCompanyName = (value) => typeof value === "string" && value.length < 160
+  && /[\p{L}\p{N}]/u.test(value) && !/(?:\.{3}|…)/u.test(value)
+  && !COMPANY_NAME_PLACEHOLDERS.has(normalizeName(value));
 
 function compare(op, actual, expected, kind) {
   // The fail-closed gate. Nothing absent satisfies anything.
   if (actual == null || actual === "") return false;
   switch (op) {
-    case "equals":
-      return kind === "school_name" && completeSchoolName(actual) && completeSchoolName(expected)
-        && normalizeSchoolName(actual) === normalizeSchoolName(expected);
+    case "equals": {
+      const completeName = kind === "school_name" ? completeSchoolName
+        : kind === "company_name" ? completeCompanyName : null;
+      return Boolean(completeName && completeName(actual) && completeName(expected)
+        && normalizeName(actual) === normalizeName(expected));
+    }
     case "any_of": {
       const wanted = Array.isArray(expected) ? expected : [expected];
       // Degree levels route through levelMatches so `unknown` can never
@@ -510,6 +525,7 @@ const VALUE_CHECK = {
     && value.every((tier) => TIERS.includes(tier)),
   text: (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 120,
   school_name: completeSchoolName,
+  company_name: completeCompanyName,
   bool: (value) => typeof value === "boolean",
   number: (value) => typeof value === "number" && Number.isFinite(value),
   year: (value, op) => (op === "between"

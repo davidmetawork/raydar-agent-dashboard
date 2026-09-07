@@ -221,6 +221,7 @@ function richHarness() {
   const requests = [];
   const patches = [];
   let feedLoads = 0;
+  let now = Date.parse("2026-09-07T00:00:00Z");
   const STATE = {
     cards: {},
     generation: { generationId: "generation-one", digest: "digest-one" },
@@ -228,6 +229,10 @@ function richHarness() {
   const context = {
     STATE,
     window: {},
+    Date: { now: () => now },
+    richProfile: (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null,
+    hasProviderHistory: (provider) => Boolean(provider && [provider.exp, provider.edu, provider.experiences, provider.education]
+      .some((items) => Array.isArray(items) && items.length > 0)),
     URLSearchParams,
     fetch: (url, options) => {
       const request = deferred();
@@ -240,7 +245,7 @@ function richHarness() {
   };
   const source = `${applicants.slice(richStart, richEnd)}; ({ RICH_CARDS, syncRichGeneration, requestVisibleRichCards, cardFor })`;
   const helpers = runInNewContext(source, context);
-  return { STATE, requests, patches, helpers, feedLoads: () => feedLoads };
+  return { STATE, requests, patches, helpers, feedLoads: () => feedLoads, advance: (milliseconds) => { now += milliseconds; } };
 }
 function ok(generation, cards) {
   return { status: 200, ok: true, json: async () => ({ ok: true, generation, cards }) };
@@ -290,4 +295,175 @@ test("a rich-card generation conflict refreshes the feed once", async () => {
   h.requests[0].resolve({ status: 409, ok: false, json: async () => ({ ok: false, error: "generation_changed" }) });
   await settle();
   assert.equal(h.feedLoads(), 1);
+});
+
+test("an absent rich card is retried after the bounded delay and can appear in the same generation", async () => {
+  const h = richHarness();
+  const id = "core:late-rich";
+  const row = { profileKey: id };
+  h.STATE.cards[id] = { title: "Application headline" };
+
+  h.helpers.requestVisibleRichCards([row]);
+  h.requests[0].resolve(ok(h.STATE.generation, { [id]: { title: "Application headline" } }));
+  await settle();
+  assert.equal(h.helpers.cardFor(id).paraformProfile, undefined);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 1, "a negative response cannot create a repaint request loop");
+
+  h.advance(60_000);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 2);
+  h.requests[1].resolve(ok(h.STATE.generation, {
+    [id]: { title: "Separately read source headline", paraformProfile: {
+      title: "Later cached LinkedIn headline", exp: [{ role: "Provider role", company: "Provider Co" }], edu: [],
+    } },
+  }));
+  await settle();
+  assert.equal(h.helpers.cardFor(id).title, "Application headline", "the rich side channel cannot replace the feed's source card");
+  assert.equal(h.helpers.cardFor(id).paraformProfile.title, "Later cached LinkedIn headline");
+  h.advance(60_000);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 2, "a positive overlay stays cached for the generation");
+});
+
+test("a sparse rich card stays visible while the same generation retries for provider history", async () => {
+  const h = richHarness();
+  const id = "core:sparse-rich";
+  const row = { profileKey: id };
+  h.STATE.cards[id] = { title: "Application headline" };
+  const sparse = { title: "Cached LinkedIn headline", paraformTier: "A", paraformTierSource: "paraform", exp: [], edu: [] };
+
+  h.helpers.requestVisibleRichCards([row]);
+  h.requests[0].resolve(ok(h.STATE.generation, { [id]: { paraformProfile: sparse } }));
+  await settle();
+  assert.equal(h.helpers.cardFor(id).paraformProfile.title, "Cached LinkedIn headline");
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 1);
+
+  h.advance(60_000);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 2);
+  h.requests[1].resolve(ok(h.STATE.generation, {
+    [id]: { paraformProfile: { ...sparse, exp: [{ role: "Provider role", company: "Provider Co" }] } },
+  }));
+  await settle();
+  assert.equal(h.helpers.cardFor(id).paraformProfile.exp[0].role, "Provider role");
+  h.advance(60_000);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 2, "populated provider history completes the generation cache");
+});
+
+test("a transient rich-card error keeps source data and retries no faster than the bound", async () => {
+  const h = richHarness();
+  const id = "core:temporary-error";
+  const row = { profileKey: id };
+  h.STATE.cards[id] = { title: "Source remains visible" };
+
+  h.helpers.requestVisibleRichCards([row]);
+  h.requests[0].resolve({ status: 502, ok: false, json: async () => ({ ok: false, error: "cards_unavailable" }) });
+  await settle();
+  assert.equal(h.helpers.cardFor(id).title, "Source remains visible");
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 1);
+  h.advance(59_999);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 1);
+  h.advance(1);
+  h.helpers.requestVisibleRichCards([row]);
+  assert.equal(h.requests.length, 2);
+});
+
+const profileFetchStart = applicants.indexOf("async function fetchProfile");
+const profileFetchEnd = applicants.indexOf("/* ---- profile modal", profileFetchStart);
+assert.ok(profileFetchStart >= 0 && profileFetchEnd > profileFetchStart, "profile fetch helper is extractable from the shipped page");
+
+function profileFetchHarness() {
+  const requests = [];
+  let now = Date.parse("2026-09-07T00:00:00Z");
+  const STATE = { profiles: {}, generation: { generationId: "generation-one", digest: "digest-one" } };
+  const context = {
+    STATE,
+    Date: { now: () => now },
+    encodeURIComponent,
+    richGenerationKey: () => `${STATE.generation.generationId}:${STATE.generation.digest}`,
+    richProfile: (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null,
+    hasProviderHistory: (provider) => Boolean(provider && [provider.exp, provider.edu, provider.experiences, provider.education]
+      .some((items) => Array.isArray(items) && items.length > 0)),
+    showGate: () => { throw new Error("unexpected auth gate"); },
+    fetch: (url, options) => {
+      const request = deferred();
+      requests.push({ url, options, ...request });
+      return request.promise;
+    },
+  };
+  const source = `const RICH_RETRY_MS = 60_000; const PROFILE_RETRY_AT = new Map(); ${applicants.slice(profileFetchStart, profileFetchEnd)}; ({ fetchProfile, PROFILE_RETRY_AT })`;
+  const extracted = runInNewContext(source, context);
+  return { STATE, requests, helpers: extracted, advance: (milliseconds) => { now += milliseconds; } };
+}
+
+function profileResponse(profile) {
+  return { status: 200, ok: true, json: async () => profile };
+}
+
+test("reopening a source-only modal can pick up a later rich profile in the same generation", async () => {
+  const h = profileFetchHarness();
+  const id = "core:late-modal";
+  const source = { title: "Application headline", experiences: [{ roleTitle: "Source role" }] };
+
+  const first = h.helpers.fetchProfile(id);
+  h.requests[0].resolve(profileResponse(source));
+  assert.equal((await first).paraformProfile, undefined);
+  assert.equal(await h.helpers.fetchProfile(id), source);
+  assert.equal(h.requests.length, 1, "reopening immediately uses the visible source response");
+
+  h.advance(60_000);
+  const second = h.helpers.fetchProfile(id);
+  assert.equal(h.requests.length, 2);
+  h.requests[1].resolve(profileResponse({ ...source, paraformProfile: { experiences: [{ roleTitle: "Provider role" }] } }));
+  assert.equal((await second).paraformProfile.experiences[0].roleTitle, "Provider role");
+  h.advance(60_000);
+  await h.helpers.fetchProfile(id);
+  assert.equal(h.requests.length, 2, "a positive modal overlay stays cached for the generation");
+});
+
+test("reopening a sparse rich modal retains its provider facts and later picks up history", async () => {
+  const h = profileFetchHarness();
+  const id = "core:sparse-modal";
+  const sparse = {
+    title: "Application headline",
+    experiences: [{ roleTitle: "Source role" }],
+    paraformProfile: { title: "Cached LinkedIn headline", paraformTier: "B", paraformTierSource: "paraform", experiences: [], education: [] },
+  };
+
+  const first = h.helpers.fetchProfile(id);
+  h.requests[0].resolve(profileResponse(sparse));
+  assert.equal((await first).paraformProfile.paraformTier, "B");
+  assert.equal((await h.helpers.fetchProfile(id)).paraformProfile.title, "Cached LinkedIn headline");
+  assert.equal(h.requests.length, 1);
+
+  h.advance(60_000);
+  const second = h.helpers.fetchProfile(id);
+  assert.equal(h.requests.length, 2);
+  h.requests[1].resolve(profileResponse({
+    ...sparse,
+    paraformProfile: { ...sparse.paraformProfile, experiences: [{ roleTitle: "Provider role" }] },
+  }));
+  assert.equal((await second).paraformProfile.experiences[0].roleTitle, "Provider role");
+});
+
+test("a failed modal request renders as unavailable and observes the same retry bound", async () => {
+  const h = profileFetchHarness();
+  const id = "core:modal-error";
+  const first = h.helpers.fetchProfile(id);
+  h.requests[0].resolve({ status: 502, ok: false, json: async () => ({ ok: false, error: "profile_unavailable" }) });
+  await assert.rejects(first, /Profile fetch failed/);
+  assert.equal(Object.hasOwn(h.STATE.profiles, id), true);
+  assert.equal(h.STATE.profiles[id], null);
+  assert.equal(await h.helpers.fetchProfile(id), null);
+  assert.equal(h.requests.length, 1);
+  h.advance(60_000);
+  const second = h.helpers.fetchProfile(id);
+  assert.equal(h.requests.length, 2);
+  h.requests[1].resolve(profileResponse({ title: "Source profile recovered" }));
+  assert.equal((await second).title, "Source profile recovered");
 });

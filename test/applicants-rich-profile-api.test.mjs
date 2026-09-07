@@ -118,6 +118,17 @@ test("refresh-due snapshots remain visible until retention ends", async () => {
   assert.equal((await profile(f, day31)).body.paraformProfile, undefined);
 });
 
+test("cards and modal require the same last-written rich receipt after a partial publication", async () => {
+  for (const field of [null, "sourceObservationId", "candidateUserId", "connectionReceiptId", "profileEnrichedAt", "richProfileRetainedUntil"]) {
+    const f = fixture(); await post(f, { richProfiles: { [KEY]: RICH } });
+    if (field === null) delete f.state[K.richProfileReady][KEY];
+    else f.state[K.richProfileReady][KEY][field] = "not-the-completed-profile";
+    assert.equal((await cards(f)).body.cards[KEY].paraformProfile, undefined, String(field));
+    assert.equal((await profile(f)).body.paraformProfile, undefined, String(field));
+    assert.equal((await feed(f)).body.snapshot.queue.length, 1, "source Review stays available");
+  }
+});
+
 test("optional store failure leaves the source feed and modal available", async () => {
   const f = fixture();
   const list = await feed(f, { readHash: async (key) => { if (key === K.richCards) throw new Error("cache unavailable"); return f.state[key] || {}; } });
@@ -214,7 +225,7 @@ test("bounded rich card requests reject changed generations and never read more 
   const ids = Array.from({ length: 100 }, (_, i) => `core:application${String(i).padStart(16, "0")}`);
   const res = await cards(f, { readHashMany: async (key, keys) => { reads.push([key, keys.length]); return {}; } }, { cus: ids.join(",") });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(reads, [[K.cards, 60], [K.richCards, 60], [K.sourceProfileReady, 60]]);
+  assert.deepEqual(reads, [[K.cards, 60], [K.richCards, 60], [K.sourceProfileReady, 60], [K.richProfileReady, 60]]);
   let pointerReads = 0;
   const raced = await cards(f, { readJson: async (key) => {
     if (key === K.activeGeneration && ++pointerReads > 1) return null;

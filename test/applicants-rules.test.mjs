@@ -14,6 +14,7 @@ import {
   MAX_CONDITIONS,
   describeRule,
   evaluateRule,
+  fieldCatalog,
   inScope,
   normalizeRule,
   validateCondition,
@@ -418,4 +419,92 @@ test("university name and degree must match the same education row", () => {
   const withoutIds = (profile) => ({ ...profile, education: profile.education.map(({ schoolId, ...row }) => row) });
   assert.equal(evaluateRule(nameRule, subject(withoutIds(HARVARD_MBA))).matched, false);
   assert.equal(evaluateRule(nameRule, subject(withoutIds(HARVARD_UNDERGRAD))).matched, true);
+});
+
+test("company-name equality is an experience field with a readable saved condition", () => {
+  assert.deepEqual(fieldCatalog().find((field) => field.name === "job.companyName"), {
+    name: "job.companyName", group: "job", ops: ["equals"], kind: "company_name",
+    label: "Company name", picker: null, approximate: false,
+  });
+  const companyName = "Company ".repeat(16).trim();
+  const condition = { field: "job.companyName", op: "equals", value: companyName };
+  const saved = normalizeRule({ name: "Company experience", action: "interview", conditions: [condition] });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.rule.conditions, [condition], "the full company name survives saving past the text field's 120-character limit");
+  assert.deepEqual(describeRule(saved.rule), [`Company name is exactly ${companyName}`]);
+});
+
+test("company-name rules match the full source name without needing a company ID", () => {
+  const companyRule = rule([{ field: "job.companyName", op: "equals", value: "three oak holdings" }]);
+  const s = subject({ experiences: [{ companyName: "THREE   OAK HOLDINGS", roleTitle: "Founder", current: true }] });
+  s.facts.jobs[0].source = "source";
+  const result = evaluateRule(companyRule, s, { now: NOW });
+  assert.equal(result.matched, true);
+  assert.deepEqual(result.evidence, [{
+    field: "job.companyName", op: "equals", source: "source", matched: "THREE   OAK HOLDINGS",
+  }]);
+
+  const matches = (actual, expected) => evaluateRule(rule([
+    { field: "job.companyName", op: "equals", value: expected },
+  ]), subject({ experiences: [{ companyName: actual }] }), { now: NOW }).matched;
+  assert.equal(matches("  Three \t Oak\nHoldings  ", "THREE OAK HOLDINGS"), true);
+  assert.equal(matches("Société Example", "Socie\u0301te\u0301 Example"), true);
+  for (const [actual, expected] of [
+    ["Three Oak Holdings LLC", "Three Oak Holdings"],
+    ["Three Oak Holdings", "Oak"],
+    ["Acme, Inc.", "Acme Inc."],
+    ["The Example Company", "Example Company"],
+    ["Société Example", "Societe Example"],
+    ["THREE OAK HOLDINGS", "THREE OAK HOLDING"],
+  ]) assert.equal(matches(actual, expected), false, `${actual} must not become ${expected}`);
+});
+
+test("company-name validation and evaluation reject absent, placeholder, and truncated names", () => {
+  const condition = (value) => ({ field: "job.companyName", op: "equals", value });
+  const matches = (actual, expected) => evaluateRule(rule([condition(expected)]),
+    subject({ experiences: [{ companyName: actual, roleTitle: "Director" }] }), { now: NOW }).matched;
+  for (const invalid of [null, undefined, 42, {}, [], "", " \t ", "—", "-", "...", "?", "N/A", "NA", "None", "null",
+    "undefined", "Unknown", "unknown   COMPANY", "not provided", "NOT AVAILABLE", "Acme…", "Acme... Holdings"]) {
+    assert.ok(validateCondition(condition(invalid)), `must reject ${String(invalid)}`);
+    assert.equal(matches("Acme", invalid), false, "invalid expected names cannot match");
+    if (typeof invalid === "string" || invalid == null) {
+      assert.equal(matches(invalid, invalid ?? "Acme"), false, "invalid source names cannot match");
+    }
+  }
+  assert.ok(validateCondition({ ...condition("Acme"), op: "contains" }));
+  assert.ok(validateCondition({ ...condition(["Acme"]), op: "any_of" }));
+  for (const length of [159, 160, 161]) {
+    const name = "x".repeat(length);
+    assert.equal(validateCondition(condition(name)) === null, length < 160);
+    assert.equal(matches(name, name), length < 160);
+  }
+  assert.equal(matches("x".repeat(161), "x".repeat(160)), false, "a truncated cache prefix cannot match");
+});
+
+test("company name, title, and current status must all describe the same job", () => {
+  const company = { field: "job.companyName", op: "equals", value: "BigCo" };
+  const title = { field: "job.title", op: "contains", value: "Director" };
+  const current = { field: "job.current", op: "is", value: true };
+  const profile = { experiences: [
+    { companyName: "BigCo", roleTitle: "Analyst", current: false },
+    { companyName: "SmallCo", roleTitle: "Director", current: true },
+  ] };
+  assert.equal(evaluateRule(rule([company]), subject(profile), { now: NOW }).matched, true, "past employers can match when current status is not required");
+  for (const conditions of [[company, title], [company, current], [company, title, current]]) {
+    assert.equal(evaluateRule(rule(conditions), subject(profile), { now: NOW }).matched, false, "facts from a different job must not complete a match");
+  }
+  profile.experiences.push({ companyName: "BIGCO", roleTitle: "Director", current: false });
+  assert.equal(evaluateRule(rule([company, title, current]), subject(profile), { now: NOW }).matched, false, "an old matching title does not make the company current");
+  profile.experiences.at(-1).current = true;
+  assert.equal(evaluateRule(rule([company, title, current]), subject(profile), { now: NOW }).matched, true);
+});
+
+test("company-name matching does not change verified company-ID rules", () => {
+  const idRule = rule([{ field: "job.companyId", op: "any_of", value: ["co_big"] }]);
+  for (const companyId of [undefined, "co_other"]) {
+    const s = subject({ experiences: [{ companyId, companyName: "BigCo" }] });
+    assert.equal(evaluateRule(idRule, s, { now: NOW }).matched, false, "name equality never supplies or replaces a verified ID");
+    assert.equal(evaluateRule(rule([{ field: "job.companyName", op: "equals", value: "BigCo" }]), s, { now: NOW }).matched, true);
+  }
+  assert.equal(evaluateRule(idRule, subject({ experiences: [{ companyId: "co_big", companyName: "Renamed company" }] }), { now: NOW }).matched, true);
 });
