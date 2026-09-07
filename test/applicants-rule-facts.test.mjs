@@ -120,11 +120,10 @@ test("company matching includes past and current jobs unless a current-role refi
   assert.equal(facts.factsFor({ kind: "experience", record: { companyId: "co_acme", current: null } }).some((item) => item.id === "experience-current"), false);
 });
 
-test("missing company and university IDs do not silently substitute title or degree text", () => {
+test("missing company IDs do not silently substitute title text", () => {
   const facts = loadFactsModule();
   for (const row of [
     { kind: "experience", record: { companyName: "Unidentified Co", roleTitle: "Engineer" } },
-    { kind: "education", record: { school: "Unidentified University", degree: "BA" } },
   ]) {
     const offered = facts.factsFor(row);
     assert.equal(offered.length, 1);
@@ -142,4 +141,22 @@ test("the chooser can only create an unsaved seed", () => {
   assert.match(source, /window\.RaydarRules\?\.fromApplicant\(cuId, row, seed\)/);
   assert.match(source, /profileModal\.inert = true/);
   assert.match(html, /window\.RaydarRuleFacts\?\.close\?\.\(\)/);
+});
+
+
+test("a university without an ID defaults to its complete name, with degree optional", () => {
+  const facts = loadFactsModule();
+  const row = { kind: "education", record: { school: "University of Central Missouri", degree: "Master’s — Computer Science" } };
+  const offered = facts.factsFor(row);
+  assert.deepEqual(Array.from(offered, ({ id, checked }) => ({ id, checked })), [
+    { id: "education-school-name", checked: true }, { id: "education-degree", checked: false },
+  ]);
+  const seed = JSON.parse(JSON.stringify(facts.createSeed(row, ["education-school-name"])));
+  assert.deepEqual(seed, { name: "University of Central Missouri education", conditions: [
+    { field: "school.name", op: "equals", value: "University of Central Missouri" },
+  ], labels: {} });
+  for (const length of [159, 160, 161]) {
+    const long = { kind: "education", record: { school: "x".repeat(length) } };
+    assert.equal(facts.factsFor(long).some((item) => item.id === "education-school-name"), length < 160);
+  }
 });

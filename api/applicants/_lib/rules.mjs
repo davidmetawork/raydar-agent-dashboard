@@ -63,6 +63,12 @@ export const FIELDS = {
     picker: "schools", read: (_s, row) => row?.id,
     display: (_s, row) => row?.name ?? row?.id,
   },
+  "school.name": {
+    group: "school", ops: ["equals"], kind: "school_name", label: "University name",
+    // A 160-character cached name may be a truncated prefix. Only shorter
+    // names are known to be complete; equality never resolves an entity ID.
+    read: (_s, row) => completeSchoolName(row?.name) ? row.name : null,
+  },
   "school.level": {
     group: "school", ops: ["any_of"], kind: "levels", label: "Degree level is",
     read: (_s, row) => row?.levels ?? row?.level, display: (_s, row) => row?.degree ?? row?.level,
@@ -310,10 +316,16 @@ function employmentFactsSourceStatus(subject, now) {
 
 // ── comparison ─────────────────────────────────────────────────────────────
 
+const completeSchoolName = (value) => typeof value === "string" && value.trim().length > 0 && value.length < 160;
+const normalizeSchoolName = (value) => value.normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase();
+
 function compare(op, actual, expected, kind) {
   // The fail-closed gate. Nothing absent satisfies anything.
   if (actual == null || actual === "") return false;
   switch (op) {
+    case "equals":
+      return kind === "school_name" && completeSchoolName(actual) && completeSchoolName(expected)
+        && normalizeSchoolName(actual) === normalizeSchoolName(expected);
     case "any_of": {
       const wanted = Array.isArray(expected) ? expected : [expected];
       // Degree levels route through levelMatches so `unknown` can never
@@ -497,6 +509,7 @@ const VALUE_CHECK = {
   tiers: (value) => Array.isArray(value) && value.length > 0
     && value.every((tier) => TIERS.includes(tier)),
   text: (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 120,
+  school_name: completeSchoolName,
   bool: (value) => typeof value === "boolean",
   number: (value) => typeof value === "number" && Number.isFinite(value),
   year: (value, op) => (op === "between"
@@ -595,7 +608,7 @@ export function inScope(rule, row) {
 // ── plain English, for the rule card ───────────────────────────────────────
 
 const OP_WORDS = {
-  any_of: "is one of", contains: "contains", is: "is",
+  any_of: "is one of", contains: "contains", equals: "is exactly", is: "is",
   at_least: "at least", at_most: "at most",
   after: "after", before: "before", between: "between", member_of: "in snapshot",
 };

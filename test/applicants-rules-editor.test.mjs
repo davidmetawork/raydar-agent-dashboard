@@ -361,3 +361,35 @@ test("profile chooser seeds reach the shared evaluator with the exact rich or so
   assert.deepEqual(Object.keys(state.decisions), [candidate.key]);
   assert.equal(state.hits[finalRule.id][0].evidence[0].source, "paraform");
 });
+
+
+test("a missing-ID university name seed previews and manually evaluates the same cached school", async (t) => {
+  const state = createFixtureState();
+  const server = createFixtureServer({ state });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((response) => response.json());
+  const fence = { generationId: "local-rules-design-fixture-v1", generationDigest: "local-fixture-no-production-data" };
+  const feed = await fetch(`${base}/api/applicants/feed`).then((response) => response.json());
+  const candidate = feed.snapshot.queue.find((row) => row.name === "Jon Bell");
+  const profile = await fetch(`${base}/api/applicants/profile?cu=${encodeURIComponent(candidate.profileKey)}`).then((response) => response.json());
+  const context = { document: { addEventListener() {} } }; context.window = context;
+  vm.runInNewContext(await readFile(new URL("../applicants-rule-facts.js", import.meta.url), "utf8"), context);
+  const chooser = context.RaydarRuleFacts;
+  const row = chooser.profileSources(candidate.profileKey, candidate, profile).find((item) => item.kind === "education" && item.source === "paraform");
+  assert.equal(row.record.schoolId, null);
+  const rule = { ...chooser.createSeed(row, ["education-school-name"]), id: "fixture-name-rule", action: "pass", state: "live", scope: { roleIds: [] } };
+  const preview = await post("/api/applicants/rules", { op: "preview", rule, ...fence });
+  assert.equal(preview.matched, 1);
+  assert.equal(preview.samples[0].name, candidate.name);
+  assert.equal(preview.samples[0].evidence[0].source, "paraform");
+  const crossed = await post("/api/applicants/rules", { op: "preview", ...fence, rule: { ...rule, conditions: [...rule.conditions, { field: "school.degreeText", op: "contains", value: "B.S." }] } });
+  assert.equal(crossed.matched, 0);
+  assert.deepEqual(state.decisions, {});
+  state.rules = [rule];
+  const run = await post("/api/applicants/rules-tick", fence);
+  assert.equal(run.decided, preview.matched);
+  assert.deepEqual(Object.keys(state.decisions), [candidate.key]);
+  assert.equal(state.hits[rule.id][0].evidence[0].source, "paraform");
+});
