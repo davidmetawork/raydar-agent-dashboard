@@ -119,6 +119,18 @@
     padding:14px 17px; box-shadow:var(--shadow); }
   .row.decided-row { opacity:.82; }
   .row.decided-row:hover { opacity:1; }
+  /* Processing rows are Core's identity stubs while source history is still
+     being prepared. They deliberately use no profile link, controls, or
+     decision state: displaying the work must not make it reviewable. */
+  .processing-row { min-height:128px; }
+  .processing-row .rc-main { display:block; }
+  .processing-state { display:inline-flex; align-items:center; border-radius:999px; padding:4px 8px;
+    background:var(--warn-bg); color:var(--warn); font-size:10.5px; font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
+  .processing-job { margin-top:9px; color:var(--ink-2); font-size:12.5px; line-height:1.45; }
+  .processing-job b { color:var(--ink); }
+  .processing-ids { display:flex; flex-wrap:wrap; gap:6px 12px; margin-top:10px; color:var(--ink-3); font:11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .processing-ids span { overflow-wrap:anywhere; }
+  .processing-reason { margin-top:9px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
   .row input[type=checkbox] { width:15px; height:15px; margin:4px 0 0; accent-color:var(--ink); cursor:pointer; flex:none; }
   .avatar { width:48px; height:48px; border-radius:50%; overflow:hidden; display:grid; place-items:center;
     background:var(--live-bg); color:#6658DA; font-weight:700; font-size:15px; flex:none; }
@@ -419,6 +431,7 @@
       <button class="view-pill" id="pillEmailed" onclick="setView('emailed')">Already emailed <span class="n" id="emailedCount"></span></button>
       <button class="view-pill" id="pillDelivery" onclick="setView('delivery')">Delivery review <span class="n" id="deliveryCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
+      <button class="view-pill" id="pillProcessing" onclick="setView('processing')">Processing <span class="n" id="processingCount"></span></button>
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span><span class="paused-flag" id="rulesPausedFlag">Paused</span></button>
       <span class="spacer"></span>
       <span id="toolbarFilters" style="display:contents">
@@ -456,6 +469,10 @@
     <div id="streamView" style="display:none">
       <div class="list" id="streamList"><div class="empty">Loading the stream…</div></div>
     </div>
+
+    <div id="processingView" style="display:none">
+      <div class="list" id="processingList"><div class="empty">Loading profile preparation…</div></div>
+    </div>
   </div>
 
   <div class="bulk" id="bulkBar">
@@ -484,6 +501,7 @@ const STATE = {
   counts: null,                       // sync's count-drop tripwire doc; .alert set = show the danger banner
   profileCache: null,                 // fail-closed coverage: rows without a compact cached profile stay hidden
   profileReceiptWithheld: 0,          // how much of "preparing" THIS read withheld, vs Core's own partition
+  profilePreparingRows: [],           // read-only Core stubs; never join actionable rows
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
@@ -625,6 +643,7 @@ function effectiveDecision(key) {
 /* ---- derived rows ---- */
 function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
+function profilePreparingRows() { return Array.isArray(STATE.profilePreparingRows) ? STATE.profilePreparingRows : []; }
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
 function richGenerationKey(generation = STATE.generation) {
   const id = String(generation?.generationId || "");
@@ -1339,6 +1358,7 @@ function renderPills() {
   $("emailedCount").textContent = STATE.snapshot ? String(emailedRows().length) : "";
   $("deliveryCount").textContent = STATE.snapshot ? String(deliveryRows().length) : "";
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
+  $("processingCount").textContent = STATE.snapshot ? String(profilePreparingRows().length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
   const pendingNoLinkedin = pendingRows().filter(hasNoLinkedin).length;
@@ -1618,7 +1638,7 @@ function patchRow(cu) {
   // repainting the list here is exactly what this function exists to avoid,
   // and a visible "more" affordance is enough to keep the growth honest until
   // the next natural render.
-  for (const id of ["reviewList", "streamList"]) {
+  for (const id of ["reviewList", "streamList", "processingList"]) {
     const list = $(id);
     if (list && list._virtual) markClippedRows(list);
   }
@@ -1675,7 +1695,7 @@ const virtualRowMax = () => window.innerWidth <= 820 ? 460 : 340;
 const virtualRowHeight = (el) =>
   (typeof el?._virtualRowHeight === "number" ? el._virtualRowHeight : virtualRowFallback());
 function resetVirtualLists() {
-  for (const id of ["reviewList", "streamList"]) {
+  for (const id of ["reviewList", "streamList", "processingList"]) {
     const list = $(id);
     if (!list) continue;
     list.scrollTop = 0;
@@ -1779,10 +1799,10 @@ function renderVirtual(el) {
       shown.map(spec.build).join("") +
     "</div></div>";
   tuneVirtualRowHeight(el);
-  requestVisibleRichCards(shown);
+  if (spec.requestRichCards !== false) requestVisibleRichCards(shown);
 }
-function paintList(el, rows, build) {
-  el._virtual = { rows, build };
+function paintList(el, rows, build, { requestRichCards = true } = {}) {
+  el._virtual = { rows, build, requestRichCards };
   if (!el._virtualBound) {
     el._virtualBound = true;
     el.addEventListener("scroll", () => {
@@ -1850,7 +1870,58 @@ function renderStream() {
   }
 }
 
-function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); postCounts(); }
+/* ---- Processing view ----
+   These are Core's minimal preparation stubs. Keep this renderer deliberately
+   separate from rowCardHtml: it has no profile link, avatar, cards request,
+   modal, decision overlay, Rules membership, checkbox, or action button. */
+function processingRowHtml(row) {
+  const role = row.roleTitle || "Role still resolving";
+  const company = row.company ? " @ " + esc(row.company) : "";
+  const ids = [
+    "Profile key: " + (row.profileKey || "pending"),
+    "Source observation: " + (row.sourceObservationId || "not assigned yet"),
+    ...(row.sourceJobId ? ["Source job: " + row.sourceJobId] : []),
+    ...(row.roleId ? ["Paraform role: " + row.roleId] : []),
+  ];
+  return '<div class="row processing-row" data-processing-key="' + esc(row.key || row.profileKey || "") + '">' +
+    '<div class="rc-main"><div class="rc-id">' +
+      '<div class="who"><span class="name"><span>' + esc(row.name || "Applicant identity pending") + '</span></span>' +
+        '<span class="processing-state">Profile preparing</span></div>' +
+      '<div class="processing-job">Job: <b>' + esc(role) + "</b>" + company + "</div>" +
+      '<div class="processing-ids">' + ids.map((value) => "<span>" + esc(value) + "</span>").join("") + "</div>" +
+      (row.reason ? '<div class="processing-reason">' + esc(row.reason) + "</div>" : "") +
+    "</div></div></div>";
+}
+function renderProcessing() {
+  const list = $("processingList");
+  if (!STATE.loaded) return;
+  if (STATE.feedUnavailable) {
+    list._virtual = null;
+    list.innerHTML = '<div class="empty"><div class="big">Applicants unavailable</div>The verified generation is unavailable, so preparation records are not shown.</div>';
+    return;
+  }
+  if (!STATE.snapshot) {
+    list._virtual = null;
+    list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>Core publishes preparation records with its next verified generation.</div>';
+    return;
+  }
+  const rows = profilePreparingRows().slice().sort((a, b) => {
+    const aAt = parseDate(a.addedAt || a.appliedAt)?.getTime() || 0;
+    const bAt = parseDate(b.addedAt || b.appliedAt)?.getTime() || 0;
+    return bAt - aAt || String(a.key || a.profileKey || "").localeCompare(String(b.key || b.profileKey || ""));
+  });
+  if (!rows.length) {
+    list._virtual = null;
+    const total = Number(STATE.snapshot?.profilePreparing) || 0;
+    list.innerHTML = '<div class="empty">' + (total
+      ? 'Core reports ' + total.toLocaleString() + ' profile' + (total === 1 ? '' : 's') + ' preparing, but none has a named preparation record to show yet.'
+      : 'No profiles are preparing.') + '</div>';
+    return;
+  }
+  paintList(list, rows, processingRowHtml, { requestRichCards: false });
+}
+
+function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); renderProcessing(); postCounts(); }
 function renderAll() {
   renderStats(); renderRoleFilter(); renderLists();
   // Rules can load before the applicant feed. Refresh its visible pending count
@@ -1874,12 +1945,14 @@ function setView(view) {
   $("pillEmailed").classList.toggle("active", view === "emailed");
   $("pillDelivery").classList.toggle("active",view==='delivery');
   $("pillStream").classList.toggle("active", view === "stream");
+  $("pillProcessing").classList.toggle("active", view === "processing");
   $("pillRules").classList.toggle("active", view === "rules");
   $("reviewView").style.display = ['review','requested','emailed','delivery'].includes(view) ? "" : "none";
   $("streamView").style.display = view === "stream" ? "" : "none";
+  $("processingView").style.display = view === "processing" ? "" : "none";
   $("rulesView").style.display = view === "rules" ? "" : "none";
-  // The toolbar filters belong to the two lists, not to the rules editor.
-  $("toolbarFilters").style.display = view === "rules" ? "none" : "contents";
+  // Processing is read-only Core work, so it carries none of the review filters.
+  $("toolbarFilters").style.display = ['rules', 'processing'].includes(view) ? "none" : "contents";
   const hash = "#" + view;
   if (location.hash !== hash) history.replaceState(null, "", hash);
   if (view === "rules" && window.RaydarRules) { window.RaydarRules.show(); return; }
@@ -2457,6 +2530,7 @@ function markFeedUnavailable(error) {
   STATE.counts = null;
   STATE.profileCache = null;
   STATE.profileReceiptWithheld = 0;
+  STATE.profilePreparingRows = [];
   STATE.generation = null;
   resetRichCards();
   STATE.profiles = {};
@@ -2485,6 +2559,7 @@ async function loadFeed(manual = false) {
     STATE.counts = body.counts || null;
     STATE.profileCache = body.profileCache || null;
     STATE.profileReceiptWithheld = Number(body.profileReceiptWithheld) || 0;
+    STATE.profilePreparingRows = Array.isArray(body.profilePreparingRows) ? body.profilePreparingRows : [];
     STATE.generation = body.generation || null;
     syncRichGeneration();
     // Full profiles are deliberately scoped to the feed generation too. Keep
@@ -2532,6 +2607,7 @@ function startApp() {
     window.addEventListener("resize", () => {
       renderVirtual($("reviewList"));
       renderVirtual($("streamList"));
+      renderVirtual($("processingList"));
     });
   }
 }
@@ -2540,7 +2616,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && AU
 /* Views that may be deep-linked. Rules is here so the master criteria page can
    be bookmarked and sent to the team as a plain link, not just reached by
    clicking through Review. */
-const DEEP_LINK_VIEWS = ["review", "requested", "emailed", "delivery", "stream", "rules"];
+const DEEP_LINK_VIEWS = ["review", "requested", "emailed", "delivery", "stream", "processing", "rules"];
 
 async function init() {
   const landed = location.hash.replace("#", "");

@@ -173,7 +173,7 @@ test("the new view is reachable, deep-linkable and rendered by the review list",
   assert.match(applicants, /\$\("pillEmailed"\)\.classList\.toggle\("active", view === "emailed"\);/);
   assert.match(applicants, /\['review','requested','emailed','delivery'\]\.includes\(view\)/);
   assert.match(applicants, /\} else if \(STATE\.view === "emailed"\) \{\s*rows = emailedRows\(\);/);
-  assert.match(applicants, /const DEEP_LINK_VIEWS = \["review", "requested", "emailed", "delivery", "stream", "rules"\];/);
+  assert.match(applicants, /const DEEP_LINK_VIEWS = \["review", "requested", "emailed", "delivery", "stream", "processing", "rules"\];/);
   assert.match(applicants, /No queue row carries published send evidence\./);
 });
 

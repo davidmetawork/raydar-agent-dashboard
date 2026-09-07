@@ -14,6 +14,40 @@ import {
   profilePreparingCount,
 } from "./_lib/profile-readiness.mjs";
 
+// Profile preparation is deliberately outside the actionable queue and stream.
+// Keep its small, source-owned identity stub separate from the count used by the
+// receipt partition below: that partition adds read-time withholds and therefore
+// represents `profilePreparing` as a number.  The browser needs the original
+// Core stubs to name the work still in progress, but it must receive neither a
+// profile nor a route that could make a decision against it.
+const text = (value) => {
+  const result = typeof value === "string" ? value.trim() : "";
+  return result || null;
+};
+
+function profilePreparingRows(snapshot) {
+  if (!Array.isArray(snapshot?.profilePreparing)) return [];
+  return snapshot.profilePreparing
+    .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => ({
+      key: text(row.key),
+      profileKey: text(row.profileKey),
+      sourceObservationId: text(row.sourceObservationId),
+      state: text(row.state) || "profile_preparing",
+      name: text(row.name),
+      roleTitle: text(row.roleTitle),
+      sourceJobId: text(row.sourceJobId),
+      roleId: text(row.roleId),
+      company: text(row.company),
+      appliedAt: text(row.appliedAt),
+      addedAt: text(row.addedAt),
+      reason: text(row.reason),
+      // A preparation stub is never actionable even if an upstream writer
+      // regresses. Expose the fact as false rather than the upstream value.
+      interviewAllowed: false,
+    }));
+}
+
 export const config = { maxDuration: 30 };
 
 export function createFeedHandler({
@@ -63,6 +97,7 @@ export function createFeedHandler({
         ...artifacts.snapshot,
         ...(Array.isArray(artifacts.queue?.rows) ? { queue: artifacts.queue.rows } : {}),
       } : null;
+      const preparingRows = profilePreparingRows(published);
       // ONE STALE ROW MUST NOT BLANK THE TAB (2026-09-04). The publish-time
       // fence in sync.mjs is what keeps an unbacked generation from ever
       // becoming active; by the time we read, this generation was already
@@ -89,6 +124,10 @@ export function createFeedHandler({
         pipeline: pipeline ?? null,
         profileCache,
         profilePreparing: profilePreparingCount(joined),
+        // Separate from the numeric profilePreparing total. These Core-owned
+        // stubs render only in the read-only Processing view; they never join
+        // the review, stream, card, or decision paths.
+        profilePreparingRows: preparingRows,
         // Reported separately from Core's own preparing partition so the tab
         // can say which part of the number this read withheld.
         profileReceiptWithheld: partition.withheld,
