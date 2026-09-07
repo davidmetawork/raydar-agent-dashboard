@@ -40,7 +40,6 @@ export default async function handler(req, res) {
       from: it.fromUser?.name || null,
       fromType: it.fromUser?.type || null,
       text: stripHtml(it.text),
-      html: it.text || "",
       structural: !stripHtml(it.text),
       stage: it.metadata?.currentStage?.name || null,
       status: it.metadata?.status || null,

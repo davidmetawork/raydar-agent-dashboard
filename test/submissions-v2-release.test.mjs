@@ -21,7 +21,8 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   await Promise.all([
     seed(root, "package.json"), seed(root, "package-lock.json"), seed(root, ".vercelignore"), seed(root, "scripts/submissions-release.mjs"),
-    seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/inbox/health.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/auth/_lib/session.mjs"),
+    seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/inbox/health.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/auth/google.mjs"),
+    seed(root, "api/auth/_lib/login-rate-limit.mjs"), seed(root, "api/auth/_lib/session.mjs"),
     seed(root, "api/seq/_lib/core.mjs"), seed(root, "api/seq/_lib/scheduling-links.mjs"), seed(root, "api/sourcing/_lib/store.mjs"), seed(root, "api/roster/_lib/outcome-sequences.mjs"),
     seed(root, "submissions-v2.html"), seed(root, "submissions-v2.css"), seed(root, "submissions-v2.js"), seed(root, "submissions-v2-ui-state.mjs"),
     seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"), seed(root, "scripts/provision-submissions-v2-roles.sql"),
@@ -57,6 +58,21 @@ test("release check rejects tampered, added, and missing permitted source files"
   await writeSubmissionsReleaseManifest({ root });
   await rm(join(root, "migrations/submissions-v2/001_foundation.sql"));
   await assert.rejects(checkSubmissionsReleaseManifest({ root }), /stale/);
+});
+
+test("release check seals the Google login issuer and its rate limiter", async (t) => {
+  const root = await fixture(t);
+  const manifest = await writeSubmissionsReleaseManifest({ root });
+  assert.equal(manifest.files.some((file) => file.path === "api/auth/google.mjs"), true);
+  assert.equal(manifest.files.some((file) => file.path === "api/auth/_lib/login-rate-limit.mjs"), true);
+
+  await seed(root, "api/auth/google.mjs", "changed");
+  await assert.rejects(checkSubmissionsReleaseManifest({ root }), /stale/);
+
+  await seed(root, "api/auth/google.mjs");
+  await writeSubmissionsReleaseManifest({ root });
+  await seed(root, "api/auth/_lib/login-rate-limit.mjs", "changed");
+  await assert.rejects(checkSubmissionsReleaseDeploymentManifest({ root }), /stale: api\/auth\/_lib\/login-rate-limit\.mjs/);
 });
 
 test("environment files are excluded from a release digest and never make it into the manifest", async (t) => {

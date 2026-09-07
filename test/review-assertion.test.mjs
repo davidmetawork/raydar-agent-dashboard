@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import { issueReviewAssertion } from '../api/_lib/review-assertion.mjs';
+import { createSessionToken, SESSION_COOKIE } from '../api/auth/_lib/session.mjs';
 import reviewHandler, { canonicalReviewAssertionPath, upstream } from '../api/post-call/review.mjs';
 
 function responseCapture() {
@@ -82,6 +83,8 @@ test('Review keeps the signed actor assertion when a separate action credential 
 test('Review handler separates feed/action credentials and fails mutations closed', async () => {
   const keys = [
     'GOOGLE_CLIENT_ID',
+    'AUTH_SESSION_SECRET',
+    'ALLOWED_DOMAINS',
     'POST_CALL_BASE',
     'POST_CALL_ALLOWED_ORIGINS',
     'POST_CALL_MONITOR_API_KEY',
@@ -97,7 +100,9 @@ test('Review handler separates feed/action credentials and fails mutations close
   const timeouts = [];
   try {
     Object.assign(process.env, {
-      GOOGLE_CLIENT_ID: '',
+      GOOGLE_CLIENT_ID: 'google-client-id',
+      AUTH_SESSION_SECRET: 'test-secret-that-is-long-and-random-enough-for-hmac',
+      ALLOWED_DOMAINS: 'raydar.xyz',
       POST_CALL_BASE: 'https://raydar-post-call.vercel.app',
       POST_CALL_ALLOWED_ORIGINS: 'https://raydar-post-call.vercel.app',
       POST_CALL_MONITOR_API_KEY: 'legacy-key',
@@ -117,9 +122,11 @@ test('Review handler separates feed/action credentials and fails mutations close
       timeouts.push(timeoutMs);
       return previousTimeout.call(AbortSignal, timeoutMs);
     };
+    const session = createSessionToken({ email: 'david@raydar.xyz', domain: 'raydar.xyz' });
+    const cookie = `${SESSION_COOKIE}=${encodeURIComponent(session)}`;
 
     const getRes = responseCapture();
-    await reviewHandler({ method: 'GET', headers: {}, query: { id: 'r1' }, authedEmail: 'david@raydar.xyz' }, getRes);
+    await reviewHandler({ method: 'GET', headers: { cookie }, query: { id: 'r1' } }, getRes);
     assert.equal(getRes.statusCode, 200);
     assert.equal(requests[0].init.headers.authorization, 'Bearer feed-key');
     assert.match(requests[0].init.headers['x-raydar-review-assertion'], /^[^.]+\.[^.]+$/);
@@ -131,9 +138,9 @@ test('Review handler separates feed/action credentials and fails mutations close
         origin: 'https://monitor.raydar.xyz',
         host: 'monitor.raydar.xyz',
         'x-forwarded-proto': 'https',
+        cookie,
       },
       query: {},
-      authedEmail: 'david@raydar.xyz',
       body: { action: 'resume', reviewId: 'r1', version: 2, reason: 'handler test' },
     }, postRes);
     assert.equal(postRes.statusCode, 200);
@@ -150,9 +157,9 @@ test('Review handler separates feed/action credentials and fails mutations close
         origin: 'https://monitor.raydar.xyz',
         host: 'monitor.raydar.xyz',
         'x-forwarded-proto': 'https',
+        cookie,
       },
       query: {},
-      authedEmail: 'david@raydar.xyz',
       body: { action: 'resume', reviewId: 'r1', version: 2, reason: 'must not run' },
     }, readOnlyRes);
     assert.equal(readOnlyRes.statusCode, 403);
@@ -163,9 +170,8 @@ test('Review handler separates feed/action credentials and fails mutations close
     const crossOriginRes = responseCapture();
     await reviewHandler({
       method: 'POST',
-      headers: { origin: 'https://evil.example', host: 'monitor.raydar.xyz', 'x-forwarded-proto': 'https' },
+      headers: { origin: 'https://evil.example', host: 'monitor.raydar.xyz', 'x-forwarded-proto': 'https', cookie },
       query: {},
-      authedEmail: 'david@raydar.xyz',
       body: { action: 'resume', reviewId: 'r1', version: 2, reason: 'must not run' },
     }, crossOriginRes);
     assert.equal(crossOriginRes.statusCode, 403);

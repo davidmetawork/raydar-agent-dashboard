@@ -21,6 +21,8 @@ const FIXED_FILES = Object.freeze([
   "api/sourcing/_lib/store.mjs",
   "api/roster/_lib/outcome-sequences.mjs",
   "api/paraai/_lib/core.mjs",
+  "api/auth/google.mjs",
+  "api/auth/_lib/login-rate-limit.mjs",
   "api/auth/_lib/session.mjs",
   "scripts/migrate-submissions-v2.mjs",
   "scripts/provision-submissions-v2-roles.sql",
