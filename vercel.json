@@ -67,6 +67,10 @@
       "destination": "/review.html"
     },
     {
+      "source": "/calls-today",
+      "destination": "/calls-today.html"
+    },
+    {
       "source": "/applicants",
       "destination": "/applicants.html"
     },
