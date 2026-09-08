@@ -1,7 +1,30 @@
 import postgres from "postgres";
 
 let sharedDatabase = null;
-let sharedDatabaseUrl = "";
+let sharedDatabaseKey = "";
+
+const DEFAULT_STATEMENT_TIMEOUT_MS = 240_000;
+const DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS = 30_000;
+
+function boundedTimeout(value, fallback, { min, max }) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.trunc(parsed))) : fallback;
+}
+
+function sessionDeadlines(env = process.env, overrides = {}) {
+  return {
+    statementTimeoutMs: boundedTimeout(
+      overrides.statementTimeoutMs ?? env.SUBMISSIONS_V2_DB_STATEMENT_TIMEOUT_MS,
+      DEFAULT_STATEMENT_TIMEOUT_MS,
+      { min: 50, max: 280_000 },
+    ),
+    idleTransactionTimeoutMs: boundedTimeout(
+      overrides.idleTransactionTimeoutMs ?? env.SUBMISSIONS_V2_DB_IDLE_TRANSACTION_TIMEOUT_MS,
+      DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS,
+      { min: 100, max: 60_000 },
+    ),
+  };
+}
 
 function configuredUrl(env = process.env) {
   const url = String(env.SUBMISSIONS_V2_DATABASE_URL || "").trim();
@@ -14,12 +37,24 @@ function configuredUrl(env = process.env) {
   return url;
 }
 
-export function createDatabase({ databaseUrl = configuredUrl(), max = 5 } = {}) {
+export function createDatabase({
+  databaseUrl = configuredUrl(),
+  max = 5,
+  env = process.env,
+  statementTimeoutMs,
+  idleTransactionTimeoutMs,
+} = {}) {
+  const deadlines = sessionDeadlines(env, { statementTimeoutMs, idleTransactionTimeoutMs });
   return postgres(databaseUrl, {
     max,
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 10,
+    connection: {
+      application_name: "raydar-submissions-v2",
+      statement_timeout: deadlines.statementTimeoutMs,
+      idle_in_transaction_session_timeout: deadlines.idleTransactionTimeoutMs,
+    },
     transform: { undefined: null },
     onnotice: () => {},
   });
@@ -27,9 +62,11 @@ export function createDatabase({ databaseUrl = configuredUrl(), max = 5 } = {}) 
 
 export function database(env = process.env) {
   const url = configuredUrl(env);
-  if (!sharedDatabase || sharedDatabaseUrl !== url) {
-    sharedDatabase = createDatabase({ databaseUrl: url });
-    sharedDatabaseUrl = url;
+  const deadlines = sessionDeadlines(env);
+  const key = `${url}\0${deadlines.statementTimeoutMs}\0${deadlines.idleTransactionTimeoutMs}`;
+  if (!sharedDatabase || sharedDatabaseKey !== key) {
+    sharedDatabase = createDatabase({ databaseUrl: url, env });
+    sharedDatabaseKey = key;
   }
   return sharedDatabase;
 }
@@ -38,9 +75,15 @@ export async function closeDatabase() {
   if (!sharedDatabase) return;
   const current = sharedDatabase;
   sharedDatabase = null;
-  sharedDatabaseUrl = "";
+  sharedDatabaseKey = "";
   await current.end({ timeout: 5 });
 }
+
+export const databaseInternals = Object.freeze({
+  DEFAULT_STATEMENT_TIMEOUT_MS,
+  DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS,
+  sessionDeadlines,
+});
 
 export async function withTransaction(callback, sql = database()) {
   return sql.begin(async (transaction) => callback(transaction));

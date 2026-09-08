@@ -4,6 +4,28 @@ import postgres from "postgres";
 
 const clean = (value, limit = 200) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
 const PRIVATE_OBJECT_PATH = /^submissions\/resumes\/v2\/[A-Za-z0-9_-]+\/[A-Za-z0-9._-]+$/u;
+const DEFAULT_STATEMENT_TIMEOUT_MS = 240_000;
+const DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS = 30_000;
+
+function boundedTimeout(value, fallback, { min, max }) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.trunc(parsed))) : fallback;
+}
+
+function databaseOptions(env) {
+  return {
+    max: 1,
+    prepare: false,
+    connect_timeout: 10,
+    idle_timeout: 10,
+    connection: {
+      application_name: "raydar-submissions-v2-purge",
+      statement_timeout: boundedTimeout(env.SUBMISSIONS_V2_PURGE_DB_STATEMENT_TIMEOUT_MS, DEFAULT_STATEMENT_TIMEOUT_MS, { min: 50, max: 280_000 }),
+      idle_in_transaction_session_timeout: boundedTimeout(env.SUBMISSIONS_V2_PURGE_DB_IDLE_TRANSACTION_TIMEOUT_MS, DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS, { min: 100, max: 60_000 }),
+    },
+    onnotice: () => {},
+  };
+}
 
 function exactPrivateObjectPath(value) {
   const pathname = String(value || "");
@@ -31,7 +53,7 @@ export async function runPurgeCycle({
 } = {}) {
   const config = configuration(env);
   const ownSql = !suppliedSql;
-  const sql = suppliedSql || postgres(config.databaseUrl, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 10, onnotice: () => {} });
+  const sql = suppliedSql || postgres(config.databaseUrl, databaseOptions(env));
   const remove = deleteObject || ((pathname) => del(pathname, { token: config.blobToken }));
   const summary = {
     claimed: 0, purged: 0, failed: 0, object_deletes: 0,
@@ -95,4 +117,11 @@ export async function runPurgeCycle({
   }
 }
 
-export const purgeInternals = Object.freeze({ configuration, exactPrivateObjectPath, PRIVATE_OBJECT_PATH });
+export const purgeInternals = Object.freeze({
+  configuration,
+  exactPrivateObjectPath,
+  databaseOptions,
+  PRIVATE_OBJECT_PATH,
+  DEFAULT_STATEMENT_TIMEOUT_MS,
+  DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS,
+});
