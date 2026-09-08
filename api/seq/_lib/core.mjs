@@ -14,7 +14,14 @@ import {
 } from "./scheduling-links.mjs";
 
 export const BASE = "https://www.paraform.com/api";
-const COOKIE = process.env.PARAFORM_COOKIE || "";          // browser session cookie value
+
+export function paraformCookieValue(environment = process.env) {
+  return String(
+    environment.PARAFORM_SESSION_COOKIE
+    || environment.PARAFORM_COOKIE
+    || "",
+  );
+}
 
 export const CONFIG = {
   TEMPLATE_ID: process.env.TEMPLATE_ID || "ms87yhip8wozzyrkpq6sx51b", // 1st-Round template (disabled, has *INSERT ROLE*)
@@ -101,7 +108,9 @@ export async function requireAuth(req, res) {
   }
 }
 
-export function hasCookie() { return !!COOKIE; }
+export function hasCookie(environment = process.env) {
+  return Boolean(paraformCookieValue(environment));
+}
 
 // Paraform migrated from NextAuth to WorkOS (2026-07): iron-sealed WorkOS session
 // values start with "Fe26.2" and ride the `wos-session` cookie; legacy NextAuth
@@ -109,8 +118,8 @@ export function hasCookie() { return !!COOKIE; }
 // the value so a cookie refresh stays a value-only swap; PARAFORM_SESSION_COOKIE_NAME
 // overrides (allowlisted).
 const PARAFORM_COOKIE_NAMES = new Set(["wos-session", "__Secure-next-auth.session-token"]);
-export function paraformCookieName(value) {
-  const override = process.env.PARAFORM_SESSION_COOKIE_NAME;
+export function paraformCookieName(value, environment = process.env) {
+  const override = environment.PARAFORM_SESSION_COOKIE_NAME;
   if (override) {
     if (!PARAFORM_COOKIE_NAMES.has(override.trim())) throw new Error("PARAFORM_SESSION_COOKIE_NAME_INVALID");
     return override.trim();
@@ -118,11 +127,14 @@ export function paraformCookieName(value) {
   return String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token";
 }
 
-export const headers = () => ({
-  accept: "application/json",
-  "content-type": "application/json",
-  cookie: `${paraformCookieName(COOKIE)}=${COOKIE}`,
-});
+export const headers = (environment = process.env) => {
+  const cookie = paraformCookieValue(environment);
+  return {
+    accept: "application/json",
+    "content-type": "application/json",
+    cookie: `${paraformCookieName(cookie, environment)}=${cookie}`,
+  };
+};
 const env = (json) => ({ json, meta: { values: {}, v: 1 } });
 const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 
@@ -217,7 +229,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- health ----------
 export async function paraformHealth() {
-  if (!COOKIE) return { paraform: "no_cookie" };
+  if (!hasCookie()) return { paraform: "no_cookie" };
   try {
     const seqs = await trpcGet("campaigns.getListOfCampaignsOptimized", {});
     return { paraform: "live", sequenceCount: Array.isArray(seqs) ? seqs.length : 0 };
