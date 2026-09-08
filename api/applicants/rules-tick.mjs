@@ -60,6 +60,13 @@ import { profileReceiptReady, sourceObservationIdFor } from "./_lib/profile-read
 import { armedRules, cardsFor, factsFor, pendingRows, profileReceiptsFor, richRuleFactsFor, richProfileReceiptsFor, readRules, watchingRules } from "./_lib/rule-store.mjs";
 import { richBindingsForSnapshot } from "./_lib/rich-profile.mjs";
 import { richRuleFactsMatch, ruleNeedsProfileFacts, selectRuleFacts } from "./_lib/rich-rule-facts.mjs";
+import {
+  applicantRowsV2ForArtifacts,
+  GRAPH_RULE_EVALUATOR_VERSION,
+  graphRuleRunManifest,
+  ruleRunDigest,
+  ruleSubjectFromApplicantV2,
+} from "./_lib/rule-run-v2.mjs";
 import {randomUUID} from 'node:crypto';
 import {
   APPLICANT_REQUEST_ALREADY_EMAILED,
@@ -192,6 +199,21 @@ export function createTickHandler({
         readHash(K.acks),
       ]);
       const pendingQueueRows = pendingRows(queueDoc?.rows ?? [], decisions);
+      const applicantRowsV2 = applicantRowsV2ForArtifacts(artifacts);
+      const v2Mode = Object.keys(applicantRowsV2).length > 0;
+      const evaluatedAt = now();
+      const v2Subjects = v2Mode ? new Map(pendingQueueRows.map((row) => [
+        row.key, ruleSubjectFromApplicantV2(row, applicantRowsV2[row.key], { now: evaluatedAt }),
+      ])) : new Map();
+      if (v2Mode && [...v2Subjects.values()].some((subject) => !subject)) {
+        return res.status(503).json({
+          ok: false,
+          error: "generation_unavailable",
+          reason: "profile_v2_fact_set_missing",
+          generationId: generation.generationId,
+          generationDigest: generation.digest,
+        });
+      }
       const candidates = [...new Set(pendingQueueRows
         .map((row) => row?.profileKey || row?.cuId).filter(Boolean))];
       const [cards, receipts] = await Promise.all([
@@ -210,7 +232,7 @@ export function createTickHandler({
         return profileReceiptReady(receipts[cuId], now(), sourceObservationIdFor(row))
           || (cardHasHistory(cards[cuId]) && profileReceiptReady(receipts[cuId], now()));
       };
-      const receiptMismatches=pendingQueueRows.filter((row)=>!profileReady(row));
+      const receiptMismatches=v2Mode ? [] : pendingQueueRows.filter((row)=>!profileReady(row));
       if (receiptMismatches.length) {
         return res.status(503).json({
           ok:false,
@@ -223,7 +245,7 @@ export function createTickHandler({
       const rows = pendingQueueRows;
       manifest = generationManifest(rows);
       const fundedEmployerSnapshots = await readMembershipSnapshots([...live, ...watching]);
-      await writeJson(K.ruleRun(ruleRunId), {
+      const legacyRuleRun = {
         ruleRunId,
         trigger:"run_rules_now",
         authenticated:true,
@@ -241,7 +263,8 @@ export function createTickHandler({
           reviewedParaformIdCount: Object.keys(snapshot.byParaformId || {}).length,
           reviewedSourceNameCount: Object.keys(snapshot.byReviewedSourceName || {}).length,
         })),
-      });
+      };
+      if (!v2Mode) await writeJson(K.ruleRun(ruleRunId), legacyRuleRun);
       if (!rows.length) {
         return res.status(200).json({
           ok: true,
@@ -262,7 +285,7 @@ export function createTickHandler({
         needsRich ? richRuleFactsFor(profileKeys, { readMany }) : {},
         needsRich ? richProfileReceiptsFor(profileKeys, { readMany }) : {},
       ]);
-      const stamp = now();
+      const stamp = evaluatedAt;
       const selections = new Map();
       const profileFactsCoverage = { required: 0, ready: 0, pending: 0 };
 
@@ -271,31 +294,46 @@ export function createTickHandler({
       const fired = {};                     // ruleId -> count, live only
       const wouldFire = {};                 // ruleId -> count, watching only
       const skipped = {};
+      const ruleItems = [];
       let considered = 0;
 
       for (const row of rows) {
         considered += 1;
         const key = row.profileKey || row.cuId;
-        const selected = selectRuleFacts({ row, sourceFacts: facts[key], richFacts: richFacts[key],
+        const v2Subject = v2Subjects.get(row.key) || null;
+        const selected = v2Subject ? {
+          facts: v2Subject.facts, richEligible: true, projectionPending: false,
+        } : selectRuleFacts({ row, sourceFacts: facts[key], richFacts: richFacts[key],
           richReceipt: richReceipts[key], bindings, now: stamp });
         selections.set(key, selected);
-        if (selected.richEligible && [...live, ...watching].some((rule) => inScope(rule, row) && ruleNeedsProfileFacts(rule))) {
+        if (selected.richEligible && [...live, ...watching].some((rule) => inScope(rule, v2Subject?.row || row) && ruleNeedsProfileFacts(rule))) {
           profileFactsCoverage.required += 1;
           profileFactsCoverage[selected.projectionPending ? "pending" : "ready"] += 1;
         }
-        const subject = {
+        const subject = v2Subject ? { ...v2Subject, fundedEmployerSnapshots } : {
           row,
           facts: selected.facts,
           profileFactsPending: selected.projectionPending,
           profileReceipt: receipts[row.profileKey || row.cuId] ?? null,
           fundedEmployerSnapshots,
         };
+        const ruleItem = v2Subject ? {
+          applicationId: v2Subject.applicationId,
+          monitorKey: row.key,
+          inputRevision: String(row.inputRevision),
+          factSetDigest: v2Subject.factSetDigest,
+          decisionRevision: Number(row.decisionRevision),
+          outcome: "no_match",
+          ruleId: null,
+          ruleVersion: null,
+        } : null;
+        if (ruleItem) ruleItems.push(ruleItem);
 
         // Watching rules are evaluated on exactly the same subject and never
         // write a decision — that equivalence is what makes Watching a
         // trustworthy preview rather than a separate code path.
         for (const rule of watching) {
-          if (!inScope(rule, row)) continue;
+          if (!inScope(rule, subject.row)) continue;
           const result = evaluateRule(rule, subject, { now: stamp });
           const interviewSkip = result.matched && rule.action === "interview"
             ? ruleInterviewSkipReason(row, { decision: decisions[row.key], ack: acks[row.key] })
@@ -320,6 +358,9 @@ export function createTickHandler({
         }
 
         const { rule, evidence } = outcome.winner;
+        if (ruleItem) Object.assign(ruleItem, {
+          outcome: outcome.action, ruleId: rule.id, ruleVersion: rule.version ?? 1,
+        });
         newDecisions[row.key] = decisionRecord({
           action: outcome.action,
           at: new Date(stamp).toISOString(),
@@ -433,6 +474,57 @@ export function createTickHandler({
           manifest,
         });
       }
+      let sealedRuleRun = null;
+      if (v2Mode) {
+        const ruleVersions = [...live, ...watching].map((rule) => ({
+          id: rule.id, version: rule.version ?? 1,
+        }));
+        const built = graphRuleRunManifest({
+          runId: ruleRunId,
+          authorizerId: authorizedBy,
+          authenticatedAt: startedAt,
+          generationId: generation.generationId,
+          generationDigest: generation.digest,
+          ruleVersions,
+          items: ruleItems,
+        });
+        const commandBase = {
+          version: "applicant-monitor-rule-command-v1",
+          runId: ruleRunId,
+          createdAt: startedAt,
+          manifest: built.manifest,
+          manifestDigest: built.manifestDigest,
+        };
+        const command = Object.freeze({ ...commandBase, commandDigest: ruleRunDigest(commandBase) });
+        // Command first. If a later per-key CAS loses a race, Core still has
+        // the full evaluated scope and will classify that item as human or
+        // changed; no unsealed rule decision can appear in the decision hash.
+        await writeHash(K.ruleRunCommands, { [ruleRunId]: command });
+        await writeJson(K.ruleRun(ruleRunId), command);
+        sealedRuleRun = built;
+        for (const [key, record] of Object.entries(newDecisions)) {
+          const matchingItem = ruleItems.find((candidate) => candidate.monitorKey === key);
+          Object.assign(record, {
+            inboxVersion: "applicant-core-graph-decisions-v2",
+            factSetDigest: matchingItem?.factSetDigest,
+            manifestDigest: built.manifestDigest,
+            manifestCount: ruleItems.length,
+            ruleVersions,
+            ruleRun: {
+              id: ruleRunId,
+              trigger: "run_rules_now",
+              authenticated: true,
+              generationId: generation.generationId,
+              manifestDigest: built.manifestDigest,
+              previewDigest: built.manifest.previewDigest,
+              evaluatorVersion: GRAPH_RULE_EVALUATOR_VERSION,
+              ruleActorId: record.actorId,
+              authorizerId: authorizedBy,
+              authenticatedAt: startedAt,
+            },
+          });
+        }
+      }
       for(let offset=0;offset<requests.length;offset+=25) {
         const batchGeneration = await readActive();
         if (!batchGeneration
@@ -448,7 +540,8 @@ export function createTickHandler({
           });
         }
         const batch = requests.slice(offset, offset + 25);
-        const needsRichRecheck = (record) => live.some((rule) => rule.id === record.actorId && ruleNeedsProfileFacts(rule));
+        const needsRichRecheck = (record) => !v2Mode
+          && live.some((rule) => rule.id === record.actorId && ruleNeedsProfileFacts(rule));
         const richKeys = [...new Set(batch.filter(([, record]) => needsRichRecheck(record)).map(([key]) => rowsByKey.get(key)?.profileKey || rowsByKey.get(key)?.cuId)
           .filter((key) => selections.get(key)?.richEligible))];
         const freshRichReceipts = await richProfileReceiptsFor(richKeys, { readMany });
@@ -513,6 +606,11 @@ export function createTickHandler({
         generationId: generation.generationId,
         generationDigest: generation.digest,
         manifest,
+        ...(sealedRuleRun ? {
+          ruleRunManifest: sealedRuleRun.manifest,
+          ruleRunManifestDigest: sealedRuleRun.manifestDigest,
+          queuedForCore: true,
+        } : {}),
         pending: rows.length,
         considered,
         decided: decidedKeys.length,

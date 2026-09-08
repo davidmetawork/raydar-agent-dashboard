@@ -1,5 +1,7 @@
 /**
- * Paraform submission notifications — the runner.
+ * Historical Paraform response notifier. Retired September 7, 2026.
+ * Production now returns a quiet retirement receipt; only a new Submissions
+ * admission may notify the channel. Collector helpers remain for audit/tests.
  *
  * Collects the three streams, dedupes, and posts one short Slack message per new
  * candidate response. NOTIFY-ONLY: this endpoint never writes to Paraform, never
@@ -390,5 +392,25 @@ return async function handler(req, res) {
 };
 }
 
-// Production wiring: real io, unchanged behaviour.
-export default createSubmissionNotifyHandler();
+export function createRetiredSubmissionNotifyHandler({
+  corsHandler = cors,
+  authHandler = requireAuth,
+  cronAuthHandler = cronAuth,
+  runnerAuth = runnerAuthorized,
+} = {}) {
+  return async function retiredSubmissionNotify(req, res) {
+    if (corsHandler(req, res)) return;
+    if (!cronAuthHandler(req).ok && !runnerAuth(req) && !(await authHandler(req, res))) return;
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.status(200).json({
+      ok: true,
+      retired: true,
+      reason: "submissions_additions_only",
+      posted: 0,
+      replacement: "submissions_v2.notification_outbox",
+    });
+  };
+}
+
+// Even a historical replay URL cannot read sources or post to Slack.
+export default createRetiredSubmissionNotifyHandler();

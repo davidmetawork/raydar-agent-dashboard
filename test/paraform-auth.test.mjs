@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { paraformCookieName as sequenceCookieName } from "../api/seq/_lib/core.mjs";
+import {
+  hasCookie as sequenceHasCookie,
+  headers as sequenceHeaders,
+  paraformCookieName as sequenceCookieName,
+} from "../api/seq/_lib/core.mjs";
 import {
   clearCookieCache,
   paraformThrottleDelays,
@@ -52,6 +56,25 @@ test("dashboard Paraform clients respect allowlisted overrides and reject unknow
     if (previous === undefined) delete process.env.PARAFORM_SESSION_COOKIE_NAME;
     else process.env.PARAFORM_SESSION_COOKIE_NAME = previous;
   }
+});
+
+test("Sequence auth headers prefer the current session cookie and retain the legacy fallback", () => {
+  assert.equal(sequenceHeaders({
+    PARAFORM_SESSION_COOKIE: "Fe26.2*current*seal",
+    PARAFORM_COOKIE: "eyJlegacy-token",
+  }).cookie, "wos-session=Fe26.2*current*seal");
+  assert.equal(sequenceHeaders({
+    PARAFORM_COOKIE: "eyJlegacy-token",
+  }).cookie, "__Secure-next-auth.session-token=eyJlegacy-token");
+  assert.equal(sequenceHasCookie({}), false);
+  assert.equal(sequenceHeaders({}).cookie, "__Secure-next-auth.session-token=");
+  assert.throws(
+    () => sequenceHeaders({
+      PARAFORM_SESSION_COOKIE: "Fe26.2*current*seal",
+      PARAFORM_SESSION_COOKIE_NAME: "third-party-session",
+    }),
+    /PARAFORM_SESSION_COOKIE_NAME_INVALID/u,
+  );
 });
 
 test("Paraform REST adapter rejects foreign paths and never retries writes", async () => {

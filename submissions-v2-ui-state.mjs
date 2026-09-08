@@ -79,6 +79,7 @@ export function healthCoverageDetails(sources = {}) {
       enabled: source.enabled === true,
       delayed: source.delayed === true,
       safeErrorDetail: typeof source.safe_error_detail === "string" ? Array.from(source.safe_error_detail.trim()).slice(0, 500).join("") : "",
+      lastSuccessAt: safeHealthInstant(source.last_success_at),
       lastCompleteAt: safeHealthInstant(source.last_complete_at),
       retryAt: safeHealthInstant(source.retry_at),
       liveThrough: safeHealthInstant(coverage.live_through),
@@ -107,6 +108,43 @@ export function embeddedModalViewport({ frameTop, frameBottom, viewportTop = 0, 
 
 export function listScopeIsCurrent(scope, state) {
   return scope.sequence === state.listSequence && scope.page === state.page && scope.query === state.query;
+}
+
+export function tabPageFromKey({ key, current, pages = [] } = {}) {
+  const index = pages.indexOf(current);
+  if (index < 0) return null;
+  if (key === "Home") return pages[0] || null;
+  if (key === "End") return pages.at(-1) || null;
+  if (key === "ArrowRight") return pages[(index + 1) % pages.length] || null;
+  if (key === "ArrowLeft") return pages[(index - 1 + pages.length) % pages.length] || null;
+  return null;
+}
+
+export function displayListTotal({ totalCount, loadedCount = 0 } = {}) {
+  const total = Number(totalCount);
+  return Number.isFinite(total) && total >= loadedCount ? total : loadedCount;
+}
+
+export function listEntityNoun(page) {
+  return page === "needs_review" ? "review item" : "candidate-role pair";
+}
+
+export function listRenderKey({ page = "", query = "", rows = [], nextCursor = null, totalCount = null, generating = [], rowActions = [] } = {}) {
+  const renderedRows = Array.isArray(rows) ? rows.map(({ source_last_success_at, ...row }) => row) : [];
+  return JSON.stringify({
+    page, query, rows: renderedRows, nextCursor, totalCount,
+    generating: [...generating].sort(), rowActions: [...rowActions].sort(),
+  });
+}
+
+export function listPageReset({ page, query = "" } = {}) {
+  return { page, query, rows: [], nextCursor: null, totalCount: null, renderedRowsKey: null, rowsDirty: false };
+}
+
+export function listRenderDisposition({ previousKey = null, nextKey, background = false, dialogOpen = false, popoverOpen = false } = {}) {
+  if (nextKey === previousKey) return "unchanged";
+  if (background && (dialogOpen || popoverOpen)) return "defer";
+  return "render";
 }
 
 export function listFailureDisposition({ scope, state, append = false, refresh = false }) {
@@ -181,6 +219,36 @@ export function reviewProgressPresentation(row = {}) {
     detail: safeProgressText(row.preparation_error_detail),
     updatedAt: safeProgressInstant(row.generation_updated_at),
     deadlineAt: safeProgressInstant(row.generation_deadline_at || row.deadline_at),
+  };
+}
+
+const PREPARATION_FAILURE_LABELS = Object.freeze({
+  generation_budget_exhausted: "Preparation budget limit",
+  budget_exhausted: "Preparation budget limit",
+  generation_deadline_exhausted: "Preparation deadline exhausted",
+  role_unavailable: "Exact role unavailable",
+  candidate_original_resume_missing: "Candidate-original resume is missing",
+  resume_preparation_failed: "Resume preparation stopped safely",
+});
+
+export function preparationFailurePresentation(row = {}) {
+  const status = safeProgressText(row.generation_status, 80).toLowerCase();
+  const code = safeProgressText(row.preparation_error_code, 100).toLowerCase();
+  const detail = safeProgressText(row.preparation_error_detail);
+  const terminal = ["failed", "cancelled", "held"].includes(status);
+  if (!terminal && !code && !detail) return null;
+  const stage = safeProgressText(row.generation_stage, 120) || status || "unknown";
+  const attemptLimitReached = ["generation_budget_exhausted", "budget_exhausted"].includes(code)
+    || /(?:budget|cost) (?:ceiling|exhausted|limit)|two-dollar.*(?:ceiling|limit)|\$2(?:\.00)?\b/iu.test(detail);
+  return {
+    stage: GENERATION_STAGE_LABELS[stage] || stage,
+    reason: attemptLimitReached ? "Preparation budget limit" : (PREPARATION_FAILURE_LABELS[code] || "Resume preparation stopped safely"),
+    detail,
+    lastAttemptAt: safeProgressInstant(row.generation_updated_at),
+    attemptLimitReached,
+    guidance: attemptLimitReached
+      ? "The estimated next step did not fit within this attempt’s $2 budget. Retry preparation starts one new, separately budgeted attempt."
+      : "Review the safe failure detail before retrying this one case.",
   };
 }
 

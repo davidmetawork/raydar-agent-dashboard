@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { database } from "./db.mjs";
 import { beginCommand, completeCommand, failCommand } from "./command-store.mjs";
-import { exactSlackChannel } from "./notifications.mjs";
+import { exactSlackChannel, safeCandidateName, safeNotificationField } from "./notifications.mjs";
 import { gmailSignalUrl } from "./presentation.mjs";
 import { isParaformCuratedListUrl } from "./paraform-links.mjs";
 
@@ -299,6 +299,16 @@ function signalUrlFromEnvelope(envelope = {}) {
   return gmailSignalUrl(value) || (/^https:\/\/monitor\.raydar\.xyz\/master-inbox#conversation=[A-Za-z0-9._~%-]+$/.test(value) ? value : null);
 }
 
+function emailAdmissionOrigin(source = {}) {
+  const labels = {
+    para_ai_interview_request: "Interview Request reply",
+    new_match: "New Match reply",
+    fit_follow_up_with_matches: "Fit Follow Up reply",
+    paraform_sequence_reply: "Paraform Sequence reply",
+  };
+  return labels[clean(source.envelope?.source_family, 100)] || "Email reply";
+}
+
 async function loadCaseDeletionSnapshot(query, pairId, { lock = false } = {}) {
   const pairRows = lock
     ? await query`select * from submissions_v2.candidate_role_pairs where id=${pairId} for update`
@@ -388,6 +398,112 @@ async function loadCaseDeletionSnapshot(query, pairId, { lock = false } = {}) {
 
 export function createRepository({ sql = database(), env = process.env } = {}) {
   const notificationDestination = () => exactSlackChannel(env.SUBMISSIONS_V2_SLACK_CHANNEL_ID);
+  const admissionSignal = ({ intentState, workflowState, origin }) => {
+    const state = workflowState === "needs_review" || intentState === "unclear" || intentState === "unknown"
+      ? "Needs review"
+      : intentState === "not_interested" ? "Not interested" : "Interested";
+    return `${state} · ${clean(origin, 100) || "Source not yet identified"}`;
+  };
+  const admissionPayload = ({ candidateName, company, roleTitle, signal, addedAt }) => ({
+    candidate_name: safeCandidateName(candidateName),
+    company: safeNotificationField(company),
+    role_title: safeNotificationField(roleTitle),
+    signal: safeNotificationField(signal, "Needs review · Source not yet identified", 300),
+    added_at: instant(addedAt),
+    monitor_url: "https://monitor.raydar.xyz/#submissions",
+  });
+  const queueSignalAdmission = async (tx, { source, review, offered = [] }) => {
+    if (!review) return false;
+    const priorReview = (await tx`
+      select id, opened_at from submissions_v2.review_items
+       where unresolved_signal_id=${source.id} and id<>${review.id}
+       order by opened_at, id limit 1 for update
+    `)[0];
+    const exactRole = offered.length === 1 ? offered[0] : null;
+    const candidateId = source.envelope?.candidate_resolution?.candidate_user_id
+      || source.envelope?.candidate_resolution?.candidate?.candidate_user_id;
+    const candidate = candidateId ? (await tx`
+      select display_name from submissions_v2.candidate_index
+       where candidate_user_id=${candidateId} and active
+    `)[0] : null;
+    const rows = await tx`
+      insert into submissions_v2.notification_outbox(
+        kind, destination_id, safe_payload, dedupe_key, state, safe_error_code, safe_error_detail
+      )
+      values (
+        'submission_added', ${notificationDestination()},
+        ${tx.json(admissionPayload({
+          candidateName: candidate?.display_name || source.sender_display_name,
+          company: exactRole?.company_snapshot,
+          roleTitle: exactRole?.role_label_snapshot,
+          signal: admissionSignal({ intentState: "unclear", workflowState: "needs_review", origin: emailAdmissionOrigin(source) }),
+          addedAt: priorReview?.opened_at || review.opened_at,
+        }))},
+        ${`submission-added:signal:${source.id}`}, ${priorReview ? "held" : "pending"},
+        ${priorReview ? "pre_release_admission_suppressed" : null},
+        ${priorReview ? "This Review entry existed before admission-only notifications were enabled." : null}
+      ) on conflict (dedupe_key) do nothing returning id
+    `;
+    return rows.length > 0 && !priorReview;
+  };
+  const queuePairAdmission = async (tx, { pair, source, candidate, role, origin }) => {
+    const lineageKey = `submission-added:signal:${source.id}`;
+    const lineage = (await tx`
+      select id, pair_id from submissions_v2.notification_outbox
+       where dedupe_key=${lineageKey} for update
+    `)[0];
+    if (lineage && !lineage.pair_id) {
+      await tx`
+        update submissions_v2.notification_outbox
+           set pair_id=${pair.id}, updated_at=clock_timestamp()
+         where id=${lineage.id} and pair_id is null
+      `;
+      return false;
+    }
+    if (!lineage) {
+      const historicalReview = (await tx`
+        select id, opened_at from submissions_v2.review_items
+         where unresolved_signal_id=${source.id}
+         order by opened_at, id limit 1 for update
+      `)[0];
+      if (historicalReview) {
+        await tx`
+          insert into submissions_v2.notification_outbox(
+            kind, destination_id, safe_payload, dedupe_key, pair_id, state,
+            safe_error_code, safe_error_detail
+          ) values (
+            'submission_added', ${notificationDestination()},
+            ${tx.json(admissionPayload({
+              candidateName: candidate?.display_name || source.sender_display_name,
+              company: role?.company_name || role?.company_snapshot,
+              roleTitle: role?.role_title || role?.role_label_snapshot,
+              signal: admissionSignal({ intentState: "unclear", workflowState: "needs_review", origin }),
+              addedAt: historicalReview.opened_at,
+            }))},
+            ${lineageKey}, ${pair.id}, 'held',
+            'pre_release_admission_suppressed',
+            'This Review entry existed before admission-only notifications were enabled.'
+          ) on conflict (dedupe_key) do nothing
+        `;
+        return false;
+      }
+    }
+    const rows = await tx`
+      insert into submissions_v2.notification_outbox(kind, destination_id, safe_payload, dedupe_key, pair_id)
+      values (
+        'submission_added', ${notificationDestination()},
+        ${tx.json(admissionPayload({
+          candidateName: candidate?.display_name,
+          company: role?.company_name || role?.company_snapshot,
+          roleTitle: role?.role_title || role?.role_label_snapshot,
+          signal: admissionSignal({ intentState: pair.intent_state, workflowState: pair.workflow_state, origin }),
+          addedAt: pair.created_at,
+        }))},
+        ${`submission-added:pair:${pair.id}`}, ${pair.id}
+      ) on conflict (dedupe_key) do nothing returning id
+    `;
+    return rows.length > 0;
+  };
   // This digest is deliberately deployment-independent: rotating the case-
   // recovery HMAC key must never resurrect a permanently purged candidate.
   const candidateSuppressionHmac = (candidateId) => digest(`submissions-v2-candidate-suppression:v1\0${candidateId}`);
@@ -542,15 +658,18 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             where se.processing_state not in ('resolved','ignored_later','ignored_machine')
               and (${needle}='' or lower(coalesce(se.sender_display_name,'')) like ${pattern} escape '\\'
               or coalesce(matched.search_key,'') like ${pattern} escape '\\')
-          ), paged as (
+          ), counted as (
             select *, count(*) over()::bigint as total_count from review_rows
+          ), paged as (
+            select * from counted
              where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
              order by sort_at desc, sort_id desc limit ${take + 1}
           ) select * from paged
         `;
       } else if (page === "not_interested") {
         rows = await sql`
-          select
+          with scoped as (
+            select
             p.id as pair_id, ni.source_event_id as signal_id, p.state_version, p.candidate_user_id,
             c.display_name as candidate_name, null::text as provisional_name,
             c.paraform_profile_url as candidate_url, c.linkedin_url, c.raydar_url,
@@ -570,14 +689,16 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           left join submissions_v2.role_index r on r.role_id=p.role_id
           join submissions_v2.source_events se on se.id=ni.source_event_id
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
-          where p.case_hidden_at is null
-            and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
-            and (${after?.at || null}::timestamptz is null or (ni.original_negative_at, ni.id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
-          order by ni.original_negative_at desc, ni.id desc limit ${take + 1}
+            where p.case_hidden_at is null
+              and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
+          ) select * from scoped
+            where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
+            order by sort_at desc, sort_id desc limit ${take + 1}
         `;
       } else {
         rows = await sql`
-          select
+          with scoped as (
+            select
             p.id as pair_id, p.first_signal_id as signal_id, p.state_version, p.candidate_user_id,
             c.display_name as candidate_name, null::text as provisional_name,
             c.paraform_profile_url as candidate_url, c.linkedin_url, c.raydar_url,
@@ -655,10 +776,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               from submissions_v2.resume_sources where generation_id=g.id and status <> 'present'
           ) caution on true
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
-          where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
-            and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
-            and (${after?.at || null}::timestamptz is null or (p.original_signal_at, p.id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
-          order by p.original_signal_at desc, p.id desc limit ${take + 1}
+            where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
+              and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
+          ) select * from scoped
+            where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
+            order by sort_at desc, sort_id desc limit ${take + 1}
         `;
       }
       const hasMore = rows.length > take;
@@ -1132,11 +1254,19 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           const reasonCode = processingState === "needs_candidate"
             ? (candidateResolution?.ambiguous ? "candidate_ambiguous" : "candidate_not_found")
             : "role_unclear";
-          await tx`
+          const review = (await tx`
             insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail, evidence)
             values (${source.id}, ${reasonCode}, ${safeErrorDetail}, ${tx.json({ source_family: event.source_family, source_event_id: source.id })})
-            on conflict do nothing
-          `;
+            on conflict do nothing returning *
+          `)[0];
+          await queueSignalAdmission(tx, {
+            source,
+            review,
+            offered: (event.offered_roles || []).map((role) => ({
+              company_snapshot: role.company,
+              role_label_snapshot: role.title,
+            })),
+          });
         }
         return { source, existing: false, job: null };
       });
@@ -1283,6 +1413,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               on conflict do nothing
             `;
             createdCount += 1;
+            await queuePairAdmission(tx, {
+              pair,
+              source,
+              candidate: candidateRows[0],
+              role: roleCurrent || role,
+              origin: emailAdmissionOrigin(source),
+            });
           }
           appliedCount += 1;
           appliedRoleIds.push(decision.role_id);
@@ -1425,6 +1562,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                 values (${pair.id}, 'classification_failed', ${clean(safeDetail, 500)}, ${tx.json({ signal_id: signalId })})
               `;
               await pairEvent(tx, pair, { actorType: "worker", actorId, source: "master_inbox", eventType: "classification_failed", reasonCode: "classification_failed", idempotencyKey: `pair:classification-failed:${signalId}:${role.role_id}` });
+              await queuePairAdmission(tx, {
+                pair,
+                source,
+                candidate,
+                role,
+                origin: emailAdmissionOrigin(source),
+              });
               await tx`
                 insert into submissions_v2.notification_outbox(kind, destination_id, safe_payload, dedupe_key, pair_id)
                 values ('classification_failed', ${notificationDestination()},
@@ -1441,11 +1585,12 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             pairs.push(pair.id);
           }
         } else {
-          await tx`
+          const review = (await tx`
             insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail, evidence)
             values (${signalId}, 'classification_failed', ${clean(safeDetail, 500)}, ${tx.json({ signal_id: signalId })})
-            on conflict do nothing
-          `;
+            on conflict do nothing returning *
+          `)[0];
+          await queueSignalAdmission(tx, { source, review, offered });
           routedCount += 1;
         }
         await tx`
@@ -1519,6 +1664,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           values (${pair.id}, ${source.id}, ${roleId}, 'manual')
           on conflict do nothing
         `;
+        await queuePairAdmission(tx, {
+          pair,
+          source,
+          candidate: candidates[0],
+          role: roles[0],
+          origin: action === "duplicate" ? "Recruiter duplicate" : "Recruiter addition",
+        });
         await pairEvent(tx, pair, {
           actorId: actorEmail, source: action, eventType: "pair_created", idempotencyKey: `pair:${commandRow.id}`,
           metadata: { source_pair_id: sourcePairId },
@@ -3262,6 +3414,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             values (${pair.id}, ${source.id}, ${observation.role_id}, 'curated')
             on conflict do nothing
           `;
+          await queuePairAdmission(tx, {
+            pair,
+            source,
+            candidate,
+            role,
+            origin: "Curated list",
+          });
           if (positiveUnavailable) {
             await tx`insert into submissions_v2.review_items(pair_id, reason_code, safe_detail) values (${pair.id}, 'role_unavailable', 'The curated-list role is not currently active.')`;
           } else if (pendingIntent === "interested") {
@@ -3840,9 +3999,16 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                    safe_error_detail='The notification delivery lease expired without a provider receipt; it was held to prevent a duplicate.'
              where state='sending' and lease_expires_at < clock_timestamp()
             returning id
+          ), retired as (
+            update submissions_v2.notification_outbox
+               set state='held', lease_owner=null, lease_expires_at=null,
+                   safe_error_code='notification_kind_retired',
+                   safe_error_detail='Only first admission to Monitor Submissions is delivered.'
+             where kind <> 'submission_added' and state in ('pending','failed')
+            returning id
           ), due as (
             select id from submissions_v2.notification_outbox
-             where state in ('pending','failed') and next_attempt_at <= clock_timestamp()
+             where kind='submission_added' and state in ('pending','failed') and next_attempt_at <= clock_timestamp()
                and (pair_id is null or exists (
                  select 1 from submissions_v2.candidate_role_pairs pair
                   where pair.id=notification_outbox.pair_id and pair.case_hidden_at is null

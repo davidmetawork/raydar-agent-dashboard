@@ -10,6 +10,7 @@ import {
 import {
   acquireInboxSyncLock,
   buildInboxRefresh,
+  inboxSubmissionsProjectionCoverage,
   readInboxSnapshotState,
   releaseInboxSyncLock,
   writeInboxRefreshState,
@@ -163,10 +164,20 @@ export async function readSequenceInboxBrokerBatch(input, {
     if (loaded?.status !== "ready" || !loaded.value) {
       throw cacheUnavailable(loaded?.cause || "state_unavailable");
     }
-    // Refresh only at the beginning of a scan or after the prior watermark is
-    // complete.  Refreshing every page moves the watermark and would force a
-    // safe restart before a large cache can ever be consumed.
-    const shouldRefresh = request.caughtUp || (!request.cursor && !request.watermark);
+    const priorCoverage = inboxSubmissionsProjectionCoverage(loaded.value, { now });
+    const midScan = !request.caughtUp && Boolean(request.cursor || request.watermark);
+    // A large catalog can need several bounded refreshes. Keep repairing a
+    // degraded/incomplete cache during a scan, but pin that scan to its prior
+    // confirmed horizon so newly refreshed replies cannot move the finish line.
+    const needsMidScanRefresh = midScan && (
+      priorCoverage.state !== "ready" || priorCoverage.coverage_complete !== true
+    );
+    const shouldRefresh = request.caughtUp
+      || (!request.cursor && !request.watermark)
+      || needsMidScanRefresh;
+    const scanWatermark = midScan
+      ? request.watermark || priorCoverage.confirmed_through || null
+      : null;
     if (shouldRefresh) requireBudget(1_000);
     const refreshedState = shouldRefresh
       ? await writeState(loaded.value, await buildRefresh({
@@ -183,6 +194,7 @@ export async function readSequenceInboxBrokerBatch(input, {
       cursorOverlapMs: request.caughtUp ? 5 * 60_000 : 0,
       expectedCatalogDigest: request.catalogDigest,
       expectedWatermark: request.watermark,
+      scanWatermark,
       savedRoleMappings: savedRoleMappingState.mappings,
       savedRoleMappingDigest: savedRoleMappingState.digest,
       savedRoleMappingStatus: savedRoleMappingState.status,

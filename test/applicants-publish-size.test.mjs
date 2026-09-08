@@ -34,7 +34,7 @@
  *  cannot be imported, so it is written down and asserted. It measures the
  *  same object these caps measure — {snapshot, queue, generation,
  *  generationId, generationDigest, sourceCutoff, sourceWatermark, acks}. */
-const CORE_TRANSPORT_MAX_DECODED_BYTES = 10_000_000;
+const CORE_TRANSPORT_MAX_DECODED_BYTES = 32_000_000;
 
 import test from "node:test";
 import assert from "node:assert/strict";

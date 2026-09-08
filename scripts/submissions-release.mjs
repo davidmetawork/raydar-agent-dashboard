@@ -21,6 +21,7 @@ const FIXED_FILES = Object.freeze([
   "api/sourcing/_lib/store.mjs",
   "api/roster/_lib/outcome-sequences.mjs",
   "api/paraai/_lib/core.mjs",
+  "api/paraai/submission-notify.mjs",
   "api/auth/_lib/session.mjs",
   "scripts/migrate-submissions-v2.mjs",
   "scripts/provision-submissions-v2-roles.sql",
@@ -31,6 +32,7 @@ const FIXED_FILES = Object.freeze([
 const FIXED_DIRECTORIES = Object.freeze([
   ["api/submissions-v2", (path) => path.endsWith(".mjs") && path !== MANIFEST_MODULE],
   ["submissions-v2-worker", (path) => /(?:\.mjs|\/Dockerfile|\/fly\.toml)$/u.test(path)],
+  ["submissions-v2-purge", (path) => /(?:\.mjs|\/Dockerfile|\/fly\.toml)$/u.test(path)],
   ["resume-renderer-v2", (path) => /(?:\.mjs|\.py|\.svg|\.txt|\/Dockerfile|\/fly\.toml)$/u.test(path) && !/(?:^|\/)test[^/]*\.(?:mjs|py)$/u.test(path)],
   ["migrations/submissions-v2", (path) => path.endsWith(".sql")],
 ]);

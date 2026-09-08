@@ -117,9 +117,21 @@ test("curated batches are stable and capped", () => {
 });
 
 test("Slack copy contains no raw quote or email and disables unfurls", async () => {
-  const text = notificationText("not_interested", { candidate_name: "Jane <!channel>", company: "Acme <@U123>", role_title: "Engineer", monitor_url: "https://monitor.raydar.xyz/#submissions-v2" });
+  const text = notificationText("submission_added", {
+    candidate_name: "Jane <!channel>\nInjected",
+    company: "Acme <@U123>",
+    role_title: "Engineer & Builder",
+    signal: "Interested · Curated list <@U456>",
+    added_at: "2026-09-07T23:15:00.000Z",
+    monitor_url: "https://monitor.raydar.xyz/#submissions-v2",
+  });
+  assert.match(text, /Jane ‹!channel› Injected/u);
+  assert.match(text, /Company: Acme ‹@U123›/u);
+  assert.match(text, /Job title: Engineer and Builder/u);
+  assert.match(text, /Signal: Interested · Curated list ‹@U456›/u);
+  assert.match(text, /Added at: Sep 7, 2026, 4:15 PM PT/u);
   let request;
-  const result = await postSafeNotification(text, { env: { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" }, destinationId: "C123ABC", fetchImpl: async (_url, init) => { request = JSON.parse(init.body); return { ok: true, json: async () => ({ ok: true, ts: "1" }) }; } });
+  const result = await postSafeNotification(text, { env: { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" }, destinationId: "C123ABC", kind: "submission_added", fetchImpl: async (_url, init) => { request = JSON.parse(init.body); return { ok: true, json: async () => ({ ok: true, ts: "1" }) }; } });
   assert.equal(request.unfurl_links, false);
   assert.equal(request.unfurl_media, false);
   assert.equal(request.mrkdwn, false);
@@ -128,15 +140,59 @@ test("Slack copy contains no raw quote or email and disables unfurls", async () 
   assert.equal(result.receipt, "1");
 });
 
+test("Slack only retries an explicit refusal, holding malformed and server-error responses", async () => {
+  const text = notificationText("submission_added", {
+    candidate_name: "Jane Candidate", company: "Acme", role_title: "Engineer",
+    signal: "Interested · Curated list", added_at: "2026-09-07T23:15:00.000Z",
+  });
+  const direct = { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" };
+  const broker = {
+    SUBMISSIONS_V2_NOTIFICATION_BROKER_URL: "https://monitor.raydar.xyz/api/submissions-v2/internal/notification",
+    SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: "k".repeat(32),
+  };
+  for (const env of [direct, broker]) {
+    for (const body of [{}, { error: "malformed" }, { ok: "true", ts: "1" }]) {
+      await assert.rejects(
+        () => postSafeNotification(text, {
+          env, destinationId: "C123ABC", kind: "submission_added",
+          fetchImpl: async () => ({ ok: true, status: 200, json: async () => body }),
+        }),
+        (error) => error.deliveryOutcome === "unknown",
+      );
+    }
+    await assert.rejects(
+      () => postSafeNotification(text, {
+        env, destinationId: "C123ABC", kind: "submission_added",
+        fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({ ok: false, error: "ratelimited" }) }),
+      }),
+      (error) => error.code === "ratelimited" && error.deliveryOutcome === "not_sent",
+    );
+  }
+  for (const body of [{ error: "service_unavailable" }, { ok: false, error: "internal_error" }]) {
+    await assert.rejects(
+      () => postSafeNotification(text, {
+        env: direct, destinationId: "C123ABC", kind: "submission_added",
+        fetchImpl: async () => ({ ok: false, status: 503, json: async () => body }),
+      }),
+      (error) => error.deliveryOutcome === "unknown",
+    );
+  }
+});
+
 test("isolated workers can use the exact Monitor notification broker", async () => {
   let request;
   const key = "k".repeat(32);
-  const result = await postSafeNotification("Safe notice", {
+  const text = notificationText("submission_added", {
+    candidate_name: "Jane Candidate", company: "Acme", role_title: "Engineer",
+    signal: "Interested · Paraform Sequence reply", added_at: "2026-09-07T23:15:00.000Z",
+  });
+  const result = await postSafeNotification(text, {
     env: {
       SUBMISSIONS_V2_NOTIFICATION_BROKER_URL: "https://monitor.raydar.xyz/api/submissions-v2/internal/notification",
       SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: key,
     },
     destinationId: "C123ABC",
+    kind: "submission_added",
     fetchImpl: async (url, init) => {
       request = { url, headers: init.headers, body: JSON.parse(init.body) };
       return { ok: true, json: async () => ({ ok: true, receipt: "2", channel: "C123ABC" }) };
@@ -144,8 +200,79 @@ test("isolated workers can use the exact Monitor notification broker", async () 
   });
   assert.equal(request.url, "https://monitor.raydar.xyz/api/submissions-v2/internal/notification");
   assert.equal(request.headers.authorization, `Bearer ${key}`);
-  assert.deepEqual(request.body, { destination_id: "C123ABC", text: "Safe notice" });
+  assert.deepEqual(request.body, { kind: "submission_added", destination_id: "C123ABC", text });
   assert.equal(result.receipt, "2");
+});
+
+test("Slack delivery fails closed for every notification kind except first admission", async () => {
+  let requests = 0;
+  await assert.rejects(
+    () => postSafeNotification("Legacy notice", {
+      env: { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" },
+      destinationId: "C123ABC",
+      kind: "source_delayed",
+      fetchImpl: async () => { requests += 1; },
+    }),
+    (error) => error.code === "notification_kind_suppressed" && error.deliveryOutcome === "not_sent",
+  );
+  assert.equal(requests, 0);
+});
+
+test("Slack admission delivery holds ambiguous or mismatched provider receipts", async () => {
+  const text = notificationText("submission_added", {
+    candidate_name: "Jane Candidate", company: "Acme", role_title: "Engineer",
+    signal: "Interested · Curated list", added_at: "",
+  });
+  assert.match(text, /Added at: Time not available/u);
+  await assert.rejects(
+    () => postSafeNotification(text, {
+      env: { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" }, destinationId: "C123ABC",
+      kind: "submission_added",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, channel: "C123ABC" }) }),
+    }),
+    (error) => error.code === "slack_receipt_missing" && error.deliveryOutcome === "unknown",
+  );
+  await assert.rejects(
+    () => postSafeNotification(text, {
+      env: { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" }, destinationId: "C123ABC",
+      kind: "submission_added",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, ts: "123.456", channel: "COTHER" }) }),
+    }),
+    (error) => error.code === "slack_channel_receipt_mismatch" && error.deliveryOutcome === "unknown",
+  );
+  const brokerEnv = {
+    SUBMISSIONS_V2_NOTIFICATION_BROKER_URL: "https://monitor.raydar.xyz/api/submissions-v2/internal/notification",
+    SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: "k".repeat(32),
+  };
+  await assert.rejects(
+    () => postSafeNotification(text, {
+      env: brokerEnv, destinationId: "C123ABC", kind: "submission_added",
+      fetchImpl: async () => ({
+        ok: false, status: 502,
+        json: async () => ({ ok: false, error: "slack_receipt_missing", delivery_outcome: "unknown" }),
+      }),
+    }),
+    (error) => error.code === "slack_receipt_missing" && error.deliveryOutcome === "unknown",
+  );
+  await assert.rejects(
+    () => postSafeNotification(text, {
+      env: brokerEnv, destinationId: "C123ABC", kind: "submission_added",
+      fetchImpl: async () => ({
+        ok: false, status: 503,
+        json: async () => ({ ok: false, error: "broker_failed" }),
+      }),
+    }),
+    (error) => error.code === "broker_failed" && error.deliveryOutcome === "unknown",
+  );
+});
+
+test("Slack admission copy never exposes an email-shaped candidate display name", () => {
+  assert.match(notificationText("submission_added", {
+    candidate_name: "candidate@example.com", signal: "Needs review · Email reply",
+  }), /Name: Not yet identified/u);
+  assert.match(notificationText("submission_added", {
+    candidate_name: "Candidate Name <candidate@example.com>", signal: "Needs review · Email reply",
+  }), /Name: Candidate Name/u);
 });
 
 test("notification broker requires an exact strong bearer", () => {

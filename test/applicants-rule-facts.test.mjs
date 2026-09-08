@@ -180,3 +180,33 @@ test("a university without an ID defaults to its complete name, with degree opti
     assert.equal(facts.factsFor(long).some((item) => item.id === "education-school-name"), length < 160);
   }
 });
+
+test("V2 chooser uses the selected immutable record and seals its digest", () => {
+  const facts = loadFactsModule();
+  const row = { key: "v2:one", inputRevision: "input-one", decisionRevision: 4 };
+  const profileV2 = {
+    factSetDigest: "a".repeat(64), factsCurrent: true, inputRevision: "input-one", decisionRevision: 4,
+    application: { applicationId: "11111111-1111-4111-8111-111111111111", sourceObservationId: "obs-one", rowRevision: "row-one",
+      appliedTo: { roleId: "role-one", title: "Platform Engineer" } },
+    profile: { facts: {
+      title: { value: "Versioned title" }, location: { value: "Versioned City" },
+      experiences: { entries: [{ recordId: "work-one", companyId: "company-one", companyName: "One Co", roleTitle: "Engineer", current: true }] },
+      education: { entries: [{ recordId: "edu-one", schoolId: "school-one", school: "One University", degree: "BA" }] },
+    } },
+  };
+  const sources = facts.profileSources("one", row, { profileV2,
+    experiences: [{ companyId: "legacy-company", companyName: "Legacy Co" }] });
+  assert.equal(sources.some((source) => source.source === "source"), false, "legacy source details remain nonactionable when V2 differs");
+  const education = sources.find((source) => source.kind === "education");
+  const seed = JSON.parse(JSON.stringify(facts.createSeed(education, ["education-school", "education-degree"])));
+  assert.deepEqual(seed.conditions, [
+    { field: "school.id", op: "any_of", value: ["school-one"] },
+    { field: "school.degreeText", op: "contains", value: "BA" },
+  ]);
+  assert.deepEqual(seed.profileFactSeed, {
+    version: "applicant-profile-v2-rule-seed-v1", key: "v2:one",
+    applicationId: "11111111-1111-4111-8111-111111111111", sourceObservationId: "obs-one", rowRevision: "row-one",
+    inputRevision: "input-one", decisionRevision: 4, factSetDigest: "a".repeat(64),
+    selection: { kind: "education", index: 0, recordId: "edu-one", selectedFactIds: ["education-school", "education-degree"] },
+  });
+});
