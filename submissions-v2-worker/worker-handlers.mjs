@@ -16,6 +16,7 @@ import { runResumePreparation, settleResumePreparationFailure } from "../api/sub
 import { ResumePipelineError, pipelineError } from "../api/submissions-v2/_lib/resume/pipeline-runtime.mjs";
 import { readExactSubmissionProofs } from "./proof-reader.mjs";
 import { reconcileGmailRoleInterest } from "./gmail-reader.mjs";
+import { mergeRoleInterestAccounting } from "../api/submissions-v2/_lib/gmail-interview-source.mjs";
 import { GMAIL_ROLE_INTEREST_SCOPE } from "../api/submissions-v2/_lib/email-source-policy.mjs";
 import { reconcileSequenceInbox } from "./sequence-inbox-reader.mjs";
 
@@ -440,6 +441,9 @@ export function createWorkerHandlers({
           stage: catchupFailure ? "gmail_catchup_delayed" : live.narrowed ? "gmail_window_narrowed" : live.completed ? "gmail_live_window_complete" : "gmail_waiting_for_window",
           observed: (live.observed || 0) + (catchup?.observed || 0),
           accepted: (live.accepted || 0) + (catchup?.accepted || 0),
+          // Every message the reader saw and did not admit, by reason, so a family or
+          // producer gap is visible in the job summary instead of silent.
+          deferred: mergeRoleInterestAccounting(live.accounting, catchup?.accounting),
           catchup_delayed: Boolean(catchupFailure),
         } };
       } catch (error) {

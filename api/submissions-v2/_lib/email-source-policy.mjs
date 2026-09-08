@@ -56,6 +56,29 @@ export function paraformRoleLink(value) {
 const INTEREST_ASK = /\b(?:would you be interested|any interest in exploring|would you be open|open to (?:connecting|having|learning)|let me know if you(?:'d| would) be open|look interesting)\b/iu;
 const ADMINISTRATIVE_COPY = /\b(?:interview (?:prep(?:aration)?|confirmed|confirmation)|prep(?:aration)? (?:guide|document|doc|materials)|later[- ]stage interview|what to expect in (?:the |your )?(?:later |next )?interview stage|(?:your |the )?interview (?:has been |is )scheduled|calendar invitation)\b/iu;
 
+// Match Watch announces roles as "Raydar - New Role Match 🎉" / "Raydar - New Role
+// Matches 🎉" and sends them through the Mailroom (SendGrid), so the outbound original
+// never reaches Gmail Sent and the reply is classified by subject alone.  A read-only
+// probe of the live mailbox on 2026-09-08 (analysis note gmail-search-probe.md) counted
+// 0 messages for the shipped phrase subject:"New Match" against 184 for
+// subject:"New Role Match": "new match" does not match "New Role Match" in either Gmail
+// phrase search or the regex below, which is why this family never entered V2.
+const NEW_ROLE_MATCH = /\bnew role match(?:es)?\b/iu;
+// Both Match Watch templates (single and multi) carry both markers; requiring both keeps
+// a neighbouring template that merely links a job description out of this family.
+const MATCH_WATCH_OPENING = /\bi recently got (?:a new role|some new roles)\b/iu;
+const MATCH_WATCH_JD_LINE = /\blinking the job description(?:s)?\b/iu;
+// Reply clients prefix the subject; the family test is anchored on what is left, so a
+// title-suffixed Interview Agent invite ("Raydar - 1st Round Interview - {title}") is not
+// read as the bare curated-list follow-up subject it resembles.
+const REPLY_PREFIX = /^(?:\s*(?:re|fw|fwd|aw|sv|antw)\s*(?:\[\d{1,3}\])?\s*:\s*)+/iu;
+const SUBJECT_TRAILING_DECORATION = /[\s\p{P}\p{S}]+$/u;
+
+/** The subject a family test sees: reply prefixes and trailing decoration removed. */
+export function coreSubject(subject) {
+  return clean(subject).replace(REPLY_PREFIX, "").replace(SUBJECT_TRAILING_DECORATION, "").trim();
+}
+
 /** Classify the exact outbound parent. Prep/admin copy intentionally returns null. */
 export function outboundEmailFamily({ subject = "", text = "", roleCount = 0 } = {}) {
   const sample = `${clean(subject)}\n${clean(text)}`;
@@ -68,6 +91,9 @@ export function outboundEmailFamily({ subject = "", text = "", roleCount = 0 } =
   if (/\binterview request(?:s)?\b/iu.test(sample) && INTEREST_ASK.test(sample)) return "para_ai_interview_request";
   if (/\b(?:interested in this|new interview request|another interview request)\b/iu.test(sample) && INTEREST_ASK.test(sample)) return "para_ai_interview_request";
   if (roleCount > 0 && /\binterview request(?:s)?\b/iu.test(subject)) return "para_ai_interview_request";
+  // Appended last so every family that already resolves keeps resolving unchanged.
+  if (NEW_ROLE_MATCH.test(sample)) return "new_match";
+  if (MATCH_WATCH_OPENING.test(sample) && MATCH_WATCH_JD_LINE.test(sample)) return "new_match";
   return null;
 }
 
@@ -76,6 +102,8 @@ export function replySubjectFamily(subject) {
   const value = clean(subject);
   if (/\binterview request(?:s)?\b/iu.test(value)) return "para_ai_interview_request";
   if (/\bnew match(?:es)?\b/iu.test(value)) return "new_match";
-  if (/\braydar\s*-\s*1st round interview\b/iu.test(value)) return "fit_follow_up_with_matches";
+  // Anchored: only the bare curated-list follow-up subject is this family.
+  if (/^raydar\s*-\s*1st round interview$/iu.test(coreSubject(value))) return "fit_follow_up_with_matches";
+  if (NEW_ROLE_MATCH.test(value)) return "new_match";
   return null;
 }

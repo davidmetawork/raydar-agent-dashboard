@@ -38,6 +38,24 @@ test("pair-scoped role uncertainty asks for an interest decision without changin
   assert.equal(unresolved.primary_action_label, "Select role(s)");
 });
 
+test("a role-unclear email with no offered role points at the producer gap, not a role picker", () => {
+  const gap = rowDto({
+    signal_id: "signal-2", source_family: "email", email_source_family: "new_match",
+    workflow_state: "needs_review", review_reasons: ["role_unclear"], offered_role_count: 0,
+  });
+  assert.equal(gap.review_reasons[0].code, "role_unclear");
+  assert.equal(gap.review_reasons[0].label, "No offered role was recorded for this reply");
+  assert.equal(gap.primary_action_label, "Open the reply");
+  assert.match(gap.review_reasons[0].detail, /no offered role/iu);
+  // A stored safe detail still wins, and every other role-unclear row is untouched.
+  assert.equal(rowDto({ ...{ signal_id: "signal-2", source_family: "email", offered_role_count: 0, workflow_state: "needs_review" }, review_reasons: [{ reason_code: "role_unclear", safe_detail: "Stored detail" }] }).review_reasons[0].detail, "Stored detail");
+  const offered = rowDto({ signal_id: "signal-3", source_family: "email", workflow_state: "needs_review", review_reasons: ["role_unclear"], offered_role_count: 2 });
+  assert.equal(offered.review_reasons[0].label, "Exact offered role is unclear");
+  assert.equal(offered.primary_action_label, "Select role(s)");
+  const curated = rowDto({ signal_id: "signal-4", source_family: "curated", workflow_state: "needs_review", review_reasons: ["role_unclear"], offered_role_count: 0 });
+  assert.equal(curated.review_reasons[0].label, "Exact offered role is unclear");
+});
+
 test("rows without source evidence hide Signal instead of resolving Monitor root", () => {
   assert.equal(safeHttps(null, ["monitor.raydar.xyz"]), null);
   assert.equal(safeHttps("/master-inbox", ["monitor.raydar.xyz"]), null);

@@ -63,12 +63,25 @@ export function rowDto(row) {
     ? Object.hasOwn(REVIEW_REASONS, preparationErrorCode) ? preparationErrorCode : "resume_preparation_failed"
     : null;
   const identifiedPair = Boolean((row.pair_id || row.case_id) && row.candidate_user_id && row.role_id);
+  const offeredRoleCount = Number(row.offered_role_count || 0);
+  // An email reply whose event carries no offered role at all cannot be answered by
+  // picking one: the producer never recorded what was offered (Match Watch and the
+  // curated-list follow-up send through the Mailroom, so no outbound parent survives in
+  // Gmail).  Presentation only - the stored reason code stays role_unclear.
+  const producerRoleGap = !identifiedPair && offeredRoleCount === 0 && row.source_family === "email";
   const reviewReasons = reasons(row.review_reasons || []).map((reason) => (
     reason.code === "role_unclear" && identifiedPair
       ? { ...reason, label: "Confirm interest for this role", action: "Review Signal" }
-      : preparationErrorDetail && reason.code === preparationReviewCode
-        ? { ...reason, detail: preparationErrorDetail }
-        : reason
+      : reason.code === "role_unclear" && producerRoleGap
+        ? {
+          ...reason,
+          label: "No offered role was recorded for this reply",
+          detail: reason.detail || "The sending lane recorded no offered role for this email, so there is no role to select here.",
+          action: "Open the reply",
+        }
+        : preparationErrorDetail && reason.code === preparationReviewCode
+          ? { ...reason, detail: preparationErrorDetail }
+          : reason
   ));
   const first = reviewReasons[0];
   const signalUrl = gmailSignalUrl(row.signal_url) || safeHttps(row.signal_url, ["monitor.raydar.xyz", "paraform.com"]);
@@ -79,7 +92,6 @@ export function rowDto(row) {
   const submissionStatus = row.submission_status || "none";
   const readyWorkflow = workflowState === "interested";
   const generationActive = ACTIVE_GENERATION_STATES.has(generationStatus);
-  const offeredRoleCount = Number(row.offered_role_count || 0);
   const unresolvedMultipleRoles = !row.pair_id && !row.case_id && offeredRoleCount > 1;
   return {
     case_id: row.pair_id || row.case_id || null,
