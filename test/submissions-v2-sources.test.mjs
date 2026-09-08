@@ -140,6 +140,45 @@ test("Slack copy contains no raw quote or email and disables unfurls", async () 
   assert.equal(result.receipt, "1");
 });
 
+test("Slack only retries an explicit refusal, holding malformed and server-error responses", async () => {
+  const text = notificationText("submission_added", {
+    candidate_name: "Jane Candidate", company: "Acme", role_title: "Engineer",
+    signal: "Interested · Curated list", added_at: "2026-09-07T23:15:00.000Z",
+  });
+  const direct = { SUBMISSIONS_V2_SLACK_BOT_TOKEN: "token" };
+  const broker = {
+    SUBMISSIONS_V2_NOTIFICATION_BROKER_URL: "https://monitor.raydar.xyz/api/submissions-v2/internal/notification",
+    SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY: "k".repeat(32),
+  };
+  for (const env of [direct, broker]) {
+    for (const body of [{}, { error: "malformed" }, { ok: "true", ts: "1" }]) {
+      await assert.rejects(
+        () => postSafeNotification(text, {
+          env, destinationId: "C123ABC", kind: "submission_added",
+          fetchImpl: async () => ({ ok: true, status: 200, json: async () => body }),
+        }),
+        (error) => error.deliveryOutcome === "unknown",
+      );
+    }
+    await assert.rejects(
+      () => postSafeNotification(text, {
+        env, destinationId: "C123ABC", kind: "submission_added",
+        fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({ ok: false, error: "ratelimited" }) }),
+      }),
+      (error) => error.code === "ratelimited" && error.deliveryOutcome === "not_sent",
+    );
+  }
+  for (const body of [{ error: "service_unavailable" }, { ok: false, error: "internal_error" }]) {
+    await assert.rejects(
+      () => postSafeNotification(text, {
+        env: direct, destinationId: "C123ABC", kind: "submission_added",
+        fetchImpl: async () => ({ ok: false, status: 503, json: async () => body }),
+      }),
+      (error) => error.deliveryOutcome === "unknown",
+    );
+  }
+});
+
 test("isolated workers can use the exact Monitor notification broker", async () => {
   let request;
   const key = "k".repeat(32);
