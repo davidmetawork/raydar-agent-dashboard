@@ -3,6 +3,36 @@ export const DELIVERY_LABELS = { delivered: 'Delivered', accepted: 'Accepted', b
 export const EMPTY_FILTERS = { view: 'sent', q: '', lane: '', sender: '', delivery: '', from: '', to: '', id: '' };
 export const EMAIL_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 
+// Registry notes often describe setup-time state. Purpose text is independent
+// of those notes; the live enabled field remains the displayed lane setting.
+const LANE_PURPOSES = {
+  'applicant-core-interview': 'Sends interview invitations to approved applicants.',
+  'canary': 'Sends test emails to David to verify email delivery.',
+  'interview-outage-apology': 'Sends an apology and rebooking invitation after a missed interview caused by an outage.',
+  'match-none': 'Follows up after a screening call when no matching openings are available.',
+  'match-watch': 'Sends new role matches and their follow-ups.',
+  'paraai-outreach-relief': 'Sends approved replacement outreach during a Para AI sending incident.',
+  'postcall-general-many': 'Shares two or more new role matches after a general screening call.',
+  'postcall-general-no-new': 'Follows up after a repeat screening call when earlier matches remain available and no new roles were found.',
+  'postcall-general-none': 'Follows up after a general screening call when no matching roles are available.',
+  'postcall-general-one': 'Shares one new role match after a general screening call.',
+  'postcall-match-correction': 'Sends an approved correction when a post-call email omitted suitable role matches.',
+  'postcall-role-bad-matches': 'Shares other new matches after a screening call when the discussed role is not a fit.',
+  'postcall-role-bad-no-new': 'Revisits earlier matches when the discussed role is not a fit and no new roles were found.',
+  'postcall-role-bad-none': 'Follows up when the discussed role is not a fit and no other matches are available.',
+  'postcall-role-good-matches': 'Follows up on a suitable role and shares other new matches after a screening call.',
+  'postcall-role-good-no-new': 'Follows up on a suitable role and earlier matches when no new roles were found.',
+  'postcall-role-good-none': 'Follows up on a suitable role when no other matches are available.',
+};
+
+export function lanePurpose(lane = {}) {
+  const id = String(lane.id || '');
+  if (Object.hasOwn(LANE_PURPOSES, id)) return LANE_PURPOSES[id];
+  if (id.startsWith('master-inbox-human-')) return 'Sends emails and replies reviewed by a person in Master Inbox.';
+  if (/^holiday-human-reschedule-\d{4}-\d{2}-\d{2}$/.test(id)) return 'Sends a holiday notice and rescheduling options for confirmed intro calls.';
+  return 'A purpose description has not been added for this lane.';
+}
+
 export function validDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return '';
   const [year, month, day] = value.split('-').map(Number);
