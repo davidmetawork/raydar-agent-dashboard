@@ -25,7 +25,7 @@ test("repository exposes the complete API and worker persistence boundary", () =
     "list", "counts", "health", "searchCandidates", "searchRoles", "pair", "jobs", "sourceForReview",
     "recordEmailSource", "applyClassifiedSignal", "routeClassificationFailure", "bindUnresolvedSignal", "dismissUnresolvedSignal",
     "addCandidate", "transition", "keepReview", "enqueuePairAction", "enqueueSignalAction",
-    "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "archive",
+    "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "markSubmitted", "unmarkSubmitted", "archive",
     "upsertCandidateIndex", "upsertRoleIndex", "curatedSnapshots", "applyCuratedObservations",
     "resumeWorkInput", "startResumeGeneration", "resumeGeneration", "updateResumeGeneration",
     "startResumeStageRun", "finishResumeStageRun", "persistResumeSources", "persistResumeClaims",

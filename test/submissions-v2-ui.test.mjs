@@ -8,6 +8,14 @@ const css = await readFile(new URL("../submissions-v2.css", import.meta.url), "u
 const uiState = await readFile(new URL("../submissions-v2-ui-state.mjs", import.meta.url), "utf8");
 const dashboard = await readFile(new URL("../index.html", import.meta.url), "utf8");
 
+function between(source, start, end) {
+  const from = source.indexOf(start);
+  const to = source.indexOf(end, from + start.length);
+  assert.notEqual(from, -1, `missing ${start}`);
+  assert.notEqual(to, -1, `missing ${end}`);
+  return source.slice(from, to);
+}
+
 test("bootstrap obtains public Google configuration before the protected V2 session", () => {
   const config = js.indexOf('publicJson("/api/auth/config")');
   const session = js.indexOf('request("/api/submissions-v2/session")');
@@ -250,9 +258,34 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
 });
 
 test("a proven submission remains explicit while a resume issue stays actionable", () => {
-  assert.match(js, /row\.submission_status === "proven" \? '<span class="submitted-label">SUBMITTED<\/span>' : ""/);
+  assert.match(js, /const submitted = row\.submission_status === "proven" \|\| row\.submitted_manually/);
   assert.match(js, /The submission is recorded; download unlocks when the resume is ready\./);
   assert.match(js, /runReviewAction\("retry_preparation"/);
+});
+
+test("David can mark a candidate submitted himself and undo it, ahead of Paraform proof", () => {
+  assert.match(js, /manualMarkPresentation, preparationFailurePresentation/);
+  assert.match(js, /submissionGroup, tabPageFromKey/);
+  assert.match(js, /class="button secondary mark-submitted" data-id="\$\{esc\(id\)\}" type="button" \$\{!canMark \|\| marking \? "disabled" : ""\}/);
+  assert.match(js, /marking \? "Marking…" : "Mark submitted"/);
+  assert.match(js, /class="button text unmark-submitted" data-id="\$\{esc\(id\)\}" type="button" \$\{!canUnmark \|\| marking \? "disabled" : ""\}>Undo</);
+  assert.match(js, /class="submitted-state"><span class="submitted-label">\$\{esc\(manual\?\.label \|\| "SUBMITTED"\)\}<\/span>/);
+  assert.match(js, /class="submitted-detail">\$\{esc\(manual\.detail\)\}<\/small>/);
+  assert.match(js, /rowCapability\(row, "can_mark_submitted", false\)/);
+  assert.match(js, /rowCapability\(row, "can_unmark_submitted", false\)/);
+  assert.match(js, /submissionGroup\(row\) === "submitted"/);
+  assert.match(js, /document\.querySelectorAll\("\.mark-submitted"\)\.forEach\(\(node\) => \{ node\.onclick = \(\) => markSubmitted\(node\.dataset\.id\); \}\)/);
+  assert.match(js, /document\.querySelectorAll\("\.unmark-submitted"\)\.forEach\(\(node\) => \{ node\.onclick = \(\) => unmarkSubmitted\(node\.dataset\.id\); \}\)/);
+  const markFn = between(js, "async function markSubmitted(id)", "async function unmarkSubmitted(id)");
+  assert.match(markFn, /withRowAction\(id, "mark", async \(\) => \{/);
+  assert.match(markFn, /command\("mark_submitted", \{ case_id: id, expected_version: row\.state_version \}\)/);
+  assert.match(markFn, /Marked as submitted\. Paraform will confirm it in the background\./);
+  const unmarkFn = between(js, "async function unmarkSubmitted(id)", "async function command(");
+  assert.match(unmarkFn, /withRowAction\(id, "mark", async \(\) => \{/);
+  assert.match(unmarkFn, /command\("unmark_submitted", \{ case_id: id, expected_version: row\.state_version \}\)/);
+  assert.match(unmarkFn, /Submission mark removed\./);
+  assert.match(css, /\.submitted-detail\{/);
+  assert.match(css, /\.submitted-state\{display:flex;flex-direction:column;align-items:flex-end;gap:2px\}/);
 });
 
 test("source health distinguishes reported delays from committed Gmail and Sequence checkpoints", () => {

@@ -81,6 +81,8 @@ export function rowDto(row) {
   const generationActive = ACTIVE_GENERATION_STATES.has(generationStatus);
   const offeredRoleCount = Number(row.offered_role_count || 0);
   const unresolvedMultipleRoles = !row.pair_id && !row.case_id && offeredRoleCount > 1;
+  const submissionMarkedAt = safeInstant(row.submission_marked_at);
+  const manuallyMarked = Boolean(submissionMarkedAt) && submissionStatus !== "proven";
   return {
     case_id: row.pair_id || row.case_id || null,
     signal_id: row.signal_id || null,
@@ -120,17 +122,22 @@ export function rowDto(row) {
     artifact_version: Number(row.artifact_version || 0) || null,
     artifact_ready: artifactReady,
     submission_status: submissionStatus,
+    submission_marked_at: submissionMarkedAt,
+    submission_marked_by: text(row.submission_marked_by, 320) || null,
+    submitted_manually: manuallyMarked,
     negative_reason: text(row.negative_reason, 500) || null,
     corrected_destination: row.corrected_destination || null,
     role_active: row.role_active === true,
     role_last_confirmed_at: row.role_last_confirmed_at || null,
     source_last_success_at: row.source_last_success_at || null,
     capabilities: {
-      can_correct: identifiedPair && submissionStatus !== "proven",
+      can_correct: identifiedPair && submissionStatus !== "proven" && !manuallyMarked,
       can_duplicate: identifiedPair,
       can_download: (readyWorkflow || submissionStatus === "proven") && artifactReady,
       can_regenerate: (readyWorkflow || (submissionStatus === "proven" && workflowState === "needs_review" && row.intent_state === "interested")) && artifactReady && !generationActive,
-      can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven",
+      can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven" && !manuallyMarked,
+      can_mark_submitted: readyWorkflow && submissionStatus !== "proven" && !manuallyMarked,
+      can_unmark_submitted: manuallyMarked,
     },
   };
 }
