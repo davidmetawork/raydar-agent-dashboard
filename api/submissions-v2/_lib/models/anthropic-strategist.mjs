@@ -277,9 +277,18 @@ async function callModel(model, payload, {
   maxTokens,
   signal,
   now,
+  onAttempt = null,
+  onUsage = null,
 }) {
   const startedAt = now();
   const resolvedApiKey = requiredKey(apiKey);
+  const requestBody = bodyFor(model, payload, maxTokens);
+  const reservation = await onAttempt?.({
+    provider: "anthropic",
+    model,
+    input: requestBody,
+    maximumOutputTokens: maxTokens,
+  });
   let response;
   try {
     response = await fetchImpl(ANTHROPIC_ENDPOINT, {
@@ -289,7 +298,7 @@ async function callModel(model, payload, {
         "x-api-key": resolvedApiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(bodyFor(model, payload, maxTokens)),
+      body: JSON.stringify(requestBody),
       signal,
     });
   } catch (cause) {
@@ -299,7 +308,20 @@ async function callModel(model, payload, {
       cause,
     });
   }
-  const raw = await responseJson(response, "anthropic");
+  let raw;
+  try {
+    raw = await responseJson(response, "anthropic");
+  } catch (error) {
+    await onUsage?.({ reservation, provider: "anthropic", model, usage: error?.details?.usage || null });
+    throw error;
+  }
+  const usage = {
+    inputTokens: raw?.usage?.input_tokens,
+    outputTokens: raw?.usage?.output_tokens,
+    cacheCreationInputTokens: raw?.usage?.cache_creation_input_tokens,
+    cacheReadInputTokens: raw?.usage?.cache_read_input_tokens,
+  };
+  await onUsage?.({ reservation, provider: "anthropic", model, usage });
   let strategy;
   try {
     strategy = assertStrictStrategy(parseText(raw));
@@ -319,12 +341,7 @@ async function callModel(model, payload, {
       effort: STRATEGIST_EFFORT,
       promptVersion: STRATEGIST_PROMPT_VERSION,
       durationMs: Math.max(0, now() - startedAt),
-      usage: {
-        inputTokens: Number(raw?.usage?.input_tokens) || 0,
-        outputTokens: Number(raw?.usage?.output_tokens) || 0,
-        cacheCreationInputTokens: Number(raw?.usage?.cache_creation_input_tokens) || 0,
-        cacheReadInputTokens: Number(raw?.usage?.cache_read_input_tokens) || 0,
-      },
+      usage,
       providerRequestId: typeof raw?.id === "string" ? raw.id : null,
       stopReason: typeof raw?.stop_reason === "string" ? raw.stop_reason : null,
     },
@@ -486,6 +503,8 @@ export async function runResumeStrategist({
   maxTokens = STRATEGIST_MAX_OUTPUT_TOKENS,
   signal,
   now = Date.now,
+  onAttempt = null,
+  onUsage = null,
 } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new ModelProviderError("STRATEGIST_FETCH_MISSING", "Anthropic strategist transport is unavailable", {
@@ -501,6 +520,8 @@ export async function runResumeStrategist({
       maxTokens,
       signal,
       now,
+      onAttempt,
+      onUsage,
     });
     const checkedStrategy = checkedResultStrategy(primary, ledger);
     return {
@@ -526,6 +547,8 @@ export async function runResumeStrategist({
       maxTokens,
       signal,
       now,
+      onAttempt,
+      onUsage,
     });
     const checkedStrategy = checkedResultStrategy(fallback, ledger);
     return {

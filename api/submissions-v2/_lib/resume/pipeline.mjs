@@ -5,10 +5,8 @@ import { extractCandidateEvidenceClaims } from "./claim-extractor.mjs";
 import { buildEvidenceLedger } from "./evidence-ledger.mjs";
 import {
   STRATEGIST_FALLBACK_MODEL,
-  STRATEGIST_MAX_OUTPUT_TOKENS,
   STRATEGIST_PRIMARY_MODEL,
   STRATEGIST_PROMPT_VERSION,
-  resumeStrategistForecastInput,
   runResumeStrategist,
 } from "../models/anthropic-strategist.mjs";
 import {
@@ -35,6 +33,7 @@ import {
   ResumePipelineError,
   createGenerationBudget,
   forecastModelCostCents,
+  meteredModelCostCents,
   pipelineError,
 } from "./pipeline-runtime.mjs";
 import { renderResumeWithService, extractPdfWithRenderer } from "./pipeline-renderer.mjs";
@@ -261,6 +260,54 @@ export async function runResumePreparation(context, {
     });
     await publishCheckpoint({ generation_id: generation.id, deadline_at: generation.deadline_at, spent_cents: budget.spentCents });
 
+    // Validator batches may dispatch concurrently. Serialize the durable
+    // generation update and checkpoint before each fetch so a crash keeps the
+    // full reservation and out-of-order completions cannot lower spent_cents.
+    let budgetWrite = Promise.resolve();
+    const stageCosts = new Map();
+    const persistBudget = ({ stage, status }) => {
+      const spentCents = budget.spentCents;
+      const write = budgetWrite.then(async () => {
+        await store.updateGeneration({
+          generationId: generation.id,
+          fromStatuses: [status],
+          status,
+          stage,
+          spentCents,
+          executionFence,
+        });
+        await publishCheckpoint({ active_stage: stage, spent_cents: spentCents });
+      });
+      budgetWrite = write.catch(() => {});
+      return write;
+    };
+    const reserveModelAttempt = async ({ stage, status, model, input, maximumOutputTokens, minimumRemainingMs }) => {
+      const reservation = budget.reserveAttempt(forecastModelCostCents({
+        model,
+        input,
+        maximumOutputTokens,
+        env,
+      }), { minimumRemainingMs });
+      reservation.stage = stage;
+      stageCosts.set(reservation, reservation.reservedCents);
+      await persistBudget({ stage, status });
+      return reservation;
+    };
+    const settleModelAttempt = async ({ reservation, model, usage, stage, status }) => {
+      if (!reservation) return;
+      const actualCents = meteredModelCostCents({ model, usage, env });
+      if (actualCents === null) return;
+      budget.settleAttempt(reservation, actualCents);
+      stageCosts.set(reservation, reservation.actualCents);
+      await persistBudget({ stage, status });
+      if (reservation.budgetExhausted) {
+        throw new ResumePipelineError("generation_budget_forecast_exceeded", "Resume preparation reached its two-dollar model-cost ceiling.");
+      }
+    };
+    const stageCostCents = (stage) => [...stageCosts]
+      .filter(([reservation]) => reservation.stage === stage)
+      .reduce((total, [, cents]) => total + cents, 0);
+
     if (loaded.pendingSupplements?.length) {
       budget.assertTime(30_000);
       await publishCheckpoint({ active_stage: "supplements" });
@@ -270,7 +317,7 @@ export async function runResumePreparation(context, {
         fetchImpl,
         signal: context.signal,
         budget,
-        onCostReserved: async () => publishCheckpoint({ active_stage: "supplements", spent_cents: budget.spentCents }),
+        onCostReserved: async () => persistBudget({ stage: "supplements", status: "collecting" }),
         attemptCount: context.job.attempt_count,
         maxAttempts: context.job.max_attempts,
         readObject: (pathname) => store.readPrivateObject(pathname),
@@ -343,38 +390,29 @@ export async function runResumePreparation(context, {
 
     let strategy = await loadStage("strategy");
     if (!strategy) {
-      const forecast = forecastModelCostCents({
-        model: STRATEGIST_PRIMARY_MODEL,
-        input: resumeStrategistForecastInput({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }),
-        maximumOutputTokens: STRATEGIST_MAX_OUTPUT_TOKENS,
-        attempts: 2,
-        env,
-      });
-      budget.reserve(forecast, { minimumRemainingMs: 60_000 });
-      await publishCheckpoint({ active_stage: "strategy", spent_cents: budget.spentCents });
       await store.updateGeneration({ generationId: generation.id, fromStatuses: ["extracting", "strategizing"], status: "strategizing", stage: "strategy", spentCents: budget.spentCents, executionFence });
+      await publishCheckpoint({ active_stage: "strategy", spent_cents: budget.spentCents });
       strategy = await strategist({ bundle, ledger: evidence.ledger, versionInstructions: strategyInstructions }, {
         env,
         fetchImpl,
         signal: context.signal,
         now,
+        onAttempt: (attempt) => reserveModelAttempt({
+          ...attempt,
+          stage: "strategy",
+          status: "strategizing",
+          minimumRemainingMs: 60_000,
+        }),
+        onUsage: (attempt) => settleModelAttempt({ ...attempt, stage: "strategy", status: "strategizing" }),
       });
-      strategy = await saveStage("strategy", strategy, { costCents: forecast });
+      strategy = await saveStage("strategy", strategy, { costCents: stageCostCents("strategy") });
     }
 
     let validation = await loadStage("validate");
     if (!validation) {
       const draftClaims = draftClaimsFromAst(strategy.strategy.document, evidence.ledger);
-      const forecast = forecastModelCostCents({
-        model: GROUNDING_VALIDATOR_MODEL,
-        input: draftClaims,
-        maximumOutputTokens: 3_000,
-        attempts: 9,
-        env,
-      });
-      budget.reserve(forecast, { minimumRemainingMs: 45_000 });
-      await publishCheckpoint({ active_stage: "validate", spent_cents: budget.spentCents });
       await store.updateGeneration({ generationId: generation.id, fromStatuses: ["strategizing", "validating"], status: "validating", stage: "validate", spentCents: budget.spentCents, executionFence });
+      await publishCheckpoint({ active_stage: "validate", spent_cents: budget.spentCents });
       const result = await validator(draftClaims, {
         env,
         fetchImpl,
@@ -383,9 +421,16 @@ export async function runResumePreparation(context, {
         maxAttempts: 3,
         maxRewriteRounds: 2,
         now,
+        onAttempt: (attempt) => reserveModelAttempt({
+          ...attempt,
+          stage: "validate",
+          status: "validating",
+          minimumRemainingMs: 45_000,
+        }),
+        onUsage: (attempt) => settleModelAttempt({ ...attempt, stage: "validate", status: "validating" }),
       });
       const ast = applyValidatedClaimsToAst(strategy.strategy.document, result.claims);
-      validation = await saveStage("validate", { result, draftClaims, ast }, { costCents: forecast });
+      validation = await saveStage("validate", { result, draftClaims, ast }, { costCents: stageCostCents("validate") });
     }
     await store.persistClaims({
       generationId: generation.id,

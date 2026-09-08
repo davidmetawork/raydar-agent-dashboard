@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createGenerationBudget,
   forecastModelCostCents,
+  meteredModelCostCents,
   pipelineError,
   ResumePipelineError,
 } from "../api/submissions-v2/_lib/resume/pipeline-runtime.mjs";
@@ -148,6 +149,34 @@ test("resume budget and unknown model prices fail closed before a provider call"
   );
 });
 
+test("model reservations settle only complete positive provider usage", () => {
+  const budget = createGenerationBudget({ deadlineAt: 10_000, now: () => 1_000 });
+  const reservation = budget.reserveAttempt(30);
+  const actual = meteredModelCostCents({
+    model: "gpt-5.4-2026-03-05",
+    usage: { inputTokens: 10_000, outputTokens: 10_000 },
+  });
+  assert.equal(actual, 18);
+  budget.settleAttempt(reservation, actual);
+  assert.equal(budget.spentCents, 18);
+  assert.equal(meteredModelCostCents({ model: "gpt-5.4-2026-03-05", usage: { inputTokens: 1 } }), null);
+  assert.equal(meteredModelCostCents({ model: "gpt-5.4-2026-03-05", usage: { inputTokens: 1, outputTokens: 0 } }), null);
+  assert.equal(meteredModelCostCents({
+    model: "claude-opus-5",
+    usage: { inputTokens: 100, outputTokens: 20, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+  }), 1);
+  const ambiguous = budget.reserveAttempt(20);
+  assert.equal(meteredModelCostCents({ model: "claude-opus-5", usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 4 } }), null);
+  assert.equal(budget.spentCents, 38);
+  assert.equal(ambiguous.settled, false);
+
+  const overrunBudget = createGenerationBudget({ deadlineAt: 10_000, spentCents: 195, now: () => 1_000 });
+  const overrun = overrunBudget.reserveAttempt(2);
+  overrunBudget.settleAttempt(overrun, 10);
+  assert.equal(overrunBudget.spentCents, 200);
+  assert.equal(overrun.budgetExhausted, true);
+});
+
 test("pipeline error propagation retains only an allowlisted resume-contract diagnostic", () => {
   const normalized = pipelineError({
     code: "RESUME_FILLER_OR_REPETITION",
@@ -290,6 +319,7 @@ test("pending image supplements use bounded transcription cost and reach parsed 
   const objects = new Map([["private/upload.jpg", { bytes, content_type: "image/jpeg" }]]);
   const updates = [];
   const reservations = [];
+  let costPersisted = false;
   const budget = {
     spentCents: 0,
     assertTime() {},
@@ -308,14 +338,46 @@ test("pending image supplements use bounded transcription cost and reach parsed 
     readObject: async (key) => objects.get(key),
     putObject: async (key, value, contentType) => { objects.set(key, { bytes: Buffer.from(value), content_type: contentType }); },
     scanSupplement: async () => ({ verdict: "clean" }),
-    extractImage: async () => ({ text: "Visible image context" }),
+    extractImage: async () => {
+      assert.equal(costPersisted, true);
+      return { text: "Visible image context" };
+    },
+    onCostReserved: async () => { costPersisted = true; },
     reserveObject: async (input) => ({ id: "reservation-image", write_fencing_token: 1, ...input }),
     updateSupplement: async (value) => updates.push(value),
   });
   assert.equal(reservations.length, 1);
+  assert.equal(costPersisted, true);
   assert.ok(reservations[0] > 0 && reservations[0] <= 200);
   assert.equal(updates[0].scanState, "clean");
   assert.equal(updates[0].parseState, "parsed");
+});
+
+test("a failed OCR cost persistence prevents the OCR dispatch", async () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, ...Buffer.from("image fixture")]);
+  let ocrCalls = 0;
+  await assert.rejects(
+    () => processResumeSupplements([{
+      id: "supplement-image-persist-failure",
+      object_key: "private/upload.jpg",
+      mime_type: "image/jpeg",
+      size_bytes: bytes.length,
+      digest: sha256(bytes),
+      scan_state: "pending",
+      parse_state: "pending",
+    }], {
+      budget: { spentCents: 0, assertTime() {}, reserve() {} },
+      readObject: async () => ({ bytes, content_type: "image/jpeg" }),
+      scanSupplement: async () => ({ verdict: "clean" }),
+      onCostReserved: async () => { throw new Error("generation spend write failed"); },
+      extractImage: async () => { ocrCalls += 1; return { text: "unexpected" }; },
+      updateSupplement: async () => {},
+      reserveObject: async () => ({}),
+      putObject: async () => {},
+    }),
+    (error) => error.code === "supplement_processing_failed" && /generation spend write failed/u.test(error.cause?.message || ""),
+  );
+  assert.equal(ocrCalls, 0);
 });
 
 test("unsafe supplements are rejected terminally and transient parsing exhausts to failed", async () => {
