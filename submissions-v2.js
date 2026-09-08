@@ -323,6 +323,12 @@ function restoreFocusedRowDescendant(focus) {
   if (node instanceof HTMLElement && !node.matches(":disabled")) node.focus();
 }
 
+function replaceRowsPlaceholder(html) {
+  STATE.renderedRowsKey = null;
+  STATE.rowsDirty = false;
+  $("rows").innerHTML = html;
+}
+
 function renderRows({ force = false, deferForInteraction = false } = {}) {
   const container = $("rows");
   const nextKey = rowRenderKey();
@@ -453,7 +459,7 @@ async function loadRows({ append = false, refresh = false, background = false } 
   $("rows").setAttribute("aria-busy", "true");
   $("load-more").disabled = true;
   $("load-more").textContent = append ? "Loading…" : "Load more";
-  if (!append && !preserveRows) $("rows").innerHTML = '<div class="loading-row">Loading submissions…</div>';
+  if (!append && !preserveRows) replaceRowsPlaceholder('<div class="loading-row">Loading submissions…</div>');
   try {
     const pages = [];
     do {
@@ -514,7 +520,7 @@ async function loadRows({ append = false, refresh = false, background = false } 
       toast(`${append ? "Could not load more." : "Could not refresh."} Showing the last loaded candidates. ${error.message}`, true);
       return;
     }
-    $("rows").innerHTML = `<div class="empty-state"><strong>Submissions are unavailable</strong>${esc(error.message)}</div>`;
+    replaceRowsPlaceholder(`<div class="empty-state"><strong>Submissions are unavailable</strong>${esc(error.message)}</div>`);
     $("rows").setAttribute("aria-busy", "false");
   } finally {
     if (STATE.listRequest === controller) {
@@ -1187,7 +1193,7 @@ async function boot() {
     await Promise.all([loadCounts(), loadRows()]);
     STATE.pollTimer = setInterval(() => { loadCounts().catch(() => {}); loadRows({ refresh: true, background: true }).catch(() => {}); }, 30_000);
   } catch (error) {
-    if ([401, 403].includes(error.status)) showSignin(); else { $("rows").innerHTML = `<div class="empty-state"><strong>Submissions V2 is not available</strong>${esc(error.message)}</div>`; renderHealth({ delayed: true }); }
+    if ([401, 403].includes(error.status)) showSignin(); else { replaceRowsPlaceholder(`<div class="empty-state"><strong>Submissions V2 is not available</strong>${esc(error.message)}</div>`); renderHealth({ delayed: true }); }
   }
 }
 

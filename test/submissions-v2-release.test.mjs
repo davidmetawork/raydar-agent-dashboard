@@ -21,7 +21,7 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   await Promise.all([
     seed(root, "package.json"), seed(root, "package-lock.json"), seed(root, ".vercelignore"), seed(root, "scripts/submissions-release.mjs"),
-    seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/inbox/health.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/auth/_lib/session.mjs"),
+    seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/inbox/health.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/paraai/submission-notify.mjs"), seed(root, "api/auth/_lib/session.mjs"),
     seed(root, "api/seq/_lib/core.mjs"), seed(root, "api/seq/_lib/scheduling-links.mjs"), seed(root, "api/sourcing/_lib/store.mjs"), seed(root, "api/roster/_lib/outcome-sequences.mjs"),
     seed(root, "submissions-v2.html"), seed(root, "submissions-v2.css"), seed(root, "submissions-v2.js"), seed(root, "submissions-v2-ui-state.mjs"),
     seed(root, "api/submissions-v2-dispatch.mjs"), seed(root, "scripts/migrate-submissions-v2.mjs"), seed(root, "scripts/provision-submissions-v2-roles.sql"),
@@ -133,5 +133,12 @@ test("release seal includes purge runtime and rejects a changed runtime user", a
   const manifest = await writeSubmissionsReleaseManifest({ root });
   assert.equal(manifest.files.filter((file) => file.path.startsWith("submissions-v2-purge/")).length, 4);
   await seed(root, "submissions-v2-purge/Dockerfile", "USER root\n");
+  await assert.rejects(checkSubmissionsReleaseManifest({ root }), /stale/);
+});
+
+test("release seal rejects reactivation of the retired legacy notification route", async (t) => {
+  const root = await fixture(t);
+  await writeSubmissionsReleaseManifest({ root });
+  await seed(root, "api/paraai/submission-notify.mjs", "export default async function sendLegacy() {}\n");
   await assert.rejects(checkSubmissionsReleaseManifest({ root }), /stale/);
 });
