@@ -1,4 +1,4 @@
-// Read-only "Calls Today" feed for monitor.raydar.xyz.
+// Read-only "Fit Follow Ups" feed for monitor.raydar.xyz.
 //
 // This reuses review.mjs's exported `config`/`upstream` helpers rather than
 // duplicating the signed-fetch logic (the same reuse Status v2 already does

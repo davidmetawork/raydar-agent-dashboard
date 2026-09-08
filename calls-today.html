@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Calls Today · Raydar</title>
+<title>Fit Follow Ups · Raydar</title>
 <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
 <script src="/auth-session.js"></script>
@@ -47,7 +47,7 @@
 <div class="gate" id="gate"><div style="font:26px 'PP Grafier Display',serif">Sign in to see today's calls</div><div id="gsi"></div><div id="gate-error" style="color:var(--bad)"></div></div>
 <main class="wrap">
   <header>
-    <div><div class="eyebrow">Live</div><h1>Calls Today</h1><p class="sub">Every call today (and recent days) with what came of it, plus what's coming up next.</p></div>
+    <div><div class="eyebrow">Live</div><h1>Fit Follow Ups</h1><p class="sub">Every call today (and recent days) with what came of it, plus what's coming up next.</p></div>
     <div class="actions"><span class="fresh" id="fresh"><span class="dot" id="fdot"></span><span id="ftxt">loading…</span></span><button class="button ghost" id="refresh">Refresh</button></div>
   </header>
   <div class="banner" id="banner" role="status" aria-live="polite"></div>
@@ -179,14 +179,14 @@ async function loadCalls(){
     const {status,body}=await api(`/api/post-call/calls-summary?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&limit=200`);
     STATE.actor=body.actor||STATE.actor;
     if(status===503||body.configured===false){
-      renderList("today",[],"Calls Today isn't configured on this dashboard yet.");
-      renderList("earlier",[],"Calls Today isn't configured on this dashboard yet.");
+      renderList("today",[],"Fit Follow Ups isn't configured on this dashboard yet.");
+      renderList("earlier",[],"Fit Follow Ups isn't configured on this dashboard yet.");
       $("today-count").textContent="";$("earlier-count").textContent="";
       return "unconfigured";
     }
     if(body.reason==="not_published"){
-      renderList("today",[],"The Calls Today feed hasn't been published by the post-call service yet.");
-      renderList("earlier",[],"The Calls Today feed hasn't been published by the post-call service yet.");
+      renderList("today",[],"The Fit Follow Ups feed hasn't been published by the post-call service yet.");
+      renderList("earlier",[],"The Fit Follow Ups feed hasn't been published by the post-call service yet.");
       $("today-count").textContent="";$("earlier-count").textContent="";
       return "not_published";
     }
@@ -239,8 +239,8 @@ async function load(){
   const [callsState,upcomingOk]=await Promise.all([loadCalls(),loadUpcoming()]);
   if(callsState==="auth"){clearInterval(STATE.refreshTimer);STATE.refreshTimer=null;return}
   setConn(callsState==="ok"&&upcomingOk);
-  if(callsState==="unconfigured")showBanner("The Calls Today feed isn't configured on this dashboard yet.","warn");
-  else if(callsState==="not_published")showBanner("The post-call service hasn't published the Calls Today feed yet — Upcoming still updates below.","warn");
+  if(callsState==="unconfigured")showBanner("The Fit Follow Ups feed isn't configured on this dashboard yet.","warn");
+  else if(callsState==="not_published")showBanner("The post-call service hasn't published the Fit Follow Ups feed yet — Upcoming still updates below.","warn");
   else if(callsState==="error"||!upcomingOk)showBanner("Some data couldn't be loaded; this page keeps retrying automatically.","warn");
   const stampDate=STATE.generatedAt&&!Number.isNaN(Date.parse(STATE.generatedAt))?new Date(STATE.generatedAt):new Date();
   const stamp=new Intl.DateTimeFormat("en-US",{timeZone:PACIFIC,hour:"numeric",minute:"2-digit"}).format(stampDate);
@@ -256,7 +256,7 @@ async function onCredential(response){try{await RaydarAuth.signIn(response.crede
 
 async function init(){
   STATE.config=await fetch("/api/auth/config",{cache:"no-store"}).then(r=>r.json()).catch(()=>({}));
-  if(STATE.config.authRequired===false){$("gate").style.display="flex";$("gate-error").textContent="Google sign-in is not configured, so Calls Today is fail-closed.";return}
+  if(STATE.config.authRequired===false){$("gate").style.display="flex";$("gate-error").textContent="Google sign-in is not configured, so Fit Follow Ups is fail-closed.";return}
   const session=await RaydarAuth.session().catch(()=>null);
   if(!session?.authenticated)return showGate();
   await load();

@@ -254,18 +254,18 @@ const callsToday = await readFile(new URL("../calls-today.html", import.meta.url
 const proxySource = await readFile(new URL("../api/post-call/calls-summary.mjs", import.meta.url), "utf8");
 const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
 
-test("Calls Today is wired through the dashboard shell", () => {
+test("Fit Follow Ups is wired through the dashboard shell", () => {
   const views = JSON.parse(index.match(/const VIEWS=(\[[^\]]+\]);/)[1]);
   assert.ok(views.includes("calls-today"));
   assert.match(index, /id="tab-calls-today"/);
   assert.match(index, /id="view-calls-today" hidden/);
-  assert.match(index, /\{name:"calls-today",label:"Calls Today",group:"Live"\}/);
+  assert.match(index, /\{name:"calls-today",label:"Fit Follow Ups",group:"Live"\}/);
   assert.match(index, /raydar-calls-today-height/);
   assert.ok(vercel.rewrites.some((row) => row.source === "/calls-today" && row.destination === "/calls-today.html"));
   assert.ok(vercel.functions["api/post-call/*.mjs"]);
 });
 
-test("Calls Today is Google-gated, same-origin only, and escapes every rendered string", () => {
+test("Fit Follow Ups is Google-gated, same-origin only, and escapes every rendered string", () => {
   assert.match(callsToday, /RaydarAuth\.session\(\)/);
   assert.match(callsToday, /credentials:"same-origin"/);
   assert.match(callsToday, /\/api\/post-call\/calls-summary/);
@@ -280,7 +280,7 @@ test("Calls Today is Google-gated, same-origin only, and escapes every rendered 
   assert.match(callsToday, /America\/Los_Angeles/);
 });
 
-test("Calls Today proxy stays read-only and reuses review.mjs's signed upstream helper", () => {
+test("Fit Follow Ups proxy stays read-only and reuses review.mjs's signed upstream helper", () => {
   assert.match(proxySource, /from "\.\/review\.mjs"/);
   assert.match(proxySource, /requireReviewOperator\(req, res, "reviewRead"\)/);
   assert.match(proxySource, /req\.method !== "GET"/);
