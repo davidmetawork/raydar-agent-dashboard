@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, embeddedModalViewport, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, preparationFailurePresentation, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -70,6 +70,18 @@ test("review rows identify the next required action without exposing a reason co
   assert.equal(reviewRowPresentation({ review_reasons: [{ code: "classification_failed" }], primary_action_label: "Retry now" }).action, "Retry now");
 });
 
+test("a preparation attempt limit names the stage, last attempt, and separately budgeted individual retry", () => {
+  assert.deepEqual(preparationFailurePresentation({
+    generation_status: "failed", generation_stage: "rendering", preparation_error_code: "generation_budget_exhausted",
+    preparation_error_detail: "The approved $2 cost ceiling was reached.", generation_updated_at: "2026-09-07T16:00:00.000Z",
+  }), {
+    stage: "Rendering the resume", reason: "Preparation budget limit",
+    detail: "The approved $2 cost ceiling was reached.", lastAttemptAt: "2026-09-07T16:00:00.000Z",
+    attemptLimitReached: true, guidance: "The estimated next step did not fit within this attempt’s $2 budget. Retry preparation starts one new, separately budgeted attempt.",
+  });
+  assert.equal(preparationFailurePresentation({ generation_status: "failed", generation_stage: "validating", preparation_error_code: "generation_deadline_exhausted" }).attemptLimitReached, false);
+});
+
 test("an active review generation presents actual progress and blocks another retry", () => {
   assert.deepEqual(reviewProgressPresentation({
     generation_status: "strategizing", generation_stage: "strategy", generation_updated_at: "2026-09-05T03:25:00.000Z",
@@ -101,7 +113,7 @@ test("an embedded modal uses only the visible slice of a tall iframe", () => {
 
 test("source health details expose only committed checkpoints and an authoritative retry time", () => {
   const details = healthCoverageDetails({
-    master_inbox: { enabled: true, delayed: true, safe_error_detail: "The Gmail cursor is paused.", last_complete_at: "2026-09-04T12:01:00.000Z", coverage: { live_through: "2026-09-04T12:00:00.000Z", history_through: "2026-09-03T12:00:00.000Z", live_caught_up: true, history_caught_up: false } },
+    master_inbox: { enabled: true, delayed: true, safe_error_detail: "The Gmail cursor is paused.", last_success_at: "2026-09-04T12:02:00.000Z", last_complete_at: "2026-09-04T12:01:00.000Z", coverage: { live_through: "2026-09-04T12:00:00.000Z", history_through: "2026-09-03T12:00:00.000Z", live_caught_up: true, history_caught_up: false } },
     sequence_inbox: { enabled: true, delayed: false, retry_at: "2026-09-04T12:20:00.000Z", coverage: { cache_confirmed_through: "2026-09-04T11:55:00.000Z", caught_up: true } },
   });
   assert.deepEqual(details.map(({ key, label, liveThrough, historyThrough, cacheConfirmedThrough, retryAt, liveCaughtUp, historyCaughtUp, caughtUp }) => ({ key, label, liveThrough, historyThrough, cacheConfirmedThrough, retryAt, liveCaughtUp, historyCaughtUp, caughtUp })), [
@@ -109,6 +121,7 @@ test("source health details expose only committed checkpoints and an authoritati
     { key: "sequence_inbox", label: "Sequence Inbox", liveThrough: null, historyThrough: null, cacheConfirmedThrough: "2026-09-04T11:55:00.000Z", retryAt: "2026-09-04T12:20:00.000Z", liveCaughtUp: null, historyCaughtUp: null, caughtUp: true },
   ]);
   assert.equal(details[0].safeErrorDetail, "The Gmail cursor is paused.");
+  assert.equal(details[0].lastSuccessAt, "2026-09-04T12:02:00.000Z");
 });
 
 test("a background refresh keeps all already loaded pages and removes a repeated cursor row", () => {
@@ -130,6 +143,58 @@ test("loading another page appends only candidates not already displayed", () =>
     pages: [{ rows: [{ case_id: "one" }, { case_id: "two" }], total_count: 2, next_cursor: null }],
   });
   assert.deepEqual(result.rows.map((row) => row.case_id), ["one", "two"]);
+});
+
+test("list totals distinguish candidate-role pairs from review items", () => {
+  assert.equal(listEntityNoun("interested"), "candidate-role pair");
+  assert.equal(listEntityNoun("not_interested"), "candidate-role pair");
+  assert.equal(listEntityNoun("needs_review"), "review item");
+});
+
+test("a 313-item scope retains its exact total through 100-row cursor pages", () => {
+  const rows = Array.from({ length: 313 }, (_, index) => ({ case_id: `case-${index + 1}` }));
+  let currentRows = [];
+  for (let page = 0; page < 4; page += 1) {
+    const start = page * 100;
+    const result = reconcileListPages({
+      append: page > 0,
+      currentRows,
+      pages: [{ rows: rows.slice(start, start + 100), total_count: 313, next_cursor: start + 100 < rows.length ? `cursor-${page + 1}` : null }],
+    });
+    currentRows = result.rows;
+    assert.equal(result.totalCount, 313);
+    assert.equal(displayListTotal({ totalCount: result.totalCount, loadedCount: currentRows.length }), 313);
+  }
+  assert.equal(currentRows.length, 313);
+});
+
+test("manual tabs move focus with arrows and Home/End without changing selection", () => {
+  const pages = ["interested", "needs_review", "not_interested"];
+  assert.equal(tabPageFromKey({ key: "ArrowRight", current: "interested", pages }), "needs_review");
+  assert.equal(tabPageFromKey({ key: "ArrowLeft", current: "interested", pages }), "not_interested");
+  assert.equal(tabPageFromKey({ key: "Home", current: "needs_review", pages }), "interested");
+  assert.equal(tabPageFromKey({ key: "End", current: "needs_review", pages }), "not_interested");
+  assert.equal(tabPageFromKey({ key: "Enter", current: "needs_review", pages }), null);
+});
+
+test("render keys exclude source-health timestamps but retain rendered row changes", () => {
+  const base = { case_id: "case-1", candidate_name: "Avery", source_last_success_at: "2026-09-08T10:00:00.000Z" };
+  const key = listRenderKey({ page: "interested", rows: [base] });
+  assert.equal(key, listRenderKey({ page: "interested", rows: [{ ...base, source_last_success_at: "2026-09-08T10:01:00.000Z" }] }));
+  assert.notEqual(key, listRenderKey({ page: "interested", rows: [{ ...base, candidate_name: "Blake" }] }));
+});
+
+test("page activation resets the list and render cache together", () => {
+  assert.deepEqual(listPageReset({ page: "needs_review", query: "Avery" }), {
+    page: "needs_review", query: "Avery", rows: [], nextCursor: null, totalCount: null, renderedRowsKey: null, rowsDirty: false,
+  });
+});
+
+test("a background poll skips unchanged rows and defers changed rows during a dialog or popover", () => {
+  assert.equal(listRenderDisposition({ previousKey: "same", nextKey: "same", background: true, dialogOpen: false }), "unchanged");
+  assert.equal(listRenderDisposition({ previousKey: "old", nextKey: "new", background: true, dialogOpen: true }), "defer");
+  assert.equal(listRenderDisposition({ previousKey: "old", nextKey: "new", background: true, popoverOpen: true }), "defer");
+  assert.equal(listRenderDisposition({ previousKey: "old", nextKey: "new", background: true, dialogOpen: false, popoverOpen: false }), "render");
 });
 
 test("stale refresh results cannot replace a changed page or search scope", () => {
@@ -175,4 +240,11 @@ test("submit popup only navigates when a validated destination is available and 
   assert.equal(popup.location.url, "https://www.paraform.com/roles/1");
   assert.equal(navigateSubmitPopup(popup, ""), false);
   assert.equal(popup.closed, true);
+});
+
+test("legacy preparation ceiling detail identifies a forecast stop without claiming money was charged", () => {
+  const result = preparationFailurePresentation({ generation_status: "failed", preparation_error_code: "resume_preparation_failed", preparation_error_detail: "Resume preparation reached its two-dollar model-cost ceiling." });
+  assert.equal(result.attemptLimitReached, true);
+  assert.match(result.guidance, /estimated next step/);
+  assert.doesNotMatch(result.guidance, /charged|spent/);
 });

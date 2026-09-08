@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { encryptJson } from "../api/submissions-v2/_lib/private-data.mjs";
-import { repairRoleEvidence, reviewedRoleRepairPlan, roleRepairBrokerRequest, roleRepairEvidence, roleRepairPlanDigest, roleRepairPlanSignature, roleRepairStoredPayload } from "../submissions-v2-worker/repair-role-evidence.mjs";
+import { repairRoleEvidence, reviewedRoleRepairPlan, roleRepairBrokerRequest, roleRepairEvidence, roleRepairPlanDigest, roleRepairPlanSignature, roleRepairSelection, roleRepairSourceEligible, roleRepairStoredPayload } from "../submissions-v2-worker/repair-role-evidence.mjs";
 
 const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -22,6 +22,40 @@ function fixture() {
   result.source.content_digest = digest({ candidateText: result.storedPayload.candidate_authored_text, sentText: result.storedPayload.sent_message_text, offered: [] });
   return result;
 }
+test("repair selection reaches only exact parent-bound direct Gmail families", () => {
+  const source = {
+    provider: "gmail", mailbox_id: "david-raydar-xyz", source_version: "submissions.email_reply.v1",
+    processing_state: "needs_role", provider_message_id: "reply", provider_thread_id: "thread",
+    outbound_message_id: "exact-parent", envelope: {
+      adapter_version: "gmail-role-interest-v2", source_family: "para_ai_interview_request",
+      provider_message_id: "reply", provider_thread_id: "thread", outbound_message_id: "exact-parent",
+    },
+  };
+  assert.equal(roleRepairSourceEligible(source), true);
+  assert.equal(roleRepairSourceEligible({
+    ...source,
+    envelope: { ...source.envelope, adapter_version: "gmail-interview-v1" },
+  }), true);
+  for (const changed of [
+    { outbound_message_id: null },
+    { provider_thread_id: null },
+    { provider: "master_inbox" },
+    { mailbox_id: "noah-flyraydar-com" },
+    { source_version: "other" },
+    { envelope: { ...source.envelope, adapter_version: "gmail-interview-v1", source_family: "new_match" } },
+    { envelope: { ...source.envelope, adapter_version: "unknown", source_family: "para_ai_interview_request" } },
+    { envelope: { ...source.envelope, adapter_version: "sequence-inbox-v1", source_family: "paraform_sequence_reply" } },
+    { envelope: { ...source.envelope, provider_thread_id: "other" } },
+  ]) assert.equal(roleRepairSourceEligible({ ...source, ...changed }), false);
+
+  assert.deepEqual(roleRepairSelection(500), {
+    provider: "gmail", mailbox_id: "david-raydar-xyz", source_version: "submissions.email_reply.v1",
+    adapter_versions: ["gmail-interview-v1", "gmail-role-interest-v2"],
+    source_families: ["para_ai_interview_request", "new_match", "fit_follow_up_with_matches"],
+    requires_outbound_message_id: true, requires_provider_thread_id: true,
+    order: ["received_at", "provider_message_id", "id"], limit: 50,
+  });
+});
 test("repair retains exact evidence without deciding intent or exporting message text", () => {
   const result = roleRepairEvidence(fixture());
   assert.equal(result.status, "repairable");

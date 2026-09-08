@@ -2,11 +2,40 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { effectiveControls, environmentControls } from "../api/submissions-v2/_lib/config.mjs";
-import { requireAdmin, requireCron, requireHuman, requireIdempotency, verifyInboxMachine } from "../api/submissions-v2/_lib/http.mjs";
+import { readRawBody, requireAdmin, requireCron, requireHuman, requireIdempotency, verifyInboxMachine } from "../api/submissions-v2/_lib/http.mjs";
 
 function response() {
   return { statusCode: 200, payload: null, headers: {}, setHeader(name, value) { this.headers[name] = value; }, status(code) { this.statusCode = code; return this; }, json(value) { this.payload = value; return this; } };
 }
+
+const tooLarge = (error) => error.code === "request_too_large" && error.status === 413;
+
+test("raw body limits are byte-accurate for pre-parsed and streamed requests", async () => {
+  const exact = "{ \"event_id\": \"event-1\" }";
+  assert.equal(await readRawBody({ body: exact }, Buffer.byteLength(exact)), exact);
+  await assert.rejects(() => readRawBody({ body: "é" }, 1), tooLarge);
+
+  const buffer = Buffer.from("é");
+  assert.equal(await readRawBody({ body: buffer }, buffer.length), "é");
+  await assert.rejects(() => readRawBody({ body: buffer }, buffer.length - 1), tooLarge);
+
+  const object = { value: "é" };
+  const serialized = JSON.stringify(object);
+  assert.equal(await readRawBody({ body: object }, Buffer.byteLength(serialized)), serialized);
+  await assert.rejects(
+    () => readRawBody({ body: object }, Buffer.byteLength(serialized) - 1),
+    tooLarge,
+  );
+
+  const streamed = {
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from("a");
+      yield Buffer.from("é");
+    },
+  };
+  assert.equal(await readRawBody(streamed, 3), "aé");
+  await assert.rejects(() => readRawBody(streamed, 2), tooLarge);
+});
 
 test("human APIs fail closed when durable auth and API bearer are absent", () => {
   const prior = { ...process.env };

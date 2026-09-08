@@ -696,6 +696,18 @@ export function createWorkerHandlers({
       if (!rows.length) break;
       const row = rows[0];
       claimed += 1;
+      if (row.kind !== "submission_added") {
+        await repository.settleNotification({
+          id: row.id,
+          workerId: context.workerId,
+          fencingToken: row.fencing_token,
+          sent: false,
+          retryable: false,
+          errorCode: "notification_kind_retired",
+          safeDetail: "Only first admission to Monitor Submissions is delivered.",
+        });
+        continue;
+      }
       try {
         await context.checkpoint({ ...context.job.checkpoint, stage: "notification_send", notification_id: row.id });
       } catch (error) {
@@ -719,7 +731,12 @@ export function createWorkerHandlers({
           executionFence: executionFence(context),
           deliver: async (current) => {
             const text = current.kind === "daily_digest" ? dailyDigestText(current.safe_payload) : notificationText(current.kind, current.safe_payload);
-            const receipt = await notify(text, { env, fetchImpl, destinationId: current.destination_id });
+            const receipt = await notify(text, {
+              env,
+              fetchImpl,
+              destinationId: current.destination_id,
+              kind: current.kind,
+            });
             return receipt.receipt;
           },
         });

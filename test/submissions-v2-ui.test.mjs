@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const js = await readFile(new URL("../submissions-v2.js", import.meta.url), "utf8");
+const html = await readFile(new URL("../submissions-v2.html", import.meta.url), "utf8");
 const css = await readFile(new URL("../submissions-v2.css", import.meta.url), "utf8");
 const uiState = await readFile(new URL("../submissions-v2-ui-state.mjs", import.meta.url), "utf8");
 const dashboard = await readFile(new URL("../index.html", import.meta.url), "utf8");
@@ -24,6 +25,55 @@ test("candidate-name filtering and list paging are complete server-side reads", 
   assert.match(js, /data\.next_cursor/);
   assert.match(js, /reconcileListPages/);
   assert.match(js, /currentRows: STATE\.rows/);
+});
+
+test("visible list totals name candidate-role pairs rather than unique people", () => {
+  assert.match(html, /id="display-count">0 candidate-role pairs/);
+  assert.match(js, /const noun = listEntityNoun\(STATE\.page\)/);
+  assert.match(js, /listEntityNoun\(STATE\.page\).*loaded/s);
+});
+
+test("Review surfaces safe preparation failures and prominent per-source freshness", () => {
+  assert.match(html, /id="source-freshness" aria-label="Per-source freshness"/);
+  assert.match(js, /preparationFailurePresentation\(row\)/);
+  assert.match(js, /Last attempt/);
+  assert.match(uiState, /starts one new, separately budgeted attempt/);
+  assert.match(js, /Retry resume preparation/);
+  assert.match(js, /lastSuccessAt/);
+  assert.match(js, /Last successful check/);
+  assert.match(js, /!\(coverage \|\| lastSuccess\)/);
+  assert.match(js, /source-freshness-card/);
+});
+
+test("polling is quiet for unchanged rows and preserves review drafts", () => {
+  assert.match(html, /id="list-status" role="status" aria-live="polite"/);
+  assert.doesNotMatch(html, /id="rows"[^>]+aria-live=/);
+  assert.match(js, /listRenderDisposition\(\{/);
+  assert.match(js, /STATE\.rowsDirty = true/);
+  assert.match(js, /if \(STATE\.rowsDirty\) renderRows\(\{ force: true \}\)/);
+  assert.match(js, /focusedRowDescendant\(\)/);
+  assert.match(js, /restoreFocusedRowDescendant\(focus\)/);
+  assert.match(js, /popoverOpen/);
+  assert.match(js, /closePopover\(\{ renderDeferred: false \}\)/);
+  assert.match(js, /loadRows\(\{ refresh: true, background: true \}\)/);
+});
+
+test("changed rows retain stable link focus and existing-result navigation resets tab focus", () => {
+  assert.match(js, /node\.matches\("\.candidate-name"\)/);
+  assert.match(js, /node\.matches\("\.identity-link\.linkedin"\)/);
+  assert.match(js, /node\.matches\("\.identity-link\.raydar"\)/);
+  assert.match(js, /node\.matches\("\.signal-link"\)/);
+  assert.match(js, /if \(node instanceof HTMLElement && !node\.matches\(":disabled"\)\) node\.focus\(\)/);
+  assert.match(js, /Object\.assign\(STATE, listPageReset\(\{ page, query \}\)\)/);
+  assert.equal((js.match(/activateListPage\(result\.state, \{ query: candidateLabel \}\)/g) || []).length, 2);
+});
+
+test("tabs use roving keyboard focus and activate only on an explicit button click", () => {
+  assert.match(html, /id="tab-interested"[^>]+tabindex="0"/);
+  assert.match(html, /id="tab-needs-review"[^>]+tabindex="-1"/);
+  assert.match(js, /tabPageFromKey\(\{ key: event\.key/);
+  assert.match(js, /updatePageTabs\(\{ selected: STATE\.page, focusable: target \}\)/);
+  assert.match(js, /node\.onclick = \(\) => switchPage\(node\.dataset\.page\)/);
 });
 
 test("list, count, and picker reads abort superseded work and reject stale list results", () => {
@@ -196,7 +246,7 @@ test("Needs Review exposes reason-specific candidate, role, retry, and Signal re
   assert.match(js, /Next step:/);
   assert.match(css, /container-type:inline-size/);
   assert.match(css, /@container \(max-width:1040px\)/);
-  assert.match(js, /const noun = STATE\.page === "needs_review" \? "review item" : "candidate"/);
+  assert.match(js, /const noun = listEntityNoun\(STATE\.page\)/);
 });
 
 test("a proven submission remains explicit while a resume issue stays actionable", () => {
@@ -206,7 +256,7 @@ test("a proven submission remains explicit while a resume issue stays actionable
 });
 
 test("source health distinguishes reported delays from committed Gmail and Sequence checkpoints", () => {
-  assert.match(js, /"No reported delays"/);
+  assert.match(js, /"Source status"/);
   assert.match(js, /healthCoverageDetails\(health\.sources\)/);
   assert.match(js, /Live committed through/);
   assert.match(js, /History committed through/);

@@ -178,10 +178,6 @@
       "schedule": "7 * * * *"
     },
     {
-      "path": "/api/paraai/submission-notify",
-      "schedule": "20 * * * *"
-    },
-    {
       "path": "/api/submissions/refresh",
       "schedule": "3,18,33,48 * * * *"
     },

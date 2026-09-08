@@ -104,8 +104,23 @@ export async function routeSubmissionsV2(req, res) {
       if (!method(req, res, ["POST"])) return;
       authorizeNotificationBroker(req);
       const { body } = await parsedBody(req, 10_000);
-      const result = await postSafeNotification(body.text, { destinationId: body.destination_id });
-      return res.status(200).json({ ok: true, receipt: result.receipt, channel: result.channel });
+      if (body.kind !== "submission_added") {
+        return res.status(409).json({ ok: false, error: "notification_kind_suppressed", reason: "submissions_additions_only" });
+      }
+      try {
+        const result = await postSafeNotification(body.text, { destinationId: body.destination_id, kind: body.kind });
+        return res.status(200).json({ ok: true, receipt: result.receipt, channel: result.channel });
+      } catch (error) {
+        // Preserve uncertainty across the broker boundary. A lost Slack receipt
+        // must stay held by the worker instead of becoming a retryable refusal.
+        const code = /^[a-z0-9_]{1,100}$/u.test(String(error?.code || ""))
+          ? error.code : "notification_delivery_failed";
+        return res.status(502).json({
+          ok: false,
+          error: code,
+          delivery_outcome: error?.deliveryOutcome === "not_sent" ? "not_sent" : "unknown",
+        });
+      }
     }
     if (key === "tick") {
       if (!method(req, res, ["POST"]) || !requireCron(req, res)) return;

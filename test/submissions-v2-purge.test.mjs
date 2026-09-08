@@ -11,12 +11,27 @@ const env = {
 
 function fakeSql(handler) {
   const sql = async (strings, ...values) => handler(strings.join("?"), values);
+  sql.begin = async (callback) => callback(sql);
   return sql;
 }
 
 test("isolated purge refuses to start unless its independent ceiling and credentials exist", () => {
   assert.throws(() => purgeInternals.configuration({}), (error) => error.code === "purge_disabled");
   assert.throws(() => purgeInternals.configuration({ SUBMISSIONS_V2_PURGE_ENABLED: "true" }), (error) => error.code === "purge_database_not_configured");
+});
+
+test("purge database sessions enforce bounded server-side deadlines", () => {
+  assert.deepEqual(purgeInternals.databaseDeadlines({}), {
+    statementTimeoutMs: 240_000,
+    idleTransactionTimeoutMs: 30_000,
+  });
+  assert.deepEqual(purgeInternals.databaseDeadlines({
+    SUBMISSIONS_V2_PURGE_DB_STATEMENT_TIMEOUT_MS: "999999",
+    SUBMISSIONS_V2_PURGE_DB_IDLE_TRANSACTION_TIMEOUT_MS: "1",
+  }), {
+    statementTimeoutMs: 280_000,
+    idleTransactionTimeoutMs: 100,
+  });
 });
 
 test("isolated purge deletes only its fresh reference-counted plan before fenced finalization", async () => {

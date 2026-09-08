@@ -393,6 +393,28 @@ function campaignMap(state) {
   return new Map(list(state?.catalog?.targets).map((campaign) => [text(campaign?.id, 500), campaign]));
 }
 
+function projectedReplyDigest(state, targetIds, through = null) {
+  const throughAt = timestamp(through);
+  const identities = targetIds.flatMap((targetSequenceId) => (
+    list(state.snapshots.get(targetSequenceId)?.submissions_replies).flatMap((reply) => {
+      const receivedAt = timestamp(reply?.date);
+      if (throughAt !== null && receivedAt !== null && receivedAt > throughAt) return [];
+      return [JSON.stringify([
+        targetSequenceId,
+        text(reply?.sequence_id, 500),
+        text(reply?.gmail_id, 500),
+        receivedAt,
+        text(reply?.candidate_user_id, 500),
+        emails(reply?.candidate_email)[0] || "",
+        text(reply?.thread_id, 500),
+        text(reply?.ccu_id, 500),
+        text(reply?.reply_category, 40),
+      ])];
+    })
+  ));
+  return sha256(JSON.stringify(identities.sort()));
+}
+
 function cursorKey(reply) {
   const at = timestamp(reply?.date);
   return `${String(at ?? -1).padStart(16, "0")}:${text(reply?.gmail_id, 500)}`;
@@ -431,6 +453,7 @@ export async function readCachedSequenceReplyBatch({
   cursorOverlapMs = 0,
   expectedCatalogDigest = null,
   expectedWatermark = null,
+  scanWatermark = null,
   now = () => new Date(),
 } = {}) {
   if (typeof readMessage !== "function") throw fail("sequence_inbox_message_reader_required");
@@ -489,10 +512,6 @@ export async function readCachedSequenceReplyBatch({
       active: mapping?.active === true,
       valid: mapping?.valid === true,
     })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))));
-  const currentDigest = sha256(JSON.stringify({
-    cache_catalog_digest: baseCatalogDigest,
-    sourcing_role_mapping_digest: mappingDigest,
-  }));
   const currentWatermark = projectionCoverage.confirmed_through || null;
   const expectedWatermarkAt = expectedWatermark == null
     ? null
@@ -500,12 +519,33 @@ export async function readCachedSequenceReplyBatch({
   const normalizedExpectedWatermark = expectedWatermarkAt === null
     ? null
     : new Date(expectedWatermarkAt).toISOString();
-  const catalogChanged = Boolean(expectedCatalogDigest && expectedCatalogDigest !== currentDigest);
+  const scanWatermarkAt = scanWatermark == null ? null : timestamp(scanWatermark);
+  if (scanWatermark != null && scanWatermarkAt === null) {
+    throw fail("sequence_inbox_watermark_invalid");
+  }
+  const normalizedScanWatermark = scanWatermarkAt === null
+    ? null
+    : new Date(scanWatermarkAt).toISOString();
+  const effectiveWatermark = normalizedScanWatermark || currentWatermark;
+  const digestAt = (watermark) => sha256(JSON.stringify({
+    cache_catalog_digest: baseCatalogDigest,
+    cache_projection_digest: projectedReplyDigest(state, targetIds, watermark),
+    sourcing_role_mapping_digest: mappingDigest,
+  }));
+  // The saved digest describes the same finite horizon as its saved watermark.
+  // Newer replies may advance the next overlap scan, while a late reply at or
+  // behind that horizon invalidates the cursor and forces a safe restart.
+  const comparableDigest = digestAt(normalizedExpectedWatermark || effectiveWatermark);
+  const currentDigest = digestAt(effectiveWatermark);
+  const catalogChanged = Boolean(
+    expectedCatalogDigest && expectedCatalogDigest !== comparableDigest
+  );
   const watermarkRegressed = Boolean(
     normalizedExpectedWatermark
     && (!currentWatermark || Date.parse(currentWatermark) < Date.parse(normalizedExpectedWatermark)),
   );
   if (catalogChanged || watermarkRegressed) {
+    const resetWatermark = watermarkRegressed ? currentWatermark : effectiveWatermark;
     return {
       records: [],
       deferred: [],
@@ -519,9 +559,9 @@ export async function readCachedSequenceReplyBatch({
         cache_campaigns_targeted: Number(projectionCoverage.campaigns_targeted) || 0,
         cache_campaigns_missing: Number(projectionCoverage.campaigns_missing) || 0,
         cache_campaigns_stale: Number(projectionCoverage.campaigns_stale) || 0,
-        catalog_digest: currentDigest,
+        catalog_digest: digestAt(resetWatermark),
         ...savedRoleMappingCoverage(savedRoleMappingStatus, savedRoleMappings),
-        watermark: currentWatermark,
+        watermark: resetWatermark,
         catalog_changed: catalogChanged,
         watermark_changed: watermarkRegressed,
         watermark_advanced: false,
@@ -537,9 +577,14 @@ export async function readCachedSequenceReplyBatch({
       },
     };
   }
+  if (normalizedScanWatermark && (
+    !currentWatermark || Date.parse(normalizedScanWatermark) > Date.parse(currentWatermark)
+  )) {
+    throw fail("sequence_inbox_watermark_invalid");
+  }
   const overlapMs = Math.max(0, Math.min(3_600_000, Number(cursorOverlapMs) || 0));
   const afterKey = decodeCursor(cursor, overlapMs);
-  const confirmedThrough = timestamp(projectionCoverage.confirmed_through);
+  const confirmedThrough = timestamp(effectiveWatermark);
   const maximum = Math.max(1, Math.min(50, Number(limit) || 25));
   const seen = new Map();
   const conflicting = new Map();
@@ -664,7 +709,7 @@ export async function readCachedSequenceReplyBatch({
       cache_campaigns_stale: Number(projectionCoverage.campaigns_stale) || 0,
       catalog_digest: currentDigest,
       ...savedRoleMappingCoverage(savedRoleMappingStatus, savedRoleMappings),
-      watermark: currentWatermark,
+      watermark: effectiveWatermark,
       catalog_changed: false,
       watermark_changed: false,
       watermark_advanced: Boolean(

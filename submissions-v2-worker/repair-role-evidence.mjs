@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDatabase } from "../api/submissions-v2/_lib/db.mjs";
 import { createRepository } from "../api/submissions-v2/_lib/repository.mjs";
+import { APPROVED_EMAIL_FAMILIES } from "../api/submissions-v2/_lib/email-source-policy.mjs";
 import { roleInterestReplyEvents } from "../api/submissions-v2/_lib/gmail-interview-source.mjs";
 import { decryptJson } from "../api/submissions-v2/_lib/private-data.mjs";
 import { createBlobBrokerClient } from "./blob-broker-client.mjs";
@@ -11,6 +12,45 @@ import { createBlobBrokerClient } from "./blob-broker-client.mjs";
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const fail = (code) => Object.assign(new Error(code), { code });
 const databaseUrl = (value) => /^postgres(?:ql)?:\/\//i.test(String(value || "").trim());
+const ROLE_REPAIR_CURRENT_ADAPTER = "gmail-role-interest-v2";
+const ROLE_REPAIR_LEGACY_ADAPTER = "gmail-interview-v1";
+const ROLE_REPAIR_PROVIDER = "gmail";
+const ROLE_REPAIR_MAILBOX = "david-raydar-xyz";
+const ROLE_REPAIR_SOURCE_VERSION = "submissions.email_reply.v1";
+const ROLE_REPAIR_FAMILY_SET = new Set(APPROVED_EMAIL_FAMILIES);
+
+function roleRepairAdapterFamilyEligible(adapterVersion, sourceFamily) {
+  return (adapterVersion === ROLE_REPAIR_CURRENT_ADAPTER && ROLE_REPAIR_FAMILY_SET.has(sourceFamily))
+    || (adapterVersion === ROLE_REPAIR_LEGACY_ADAPTER && sourceFamily === "para_ai_interview_request");
+}
+
+export function roleRepairSelection(limit = 50) {
+  return {
+    provider: ROLE_REPAIR_PROVIDER,
+    mailbox_id: ROLE_REPAIR_MAILBOX,
+    source_version: ROLE_REPAIR_SOURCE_VERSION,
+    adapter_versions: [ROLE_REPAIR_LEGACY_ADAPTER, ROLE_REPAIR_CURRENT_ADAPTER],
+    source_families: [...APPROVED_EMAIL_FAMILIES],
+    requires_outbound_message_id: true,
+    requires_provider_thread_id: true,
+    order: ["received_at", "provider_message_id", "id"],
+    limit: Math.max(1, Math.min(50, Number(limit) || 50)),
+  };
+}
+
+/** Reject rows outside the exact direct-Gmail replay scope before provider access. */
+export function roleRepairSourceEligible(source) {
+  return source?.provider === ROLE_REPAIR_PROVIDER
+    && source?.mailbox_id === ROLE_REPAIR_MAILBOX
+    && source?.source_version === ROLE_REPAIR_SOURCE_VERSION
+    && source?.processing_state === "needs_role"
+    && Boolean(source?.provider_thread_id)
+    && Boolean(source?.outbound_message_id)
+    && roleRepairAdapterFamilyEligible(source?.envelope?.adapter_version, source?.envelope?.source_family)
+    && source.envelope.provider_message_id === source.provider_message_id
+    && source.envelope.provider_thread_id === source.provider_thread_id
+    && source.envelope.outbound_message_id === source.outbound_message_id;
+}
 export const roleRepairPlanSignature = (digest, env = process.env) => {
   const key = String(env.SUBMISSIONS_V2_EMAIL_HMAC_KEY || "");
   if (key.length < 32) throw fail("repair_plan_signing_not_configured");
@@ -161,16 +201,33 @@ export async function repairRoleEvidence({ env = process.env, limit = 50, applyD
     const key = String(env.SUBMISSIONS_V2_MASTER_INBOX_WORKER_KEY || "");
     if (key.length < 32) throw fail("gmail_read_broker_not_configured");
     const blobs = createBlobBrokerClient({ env });
+    const selection = roleRepairSelection(limit);
     const sources = await sql.begin("read only", (tx) => tx`
       select s.* from submissions_v2.source_events s
-       where s.provider='gmail' and s.mailbox_id='david-raydar-xyz' and s.processing_state='needs_role'
+       where s.provider=${selection.provider} and s.mailbox_id=${selection.mailbox_id}
+         and s.source_version=${selection.source_version} and s.processing_state='needs_role'
+         and s.provider_thread_id is not null and s.outbound_message_id is not null
+         and ((s.envelope->>'adapter_version'=${ROLE_REPAIR_LEGACY_ADAPTER}
+               and s.envelope->>'source_family'='para_ai_interview_request')
+           or (s.envelope->>'adapter_version'=${ROLE_REPAIR_CURRENT_ADAPTER}
+               and s.envelope->>'source_family'=any(${tx.array(selection.source_families, 25)})))
+         and s.envelope->>'provider_message_id'=s.provider_message_id
+         and s.envelope->>'provider_thread_id'=s.provider_thread_id
+         and s.envelope->>'outbound_message_id'=s.outbound_message_id
          and s.received_at>=${new Date(activation)}
          and not exists(select 1 from submissions_v2.source_offered_roles r where r.signal_id=s.id)
          and exists(select 1 from submissions_v2.review_items r where r.unresolved_signal_id=s.id and r.action_state='open' and r.reason_code='role_unclear')
-       order by s.received_at,s.provider_message_id limit ${Math.max(1, Math.min(50, Number(limit) || 50))}
+       order by s.received_at,s.provider_message_id,s.id limit ${selection.limit}
     `);
     const plan = [];
     for (const source of sources) {
+      // Keep this guard even though the SQL applies the same scope. It ensures a
+      // stale test double or future query refactor cannot spend a Gmail read on
+      // a null-parent, Sequence, or identity-mismatched source.
+      if (!roleRepairSourceEligible(source)) {
+        plan.push({ signal_id: source.id, status: "review", reason: "source_not_eligible" });
+        continue;
+      }
       const at = Date.parse(source.received_at);
       const after = Math.max(activation, at - 1000);
       const before = Math.min(Date.now(), at + 1000);
@@ -195,7 +252,7 @@ export async function repairRoleEvidence({ env = process.env, limit = 50, applyD
       await new Promise((done) => setTimeout(done, 1000));
     }
     const digest = roleRepairPlanDigest(plan);
-    const result = { schema_version: 1, mode: "dry_run", digest, plan_signature: roleRepairPlanSignature(digest, env), inspected: plan.length,
+    const result = { schema_version: 1, mode: "dry_run", selection, digest, plan_signature: roleRepairPlanSignature(digest, env), inspected: plan.length,
       repairable: plan.filter((row) => row.status === "repairable").length, plan };
     return result;
   } finally { await sql.end({ timeout: 5 }); }

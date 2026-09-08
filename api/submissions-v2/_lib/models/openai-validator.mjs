@@ -11,6 +11,8 @@ export const GROUNDING_VALIDATOR_MODEL = "gpt-5.4-2026-03-05";
 export const GROUNDING_VALIDATOR_EFFORT = "high";
 export const GROUNDING_PROMPT_VERSION = "submissions-v2-grounding-validator-2026-08-31.v1";
 export const GROUNDING_VALIDATOR_BATCH_SIZE = 10;
+export const GROUNDING_VALIDATOR_MAX_OUTPUT_TOKENS = 12_000;
+export const GROUNDING_VALIDATOR_MAX_CONCURRENT_BATCHES = 2;
 
 const OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const SYSTEM_PROMPT = `You are an independent factual grounding validator for a resume.
@@ -96,6 +98,7 @@ function parseValidation(response, claims) {
 function bodyFor(claims) {
   return {
     model: GROUNDING_VALIDATOR_MODEL,
+    max_output_tokens: GROUNDING_VALIDATOR_MAX_OUTPUT_TOKENS,
     store: false,
     reasoning: { effort: GROUNDING_VALIDATOR_EFFORT },
     input: [
@@ -166,45 +169,72 @@ function normalizeClaimPackets(claims) {
   });
 }
 
-async function oneAttempt(claims, { apiKey, fetchImpl, signal, now }) {
+async function oneAttempt(claims, {
+  apiKey,
+  fetchImpl,
+  signal,
+  now,
+  onAttempt = null,
+  onUsage = null,
+  onAttemptFinished = null,
+}) {
   const startedAt = now();
   const resolvedApiKey = requiredKey(apiKey);
-  let response;
+  const requestBody = bodyFor(claims);
+  const reservation = await onAttempt?.({
+    provider: "openai",
+    model: GROUNDING_VALIDATOR_MODEL,
+    input: requestBody,
+    maximumOutputTokens: GROUNDING_VALIDATOR_MAX_OUTPUT_TOKENS,
+  });
   try {
-    response = await fetchImpl(OPENAI_RESPONSES_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${resolvedApiKey}`,
+    let response;
+    try {
+      response = await fetchImpl(OPENAI_RESPONSES_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${resolvedApiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+    } catch (cause) {
+      throw new ModelProviderError("VALIDATOR_TRANSPORT_FAILED", "OpenAI grounding validator request failed", {
+        retryable: true,
+        provider: "openai",
+        cause,
+      });
+    }
+    let raw;
+    try {
+      raw = await responseJson(response, "openai");
+    } catch (error) {
+      await onUsage?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL, usage: error?.details?.usage || null });
+      throw error;
+    }
+    const usage = {
+      inputTokens: raw?.usage?.input_tokens,
+      outputTokens: raw?.usage?.output_tokens,
+      totalTokens: raw?.usage?.total_tokens,
+    };
+    await onUsage?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL, usage });
+    const validation = parseValidation(raw, claims);
+    return {
+      validation,
+      audit: {
+        provider: "openai",
+        model: GROUNDING_VALIDATOR_MODEL,
+        effort: GROUNDING_VALIDATOR_EFFORT,
+        promptVersion: GROUNDING_PROMPT_VERSION,
+        durationMs: Math.max(0, now() - startedAt),
+        providerRequestId: typeof raw?.id === "string" ? raw.id : null,
+        usage,
       },
-      body: JSON.stringify(bodyFor(claims)),
-      signal,
-    });
-  } catch (cause) {
-    throw new ModelProviderError("VALIDATOR_TRANSPORT_FAILED", "OpenAI grounding validator request failed", {
-      retryable: true,
-      provider: "openai",
-      cause,
-    });
+    };
+  } finally {
+    await onAttemptFinished?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL });
   }
-  const raw = await responseJson(response, "openai");
-  const validation = parseValidation(raw, claims);
-  return {
-    validation,
-    audit: {
-      provider: "openai",
-      model: GROUNDING_VALIDATOR_MODEL,
-      effort: GROUNDING_VALIDATOR_EFFORT,
-      promptVersion: GROUNDING_PROMPT_VERSION,
-      durationMs: Math.max(0, now() - startedAt),
-      providerRequestId: typeof raw?.id === "string" ? raw.id : null,
-      usage: {
-        inputTokens: Number(raw?.usage?.input_tokens) || 0,
-        outputTokens: Number(raw?.usage?.output_tokens) || 0,
-        totalTokens: Number(raw?.usage?.total_tokens) || 0,
-      },
-    },
-  };
 }
 
 export async function runGroundingValidator(claimPackets, {
@@ -216,6 +246,9 @@ export async function runGroundingValidator(claimPackets, {
   deadlineAt = Number.POSITIVE_INFINITY,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  onAttempt = null,
+  onUsage = null,
+  onAttemptFinished = null,
 } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new ModelProviderError("VALIDATOR_FETCH_MISSING", "OpenAI grounding validator transport is unavailable", {
@@ -234,9 +267,10 @@ export async function runGroundingValidator(claimPackets, {
       });
     }
     try {
-      const result = await oneAttempt(claims, { apiKey, fetchImpl, signal, now });
+      const result = await oneAttempt(claims, { apiKey, fetchImpl, signal, now, onAttempt, onUsage, onAttemptFinished });
       return { ...result, attempts: [...attempts, result.audit] };
     } catch (error) {
+      if (error?.code === "generation_budget_exhausted" || error?.code === "generation_budget_forecast_exceeded") throw error;
       lastError = error;
       attempts.push({
         provider: "openai",
@@ -272,7 +306,25 @@ export async function validateClaimsToCompletion(claimPackets, options = {}) {
     for (let index = 0; index < pending.length; index += GROUNDING_VALIDATOR_BATCH_SIZE) {
       batches.push(pending.slice(index, index + GROUNDING_VALIDATOR_BATCH_SIZE));
     }
-    const batchResults = await Promise.all(batches.map((batch) => runGroundingValidator(batch, options)));
+    const batchResults = new Array(batches.length);
+    let nextBatch = 0;
+    let batchError = null;
+    const worker = async () => {
+      while (!batchError && nextBatch < batches.length) {
+        const batchIndex = nextBatch;
+        nextBatch += 1;
+        try {
+          batchResults[batchIndex] = await runGroundingValidator(batches[batchIndex], options);
+        } catch (error) {
+          batchError ||= error;
+        }
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(GROUNDING_VALIDATOR_MAX_CONCURRENT_BATCHES, batches.length) },
+      worker,
+    ));
+    if (batchError) throw batchError;
     batchResults.forEach((result, batch) => history.push({
       round,
       batch,

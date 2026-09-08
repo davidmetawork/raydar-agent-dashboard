@@ -16,10 +16,24 @@ function bearer(req) {
   return match ? match[1] : "";
 }
 
+function checkedRawBody(value, limit) {
+  const raw = Buffer.isBuffer(value) ? value.toString("utf8") : String(value);
+  const size = Buffer.isBuffer(value) ? value.length : Buffer.byteLength(raw, "utf8");
+  if (size > limit) {
+    throw Object.assign(new Error("Request body is too large."), {
+      code: "request_too_large", status: 413,
+    });
+  }
+  return raw;
+}
+
 export async function readRawBody(req, limit = 1_000_000) {
-  if (typeof req?.body === "string") return req.body;
-  if (Buffer.isBuffer(req?.body)) return req.body.toString("utf8");
-  if (req?.body && typeof req.body === "object") return JSON.stringify(req.body);
+  if (typeof req?.body === "string" || Buffer.isBuffer(req?.body)) {
+    return checkedRawBody(req.body, limit);
+  }
+  if (req?.body && typeof req.body === "object") {
+    return checkedRawBody(JSON.stringify(req.body), limit);
+  }
   if (!req || typeof req[Symbol.asyncIterator] !== "function") return "";
   const chunks = [];
   let size = 0;

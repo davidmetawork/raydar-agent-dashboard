@@ -6,4 +6,5 @@ RUN npm ci --omit=dev
 COPY api ./api
 COPY resume-renderer-v2 ./resume-renderer-v2
 COPY submissions-v2-worker ./submissions-v2-worker
+USER node
 CMD ["node", "submissions-v2-worker/server.mjs"]
