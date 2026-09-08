@@ -1158,7 +1158,79 @@ export function createSyncHandler({
           profilePreparing: conservedCounts.profilePreparing,
           total: conservedCounts.total,
         };
-        generationCounts = nextCountsDoc(await readJson(K.counts), incomingCounts, now());
+        const displayDigest = body.profileDisplayDigest || body.snapshot.profileDisplayDigest || null;
+        // A successful Monitor publish can lose its HTTP response, or Core can
+        // stop before activating the matching staged generation.  Core then
+        // retries the exact generation id and body.  Reuse Monitor's verified
+        // immutable values on that retry: generating a new counts.updatedAt or
+        // pointer.publishedAt for the same id would turn a harmless replay into
+        // generation_immutable_collision and strand the staged generation.
+        const existingMeta = await readJson(`${K.generation(sourceGeneration.id)}:meta`);
+        const matchingExistingMeta = existingMeta
+          && existingMeta.generationId === sourceGeneration.id
+          && existingMeta.digest === sourceGeneration.digest
+          && stableHash(existingMeta.sourceCutoff ?? null) === stableHash(sourceGeneration.sourceCutoff)
+          && stableHash(existingMeta.sourceWatermark ?? null) === stableHash(sourceGeneration.sourceWatermark)
+          && stableHash(existingMeta.displayDigest || null) === stableHash(displayDigest);
+        const existingArtifacts = matchingExistingMeta
+          ? await readPublishedArtifacts(existingMeta, { readJson })
+          : null;
+        if (matchingExistingMeta && !existingArtifacts) {
+          throw new Error("generation_existing_artifacts_invalid");
+        }
+        // Pin activation to the pointer this request actually inspected.  The
+        // generation writer performs all immutable writes before CAS; without
+        // this earlier base, a second publisher could advance the pointer in
+        // that window and the late request would simply read the new pointer
+        // as its predecessor and move it backwards.
+        const publicationBase = await readActivePublication({ readJson });
+        const incomingIsCurrent = publicationBase
+          && publicationBase.generationId === sourceGeneration.id
+          && publicationBase.digest === sourceGeneration.digest;
+        if (publicationBase && !incomingIsCurrent) {
+          const currentArtifacts = await readPublishedArtifacts(publicationBase, { readJson });
+          if (!currentArtifacts) throw new Error("generation_active_artifacts_invalid");
+          const incomingGeneratedAt = Date.parse(body.snapshot.generatedAt || "");
+          const currentGeneratedAt = Date.parse(currentArtifacts.snapshot.generatedAt || "");
+          const incomingWatermark = sourceGeneration.sourceWatermark;
+          const currentWatermark = publicationBase.sourceWatermark;
+          const watermarksOrdered = Number.isSafeInteger(incomingWatermark)
+            && Number.isSafeInteger(currentWatermark)
+            ? incomingWatermark >= currentWatermark
+            : stableHash(incomingWatermark) === stableHash(currentWatermark);
+          // The authenticated Core snapshot timestamp orders generations that
+          // legitimately share one source watermark.  This also closes the
+          // last lock-loss race: a delayed first final request has no stored
+          // meta yet, but it still cannot move a newer active pointer backward.
+          if (!Number.isFinite(incomingGeneratedAt) || !Number.isFinite(currentGeneratedAt)
+            || incomingGeneratedAt <= currentGeneratedAt || !watermarksOrdered) {
+            return res.status(409).json({
+              ok: false,
+              error: "generation_changed_retry_publish",
+              generationId: publicationBase.generationId,
+            });
+          }
+        }
+        const existingIsCurrent = existingArtifacts && publicationBase
+          && stableHash(publicationBase) === stableHash(existingArtifacts.pointer);
+        if (existingArtifacts && publicationBase && !existingIsCurrent) {
+          const existingPublishedAt = Date.parse(existingArtifacts.pointer.publishedAt || "");
+          const currentPublishedAt = Date.parse(publicationBase.publishedAt || "");
+          // A stored generation newer than the active pointer can be the tail
+          // of an interrupted first publication and may finish its original
+          // CAS.  An older (or unorderable) stored generation is a stale replay
+          // and must never replace a newer current publication.
+          if (!Number.isFinite(existingPublishedAt) || !Number.isFinite(currentPublishedAt)
+            || existingPublishedAt <= currentPublishedAt) {
+            return res.status(409).json({
+              ok: false,
+              error: "generation_changed_retry_publish",
+              generationId: publicationBase.generationId,
+            });
+          }
+        }
+        generationCounts = existingArtifacts?.counts
+          || nextCountsDoc(await readJson(K.counts), incomingCounts, now());
         generation = buildGeneration({
           snapshot: body.snapshot,
           queue: body.queue,
@@ -1167,15 +1239,16 @@ export function createSyncHandler({
           generationDigest: sourceGeneration.digest,
           sourceCutoff: sourceGeneration.sourceCutoff,
           sourceWatermark: sourceGeneration.sourceWatermark,
-          displayDigest: body.profileDisplayDigest || body.snapshot.profileDisplayDigest || null,
-          publishedAt: now(),
+          displayDigest,
+          publishedAt: existingArtifacts?.pointer.publishedAt || now(),
         });
         const published = await publishGeneration({
           generation,
           expectedCounts: conservedCounts,
           readJson,
           writeImmutableJson,
-          activate: activateGeneration,
+          activate: (key, _observedLater, next) =>
+            activateGeneration(key, publicationBase, next),
         });
         if (!published.ok) {
           return res.status(409).json({

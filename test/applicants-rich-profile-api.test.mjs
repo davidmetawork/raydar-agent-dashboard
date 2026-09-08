@@ -210,7 +210,8 @@ test("a full publication prunes expired rich hashes even while the application s
   f.state[K.richCards][KEY].richProfileRetainedUntil = expired;
   f.state[K.richProfileReady][KEY].richProfileRetainedUntil = expired;
   f.state[K.richRuleFacts][KEY].richProfileRetainedUntil = expired;
-  const res = await post(f, publicationBody({ generationId: "prune-generation", snapshot: { generatedAt: AT, stream: [] }, queue: [f.row] }));
+  const res = await post(f, publicationBody({ generationId: "prune-generation",
+    snapshot: { generatedAt: "2026-09-05T22:00:01.000Z", stream: [] }, queue: [f.row] }));
   assert.equal(res.statusCode, 200);
   assert.equal(f.state[K.richCards][KEY], undefined);
   assert.equal(f.state[K.richProfileReady][KEY], undefined);
