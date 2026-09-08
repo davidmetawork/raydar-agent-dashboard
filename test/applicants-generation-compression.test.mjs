@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { gunzipSync } from 'node:zlib';
-import { encodeStoredGenerationArtifact, decodeStoredGenerationArtifact, buildGeneration, publishGeneration, readPublishedArtifacts } from '../api/applicants/_lib/generation.mjs';
+import { coreGenerationDigest, encodeStoredGenerationArtifact, decodeStoredGenerationArtifact, buildGeneration, publishGeneration, readPublishedArtifacts } from '../api/applicants/_lib/generation.mjs';
 import { respondApplicantFeed } from '../api/applicants/feed.mjs';
 
 test('large immutable generations round-trip through bounded compressed storage and idempotent retries', async () => {
@@ -38,4 +38,13 @@ test('large browser feed uses transparent HTTP gzip with the complete response',
   const res={setHeader:(k,v)=>{headers[k]=v},status:n=>{assert.equal(n,200);return res},end:b=>{wire=b}};
   respondApplicantFeed({headers:{'accept-encoding':'gzip, deflate, br'}},res,body);
   assert.equal(headers['Content-Encoding'],'gzip');assert.deepEqual(JSON.parse(gunzipSync(wire)),body);
+});
+
+// Captured from Core's stable-json.mjs logical generation contract.
+test('logical generation uses Core key ordering for real profile fact names', () => {
+  assert.equal(coreGenerationDigest({ generationId:'canonical-order-vector',
+    sourceCutoff:'a'.repeat(64),sourceWatermark:7,snapshot:{counts:{total:1},
+      applicantRowsV2:{'core:fixture':{factSetDigest:'f'.repeat(64),factsCurrent:true,
+        decisionRevision:1,contractVersion:'applicant-profile-v2'}}},queue:[] }),
+  '0361112d7abfe72fafaffe9977d51127ead6ed673b4881729b28a5256fa6b4de');
 });
