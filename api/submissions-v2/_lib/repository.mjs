@@ -4,6 +4,7 @@ import { beginCommand, completeCommand, failCommand } from "./command-store.mjs"
 import { exactSlackChannel, safeCandidateName, safeNotificationField } from "./notifications.mjs";
 import { gmailSignalUrl } from "./presentation.mjs";
 import { isParaformCuratedListUrl } from "./paraform-links.mjs";
+import { OMISSION_EVIDENCE_KIND, OMISSION_GROUNDED_REASON } from "./omission-prepass.mjs";
 
 const PAGE_STATES = new Set(["interested", "needs_review", "not_interested"]);
 const REVIEW_REASONS = new Set([
@@ -19,6 +20,7 @@ const SIGNAL_DISMISSAL_REASONS = new Set([
 ]);
 
 const clean = (value, limit = 500) => String(value ?? "").trim().slice(0, limit);
+const safeReasonCode = (value) => String(value ?? "").trim().replace(/[^a-z0-9_.:-]/giu, "").slice(0, 60);
 const digest = (value) => createHash("sha256").update(String(value ?? "")).digest("hex");
 const boundedLimit = (value, fallback = 100, maximum = 100) => Math.max(1, Math.min(maximum, Number(value) || fallback));
 const pairAdvisoryLockKey = (candidateId, roleId) => JSON.stringify([String(candidateId), String(roleId)]);
@@ -1339,7 +1341,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       });
     },
 
-    async applyClassifiedSignal({ signalId, candidateId = null, decisions, attempts = [], actorId = "submissions-v2-worker", executionFence }) {
+    async applyClassifiedSignal({ signalId, candidateId = null, decisions, omissions = [], attempts = [], actorId = "submissions-v2-worker", executionFence }) {
       return sql.begin(async (tx) => {
         await assertWorkerFence(tx, executionFence, "master_inbox");
         const sourceRows = await tx`select * from submissions_v2.source_events where id=${signalId} for update`;
@@ -1355,6 +1357,19 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (!Array.isArray(decisions) || !decisions.length || decisions.some((item) => !offeredByRole.has(item.role_id))) {
           throw problem("classification_binding_invalid", "The classification did not bind only to offered roles.", 422);
         }
+        // Deterministic omission decisions (R27/R28) arrive alongside the model's
+        // own decisions, never inside them: they bind to offered roles the reply
+        // left unnamed and carry quote-free evidence instead of a quote.
+        const omissionList = Array.isArray(omissions) ? omissions : [];
+        const decidedByModel = new Set(decisions.map((item) => item.role_id));
+        if (omissionList.some((item) => !offeredByRole.has(item.role_id)
+          || decidedByModel.has(item.role_id)
+          || item.evidence_kind !== OMISSION_EVIDENCE_KIND
+          || item.label !== "not_interested"
+          || clean(item.quote, 10) !== "")) {
+          throw problem("classification_binding_invalid", "The omission pre-pass did not bind quote-free negatives to undecided offered roles.", 422);
+        }
+        const applied = omissionList.length ? [...decisions, ...omissionList] : decisions;
         const executionId = clean(executionFence?.jobId, 100);
         if (!/^[0-9a-f-]{36}$/iu.test(executionId)) throw problem("classification_execution_required", "Classification audit requires its worker execution id.", 409);
         const attemptOffset = Number((await tx`
@@ -1390,7 +1405,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         let appliedCount = 0;
         let recoveredCount = 0;
         const appliedRoleIds = [];
-        for (const decision of decisions) {
+        for (const decision of applied) {
+          const omitted = decision.evidence_kind === OMISSION_EVIDENCE_KIND;
           const role = offeredByRole.get(decision.role_id);
           const roleRows = await tx`select * from submissions_v2.role_index where role_id=${decision.role_id}`;
           const roleCurrent = roleRows[0] || null;
@@ -1427,17 +1443,38 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             recoveringFailure = true;
             previousPair = current;
           }
-          await tx`
-            insert into submissions_v2.signal_role_decisions(
-              signal_id, role_id, candidate_user_id, decision_label, exact_quote, binding_result,
-              primary_model_pin, fallback_model_pin, selected_model_pin, prompt_pin, schema_version, validation
-            ) values (
-              ${signalId}, ${decision.role_id}, ${resolvedCandidateId}, ${effectiveLabel}, ${clean(decision.quote, 10_000) || null}, ${bindingResult},
-              'gpt-5.4-nano-2026-03-17', 'gpt-5.4-2026-03-05', ${clean(attempts.find((item) => item.outcome === "accepted")?.model, 200) || "gpt-5.4-nano-2026-03-17"},
-              'submissions-v2-interest-classifier-2026-08-31.v1', 'submissions.email_reply.v1',
-              ${tx.json({ quote_validated: true, offered_role_bound: true })}
-            ) on conflict (signal_id, role_id) do nothing
-          `;
+          const selectedModelPin = clean(attempts.find((item) => item.outcome === "accepted")?.model, 200) || "gpt-5.4-nano-2026-03-17";
+          const decisionQuote = clean(decision.quote, 10_000) || null;
+          // evidence_kind exists only once migration 017 has run. Naming the column
+          // on every decision would break ALL classification on a database that is
+          // one deploy ahead of its migrations, including with the omission pre-pass
+          // flag off, so only the omission path (itself flag-gated) touches it.
+          if (omitted) {
+            await tx`
+              insert into submissions_v2.signal_role_decisions(
+                signal_id, role_id, candidate_user_id, decision_label, exact_quote, binding_result,
+                primary_model_pin, fallback_model_pin, selected_model_pin, prompt_pin, schema_version, validation, evidence_kind
+              ) values (
+                ${signalId}, ${decision.role_id}, ${resolvedCandidateId}, ${effectiveLabel}, ${decisionQuote}, ${bindingResult},
+                'gpt-5.4-nano-2026-03-17', 'gpt-5.4-2026-03-05', ${selectedModelPin},
+                'submissions-v2-interest-classifier-2026-08-31.v1', 'submissions.email_reply.v1',
+                ${tx.json({ quote_validated: false, offered_role_bound: true, omission_evidence: decision.evidence || null })},
+                ${OMISSION_EVIDENCE_KIND}
+              ) on conflict (signal_id, role_id) do nothing
+            `;
+          } else {
+            await tx`
+              insert into submissions_v2.signal_role_decisions(
+                signal_id, role_id, candidate_user_id, decision_label, exact_quote, binding_result,
+                primary_model_pin, fallback_model_pin, selected_model_pin, prompt_pin, schema_version, validation
+              ) values (
+                ${signalId}, ${decision.role_id}, ${resolvedCandidateId}, ${effectiveLabel}, ${decisionQuote}, ${bindingResult},
+                'gpt-5.4-nano-2026-03-17', 'gpt-5.4-2026-03-05', ${selectedModelPin},
+                'submissions-v2-interest-classifier-2026-08-31.v1', 'submissions.email_reply.v1',
+                ${tx.json({ quote_validated: true, offered_role_bound: true })}
+              ) on conflict (signal_id, role_id) do nothing
+            `;
+          }
           const intent = effectiveLabel === "interested" || (roleUnavailable && decision.label === "interested")
             ? "interested" : effectiveLabel === "not_interested" ? "not_interested" : "unclear";
           const workflow = effectiveLabel === "interested" ? "preparing_resume" : effectiveLabel;
@@ -1491,31 +1528,53 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           appliedCount += 1;
           appliedRoleIds.push(decision.role_id);
           if (workflow === "needs_review") {
-            const reasonCode = roleUnavailable && decision.label === "interested" ? "role_unavailable" : (REVIEW_REASONS.has(decision.review_reason) ? decision.review_reason : "reply_unclear_or_conditional");
+            const unavailableReason = roleUnavailable && decision.label === "interested";
+            const recognisedReason = REVIEW_REASONS.has(decision.review_reason);
+            const reasonCode = unavailableReason ? "role_unavailable" : (recognisedReason ? decision.review_reason : "reply_unclear_or_conditional");
+            // An unrecognised review reason is surfaced rather than silently
+            // rewritten (R50): the raw code is sanitised into safe_detail and
+            // the evidence so the item explains why it is on the page.
+            const unrecognisedReason = unavailableReason || recognisedReason ? null : (safeReasonCode(decision.review_reason) || null);
             await tx`
               insert into submissions_v2.review_items(pair_id, reason_code, safe_detail, evidence)
-              values (${pair.id}, ${reasonCode}, ${reasonCode === "role_unavailable" ? "The exact offered role is not currently active." : null},
-                      ${tx.json({ signal_id: signalId, exact_quote_digest: digest(decision.quote) })})
+              values (${pair.id}, ${reasonCode},
+                      ${reasonCode === "role_unavailable"
+                        ? "The exact offered role is not currently active."
+                        : unrecognisedReason
+                          ? `The classifier returned an unrecognised review reason: ${unrecognisedReason}.`
+                          : null},
+                      ${tx.json({
+                        signal_id: signalId,
+                        exact_quote_digest: digest(decision.quote),
+                        ...(unrecognisedReason ? { unrecognised_review_reason: unrecognisedReason } : {}),
+                      })})
             `;
           } else if (workflow === "not_interested") {
-            const groundedReason = clean(decision.negative_reason, 500) || "No reason provided";
+            const groundedReason = omitted
+              ? OMISSION_GROUNDED_REASON
+              : clean(decision.negative_reason, 500) || "No reason provided";
             await tx`
               insert into submissions_v2.not_interested_entries(
                 pair_id, source_event_id, original_negative_at, grounded_reason, exact_quote,
                 evidence_digest, notification_dedupe_key
               ) values (
-                ${pair.id}, ${signalId}, ${source.received_at}, ${groundedReason}, ${clean(decision.quote, 10_000)},
+                ${pair.id}, ${signalId}, ${source.received_at}, ${groundedReason}, ${omitted ? null : clean(decision.quote, 10_000)},
                 ${source.content_digest}, ${`not-interested:${pair.id}:${signalId}`}
               )
             `;
-            await tx`
-              insert into submissions_v2.notification_outbox(kind, destination_id, safe_payload, dedupe_key, pair_id)
-              values (
-                'not_interested', ${notificationDestination()},
-                ${tx.json({ candidate_name: candidateRows[0].display_name, company: roleCurrent?.company_name || role.company_snapshot, role_title: roleCurrent?.role_title || role.role_label_snapshot, owner_name: ownerDisplayName(pair.owner_email), monitor_url: "https://monitor.raydar.xyz/#submissions-v2" })},
-                ${`not-interested:${pair.id}:${signalId}`}, ${pair.id}
-              ) on conflict (dedupe_key) do nothing
-            `;
+            // One reply produces one Slack post about what the candidate said.
+            // A role the candidate never mentioned is recorded on the page but
+            // never announced, or a fifteen-role send would post fourteen times.
+            if (!omitted) {
+              await tx`
+                insert into submissions_v2.notification_outbox(kind, destination_id, safe_payload, dedupe_key, pair_id)
+                values (
+                  'not_interested', ${notificationDestination()},
+                  ${tx.json({ candidate_name: candidateRows[0].display_name, company: roleCurrent?.company_name || role.company_snapshot, role_title: roleCurrent?.role_title || role.role_label_snapshot, owner_name: ownerDisplayName(pair.owner_email), monitor_url: "https://monitor.raydar.xyz/#submissions-v2" })},
+                  ${`not-interested:${pair.id}:${signalId}`}, ${pair.id}
+                ) on conflict (dedupe_key) do nothing
+              `;
+            }
           } else {
             await enqueue(tx, {
               kind: "prepare_resume", subjectType: "pair", subjectId: pair.id,
@@ -1535,11 +1594,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             actorType: "worker", actorId, source: "master_inbox", eventType: recoveringFailure ? "classification_recovered" : "first_signal_applied",
             reasonCode: workflow === "needs_review" ? (!roleCurrent?.active ? "role_unavailable" : decision.review_reason) : null,
             idempotencyKey: recoveringFailure ? `pair:classification-recovered:${signalId}:${decision.role_id}` : `pair:${signalId}:${decision.role_id}`,
-          metadata: { source_family: source.source_family, decision_label: effectiveLabel, classified_label: decision.label },
+          metadata: { source_family: source.source_family, decision_label: effectiveLabel, classified_label: decision.label, ...(omitted ? { decision_basis: OMISSION_EVIDENCE_KIND } : {}) },
           });
           results.push({ pair_id: pair.id, created: !recoveringFailure, recovered: recoveringFailure, state: pair.workflow_state });
         }
-        const decidedRoleIds = decisions.map((decision) => decision.role_id);
+        const decidedRoleIds = applied.map((decision) => decision.role_id);
         await tx`
           update submissions_v2.first_response_claims
              set released_at=clock_timestamp(),

@@ -2,8 +2,8 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 102,
-  "digest": "b7e0333a38c21eec63497f4aec8d0e0027724c0da57d96c27efd8f912616c044",
+  "file_count": 104,
+  "digest": "5ff0896e59ddeac357c7adae75b3df02283644279ef882842acbc1c202855974",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -60,7 +60,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/classifier.mjs",
-      "sha256": "429b5a33862cff5453f80eae8a7737ea6a85fbfd90b7d5566323758649bea613"
+      "sha256": "01870cf3f14e842f3b5ac7ac32c47e46c93747a01fbf8824b28826fb2bdb8246"
     },
     {
       "path": "api/submissions-v2/_lib/command-store.mjs",
@@ -84,7 +84,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/email-source-policy.mjs",
-      "sha256": "0c48533617c9e9d0f24a842efa8542d69ed324dcd56de9eda833f7539aa0829e"
+      "sha256": "d1cc2fe8339282e4660cc8af0851b1b04c069db700a2f6e0c6f97c8b18cfbd03"
     },
     {
       "path": "api/submissions-v2/_lib/explicit-role-resolution.mjs",
@@ -92,7 +92,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/gmail-interview-source.mjs",
-      "sha256": "09dde3d0ce6f1c1babc6e4c720d1dcd3d5a7f522fc4d285d5dacb33c81f0bafb"
+      "sha256": "a08609e02101b40a36a2ee51f7f19e5ab8f8fee3c5905d5a6315168b96f0c3a3"
     },
     {
       "path": "api/submissions-v2/_lib/http.mjs",
@@ -123,6 +123,10 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
       "sha256": "2b08ea920d903eeda7828052379a53f6599a786ce4d5e59ad474c03b580b9a6a"
     },
     {
+      "path": "api/submissions-v2/_lib/omission-prepass.mjs",
+      "sha256": "2895673be2047f9704290822ea74905fd1e21ebb9f2b9b3604fc6e692aa5b556"
+    },
+    {
       "path": "api/submissions-v2/_lib/paraform-links.mjs",
       "sha256": "a162628ca51b50b3ec0a90ca252321427d4fe60d4bf73f668088a79cd1e045a5"
     },
@@ -132,7 +136,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/presentation.mjs",
-      "sha256": "250039cf646df6cb6cd260f9821fb23c1df93744c267b34ec047515c91682fb3"
+      "sha256": "5c9f85268bd38e60957707b7a08c1091975470d2ea3f9ebd6338725d17ea8b10"
     },
     {
       "path": "api/submissions-v2/_lib/private-data.mjs",
@@ -140,7 +144,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "449ba0b2d6933dfef09eb1cd1ca1019bd25cd67beab3947b851e374bce92645d"
+      "sha256": "894d54c0e4d0f5220662bd45691688c3bbbda6c0fc62b86c14a441f3a456aca9"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -196,11 +200,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-source.mjs",
-      "sha256": "bd48d8b5e6e6afc7c09b708f9b61e14f4868c68e77cc90081e68f000d9e165fd"
+      "sha256": "0a1dbcc745966ba9c5421980338519de49a7baf0790fbbc445dfb27b767aa265"
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
-      "sha256": "d65ec68f53c047f881ba6a531c104de8c1c2f02902c6812778f6f4a8d5e8dce9"
+      "sha256": "03e9467e249e3cb995f73d310ba403753de05846e8893f673ec226ddaf3d4b62"
     },
     {
       "path": "api/submissions-v2/_lib/sourcing-role-mappings.mjs",
@@ -273,6 +277,10 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     {
       "path": "migrations/submissions-v2/016_review_submission_proof.sql",
       "sha256": "3447c937d8336090f3908a98df0ac4580e277b936b79752c24317c3381d6067f"
+    },
+    {
+      "path": "migrations/submissions-v2/017_omission_prepass_evidence.sql",
+      "sha256": "29a60bf0524e18f25f45664e67002d42e045d96e102e0aea3ee5798916da0328"
     },
     {
       "path": "package-lock.json",
@@ -364,7 +372,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-worker/gmail-reader.mjs",
-      "sha256": "0c7819aa2f70160a2ca627a5e5fabc78697be673a6a548a43224bb7af3da6be1"
+      "sha256": "9df56e693fab4f6d8e08ffc451b866ca8f2bb09b28abe6b4e56b9c61381bdbce"
     },
     {
       "path": "submissions-v2-worker/health.mjs",
@@ -396,7 +404,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-worker/worker-handlers.mjs",
-      "sha256": "5b7edeb91e79c6b3d44767ec099e9147b1649b710e254618fbe5286bc0d28b33"
+      "sha256": "ad052c9ac98f735a7898f02636f58b946973298b270fb99008a7a10281db18f0"
     },
     {
       "path": "submissions-v2.css",
