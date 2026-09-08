@@ -2,8 +2,8 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 102,
-  "digest": "afb4d9b6619dc42537d9f778ee7fb7df5f1e2caa3ac08bbd8d9d8aa6aa2f458f",
+  "file_count": 104,
+  "digest": "032ed7fdf2418b7616fc4fb87703da2ebfbb00e966eee3bbbceed2364b306794",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -123,6 +123,10 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
       "sha256": "2b08ea920d903eeda7828052379a53f6599a786ce4d5e59ad474c03b580b9a6a"
     },
     {
+      "path": "api/submissions-v2/_lib/omission-prepass.mjs",
+      "sha256": "2895673be2047f9704290822ea74905fd1e21ebb9f2b9b3604fc6e692aa5b556"
+    },
+    {
       "path": "api/submissions-v2/_lib/paraform-links.mjs",
       "sha256": "a162628ca51b50b3ec0a90ca252321427d4fe60d4bf73f668088a79cd1e045a5"
     },
@@ -140,7 +144,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "a08367e6b891ee2135b6c0d3a408964cde70c3a8de2a388a2ff840a0896f2ede"
+      "sha256": "60e57b78f3d79fc234375459e188678f0c14ad34c70ea22bb84e2c55d81b2894"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -200,7 +204,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
-      "sha256": "385df9b57f945eb36b9400ce430f694c0e3207fe595818f93140b15c9e50e80d"
+      "sha256": "d151c7229dc09203cdc03fafa3bd3f956700dd37caa1100c0dad311a95a00141"
     },
     {
       "path": "api/submissions-v2/_lib/sourcing-role-mappings.mjs",
@@ -273,6 +277,10 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     {
       "path": "migrations/submissions-v2/016_review_submission_proof.sql",
       "sha256": "3447c937d8336090f3908a98df0ac4580e277b936b79752c24317c3381d6067f"
+    },
+    {
+      "path": "migrations/submissions-v2/017_omission_prepass_evidence.sql",
+      "sha256": "29a60bf0524e18f25f45664e67002d42e045d96e102e0aea3ee5798916da0328"
     },
     {
       "path": "package-lock.json",
