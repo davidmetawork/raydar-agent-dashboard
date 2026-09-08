@@ -135,6 +135,8 @@ export function rowDto(row) {
       can_duplicate: identifiedPair,
       can_download: (readyWorkflow || submissionStatus === "proven") && artifactReady,
       can_regenerate: (readyWorkflow || (submissionStatus === "proven" && workflowState === "needs_review" && row.intent_state === "interested")) && artifactReady && !generationActive,
+      can_prepare_resume: submissionStatus === "proven" && !artifactReady && !generationActive
+        && workflowState !== "not_interested" && ["interested", "unclear"].includes(row.intent_state),
       can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven" && !manuallyMarked,
       can_mark_submitted: readyWorkflow && submissionStatus !== "proven" && !manuallyMarked,
       can_unmark_submitted: manuallyMarked,

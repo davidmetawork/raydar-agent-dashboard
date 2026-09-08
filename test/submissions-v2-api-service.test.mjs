@@ -486,6 +486,45 @@ test("regeneration can reuse the existing source bundle without supplemental con
   assert.deepEqual(requested.uploads, []);
 });
 
+test("prepare_resume routes the exact pair fence to the repository and needs the generation control", async () => {
+  let requested;
+  const repository = {
+    runtimeControls,
+    prepareResume: async (input) => {
+      requested = input;
+      return { case_id: input.pairId, state: "preparing_resume", state_version: 6, job_id: "job-rearm", resume_queued: true };
+    },
+  };
+  const service = createService({ repository, env });
+  const result = await service.command({
+    actorEmail: "recruiter@raydar.xyz",
+    idempotencyKey: "prepare-resume-1",
+    body: { action: "prepare_resume", case_id: "pair-1", expected_version: 5 },
+  });
+  assert.equal(result.job_id, "job-rearm");
+  assert.equal(result.resume_queued, true);
+  assert.equal(requested.pairId, "pair-1");
+  assert.equal(requested.expectedVersion, 5);
+  assert.equal(requested.actorEmail, "recruiter@raydar.xyz");
+  assert.equal(requested.idempotencyKey, "prepare-resume-1");
+
+  const halted = createService({ repository, env: { ...env, SUBMISSIONS_V2_GENERATION_ENABLED: "false" } });
+  await assert.rejects(
+    () => halted.command({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: "prepare-resume-2",
+      body: { action: "prepare_resume", case_id: "pair-1", expected_version: 5 },
+    }),
+    (error) => error.code === "submissions_v2_disabled" && error.status === 503,
+  );
+  await assert.rejects(
+    () => service.command({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: "prepare-resume-3",
+      body: { action: "prepare_resume", expected_version: 5 },
+    }),
+    (error) => error.status === 400,
+  );
+});
+
 test("Review dismissal requires a controlled reason and a human note", async () => {
   let dismissed;
   const service = createService({

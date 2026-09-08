@@ -14,6 +14,10 @@ const REVIEW_REASONS = new Set([
 const HUMAN_REVIEW_DECISION_REASONS = new Set([
   "reply_unclear_or_conditional", "candidate_question",
 ]);
+const RESUME_BLOCKER_REASONS = new Set([
+  "candidate_original_resume_missing", "resume_preparation_failed",
+]);
+const REARMABLE_INTENT_STATES = new Set(["interested", "unclear"]);
 const SIGNAL_DISMISSAL_REASONS = new Set([
   "not_candidate_response", "irrelevant_notification", "already_handled",
 ]);
@@ -337,6 +341,81 @@ async function queueResume(tx, pair, commandRow, triggerKind = "initial") {
   });
 }
 
+// Re-arming resume preparation is the one repair for a candidate-role item that
+// carries recruiter interest but no resume: a proven submission resolved the
+// preparation blocker, so Retry preparation and Regenerate both refuse it. The
+// recruiter's add (or the explicit Generate resume control) is the interest
+// decision, so an unclear intent becomes Interested here. It never touches the
+// submission proof and never queues a notification: only a new entry is announced.
+async function rearmResumePreparation(tx, pair, commandRow, { actorEmail, source }) {
+  // A soft-deleted case is invisible everywhere else and its recovery manifest is pinned to
+  // the state_version it was hidden at, so bumping the version here would permanently break
+  // restoreCase. addCandidate's existing-pair select is the only path that can reach one
+  // (lockPair already filters case_hidden_at), so refuse it the same way an open blocker is.
+  if (pair.case_hidden_at) return { outcome: "review_required", pair, job: null };
+  if (pair.intent_state === "not_interested") return { outcome: "not_interested", pair, job: null };
+  const currentArtifact = pair.current_artifact_id ? (await tx`
+    select id from submissions_v2.resume_artifacts
+     where id=${pair.current_artifact_id} and pair_id=${pair.id} and kind='pdf'
+       and validation_status='passed' and current_state='current' and deleted_at is null
+       and archived_at is not null and archive_readback_at is not null
+  `)[0] : null;
+  if (currentArtifact) return { outcome: "resume_ready", pair, job: null };
+  const preparing = await tx`
+    select id::text from submissions_v2.resume_generations
+     where pair_id=${pair.id} and status in ('queued','collecting','extracting','strategizing','validating','rendering','archiving')
+    union all
+    select id::text from submissions_v2.jobs
+     where kind='prepare_resume' and subject_type='pair' and subject_id=${pair.id}
+       and state in ('queued','running')
+    limit 1
+  `;
+  if (preparing.length) return { outcome: "preparing", pair, job: null };
+  const openReviews = await tx`
+    select id, reason_code from submissions_v2.review_items
+     where pair_id=${pair.id} and action_state='open'
+     for update
+  `;
+  const resumeBlockersOnly = openReviews.every((row) => RESUME_BLOCKER_REASONS.has(row.reason_code));
+  if (!resumeBlockersOnly || !REARMABLE_INTENT_STATES.has(pair.intent_state)) {
+    return { outcome: "review_required", pair, job: null };
+  }
+  if (openReviews.length) {
+    await tx`
+      update submissions_v2.review_items
+         set action_state='resolved', resolved_at=clock_timestamp(), resolved_by=${actorEmail},
+             resolution_note='Recruiter re-added the candidate; resume preparation re-armed.'
+       where pair_id=${pair.id} and action_state='open'
+    `;
+  }
+  const updated = (await tx`
+    update submissions_v2.candidate_role_pairs
+       set intent_state='interested', workflow_state='preparing_resume', state_version=state_version+1
+     where id=${pair.id} and state_version=${pair.state_version} returning *
+  `)[0];
+  if (!updated) throw problem("stale_pair_version", "The candidate-role item changed before this action was committed.", 409, pairCurrent(pair));
+  const job = await enqueue(tx, {
+    kind: "prepare_resume", subjectType: "pair", subjectId: pair.id, commandId: commandRow.id,
+    idempotencyKey: `resume:rearm:${commandRow.id}`, requiredControl: "generation",
+    priority: 50, maxAttempts: 3,
+    checkpoint: {
+      trigger_kind: "retry", expected_pair_version: Number(updated.state_version),
+      rearmed: true, rearm_source: source,
+    },
+  });
+  await pairEvent(tx, updated, {
+    actorId: actorEmail, source, eventType: "preparation_rearmed",
+    expectedVersion: Number(pair.state_version), previous: pair,
+    idempotencyKey: `pair:rearm:${commandRow.id}`,
+    metadata: {
+      job_id: job?.id || null, prior_intent_state: pair.intent_state,
+      prior_workflow_state: pair.workflow_state, resolved_review_count: openReviews.length,
+      submission_status: pair.submission_status,
+    },
+  });
+  return { outcome: "queued", pair: updated, job };
+}
+
 function curatedSignalUrlFromObservation(observation = {}) {
   if (clean(observation.source_link_kind, 100) !== "curated_list_exact") return null;
   const value = clean(observation.signal_url, 2_000);
@@ -610,7 +689,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               se.envelope->>'signal_url' as signal_url,
               se.source_family, se.envelope->>'source_family' as email_source_family,
               se.envelope->>'decisive_status' as decisive_status,
-              p.original_signal_at as signal_at, p.workflow_state,
+              p.original_signal_at as signal_at, p.workflow_state, p.intent_state,
               coalesce(rv.reasons, '[]'::jsonb) as review_reasons,
               '[]'::jsonb as resume_cautions, g.status as generation_status,
               g.stage as generation_stage, g.safe_error_code as preparation_error_code,
@@ -672,7 +751,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               offered.count as offered_role_count, offered.roles as offered_roles, se.envelope->>'signal_url' as signal_url,
               se.source_family, se.envelope->>'source_family' as email_source_family,
               se.envelope->>'decisive_status' as decisive_status,
-              se.received_at as signal_at, 'needs_review'::text as workflow_state,
+              se.received_at as signal_at, 'needs_review'::text as workflow_state, null::text as intent_state,
               rv.reasons as review_reasons, '[]'::jsonb as resume_cautions, null::text as generation_status,
               null::text as generation_stage, null::text as preparation_error_code, null::text as preparation_error_detail,
               null::timestamptz as generation_updated_at, null::timestamptz as generation_deadline_at,
@@ -728,7 +807,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles, se.envelope->>'signal_url' as signal_url,
               se.source_family, se.envelope->>'source_family' as email_source_family,
               se.envelope->>'decisive_status' as decisive_status,
-            ni.original_negative_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
+            ni.original_negative_at as signal_at, p.workflow_state, p.intent_state, '[]'::jsonb as review_reasons,
             '[]'::jsonb as resume_cautions, null::text as generation_status, p.submission_status,
             null::timestamptz as submission_marked_at, null::text as submission_marked_by,
             ni.grounded_reason as negative_reason, ni.corrected_destination,
@@ -758,7 +837,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             r.destination_url as role_url, 1::bigint as offered_role_count, '[]'::jsonb as offered_roles, se.envelope->>'signal_url' as signal_url,
               se.source_family, se.envelope->>'source_family' as email_source_family,
               se.envelope->>'decisive_status' as decisive_status,
-            p.original_signal_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
+            p.original_signal_at as signal_at, p.workflow_state, p.intent_state, '[]'::jsonb as review_reasons,
             coalesce(caution.cautions, '[]'::jsonb) as resume_cautions, g.status as generation_status,
             g.stage as generation_stage, g.safe_error_code as preparation_error_code,
             g.safe_error_detail as preparation_error_detail,
@@ -1685,7 +1764,18 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         if (!roles.length) throw problem("role_unavailable", "The selected Paraform role is not active.", 409);
         await tx`select pg_advisory_xact_lock(hashtextextended(${pairAdvisoryLockKey(candidateId, roleId)}, 0))`;
         const prior = await tx`select * from submissions_v2.candidate_role_pairs where candidate_user_id=${candidateId} and role_id=${roleId} for update`;
-        if (prior.length) return { existing: true, case_id: prior[0].id, state: prior[0].workflow_state, state_version: Number(prior[0].state_version) };
+        if (prior.length) {
+          const rearm = await rearmResumePreparation(tx, prior[0], commandRow, { actorEmail, source: action });
+          return {
+            existing: true, case_id: rearm.pair.id,
+            state: rearm.pair.workflow_state, state_version: Number(rearm.pair.state_version),
+            job_id: rearm.job?.id || null,
+            resume_queued: rearm.outcome === "queued",
+            resume_ready: rearm.outcome === "resume_ready",
+            preparing: rearm.outcome === "preparing",
+            rearm: rearm.outcome,
+          };
+        }
         const manualEventId = `manual:${commandRow.id}`;
         const firstResponseClaim = await reserveFirstResponse(tx, {
           candidateId, roleId, eventId: manualEventId, sourceFamily: "manual",
@@ -1930,6 +2020,29 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         });
         await pairEvent(tx, current, { actorId: actorEmail, source: action, eventType: `${action}_requested`, idempotencyKey: `pair:${commandRow.id}`, metadata: { job_id: job?.id || null } });
         return { case_id: pairId, state: current.workflow_state, state_version: Number(current.state_version), job_id: job?.id || null };
+      }));
+    },
+
+    async prepareResume({ actorEmail, idempotencyKey, pairId, expectedVersion }) {
+      return sql.begin(async (tx) => command(tx, {
+        actorEmail, action: "prepare_resume", idempotencyKey, expectedVersion, pairId,
+        input: { pairId, expectedVersion },
+      }, async (commandRow) => {
+        const current = await lockPair(tx, pairId, expectedVersion);
+        const rearm = await rearmResumePreparation(tx, current, commandRow, { actorEmail, source: "prepare_resume" });
+        if (rearm.outcome !== "queued") {
+          const refusal = {
+            not_interested: ["pair_not_interested", "A Not Interested candidate-role item cannot prepare a resume."],
+            resume_ready: ["resume_already_ready", "This candidate-role item already has a ready resume."],
+            preparing: ["resume_preparation_in_progress", "This resume is already being prepared."],
+            review_required: ["review_required", "Resolve the open Review blockers before preparing this resume."],
+          }[rearm.outcome];
+          throw problem(refusal[0], refusal[1], 409, pairCurrent(current));
+        }
+        return {
+          case_id: pairId, state: rearm.pair.workflow_state, state_version: Number(rearm.pair.state_version),
+          job_id: rearm.job?.id || null, resume_queued: true,
+        };
       }));
     },
 

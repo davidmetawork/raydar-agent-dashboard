@@ -14,6 +14,8 @@ const EMPTY = Object.freeze({
   not_interested: "No not-interested candidates right now",
 });
 const PAGE_ORDER = Object.freeze(Object.keys(PAGE_LABELS));
+const STATE_PAGE_ALIASES = Object.freeze({ preparing_resume: "interested" });
+function pageForState(state) { return STATE_PAGE_ALIASES[state] || state; }
 const URL_HOSTS = Object.freeze({
   candidate: ["paraform.com"],
   linkedin: ["linkedin.com"],
@@ -230,7 +232,14 @@ function interestedActions(row) {
     ? `<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating || !canRegenerate ? "disabled" : ""}>${rerunIcon}</button>`
     : "";
   if (submitted && !resume.hasArtifact) {
-    return `${historyLabel}${unmark}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>`;
+    const canPrepareResume = rowCapability(row, "can_prepare_resume", false);
+    const preparingResume = rowActionPending(id, "prepare-resume");
+    const generateResume = (resume.preparing || resume.generating)
+      ? ""
+      : canPrepareResume
+        ? `<button class="button primary prepare-resume" data-id="${esc(id)}" type="button" ${preparingResume ? "disabled" : ""}>${preparingResume ? "Starting…" : "Generate resume"}</button>`
+        : "";
+    return `${historyLabel}${unmark}${generateResume}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>`;
   }
   return `${historyLabel}${unmark}${submit}${mark}<button class="button secondary download" data-id="${esc(id)}" type="button" ${!canDownload || downloading ? "disabled" : ""} title="${!canDownload ? "Resume is still being prepared" : ""}">${downloading ? "Downloading…" : "Download Resume"}</button>${cautionButton(row)}${regenerate}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>${correct}`;
 }
@@ -297,6 +306,7 @@ function bindRows() {
   document.querySelectorAll(".submit").forEach((node) => { node.onclick = () => openSubmit(node.dataset.id); });
   document.querySelectorAll(".mark-submitted").forEach((node) => { node.onclick = () => markSubmitted(node.dataset.id); });
   document.querySelectorAll(".unmark-submitted").forEach((node) => { node.onclick = () => unmarkSubmitted(node.dataset.id); });
+  document.querySelectorAll(".prepare-resume").forEach((node) => { node.onclick = () => prepareResume(node.dataset.id); });
   document.querySelectorAll(".review-action").forEach((node) => { node.onclick = () => openReview(node.dataset.id); });
   document.querySelectorAll(".caution").forEach(bindPopoverButton);
 }
@@ -316,7 +326,7 @@ function focusedRowDescendant() {
   const row = node.closest("#rows .submission-row");
   const id = row?.dataset.id;
   if (!id) return null;
-  const action = ["download", "regenerate", "duplicate", "correct", "submit", "mark-submitted", "unmark-submitted", "review-action", "caution"]
+  const action = ["download", "regenerate", "duplicate", "correct", "submit", "mark-submitted", "unmark-submitted", "prepare-resume", "review-action", "caution"]
     .find((name) => node.classList.contains(name));
   if (action) return { id, selector: `.${action}[data-id]` };
   if (node.matches(".candidate-name")) return { id, selector: ".candidate-name" };
@@ -794,9 +804,15 @@ async function confirmAdd() {
     const candidateLabel = active.candidate_id_label || "";
     if (dialogStillActive(active)) {
       closeDialog();
-      if (result.existing && PAGE_LABELS[result.state]) {
-        activateListPage(result.state, { query: candidateLabel });
-        toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
+      const page = pageForState(result.state);
+      if (result.existing && PAGE_LABELS[page]) {
+        activateListPage(page, { query: candidateLabel });
+        const label = PAGE_LABELS[page];
+        if (result.resume_queued) toast(`Already in ${label}; resume preparation has started.`);
+        else if (result.resume_ready) toast(`Already in ${label}; the resume is ready.`);
+        else if (result.preparing) toast(`Already in ${label}; the resume is still being prepared.`);
+        else if (result.rearm === "not_interested") toast("Already in Not Interested; use Correct to move it.");
+        else toast(`Already in ${label}; showing it now.`);
       } else toast("Candidate added; resume preparation has started.");
     }
     await Promise.all([loadCounts(), loadRows({ refresh: true })]);
@@ -1132,6 +1148,18 @@ async function unmarkSubmitted(id) {
       await command("unmark_submitted", { case_id: id, expected_version: row.state_version });
       toast("Submission mark removed.");
       await loadRows({ refresh: true });
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+async function prepareResume(id) {
+  const row = rowFor(id); if (!row) return;
+  if (!rowCapability(row, "can_prepare_resume", false)) return;
+  return withRowAction(id, "prepare-resume", async () => {
+    try {
+      await command("prepare_resume", { case_id: id, expected_version: row.state_version });
+      toast("Resume preparation has started.");
+      await Promise.all([loadCounts(), loadRows({ refresh: true })]);
     } catch (error) { toast(error.message, true); }
   });
 }

@@ -380,7 +380,7 @@ export function createService({
 
     async command({ actorEmail, idempotencyKey, body }) {
       const action = required(body?.action, "action", 80);
-      const generationActions = new Set(["add_candidate", "duplicate", "regenerate", "retry_preparation", "create_upload_intent", "complete_upload"]);
+      const generationActions = new Set(["add_candidate", "duplicate", "regenerate", "retry_preparation", "prepare_resume", "create_upload_intent", "complete_upload"]);
       const destinationNeedsGeneration = new Set(["correct", "resolve_review"]).has(action) && body?.destination === "interested";
       await requireControls("ui", ...(generationActions.has(action) || destinationNeedsGeneration ? ["generation"] : []));
       if (action === "add_candidate") {
@@ -433,6 +433,12 @@ export function createService({
           checkpoint: roleRecheck
             ? { target: "role" }
             : { trigger_kind: action === "retry_preparation" ? "retry" : undefined },
+        });
+      }
+      if (action === "prepare_resume") {
+        return repository.prepareResume({
+          actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100),
+          expectedVersion: expectedVersion(body.expected_version),
         });
       }
       if (action === "retry_classification") {

@@ -73,7 +73,8 @@ test("changed rows retain stable link focus and existing-result navigation reset
   assert.match(js, /node\.matches\("\.signal-link"\)/);
   assert.match(js, /if \(node instanceof HTMLElement && !node\.matches\(":disabled"\)\) node\.focus\(\)/);
   assert.match(js, /Object\.assign\(STATE, listPageReset\(\{ page, query \}\)\)/);
-  assert.equal((js.match(/activateListPage\(result\.state, \{ query: candidateLabel \}\)/g) || []).length, 2);
+  assert.match(js, /activateListPage\(page, \{ query: candidateLabel \}\)/);
+  assert.match(js, /activateListPage\(result\.state, \{ query: candidateLabel \}\)/);
 });
 
 test("tabs use roving keyboard focus and activate only on an explicit button click", () => {
@@ -286,6 +287,44 @@ test("David can mark a candidate submitted himself and undo it, ahead of Parafor
   assert.match(unmarkFn, /Submission mark removed\./);
   assert.match(css, /\.submitted-detail\{/);
   assert.match(css, /\.submitted-state\{display:flex;flex-direction:column;align-items:flex-end;gap:2px\}/);
+});
+
+test("a proven submission with no resume and can_prepare_resume offers Generate resume before Duplicate", () => {
+  assert.match(js, /const canPrepareResume = rowCapability\(row, "can_prepare_resume", false\)/);
+  assert.match(js, /const preparingResume = rowActionPending\(id, "prepare-resume"\)/);
+  const submittedNoArtifactBranch = between(js, "if (submitted && !resume.hasArtifact) {", "return `${historyLabel}${unmark}${generateResume}");
+  assert.match(submittedNoArtifactBranch, /resume\.preparing \|\| resume\.generating/);
+  assert.match(js, /class="button primary prepare-resume" data-id="\$\{esc\(id\)\}" type="button" \$\{preparingResume \? "disabled" : ""\}>\$\{preparingResume \? "Starting…" : "Generate resume"\}<\/button>/);
+  assert.match(js, /\$\{historyLabel\}\$\{unmark\}\$\{generateResume\}<button class="button secondary duplicate"/);
+});
+
+test("Generate resume is withheld while can_prepare_resume is false or a generation is already active", () => {
+  const generateResumeAssignment = between(js, "const canPrepareResume = rowCapability", "return `${historyLabel}${unmark}${generateResume}");
+  assert.match(generateResumeAssignment, /\(resume\.preparing \|\| resume\.generating\)\s*\n\s*\? ""\s*\n\s*: canPrepareResume/);
+});
+
+test("prepareResume commands prepare_resume with the row's expected version and refreshes on success", () => {
+  assert.match(js, /document\.querySelectorAll\("\.prepare-resume"\)\.forEach\(\(node\) => \{ node\.onclick = \(\) => prepareResume\(node\.dataset\.id\); \}\)/);
+  assert.match(js, /"mark-submitted", "unmark-submitted", "prepare-resume", "review-action", "caution"/);
+  const prepareFn = between(js, "async function prepareResume(id)", "async function command(");
+  assert.match(prepareFn, /rowCapability\(row, "can_prepare_resume", false\)/);
+  assert.match(prepareFn, /withRowAction\(id, "prepare-resume", async \(\) => \{/);
+  assert.match(prepareFn, /command\("prepare_resume", \{ case_id: id, expected_version: row\.state_version \}\)/);
+  assert.match(prepareFn, /toast\("Resume preparation has started\."\)/);
+  assert.match(prepareFn, /Promise\.all\(\[loadCounts\(\), loadRows\(\{ refresh: true \}\)\]\)/);
+});
+
+test("confirmAdd's existing-pair toast distinguishes rearm outcomes and maps preparing_resume to Interested", () => {
+  assert.match(js, /const STATE_PAGE_ALIASES = Object\.freeze\(\{ preparing_resume: "interested" \}\)/);
+  assert.match(js, /function pageForState\(state\) \{ return STATE_PAGE_ALIASES\[state\] \|\| state; \}/);
+  const confirmAddFn = between(js, "async function confirmAdd()", "function openDuplicate(id)");
+  assert.match(confirmAddFn, /const page = pageForState\(result\.state\)/);
+  assert.match(confirmAddFn, /if \(result\.existing && PAGE_LABELS\[page\]\)/);
+  assert.match(confirmAddFn, /if \(result\.resume_queued\) toast\(`Already in \$\{label\}; resume preparation has started\.`\)/);
+  assert.match(confirmAddFn, /else if \(result\.resume_ready\) toast\(`Already in \$\{label\}; the resume is ready\.`\)/);
+  assert.match(confirmAddFn, /else if \(result\.preparing\) toast\(`Already in \$\{label\}; the resume is still being prepared\.`\)/);
+  assert.match(confirmAddFn, /else if \(result\.rearm === "not_interested"\) toast\("Already in Not Interested; use Correct to move it\."\)/);
+  assert.match(confirmAddFn, /else toast\(`Already in \$\{label\}; showing it now\.`\)/);
 });
 
 test("source health distinguishes reported delays from committed Gmail and Sequence checkpoints", () => {
