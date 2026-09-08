@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 101,
-  "digest": "1ca8d35555114fe56bf2dafe0bed56837ec66667264e278fbf9396f403f8e233",
+  "file_count": 102,
+  "digest": "097f9d6fc99dfd16680fca7ea73206ff628553d36d8cd6942f22944b0342e2ba",
   "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
   "files": [
     {
@@ -24,6 +24,10 @@
     {
       "path": "api/paraai/_lib/core.mjs",
       "sha256": "d1e8cd2e905df194922cd9c0a16d4c1b7687a7f8b91e1935e47c49ac114d520d"
+    },
+    {
+      "path": "api/paraai/submission-notify.mjs",
+      "sha256": "98d66cd8cf4e123008ced206a4bc6db70777b77b60d86726ba92a5c8f546f832"
     },
     {
       "path": "api/roster/_lib/outcome-sequences.mjs",
@@ -95,7 +99,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/models/anthropic-strategist.mjs",
-      "sha256": "5b36dd0447e45d3db696176be2af71cb33dcd6e93faed70ac57ea09cfa15a6f6"
+      "sha256": "25af7d7730e9e11856b0a50725a5e4db449e6261c9e3fa85034696113646011a"
     },
     {
       "path": "api/submissions-v2/_lib/models/contracts.mjs",
@@ -107,15 +111,15 @@
     },
     {
       "path": "api/submissions-v2/_lib/models/openai-validator.mjs",
-      "sha256": "c27a1c1be01411849b7ad1e6e47b2ded787aec4f02c4a16bf8d4c2e1f5b93108"
+      "sha256": "3d76a3331d39b73488f28a4128047e4d25e09e5a42af3d5f3ae90c30e0c28293"
     },
     {
       "path": "api/submissions-v2/_lib/models/provider-errors.mjs",
-      "sha256": "6017cb53deacbe78bc565291b3c90e94f5487e7d45e3fb3e44c0a70413386377"
+      "sha256": "2113deb83643c8b895ae6349e7a39483600706e09b666fdf0249eba37ffae1a7"
     },
     {
       "path": "api/submissions-v2/_lib/notifications.mjs",
-      "sha256": "b552010eaec32626fa981717b0797eaa42e0a250f9d6c1b694d49cd922a4f486"
+      "sha256": "2b08ea920d903eeda7828052379a53f6599a786ce4d5e59ad474c03b580b9a6a"
     },
     {
       "path": "api/submissions-v2/_lib/paraform-links.mjs",
@@ -135,7 +139,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "e63fb774b520685fda35ec5994a151f0c941e5649b4e1795f1a4fd2c77e4eb73"
+      "sha256": "60658f8de73525ab35264c270ff99c70b511774e62731480584b2b88e4f66bec"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -159,7 +163,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-runtime.mjs",
-      "sha256": "29922b640e9cf0876556678d8084feaf7dd9bc36961bbb5fb8e5a12f267ed0ec"
+      "sha256": "17b60cc225535f93821de847b541b4b6a68fdad790bb520f83eba1e4dc22d60e"
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-store.mjs",
@@ -171,7 +175,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline.mjs",
-      "sha256": "30ac03e1c1a8c0527db88d530756c32b2fb13969b21711b68ad6dd13cad09bbf"
+      "sha256": "b9b9ccac82b9182bc31e18ee01c9d7893148d10506e4398eacf82c6d00ac69e1"
     },
     {
       "path": "api/submissions-v2/_lib/resume/source-bundle.mjs",
@@ -323,7 +327,7 @@
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "17c74bec8bc21041e1a3775fd87a47f47012e83bcb34af692d73da16380eefd2"
+      "sha256": "242df5d60e2848426d5fc90d0ee838504fb4a6a7addd0a0bbf04ab3d4ebc768c"
     },
     {
       "path": "submissions-v2-purge/Dockerfile",
@@ -403,7 +407,7 @@
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "cacc54e24792b3e31d69a95fd9294b07476b9e6cf5fd8062b67a015def370642"
+      "sha256": "5ea5deec4af6262d9007ec1bcb5711171df01f88827dc64bbe2be47a7945bc01"
     },
     {
       "path": "vercel.json",

@@ -146,16 +146,16 @@ export async function postSafeNotification(text, { env = process.env, fetchImpl 
   }
   const body = await response.json().catch(() => null);
   if (!body) throw Object.assign(new Error("Slack delivery outcome is unknown."), { code: "slack_receipt_unreadable", deliveryOutcome: "unknown" });
-  if (!response.ok || !body.ok) {
-    const brokerOutcomeUnknown = usingBroker && (
-      body.delivery_outcome === "unknown"
-      || (Number(response.status) >= 500 && body.delivery_outcome !== "not_sent")
-    );
-    throw Object.assign(new Error(brokerOutcomeUnknown
+  if (!response.ok || body.ok !== true) {
+    const outcomeUnknown = body.ok !== false || (usingBroker
+      ? body.delivery_outcome === "unknown"
+        || (Number(response.status) >= 500 && body.delivery_outcome !== "not_sent")
+      : Number(response.status) >= 500);
+    throw Object.assign(new Error(outcomeUnknown
       ? "Slack delivery outcome is unknown."
       : "Slack did not accept the notification."), {
       code: clean(body.error || `slack_http_${response.status}`, 100),
-      deliveryOutcome: brokerOutcomeUnknown ? "unknown" : "not_sent",
+      deliveryOutcome: outcomeUnknown ? "unknown" : "not_sent",
     });
   }
   const receipt = typeof (body.receipt || body.ts) === "string" ? String(body.receipt || body.ts).trim() : "";

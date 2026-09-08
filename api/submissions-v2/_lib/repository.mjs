@@ -414,6 +414,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
   });
   const queueSignalAdmission = async (tx, { source, review, offered = [] }) => {
     if (!review) return false;
+    const priorReview = (await tx`
+      select id, opened_at from submissions_v2.review_items
+       where unresolved_signal_id=${source.id} and id<>${review.id}
+       order by opened_at, id limit 1 for update
+    `)[0];
     const exactRole = offered.length === 1 ? offered[0] : null;
     const candidateId = source.envelope?.candidate_resolution?.candidate_user_id
       || source.envelope?.candidate_resolution?.candidate?.candidate_user_id;
@@ -422,7 +427,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
        where candidate_user_id=${candidateId} and active
     `)[0] : null;
     const rows = await tx`
-      insert into submissions_v2.notification_outbox(kind, destination_id, safe_payload, dedupe_key)
+      insert into submissions_v2.notification_outbox(
+        kind, destination_id, safe_payload, dedupe_key, state, safe_error_code, safe_error_detail
+      )
       values (
         'submission_added', ${notificationDestination()},
         ${tx.json(admissionPayload({
@@ -430,12 +437,14 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           company: exactRole?.company_snapshot,
           roleTitle: exactRole?.role_label_snapshot,
           signal: admissionSignal({ intentState: "unclear", workflowState: "needs_review", origin: emailAdmissionOrigin(source) }),
-          addedAt: review.opened_at,
+          addedAt: priorReview?.opened_at || review.opened_at,
         }))},
-        ${`submission-added:signal:${source.id}`}
+        ${`submission-added:signal:${source.id}`}, ${priorReview ? "held" : "pending"},
+        ${priorReview ? "pre_release_admission_suppressed" : null},
+        ${priorReview ? "This Review entry existed before admission-only notifications were enabled." : null}
       ) on conflict (dedupe_key) do nothing returning id
     `;
-    return rows.length > 0;
+    return rows.length > 0 && !priorReview;
   };
   const queuePairAdmission = async (tx, { pair, source, candidate, role, origin }) => {
     const lineageKey = `submission-added:signal:${source.id}`;
