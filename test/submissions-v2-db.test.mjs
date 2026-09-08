@@ -608,7 +608,7 @@ test("email intake keeps one immutable provider-event object owner through commi
   assert.deepEqual({ ...admission.safe_payload, added_at: undefined }, {
     candidate_name: "Candidate", company: "Not yet identified",
     role_title: "Not yet identified", signal: "Needs review · Email reply",
-    added_at: undefined, monitor_url: "https://monitor.raydar.xyz/#submissions-v2",
+    added_at: undefined, monitor_url: "https://monitor.raydar.xyz/#submissions",
   });
   const review = (await sql`
     select opened_at from submissions_v2.review_items
@@ -2188,7 +2188,7 @@ test("first recruiter addition queues one exact admission notification and later
   assert.deepEqual({ ...rows[0].safe_payload, added_at: undefined }, {
     candidate_name: "Addition Candidate", company: "Addition Company",
     role_title: "Addition Engineer", signal: "Interested · Recruiter addition",
-    added_at: undefined, monitor_url: "https://monitor.raydar.xyz/#submissions-v2",
+    added_at: undefined, monitor_url: "https://monitor.raydar.xyz/#submissions",
   });
   assert.equal(rows[0].safe_payload.added_at, new Date(rows[0].created_at).toISOString());
   await setRuntimeControls({
