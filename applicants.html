@@ -1727,7 +1727,7 @@ function interviewControl(row) {
     title: "Interview held: " + (actionability.reasons?.[0] || eligibility) };
   if (eligibility === "ready") return { label: "Interview", enabled: true, title: "Request interview" };
   if (actionability) return { label: "Preparing", enabled: false, title: "Applicant readiness is being checked." };
-  return { label: "Interview", enabled: true, title: "Request interview" };
+  return { label: "Preparing", enabled: false, title: "Applicant readiness is being checked." };
 }
 
 function rowCardHtml(row, mode, decision) {
