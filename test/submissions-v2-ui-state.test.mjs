@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, preparationFailurePresentation, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -70,6 +70,18 @@ test("review rows identify the next required action without exposing a reason co
   assert.equal(reviewRowPresentation({ review_reasons: [{ code: "classification_failed" }], primary_action_label: "Retry now" }).action, "Retry now");
 });
 
+test("a preparation attempt limit names the stage, last attempt, and separately budgeted individual retry", () => {
+  assert.deepEqual(preparationFailurePresentation({
+    generation_status: "failed", generation_stage: "rendering", preparation_error_code: "generation_budget_exhausted",
+    preparation_error_detail: "The approved $2 cost ceiling was reached.", generation_updated_at: "2026-09-07T16:00:00.000Z",
+  }), {
+    stage: "Rendering the resume", reason: "Preparation attempt limit reached",
+    detail: "The approved $2 cost ceiling was reached.", lastAttemptAt: "2026-09-07T16:00:00.000Z",
+    attemptLimitReached: true, guidance: "The previous attempt reached its $2 limit. Review this failure before retrying; Retry preparation starts one new, separately budgeted attempt.",
+  });
+  assert.equal(preparationFailurePresentation({ generation_status: "failed", generation_stage: "validating", preparation_error_code: "generation_deadline_exhausted" }).attemptLimitReached, false);
+});
+
 test("an active review generation presents actual progress and blocks another retry", () => {
   assert.deepEqual(reviewProgressPresentation({
     generation_status: "strategizing", generation_stage: "strategy", generation_updated_at: "2026-09-05T03:25:00.000Z",
@@ -101,7 +113,7 @@ test("an embedded modal uses only the visible slice of a tall iframe", () => {
 
 test("source health details expose only committed checkpoints and an authoritative retry time", () => {
   const details = healthCoverageDetails({
-    master_inbox: { enabled: true, delayed: true, safe_error_detail: "The Gmail cursor is paused.", last_complete_at: "2026-09-04T12:01:00.000Z", coverage: { live_through: "2026-09-04T12:00:00.000Z", history_through: "2026-09-03T12:00:00.000Z", live_caught_up: true, history_caught_up: false } },
+    master_inbox: { enabled: true, delayed: true, safe_error_detail: "The Gmail cursor is paused.", last_success_at: "2026-09-04T12:02:00.000Z", last_complete_at: "2026-09-04T12:01:00.000Z", coverage: { live_through: "2026-09-04T12:00:00.000Z", history_through: "2026-09-03T12:00:00.000Z", live_caught_up: true, history_caught_up: false } },
     sequence_inbox: { enabled: true, delayed: false, retry_at: "2026-09-04T12:20:00.000Z", coverage: { cache_confirmed_through: "2026-09-04T11:55:00.000Z", caught_up: true } },
   });
   assert.deepEqual(details.map(({ key, label, liveThrough, historyThrough, cacheConfirmedThrough, retryAt, liveCaughtUp, historyCaughtUp, caughtUp }) => ({ key, label, liveThrough, historyThrough, cacheConfirmedThrough, retryAt, liveCaughtUp, historyCaughtUp, caughtUp })), [
@@ -109,6 +121,7 @@ test("source health details expose only committed checkpoints and an authoritati
     { key: "sequence_inbox", label: "Sequence Inbox", liveThrough: null, historyThrough: null, cacheConfirmedThrough: "2026-09-04T11:55:00.000Z", retryAt: "2026-09-04T12:20:00.000Z", liveCaughtUp: null, historyCaughtUp: null, caughtUp: true },
   ]);
   assert.equal(details[0].safeErrorDetail, "The Gmail cursor is paused.");
+  assert.equal(details[0].lastSuccessAt, "2026-09-04T12:02:00.000Z");
 });
 
 test("a background refresh keeps all already loaded pages and removes a repeated cursor row", () => {
