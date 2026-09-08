@@ -68,6 +68,9 @@
 //                              desktop refresh listener only ever READS it and
 //                              keeps its own served-watermark on disk, which is
 //                              what keeps the on-demand path idempotent.)
+//   apphub:transport:<digest>:<index> — POST /api/applicants/sync only.
+//                              Immutable15-minute upload chunks, outside the
+//                              active publication and decision namespaces.
 //   apphub:funded-employers:* — POST /api/applicants/funded-employers only.
 //                              Immutable licensed snapshots plus a metadata-
 //                              only catalog; Rules endpoints are readers.

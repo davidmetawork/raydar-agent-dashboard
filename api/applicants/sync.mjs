@@ -12,6 +12,7 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { storeTransportChunk, readTransportChunks } from './_lib/transport-chunks.mjs';
 import { directoryFromFacts, factsFromProfile } from "./_lib/facts.mjs";
 import {
   buildGeneration,
@@ -880,6 +881,22 @@ export function createSyncHandler({
       let body;
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
       catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
+      if (own(body, 'transportChunk') || own(body, 'transportRef')) {
+        if (Object.keys(body).length !== 1) return res.status(400).json({ ok: false, error: 'invalid_transport_envelope' });
+        try {
+          const options = { readJson, writeImmutableJson, maxDecodedBytes: MAX_TRANSPORT_DECODED_BYTES };
+          if (own(body, 'transportChunk')) {
+            const receipt = await storeTransportChunk(body.transportChunk, options);
+            return res.status(200).json({ ok: true, transportChunk: receipt });
+          }
+          body = await readTransportChunks(body.transportRef, options);
+        } catch (error) {
+          if (error?.code?.startsWith('invalid_transport_') || error?.code?.startsWith('transport_chunk')) {
+            return res.status(error.status || 400).json({ ok: false, error: error.code });
+          }
+          throw error;
+        }
+      }
       if (own(body, "transport")) {
         const decoded = decodeTransportBody(body);
         if (!decoded.ok) return res.status(400).json({ ok: false, error: decoded.error });
