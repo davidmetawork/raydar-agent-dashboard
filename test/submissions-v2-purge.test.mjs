@@ -11,6 +11,7 @@ const env = {
 
 function fakeSql(handler) {
   const sql = async (strings, ...values) => handler(strings.join("?"), values);
+  sql.begin = async (callback) => callback(sql);
   return sql;
 }
 
@@ -20,15 +21,17 @@ test("isolated purge refuses to start unless its independent ceiling and credent
 });
 
 test("purge database sessions enforce bounded server-side deadlines", () => {
-  const defaults = purgeInternals.databaseOptions({});
-  assert.equal(defaults.connection.statement_timeout, 240_000);
-  assert.equal(defaults.connection.idle_in_transaction_session_timeout, 30_000);
-  const bounded = purgeInternals.databaseOptions({
+  assert.deepEqual(purgeInternals.databaseDeadlines({}), {
+    statementTimeoutMs: 240_000,
+    idleTransactionTimeoutMs: 30_000,
+  });
+  assert.deepEqual(purgeInternals.databaseDeadlines({
     SUBMISSIONS_V2_PURGE_DB_STATEMENT_TIMEOUT_MS: "999999",
     SUBMISSIONS_V2_PURGE_DB_IDLE_TRANSACTION_TIMEOUT_MS: "1",
+  }), {
+    statementTimeoutMs: 280_000,
+    idleTransactionTimeoutMs: 100,
   });
-  assert.equal(bounded.connection.statement_timeout, 280_000);
-  assert.equal(bounded.connection.idle_in_transaction_session_timeout, 100);
 });
 
 test("isolated purge deletes only its fresh reference-counted plan before fenced finalization", async () => {

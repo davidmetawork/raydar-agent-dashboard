@@ -1,30 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { del } from "@vercel/blob";
-import postgres from "postgres";
+import { createDatabase, databaseInternals, withTransaction } from "../api/submissions-v2/_lib/db.mjs";
 
 const clean = (value, limit = 200) => String(value ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, limit);
 const PRIVATE_OBJECT_PATH = /^submissions\/resumes\/v2\/[A-Za-z0-9_-]+\/[A-Za-z0-9._-]+$/u;
-const DEFAULT_STATEMENT_TIMEOUT_MS = 240_000;
-const DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS = 30_000;
-
-function boundedTimeout(value, fallback, { min, max }) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.trunc(parsed))) : fallback;
-}
-
-function databaseOptions(env) {
-  return {
-    max: 1,
-    prepare: false,
-    connect_timeout: 10,
-    idle_timeout: 10,
-    connection: {
-      application_name: "raydar-submissions-v2-purge",
-      statement_timeout: boundedTimeout(env.SUBMISSIONS_V2_PURGE_DB_STATEMENT_TIMEOUT_MS, DEFAULT_STATEMENT_TIMEOUT_MS, { min: 50, max: 280_000 }),
-      idle_in_transaction_session_timeout: boundedTimeout(env.SUBMISSIONS_V2_PURGE_DB_IDLE_TRANSACTION_TIMEOUT_MS, DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS, { min: 100, max: 60_000 }),
-    },
-    onnotice: () => {},
-  };
+function databaseDeadlines(env) {
+  return databaseInternals.sessionDeadlines({
+    SUBMISSIONS_V2_DB_STATEMENT_TIMEOUT_MS: env.SUBMISSIONS_V2_PURGE_DB_STATEMENT_TIMEOUT_MS,
+    SUBMISSIONS_V2_DB_IDLE_TRANSACTION_TIMEOUT_MS: env.SUBMISSIONS_V2_PURGE_DB_IDLE_TRANSACTION_TIMEOUT_MS,
+  });
 }
 
 function exactPrivateObjectPath(value) {
@@ -53,7 +37,9 @@ export async function runPurgeCycle({
 } = {}) {
   const config = configuration(env);
   const ownSql = !suppliedSql;
-  const sql = suppliedSql || postgres(config.databaseUrl, databaseOptions(env));
+  const deadlines = databaseDeadlines(env);
+  const sql = suppliedSql || createDatabase({ databaseUrl: config.databaseUrl, max: 1, ...deadlines });
+  const query = (callback) => withTransaction(callback, sql);
   const remove = deleteObject || ((pathname) => del(pathname, { token: config.blobToken }));
   const summary = {
     claimed: 0, purged: 0, failed: 0, object_deletes: 0,
@@ -62,11 +48,11 @@ export async function runPurgeCycle({
     routine_by_kind: { private_object_reservation: 0, upload_reservation: 0, quarantined_supplement: 0 },
   };
   try {
-    const claims = await sql`select * from submissions_v2.claim_case_purges(${workerId}, ${Math.max(1, Math.min(20, Number(limit) || 5))}, 1800)`;
+    const claims = await query((transaction) => transaction`select * from submissions_v2.claim_case_purges(${workerId}, ${Math.max(1, Math.min(20, Number(limit) || 5))}, 1800)`);
     summary.claimed = claims.length;
     for (const claim of claims) {
       try {
-        const plans = await sql`select submissions_v2.case_purge_plan(${claim.id}, ${workerId}, ${claim.purge_fencing_token}) as plan`;
+        const plans = await query((transaction) => transaction`select submissions_v2.case_purge_plan(${claim.id}, ${workerId}, ${claim.purge_fencing_token}) as plan`);
         const plan = plans[0]?.plan;
         if (!plan || String(plan.deletion_id) !== String(claim.id)) throw Object.assign(new Error("The purge plan did not match its claim."), { code: "purge_plan_invalid" });
         const keys = [...new Set((Array.isArray(plan.object_keys) ? plan.object_keys : []).map(exactPrivateObjectPath))];
@@ -74,41 +60,41 @@ export async function runPurgeCycle({
           await remove(pathname);
           summary.object_deletes += 1;
         }
-        await sql`select submissions_v2.finalize_case_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token}, ${`deleted_${keys.length}_private_objects`})`;
+        await query((transaction) => transaction`select submissions_v2.finalize_case_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token}, ${`deleted_${keys.length}_private_objects`})`);
         summary.purged += 1;
       } catch (error) {
         summary.failed += 1;
-        await sql`select submissions_v2.release_case_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token}, ${clean(error?.code || "purge_failed", 120)})`.catch(() => {});
+        await query((transaction) => transaction`select submissions_v2.release_case_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token}, ${clean(error?.code || "purge_failed", 120)})`).catch(() => {});
       }
     }
-    const manifestClaims = await sql`select * from submissions_v2.claim_restored_manifest_purges(${workerId}, ${Math.max(1, Math.min(20, Number(limit) || 5))}, 1800)`;
+    const manifestClaims = await query((transaction) => transaction`select * from submissions_v2.claim_restored_manifest_purges(${workerId}, ${Math.max(1, Math.min(20, Number(limit) || 5))}, 1800)`);
     summary.restored_manifests_claimed = manifestClaims.length;
     for (const claim of manifestClaims) {
       try {
-        const plans = await sql`select submissions_v2.restored_manifest_purge_plan(${claim.id}, ${workerId}, ${claim.purge_fencing_token}) as object_key`;
+        const plans = await query((transaction) => transaction`select submissions_v2.restored_manifest_purge_plan(${claim.id}, ${workerId}, ${claim.purge_fencing_token}) as object_key`);
         const objectKey = exactPrivateObjectPath(plans[0]?.object_key);
         await remove(objectKey);
         summary.object_deletes += 1;
-        await sql`select submissions_v2.finalize_restored_manifest_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token})`;
+        await query((transaction) => transaction`select submissions_v2.finalize_restored_manifest_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token})`);
         summary.restored_manifests_purged += 1;
       } catch (error) {
         summary.failed += 1;
-        await sql`select submissions_v2.release_restored_manifest_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token}, ${clean(error?.code || "manifest_purge_failed", 120)})`.catch(() => {});
+        await query((transaction) => transaction`select submissions_v2.release_restored_manifest_purge(${claim.id}, ${workerId}, ${claim.purge_fencing_token}, ${clean(error?.code || "manifest_purge_failed", 120)})`).catch(() => {});
       }
     }
-    const routineClaims = await sql`select * from submissions_v2.claim_routine_object_purges(${workerId}, ${Math.max(1, Math.min(50, Number(limit) || 5))}, 1800)`;
+    const routineClaims = await query((transaction) => transaction`select * from submissions_v2.claim_routine_object_purges(${workerId}, ${Math.max(1, Math.min(50, Number(limit) || 5))}, 1800)`);
     summary.routine_claimed = routineClaims.length;
     for (const claim of routineClaims) {
       try {
         const pathname = exactPrivateObjectPath(claim.object_path);
         await remove(pathname);
         summary.object_deletes += 1;
-        await sql`select submissions_v2.finalize_routine_object_purge(${claim.purge_kind}, ${claim.record_id}, ${workerId}, ${claim.fencing_token})`;
+        await query((transaction) => transaction`select submissions_v2.finalize_routine_object_purge(${claim.purge_kind}, ${claim.record_id}, ${workerId}, ${claim.fencing_token})`);
         summary.routine_purged += 1;
         if (Object.hasOwn(summary.routine_by_kind, claim.purge_kind)) summary.routine_by_kind[claim.purge_kind] += 1;
       } catch (error) {
         summary.failed += 1;
-        await sql`select submissions_v2.release_routine_object_purge(${claim.purge_kind}, ${claim.record_id}, ${workerId}, ${claim.fencing_token})`.catch(() => {});
+        await query((transaction) => transaction`select submissions_v2.release_routine_object_purge(${claim.purge_kind}, ${claim.record_id}, ${workerId}, ${claim.fencing_token})`).catch(() => {});
       }
     }
     return summary;
@@ -120,8 +106,6 @@ export async function runPurgeCycle({
 export const purgeInternals = Object.freeze({
   configuration,
   exactPrivateObjectPath,
-  databaseOptions,
+  databaseDeadlines,
   PRIVATE_OBJECT_PATH,
-  DEFAULT_STATEMENT_TIMEOUT_MS,
-  DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS,
 });
