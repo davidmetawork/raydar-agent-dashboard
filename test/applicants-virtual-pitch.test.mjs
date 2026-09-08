@@ -30,8 +30,9 @@ const ROW_CHROME = 30; // 14px padding top and bottom, 1px border top and bottom
 /** A fake list element with just enough layout to run the real code.
  *  `viewport` is shared with the VM's `window`, so a test can widen or narrow
  *  the page between paints exactly as a real resize does. */
-function fakeList({ viewport, clientHeight = 640 } = {}) {
+function fakeList({ viewport, clientHeight = 640, id = "" } = {}) {
   const list = {
+    id,
     _virtual: null,
     _rows: [],
     scrollTop: 0,
@@ -71,7 +72,7 @@ function fakeList({ viewport, clientHeight = 640 } = {}) {
   return list;
 }
 
-function run({ rows, innerWidth = 1440, clientHeight = 640 } = {}) {
+function run({ rows, innerWidth = 1440, clientHeight = 640, listId = "" } = {}) {
   const viewport = {
     innerWidth,
     getComputedStyle: () => ({
@@ -79,7 +80,7 @@ function run({ rows, innerWidth = 1440, clientHeight = 640 } = {}) {
       borderTopWidth: "1px", borderBottomWidth: "1px",
     }),
   };
-  const list = fakeList({ viewport, clientHeight });
+  const list = fakeList({ viewport, clientHeight, id: listId });
   const api = runInNewContext(
     `${source}; ({ paintList, renderVirtual, virtualRowHeight })`,
     // Viewport enrichment is deliberately fire-and-forget after a paint; the
@@ -151,6 +152,13 @@ test("the virtual space is exactly rows * pitch, so the scrollbar cannot lie", (
 test("a mobile viewport keeps its own bounds and fallback", () => {
   const { list, api } = run({ rows: uniform(50, 90), innerWidth: 390, clientHeight: 600 });
   assert.equal(api.virtualRowHeight(list), 200, "the mobile floor, not the desktop one");
+});
+
+test("Problems uses compact read-only geometry at both breakpoints", () => {
+  const wide = run({ rows: uniform(50, 90), listId: "problemsList" });
+  const narrow = run({ rows: uniform(50, 90), listId: "problemsList", innerWidth: 390 });
+  assert.equal(wide.api.virtualRowHeight(wide.list), 130, "Problems does not inherit Review's 150px floor");
+  assert.equal(narrow.api.virtualRowHeight(narrow.list), 150, "Problems keeps the compact mobile floor");
 });
 
 test("the pitch never shrinks under a reader mid-scroll", () => {

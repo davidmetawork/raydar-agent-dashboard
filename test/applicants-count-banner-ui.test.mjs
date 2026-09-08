@@ -34,9 +34,9 @@ test("the banner toggles before the no-snapshot early return", () => {
   assert.ok(toggle < earlyReturn, "counts banner is toggled before the no-snapshot return");
 });
 
-test("the banner names the log to check and says the data still rendered", () => {
-  assert.match(applicants, /~\/Library\/Logs\/raydar-interview-index\.log/);
-  assert.match(applicants, /Everything below still renders the published snapshot/);
+test("the banner names Problems and says the last published data is shown", () => {
+  assert.match(applicants, /Check Problems for affected records/);
+  assert.match(applicants, /this page shows the last published snapshot/);
 });
 
 // ---- the partial-snapshot notice (2026-08-27) ----
@@ -49,7 +49,7 @@ test("a partial snapshot says so, and says the count is a floor", () => {
 
 test("the partial notice is written AFTER the age branches, so age still colours the chip", () => {
   const body = applicants.slice(applicants.indexOf("function renderStats()"));
-  const ageBranch = body.indexOf('$("updatedText").textContent += " · desktop asleep?"');
+  const ageBranch = body.indexOf('$("updatedText").textContent += " · sync delayed"');
   const partial = body.indexOf('$("updatedText").textContent += " · partial"');
   assert.ok(ageBranch > 0 && partial > 0, "both branches present");
   assert.ok(partial > ageBranch,

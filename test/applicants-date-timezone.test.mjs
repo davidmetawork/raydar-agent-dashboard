@@ -101,6 +101,15 @@ test("profile-history month/year uses its ISO calendar month in every timezone",
   }
 });
 
+test("partial profile dates retain their supplied precision in every timezone", () => {
+  for (const tz of ["America/Los_Angeles", "UTC", "Asia/Tokyo"]) {
+    assert.equal(renderMonthIn(tz, "2022-02"), "Feb 2022", tz);
+    assert.equal(renderMonthIn(tz, "2018"), "2018", tz);
+    assert.equal(renderDurationIn(tz, "2014", "2018", false), "", tz);
+    assert.equal(renderMonthIn(tz, "2022-13"), "", tz);
+  }
+});
+
 test("profile-history month/year omits absent and invalid dates", () => {
   for (const value of [null, undefined, "", "not-a-date", "2023-13-01", "2023-02-30T00:00:00.000Z"]) {
     assert.equal(renderMonthIn("America/Los_Angeles", value), "", String(value));

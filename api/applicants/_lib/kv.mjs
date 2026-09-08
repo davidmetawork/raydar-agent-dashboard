@@ -212,6 +212,8 @@ export const K = {
   rulestats: "apphub:rulestats", // hash: ruleId → {fired, firedAt, ...} — writer: /api/applicants/rules-tick only
   ruleruns: "apphub:ruleruns",   // hash: `<cuId>:<roleId>` → why a rule fired — writer: rules-tick only
   ruleRun: (ruleRunId) => `apphub:rule-run:${ruleRunId}`, // immutable exact run manifest
+  ruleRunCommands: "apphub:rule-run-commands", // hash: run UUID -> immutable manual V2 command
+  ruleRunAcks: "apphub:rule-run-acks", // hash: run UUID -> Core seal readback
   fundedEmployerCatalog: "apphub:funded-employers:catalog",
   fundedEmployerSnapshot: (snapshotId) => `apphub:funded-employers:snapshot:${snapshotId}`,
 

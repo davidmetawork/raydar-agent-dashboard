@@ -31,6 +31,7 @@ import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
 import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
 import { richBindingsForSnapshot, richProfileReadyMatches } from "./_lib/rich-profile.mjs";
 import { richProfileForRules } from "./_lib/rich-rule-facts.mjs";
+import { applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -41,6 +42,17 @@ const str = (value) => {
   const s = value == null ? "" : String(value).trim();
   return s || null;
 };
+
+function profileV2ForArtifacts(artifacts, profileKey, sourceObservationId = null) {
+  if (!artifacts?.snapshot) return null;
+  const sourceRows = [
+    ...(Array.isArray(artifacts.snapshot.stream) ? artifacts.snapshot.stream : []),
+    ...(Array.isArray(artifacts.queue?.rows) ? artifacts.queue.rows : []),
+  ];
+  const row = sourceRows.find((candidate) => (candidate?.profileKey || candidate?.cuId) === profileKey
+    && (!sourceObservationId || candidate?.sourceObservationId === sourceObservationId));
+  return row?.key ? applicantRowsV2FromSnapshot(artifacts.snapshot)[row.key] ?? null : null;
+}
 
 // One rank per unique company/school id, cache-first, live reads paced 250ms
 // apart. A confirmed auth failure stops the live walk (every remaining lookup
@@ -141,9 +153,11 @@ return async function handler(req, res) {
     if (sourceCached) {
       const { paraformProfile: _unboundProviderProfile, ...sourceProfile } = sourceCached;
       let paraformProfile = null;
+      let profileV2 = null;
       try {
         const publication = await readActivePublication({ readJson });
         const artifacts = publication ? await readPublishedArtifacts(publication, { readJson }) : null;
+        profileV2 = profileV2ForArtifacts(artifacts, cu, sourceCached.sourceObservationId);
         const binding = artifacts ? richBindingsForSnapshot({ ...artifacts.snapshot, queue: artifacts.queue.rows }).get(cu) : null;
         if (binding && binding.sourceObservationId === sourceCached.sourceObservationId) {
           const rich = await readJson(K.richProfile(cu));
@@ -155,7 +169,7 @@ return async function handler(req, res) {
           }
         }
       } catch { /* Optional provider state cannot prevent opening the source profile. */ }
-      return res.status(200).json({ ok: true, ...sourceProfile, ...(paraformProfile ? { paraformProfile } : {}) });
+      return res.status(200).json({ ok: true, ...sourceProfile, ...(paraformProfile ? { paraformProfile } : {}), ...(profileV2 ? { profileV2 } : {}) });
     }
     const cached = await readJson(K.profile(cu)).catch(() => null);
     if (cached) return res.status(200).json({ ok: true, ...cached });

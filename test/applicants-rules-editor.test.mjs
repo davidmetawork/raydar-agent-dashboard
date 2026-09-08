@@ -440,3 +440,24 @@ test("a missing-ID company seed renders, previews, saves and manually evaluates 
   assert.equal(state.hits[rule.id][0].evidence[0].field, "job.companyName");
   assert.equal(state.hits[rule.id][0].evidence[0].source, "paraform");
 });
+
+test("V2 profile seed travels separately with preview while the stored rule remains plain conditions", async () => {
+  const calls = [];
+  const { testApi } = await loadRulesUi(async (url, options = {}) => {
+    calls.push({ url, options });
+    return response({ ok: true, matched: 1, considered: 1, skipped: {}, samples: [] });
+  });
+  testApi.state.draft = {
+    id: null, name: "One university", action: "interview", state: "live", scope: { roleIds: [] }, labels: {},
+    conditions: [{ field: "school.id", op: "any_of", value: ["school-one"] }],
+    profileFactSeed: { version: "applicant-profile-v2-rule-seed-v1", key: "v2:one", applicationId: "11111111-1111-4111-8111-111111111111",
+      sourceObservationId: "obs-one", rowRevision: "row-one", inputRevision: "input-one", decisionRevision: 4, factSetDigest: "a".repeat(64),
+      selection: { kind: "education", index: 0, recordId: "edu-one", selectedFactIds: ["education-school"] } },
+  };
+  testApi.state.previewSerial = 1;
+  await testApi.runPreview();
+  const request = JSON.parse(calls[0].options.body);
+  assert.equal(request.profileFactSeed.factSetDigest, "a".repeat(64));
+  assert.equal(request.rule.profileFactSeed, undefined);
+  assert.deepEqual(request.rule.conditions, [{ field: "school.id", op: "any_of", value: ["school-one"] }]);
+});

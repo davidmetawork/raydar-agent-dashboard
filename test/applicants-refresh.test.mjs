@@ -146,12 +146,12 @@ test("success is the snapshot moving, not the request being accepted", () => {
   // The whole point of the rebuild: only a newer generatedAt may say "Refreshed".
   assert.match(applicants, /const before = parseDate\(STATE\.snapshot\?\.generatedAt\)\?\.getTime\(\) \|\| 0;/);
   assert.match(applicants, /if \(at > REFRESH\.before\) return endRefreshWatch\(true\);/);
-  assert.match(applicants, /toast\("Refreshed — the desktop republished just now\."\)/);
+  assert.match(applicants, /toast\("Refreshed — applicant data was published just now\."\)/);
 });
 
-test("silence from the desktop is reported honestly, with the age of what is on screen", () => {
+test("silence from the applicant service is reported honestly, with the age of what is on screen", () => {
   assert.match(applicants, /if \(elapsed >= REFRESH_TIMEOUT_MS\) return endRefreshWatch\(false\);/);
-  assert.match(applicants, /didn’t answer in " \+ Math\.round\(REFRESH_TIMEOUT_MS \/ 1000\)/);
+  assert.match(applicants, /did not respond in " \+ Math\.round\(REFRESH_TIMEOUT_MS \/ 1000\)/);
   assert.match(applicants, /Still showing the snapshot from " \+ relTime\(at\)/);
 });
 

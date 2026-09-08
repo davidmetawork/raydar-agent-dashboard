@@ -177,7 +177,8 @@ const row = (cuId, extra = {}) => ({
  *  The queue is not a free-standing key any more: the tick reads the immutable
  *  ACTIVE PUBLICATION and refuses to run against anything else, so every
  *  fixture publishes a real generation and every request carries its fence. */
-function store({ rules = [], pausedAll = false, queue = [], decisions = {}, acks = {}, facts = {}, cards = null, receipts = null, counts = null } = {}) {
+function store({ rules = [], pausedAll = false, queue = [], decisions = {}, acks = {}, facts = {}, cards = null, receipts = null, counts = null,
+  applicantRowsV2 = null, generationId = undefined } = {}) {
   const availableCards = cards ?? Object.fromEntries(Object.keys(facts).map((cuId) => [cuId, {}]));
   const state = {
     "apphub:rules": { rev: 3, pausedAll, rules, updatedAt: null },
@@ -193,9 +194,11 @@ function store({ rules = [], pausedAll = false, queue = [], decisions = {}, acks
     "apphub:companies": { co1: "Acme" },
   };
   const generation = publishInto(state, {
-    snapshot: { generatedAt: "2026-08-20T11:00:00.000Z", stream: [] },
+    snapshot: { generatedAt: "2026-08-20T11:00:00.000Z", stream: [],
+      ...(applicantRowsV2 ? { applicantRowsV2 } : {}) },
     queue,
     counts,
+    ...(generationId ? { generationId } : {}),
   });
   const writes = [];
   return {
@@ -278,6 +281,141 @@ test("an armed rule writes the same decision record a human click writes", async
   assert.equal(decision.actorType, "rule");
   assert.ok(isRuleActor(decision.by));
   assert.equal(ruleIdFromActor(decision.by), "rule-harvard");
+});
+
+test("Profile V2 preview and manual run share one sealed full-scope command", async () => {
+  const queueRow = row("cu1");
+  const applicationId = "11111111-1111-4111-8111-111111111111";
+  const generationId = "22222222-2222-4222-8222-222222222222";
+  const projection = {
+    key: queueRow.key,
+    application: {
+      applicationId, tenantScopeId: "tenant-one", personId: "person-one",
+      sourceObservationId: "obs-cu1", rowRevision: "obs-cu1",
+      appliedTo: { roleVersionId: "role-version-one", roleId: "role1", title: "Engineer",
+        hiringCompany: { name: "Acme Corp", source: "role_version", state: "verified" } },
+    },
+    profile: { facts: {
+      name: { value: "Applicant", source: "paraform_linkedin", state: "verified" },
+      title: { value: "Engineer", source: "paraform_linkedin", state: "verified" },
+      location: { value: "Boston", source: "paraform_linkedin", state: "verified" },
+      about: { value: null, state: "unavailable" }, linkedin: { value: "applicant", source: "paraform_linkedin", state: "verified" },
+      experiences: { entries: [{ companyId: "co1", companyName: "Acme", roleTitle: "Engineer", current: true,
+        source: "paraform_linkedin", state: "verified" }], source: "paraform_linkedin", state: "verified" },
+      education: { entries: [{ schoolId: "sch_harvard", school: "Harvard University", degree: "Bachelor of Arts",
+        end: "2016-01-01", source: "paraform_linkedin", state: "verified" }], source: "paraform_linkedin", state: "verified" },
+    }, paraform: { source: "paraform_linkedin", state: "available", observedAt: "2026-08-20T11:00:00.000Z" },
+    resume: { source: "resume", state: "unavailable" }, selectedResume: null },
+    actionability: { eligibility: "waiting", readinessRevision: "rev-ready-1" },
+    problems: [], factSetDigest: "b".repeat(64), inputRevision: queueRow.inputRevision,
+    decisionRevision: queueRow.decisionRevision, factsCurrent: true,
+  };
+  const s = store({ rules: [HARVARD_RULE], queue: [queueRow], applicantRowsV2: { [queueRow.key]: projection }, generationId });
+  const preview = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule: HARVARD_RULE, ...s.fence } }), preview,
+  );
+  assert.equal(preview.statusCode, 200, JSON.stringify(preview.body));
+  assert.equal(preview.body.matched, 1);
+
+  const tick = response();
+  await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.statusCode, 200);
+  assert.equal(tick.body.decided, 1, JSON.stringify(tick.body));
+  assert.equal(tick.body.queuedForCore, true);
+  const command = s.state[K.ruleRunCommands][tick.body.ruleRunId];
+  assert.equal(command.manifest.items.length, 1);
+  assert.equal(command.manifest.items[0].applicationId, applicationId);
+  assert.equal(command.manifest.items[0].factSetDigest, projection.factSetDigest);
+  assert.equal(command.manifest.items[0].outcome, "interview");
+  assert.equal(command.manifestDigest, tick.body.ruleRunManifestDigest);
+  const decision = s.state[K.decisions][queueRow.key];
+  assert.equal(decision.ruleRun.manifestDigest, command.manifestDigest);
+  assert.equal(decision.ruleRun.previewDigest, command.manifest.previewDigest);
+  assert.deepEqual(decision.ruleVersions, command.manifest.ruleVersions);
+  assert.ok(s.writes.findIndex(([key]) => key === K.ruleRunCommands)
+    < s.writes.findIndex(([key]) => key === K.decisions));
+});
+
+test("V2 profile Rule seed is rechecked against the exact immutable fact record", async () => {
+  const queueRow = row("cu1");
+  const applicationId = "11111111-1111-4111-8111-111111111111";
+  const projection = {
+    key: queueRow.key,
+    application: { applicationId, tenantScopeId: "tenant-one", personId: "person-one", sourceObservationId: "obs-cu1", rowRevision: "obs-cu1",
+      appliedTo: { roleId: "role1", title: "Engineer", hiringCompany: { state: "verified" } } },
+    profile: { facts: {
+      title: { value: "Engineer", source: "paraform_linkedin", state: "verified" }, location: { value: "Boston", source: "paraform_linkedin", state: "verified" },
+      experiences: { entries: [], state: "verified" }, education: { entries: [
+        { recordId: "edu-one", schoolId: "sch_harvard", school: "Harvard", degree: "BA", source: "paraform_linkedin", state: "verified" },
+        { recordId: "edu-two", schoolId: "sch_other", school: "Other", degree: "MS", source: "paraform_linkedin", state: "verified" },
+      ], state: "verified" },
+    } }, actionability: { eligibility: "ready" }, problems: [], factSetDigest: "d".repeat(64),
+    inputRevision: queueRow.inputRevision, decisionRevision: queueRow.decisionRevision, factsCurrent: true,
+  };
+  const s = store({ queue: [queueRow], applicantRowsV2: { [queueRow.key]: projection } });
+  const rule = { name: "Harvard", action: "interview", state: "live", scope: { roleIds: [] },
+    conditions: [{ field: "school.id", op: "any_of", value: ["sch_harvard"] }] };
+  const profileFactSeed = { version: "applicant-profile-v2-rule-seed-v1", key: queueRow.key, applicationId,
+    sourceObservationId: "obs-cu1", rowRevision: "obs-cu1", inputRevision: queueRow.inputRevision,
+    decisionRevision: queueRow.decisionRevision, factSetDigest: projection.factSetDigest,
+    selection: { kind: "education", index: 0, recordId: "edu-one", selectedFactIds: ["education-school"] } };
+  const preview = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule, profileFactSeed, ...s.fence } }), preview,
+  );
+  assert.equal(preview.statusCode, 200, JSON.stringify(preview.body));
+  const stale = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule, profileFactSeed: { ...profileFactSeed, factSetDigest: "e".repeat(64) }, ...s.fence } }), stale,
+  );
+  assert.equal(stale.statusCode, 409);
+  assert.equal(stale.body.error, "profile_v2_fact_set_changed_refresh_required");
+  const staleSave = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "save", rev: 3, rule, profileFactSeed: { ...profileFactSeed, factSetDigest: "e".repeat(64) }, ...s.fence } }), staleSave,
+  );
+  assert.equal(staleSave.statusCode, 409);
+  assert.equal(staleSave.body.error, "profile_v2_fact_set_changed_refresh_required");
+  const crossPerson = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule, profileFactSeed: { ...profileFactSeed,
+      applicationId: "22222222-2222-4222-8222-222222222222" }, ...s.fence } }), crossPerson,
+  );
+  assert.equal(crossPerson.statusCode, 409);
+  const crossRecord = response();
+  const otherRecordRule = { ...rule, conditions: [{ field: "school.id", op: "any_of", value: ["sch_other"] }] };
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule: otherRecordRule, profileFactSeed, ...s.fence } }), crossRecord,
+  );
+  assert.equal(crossRecord.statusCode, 409, "a selected first education record cannot be rebound to the second");
+  const spoofedFact = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "preview", rule, profileFactSeed: { ...profileFactSeed,
+      selection: { ...profileFactSeed.selection, selectedFactIds: ["education-degree"] } }, ...s.fence } }), spoofedFact,
+  );
+  assert.equal(spoofedFact.statusCode, 409);
+  assert.equal(s.writes.length, 0);
+  const saved = response();
+  await createRulesHandler({ ...s.deps, mutationAuthHandler: s.deps.authHandler })(
+    request(s, { body: { op: "save", rev: 3, rule, profileFactSeed, ...s.fence } }), saved,
+  );
+  assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
+  assert.equal(saved.body.rule.conditions[0].value[0], "sch_harvard");
+});
+
+test("Profile V2 run parks the whole cohort when one fact revision is unavailable", async () => {
+  const queueRow = row("cu1");
+  const s = store({ rules: [HARVARD_RULE], queue: [queueRow], generationId: "22222222-2222-4222-8222-222222222222",
+    applicantRowsV2: { [queueRow.key]: { application: { applicationId: "11111111-1111-4111-8111-111111111111",
+      tenantScopeId: "tenant-one", personId: "person-one", sourceObservationId: "obs-cu1" },
+      factSetDigest: "b".repeat(64), inputRevision: "older", decisionRevision: 0, factsCurrent: false } } });
+  const tick = response();
+  await createTickHandler(s.deps)(request(s), tick);
+  assert.equal(tick.statusCode, 503);
+  assert.equal(tick.body.reason, "profile_v2_fact_set_missing");
+  assert.equal(s.state[K.ruleRunCommands], undefined);
+  assert.deepEqual(s.state[K.decisions], {});
 });
 
 test("the audit records the rule, its version and the literal fact", async () => {

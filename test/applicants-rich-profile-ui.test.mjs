@@ -101,9 +101,9 @@ test("the compact overlay is used only for meaningful provider content", () => {
 const modalEnd = applicants.indexOf("/* ---- event delegation", start);
 assert.ok(modalEnd > start, "modal rendering helpers are extractable from the shipped page");
 
-function renderHarness({ card, profile, provider = null, source = "queue" }) {
+function renderHarness({ card, profile, provider = null, source = "queue", rowOverrides = {} }) {
   const profileCard = { innerHTML: "" };
-  const row = { key: "row-one", profileKey: "core:one", cuId: "candidate-one", name: "Source Applicant", roleTitle: "Engineer", company: "Example Co", roleId: "role-one" };
+  const row = { key: "row-one", profileKey: "core:one", cuId: "candidate-one", name: "Source Applicant", roleTitle: "Engineer", company: "Example Co", roleId: "role-one", ...rowOverrides };
   const STATE = {
     cards: { [row.profileKey]: card },
     photos: {},
@@ -125,6 +125,14 @@ function renderHarness({ card, profile, provider = null, source = "queue" }) {
   rendered.renderModal();
   return { card: rendered.historyHtml(row), modal: profileCard.innerHTML };
 }
+
+test("profile detail preserves the exact applied-to company and labels an unknown source", () => {
+  const known = renderHarness({ card: {}, profile: {}, rowOverrides: { company: "  Applied Co  " } }).modal;
+  assert.match(known, /Applied to <b>Engineer<\/b> @ Applied Co/);
+  const unknown = renderHarness({ card: {}, profile: {}, rowOverrides: { company: "" } }).modal;
+  assert.match(unknown, /Applied to <b>Engineer<\/b> @ Unknown company/);
+  assert.doesNotMatch(unknown, /Source Co|Provider Co/);
+});
 
 test("tier-only and identity-only overlays keep source card and modal history primary", () => {
   const sourceCard = { exp: [{ role: "Source card role", company: "Source Co" }], edu: [] };

@@ -131,6 +131,14 @@
   .processing-job b { color:var(--ink); }
   .processing-meta { margin-top:9px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
   .processing-reason { margin-top:6px; color:var(--ink-3); font-size:11.5px; line-height:1.4; }
+  .processing-source-details { margin-top:10px; padding:9px 10px; border-radius:8px; background:var(--surface-2); border:1px solid var(--line); color:var(--ink-2); font-size:11.5px; line-height:1.45; }
+  .processing-source-details b { color:var(--ink); }
+  .processing-source-history { margin-top:5px; color:var(--ink-3); }
+  .processing-source-history span + span::before { content:" · "; }
+  .problem-row { min-height:112px; border-left:4px solid var(--warn); }
+  .problem-row .problem-code { margin-top:8px; color:var(--ink-2); font-size:12px; font-weight:700; }
+  .problem-row .problem-meta { margin-top:5px; color:var(--ink-3); font-size:11.5px; }
+  .v2-provenance { display:inline-flex; align-items:center; margin-top:5px; color:var(--ink-3); font-size:10.5px; }
   .row input[type=checkbox] { width:15px; height:15px; margin:4px 0 0; accent-color:var(--ink); cursor:pointer; flex:none; }
   .avatar { width:48px; height:48px; border-radius:50%; overflow:hidden; display:grid; place-items:center;
     background:var(--live-bg); color:#6658DA; font-weight:700; font-size:15px; flex:none; }
@@ -375,9 +383,25 @@
   #gsi { display:flex; justify-content:center; }
   .gateerr { color:var(--bad); font-size:12px; margin-top:10px; min-height:15px; }
 
+  @media (max-width:560px) {
+    /* The header remains a single responsive unit: its text may wrap, but a
+       fixed Refresh control must never make the embedded narrow viewport pan
+       sideways. */
+    header { gap:10px; }
+    .brand { min-width:0; gap:10px; }
+    .brand img { width:80px; }
+    h1 { font-size:30px; }
+    .sub { overflow-wrap:anywhere; }
+    .refresh-btn { flex:none; padding:8px 10px; }
+  }
+
   @media (max-width:820px) {
     .list { --row-h:360px; }
     .rc-main { flex-direction:column; gap:9px; }
+    .rc-id { width:100%; }
+    .rc-applied { white-space:normal; overflow-wrap:anywhere; }
+    .rc-right { max-width:100%; flex-wrap:wrap; }
+    .rc-right .actions { flex-wrap:wrap; }
     .rc-right { align-items:center; flex-direction:row; align-self:stretch; justify-content:space-between; }
     /* No room for a label gutter — stack the label above its lines rather than
        squeezing it into a column narrower than the word. */
@@ -426,12 +450,13 @@
     <div class="banner" id="cacheBanner"><div>●</div><div><strong id="cacheTitle">Applicant profiles are preparing</strong><span id="cacheText"></span></div></div>
 
     <div class="toolbar">
-      <button class="view-pill active" id="pillReview" onclick="setView('review')">Review <span class="n" id="reviewCount"></span></button>
+      <button class="view-pill active" id="pillReview" onclick="setView('review')">Ready <span class="n" id="reviewCount"></span></button>
       <button class="view-pill" id="pillRequested" onclick="setView('requested')">Interview requested <span class="n" id="requestedCount"></span></button>
       <button class="view-pill" id="pillEmailed" onclick="setView('emailed')">Already emailed <span class="n" id="emailedCount"></span></button>
       <button class="view-pill" id="pillDelivery" onclick="setView('delivery')">Delivery review <span class="n" id="deliveryCount"></span></button>
       <button class="view-pill" id="pillStream" onclick="setView('stream')">Stream <span class="n" id="streamCount"></span></button>
-      <button class="view-pill" id="pillProcessing" onclick="setView('processing')">Processing <span class="n" id="processingCount"></span></button>
+      <button class="view-pill" id="pillProcessing" onclick="setView('processing')">Preparing <span class="n" id="processingCount"></span></button>
+      <button class="view-pill" id="pillProblems" onclick="setView('problems')">Problems <span class="n" id="problemsCount"></span></button>
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span><span class="paused-flag" id="rulesPausedFlag">Paused</span></button>
       <span class="spacer"></span>
       <span id="toolbarFilters" style="display:contents">
@@ -473,6 +498,10 @@
     <div id="processingView" style="display:none">
       <div class="list" id="processingList"><div class="empty">Loading profile preparation…</div></div>
     </div>
+
+    <div id="problemsView" style="display:none">
+      <div class="list" id="problemsList"><div class="empty">Loading Problems…</div></div>
+    </div>
   </div>
 
   <div class="bulk" id="bulkBar">
@@ -502,6 +531,8 @@ const STATE = {
   profileCache: null,                 // fail-closed coverage: rows without a compact cached profile stay hidden
   profileReceiptWithheld: 0,          // how much of "preparing" THIS read withheld, vs Core's own partition
   profilePreparingRows: [],           // read-only Core stubs; never join actionable rows
+  applicantRowsV2: {},                 // optional Core V2 read projection, keyed by legacy row key
+  problems: [],                        // V2 Problems are visible here only; they do not alert or mutate work
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
@@ -590,6 +621,12 @@ function timeOfDay(v) {
    month west of UTC. */
 function calendarYearMonth(v) {
   const s = typeof v === "string" ? v.trim() : "";
+  const partial = /^(\d{4})(?:-(\d{2}))?$/.exec(s);
+  if (partial) {
+    const year = Number(partial[1]);
+    const month = partial[2] ? Number(partial[2]) : null;
+    return year >= 1000 && (month === null || (month >= 1 && month <= 12)) ? { year, month } : null;
+  }
   const calendar = ISO_CALENDAR_DATE.exec(s);
   if (calendar) {
     const year = Number(calendar[1]), month = Number(calendar[2]), day = Number(calendar[3]);
@@ -602,7 +639,7 @@ function calendarYearMonth(v) {
 }
 function monthYear(v) {
   const calendar = calendarYearMonth(v);
-  return calendar ? MONTHS[calendar.month - 1] + " " + calendar.year : "";
+  return calendar ? (calendar.month === null ? String(calendar.year) : MONTHS[calendar.month - 1] + " " + calendar.year) : "";
 }
 function relTime(v) {
   const d = parseDate(v); if (!d) return "";
@@ -613,10 +650,10 @@ function relTime(v) {
   return Math.round(hours / 24) + "d ago";
 }
 function duration(startV, endV, current) {
-  const start = calendarYearMonth(startV); if (!start) return "";
+  const start = calendarYearMonth(startV); if (!start?.month) return "";
   const now = current ? new Date() : null;
   const end = current ? { year: now.getFullYear(), month: now.getMonth() + 1 } : calendarYearMonth(endV);
-  if (!end) return "";
+  if (!end?.month) return "";
   let months = (end.year - start.year) * 12 + (end.month - start.month);
   if (months < 1) months = 1;
   const y = Math.floor(months / 12), m = months % 12;
@@ -649,6 +686,24 @@ function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function profilePreparingRows() { return Array.isArray(STATE.profilePreparingRows) ? STATE.profilePreparingRows : []; }
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
+function applicantRowV2(row) { return STATE.applicantRowsV2?.[row?.key] || null; }
+function applicantFact(row, name) {
+  const fact = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.profile?.facts?.[name];
+  return fact && (typeof fact.value === "string" || typeof fact.value === "number") ? fact : null;
+}
+function v2ProvenanceLabel(source) {
+  return source === "paraform_linkedin" ? "Cached LinkedIn profile" : source === "resume" ? "Resume fallback" : "";
+}
+function v2CardProvenanceHtml(row) {
+  const fields = [["Headline", applicantFact(row, "title")], ["Location", applicantFact(row, "location")]]
+    .filter(([, value]) => value?.source)
+    .map(([label, value]) => label + ": " + v2ProvenanceLabel(value.source)
+      + (value.freshness && value.freshness !== "current" ? " (" + value.freshness + ")" : ""));
+  return fields.length ? '<div class="v2-provenance">' + esc(fields.join(" · ")) + "</div>" : "";
+}
+function appliedRole(row) {
+  return (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.application?.appliedTo?.title || row?.roleTitle || "Unknown role";
+}
 function richGenerationKey(generation = STATE.generation) {
   const id = String(generation?.generationId || "");
   const digest = String(generation?.digest || "");
@@ -752,6 +807,10 @@ const HARD_HOLD_CODES = new Set(["identity_conflict", "cross_person_identity_con
 function normalizedHold(value) { const hold = String(value ?? "").trim().toLowerCase(); return hold || null; }
 function interviewHold(row) {
   if (!row) return "application_missing";
+  const projected = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.actionability;
+  if (projected && ["hard_hold", "stopped"].includes(projected.eligibility)) {
+    return normalizedHold(projected.reasons?.[0]) || projected.eligibility;
+  }
   if (row.withdrawn === true || row.privacyHold === true || row.doNotProcess === true
     || row.protectedPerson === true || row.identityConflict === true || row.recipientConflict === true) {
     return normalizedHold(row.holdReasonCode || row.reasonCode)
@@ -1234,7 +1293,7 @@ function renderStats() {
     if (drops.queue) parts.push(dropLine("review queue", drops.queue));
     if (drops.stream) parts.push(dropLine("stream", drops.stream));
     $("countsText").textContent = (parts.length ? parts.join(", ") + ". " : "")
-      + "Upstream data may be broken — check ~/Library/Logs/raydar-interview-index.log on the desktop. Everything below still renders the published snapshot.";
+      + "The applicant count changed unexpectedly. Check Problems for affected records; this page shows the last published snapshot.";
     $("countsBanner").classList.add("on");
   } else {
     $("countsBanner").classList.remove("on");
@@ -1338,9 +1397,9 @@ function renderStats() {
   const planStale = planH != null && planH > 3;
   if (ageH > 6) {
     chip.classList.add("red");
-    $("updatedText").textContent += " · desktop asleep?";
+    $("updatedText").textContent += " · sync delayed";
     $("staleTitle").textContent = "Snapshot is " + Math.round(ageH) + "h old";
-    $("staleText").textContent = "The desktop invite loop has not synced in a while — it may be asleep. Everything below reflects the last sync; decisions you make here still queue and send when it wakes.";
+    $("staleText").textContent = "Applicant updates are delayed. This page shows the last verified sync. Saved interview requests remain queued until the service can safely continue.";
     banner.classList.add("on");
   } else if (planStale) {
     // The snapshot is fresh and the plan is not: the publisher is alive but
@@ -1393,6 +1452,7 @@ function renderPills() {
   $("deliveryCount").textContent = STATE.snapshot ? String(deliveryRows().length) : "";
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   $("processingCount").textContent = STATE.snapshot ? String(profilePreparingRows().length) : "";
+  $("problemsCount").textContent = STATE.snapshot ? String(STATE.problems.length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
   const pendingNoLinkedin = pendingRows().filter(hasNoLinkedin).length;
@@ -1556,7 +1616,38 @@ function eduLineHtml(x, showParaformTier = false) {
 function secHtml(label, lines, extra) {
   return '<div class="rc-sec"><span class="rc-lab">' + label + '</span><div class="rc-lines">' + lines + (extra || "") + "</div></div>";
 }
+function v2HistoryHtml(history, kind, { allowRuleFacts = false, detailed = false } = {}) {
+  if (!history || !Array.isArray(history.entries)) return "";
+  const lines = history.entries.map((entry, index) => {
+    if (detailed) return kind === "experience"
+      ? experienceHtml(entry, index, allowRuleFacts, history.source === "paraform_linkedin", "v2")
+      : educationHtml(entry, index, allowRuleFacts, history.source === "paraform_linkedin", "v2");
+    const line = kind === "experience"
+      ? expLineHtml({ role: entry.roleTitle, company: entry.companyName, start: entry.start, end: entry.end, current: entry.current, logo: entry.logo })
+      : eduLineHtml({ school: entry.school, degree: entry.degree, start: entry.start, end: entry.end, logo: entry.logo });
+    const usable = kind === "experience"
+      ? entry.companyId || entry.companyName || entry.roleTitle
+      : entry.schoolId || entry.school || entry.degree;
+    const button = allowRuleFacts && usable
+      ? '<button type="button" class="rule-use" data-rule-fact-kind="' + kind + '" data-rule-fact-source="v2" data-rule-fact-index="' + index + '">' + (kind === "education" && (entry.schoolId || entry.school) ? 'Use university in rule' : 'Use in rule') + '</button>'
+      : "";
+    return line + button;
+  }).join("");
+  if (!lines) return "";
+  const label = v2ProvenanceLabel(history.source) || "Profile facts";
+  return '<div class="rc-paraform"><span class="label">' + esc(label) + '</span></div>' + (detailed
+    ? '<div class="p-section"><h3>' + (kind === "experience" ? "Experience" : "Education") + '</h3>' + lines + '</div>'
+    : secHtml(kind === "experience" ? "Experience" : "Education", lines));
+}
+function v2HistoryForRow(row, options = {}) {
+  const facts = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.profile?.facts;
+  if (!facts) return "";
+  const blocks = [v2HistoryHtml(facts.experiences, "experience", options), v2HistoryHtml(facts.education, "education", options)].filter(Boolean);
+  return blocks.join("");
+}
 function historyHtml(row) {
+  const projected = v2HistoryForRow(row);
+  if (projected) return projected;
   const cu = profileId(row);
   const card = cardFor(cu);
   if (!card) return '<div class="rc-none">Source profile history is still preparing for this applicant.</div>';
@@ -1585,6 +1676,47 @@ function historyHtml(row) {
   return out.join("");
 }
 
+function appliedCompany(row) {
+  const projected = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.application?.appliedTo?.hiringCompany;
+  const company = String(projected?.name || row?.company || "").trim();
+  return company || "Unknown company";
+}
+function invitationAgeText(seconds) {
+  if (!Number.isFinite(Number(seconds)) || Number(seconds) < 0) return "";
+  const value = Math.floor(Number(seconds));
+  if (value < 60) return value + "s";
+  if (value < 3600) return Math.floor(value / 60) + "m";
+  if (value < 86400) return Math.floor(value / 3600) + "h";
+  return Math.floor(value / 86400) + "d";
+}
+function invitationStatusHtml(row) {
+  const invitation = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.invitation;
+  if (!invitation) return "";
+  const active = ["waiting", "queued"].includes(invitation.state);
+  const review = ["held", "reconcile_required"].includes(invitation.state);
+  if (!active && !review) return invitation.state === "externally_committed"
+    ? '<div class="rc-none">Interview provider acceptance recorded.</div>' : "";
+  const label = review ? "Interview request needs review" : "Interview request waiting";
+  const reason = invitation.reason || invitation.reasonCode || "Awaiting Applicant Core";
+  const age = invitationAgeText(invitation.ageSeconds);
+  const retry = invitation.nextAttemptAt && active ? " · next attempt " + shortDate(invitation.nextAttemptAt) : "";
+  return '<div class="rc-none">' + esc(label + ": " + reason + (age ? " · " + age + " old" : "") + retry) + "</div>";
+}
+
+function interviewControl(row) {
+  const actionability = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.actionability;
+  const eligibility = actionability?.eligibility;
+  if (eligibility === "waiting" && actionability?.canCreateApproval === true && actionability?.approvalState === "required") return { label: "Interview when ready", enabled: true,
+    title: "Save the interview request. It will proceed when the required information is ready." };
+  if (eligibility === "waiting") return { label: "Interview held", enabled: false,
+    title: "Interview held: " + (actionability?.reasons?.[0] || "approval unavailable") };
+  if (eligibility === "hard_hold" || eligibility === "stopped") return { label: "Interview held", enabled: false,
+    title: "Interview held: " + (actionability.reasons?.[0] || eligibility) };
+  if (eligibility === "ready") return { label: "Interview", enabled: true, title: "Request interview" };
+  if (actionability) return { label: "Preparing", enabled: false, title: "Applicant readiness is being checked." };
+  return { label: "Interview", enabled: true, title: "Request interview" };
+}
+
 function rowCardHtml(row, mode, decision) {
   const key = row.key;
   const busy = STATE.busy.has(key);
@@ -1594,6 +1726,7 @@ function rowCardHtml(row, mode, decision) {
   const hold = interviewHold(row);
   const interviewReady = !hold;
   const sentAlready = !decision && interviewReady && alreadyEmailed(row);
+  const control = interviewControl(row);
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
@@ -1601,9 +1734,9 @@ function rowCardHtml(row, mode, decision) {
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
-          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : interviewReady ? "Request interview" : "Interview held: " + hold) + '"' +
-          (busy || !interviewReady || sentAlready ? " disabled" : "") + ">" +
-          (sentAlready ? "Already emailed" : interviewReady ? "Interview" : "Interview held") + "</button></div>");
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : control.title) + '"' +
+          (busy || !interviewReady || sentAlready || !control.enabled ? " disabled" : "") + ">" +
+          (sentAlready ? "Already emailed" : !interviewReady ? "Interview held" : control.label) + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
@@ -1643,11 +1776,13 @@ function rowCardHtml(row, mode, decision) {
       '<div class="rc-id">' +
         '<div class="who"><a class="name" href="' + esc(RaydarNav.href(key)) + '" data-open="' + esc(key) + '"><span>' + esc(row.name || "Unknown") + "</span></a>" +
           nameLinks(row) + tierPill(row.tier) +
-          '<span class="rc-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") + "</span></div>" +
-        '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(displayCard.title || card?.title || "") + "</div>" +
-        '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(displayCard.location || card?.location || "") + "</div>" +
+          '<span class="rc-applied">Applied to <b>' + esc(typeof appliedRole === "function" ? appliedRole(row) : (row.roleTitle || "Unknown role")) + "</b> @ " + esc(appliedCompany(row)) + "</span></div>" +
+        '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(applicantFact(row, "title")?.value || displayCard.title || card?.title || "") + "</div>" +
+        '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(applicantFact(row, "location")?.value || displayCard.location || card?.location || "") + "</div>" +
+        (v2CardProvenanceHtml(row)) +
         (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>'
           : sentAlready ? '<div class="rc-none">Already emailed for this role.</div>' : '') +
+        invitationStatusHtml(row) +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
       "</div>" +
       '<div class="rc-right">' + (when ? '<div class="rc-when">' + when + "</div>" : "") + right + "</div>" +
@@ -1661,10 +1796,14 @@ function rowByCu(cu) { return queueRows().find((r) => profileId(r) === cu) || st
 function patchRow(cu) {
   const card = cardFor(cu);
   const display = visibleCardProfile(card);
-  const sel = CSS.escape(cu);
-  document.querySelectorAll('[data-headline="' + sel + '"]').forEach((el) => { el.textContent = display.title || card?.title || ""; });
-  document.querySelectorAll('[data-loc="' + sel + '"]').forEach((el) => { el.textContent = display.location || card?.location || ""; });
   const row = rowByCu(cu);
+  const projectedTitle = applicantFact(row, "title")?.value;
+  const projectedLocation = applicantFact(row, "location")?.value;
+  const sel = CSS.escape(cu);
+  // A later rich-card refresh may improve legacy display cache data, but it
+  // must never replace a Core-selected V2 fact on the compact card.
+  document.querySelectorAll('[data-headline="' + sel + '"]').forEach((el) => { el.textContent = projectedTitle || display.title || card?.title || ""; });
+  document.querySelectorAll('[data-loc="' + sel + '"]').forEach((el) => { el.textContent = projectedLocation || display.location || card?.location || ""; });
   if (row) document.querySelectorAll('[data-body="' + sel + '"]').forEach((el) => { el.innerHTML = historyHtml(row); });
   applyAvatar(cu);
   // A card that just gained a headline, a location or a history block can now
@@ -1672,7 +1811,7 @@ function patchRow(cu) {
   // repainting the list here is exactly what this function exists to avoid,
   // and a visible "more" affordance is enough to keep the growth honest until
   // the next natural render.
-  for (const id of ["reviewList", "streamList", "processingList"]) {
+  for (const id of ["reviewList", "streamList", "processingList", "problemsList"]) {
     const list = $(id);
     if (list && list._virtual) markClippedRows(list);
   }
@@ -1724,19 +1863,23 @@ const VIRTUAL_OVERSCAN = 4;
    both ways. The bounds matter — a runaway measurement must never be able to
    produce a 40,000px virtual-space. */
 const isProcessingList = (el) => el?.id === "processingList";
-const virtualRowFallback = (el) => isProcessingList(el)
+// Problems are compact read-only records, like Processing stubs. Let their
+// measured pitch follow their actual content instead of inheriting Review's
+// 260/360px card geometry and leaving an artificial blank band after each.
+const isCompactReadOnlyList = (el) => isProcessingList(el) || el?.id === "problemsList";
+const virtualRowFallback = (el) => isCompactReadOnlyList(el)
   ? (window.innerWidth <= 820 ? 200 : 160)
   : (window.innerWidth <= 820 ? 360 : 260);
-const virtualRowMin = (el) => isProcessingList(el)
+const virtualRowMin = (el) => isCompactReadOnlyList(el)
   ? (window.innerWidth <= 820 ? 150 : 130)
   : (window.innerWidth <= 820 ? 200 : 150);
-const virtualRowMax = (el) => isProcessingList(el)
-  ? (window.innerWidth <= 820 ? 260 : 210)
+const virtualRowMax = (el) => isCompactReadOnlyList(el)
+  ? (window.innerWidth <= 820 ? 300 : 260)
   : (window.innerWidth <= 820 ? 460 : 340);
 const virtualRowHeight = (el) =>
   (typeof el?._virtualRowHeight === "number" ? el._virtualRowHeight : virtualRowFallback(el));
 function resetVirtualLists() {
-  for (const id of ["reviewList", "streamList", "processingList"]) {
+  for (const id of ["reviewList", "streamList", "processingList", "problemsList"]) {
     const list = $(id);
     if (!list) continue;
     list.scrollTop = 0;
@@ -1865,7 +2008,7 @@ function renderReview() {
   }
   if (!STATE.snapshot) {
     list._virtual = null;
-    list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
+    list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>Applicants will appear after the first verified sync.</div>';
     return;
   }
   const { rows: filtered, decidedMode } = reviewListRows();
@@ -1897,7 +2040,7 @@ function renderStream() {
   }
   if (!STATE.snapshot) {
     list._virtual = null;
-    list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>The desktop invite loop publishes applicants here after its next cycle.</div>';
+    list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>Applicants will appear after the first verified sync.</div>';
     return;
   }
   const rows = sortByApplicationDate(streamRows());
@@ -1943,9 +2086,23 @@ function processingDisplay(row) {
     : needsAttention ? "Source preparation needs attention." : "Preparing the source profile.";
   return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention, reason };
 }
+function processingSourceDetailsHtml(details) {
+  if (!details || details.state !== "pending_source_review" || details.provenance !== "applicant_hub"
+    || details.verification !== "unverified_source" || details.ruleEligible !== false) return "";
+  const history = details.profile && typeof details.profile === "object" ? details.profile : {};
+  const roles = (Array.isArray(history.experiences) ? history.experiences : []).slice(0, 3)
+    .map((item) => [item.roleTitle, item.companyName].filter(Boolean).join(" at ")).filter(Boolean);
+  const education = (Array.isArray(history.education) ? history.education : []).slice(0, 2)
+    .map((item) => [item.school, item.degree].filter(Boolean).join(" — ")).filter(Boolean);
+  const title = [history.title, history.location].filter(Boolean).join(" · ");
+  const lines = [title, ...roles, ...education].filter(Boolean).slice(0, 5);
+  return '<div class="processing-source-details"><b>Source details pending review</b><div>Applicant Hub source history. It is not a verified Paraform or resume profile and is not used by Rules.</div>' +
+    (lines.length ? '<div class="processing-source-history">' + lines.map((line) => '<span>' + esc(line) + '</span>').join("") + '</div>' : "") +
+    '</div>';
+}
 function processingRowHtml(row) {
   const role = row.roleTitle || "Role still resolving";
-  const company = row.company ? " @ " + esc(row.company) : "";
+  const company = " @ " + esc(appliedCompany(row));
   // `receivedAt` is the source arrival time when Core has it. Older stubs
   // carry only the Hub ingestion time or a date-only application record; use
   // each one with its real label rather than inventing a received timestamp.
@@ -1959,6 +2116,7 @@ function processingRowHtml(row) {
       '<div class="processing-job">Job: <b>' + esc(role) + "</b>" + company + "</div>" +
       (receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
       '<div class="processing-reason">' + esc(display.reason) + "</div>" +
+      processingSourceDetailsHtml(row.sourceDetails) +
     "</div></div></div>";
 }
 function renderProcessing() {
@@ -1990,7 +2148,33 @@ function renderProcessing() {
   paintList(list, rows, processingRowHtml, { requestRichCards: false });
 }
 
-function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); renderProcessing(); postCounts(); }
+function problemReason(problem) {
+  return problem.reason || String(problem.code || "problem").replace(/[_-]+/g, " ");
+}
+function problemRowHtml(problem) {
+  const linked = problem.key && (queueRows().some((row) => row.key === problem.key) || streamRows().some((row) => row.key === problem.key));
+  const next = problem.nextAction || (problem.nextAt ? "Retry after " + shortDate(problem.nextAt) : "Next action is being determined");
+  const ownership = problem.owner ? "Owner: " + problem.owner : "Owner: unassigned";
+  const shared = problem.affectedCount && problem.affectedCount > 1
+    ? "Shared incident affecting " + problem.affectedCount + " applicants" : "";
+  return '<div class="row problem-row"><div class="rc-main"><div class="rc-id">' +
+    '<div class="who"><span class="name"><span>' + esc(problem.domain || "Applicant") + " problem</span></span>" +
+    (linked ? '<a class="rc-more" href="' + esc(RaydarNav.href(problem.key)) + '" data-open="' + esc(problem.key) + '">Open applicant</a>' : "") + "</div>" +
+    '<div class="problem-code">' + esc(problemReason(problem)) + "</div>" +
+    '<div class="problem-meta">' + esc(ownership) + " · " + esc(next) + "</div>" +
+    (shared ? '<div class="problem-meta">' + esc(shared) + "</div>" : "") +
+    (problem.ageSeconds != null ? '<div class="problem-meta">Open for ' + esc(typeof invitationAgeText === "function" ? invitationAgeText(problem.ageSeconds) : String(problem.ageSeconds) + "s") + "</div>" : problem.observedAt ? '<div class="problem-meta">Observed ' + esc(relTime(parseDate(problem.observedAt))) + "</div>" : "") +
+    "</div></div></div>";
+}
+function renderProblems() {
+  const list = $("problemsList");
+  if (!STATE.loaded) return;
+  if (STATE.feedUnavailable) { list._virtual = null; list.innerHTML = '<div class="empty">Problems are unavailable until the next verified Applicant generation.</div>'; return; }
+  const rows = STATE.problems.filter((problem) => problem.state !== "resolved");
+  if (!rows.length) { list._virtual = null; list.innerHTML = '<div class="empty"><div class="big">No active problems</div>Applicant Problems stay here for review; this tab does not send alerts.</div>'; return; }
+  paintList(list, rows, problemRowHtml, { requestRichCards: false });
+}
+function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); renderProcessing(); renderProblems(); postCounts(); }
 function renderAll() {
   renderStats(); renderRoleFilter(); renderLists();
   // Rules can load before the applicant feed. Refresh its visible pending count
@@ -2015,13 +2199,15 @@ function setView(view) {
   $("pillDelivery").classList.toggle("active",view==='delivery');
   $("pillStream").classList.toggle("active", view === "stream");
   $("pillProcessing").classList.toggle("active", view === "processing");
+  $("pillProblems").classList.toggle("active", view === "problems");
   $("pillRules").classList.toggle("active", view === "rules");
   $("reviewView").style.display = ['review','requested','emailed','delivery'].includes(view) ? "" : "none";
   $("streamView").style.display = view === "stream" ? "" : "none";
   $("processingView").style.display = view === "processing" ? "" : "none";
+  $("problemsView").style.display = view === "problems" ? "" : "none";
   $("rulesView").style.display = view === "rules" ? "" : "none";
   // Processing is read-only Core work, so it carries none of the review filters.
-  $("toolbarFilters").style.display = ['rules', 'processing'].includes(view) ? "none" : "contents";
+  $("toolbarFilters").style.display = ['rules', 'processing', 'problems'].includes(view) ? "none" : "contents";
   const hash = "#" + view;
   if (location.hash !== hash) history.replaceState(null, "", hash);
   if (view === "rules" && window.RaydarRules) { window.RaydarRules.show(); return; }
@@ -2085,12 +2271,20 @@ async function decide(key, action, row, silent = false, { retryOfRequestId = nul
   renderLists();
   if (STATE.modal && STATE.modal.key === key) renderModal();
   try {
+    const v2 = typeof applicantRowV2 === "function" ? applicantRowV2(row) : null;
     const response = await fetch("/api/applicants/decision", {
       method: "POST", credentials: "same-origin",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ key, action, requestId, generationId: STATE.generation?.generationId,
-        generationDigest: STATE.generation?.digest, inputRevision:row?.inputRevision,
-        readinessRevision:row?.readinessRevision,decisionRevision:row?.decisionRevision,
+        generationDigest: STATE.generation?.digest,
+        inputRevision:v2?.inputRevision || row?.inputRevision,
+        readinessRevision:v2?.actionability?.readinessRevision || row?.readinessRevision,
+        decisionRevision:v2?.decisionRevision ?? row?.decisionRevision,
+        ...(v2 ? {
+          applicationId: v2.application.applicationId,
+          sourceObservationId: v2.application.sourceObservationId,
+          rowRevision: v2.application.rowRevision,
+        } : {}),
         name: row?.name, roleTitle: row?.roleTitle,
         ...(retryOfRequestId ? { retryOfRequestId } : {}) }),
     });
@@ -2244,11 +2438,14 @@ function lockOuterScroll(on) {
     }
   } catch { /* shell not reachable — the in-frame lock above still applies */ }
 }
-function openProfile(key) {
+function openProfile(key, { restoreFocus = false } = {}) {
   const row = queueRows().find((r) => r.key === key) || streamRows().find((r) => r.key === key);
   if (!row) return;
   const id = profileId(row);
-  STATE.modal = { cu: id, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream" };
+  // The virtualizer may replace the link node while the profile is open. Keep
+  // only its opaque application key and find the current node when closing;
+  // retaining an HTMLElement here would strand keyboard focus on <body>.
+  STATE.modal = { cu: id, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream", returnFocusKey: restoreFocus ? key : null };
   ensureRoom();
   placeModal();
   $("profileModal").classList.add("open");
@@ -2259,12 +2456,29 @@ function openProfile(key) {
   fetchProfile(id).then(() => { if (STATE.modal && STATE.modal.cu === id) { renderModal(); applyAvatar(id); } })
     .catch(() => { if (STATE.modal && STATE.modal.cu === id) renderModal(); });
 }
+function restoreProfileFocus(key) {
+  // A URL-restored profile has no original control. Its active view pill is a
+  // predictable fallback. For an in-page link, prefer the current visible
+  // link for this exact application key, never a saved node from a stale
+  // virtual-list paint.
+  requestAnimationFrame(() => {
+    const links = [...document.querySelectorAll("[data-open]")]
+      .filter((link) => String(link.dataset.open || "") === String(key || ""));
+    const visible = links.find((link) => link.getClientRects().length > 0);
+    const pills = { review: "pillReview", requested: "pillRequested", emailed: "pillEmailed", delivery: "pillDelivery", stream: "pillStream", processing: "pillProcessing", problems: "pillProblems", rules: "pillRules" };
+    const target = visible || links[0] || $(pills[STATE.view] || "pillReview");
+    if (!target || typeof target.focus !== "function") return;
+    // Restoring focus must not reinterpret or move a virtual-list scrollTop.
+    try { target.focus({ preventScroll: true }); } catch { target.focus(); }
+  });
+}
 function closeProfile() {
   // Browser Back can close the profile while its fact chooser is open. Close
   // the child dialog first so it cannot be orphaned over the Applicants page.
   window.RaydarRuleFacts?.close?.();
   $("profileModal").classList.remove("open");
   lockOuterScroll(false);
+  const returnFocusKey = STATE.modal?.returnFocusKey || null;
   STATE.modal = null;
   // Put the reader back where they were before the pane needed room.
   if (OVERLAY.restoreScroll != null) {
@@ -2272,6 +2486,7 @@ function closeProfile() {
     try { pw?.scrollTo({ top: OVERLAY.restoreScroll, behavior: "auto" }); } catch { /* nothing to restore to */ }
     OVERLAY.restoreScroll = null;
   }
+  restoreProfileFocus(returnFocusKey);
 }
 // Every way a person dismisses the profile — the ✕, the backdrop, Escape —
 // unwinds the history entry it pushed, so back never fires into a closed modal.
@@ -2300,8 +2515,8 @@ function chipRowHtml(item, isParaformProfile = false) {
   if (industry) chips.push('<span class="tag industry">' + esc(industry) + "</span>");
   return chips.length ? '<div class="xp-chips">' + chips.join("") + "</div>" : "";
 }
-function experienceHtml(xp, index, allowRuleFacts, isParaformProfile = false) {
-  const factSource = isParaformProfile ? "paraform" : "source";
+function experienceHtml(xp, index, allowRuleFacts, isParaformProfile = false, factSourceOverride = null) {
+  const factSource = factSourceOverride || (isParaformProfile ? "paraform" : "source");
   const descriptionId = "xpDesc-" + factSource + "-" + index;
   const dates = (xp.start ? monthYear(xp.start) : "") + " – " + (xp.current ? "Present" : xp.end ? monthYear(xp.end) : "") ;
   const span = duration(xp.start, xp.end, xp.current);
@@ -2315,8 +2530,8 @@ function experienceHtml(xp, index, allowRuleFacts, isParaformProfile = false) {
       (long ? '<button class="xp-more" data-expand="' + descriptionId + '">Show more</button>' : "") : "") +
     chipRowHtml(xp, isParaformProfile) + "</div>";
 }
-function educationHtml(ed, index, allowRuleFacts, isParaformProfile = false) {
-  const factSource = isParaformProfile ? "paraform" : "source";
+function educationHtml(ed, index, allowRuleFacts, isParaformProfile = false, factSourceOverride = null) {
+  const factSource = factSourceOverride || (isParaformProfile ? "paraform" : "source");
   const dates = [ed.start ? monthYear(ed.start) : "", ed.end ? monthYear(ed.end) : ""].filter(Boolean).join(" – ");
   return '<div class="xp">' + entityLogoHtml(ed, "school", "xp-logo") +
     '<div class="xp-top"><span class="xp-role">' + esc(ed.school || "School") + '</span><span class="xp-co">' + esc(ed.degree || "") + "</span>" +
@@ -2353,37 +2568,47 @@ function renderModal() {
   const profile = STATE.profiles[modal.cu];
   const loading = !(modal.cu in STATE.profiles);
   const p = profile || {};
+  const projected = p.profileV2 || (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null);
+  const projectedFacts = projected?.profile?.facts || {};
   const provider = richProfile(p.paraformProfile);
   const providerHistory = hasProviderHistory(provider);
   const providerContent = hasProviderContent(provider);
   const locationSource = presentText(provider?.location) ? "paraform" : "source";
   const headlineSource = presentText(provider?.title) ? "paraform" : "source";
-  const displayedLocation = locationSource === "paraform" ? provider.location : p.location;
-  const displayedHeadline = headlineSource === "paraform" ? provider.title : p.title;
-  const canUseFact = (source) => modal.source === "queue" && (source === "source" || provider?.ruleFactsEligible === true);
+  const displayedLocation = projectedFacts.location?.value || (locationSource === "paraform" ? provider.location : p.location);
+  const displayedHeadline = projectedFacts.title?.value || (headlineSource === "paraform" ? provider.title : p.title);
+  // Rules may seed only Core's exact V2 selection. If it exists but is stale,
+  // source-cache details remain visible and deliberately nonactionable.
+  const hasV2Projection = Boolean(projected);
+  const v2RuleFactsReady = modal.source === "queue" && Boolean(projected?.factSetDigest)
+    && projected?.factsCurrent === true && projected?.inputRevision === row?.inputRevision
+    && Number(projected?.decisionRevision) === Number(row?.decisionRevision);
+  const canUseFact = (source) => source === "v2" ? v2RuleFactsReady
+    : !hasV2Projection && modal.source === "queue"
+      && (source === "source" || provider?.ruleFactsEligible === true);
   const linkedin = preferredLinkedinProfileUrl(p.linkedin, row.linkedin);
   const decision = modal.source === "queue" ? effectiveDecision(modal.key) : null;
   const busy = STATE.busy.has(modal.key);
   const parts = [];
   parts.push('<div class="p-head">' + avatarHtml(row) +
-    '<div class="p-id"><h2 id="profileName">' + esc(p.name || row.name || "Unknown") + "</h2>" +
+    '<div class="p-id"><h2 id="profileName">' + esc(projectedFacts.name?.value || p.name || row.name || "Unknown") + "</h2>" +
     (displayedHeadline ? '<div class="headline">' + esc(displayedHeadline) +
-      (canUseFact(headlineSource) ? '<button type="button" class="rule-use" data-rule-fact-kind="headline" data-rule-fact-source="' + headlineSource + '">Use in rule</button>' : '') + "</div>" : "") +
+      (canUseFact(hasV2Projection ? "v2" : headlineSource) ? '<button type="button" class="rule-use" data-rule-fact-kind="headline" data-rule-fact-source="' + (hasV2Projection ? "v2" : headlineSource) + '">Use in rule</button>' : '') + "</div>" : "") +
     '<div class="meta">' +
     (displayedLocation ? "<span>" + esc(displayedLocation) +
-      (canUseFact(locationSource) ? '<button type="button" class="rule-use" data-rule-fact-kind="location" data-rule-fact-source="' + locationSource + '">Use in rule</button>' : '') + "</span>" : "") +
+      (canUseFact(hasV2Projection ? "v2" : locationSource) ? '<button type="button" class="rule-use" data-rule-fact-kind="location" data-rule-fact-source="' + (hasV2Projection ? "v2" : locationSource) + '">Use in rule</button>' : '') + "</span>" : "") +
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    (providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(projectedFacts.title.freshness || "unknown freshness") + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
-  parts.push('<div class="p-applied">Applied to <b>' + esc(row.roleTitle || "Unknown role") + "</b> @ " + esc(row.company || "—") +
+  parts.push('<div class="p-applied">Applied to <b>' + esc(typeof appliedRole === "function" ? appliedRole(row) : (row.roleTitle || "Unknown role")) + "</b> @ " + esc(appliedCompany(row)) +
     (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") +
-    (modal.source === "queue" && row.roleId ? '<button type="button" class="rule-use" data-rule-fact-kind="application" data-rule-fact-index="0">Use in rule</button>' : "") + "</div>");
+    (canUseFact(hasV2Projection ? "v2" : "source") && (hasV2Projection ? projected?.application?.appliedTo?.roleId : row.roleId) ? '<button type="button" class="rule-use" data-rule-fact-kind="application" data-rule-fact-source="' + (hasV2Projection ? "v2" : "source") + '" data-rule-fact-index="0">Use in rule</button>' : "") + "</div>");
   if (p.degraded === "paraform_auth") {
-    parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform session expired on the desktop.</strong> ' +
-      (providerContent ? "Showing cached LinkedIn data only — refresh the cookie to pull fresh profiles." : "Showing source profile details — refresh the cookie to pull fresh profiles.") + "</div></div>");
+    parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform needs to reconnect.</strong> ' +
+      (providerContent ? "Showing cached LinkedIn data. Reconnect Paraform to refresh profiles." : "Showing application details. Reconnect Paraform to refresh profiles.") + "</div></div>");
   }
   if (loading) {
     parts.push('<div class="p-loading">Pulling the LinkedIn profile…</div>');
@@ -2391,8 +2616,10 @@ function renderModal() {
     parts.push('<div class="p-loading">Profile unavailable right now — LinkedIn and resume links above still work.</div>');
   } else {
     parts.push(profileFactsHtml(provider));
+    const projectedHistory = v2HistoryForRow(row, { allowRuleFacts: canUseFact("v2"), detailed: true });
+    if (projectedHistory) parts.push(projectedHistory);
     const primaryProfile = providerHistory ? provider : p;
-    const primaryHistory = historySectionsHtml(primaryProfile, { allowRuleFacts: canUseFact(providerHistory ? "paraform" : "source"), isParaformProfile: providerHistory });
+    const primaryHistory = projectedHistory ? "" : historySectionsHtml(primaryProfile, { allowRuleFacts: canUseFact(providerHistory ? "paraform" : "source"), isParaformProfile: providerHistory });
     if (primaryHistory) {
       parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">Application profile <span>source record</span></div>' + primaryHistory + "</div></div>");
     }
@@ -2402,7 +2629,7 @@ function renderModal() {
         parts.push('<details class="p-source"><summary>Application profile <span>source record</span></summary><div class="p-source-body">' + applicationHistory + "</div></details>");
       }
     }
-    if (!primaryHistory && !(providerHistory && ((p.experiences || []).length || (p.education || []).length)) && p.degraded !== "paraform_auth") {
+    if (!projectedHistory && !primaryHistory && !(providerHistory && ((p.experiences || []).length || (p.education || []).length)) && p.degraded !== "paraform_auth") {
       const historyState = String(p.historyState || "").trim().toLowerCase();
       parts.push('<div class="p-loading">' + (historyState === "verified_empty"
         ? "The source reported no work or education history."
@@ -2414,15 +2641,17 @@ function renderModal() {
     // Same gate as the row card, for the same reason — the modal is the other
     // way a person reaches this button.
     const sentAlready = !decision && !hold && alreadyEmailed(row);
+    const control = interviewControl(row);
     parts.push('<div class="p-actions">' +
-      '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto">Create rule from profile</button>' +
+      '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto"' +
+        (hasV2Projection && !v2RuleFactsReady ? ' disabled title="This profile fact version changed. Refresh Applicants before creating a rule."' : "") + '>Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? retryInterviewButtonHtml(row, decision, busy) :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
-          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : "Queue interview request") + '"' +
-          (busy || hold || sentAlready ? " disabled" : "") + ">" +
-          (sentAlready ? "Already emailed" : hold ? "Interview held" : "Interview") + "</button>") +
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : control.title) + '"' +
+          (busy || hold || sentAlready || !control.enabled ? " disabled" : "") + ">" +
+          (sentAlready ? "Already emailed" : hold ? "Interview held" : control.label) + "</button>") +
       "</div>");
   }
   $("profileCard").innerHTML = parts.join("");
@@ -2489,7 +2718,7 @@ document.addEventListener("click", async (event) => {
     // ⌘/ctrl/shift/middle click: let the browser open the profile elsewhere
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button) return;
     event.preventDefault();
-    openProfile(open.dataset.open);
+    openProfile(open.dataset.open, { restoreFocus: true });
     return;
   }
 });
@@ -2580,12 +2809,12 @@ function endRefreshWatch(ok) {
   REFRESH.running = false;
   REFRESH.timer = null;
   setRefreshBusy(null);
-  if (ok) { toast("Refreshed — the desktop republished just now."); return; }
+  if (ok) { toast("Refreshed — applicant data was published just now."); return; }
   const at = parseDate(STATE.snapshot?.generatedAt);
   toast(at
-    ? "The desktop didn’t answer in " + Math.round(REFRESH_TIMEOUT_MS / 1000)
-      + "s — it may be asleep. Still showing the snapshot from " + relTime(at) + "."
-    : "The desktop didn’t answer — no snapshot has been published yet.", true);
+    ? "The applicant service did not respond in " + Math.round(REFRESH_TIMEOUT_MS / 1000)
+      + "s. Still showing the snapshot from " + relTime(at) + "."
+    : "The applicant service did not respond. No snapshot has been published yet.", true);
 }
 
 /* ---- feed ---- */
@@ -2607,6 +2836,8 @@ function markFeedUnavailable(error) {
   STATE.profileCache = null;
   STATE.profileReceiptWithheld = 0;
   STATE.profilePreparingRows = [];
+  STATE.applicantRowsV2 = {};
+  STATE.problems = [];
   STATE.generation = null;
   resetRichCards();
   STATE.profiles = {};
@@ -2637,6 +2868,8 @@ async function loadFeed(manual = false) {
     STATE.profileCache = body.profileCache || null;
     STATE.profileReceiptWithheld = Number(body.profileReceiptWithheld) || 0;
     STATE.profilePreparingRows = Array.isArray(body.profilePreparingRows) ? body.profilePreparingRows : [];
+    STATE.applicantRowsV2 = body.applicantRowsV2 && typeof body.applicantRowsV2 === "object" ? body.applicantRowsV2 : {};
+    STATE.problems = Array.isArray(body.problems) ? body.problems : [];
     STATE.generation = body.generation || null;
     syncRichGeneration();
     // Full profiles are deliberately scoped to the feed generation too. Keep
@@ -2688,6 +2921,7 @@ function startApp() {
       renderVirtual($("reviewList"));
       renderVirtual($("streamList"));
       renderVirtual($("processingList"));
+      renderVirtual($("problemsList"));
     });
   }
 }
@@ -2697,10 +2931,11 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && AU
    be bookmarked and sent to the team as a plain link, not just reached by
    clicking through Review. */
 const DEEP_LINK_VIEWS = ["review", "requested", "emailed", "delivery", "stream", "processing", "rules"];
+const APPLICANTS_V2_DEEP_LINK_VIEWS = [...DEEP_LINK_VIEWS, "problems"];
 
 async function init() {
   const landed = location.hash.replace("#", "");
-  if (DEEP_LINK_VIEWS.includes(landed) && landed !== "review") setView(landed);
+  if (APPLICANTS_V2_DEEP_LINK_VIEWS.includes(landed) && landed !== "review") setView(landed);
   let config = {};
   try { config = await fetch("/api/seq/config", { cache: "no-store" }).then((r) => r.json()); } catch {}
   AUTH.required = !!config.authRequired;

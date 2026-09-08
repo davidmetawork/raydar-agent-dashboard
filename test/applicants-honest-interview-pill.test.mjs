@@ -225,14 +225,15 @@ test("a row with published send evidence and no decision cannot be sent again fr
   // `interviewReady` keeps its exact old meaning (hard hold only); the send
   // evidence is a separate, additional gate.
   assert.match(applicants, /const hold = interviewHold\(row\);\s*\n\s*const interviewReady = !hold;\s*\n\s*const sentAlready = !decision && interviewReady && alreadyEmailed\(row\);/);
-  assert.match(applicants, /\(busy \|\| !interviewReady \|\| sentAlready \? " disabled" : ""\)/);
+  assert.match(applicants, /const control = interviewControl\(row\);/);
+  assert.match(applicants, /\(busy \|\| !interviewReady \|\| sentAlready \|\| !control\.enabled \? " disabled" : ""\)/);
   // and the profile modal, the other way to that button
   assert.match(applicants, /const sentAlready = !decision && !hold && alreadyEmailed\(row\);/);
-  assert.match(applicants, /\(busy \|\| hold \|\| sentAlready \? " disabled" : ""\)/);
+  assert.match(applicants, /\(busy \|\| hold \|\| sentAlready \|\| !control\.enabled \? " disabled" : ""\)/);
 });
 
 test("the disabled button says why, on its face and on hover", () => {
   assert.match(applicants, /const ALREADY_EMAILED_ACTION_TITLE =\s*\n\s*"Already emailed for this role — /);
-  assert.match(applicants, /\(sentAlready \? "Already emailed" : interviewReady \? "Interview" : "Interview held"\)/);
+  assert.match(applicants, /\(sentAlready \? "Already emailed" : !interviewReady \? "Interview held" : control\.label\)/);
   assert.match(applicants, /sentAlready \? '<div class="rc-none">Already emailed for this role\.<\/div>' : ''/);
 });

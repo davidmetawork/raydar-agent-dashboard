@@ -764,6 +764,21 @@ export function createSyncHandler({
             } : {}),
           });
         }
+        if (String(req.query?.ruleRuns || "") === "1") {
+          const [commands, commandAcks] = await Promise.all([
+            readHash(K.ruleRunCommands), readHash(K.ruleRunAcks),
+          ]);
+          if (!commands || typeof commands !== "object" || Array.isArray(commands)
+            || !commandAcks || typeof commandAcks !== "object" || Array.isArray(commandAcks)) {
+            return res.status(503).json({ ok: false, error: "rule_run_commands_unavailable" });
+          }
+          const pending = Object.values(commands)
+            .filter((command) => command && typeof command === "object"
+              && commandAcks[command.runId]?.commandDigest !== command.commandDigest)
+            .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")))
+            .slice(0, 32);
+          return res.status(200).json({ ok: true, ruleRunCommands: pending });
+        }
         const [decisions, acks] = await Promise.all([
           readHash(K.decisions),
           readHash(K.acks),
@@ -866,6 +881,35 @@ export function createSyncHandler({
         const decoded = decodeTransportBody(body);
         if (!decoded.ok) return res.status(400).json({ ok: false, error: decoded.error });
         body = decoded.body;
+      }
+
+      // Core acknowledges a sealed manual Rules manifest on the same
+      // authenticated channel used for decisions. This branch is isolated so
+      // an acknowledgement cannot ride with a publication or profile write.
+      if (own(body, "ruleRunAcks")) {
+        if (Object.keys(body).length !== 1 || !body.ruleRunAcks
+          || typeof body.ruleRunAcks !== "object" || Array.isArray(body.ruleRunAcks)
+          || Object.keys(body.ruleRunAcks).length > 32) {
+          return res.status(400).json({ ok: false, error: "invalid_rule_run_acks" });
+        }
+        const commands = await readHash(K.ruleRunCommands);
+        const accepted = {};
+        for (const [runId, ack] of Object.entries(body.ruleRunAcks)) {
+          const command = commands?.[runId];
+          if (!/^[0-9a-f-]{36}$/iu.test(runId) || ack?.status !== "sealed"
+            || ack.runId !== runId || ack.commandDigest !== command?.commandDigest
+            || ack.manifestDigest !== command?.manifestDigest
+            || ack.previewDigest !== command?.manifest?.previewDigest) {
+            return res.status(409).json({ ok: false, error: "rule_run_ack_mismatch", runId });
+          }
+          accepted[runId] = {
+            status: "sealed", runId, commandDigest: ack.commandDigest,
+            manifestDigest: ack.manifestDigest, previewDigest: ack.previewDigest,
+            acknowledgedAt: now(),
+          };
+        }
+        if (Object.keys(accepted).length) await writeHash(K.ruleRunAcks, accepted);
+        return res.status(200).json({ ok: true, acks: accepted });
       }
 
       // The existing publisher may derive compact facts from retained caches.
