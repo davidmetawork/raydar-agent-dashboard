@@ -98,6 +98,42 @@ export function outboundParent(messages, reply, sender) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+/**
+ * Why a message in a listed thread did not become a source event.  Every skip is
+ * counted: a reply that leaves no trace anywhere is how 184 Match Watch replies stayed
+ * invisible for six days (analysis note gmail-search-probe.md, 2026-09-08).
+ */
+export const ROLE_INTEREST_DEFERRAL_REASONS = Object.freeze([
+  "outside_window",
+  "excluded_label",
+  "machine",
+  "sender_excluded",
+  "no_reference_headers",
+  "prep_admin_parent",
+  "family_unknown",
+]);
+
+export function emptyRoleInterestAccounting() {
+  const counts = { admitted: 0 };
+  for (const reason of ROLE_INTEREST_DEFERRAL_REASONS) counts[reason] = 0;
+  return counts;
+}
+
+export function mergeRoleInterestAccounting(...parts) {
+  const total = emptyRoleInterestAccounting();
+  for (const part of parts) {
+    if (!part || typeof part !== "object") continue;
+    for (const key of Object.keys(total)) total[key] += Number(part[key]) || 0;
+  }
+  return total;
+}
+
+/** Attach counts without making them part of the array's own enumerable shape. */
+function withAccounting(list, accounting) {
+  Object.defineProperty(list, "accounting", { value: Object.freeze(accounting) });
+  return list;
+}
+
 /** Pure adapter: exact Gmail evidence in, provider-neutral V2 events out. */
 export function roleInterestReplyEvents(thread, { after, before, env = process.env } = {}) {
   if (!thread?.id || !Array.isArray(thread.messages)) throw fail("gmail_thread_shape_invalid");
@@ -106,14 +142,19 @@ export function roleInterestReplyEvents(thread, { after, before, env = process.e
   if (secret.length < 32 || !version) throw fail("gmail_email_hmac_not_configured");
   const messages = [...thread.messages].sort((a, b) => timestamp(a) - timestamp(b) || String(a.id).localeCompare(String(b.id)));
   const events = [];
+  // The window, mailbox-label, machine-message, sender-identity and threading-header
+  // guards stay ahead of every admission branch; only their outcome is now counted.
+  const accounting = emptyRoleInterestAccounting();
   for (const reply of messages) {
     const at = timestamp(reply);
-    if (!Number.isFinite(at) || at < after || at >= before || reply.labelIds?.some((label) => ["SENT", "DRAFT", "SPAM", "TRASH"].includes(label))) continue;
-    if (machineMessage(reply)) continue;
+    if (!Number.isFinite(at) || at < after || at >= before) { accounting.outside_window += 1; continue; }
+    if (reply.labelIds?.some((label) => ["SENT", "DRAFT", "SPAM", "TRASH"].includes(label))) { accounting.excluded_label += 1; continue; }
+    if (machineMessage(reply)) { accounting.machine += 1; continue; }
     const sender = address(header(reply, "From"));
-    if (!sender || sender === GMAIL_MAILBOX || sender.endsWith("@raydar.xyz")) continue;
+    if (!sender || sender === GMAIL_MAILBOX || sender.endsWith("@raydar.xyz")) { accounting.sender_excluded += 1; continue; }
     const referenceIds = [...ids(header(reply, "In-Reply-To")), ...ids(header(reply, "References"))];
-    if (!referenceIds.length) continue; // A matching subject by itself is not a candidate reply.
+    // A matching subject by itself is not a candidate reply.
+    if (!referenceIds.length) { accounting.no_reference_headers += 1; continue; }
     const sent = outboundParent(messages, reply, sender);
     const candidateText = authoredReply(reply);
     const sentText = sent ? gmailBody(sent).text : "";
@@ -125,7 +166,12 @@ export function roleInterestReplyEvents(thread, { after, before, env = process.e
       : replySubjectFamily(header(reply, "Subject"));
     // A known prep/admin parent is not fresh role outreach. When the exact parent is
     // absent, a supported subject may still enter Needs Review with zero offered roles.
-    if (!family) continue;
+    if (!family) {
+      // A known parent with no family is prep/admin copy; no parent and no supported
+      // subject is a producer or subject gap, which is the counted one to watch.
+      accounting[sent ? "prep_admin_parent" : "family_unknown"] += 1;
+      continue;
+    }
     const key = `gmail:${GMAIL_MAILBOX_ID}:${reply.id}`;
     events.push({
       schema_version: EMAIL_SCHEMA, event_id: `gmail_${hash(key).slice(0, 32)}`,
@@ -139,8 +185,9 @@ export function roleInterestReplyEvents(thread, { after, before, env = process.e
       machine_message: false, raw_record_ref: `gmail:${GMAIL_MAILBOX_ID}:${reply.id}`,
       content_digest: hash(JSON.stringify({ candidateText, sentText, offered })), idempotency_key: key,
     });
+    accounting.admitted += 1;
   }
-  return events;
+  return withAccounting(events, accounting);
 }
 
 export const interviewReplyEvents = roleInterestReplyEvents;
@@ -153,7 +200,11 @@ export function interviewSearch(after, before) {
 
 export function roleInterestSearch(after, before) {
   if (!Number.isFinite(after) || !Number.isFinite(before) || after >= before) throw fail("gmail_window_invalid");
-  return `{subject:"Interview Request" subject:"New Match" subject:"Raydar - 1st Round Interview" "See matches here"} -from:${GMAIL_MAILBOX} -in:sent -in:drafts after:${Math.floor(after / 1000) - 1} before:${Math.ceil(before / 1000)}`;
+  // Phrase list only: the window, the read budget and the activation boundary are
+  // unchanged.  "New Role Match(es)" is the Match Watch subject, which Gmail does not
+  // return for the phrase "New Match" (probe 2026-09-08: 0 vs 184 messages), and
+  // "See match here" is the one-match variant of the curated-list follow-up.
+  return `{subject:"Interview Request" subject:"New Match" subject:"New Role Match" subject:"New Role Matches" subject:"Raydar - 1st Round Interview" "See matches here" "See match here"} -from:${GMAIL_MAILBOX} -in:sent -in:drafts after:${Math.floor(after / 1000) - 1} before:${Math.ceil(before / 1000)}`;
 }
 
 /** Read all pages before admitting any event, then admit oldest first. */
@@ -178,14 +229,18 @@ export async function collectRoleInterestWindow({ after, before, client, env, as
     if (page === 3) throw fail("gmail_window_too_large");
   }
   const events = new Map();
+  let accounting = emptyRoleInterestAccounting();
   for (const threadId of threads) {
     await assertCurrent();
     const thread = await client.thread(threadId);
     if (thread?.id !== threadId) throw fail("gmail_thread_identity_mismatch");
-    for (const event of roleInterestReplyEvents(thread, { after, before, env })) events.set(event.idempotency_key, event);
+    const found = roleInterestReplyEvents(thread, { after, before, env });
+    accounting = mergeRoleInterestAccounting(accounting, found.accounting);
+    for (const event of found) events.set(event.idempotency_key, event);
   }
   const ordered = [...events.values()].sort((a, b) => a.received_at.localeCompare(b.received_at) || a.provider_message_id.localeCompare(b.provider_message_id));
   Object.defineProperty(ordered, "threads_read", { value: threads.size });
+  withAccounting(ordered, accounting);
   return ordered;
 }
 

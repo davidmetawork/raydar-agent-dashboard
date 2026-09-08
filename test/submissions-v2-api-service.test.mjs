@@ -683,3 +683,72 @@ test("API scheduler calls never invoke worker-only resume recovery", async () =>
   await service.tick();
   assert.equal(recoveries, 0);
 });
+
+test("the omission pre-pass is wired into worker processing and stays inert while its flag is off", async (t) => {
+  const eventId = "event-omission";
+  const envelope = encryptJson(
+    { candidate_authored_text: "Please put me forward for Acme.", sent_message_text: "Three matches for you." },
+    { env, context: `event:${eventId}` },
+  );
+  const source = {
+    id: "signal-omission",
+    event_id: eventId,
+    encrypted_body_object_key: "private/omission",
+    envelope: {
+      candidate_resolution: { candidate_user_id: "candidate-1" },
+      schema_version: "submissions.email_reply.v1",
+      adapter_version: "gmail-role-interest-v2",
+      provider: "gmail",
+      provider_message_id: "message-omission",
+      outbound_message_id: "outbound-omission",
+      source_evidence: null,
+    },
+    offered_roles: [
+      { role_id: "role-1", company: "Acme", title: "Engineer" },
+      { role_id: "role-2", company: "Orbit", title: "Manager" },
+      { role_id: "role-3", company: "Nova", title: "Account Executive" },
+    ],
+  };
+  const build = (overrides) => {
+    let applied;
+    const service = createService({
+      repository: {
+        runtimeControls,
+        sourceForClassification: async () => source,
+        applyClassifiedSignal: async (input) => { applied = input; return { created_count: input.decisions.length + input.omissions.length }; },
+        routeClassificationFailure: async () => assert.fail("should not fail classification"),
+      },
+      env: { ...env, ...overrides },
+      blob: { readPrivateObject: async () => ({ bytes: Buffer.from(JSON.stringify(envelope)) }) },
+      classifier: async () => ({
+        decisions: [{ role_id: "role-1", label: "interested", quote: "Please put me forward for Acme.", review_reason: null, negative_reason: null }],
+        attempts: [{ model: "gpt-5.4-nano-2026-03-17", outcome: "accepted" }],
+        duration_ms: 12,
+      }),
+    });
+    return { service, applied: () => applied };
+  };
+
+  await t.test("flag off keeps the classifier's decisions as the only decisions", async () => {
+    const { service, applied } = build({});
+    const result = await service.processSignal("signal-omission");
+    assert.deepEqual(applied().omissions, []);
+    assert.equal(applied().decisions.length, 1);
+    assert.equal(result.omission_prepass, undefined);
+  });
+
+  await t.test("flag on closes the unnamed offered roles and reports what it did", async () => {
+    const { service, applied } = build({ SUBMISSIONS_V2_OMISSION_PREPASS: "apply" });
+    const result = await service.processSignal("signal-omission");
+    assert.deepEqual(applied().omissions.map((decision) => decision.role_id), ["role-2", "role-3"]);
+    assert.ok(applied().omissions.every((decision) => decision.quote === null && decision.label === "not_interested"));
+    assert.deepEqual(result.omission_prepass, { applied_role_ids: ["role-2", "role-3"], skipped: null });
+  });
+
+  await t.test("an operator-scoped role selection is never an exact producer offer", async () => {
+    const { service, applied } = build({ SUBMISSIONS_V2_OMISSION_PREPASS: "apply" });
+    const result = await service.processSignal("signal-omission", { roleIds: ["role-1"] });
+    assert.deepEqual(applied().omissions, []);
+    assert.deepEqual(result.omission_prepass, { applied_role_ids: [], skipped: "operator_scoped_roles" });
+  });
+});

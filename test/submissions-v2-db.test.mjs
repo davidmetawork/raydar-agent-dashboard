@@ -25,6 +25,7 @@ import { createRepository, repositoryInternals } from "../api/submissions-v2/_li
 import { rowDto } from "../api/submissions-v2/_lib/presentation.mjs";
 import { createService } from "../api/submissions-v2/_lib/service.mjs";
 import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pipeline-store.mjs";
+import { omissionDecisions } from "../api/submissions-v2/_lib/omission-prepass.mjs";
 
 const databaseUrl = process.env.SUBMISSIONS_V2_TEST_DATABASE_URL
   || "postgresql://localhost:5432/raydar_submissions_v2_test";
@@ -128,6 +129,7 @@ test("migrations are digest-checked and idempotent", async () => {
     "014_api_review_binding_source_offers.sql",
     "015_proof_during_resume_preparation.sql",
     "016_review_submission_proof.sql",
+    "017_omission_prepass_evidence.sql",
   ]);
   const tables = await sql`
     select count(*)::integer as count
@@ -3816,6 +3818,225 @@ test("explicit role catalog refuses partial uniqueness beyond its complete-read 
     assert.deepEqual(catalog, { status: "unavailable", complete: false, roles: [], digest: null });
     throw rollback;
   }), (error) => error === rollback);
+});
+
+// One control write for the whole omission group: every extra epoch bump adds
+// contention on the single runtime-controls row that every other suite reads.
+let omissionControls = null;
+async function omissionFixture(label) {
+  if (!omissionControls) {
+    omissionControls = (async () => {
+      const prior = await readRuntimeControls(sql);
+      return setRuntimeControls({
+        actorEmail: "admin@raydar.xyz", reason: "Enable omission pre-pass regressions",
+        ui: prior.ui_enabled, ingestion: true, generation: true, masterInbox: true,
+        curated: prior.curated_enabled,
+      }, sql);
+    })();
+  }
+  const enabled = await omissionControls;
+  const candidateId = `omission-candidate-${randomUUID()}`;
+  const roleIds = [`omission-role-a-${randomUUID()}`, `omission-role-b-${randomUUID()}`, `omission-role-c-${randomUUID()}`];
+  const signalId = randomUUID();
+  const eventId = `omission-event-${randomUUID()}`;
+  await sql`
+    insert into submissions_v2.candidate_index(
+      candidate_user_id, display_name, normalized_name, search_key, active,
+      paraform_profile_url, last_confirmed_at, source_digest
+    ) values (
+      ${candidateId}, 'Omission Candidate', 'omission candidate', 'omission candidate', true,
+      ${`https://www.paraform.com/candidates?candidate=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+    )
+  `;
+  const envelope = {
+    candidate_resolution: { candidate_user_id: candidateId },
+    schema_version: "submissions.email_reply.v1",
+    adapter_version: "gmail-role-interest-v2",
+    provider: "gmail",
+    provider_message_id: `message-${eventId}`,
+    outbound_message_id: `outbound-${eventId}`,
+    source_evidence: null,
+  };
+  await sql`
+    insert into submissions_v2.source_events(
+      id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+      direction, received_at, content_digest, processing_state, idempotency_key, envelope
+    ) values (
+      ${signalId}, 'email', 'submissions.email_reply.v1', ${eventId}, 'gmail', 'mailbox-test',
+      ${`message-${eventId}`}, 'inbound', clock_timestamp(), ${digest(signalId)}, 'ready',
+      ${`source:${signalId}`}, ${sql.json(envelope)}
+    )
+  `;
+  for (const [index, roleId] of roleIds.entries()) {
+    await sql`
+      insert into submissions_v2.role_index(
+        role_id, company_name, role_title, search_key, active, destination_url, last_confirmed_at, source_digest
+      ) values (
+        ${roleId}, 'Omission Company', ${`Omission Role ${index}`}, ${`omission company omission role ${index}`}, true,
+        ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.source_offered_roles(
+        signal_id, role_id, company_snapshot, role_label_snapshot, role_url_snapshot, offered_order, content_digest
+      ) values (
+        ${signalId}, ${roleId}, 'Omission Company', ${`Omission Role ${index}`},
+        ${`https://www.paraform.com/browse?role=${roleId}`}, ${index}, ${digest(`${signalId}:${roleId}`)}
+      )
+    `;
+    await sql`
+      insert into submissions_v2.first_response_claims(
+        candidate_user_id, role_id, event_id, source_family, signal_id, committed_at
+      ) values (${candidateId}, ${roleId}, ${eventId}, 'email', ${signalId}, clock_timestamp())
+    `;
+  }
+  const jobId = randomUUID();
+  await sql`
+    insert into submissions_v2.jobs(id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch)
+    values (${jobId}, 'classify_email_reply', 'signal', ${signalId}, ${`job:${jobId}`}, 'master_inbox', ${enabled.control_epoch})
+  `;
+  const claimed = (await claimJobs({
+    workerId: `omission-worker-${label}`, kinds: ["classify_email_reply"], limit: 1,
+    leaseSeconds: 120, controlEpoch: enabled.control_epoch,
+  }, sql)).find((row) => row.id === jobId);
+  assert.ok(claimed, "the omission fixture must own its own classification job");
+  return {
+    candidateId, roleIds, signalId, envelope,
+    event: { ...envelope, candidate_authored_text: "Please put me forward for the first one.", offered_roles: roleIds.map((role_id) => ({ role_id })) },
+    executionFence: {
+      jobId: claimed.id, workerId: claimed.lease_owner,
+      fencingToken: Number(claimed.fencing_token), controlEpoch: Number(enabled.control_epoch),
+    },
+  };
+}
+
+test("with the omission pre-pass off an unnamed offered role stays open for a later reply", async () => {
+  const fixture = await omissionFixture("off");
+  const decisions = [{ role_id: fixture.roleIds[0], label: "interested", quote: "Please put me forward for the first one.", review_reason: null, negative_reason: null }];
+  const omissions = omissionDecisions({ event: fixture.event, decisions, env: {} });
+  assert.deepEqual(omissions, { mode: "off", skipped: "prepass_off", decisions: [] });
+  const applied = await createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } }).applyClassifiedSignal({
+    signalId: fixture.signalId, candidateId: fixture.candidateId,
+    decisions, omissions: omissions.decisions,
+    attempts: [{ outcome: "accepted", model: "test-model" }],
+    executionFence: fixture.executionFence,
+  });
+  assert.equal(applied.created_count, 1);
+  const pairs = await sql`
+    select role_id, workflow_state from submissions_v2.candidate_role_pairs
+     where candidate_user_id=${fixture.candidateId} order by role_id
+  `;
+  assert.deepEqual([...pairs].map((row) => row.workflow_state), ["preparing_resume"]);
+  const claims = await sql`
+    select role_id, release_reason from submissions_v2.first_response_claims
+     where signal_id=${fixture.signalId} and released_at is not null
+  `;
+  assert.deepEqual([...claims].map((row) => row.release_reason).sort(), ["unmentioned_role", "unmentioned_role"]);
+});
+
+test("with the omission pre-pass on every unnamed offered role closes on quote-free evidence", async () => {
+  const fixture = await omissionFixture("apply");
+  const decisions = [{ role_id: fixture.roleIds[0], label: "interested", quote: "Please put me forward for the first one.", review_reason: null, negative_reason: null }];
+  const omissions = omissionDecisions({ event: fixture.event, decisions, env: { SUBMISSIONS_V2_OMISSION_PREPASS: "apply" } });
+  assert.equal(omissions.skipped, null);
+  const applied = await createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } }).applyClassifiedSignal({
+    signalId: fixture.signalId, candidateId: fixture.candidateId,
+    decisions, omissions: omissions.decisions,
+    attempts: [{ outcome: "accepted", model: "test-model" }],
+    executionFence: fixture.executionFence,
+  });
+  assert.equal(applied.created_count, 3);
+
+  const pairs = await sql`
+    select id, role_id, intent_state, workflow_state from submissions_v2.candidate_role_pairs
+     where candidate_user_id=${fixture.candidateId}
+  `;
+  const byRole = new Map([...pairs].map((row) => [row.role_id, row]));
+  assert.deepEqual(byRole.get(fixture.roleIds[0]).workflow_state, "preparing_resume");
+  for (const roleId of fixture.roleIds.slice(1)) {
+    assert.deepEqual(
+      { intent: byRole.get(roleId).intent_state, workflow: byRole.get(roleId).workflow_state },
+      { intent: "not_interested", workflow: "not_interested" },
+    );
+  }
+
+  const recorded = await sql`
+    select role_id, decision_label, exact_quote, evidence_kind, validation
+      from submissions_v2.signal_role_decisions where signal_id=${fixture.signalId}
+  `;
+  const omitted = [...recorded].filter((row) => row.evidence_kind === "omission_prepass_v1");
+  assert.equal(omitted.length, 2);
+  for (const row of omitted) {
+    assert.equal(row.decision_label, "not_interested");
+    assert.equal(row.exact_quote, null);
+    assert.equal(row.validation.quote_validated, false);
+    assert.equal(row.validation.omission_evidence.kind, "omission_prepass_v1");
+    assert.deepEqual(row.validation.omission_evidence.named_role_ids, [fixture.roleIds[0]]);
+    assert.match(row.validation.omission_evidence.offered_role_set_digest, /^[a-f0-9]{64}$/u);
+  }
+  assert.equal([...recorded].find((row) => row.role_id === fixture.roleIds[0]).evidence_kind, null);
+
+  const entries = await sql`
+    select p.role_id, ni.grounded_reason, ni.exact_quote
+      from submissions_v2.not_interested_entries ni
+      join submissions_v2.candidate_role_pairs p on p.id=ni.pair_id
+     where ni.source_event_id=${fixture.signalId}
+  `;
+  assert.equal(entries.length, 2);
+  for (const row of entries) {
+    assert.equal(row.exact_quote, null);
+    assert.equal(row.grounded_reason, "Not named in a reply that accepted other roles offered in the same message.");
+  }
+
+  // One reply is one Slack post; a role the candidate never mentioned is
+  // recorded on the page but never announced.
+  const notifications = await sql`
+    select p.role_id from submissions_v2.notification_outbox n
+      join submissions_v2.candidate_role_pairs p on p.id=n.pair_id
+     where n.kind='not_interested' and p.candidate_user_id=${fixture.candidateId}
+  `;
+  assert.deepEqual([...notifications], []);
+  const openClaims = await sql`
+    select count(*)::integer as count from submissions_v2.first_response_claims
+     where signal_id=${fixture.signalId} and released_at is not null
+  `;
+  assert.equal(openClaims[0].count, 0);
+});
+
+test("an unrecognised classifier review reason is surfaced instead of silently rewritten", async () => {
+  const fixture = await omissionFixture("unknown-reason");
+  const applied = await createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } }).applyClassifiedSignal({
+    signalId: fixture.signalId, candidateId: fixture.candidateId,
+    decisions: [
+      { role_id: fixture.roleIds[0], label: "needs_review", quote: "Please put me forward", review_reason: "role_mapping_conflict", negative_reason: null },
+      { role_id: fixture.roleIds[1], label: "needs_review", quote: "Please put me forward", review_reason: "candidate_question", negative_reason: null },
+      { role_id: fixture.roleIds[2], label: "needs_review", quote: "Please put me forward", review_reason: "drop table review_items;", negative_reason: null },
+    ],
+    attempts: [{ outcome: "accepted", model: "test-model" }],
+    executionFence: fixture.executionFence,
+  });
+  assert.equal(applied.created_count, 3);
+  const reviews = await sql`
+    select p.role_id, r.reason_code, r.safe_detail, r.evidence
+      from submissions_v2.review_items r
+      join submissions_v2.candidate_role_pairs p on p.id=r.pair_id
+     where p.candidate_user_id=${fixture.candidateId}
+  `;
+  const byRole = new Map([...reviews].map((row) => [row.role_id, row]));
+  const unknown = byRole.get(fixture.roleIds[0]);
+  assert.equal(unknown.reason_code, "reply_unclear_or_conditional");
+  assert.equal(unknown.safe_detail, "The classifier returned an unrecognised review reason: role_mapping_conflict.");
+  assert.equal(unknown.evidence.unrecognised_review_reason, "role_mapping_conflict");
+
+  const known = byRole.get(fixture.roleIds[1]);
+  assert.equal(known.reason_code, "candidate_question");
+  assert.equal(known.safe_detail, null);
+  assert.equal(known.evidence.unrecognised_review_reason, undefined);
+
+  // A reason that is not a code is sanitised before it is ever stored or shown.
+  const hostile = byRole.get(fixture.roleIds[2]);
+  assert.equal(hostile.reason_code, "reply_unclear_or_conditional");
+  assert.equal(hostile.safe_detail, "The classifier returned an unrecognised review reason: droptablereview_items.");
 });
 
 test("a human submission mark opens Paraform proof reconciliation and stays reversible until proof lands", async () => {

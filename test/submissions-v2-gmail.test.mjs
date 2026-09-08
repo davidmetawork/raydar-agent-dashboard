@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { GMAIL_ROLE_INTEREST_SCOPE, paraformRoleLink } from "../api/submissions-v2/_lib/email-source-policy.mjs";
+import { APPROVED_EMAIL_FAMILIES, GMAIL_ROLE_INTEREST_SCOPE, SUBMISSIONS_V2_APPROVED_ACTIVATION_AT, outboundEmailFamily, paraformRoleLink, replySubjectFamily } from "../api/submissions-v2/_lib/email-source-policy.mjs";
 import { authoredReply, collectInterviewWindow, interviewReplyEvents, interviewSearch, offeredRoles, outboundParent, roleInterestSearch } from "../api/submissions-v2/_lib/gmail-interview-source.mjs";
-import { normalizeEmailReply } from "../api/submissions-v2/_lib/contracts.mjs";
+import { EMAIL_FAMILIES, normalizeEmailReply } from "../api/submissions-v2/_lib/contracts.mjs";
 import { serviceInternals } from "../api/submissions-v2/_lib/service.mjs";
 import { gmailWindow, reconcileGmailInterviews } from "../submissions-v2-worker/gmail-reader.mjs";
 import { createWorkerHandlers } from "../submissions-v2-worker/worker-handlers.mjs";
@@ -136,6 +136,177 @@ test("approved New Match and Fit Follow Up parents use their own families", () =
   assert.ok(normalizeEmailReply(fitEvent).errors.includes("offered_roles_missing"));
 });
 
+const MATCH_WATCH_SINGLE = [
+  "Hey Sample,",
+  "I recently got a new role that I think you would be a strong fit for!",
+  "The role is with Example and they are looking to bring on a Engineer",
+  "Linking the Job Description here: https://www.paraform.com/share/example-company/role-123456",
+  "Let me know what you think!",
+].join("\n\n");
+const MATCH_WATCH_MULTI = [
+  "Hey Sample,",
+  "I recently got some new roles that I think you would be a strong fit for!",
+  "Linking the Job Descriptions to the company names and job titles below so you can review :)",
+  "Example - Engineer: https://www.paraform.com/share/example-company/role-123456",
+  "Other Example - Designer: https://www.paraform.com/share/other-example/role-654321",
+  "Let me know what you think!",
+].join("\n\n");
+const FIT_FOLLOW_UP_ONE = [
+  "Hey Sample,",
+  "Thanks for taking the time to chat!",
+  "I went through all of our clients and hundreds of opportunities and was able to find a match with your background.",
+  "See match here: https://www.paraform.com/lists/list-1",
+  "Let me know if any of these opportunities look interesting and if so I can connect you with the respective teams ASAP!",
+].join("\n\n");
+const SCREENING_CALL_NO_MATCH = [
+  "Hey Sample,",
+  "Thanks for taking the time to chat!",
+  "We were able to get all of your preferences down but unfortunately do not have any matching openings at the moment.",
+].join("\n\n");
+
+test("Match Watch replies enter Review by subject when the Mailroom original never reached Gmail", () => {
+  // Measured 2026-09-08 (analysis note gmail-search-probe.md): 184 live replies carried
+  // this subject and none of them produced a source event.
+  for (const subject of ["Re: Raydar - New Role Match \u{1F389}", "Re: Raydar - New Role Matches \u{1F389}", "RE: Raydar - New Role Match"]) {
+    const [event] = interviewReplyEvents({ id: "mw", messages: [message({ subject, body: "That first one looks interesting." })] }, options);
+    assert.equal(event.source_family, "new_match", subject);
+    assert.equal(event.offered_roles.length, 0, subject);
+    assert.ok(normalizeEmailReply(event).errors.includes("offered_roles_missing"), subject);
+  }
+  assert.equal(replySubjectFamily("Raydar - New Role Match \u{1F389}"), "new_match");
+  assert.equal(replySubjectFamily("Raydar - New Role Matches"), "new_match");
+});
+
+test("a surviving Match Watch original supplies its own family and its exact role links", () => {
+  const single = sent({ subject: "Raydar - New Role Match \u{1F389}", body: MATCH_WATCH_SINGLE });
+  const [one] = interviewReplyEvents(thread([message({ subject: "Re: Raydar - New Role Match \u{1F389}" })], single), options);
+  assert.equal(one.source_family, "new_match");
+  assert.deepEqual(one.offered_roles.map((role) => role.role_id), ["role-123456"]);
+  const multi = sent({ subject: "Raydar - New Role Matches \u{1F389}", body: MATCH_WATCH_MULTI });
+  const [many] = interviewReplyEvents(thread([message({ subject: "Re: Raydar - New Role Matches \u{1F389}" })], multi), options);
+  assert.deepEqual(many.offered_roles.map((role) => role.role_id), ["role-123456", "role-654321"]);
+  // Body markers alone are enough when a client rewrites the subject.
+  assert.equal(outboundEmailFamily({ subject: "Following up", text: MATCH_WATCH_SINGLE, roleCount: 1 }), "new_match");
+  assert.equal(outboundEmailFamily({ subject: "Following up", text: "Linking the Job Description here: https://example.com" }), null);
+});
+
+test("the one-match curated follow-up is admitted and the no-match screening copy is not", () => {
+  const fit = sent({ subject: "Raydar - 1st Round Interview", body: FIT_FOLLOW_UP_ONE });
+  const [event] = interviewReplyEvents(thread([message({ subject: "Re: Raydar - 1st Round Interview" })], fit), options);
+  assert.equal(event.source_family, "fit_follow_up_with_matches");
+  assert.equal(outboundEmailFamily({ subject: "Raydar - Screening Call", text: SCREENING_CALL_NO_MATCH }), null);
+  assert.equal(replySubjectFamily("Re: Raydar - Screening Call"), null);
+  assert.deepEqual(interviewReplyEvents(thread([message({ subject: "Re: Raydar - Screening Call", body: "Thanks for the call." })], sent({ subject: "Raydar - Screening Call", body: SCREENING_CALL_NO_MATCH })), options), []);
+});
+
+test("a screening-call thread admits only the roles a later offer in that thread carried", () => {
+  const screening = sent({ id: "call", at: start - 3000, subject: "Raydar - Screening Call", body: SCREENING_CALL_NO_MATCH, headers: { "Message-ID": "<call@example.com>" } });
+  const offer = sent({ id: "offer", at: start - 1000, subject: "Raydar - New Role Match \u{1F389}", body: MATCH_WATCH_SINGLE, headers: { "Message-ID": "<offer@example.com>", "In-Reply-To": "<call@example.com>", References: "<call@example.com>" } });
+  const reply = message({ subject: "Re: Raydar - Screening Call", headers: { "In-Reply-To": "<offer@example.com>", References: "<call@example.com> <offer@example.com>" } });
+  const [event] = interviewReplyEvents({ id: "call-thread", messages: [screening, offer, reply] }, options);
+  assert.equal(event.source_family, "new_match");
+  assert.deepEqual(event.offered_roles.map((role) => role.role_id), ["role-123456"]);
+  const onlyCall = message({ subject: "Re: Raydar - Screening Call", headers: { "In-Reply-To": "<call@example.com>", References: "<call@example.com>" } });
+  assert.deepEqual(interviewReplyEvents({ id: "call-thread", messages: [screening, onlyCall] }, options), []);
+});
+
+test("the Interview Agent invite subject stays out of the curated follow-up family", () => {
+  for (const subject of [
+    "Re: Raydar - 1st Round Interview - AI Engineer \u{1F389}",
+    "Re: Raydar - 1st Round Interview \u{1F389} - Product Designer",
+    "Re: Raydar - 1st Round Interview - Head of Product",
+  ]) {
+    assert.equal(replySubjectFamily(subject), null, subject);
+    assert.deepEqual(interviewReplyEvents({ id: "invite", messages: [message({ subject, body: "Yes, that works." })] }, options), [], subject);
+  }
+  for (const subject of ["Re: Raydar - 1st Round Interview", "Raydar - 1st Round Interview \u{1F389}", "Fwd: raydar - 1st round interview"]) {
+    assert.equal(replySubjectFamily(subject), "fit_follow_up_with_matches", subject);
+  }
+});
+
+test("every message the reader skips is counted by reason instead of vanishing", () => {
+  const admitted = message({ id: "keep", subject: "Re: Raydar - New Role Match \u{1F389}", body: "Sounds good." });
+  const scan = interviewReplyEvents({ id: "mixed", messages: [
+    admitted,
+    message({ id: "old", at: start - 5, subject: "Re: Raydar - New Role Match \u{1F389}" }),
+    message({ id: "draft", labels: ["DRAFT"] }),
+    message({ id: "auto", headers: { "Auto-Submitted": "auto-replied" } }),
+    message({ id: "mate", from: "colleague@raydar.xyz" }),
+    message({ id: "bare", headers: { "In-Reply-To": "", References: "" } }),
+    message({ id: "other", subject: "Re: Quick question about payroll" }),
+  ] }, options);
+  assert.deepEqual(scan.map((event) => event.provider_message_id), ["keep"]);
+  assert.deepEqual(scan.accounting, {
+    admitted: 1,
+    outside_window: 1,
+    excluded_label: 1,
+    machine: 1,
+    sender_excluded: 1,
+    no_reference_headers: 1,
+    prep_admin_parent: 0,
+    family_unknown: 1,
+  });
+  const prep = interviewReplyEvents(thread([message({ body: "Yes, looks good." })], sent({ body: "Here is your interview preparation guide." })), options);
+  assert.equal(prep.accounting.prep_admin_parent, 1);
+  assert.equal(prep.accounting.family_unknown, 0);
+});
+
+test("the window collector and the reader report one merged deferral account", async () => {
+  const result = await collectInterviewWindow({ ...options, client: {
+    list: async () => ({ messages: [{ threadId: "ab" }] }),
+    thread: async () => ({ id: "ab", messages: [
+      message({ id: "keep", subject: "Re: Raydar - New Role Matches \u{1F389}" }),
+      message({ id: "other", subject: "Re: Quick question about payroll" }),
+    ] }),
+  } });
+  assert.equal(result.length, 1);
+  assert.equal(result.accounting.admitted, 1);
+  assert.equal(result.accounting.family_unknown, 1);
+  const reader = await reconcileGmailInterviews({ env, now: start + 600_000, assertCurrent: async () => {}, admit: async () => ({ accepted: true }), sleepImpl: async () => {},
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      return new Response(JSON.stringify({ ok: true, result: { brokerScope: GMAIL_ROLE_INTEREST_SCOPE, ...(body.operation === "list"
+        ? { messages: [{ threadId: "ab" }] }
+        : { id: "ab", messages: [message({ id: "other", subject: "Re: Quick question about payroll" })] }) } }));
+    },
+  });
+  assert.equal(reader.observed, 0);
+  assert.equal(reader.accounting.family_unknown, 1);
+});
+
+test("Match Watch reuses the approved new_match family and the forward-only boundary is untouched", () => {
+  // A family string the contract layer does not know is quarantined, and an unapproved
+  // family also loses the explicit-role fallback in service.intakeMasterInbox.
+  for (const family of APPROVED_EMAIL_FAMILIES) assert.ok(EMAIL_FAMILIES.has(family), family);
+  assert.equal(SUBMISSIONS_V2_APPROVED_ACTIVATION_AT, "2026-09-02T02:45:14.308Z");
+  const [event] = interviewReplyEvents({ id: "mw", messages: [message({ subject: "Re: Raydar - New Role Match \u{1F389}" })] }, options);
+  assert.equal(normalizeEmailReply(event).event.source_family, "new_match");
+  assert.equal(normalizeEmailReply(event).quarantined, false);
+});
+
+test("the worker job summary reports the merged deferral account for both Gmail lanes", async () => {
+  let committed; const sql = async () => []; sql.json = (value) => value; let calls = 0;
+  const handlers = createWorkerHandlers({ env: { ...env, SUBMISSIONS_V2_EMAIL_READER: "gmail" }, sql, resumeStore: {},
+    service: { intakeMasterInbox: async () => ({ accepted: true }) },
+    repository: { recordSourceHealth: async () => {} },
+    sourceLease: {
+      claimSourceCursor: async () => ({ fencing_token: 3, checkpoint: { gmail: { scopes: { [GMAIL_ROLE_INTEREST_SCOPE]: { live: { through: start + 300_000 }, catchup: { through: start } } } } } }),
+      commitSourceCursor: async (value) => { committed = value; return {}; },
+      releaseSourceCursor: async () => assert.fail("both lanes succeed"),
+    },
+    gmailInterviews: async () => (calls++ === 0
+      ? { checkpoint: { through: start + 360_000 }, completed: true, caught_up: true, accepted: 1, observed: 1, threads_read: 1, accounting: { admitted: 1, family_unknown: 2, machine: 1 } }
+      : { checkpoint: { through: start + 120_000 }, completed: true, caught_up: true, accepted: 0, observed: 0, threads_read: 1, accounting: { admitted: 0, family_unknown: 3 } }),
+    now: () => new Date(start + 600_000),
+  });
+  const result = await handlers.reconcile_master_inbox({ job: {}, workerId: "test", controlEpoch: 5, checkpoint: async () => {}, signal: new AbortController().signal });
+  assert.ok(committed);
+  assert.deepEqual(result.checkpoint.deferred, {
+    admitted: 1, outside_window: 0, excluded_label: 0, machine: 1,
+    sender_excluded: 0, no_reference_headers: 0, prep_admin_parent: 0, family_unknown: 5,
+  });
+});
+
 test("multiple offered roles stay in one event for contextual classification", () => {
   const [event] = interviewReplyEvents(thread([message()], sent({ body: "https://paraform.com/browse?role=one https://paraform.com/browse?role=two https://paraform.com/browse?role=one" })), options);
   assert.deepEqual(event.offered_roles.map((role) => role.role_id), ["one", "two"]);
@@ -192,8 +363,13 @@ test("windows are activation-clamped, bounded, overlap one minute, and lag two m
   assert.throws(() => gmailWindow({}, { now: start }), /activation_required/u);
   assert.match(interviewSearch(start, start + 300_000), /subject:"Interview Request"/u);
   assert.match(roleInterestSearch(start, start + 300_000), /subject:"New Match"/u);
+  assert.match(roleInterestSearch(start, start + 300_000), /subject:"New Role Match"/u);
+  assert.match(roleInterestSearch(start, start + 300_000), /subject:"New Role Matches"/u);
   assert.match(roleInterestSearch(start, start + 300_000), /subject:"Raydar - 1st Round Interview"/u);
   assert.match(roleInterestSearch(start, start + 300_000), /"See matches here"/u);
+  assert.match(roleInterestSearch(start, start + 300_000), /"See match here"/u);
+  // The window, the lag, the overlap and the thread budget are untouched by the phrases.
+  assert.match(roleInterestSearch(start, start + 300_000), /-from:david@raydar\.xyz -in:sent -in:drafts/u);
 });
 
 test("a no-window retry preserves a proven live checkpoint without a broker read", async () => {

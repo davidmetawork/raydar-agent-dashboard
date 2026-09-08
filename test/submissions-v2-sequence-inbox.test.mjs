@@ -325,6 +325,11 @@ test("full detail, activation, direction, sender, and identity conflicts fail cl
   assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ sent_from_paraform: true }) }).reason, "outbound_message");
   assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ sent_from_paraform: undefined }) }).reason, "provider_direction_unavailable");
   assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ to: ["David <david@raydar.xyz>"], subject: "Re: New Match" }) }).reason, "gmail_owned_mailbox");
+  // Match Watch subjects belong to the direct Gmail reader too, so one reply is never
+  // claimed twice with two different role sets.
+  for (const subject of ["Re: Raydar - New Role Match \u{1F389}", "Re: Raydar - New Role Matches \u{1F389}"]) {
+    assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ to: ["David <david@raydar.xyz>"], subject }) }).reason, "gmail_owned_mailbox", subject);
+  }
   assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ to: ["David <david@raydar.xyz>"], subject: "Re: Platform outreach" }) }).status, "ready");
   assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ to: ["Noah <noah@raydarlab.com>"] }) }).status, "ready");
   assert.equal(adaptSequenceInboxReply({ ...base, detail: detail({ to: ["noah@raydarlab.com", "other@burner.example"] }) }).reason, "mailbox_identity_invalid");

@@ -2,7 +2,7 @@ import {
   GMAIL_ROLE_INTEREST_SCOPE,
   SUBMISSIONS_V2_APPROVED_ACTIVATION_AT,
 } from "../api/submissions-v2/_lib/email-source-policy.mjs";
-import { collectRoleInterestWindow } from "../api/submissions-v2/_lib/gmail-interview-source.mjs";
+import { collectRoleInterestWindow, emptyRoleInterestAccounting } from "../api/submissions-v2/_lib/gmail-interview-source.mjs";
 
 const error = (code) => Object.assign(new Error(code), { code, retryable: true });
 
@@ -38,6 +38,7 @@ export async function reconcileGmailRoleInterest({ env, fetchImpl = fetch, signa
     accepted: 0,
     observed: 0,
     threads_read: 0,
+    accounting: emptyRoleInterestAccounting(),
   };
   const key = String(env.SUBMISSIONS_V2_MASTER_INBOX_WORKER_KEY || "");
   if (key.length < 32) throw error("gmail_read_broker_not_configured");
@@ -87,6 +88,8 @@ export async function reconcileGmailRoleInterest({ env, fetchImpl = fetch, signa
     accepted,
     observed: events.length,
     threads_read: Number(events.threads_read) || 0,
+    // Why the rest of the read window produced nothing; admission is unchanged.
+    accounting: events.accounting || emptyRoleInterestAccounting(),
   };
 }
 

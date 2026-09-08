@@ -232,7 +232,11 @@ function senderIdentity(message) {
 
 function directGmailOwnedMessage(message) {
   const subject = text(message?.subject, 1_000);
-  return /\b(?:interview request(?:s)?|new match(?:es)?|raydar\s*-\s*1st round interview)\b/iu.test(subject);
+  // Same alternation as replySubjectFamily (email-source-policy.mjs), including the
+  // Match Watch subject, so one reply is never claimed by both adapters with different
+  // role evidence.  Deliberately left unanchored: a subject that only resembles a
+  // direct-Gmail family still defers to the reader that owns this mailbox.
+  return /\b(?:interview request(?:s)?|new (?:role )?match(?:es)?|raydar\s*-\s*1st round interview)\b/iu.test(subject);
 }
 
 function deferred(reply, reason, extra = {}) {

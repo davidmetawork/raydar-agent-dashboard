@@ -3,6 +3,7 @@ import { effectiveControls, environmentControls } from "./config.mjs";
 import { normalizeEmailReply, privateEventPayload, safeEventProjection } from "./contracts.mjs";
 import { classifyReply } from "./classifier.mjs";
 import { resolveExplicitCandidateRoles } from "./explicit-role-resolution.mjs";
+import { omissionDecisions } from "./omission-prepass.mjs";
 import { APPROVED_EMAIL_FAMILIES } from "./email-source-policy.mjs";
 import { createRepository } from "./repository.mjs";
 import { rowDto, publicHealth } from "./presentation.mjs";
@@ -355,14 +356,32 @@ export function createService({
       };
       try {
         const result = await classifier(event, { env, fetchImpl, now });
+        // Deterministic, quote-free, and off unless SUBMISSIONS_V2_OMISSION_PREPASS
+        // is "apply": roles the reply left unnamed in an exact producer offer it
+        // otherwise accepted (R27/R28).
+        const omission = omissionDecisions({
+          event,
+          decisions: result.decisions,
+          env,
+          operatorScopedRoles: Array.isArray(overrides.roleIds) && overrides.roleIds.length > 0,
+        });
         if (typeof overrides.beforeApply === "function") await overrides.beforeApply();
-        return repository.applyClassifiedSignal({
+        const settled = await repository.applyClassifiedSignal({
           signalId: source.id,
           candidateId: overrides.candidateId || source.envelope?.candidate_resolution?.candidate_user_id,
           decisions: result.decisions,
+          omissions: omission.decisions,
           attempts: result.attempts.map((attempt) => ({ ...attempt, duration_ms: result.duration_ms })),
           executionFence: overrides.executionFence,
         });
+        if (omission.mode !== "apply") return settled;
+        return {
+          ...settled,
+          omission_prepass: {
+            applied_role_ids: omission.decisions.map((decision) => decision.role_id),
+            skipped: omission.skipped,
+          },
+        };
       } catch (error) {
         if (error.code === "classification_failed") {
           if (typeof overrides.beforeApply === "function") await overrides.beforeApply();
