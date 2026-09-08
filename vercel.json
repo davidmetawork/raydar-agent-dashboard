@@ -35,6 +35,10 @@
       "destination": "/master-inbox.html"
     },
     {
+      "source": "/mailroom",
+      "destination": "/mailroom.html"
+    },
+    {
       "source": "/enrich",
       "destination": "/enrich.html"
     },
@@ -145,6 +149,9 @@
       "maxDuration": 30
     },
     "api/status-v2/*.mjs": {
+      "maxDuration": 30
+    },
+    "api/mailroom/*.mjs": {
       "maxDuration": 30
     }
   },

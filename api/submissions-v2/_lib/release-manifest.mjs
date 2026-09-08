@@ -3,8 +3,8 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 102,
-  "digest": "83af0388e2a641cfb61ddf5236c8d002f2cce00026b05435b197968bc85187a4",
-  "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
+  "digest": "73554f77a4151dcd078fa95db29fd3abd44cf6d397cf0fe53b534b0a776d758a",
+  "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
       "path": ".vercelignore",
@@ -412,7 +412,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "vercel.json",
-      "sha256": "d00d2bd969afa09cd009f0353672211f33fcc74a57e9f7a6f08472c53fe0b84e"
+      "sha256": "10ee2eb294ba15ff41026f3f96cbad74ea4feda662a693b3d31fe3858a6064e1"
     }
   ]
 });
