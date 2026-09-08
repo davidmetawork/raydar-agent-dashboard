@@ -253,6 +253,44 @@ async function enqueue(tx, {
   return existing[0] || null;
 }
 
+const SEQUENCE_SCHEDULE_LOCK = "submissions-v2:schedule:sequence_inbox";
+
+async function scheduleSequenceInbox(tx, {
+  minuteKey,
+  fiveMinuteKey,
+  nightlyDue,
+}) {
+  // The worker can call tick continuously and more than one worker may do so.
+  // Serialize the state read and absence check because minute and five-minute
+  // buckets intentionally have different idempotency keys.
+  await tx`select pg_advisory_xact_lock(hashtextextended(${SEQUENCE_SCHEDULE_LOCK}, 0))`;
+  const existing = (await tx`
+    select * from submissions_v2.jobs
+     where kind='reconcile_sequence_inbox'
+       and subject_type='source' and subject_id='sequence_inbox'
+       and state in ('queued','running','held')
+     order by created_at, id limit 1 for update
+  `)[0];
+  if (existing) return existing;
+  const state = (await tx`
+    select exists (
+      select 1
+        from submissions_v2.source_health health
+        join submissions_v2.source_cursors cursor
+          on cursor.source_key=health.source_key
+       where health.source_key='sequence_inbox'
+         and health.error_class='sequence_inbox_catching_up'
+         and cursor.checkpoint @> '{"caught_up":false}'::jsonb
+    ) as catching_up
+  `)[0];
+  const scheduleKey = state?.catching_up === true ? minuteKey : fiveMinuteKey;
+  return enqueue(tx, {
+    kind: "reconcile_sequence_inbox", subjectType: "source", subjectId: "sequence_inbox",
+    idempotencyKey: `tick:sequence_inbox:${scheduleKey}`, requiredControl: "master_inbox", priority: 12,
+    checkpoint: { mode: nightlyDue ? "nightly" : "incremental" },
+  });
+}
+
 async function pairEvent(tx, pair, {
   actorType = "human", actorId, source, eventType, expectedVersion = null,
   previous = null, note = null, reasonCode = null, idempotencyKey, metadata = {},
@@ -2862,10 +2900,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           idempotencyKey: `tick:master_inbox:${fiveMinuteKey}`, requiredControl: "master_inbox", priority: 10,
           checkpoint: { mode: nightlyDue ? "nightly" : "incremental" },
         }));
-        if (masterInboxEnabled) jobs.push(await enqueue(tx, {
-          kind: "reconcile_sequence_inbox", subjectType: "source", subjectId: "sequence_inbox",
-          idempotencyKey: `tick:sequence_inbox:${fiveMinuteKey}`, requiredControl: "master_inbox", priority: 12,
-          checkpoint: { mode: nightlyDue ? "nightly" : "incremental" },
+        if (masterInboxEnabled) jobs.push(await scheduleSequenceInbox(tx, {
+          minuteKey, fiveMinuteKey, nightlyDue,
         }));
         if (curatedEnabled) jobs.push(await enqueue(tx, {
           kind: "reconcile_curated", subjectType: "source", subjectId: "curated",
