@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 96,
-  "digest": "03d65ee8404b238a4a764152e885207109ef1feff366e9981aa033ddbf5e195d",
+  "digest": "f7bc39c1f7e7bb8411558cdd9099fa4d40c3d70eb095229dd7ed7b7f61b6c66d",
   "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
   "files": [
     {
@@ -136,7 +136,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "b34610e5a867921feed8ae1e506aec0183cbd1c002ed3baa9645245104e24710"
+      "sha256": "8f5ea4125745183f014c8d931641ce6c755fde17c4a41e3c1691a6eb4022722b"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",

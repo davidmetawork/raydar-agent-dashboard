@@ -142,6 +142,73 @@ test("migrations are digest-checked and idempotent", async () => {
   }
 });
 
+test("notification claims retire operational rows and hold expired uncertain deliveries", async () => {
+  const prior = await readRuntimeControls(sql);
+  assert.equal((await sql`select count(*)::int as count from submissions_v2.notification_outbox`)[0].count, 0);
+  assert.equal((await sql`select count(*)::int as count from submissions_v2.jobs`)[0].count, 0);
+  const ids = Array.from({ length: 4 }, () => randomUUID());
+  const jobId = randomUUID();
+  const workerId = `notification-test-${randomUUID()}`;
+  const enabled = await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Enable isolated notification policy regression",
+    ui: prior.ui_enabled, ingestion: true, generation: prior.generation_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+  try {
+    await sql`
+      insert into submissions_v2.jobs(id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch)
+      values (${jobId}, 'deliver_notification', 'outbox', 'notification_outbox', ${jobId}, 'ingestion', ${enabled.control_epoch})
+    `;
+    const [job] = await claimJobs({ workerId, kinds: ["deliver_notification"], limit: 1, leaseSeconds: 120, controlEpoch: enabled.control_epoch }, sql);
+    assert.equal(job.id, jobId);
+    const fixtures = [
+      [ids[0], "source_delayed", "pending"], [ids[1], "daily_digest", "failed"],
+      [ids[2], "submission_added", "sending"], [ids[3], "submission_added", "pending"],
+    ];
+    for (const [id, kind, state] of fixtures) {
+      await sql`
+        insert into submissions_v2.notification_outbox(
+          id, kind, destination_id, safe_payload, dedupe_key, state, next_attempt_at, lease_owner, lease_expires_at
+        ) values (
+          ${id}, ${kind}, 'C123TEST', ${sql.json({})}, ${id}, ${state},
+          clock_timestamp() - interval '1 minute', ${state === "sending" ? "expired-worker" : null},
+          case when ${state === "sending"} then clock_timestamp() - interval '1 minute' else null end
+        )
+      `;
+    }
+    const claimed = await createRepository({ sql, env: {} }).claimNotifications({
+      workerId, limit: 10, leaseSeconds: 120,
+      executionFence: { jobId, workerId, fencingToken: Number(job.fencing_token), controlEpoch: Number(enabled.control_epoch) },
+    });
+    assert.deepEqual(claimed.map((row) => row.id), [ids[3]]);
+    const rows = await sql`
+      select id, state, safe_error_code, lease_owner, lease_expires_at
+        from submissions_v2.notification_outbox where id=any(${sql.array(ids, 2950)})
+    `;
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    for (const id of ids.slice(0, 3)) {
+      assert.equal(byId.get(id).state, "held");
+      assert.equal(byId.get(id).safe_error_code, id === ids[2] ? "delivery_outcome_unknown" : "notification_kind_retired");
+      assert.equal(byId.get(id).lease_owner, null);
+      assert.equal(byId.get(id).lease_expires_at, null);
+    }
+    assert.equal(byId.get(ids[3]).state, "sending");
+    assert.equal(byId.get(ids[3]).lease_owner, workerId);
+  } finally {
+    try {
+      await sql`delete from submissions_v2.notification_outbox where id=any(${sql.array(ids, 2950)})`;
+      await sql`delete from submissions_v2.job_attempts where job_id=${jobId}`;
+      await sql`delete from submissions_v2.jobs where id=${jobId}`;
+    } finally {
+      await setRuntimeControls({
+        actorEmail: "admin@raydar.xyz", reason: "Restore notification policy regression controls",
+        ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+        masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+      }, sql);
+    }
+  }
+});
+
 test("authoritative submission proof may persist while resume preparation remains fenced", async () => {
   const prior = await readRuntimeControls(sql);
   const enabled = await setRuntimeControls({
@@ -1355,6 +1422,67 @@ test("a later hidden-pair email is dropped before Blob storage and classifier ac
     ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
     masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
   }, sql);
+});
+
+test("a new review reason for an existing unresolved entry never announces a new admission", async () => {
+  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+  const prior = await readRuntimeControls(sql);
+  const enabled = await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Enable first-review admission regression",
+    ui: true, ingestion: true, generation: true, masterInbox: true, curated: prior.curated_enabled,
+  }, sql);
+  try {
+    for (const historical of [false, true]) {
+      const signalId = await sourceEvent({ family: "email", senderDisplayName: "Review Candidate" });
+      const originalTime = "2026-09-01T12:00:00.000Z";
+      if (historical) {
+        await sql`
+          insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail, opened_at)
+          values (${signalId}, 'candidate_not_found', 'Select the exact candidate.', ${originalTime})
+        `;
+      }
+      const jobId = randomUUID();
+      await sql`
+        insert into submissions_v2.jobs(id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch)
+        values (${jobId}, 'classify_email_reply', 'signal', ${signalId}, ${`job:${jobId}`}, 'master_inbox', ${enabled.control_epoch})
+      `;
+      const claimed = (await claimJobs({
+        workerId: `first-review-${jobId}`, kinds: ["classify_email_reply"], limit: 50,
+        leaseSeconds: 120, controlEpoch: enabled.control_epoch,
+      }, sql)).find((row) => row.id === jobId);
+      assert.ok(claimed);
+      const input = {
+        signalId, attempts: [{ outcome: "failed", model: "test-model", reason: "provider_timeout" }],
+        safeDetail: "Classification stopped safely.",
+        executionFence: {
+          jobId, workerId: claimed.lease_owner, fencingToken: Number(claimed.fencing_token),
+          controlEpoch: Number(enabled.control_epoch),
+        },
+      };
+      assert.deepEqual((await repository.routeClassificationFailure(input)).pairs, []);
+      assert.equal((await repository.routeClassificationFailure(input)).existing, true);
+      const rows = await sql`
+        select state, safe_error_code, safe_payload from submissions_v2.notification_outbox
+         where dedupe_key=${`submission-added:signal:${signalId}`}
+      `;
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].state, historical ? "held" : "pending");
+      assert.equal(rows[0].safe_error_code, historical ? "pre_release_admission_suppressed" : null);
+      const firstReview = (await sql`
+        select opened_at from submissions_v2.review_items
+         where unresolved_signal_id=${signalId} order by opened_at, id limit 1
+      `)[0];
+      assert.equal(rows[0].safe_payload.added_at, new Date(firstReview.opened_at).toISOString());
+      if (historical) assert.equal(rows[0].safe_payload.added_at, originalTime);
+      assert.equal((await sql`select count(*)::int as count from submissions_v2.review_items where unresolved_signal_id=${signalId}`)[0].count, historical ? 2 : 1);
+    }
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore first-review admission regression controls",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
 });
 
 test("classification-failure replay stays terminal until an approved retry recovers the same pair", async () => {
