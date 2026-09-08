@@ -67,6 +67,42 @@ export function forecastModelCostCents({
   return Math.max(1, Math.ceil(dollarsPerCall * 100 * calls));
 }
 
+function positiveTokenCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) && count > 0 ? count : null;
+}
+
+function nonnegativeTokenCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : null;
+}
+
+// A provider response without complete positive usage is deliberately not
+// settled. Its pre-dispatch reservation stays charged so an ambiguous response
+// can never reopen budget for another paid request.
+export function meteredModelCostCents({ model, usage, env = process.env }) {
+  const inputTokens = positiveTokenCount(usage?.inputTokens);
+  const outputTokens = positiveTokenCount(usage?.outputTokens);
+  const inputRate = configuredRate(model, "input", env);
+  const outputRate = configuredRate(model, "output", env);
+  if (!inputTokens || !outputTokens || !inputRate || !outputRate) return null;
+
+  const cacheCreationTokens = usage?.cacheCreationInputTokens;
+  const cacheReadTokens = usage?.cacheReadInputTokens;
+  if (cacheCreationTokens !== undefined && cacheCreationTokens !== null && nonnegativeTokenCount(cacheCreationTokens) === null) return null;
+  if (cacheReadTokens !== undefined && cacheReadTokens !== null && nonnegativeTokenCount(cacheReadTokens) === null) return null;
+  if ((nonnegativeTokenCount(cacheCreationTokens) || 0) > 0 || (nonnegativeTokenCount(cacheReadTokens) || 0) > 0) {
+    const cacheCreationRate = configuredRate(model, "cache_creation_input", env);
+    const cacheReadRate = configuredRate(model, "cache_read_input", env);
+    if (!cacheCreationRate || !cacheReadRate) return null;
+    const dollars = ((inputTokens * inputRate) + (outputTokens * outputRate)
+      + (nonnegativeTokenCount(cacheCreationTokens) || 0) * cacheCreationRate
+      + (nonnegativeTokenCount(cacheReadTokens) || 0) * cacheReadRate) / 1_000_000;
+    return Math.max(1, Math.ceil(dollars * 100));
+  }
+  return Math.max(1, Math.ceil(((inputTokens * inputRate) + (outputTokens * outputRate)) / 10_000));
+}
+
 export function createGenerationBudget({
   deadlineAt,
   budgetCents = GENERATION_BUDGET_CENTS,
@@ -98,6 +134,26 @@ export function createGenerationBudget({
       }
       spent += value;
       return value;
+    },
+    reserveAttempt(cents, options = {}) {
+      const reservedCents = this.reserve(cents, options);
+      return { reservedCents, settled: false };
+    },
+    settleAttempt(reservation, actualCents) {
+      if (!reservation || reservation.settled) return spent;
+      const actual = Math.max(1, Math.ceil(Number(actualCents) || 0));
+      const delta = actual - reservation.reservedCents;
+      if (delta > 0 && spent + delta > ceiling) {
+        // The provider already charged more than the preflight bound. Record
+        // the entire remaining ceiling before stopping further dispatch.
+        spent = ceiling;
+        reservation.budgetExhausted = true;
+      } else {
+        spent += delta;
+      }
+      reservation.settled = true;
+      reservation.actualCents = actual;
+      return spent;
     },
     snapshot() {
       return { budget_cents: ceiling, spent_cents: spent, deadline_at_ms: deadline };

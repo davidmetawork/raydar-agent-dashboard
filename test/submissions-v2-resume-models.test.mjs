@@ -16,11 +16,17 @@ import {
 } from "../api/submissions-v2/_lib/models/anthropic-strategist.mjs";
 import {
   GROUNDING_VALIDATOR_BATCH_SIZE,
+  GROUNDING_VALIDATOR_MAX_CONCURRENT_BATCHES,
   GROUNDING_VALIDATOR_MODEL,
   runGroundingValidator,
   schemaForOpenAI,
   validateClaimsToCompletion,
 } from "../api/submissions-v2/_lib/models/openai-validator.mjs";
+import {
+  createGenerationBudget,
+  meteredModelCostCents,
+  ResumePipelineError,
+} from "../api/submissions-v2/_lib/resume/pipeline-runtime.mjs";
 
 function response(status, value) {
   return { ok: status >= 200 && status < 300, status, json: async () => value };
@@ -185,6 +191,7 @@ function validation(verdict = "supported", rewrite = null) {
 test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable primary failure", async () => {
   const { bundle, ledger } = evidenceFixture();
   const bodies = [];
+  const events = [];
   const result = await runResumeStrategist({ bundle, ledger }, {
     apiKey: "test-key",
     fetchImpl: async (_url, init) => {
@@ -197,6 +204,11 @@ test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable prima
         stop_reason: "end_turn",
       });
     },
+    onAttempt: async ({ model }) => {
+      events.push(["reserve", model]);
+      return { id: `reservation-${events.length}` };
+    },
+    onUsage: async ({ model, usage }) => events.push(["usage", model, usage?.inputTokens ?? null]),
   });
   assert.equal(bodies[0].model, STRATEGIST_PRIMARY_MODEL);
   assert.equal(bodies[0].max_tokens, STRATEGIST_MAX_OUTPUT_TOKENS);
@@ -205,6 +217,12 @@ test("strategist pins Opus 5 high and uses Opus 4.8 only after a retryable prima
   assert.equal(result.audit.model, STRATEGIST_FALLBACK_MODEL);
   assert.equal(result.fallbackReason, "MODEL_PROVIDER_ERROR");
   assert.equal(result.strategy.document.schema_version, "raydar.resume.ast.v1");
+  assert.deepEqual(events, [
+    ["reserve", STRATEGIST_PRIMARY_MODEL],
+    ["usage", STRATEGIST_PRIMARY_MODEL, null],
+    ["reserve", STRATEGIST_FALLBACK_MODEL],
+    ["usage", STRATEGIST_FALLBACK_MODEL, 100],
+  ]);
 });
 
 test("strategist gives its existing fallback a bounded diagnostic after repeated visible copy", async () => {
@@ -369,6 +387,22 @@ test("strategist does not fall back on nonretryable authentication failure", asy
   assert.equal(calls, 1);
 });
 
+test("strategist reserves only the primary call when it succeeds", async () => {
+  const { bundle, ledger } = evidenceFixture();
+  const reservedModels = [];
+  await runResumeStrategist({ bundle, ledger }, {
+    apiKey: "test-key",
+    onAttempt: async ({ model }) => { reservedModels.push(model); return {}; },
+    fetchImpl: async () => response(200, {
+      id: "msg-primary-only",
+      content: [{ type: "text", text: JSON.stringify(strategyFixture()) }],
+      usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      stop_reason: "end_turn",
+    }),
+  });
+  assert.deepEqual(reservedModels, [STRATEGIST_PRIMARY_MODEL]);
+});
+
 test("strategist derives selected claim metadata from the validated visible document", async () => {
   const { bundle, ledger } = evidenceFixture();
   const strategy = strategyFixture();
@@ -416,25 +450,70 @@ test("strategist deterministically repairs internal ids and drops invalid visual
 
 test("grounding validator pins GPT-5.4 high, retries invalid output, and never stores the request", async () => {
   const bodies = [];
+  const events = [];
+  const budget = createGenerationBudget({ deadlineAt: 10_000, now: () => 1_000 });
   const result = await runGroundingValidator(claimPacket(), {
     apiKey: "test-key",
     sleep: async () => {},
     fetchImpl: async (_url, init) => {
       bodies.push(JSON.parse(init.body));
-      if (bodies.length === 1) return response(200, { id: "resp-invalid", output_text: "not json" });
+      if (bodies.length === 1) return response(200, {
+        id: "resp-invalid",
+        output_text: "not json",
+        usage: { input_tokens: 50, output_tokens: 20, total_tokens: 70 },
+      });
       return response(200, {
         id: "resp-good",
         output_text: JSON.stringify(validation()),
         usage: { input_tokens: 50, output_tokens: 20, total_tokens: 70 },
       });
     },
+    onAttempt: async ({ maximumOutputTokens }) => {
+      const reservation = budget.reserveAttempt(5);
+      events.push(["reserve", maximumOutputTokens]);
+      return reservation;
+    },
+    onUsage: async ({ reservation, usage }) => {
+      budget.settleAttempt(reservation, meteredModelCostCents({ model: GROUNDING_VALIDATOR_MODEL, usage }));
+      events.push(["usage", usage.inputTokens, usage.outputTokens]);
+    },
   });
   assert.equal(bodies.length, 2);
   assert.equal(bodies[0].model, GROUNDING_VALIDATOR_MODEL);
   assert.equal(bodies[0].store, false);
   assert.equal(bodies[0].reasoning.effort, "high");
+  assert.equal(bodies[0].max_output_tokens, 12_000);
   assert.equal(bodies[0].text.format.strict, true);
+  assert.deepEqual(events, [["reserve", 12_000], ["usage", 50, 20], ["reserve", 12_000], ["usage", 50, 20]]);
+  assert.equal(budget.spentCents, 2);
   assert.equal(result.validation.results[0].verdict, "supported");
+});
+
+test("validator budget denial is propagated without another provider retry", async () => {
+  let providerCalls = 0;
+  await assert.rejects(
+    () => runGroundingValidator(claimPacket(), {
+      apiKey: "test-key",
+      maxAttempts: 3,
+      fetchImpl: async () => { providerCalls += 1; return response(200, {}); },
+      onAttempt: async () => { throw new ResumePipelineError("generation_budget_exhausted", "ceiling"); },
+    }),
+    (error) => error.code === "generation_budget_exhausted",
+  );
+  assert.equal(providerCalls, 0);
+});
+
+test("failed budget persistence dispatches no validator request", async () => {
+  let providerCalls = 0;
+  await assert.rejects(
+    () => runGroundingValidator(claimPacket(), {
+      apiKey: "test-key",
+      fetchImpl: async () => { providerCalls += 1; return response(200, {}); },
+      onAttempt: async () => { throw new Error("generation spend write failed"); },
+    }),
+    (error) => error.code === "VALIDATOR_RETRIES_EXHAUSTED",
+  );
+  assert.equal(providerCalls, 0);
 });
 
 test("OpenAI receives its supported schema projection while local validation stays strict", () => {
@@ -481,8 +560,8 @@ test("a narrowing rewrite is independently revalidated before it can survive", a
   assert.equal(result.history.length, 2);
 });
 
-test("grounding validation splits large documents into bounded parallel batches", async () => {
-  const claims = Array.from({ length: GROUNDING_VALIDATOR_BATCH_SIZE * 2 + 1 }, (_, index) => ({
+test("grounding validation limits concurrent batches so settled budget can fund a large document", async () => {
+  const claims = Array.from({ length: GROUNDING_VALIDATOR_BATCH_SIZE * 10 + 1 }, (_, index) => ({
     id: `claim-${index + 1}`,
     text: `Supported fact ${index + 1}.`,
     evidence: [{
@@ -495,13 +574,22 @@ test("grounding validation splits large documents into bounded parallel batches"
     }],
   }));
   let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let persistedReservations = 0;
+  const budget = createGenerationBudget({ deadlineAt: 10_000, now: () => 1_000 });
   const result = await validateClaimsToCompletion(claims, {
     apiKey: "test-key",
     fetchImpl: async (_url, init) => {
       calls += 1;
+      assert.ok(persistedReservations >= calls);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
       const body = JSON.parse(init.body);
       const payload = body.input[1].content[0].text.match(/<UNTRUSTED_CLAIM_PACKETS_JSON>\n([\s\S]+)\n<\/UNTRUSTED_CLAIM_PACKETS_JSON>/u)[1];
       const batch = JSON.parse(payload).claims;
+      inFlight -= 1;
       return response(200, {
         output_text: JSON.stringify({
           schema_version: "raydar.resume.grounding-validation.v1",
@@ -513,10 +601,21 @@ test("grounding validation splits large documents into bounded parallel batches"
             reason_code: "direct_support",
           })),
         }),
+        usage: { input_tokens: 50, output_tokens: 20, total_tokens: 70 },
       });
     },
+    onAttempt: async () => {
+      const reservation = budget.reserveAttempt(20);
+      persistedReservations += 1;
+      return reservation;
+    },
+    onUsage: async ({ reservation, usage }) => {
+      budget.settleAttempt(reservation, meteredModelCostCents({ model: GROUNDING_VALIDATOR_MODEL, usage }));
+    },
   });
-  assert.equal(calls, 3);
+  assert.equal(calls, 11);
+  assert.equal(maxInFlight, GROUNDING_VALIDATOR_MAX_CONCURRENT_BATCHES);
+  assert.equal(budget.spentCents, 11);
   assert.equal(result.claims.length, claims.length);
-  assert.equal(result.history.length, 3);
+  assert.equal(result.history.length, 11);
 });

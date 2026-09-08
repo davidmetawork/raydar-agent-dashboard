@@ -12,12 +12,12 @@ export class ModelProviderError extends Error {
 
 export const TRANSIENT_PROVIDER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 
-export function safeProviderError(provider, status, code = "MODEL_PROVIDER_ERROR") {
+export function safeProviderError(provider, status, code = "MODEL_PROVIDER_ERROR", usage = null) {
   const retryable = TRANSIENT_PROVIDER_STATUSES.has(Number(status));
   return new ModelProviderError(
     code,
     `${provider} model request failed${status ? ` with status ${status}` : ""}`,
-    { retryable, status: Number(status) || null, provider },
+    { retryable, status: Number(status) || null, provider, details: usage ? { usage } : null },
   );
 }
 
@@ -28,7 +28,11 @@ export async function responseJson(response, provider) {
       provider,
     });
   }
-  if (!response.ok) throw safeProviderError(provider, response.status);
+  if (!response.ok) {
+    let body = null;
+    try { body = await response.json(); } catch { /* status remains authoritative */ }
+    throw safeProviderError(provider, response.status, "MODEL_PROVIDER_ERROR", body?.usage || null);
+  }
   try {
     return await response.json();
   } catch (cause) {
