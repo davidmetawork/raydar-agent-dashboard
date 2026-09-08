@@ -113,7 +113,8 @@ function validateChanges(action, changes) {
     else if (field === "fundingRounds" && !validStringList(value, FUNDING_ROUNDS)) return false;
     else if (field === "visaAuthorization" && !VISA_AUTHORIZATIONS.has(value)) return false;
     else if (field === "callTranscript" && !(typeof value === "string" && value.trim().length > 0 && value.length <= 8_000)) return false;
-    else if (!["fullName", "email", "phone", "linkedinUrl", "locations", "minimumBaseSalary", "workplaces", "fundingRounds", "visaAuthorization", "callTranscript"].includes(field)) return false;
+    else if ((field === "roleTitle" || field === "company") && !(typeof value === "string" && value.trim().length > 0 && value.length <= 200)) return false;
+    else if (!["fullName", "email", "phone", "linkedinUrl", "locations", "minimumBaseSalary", "workplaces", "fundingRounds", "visaAuthorization", "callTranscript", "roleTitle", "company"].includes(field)) return false;
   }
   return true;
 }

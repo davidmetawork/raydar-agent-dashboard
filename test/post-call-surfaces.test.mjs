@@ -9,7 +9,10 @@ const review = await readFile(new URL("../review.html", import.meta.url), "utf8"
 const reviewProxy = await readFile(new URL("../api/post-call/review.mjs", import.meta.url), "utf8");
 const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
 
-test("Review is wired through all dashboard registries without Mailroom", () => {
+// Mailroom shipped as its own tab and route after this test was written, so the
+// two "no Mailroom anywhere" assertions it used to carry were removed rather
+// than kept failing against reality.
+test("Review is wired through all dashboard registries", () => {
   const views = JSON.parse(index.match(/const VIEWS=(\[[^\]]+\]);/)[1]);
   assert.ok(views.includes("review"));
   assert.match(index, /id="tab-review"/);
@@ -17,8 +20,6 @@ test("Review is wired through all dashboard registries without Mailroom", () => 
   assert.match(index, /\{name:"review",label:"Review",group:"People"\}/);
   assert.ok(vercel.rewrites.some((row) => row.source === "/review" && row.destination === "/review.html"));
   assert.ok(vercel.functions["api/post-call/*.mjs"]);
-  assert.doesNotMatch(index, /id="tab-mailroom"|id="view-mailroom"/);
-  assert.ok(!vercel.rewrites.some((row) => row.source === "/mailroom"));
 });
 
 test("the existing Emails and Master Inbox surfaces remain registered", () => {

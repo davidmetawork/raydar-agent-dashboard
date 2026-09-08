@@ -7,12 +7,13 @@
 <link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
 <link rel="stylesheet" href="/fonts/pp-grafier.css" />
 <script src="/auth-session.js"></script>
+<script src="/review-controls.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{--cream:#F6F3E9;--ink:#16140F;--ink2:#57534A;--ink3:#8C877B;--card:#fff;--line:#E9E3D5;--soft:#EFEADE;--orange:#FF5E00;--good:#119865;--goodbg:#E4F4EC;--warn:#B66A10;--warnbg:#FAEEDC;--bad:#D84242;--badbg:#FBE9E9;--violet:#6658DA;--violetbg:#ECEAFE;--muted:#8C877B;--mutedbg:#EFEADE;--shadow:0 1px 2px rgba(20,16,8,.04),0 12px 30px -18px rgba(20,16,8,.22)}
   *{box-sizing:border-box}html,body{margin:0}body{background:var(--cream);color:var(--ink);font:14px "Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;padding:28px clamp(14px,3.5vw,46px) 80px}body.embed{padding-top:8px}.wrap{max-width:1240px;margin:0 auto}h1,h2,h3{font-family:"PP Grafier Display",Georgia,serif;font-weight:400}a{color:inherit}.eyebrow{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--orange)}
   header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:16px}h1{font-size:36px;line-height:1;margin:4px 0 0}.sub{color:var(--ink2);margin:8px 0 0;max-width:720px}body.embed h1,body.embed .sub{display:none}body.embed header{margin-bottom:9px}
-  .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.button{appearance:none;border:0;border-radius:10px;padding:9px 13px;font:750 12px "Inter Variable";cursor:pointer}.button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.button{appearance:none;border:0;border-radius:10px;padding:9px 13px;font:750 12px "Inter Variable";cursor:pointer}.button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}.button.primary{background:var(--orange);color:#fff}.button.warn{background:var(--warnbg);color:var(--warn)}.button.small{padding:6px 9px;font-size:11px}.button:disabled{opacity:.45;cursor:default}
   .fresh{display:flex;align-items:center;gap:7px;color:var(--ink3);font-size:12px}.fresh .dot{width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px var(--goodbg)}.fresh .dot.stale{background:var(--warn);box-shadow:0 0 0 3px var(--warnbg)}
   .banner{display:none;border-radius:11px;padding:11px 13px;margin-bottom:14px}.banner.on{display:block}.banner.bad{background:var(--badbg);color:var(--bad)}.banner.warn{background:var(--warnbg);color:var(--warn)}.banner.good{background:var(--goodbg);color:var(--good)}
   .sec-head{display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 12px}.sec-head h2{font-size:22px;margin:0}.sec-head span{font-size:12px;color:var(--ink3)}
@@ -37,6 +38,43 @@
   .pill.violet{background:var(--violetbg);color:var(--violet)}.pill.violet .d{background:var(--violet)}
   .empty{padding:26px;text-align:center;color:var(--ink3)}
   .note{font-size:11.5px;color:var(--ink3);margin:8px 2px 0}
+  /* The inline fix panel: one full-width block directly under its row, so a
+     blocked follow-up is corrected where it is seen instead of on another tab. */
+  .row-panel{border-top:1px solid var(--soft);background:#FAF8F2;padding:18px 16px 20px;position:relative}
+  .row-panel .panel-close{position:absolute;top:12px;right:14px;line-height:1}
+  .panel-loading{display:flex;align-items:center;gap:9px;color:var(--ink2);font-weight:650}
+  .spinner{width:14px;height:14px;border:2px solid #D7D1C4;border-top-color:var(--orange);border-radius:50%;animation:spin .7s linear infinite;flex:none}@keyframes spin{to{transform:rotate(360deg)}}
+  .fix{max-width:640px}
+  .fix-kicker{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--orange)}
+  .fix-title{font:400 22px/1.2 "PP Grafier Display",Georgia,serif;margin:5px 0 7px}
+  .fix-copy{color:var(--ink2);margin:0 0 4px}
+  .control-block{margin-top:16px}
+  .hint{font-size:11.5px;color:var(--ink3);margin-top:7px}
+  .profiles{display:grid;grid-template-columns:1fr;gap:9px}
+  .profile{border:1px solid var(--line);border-radius:12px;background:#fff;padding:13px;text-align:left;cursor:pointer}
+  .profile[aria-disabled="true"]{cursor:default;opacity:.6}
+  .profile:hover,.profile.selected{border-color:var(--orange);box-shadow:0 0 0 2px #FFE6D6}
+  .profile b{display:block;font-size:14px}
+  .profile span{display:block;color:var(--ink3);font-size:11.5px;margin-top:4px;overflow-wrap:anywhere}
+  .profile .call-attached{color:var(--good);font-weight:800}
+  .profile .call-missing{color:var(--ink3);font-weight:650}
+  .profile-title{display:flex;align-items:center;gap:8px}
+  .profile-title b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .profile .paraform-link{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;flex:none}
+  .profile .paraform-link img{display:block;width:18px;height:18px;border-radius:50%}
+  .fields{display:grid;grid-template-columns:1fr;gap:12px}
+  .field label{display:block;color:var(--ink);font-size:12px;font-weight:800;margin:0 0 6px}
+  .field input,.field select,.field textarea{width:100%;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit;font-size:14px;padding:11px 12px}
+  .field textarea{min-height:140px;resize:vertical}
+  .lookup{display:grid;gap:10px}
+  .lookup-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+  .lookup-row input{min-width:0;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit;padding:11px 12px}
+  .lookup-or{display:flex;align-items:center;gap:9px;color:var(--ink3);font-size:11px}
+  .lookup-or:before,.lookup-or:after{content:"";height:1px;background:var(--line);flex:1}
+  .search-state{display:none;color:var(--ink2);font-size:11.5px;font-weight:700}.search-state.on{display:block}
+  .review-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:18px}
+  .toast{position:fixed;right:20px;bottom:20px;max-width:420px;background:var(--ink);color:#fff;border-radius:11px;padding:11px 14px;box-shadow:var(--shadow);z-index:50}
+  .toast[hidden]{display:none}.toast.bad{background:var(--bad)}
   .gate{position:fixed;inset:0;background:rgba(246,243,233,.97);display:none;align-items:flex-start;justify-content:center;flex-direction:column;gap:14px;z-index:40;padding:32px 20px 20px}
   .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
   @media(max-width:900px){.row{grid-template-columns:1fr auto;row-gap:6px}.row .when,.row .type,.row .what,.row .links{grid-column:1/-1}.row .links{justify-content:flex-start}.pill{white-space:normal;overflow-wrap:anywhere;max-width:100%}}
@@ -68,23 +106,29 @@
     <div class="list" id="earlier"><div class="empty">Loading…</div></div>
   </section>
 </main>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <script>
 const $=(id)=>document.getElementById(id);
 const params=new URLSearchParams(location.search);if(params.has("embed"))document.body.classList.add("embed");
-const STATE={config:null,actor:null,refreshTimer:null,generatedAt:null};
+// panelOpen holds the reviewId of the one open fix panel. While it is set the
+// 30s refresh is paused: re-rendering the lists under David mid-edit would
+// throw away whatever he had typed.
+const STATE={config:null,actor:null,refreshTimer:null,generatedAt:null,calls:[],panelOpen:null,panelItem:null,panelBusy:false,identityQuery:"",panelDraft:null};
+const RC=window.RaydarReviewControls;
 const PACIFIC="America/Los_Angeles";
 const esc=(value)=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label=(value)=>String(value||"").replace(/[_-]+/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 
 function showBanner(message,kind="warn"){const el=$("banner");el.className=`banner on ${kind}`;el.textContent=message}
 function clearBanner(){$("banner").className="banner"}
+function toast(message,bad=false){const el=$("toast");el.textContent=message;el.className="toast"+(bad?" bad":"");el.hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>{el.hidden=true},5000)}
 function setConn(ok){$("fdot").className="dot"+(ok?"":" stale")}
 
 async function api(url){
   const response=await fetch(url,{credentials:"same-origin",cache:"no-store",headers:{"content-type":"application/json"}});
   const body=await response.json().catch(()=>({}));
   if(response.status===401){showGate();const error=new Error("auth");error.status=401;throw error}
-  if(response.status===403){const error=new Error(body.detail||body.error||"Access denied");error.status=403;throw error}
+  if(response.status===403){const error=new Error(RC.plainError(body.detail||body.error));error.status=403;error.serverMessage=String(body.detail||body.error||"");throw error}
   return {status:response.status,body};
 }
 
@@ -125,14 +169,20 @@ function resultPill(call){
   return `<span class="pill ${tone}"><span class="d"></span>${esc(result.label)}</span>`;
 }
 
+// A call is fixable from this tab when it is parked in review: it has a review
+// id and its result is anything other than the green "sent" tone.
+function isFixable(call){return Boolean(call.reviewId)&&call.result?.tone!=="good"}
+
 function callRow(call){
   const name=call.candidateName||"Candidate";
   const recruiter=call.assignedRecruiter?`<span class="sub" title="Assigned recruiter of record — not necessarily who hosted the call">Assigned: ${esc(call.assignedRecruiter)}</span>`:"";
   const detail=call.result?.detail?`<span class="detail">${esc(call.result.detail)}</span>`:"";
   const paraformUrl=paraformCallUrl(call.meetingId);
+  const fixable=isFixable(call),open=fixable&&STATE.panelOpen===call.reviewId;
   const links=[
     paraformUrl?`<a href="${esc(paraformUrl)}" target="_blank" rel="noopener noreferrer">Paraform call ↗</a>`:"",
-    call.reviewId?`<a href="/#review" target="_blank" rel="noopener noreferrer" title="Open the Review board (no direct deep link to this item yet)">Review board ↗</a>`:"",
+    fixable?`<button class="button ghost small" data-fix="${esc(call.reviewId)}" aria-expanded="${open}">${open?"Close":"Fix"}</button>`:"",
+    !fixable&&call.reviewId?`<a href="/#review" target="_blank" rel="noopener noreferrer" title="Open the Review board (no direct deep link to this item yet)">Review board ↗</a>`:"",
   ].filter(Boolean).join("");
   return `<div class="row">
     <div class="who">${esc(name)}${recruiter}</div>
@@ -140,7 +190,138 @@ function callRow(call){
     <div class="type">${esc(callTypeLabel(call))}</div>
     <div class="what">${resultPill(call)}${detail}</div>
     <div class="links">${links||'<span class="sub" style="color:var(--ink3)">—</span>'}</div>
-  </div>`;
+  </div>${open?`<div class="row-panel" id="row-panel">${panelHtml()}</div>`:""}`;
+}
+
+// ---- The inline fix panel ----------------------------------------------
+// Everything a blocked follow-up needs is rendered by the shared Review
+// controls module; this page only owns opening, closing, and what to do after
+// a successful action.
+
+function panelHtml(){
+  if(!STATE.panelItem)return `<button class="button ghost small panel-close" data-panel-close="1" aria-label="Close">×</button><div class="panel-loading"><span class="spinner" aria-hidden="true"></span>Loading what is blocking this…</div>`;
+  return `<button class="button ghost small panel-close" data-panel-close="1" aria-label="Close">×</button>${RC.renderPanel(STATE.panelItem,STATE.actor,{identityQuery:STATE.identityQuery})}`;
+}
+
+function bindPanel(){
+  const root=$("row-panel");
+  if(!root)return;
+  root.querySelectorAll("[data-panel-close]").forEach(el=>{el.onclick=closePanel});
+  RC.bindPanel(root,{onAction:doAction,onSearch:searchProfiles,onProfileLink:useProfileLink,onReload:()=>{keepDraft();loadPanelItem(STATE.panelOpen,STATE.identityQuery)}});
+  reportHeight();
+}
+
+// A redraw (a profile search, a reload of the candidate list) rebuilds the
+// whole panel, so anything already typed into a field on this row is put back
+// afterwards instead of being silently thrown away.
+function renderPanelOnly(){const root=$("row-panel");if(!root)return;const draft=STATE.panelDraft;root.innerHTML=panelHtml();bindPanel();if(draft)RC.applyChanges($("row-panel"),draft)}
+
+function openPanel(reviewId,presetItem=null){
+  if(STATE.panelOpen===reviewId)return closePanel();
+  STATE.panelOpen=reviewId;STATE.panelItem=presetItem;STATE.identityQuery="";STATE.panelDraft=null;
+  renderCalls();
+  $("ftxt").textContent="Paused while you fix this";
+  if(presetItem)return;
+  loadPanelItem(reviewId);
+}
+
+function closePanel(){
+  STATE.panelOpen=null;STATE.panelItem=null;STATE.identityQuery="";STATE.panelBusy=false;STATE.panelDraft=null;
+  renderCalls();reportHeight();
+  load();
+}
+
+async function loadPanelItem(reviewId,identitySearch=""){
+  try{
+    const {item,actor}=await RC.fetchItem(reviewId,identitySearch);
+    if(STATE.panelOpen!==reviewId)return;
+    if(actor)STATE.actor=actor;
+    STATE.panelItem=item;
+    renderPanelOnly();
+  }catch(error){
+    if(error.status===401)return showGate();
+    if(STATE.panelOpen!==reviewId)return;
+    toast(error.message||"Couldn't load this follow-up.",true);
+    STATE.panelOpen=null;STATE.panelItem=null;renderCalls();reportHeight();
+  }
+}
+
+// Snapshot whatever is typed into this panel right now, so a redraw can
+// restore it (RC.collectChanges with no action returns field values only).
+function keepDraft(){const root=$("row-panel");if(root)STATE.panelDraft={...(STATE.panelDraft||{}),...RC.collectChanges(root)}}
+
+function setPanelBusy(busy){STATE.panelBusy=busy;RC.setBusy($("row-panel"),busy)}
+
+async function searchProfiles(){
+  if(STATE.panelBusy||!STATE.panelItem)return;
+  const root=$("row-panel"),input=root?.querySelector('[data-role="profile-search"]');
+  const query=input?.value.trim()||"";
+  if(query.length<2)return toast("Enter at least two characters.",true);
+  STATE.identityQuery=query;
+  keepDraft();
+  const status=root?.querySelector('[data-role="profile-search-status"]');
+  if(status){status.textContent="Searching Paraform…";status.classList.add("on")}
+  setPanelBusy(true);
+  try{await loadPanelItem(STATE.panelOpen,query)}
+  finally{setPanelBusy(false)}
+}
+
+function useProfileLink(){
+  const value=$("row-panel")?.querySelector('[data-role="profile-link"]')?.value;
+  const candidateUserId=RC.profileIdFromLink(value);
+  if(!candidateUserId)return toast("Paste a valid Paraform candidate profile link.",true);
+  doAction("select_profile",{candidateUserId});
+}
+
+async function doAction(action,overrideChanges=null){
+  if(STATE.panelBusy||!STATE.panelItem)return;
+  const root=$("row-panel"),item=STATE.panelItem,reviewId=item.id;
+  if(action==="attach_resume")return doAttachResume();
+  const changes=overrideChanges||RC.collectChanges(root,action);
+  if(action==="select_profile"&&!changes.candidateUserId)return toast("Choose the right Paraform profile first.",true);
+  setPanelBusy(true);
+  try{
+    const {cancelled,approveSend}=await RC.runAction({item,action,changes,actor:STATE.actor});
+    if(cancelled)return;
+    toast(approveSend?"Email approved, Mailroom is sending it":"Saved, the follow-up is continuing");
+    await afterAction(reviewId);
+  }catch(error){await actionFailed(error)}
+  finally{setPanelBusy(false)}
+}
+
+async function doAttachResume(){
+  const file=$("row-panel")?.querySelector('[data-role="resume"]')?.files?.[0];
+  const item=STATE.panelItem,reviewId=item.id;
+  setPanelBusy(true);
+  try{
+    await RC.attachResume(item,file);
+    toast("Saved, the follow-up is continuing");
+    await afterAction(reviewId);
+  }catch(error){await actionFailed(error)}
+  finally{setPanelBusy(false)}
+}
+
+// The action already resumed the workflow, so the row's pill can change
+// immediately. If the obligation parks again on a different blocker, reopen the
+// panel on that new blocker rather than leaving David to hunt for it.
+async function afterAction(reviewId){
+  STATE.panelOpen=null;STATE.panelItem=null;STATE.identityQuery="";STATE.panelDraft=null;
+  await load();
+  let next=null;
+  try{next=(await RC.fetchItem(reviewId)).item}catch{next=null}
+  const stillListed=STATE.calls.some(call=>call.reviewId===reviewId);
+  if(next&&stillListed&&next.status==="open"&&(next.allowedActions||[]).length)openPanel(reviewId,next);
+  else reportHeight();
+}
+
+async function actionFailed(error){
+  if(error.status===401)return showGate();
+  if(error.status===409){
+    showBanner("This person changed since you opened them; refreshing.","warn");
+    if(STATE.panelOpen)await loadPanelItem(STATE.panelOpen);
+    return;
+  }
+  toast(error.message||"That didn't work.",true);
 }
 
 // Same plain-language map the existing Agent Calls tab uses (index.html), so
@@ -172,6 +353,23 @@ function renderList(elId,rows,emptyText){
   $(elId).innerHTML=rows.length?rows.join(""):`<div class="empty">${esc(emptyText)}</div>`;
 }
 
+// Rendering is split from loading so an open fix panel can be redrawn without
+// refetching, and so a background refresh can update STATE without touching
+// the DOM the operator is typing into.
+function renderCalls(){
+  const todayKey=pacificDateKey(new Date().toISOString());
+  const today=[],earlier=[];
+  for(const call of STATE.calls)(pacificDateKey(call.callTimeIso)===todayKey?today:earlier).push(call);
+  const byTimeDesc=(a,b)=>Date.parse(b.callTimeIso||0)-Date.parse(a.callTimeIso||0);
+  today.sort(byTimeDesc);earlier.sort(byTimeDesc);
+  renderList("today",today.map(callRow),"No calls yet today.");
+  renderList("earlier",earlier.map(callRow),"No earlier calls in this window.");
+  $("today-count").textContent=today.length?`${today.length} today`:"";
+  $("earlier-count").textContent=earlier.length?`${earlier.length} in the last few days`:"";
+  document.querySelectorAll("[data-fix]").forEach(el=>{el.onclick=()=>openPanel(el.dataset.fix)});
+  bindPanel();
+}
+
 async function loadCalls(){
   const to=new Date();
   const from=new Date(to.getTime()-4*24*60*60*1000); // 4 days back covers Today + a few Earlier days
@@ -197,19 +395,8 @@ async function loadCalls(){
       return "error";
     }
     STATE.generatedAt=body.generatedAt||STATE.generatedAt;
-    const calls=body.calls;
-    const todayKey=pacificDateKey(new Date().toISOString());
-    const today=[],earlier=[];
-    for(const call of calls){
-      const key=pacificDateKey(call.callTimeIso);
-      (key===todayKey?today:earlier).push(call);
-    }
-    const byTimeDesc=(a,b)=>Date.parse(b.callTimeIso||0)-Date.parse(a.callTimeIso||0);
-    today.sort(byTimeDesc);earlier.sort(byTimeDesc);
-    renderList("today",today.map(callRow),"No calls yet today.");
-    renderList("earlier",earlier.map(callRow),"No earlier calls in this window.");
-    $("today-count").textContent=today.length?`${today.length} today`:"";
-    $("earlier-count").textContent=earlier.length?`${earlier.length} in the last few days`:"";
+    STATE.calls=body.calls;
+    renderCalls();
     return "ok";
   }catch(error){
     if(error.status===401)return "auth";
@@ -234,6 +421,9 @@ async function loadUpcoming(){
 }
 
 async function load(){
+  // A panel open means someone is mid-correction; the lists stay exactly as
+  // they are until it closes, so nothing typed is ever lost to a refresh.
+  if(STATE.panelOpen)return;
   clearBanner();
   $("ftxt").textContent="Refreshing…";
   const [callsState,upcomingOk]=await Promise.all([loadCalls(),loadUpcoming()]);
@@ -262,7 +452,7 @@ async function init(){
   await load();
   startRefresh();
 }
-$("refresh").onclick=load;
+$("refresh").onclick=()=>{if(STATE.panelOpen)return closePanel();load()};
 window.addEventListener("resize",reportHeight);
 init();
 </script>
