@@ -5,9 +5,11 @@
 // "Queued to send" to "Emailed") and never fetches cards while scrolling.
 
 import { cors, requireAuth } from "./_lib/core.mjs";
+import { gzipSync } from "node:zlib";
 import { readActivePublication, readPublishedArtifacts, verifyGeneration } from "./_lib/generation.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
 import { sourceCardsOnly } from "./_lib/rich-profile.mjs";
+import { applicantProblemsV2, applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
 import {
   partitionByProfileReceipt,
   profileCacheSummary,
@@ -24,6 +26,34 @@ const text = (value) => {
   const result = typeof value === "string" ? value.trim() : "";
   return result || null;
 };
+
+function sourceDetails(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || text(value.state) !== "pending_source_review"
+    || text(value.provenance) !== "applicant_hub"
+    || text(value.verification) !== "unverified_source"
+    || !value.profile || typeof value.profile !== "object" || Array.isArray(value.profile)) return null;
+  const history = value.profile;
+  const experiences = (Array.isArray(history.experiences) ? history.experiences : []).slice(0, 12)
+    .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => ({ roleTitle: text(row.roleTitle), companyName: text(row.companyName),
+      start: text(row.start), end: text(row.end), current: row.current === true }))
+    .filter((row) => row.roleTitle || row.companyName);
+  const education = (Array.isArray(history.education) ? history.education : []).slice(0, 12)
+    .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => ({ school: text(row.school), degree: text(row.degree), start: text(row.start), end: text(row.end) }))
+    .filter((row) => row.school || row.degree);
+  return Object.freeze({
+    state: "pending_source_review",
+    label: "Source details pending review",
+    provenance: "applicant_hub",
+    verification: "unverified_source",
+    ruleEligible: false,
+    sourceObservationId: text(value.sourceObservationId), observedAt: text(value.observedAt),
+    historyState: text(value.historyState),
+    profile: Object.freeze({ title: text(history.title), location: text(history.location), experiences, education }),
+  });
+}
 
 function profilePreparingRows(snapshot) {
   if (!Array.isArray(snapshot?.profilePreparing)) return [];
@@ -43,6 +73,7 @@ function profilePreparingRows(snapshot) {
       addedAt: text(row.addedAt),
       receivedAt: text(row.receivedAt),
       reason: text(row.reason),
+      ...(sourceDetails(row.sourceDetails) ? { sourceDetails: sourceDetails(row.sourceDetails) } : {}),
       // A preparation stub is never actionable even if an upstream writer
       // regresses. Expose the fact as false rather than the upstream value.
       interviewAllowed: false,
@@ -50,6 +81,17 @@ function profilePreparingRows(snapshot) {
 }
 
 export const config = { maxDuration: 30 };
+
+export function respondApplicantFeed(req, res, body) {
+  const json = JSON.stringify(body);
+  if (Buffer.byteLength(json) > 1_000_000 && /\bgzip\b/i.test(req.headers?.["accept-encoding"] || "")) {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    return res.status(200).end(gzipSync(Buffer.from(json), { level: 9 }));
+  }
+  return res.status(200).json(body);
+}
 
 export function createFeedHandler({
   corsHandler = cors,
@@ -99,6 +141,10 @@ export function createFeedHandler({
         ...(Array.isArray(artifacts.queue?.rows) ? { queue: artifacts.queue.rows } : {}),
       } : null;
       const preparingRows = profilePreparingRows(published);
+      // V2 is an additive Core-owned read projection. Legacy snapshot rows stay
+      // authoritative for every existing screen until Core publishes it.
+      const applicantRowsV2 = applicantRowsV2FromSnapshot(published);
+      const problems = applicantProblemsV2(applicantRowsV2, published?.problems);
       // ONE STALE ROW MUST NOT BLANK THE TAB (2026-09-04). The publish-time
       // fence in sync.mjs is what keeps an unbacked generation from ever
       // becoming active; by the time we read, this generation was already
@@ -110,17 +156,22 @@ export function createFeedHandler({
       // not actionable; counted, so never silently gone.
       const partition = partitionByProfileReceipt(published, sourceProfileReceipts, { now: now() });
       const joined = partition.snapshot;
+      // These complete projections have their own top-level response fields.
+      // Keep one copy on the wire while retaining the full immutable artifact.
+      const { applicantRowsV2: _rowsV2, problems: _problems, ...browserSnapshot } = joined || {};
       const profileCache = profileCacheSummary(joined);
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.
-      return res.status(200).json({
+      return respondApplicantFeed(req, res, {
         ok: true,
-        snapshot: joined,
+        snapshot: joined ? browserSnapshot : null,
         decisions,
         acks,
         photos,
         cards: sourceCardsOnly(cards),
+        applicantRowsV2,
+        problems,
         counts: artifacts.counts,
         pipeline: pipeline ?? null,
         profileCache,

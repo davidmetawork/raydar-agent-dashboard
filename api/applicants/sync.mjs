@@ -45,9 +45,9 @@ import {
 
 export const config = { maxDuration: 30 };
 
-// The loop caps the snapshot on its side (drops per-step detail); this guard
-// keeps a buggy publisher from parking a multi-megabyte blob in KV.
-export const MAX_SNAPSHOT_BYTES = 1_800_000;
+// The complete graph projection measured 16.4 MB for 4,944 applicants on
+// September 8. Bound its decoded body separately from gzip wire and storage.
+export const MAX_SNAPSHOT_BYTES = 30_000_000;
 // The authenticated publisher uses a bounded gzip+base64 transport envelope
 // once the exact JSON body would exceed Vercel's request ceiling. These are
 // decoded logical limits; the wire envelope has its own smaller cap below.
@@ -81,10 +81,13 @@ export const MAX_SNAPSHOT_BYTES = 1_800_000;
 // nothing in this log to point at it. It is now 10,000,000, equal to
 // MAX_TRANSPORT_DECODED_BYTES below, and the publish-size suite pins it as the
 // fourth member of the ordering chain. RAISE THEM TOGETHER OR NOT AT ALL.
+// September 8: Core and Monitor now share a 32 MB logical ceiling. The
+// measured 17.1 MB complete body compresses to 2.1 MB at level 9, within the
+// unchanged wire cap. Immutable generation artifacts are stored compressed.
 export const MAX_QUEUE_BYTES = 9_000_000;
-export const MAX_PUBLISH_BYTES = 10_000_000;
+export const MAX_PUBLISH_BYTES = 32_000_000;
 export const MAX_TRANSPORT_COMPRESSED_BYTES = 2_500_000;
-export const MAX_TRANSPORT_DECODED_BYTES = 10_000_000;
+export const MAX_TRANSPORT_DECODED_BYTES = 32_000_000;
 const MONITOR_TRANSPORT_VERSION = "applicant-core-monitor-gzip-v1";
 // Delivery is a separate state machine. `blocked` and `invited` are retained
 // for the existing loop; the preparation states make a saved Interview intent
@@ -764,6 +767,21 @@ export function createSyncHandler({
             } : {}),
           });
         }
+        if (String(req.query?.ruleRuns || "") === "1") {
+          const [commands, commandAcks] = await Promise.all([
+            readHash(K.ruleRunCommands), readHash(K.ruleRunAcks),
+          ]);
+          if (!commands || typeof commands !== "object" || Array.isArray(commands)
+            || !commandAcks || typeof commandAcks !== "object" || Array.isArray(commandAcks)) {
+            return res.status(503).json({ ok: false, error: "rule_run_commands_unavailable" });
+          }
+          const pending = Object.values(commands)
+            .filter((command) => command && typeof command === "object"
+              && commandAcks[command.runId]?.commandDigest !== command.commandDigest)
+            .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")))
+            .slice(0, 32);
+          return res.status(200).json({ ok: true, ruleRunCommands: pending });
+        }
         const [decisions, acks] = await Promise.all([
           readHash(K.decisions),
           readHash(K.acks),
@@ -866,6 +884,35 @@ export function createSyncHandler({
         const decoded = decodeTransportBody(body);
         if (!decoded.ok) return res.status(400).json({ ok: false, error: decoded.error });
         body = decoded.body;
+      }
+
+      // Core acknowledges a sealed manual Rules manifest on the same
+      // authenticated channel used for decisions. This branch is isolated so
+      // an acknowledgement cannot ride with a publication or profile write.
+      if (own(body, "ruleRunAcks")) {
+        if (Object.keys(body).length !== 1 || !body.ruleRunAcks
+          || typeof body.ruleRunAcks !== "object" || Array.isArray(body.ruleRunAcks)
+          || Object.keys(body.ruleRunAcks).length > 32) {
+          return res.status(400).json({ ok: false, error: "invalid_rule_run_acks" });
+        }
+        const commands = await readHash(K.ruleRunCommands);
+        const accepted = {};
+        for (const [runId, ack] of Object.entries(body.ruleRunAcks)) {
+          const command = commands?.[runId];
+          if (!/^[0-9a-f-]{36}$/iu.test(runId) || ack?.status !== "sealed"
+            || ack.runId !== runId || ack.commandDigest !== command?.commandDigest
+            || ack.manifestDigest !== command?.manifestDigest
+            || ack.previewDigest !== command?.manifest?.previewDigest) {
+            return res.status(409).json({ ok: false, error: "rule_run_ack_mismatch", runId });
+          }
+          accepted[runId] = {
+            status: "sealed", runId, commandDigest: ack.commandDigest,
+            manifestDigest: ack.manifestDigest, previewDigest: ack.previewDigest,
+            acknowledgedAt: now(),
+          };
+        }
+        if (Object.keys(accepted).length) await writeHash(K.ruleRunAcks, accepted);
+        return res.status(200).json({ ok: true, acks: accepted });
       }
 
       // The existing publisher may derive compact facts from retained caches.

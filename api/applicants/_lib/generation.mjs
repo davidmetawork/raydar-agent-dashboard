@@ -7,6 +7,7 @@
 // when the pointer, artifacts, or digest disagree.
 
 import { createHash, randomUUID } from "node:crypto";
+import { gzipSync, gunzipSync } from "node:zlib";
 import {
   compareAndSetJson,
   getJson,
@@ -24,7 +25,38 @@ export const DIGEST_RE = /^[a-f0-9]{64}$/i;
 // cap, an oversized queue would sail past sync's clean 413 and then throw in
 // here, surfacing as a 502 store_unavailable — the wrong error, at the wrong
 // layer, after the snapshot artifact had already been written.
-export const MAX_GENERATION_ARTIFACT_BYTES = 12_000_000;
+export const MAX_GENERATION_ARTIFACT_BYTES = 40_000_000;
+const STORED_ARTIFACT_VERSION = "applicant-generation-gzip-v1";
+const MAX_STORED_COMPRESSED_BYTES = 8_000_000;
+
+// Keep the immutable logical artifact and its digest unchanged. Compression is
+// only a storage encoding; legacy plain JSON remains readable.
+export function encodeStoredGenerationArtifact(value) {
+  const decoded = Buffer.from(JSON.stringify(value));
+  if (decoded.length > MAX_GENERATION_ARTIFACT_BYTES) throw new Error("generation_artifact_too_large");
+  if (decoded.length < 1_000_000) return value;
+  const compressed = gzipSync(decoded, { level: 9 });
+  if (compressed.length > MAX_STORED_COMPRESSED_BYTES) throw new Error("generation_storage_too_large");
+  return { storageVersion: STORED_ARTIFACT_VERSION, decodedBytes: decoded.length,
+    sha256: createHash("sha256").update(decoded).digest("hex"), data: compressed.toString("base64") };
+}
+
+export function decodeStoredGenerationArtifact(value) {
+  if (!value?.storageVersion) return value;
+  if (value.storageVersion !== STORED_ARTIFACT_VERSION
+    || !Number.isSafeInteger(value.decodedBytes) || value.decodedBytes < 1
+    || value.decodedBytes > MAX_GENERATION_ARTIFACT_BYTES
+    || !/^[a-f0-9]{64}$/.test(value.sha256 || "") || typeof value.data !== "string"
+    || value.data.length > Math.ceil(MAX_STORED_COMPRESSED_BYTES / 3) * 4) {
+    throw new Error("generation_storage_invalid");
+  }
+  const decoded = gunzipSync(Buffer.from(value.data, "base64"), { maxOutputLength: value.decodedBytes });
+  if (decoded.length !== value.decodedBytes
+    || createHash("sha256").update(decoded).digest("hex") !== value.sha256) {
+    throw new Error("generation_storage_digest_mismatch");
+  }
+  return JSON.parse(decoded.toString("utf8"));
+}
 
 const GENERATION_FIELDS = new Set([
   "generationId",
@@ -321,11 +353,12 @@ export async function readActivePublication({ readJson = getJson } = {}) {
 export async function readPublishedArtifacts(pointer, { readJson = getJson } = {}) {
   if (!validPublication(pointer)) return null;
   const prefix = K.generation(pointer.generationId);
-  const [snapshot, queue, counts] = await Promise.all([
+  const stored = await Promise.all([
     readJson(`${prefix}:snapshot`),
     readJson(`${prefix}:queue`),
     readJson(`${prefix}:counts`),
   ]);
+  const [snapshot, queue, counts] = stored.map(decodeStoredGenerationArtifact);
   const checked = verifyGeneration({ pointer, snapshot, queue, counts });
   return checked.ok ? { pointer, snapshot, queue, counts } : null;
 }
@@ -364,23 +397,24 @@ export async function publishGeneration({
     }
   }
   for (const [key, value] of artifacts) {
-    const result = await writeImmutableJson(key, value);
+    const result = await writeImmutableJson(key, encodeStoredGenerationArtifact(value));
     // SET NX returns null when a generation id was already used.  Re-reading
     // below distinguishes a harmless retry of the same immutable artifact from
     // a collision/corruption.
     if (result === null || result === false || result === 0) {
-      const existing = await readJson(key);
+      const existing = decodeStoredGenerationArtifact(await readJson(key));
       if (stableDigest(existing) !== stableDigest(value)) {
         throw new Error("generation_immutable_collision");
       }
     }
   }
-  const [storedSnapshot, storedQueue, storedCounts, storedMeta] = await Promise.all([
+  const storedArtifacts = await Promise.all([
     readJson(`${prefix}:snapshot`),
     readJson(`${prefix}:queue`),
     readJson(`${prefix}:counts`),
     readJson(`${prefix}:meta`),
   ]);
+  const [storedSnapshot, storedQueue, storedCounts, storedMeta] = storedArtifacts.map(decodeStoredGenerationArtifact);
   const check = verifyGeneration({ pointer, snapshot: storedSnapshot, queue: storedQueue, counts: storedCounts });
   if (!check.ok) throw new Error(check.error);
   if (!validPublication(storedMeta)
@@ -468,6 +502,8 @@ export function interviewDecisionHold(row) {
     return normalizedHold(row.holdReasonCode || row.reasonCode)
       || (row.identityConflict ? "identity_conflict" : row.recipientConflict ? "recipient_conflict" : "policy_hold");
   }
+  if (["hard_hold","stopped"].includes(row.decisionEligibility)) return normalizedHold(row.hardHoldCode)||row.decisionEligibility;
+  if (row.decisionEligibility === "unknown") return "applicant_readiness_pending";
   const candidates = [
     row.hardHoldCode,
     row.hard_hold_code,

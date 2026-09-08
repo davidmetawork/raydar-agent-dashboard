@@ -15,6 +15,8 @@ import {
 import { createCardsHandler, MAX_CARD_IDS } from "../api/applicants/cards.mjs";
 import { createDecisionHandler } from "../api/applicants/decision.mjs";
 import { createFeedHandler } from "../api/applicants/feed.mjs";
+import { K } from "../api/applicants/_lib/kv.mjs";
+import { generationFence, publicationBody, publishInto, sourceReceiptsFor, sourceRow } from "./helpers/applicant-generation.mjs";
 
 const SAVED_SYNC_KEY = process.env.APPHUB_SYNC_KEY;
 const KEY = "apphub-sync-key-0000000000000000001";
@@ -72,11 +74,27 @@ function fakeStore(initial = {}) {
       },
       writeHash: async (key, fields) => {
         calls.writeHash.push([key, fields]);
+        initial[key] = { ...(initial[key] || {}), ...fields };
         return Object.keys(fields).length;
       },
       writeJson: async (key, value, ttlSeconds) => {
         calls.writeJson.push([key, value, ttlSeconds]);
+        initial[key] = value;
         return "OK";
+      },
+      writeImmutableJson: async (key, value) => {
+        if (Object.hasOwn(initial, key)) return null;
+        initial[key] = value;
+        return "OK";
+      },
+      activateGeneration: async (key, expected, value) => {
+        if ((initial[key] ?? null) !== (expected ?? null)) return false;
+        initial[key] = value;
+        return true;
+      },
+      saveAck: async (key, record) => {
+        initial[K.acks] = { ...(initial[K.acks] || {}), [key]: record };
+        return true;
       },
       readHashKeys: async (key) => {
         calls.readHashKeys.push(key);
@@ -87,6 +105,7 @@ function fakeStore(initial = {}) {
         return fields.length;
       },
       now: () => "2026-08-09T00:00:00.000Z",
+      __state: initial,
     },
   };
 }
@@ -191,18 +210,12 @@ test("sync validates every ack key and status before writing any", async () => {
   }), ok);
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 2 });
-  assert.equal(calls.writeHash.length, 1);
-  const [hashKey, fields] = calls.writeHash[0];
-  assert.equal(hashKey, "apphub:acks");
-  assert.deepEqual(fields["cu1:role1"], {
-    status: "invited",
-    at: "2026-08-09T01:00:00.000Z",
-    inviteId: "inv1",
+  assert.equal(calls.writeHash.length, 0, "acks use their own compare-and-set writer");
+  assert.deepEqual(deps.__state[K.acks]["cu1:role1"], {
+    status: "invited", at: "2026-08-09T01:00:00.000Z", inviteId: "inv1",
   });
-  assert.deepEqual(fields["cu2:role1"], {
-    status: "blocked",
-    at: "2026-08-09T00:00:00.000Z",
-    reason: "no email on file",
+  assert.deepEqual(deps.__state[K.acks]["cu2:role1"], {
+    status: "blocked", at: "2026-08-09T00:00:00.000Z", reason: "no email on file",
   });
 });
 
@@ -245,119 +258,102 @@ test("sync GET preserves legacy approvals and exposes all un-acked Core decision
   assert.deepEqual(res.body.decidedKeys, ["cu1:role1", "cu2:role1", "cu3:role2"]);
 });
 
-test("sync reports authoritative profile-cache coverage without candidate names", async () => {
+test("sync reports current immutable profile-cache coverage without candidate names", async () => {
   process.env.APPHUB_SYNC_KEY = KEY;
-  const { deps } = fakeStore({
-    "apphub:snapshot": {
-      generatedAt: "2026-08-09T00:00:00.000Z",
-      stream: [
-        { key: "ready00001:role1", cuId: "ready00001", name: "Ready Person" },
-        { key: "missing001:role1", cuId: "missing001", name: "Missing Person" },
-      ],
-    },
-    "apphub:queue": { rows: [{ key: "missing002:role1", cuId: "missing002", name: "Another Person" }] },
-    "apphub:cards": { ready00001: { exp: [], edu: [] } },
-    "apphub:profile-ready": { ready00001: READY_RECEIPT },
+  const ready = sourceRow("ready00001");
+  const streamMissing = sourceRow("missing001");
+  const queueMissing = sourceRow("missing002");
+  const state = { [K.sourceProfileReady]: sourceReceiptsFor([ready, streamMissing, queueMissing]) };
+  publishInto(state, {
+    snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [ready, streamMissing] },
+    queue: [queueMissing],
   });
+  const { deps } = fakeStore(state);
   const handler = createSyncHandler(deps);
   const res = response();
   await handler(request({ method: "GET", body: undefined, query: { profileCache: "1" } }), res);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.profileCache.missingCuIds, ["missing002", "missing001"]);
-  assert.equal(res.body.profileCache.readyCandidates, 1);
-  assert.equal(res.body.profileCache.withheldCandidates, 2);
+  assert.deepEqual(res.body.profileCache.missingCuIds, []);
+  assert.equal(res.body.profileCache.readyCandidates, 3);
+  assert.equal(res.body.profileCache.withheldCandidates, 0);
   assert.doesNotMatch(JSON.stringify(res.body), /Person/);
 });
 
-function decisionSetup({ ack = null, queue = [{ key: "cu1:role1", cuId: "cu1" }], card = {}, receipt = READY_RECEIPT } = {}) {
-  const calls = { wrote: [], deleted: [] };
+function decisionSetup({ ack = null, queue = null } = {}) {
+  const calls = { wrote: [] };
+  const row = (queue || [{
+    key: "cu1:role1", cuId: "cu1", profileKey: "cu1", sourceObservationId: "obs-cu1",
+    inputRevision: "input-1", readinessRevision: "ready-1", decisionRevision: 1,
+  }])[0];
+  const state = { [K.sourceProfileReady]: sourceReceiptsFor([row]) };
+  const generation = publishInto(state, {
+    snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] }, queue: [row],
+  });
+  if (ack) state[K.acks] = { [row.key]: ack };
   const handler = createDecisionHandler({
     corsHandler: () => false,
-    authHandler: async (req) => {
-      req.authedEmail = "hi@davidphillips.world";
-      return true;
-    },
+    authHandler: async (req) => { req.authedEmail = "hi@davidphillips.world"; return true; },
     kvReady: () => true,
-    readAck: async () => ack,
-    readQueue: async () => ({ rows: queue }),
-    readCard: async () => card,
-    readProfileReceipt: async () => receipt,
-    writeDecision: async (key, record) => calls.wrote.push([key, record]),
-    deleteDecision: async (key) => calls.deleted.push(key),
+    readAck: async (key) => state[K.acks]?.[key] ?? null,
+    readJson: async (key) => state[key] ?? null,
+    writeDecision: async (key, record) => { calls.wrote.push([key, record]); return true; },
     now: () => "2026-08-09T00:00:00.000Z",
   });
-  return { calls, handler };
+  return { calls, handler, row, generation };
+}
+
+function decisionBody(setup, action, extra = {}) {
+  return {
+    key: setup.row.key, action, requestId: "request-0000000001", inputRevision: setup.row.inputRevision,
+    readinessRevision: setup.row.readinessRevision, decisionRevision: setup.row.decisionRevision,
+    ...generationFence(setup.generation), ...extra,
+  };
 }
 
 test("decision validates the key, validates the action, and stamps the session email", async () => {
-  const { calls, handler } = decisionSetup();
-
+  const setup = decisionSetup();
   for (const body of [
-    { key: "not a key", action: "pass" },
-    { key: "a:b:c", action: "interview" },
-    { key: "", action: "pass" },
+    { key: "not a key", action: "pass" }, { key: "a:b:c", action: "interview" }, { key: "", action: "pass" },
   ]) {
-    const res = response();
-    await handler(request({ body }), res);
-    assert.equal(res.statusCode, 400, JSON.stringify(body));
-    assert.equal(res.body.error, "invalid_key");
+    const res = response(); await setup.handler(request({ body }), res);
+    assert.equal(res.statusCode, 400, JSON.stringify(body)); assert.equal(res.body.error, "invalid_key");
   }
-
   const badAction = response();
-  await handler(request({ body: { key: "cu1:role1", action: "reject" } }), badAction);
-  assert.equal(badAction.statusCode, 400);
-  assert.equal(badAction.body.error, "unsupported_action");
-  assert.equal(calls.wrote.length, 0);
-
+  await setup.handler(request({ body: decisionBody(setup, "reject") }), badAction);
+  assert.equal(badAction.statusCode, 400); assert.equal(badAction.body.error, "unsupported_action");
   const ok = response();
-  await handler(request({
-    body: { key: "cu1:role1", action: "interview", name: "Applicant Example", roleTitle: "Founding Engineer" },
-  }), ok);
-  assert.equal(ok.statusCode, 200);
-  assert.deepEqual(calls.wrote, [["cu1:role1", {
-    action: "interview",
-    at: "2026-08-09T00:00:00.000Z",
-    by: "hi@davidphillips.world",
-    name: "Applicant Example",
-    roleTitle: "Founding Engineer",
-  }]]);
-  assert.deepEqual(ok.body.decision, calls.wrote[0][1]);
+  await setup.handler(request({ body: decisionBody(setup, "interview") }), ok);
+  assert.equal(ok.statusCode, 202);
+  assert.equal(setup.calls.wrote.length, 1);
+  assert.deepEqual(setup.calls.wrote[0][1].application, undefined);
+  assert.equal(setup.calls.wrote[0][1].by, "hi@davidphillips.world");
+  assert.equal(setup.calls.wrote[0][1].generationId, setup.generation.pointer.generationId);
 });
 
-test("undo deletes only while un-acked and answers 409 after an ack", async () => {
-  const acked = decisionSetup({ ack: { status: "invited", at: "2026-08-09T00:05:00.000Z" } });
-  const refused = response();
-  await acked.handler(request({ body: { key: "cu1:role1", action: "undo" } }), refused);
-  assert.equal(refused.statusCode, 409);
-  assert.equal(refused.body.error, "already_acked");
-  assert.equal(acked.calls.deleted.length, 0);
-
-  const open = decisionSetup();
-  const undone = response();
-  await open.handler(request({ body: { key: "cu1:role1", action: "undo" } }), undone);
-  assert.equal(undone.statusCode, 200);
-  assert.equal(undone.body.undone, true);
-  assert.deepEqual(open.calls.deleted, ["cu1:role1"]);
-});
-
-test("decision refuses a hidden applicant until its profile card is cached", async () => {
-  const missing = decisionSetup({ card: null });
+test("undo is always refused because a published request may already be processing", async () => {
+  const setup = decisionSetup({ ack: { status: "invited", at: "2026-08-09T00:05:00.000Z" } });
   const res = response();
-  await missing.handler(request({ body: { key: "cu1:role1", action: "pass" } }), res);
+  await setup.handler(request({ body: decisionBody(setup, "undo") }), res);
   assert.equal(res.statusCode, 409);
-  assert.equal(res.body.error, "profile_cache_not_ready");
-  assert.equal(missing.calls.wrote.length, 0);
+  assert.equal(res.body.error, "request_may_already_be_processing");
+  assert.equal(setup.calls.wrote.length, 0);
 });
 
-test("decision refuses an applicant whose full profile expired even when its card remains", async () => {
-  const expired = decisionSetup({
-    receipt: { cachedAt: "2026-08-07T00:00:00.000Z", expiresAt: "2026-08-08T00:00:00.000Z" },
-  });
+test("decision fences a stale immutable publication before it can create an action", async () => {
+  const setup = decisionSetup();
   const res = response();
-  await expired.handler(request({ body: { key: "cu1:role1", action: "interview" } }), res);
+  await setup.handler(request({ body: decisionBody(setup, "pass", { generationDigest: "b".repeat(64) }) }), res);
   assert.equal(res.statusCode, 409);
-  assert.equal(res.body.error, "profile_cache_not_ready");
-  assert.equal(expired.calls.wrote.length, 0);
+  assert.equal(res.body.error, "applicant_changed_refresh_required");
+  assert.equal(setup.calls.wrote.length, 0);
+});
+
+test("decision refuses a hard-held applicant from the active publication", async () => {
+  const queue = [{ key: "cu1:role1", cuId: "cu1", profileKey: "cu1", sourceObservationId: "obs-cu1", inputRevision: "input-1", readinessRevision: "ready-1", decisionRevision: 1, decisionEligibility: "hard_hold", hardHoldCode: "identity_conflict" }];
+  const setup = decisionSetup({ queue }); const res = response();
+  await setup.handler(request({ body: decisionBody(setup, "interview") }), res);
+  assert.equal(res.statusCode, 409); assert.equal(res.body.error, "interview_hard_hold");
+  assert.equal(setup.calls.wrote.length, 0);
 });
 
 test("normalizeAcks reports the first offending key", () => {
@@ -373,14 +369,14 @@ test("sync stores the split queue doc under its own key with its own cap", async
   process.env.APPHUB_SYNC_KEY = KEY;
   const { calls, deps } = fakeStore();
   const handler = createSyncHandler(deps);
-  const rows = [{ key: "cu1:role1", tier: "C" }];
+  const rows = [sourceRow("cu1")];
+  deps.__state[K.sourceProfileReady] = sourceReceiptsFor(rows);
   const ok = response();
-  await handler(request({ body: { snapshot: { generatedAt: "2026-08-09T00:00:00.000Z" }, queue: rows } }), ok);
+  await handler(request({ body: publicationBody({ snapshot: { generatedAt: "2026-08-09T00:00:00.000Z" }, queue: rows }) }), ok);
   assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.body.stored, { snapshot: true, queue: true, acks: 0 });
-  const queueWrite = calls.writeJson.find(([key]) => key === "apphub:queue");
-  assert.ok(queueWrite, "queue doc written");
-  assert.deepEqual(queueWrite[1], { generatedAt: "2026-08-09T00:00:00.000Z", rows });
+  assert.equal(ok.body.stored.snapshot, true); assert.equal(ok.body.stored.queue, true);
+  assert.equal(ok.body.stored.generation.id, "gen-fixture-0001");
+  assert.equal(calls.writeJson.some(([key]) => key === "apphub:queue"), false, "active queue is immutable");
 
   const bad = response();
   await handler(request({ body: { queue: "nope" } }), bad);
@@ -474,7 +470,7 @@ test("sync caches verified Applicant Hub history under a neutral profile key", a
   const handler = createSyncHandler(deps);
   const key = "core:1234567890abcdef1234567890abcdef";
   const profile = {
-    profileSource: "applicant_hub",
+    profileSource: "applicant_hub", historyState: "data", sourceObservationId: "obs-source-profile",
     name: "Applicant",
     experiences: [{ roleTitle: "Engineer", companyName: "Example" }],
     education: [],
@@ -483,15 +479,13 @@ test("sync caches verified Applicant Hub history under a neutral profile key", a
   await handler(request({ body: { sourceProfiles: { [key]: profile } } }), res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.stored.sourceProfiles, 1);
-  assert.deepEqual(calls.writeJson[0], [`apphub:profile:${key}`, profile, PROFILE_TTL_SECONDS]);
-  assert.deepEqual(calls.writeHash.find(([name]) => name === "apphub:profile-ready"), [
-    "apphub:profile-ready",
-    { [key]: {
-      cachedAt: "2026-08-09T00:00:00.000Z",
-      expiresAt: "2026-08-10T00:00:00.000Z",
-      source: "applicant_hub",
-    } },
-  ]);
+  assert.deepEqual(calls.writeJson[0], [K.sourceProfile(key), profile, undefined]);
+  const [, receipt] = calls.writeHash.find(([name]) => name === K.sourceProfileReady);
+  assert.equal(receipt[key].source, "applicant_hub");
+  assert.equal(receipt[key].durable, true);
+  assert.equal(receipt[key].historyState, "data");
+  assert.equal(receipt[key].sourceObservationId, "obs-source-profile");
+  assert.match(receipt[key].payloadDigest, /^[a-f0-9]{64}$/);
 });
 
 test("Applicant Hub cache input rejects an empty history", () => {
@@ -516,7 +510,7 @@ test("feed permits a no-Paraform-id row only when its source history is cached",
   assert.equal(res.body.profileCache.unidentifiedRows, 0);
 });
 
-test("feed withholds a cached card whose work and education history are both empty", async () => {
+test("feed keeps an immutable row when its compact card has empty history", async () => {
   const { handler } = feedSetup({
     "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
     "apphub:queue": { rows: [{ key: "empty00001:role1", cuId: "empty00001" }] },
@@ -525,24 +519,28 @@ test("feed withholds a cached card whose work and education history are both emp
   });
   const res = response();
   await handler(request({ method: "GET", body: undefined }), res);
-  assert.equal(res.body.snapshot.queue.length, 0);
-  assert.equal(res.body.profileCache.withheldCandidates, 1);
+  assert.equal(res.body.snapshot.queue.length, 1);
+  assert.equal(res.body.profileCache.withheldCandidates, 0);
 });
 
 function feedSetup(initial = {}) {
+  // Older assertions below describe input in terms of the former split keys.
+  // Materialize exactly one immutable generation from that fixture rather than
+  // letting a test silently exercise a mixed legacy read.
+  const snapshot = initial["apphub:snapshot"];
+  if (snapshot) {
+    const queue = Array.isArray(initial["apphub:queue"]?.rows) ? initial["apphub:queue"].rows : [];
+    const stamp = (row) => ({ ...row, sourceObservationId: row.sourceObservationId || `obs-${row.profileKey || row.cuId || row.key}` });
+    const stream = Array.isArray(snapshot.stream) ? snapshot.stream.map(stamp) : [];
+    const queueRows = queue.map(stamp);
+    publishInto(initial, { snapshot: { ...snapshot, stream }, queue: queueRows });
+    initial[K.sourceProfileReady] = { ...sourceReceiptsFor([...stream, ...queueRows]), ...(initial[K.sourceProfileReady] || {}) };
+  }
   const calls = { readJson: [], readHash: [] };
   const handler = createFeedHandler({
-    corsHandler: () => false,
-    authHandler: async () => true,
-    kvReady: () => true,
-    readJson: async (key) => {
-      calls.readJson.push(key);
-      return initial[key] ?? null;
-    },
-    readHash: async (key) => {
-      calls.readHash.push(key);
-      return initial[key] || {};
-    },
+    corsHandler: () => false, authHandler: async () => true, kvReady: () => true,
+    readJson: async (key) => { calls.readJson.push(key); return initial[key] ?? null; },
+    readHash: async (key) => { calls.readHash.push(key); return initial[key] || {}; },
     now: () => Date.parse("2026-08-09T01:00:00.000Z"),
   });
   return { calls, handler };
@@ -564,7 +562,7 @@ test("feed returns every compact card and photo alongside the snapshot and overl
   assert.deepEqual(res.body.photos, { cu1abcdef0: photoUrl });
   assert.deepEqual(res.body.cards, { cu1abcdef0: { title: "Founding Engineer", exp: [], edu: [] } });
   // The pre-photos merge behavior is intact: split queue doc back onto the snapshot.
-  assert.deepEqual(res.body.snapshot.queue, [{ key: "cu1abcdef0:role1", cuId: "cu1abcdef0" }]);
+  assert.deepEqual(res.body.snapshot.queue.map(({ key, cuId }) => ({ key, cuId })), [{ key: "cu1abcdef0:role1", cuId: "cu1abcdef0" }]);
   assert.deepEqual(res.body.decisions, { "cu1abcdef0:role1": { action: "pass" } });
   assert.deepEqual(res.body.acks, {});
   assert.equal(res.headers["cache-control"], "no-store");
@@ -572,7 +570,7 @@ test("feed returns every compact card and photo alongside the snapshot and overl
   assert.ok(calls.readHash.includes("apphub:cards"));
 });
 
-test("feed withholds every row that has no cached profile card", async () => {
+test("feed keeps every published row even when no compact card is cached", async () => {
   const { handler } = feedSetup({
     "apphub:snapshot": {
       generatedAt: "2026-08-09T00:00:00.000Z",
@@ -591,31 +589,34 @@ test("feed withholds every row that has no cached profile card", async () => {
   });
   const res = response();
   await handler(request({ method: "GET", body: undefined }), res);
-  assert.deepEqual(res.body.snapshot.stream.map((row) => row.cuId), ["ready00001"]);
-  assert.deepEqual(res.body.snapshot.queue.map((row) => row.cuId), ["ready00001"]);
-  assert.equal(res.body.snapshot.counts.stream, 1);
-  assert.equal(res.body.snapshot.counts.queue, 1);
+  assert.deepEqual(res.body.snapshot.stream.map((row) => row.cuId), ["ready00001", "missing001"]);
+  assert.deepEqual(res.body.snapshot.queue.map((row) => row.cuId), ["ready00001", "missing002"]);
+  assert.equal(res.body.snapshot.counts.stream, 2);
+  assert.equal(res.body.snapshot.counts.queue, 2);
   assert.deepEqual(res.body.profileCache, {
     required: true,
     totalRows: 4,
-    readyRows: 2,
-    withheldRows: 2,
+    readyRows: 4,
+    withheldRows: 0,
     totalCandidates: 3,
     unidentifiedRows: 0,
-    readyCandidates: 1,
-    withheldCandidates: 2,
-    queue: { total: 2, ready: 1, withheld: 1, unidentified: 0 },
-    stream: { total: 2, ready: 1, withheld: 1, unidentified: 0 },
+    readyCandidates: 3,
+    withheldCandidates: 0,
+    profilePreparing: 0,
+    missingProfileKeys: [], missingCuIds: [], upgradeCuIds: [], warmCuIds: [],
+    queue: { total: 2, ready: 2, withheld: 0, unidentified: 0 },
+    stream: { total: 2, ready: 2, withheld: 0, unidentified: 0 },
+    counts: { stream: 2, queue: 2, unrated: 1, emailedToday: 0, newToday: 0 },
   });
 });
 
-test("feed withholds an expired full profile even when its compact card remains", async () => {
+test("feed withholds a row when its durable source receipt no longer matches", async () => {
   const { handler } = feedSetup({
     "apphub:snapshot": { generatedAt: "2026-08-09T00:00:00.000Z", stream: [{ key: "expired001:role1", cuId: "expired001" }] },
     "apphub:queue": { rows: [] },
     "apphub:cards": { expired001: { exp: [], edu: [] } },
-    "apphub:profile-ready": {
-      expired001: { cachedAt: "2026-08-07T00:00:00.000Z", expiresAt: "2026-08-08T00:00:00.000Z" },
+    [K.sourceProfileReady]: {
+      expired001: { cachedAt: "2026-08-07T00:00:00.000Z", source: "applicant_hub", durable: true, historyState: "data", sourceObservationId: "obsolete-observation" },
     },
   });
   const res = response();
@@ -666,7 +667,7 @@ test("cardFromProfile keeps the top 3 of each list, counts the full ones, and dr
   const card = cardFromProfile(CARD_SOURCE_PROFILE);
 
   assert.deepEqual(Object.keys(card).sort(), [
-    "edu", "eduCount", "exp", "expCount", "location", "photo", "title", "updatedAt",
+    "edu", "eduCount", "exp", "expCount", "historyState", "location", "photo", "title", "updatedAt",
   ]);
   assert.equal(card.photo, BUCKET_PHOTO);
   assert.equal(card.title, "Founding Engineer");
@@ -730,7 +731,7 @@ test("cardFromProfile nulls a non-bucket photo and caps every string at the fiel
 test("cardFromProfile always returns the full shape, even on junk input", () => {
   const empty = {
     photo: null, title: null, location: null, updatedAt: null,
-    exp: [], expCount: 0, edu: [], eduCount: 0,
+    exp: [], expCount: 0, edu: [], eduCount: 0, historyState: null,
   };
   for (const input of [
     {},
@@ -805,18 +806,22 @@ test("a full publish prunes cards against the same keep-set as photos, using the
     // key list rather than from the cards drop list.
     "apphub:facts": { keptcu0001: {}, stalecu001: {}, factsonlycu: {} },
   });
+  deps.__state[K.sourceProfileReady] = sourceReceiptsFor([sourceRow("keptcu0001")]);
   const handler = createSyncHandler(deps);
 
   const ok = response();
   await handler(request({
     body: {
-      snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [{ cuId: "keptcu0001" }] },
-      queue: [{ key: "keptcu0001:role1", cuId: "keptcu0001" }],
+      ...publicationBody({
+        snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [sourceRow("keptcu0001")] },
+        queue: [sourceRow("keptcu0001")],
+      }),
     },
   }), ok);
   assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.body.stored, { snapshot: true, queue: true, acks: 0 });
-  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards", "apphub:profile-ready", "apphub:facts"]);
+  assert.equal(ok.body.stored.snapshot, true); assert.equal(ok.body.stored.queue, true);
+  assert.equal(ok.body.stored.generation.id, "gen-fixture-0001");
+  assert.deepEqual(calls.readHashKeys, ["apphub:photos", "apphub:cards", "apphub:facts"]);
   assert.deepEqual(calls.deleteHashFields, [
     ["apphub:photos", ["stalecu001"]],
     ["apphub:cards", ["stalecu001", "nophotocu1"]],
@@ -832,8 +837,7 @@ test("a cards prune failure never fails the push that carried real data", async 
   const ok = response();
   await handler(request({
     body: {
-      snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
-      queue: [],
+      ...publicationBody({ snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] }, queue: [] }),
     },
   }), ok);
   // Sanity: the prune ran and wanted to drop the stale card.
@@ -844,12 +848,12 @@ test("a cards prune failure never fails the push that carried real data", async 
   const survived = response();
   await createSyncHandler(exploding.deps)(request({
     body: {
-      snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] },
-      queue: [],
+      ...publicationBody({ snapshot: { generatedAt: "2026-08-09T00:00:00.000Z", stream: [] }, queue: [] }),
     },
   }), survived);
   assert.equal(survived.statusCode, 200);
-  assert.deepEqual(survived.body.stored, { snapshot: true, queue: true, acks: 0 });
+  assert.equal(survived.body.stored.snapshot, true); assert.equal(survived.body.stored.queue, true);
+  assert.equal(survived.body.stored.generation.id, "gen-fixture-0001");
 });
 
 test("hashGetMany aligns HMGET to the requested fields and never fires on an empty list", async () => {
