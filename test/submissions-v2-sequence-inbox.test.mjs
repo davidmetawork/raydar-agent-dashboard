@@ -398,6 +398,168 @@ test("broker holds the shared lock for at most its conservative refresh and poin
   assert.deepEqual(result.records, []);
 });
 
+test("broker repairs 136 stale campaigns across bounded mid-scan refreshes without moving the scan watermark", async () => {
+  const campaigns = Array.from({ length: 136 }, (_, index) => ({
+    id: `sequence-${index + 1}`,
+    name: `Sequence ${index + 1}`,
+    exact_role_id: `role-${index + 1}`,
+    exact_role_source: "campaign.role_id",
+  }));
+  const cached = state([], campaigns);
+  const staleAt = "2026-09-03T12:01:00.000Z";
+  const refreshedAt = "2026-09-04T12:01:00.000Z";
+  for (const snapshot of cached.snapshots.values()) snapshot.refreshed_at = staleAt;
+  cached.catalog.refreshed_at = staleAt;
+  cached.meta.last_refresh_at = staleAt;
+  cached.meta.last_complete_at = staleAt;
+
+  let refreshes = 0;
+  const scanWatermarks = [];
+  const dependencies = {
+    env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+    now: () => new Date("2026-09-04T12:02:00.000Z"),
+    acquireLock: async () => ({ status: "acquired", token: "lock" }),
+    releaseLock: async () => {},
+    readState: async () => ({ status: "ready", value: cached }),
+    buildRefresh: async () => {
+      refreshes += 1;
+      const sequenceIds = [...cached.snapshots.entries()]
+        .filter(([, snapshot]) => snapshot.refreshed_at === staleAt)
+        .slice(0, 18)
+        .map(([sequenceId]) => sequenceId);
+      return { sequenceIds };
+    },
+    writeState: async (previousState, refresh) => {
+      for (const sequenceId of refresh.sequenceIds) {
+        previousState.snapshots.get(sequenceId).refreshed_at = refreshedAt;
+      }
+      previousState.meta.last_refresh_at = refreshedAt;
+      return previousState;
+    },
+    readRoleMappings: async () => ({
+      status: "ready", digest: "a".repeat(64), mappings: [],
+    }),
+    readBatch: async ({ scanWatermark }) => {
+      scanWatermarks.push(scanWatermark);
+      return {
+        records: [], deferred: [], checkpoint_cursor: "cursor-1",
+        coverage: { checkpoint_safe: true, full_success: false },
+      };
+    },
+  };
+  for (let attempt = 0; attempt < 9; attempt += 1) {
+    await readSequenceInboxBrokerBatch({
+      cursor: "cursor-1", watermark: staleAt,
+    }, dependencies);
+  }
+
+  assert.equal(refreshes, 8);
+  assert.deepEqual(scanWatermarks.slice(0, 8), Array(8).fill(staleAt));
+  assert.equal(scanWatermarks[8], staleAt);
+  assert.equal([...cached.snapshots.values()].every((snapshot) => (
+    snapshot.refreshed_at === refreshedAt
+  )), true);
+});
+
+test("broker, cache reader, and worker reconcile 136 stale campaigns through a fixed backlog into a newer reply", async () => {
+  const campaigns = Array.from({ length: 136 }, (_, index) => ({
+    id: `sequence-${index + 1}`,
+    name: `Sequence ${index + 1}`,
+    exact_role_id: `role-${index + 1}`,
+    exact_role_source: "campaign.role_id",
+  }));
+  const staleAt = "2026-09-03T12:01:00.000Z";
+  const refreshedAt = "2026-09-03T12:03:00.000Z";
+  const backlog = Array.from({ length: 12 }, (_, index) => reply({
+    gmail_id: `backlog-${String(index + 1).padStart(2, "0")}`,
+    sequence_id: `sequence-${index + 1}`,
+    date: `2026-09-03T11:50:${String(index).padStart(2, "0")}.000Z`,
+  }));
+  const newer = reply({
+    gmail_id: "newer-after-pin",
+    sequence_id: "sequence-136",
+    date: "2026-09-03T12:02:00.000Z",
+  });
+  const cached = state(backlog, campaigns);
+  for (const snapshot of cached.snapshots.values()) snapshot.refreshed_at = staleAt;
+  cached.catalog.refreshed_at = staleAt;
+  cached.meta.last_refresh_at = staleAt;
+  cached.meta.last_complete_at = staleAt;
+
+  let refreshes = 0;
+  let addedNewer = false;
+  const admitted = new Set();
+  const newlyAccepted = [];
+  const brokerDependencies = {
+    env: { ...env, SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+    now: () => new Date("2026-09-03T12:04:00.000Z"),
+    acquireLock: async () => ({ status: "acquired", token: "lock" }),
+    releaseLock: async () => {},
+    readState: async () => ({ status: "ready", value: cached }),
+    buildRefresh: async () => {
+      refreshes += 1;
+      const sequenceIds = [...cached.snapshots.entries()]
+        .filter(([, snapshot]) => snapshot.refreshed_at === staleAt)
+        .slice(0, 18)
+        .map(([sequenceId]) => sequenceId);
+      return { sequenceIds };
+    },
+    writeState: async (previousState, refresh) => {
+      for (const sequenceId of refresh.sequenceIds) {
+        const snapshot = previousState.snapshots.get(sequenceId);
+        snapshot.refreshed_at = refreshedAt;
+        if (sequenceId === "sequence-136" && !addedNewer) {
+          snapshot.replies.push(newer);
+          snapshot.submissions_replies.push(newer);
+          addedNewer = true;
+        }
+      }
+      previousState.meta.last_refresh_at = refreshedAt;
+      return previousState;
+    },
+    readRoleMappings: async () => ({
+      status: "ready", digest: "a".repeat(64), mappings: [],
+    }),
+    readMessage: async (gmailId) => {
+      const cachedReply = [...backlog, newer].find((item) => item.gmail_id === gmailId);
+      return detail({ date: cachedReply.date });
+    },
+    sleepImpl: async () => {},
+  };
+  let checkpoint = {};
+  let completed = false;
+  for (let attempt = 0; attempt < 20 && !completed; attempt += 1) {
+    const result = await reconcileSequenceInbox({
+      env: brokerDependencies.env,
+      checkpoint,
+      assertCurrent: async () => {},
+      readBatch: ({ cursor, caughtUp, catalogDigest, watermark, limit }) => (
+        readSequenceInboxBrokerBatch({
+          cursor,
+          caught_up: caughtUp,
+          catalog_digest: catalogDigest,
+          watermark,
+          limit,
+        }, brokerDependencies)
+      ),
+      admit: async (event) => {
+        const existing = admitted.has(event.idempotency_key);
+        admitted.add(event.idempotency_key);
+        if (!existing) newlyAccepted.push(event.provider_message_id);
+        return { accepted: true, existing };
+      },
+    });
+    checkpoint = result.checkpoint;
+    completed = result.caught_up && checkpoint.watermark === refreshedAt;
+  }
+
+  assert.equal(completed, true);
+  assert.equal(refreshes, 8);
+  assert.equal(admitted.size, 13);
+  assert.equal(new Set(newlyAccepted).size, newlyAccepted.length);
+  assert.equal(newlyAccepted.includes("newer-after-pin"), true);
+});
+
 test("broker deadline releases the lock and leaves the page resumable", async () => {
   let clock = 0;
   let released = false;
@@ -474,6 +636,106 @@ test("cached reader is bounded, stable, full-detail only, and exposes checkpoint
   assert.equal(second.next_cursor, null);
   assert.equal(second.coverage.checkpoint_safe, true);
   assert.equal(second.coverage.full_success, true);
+});
+
+test("cached reader pins a repaired scan horizon and admits newer replies on the next overlap scan", async () => {
+  const pinnedAt = "2026-09-03T12:01:00.000Z";
+  const refreshedAt = "2026-09-03T12:03:00.000Z";
+  const cachedReplies = [
+    reply({ gmail_id: "message-before-pin", date: "2026-09-03T12:00:00.000Z" }),
+    reply({ gmail_id: "message-after-pin", date: "2026-09-03T12:02:00.000Z" }),
+  ];
+  const cached = state(cachedReplies);
+  for (const snapshot of cached.snapshots.values()) snapshot.refreshed_at = refreshedAt;
+  cached.catalog.refreshed_at = refreshedAt;
+  cached.meta.last_refresh_at = refreshedAt;
+  cached.meta.last_complete_at = refreshedAt;
+  const options = {
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async (gmailId) => detail({
+      date: cachedReplies.find((item) => item.gmail_id === gmailId).date,
+    }),
+    activationAt, env, limit: 8,
+    now: () => new Date("2026-09-03T12:04:00.000Z"),
+  };
+
+  const pinned = await readCachedSequenceReplyBatch({ ...options, scanWatermark: pinnedAt });
+  assert.deepEqual(pinned.records.map((record) => record.event.provider_message_id), ["message-before-pin"]);
+  assert.equal(pinned.coverage.cache_confirmed_through, refreshedAt);
+  assert.equal(pinned.coverage.watermark, pinnedAt);
+  assert.equal(pinned.coverage.full_success, true);
+
+  const next = await readCachedSequenceReplyBatch({
+    ...options,
+    cursor: pinned.checkpoint_cursor,
+    cursorOverlapMs: 5 * 60_000,
+    expectedCatalogDigest: pinned.coverage.catalog_digest,
+    expectedWatermark: pinned.coverage.watermark,
+  });
+  assert.equal(next.records.some((record) => (
+    record.event.provider_message_id === "message-after-pin"
+  )), true);
+  assert.equal(next.coverage.watermark, refreshedAt);
+  assert.equal(next.coverage.watermark_advanced, true);
+});
+
+test("a refresh that inserts an older reply behind the cursor resets the scan before reading ahead", async () => {
+  const campaigns = [
+    { id: "sequence-a", name: "A", exact_role_id: "role-a", exact_role_source: "campaign.role_id" },
+    { id: "sequence-b", name: "B", exact_role_id: "role-b", exact_role_source: "campaign.role_id" },
+  ];
+  const initialReplies = [
+    reply({ sequence_id: "sequence-a", gmail_id: "message-a-1", date: "2026-09-03T12:00:00.000Z" }),
+    reply({ sequence_id: "sequence-a", gmail_id: "message-a-2", date: "2026-09-03T12:00:30.000Z" }),
+  ];
+  const cached = state(initialReplies, campaigns);
+  const messageDates = new Map(initialReplies.map((item) => [item.gmail_id, item.date]));
+  const reads = [];
+  const options = {
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async (gmailId) => {
+      reads.push(gmailId);
+      return detail({ date: messageDates.get(gmailId) });
+    },
+    activationAt, env, limit: 1,
+    now: () => new Date("2026-09-03T12:04:00.000Z"),
+  };
+
+  const first = await readCachedSequenceReplyBatch(options);
+  assert.deepEqual(reads, ["message-a-1"]);
+  assert.equal(first.coverage.watermark, "2026-09-03T12:01:00.000Z");
+  assert.equal(first.coverage.has_more, true);
+
+  const lateOlder = reply({
+    sequence_id: "sequence-b",
+    gmail_id: "message-b-late-older",
+    date: "2026-09-03T11:59:00.000Z",
+  });
+  messageDates.set(lateOlder.gmail_id, lateOlder.date);
+  cached.snapshots.get("sequence-b").submissions_replies.push(lateOlder);
+  cached.snapshots.get("sequence-b").refreshed_at = "2026-09-03T12:03:00.000Z";
+
+  const changed = await readCachedSequenceReplyBatch({
+    ...options,
+    cursor: first.next_cursor,
+    expectedCatalogDigest: first.coverage.catalog_digest,
+    expectedWatermark: first.coverage.watermark,
+    scanWatermark: first.coverage.watermark,
+  });
+  assert.equal(changed.coverage.catalog_changed, true);
+  assert.equal(changed.checkpoint_cursor, null);
+  assert.deepEqual(reads, ["message-a-1"]);
+
+  const restarted = await readCachedSequenceReplyBatch({
+    ...options,
+    expectedCatalogDigest: changed.coverage.catalog_digest,
+    expectedWatermark: changed.coverage.watermark,
+  });
+  assert.equal(restarted.coverage.catalog_changed, false);
+  assert.deepEqual(
+    restarted.records.map((record) => record.event.provider_message_id),
+    ["message-b-late-older"],
+  );
 });
 
 test("optional saved-role lookup unavailability preserves literal campaign role intake", async () => {

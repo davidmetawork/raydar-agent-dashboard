@@ -109,6 +109,43 @@ export function listScopeIsCurrent(scope, state) {
   return scope.sequence === state.listSequence && scope.page === state.page && scope.query === state.query;
 }
 
+export function tabPageFromKey({ key, current, pages = [] } = {}) {
+  const index = pages.indexOf(current);
+  if (index < 0) return null;
+  if (key === "Home") return pages[0] || null;
+  if (key === "End") return pages.at(-1) || null;
+  if (key === "ArrowRight") return pages[(index + 1) % pages.length] || null;
+  if (key === "ArrowLeft") return pages[(index - 1 + pages.length) % pages.length] || null;
+  return null;
+}
+
+export function displayListTotal({ totalCount, loadedCount = 0 } = {}) {
+  const total = Number(totalCount);
+  return Number.isFinite(total) && total >= loadedCount ? total : loadedCount;
+}
+
+export function listEntityNoun(page) {
+  return page === "needs_review" ? "review item" : "candidate-role pair";
+}
+
+export function listRenderKey({ page = "", query = "", rows = [], nextCursor = null, totalCount = null, generating = [], rowActions = [] } = {}) {
+  const renderedRows = Array.isArray(rows) ? rows.map(({ source_last_success_at, ...row }) => row) : [];
+  return JSON.stringify({
+    page, query, rows: renderedRows, nextCursor, totalCount,
+    generating: [...generating].sort(), rowActions: [...rowActions].sort(),
+  });
+}
+
+export function listPageReset({ page, query = "" } = {}) {
+  return { page, query, rows: [], nextCursor: null, totalCount: null, renderedRowsKey: null, rowsDirty: false };
+}
+
+export function listRenderDisposition({ previousKey = null, nextKey, background = false, dialogOpen = false, popoverOpen = false } = {}) {
+  if (nextKey === previousKey) return "unchanged";
+  if (background && (dialogOpen || popoverOpen)) return "defer";
+  return "render";
+}
+
 export function listFailureDisposition({ scope, state, append = false, refresh = false }) {
   if (!listScopeIsCurrent(scope, state)) return "ignore";
   return (append || refresh) && state.rows.length > 0 ? "preserve" : "empty";

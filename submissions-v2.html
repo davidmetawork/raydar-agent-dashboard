@@ -31,13 +31,13 @@
     </details>
 
     <nav class="page-tabs" aria-label="Submission status" role="tablist">
-      <button class="page-tab active" id="tab-interested" data-page="interested" type="button" role="tab" aria-selected="true" aria-controls="rows">
+      <button class="page-tab active" id="tab-interested" data-page="interested" type="button" role="tab" aria-selected="true" aria-controls="rows" tabindex="0">
         Interested <span class="tab-count" id="count-interested">0</span>
       </button>
-      <button class="page-tab" id="tab-needs-review" data-page="needs_review" type="button" role="tab" aria-selected="false" aria-controls="rows">
+      <button class="page-tab" id="tab-needs-review" data-page="needs_review" type="button" role="tab" aria-selected="false" aria-controls="rows" tabindex="-1">
         Needs Review <span class="tab-count review" id="count-needs-review">0</span>
       </button>
-      <button class="page-tab" id="tab-not-interested" data-page="not_interested" type="button" role="tab" aria-selected="false" aria-controls="rows">
+      <button class="page-tab" id="tab-not-interested" data-page="not_interested" type="button" role="tab" aria-selected="false" aria-controls="rows" tabindex="-1">
         Not Interested <span class="tab-count quiet" id="count-not-interested">0</span>
       </button>
     </nav>
@@ -49,10 +49,11 @@
           <span class="sr-only">Search candidates</span>
           <input id="candidate-search" type="search" autocomplete="off" placeholder="Search candidate name" />
         </label>
-        <div class="list-meta"><span id="display-count">0 candidates</span><span id="sort-label">Most recent first</span></div>
+        <div class="list-meta"><span id="display-count">0 candidate-role pairs</span><span id="sort-label">Most recent first</span></div>
       </div>
-      <h2 class="sr-only" id="current-page-title">Interested candidates</h2>
-      <div class="rows" id="rows" role="tabpanel" aria-labelledby="tab-interested" aria-live="polite" aria-busy="true"><div class="loading-row">Loading submissions…</div></div>
+      <h2 class="sr-only" id="current-page-title">Interested candidate-role pairs</h2>
+      <p class="sr-only" id="list-status" role="status" aria-live="polite"></p>
+      <div class="rows" id="rows" role="tabpanel" aria-labelledby="tab-interested" aria-busy="true"><div class="loading-row">Loading submissions…</div></div>
       <div class="pagination" id="pagination" hidden>
         <button class="button secondary" id="load-more" type="button">Load more</button>
       </div>

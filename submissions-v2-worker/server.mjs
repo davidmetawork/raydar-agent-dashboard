@@ -8,6 +8,7 @@ import { createService } from "../api/submissions-v2/_lib/service.mjs";
 import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pipeline-store.mjs";
 import { createBlobBrokerClient } from "./blob-broker-client.mjs";
 import { submissionsV2ReleaseManifest } from "../api/submissions-v2/_lib/release-manifest.mjs";
+import { createWorkerHealth } from "./health.mjs";
 
 function required(name) {
   const value = String(process.env[name] || "").trim();
@@ -62,6 +63,7 @@ const options = {
 };
 let lastCycle = null;
 let cycleRunning = false;
+const health = createWorkerHealth();
 
 function equal(left, right) {
   const a = Buffer.from(String(left || "")); const b = Buffer.from(String(right || ""));
@@ -73,7 +75,15 @@ const strongSecret = (value) => Buffer.byteLength(String(value || "").trim(), "u
 async function cycle() {
   if (cycleRunning) return lastCycle;
   cycleRunning = true;
-  try { lastCycle = { at: new Date().toISOString(), ...(await workerCycle(options)) }; return lastCycle; }
+  health.beginCycle();
+  try {
+    lastCycle = { at: new Date().toISOString(), ...(await workerCycle(options)) };
+    health.completeCycle(lastCycle);
+    return lastCycle;
+  } catch (error) {
+    health.failCycle();
+    throw error;
+  }
   finally { cycleRunning = false; }
 }
 
@@ -82,7 +92,9 @@ createServer(async (req, res) => {
   res.setHeader("cache-control", "no-store");
   if (req.url === "/health" && req.method === "GET") {
     const { schema_version, algorithm, digest, file_count } = submissionsV2ReleaseManifest();
-    res.statusCode = 200; res.end(JSON.stringify({ ok: true, worker: "submissions-v2", cycle_running: cycleRunning, last_cycle_at: lastCycle?.at || null, release: { schema_version, algorithm, digest, file_count } })); return;
+    const current = health.snapshot();
+    res.statusCode = current.ok ? 200 : 503;
+    res.end(JSON.stringify({ ...current, worker: "submissions-v2", release: { schema_version, algorithm, digest, file_count } })); return;
   }
   if (req.url === "/tick" && req.method === "POST") {
     const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
@@ -93,5 +105,5 @@ createServer(async (req, res) => {
   res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: "not_found" }));
 }).listen(port, "0.0.0.0");
 
-runWorkerLoop(options, { signal: controller.signal, cycleImpl: cycle }).catch(() => process.exitCode = 1);
-for (const name of ["SIGTERM", "SIGINT"]) process.on(name, () => controller.abort());
+runWorkerLoop(options, { signal: controller.signal, cycleImpl: cycle }).catch(() => { health.failCycle(); process.exitCode = 1; });
+for (const name of ["SIGTERM", "SIGINT"]) process.on(name, () => { health.stop(); controller.abort(); });

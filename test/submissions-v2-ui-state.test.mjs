@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, embeddedModalViewport, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -130,6 +130,58 @@ test("loading another page appends only candidates not already displayed", () =>
     pages: [{ rows: [{ case_id: "one" }, { case_id: "two" }], total_count: 2, next_cursor: null }],
   });
   assert.deepEqual(result.rows.map((row) => row.case_id), ["one", "two"]);
+});
+
+test("list totals distinguish candidate-role pairs from review items", () => {
+  assert.equal(listEntityNoun("interested"), "candidate-role pair");
+  assert.equal(listEntityNoun("not_interested"), "candidate-role pair");
+  assert.equal(listEntityNoun("needs_review"), "review item");
+});
+
+test("a 313-item scope retains its exact total through 100-row cursor pages", () => {
+  const rows = Array.from({ length: 313 }, (_, index) => ({ case_id: `case-${index + 1}` }));
+  let currentRows = [];
+  for (let page = 0; page < 4; page += 1) {
+    const start = page * 100;
+    const result = reconcileListPages({
+      append: page > 0,
+      currentRows,
+      pages: [{ rows: rows.slice(start, start + 100), total_count: 313, next_cursor: start + 100 < rows.length ? `cursor-${page + 1}` : null }],
+    });
+    currentRows = result.rows;
+    assert.equal(result.totalCount, 313);
+    assert.equal(displayListTotal({ totalCount: result.totalCount, loadedCount: currentRows.length }), 313);
+  }
+  assert.equal(currentRows.length, 313);
+});
+
+test("manual tabs move focus with arrows and Home/End without changing selection", () => {
+  const pages = ["interested", "needs_review", "not_interested"];
+  assert.equal(tabPageFromKey({ key: "ArrowRight", current: "interested", pages }), "needs_review");
+  assert.equal(tabPageFromKey({ key: "ArrowLeft", current: "interested", pages }), "not_interested");
+  assert.equal(tabPageFromKey({ key: "Home", current: "needs_review", pages }), "interested");
+  assert.equal(tabPageFromKey({ key: "End", current: "needs_review", pages }), "not_interested");
+  assert.equal(tabPageFromKey({ key: "Enter", current: "needs_review", pages }), null);
+});
+
+test("render keys exclude source-health timestamps but retain rendered row changes", () => {
+  const base = { case_id: "case-1", candidate_name: "Avery", source_last_success_at: "2026-09-08T10:00:00.000Z" };
+  const key = listRenderKey({ page: "interested", rows: [base] });
+  assert.equal(key, listRenderKey({ page: "interested", rows: [{ ...base, source_last_success_at: "2026-09-08T10:01:00.000Z" }] }));
+  assert.notEqual(key, listRenderKey({ page: "interested", rows: [{ ...base, candidate_name: "Blake" }] }));
+});
+
+test("page activation resets the list and render cache together", () => {
+  assert.deepEqual(listPageReset({ page: "needs_review", query: "Avery" }), {
+    page: "needs_review", query: "Avery", rows: [], nextCursor: null, totalCount: null, renderedRowsKey: null, rowsDirty: false,
+  });
+});
+
+test("a background poll skips unchanged rows and defers changed rows during a dialog or popover", () => {
+  assert.equal(listRenderDisposition({ previousKey: "same", nextKey: "same", background: true, dialogOpen: false }), "unchanged");
+  assert.equal(listRenderDisposition({ previousKey: "old", nextKey: "new", background: true, dialogOpen: true }), "defer");
+  assert.equal(listRenderDisposition({ previousKey: "old", nextKey: "new", background: true, popoverOpen: true }), "defer");
+  assert.equal(listRenderDisposition({ previousKey: "old", nextKey: "new", background: true, dialogOpen: false, popoverOpen: false }), "render");
 });
 
 test("stale refresh results cannot replace a changed page or search scope", () => {

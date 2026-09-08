@@ -542,15 +542,18 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             where se.processing_state not in ('resolved','ignored_later','ignored_machine')
               and (${needle}='' or lower(coalesce(se.sender_display_name,'')) like ${pattern} escape '\\'
               or coalesce(matched.search_key,'') like ${pattern} escape '\\')
-          ), paged as (
+          ), counted as (
             select *, count(*) over()::bigint as total_count from review_rows
+          ), paged as (
+            select * from counted
              where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
              order by sort_at desc, sort_id desc limit ${take + 1}
           ) select * from paged
         `;
       } else if (page === "not_interested") {
         rows = await sql`
-          select
+          with scoped as (
+            select
             p.id as pair_id, ni.source_event_id as signal_id, p.state_version, p.candidate_user_id,
             c.display_name as candidate_name, null::text as provisional_name,
             c.paraform_profile_url as candidate_url, c.linkedin_url, c.raydar_url,
@@ -570,14 +573,16 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           left join submissions_v2.role_index r on r.role_id=p.role_id
           join submissions_v2.source_events se on se.id=ni.source_event_id
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
-          where p.case_hidden_at is null
-            and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
-            and (${after?.at || null}::timestamptz is null or (ni.original_negative_at, ni.id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
-          order by ni.original_negative_at desc, ni.id desc limit ${take + 1}
+            where p.case_hidden_at is null
+              and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
+          ) select * from scoped
+            where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
+            order by sort_at desc, sort_id desc limit ${take + 1}
         `;
       } else {
         rows = await sql`
-          select
+          with scoped as (
+            select
             p.id as pair_id, p.first_signal_id as signal_id, p.state_version, p.candidate_user_id,
             c.display_name as candidate_name, null::text as provisional_name,
             c.paraform_profile_url as candidate_url, c.linkedin_url, c.raydar_url,
@@ -655,10 +660,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               from submissions_v2.resume_sources where generation_id=g.id and status <> 'present'
           ) caution on true
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
-          where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
-            and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
-            and (${after?.at || null}::timestamptz is null or (p.original_signal_at, p.id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
-          order by p.original_signal_at desc, p.id desc limit ${take + 1}
+            where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
+              and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
+          ) select * from scoped
+            where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
+            order by sort_at desc, sort_id desc limit ${take + 1}
         `;
       }
       const hasMore = rows.length > take;

@@ -1,6 +1,6 @@
 "use strict";
 
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, embeddedModalViewport, healthCoverageDetails, listFailureDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState } from "/submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -13,6 +13,7 @@ const EMPTY = Object.freeze({
   needs_review: "No candidates need review",
   not_interested: "No not-interested candidates right now",
 });
+const PAGE_ORDER = Object.freeze(Object.keys(PAGE_LABELS));
 const URL_HOSTS = Object.freeze({
   candidate: ["paraform.com"],
   linkedin: ["linkedin.com"],
@@ -47,7 +48,7 @@ const STATE = {
   searchRequests: new Map(), generating: new Set(), dialogReturnFocus: null,
   pendingDownloads: pendingDownloadsFromSession(), downloadsInFlight: new Set(),
   popoverAnchor: null, popoverCloseTimer: null, signinStarted: false, rowActions: new Set(),
-  reviewContextRequest: null,
+  reviewContextRequest: null, renderedRowsKey: null, rowsDirty: false,
 };
 
 if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
@@ -83,11 +84,11 @@ async function withRowAction(id, action, work) {
   const key = rowActionKey(id, action);
   if (STATE.rowActions.has(key)) return;
   STATE.rowActions.add(key);
-  renderRows();
+  renderRows({ force: true });
   try { return await work(); }
   finally {
     STATE.rowActions.delete(key);
-    renderRows();
+    renderRows({ force: true });
   }
 }
 
@@ -284,8 +285,58 @@ function bindRows() {
 
 function rowFor(id) { return STATE.rows.find((row) => String(row.case_id || row.signal_id) === String(id)); }
 
-function renderRows() {
+function rowRenderKey() {
+  return listRenderKey({
+    page: STATE.page, query: STATE.query, rows: STATE.rows, nextCursor: STATE.nextCursor,
+    totalCount: STATE.totalCount, generating: STATE.generating, rowActions: STATE.rowActions,
+  });
+}
+
+function focusedRowDescendant() {
+  const node = document.activeElement;
+  if (!(node instanceof HTMLElement)) return null;
+  const row = node.closest("#rows .submission-row");
+  const id = row?.dataset.id;
+  if (!id) return null;
+  const action = ["download", "regenerate", "duplicate", "correct", "submit", "review-action", "caution"]
+    .find((name) => node.classList.contains(name));
+  if (action) return { id, selector: `.${action}[data-id]` };
+  if (node.matches(".candidate-name")) return { id, selector: ".candidate-name" };
+  if (node.matches(".identity-link.linkedin")) return { id, selector: ".identity-link.linkedin" };
+  if (node.matches(".identity-link.raydar")) return { id, selector: ".identity-link.raydar" };
+  if (node.matches(".signal-link")) return { id, selector: ".signal-link" };
+  return null;
+}
+
+function restoreFocusedRowDescendant(focus) {
+  if (!focus) return;
+  const row = document.querySelector(`#rows .submission-row[data-id="${CSS.escape(focus.id)}"]`);
+  const node = row?.querySelector(focus.selector);
+  if (node instanceof HTMLElement && !node.matches(":disabled")) node.focus();
+}
+
+function renderRows({ force = false, deferForInteraction = false } = {}) {
   const container = $("rows");
+  const nextKey = rowRenderKey();
+  const popoverOpen = STATE.popoverAnchor instanceof HTMLElement && STATE.popoverAnchor.isConnected;
+  const disposition = force ? "render" : listRenderDisposition({
+    previousKey: STATE.renderedRowsKey,
+    nextKey,
+    background: deferForInteraction,
+    dialogOpen: !$("modal").hidden,
+    popoverOpen,
+  });
+  if (disposition === "unchanged") {
+    container.setAttribute("aria-busy", "false");
+    return false;
+  }
+  if (disposition === "defer") {
+    STATE.rowsDirty = true;
+    container.setAttribute("aria-busy", "false");
+    return false;
+  }
+  const focus = focusedRowDescendant();
+  if (popoverOpen) closePopover({ renderDeferred: false });
   if (!STATE.rows.length) container.innerHTML = `<div class="empty-state"><strong>${esc(EMPTY[STATE.page])}</strong>${STATE.query ? "Try another candidate name." : ""}</div>`;
   else if (STATE.page === "interested") {
     const preparing = STATE.rows.filter((row) => row.submission_status !== "proven" && resumeUiState(row).preparing);
@@ -293,15 +344,19 @@ function renderRows() {
     const submitted = STATE.rows.filter((row) => row.submission_status === "proven");
     container.innerHTML = `${rowGroupHtml("preparing", "Preparing resumes", preparing)}${rowGroupHtml("ready", "Ready to submit", active)}${rowGroupHtml("submitted", "Submitted history", submitted)}`;
   } else container.innerHTML = STATE.rows.map(rowHtml).join("");
-  const total = Number.isFinite(STATE.totalCount) && STATE.totalCount >= STATE.rows.length ? STATE.totalCount : STATE.rows.length;
-  const noun = STATE.page === "needs_review" ? "review item" : "candidate";
+  const total = displayListTotal({ totalCount: STATE.totalCount, loadedCount: STATE.rows.length });
+  const noun = listEntityNoun(STATE.page);
   $("display-count").textContent = `${STATE.rows.length}${total > STATE.rows.length ? ` of ${total}` : ""} ${noun}${total === 1 ? "" : "s"}`;
-  $("current-page-title").textContent = `${PAGE_LABELS[STATE.page]} candidates`;
+  $("current-page-title").textContent = `${PAGE_LABELS[STATE.page]} ${noun}${total === 1 ? "" : "s"}`;
   $("pagination").hidden = !STATE.nextCursor;
   $("add-candidate").hidden = STATE.page !== "interested";
   container.setAttribute("aria-busy", "false");
   bindRows();
+  STATE.renderedRowsKey = nextKey;
+  STATE.rowsDirty = false;
+  requestAnimationFrame(() => restoreFocusedRowDescendant(focus));
   reportHeight();
+  return true;
 }
 
 function rowGroupHtml(key, label, rows) {
@@ -359,7 +414,7 @@ async function loadCounts() {
   }
 }
 
-async function loadRows({ append = false, refresh = false } = {}) {
+async function loadRows({ append = false, refresh = false, background = false } = {}) {
   if (append && STATE.loading) return;
   STATE.listRequest?.abort();
   const controller = new AbortController();
@@ -415,7 +470,11 @@ async function loadRows({ append = false, refresh = false } = {}) {
     }
     persistPendingDownloads();
     renderHealth(pages[0]?.health || {});
-    renderRows();
+    const rendered = renderRows({ deferForInteraction: background });
+    if (background && rendered) {
+      const total = displayListTotal({ totalCount: STATE.totalCount, loadedCount: STATE.rows.length });
+      $("list-status").textContent = `Updated. ${STATE.rows.length} of ${total} ${listEntityNoun(STATE.page)}${total === 1 ? "" : "s"} loaded.`;
+    }
     if (completedDownloads.length) {
       for (const row of completedDownloads) autoDownloadResume(row);
     } else if (failedRegeneration) toast("Resume generation failed safely; no new file was saved.", true);
@@ -441,19 +500,30 @@ async function loadRows({ append = false, refresh = false } = {}) {
   }
 }
 
-function switchPage(page) {
-  if (!PAGE_LABELS[page] || page === STATE.page) return;
-  STATE.page = page; STATE.rows = []; STATE.nextCursor = null; STATE.totalCount = null;
+function updatePageTabs({ selected = STATE.page, focusable = selected } = {}) {
   document.querySelectorAll(".page-tab").forEach((node) => {
-    const active = node.dataset.page === page;
+    const active = node.dataset.page === selected;
     node.classList.toggle("active", active);
     node.setAttribute("aria-selected", String(active));
+    node.tabIndex = node.dataset.page === focusable ? 0 : -1;
   });
+}
+
+function activateListPage(page, { query = STATE.query } = {}) {
+  if (!PAGE_LABELS[page]) return false;
+  Object.assign(STATE, listPageReset({ page, query }));
+  updatePageTabs();
+  $("candidate-search").value = query;
   $("rows").setAttribute("aria-labelledby", `tab-${page.replaceAll("_", "-")}`);
+  return true;
+}
+
+function switchPage(page) {
+  if (page === STATE.page || !activateListPage(page)) return;
   loadRows();
 }
 
-function closePopover() {
+function closePopover({ renderDeferred = true } = {}) {
   clearTimeout(STATE.popoverCloseTimer);
   document.querySelector(".popover")?.remove();
   if (STATE.popoverAnchor) {
@@ -461,6 +531,7 @@ function closePopover() {
     STATE.popoverAnchor.removeAttribute("aria-controls");
     STATE.popoverAnchor = null;
   }
+  if (renderDeferred && STATE.rowsDirty) renderRows({ force: true });
 }
 
 function schedulePopoverClose() {
@@ -483,7 +554,7 @@ function bindPopoverButton(node) {
 }
 
 function showPopover(anchor, row, kind) {
-  closePopover();
+  closePopover({ renderDeferred: false });
   const items = kind === "caution" ? row?.resume_cautions : row?.review_reasons;
   const pop = document.createElement("div");
   const popoverId = `submission-popover-${String(row?.case_id || row?.signal_id || "item").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
@@ -520,6 +591,7 @@ function closeDialog() {
   $("modal").hidden = true; STATE.active = null; $("shell").inert = false; $("shell").removeAttribute("aria-hidden"); document.body.classList.remove("modal-open");
   const returnFocus = STATE.dialogReturnFocus; STATE.dialogReturnFocus = null;
   if (returnFocus?.isConnected) returnFocus.focus();
+  if (STATE.rowsDirty) renderRows({ force: true });
   reportHeight();
 }
 
@@ -681,8 +753,7 @@ async function confirmAdd() {
     if (dialogStillActive(active)) {
       closeDialog();
       if (result.existing && PAGE_LABELS[result.state]) {
-        STATE.page = result.state; STATE.query = candidateLabel; STATE.rows = []; STATE.nextCursor = null; $("candidate-search").value = candidateLabel;
-        document.querySelectorAll(".page-tab").forEach((node) => { const pageActive = node.dataset.page === STATE.page; node.classList.toggle("active", pageActive); node.setAttribute("aria-selected", String(pageActive)); });
+        activateListPage(result.state, { query: candidateLabel });
         toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
       } else toast("Candidate added; resume preparation has started.");
     }
@@ -706,8 +777,7 @@ function openDuplicate(id) {
       if (dialogStillActive(active)) {
         closeDialog();
         if (result.existing && PAGE_LABELS[result.state]) {
-          STATE.page = result.state; STATE.query = candidateLabel; STATE.rows = []; STATE.nextCursor = null; $("candidate-search").value = candidateLabel;
-          document.querySelectorAll(".page-tab").forEach((node) => { const pageActive = node.dataset.page === STATE.page; node.classList.toggle("active", pageActive); node.setAttribute("aria-selected", String(pageActive)); });
+          activateListPage(result.state, { query: candidateLabel });
           toast(`Already in ${PAGE_LABELS[result.state]}; showing it now.`);
         } else toast("Preparing the role-specific resume.");
       }
@@ -891,7 +961,7 @@ async function regenerateResume(id) {
   STATE.pendingDownloads.set(key, String(row.current_artifact_id || ""));
   persistPendingDownloads();
   STATE.generating.add(key);
-  renderRows();
+  renderRows({ force: true });
   toast("Regeneration started; the finished resume will save to Downloads automatically.");
   try {
     await command("regenerate", { case_id: id, expected_version: row.state_version });
@@ -899,14 +969,14 @@ async function regenerateResume(id) {
   } catch (error) {
     if (error.code === "resume_regeneration_in_progress") {
       STATE.generating.add(key);
-      renderRows();
+      renderRows({ force: true });
       toast("Resume generation is already running; the finished resume will save to Downloads automatically.");
       return;
     }
     STATE.pendingDownloads.delete(key);
     persistPendingDownloads();
     STATE.generating.delete(key);
-    renderRows();
+    renderRows({ force: true });
     toast(error.message, true);
   }
 }
@@ -1088,13 +1158,22 @@ async function boot() {
     STATE.session = await request("/api/submissions-v2/session"); STATE.csrf = STATE.session.csrf_token || "";
     if (!STATE.session.authenticated) return showSignin();
     await Promise.all([loadCounts(), loadRows()]);
-    STATE.pollTimer = setInterval(() => { loadCounts().catch(() => {}); loadRows({ refresh: true }).catch(() => {}); }, 30_000);
+    STATE.pollTimer = setInterval(() => { loadCounts().catch(() => {}); loadRows({ refresh: true, background: true }).catch(() => {}); }, 30_000);
   } catch (error) {
     if ([401, 403].includes(error.status)) showSignin(); else { $("rows").innerHTML = `<div class="empty-state"><strong>Submissions V2 is not available</strong>${esc(error.message)}</div>`; renderHealth({ delayed: true }); }
   }
 }
 
-document.querySelectorAll(".page-tab").forEach((node) => { node.onclick = () => switchPage(node.dataset.page); });
+document.querySelectorAll(".page-tab").forEach((node) => {
+  node.onclick = () => switchPage(node.dataset.page);
+  node.onkeydown = (event) => {
+    const target = tabPageFromKey({ key: event.key, current: node.dataset.page, pages: PAGE_ORDER });
+    if (!target) return;
+    event.preventDefault();
+    updatePageTabs({ selected: STATE.page, focusable: target });
+    $("tab-" + target.replaceAll("_", "-"))?.focus();
+  };
+});
 $("candidate-search").oninput = (event) => { clearTimeout(STATE.searchTimer); STATE.searchTimer = setTimeout(() => { STATE.query = event.target.value.trim(); STATE.nextCursor = null; STATE.totalCount = null; loadRows(); }, 220); };
 $("load-more").onclick = () => loadRows({ append: true }); $("add-candidate").onclick = openAddCandidate;
 $("dialog-close").onclick = closeDialog; $("modal").onclick = (event) => { if (event.target === $("modal")) closeDialog(); };
