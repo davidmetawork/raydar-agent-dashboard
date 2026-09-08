@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 102,
-  "digest": "73554f77a4151dcd078fa95db29fd3abd44cf6d397cf0fe53b534b0a776d758a",
+  "digest": "afb4d9b6619dc42537d9f778ee7fb7df5f1e2caa3ac08bbd8d9d8aa6aa2f458f",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -59,7 +59,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/classifier.mjs",
-      "sha256": "429b5a33862cff5453f80eae8a7737ea6a85fbfd90b7d5566323758649bea613"
+      "sha256": "01870cf3f14e842f3b5ac7ac32c47e46c93747a01fbf8824b28826fb2bdb8246"
     },
     {
       "path": "api/submissions-v2/_lib/command-store.mjs",
