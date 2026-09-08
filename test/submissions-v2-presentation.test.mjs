@@ -16,6 +16,8 @@ test("row DTO rejects unsafe Signal destinations", () => {
     can_download: false,
     can_regenerate: false,
     can_submit: false,
+    can_mark_submitted: false,
+    can_unmark_submitted: false,
   });
 });
 
@@ -105,6 +107,8 @@ test("Interested preparation rows expose safe progress without artifact actions"
     can_download: false,
     can_regenerate: false,
     can_submit: false,
+    can_mark_submitted: false,
+    can_unmark_submitted: false,
   });
 });
 
@@ -157,6 +161,49 @@ test("Submitted history preserves downloads while regeneration still requires po
   assert.equal(unclear.capabilities.can_regenerate, false);
   assert.equal(unclear.capabilities.can_submit, false);
   assert.equal(rowDto({ ...row, intent_state: "interested", generation_status: "strategizing" }).capabilities.can_regenerate, false);
+});
+
+test("a manual submission mark replaces the ready actions until Paraform confirms or the mark is undone", () => {
+  const ready = {
+    pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",
+    workflow_state: "interested", submission_status: "none", generation_status: "succeeded",
+    current_artifact_id: "artifact-1", artifact_ready: true, role_active: true,
+  };
+  const unmarked = rowDto(ready);
+  assert.equal(unmarked.submission_marked_at, null);
+  assert.equal(unmarked.submission_marked_by, null);
+  assert.equal(unmarked.submitted_manually, false);
+  assert.equal(unmarked.capabilities.can_mark_submitted, true);
+  assert.equal(unmarked.capabilities.can_unmark_submitted, false);
+
+  const marked = rowDto({
+    ...ready, submission_status: "opened",
+    submission_marked_at: "2026-09-08T10:00:00Z", submission_marked_by: "david@raydar.xyz",
+  });
+  assert.equal(marked.submission_marked_at, "2026-09-08T10:00:00.000Z");
+  assert.equal(marked.submission_marked_by, "david@raydar.xyz");
+  assert.equal(marked.submitted_manually, true);
+  assert.equal(marked.capabilities.can_mark_submitted, false);
+  assert.equal(marked.capabilities.can_unmark_submitted, true);
+  assert.equal(marked.capabilities.can_submit, false);
+  assert.equal(marked.capabilities.can_correct, false);
+  assert.equal(marked.capabilities.can_download, true);
+  assert.equal(marked.capabilities.can_regenerate, true);
+  assert.equal(marked.capabilities.can_duplicate, true);
+
+  const proven = rowDto({ ...marked, submission_status: "proven" });
+  assert.equal(proven.submitted_manually, false, "Paraform proof supersedes the human mark");
+  assert.equal(proven.capabilities.can_mark_submitted, false);
+  assert.equal(proven.capabilities.can_unmark_submitted, false);
+  assert.equal(proven.capabilities.can_submit, false);
+
+  const preparing = rowDto({ ...ready, workflow_state: "preparing_resume", artifact_ready: false });
+  assert.equal(preparing.capabilities.can_mark_submitted, false, "only an Interested candidate can be marked");
+
+  const withoutArtifact = rowDto({ ...ready, artifact_ready: false, current_artifact_id: null });
+  assert.equal(withoutArtifact.capabilities.can_submit, false);
+  assert.equal(withoutArtifact.capabilities.can_mark_submitted, true, "David may have submitted a different resume");
+  assert.equal(rowDto({ ...ready, role_active: false }).capabilities.can_mark_submitted, true, "the role may go inactive after a real submission");
 });
 
 test("public health preserves safe per-source status for dependency-specific gating", () => {

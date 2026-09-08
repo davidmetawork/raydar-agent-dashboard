@@ -314,6 +314,17 @@ async function pairEvent(tx, pair, {
   `;
 }
 
+async function latestManualMark(tx, pairId) {
+  const rows = await tx`
+    select event_type, actor_id, created_at from submissions_v2.pair_events
+     where pair_id=${pairId} and event_type in ('submission_marked','submission_unmarked')
+     order by created_at desc, id desc limit 1
+  `;
+  const latest = rows[0];
+  if (latest?.event_type !== "submission_marked") return null;
+  return { marked_at: instant(latest.created_at), marked_by: latest.actor_id };
+}
+
 async function queueResume(tx, pair, commandRow, triggerKind = "initial") {
   return enqueue(tx, {
     kind: "prepare_resume",
@@ -607,7 +618,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               g.stage as generation_stage, g.safe_error_code as preparation_error_code,
               g.safe_error_detail as preparation_error_detail,
               g.updated_at as generation_updated_at, g.deadline_at as generation_deadline_at,
-              p.submission_status, null::text as negative_reason, null::text as corrected_destination,
+              p.submission_status, null::timestamptz as submission_marked_at, null::text as submission_marked_by,
+              null::text as negative_reason, null::text as corrected_destination,
               r.last_confirmed_at as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
               p.original_signal_at as sort_at, p.id as sort_id
             from submissions_v2.candidate_role_pairs p
@@ -666,7 +678,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               rv.reasons as review_reasons, '[]'::jsonb as resume_cautions, null::text as generation_status,
               null::text as generation_stage, null::text as preparation_error_code, null::text as preparation_error_detail,
               null::timestamptz as generation_updated_at, null::timestamptz as generation_deadline_at,
-              'none'::text as submission_status, null::text as negative_reason, null::text as corrected_destination,
+              'none'::text as submission_status, null::timestamptz as submission_marked_at, null::text as submission_marked_by,
+              null::text as negative_reason, null::text as corrected_destination,
               null::timestamptz as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
               se.received_at as sort_at, se.id as sort_id
             from submissions_v2.source_events se
@@ -719,6 +732,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               se.envelope->>'decisive_status' as decisive_status,
             ni.original_negative_at as signal_at, p.workflow_state, '[]'::jsonb as review_reasons,
             '[]'::jsonb as resume_cautions, null::text as generation_status, p.submission_status,
+            null::timestamptz as submission_marked_at, null::text as submission_marked_by,
             ni.grounded_reason as negative_reason, ni.corrected_destination,
             r.last_confirmed_at as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
             ni.original_negative_at as sort_at, ni.id as sort_id,
@@ -751,7 +765,10 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             g.stage as generation_stage, g.safe_error_code as preparation_error_code,
             g.safe_error_detail as preparation_error_detail,
             g.updated_at as generation_updated_at, g.deadline_at as generation_deadline_at,
-            p.submission_status, current_artifact.id as current_artifact_id, current_artifact.artifact_version,
+            p.submission_status,
+            case when mark.event_type='submission_marked' then mark.created_at end as submission_marked_at,
+            case when mark.event_type='submission_marked' then mark.actor_id end as submission_marked_by,
+            current_artifact.id as current_artifact_id, current_artifact.artifact_version,
             (current_artifact.id is not null) as artifact_ready, r.active as role_active,
             null::text as negative_reason, null::text as corrected_destination,
             r.last_confirmed_at as role_last_confirmed_at, sh.last_success_at as source_last_success_at,
@@ -816,6 +833,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
               from submissions_v2.resume_sources where generation_id=g.id and status <> 'present'
           ) caution on true
           left join lateral (select max(last_success_at) as last_success_at from submissions_v2.source_health where enabled) sh on true
+          left join lateral (
+            select e.event_type, e.created_at, e.actor_id from submissions_v2.pair_events e
+             where e.pair_id=p.id and e.event_type in ('submission_marked','submission_unmarked')
+             order by e.created_at desc, e.id desc limit 1
+          ) mark on true
             where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
               and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
           ) select * from scoped
@@ -926,7 +948,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                r.active as role_active, r.last_confirmed_at as role_last_confirmed_at,
                a.private_object_key as artifact_object_key, a.digest as artifact_digest,
                a.artifact_version, a.validation_status as artifact_validation_status,
-               (a.id is not null) as artifact_ready
+               (a.id is not null) as artifact_ready,
+               case when mark.event_type='submission_marked' then mark.created_at end as submission_marked_at,
+               case when mark.event_type='submission_marked' then mark.actor_id end as submission_marked_by
           from submissions_v2.candidate_role_pairs p
           left join submissions_v2.candidate_index c on c.candidate_user_id=p.candidate_user_id
           left join submissions_v2.role_index r on r.role_id=p.role_id
@@ -934,6 +958,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             on a.id=p.current_artifact_id and a.pair_id=p.id and a.kind='pdf'
            and a.validation_status='passed' and a.current_state='current' and a.deleted_at is null
            and a.archived_at is not null and a.archive_readback_at is not null
+          left join lateral (
+            select e.event_type, e.created_at, e.actor_id from submissions_v2.pair_events e
+             where e.pair_id=p.id and e.event_type in ('submission_marked','submission_unmarked')
+             order by e.created_at desc, e.id desc limit 1
+          ) mark on true
          where p.id=${pairId} and p.case_hidden_at is null
       `;
       return rows[0] || null;
@@ -2357,6 +2386,70 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         }
         await pairEvent(tx, updated, { actorId: actorEmail, source: "submit_open", eventType: "paraform_role_opened", expectedVersion, previous: current, idempotencyKey: `pair:${commandRow.id}`, metadata: { navigation_only: true, role_id: current.role_id } });
         return { case_id: pairId, state_version: Number(updated.state_version), redirect_url: exactUrl, submission_status: "opened" };
+      }));
+    },
+
+    async markSubmitted({ actorEmail, idempotencyKey, pairId, expectedVersion }) {
+      return sql.begin(async (tx) => command(tx, {
+        actorEmail, action: "mark_submitted", idempotencyKey, expectedVersion, pairId,
+        input: { pairId, expectedVersion },
+      }, async (commandRow) => {
+        const current = await lockPair(tx, pairId, expectedVersion);
+        if (current.submission_status === "proven") throw problem("proven_pair_immutable", "Paraform already confirmed this submission.", 409, pairCurrent(current));
+        if (current.workflow_state !== "interested") throw problem("pair_not_submit_ready", "Only an Interested candidate can be marked as submitted.", 409, pairCurrent(current));
+        // No artifact or active-role requirement: a different resume may have been
+        // submitted, and the role may have gone inactive after the real submission.
+        const marked = await latestManualMark(tx, pairId);
+        if (marked) {
+          return {
+            case_id: pairId, state_version: Number(current.state_version),
+            submission_status: current.submission_status, manual_mark: marked, already_marked: true,
+          };
+        }
+        const updated = (await tx`
+          update submissions_v2.candidate_role_pairs
+             set submission_status=case when submission_status='none' then 'opened' else submission_status end,
+                 submission_opened_at=coalesce(submission_opened_at, clock_timestamp()),
+                 state_version=state_version+1
+           where id=${pairId} and state_version=${expectedVersion} returning *
+        `)[0];
+        if (!updated) throw problem("stale_pair_version", "The candidate-role item changed before this action was committed.", 409, pairCurrent(current));
+        await pairEvent(tx, updated, { actorId: actorEmail, source: "mark_submitted", eventType: "submission_marked", expectedVersion, previous: current, idempotencyKey: `pair:${commandRow.id}`, metadata: { marked_by: actorEmail, role_id: current.role_id, opened_by_mark: current.submission_status === "none" } });
+        for (const delayMinutes of [5, 30, 120]) {
+          await enqueue(tx, {
+            kind: "proof_reconcile", subjectType: "pair", subjectId: pairId,
+            commandId: commandRow.id, idempotencyKey: `proof:${commandRow.id}:${delayMinutes}m`,
+            requiredControl: "ingestion", priority: 12,
+            scheduledAt: new Date(Date.now() + delayMinutes * 60_000).toISOString(),
+            checkpoint: { opened_pair_id: pairId, delay_minutes: delayMinutes, trigger: "manual_mark" },
+          });
+        }
+        return {
+          case_id: pairId, state_version: Number(updated.state_version),
+          submission_status: updated.submission_status, manual_mark: await latestManualMark(tx, pairId),
+        };
+      }));
+    },
+
+    async unmarkSubmitted({ actorEmail, idempotencyKey, pairId, expectedVersion }) {
+      return sql.begin(async (tx) => command(tx, {
+        actorEmail, action: "unmark_submitted", idempotencyKey, expectedVersion, pairId,
+        input: { pairId, expectedVersion },
+      }, async (commandRow) => {
+        const current = await lockPair(tx, pairId, expectedVersion);
+        if (current.submission_status === "proven") throw problem("proven_pair_immutable", "Paraform already confirmed this submission; it cannot be un-marked.", 409, pairCurrent(current));
+        if (!(await latestManualMark(tx, pairId))) throw problem("pair_not_marked", "This candidate-role item is not marked as submitted.", 409, pairCurrent(current));
+        const updated = (await tx`
+          update submissions_v2.candidate_role_pairs
+             set state_version=state_version+1
+           where id=${pairId} and state_version=${expectedVersion} returning *
+        `)[0];
+        if (!updated) throw problem("stale_pair_version", "The candidate-role item changed before this action was committed.", 409, pairCurrent(current));
+        await pairEvent(tx, updated, { actorId: actorEmail, source: "unmark_submitted", eventType: "submission_unmarked", expectedVersion, previous: current, idempotencyKey: `pair:${commandRow.id}`, metadata: { unmarked_by: actorEmail } });
+        return {
+          case_id: pairId, state_version: Number(updated.state_version),
+          submission_status: updated.submission_status, manual_mark: null,
+        };
       }));
     },
 

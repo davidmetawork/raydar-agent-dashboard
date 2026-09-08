@@ -484,6 +484,12 @@ export function createService({
           uploads: requestedUploads,
         });
       }
+      if (action === "mark_submitted") {
+        return repository.markSubmitted({ actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100), expectedVersion: expectedVersion(body.expected_version) });
+      }
+      if (action === "unmark_submitted") {
+        return repository.unmarkSubmitted({ actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100), expectedVersion: expectedVersion(body.expected_version) });
+      }
       throw problem("action_not_supported", "This Submissions V2 action is not supported.", 400);
     },
 
