@@ -547,7 +547,7 @@ test("email intake cannot commit a source after its private-object write lease e
 });
 
 test("email intake keeps one immutable provider-event object owner through commit", async () => {
-  const repository = createRepository({ sql });
+  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
   const prior = await readRuntimeControls(sql);
   await setRuntimeControls({
     actorEmail: "admin@raydar.xyz", reason: "Enable source object binding regression",
@@ -570,7 +570,7 @@ test("email intake keeps one immutable provider-event object owner through commi
     provider: "master_inbox", mailbox_id: "mailbox-test", provider_message_id: `message-${eventId}`,
     provider_thread_id: `thread-${eventId}`, outbound_message_id: `outbound-${eventId}`,
     sent_at: new Date().toISOString(), received_at: new Date().toISOString(),
-    content_digest: digest(`content:${eventId}`), sender_display_name: "Candidate",
+    content_digest: digest(`content:${eventId}`), sender_display_name: "Candidate <candidate@example.com>",
     sender_match_hmac: null, previous_sender_match_hmac: null, machine_message: false,
     idempotency_key: `source:${eventId}`, offered_roles: [],
   };
@@ -594,6 +594,27 @@ test("email intake keeps one immutable provider-event object owner through commi
     owner_id: recorded.source.id,
     owner_binding_ref: eventId,
   });
+  const admission = (await sql`
+    select kind, pair_id, safe_payload, dedupe_key
+      from submissions_v2.notification_outbox
+     where dedupe_key=${`submission-added:signal:${recorded.source.id}`}
+  `)[0];
+  assert.equal(admission.kind, "submission_added");
+  assert.equal(admission.pair_id, null);
+  assert.equal((await sql`
+    select count(*)::integer as count from submissions_v2.notification_outbox
+     where dedupe_key=${`submission-added:signal:${recorded.source.id}`}
+  `)[0].count, 1);
+  assert.deepEqual({ ...admission.safe_payload, added_at: undefined }, {
+    candidate_name: "Candidate", company: "Not yet identified",
+    role_title: "Not yet identified", signal: "Needs review · Email reply",
+    added_at: undefined, monitor_url: "https://monitor.raydar.xyz/#submissions-v2",
+  });
+  const review = (await sql`
+    select opened_at from submissions_v2.review_items
+     where unresolved_signal_id=${recorded.source.id}
+  `)[0];
+  assert.equal(admission.safe_payload.added_at, new Date(review.opened_at).toISOString());
 });
 
 test("exact pair identity, first response, review consistency, and pair ledger are database-enforced", async () => {
@@ -698,6 +719,102 @@ test("human review can bind a missing-role signal to an exact active Paraform ro
   await sql`update submissions_v2.candidate_index set active=false where candidate_user_id=${candidateId}`;
   await setRuntimeControls({
     actorEmail: "admin@raydar.xyz", reason: "Restore controls after missing-role recovery regression",
+    ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+});
+
+test("resolving a pre-release source Review row creates only a held lineage marker", async () => {
+  const prior = await readRuntimeControls(sql);
+  const enabled = await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Enable source-lineage notification regression",
+    ui: true, ingestion: true, generation: true, masterInbox: true,
+    curated: prior.curated_enabled,
+  }, sql);
+  const candidateId = `lineage-candidate-${randomUUID()}`;
+  const roleA = `lineage-role-a-${randomUUID()}`;
+  const roleB = `lineage-role-b-${randomUUID()}`;
+  const signalId = randomUUID();
+  const eventId = `lineage-event-${randomUUID()}`;
+  await sql`
+    insert into submissions_v2.candidate_index(
+      candidate_user_id, display_name, normalized_name, search_key, active,
+      paraform_profile_url, last_confirmed_at, source_digest
+    ) values (
+      ${candidateId}, 'Lineage Candidate', 'lineage candidate', 'lineage candidate', true,
+      ${`https://www.paraform.com/candidates?candidate_profile_id=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+    )
+  `;
+  await sql`
+    insert into submissions_v2.role_index(
+      role_id, company_name, role_title, search_key, active, destination_url, last_confirmed_at, source_digest
+    ) values
+      (${roleA}, 'Lineage Company', 'Lineage Engineer A', 'lineage company lineage engineer a', true,
+       ${`https://www.paraform.com/browse?role=${roleA}`}, clock_timestamp(), ${digest(roleA)}),
+      (${roleB}, 'Lineage Company', 'Lineage Engineer B', 'lineage company lineage engineer b', true,
+       ${`https://www.paraform.com/browse?role=${roleB}`}, clock_timestamp(), ${digest(roleB)})
+  `;
+  await sql`
+    insert into submissions_v2.source_events(
+      id, source_family, source_version, event_id, provider, mailbox_id, provider_message_id,
+      direction, received_at, content_digest, processing_state, safe_error_code,
+      safe_error_detail, idempotency_key, envelope, sender_display_name
+    ) values (
+      ${signalId}, 'email', 'submissions.email_reply.v1', ${eventId}, 'master_inbox', 'mailbox-test',
+      ${`message-${eventId}`}, 'inbound', clock_timestamp(), ${digest(signalId)}, 'needs_role',
+      'role_unclear', 'The exact role requires review.', ${`source:${signalId}`},
+      ${sql.json({ candidate_resolution: { candidate_user_id: candidateId } })}, 'Lineage Candidate'
+    )
+  `;
+  await sql`
+    insert into submissions_v2.review_items(unresolved_signal_id, reason_code, safe_detail)
+    values (${signalId}, 'role_unclear', 'Select the exact role.')
+  `;
+  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+  const bound = await repository.bindUnresolvedSignal({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), signalId,
+    candidateId, roleIds: [roleA, roleB], note: "Confirmed exact roles from source.",
+  });
+  const claimed = (await claimJobs({
+    workerId: "lineage-worker", kinds: ["classify_email_reply"], limit: 50,
+    leaseSeconds: 120, controlEpoch: enabled.control_epoch,
+  }, sql)).find((row) => row.id === bound.job_id);
+  assert.ok(claimed);
+  const applied = await repository.applyClassifiedSignal({
+    signalId, candidateId,
+    decisions: [
+      { role_id: roleA, label: "interested", quote: "Yes, I am interested.", review_reason: null, negative_reason: null },
+      { role_id: roleB, label: "interested", quote: "Yes, I am interested.", review_reason: null, negative_reason: null },
+    ],
+    attempts: [{ outcome: "accepted", model: "test-model" }],
+    executionFence: {
+      jobId: claimed.id, workerId: claimed.lease_owner,
+      fencingToken: Number(claimed.fencing_token), controlEpoch: Number(enabled.control_epoch),
+    },
+  });
+  assert.equal(applied.created_count, 2);
+  const notifications = await sql`
+    select dedupe_key, pair_id, state, safe_error_code from submissions_v2.notification_outbox
+     where dedupe_key in (
+       ${`submission-added:signal:${signalId}`},
+       ${`submission-added:pair:${applied.pairs[0].pair_id}`},
+       ${`submission-added:pair:${applied.pairs[1].pair_id}`}
+     )
+     order by dedupe_key
+  `;
+  assert.equal(notifications.length, 2);
+  const signalMarker = notifications.find((row) => row.dedupe_key === `submission-added:signal:${signalId}`);
+  assert.deepEqual(signalMarker, {
+    dedupe_key: `submission-added:signal:${signalId}`, pair_id: applied.pairs[0].pair_id,
+    state: "held", safe_error_code: "pre_release_admission_suppressed",
+  });
+  const additionalRole = notifications.find((row) => row.pair_id === applied.pairs[1].pair_id);
+  assert.deepEqual(additionalRole, {
+    dedupe_key: `submission-added:pair:${applied.pairs[1].pair_id}`, pair_id: applied.pairs[1].pair_id,
+    state: "pending", safe_error_code: null,
+  });
+  await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Restore source-lineage notification regression controls",
     ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
     masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
   }, sql);
@@ -1026,7 +1143,7 @@ test("the API principal closes an all-existing source binding as an audited dupl
 });
 
 test("a multi-role reply releases unmentioned roles for their later first response", async () => {
-  const repository = createRepository({ sql });
+  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
   const prior = await readRuntimeControls(sql);
   const enabled = await setRuntimeControls({
     actorEmail: "admin@raydar.xyz", reason: "Enable multi-role first-response release regression",
@@ -1311,7 +1428,14 @@ test("classification-failure replay stays terminal until an approved retry recov
   assert.equal((await sql`select processing_state from submissions_v2.source_events where id=${signalId}`)[0].processing_state, 'quarantined');
   assert.equal((await sql`select count(*)::integer as count from submissions_v2.review_items where pair_id=${first.pairs[0]}`)[0].count, 1);
   assert.equal((await sql`select count(*)::integer as count from submissions_v2.pair_signal_links where signal_id=${signalId}`)[0].count, 1);
-  assert.equal((await sql`select count(*)::integer as count from submissions_v2.notification_outbox where pair_id=${first.pairs[0]}`)[0].count, 1);
+  assert.equal((await sql`
+    select count(*)::integer as count from submissions_v2.notification_outbox
+     where pair_id=${first.pairs[0]} and kind='classification_failed'
+  `)[0].count, 1);
+  assert.equal((await sql`
+    select count(*)::integer as count from submissions_v2.notification_outbox
+     where pair_id=${first.pairs[0]} and kind='submission_added'
+  `)[0].count, 1);
   const retryJobId = randomUUID();
   await sql`
     insert into submissions_v2.jobs(id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch)
@@ -2012,6 +2136,65 @@ test("candidate reconciliation deactivates missing profiles only after a fenced 
     sourceKey: "candidate_index", workerId: sourceClaim.lease_owner,
     fencingToken: sourceClaim.fencing_token, controlEpoch: enabled.control_epoch,
     checkpoint: {}, fullSuccess: true,
+  }, sql);
+});
+
+test("first recruiter addition queues one exact admission notification and later adds do not repeat it", async () => {
+  const prior = await readRuntimeControls(sql);
+  await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Enable admission notification regression",
+    ui: true, ingestion: true, generation: true,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+  const candidateId = `addition-candidate-${randomUUID()}`;
+  const roleId = `addition-role-${randomUUID()}`;
+  await sql`
+    insert into submissions_v2.candidate_index(
+      candidate_user_id, display_name, normalized_name, search_key, active,
+      paraform_profile_url, last_confirmed_at, source_digest
+    ) values (
+      ${candidateId}, 'Addition Candidate', 'addition candidate', 'addition candidate', true,
+      ${`https://www.paraform.com/candidates?candidate_profile_id=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+    )
+  `;
+  await sql`
+    insert into submissions_v2.role_index(
+      role_id, company_name, role_title, search_key, active,
+      destination_url, last_confirmed_at, source_digest
+    ) values (
+      ${roleId}, 'Addition Company', 'Addition Engineer', 'addition company addition engineer', true,
+      ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
+    )
+  `;
+  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+  const first = await repository.addCandidate({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), candidateId, roleId,
+  });
+  const later = await repository.addCandidate({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), candidateId, roleId,
+  });
+  assert.equal(first.existing, false);
+  assert.equal(later.existing, true);
+  assert.equal(later.case_id, first.case_id);
+  const rows = await sql`
+    select n.kind, n.dedupe_key, n.safe_payload, p.created_at
+      from submissions_v2.notification_outbox n
+      join submissions_v2.candidate_role_pairs p on p.id=n.pair_id
+     where n.pair_id=${first.case_id}
+  `;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, "submission_added");
+  assert.equal(rows[0].dedupe_key, `submission-added:pair:${first.case_id}`);
+  assert.deepEqual({ ...rows[0].safe_payload, added_at: undefined }, {
+    candidate_name: "Addition Candidate", company: "Addition Company",
+    role_title: "Addition Engineer", signal: "Interested · Recruiter addition",
+    added_at: undefined, monitor_url: "https://monitor.raydar.xyz/#submissions-v2",
+  });
+  assert.equal(rows[0].safe_payload.added_at, new Date(rows[0].created_at).toISOString());
+  await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Restore admission notification regression controls",
+    ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
   }, sql);
 });
 

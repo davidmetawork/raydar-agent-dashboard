@@ -2,8 +2,8 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 96,
-  "digest": "1fe13dab2201df147276d6b8d3c485584735f614d19f6c775dd255e77f43b079",
-  "vercel_json_canonical_sha256": "f1919f6629d67116ca547445e801b03cbbf756df5d494fd2984e3286a9465329",
+  "digest": "c78579e6a6b82fdeb7b5a9cf42fa763a7fd2297285296c5a5ba21e625cf1ccbf",
+  "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
   "files": [
     {
       "path": ".vercelignore",
@@ -115,7 +115,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/notifications.mjs",
-      "sha256": "6c2debebd8ce80b75dcb3ad59db1e3fe98c670be3a99448ff3d26b6f967ddf31"
+      "sha256": "b552010eaec32626fa981717b0797eaa42e0a250f9d6c1b694d49cd922a4f486"
     },
     {
       "path": "api/submissions-v2/_lib/paraform-links.mjs",
@@ -135,7 +135,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "c3558dad2266ef6c9c798d6c294d2ec15cd19c158d5c1ae6862faea8d71c18da"
+      "sha256": "ca761bb78492215d5d676a321787a483a38445492154ad488ee8447cbeb6665e"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -183,7 +183,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/router.mjs",
-      "sha256": "58c1f79fb437336e9177978cf8c9add35eb2018d0a75e86ab3ff20d793050a2d"
+      "sha256": "4c8b1120c2187bb49119e7fe263300f35312cd83ee3484be74b5c48d1097e050"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",
@@ -371,7 +371,7 @@
     },
     {
       "path": "submissions-v2-worker/worker-handlers.mjs",
-      "sha256": "bd662057624dfef7a8458811394ac5c845f590519ed83c676961c490dbaa4497"
+      "sha256": "5b7edeb91e79c6b3d44767ec099e9147b1649b710e254618fbe5286bc0d28b33"
     },
     {
       "path": "submissions-v2.css",
@@ -387,7 +387,7 @@
     },
     {
       "path": "vercel.json",
-      "sha256": "7bba45db4a08284e837ff5fd54371eb7ac5543bae00b05c6530a3aa482c9b4cd"
+      "sha256": "d00d2bd969afa09cd009f0353672211f33fcc74a57e9f7a6f08472c53fe0b84e"
     }
   ]
 }

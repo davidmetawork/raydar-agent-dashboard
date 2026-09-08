@@ -10,6 +10,26 @@ const clean = (value, limit = 500) => String(value ?? "")
   .trim()
   .slice(0, limit);
 
+export function safeCandidateName(value) {
+  let raw = String(value ?? "").replace(/[\r\n]+/gu, " ").trim();
+  const addressed = raw.match(/^([^<>]+?)\s*<[^<>\s@]+@[^<>\s@]+>$/u);
+  if (addressed) raw = addressed[1].trim();
+  if (/\b[^\s@]+@[^\s@]+\.[^\s@]+\b/u.test(raw)
+    || /(?:^|\s)\+?\d[\d\s().-]{6,}\d(?:\s|$)/u.test(raw)) {
+    return "Not yet identified";
+  }
+  return clean(raw, 200) || "Not yet identified";
+}
+
+export function safeNotificationField(value, fallback = "Not yet identified", limit = 200) {
+  const raw = String(value ?? "").replace(/[\r\n]+/gu, " ").trim();
+  if (/\b[^\s@]+@[^\s@]+\.[^\s@]+\b/u.test(raw)
+    || /(?:^|\s)\+?\d[\d\s().-]{6,}\d(?:\s|$)/u.test(raw)) {
+    return fallback;
+  }
+  return clean(raw, limit) || fallback;
+}
+
 export function exactSlackChannel(value) {
   const channel = clean(value, 100);
   if (!/^[CG][A-Z0-9]{2,}$/u.test(channel)) {
@@ -19,10 +39,25 @@ export function exactSlackChannel(value) {
 }
 
 export function notificationText(kind, data = {}) {
-  const candidate = clean(data.candidate_name || "Candidate", 200);
+  const candidate = safeCandidateName(data.candidate_name);
   const role = clean([data.company, data.role_title].filter(Boolean).join(" · ") || "role unavailable", 300);
   const owner = clean(data.owner_name || "Unassigned", 120);
   const link = /^https:\/\/monitor\.raydar\.xyz\//.test(String(data.monitor_url || "")) ? data.monitor_url : "https://monitor.raydar.xyz/#submissions";
+  if (kind === "submission_added") {
+    const company = safeNotificationField(data.company);
+    const roleTitle = safeNotificationField(data.role_title);
+    const signal = safeNotificationField(data.signal, "Needs review · Source not yet identified", 300);
+    const addedAt = formatPacificTime(data.added_at);
+    return [
+      "Added to Monitor Submissions",
+      `Name: ${candidate}`,
+      `Company: ${company}`,
+      `Job title: ${roleTitle}`,
+      `Signal: ${signal}`,
+      `Added at: ${addedAt}`,
+      `Monitor: ${link}`,
+    ].join("\n");
+  }
   if (kind === "not_interested") return `Submissions: ${candidate} is not interested in ${role}; owner: ${owner}; review in Monitor: ${link}`;
   if (kind === "classification_failed") return `Submissions needs review: reply classification failed for ${candidate} · ${role}; owner: ${owner}; ${link}`;
   if (kind === "resume_preparation_failed") return `Submissions needs review: resume preparation failed for ${candidate} · ${role}; owner: ${owner}; ${link}`;
@@ -30,6 +65,21 @@ export function notificationText(kind, data = {}) {
   if (kind === "source_delayed") return `Submissions source delayed: ${clean(data.source || "unknown source", 100)} has not completed successfully; ${link}`;
   if (kind === "source_recovered") return `Submissions source recovered: ${clean(data.source || "unknown source", 100)} is current again; ${link}`;
   return `Submissions notice: ${clean(kind, 100)}; ${link}`;
+}
+
+export function formatPacificTime(value) {
+  if (value == null || String(value).trim() === "") return "Time not available";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Time not available";
+  return `${new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date)} PT`;
 }
 
 function equal(left, right) {
@@ -59,24 +109,64 @@ function brokerUrl(env) {
   return url.toString();
 }
 
-export async function postSafeNotification(text, { env = process.env, fetchImpl = fetch, destinationId } = {}) {
+export async function postSafeNotification(text, { env = process.env, fetchImpl = fetch, destinationId, kind } = {}) {
+  if (clean(kind, 100) !== "submission_added") {
+    throw Object.assign(new Error("Only Monitor Submissions admission notifications are enabled."), {
+      code: "notification_kind_suppressed",
+      deliveryOutcome: "not_sent",
+    });
+  }
+  const lines = String(text ?? "").split(/\r?\n/u);
+  const prefixes = [
+    "Added to Monitor Submissions", "Name: ", "Company: ", "Job title: ",
+    "Signal: ", "Added at: ", "Monitor: https://monitor.raydar.xyz/",
+  ];
+  if (lines.length !== prefixes.length || lines.some((line, index) => (
+    index === 0 ? line !== prefixes[index] : !line.startsWith(prefixes[index])
+  ))) {
+    throw Object.assign(new Error("The Monitor Submissions admission notification is malformed."), {
+      code: "submission_added_notification_invalid",
+      deliveryOutcome: "not_sent",
+    });
+  }
+  const safeText = lines.map((line) => clean(line, 500)).join("\n").slice(0, 2_000);
   const token = String(env.SUBMISSIONS_V2_SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN || "").trim();
   const channel = exactSlackChannel(destinationId);
   const broker = brokerUrl(env);
   const brokerKey = String(env.SUBMISSIONS_V2_NOTIFICATION_BROKER_KEY || "").trim();
   if (!token && (!broker || !strong(brokerKey))) throw Object.assign(new Error("Slack notification is not configured."), { code: "slack_not_configured", status: 503, deliveryOutcome: "not_sent" });
+  const usingBroker = !token;
   let response;
   try {
     response = token
-      ? await fetchImpl(POST_URL, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ channel, text: clean(text, 2_000), mrkdwn: false, link_names: false, unfurl_links: false, unfurl_media: false }), signal: AbortSignal.timeout(10_000) })
-      : await fetchImpl(broker, { method: "POST", headers: { authorization: `Bearer ${brokerKey}`, "content-type": "application/json" }, body: JSON.stringify({ destination_id: channel, text: clean(text, 2_000) }), signal: AbortSignal.timeout(10_000) });
+      ? await fetchImpl(POST_URL, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ channel, text: safeText, mrkdwn: false, link_names: false, unfurl_links: false, unfurl_media: false }), signal: AbortSignal.timeout(10_000) })
+      : await fetchImpl(broker, { method: "POST", headers: { authorization: `Bearer ${brokerKey}`, "content-type": "application/json" }, body: JSON.stringify({ kind: clean(kind, 100), destination_id: channel, text: safeText }), signal: AbortSignal.timeout(10_000) });
   } catch (error) {
     throw Object.assign(new Error("Slack delivery outcome is unknown."), { code: clean(error?.code || "slack_transport_unknown", 100), deliveryOutcome: "unknown" });
   }
   const body = await response.json().catch(() => null);
   if (!body) throw Object.assign(new Error("Slack delivery outcome is unknown."), { code: "slack_receipt_unreadable", deliveryOutcome: "unknown" });
-  if (!response.ok || !body.ok) throw Object.assign(new Error("Slack did not accept the notification."), { code: clean(body.error || `slack_http_${response.status}`, 100), deliveryOutcome: "not_sent" });
-  return { receipt: body.receipt || body.ts || null, channel: body.channel || channel };
+  if (!response.ok || !body.ok) {
+    const brokerOutcomeUnknown = usingBroker && (
+      body.delivery_outcome === "unknown"
+      || (Number(response.status) >= 500 && body.delivery_outcome !== "not_sent")
+    );
+    throw Object.assign(new Error(brokerOutcomeUnknown
+      ? "Slack delivery outcome is unknown."
+      : "Slack did not accept the notification."), {
+      code: clean(body.error || `slack_http_${response.status}`, 100),
+      deliveryOutcome: brokerOutcomeUnknown ? "unknown" : "not_sent",
+    });
+  }
+  const receipt = typeof (body.receipt || body.ts) === "string" ? String(body.receipt || body.ts).trim() : "";
+  const returnedChannel = typeof body.channel === "string" ? body.channel.trim() : "";
+  if (!receipt || (returnedChannel && returnedChannel !== channel)) {
+    throw Object.assign(new Error("Slack delivery outcome is unknown."), {
+      code: returnedChannel && returnedChannel !== channel ? "slack_channel_receipt_mismatch" : "slack_receipt_missing",
+      deliveryOutcome: "unknown",
+    });
+  }
+  return { receipt, channel: returnedChannel || channel };
 }
 
 export const notificationInternals = Object.freeze({ BROKER_PATH, brokerUrl, strong });
