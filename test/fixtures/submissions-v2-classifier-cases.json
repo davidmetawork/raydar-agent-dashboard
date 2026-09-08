@@ -561,6 +561,17 @@
       "sent_message": "A new role match for you.",
       "offered_roles": ["product"],
       "expected": [{ "role": "product", "label": "needs_review", "quote": "Tuesday afternoon works best for a call.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "outbound-enthusiasm-not-evidence",
+      "category": "needs_review_unclear",
+      "reply": "Got your note.",
+      "sent_message": "These two are an outstanding match for you and I would move on both of them straight away.",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "Got your note.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "Got your note.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }
+      ]
     }
   ]
 }
