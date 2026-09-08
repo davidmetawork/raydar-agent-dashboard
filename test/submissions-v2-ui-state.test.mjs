@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, preparationFailurePresentation, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, manualMarkPresentation, preparationFailurePresentation, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, submissionGroup, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -247,4 +247,24 @@ test("legacy preparation ceiling detail identifies a forecast stop without claim
   assert.equal(result.attemptLimitReached, true);
   assert.match(result.guidance, /estimated next step/);
   assert.doesNotMatch(result.guidance, /charged|spent/);
+});
+
+test("submission group sorts a manual mark into Submitted history ahead of Paraform proof", () => {
+  assert.equal(submissionGroup({ submission_status: "proven" }), "submitted");
+  assert.equal(submissionGroup({ submission_status: "opened", submitted_manually: true }), "submitted");
+  assert.equal(submissionGroup({ workflow_state: "preparing_resume", generation_status: "rendering" }), "preparing");
+  assert.equal(submissionGroup({ workflow_state: "interested", submission_status: "none" }), "ready");
+  assert.equal(submissionGroup({ workflow_state: "interested", submission_status: "opened" }), "ready");
+});
+
+test("manual mark presentation names who marked it and flags the pending Paraform check, proven rows read confirmed", () => {
+  assert.deepEqual(manualMarkPresentation({ submitted_manually: true, submission_marked_by: "david@raydar.xyz" }), {
+    label: "SUBMITTED", detail: "Marked by David · Paraform check pending", pending: true,
+  });
+  assert.equal(manualMarkPresentation({ submitted_manually: true, submission_marked_by: "" }).detail, "Marked by team · Paraform check pending");
+  assert.deepEqual(manualMarkPresentation({ submission_status: "proven" }), {
+    label: "SUBMITTED", detail: "Confirmed in Paraform", pending: false,
+  });
+  assert.equal(manualMarkPresentation({ submission_status: "opened" }), null);
+  assert.equal(manualMarkPresentation({ submission_status: "none" }), null);
 });

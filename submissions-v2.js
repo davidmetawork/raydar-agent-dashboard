@@ -1,6 +1,6 @@
 "use strict";
 
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, preparationFailurePresentation, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, manualMarkPresentation, preparationFailurePresentation, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, submissionGroup, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -204,27 +204,35 @@ function resumeProgressHtml(row) {
 
 function interestedActions(row) {
   const id = String(row.case_id || "");
-  const submitted = row.submission_status === "proven";
+  const submitted = row.submission_status === "proven" || row.submitted_manually;
   const resume = resumeUiState(row);
   const generating = resume.generating || STATE.generating.has(id);
   const downloading = rowActionPending(id, "download");
   const submitting = rowActionPending(id, "submit");
+  const marking = rowActionPending(id, "mark");
   const canDownload = rowCapability(row, "can_download", resume.hasArtifact);
   const canSubmit = rowCapability(row, "can_submit", resume.hasArtifact);
   const canRegenerate = rowCapability(row, "can_regenerate", resume.hasArtifact);
   const canCorrect = rowCapability(row, "can_correct", !submitted);
   const canDuplicate = rowCapability(row, "can_duplicate", Boolean(row.candidate_id));
-  const historyLabel = submitted ? '<span class="submitted-label">SUBMITTED</span>' : "";
+  const canMark = rowCapability(row, "can_mark_submitted", false);
+  const canUnmark = rowCapability(row, "can_unmark_submitted", false);
+  const manual = manualMarkPresentation(row);
+  const historyLabel = submitted
+    ? `<span class="submitted-state"><span class="submitted-label">${esc(manual?.label || "SUBMITTED")}</span>${manual?.detail ? `<small class="submitted-detail">${esc(manual.detail)}</small>` : ""}</span>`
+    : "";
+  const unmark = row.submitted_manually ? `<button class="button text unmark-submitted" data-id="${esc(id)}" type="button" ${!canUnmark || marking ? "disabled" : ""}>Undo</button>` : "";
   const correct = submitted ? "" : `<button class="button text correct" data-id="${esc(id)}" type="button" ${canCorrect ? "" : "disabled"}>Correct</button>`;
   const submit = submitted ? "" : `<button class="button primary submit" data-id="${esc(id)}" type="button" ${!canSubmit || submitting ? "disabled" : ""} title="${!canSubmit ? "Resume is still being prepared" : ""}">${submitting ? "Opening…" : "Submit"}</button>`;
+  const mark = submitted ? "" : `<button class="button secondary mark-submitted" data-id="${esc(id)}" type="button" ${!canMark || marking ? "disabled" : ""}>${marking ? "Marking…" : "Mark submitted"}</button>`;
   const rerunIcon = '<svg class="rerun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
   const regenerate = resume.hasArtifact
     ? `<button class="icon-button regenerate${generating ? " spinning" : ""}" data-id="${esc(id)}" type="button" aria-label="${generating ? "Generating resume" : "Regenerate resume"}" title="${generating ? "Generating resume" : "Regenerate resume"}" aria-busy="${generating}" ${generating || !canRegenerate ? "disabled" : ""}>${rerunIcon}</button>`
     : "";
   if (submitted && !resume.hasArtifact) {
-    return `${historyLabel}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>`;
+    return `${historyLabel}${unmark}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>`;
   }
-  return `${historyLabel}${submit}<button class="button secondary download" data-id="${esc(id)}" type="button" ${!canDownload || downloading ? "disabled" : ""} title="${!canDownload ? "Resume is still being prepared" : ""}">${downloading ? "Downloading…" : "Download Resume"}</button>${cautionButton(row)}${regenerate}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>${correct}`;
+  return `${historyLabel}${unmark}${submit}${mark}<button class="button secondary download" data-id="${esc(id)}" type="button" ${!canDownload || downloading ? "disabled" : ""} title="${!canDownload ? "Resume is still being prepared" : ""}">${downloading ? "Downloading…" : "Download Resume"}</button>${cautionButton(row)}${regenerate}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>${correct}`;
 }
 
 function reviewActions(row) {
@@ -278,7 +286,7 @@ function rowHtml(row) {
   const reason = STATE.page === "not_interested" ? `<div class="reason-line">${esc(row.negative_reason || "No reason provided")}</div>` : "";
   const actions = STATE.page === "interested" ? interestedActions(row) : STATE.page === "needs_review" ? reviewActions(row) : negativeActions(row);
   const progress = STATE.page === "interested" ? resumeProgressHtml(row) : "";
-  return `<article class="submission-row${row.submission_status === "proven" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${reviewSummaryHtml(row)}${progress}${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
+  return `<article class="submission-row${submissionGroup(row) === "submitted" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${reviewSummaryHtml(row)}${progress}${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
 }
 
 function bindRows() {
@@ -287,6 +295,8 @@ function bindRows() {
   document.querySelectorAll(".duplicate").forEach((node) => { node.onclick = () => openDuplicate(node.dataset.id); });
   document.querySelectorAll(".correct").forEach((node) => { node.onclick = () => openCorrect(node.dataset.id); });
   document.querySelectorAll(".submit").forEach((node) => { node.onclick = () => openSubmit(node.dataset.id); });
+  document.querySelectorAll(".mark-submitted").forEach((node) => { node.onclick = () => markSubmitted(node.dataset.id); });
+  document.querySelectorAll(".unmark-submitted").forEach((node) => { node.onclick = () => unmarkSubmitted(node.dataset.id); });
   document.querySelectorAll(".review-action").forEach((node) => { node.onclick = () => openReview(node.dataset.id); });
   document.querySelectorAll(".caution").forEach(bindPopoverButton);
 }
@@ -306,7 +316,7 @@ function focusedRowDescendant() {
   const row = node.closest("#rows .submission-row");
   const id = row?.dataset.id;
   if (!id) return null;
-  const action = ["download", "regenerate", "duplicate", "correct", "submit", "review-action", "caution"]
+  const action = ["download", "regenerate", "duplicate", "correct", "submit", "mark-submitted", "unmark-submitted", "review-action", "caution"]
     .find((name) => node.classList.contains(name));
   if (action) return { id, selector: `.${action}[data-id]` };
   if (node.matches(".candidate-name")) return { id, selector: ".candidate-name" };
@@ -353,9 +363,9 @@ function renderRows({ force = false, deferForInteraction = false } = {}) {
   if (popoverOpen) closePopover({ renderDeferred: false });
   if (!STATE.rows.length) container.innerHTML = `<div class="empty-state"><strong>${esc(EMPTY[STATE.page])}</strong>${STATE.query ? "Try another candidate name." : ""}</div>`;
   else if (STATE.page === "interested") {
-    const preparing = STATE.rows.filter((row) => row.submission_status !== "proven" && resumeUiState(row).preparing);
-    const active = STATE.rows.filter((row) => row.submission_status !== "proven" && !resumeUiState(row).preparing);
-    const submitted = STATE.rows.filter((row) => row.submission_status === "proven");
+    const preparing = STATE.rows.filter((row) => submissionGroup(row) === "preparing");
+    const active = STATE.rows.filter((row) => submissionGroup(row) === "ready");
+    const submitted = STATE.rows.filter((row) => submissionGroup(row) === "submitted");
     container.innerHTML = `${rowGroupHtml("preparing", "Preparing resumes", preparing)}${rowGroupHtml("ready", "Ready to submit", active)}${rowGroupHtml("submitted", "Submitted history", submitted)}`;
   } else container.innerHTML = STATE.rows.map(rowHtml).join("");
   const total = displayListTotal({ totalCount: STATE.totalCount, loadedCount: STATE.rows.length });
@@ -1099,6 +1109,30 @@ async function openSubmit(id) {
       if (!navigateSubmitPopup(popup, url)) throw new Error("Paraform role link was invalid.");
       await loadRows({ refresh: true });
     } catch (error) { popup.close(); toast(error.message, true); }
+  });
+}
+
+async function markSubmitted(id) {
+  const row = rowFor(id); if (!row) return;
+  if (!rowCapability(row, "can_mark_submitted", false)) return;
+  return withRowAction(id, "mark", async () => {
+    try {
+      await command("mark_submitted", { case_id: id, expected_version: row.state_version });
+      toast("Marked as submitted. Paraform will confirm it in the background.");
+      await loadRows({ refresh: true });
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+async function unmarkSubmitted(id) {
+  const row = rowFor(id); if (!row) return;
+  if (!rowCapability(row, "can_unmark_submitted", false)) return;
+  return withRowAction(id, "mark", async () => {
+    try {
+      await command("unmark_submitted", { case_id: id, expected_version: row.state_version });
+      toast("Submission mark removed.");
+      await loadRows({ refresh: true });
+    } catch (error) { toast(error.message, true); }
   });
 }
 

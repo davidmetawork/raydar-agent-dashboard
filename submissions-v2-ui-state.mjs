@@ -294,6 +294,25 @@ export function reviewRowPresentation(row = {}) {
   };
 }
 
+export function submissionGroup(row = {}) {
+  if (row.submission_status === "proven" || row.submitted_manually) return "submitted";
+  if (resumeUiState(row).preparing) return "preparing";
+  return "ready";
+}
+
+function markedByName(value) {
+  const local = String(value || "").split("@")[0].trim();
+  return local ? `${local[0].toUpperCase()}${local.slice(1)}` : "team";
+}
+
+export function manualMarkPresentation(row = {}) {
+  if (row.submitted_manually) {
+    return { label: "SUBMITTED", detail: `Marked by ${markedByName(row.submission_marked_by)} · Paraform check pending`, pending: true };
+  }
+  if (row.submission_status === "proven") return { label: "SUBMITTED", detail: "Confirmed in Paraform", pending: false };
+  return null;
+}
+
 export function navigateSubmitPopup(popup, url) {
   if (!popup || !url) {
     popup?.close();

@@ -519,6 +519,37 @@ test("Review dismissal requires a controlled reason and a human note", async () 
   }
 });
 
+test("the human submission mark and its undo dispatch to the audited pair commands", async () => {
+  const calls = [];
+  const service = createService({
+    repository: {
+      runtimeControls,
+      markSubmitted: async (input) => { calls.push(["mark", input]); return { case_id: input.pairId, state_version: 6, submission_status: "opened", manual_mark: { marked_at: "2026-09-08T10:00:00.000Z", marked_by: input.actorEmail } }; },
+      unmarkSubmitted: async (input) => { calls.push(["unmark", input]); return { case_id: input.pairId, state_version: 7, submission_status: "opened", manual_mark: null }; },
+    },
+    env,
+  });
+  const marked = await service.command({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: "mark-submitted-1",
+    body: { action: "mark_submitted", case_id: "pair-1", expected_version: 5 },
+  });
+  assert.equal(marked.submission_status, "opened");
+  assert.equal(marked.manual_mark.marked_by, "recruiter@raydar.xyz");
+  const unmarked = await service.command({
+    actorEmail: "recruiter@raydar.xyz", idempotencyKey: "unmark-submitted-1",
+    body: { action: "unmark_submitted", case_id: "pair-1", expected_version: 6 },
+  });
+  assert.equal(unmarked.manual_mark, null);
+  assert.deepEqual(calls, [
+    ["mark", { actorEmail: "recruiter@raydar.xyz", idempotencyKey: "mark-submitted-1", pairId: "pair-1", expectedVersion: 5 }],
+    ["unmark", { actorEmail: "recruiter@raydar.xyz", idempotencyKey: "unmark-submitted-1", pairId: "pair-1", expectedVersion: 6 }],
+  ]);
+  await assert.rejects(
+    () => service.command({ actorEmail: "recruiter@raydar.xyz", idempotencyKey: "mark-submitted-2", body: { action: "mark_submitted", expected_version: 5 } }),
+    (error) => error.status === 400,
+  );
+});
+
 test("role recheck queues a live ingestion read for the same pair", async () => {
   let queued;
   const service = createService({

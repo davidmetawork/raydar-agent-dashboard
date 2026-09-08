@@ -3292,3 +3292,188 @@ test("explicit role catalog refuses partial uniqueness beyond its complete-read 
     throw rollback;
   }), (error) => error === rollback);
 });
+
+test("a human submission mark opens Paraform proof reconciliation and stays reversible until proof lands", async () => {
+  const repository = createRepository({ sql });
+  const priorControls = await readRuntimeControls(sql);
+  const enabled = await setRuntimeControls({
+    actorEmail: "test@raydar.xyz", reason: "Enable UI and ingestion for the manual submission mark regression",
+    ui: true, ingestion: true, generation: priorControls.generation_enabled,
+    masterInbox: priorControls.master_inbox_enabled, curated: priorControls.curated_enabled,
+  }, sql);
+  const readyPair = async () => {
+    const pair = await preparingPair();
+    const generationId = randomUUID();
+    await sql`
+      insert into submissions_v2.resume_generations(
+        id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+        expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+        validator_model_pin, prompt_pin, template_pin, deadline_at, completed_at
+      ) values (
+        ${generationId}, ${pair.id}, 1, 'initial', ${`mark-generation:${generationId}`}, 'succeeded', 'complete',
+        1, ${pair.signal}, 'primary-test', 'fallback-test', 'validator-test',
+        'prompt-test', 'template-test', clock_timestamp(), clock_timestamp()
+      )
+    `;
+    let pdfId;
+    for (const kind of ["pdf", "ats", "manifest"]) {
+      const artifactId = randomUUID();
+      if (kind === "pdf") pdfId = artifactId;
+      await sql`
+        insert into submissions_v2.resume_artifacts(
+          id, pair_id, generation_id, artifact_version, kind, private_object_key, digest,
+          size_bytes, page_count, text_digest, validation_status, archive_readback_at, archived_at, current_state
+        ) values (
+          ${artifactId}, ${pair.id}, ${generationId}, 1, ${kind},
+          ${`submissions/resumes/v2/${pair.id}/${kind}`}, ${digest(`${pair.id}:${kind}`)}, 500,
+          ${kind === "pdf" ? 1 : null}, ${digest(`${pair.id}:${kind}-text`)}, 'passed',
+          clock_timestamp(), clock_timestamp(), 'current'
+        )
+      `;
+    }
+    await sql`
+      update submissions_v2.candidate_role_pairs
+         set workflow_state='interested', current_artifact_id=${pdfId},
+             resume_ready_at=clock_timestamp(), state_version=state_version+1
+       where id=${pair.id}
+    `;
+    return { ...pair, artifactId: pdfId, version: 2 };
+  };
+  const pairRow = async (pairId) => (await sql`
+    select submission_status, submission_opened_at, state_version
+      from submissions_v2.candidate_role_pairs where id=${pairId}
+  `)[0];
+  const markEvents = async (pairId) => sql`
+    select event_type, actor_id, source, expected_version, new_version, metadata
+      from submissions_v2.pair_events
+     where pair_id=${pairId} and event_type in ('submission_marked','submission_unmarked')
+     order by created_at, id
+  `;
+  try {
+    const pair = await readyPair();
+    const marked = await repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `mark:${pair.id}`, pairId: pair.id, expectedVersion: pair.version,
+    });
+    assert.equal(marked.case_id, pair.id);
+    assert.equal(marked.state_version, 3);
+    assert.equal(marked.submission_status, "opened");
+    assert.equal(marked.manual_mark.marked_by, "david@raydar.xyz");
+    assert.match(marked.manual_mark.marked_at, /^\d{4}-\d{2}-\d{2}T/u);
+    const openedRow = await pairRow(pair.id);
+    assert.equal(openedRow.submission_status, "opened");
+    assert.ok(openedRow.submission_opened_at, "the mark opens the Paraform submission window");
+    assert.equal(Number(openedRow.state_version), 3);
+    const firstEvents = await markEvents(pair.id);
+    assert.equal(firstEvents.length, 1);
+    assert.deepEqual(
+      { ...firstEvents[0], metadata: firstEvents[0].metadata.opened_by_mark },
+      {
+        event_type: "submission_marked", actor_id: "david@raydar.xyz", source: "mark_submitted",
+        expected_version: "2", new_version: "3", metadata: true,
+      },
+    );
+    assert.equal(firstEvents[0].metadata.role_id, pair.role);
+    const proofJobs = await sql`
+      select checkpoint, required_control, priority from submissions_v2.jobs
+       where kind='proof_reconcile' and subject_type='pair' and subject_id=${pair.id}::text
+       order by scheduled_at
+    `;
+    assert.deepEqual(proofJobs.map((job) => Number(job.checkpoint.delay_minutes)), [5, 30, 120]);
+    assert.deepEqual([...new Set(proofJobs.map((job) => job.checkpoint.trigger))], ["manual_mark"]);
+    assert.deepEqual([...new Set(proofJobs.map((job) => job.required_control))], ["ingestion"]);
+
+    const detail = await repository.pair(pair.id);
+    assert.equal(detail.submission_marked_by, "david@raydar.xyz");
+    assert.equal(new Date(detail.submission_marked_at).toISOString(), marked.manual_mark.marked_at);
+    const listed = (await repository.list({ page: "interested" })).rows.find((row) => row.pair_id === pair.id);
+    assert.equal(listed.submission_marked_by, "david@raydar.xyz");
+    assert.equal(new Date(listed.submission_marked_at).toISOString(), marked.manual_mark.marked_at);
+
+    const replay = await repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `mark:${pair.id}`, pairId: pair.id, expectedVersion: pair.version,
+    });
+    assert.equal(replay.replay, true);
+    assert.equal(replay.state_version, 3);
+    assert.equal((await markEvents(pair.id)).length, 1);
+
+    await assert.rejects(() => repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `mark-stale:${pair.id}`, pairId: pair.id, expectedVersion: pair.version,
+    }), (error) => error.code === "stale_pair_version" && error.status === 409 && Number(error.current.state_version) === 3);
+
+    const again = await repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `mark-again:${pair.id}`, pairId: pair.id, expectedVersion: 3,
+    });
+    assert.equal(again.already_marked, true);
+    assert.equal(again.state_version, 3);
+    assert.equal(again.manual_mark.marked_by, "david@raydar.xyz");
+    assert.equal((await markEvents(pair.id)).length, 1);
+
+    const unmarked = await repository.unmarkSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `unmark:${pair.id}`, pairId: pair.id, expectedVersion: 3,
+    });
+    assert.equal(unmarked.state_version, 4);
+    assert.equal(unmarked.manual_mark, null);
+    assert.equal(unmarked.submission_status, "opened", "undoing the mark never rewinds the Paraform submission window");
+    const clearedDetail = await repository.pair(pair.id);
+    assert.equal(clearedDetail.submission_marked_at, null);
+    assert.equal(clearedDetail.submission_marked_by, null);
+    assert.deepEqual((await markEvents(pair.id)).map((event) => event.event_type), ["submission_marked", "submission_unmarked"]);
+
+    await assert.rejects(() => repository.unmarkSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `unmark-twice:${pair.id}`, pairId: pair.id, expectedVersion: 4,
+    }), (error) => error.code === "pair_not_marked" && error.status === 409);
+
+    const remarked = await repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `mark-second:${pair.id}`, pairId: pair.id, expectedVersion: 4,
+    });
+    assert.equal(remarked.state_version, 5);
+    const remarkedRow = await pairRow(pair.id);
+    assert.equal(remarkedRow.submission_status, "opened");
+    assert.equal(remarkedRow.submission_opened_at.getTime(), openedRow.submission_opened_at.getTime(),
+      "an already-opened pair keeps its first submission window");
+    assert.equal((await markEvents(pair.id)).at(-1).metadata.opened_by_mark, false);
+
+    const proofJobId = randomUUID();
+    await sql`
+      insert into submissions_v2.jobs(
+        id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+        state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+      ) values (
+        ${proofJobId}, 'proof_reconcile', 'source', 'submission_proof', ${`mark-proof:${proofJobId}`}, 'ingestion',
+        ${enabled.control_epoch}, 'running', 'mark-proof-worker', clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+      )
+    `;
+    const proven = await repository.applySubmissionProof({
+      pairId: pair.id, applicationId: `mark-application-${pair.id}`,
+      authoritativePath: "application.getRecruiterApplicationData", evidenceDigest: digest(`mark-proof:${pair.id}`),
+      observedAt: new Date().toISOString(), checkedAt: new Date().toISOString(),
+      executionFence: { jobId: proofJobId, workerId: "mark-proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+    });
+    assert.equal(proven.submission_status, "proven");
+    assert.equal(Number(proven.state_version), 6);
+    for (const method of ["markSubmitted", "unmarkSubmitted"]) {
+      await assert.rejects(() => repository[method]({
+        actorEmail: "david@raydar.xyz", idempotencyKey: `${method}-proven:${pair.id}`, pairId: pair.id, expectedVersion: 6,
+      }), (error) => error.code === "proven_pair_immutable" && error.status === 409);
+    }
+
+    const reviewPair = await preparingPair();
+    await sql.begin(async (tx) => {
+      await tx`
+        update submissions_v2.candidate_role_pairs
+           set workflow_state='needs_review', state_version=state_version+1 where id=${reviewPair.id}
+      `;
+      await tx`insert into submissions_v2.review_items(pair_id, reason_code) values (${reviewPair.id}, 'candidate_question')`;
+    });
+    await assert.rejects(() => repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `mark-review:${reviewPair.id}`, pairId: reviewPair.id, expectedVersion: 2,
+    }), (error) => error.code === "pair_not_submit_ready" && error.status === 409);
+    assert.equal((await markEvents(reviewPair.id)).length, 0);
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "test@raydar.xyz", reason: "Restore controls after the manual submission mark regression",
+      ui: priorControls.ui_enabled, ingestion: priorControls.ingestion_enabled, generation: priorControls.generation_enabled,
+      masterInbox: priorControls.master_inbox_enabled, curated: priorControls.curated_enabled,
+    }, sql);
+  }
+});
