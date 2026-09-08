@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 102,
-  "digest": "312771da9f27edcfb39d8df19aa5b3398ab59fbec0b4a08e5b33a8bb7138045d",
+  "digest": "9678e9cd693127904fded38765faa4b5f3eeb9eb859041818ed3fca14af34bde",
   "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
   "files": [
     {
@@ -139,7 +139,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "60658f8de73525ab35264c270ff99c70b511774e62731480584b2b88e4f66bec"
+      "sha256": "a08367e6b891ee2135b6c0d3a408964cde70c3a8de2a388a2ff840a0896f2ede"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
