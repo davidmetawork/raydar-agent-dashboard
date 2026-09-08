@@ -32,19 +32,25 @@ test("repair selection reaches only exact parent-bound direct Gmail families", (
     },
   };
   assert.equal(roleRepairSourceEligible(source), true);
+  assert.equal(roleRepairSourceEligible({
+    ...source,
+    envelope: { ...source.envelope, adapter_version: "gmail-interview-v1" },
+  }), true);
   for (const changed of [
     { outbound_message_id: null },
     { provider_thread_id: null },
     { provider: "master_inbox" },
     { mailbox_id: "noah-flyraydar-com" },
     { source_version: "other" },
+    { envelope: { ...source.envelope, adapter_version: "gmail-interview-v1", source_family: "new_match" } },
+    { envelope: { ...source.envelope, adapter_version: "unknown", source_family: "para_ai_interview_request" } },
     { envelope: { ...source.envelope, adapter_version: "sequence-inbox-v1", source_family: "paraform_sequence_reply" } },
     { envelope: { ...source.envelope, provider_thread_id: "other" } },
   ]) assert.equal(roleRepairSourceEligible({ ...source, ...changed }), false);
 
   assert.deepEqual(roleRepairSelection(500), {
     provider: "gmail", mailbox_id: "david-raydar-xyz", source_version: "submissions.email_reply.v1",
-    adapter_version: "gmail-role-interest-v2",
+    adapter_versions: ["gmail-interview-v1", "gmail-role-interest-v2"],
     source_families: ["para_ai_interview_request", "new_match", "fit_follow_up_with_matches"],
     requires_outbound_message_id: true, requires_provider_thread_id: true,
     order: ["received_at", "provider_message_id", "id"], limit: 50,
