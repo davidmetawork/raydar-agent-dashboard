@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Mailroom — Raydar</title>
+  <link rel="stylesheet" href="/fonts/pp-grafier.css">
+  <link rel="stylesheet" href="/mailroom.css">
+  <script src="/nav-history.js"></script>
+  <script>if(new URLSearchParams(location.search).get('embed')==='1')document.documentElement.classList.add('embedded');</script>
+  <script type="module" src="/mailroom.mjs"></script>
+</head>
+<body>
+<main class="app">
+  <header class="topbar">
+    <div class="heading"><span class="eyebrow">MONITOR / EMAIL</span><h1>Mailroom</h1><p>Every outgoing email, easy to find.</p></div>
+    <div class="connection"><span class="transport-label">SendGrid</span><span id="freshness" role="status">Connecting…</span></div>
+    <button class="button refresh" id="refresh" type="button" aria-label="Refresh Mailroom"><span aria-hidden="true">↻</span> Refresh</button>
+  </header>
+  <section class="workspace" aria-label="Mailroom email browser">
+    <nav class="rail" aria-label="Mailroom views">
+      <p class="rail-title">EMAIL</p>
+      <button class="view-button active" type="button" data-view="sent" aria-current="page"><span class="view-icon" aria-hidden="true">↗</span><span>Sent</span><span class="count" data-count="sent">—</span></button>
+      <button class="view-button" type="button" data-view="queued"><span class="view-icon" aria-hidden="true">◷</span><span>Queued</span><span class="count" data-count="queued">—</span></button>
+      <button class="view-button" type="button" data-view="attention"><span class="view-icon" aria-hidden="true">!</span><span>Needs attention</span><span class="count" data-count="attention">—</span></button>
+      <button class="view-button" type="button" data-view="all"><span class="view-icon" aria-hidden="true">☰</span><span>All emails</span><span class="count" data-count="all">—</span></button>
+      <div class="rail-divider"></div>
+      <button class="view-button" type="button" data-view="lanes"><span class="view-icon" aria-hidden="true">⇉</span><span>Sending lanes</span></button>
+      <div class="rail-footer"><span class="read-only-dot" aria-hidden="true"></span> Viewing only<p>Browse messages and delivery events across your sending lanes.</p></div>
+    </nav>
+    <div class="main-area">
+      <form class="searchbar" id="searchForm" role="search">
+        <span class="search-icon" aria-hidden="true">⌕</span><label class="sr-only" for="search">Search Mailroom</label><input type="search" id="search" placeholder="Search people, email addresses, subjects, or message text…" autocomplete="off">
+        <button class="filter-toggle" id="filterToggle" type="button" aria-controls="filters" aria-expanded="false">Filters <span id="filterCount" class="hidden"></span></button>
+      </form>
+      <section class="filters hidden" id="filters" aria-label="Email filters">
+        <label>Lane<select id="lane"><option value="">All lanes</option></select></label>
+        <label>From<select id="sender"><option value="">All senders</option></select></label>
+        <label>Delivery<select id="delivery"><option value="">All statuses</option><option value="delivered">Delivered</option><option value="accepted">Accepted</option><option value="queued">Queued</option><option value="bounced">Bounced</option><option value="blocked">Blocked</option><option value="dropped">Dropped</option><option value="spam">Spam reported</option><option value="unsubscribed">Unsubscribed</option><option value="unknown">Unknown</option><option value="cancelled">Cancelled</option></select></label>
+        <label>From date<input id="from" type="date"></label>
+        <label>Through date<input id="to" type="date"></label>
+        <button class="text-button" id="clearFilters" type="button">Clear filters</button>
+        <p class="filter-hint" id="filterHint">Dates use your local time zone. Company and role search matches their names in stored message text.</p>
+      </section>
+      <div id="notice" class="notice hidden" role="status"></div>
+      <div class="mail-panes" id="mailPanes">
+        <section class="message-list" aria-label="Emails">
+          <div class="list-header"><div><h2 id="viewTitle">Sent</h2><span id="listSummary">Loading emails…</span></div><span class="sort-label">Newest first</span></div>
+          <div class="list-scroll" id="listScroll"><div id="rows" aria-live="polite" aria-busy="true"></div><button type="button" class="button load-more hidden" id="loadMore">Load more emails</button></div>
+        </section>
+        <article class="reader" id="reader" aria-label="Email reader">
+          <div class="reader-empty"><span class="empty-envelope" aria-hidden="true">↗</span><h2>Your sent folder, across every lane.</h2><p>Choose an email to see the stored message and what happened after it was sent.</p><div class="delivery-key"><span class="badge delivered">Delivered</span><span>Recipient’s server confirmed receipt</span><span class="badge accepted">Accepted</span><span>Provider accepted the email</span></div></div>
+        </article>
+      </div>
+      <section class="lanes-pane hidden" id="lanesPane" aria-label="Sending lanes"><div class="lanes-header"><h2>Sending lanes</h2><p>See what sends through Mailroom, and open any lane’s emails.</p></div><div id="laneCards" aria-live="polite"></div></section>
+      <details class="coverage" id="coverage"><summary id="coverageSummary">History and coverage</summary><div id="coverageDetails"><p>Loading available Mailroom history…</p></div></details>
+    </div>
+  </section>
+</main>
+</body>
+</html>
