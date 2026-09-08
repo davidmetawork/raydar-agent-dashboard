@@ -410,7 +410,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     role_title: safeNotificationField(roleTitle),
     signal: safeNotificationField(signal, "Needs review · Source not yet identified", 300),
     added_at: instant(addedAt),
-    monitor_url: "https://monitor.raydar.xyz/#submissions-v2",
+    monitor_url: "https://monitor.raydar.xyz/#submissions",
   });
   const queueSignalAdmission = async (tx, { source, review, offered = [] }) => {
     if (!review) return false;
