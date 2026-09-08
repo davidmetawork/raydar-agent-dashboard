@@ -22,6 +22,8 @@ import {
   firstDeliveredInternalDate,
   hardBounceAfter,
   isHardBounce,
+  messageReferenceIds,
+  threadReferencesAnyMessage,
   threadDigestAnchorStatus,
   threadReplyContext,
 } from "../api/paraai/_lib/outreach-gmail.mjs";
@@ -67,6 +69,7 @@ import {
   SUBMISSION_REQUEST_EXPIRY_DAYS,
   heldAlertCopy,
   isPendingDigestUnavailableError,
+  legacyGmailClaimUnresolved,
   messageForMatch,
   missingEmailAlertCopy,
   normalizeExternalDeliveryEvidence,
@@ -80,10 +83,12 @@ import {
   PENDING_DIGEST_UNAVAILABLE_REASON,
   PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE,
   pendingBackfillRequests,
+  planMailroomPending,
   planDeliveredFollowup,
   planDeliveredMatch,
   requestOrdinal,
   retryableFailure,
+  syntheticMailroomReplyContext,
   verifyPendingDigestUnavailable,
 } from "../api/paraai/_lib/outreach.mjs";
 import {
@@ -570,6 +575,60 @@ test("thread context follows the latest Gmail message and replies stop follow-up
   assert.equal(candidateRepliedAfter({ messages: [thread.messages[0]] }, "david@raydar.xyz", 0), false);
   // Unsent drafts sitting in the thread are not replies either.
   assert.equal(candidateRepliedAfter({ messages: [thread.messages[2]] }, "david@raydar.xyz", 0), false);
+});
+
+test("SendGrid reply discovery uses exact RFC reference tokens", () => {
+  const reply = {
+    payload: { headers: [
+      { name: "In-Reply-To", value: "<mailroom-1@raydar.xyz>" },
+      { name: "References", value: "<older@raydar.xyz> <mailroom-1@raydar.xyz>" },
+    ] },
+  };
+  assert.deepEqual(messageReferenceIds(reply), [
+    "<mailroom-1@raydar.xyz>",
+    "<older@raydar.xyz>",
+  ]);
+  assert.equal(threadReferencesAnyMessage({ messages: [reply] }, [
+    "<mailroom-1@raydar.xyz>",
+  ]), true);
+  assert.equal(threadReferencesAnyMessage({ messages: [reply] }, [
+    "<mailroom-10@raydar.xyz>",
+  ]), false);
+});
+
+test("Mailroom acceptance remains pending and supplies RFC context without a fake Gmail id", () => {
+  const pending = planMailroomPending({
+    journal: [],
+    outbox: {},
+    threadSubject: "1st Round - Interview Request @ Acme 🎉",
+  }, "match:req-mailroom", "<local-action@raydar.xyz>", {
+    deliveryState: "provider_accepted",
+    providerMessageId: "provider-1",
+    rfc822MessageId: "<mailroom-1@raydar.xyz>",
+    mailroomRowId: 3010,
+    dedupeKey: "paraai-interview-request:match:req-mailroom",
+    payloadHash: "a".repeat(64),
+    sentAt: "2026-09-07T20:00:00.000Z",
+  });
+  assert.equal(pending.outbox["match:req-mailroom"].status, "provider_accepted");
+  assert.equal(pending.outbox["match:req-mailroom"].gmailMessageId, undefined);
+  assert.equal(pending.followup, undefined);
+  assert.deepEqual(syntheticMailroomReplyContext(pending), {
+    threadId: null,
+    originalSubject: "1st Round - Interview Request @ Acme 🎉",
+    replySubject: "Re: 1st Round - Interview Request @ Acme 🎉",
+    inReplyTo: "<mailroom-1@raydar.xyz>",
+    references: "<mailroom-1@raydar.xyz>",
+    firstInternalDate: 0,
+    lastInternalDate: 0,
+  });
+});
+
+test("unresolved legacy Gmail claims fence the Mailroom cutover", () => {
+  assert.equal(legacyGmailClaimUnresolved({ status: "claimed" }), true);
+  assert.equal(legacyGmailClaimUnresolved({ status: "uncertain", transport: "gmail" }), true);
+  assert.equal(legacyGmailClaimUnresolved({ status: "delivered", transport: "gmail" }), false);
+  assert.equal(legacyGmailClaimUnresolved({ status: "claimed", transport: "mailroom-sendgrid" }), false);
 });
 
 test("a reply from an address Paraform never had still stops the ladder", () => {
@@ -1894,6 +1953,8 @@ test("all three live-send gates and a pinned cutoff are required", () => {
     PARAAI_OUTREACH_CANDIDATE_RECIPIENT_NOT_BEFORE: "2026-09-01T20:00:00.000Z",
     GOOGLE_SA_KEY_FILE: "/private/key.json",
     PARAAI_OUTREACH_MAILBOX: "david@raydar.xyz",
+    MAILROOM_API_KEY: "mailroom-key",
+    PARAAI_OUTREACH_MAILROOM_CUTOVER_ENABLED: "true",
     KV_REST_API_URL: "https://kv.example",
     KV_REST_API_TOKEN: "token",
   });
@@ -1909,6 +1970,7 @@ test("all three live-send gates and a pinned cutoff are required", () => {
     Date.parse("2026-09-01T20:00:00.000Z"),
   );
   assert.equal(open.gmailConfigured, true);
+  assert.equal(open.mailroomCutoverEnabled, true);
   // INCIDENT 2026-07-20: the outreach incident halt is a top-level override that
   // forces execution off even when every gate is live. It flips back to
   // asserting `true` automatically once David lifts the halt.

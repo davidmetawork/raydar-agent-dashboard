@@ -260,7 +260,7 @@ export default async function handler(req, res) {
       try {
         // Human-only recovery for a request that expired before its first email.
         // It deliberately skips the now-impossible digest mutation, opens a new
-        // Gmail thread, and keeps all outbox/reply/follow-up safeguards.
+        // RFC conversation through Mailroom, and keeps all reply/follow-up safeguards.
         result = await processMatchRequest(request, history, {
           mode: "send",
           config,

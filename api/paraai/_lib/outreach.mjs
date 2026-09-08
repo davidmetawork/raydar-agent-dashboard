@@ -20,11 +20,10 @@ import {
 import {
   canonicalAddress,
   candidateRepliedAfter,
-  createReviewDraft,
-  deliverMessage,
   deterministicActionId,
   deterministicMessageId,
   findDigestThread,
+  findThreadByRfc822References,
   firstDeliveredInternalDate,
   getSignatureHtml,
   getThread,
@@ -57,7 +56,9 @@ import {
 } from "./outreach-decline.mjs";
 import { discoverCandidateContact, probeCalendarAccess } from "./outreach-contact.mjs";
 import {
+  deliverViaMailroomOutreach,
   deliverViaMailroomRelief,
+  mailroomOutreachConfig,
   mailroomReliefConfig,
 } from "./outreach-mailroom.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
@@ -124,6 +125,11 @@ const HUMAN_HELD_EXCEPTION_CODES = new Set([
 const SYSTEM_HELD_EXCEPTION_CODES = new Set([
   "GMAIL_SEND_UNKNOWN",
   "GMAIL_AUTH_FAILED",
+  "OUTREACH_MAILROOM_DELIVERY_NEGATIVE",
+  "OUTREACH_MAILROOM_EVENT_IDENTITY_MISMATCH",
+  "OUTREACH_MAILROOM_IDENTITY_MISMATCH",
+  "OUTREACH_MAILROOM_PARKED",
+  "OUTREACH_LEGACY_GMAIL_CLAIM_UNRESOLVED",
 ]);
 // INCIDENT 2026-07-31. An attempt that dies BEFORE the outbox is claimed cannot
 // have sent anything, so retrying it is safe. Classifying retryability by code
@@ -202,6 +208,10 @@ export function outreachConfig(env = process.env) {
     candidateRecipientNotBeforeMs,
     mailbox: outreachMailbox(env),
     gmailConfigured: gmailConfigured(env),
+    mailroomConfigured: mailroomOutreachConfig(env).configured,
+    // Experimental until Mailroom can re-check candidate eligibility at drain
+    // time and this worker rescans post-delivery negative events.
+    mailroomCutoverEnabled: bool(env.PARAAI_OUTREACH_MAILROOM_CUTOVER_ENABLED),
     storeConfigured: storeConfigured(),
     batchSize: Math.max(1, Math.min(10, Number(env.PARAAI_OUTREACH_BATCH || 3))),
     pollLockSeconds: Math.max(15, Math.min(300, Number(env.PARAAI_OUTREACH_POLL_SECONDS || 45))),
@@ -223,6 +233,8 @@ export function outreachExecutionEnabled(config = outreachConfig()) {
     config.dryRun === false &&
     config.notBeforeMs != null &&
     config.gmailConfigured &&
+    config.mailroomConfigured &&
+    config.mailroomCutoverEnabled === true &&
     config.storeConfigured,
   );
 }
@@ -802,6 +814,10 @@ async function threadForMatch({ state, request, mailbox, digestUrl }) {
       // A stale state thread must not prevent exact digest-anchor discovery.
     }
   }
+  const mailroomContext = syntheticMailroomReplyContext(state);
+  if (mailroomContext) {
+    return { thread: null, context: mailroomContext, anchorStatus: "mailroom" };
+  }
   const found = await findDigestThread(mailbox, state?.candidateEmail, digestUrl);
   if (found?.context) {
     return {
@@ -811,6 +827,102 @@ async function threadForMatch({ state, request, mailbox, digestUrl }) {
     };
   }
   return { thread: null, context: null, anchorStatus: "none" };
+}
+
+export function mailroomOutboundRfc822Ids(state) {
+  return [...new Set(
+    Object.values(state?.outbox || {})
+      .filter((row) => (
+        row?.transport === "mailroom-sendgrid" &&
+        ["provider_accepted", "delivered"].includes(clean(row?.status))
+      ))
+      .map((row) => clean(row?.rfc822MessageId))
+      .filter(Boolean),
+  )];
+}
+
+export function syntheticMailroomReplyContext(state) {
+  const messageIds = mailroomOutboundRfc822Ids(state);
+  const lastMessageId = messageIds.at(-1) || null;
+  if (!lastMessageId) return null;
+  const originalSubject = clean(state?.threadSubject);
+  return {
+    threadId: null,
+    originalSubject,
+    replySubject: /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`,
+    inReplyTo: lastMessageId,
+    references: messageIds.join(" "),
+    firstInternalDate: finiteDate(state?.firstOutboundAt) || 0,
+    lastInternalDate: finiteDate(state?.lastOutboundAt) || 0,
+  };
+}
+
+async function discoverMailroomReplyThread(state, config) {
+  if (state?.threadId) return null;
+  const ids = mailroomOutboundRfc822Ids(state);
+  if (!ids.length || !clean(state?.candidateEmail)) return null;
+  return findThreadByRfc822References(
+    config.mailbox,
+    state.candidateEmail,
+    ids,
+  ).catch(() => null);
+}
+
+export function planMailroomPending(state, actionKey, messageId, result) {
+  const status = clean(result?.deliveryState) || "queued";
+  return appendOutreachJournal({
+    ...state,
+    outbox: {
+      ...(state.outbox || {}),
+      [actionKey]: {
+        ...(state.outbox?.[actionKey] || {}),
+        status,
+        messageId,
+        transport: "mailroom-sendgrid",
+        mailroomRowId: result?.mailroomRowId || null,
+        mailroomDedupeKey: result?.dedupeKey || null,
+        payloadHash: result?.payloadHash || null,
+        providerMessageId: result?.providerMessageId || null,
+        rfc822MessageId: result?.rfc822MessageId || null,
+        providerAcceptedAt: result?.sentAt || null,
+      },
+    },
+  }, `mailroom_${status}`, { actionKey });
+}
+
+export function planMailroomNegative(state, actionKey, messageId, result) {
+  const event = result?.negativeEvent || {};
+  return appendOutreachJournal({
+    ...state,
+    followup: null,
+    stoppedReason: `mailroom_${clean(event.eventType) || "negative"}`,
+    outbox: {
+      ...(state.outbox || {}),
+      [actionKey]: {
+        ...(state.outbox?.[actionKey] || {}),
+        status: "negative",
+        messageId,
+        transport: "mailroom-sendgrid",
+        mailroomRowId: result?.mailroomRowId || null,
+        mailroomDedupeKey: result?.dedupeKey || null,
+        payloadHash: result?.payloadHash || null,
+        providerMessageId: result?.providerMessageId || null,
+        rfc822MessageId: result?.rfc822MessageId || null,
+        negativeEvent: event,
+      },
+    },
+  }, "mailroom_delivery_negative", {
+    actionKey,
+    eventType: event.eventType || null,
+    eventId: event.eventId || null,
+  });
+}
+
+export function legacyGmailClaimUnresolved(outbox) {
+  const status = clean(outbox?.status);
+  const transport = clean(outbox?.transport);
+  return ["claimed", "uncertain"].includes(status) &&
+    (!transport || transport === "gmail");
 }
 
 export function messageForMatch({
@@ -869,6 +981,10 @@ function matchRecord({
     gmailMessageId: transport === "gmail" ? sent?.id || null : null,
     providerMessageId: transport === "gmail" ? null : providerMessageId,
     mailroomRowId: sent?.mailroomRowId || null,
+    mailroomDedupeKey: sent?.dedupeKey || null,
+    payloadHash: sent?.payloadHash || null,
+    rfc822MessageId: sent?.rfc822MessageId || null,
+    deliveryEventId: sent?.deliveryEventId || null,
     copyVariant: copy.variant,
   };
 }
@@ -923,6 +1039,10 @@ export function planDeliveredMatch(state, {
           ? null
           : sent?.providerMessageId || sent?.id || null,
         mailroomRowId: sent?.mailroomRowId || null,
+        mailroomDedupeKey: sent?.dedupeKey || null,
+        payloadHash: sent?.payloadHash || null,
+        rfc822MessageId: sent?.rfc822MessageId || null,
+        deliveryEventId: sent?.deliveryEventId || null,
       },
     },
     // A candidate who has already replied never gets a re-armed nudge ladder,
@@ -1133,7 +1253,7 @@ export async function processMatchRequest(
     allowAfterReply = false,
     allowWithoutDigest = false,
     allowWithoutDigestReason = null,
-    transport = "gmail",
+    transport = "mailroom",
     deliveryImpl = null,
     contactOverride = null,
   } = {},
@@ -1147,7 +1267,8 @@ export async function processMatchRequest(
   }
   const noDigestReason = clean(allowWithoutDigestReason);
   const reliefTransport = clean(transport) === "mailroom-relief";
-  if (!new Set(["gmail", "mailroom-relief"]).has(clean(transport))) {
+  const permanentMailroomTransport = clean(transport) === "mailroom";
+  if (!new Set(["mailroom", "mailroom-relief"]).has(clean(transport))) {
     const error = new Error("unsupported Para AI outreach transport");
     error.code = "OUTREACH_TRANSPORT_INVALID";
     throw error;
@@ -1298,6 +1419,21 @@ export async function processMatchRequest(
       }
     }
 
+    // Replies to SendGrid-originated messages have no Gmail Sent ancestor. Link
+    // their Gmail thread by exact RFC References before applying the same reply,
+    // role-decline, off-market, DNC, and bounce gates used for legacy threads.
+    if (gated && !state.threadId) {
+      const foundReply = await discoverMailroomReplyThread(state, config);
+      if (foundReply?.context?.threadId) {
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          threadId: foundReply.context.threadId,
+        }, "mailroom_reply_thread_discovered", {
+          threadId: foundReply.context.threadId,
+        }), state.revision);
+      }
+    }
+
     // Live thread read. Candidates who replied BEFORE any of this shipped carry no
     // stored flag — their ladder had already finished, so the follow-up gate will
     // never run again to record one. Reading the thread here is what makes the
@@ -1391,6 +1527,11 @@ export async function processMatchRequest(
     request = { ...request, candidateEmail: contact.email };
     const actionKey = `match:${request.id}`;
     const previousOutbox = state.outbox?.[actionKey] || {};
+    if (legacyGmailClaimUnresolved(previousOutbox)) {
+      const error = new Error("an unresolved legacy Gmail claim must be reconciled before cutover");
+      error.code = "OUTREACH_LEGACY_GMAIL_CLAIM_UNRESOLVED";
+      throw error;
+    }
     const previousThreadId = state.threadId || null;
     attemptStage = "thread_anchor";
     const { context, anchorStatus } = reliefTransport
@@ -1401,11 +1542,6 @@ export async function processMatchRequest(
           mailbox: config.mailbox,
           digestUrl: digest?.digestUrl || null,
         });
-    const replaceExistingDraft = Boolean(
-      mode === "draft" &&
-      previousOutbox.draftId &&
-      anchorStatus === "none"
-    );
     const signatureHtml = reliefTransport
       ? ""
       : context
@@ -1463,19 +1599,17 @@ export async function processMatchRequest(
           requestId: request.id,
           claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
           deliveryMode,
-          transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
+          transport: "mailroom-sendgrid",
         },
       },
     }, mode === "draft"
       ? "review_draft_claimed"
-      : reliefTransport
-        ? "mailroom_delivery_claimed"
-        : "gmail_delivery_claimed", {
+      : "mailroom_delivery_claimed", {
       requestId: request.id,
       ordinal,
       anchorStatus,
       deliveryMode,
-      transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
+      transport: "mailroom-sendgrid",
       // Self-healing must stay legible: a send that only happened because the
       // vendor contradicted itself has to be distinguishable, forever, from a
       // send that took the normal digest path.
@@ -1485,50 +1619,39 @@ export async function processMatchRequest(
     state = await saveOutreachState(claimed, state.revision);
 
     if (mode === "draft") {
-      const draft = await createReviewDraft({
-        mailbox: config.mailbox,
-        existingDraftId: previousOutbox.draftId || null,
-        replaceExistingDraft,
-        message,
-      });
-      const drafted = appendOutreachJournal({
+      const previewed = appendOutreachJournal({
         ...state,
-        threadId: draft.threadId || anchoredThreadId,
+        threadId: anchoredThreadId,
         threadSubject: context?.originalSubject || message.subject,
         outbox: {
           ...(state.outbox || {}),
           [message.actionKey]: {
             ...state.outbox[message.actionKey],
-            status: "drafted",
-            draftId: draft.id,
-            gmailDraftMessageId: draft.messageId,
-            gmailDraftRfc822MessageId: draft.rfc822MessageId,
-            threadId: context?.threadId || draft.threadId || null,
-            draftedAt: new Date().toISOString(),
+            status: "previewed",
+            threadId: context?.threadId || null,
+            previewedAt: new Date().toISOString(),
             copyVariant: copy.variant,
           },
         },
-      }, "review_draft_created", {
+      }, "review_preview_created", {
         requestId: request.id,
         ordinal,
         anchorStatus,
-        draftAction: draft.draftAction,
       });
-      state = await saveOutreachState(drafted, state.revision);
+      state = await saveOutreachState(previewed, state.revision);
       return {
-        action: "drafted",
+        action: "previewed",
         request,
         ordinal,
         digest,
         roleUrl,
         copy,
         message,
-        draft,
         state,
       };
     }
 
-    attemptStage = reliefTransport ? "mailroom_delivery" : "gmail_delivery";
+    attemptStage = "mailroom_delivery";
     let sent;
     try {
       if (reliefTransport) {
@@ -1539,16 +1662,10 @@ export async function processMatchRequest(
           candidateName: contact.name || request.candidateName,
         });
       } else {
-        const send = deliveryImpl || deliverMessage;
+        const send = deliveryImpl || deliverViaMailroomOutreach;
         sent = await send({
-          mailbox: config.mailbox,
-          draftId: previousOutbox.draftId || null,
-          draftRfc822MessageId: previousOutbox.gmailDraftRfc822MessageId || null,
           message,
-          // A process can die after Gmail accepts the email and before Redis
-          // records delivery. A previous claim must reconcile by action marker;
-          // it must never become authorization for a second send.
-          reconcileOnly: ["claimed", "uncertain"].includes(previousOutbox.status),
+          candidateName: contact.name || request.candidateName,
         });
       }
     } catch (error) {
@@ -1557,11 +1674,43 @@ export async function processMatchRequest(
         message.actionKey,
         message.messageId,
         error,
-        { transport: reliefTransport ? "mailroom-sendgrid" : "gmail" },
+        { transport: "mailroom-sendgrid" },
       );
       throw error;
     }
-    const sentAt = new Date().toISOString();
+    if (permanentMailroomTransport && sent?.deliveryState === "negative") {
+      state = await saveOutreachState(
+        planMailroomNegative(state, message.actionKey, message.messageId, sent),
+        state.revision,
+      );
+      const error = new Error(`Mailroom reported ${sent.negativeEvent?.eventType || "negative"}`);
+      error.code = "OUTREACH_MAILROOM_DELIVERY_NEGATIVE";
+      error.detail = sent.negativeEvent || null;
+      throw error;
+    }
+    if (
+      permanentMailroomTransport &&
+      !["delivered"].includes(clean(sent?.deliveryState))
+    ) {
+      state = await saveOutreachState(
+        planMailroomPending(state, message.actionKey, message.messageId, sent),
+        state.revision,
+      );
+      return {
+        action: clean(sent?.deliveryState) || "queued",
+        request,
+        ordinal,
+        digest,
+        roleUrl,
+        copy,
+        sent,
+        state,
+        deliveryMode,
+        transport: "mailroom-sendgrid",
+        autoRecoveredNoDigest,
+      };
+    }
+    const sentAt = sent?.deliveredAt || sent?.sentAt || new Date().toISOString();
     state = await saveOutreachState(planDeliveredMatch(state, {
       request,
       ordinal,
@@ -1572,10 +1721,10 @@ export async function processMatchRequest(
       sentAt,
       messageId: message.messageId,
       deliveryMode,
-      transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
+      transport: "mailroom-sendgrid",
       // SendGrid opens a fresh conversation and Mailroom does not yet ingest
       // replies, so automatic nudges would be unsafe for this relief path.
-      armFollowup: !reliefTransport,
+      armFollowup: permanentMailroomTransport,
     }), state.revision);
 
     await resolveOutreachException(request.id, {
@@ -1629,7 +1778,7 @@ export async function processMatchRequest(
       sent,
       state,
       deliveryMode,
-      transport: reliefTransport ? "mailroom-sendgrid" : "gmail",
+      transport: "mailroom-sendgrid",
       autoRecoveredNoDigest,
     };
   } catch (error) {
@@ -2078,7 +2227,12 @@ export async function recordExpiredExternalDelivery(
   }
 }
 
-export function planDeliveredFollowup(state, { sent, sentAt, messageId }) {
+export function planDeliveredFollowup(state, {
+  sent,
+  sentAt,
+  messageId,
+  transport = "mailroom-sendgrid",
+}) {
   const current = state.followup;
   if (!current) return state;
   const hasAnother = Number(current.remaining) > 1;
@@ -2100,9 +2254,16 @@ export function planDeliveredFollowup(state, { sent, sentAt, messageId }) {
         ...(state.outbox?.[actionKey] || {}),
         status: "delivered",
         messageId,
-        gmailMessageId: sent?.id || null,
+        gmailMessageId: transport === "gmail" ? sent?.id || null : null,
+        providerMessageId: transport === "gmail" ? null : sent?.providerMessageId || null,
+        rfc822MessageId: transport === "gmail" ? null : sent?.rfc822MessageId || null,
+        mailroomRowId: transport === "gmail" ? null : sent?.mailroomRowId || null,
+        mailroomDedupeKey: transport === "gmail" ? null : sent?.dedupeKey || null,
+        payloadHash: transport === "gmail" ? null : sent?.payloadHash || null,
+        deliveryEventId: transport === "gmail" ? null : sent?.deliveryEventId || null,
         threadId: sent?.threadId || state.threadId || null,
         deliveredAt: sentAt,
+        transport,
       },
     },
   }, "followup_delivered", {
@@ -2116,6 +2277,7 @@ export async function processDueFollowup(
   {
     config = outreachConfig(),
     now = Date.now(),
+    deliveryImpl = deliverViaMailroomOutreach,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: the halt must close this path on its
@@ -2155,31 +2317,40 @@ export async function processDueFollowup(
       return { action: "canceled", state };
     }
     if (!state.threadId) {
-      const error = new Error("follow-up has no Gmail thread");
-      error.code = "OUTREACH_THREAD_NOT_FOUND";
-      throw error;
+      const foundReply = await discoverMailroomReplyThread(state, config);
+      if (foundReply?.context?.threadId) {
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          threadId: foundReply.context.threadId,
+        }, "mailroom_reply_thread_discovered", {
+          threadId: foundReply.context.threadId,
+        }), state.revision);
+      }
     }
-    const thread = await getThread(config.mailbox, state.threadId);
-    // Anchor the reply window at the START of the conversation, not at our most
-    // recent send. The old `lastOutboundAt` cutoff meant a reply became
-    // permanently invisible the moment any outbound followed it.
-    const replyWindowStart = finiteDate(state.firstOutboundAt)
-      ?? firstDeliveredInternalDate(thread)
-      ?? 0;
-    if (candidateRepliedAfter(thread, config.mailbox, replyWindowStart)) {
-      state = await saveOutreachState(appendOutreachJournal({
-        ...state,
-        followup: null,
-        stoppedReason: "candidate_replied",
-        repliedAt: new Date().toISOString(),
-      }, "followups_stopped_on_reply", {
-        ownerMatchId: followup.ownerMatchId,
-      }), state.revision);
-      return { action: "stopped_on_reply", state };
+    let context = syntheticMailroomReplyContext(state);
+    if (state.threadId) {
+      const thread = await getThread(config.mailbox, state.threadId);
+      // Anchor the reply window at the START of the conversation, not at our most
+      // recent send. The old `lastOutboundAt` cutoff meant a reply became
+      // permanently invisible the moment any outbound followed it.
+      const replyWindowStart = finiteDate(state.firstOutboundAt)
+        ?? firstDeliveredInternalDate(thread)
+        ?? 0;
+      if (candidateRepliedAfter(thread, config.mailbox, replyWindowStart)) {
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          followup: null,
+          stoppedReason: "candidate_replied",
+          repliedAt: new Date().toISOString(),
+        }, "followups_stopped_on_reply", {
+          ownerMatchId: followup.ownerMatchId,
+        }), state.revision);
+        return { action: "stopped_on_reply", state };
+      }
+      context = threadReplyContext(thread);
     }
-    const context = threadReplyContext(thread);
     if (!context) {
-      const error = new Error("Gmail thread has no reply context");
+      const error = new Error("follow-up has no RFC reply context");
       error.code = "OUTREACH_THREAD_NOT_FOUND";
       throw error;
     }
@@ -2194,6 +2365,11 @@ export async function processDueFollowup(
     });
     const actionKey = `followup:${followup.ownerMatchId}:${followup.number}`;
     const previousOutbox = state.outbox?.[actionKey] || {};
+    if (legacyGmailClaimUnresolved(previousOutbox)) {
+      const error = new Error("an unresolved legacy Gmail claim must be reconciled before cutover");
+      error.code = "OUTREACH_LEGACY_GMAIL_CLAIM_UNRESOLVED";
+      throw error;
+    }
     const message = {
       actionKey,
       from: `David Phillips <${config.mailbox}>`,
@@ -2215,6 +2391,7 @@ export async function processDueFollowup(
           status: "claimed",
           messageId: message.messageId,
           claimedAt: previousOutbox.claimedAt || new Date().toISOString(),
+          transport: "mailroom-sendgrid",
         },
       },
     }, "followup_claimed", {
@@ -2224,20 +2401,36 @@ export async function processDueFollowup(
     state = await saveOutreachState(claimed, state.revision);
     let sent;
     try {
-      sent = await deliverMessage({
-        mailbox: config.mailbox,
+      sent = await deliveryImpl({
         message,
-        reconcileOnly: ["claimed", "uncertain"].includes(previousOutbox.status),
+        candidateName: state.candidateName,
       });
     } catch (error) {
-      await saveUncertainOutbox(state, actionKey, message.messageId, error);
+      await saveUncertainOutbox(state, actionKey, message.messageId, error, {
+        transport: "mailroom-sendgrid",
+      });
       throw error;
     }
-    const sentAt = new Date().toISOString();
+    if (sent?.deliveryState === "negative") {
+      state = await saveOutreachState(
+        planMailroomNegative(state, actionKey, message.messageId, sent),
+        state.revision,
+      );
+      return { action: "stopped_on_delivery_event", event: sent.negativeEvent, state };
+    }
+    if (sent?.deliveryState !== "delivered") {
+      state = await saveOutreachState(
+        planMailroomPending(state, actionKey, message.messageId, sent),
+        state.revision,
+      );
+      return { action: clean(sent?.deliveryState) || "queued", state };
+    }
+    const sentAt = sent?.deliveredAt || sent?.sentAt || new Date().toISOString();
     state = await saveOutreachState(planDeliveredFollowup(state, {
       sent,
       sentAt,
       messageId: message.messageId,
+      transport: "mailroom-sendgrid",
     }), state.revision);
     return { action: "sent", copyVariant: copy.variant, state };
   } finally {
@@ -2985,6 +3178,8 @@ export async function outreachHealth({
     candidateRecipientNotBeforePinned:
       config.candidateRecipientNotBeforeMs != null,
     gmailConfigured: config.gmailConfigured,
+    mailroomConfigured: config.mailroomConfigured,
+    mailroomCutoverEnabled: config.mailroomCutoverEnabled,
     storeConfigured: config.storeConfigured,
     mailroomReliefConfigured: mailroomReliefConfig().configured,
     mailbox: config.mailbox,

@@ -486,6 +486,52 @@ export async function findDigestThread(mailbox, candidateEmail, digestUrl) {
   return candidates[0] || null;
 }
 
+const RFC_MESSAGE_ID_PATTERN = /<[^<>\s]+>/g;
+
+export function messageReferenceIds(message) {
+  return [...new Set([
+    ...(String(headerValue(message, "In-Reply-To") || "").match(RFC_MESSAGE_ID_PATTERN) || []),
+    ...(String(headerValue(message, "References") || "").match(RFC_MESSAGE_ID_PATTERN) || []),
+  ].map((value) => value.toLowerCase()))];
+}
+
+export function threadReferencesAnyMessage(thread, messageIds) {
+  const expected = new Set((messageIds || []).map((value) => clean(value).toLowerCase()).filter(Boolean));
+  if (!expected.size) return false;
+  return (thread?.messages || []).some((message) => (
+    messageReferenceIds(message).some((value) => expected.has(value))
+  ));
+}
+
+// SendGrid-originated messages do not exist in Gmail Sent. Replies do, so find
+// them by an exact In-Reply-To/References token within a bounded candidate-only
+// thread search. This is read-only and never treats Sent absence as send proof.
+export async function findThreadByRfc822References(
+  mailbox,
+  candidateEmail,
+  messageIds,
+  { maxResults = 30 } = {},
+) {
+  const expected = [...new Set(
+    (messageIds || []).map((value) => clean(value).toLowerCase()).filter(Boolean),
+  )];
+  if (!clean(candidateEmail) || !expected.length) return null;
+  const refs = await searchThreads(mailbox, `from:${candidateEmail}`, maxResults);
+  const matches = [];
+  for (const ref of refs) {
+    try {
+      const thread = await getThread(mailbox, ref.id);
+      if (!threadReferencesAnyMessage(thread, expected)) continue;
+      const context = threadReplyContext(thread);
+      if (context) matches.push({ id: ref.id, context, thread });
+    } catch {
+      // One inaccessible result must not hide another exact-reference reply.
+    }
+  }
+  matches.sort((left, right) => left.context.firstInternalDate - right.context.firstInternalDate);
+  return matches[0] || null;
+}
+
 export async function getSignatureHtml(mailbox) {
   const data = await gmailCall(mailbox, "/settings/sendAs");
   const rows = data?.sendAs || [];

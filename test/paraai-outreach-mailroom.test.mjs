@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deliverViaMailroomOutreach,
   deliverViaMailroomRelief,
+  mailroomOutreachConfig,
+  mailroomOutreachDedupeKey,
+  mailroomOutreachPayloadHash,
   mailroomMatchBundleConfirmation,
   mailroomReliefConfirmation,
   mailroomReliefConfig,
   mailroomReliefDedupeKey,
   OutreachMailroomError,
+  PARAAI_INTERVIEW_REQUESTS_LANE,
+  PARAAI_INTERVIEW_REQUESTS_SENDER,
   PARAAI_OUTREACH_RELIEF_LANE,
 } from "../api/paraai/_lib/outreach-mailroom.mjs";
 import {
@@ -31,11 +37,33 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 });
 
 const message = {
+  actionKey: "match:req-1",
   to: "candidate@example.com",
   subject: "1st Round - Interview Request @ Acme 🎉",
   bodyText: "Hey Candidate,\n\nA role is ready.\n\nThanks,\nDavid",
   bodyHtml: "<div>Hey Candidate,</div><div>A role is ready.</div>",
 };
+
+const permanentConfig = {
+  base: "https://mailroom.test",
+  key: "secret",
+  lane: PARAAI_INTERVIEW_REQUESTS_LANE,
+  configured: true,
+};
+
+function permanentStatus(overrides = {}) {
+  return {
+    ok: true,
+    found: true,
+    id: 3001,
+    lane_id: PARAAI_INTERVIEW_REQUESTS_LANE,
+    sender_id: PARAAI_INTERVIEW_REQUESTS_SENDER,
+    state: "pending",
+    payload_hash: mailroomOutreachPayloadHash(message, "Candidate One"),
+    deliveryEvents: [],
+    ...overrides,
+  };
+}
 
 test("mailroom relief configuration is explicit and dedupe is request-scoped", () => {
   assert.deepEqual(mailroomReliefConfig({
@@ -65,6 +93,134 @@ test("mailroom relief configuration is explicit and dedupe is request-scoped", (
       recipientEmail: "Candidate@Example.com",
     }),
     "SEND BUNDLE VIA MAILROOM req-1,req-2 TO candidate@example.com",
+  );
+});
+
+test("permanent Mailroom configuration and payload identity match the lane contract", () => {
+  assert.deepEqual(mailroomOutreachConfig({
+    MAILROOM_BASE: "https://mailroom.test/",
+    MAILROOM_API_KEY: "secret",
+  }), permanentConfig);
+  assert.equal(
+    mailroomOutreachDedupeKey("followup:req-1:2"),
+    "paraai-interview-request:followup:req-1:2",
+  );
+  assert.equal(mailroomOutreachPayloadHash(message, "Candidate One").length, 64);
+});
+
+test("permanent Mailroom enqueues once and leaves cron-owned work queued", async () => {
+  const calls = [];
+  let reads = 0;
+  const result = await deliverViaMailroomOutreach({
+    message,
+    candidateName: "Candidate One",
+    config: permanentConfig,
+    fetchImpl: async (url, init = {}) => {
+      const parsed = new URL(url);
+      calls.push({ path: parsed.pathname, body: init.body });
+      if (parsed.pathname === "/api/status") {
+        reads += 1;
+        return json(reads === 1 ? { ok: true, found: false } : permanentStatus());
+      }
+      if (parsed.pathname === "/api/enqueue") {
+        return json({
+          ok: true,
+          enqueued: true,
+          id: 3001,
+          payloadHash: mailroomOutreachPayloadHash(message, "Candidate One"),
+        });
+      }
+      throw new Error(`unexpected ${parsed.pathname}`);
+    },
+  });
+  assert.equal(result.deliveryState, "queued");
+  assert.equal(result.mailroomRowId, 3001);
+  assert.deepEqual(calls.map((call) => call.path), [
+    "/api/status",
+    "/api/enqueue",
+    "/api/status",
+  ]);
+  assert.ok(!calls.some((call) => call.path === "/api/worker"));
+});
+
+test("permanent Mailroom separates provider acceptance from signed delivery", async () => {
+  const base = permanentStatus({
+    state: "sent",
+    sent_at: "2026-09-07T20:00:00.000Z",
+    provider_message_id: "provider-1",
+    rfc822_message_id: "<mailroom-provider-1@raydar.xyz>",
+  });
+  const accepted = await deliverViaMailroomOutreach({
+    message,
+    candidateName: "Candidate One",
+    config: permanentConfig,
+    fetchImpl: async () => json(base),
+  });
+  assert.equal(accepted.deliveryState, "provider_accepted");
+
+  const delivered = await deliverViaMailroomOutreach({
+    message,
+    candidateName: "Candidate One",
+    config: permanentConfig,
+    fetchImpl: async () => json(permanentStatus({
+      ...base,
+      deliveryEvents: [{
+        event_id: "event-1",
+        event_type: "delivered",
+        occurred_at: "2026-09-07T20:00:03.000Z",
+        provider_message_id: "provider-1.filter123",
+      }],
+    })),
+  });
+  assert.equal(delivered.deliveryState, "delivered");
+  assert.equal(delivered.deliveredAt, "2026-09-07T20:00:03.000Z");
+});
+
+test("permanent Mailroom parks negative events and identity ambiguity", async () => {
+  const negative = await deliverViaMailroomOutreach({
+    message,
+    candidateName: "Candidate One",
+    config: permanentConfig,
+    fetchImpl: async () => json(permanentStatus({
+      state: "sent",
+      sent_at: "2026-09-07T20:00:00.000Z",
+      provider_message_id: "provider-2",
+      rfc822_message_id: "<mailroom-provider-2@raydar.xyz>",
+      deliveryEvents: [{
+        event_id: "event-2",
+        event_type: "bounce",
+        occurred_at: "2026-09-07T20:00:03.000Z",
+        provider_message_id: "provider-2.filter123",
+        reason: "550 mailbox unavailable",
+      }],
+    })),
+  });
+  assert.equal(negative.deliveryState, "negative");
+  assert.equal(negative.negativeEvent.eventType, "bounce");
+
+  await assert.rejects(
+    () => deliverViaMailroomOutreach({
+      message,
+      candidateName: "Candidate One",
+      config: permanentConfig,
+      fetchImpl: async () => json(permanentStatus({ lane_id: "wrong-lane" })),
+    }),
+    (error) => error.code === "OUTREACH_MAILROOM_IDENTITY_MISMATCH",
+  );
+  await assert.rejects(
+    () => deliverViaMailroomOutreach({
+      message,
+      candidateName: "Candidate One",
+      config: permanentConfig,
+      fetchImpl: async () => json(permanentStatus({
+        state: "sent",
+        sent_at: "2026-09-07T20:00:00.000Z",
+        provider_message_id: "provider-3",
+        rfc822_message_id: "<mailroom-provider-3@raydar.xyz>",
+        deliveryEvents: [{ event_type: "delivered", provider_message_id: "other-provider" }],
+      })),
+    }),
+    (error) => error.code === "OUTREACH_MAILROOM_EVENT_IDENTITY_MISMATCH",
   );
 });
 
