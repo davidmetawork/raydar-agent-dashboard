@@ -4,4 +4,5 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY submissions-v2-purge ./submissions-v2-purge
+USER node
 CMD ["node", "submissions-v2-purge/server.mjs"]
