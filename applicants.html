@@ -1295,6 +1295,9 @@ function avatarHtml(row) {
 
 function renderStats() {
   const counts = STATE.snapshot?.counts || {};
+  const dayZone = counts.dayTimeZone === "America/Los_Angeles" ? "Pacific time" : counts.dayTimeZone || "UTC";
+  $("statNew").title = "Applications first received by Raydar today (" + dayZone + ").";
+  $("statEmailed").title = "Applications with a verified email send timestamp today (" + dayZone + ").";
   $("statNew").textContent = counts.newToday ?? "–";
   $("statQueue").textContent = STATE.snapshot ? String(pendingRows().length) : (counts.queue ?? "–");
   $("statEmailed").textContent = counts.emailedToday ?? "–";

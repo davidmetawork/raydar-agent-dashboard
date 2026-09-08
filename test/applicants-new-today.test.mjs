@@ -23,3 +23,13 @@ test("New today counts unique applications across every published section", () =
 
   assert.equal(summary.counts.newToday, 3);
 });
+
+
+test("Core's dated counts survive receipt partitioning without using arrival time as send time", () => {
+  const published={generatedAt:"2026-09-09T01:00:00.000Z",
+    counts:{dayTimeZone:"America/Los_Angeles",newToday:7,emailedToday:5},
+    stream:[],queue:[],profilePreparing:[]};
+  const summary=profileCacheSummary({...published,profilePreparing:12},{publishedSnapshot:published});
+  assert.deepEqual({newToday:summary.counts.newToday,emailedToday:summary.counts.emailedToday,
+    dayTimeZone:summary.counts.dayTimeZone},{newToday:7,emailedToday:5,dayTimeZone:"America/Los_Angeles"});
+});

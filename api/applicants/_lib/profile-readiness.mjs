@@ -97,6 +97,10 @@ export function profileCacheSummary(snapshot, { publishedSnapshot = snapshot } =
     ...rows(publishedSnapshot?.queue),
     ...rows(publishedSnapshot?.profilePreparing),
   ];
+  const publishedCounts = publishedSnapshot?.counts;
+  const ownsDailyCounts = typeof publishedCounts?.dayTimeZone === "string"
+    && Number.isSafeInteger(publishedCounts.newToday) && publishedCounts.newToday >= 0
+    && Number.isSafeInteger(publishedCounts.emailedToday) && publishedCounts.emailedToday >= 0;
   const newTodayApplications = new Set(publishedRows
     .filter((row) => String(row?.addedAt || "").slice(0, 10) === generatedDay)
     .map((row) => row?.profileKey || row?.key || null)
@@ -135,9 +139,10 @@ export function profileCacheSummary(snapshot, { publishedSnapshot = snapshot } =
       stream: stream.length,
       queue: queue.length,
       unrated: queue.filter((row) => row?.tier === "unrated").length,
-      emailedToday: stream.filter((row) =>
+      emailedToday: ownsDailyCounts ? publishedCounts.emailedToday : stream.filter((row) =>
         row?.status === "emailed" && String(row?.addedAt || "").slice(0, 10) === generatedDay).length,
-      newToday: newTodayApplications.size,
+      newToday: ownsDailyCounts ? publishedCounts.newToday : newTodayApplications.size,
+      dayTimeZone: ownsDailyCounts ? publishedCounts.dayTimeZone : "UTC",
     },
   };
 }
