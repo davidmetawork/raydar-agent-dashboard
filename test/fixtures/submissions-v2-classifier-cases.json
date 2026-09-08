@@ -24,6 +24,12 @@
       "company": "Pixel Works",
       "title": "Product Designer",
       "url": "https://www.paraform.com/browse?role=role-design"
+    },
+    "sales_lead": {
+      "role_id": "role-sales-lead",
+      "company": "Nova Cloud",
+      "title": "Sales Manager",
+      "url": "https://www.paraform.com/browse?role=role-sales-lead"
     }
   },
   "cases": [
@@ -378,6 +384,193 @@
       "expected": [
         { "role": "product", "label": "interested", "quote": "Move me forward for Orbit Labs", "review_reason": null, "negative_reason": null },
         { "role": "backend", "label": "not_interested", "quote": "please pass on Acme Systems.", "review_reason": null, "negative_reason": "pass on Acme Systems" }
+      ]
+    },
+    {
+      "id": "multi-collective-these",
+      "category": "multiple_roles_explicit",
+      "reply": "These look like a strong fit, please put me forward for them.",
+      "sent_message": "Three new role matches for you.",
+      "offered_roles": ["backend", "product", "sales"],
+      "expected": [
+        { "role": "backend", "label": "interested", "quote": "These look like a strong fit, please put me forward for them.", "review_reason": null, "negative_reason": null },
+        { "role": "product", "label": "interested", "quote": "These look like a strong fit, please put me forward for them.", "review_reason": null, "negative_reason": null },
+        { "role": "sales", "label": "interested", "quote": "These look like a strong fit, please put me forward for them.", "review_reason": null, "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-collective-either",
+      "category": "multiple_roles_explicit",
+      "reply": "Either of these would work for me, so go ahead and submit me.",
+      "sent_message": "Two new role matches for you.",
+      "offered_roles": ["product", "design"],
+      "expected": [
+        { "role": "product", "label": "interested", "quote": "Either of these would work for me, so go ahead and submit me.", "review_reason": null, "negative_reason": null },
+        { "role": "design", "label": "interested", "quote": "Either of these would work for me, so go ahead and submit me.", "review_reason": null, "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-collective-politeness-counter",
+      "category": "needs_review_unclear",
+      "reply": "Thanks for sending these over, I will take a look this weekend.",
+      "sent_message": "Two new role matches for you.",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "Thanks for sending these over, I will take a look this weekend.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "Thanks for sending these over, I will take a look this weekend.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-carve-out-exception",
+      "category": "multiple_roles_mixed",
+      "reply": "I am interested in these except Nova Cloud, which I applied to last year.",
+      "sent_message": "Three new role matches for you.",
+      "offered_roles": ["backend", "product", "sales"],
+      "expected": [
+        { "role": "backend", "label": "interested", "quote": "I am interested in these", "review_reason": null, "negative_reason": null },
+        { "role": "product", "label": "interested", "quote": "I am interested in these", "review_reason": null, "negative_reason": null },
+        { "role": "sales", "label": "not_interested", "quote": "except Nova Cloud, which I applied to last year.", "review_reason": null, "negative_reason": "except Nova Cloud" }
+      ]
+    },
+    {
+      "id": "multi-blanket-decline",
+      "category": "multiple_roles_explicit",
+      "reply": "None of these are right for me, they are all individual contributor roles.",
+      "sent_message": "Three new role matches for you.",
+      "offered_roles": ["backend", "product", "sales"],
+      "expected": [
+        { "role": "backend", "label": "not_interested", "quote": "None of these are right for me, they are all individual contributor roles.", "review_reason": null, "negative_reason": "they are all individual contributor roles" },
+        { "role": "product", "label": "not_interested", "quote": "None of these are right for me, they are all individual contributor roles.", "review_reason": null, "negative_reason": "they are all individual contributor roles" },
+        { "role": "sales", "label": "not_interested", "quote": "None of these are right for me, they are all individual contributor roles.", "review_reason": null, "negative_reason": "they are all individual contributor roles" }
+      ]
+    },
+    {
+      "id": "interested-with-next-steps-question",
+      "category": "interested",
+      "reply": "Yes, please submit me for the Backend Engineer role. What are the next steps?",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "interested", "quote": "Yes, please submit me for the Backend Engineer role.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "interested-broken-link-report",
+      "category": "interested",
+      "reply": "Count me in for the Product Manager role. The job description link would not open for me.",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "interested", "quote": "Count me in for the Product Manager role.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "hedged-with-next-steps-question",
+      "category": "needs_review_unclear",
+      "reply": "The Backend Engineer role might be worth exploring. What are the next steps?",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "needs_review", "quote": "The Backend Engineer role might be worth exploring.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "gratitude-only-no-intent",
+      "category": "needs_review_unclear",
+      "reply": "Thank you so much for thinking of me, I really appreciate it.",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["sales"],
+      "expected": [{ "role": "sales", "label": "needs_review", "quote": "Thank you so much for thinking of me, I really appreciate it.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "multi-preference-with-set-wide-yes",
+      "category": "multiple_roles_explicit",
+      "reply": "Happy to be put forward for these, particularly Orbit Labs.",
+      "sent_message": "Three new role matches for you.",
+      "offered_roles": ["backend", "product", "design"],
+      "expected": [
+        { "role": "backend", "label": "interested", "quote": "Happy to be put forward for these", "review_reason": null, "negative_reason": null },
+        { "role": "product", "label": "interested", "quote": "Happy to be put forward for these", "review_reason": null, "negative_reason": null },
+        { "role": "design", "label": "interested", "quote": "Happy to be put forward for these", "review_reason": null, "negative_reason": null }
+      ]
+    },
+    {
+      "id": "multi-preference-named-only",
+      "category": "multiple_roles_named",
+      "reply": "I am particularly interested in Orbit Labs.",
+      "sent_message": "Three new role matches for you.",
+      "offered_roles": ["backend", "product", "design"],
+      "expected": [{ "role": "product", "label": "interested", "quote": "I am particularly interested in Orbit Labs.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "pronoun-single-role-decisive",
+      "category": "interested",
+      "reply": "This one looks interesting, please put me forward.",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "interested", "quote": "This one looks interesting, please put me forward.", "review_reason": null, "negative_reason": null }]
+    },
+    {
+      "id": "pronoun-two-roles-unclear",
+      "category": "multiple_roles_unclear",
+      "reply": "This one looks interesting, please put me forward.",
+      "sent_message": "Two new role matches for you.",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "This one looks interesting, please put me forward.", "review_reason": "role_unclear", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "This one looks interesting, please put me forward.", "review_reason": "role_unclear", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "company-only-mention-unclear",
+      "category": "multiple_roles_unclear",
+      "reply": "Nova Cloud sounds interesting to me.",
+      "sent_message": "Two new role matches for you.",
+      "offered_roles": ["sales", "sales_lead"],
+      "expected": [
+        { "role": "sales", "label": "needs_review", "quote": "Nova Cloud sounds interesting to me.", "review_reason": "role_unclear", "negative_reason": null },
+        { "role": "sales_lead", "label": "needs_review", "quote": "Nova Cloud sounds interesting to me.", "review_reason": "role_unclear", "negative_reason": null }
+      ]
+    },
+    {
+      "id": "role-url-scope-without-intent",
+      "category": "multiple_roles_question",
+      "reply": "https://www.paraform.com/browse?role=role-design\nCan you tell me more about this one?",
+      "sent_message": "Two new role matches for you.",
+      "offered_roles": ["product", "design"],
+      "expected": [{ "role": "design", "label": "needs_review", "quote": "Can you tell me more about this one?", "review_reason": "candidate_question", "negative_reason": null }]
+    },
+    {
+      "id": "updated-resume-no-intent",
+      "category": "needs_review_unclear",
+      "reply": "Attaching an updated resume for your records.",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["backend"],
+      "expected": [{ "role": "backend", "label": "needs_review", "quote": "Attaching an updated resume for your records.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "off-market-withdrawal",
+      "category": "multiple_roles_explicit",
+      "reply": "I have signed an offer elsewhere, so please withdraw me from everything.",
+      "sent_message": "Three new role matches for you.",
+      "offered_roles": ["backend", "product", "sales"],
+      "expected": [
+        { "role": "backend", "label": "not_interested", "quote": "I have signed an offer elsewhere, so please withdraw me from everything.", "review_reason": null, "negative_reason": "I have signed an offer elsewhere" },
+        { "role": "product", "label": "not_interested", "quote": "I have signed an offer elsewhere, so please withdraw me from everything.", "review_reason": null, "negative_reason": "I have signed an offer elsewhere" },
+        { "role": "sales", "label": "not_interested", "quote": "I have signed an offer elsewhere, so please withdraw me from everything.", "review_reason": null, "negative_reason": "I have signed an offer elsewhere" }
+      ]
+    },
+    {
+      "id": "scheduling-only-no-intent",
+      "category": "needs_review_unclear",
+      "reply": "Tuesday afternoon works best for a call.",
+      "sent_message": "A new role match for you.",
+      "offered_roles": ["product"],
+      "expected": [{ "role": "product", "label": "needs_review", "quote": "Tuesday afternoon works best for a call.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }]
+    },
+    {
+      "id": "outbound-enthusiasm-not-evidence",
+      "category": "needs_review_unclear",
+      "reply": "Got your note.",
+      "sent_message": "These two are an outstanding match for you and I would move on both of them straight away.",
+      "offered_roles": ["backend", "product"],
+      "expected": [
+        { "role": "backend", "label": "needs_review", "quote": "Got your note.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null },
+        { "role": "product", "label": "needs_review", "quote": "Got your note.", "review_reason": "reply_unclear_or_conditional", "negative_reason": null }
       ]
     }
   ]
