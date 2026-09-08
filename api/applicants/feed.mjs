@@ -159,7 +159,7 @@ export function createFeedHandler({
       // These complete projections have their own top-level response fields.
       // Keep one copy on the wire while retaining the full immutable artifact.
       const { applicantRowsV2: _rowsV2, problems: _problems, ...browserSnapshot } = joined || {};
-      const profileCache = profileCacheSummary(joined);
+      const profileCache = profileCacheSummary(joined, { publishedSnapshot: published });
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.

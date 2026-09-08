@@ -62,6 +62,7 @@ test("feed projects Core preparation stubs separately from actionable snapshot r
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.profilePreparing, 1);
+  assert.equal(res.body.profileCache.counts.newToday, 1);
   // Receipt partition keeps its numeric count behavior, so a browser cannot
   // accidentally merge a stub into an actionable array.
   assert.equal(res.body.snapshot.profilePreparing, 1);
