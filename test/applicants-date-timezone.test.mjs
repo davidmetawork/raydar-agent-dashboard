@@ -154,10 +154,10 @@ test("a real arrival time is shown to the minute; a bare date never invents one"
   assert.match(source, /function timeOfDay\(v\)/);
   // The row uses addedAt for the age when it carries a clock, and says "added"
   // rather than "applied" — they are different events and ingestion is batched.
-  assert.match(source, /hasClockTime\(row\.addedAt\)/);
-  assert.match(source, /"added " \+ esc\(timeOfDay\(row\.addedAt\)\)/);
+  assert.match(source, /if \(row\?\.addedAt && parseDate\(row\.addedAt\)\) return \{ value: row\.addedAt, label: "Added", timed: hasClockTime\(row\.addedAt\) \}/);
+  assert.match(source, /moment\.label\.toLowerCase\(\)/);
   // ...and falls back to the old wording when there is no clock time to show.
-  assert.match(source, /"applied " \+ esc\(relTime\(row\.appliedAt\) \|\| "—"\)/);
+  assert.match(source, /if \(row\?\.appliedAt && parseDate\(row\.appliedAt\)\) return \{ value: row\.appliedAt, label: "Applied", timed: false \}/);
 });
 
 test("timeOfDay is never called on a bare date, in any timezone", () => {
@@ -179,12 +179,12 @@ test("the exact application time wins, and only it may say 'applied'", () => {
   // applied (from the Applicant Hub's Workable record, 98% of rows); addedAt
   // is when ingestion reached them, ~40h later on the live queue; a bare
   // appliedAt date is the retired path's last resort.
-  assert.match(source, /const exactApplied = hasClockTime\(row\.appliedAtIso\) \? row\.appliedAtIso : null;/);
-  assert.match(source, /\? "applied " \+ esc\(timeOfDay\(exactApplied\)\) \+ " · " \+ esc\(relTime\(exactApplied\)\)/);
+  assert.match(source, /if \(hasClockTime\(row\?\.appliedAtIso\)\) return \{ value: row\.appliedAtIso, label: "Applied", timed: true \}/);
+  assert.match(source, /if \(hasClockTime\(row\?\.appliedAt\)\) return \{ value: row\.appliedAt, label: "Applied", timed: true \}/);
   // addedAt keeps its own, different word — conflating the two would claim a
   // precision about the APPLICATION that the ingestion time does not have.
-  assert.match(source, /\? "added " \+ esc\(timeOfDay\(row\.addedAt\)\) \+ " · " \+ esc\(relTime\(row\.addedAt\)\)/);
+  assert.match(source, /label: "Added", timed: hasClockTime\(row\.addedAt\)/);
   // The date is what the row is stamped with when an exact time exists, so the
   // day shown is the day they applied rather than the day we ingested them.
-  assert.match(source, /esc\(shortDate\(exactApplied \|\| row\.appliedAt \|\| row\.addedAt\)\)/);
+  assert.match(source, /const when = applicationMomentHtml\(row\)/);
 });

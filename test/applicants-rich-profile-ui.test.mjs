@@ -118,6 +118,8 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
     initials: () => "SA", avatarImg: () => "<img>",
     preferredLinkedinProfileUrl: () => "", liAnchor: () => "", pfAnchor: () => "", tierPill: () => "",
     monthYear: () => "September 2026", shortDate: () => "September 1", relTime: () => "now",
+    applicationMomentText: (value) => value?.appliedAt ? "Applied September 1" : "",
+    DISPLAY_ONLY_SOURCE_HOLD_CODES: new Set(["source_held", "display_only_source_held"]),
     duration: () => "", effectiveDecision: () => null, interviewHold: () => "", alreadyEmailed: () => false,
     ALREADY_EMAILED_ACTION_TITLE: "", $: (id) => id === "profileCard" ? profileCard : null,
   };

@@ -27,8 +27,8 @@ test("Interview controls fail closed on a hard hold, not on a delivery hint", ()
   // generation.mjs interviewDecisionHold), mirrored into the page as
   // interviewHold(). `interviewAllowed` is a delivery-readiness hint and is
   // deliberately NOT a decision gate any more.
-  assert.match(applicants, /const hold = interviewHold\(row\);\s*\n\s*const interviewReady = !hold;/);
+  assert.match(applicants, /const hold = interviewHold\(row\);[\s\S]*?const interviewReady = !hold;/);
   assert.match(applicants, /function interviewHold\(row\) \{\s*\n\s*if \(!row\) return "application_missing";/);
-  assert.match(applicants, /"Interview held: " \+ hold/);
+  assert.match(applicants, /Ready to review · Interview unavailable:/);
   assert.doesNotMatch(applicants, /row\.interviewAllowed === true/);
 });

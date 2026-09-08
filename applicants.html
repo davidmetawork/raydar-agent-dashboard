@@ -473,7 +473,7 @@
         <option value="emailed">Emailed</option>
         <option value="blocked">Blocked</option>
       </select>
-      <input id="searchInput" type="text" placeholder="Search by name…" autocomplete="off" oninput="STATE.query=this.value;resetVirtualLists();renderLists()" />
+      <input id="searchInput" type="text" placeholder="Search name, role, or job…" autocomplete="off" oninput="STATE.query=this.value;resetVirtualLists();renderLists()" />
       </span>
     </div>
 
@@ -614,6 +614,29 @@ function hasClockTime(v) { return !!v && !DATE_ONLY.test(String(v)) && !!parseDa
 function timeOfDay(v) {
   const d = parseDate(v); if (!d) return "";
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+// Prefer a real application timestamp, then the time Raydar added the record,
+// then a date-only application value. Each fallback keeps its own label so a
+// processing delay never looks like the moment the candidate applied.
+function applicationMoment(row) {
+  if (hasClockTime(row?.appliedAtIso)) return { value: row.appliedAtIso, label: "Applied", timed: true };
+  if (hasClockTime(row?.appliedAt)) return { value: row.appliedAt, label: "Applied", timed: true };
+  if (row?.addedAt && parseDate(row.addedAt)) return { value: row.addedAt, label: "Added", timed: hasClockTime(row.addedAt) };
+  if (row?.appliedAt && parseDate(row.appliedAt)) return { value: row.appliedAt, label: "Applied", timed: false };
+  return null;
+}
+function applicationMomentText(row) {
+  const moment = applicationMoment(row);
+  if (!moment) return "";
+  return moment.label + " " + shortDate(moment.value)
+    + (moment.timed ? " at " + timeOfDay(moment.value) + " · " + relTime(moment.value) : "");
+}
+function applicationMomentHtml(row) {
+  const moment = applicationMoment(row);
+  if (!moment) return "";
+  return "<b>" + esc(shortDate(moment.value)) + "</b>"
+    + moment.label.toLowerCase()
+    + (moment.timed ? " " + esc(timeOfDay(moment.value)) + " · " + esc(relTime(moment.value)) : "");
 }
 /* Employment and education dates are calendar fields, even when the provider
    serializes them as UTC-midnight timestamps. Keep their written month/year:
@@ -803,8 +826,16 @@ function requestVisibleRichCards(rows) {
 function pendingRows() { return queueRows().filter((r) => !effectiveDecision(r.key)); }
 function decidedRows() { return queueRows().filter((r) => effectiveDecision(r.key)); }
 const HARD_HOLD_STATES = new Set(["identity_review", "recipient_review", "delivery_review", "withdrawn", "privacy_hold", "do_not_process"]);
-const HARD_HOLD_CODES = new Set(["identity_conflict", "cross_person_identity_conflict", "recipient_conflict", "recipient_reserved_other_person", "ambiguous_delivery", "delivery_reconciliation_required", "source_withdrawn", "withdrawn", "privacy_hold", "do_not_process", "protected_person", "processing_basis_restricted"]);
+const DISPLAY_ONLY_SOURCE_HOLD_CODES = new Set(["source_held", "display_only_source_held"]);
+const HARD_HOLD_CODES = new Set(["identity_conflict", "cross_person_identity_conflict", "recipient_conflict", "recipient_reserved_other_person", "ambiguous_delivery", "delivery_reconciliation_required", "source_withdrawn", "withdrawn", "privacy_hold", "do_not_process", "protected_person", "processing_basis_restricted", ...DISPLAY_ONLY_SOURCE_HOLD_CODES]);
 function normalizedHold(value) { const hold = String(value ?? "").trim().toLowerCase(); return hold || null; }
+function humanHoldReason(value) {
+  const code = normalizedHold(value);
+  if (DISPLAY_ONLY_SOURCE_HOLD_CODES.has(code)) return "This Workable application is available for review, but its source is display-only.";
+  if (code === "workable_display_profile_not_eligible") return "The Workable profile no longer passes the display-only safety checks.";
+  return String(value || "Applicant readiness needs attention").replace(/^APPLICANT_CORE_/i, "")
+    .replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
 function interviewHold(row) {
   if (!row) return "application_missing";
   const projected = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.actionability;
@@ -1510,7 +1541,8 @@ function setPillDescription(id, label, text) {
 }
 
 function renderRoleFilter() {
-  const roles = [...new Set([...queueRows(), ...streamRows()].map((r) => r.roleTitle).filter(Boolean))].sort();
+  const roles = [...new Set([...queueRows(), ...streamRows(), ...profilePreparingRows()]
+    .map((r) => r.roleTitle).filter(Boolean))].sort();
   const select = $("roleFilter"), current = STATE.role;
   select.innerHTML = '<option value="all">All roles</option>' + roles.map((r) => '<option value="' + esc(r) + '">' + esc(r) + "</option>").join("");
   select.value = roles.includes(current) ? current : "all";
@@ -1593,7 +1625,15 @@ function decidedStatusHtml(key, decision) {
   let chip;
   if (decisionStatus(key, decision) === "passed") chip = '<span class="decided-chip passed">Passed</span>';
   else if (decisionStatus(key, decision) === "emailed") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
-  else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">' + (decision.action === "interview" ? "Interview held: " : "Blocked: ") + esc(invitation?.reason || invitation?.reasonCode || ack?.reason || interviewHold(queueRows().find((row) => row.key === key)) || "see delivery state") + "</span>";
+  else if (decisionStatus(key, decision) === "blocked") {
+    const rawBlockReason = invitation?.reason || invitation?.reasonCode || ack?.reason
+      || interviewHold(queueRows().find((row) => row.key === key)) || "see delivery state";
+    const blockCode = String(rawBlockReason).trim().toLowerCase();
+    const blockReason = ["source_held", "display_only_source_held"].includes(blockCode)
+      ? "This Workable application is available for review, but its source is display-only."
+      : rawBlockReason;
+    chip = '<span class="decided-chip blocked">' + (decision.action === "interview" ? "Interview held: " : "Blocked: ") + esc(blockReason) + "</span>";
+  }
   else if (invitation?.state === "queued") chip = '<span class="decided-chip queued">Invitation queued</span>';
   else if (invitation?.state === "externally_committed") chip = '<span class="decided-chip queued">Provider accepted · delivery pending</span>';
   else if (decision.action === "interview") chip = '<span class="decided-chip queued">Interview requested · preparing</span>';
@@ -1674,7 +1714,8 @@ function historyHtml(row) {
   const rating = paraformRatingText(provider);
   if (providerHistory) out.push('<div class="rc-paraform"><span class="label">Cached LinkedIn profile</span></div>');
   if (!providerHistory && (exps.length || edus.length)) {
-    out.push('<div class="rc-paraform"><span class="label">Application profile</span><span class="value">source record</span></div>');
+    const displayOnly = DISPLAY_ONLY_SOURCE_HOLD_CODES.has(interviewHold(row));
+    out.push('<div class="rc-paraform"><span class="label">' + (displayOnly ? "Workable application profile" : "Application profile") + '</span><span class="value">' + (displayOnly ? "current source · review only" : "source record") + '</span></div>');
   }
   if (rating) out.push('<div class="rc-paraform"><span class="label">Paraform rating</span><span class="value">Paraform ' + esc(rating) + "</span></div>");
   if (exps.length) out.push(secHtml("Experience", exps.map((item) => expLineHtml(item, providerHistory)).join("")));
@@ -1737,6 +1778,8 @@ function rowCardHtml(row, mode, decision) {
   const card = cardFor(id);
   const displayCard = visibleCardProfile(card);
   const hold = interviewHold(row);
+  const displayOnlySource = DISPLAY_ONLY_SOURCE_HOLD_CODES.has(hold);
+  const holdReason = hold ? humanHoldReason(hold) : "";
   const interviewReady = !hold;
   const sentAlready = !decision && interviewReady && alreadyEmailed(row);
   const control = interviewControl(row);
@@ -1747,9 +1790,9 @@ function rowCardHtml(row, mode, decision) {
       : '<div class="actions">' +
         '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
-          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : control.title) + '"' +
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? (displayOnlySource ? "Interview unavailable: " : "Interview held: ") + holdReason : control.title) + '"' +
           (busy || !interviewReady || sentAlready || !control.enabled ? " disabled" : "") + ">" +
-          (sentAlready ? "Already emailed" : !interviewReady ? "Interview held" : control.label) + "</button></div>");
+          (sentAlready ? "Already emailed" : !interviewReady ? (displayOnlySource ? "Interview unavailable" : "Interview held") : control.label) + "</button></div>");
   const check = mode === "review" && !decision
     ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
     : "";
@@ -1774,15 +1817,7 @@ function rowCardHtml(row, mode, decision) {
         retired LinkedIn/Gmail path ever recorded. relTime then measures from
         local midnight, so every row from one day reads the same; that is the
         old behaviour and it is the last resort, not the default. */
-  const exactApplied = hasClockTime(row.appliedAtIso) ? row.appliedAtIso : null;
-  const when = row.appliedAt || row.addedAt || exactApplied
-    ? "<b>" + esc(shortDate(exactApplied || row.appliedAt || row.addedAt)) + "</b>" +
-      (exactApplied
-        ? "applied " + esc(timeOfDay(exactApplied)) + " · " + esc(relTime(exactApplied))
-        : hasClockTime(row.addedAt)
-          ? "added " + esc(timeOfDay(row.addedAt)) + " · " + esc(relTime(row.addedAt))
-          : "applied " + esc(relTime(row.appliedAt) || "—"))
-    : "";
+  const when = applicationMomentHtml(row);
   return '<div class="row' + (decision ? " decided-row" : "") + '" data-row="' + esc(key) + '">' +
     check + avatarHtml(row) +
     '<div class="rc-main">' +
@@ -1793,7 +1828,7 @@ function rowCardHtml(row, mode, decision) {
         '<div class="rc-headline" data-headline="' + esc(id) + '">' + esc(applicantFact(row, "title")?.value || displayCard.title || card?.title || "") + "</div>" +
         '<div class="rc-loc" data-loc="' + esc(id) + '">' + esc(applicantFact(row, "location")?.value || displayCard.location || card?.location || "") + "</div>" +
         (v2CardProvenanceHtml(row)) +
-        (hold ? '<div class="rc-none">Interview held: ' + esc(hold) + '</div>'
+        (hold ? '<div class="rc-none">' + (displayOnlySource ? "Ready to review · Interview unavailable: " : "Interview held: ") + esc(holdReason) + '</div>'
           : sentAlready ? '<div class="rc-none">Already emailed for this role.</div>' : '') +
         invitationStatusHtml(row) +
         '<div class="rc-body" data-body="' + esc(id) + '">' + historyHtml(row) + "</div>" +
@@ -2075,19 +2110,36 @@ const PROCESSING_REVIEW_STATES = new Set([
   "review", "needs_review", "terminal_needs_review", "terminal-review",
 ]);
 const PROCESSING_REASONS = Object.freeze({
-  source_profile_preparing: "Preparing the source profile.",
-  source_profile_pending: "Preparing the source profile.",
-  source_import_needs_review: "Source import needs review.",
-  APPLICANT_CORE_GRAPH_WORK_LEASE_EXHAUSTED: "Source preparation stopped after repeated retries and needs attention.",
-  APPLICANT_CORE_GRAPH_SOURCE_HEAD_MISSING: "The source application is no longer available and needs attention.",
+  source_discovery_pending: {
+    reason: "Basic application received. Workable is still loading the candidate's full profile.",
+    next: "Next: Raydar intake will retry the Workable profile automatically.", owner: "Raydar intake",
+  },
+  workable_display_profile_not_eligible: {
+    reason: "The saved Workable profile no longer passes the display-only safety checks.",
+    next: "Next: recheck the current source, identity, and privacy evidence.", owner: "Raydar source review",
+  },
+  source_held: {
+    reason: "This application is visible, but its source is temporarily held for review.",
+    next: "Next: finish the protected source review before releasing the application.", owner: "Raydar source review",
+  },
+  display_only_source_held: {
+    reason: "The current Workable application is review-only. Interview remains unavailable for this source.",
+    next: "Next: confirm an eligible profile before Interview.", owner: "Raydar source review",
+  },
+  source_profile_preparing: { reason: "Preparing the source profile.", next: "Next: Raydar intake will retry automatically.", owner: "Raydar intake" },
+  source_profile_pending: { reason: "Preparing the source profile.", next: "Next: Raydar intake will retry automatically.", owner: "Raydar intake" },
+  source_import_needs_review: { reason: "Source import needs review.", next: "Next: inspect the current source record before releasing it.", owner: "Raydar source review" },
+  APPLICANT_CORE_GRAPH_WORK_LEASE_EXHAUSTED: { reason: "Source preparation stopped after repeated retries and needs attention.", next: "Next: inspect and requeue the failed source work.", owner: "Raydar source review" },
+  APPLICANT_CORE_GRAPH_SOURCE_HEAD_MISSING: { reason: "The source application is no longer available and needs attention.", next: "Next: confirm whether the source was removed or replaced.", owner: "Raydar source review" },
 });
 function processingDisplay(row) {
   const state = String(row?.state || "profile_preparing").trim().toLowerCase();
   const needsAttention = PROCESSING_REVIEW_STATES.has(state);
   const rawReason = String(row?.reason || "").trim();
-  if (PROCESSING_REASONS[rawReason]) {
+  const guidance = PROCESSING_REASONS[rawReason];
+  if (guidance) {
     return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention,
-      reason: PROCESSING_REASONS[rawReason] };
+      reason: guidance.reason, next: guidance.next, owner: guidance.owner };
   }
   // Core reasons are machine-safe codes, but they are not useful UI copy. Do
   // not surface any ids embedded in an unexpected source string.
@@ -2097,16 +2149,28 @@ function processingDisplay(row) {
   const reason = plain
     ? plain.charAt(0).toUpperCase() + plain.slice(1).toLowerCase() + (/[.!?]$/.test(plain) ? "" : ".")
     : needsAttention ? "Source preparation needs attention." : "Preparing the source profile.";
-  return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention, reason };
+  return { label: needsAttention ? "Needs attention" : "Preparing application", needsAttention, reason,
+    next: needsAttention ? "Next: inspect the current source record." : "Next: Raydar intake will retry automatically.",
+    owner: needsAttention ? "Raydar source review" : "Raydar intake" };
+}
+function sourceHistoryPeriod(item, current = false) {
+  const start = item?.start ? monthYear(item.start) : "";
+  const end = current ? "Present" : item?.end ? monthYear(item.end) : "";
+  return [start, end].filter(Boolean).join(" — ");
 }
 function processingSourceDetailsHtml(details) {
   if (!details || details.state !== "pending_source_review" || details.provenance !== "applicant_hub"
     || details.verification !== "unverified_source" || details.ruleEligible !== false) return "";
   const history = details.profile && typeof details.profile === "object" ? details.profile : {};
   const roles = (Array.isArray(history.experiences) ? history.experiences : []).slice(0, 3)
-    .map((item) => [item.roleTitle, item.companyName].filter(Boolean).join(" at ")).filter(Boolean);
+    .map((item) => {
+      const role = [item.roleTitle, item.companyName].filter(Boolean).join(" at ");
+      const period = sourceHistoryPeriod(item, item.current === true);
+      return [item.current === true ? "Current: " + role : role, period].filter(Boolean).join(" · ");
+    }).filter(Boolean);
   const education = (Array.isArray(history.education) ? history.education : []).slice(0, 2)
-    .map((item) => [item.school, item.degree].filter(Boolean).join(" — ")).filter(Boolean);
+    .map((item) => [[item.school, item.degree].filter(Boolean).join(" — "), sourceHistoryPeriod(item)]
+      .filter(Boolean).join(" · ")).filter(Boolean);
   const title = [history.title, history.location].filter(Boolean).join(" · ");
   const lines = [title, ...roles, ...education].filter(Boolean).slice(0, 5);
   return '<div class="processing-source-details"><b>Source details pending review</b><div>Applicant Hub source history. It is not a verified Paraform or resume profile and is not used by Rules.</div>' +
@@ -2122,13 +2186,18 @@ function processingRowHtml(row) {
   const receivedAt = row.receivedAt || row.addedAt || row.appliedAt || null;
   const receivedLabel = row.receivedAt ? "Received" : row.addedAt ? "Added" : "Applied";
   const display = processingDisplay(row);
+  const waitAt = row.receivedAt || row.addedAt || row.appliedAt || null;
+  const waitSeconds = hasClockTime(waitAt) ? Math.max(0, Math.floor((Date.now() - parseDate(waitAt).getTime()) / 1000)) : null;
+  const wait = waitSeconds == null ? (waitAt ? "Since " + shortDate(waitAt) : "") : "Waiting " + invitationAgeText(waitSeconds);
   return '<div class="row processing-row" data-processing-key="' + esc(row.key || row.profileKey || "") + '">' +
     '<div class="rc-main"><div class="rc-id">' +
       '<div class="who"><span class="name"><span>' + esc(row.name || "Applicant identity pending") + '</span></span>' +
         '<span class="processing-state' + (display.needsAttention ? ' needs-attention' : '') + '">' + esc(display.label) + '</span></div>' +
-      '<div class="processing-job">Job: <b>' + esc(role) + "</b>" + company + "</div>" +
+      '<div class="processing-job">Applied to <b>' + esc(role) + "</b>" + company + "</div>" +
       (receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
       '<div class="processing-reason">' + esc(display.reason) + "</div>" +
+      '<div class="processing-meta">' + esc([wait, "Owner: " + display.owner].filter(Boolean).join(" · ")) + "</div>" +
+      '<div class="processing-reason">' + esc(display.next) + "</div>" +
       processingSourceDetailsHtml(row.sourceDetails) +
     "</div></div></div>";
 }
@@ -2145,7 +2214,12 @@ function renderProcessing() {
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>Core publishes preparation records with its next verified generation.</div>';
     return;
   }
-  const rows = profilePreparingRows().slice().sort((a, b) => {
+  const rows = profilePreparingRows().filter((row) => {
+    if (STATE.role !== "all" && (row.roleTitle || "") !== STATE.role) return false;
+    const q = STATE.query.trim().toLowerCase();
+    return !q || [row.name, row.roleTitle, row.company, row.sourceJobId]
+      .some((value) => String(value || "").toLowerCase().includes(q));
+  }).sort((a, b) => {
     const aAt = parseDate(a.addedAt || a.appliedAt)?.getTime() || 0;
     const bAt = parseDate(b.addedAt || b.appliedAt)?.getTime() || 0;
     return bAt - aAt || String(a.key || a.profileKey || "").localeCompare(String(b.key || b.profileKey || ""));
@@ -2153,7 +2227,10 @@ function renderProcessing() {
   if (!rows.length) {
     list._virtual = null;
     const total = Number(STATE.snapshot?.profilePreparing) || 0;
-    list.innerHTML = '<div class="empty">' + (total
+    const hasFilters = STATE.role !== "all" || STATE.query.trim();
+    list.innerHTML = '<div class="empty">' + (hasFilters
+      ? "No preparing applicants match the current filters."
+      : total
       ? 'Core reports ' + total.toLocaleString() + ' profile' + (total === 1 ? '' : 's') + ' preparing, but none has a named preparation record to show yet.'
       : 'No profiles are preparing.') + '</div>';
     return;
@@ -2583,6 +2660,8 @@ function renderModal() {
   const p = profile || {};
   const projected = p.profileV2 || (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null);
   const projectedFacts = projected?.profile?.facts || {};
+  const modalHold = interviewHold(row);
+  const displayOnlySource = DISPLAY_ONLY_SOURCE_HOLD_CODES.has(modalHold);
   const provider = richProfile(p.paraformProfile);
   const providerHistory = hasProviderHistory(provider);
   const providerContent = hasProviderContent(provider);
@@ -2598,7 +2677,7 @@ function renderModal() {
     && Number(projected?.decisionRevision) === Number(row?.decisionRevision);
   const canUseFact = (source) => source === "v2" ? v2RuleFactsReady
     : !hasV2Projection && modal.source === "queue"
-      && (source === "source" || provider?.ruleFactsEligible === true);
+      && ((source === "source" && !displayOnlySource) || provider?.ruleFactsEligible === true);
   const linkedin = preferredLinkedinProfileUrl(p.linkedin, row.linkedin);
   const decision = modal.source === "queue" ? effectiveDecision(modal.key) : null;
   const busy = STATE.busy.has(modal.key);
@@ -2613,11 +2692,11 @@ function renderModal() {
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(projectedFacts.title.freshness || "unknown freshness") + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">Application profile as of ' + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(projectedFacts.title.freshness || "unknown freshness") + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">' + (displayOnlySource ? "Workable application profile · current source as of " : "Application profile as of ") + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(typeof appliedRole === "function" ? appliedRole(row) : (row.roleTitle || "Unknown role")) + "</b> @ " + esc(appliedCompany(row)) +
-    (row.appliedAt ? " · " + esc(shortDate(row.appliedAt)) + " (" + esc(relTime(row.appliedAt)) + ")" : "") +
+    (applicationMomentText(row) ? " · " + esc(applicationMomentText(row)) : "") +
     (canUseFact(hasV2Projection ? "v2" : "source") && (hasV2Projection ? projected?.application?.appliedTo?.roleId : row.roleId) ? '<button type="button" class="rule-use" data-rule-fact-kind="application" data-rule-fact-source="' + (hasV2Projection ? "v2" : "source") + '" data-rule-fact-index="0">Use in rule</button>' : "") + "</div>");
   if (p.degraded === "paraform_auth") {
     parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform needs to reconnect.</strong> ' +
@@ -2634,7 +2713,7 @@ function renderModal() {
     const primaryProfile = providerHistory ? provider : p;
     const primaryHistory = projectedHistory ? "" : historySectionsHtml(primaryProfile, { allowRuleFacts: canUseFact(providerHistory ? "paraform" : "source"), isParaformProfile: providerHistory });
     if (primaryHistory) {
-      parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">Application profile <span>source record</span></div>' + primaryHistory + "</div></div>");
+      parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">' + (displayOnlySource ? "Workable application profile <span>current source · review only</span>" : "Application profile <span>source record</span>") + '</div>' + primaryHistory + "</div></div>");
     }
     if (providerHistory) {
       const applicationHistory = historySectionsHtml(p, { allowRuleFacts: modal.source === "queue" });
@@ -2650,21 +2729,23 @@ function renderModal() {
     }
   }
   if (modal.source === "queue") {
-    const hold = interviewHold(row);
+    const hold = modalHold;
+    const holdReason = hold ? humanHoldReason(hold) : "";
     // Same gate as the row card, for the same reason — the modal is the other
     // way a person reaches this button.
     const sentAlready = !decision && !hold && alreadyEmailed(row);
     const control = interviewControl(row);
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto"' +
-        (hasV2Projection && !v2RuleFactsReady ? ' disabled title="This profile fact version changed. Refresh Applicants before creating a rule."' : "") + '>Create rule from profile</button>' +
+        (hasV2Projection && !v2RuleFactsReady ? ' disabled title="This profile fact version changed. Refresh Applicants before creating a rule."'
+          : displayOnlySource && !hasV2Projection ? ' disabled title="This Workable source profile is for review only and cannot create Rules."' : "") + '>Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? retryInterviewButtonHtml(row, decision, busy) :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
-          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? "Interview held: " + hold : control.title) + '"' +
+          esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? (displayOnlySource ? "Interview unavailable: " : "Interview held: ") + holdReason : control.title) + '"' +
           (busy || hold || sentAlready || !control.enabled ? " disabled" : "") + ">" +
-          (sentAlready ? "Already emailed" : hold ? "Interview held" : control.label) + "</button>") +
+          (sentAlready ? "Already emailed" : hold ? (displayOnlySource ? "Interview unavailable" : "Interview held") : control.label) + "</button>") +
       "</div>");
   }
   $("profileCard").innerHTML = parts.join("");
@@ -2715,7 +2796,9 @@ document.addEventListener("click", async (event) => {
     }
     const action = requestedAction;
     if (action === "interview" && interviewHold(row)) {
-      toast("Interview held: " + interviewHold(row), true);
+      const hold = interviewHold(row);
+      toast((DISPLAY_ONLY_SOURCE_HOLD_CODES.has(hold) ? "Interview unavailable: " : "Interview held: ")
+        + humanHoldReason(hold), true);
       return;
     }
     // Deciding from inside the profile hands over the next one, so a reviewer
