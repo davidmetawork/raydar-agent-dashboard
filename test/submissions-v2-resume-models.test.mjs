@@ -560,7 +560,7 @@ test("a narrowing rewrite is independently revalidated before it can survive", a
   assert.equal(result.history.length, 2);
 });
 
-test("grounding validation limits concurrent batches so settled budget can fund a large document", async () => {
+test("grounding validation bounds concurrent batches and settles actual usage", async () => {
   const claims = Array.from({ length: GROUNDING_VALIDATOR_BATCH_SIZE * 10 + 1 }, (_, index) => ({
     id: `claim-${index + 1}`,
     text: `Supported fact ${index + 1}.`,
@@ -577,7 +577,7 @@ test("grounding validation limits concurrent batches so settled budget can fund 
   let inFlight = 0;
   let maxInFlight = 0;
   let persistedReservations = 0;
-  const budget = createGenerationBudget({ deadlineAt: 10_000, now: () => 1_000 });
+  const budget = createGenerationBudget({ deadlineAt: 10_000, spentCents: 0, now: () => 1_000 });
   const result = await validateClaimsToCompletion(claims, {
     apiKey: "test-key",
     fetchImpl: async (_url, init) => {
@@ -605,7 +605,7 @@ test("grounding validation limits concurrent batches so settled budget can fund 
       });
     },
     onAttempt: async () => {
-      const reservation = budget.reserveAttempt(20);
+      const reservation = budget.reserveAttempt(19);
       persistedReservations += 1;
       return reservation;
     },

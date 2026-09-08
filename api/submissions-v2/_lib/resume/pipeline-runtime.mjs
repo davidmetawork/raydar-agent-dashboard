@@ -112,6 +112,7 @@ export function createGenerationBudget({
   const deadline = Number(deadlineAt);
   const ceiling = Math.max(1, Math.min(GENERATION_BUDGET_CENTS, Number(budgetCents) || GENERATION_BUDGET_CENTS));
   let spent = Math.max(0, Number(spentCents) || 0);
+  let exhausted = spent >= ceiling;
 
   function assertTime(minimumRemainingMs = 1) {
     if (!Number.isFinite(deadline) || now() + Math.max(1, minimumRemainingMs) > deadline) {
@@ -128,6 +129,9 @@ export function createGenerationBudget({
     assertTime,
     reserve(cents, { minimumRemainingMs = 1 } = {}) {
       assertTime(minimumRemainingMs);
+      if (exhausted) {
+        throw new ResumePipelineError("generation_budget_exhausted", "Resume preparation reached its two-dollar model-cost ceiling.");
+      }
       const value = Math.max(1, Math.ceil(Number(cents) || 0));
       if (spent + value > ceiling) {
         throw new ResumePipelineError("generation_budget_exhausted", "Resume preparation reached its two-dollar model-cost ceiling.");
@@ -142,11 +146,17 @@ export function createGenerationBudget({
     settleAttempt(reservation, actualCents) {
       if (!reservation || reservation.settled) return spent;
       const actual = Math.max(1, Math.ceil(Number(actualCents) || 0));
+      if (exhausted) {
+        reservation.settled = true;
+        reservation.actualCents = actual;
+        return spent;
+      }
       const delta = actual - reservation.reservedCents;
       if (delta > 0 && spent + delta > ceiling) {
         // The provider already charged more than the preflight bound. Record
         // the entire remaining ceiling before stopping further dispatch.
         spent = ceiling;
+        exhausted = true;
         reservation.budgetExhausted = true;
       } else {
         spent += delta;

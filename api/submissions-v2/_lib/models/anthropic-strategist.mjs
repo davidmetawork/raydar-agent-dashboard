@@ -279,6 +279,7 @@ async function callModel(model, payload, {
   now,
   onAttempt = null,
   onUsage = null,
+  onAttemptFinished = null,
 }) {
   const startedAt = now();
   const resolvedApiKey = requiredKey(apiKey);
@@ -289,63 +290,67 @@ async function callModel(model, payload, {
     input: requestBody,
     maximumOutputTokens: maxTokens,
   });
-  let response;
   try {
-    response = await fetchImpl(ANTHROPIC_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": resolvedApiKey,
-        "anthropic-version": "2023-06-01",
+    let response;
+    try {
+      response = await fetchImpl(ANTHROPIC_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": resolvedApiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+    } catch (cause) {
+      throw new ModelProviderError("STRATEGIST_TRANSPORT_FAILED", "Anthropic strategist request failed", {
+        retryable: true,
+        provider: "anthropic",
+        cause,
+      });
+    }
+    let raw;
+    try {
+      raw = await responseJson(response, "anthropic");
+    } catch (error) {
+      await onUsage?.({ reservation, provider: "anthropic", model, usage: error?.details?.usage || null });
+      throw error;
+    }
+    const usage = {
+      inputTokens: raw?.usage?.input_tokens,
+      outputTokens: raw?.usage?.output_tokens,
+      cacheCreationInputTokens: raw?.usage?.cache_creation_input_tokens,
+      cacheReadInputTokens: raw?.usage?.cache_read_input_tokens,
+    };
+    await onUsage?.({ reservation, provider: "anthropic", model, usage });
+    let strategy;
+    try {
+      strategy = assertStrictStrategy(parseText(raw));
+    } catch (cause) {
+      if (cause instanceof ModelProviderError) throw cause;
+      throw new ModelProviderError("STRATEGIST_SCHEMA_INVALID", "Anthropic returned a strategy outside the strict contract", {
+        retryable: true,
+        provider: "anthropic",
+        cause,
+      });
+    }
+    return {
+      strategy,
+      audit: {
+        provider: "anthropic",
+        model,
+        effort: STRATEGIST_EFFORT,
+        promptVersion: STRATEGIST_PROMPT_VERSION,
+        durationMs: Math.max(0, now() - startedAt),
+        usage,
+        providerRequestId: typeof raw?.id === "string" ? raw.id : null,
+        stopReason: typeof raw?.stop_reason === "string" ? raw.stop_reason : null,
       },
-      body: JSON.stringify(requestBody),
-      signal,
-    });
-  } catch (cause) {
-    throw new ModelProviderError("STRATEGIST_TRANSPORT_FAILED", "Anthropic strategist request failed", {
-      retryable: true,
-      provider: "anthropic",
-      cause,
-    });
+    };
+  } finally {
+    await onAttemptFinished?.({ reservation, provider: "anthropic", model });
   }
-  let raw;
-  try {
-    raw = await responseJson(response, "anthropic");
-  } catch (error) {
-    await onUsage?.({ reservation, provider: "anthropic", model, usage: error?.details?.usage || null });
-    throw error;
-  }
-  const usage = {
-    inputTokens: raw?.usage?.input_tokens,
-    outputTokens: raw?.usage?.output_tokens,
-    cacheCreationInputTokens: raw?.usage?.cache_creation_input_tokens,
-    cacheReadInputTokens: raw?.usage?.cache_read_input_tokens,
-  };
-  await onUsage?.({ reservation, provider: "anthropic", model, usage });
-  let strategy;
-  try {
-    strategy = assertStrictStrategy(parseText(raw));
-  } catch (cause) {
-    if (cause instanceof ModelProviderError) throw cause;
-    throw new ModelProviderError("STRATEGIST_SCHEMA_INVALID", "Anthropic returned a strategy outside the strict contract", {
-      retryable: true,
-      provider: "anthropic",
-      cause,
-    });
-  }
-  return {
-    strategy,
-    audit: {
-      provider: "anthropic",
-      model,
-      effort: STRATEGIST_EFFORT,
-      promptVersion: STRATEGIST_PROMPT_VERSION,
-      durationMs: Math.max(0, now() - startedAt),
-      usage,
-      providerRequestId: typeof raw?.id === "string" ? raw.id : null,
-      stopReason: typeof raw?.stop_reason === "string" ? raw.stop_reason : null,
-    },
-  };
 }
 
 function checkedResultStrategy(result, ledger) {
@@ -505,6 +510,7 @@ export async function runResumeStrategist({
   now = Date.now,
   onAttempt = null,
   onUsage = null,
+  onAttemptFinished = null,
 } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new ModelProviderError("STRATEGIST_FETCH_MISSING", "Anthropic strategist transport is unavailable", {
@@ -522,6 +528,7 @@ export async function runResumeStrategist({
       now,
       onAttempt,
       onUsage,
+      onAttemptFinished,
     });
     const checkedStrategy = checkedResultStrategy(primary, ledger);
     return {
@@ -549,6 +556,7 @@ export async function runResumeStrategist({
       now,
       onAttempt,
       onUsage,
+      onAttemptFinished,
     });
     const checkedStrategy = checkedResultStrategy(fallback, ledger);
     return {

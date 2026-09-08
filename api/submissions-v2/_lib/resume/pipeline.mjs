@@ -192,10 +192,10 @@ export async function runResumePreparation(context, {
       render: { fromStatuses: ["validating", "rendering"], status: "rendering", stage: "render" },
     }[stage];
     if (progress) {
+      // Cloning cached stages must preserve any OCR cost already reserved.
       await store.updateGeneration({
         generationId: generation.id,
         ...progress,
-        spentCents: 0,
         executionFence,
       });
     }
@@ -262,12 +262,21 @@ export async function runResumePreparation(context, {
 
     // Validator batches may dispatch concurrently. Serialize the durable
     // generation update and checkpoint before each fetch so a crash keeps the
-    // full reservation and out-of-order completions cannot lower spent_cents.
+    // full reservation and stale completions cannot overwrite newer spending.
     let budgetWrite = Promise.resolve();
+    let budgetWriteFailure = null;
+    const activeReservations = new Set();
+    const budgetWaiters = new Set();
+    const notifyBudgetWaiters = () => {
+      for (const resolve of budgetWaiters) resolve();
+      budgetWaiters.clear();
+    };
+    const waitForActiveReservation = () => new Promise((resolve) => budgetWaiters.add(resolve));
     const stageCosts = new Map();
     const persistBudget = ({ stage, status }) => {
       const spentCents = budget.spentCents;
       const write = budgetWrite.then(async () => {
+        if (budgetWriteFailure) throw budgetWriteFailure;
         await store.updateGeneration({
           generationId: generation.id,
           fromStatuses: [status],
@@ -278,19 +287,34 @@ export async function runResumePreparation(context, {
         });
         await publishCheckpoint({ active_stage: stage, spent_cents: spentCents });
       });
-      budgetWrite = write.catch(() => {});
+      budgetWrite = write.catch((error) => {
+        budgetWriteFailure ||= error;
+      });
       return write;
     };
     const reserveModelAttempt = async ({ stage, status, model, input, maximumOutputTokens, minimumRemainingMs }) => {
-      const reservation = budget.reserveAttempt(forecastModelCostCents({
-        model,
-        input,
-        maximumOutputTokens,
-        env,
-      }), { minimumRemainingMs });
+      const forecast = forecastModelCostCents({ model, input, maximumOutputTokens, env });
+      let reservation;
+      while (!reservation) {
+        if (budgetWriteFailure) throw budgetWriteFailure;
+        try {
+          reservation = budget.reserveAttempt(forecast, { minimumRemainingMs });
+        } catch (error) {
+          if (error?.code !== "generation_budget_exhausted" || !activeReservations.size) throw error;
+          await waitForActiveReservation();
+        }
+      }
       reservation.stage = stage;
       stageCosts.set(reservation, reservation.reservedCents);
-      await persistBudget({ stage, status });
+      activeReservations.add(reservation);
+      try {
+        await persistBudget({ stage, status });
+        if (budgetWriteFailure) throw budgetWriteFailure;
+      } catch (error) {
+        activeReservations.delete(reservation);
+        notifyBudgetWaiters();
+        throw error;
+      }
       return reservation;
     };
     const settleModelAttempt = async ({ reservation, model, usage, stage, status }) => {
@@ -303,6 +327,11 @@ export async function runResumePreparation(context, {
       if (reservation.budgetExhausted) {
         throw new ResumePipelineError("generation_budget_forecast_exceeded", "Resume preparation reached its two-dollar model-cost ceiling.");
       }
+    };
+    const finishModelAttempt = ({ reservation }) => {
+      if (!reservation) return;
+      activeReservations.delete(reservation);
+      notifyBudgetWaiters();
     };
     const stageCostCents = (stage) => [...stageCosts]
       .filter(([reservation]) => reservation.stage === stage)
@@ -404,6 +433,7 @@ export async function runResumePreparation(context, {
           minimumRemainingMs: 60_000,
         }),
         onUsage: (attempt) => settleModelAttempt({ ...attempt, stage: "strategy", status: "strategizing" }),
+        onAttemptFinished: finishModelAttempt,
       });
       strategy = await saveStage("strategy", strategy, { costCents: stageCostCents("strategy") });
     }
@@ -428,6 +458,7 @@ export async function runResumePreparation(context, {
           minimumRemainingMs: 45_000,
         }),
         onUsage: (attempt) => settleModelAttempt({ ...attempt, stage: "validate", status: "validating" }),
+        onAttemptFinished: finishModelAttempt,
       });
       const ast = applyValidatedClaimsToAst(strategy.strategy.document, result.claims);
       validation = await saveStage("validate", { result, draftClaims, ast }, { costCents: stageCostCents("validate") });

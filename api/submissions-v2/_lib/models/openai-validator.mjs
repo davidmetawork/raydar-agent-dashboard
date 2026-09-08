@@ -169,7 +169,15 @@ function normalizeClaimPackets(claims) {
   });
 }
 
-async function oneAttempt(claims, { apiKey, fetchImpl, signal, now, onAttempt = null, onUsage = null }) {
+async function oneAttempt(claims, {
+  apiKey,
+  fetchImpl,
+  signal,
+  now,
+  onAttempt = null,
+  onUsage = null,
+  onAttemptFinished = null,
+}) {
   const startedAt = now();
   const resolvedApiKey = requiredKey(apiKey);
   const requestBody = bodyFor(claims);
@@ -179,50 +187,54 @@ async function oneAttempt(claims, { apiKey, fetchImpl, signal, now, onAttempt = 
     input: requestBody,
     maximumOutputTokens: GROUNDING_VALIDATOR_MAX_OUTPUT_TOKENS,
   });
-  let response;
   try {
-    response = await fetchImpl(OPENAI_RESPONSES_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${resolvedApiKey}`,
+    let response;
+    try {
+      response = await fetchImpl(OPENAI_RESPONSES_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${resolvedApiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+    } catch (cause) {
+      throw new ModelProviderError("VALIDATOR_TRANSPORT_FAILED", "OpenAI grounding validator request failed", {
+        retryable: true,
+        provider: "openai",
+        cause,
+      });
+    }
+    let raw;
+    try {
+      raw = await responseJson(response, "openai");
+    } catch (error) {
+      await onUsage?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL, usage: error?.details?.usage || null });
+      throw error;
+    }
+    const usage = {
+      inputTokens: raw?.usage?.input_tokens,
+      outputTokens: raw?.usage?.output_tokens,
+      totalTokens: raw?.usage?.total_tokens,
+    };
+    await onUsage?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL, usage });
+    const validation = parseValidation(raw, claims);
+    return {
+      validation,
+      audit: {
+        provider: "openai",
+        model: GROUNDING_VALIDATOR_MODEL,
+        effort: GROUNDING_VALIDATOR_EFFORT,
+        promptVersion: GROUNDING_PROMPT_VERSION,
+        durationMs: Math.max(0, now() - startedAt),
+        providerRequestId: typeof raw?.id === "string" ? raw.id : null,
+        usage,
       },
-      body: JSON.stringify(requestBody),
-      signal,
-    });
-  } catch (cause) {
-    throw new ModelProviderError("VALIDATOR_TRANSPORT_FAILED", "OpenAI grounding validator request failed", {
-      retryable: true,
-      provider: "openai",
-      cause,
-    });
+    };
+  } finally {
+    await onAttemptFinished?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL });
   }
-  let raw;
-  try {
-    raw = await responseJson(response, "openai");
-  } catch (error) {
-    await onUsage?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL, usage: error?.details?.usage || null });
-    throw error;
-  }
-  const usage = {
-    inputTokens: raw?.usage?.input_tokens,
-    outputTokens: raw?.usage?.output_tokens,
-    totalTokens: raw?.usage?.total_tokens,
-  };
-  await onUsage?.({ reservation, provider: "openai", model: GROUNDING_VALIDATOR_MODEL, usage });
-  const validation = parseValidation(raw, claims);
-  return {
-    validation,
-    audit: {
-      provider: "openai",
-      model: GROUNDING_VALIDATOR_MODEL,
-      effort: GROUNDING_VALIDATOR_EFFORT,
-      promptVersion: GROUNDING_PROMPT_VERSION,
-      durationMs: Math.max(0, now() - startedAt),
-      providerRequestId: typeof raw?.id === "string" ? raw.id : null,
-      usage,
-    },
-  };
 }
 
 export async function runGroundingValidator(claimPackets, {
@@ -236,6 +248,7 @@ export async function runGroundingValidator(claimPackets, {
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onAttempt = null,
   onUsage = null,
+  onAttemptFinished = null,
 } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new ModelProviderError("VALIDATOR_FETCH_MISSING", "OpenAI grounding validator transport is unavailable", {
@@ -254,7 +267,7 @@ export async function runGroundingValidator(claimPackets, {
       });
     }
     try {
-      const result = await oneAttempt(claims, { apiKey, fetchImpl, signal, now, onAttempt, onUsage });
+      const result = await oneAttempt(claims, { apiKey, fetchImpl, signal, now, onAttempt, onUsage, onAttemptFinished });
       return { ...result, attempts: [...attempts, result.audit] };
     } catch (error) {
       if (error?.code === "generation_budget_exhausted" || error?.code === "generation_budget_forecast_exceeded") throw error;
