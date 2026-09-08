@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import {
   OMISSION_EVIDENCE_KIND,
@@ -129,4 +130,20 @@ test("an operator-scoped role selection never triggers the pre-pass", () => {
     omissionDecisions({ event: gmailEvent(), decisions: [yes("role-a")], env: ON, operatorScopedRoles: true }),
     { mode: "apply", skipped: "operator_scoped_roles", decisions: [] },
   );
+});
+
+// Migration ordering: evidence_kind is added by migrations/submissions-v2/017.
+// Migrations are applied by hand (npm run migrate:submissions-v2), never at
+// deploy time, so the ordinary decision insert must not name the column — code
+// that lands before the migration would otherwise abort every classification,
+// with the pre-pass flag off as well as on.
+test("only the omission insert names the post-017 evidence_kind column", () => {
+  const source = readFileSync(new URL("../api/submissions-v2/_lib/repository.mjs", import.meta.url), "utf8");
+  const inserts = source
+    .split("insert into submissions_v2.signal_role_decisions(")
+    .slice(1)
+    .map((chunk) => chunk.slice(0, chunk.indexOf(")")));
+  assert.equal(inserts.length, 2);
+  assert.deepEqual(inserts.map((columns) => columns.includes("evidence_kind")), [true, false]);
+  assert.match(source, /if \(omitted\) \{\n\s+await tx`\n\s+insert into submissions_v2\.signal_role_decisions\(/u);
 });

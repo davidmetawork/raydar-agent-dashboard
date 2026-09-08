@@ -1414,20 +1414,38 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             recoveringFailure = true;
             previousPair = current;
           }
-          await tx`
-            insert into submissions_v2.signal_role_decisions(
-              signal_id, role_id, candidate_user_id, decision_label, exact_quote, binding_result,
-              primary_model_pin, fallback_model_pin, selected_model_pin, prompt_pin, schema_version, validation, evidence_kind
-            ) values (
-              ${signalId}, ${decision.role_id}, ${resolvedCandidateId}, ${effectiveLabel}, ${clean(decision.quote, 10_000) || null}, ${bindingResult},
-              'gpt-5.4-nano-2026-03-17', 'gpt-5.4-2026-03-05', ${clean(attempts.find((item) => item.outcome === "accepted")?.model, 200) || "gpt-5.4-nano-2026-03-17"},
-              'submissions-v2-interest-classifier-2026-08-31.v1', 'submissions.email_reply.v1',
-              ${tx.json(omitted
-                ? { quote_validated: false, offered_role_bound: true, omission_evidence: decision.evidence || null }
-                : { quote_validated: true, offered_role_bound: true })},
-              ${omitted ? OMISSION_EVIDENCE_KIND : null}
-            ) on conflict (signal_id, role_id) do nothing
-          `;
+          const selectedModelPin = clean(attempts.find((item) => item.outcome === "accepted")?.model, 200) || "gpt-5.4-nano-2026-03-17";
+          const decisionQuote = clean(decision.quote, 10_000) || null;
+          // evidence_kind exists only once migration 017 has run. Naming the column
+          // on every decision would break ALL classification on a database that is
+          // one deploy ahead of its migrations, including with the omission pre-pass
+          // flag off, so only the omission path (itself flag-gated) touches it.
+          if (omitted) {
+            await tx`
+              insert into submissions_v2.signal_role_decisions(
+                signal_id, role_id, candidate_user_id, decision_label, exact_quote, binding_result,
+                primary_model_pin, fallback_model_pin, selected_model_pin, prompt_pin, schema_version, validation, evidence_kind
+              ) values (
+                ${signalId}, ${decision.role_id}, ${resolvedCandidateId}, ${effectiveLabel}, ${decisionQuote}, ${bindingResult},
+                'gpt-5.4-nano-2026-03-17', 'gpt-5.4-2026-03-05', ${selectedModelPin},
+                'submissions-v2-interest-classifier-2026-08-31.v1', 'submissions.email_reply.v1',
+                ${tx.json({ quote_validated: false, offered_role_bound: true, omission_evidence: decision.evidence || null })},
+                ${OMISSION_EVIDENCE_KIND}
+              ) on conflict (signal_id, role_id) do nothing
+            `;
+          } else {
+            await tx`
+              insert into submissions_v2.signal_role_decisions(
+                signal_id, role_id, candidate_user_id, decision_label, exact_quote, binding_result,
+                primary_model_pin, fallback_model_pin, selected_model_pin, prompt_pin, schema_version, validation
+              ) values (
+                ${signalId}, ${decision.role_id}, ${resolvedCandidateId}, ${effectiveLabel}, ${decisionQuote}, ${bindingResult},
+                'gpt-5.4-nano-2026-03-17', 'gpt-5.4-2026-03-05', ${selectedModelPin},
+                'submissions-v2-interest-classifier-2026-08-31.v1', 'submissions.email_reply.v1',
+                ${tx.json({ quote_validated: true, offered_role_bound: true })}
+              ) on conflict (signal_id, role_id) do nothing
+            `;
+          }
           const intent = effectiveLabel === "interested" || (roleUnavailable && decision.label === "interested")
             ? "interested" : effectiveLabel === "not_interested" ? "not_interested" : "unclear";
           const workflow = effectiveLabel === "interested" ? "preparing_resume" : effectiveLabel;
