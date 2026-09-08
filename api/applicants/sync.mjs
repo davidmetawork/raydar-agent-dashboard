@@ -45,9 +45,9 @@ import {
 
 export const config = { maxDuration: 30 };
 
-// The loop caps the snapshot on its side (drops per-step detail); this guard
-// keeps a buggy publisher from parking a multi-megabyte blob in KV.
-export const MAX_SNAPSHOT_BYTES = 1_800_000;
+// The complete graph projection measured 16.4 MB for 4,944 applicants on
+// September 8. Bound its decoded body separately from gzip wire and storage.
+export const MAX_SNAPSHOT_BYTES = 30_000_000;
 // The authenticated publisher uses a bounded gzip+base64 transport envelope
 // once the exact JSON body would exceed Vercel's request ceiling. These are
 // decoded logical limits; the wire envelope has its own smaller cap below.
@@ -81,10 +81,13 @@ export const MAX_SNAPSHOT_BYTES = 1_800_000;
 // nothing in this log to point at it. It is now 10,000,000, equal to
 // MAX_TRANSPORT_DECODED_BYTES below, and the publish-size suite pins it as the
 // fourth member of the ordering chain. RAISE THEM TOGETHER OR NOT AT ALL.
+// September 8: Core and Monitor now share a 32 MB logical ceiling. The
+// measured 17.1 MB complete body compresses to 2.1 MB at level 9, within the
+// unchanged wire cap. Immutable generation artifacts are stored compressed.
 export const MAX_QUEUE_BYTES = 9_000_000;
-export const MAX_PUBLISH_BYTES = 10_000_000;
+export const MAX_PUBLISH_BYTES = 32_000_000;
 export const MAX_TRANSPORT_COMPRESSED_BYTES = 2_500_000;
-export const MAX_TRANSPORT_DECODED_BYTES = 10_000_000;
+export const MAX_TRANSPORT_DECODED_BYTES = 32_000_000;
 const MONITOR_TRANSPORT_VERSION = "applicant-core-monitor-gzip-v1";
 // Delivery is a separate state machine. `blocked` and `invited` are retained
 // for the existing loop; the preparation states make a saved Interview intent

@@ -5,6 +5,7 @@
 // "Queued to send" to "Emailed") and never fetches cards while scrolling.
 
 import { cors, requireAuth } from "./_lib/core.mjs";
+import { gzipSync } from "node:zlib";
 import { readActivePublication, readPublishedArtifacts, verifyGeneration } from "./_lib/generation.mjs";
 import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
 import { sourceCardsOnly } from "./_lib/rich-profile.mjs";
@@ -81,6 +82,17 @@ function profilePreparingRows(snapshot) {
 
 export const config = { maxDuration: 30 };
 
+export function respondApplicantFeed(req, res, body) {
+  const json = JSON.stringify(body);
+  if (Buffer.byteLength(json) > 1_000_000 && /\bgzip\b/i.test(req.headers?.["accept-encoding"] || "")) {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    return res.status(200).end(gzipSync(Buffer.from(json), { level: 9 }));
+  }
+  return res.status(200).json(body);
+}
+
 export function createFeedHandler({
   corsHandler = cors,
   authHandler = requireAuth,
@@ -144,13 +156,16 @@ export function createFeedHandler({
       // not actionable; counted, so never silently gone.
       const partition = partitionByProfileReceipt(published, sourceProfileReceipts, { now: now() });
       const joined = partition.snapshot;
+      // These complete projections have their own top-level response fields.
+      // Keep one copy on the wire while retaining the full immutable artifact.
+      const { applicantRowsV2: _rowsV2, problems: _problems, ...browserSnapshot } = joined || {};
       const profileCache = profileCacheSummary(joined);
       res.setHeader("Cache-Control", "no-store");
       // `counts` carries sync's count-drop tripwire doc (apphub:counts); the
       // tab shows a warning banner when counts.alert is set, data untouched.
-      return res.status(200).json({
+      return respondApplicantFeed(req, res, {
         ok: true,
-        snapshot: joined,
+        snapshot: joined ? browserSnapshot : null,
         decisions,
         acks,
         photos,
