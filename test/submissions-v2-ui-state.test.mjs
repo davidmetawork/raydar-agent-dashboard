@@ -75,9 +75,9 @@ test("a preparation attempt limit names the stage, last attempt, and separately 
     generation_status: "failed", generation_stage: "rendering", preparation_error_code: "generation_budget_exhausted",
     preparation_error_detail: "The approved $2 cost ceiling was reached.", generation_updated_at: "2026-09-07T16:00:00.000Z",
   }), {
-    stage: "Rendering the resume", reason: "Preparation attempt limit reached",
+    stage: "Rendering the resume", reason: "Preparation budget limit",
     detail: "The approved $2 cost ceiling was reached.", lastAttemptAt: "2026-09-07T16:00:00.000Z",
-    attemptLimitReached: true, guidance: "The previous attempt reached its $2 limit. Review this failure before retrying; Retry preparation starts one new, separately budgeted attempt.",
+    attemptLimitReached: true, guidance: "The estimated next step did not fit within this attempt’s $2 budget. Retry preparation starts one new, separately budgeted attempt.",
   });
   assert.equal(preparationFailurePresentation({ generation_status: "failed", generation_stage: "validating", preparation_error_code: "generation_deadline_exhausted" }).attemptLimitReached, false);
 });
@@ -240,4 +240,11 @@ test("submit popup only navigates when a validated destination is available and 
   assert.equal(popup.location.url, "https://www.paraform.com/roles/1");
   assert.equal(navigateSubmitPopup(popup, ""), false);
   assert.equal(popup.closed, true);
+});
+
+test("legacy preparation ceiling detail identifies a forecast stop without claiming money was charged", () => {
+  const result = preparationFailurePresentation({ generation_status: "failed", preparation_error_code: "resume_preparation_failed", preparation_error_detail: "Resume preparation reached its two-dollar model-cost ceiling." });
+  assert.equal(result.attemptLimitReached, true);
+  assert.match(result.guidance, /estimated next step/);
+  assert.doesNotMatch(result.guidance, /charged|spent/);
 });

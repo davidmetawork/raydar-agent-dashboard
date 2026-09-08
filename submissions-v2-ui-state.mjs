@@ -223,8 +223,8 @@ export function reviewProgressPresentation(row = {}) {
 }
 
 const PREPARATION_FAILURE_LABELS = Object.freeze({
-  generation_budget_exhausted: "Preparation attempt limit reached",
-  budget_exhausted: "Preparation attempt limit reached",
+  generation_budget_exhausted: "Preparation budget limit",
+  budget_exhausted: "Preparation budget limit",
   generation_deadline_exhausted: "Preparation deadline exhausted",
   role_unavailable: "Exact role unavailable",
   candidate_original_resume_missing: "Candidate-original resume is missing",
@@ -239,15 +239,15 @@ export function preparationFailurePresentation(row = {}) {
   if (!terminal && !code && !detail) return null;
   const stage = safeProgressText(row.generation_stage, 120) || status || "unknown";
   const attemptLimitReached = ["generation_budget_exhausted", "budget_exhausted"].includes(code)
-    || /(?:budget|cost) (?:ceiling|exhausted|limit)|\$2(?:\.00)?\b/iu.test(detail);
+    || /(?:budget|cost) (?:ceiling|exhausted|limit)|two-dollar.*(?:ceiling|limit)|\$2(?:\.00)?\b/iu.test(detail);
   return {
     stage: GENERATION_STAGE_LABELS[stage] || stage,
-    reason: attemptLimitReached ? "Preparation attempt limit reached" : (PREPARATION_FAILURE_LABELS[code] || "Resume preparation stopped safely"),
+    reason: attemptLimitReached ? "Preparation budget limit" : (PREPARATION_FAILURE_LABELS[code] || "Resume preparation stopped safely"),
     detail,
     lastAttemptAt: safeProgressInstant(row.generation_updated_at),
     attemptLimitReached,
     guidance: attemptLimitReached
-      ? "The previous attempt reached its $2 limit. Review this failure before retrying; Retry preparation starts one new, separately budgeted attempt."
+      ? "The estimated next step did not fit within this attempt’s $2 budget. Retry preparation starts one new, separately budgeted attempt."
       : "Review the safe failure detail before retrying this one case.",
   };
 }
