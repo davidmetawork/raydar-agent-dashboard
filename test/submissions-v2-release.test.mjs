@@ -28,6 +28,7 @@ async function fixture(t) {
     seed(root, "vercel.json", '{\n  "buildCommand": "node check.mjs",\n  "rewrites": [{ "source": "/submissions-v2", "destination": "/submissions-v2.html" }]\n}\n'),
     seed(root, "api/submissions-v2/_lib/service.mjs"), seed(root, "submissions-v2-worker/server.mjs"), seed(root, "submissions-v2-worker/Dockerfile"), seed(root, "submissions-v2-worker/fly.toml"),
     seed(root, "resume-renderer-v2/app.py"), seed(root, "resume-renderer-v2/requirements.txt"), seed(root, "resume-renderer-v2/assets/raydar-lockup.svg"), seed(root, "resume-renderer-v2/Dockerfile"), seed(root, "resume-renderer-v2/fly.toml"),
+    seed(root, "submissions-v2-purge/server.mjs"), seed(root, "submissions-v2-purge/purge.mjs"), seed(root, "submissions-v2-purge/Dockerfile"), seed(root, "submissions-v2-purge/fly.toml"),
     seed(root, "migrations/submissions-v2/001_foundation.sql"),
   ]);
   return root;
@@ -88,6 +89,7 @@ test("deployment check accepts only Vercel's intentional Submissions omissions",
     rm(join(root, "migrations/submissions-v2"), { recursive: true }),
     rm(join(root, "resume-renderer-v2"), { recursive: true }),
     rm(join(root, "submissions-v2-worker"), { recursive: true }),
+    rm(join(root, "submissions-v2-purge"), { recursive: true }),
     rm(join(root, "scripts/migrate-submissions-v2.mjs")),
     rm(join(root, "scripts/provision-submissions-v2-roles.sql")),
   ]);
@@ -124,4 +126,12 @@ test("deployment check rejects changed or missing API files and unexpected deplo
   await writeSubmissionsReleaseManifest({ root });
   await seed(root, "api/submissions-v2/_lib/unexpected.mjs", "export default null;");
   await assert.rejects(checkSubmissionsReleaseDeploymentManifest({ root }), /stale: api\/submissions-v2\/_lib\/unexpected\.mjs/);
+});
+
+test("release seal includes purge runtime and rejects a changed runtime user", async (t) => {
+  const root = await fixture(t);
+  const manifest = await writeSubmissionsReleaseManifest({ root });
+  assert.equal(manifest.files.filter((file) => file.path.startsWith("submissions-v2-purge/")).length, 4);
+  await seed(root, "submissions-v2-purge/Dockerfile", "USER root\n");
+  await assert.rejects(checkSubmissionsReleaseManifest({ root }), /stale/);
 });

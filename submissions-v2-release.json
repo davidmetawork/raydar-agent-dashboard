@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 97,
-  "digest": "dc7ad1b863dbd8560617db30b57db902f55b081682412d4a712abeb150160c8e",
+  "file_count": 101,
+  "digest": "1ca8d35555114fe56bf2dafe0bed56837ec66667264e278fbf9396f403f8e233",
   "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
   "files": [
     {
@@ -75,7 +75,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/db.mjs",
-      "sha256": "452d9acd6d0980c98df013a34913aa725cdbd5483e54f1b93e96d73580562b01"
+      "sha256": "f07c6604bdfd8aac5a638672d9099b1ebe5c1e6ec71537330d14e7c531c9fd90"
     },
     {
       "path": "api/submissions-v2/_lib/email-source-policy.mjs",
@@ -323,15 +323,31 @@
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "296cfb12d98879a7b8fe40fc37862b462cd29aaa3f50f9e36080ba3d26ff3acb"
+      "sha256": "17c74bec8bc21041e1a3775fd87a47f47012e83bcb34af692d73da16380eefd2"
+    },
+    {
+      "path": "submissions-v2-purge/Dockerfile",
+      "sha256": "77247dce22c44fa90dd719b81830534402918a0a13b892d2654847724aa4af05"
+    },
+    {
+      "path": "submissions-v2-purge/fly.toml",
+      "sha256": "b12d12a6823126d44c667d5859c2f2ece97f60706c1482daf83c207c8aa2c794"
+    },
+    {
+      "path": "submissions-v2-purge/purge.mjs",
+      "sha256": "8540591acbb74b303045689159713cf09746c56b9f491a62f39dedab71c99747"
+    },
+    {
+      "path": "submissions-v2-purge/server.mjs",
+      "sha256": "5fb73cf1db113f36d5bc5f551c57c9c417032931fa51996f14f4dbfcaff6c86d"
     },
     {
       "path": "submissions-v2-ui-state.mjs",
-      "sha256": "52ae622575090467c09e7f0182fe598d64bec73373aba5d23aef7a042ba4f42f"
+      "sha256": "0dec76b933e3ecde2bc85f076edb7cc7ba1cfffde9ca75cc1d9f5a7674c95276"
     },
     {
       "path": "submissions-v2-worker/Dockerfile",
-      "sha256": "02cc01c820f3e203cbb3628e45c10a60dfb983043839621d4b5927b422c44a75"
+      "sha256": "a62934ff61d20da48e421284444793f703b489fafc162a853195f2ee445ec715"
     },
     {
       "path": "submissions-v2-worker/blob-broker-client.mjs",
@@ -355,7 +371,7 @@
     },
     {
       "path": "submissions-v2-worker/repair-role-evidence.mjs",
-      "sha256": "b6459cc7f329766c59232270f21fa77ba577396b4e9e34a890b012456bf33671"
+      "sha256": "55e859e8545c88c747d4b0aef436120b63f0b0c4e61272b89a6988ded13f7a1f"
     },
     {
       "path": "submissions-v2-worker/runner.mjs",
@@ -379,15 +395,15 @@
     },
     {
       "path": "submissions-v2.css",
-      "sha256": "4258ab8bab165a09d83c328cb4a9783b5111ae1d89dc7a27690d0d3f20ae30a8"
+      "sha256": "0e2a57455fe695a1f18abd67bf37acf072aac6271efa8a91b3f05c8cefd7aa69"
     },
     {
       "path": "submissions-v2.html",
-      "sha256": "5a5ab325a8456175107ec658924830749b5769233cc9f8f22e399c259ce56f30"
+      "sha256": "a56e615569c314c6df80869bef02486b20d2a04b91a45db0b4b3d4ef2a5f50ef"
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "9146b5972cb930cdef2e7092251bcedddfb9c2aa61522550d2b63cfcbd52bc54"
+      "sha256": "cacc54e24792b3e31d69a95fd9294b07476b9e6cf5fd8062b67a015def370642"
     },
     {
       "path": "vercel.json",
