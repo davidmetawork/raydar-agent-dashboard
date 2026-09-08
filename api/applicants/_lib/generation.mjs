@@ -102,13 +102,21 @@ export function coreGenerationDigest({
   snapshot,
   queue,
 } = {}) {
-  return stableDigest({
+  // Core uses code-unit key ordering. Locale collation changes the order of
+  // real profile keys such as factSetDigest and factsCurrent. Storage artifact
+  // checksums retain their historical canonical format independently.
+  const material = {
     generationId,
     sourceCutoff,
     sourceWatermark,
     snapshot: stripGeneration(snapshot),
     queue: stripGeneration(queue),
+  };
+  const encoded = JSON.stringify(material, (_key, item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    return Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]]));
   });
+  return createHash("sha256").update(encoded).digest("hex");
 }
 
 export function validGenerationId(value) {
