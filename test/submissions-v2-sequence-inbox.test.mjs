@@ -80,6 +80,8 @@ function state(replies, campaigns = [{
       sequence_name: campaign.name,
       exact_role_id: campaign.exact_role_id || null,
       exact_role_source: campaign.exact_role_source || null,
+      exact_project_id: campaign.exact_project_id || null,
+      exact_project_source: campaign.exact_project_source || null,
       refreshed_at: "2026-09-03T12:01:00.000Z",
       replies: replies.filter((item) => item.sequence_id === campaign.id),
       submissions_replies: replies.filter((item) => item.sequence_id === campaign.id),
@@ -560,6 +562,131 @@ test("broker, cache reader, and worker reconcile 136 stale campaigns through a f
   assert.equal(newlyAccepted.includes("newer-after-pin"), true);
 });
 
+test("broker, cache reader, and worker finish a pinned replay across 130-to-137 empty-target churn before advancing", async () => {
+  const baseCampaigns = Array.from({ length: 130 }, (_, index) => ({
+    id: `sequence-${index + 1}`,
+    name: `Sequence ${index + 1}`,
+    exact_role_id: `role-${index + 1}`,
+    exact_role_source: "campaign.role_id",
+  }));
+  const addedCampaigns = Array.from({ length: 7 }, (_, index) => ({
+    id: `sequence-${index + 131}`,
+    name: `Sequence ${index + 131}`,
+    exact_role_id: `role-${index + 131}`,
+    exact_role_source: "campaign.role_id",
+  }));
+  const pinnedAt = "2026-09-03T12:01:00.000Z";
+  const refreshedAt = "2026-09-03T12:03:00.000Z";
+  const backlog = Array.from({ length: 25 }, (_, index) => reply({
+    gmail_id: `churn-backlog-${String(index + 1).padStart(2, "0")}`,
+    sequence_id: `sequence-${index + 1}`,
+    date: `2026-09-03T11:50:${String(index).padStart(2, "0")}.000Z`,
+  }));
+  const newer = reply({
+    gmail_id: "churn-newer-after-pin",
+    sequence_id: "sequence-137",
+    date: "2026-09-03T12:02:00.000Z",
+  });
+  const cached = state(backlog, [...baseCampaigns, ...addedCampaigns]);
+  const setAddedTargets = (included) => {
+    cached.catalog.targets = included
+      ? [...baseCampaigns, ...addedCampaigns]
+      : [...baseCampaigns];
+    cached.catalog.campaigns_total = cached.catalog.targets.length;
+  };
+  setAddedTargets(false);
+  for (const snapshot of cached.snapshots.values()) snapshot.refreshed_at = pinnedAt;
+  cached.catalog.refreshed_at = pinnedAt;
+  cached.meta.last_refresh_at = pinnedAt;
+  cached.meta.last_complete_at = pinnedAt;
+
+  let brokerCalls = 0;
+  let refreshes = 0;
+  let newerAdded = false;
+  let pinnedCompleted = false;
+  const targetCounts = [];
+  const observedPages = [];
+  const admitted = new Set();
+  const newlyAccepted = [];
+  const brokerDependencies = {
+    env: { ...env, SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+    now: () => new Date("2026-09-03T12:04:00.000Z"),
+    acquireLock: async () => ({ status: "acquired", token: "lock" }),
+    releaseLock: async () => {},
+    readState: async () => {
+      brokerCalls += 1;
+      if (!pinnedCompleted) setAddedTargets(brokerCalls % 2 === 0);
+      else setAddedTargets(true);
+      targetCounts.push(cached.catalog.targets.length);
+      return { status: "ready", value: cached };
+    },
+    buildRefresh: async () => ({ advance: refreshes++ > 0 }),
+    writeState: async (previousState, refresh) => {
+      if (!refresh.advance) return previousState;
+      for (const campaign of previousState.catalog.targets) {
+        previousState.snapshots.get(campaign.id).refreshed_at = refreshedAt;
+      }
+      if (!newerAdded) {
+        const snapshot = previousState.snapshots.get("sequence-137");
+        snapshot.replies.push(newer);
+        snapshot.submissions_replies.push(newer);
+        newerAdded = true;
+      }
+      previousState.catalog.refreshed_at = refreshedAt;
+      previousState.meta.last_refresh_at = refreshedAt;
+      previousState.meta.last_complete_at = refreshedAt;
+      return previousState;
+    },
+    readRoleMappings: async () => ({
+      status: "ready", digest: "a".repeat(64), mappings: [],
+    }),
+    readMessage: async (gmailId) => {
+      const cachedReply = [...backlog, newer].find((item) => item.gmail_id === gmailId);
+      return detail({ date: cachedReply.date });
+    },
+    sleepImpl: async () => {},
+  };
+
+  let checkpoint = {};
+  let completed = false;
+  for (let attempt = 0; attempt < 12 && !completed; attempt += 1) {
+    const result = await reconcileSequenceInbox({
+      env: brokerDependencies.env,
+      checkpoint,
+      assertCurrent: async () => {},
+      readBatch: ({ cursor, caughtUp, catalogDigest, watermark, limit }) => (
+        readSequenceInboxBrokerBatch({
+          cursor,
+          caught_up: caughtUp,
+          catalog_digest: catalogDigest,
+          watermark,
+          limit,
+        }, brokerDependencies)
+      ),
+      admit: async (event) => {
+        const existing = admitted.has(event.idempotency_key);
+        admitted.add(event.idempotency_key);
+        if (!existing) newlyAccepted.push(event.provider_message_id);
+        return { accepted: true, existing };
+      },
+    });
+    checkpoint = result.checkpoint;
+    observedPages.push(result.observed);
+    if (result.caught_up && checkpoint.watermark === pinnedAt) pinnedCompleted = true;
+    completed = result.caught_up && checkpoint.watermark === refreshedAt;
+  }
+
+  assert.deepEqual(targetCounts.slice(0, 4), [130, 137, 130, 137]);
+  assert.deepEqual(observedPages.slice(0, 4), [8, 8, 8, 1]);
+  assert.equal(brokerCalls, 5);
+  assert.equal(pinnedCompleted, true);
+  assert.equal(completed, true);
+  assert.equal(refreshes, 2);
+  assert.equal(admitted.size, 26);
+  assert.equal(new Set(newlyAccepted).size, newlyAccepted.length);
+  assert.equal(newlyAccepted.includes("churn-newer-after-pin"), true);
+});
+
 test("broker deadline releases the lock and leaves the page resumable", async () => {
   let clock = 0;
   let released = false;
@@ -736,6 +863,322 @@ test("a refresh that inserts an older reply behind the cursor resets the scan be
     restarted.records.map((record) => record.event.provider_message_id),
     ["message-b-late-older"],
   );
+});
+
+test("empty target churn cannot reset or prevent a finite replay from completing", async () => {
+  const replies = Array.from({ length: 6 }, (_, index) => reply({
+    gmail_id: `message-${index + 1}`,
+    date: `2026-09-03T12:00:0${index}.000Z`,
+  }));
+  const baseCampaign = {
+    id: "sequence-1", name: "One",
+    exact_role_id: "role-1", exact_role_source: "campaign.role_id",
+  };
+  const cached = state(replies, [baseCampaign]);
+  const reads = [];
+  const options = {
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async (gmailId) => {
+      reads.push(gmailId);
+      return detail({ date: replies.find((item) => item.gmail_id === gmailId).date });
+    },
+    activationAt, env, limit: 1,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  };
+
+  let cursor = null;
+  let digest = null;
+  let watermark = null;
+  let final = null;
+  for (let page = 0; page < replies.length; page += 1) {
+    if (page > 0 && page % 2 === 1) {
+      const emptyCampaign = {
+        id: `sequence-empty-${page}`,
+        name: `Empty ${page}`,
+        exact_role_id: `empty-role-${page}`,
+        exact_role_source: "campaign.role_id",
+      };
+      cached.catalog.targets.push(emptyCampaign);
+      cached.snapshots.set(emptyCampaign.id, state([], [emptyCampaign]).snapshots.get(emptyCampaign.id));
+    } else if (page > 0) {
+      cached.catalog.targets = cached.catalog.targets.filter((campaign) => campaign.id === "sequence-1");
+      for (const sequenceId of [...cached.snapshots.keys()]) {
+        if (sequenceId !== "sequence-1") cached.snapshots.delete(sequenceId);
+      }
+    }
+    cached.catalog.campaigns_total = cached.catalog.targets.length;
+    final = await readCachedSequenceReplyBatch({
+      ...options,
+      cursor,
+      expectedCatalogDigest: digest,
+      expectedWatermark: watermark,
+      scanWatermark: watermark,
+    });
+    assert.equal(final.coverage.catalog_changed, false);
+    assert.equal(final.records.length, 1);
+    cursor = final.next_cursor;
+    digest = final.coverage.catalog_digest;
+    watermark = final.coverage.watermark;
+  }
+
+  assert.deepEqual(reads, replies.map((item) => item.gmail_id));
+  assert.equal(final.next_cursor, null);
+  assert.equal(final.coverage.full_success, true);
+});
+
+test("a newly seeded target with an old reply resets before point read and is caught on replay", async () => {
+  const initialReplies = [
+    reply({ sequence_id: "sequence-a", gmail_id: "message-a-1", date: "2026-09-03T12:00:00.000Z" }),
+    reply({ sequence_id: "sequence-a", gmail_id: "message-a-2", date: "2026-09-03T12:00:30.000Z" }),
+  ];
+  const campaignA = {
+    id: "sequence-a", name: "A",
+    exact_role_id: "role-a", exact_role_source: "campaign.role_id",
+  };
+  const cached = state(initialReplies, [campaignA]);
+  const dates = new Map(initialReplies.map((item) => [item.gmail_id, item.date]));
+  const reads = [];
+  const options = {
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async (gmailId) => {
+      reads.push(gmailId);
+      return detail({ date: dates.get(gmailId) });
+    },
+    activationAt, env, limit: 1,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  };
+  const first = await readCachedSequenceReplyBatch(options);
+  assert.deepEqual(reads, ["message-a-1"]);
+
+  const campaignB = {
+    id: "sequence-b", name: "B",
+    exact_role_id: "role-b", exact_role_source: "campaign.role_id",
+  };
+  const lateOlder = reply({
+    sequence_id: "sequence-b",
+    gmail_id: "message-b-late-older",
+    date: "2026-09-03T11:59:00.000Z",
+  });
+  dates.set(lateOlder.gmail_id, lateOlder.date);
+  cached.catalog.targets.push(campaignB);
+  cached.catalog.campaigns_total = 2;
+  cached.snapshots.set(campaignB.id, state([lateOlder], [campaignB]).snapshots.get(campaignB.id));
+
+  const changed = await readCachedSequenceReplyBatch({
+    ...options,
+    cursor: first.next_cursor,
+    expectedCatalogDigest: first.coverage.catalog_digest,
+    expectedWatermark: first.coverage.watermark,
+    scanWatermark: first.coverage.watermark,
+  });
+  assert.equal(changed.coverage.catalog_changed, true);
+  assert.equal(changed.checkpoint_cursor, null);
+  assert.deepEqual(reads, ["message-a-1"]);
+
+  const replayed = await readCachedSequenceReplyBatch({
+    ...options,
+    expectedCatalogDigest: changed.coverage.catalog_digest,
+    expectedWatermark: changed.coverage.watermark,
+    scanWatermark: changed.coverage.watermark,
+  });
+  assert.equal(replayed.records[0].event.provider_message_id, "message-b-late-older");
+});
+
+test("role and project evidence changes for an old reply each reset its replay epoch", async () => {
+  for (const [field, replacement] of [
+    ["exact_role_id", "role-2"],
+    ["exact_role_source", "changed.role.source"],
+    ["exact_project_id", "project-2"],
+    ["exact_project_source", "changed.project.source"],
+  ]) {
+    const campaign = {
+      id: "sequence-1", name: "One",
+      exact_role_id: "role-1", exact_role_source: "campaign.role_id",
+      exact_project_id: "project-1", exact_project_source: "campaign.project_id",
+    };
+    const cached = state([reply()], [campaign]);
+    const stable = await readCachedSequenceReplyBatch({
+      readState: async () => ({ status: "ready", value: cached }),
+      readMessage: async () => detail(),
+      activationAt, env,
+      now: () => new Date("2026-09-03T12:02:00.000Z"),
+    });
+    campaign[field] = replacement;
+    const changed = await readCachedSequenceReplyBatch({
+      readState: async () => ({ status: "ready", value: cached }),
+      readMessage: async () => assert.fail(`must reset before reading after ${field} change`),
+      activationAt, env,
+      expectedCatalogDigest: stable.coverage.catalog_digest,
+      expectedWatermark: stable.coverage.watermark,
+      scanWatermark: stable.coverage.watermark,
+      now: () => new Date("2026-09-03T12:02:00.000Z"),
+    });
+    assert.equal(changed.coverage.catalog_changed, true, field);
+    assert.equal(changed.checkpoint_cursor, null, field);
+  }
+});
+
+test("newer-only target metadata waits for the next overlap scan and the newer reply is then read", async () => {
+  const pinnedAt = "2026-09-03T12:01:00.000Z";
+  const refreshedAt = "2026-09-03T12:03:00.000Z";
+  const cachedReplies = [
+    reply({ sequence_id: "sequence-a", gmail_id: "message-old", date: "2026-09-03T12:00:00.000Z" }),
+    reply({ sequence_id: "sequence-b", gmail_id: "message-newer", date: "2026-09-03T12:02:00.000Z" }),
+  ];
+  const campaigns = [
+    { id: "sequence-a", name: "A", exact_role_id: "role-a", exact_role_source: "campaign.role_id" },
+    { id: "sequence-b", name: "B", exact_role_id: "role-b", exact_role_source: "campaign.role_id" },
+  ];
+  const cached = state(cachedReplies, campaigns);
+  for (const snapshot of cached.snapshots.values()) snapshot.refreshed_at = refreshedAt;
+  cached.catalog.refreshed_at = refreshedAt;
+  cached.meta.last_refresh_at = refreshedAt;
+  cached.meta.last_complete_at = refreshedAt;
+  const reads = [];
+  const options = {
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async (gmailId) => {
+      reads.push(gmailId);
+      return detail({ date: cachedReplies.find((item) => item.gmail_id === gmailId).date });
+    },
+    activationAt, env, limit: 8,
+    now: () => new Date("2026-09-03T12:04:00.000Z"),
+  };
+  const pinned = await readCachedSequenceReplyBatch({ ...options, scanWatermark: pinnedAt });
+  assert.deepEqual(reads, ["message-old"]);
+
+  campaigns[1].exact_role_id = "role-b-updated";
+  campaigns[1].exact_project_id = "project-b-updated";
+  campaigns[1].exact_project_source = "campaign.project_id";
+  const unchanged = await readCachedSequenceReplyBatch({
+    ...options,
+    cursor: pinned.checkpoint_cursor,
+    expectedCatalogDigest: pinned.coverage.catalog_digest,
+    expectedWatermark: pinned.coverage.watermark,
+    scanWatermark: pinned.coverage.watermark,
+  });
+  assert.equal(unchanged.coverage.catalog_changed, false);
+  assert.deepEqual(reads, ["message-old"]);
+
+  const next = await readCachedSequenceReplyBatch({
+    ...options,
+    cursor: unchanged.checkpoint_cursor,
+    cursorOverlapMs: 5 * 60_000,
+    expectedCatalogDigest: unchanged.coverage.catalog_digest,
+    expectedWatermark: unchanged.coverage.watermark,
+  });
+  assert.equal(next.coverage.catalog_changed, false);
+  assert.equal(next.coverage.watermark_advanced, true);
+  assert.deepEqual(next.records.map((record) => record.event.provider_message_id), [
+    "message-old", "message-newer",
+  ]);
+  assert.deepEqual(next.records.find((record) => (
+    record.event.provider_message_id === "message-newer"
+  )).event.offered_roles.map((role) => role.role_id), ["role-b-updated"]);
+});
+
+test("projection readiness and watermark regression still stop replay safely", async () => {
+  const unprojected = state([reply()]);
+  unprojected.snapshots.get("sequence-1").submissions_projection_version = 0;
+  const unavailable = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: unprojected }),
+    readMessage: async () => assert.fail("must not read an incomplete projection"),
+    activationAt, env,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(unavailable.deferred[0].reason, "submissions_projection_unavailable");
+  assert.equal(unavailable.coverage.checkpoint_safe, false);
+
+  const cached = state([reply()]);
+  const stable = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => detail(), activationAt, env,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  cached.snapshots.get("sequence-1").refreshed_at = "2026-09-03T11:59:00.000Z";
+  const regressed = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => assert.fail("must not read after watermark regression"),
+    activationAt, env,
+    expectedCatalogDigest: stable.coverage.catalog_digest,
+    expectedWatermark: stable.coverage.watermark,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(regressed.coverage.watermark_changed, true);
+  assert.equal(regressed.checkpoint_cursor, null);
+});
+
+test("a reply hashes the declared campaign used by adaptation, not its snapshot container", async () => {
+  const campaigns = [
+    { id: "sequence-container", name: "Container", exact_role_id: "role-container", exact_role_source: "campaign.role_id" },
+    { id: "sequence-declared", name: "Declared", exact_role_id: "role-declared", exact_role_source: "campaign.role_id" },
+  ];
+  const mismatched = reply({ sequence_id: "sequence-declared", gmail_id: "message-mismatched" });
+  const cached = state([mismatched], campaigns);
+  cached.snapshots.get("sequence-declared").submissions_replies = [];
+  cached.snapshots.get("sequence-declared").replies = [];
+  cached.snapshots.get("sequence-container").submissions_replies = [mismatched];
+  cached.snapshots.get("sequence-container").replies = [mismatched];
+  const stable = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => detail(), activationAt, env,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.deepEqual(stable.records[0].event.offered_roles.map((role) => role.role_id), ["role-declared"]);
+
+  campaigns[0].exact_role_id = "role-container-updated";
+  const containerChanged = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => detail(), activationAt, env,
+    expectedCatalogDigest: stable.coverage.catalog_digest,
+    expectedWatermark: stable.coverage.watermark,
+    scanWatermark: stable.coverage.watermark,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(containerChanged.coverage.catalog_changed, false);
+
+  campaigns[1].exact_role_id = "role-declared-updated";
+  const declaredChanged = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => assert.fail("must reset before using changed declared evidence"),
+    activationAt, env,
+    expectedCatalogDigest: containerChanged.coverage.catalog_digest,
+    expectedWatermark: containerChanged.coverage.watermark,
+    scanWatermark: containerChanged.coverage.watermark,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(declaredChanged.coverage.catalog_changed, true);
+});
+
+test("a reply whose declared sequence is absent hashes neutral evidence instead of its container role", async () => {
+  const campaign = {
+    id: "sequence-container", name: "Container",
+    exact_role_id: "role-container", exact_role_source: "campaign.role_id",
+  };
+  const mismatched = reply({ sequence_id: "sequence-absent", gmail_id: "message-absent-sequence" });
+  const cached = state([], [campaign]);
+  cached.snapshots.get(campaign.id).submissions_replies = [mismatched];
+  cached.snapshots.get(campaign.id).replies = [mismatched];
+  const stable = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => detail(), activationAt, env,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(stable.records[0].route, "needs_review");
+  assert.deepEqual(stable.records[0].event.offered_roles, []);
+  assert.equal(stable.records[0].source_evidence.sequence_id, "sequence-absent");
+
+  campaign.exact_role_id = "role-container-updated";
+  const containerChanged = await readCachedSequenceReplyBatch({
+    readState: async () => ({ status: "ready", value: cached }),
+    readMessage: async () => detail(), activationAt, env,
+    expectedCatalogDigest: stable.coverage.catalog_digest,
+    expectedWatermark: stable.coverage.watermark,
+    scanWatermark: stable.coverage.watermark,
+    now: () => new Date("2026-09-03T12:02:00.000Z"),
+  });
+  assert.equal(containerChanged.coverage.catalog_changed, false);
+  assert.deepEqual(containerChanged.records[0].event.offered_roles, []);
 });
 
 test("optional saved-role lookup unavailability preserves literal campaign role intake", async () => {

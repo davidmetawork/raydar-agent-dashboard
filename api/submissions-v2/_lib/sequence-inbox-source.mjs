@@ -393,12 +393,13 @@ function campaignMap(state) {
   return new Map(list(state?.catalog?.targets).map((campaign) => [text(campaign?.id, 500), campaign]));
 }
 
-function projectedReplyDigest(state, targetIds, through = null) {
+function projectedReplyDigest(state, targetIds, targets, through = null) {
   const throughAt = timestamp(through);
   const identities = targetIds.flatMap((targetSequenceId) => (
     list(state.snapshots.get(targetSequenceId)?.submissions_replies).flatMap((reply) => {
       const receivedAt = timestamp(reply?.date);
       if (throughAt !== null && receivedAt !== null && receivedAt > throughAt) return [];
+      const campaign = targets.get(text(reply?.sequence_id, 500)) || {};
       return [JSON.stringify([
         targetSequenceId,
         text(reply?.sequence_id, 500),
@@ -409,6 +410,10 @@ function projectedReplyDigest(state, targetIds, through = null) {
         text(reply?.thread_id, 500),
         text(reply?.ccu_id, 500),
         text(reply?.reply_category, 40),
+        text(campaign.exact_role_id, 200),
+        text(campaign.exact_role_source, 100),
+        text(campaign.exact_project_id, 500),
+        text(campaign.exact_project_source, 100),
       ])];
     })
   ));
@@ -500,7 +505,6 @@ export async function readCachedSequenceReplyBatch({
       },
     };
   }
-  const baseCatalogDigest = text(projectionCoverage.catalog_digest, 128) || null;
   const mappingDigest = text(savedRoleMappingDigest, 128)
     || sha256(JSON.stringify(list(savedRoleMappings).map((mapping) => ({
       sequence_id: text(mapping?.sequence_id, 500),
@@ -527,9 +531,12 @@ export async function readCachedSequenceReplyBatch({
     ? null
     : new Date(scanWatermarkAt).toISOString();
   const effectiveWatermark = normalizedScanWatermark || currentWatermark;
+  // Fingerprint only replies inside this finite horizon and the effective
+  // role/project evidence each reply will use. Empty targets and newer-only
+  // target changes cannot disturb the epoch; late old replies and changes to
+  // their evidence still force a safe restart.
   const digestAt = (watermark) => sha256(JSON.stringify({
-    cache_catalog_digest: baseCatalogDigest,
-    cache_projection_digest: projectedReplyDigest(state, targetIds, watermark),
+    cache_projection_digest: projectedReplyDigest(state, targetIds, targets, watermark),
     sourcing_role_mapping_digest: mappingDigest,
   }));
   // The saved digest describes the same finite horizon as its saved watermark.

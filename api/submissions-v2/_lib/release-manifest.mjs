@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 102,
-  "digest": "9678e9cd693127904fded38765faa4b5f3eeb9eb859041818ed3fca14af34bde",
+  "digest": "83af0388e2a641cfb61ddf5236c8d002f2cce00026b05435b197968bc85187a4",
   "vercel_json_canonical_sha256": "4d2b5b82afa0bb6852222b2363aa78e2341d68887ce5d0218cf04b480a03504a",
   "files": [
     {
@@ -196,7 +196,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-source.mjs",
-      "sha256": "db47232fa5406e8e9ff6cbc59c08263e46a22cfe2c5a93acc56397904a8b5b27"
+      "sha256": "bd48d8b5e6e6afc7c09b708f9b61e14f4868c68e77cc90081e68f000d9e165fd"
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
