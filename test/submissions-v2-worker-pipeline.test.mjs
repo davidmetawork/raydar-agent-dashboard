@@ -1051,8 +1051,9 @@ test("submission proof reconciliation shares candidate-scoped locators and point
 test("notification delivery settles each outbox row independently", async () => {
   const settled = [];
   const pending = [
-    { id: "notification-1", kind: "daily_digest", safe_payload: { interested: 2 } },
-    { id: "notification-2", kind: "daily_digest", safe_payload: { needs_review: 1 } },
+    { id: "notification-legacy", kind: "daily_digest", safe_payload: { interested: 2 } },
+    { id: "notification-1", kind: "submission_added", safe_payload: { candidate_name: "Jane", signal: "Interested · Curated list", added_at: "2026-08-31T20:00:00.000Z" } },
+    { id: "notification-2", kind: "submission_added", safe_payload: { candidate_name: "Sam", signal: "Needs review · Email reply", added_at: "2026-08-31T20:00:00.000Z" } },
   ];
   let claimed;
   const repository = {
@@ -1063,12 +1064,12 @@ test("notification delivery settles each outbox row independently", async () => 
     deliverNotification: async ({ deliver }) => ({ sent: true, receipt: await deliver(claimed) }),
     settleNotification: async (value) => settled.push(value),
   };
-  let count = 0;
+  const notified = [];
   const handlers = handlerSet({
     repository,
-    notify: async () => {
-      count += 1;
-      if (count === 2) throw Object.assign(new Error("Slack unavailable"), { code: "slack_unavailable", deliveryOutcome: "not_sent" });
+    notify: async (_text, options) => {
+      notified.push(options);
+      if (notified.length === 2) throw Object.assign(new Error("Slack unavailable"), { code: "slack_unavailable", deliveryOutcome: "not_sent" });
       return { receipt: "receipt-1" };
     },
   });
@@ -1076,12 +1077,15 @@ test("notification delivery settles each outbox row independently", async () => 
   const result = await handlers.deliver_notification(deliveryContext.value);
   assert.equal(result.checkpoint.sent_count, 1);
   assert.deepEqual(deliveryContext.checkpoints.map((checkpoint) => checkpoint.stage), [
-    "notification_claim", "notification_send", "notification_claim", "notification_send", "notification_claim",
+    "notification_claim", "notification_claim", "notification_send", "notification_claim", "notification_send", "notification_claim",
   ]);
-  assert.equal(settled.length, 1);
+  assert.equal(settled.length, 2);
   assert.equal(settled[0].sent, false);
-  assert.equal(settled[0].errorCode, "slack_unavailable");
-  assert.equal(settled[0].retryAt, "2026-08-31T20:05:00.000Z");
+  assert.equal(settled[0].errorCode, "notification_kind_retired");
+  assert.equal(settled[1].sent, false);
+  assert.equal(settled[1].errorCode, "slack_unavailable");
+  assert.equal(settled[1].retryAt, "2026-08-31T20:05:00.000Z");
+  assert.deepEqual(notified.map((options) => options.kind), ["submission_added", "submission_added"]);
 });
 
 test("ordinary worker has no delete path and delegates every purge to the isolated service", async () => {
