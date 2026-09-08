@@ -1533,10 +1533,20 @@ function ackFor(key) {
   const ack=STATE.acks[key];
   return decision?.requestId && ack?.requestId!==decision.requestId ? null : ack || null;
 }
+function currentInvitationFor(key, decision) {
+  if (decision?.action !== "interview" || !decision.requestId) return null;
+  const row = queueRows().find(row => row.key === key) || streamRows().find(row => row.key === key);
+  const invitation = typeof applicantRowV2 === "function" ? applicantRowV2(row)?.invitation : null;
+  return invitation?.currentDecision === true && invitation.requestId === decision.requestId
+    ? invitation : null;
+}
 function decisionStatus(key, decision) {
   const ack = ackFor(key);
   if (decision?.action === "pass" && (!decision.requestId || ack?.reason==='human_pass')) return "passed";
   if (decision?.action === "interview" && SENT_ACK_STATUSES.has(String(ack?.status || ""))) return "emailed";
+  const invitation = currentInvitationFor(key, decision);
+  if (["waiting", "queued", "externally_committed"].includes(invitation?.state)) return "queued";
+  if (["held", "reconcile_required", "cancelled"].includes(invitation?.state)) return "blocked";
   if (decision?.action === "interview" && (ack?.status === "blocked"
     || ["identity_review", "recipient_review", "delivery_review"].includes(ack?.status))) return "blocked";
   if (SENT_ACK_STATUSES.has(String(ack?.status || ""))) return "emailed";
@@ -1577,12 +1587,15 @@ function decisionByline(decision) {
 }
 function decidedStatusHtml(key, decision) {
   const ack = ackFor(key);
+  const invitation = currentInvitationFor(key, decision);
   const by = decisionByline(decision);
   const when = decision.at ? shortDate(decision.at) + " · " + relTime(decision.at) : "";
   let chip;
   if (decisionStatus(key, decision) === "passed") chip = '<span class="decided-chip passed">Passed</span>';
   else if (decisionStatus(key, decision) === "emailed") chip = '<span class="decided-chip emailed">Emailed ✓</span>';
-  else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">' + (decision.action === "interview" ? "Interview held: " : "Blocked: ") + esc(ack?.reason || interviewHold(queueRows().find((row) => row.key === key)) || "see delivery state") + "</span>";
+  else if (decisionStatus(key, decision) === "blocked") chip = '<span class="decided-chip blocked">' + (decision.action === "interview" ? "Interview held: " : "Blocked: ") + esc(invitation?.reason || invitation?.reasonCode || ack?.reason || interviewHold(queueRows().find((row) => row.key === key)) || "see delivery state") + "</span>";
+  else if (invitation?.state === "queued") chip = '<span class="decided-chip queued">Invitation queued</span>';
+  else if (invitation?.state === "externally_committed") chip = '<span class="decided-chip queued">Provider accepted · delivery pending</span>';
   else if (decision.action === "interview") chip = '<span class="decided-chip queued">Interview requested · preparing</span>';
   else chip = '<span class="decided-chip queued">Pending</span>';
   const undo = "";

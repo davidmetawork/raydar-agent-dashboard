@@ -132,6 +132,8 @@ function invitation(value) {
   if (!state) return null;
   return Object.freeze({
     state, reasonCode: text(raw.reasonCode, 180), reason: text(raw.reason, 500),
+    requestId: id(raw.requestId), decisionEventId: id(raw.decisionEventId),
+    currentDecision: raw.currentDecision === true, updatedAt: text(raw.updatedAt, 64),
     requestedAt: text(raw.requestedAt, 64),
     ageSeconds: Number.isSafeInteger(Number(raw.ageSeconds)) && Number(raw.ageSeconds) >= 0
       ? Math.min(Number(raw.ageSeconds), 31_536_000) : null,
