@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { normalizeFilters, stateAddress, addressState, listQuery, localDayBound, statusKey, statusExplanation, displayNumber, createRequestGate, mergeMessageRows, wrapSafeEmailHTML, EMAIL_CSP } from '../mailroom-model.mjs';
+import { normalizeFilters, stateAddress, addressState, listQuery, localDayBound, statusKey, statusExplanation, displayNumber, createRequestGate, mergeMessageRows, wrapSafeEmailHTML, EMAIL_CSP, lanePurpose } from '../mailroom-model.mjs';
+
+test('lane purpose cannot contradict enabled state with stale setup notes', () => {
+  const lane = { id: 'applicant-core-interview', enabled: true, description: 'Disabled Applicant Core interview invitation lane; Mailroom + SendGrid only.' };
+  assert.equal(lanePurpose(lane), 'Sends interview invitations to approved applicants.');
+  assert.equal(lane.enabled, true);
+  assert.match(lane.description, /^Disabled/); // Source notes stay intact for inspection.
+  assert.doesNotMatch(lanePurpose({ id: 'postcall-general-many', enabled: true, description: 'Inert until separately switched and armed.' }), /inert|disabled|armed/i);
+  assert.equal(lanePurpose({ id: 'master-inbox-human-david-raydar-xyz' }), 'Sends emails and replies reviewed by a person in Master Inbox.');
+  assert.equal(lanePurpose({ id: 'unknown-lane', description: 'Disabled until armed.' }), 'A purpose description has not been added for this lane.');
+});
 
 test('deep links round-trip filters and message identity without query injection', () => {
   const filters = { view: 'all', q: 'Maya & Ben? # résumé', lane: 'interview-v1', sender: 'david', delivery: 'accepted', from: '2026-09-01', to: '2026-09-08', id: '73?&id=other' };

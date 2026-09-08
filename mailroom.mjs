@@ -1,4 +1,4 @@
-import { VIEWS, DELIVERY_LABELS, EMPTY_FILTERS, normalizeFilters, stateAddress, addressState, listQuery, displayNumber, statusKey, statusExplanation, wrapSafeEmailHTML, createRequestGate, mergeMessageRows } from './mailroom-model.mjs';
+import { VIEWS, DELIVERY_LABELS, EMPTY_FILTERS, normalizeFilters, stateAddress, addressState, listQuery, displayNumber, statusKey, statusExplanation, wrapSafeEmailHTML, createRequestGate, mergeMessageRows, lanePurpose } from './mailroom-model.mjs';
 
 const $ = id => document.getElementById(id);
 const state = { filters: normalizeFilters(Object.fromEntries(new URLSearchParams(location.search))), rows: [], nextCursor: null, message: null, lanes: [], senders: [], counts: null, listCoverage: null, laneCoverage: null, loadedAt: null, listLoading: false, lanesLoaded: false, currentScreen: '', screenSequence: 0, bodyMode: 'text' };
@@ -176,7 +176,13 @@ function renderLanes() {
     const stats = node('div', 'lane-stats');
     for (const [key, label] of [['sent_24h', 'Sent in 24 hours'], ['queued', 'Queued'], ['attention', 'Need attention']]) { const value = node('div', key === 'attention' && Number(lane[key]) > 0 ? 'problem' : ''); value.append(node('strong', '', displayNumber(lane[key])), node('span', '', label)); stats.append(value); }
     const footer = node('div', 'lane-card-footer'); const when = node('time', '', lane.last_sent ? 'Last sent ' + shortDate(lane.last_sent) : 'No send recorded'); when.title = fullDate(lane.last_sent); const link = routeLink(node('a', '', 'View emails →'), { ...EMPTY_FILTERS, view: 'all', lane: String(lane.id) }); footer.append(when, link);
-    card.append(header, node('p', '', lane.description || 'No description recorded for this lane.'), sender, stats, footer); cards.append(card);
+    card.append(header, node('p', 'lane-purpose', lanePurpose(lane)), sender, stats, footer);
+    if (lane.description) {
+      const notes = node('details', 'lane-registry-notes');
+      notes.append(node('summary', '', 'Registry notes'), node('p', 'registry-note-context', 'These notes may describe the original setup. The status above shows the lane’s current setting.'), node('p', '', lane.description));
+      card.append(notes);
+    }
+    cards.append(card);
   }
   host.replaceChildren(cards);
 }
@@ -290,7 +296,7 @@ function renderCoverage() {
   if (!coverage) return;
   const summary = ['History and coverage']; if (coverage.total !== undefined && coverage.total !== null) summary.push(displayNumber(coverage.total) + ' retained emails'); if (coverage.earliest_at) summary.push('since ' + new Date(coverage.earliest_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }));
   $('coverageSummary').textContent = summary.join(' · '); const host = $('coverageDetails'); host.replaceChildren();
-  host.append(node('p', '', 'This browser shows SendGrid messages recorded by Mailroom. Sent means the provider accepted the email; delivery is shown separately. Counts in the sidebar follow the active email filters.'));
+  host.append(node('p', '', 'This browser shows SendGrid messages recorded by Mailroom. Sent includes recorded sends and provider-accepted messages; delivery is shown separately. Counts in the sidebar follow the active email filters.'));
   const notes = [...safeArray(coverage.notes)];
   if (!notes.length) notes.push('Historical availability depends on what Mailroom retained. A missing body, attachment, sender snapshot, or delivery event is shown as unavailable.');
   const list = node('ul'); for (const note of notes) list.append(node('li', '', typeof note === 'string' ? note : note.message || note.note || 'Some historical fields are unavailable.')); host.append(list);
