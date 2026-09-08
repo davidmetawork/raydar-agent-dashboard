@@ -39,12 +39,21 @@ test("runtime database defaults stay below the worker deadline", () => {
   });
 });
 
-test("server statement timeout rolls back fenced work and the pool remains reusable", async () => {
-  const settings = await sql`select current_setting('statement_timeout') as statement_timeout,
-    current_setting('idle_in_transaction_session_timeout') as idle_transaction_timeout`;
+test("both begin signatures apply transaction-local deadlines and preserve array callbacks", async () => {
+  assert.equal(sql.options.connection.statement_timeout, undefined);
+  assert.equal(sql.options.connection.idle_in_transaction_session_timeout, undefined);
+  const settings = await sql.begin("read only", (tx) => tx`
+    select current_setting('statement_timeout') as statement_timeout,
+           current_setting('idle_in_transaction_session_timeout') as idle_transaction_timeout
+  `);
   assert.equal(settings[0].statement_timeout, "100ms");
   assert.equal(settings[0].idle_transaction_timeout, "200ms");
 
+  const parallel = await sql.begin((tx) => [tx`select 1 as value`, tx`select 2 as value`]);
+  assert.deepEqual(parallel.map((rows) => rows[0].value), [1, 2]);
+});
+
+test("server statement timeout rolls back fenced work and the pool remains reusable", async () => {
   await assert.rejects(sql.begin(async (tx) => {
     const changed = await tx.unsafe(`update ${tableName} set value = 'partial', fencing_token = fencing_token + 1 where id = 1 and fencing_token = 7 returning id`);
     assert.equal(changed.length, 1);

@@ -26,6 +26,30 @@ function sessionDeadlines(env = process.env, overrides = {}) {
   };
 }
 
+async function applyTransactionDeadlines(transaction, deadlines) {
+  await transaction`
+    select set_config('statement_timeout', ${`${deadlines.statementTimeoutMs}ms`}, true),
+           set_config('idle_in_transaction_session_timeout', ${`${deadlines.idleTransactionTimeoutMs}ms`}, true)
+  `;
+}
+
+function bindTransactionDeadlines(sql, deadlines) {
+  const begin = sql.begin.bind(sql);
+  sql.begin = (options, callback) => {
+    const hasOptions = typeof options === "string";
+    const transactionOptions = hasOptions ? options : null;
+    const transactionCallback = hasOptions ? callback : options;
+    if (typeof transactionCallback !== "function") throw new TypeError("A transaction callback is required");
+    const boundedCallback = async (transaction) => {
+      await applyTransactionDeadlines(transaction, deadlines);
+      const result = transactionCallback(transaction);
+      return Array.isArray(result) ? Promise.all(result) : result;
+    };
+    return transactionOptions === null ? begin(boundedCallback) : begin(transactionOptions, boundedCallback);
+  };
+  return sql;
+}
+
 function configuredUrl(env = process.env) {
   const url = String(env.SUBMISSIONS_V2_DATABASE_URL || "").trim();
   if (!/^postgres(?:ql)?:\/\//i.test(url)) {
@@ -45,19 +69,15 @@ export function createDatabase({
   idleTransactionTimeoutMs,
 } = {}) {
   const deadlines = sessionDeadlines(env, { statementTimeoutMs, idleTransactionTimeoutMs });
-  return postgres(databaseUrl, {
+  const sql = postgres(databaseUrl, {
     max,
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 10,
-    connection: {
-      application_name: "raydar-submissions-v2",
-      statement_timeout: deadlines.statementTimeoutMs,
-      idle_in_transaction_session_timeout: deadlines.idleTransactionTimeoutMs,
-    },
     transform: { undefined: null },
     onnotice: () => {},
   });
+  return bindTransactionDeadlines(sql, deadlines);
 }
 
 export function database(env = process.env) {
@@ -83,6 +103,8 @@ export const databaseInternals = Object.freeze({
   DEFAULT_STATEMENT_TIMEOUT_MS,
   DEFAULT_IDLE_TRANSACTION_TIMEOUT_MS,
   sessionDeadlines,
+  applyTransactionDeadlines,
+  bindTransactionDeadlines,
 });
 
 export async function withTransaction(callback, sql = database()) {
@@ -90,13 +112,13 @@ export async function withTransaction(callback, sql = database()) {
 }
 
 export async function readRuntimeControls(sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select control_epoch, ui_enabled, ingestion_enabled, generation_enabled,
            master_inbox_enabled, curated_enabled, actor_email, reason, changed_at
       from submissions_v2.runtime_controls
      where singleton = true
      limit 1
-  `;
+  `, sql);
   if (rows.length !== 1) {
     const error = new Error("Submissions V2 runtime controls are unavailable");
     error.code = "submissions_v2_controls_unavailable";
@@ -115,11 +137,11 @@ export async function setRuntimeControls({
   masterInbox,
   curated,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.set_runtime_controls(
       ${actorEmail}, ${reason}, ${ui}, ${ingestion}, ${generation}, ${masterInbox}, ${curated}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -130,15 +152,15 @@ export async function claimJobs({
   leaseSeconds = 60,
   controlEpoch,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.claim_jobs(
       ${workerId},
-      ${sql.array(kinds)},
+      ${transaction.array(kinds)},
       ${Math.max(1, Math.min(50, Number(limit) || 1))},
       ${Math.max(15, Math.min(900, Number(leaseSeconds) || 60))},
       ${Number(controlEpoch)}
     )
-  `;
+  `, sql);
   return rows;
 }
 
@@ -148,13 +170,13 @@ export async function claimSourceCursor({
   leaseSeconds = 60,
   controlEpoch,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.claim_source_cursor(
       ${sourceKey}, ${workerId},
       ${Math.max(15, Math.min(900, Number(leaseSeconds) || 60))},
       ${Number(controlEpoch)}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -165,12 +187,12 @@ export async function heartbeatSourceCursor({
   controlEpoch,
   leaseSeconds = 60,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.heartbeat_source_cursor(
       ${sourceKey}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)},
       ${Math.max(15, Math.min(900, Number(leaseSeconds) || 60))}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -182,12 +204,12 @@ export async function commitSourceCursor({
   checkpoint,
   fullSuccess = false,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.commit_source_cursor(
       ${sourceKey}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)},
-      ${sql.json(checkpoint || {})}, ${Boolean(fullSuccess)}
+      ${transaction.json(checkpoint || {})}, ${Boolean(fullSuccess)}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -197,11 +219,11 @@ export async function releaseSourceCursor({
   fencingToken,
   controlEpoch,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.release_source_cursor(
       ${sourceKey}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -212,12 +234,12 @@ export async function heartbeatJob({
   controlEpoch,
   leaseSeconds = 60,
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.heartbeat_job(
       ${jobId}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)},
       ${Math.max(15, Math.min(900, Number(leaseSeconds) || 60))}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -228,12 +250,12 @@ export async function checkpointJob({
   controlEpoch,
   checkpoint = {},
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.checkpoint_job(
       ${jobId}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)},
-      ${sql.json(checkpoint)}
+      ${transaction.json(checkpoint)}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -244,12 +266,12 @@ export async function completeJob({
   controlEpoch,
   checkpoint = {},
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.complete_job(
       ${jobId}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)},
-      ${sql.json(checkpoint)}
+      ${transaction.json(checkpoint)}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
 
@@ -264,13 +286,13 @@ export async function failJob({
   retryDelaySeconds = 30,
   checkpoint = {},
 }, sql = database()) {
-  const rows = await sql`
+  const rows = await withTransaction((transaction) => transaction`
     select * from submissions_v2.fail_job(
       ${jobId}, ${workerId}, ${Number(fencingToken)}, ${Number(controlEpoch)},
       ${errorCode}, ${safeError}, ${Boolean(retry)},
       ${Math.max(0, Math.min(86400, Number(retryDelaySeconds) || 0))},
-      ${sql.json(checkpoint)}
+      ${transaction.json(checkpoint)}
     )
-  `;
+  `, sql);
   return rows[0] || null;
 }
