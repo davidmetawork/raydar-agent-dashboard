@@ -79,6 +79,7 @@ export function healthCoverageDetails(sources = {}) {
       enabled: source.enabled === true,
       delayed: source.delayed === true,
       safeErrorDetail: typeof source.safe_error_detail === "string" ? Array.from(source.safe_error_detail.trim()).slice(0, 500).join("") : "",
+      lastSuccessAt: safeHealthInstant(source.last_success_at),
       lastCompleteAt: safeHealthInstant(source.last_complete_at),
       retryAt: safeHealthInstant(source.retry_at),
       liveThrough: safeHealthInstant(coverage.live_through),
@@ -218,6 +219,36 @@ export function reviewProgressPresentation(row = {}) {
     detail: safeProgressText(row.preparation_error_detail),
     updatedAt: safeProgressInstant(row.generation_updated_at),
     deadlineAt: safeProgressInstant(row.generation_deadline_at || row.deadline_at),
+  };
+}
+
+const PREPARATION_FAILURE_LABELS = Object.freeze({
+  generation_budget_exhausted: "Preparation attempt limit reached",
+  budget_exhausted: "Preparation attempt limit reached",
+  generation_deadline_exhausted: "Preparation deadline exhausted",
+  role_unavailable: "Exact role unavailable",
+  candidate_original_resume_missing: "Candidate-original resume is missing",
+  resume_preparation_failed: "Resume preparation stopped safely",
+});
+
+export function preparationFailurePresentation(row = {}) {
+  const status = safeProgressText(row.generation_status, 80).toLowerCase();
+  const code = safeProgressText(row.preparation_error_code, 100).toLowerCase();
+  const detail = safeProgressText(row.preparation_error_detail);
+  const terminal = ["failed", "cancelled", "held"].includes(status);
+  if (!terminal && !code && !detail) return null;
+  const stage = safeProgressText(row.generation_stage, 120) || status || "unknown";
+  const attemptLimitReached = ["generation_budget_exhausted", "budget_exhausted"].includes(code)
+    || /(?:budget|cost) (?:ceiling|exhausted|limit)|\$2(?:\.00)?\b/iu.test(detail);
+  return {
+    stage: GENERATION_STAGE_LABELS[stage] || stage,
+    reason: attemptLimitReached ? "Preparation attempt limit reached" : (PREPARATION_FAILURE_LABELS[code] || "Resume preparation stopped safely"),
+    detail,
+    lastAttemptAt: safeProgressInstant(row.generation_updated_at),
+    attemptLimitReached,
+    guidance: attemptLimitReached
+      ? "The previous attempt reached its $2 limit. Review this failure before retrying; Retry preparation starts one new, separately budgeted attempt."
+      : "Review the safe failure detail before retrying this one case.",
   };
 }
 

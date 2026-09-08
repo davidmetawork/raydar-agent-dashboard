@@ -1,6 +1,6 @@
 "use strict";
 
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, preparationFailurePresentation, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
@@ -236,6 +236,14 @@ function reviewActions(row) {
   return `${submitted}<span class="review-age${ageHours >= 24 ? " old" : ""}">${ageHours >= 24 ? `${Math.floor(ageHours)}h open` : ""}</span><button class="button primary review-action" data-id="${esc(row.case_id || row.signal_id)}" type="button">${esc(action)}</button>`;
 }
 
+function preparationFailureHtml(row) {
+  const failure = preparationFailurePresentation(row);
+  if (!failure) return "";
+  const lastAttempt = failure.lastAttemptAt ? `<p class="preparation-failure-last-attempt">Last attempt ${esc(fmtWhen(failure.lastAttemptAt))}</p>` : "";
+  const detail = failure.detail ? `<p>${esc(failure.detail)}</p>` : "";
+  return `<div class="preparation-failure"><strong>${esc(failure.reason)} · ${esc(failure.stage)}</strong>${detail}${lastAttempt}<p class="preparation-failure-guidance">${esc(failure.guidance)}</p></div>`;
+}
+
 function reviewSummaryHtml(row) {
   if (STATE.page !== "needs_review") return "";
   const review = reviewRowPresentation(row);
@@ -243,7 +251,7 @@ function reviewSummaryHtml(row) {
   const count = review.reasonCount === 1 ? "Open issue" : `${review.reasonCount || 1} open issues`;
   const more = review.additionalReasons ? ` · ${review.additionalReasons} more in review` : "";
   const next = progress.active ? "Resume preparation is running · View progress" : review.action;
-  return `<div class="review-summary"><span class="review-summary-label">${esc(count)}</span><strong>${esc(review.label)}</strong><span>${esc(review.detail)}</span><span class="review-summary-next">Next step: ${esc(next)}${esc(more)}</span></div>`;
+  return `<div class="review-summary"><span class="review-summary-label">${esc(count)}</span><strong>${esc(review.label)}</strong><span>${esc(review.detail)}</span><span class="review-summary-next">Next step: ${esc(next)}${esc(more)}</span>${preparationFailureHtml(row)}</div>`;
 }
 
 function admissionSourceHtml(row) {
@@ -371,16 +379,22 @@ function renderCounts() {
   if (window.parent !== window) window.parent.postMessage({ type: "raydar-submissions-v2-counts", count: STATE.counts.actionable || 0 }, location.origin);
 }
 
+function freshnessFact(label, value, caughtUp = null) {
+  if (!value) return "";
+  return `<li>${esc(label)} ${esc(fmtWhen(value))}${caughtUp === true ? " · caught up" : caughtUp === false ? " · not caught up" : ""}</li>`;
+}
+
 function renderHealth(health = {}) {
   const node = $("source-health");
-  const delayed = health.delayed || health.database === "unavailable";
+  const sourceDetails = healthCoverageDetails(health.sources);
+  const delayedSources = sourceDetails.filter((source) => source.delayed).map((source) => source.label);
+  const delayed = health.delayed || health.database === "unavailable" || delayedSources.length > 0;
   node.className = `source-health ${delayed ? "delayed" : "current"}`;
-  node.textContent = delayed ? `Updates delayed${health.last_success_at ? ` · last success ${fmtWhen(health.last_success_at)}` : ""}` : "No reported delays";
+  node.textContent = delayedSources.length ? `${delayedSources.join(" and ")} delayed` : delayed ? "Source status delayed" : "Source status";
   const banner = $("delay-banner");
   banner.hidden = !delayed;
   banner.textContent = delayed ? "Updates are delayed. Raydar is keeping the last confirmed rows visible while source updates recover." : "";
   const details = $("source-health-details");
-  const sourceDetails = healthCoverageDetails(health.sources);
   details.hidden = sourceDetails.length === 0;
   $("source-health-detail-list").innerHTML = sourceDetails.map((source) => {
     const checkpoint = (label, value, caughtUp) => value
@@ -394,6 +408,18 @@ function renderHealth(health = {}) {
     const complete = source.lastCompleteAt ? `<li><span>Last complete scan</span><strong>${esc(fmtWhen(source.lastCompleteAt))}</strong></li>` : "";
     const retry = source.retryAt ? `<li><span>Retry time</span><strong>${esc(fmtWhen(source.retryAt))}</strong></li>` : "";
     return `<section class="source-health-source"><h3>${esc(source.label)}</h3><p>${esc(status)}</p>${delayDetail}${checkpoints || complete || retry ? `<ul>${checkpoints}${complete}${retry}</ul>` : ""}</section>`;
+  }).join("");
+  const freshness = $("source-freshness");
+  freshness.hidden = sourceDetails.length === 0;
+  freshness.innerHTML = sourceDetails.map((source) => {
+    const status = source.delayed ? "Reported delay" : source.enabled ? "No reported delay" : "Not enabled";
+    const coverage = source.key === "sequence_inbox"
+      ? freshnessFact("Cache confirmed", source.cacheConfirmedThrough, source.caughtUp)
+      : `${freshnessFact("Live confirmed", source.liveThrough, source.liveCaughtUp)}${freshnessFact("History confirmed", source.historyThrough, source.historyCaughtUp)}`;
+    const lastSuccess = freshnessFact("Last successful check", source.lastSuccessAt);
+    const detail = source.delayed && source.safeErrorDetail ? `<li>${esc(source.safeErrorDetail)}</li>` : "";
+    const noConfirmedCheckpoint = !(coverage || lastSuccess);
+    return `<section class="source-freshness-card${source.delayed ? " delayed" : ""}"><h3>${esc(source.label)}</h3><p class="${source.delayed ? "delayed" : ""}">${esc(status)}</p><ul>${lastSuccess}${coverage}${detail}${noConfirmedCheckpoint ? "<li>No confirmed checkpoint reported.</li>" : ""}</ul></section>`;
   }).join("");
 }
 
@@ -921,10 +947,11 @@ function openReview(id) {
   }
 
   if (codes.has("resume_preparation_failed")) {
-    const failureDetail = typeof row.preparation_error_detail === "string" && row.preparation_error_detail.trim()
-      ? esc(row.preparation_error_detail)
-      : "Resume preparation exhausted its safe retries and can be started again.";
-    openDialog({ title: "Retry resume preparation", subtitle, body: `${header}${reviewProgressHtml(row)}${evidence}<p>${failureDetail}</p>`, footer: '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Retry preparation" type="button">Retry preparation</button>' });
+    const failure = preparationFailurePresentation(row);
+    const failureDetail = failure?.detail ? esc(failure.detail) : "Resume preparation exhausted its safe retries and needs an individual review.";
+    const footer = '<button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" data-label="Retry preparation" type="button">Retry preparation</button>';
+    const guidance = failure?.guidance || "Review the safe failure detail before retrying this one case.";
+    openDialog({ title: "Retry resume preparation", subtitle, body: `${header}${reviewProgressHtml(row)}${evidence}<p>${failureDetail}</p><p class="field-help">${esc(guidance)}</p>`, footer });
     addDismissReviewControl(row);
     void loadReviewContext(STATE.active);
     $("dialog-cancel").onclick = closeDialog;

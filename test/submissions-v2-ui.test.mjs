@@ -33,6 +33,18 @@ test("visible list totals name candidate-role pairs rather than unique people", 
   assert.match(js, /listEntityNoun\(STATE\.page\).*loaded/s);
 });
 
+test("Review surfaces safe preparation failures and prominent per-source freshness", () => {
+  assert.match(html, /id="source-freshness" aria-label="Per-source freshness"/);
+  assert.match(js, /preparationFailurePresentation\(row\)/);
+  assert.match(js, /Last attempt/);
+  assert.match(uiState, /starts one new, separately budgeted attempt/);
+  assert.match(js, /Retry resume preparation/);
+  assert.match(js, /lastSuccessAt/);
+  assert.match(js, /Last successful check/);
+  assert.match(js, /!\(coverage \|\| lastSuccess\)/);
+  assert.match(js, /source-freshness-card/);
+});
+
 test("polling is quiet for unchanged rows and preserves review drafts", () => {
   assert.match(html, /id="list-status" role="status" aria-live="polite"/);
   assert.doesNotMatch(html, /id="rows"[^>]+aria-live=/);
@@ -244,7 +256,7 @@ test("a proven submission remains explicit while a resume issue stays actionable
 });
 
 test("source health distinguishes reported delays from committed Gmail and Sequence checkpoints", () => {
-  assert.match(js, /"No reported delays"/);
+  assert.match(js, /"Source status"/);
   assert.match(js, /healthCoverageDetails\(health\.sources\)/);
   assert.match(js, /Live committed through/);
   assert.match(js, /History committed through/);
