@@ -607,7 +607,7 @@ function parseDate(v) {
   const d = DATE_ONLY.test(s) ? new Date(s + "T00:00:00") : new Date(s);
   return isNaN(d) ? null : d;
 }
-function shortDate(v) { const d = parseDate(v); return d ? MONTHS[d.getMonth()] + " " + d.getDate() : "—"; }
+function shortDate(v) { const d = parseDate(v); return d ? MONTHS[d.getMonth()] + " " + d.getDate() + (d.getFullYear() !== new Date().getFullYear() ? ", " + d.getFullYear() : "") : "—"; }
 /* Does this value carry a clock time at all? A bare YYYY-MM-DD does not, and
    showing "12:00 AM" for one would be inventing precision we were never given. */
 function hasClockTime(v) { return !!v && !DATE_ONLY.test(String(v)) && !!parseDate(v); }
@@ -615,28 +615,33 @@ function timeOfDay(v) {
   const d = parseDate(v); if (!d) return "";
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
-// Prefer a real application timestamp, then the time Raydar added the record,
-// then a date-only application value. Each fallback keeps its own label so a
-// processing delay never looks like the moment the candidate applied.
+// Keep the application's supplied date even when it has no clock time.
+// Arrival time is a separately labeled fact; a migration must never replace
+// an older application date with the day Raydar added the record.
 function applicationMoment(row) {
   if (hasClockTime(row?.appliedAtIso)) return { value: row.appliedAtIso, label: "Applied", timed: true };
   if (hasClockTime(row?.appliedAt)) return { value: row.appliedAt, label: "Applied", timed: true };
-  if (row?.addedAt && parseDate(row.addedAt)) return { value: row.addedAt, label: "Added", timed: hasClockTime(row.addedAt) };
   if (row?.appliedAt && parseDate(row.appliedAt)) return { value: row.appliedAt, label: "Applied", timed: false };
+  if (row?.appliedAtIso && parseDate(row.appliedAtIso)) return { value: row.appliedAtIso, label: "Applied", timed: false };
+  if (row?.addedAt && parseDate(row.addedAt)) return { value: row.addedAt, label: "Added", timed: hasClockTime(row.addedAt) };
   return null;
 }
 function applicationMomentText(row) {
   const moment = applicationMoment(row);
   if (!moment) return "";
   return moment.label + " " + shortDate(moment.value)
-    + (moment.timed ? " at " + timeOfDay(moment.value) + " · " + relTime(moment.value) : "");
+    + (moment.timed ? " at " + timeOfDay(moment.value) + " · " + relTime(moment.value) : "")
+    + (moment.label === "Applied" && !moment.timed && hasClockTime(row.addedAt)
+      ? " · Added " + shortDate(row.addedAt) + " at " + timeOfDay(row.addedAt) + " · " + relTime(row.addedAt) : "");
 }
 function applicationMomentHtml(row) {
   const moment = applicationMoment(row);
   if (!moment) return "";
   return "<b>" + esc(shortDate(moment.value)) + "</b>"
     + moment.label.toLowerCase()
-    + (moment.timed ? " " + esc(timeOfDay(moment.value)) + " · " + esc(relTime(moment.value)) : "");
+    + (moment.timed ? " " + esc(timeOfDay(moment.value)) + " · " + esc(relTime(moment.value)) : "")
+    + (moment.label === "Applied" && !moment.timed && hasClockTime(row.addedAt)
+      ? "<br>added " + esc(shortDate(row.addedAt)) + " " + esc(timeOfDay(row.addedAt)) + " · " + esc(relTime(row.addedAt)) : "");
 }
 /* Employment and education dates are calendar fields, even when the provider
    serializes them as UTC-midnight timestamps. Keep their written month/year:
@@ -831,7 +836,7 @@ const HARD_HOLD_CODES = new Set(["identity_conflict", "cross_person_identity_con
 function normalizedHold(value) { const hold = String(value ?? "").trim().toLowerCase(); return hold || null; }
 function humanHoldReason(value) {
   const code = normalizedHold(value);
-  if (DISPLAY_ONLY_SOURCE_HOLD_CODES.has(code)) return "This Workable application is available for review, but its source is display-only.";
+  if (DISPLAY_ONLY_SOURCE_HOLD_CODES.has(code)) return "The saved application profile is available for review. Its source does not currently permit Interview.";
   if (code === "workable_display_profile_not_eligible") return "The Workable profile no longer passes the display-only safety checks.";
   return String(value || "Applicant readiness needs attention").replace(/^APPLICANT_CORE_/i, "")
     .replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
@@ -1630,7 +1635,7 @@ function decidedStatusHtml(key, decision) {
       || interviewHold(queueRows().find((row) => row.key === key)) || "see delivery state";
     const blockCode = String(rawBlockReason).trim().toLowerCase();
     const blockReason = ["source_held", "display_only_source_held"].includes(blockCode)
-      ? "This Workable application is available for review, but its source is display-only."
+      ? "The saved application profile is available for review. Its source does not currently permit Interview."
       : rawBlockReason;
     chip = '<span class="decided-chip blocked">' + (decision.action === "interview" ? "Interview held: " : "Blocked: ") + esc(blockReason) + "</span>";
   }
@@ -1715,7 +1720,7 @@ function historyHtml(row) {
   if (providerHistory) out.push('<div class="rc-paraform"><span class="label">Cached LinkedIn profile</span></div>');
   if (!providerHistory && (exps.length || edus.length)) {
     const displayOnly = DISPLAY_ONLY_SOURCE_HOLD_CODES.has(interviewHold(row));
-    out.push('<div class="rc-paraform"><span class="label">' + (displayOnly ? "Workable application profile" : "Application profile") + '</span><span class="value">' + (displayOnly ? "current source · review only" : "source record") + '</span></div>');
+    out.push('<div class="rc-paraform"><span class="label">Application profile</span><span class="value">' + (displayOnly ? "current source · review only" : "source record") + '</span></div>');
   }
   if (rating) out.push('<div class="rc-paraform"><span class="label">Paraform rating</span><span class="value">Paraform ' + esc(rating) + "</span></div>");
   if (exps.length) out.push(secHtml("Experience", exps.map((item) => expLineHtml(item, providerHistory)).join("")));
@@ -2119,7 +2124,7 @@ const PROCESSING_REASONS = Object.freeze({
     next: "Next: recheck the current source, identity, and privacy evidence.", owner: "Raydar source review",
   },
   source_held: {
-    reason: "This application is visible, but its source is temporarily held for review.",
+    reason: "This application is visible, but its source is held for review.",
     next: "Next: finish the protected source review before releasing the application.", owner: "Raydar source review",
   },
   display_only_source_held: {
@@ -2185,6 +2190,7 @@ function processingRowHtml(row) {
   // each one with its real label rather than inventing a received timestamp.
   const receivedAt = row.receivedAt || row.addedAt || row.appliedAt || null;
   const receivedLabel = row.receivedAt ? "Received" : row.addedAt ? "Added" : "Applied";
+  const applicationDate = applicationMomentText(row);
   const display = processingDisplay(row);
   const waitAt = row.receivedAt || row.addedAt || row.appliedAt || null;
   const waitSeconds = hasClockTime(waitAt) ? Math.max(0, Math.floor((Date.now() - parseDate(waitAt).getTime()) / 1000)) : null;
@@ -2194,7 +2200,8 @@ function processingRowHtml(row) {
       '<div class="who"><span class="name"><span>' + esc(row.name || "Applicant identity pending") + '</span></span>' +
         '<span class="processing-state' + (display.needsAttention ? ' needs-attention' : '') + '">' + esc(display.label) + '</span></div>' +
       '<div class="processing-job">Applied to <b>' + esc(role) + "</b>" + company + "</div>" +
-      (receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
+      '<div class="processing-meta">' + esc(applicationDate || "Application date is unavailable in the current source record.") + "</div>" +
+      (row.receivedAt ? '<div class="processing-meta">' + esc(receivedLabel) + ": " + esc(shortDate(receivedAt)) + "</div>" : "") +
       '<div class="processing-reason">' + esc(display.reason) + "</div>" +
       '<div class="processing-meta">' + esc([wait, "Owner: " + display.owner].filter(Boolean).join(" · ")) + "</div>" +
       '<div class="processing-reason">' + esc(display.next) + "</div>" +
@@ -2692,7 +2699,7 @@ function renderModal() {
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(projectedFacts.title.freshness || "unknown freshness") + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">' + (displayOnlySource ? "Workable application profile · current source as of " : "Application profile as of ") + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(projectedFacts.title.freshness || "unknown freshness") + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">' + (displayOnlySource ? "Application profile · current source as of " : "Application profile as of ") + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(typeof appliedRole === "function" ? appliedRole(row) : (row.roleTitle || "Unknown role")) + "</b> @ " + esc(appliedCompany(row)) +
@@ -2713,10 +2720,10 @@ function renderModal() {
     const primaryProfile = providerHistory ? provider : p;
     const primaryHistory = projectedHistory ? "" : historySectionsHtml(primaryProfile, { allowRuleFacts: canUseFact(providerHistory ? "paraform" : "source"), isParaformProfile: providerHistory });
     if (primaryHistory) {
-      parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">' + (displayOnlySource ? "Workable application profile <span>current source · review only</span>" : "Application profile <span>source record</span>") + '</div>' + primaryHistory + "</div></div>");
+      parts.push(providerHistory ? primaryHistory : '<div class="p-source"><div class="p-source-body"><div class="p-source-title">Application profile <span>' + (displayOnlySource ? "current source · review only" : "source record") + '</span></div>' + primaryHistory + "</div></div>");
     }
     if (providerHistory) {
-      const applicationHistory = historySectionsHtml(p, { allowRuleFacts: modal.source === "queue" });
+      const applicationHistory = historySectionsHtml(p, { allowRuleFacts: canUseFact("source") });
       if (applicationHistory) {
         parts.push('<details class="p-source"><summary>Application profile <span>source record</span></summary><div class="p-source-body">' + applicationHistory + "</div></details>");
       }
@@ -2738,7 +2745,7 @@ function renderModal() {
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto"' +
         (hasV2Projection && !v2RuleFactsReady ? ' disabled title="This profile fact version changed. Refresh Applicants before creating a rule."'
-          : displayOnlySource && !hasV2Projection ? ' disabled title="This Workable source profile is for review only and cannot create Rules."' : "") + '>Create rule from profile</button>' +
+          : displayOnlySource && !hasV2Projection ? ' disabled title="This source profile is for review only and cannot create Rules."' : "") + '>Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? retryInterviewButtonHtml(row, decision, busy) :
         '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +

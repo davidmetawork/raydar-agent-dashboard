@@ -194,7 +194,7 @@ test("the page offers verified rich facts and source facts with separate provena
   assert.match(applicants, /const providerHistory = hasProviderHistory\(provider\);/);
   assert.match(applicants, /const primaryProfile = providerHistory \? provider : p;/);
   assert.match(applicants, /historySectionsHtml\(primaryProfile, \{ allowRuleFacts: canUseFact\(providerHistory \? "paraform" : "source"\), isParaformProfile: providerHistory \}\)/);
-  assert.match(applicants, /historySectionsHtml\(p, \{ allowRuleFacts: modal\.source === "queue" \}\)/);
+  assert.match(applicants, /historySectionsHtml\(p, \{ allowRuleFacts: canUseFact\("source"\) \}\)/);
   assert.match(applicants, /provider\?\.ruleFactsEligible === true/);
   assert.doesNotMatch(applicants.slice(start, end), /paraformProfile\?\./);
 });
