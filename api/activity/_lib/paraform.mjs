@@ -18,6 +18,17 @@
 //      cookie self-heals; env is only the seed. The rotated value is never
 //      logged.
 //
+//   3. Self-healing only covers a session that is ALIVE and rotating. Once
+//      the stored chain dies, the operator's refreshed env seed was locked
+//      out: the KV value won unconditionally, so pasting a fresh cookie into
+//      Vercel changed nothing and there is no route that clears the key.
+//      That froze the Activity feed for three days from 2026-09-05 while
+//      health reported "expired". So the stored value is a CACHE of
+//      rotations and the env seed is the operator's AUTHORITY: a cached
+//      credential that fails auth never outranks a different env seed. On an
+//      auth failure we fall back to the seed once per invocation, and a seed
+//      that works is written back so the next invocation starts healed.
+//
 // Read/write allowlists: a future edit cannot quietly reach a new surface.
 // consolidatedMessaging.send is the ONLY write, single-try, never retried —
 // a comment post is not idempotent and recovery is read-back, never resend.
@@ -42,7 +53,13 @@ export function paraformCookieName(value) {
 
 let sessionValue = null;   // resolved once per invocation: KV if present, else env
 let sessionLoaded = false;
+let sessionFromStore = false;  // true while the in-use value came from KV, not env
+let seedFallbackUsed = false;  // the env-seed fallback fires at most once per invocation
+let seedNeedsPersist = false;  // a fallback seed is written back once it proves itself
 let rotations = 0;
+let seedFallbacks = 0;
+
+const envSeed = () => process.env.PARAFORM_SESSION_COOKIE || process.env.PARAFORM_COOKIE || null;
 
 export const hasCookie = () => Boolean(process.env.PARAFORM_COOKIE || process.env.PARAFORM_SESSION_COOKIE);
 
@@ -52,13 +69,46 @@ async function cookieValue() {
     if (kvConfigured()) {
       try {
         const stored = await getJson(SESSION_KEY);
-        if (stored?.value && stored.value.length >= 32) sessionValue = stored.value;
+        if (stored?.value && stored.value.length >= 32) {
+          sessionValue = stored.value;
+          sessionFromStore = true;
+        }
       } catch { /* env seed below */ }
     }
-    if (!sessionValue) sessionValue = process.env.PARAFORM_SESSION_COOKIE || process.env.PARAFORM_COOKIE || null;
+    if (!sessionValue) sessionValue = envSeed();
   }
   if (!sessionValue) throw new Error("PARAFORM_COOKIE_MISSING");
   return sessionValue;
+}
+
+/**
+ * The stored chain has failed auth. If the operator has since seeded a
+ * DIFFERENT cookie in env, adopt it for the rest of this invocation — this is
+ * the only path by which a refreshed Vercel credential can displace a dead
+ * cached one. Returns true when the caller should retry immediately.
+ *
+ * Fires only against a store-sourced credential (an env seed that fails auth
+ * has nothing better to fall back to) and only once, so a genuinely dead pair
+ * still reports AUTH_EXPIRED instead of looping between two dead values.
+ */
+function fallBackToEnvSeed() {
+  if (seedFallbackUsed || !sessionFromStore) return false;
+  const seed = envSeed();
+  seedFallbackUsed = true;
+  if (!seed || seed.length < 32 || seed === sessionValue) return false;
+  sessionValue = seed;
+  sessionFromStore = false;
+  seedNeedsPersist = true;
+  seedFallbacks++;
+  return true;
+}
+
+/** A fallback seed that returned a non-auth response is the live credential; cache it. */
+async function persistSeedIfProven() {
+  if (!seedNeedsPersist) return;
+  seedNeedsPersist = false;
+  if (!kvConfigured()) return;
+  try { await setJson(SESSION_KEY, { value: sessionValue, at: new Date().toISOString() }); } catch { /* next invocation retries the fallback */ }
 }
 
 async function headers() {
@@ -91,6 +141,7 @@ async function absorbRotation(response) {
     if (value === current) return false;
     sessionValue = value;
     rotations++;
+    seedNeedsPersist = false; // the rotation is newer than any pending seed write-back
     if (kvConfigured()) {
       try { await setJson(SESSION_KEY, { value, at: new Date().toISOString() }); } catch { /* memory copy still serves this invocation */ }
     }
@@ -106,7 +157,7 @@ export class AuthExpired extends Error {
 // Transport accounting — log-safe counters only, no payloads, no cookie.
 let calls = 0;
 let auth401 = 0;
-export const transportStats = () => ({ calls, auth401, rotations });
+export const transportStats = () => ({ calls, auth401, rotations, seedFallbacks });
 
 export const READ_PROCEDURES = new Set([
   "user.getCurrentUser",
@@ -125,7 +176,10 @@ export async function trpcGet(proc, json, { tries = 4 } = {}) {
   const url = `${BASE}/trpc/${proc}?input=` +
     encodeURIComponent(JSON.stringify({ json, meta: { values: {}, v: 1 } }));
   let last;
-  for (let a = 0; a < tries; a++) {
+  // One bonus attempt is granted when the env-seed fallback swaps the
+  // credential, so a swap on the final attempt still gets to prove itself.
+  let bonus = 0;
+  for (let a = 0; a < tries + bonus; a++) {
     try {
       calls++;
       // Headers rebuilt per attempt: a 401 carrying a rotated cookie means the
@@ -133,12 +187,16 @@ export async function trpcGet(proc, json, { tries = 4 } = {}) {
       const r = await fetch(url, { headers: await headers(), signal: AbortSignal.timeout(TIMEOUT_MS) });
       await absorbRotation(r);
       if (r.status === 401 || r.status === 403) { auth401++; throw new AuthExpired(); }
+      await persistSeedIfProven();
       const b = await r.json();
       if (b?.error) throw new Error(String(b.error.json?.message || "trpc_error").slice(0, 300));
       return b?.result?.data?.json;
     } catch (e) {
       last = e;
-      if (a === tries - 1) break;
+      // A dead cached credential must yield to the operator's refreshed seed
+      // straight away — no backoff, this is a swap and not a burst.
+      if (e instanceof AuthExpired && fallBackToEnvSeed()) { bonus = 1; continue; }
+      if (a === tries + bonus - 1) break;
       // Auth blips get longer to pass than network hiccups (burst decay).
       await sleep(Math.min(6000, (e instanceof AuthExpired ? 1500 : 500) * (a + 1)));
     }
@@ -160,6 +218,7 @@ export async function trpcPost(proc, json) {
   });
   await absorbRotation(r);
   if (r.status === 401 || r.status === 403) { auth401++; throw new AuthExpired(); }
+  await persistSeedIfProven();
   const b = await r.json();
   if (b?.error) throw new Error(String(b.error.json?.message || "trpc_error").slice(0, 300));
   return b?.result?.data?.json;
