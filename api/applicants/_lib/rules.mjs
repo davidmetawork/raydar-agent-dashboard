@@ -27,6 +27,7 @@
 import { DEGREE_LEVELS, levelMatches } from "./degree.mjs";
 import { FACTS_VERSION } from "./facts.mjs";
 import { matchFundedEmployer, SNAPSHOT_ID_RE } from "./funded-employers.mjs";
+import { profileV2EmploymentEvidenceStatus } from "./profile-v2-employment-evidence.mjs";
 import { profileReceiptReady, sourceObservationIdFor } from "./profile-readiness.mjs";
 import { ruleNeedsProfileFacts } from "./rich-rule-facts.mjs";
 
@@ -178,8 +179,11 @@ export const FIELDS = {
         orgId: found.orgId,
         paraformCompanyId: found.paraformCompanyId,
         identityBasis: found.identityBasis,
-        sourceObservationId: subject.facts?.sourceObservationId,
+        sourceObservationId: subject.employmentFactsEvidence?.sourceObservationId
+          ?? subject.facts?.sourceObservationId,
         sourcePayloadDigest: subject.facts?.sourcePayloadDigest,
+        factSetVersion: subject.employmentFactsEvidence?.factSetVersion,
+        factSetDigest: subject.employmentFactsEvidence?.factSetDigest,
       } : null;
     },
   },
@@ -299,6 +303,9 @@ const ROW_GROUPS = { school: "schools", job: "jobs", employment: "allCompanies" 
 const SOURCE_PAYLOAD_DIGEST_RE = /^[a-f0-9]{64}$/;
 
 function employmentFactsSourceStatus(subject, now) {
+  if (subject?.employmentFactsEvidence) {
+    return profileV2EmploymentEvidenceStatus(subject);
+  }
   const factsObservationId = sourceObservationIdFor(subject?.facts);
   const factsPayloadDigest = typeof subject?.facts?.sourcePayloadDigest === "string"
     ? subject.facts.sourcePayloadDigest : null;
@@ -404,6 +411,8 @@ function groupMatches(conditions, subject, row, now) {
       ...(custom?.identityBasis ? { identityBasis: custom.identityBasis } : {}),
       ...(custom?.sourceObservationId ? { sourceObservationId: custom.sourceObservationId } : {}),
       ...(custom?.sourcePayloadDigest ? { sourcePayloadDigest: custom.sourcePayloadDigest } : {}),
+      ...(custom?.factSetVersion ? { factSetVersion: custom.factSetVersion } : {}),
+      ...(custom?.factSetDigest ? { factSetDigest: custom.factSetDigest } : {}),
       ...(field.kind === "snapshot" ? { snapshotId: condition.value } : {}),
     });
   }
