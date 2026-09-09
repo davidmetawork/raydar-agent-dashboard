@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "63c65670222602a381405c54a93a5444a4f2ffa61eda6db1b79621f95d0b59dc",
+  "digest": "56f34051deeabc32d95e1cd6b22182a7ecf8522d325a12c0e664cd122d97f928",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -332,7 +332,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "scripts/provision-submissions-v2-roles.sql",
-      "sha256": "029397b6a9338df72fb46ca134a30e29bfc467fd4c5df774838377bbb536261b"
+      "sha256": "7723cc5ceaada88f7a89d700536e05b3f4663b2817fc68320dec61a16febc9e6"
     },
     {
       "path": "scripts/submissions-release.mjs",
