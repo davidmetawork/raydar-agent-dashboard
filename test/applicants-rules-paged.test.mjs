@@ -72,9 +72,10 @@ function fundedV2Item() {
       sourceObservationId: SOURCE_OBSERVATION_ID, rowRevision: "row-7",
       appliedTo: { roleVersionId: "role-version-one", roleId: "role-one", title: "Engineer",
         hiringCompany: { roleVersion: { name: "Client Co", observedAt: AT, version: "role-version-one" } } } },
-    paraformProfile: { scope: { tenantScopeId: "tenant-one", personId: "person-one" },
+    applicationSource: { applicationId: APP_ID, sourceProvider: "workable",
+      scope: { tenantScopeId: "tenant-one", personId: "person-one" },
       sourceObservationId: SOURCE_OBSERVATION_ID, state: "verified", observedAt: AT,
-      factVersion: "profile-facts-v7", freshness: "current", facts: {
+      normalizedHash: "f".repeat(64), factVersion: "f".repeat(64), freshness: "current", facts: {
         name: "Candidate", title: "Engineer", location: "Austin",
         provenance: { experiences: { source: "application_source", observedAt: AT } },
         experiences: [{ recordId: "experience-funded", companyId: "pf-funded",
@@ -149,7 +150,7 @@ test("funded-employer evaluation accepts exact current V2 evidence and keeps fac
     field: "employment.fundedEmployerSnapshot", op: "member_of", source: "application_source",
     matched: "Funded Co", organizationId: "org-funded", paraformCompanyId: "pf-funded",
     identityBasis: "paraform_company_id", sourceObservationId: SOURCE_OBSERVATION_ID,
-    factSetVersion: "applicant-profile-v2-fact-set-v1", factSetDigest: item.factSetDigest,
+    factSetVersion: "applicant-profile-v2-fact-set-v2", factSetDigest: item.factSetDigest,
     snapshotId: FUNDED_SNAPSHOT_ID,
   }]);
   assert.equal(Object.hasOwn(result.evidence.winner[0], "sourcePayloadDigest"), false,

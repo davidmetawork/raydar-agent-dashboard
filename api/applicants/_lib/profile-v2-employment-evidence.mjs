@@ -7,7 +7,7 @@
 // fact-set identity; it is never presented as a legacy source-payload digest.
 
 export const PROFILE_V2_EMPLOYMENT_EVIDENCE_VERSION = "applicant-profile-v2-employment-evidence-v1";
-export const PROFILE_V2_FACT_SET_VERSION = "applicant-profile-v2-fact-set-v1";
+export const PROFILE_V2_FACT_SET_VERSION = "applicant-profile-v2-fact-set-v2";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const text = (value) => typeof value === "string" && value.trim() ? value.trim() : null;
@@ -30,7 +30,7 @@ export function employmentEvidenceFromApplicantV2(projection) {
   const history = projection?.profile?.facts?.experiences;
   return Object.freeze({
     version: PROFILE_V2_EMPLOYMENT_EVIDENCE_VERSION,
-    factSetVersion: PROFILE_V2_FACT_SET_VERSION,
+    factSetVersion: text(projection?.factSetVersion),
     applicationId: text(projection?.application?.applicationId)?.toLowerCase() ?? null,
     sourceObservationId: text(projection?.application?.sourceObservationId),
     factSetDigest: text(projection?.factSetDigest)?.toLowerCase() ?? null,

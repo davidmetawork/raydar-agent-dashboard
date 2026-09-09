@@ -1,5 +1,6 @@
 import postgres from 'postgres';
 import { projectPinnedApplicantProfile } from './paged-core/paged-profile-contract.mjs';
+import { hasUsableApplicantProfileV2 } from './paged-core/applicant-profile-contract.mjs';
 import { PAGED_DECISION_AUTHORITY_VERSION } from './paged-core/paged-decision-authority.mjs';
 import { readActivePagedViewManifest, readActivePagedViewPage, readPagedViewDetail,
   readActivePagedViewAuthority } from './paged-core/paged-view-read.mjs';
@@ -27,10 +28,19 @@ export function projectPagedDocument(document) {
   const captured = document.captured || {};
   const current = document.current === true;
   const profileV2 = index.profilePins ? projectPinnedApplicantProfile({ pins: index.profilePins,
-    paraform: document.profile, resume: document.resume, current, problems: raw.problems || [] }) : null;
+    source: document.source, paraform: document.profile, resume: document.resume,
+    current, problems: raw.problems || [] }) : null;
   const profileKey = `application:${raw.application_id}:${raw.id}`;
   const facts = profileV2?.profile?.facts;
-  const name = string(facts?.name?.value) || string(source.name) || string(source.fullName)
+  const reviewProfileUsable = hasUsableApplicantProfileV2(profileV2);
+  const viewStates = [...new Set([
+    ...(Array.isArray(raw.view_states) ? raw.view_states : []).filter((state) =>
+      reviewProfileUsable || state !== 'ready'),
+    ...(!reviewProfileUsable ? ['preparing'] : []),
+  ])].sort();
+  const name = string(facts?.name?.value) || string(source.name) || string(source.contact?.name)
+    || string(source.context_snapshot?.candidate_detail?.name) || string(source.applicant?.name)
+    || string(source.fullName)
     || string([source.firstName, source.lastName].filter(Boolean).join(' ')) || string(captured.candidateName);
   const actionability = profileV2?.actionability;
   const viewAuthority = raw.source_observation_id && raw.fact_set_digest ? {
@@ -48,7 +58,7 @@ export function projectPagedDocument(document) {
     appliedAtIso: /T\d{2}:\d{2}/.test(index.appliedAt || '') ? index.appliedAt : null,
     addedAt: raw.source_arrival_at, receivedAt: raw.source_arrival_at,
     sourceObservationId: raw.source_observation_id, sourceStatus: raw.source_status,
-    state: raw.partition === 'preparing' ? 'profile_preparing' : raw.source_status,
+    state: raw.partition === 'preparing' || !reviewProfileUsable ? 'profile_preparing' : raw.source_status,
     status: raw.invitation_state === 'externally_committed' ? 'emailed' : raw.source_status,
     inputRevision: raw.input_revision, readinessRevision: raw.readiness_revision,
     decisionRevision: Number(raw.decision_revision || 0),
@@ -56,8 +66,9 @@ export function projectPagedDocument(document) {
     interviewWhenReadyAllowed: current && index.interviewWhenReadyAllowed === true
       && actionability?.canCreateApproval === true,
     linkedin: facts?.linkedin?.value || null, tier: index.tier || null,
-    reason: raw.problems?.[0]?.code || (raw.partition === 'preparing' ? 'profile_preparing' : null),
-    problems: raw.problems || [], viewAuthority, viewStates: raw.view_states,
+    reason: raw.problems?.[0]?.code || (!reviewProfileUsable
+      ? 'profile_review_content_unavailable' : raw.partition === 'preparing' ? 'profile_preparing' : null),
+    problems: raw.problems || [], viewAuthority, viewStates,
     decisionAt: raw.decision_at, decisionAction: raw.decision_action,
     savedDecisionRequestId: index.decisionRequestId || null,
     rowDigest: raw.row_digest,
