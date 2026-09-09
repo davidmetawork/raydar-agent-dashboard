@@ -1971,7 +1971,15 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
              set action_state='resolved', resolved_at=clock_timestamp(), resolved_by=${actorEmail}, resolution_note=${clean(note, 500)}
            where pair_id=${pairId} and action_state='open'
         `;
-        const nextWorkflow = destination === "interested" ? "preparing_resume" : "not_interested";
+        const currentArtifact = destination === "interested" && current.current_artifact_id ? (await tx`
+          select id from submissions_v2.resume_artifacts
+           where id=${current.current_artifact_id} and pair_id=${pairId} and kind='pdf'
+             and validation_status='passed' and current_state='current' and deleted_at is null
+             and archived_at is not null and archive_readback_at is not null
+        `)[0] : null;
+        const nextWorkflow = destination === "interested"
+          ? currentArtifact ? "interested" : "preparing_resume"
+          : "not_interested";
         const updated = (await tx`
           update submissions_v2.candidate_role_pairs
              set intent_state=${destination}, workflow_state=${nextWorkflow}, state_version=state_version+1
@@ -2022,9 +2030,15 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                    correction_note=${clean(note, 500)}, active_projection=false
              where pair_id=${pairId} and active_projection
           `;
-          await queueResume(tx, updated, commandRow, "retry");
+          if (nextWorkflow === "preparing_resume") {
+            await queueResume(tx, updated, commandRow, "retry");
+          }
         }
-        await pairEvent(tx, updated, { actorId: actorEmail, source: action, eventType: "classification_corrected", expectedVersion, previous: current, note, idempotencyKey: `pair:${commandRow.id}` });
+        await pairEvent(tx, updated, {
+          actorId: actorEmail, source: action, eventType: "classification_corrected",
+          expectedVersion, previous: current, note, idempotencyKey: `pair:${commandRow.id}`,
+          metadata: { reused_current_artifact: Boolean(currentArtifact) },
+        });
         return { case_id: pairId, state: updated.workflow_state, state_version: Number(updated.state_version) };
       }));
     },
@@ -3192,6 +3206,58 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         const controls = await tx`select * from submissions_v2.lock_runtime_controls()`;
         if (!controls[0]) throw problem("submissions_v2_controls_unavailable", "Submissions V2 controls are unavailable.", 503);
         if (!controls[0].ui_enabled || !controls[0].generation_enabled) return { recovered: [] };
+        // A Review resolution may deliberately ask for Interested while a
+        // previously promoted resume is still current. If that refresh ends
+        // safely, the existing resume remains authoritative; do not strand the
+        // pair in Preparing after all generation work has become terminal.
+        const readyOrphans = await tx`
+          select pair.*
+            from submissions_v2.candidate_role_pairs pair
+            join submissions_v2.resume_artifacts artifact
+              on artifact.id=pair.current_artifact_id and artifact.pair_id=pair.id
+             and artifact.kind='pdf' and artifact.validation_status='passed'
+             and artifact.current_state='current' and artifact.deleted_at is null
+             and artifact.archived_at is not null and artifact.archive_readback_at is not null
+           where pair.intent_state='interested' and pair.workflow_state='preparing_resume'
+             and pair.case_hidden_at is null
+             and not exists (
+               select 1 from submissions_v2.review_items review
+                where review.pair_id=pair.id and review.action_state='open'
+             )
+             and not exists (
+               select 1 from submissions_v2.resume_generations generation
+                where generation.pair_id=pair.id
+                  and generation.status = any(${tx.array(ACTIVE_GENERATION_STATES, 25)})
+             )
+             and not exists (
+               select 1 from submissions_v2.jobs job
+                where job.kind='prepare_resume' and job.subject_type='pair'
+                  and job.subject_id=pair.id::text and job.state in ('queued','running')
+             )
+           order by pair.updated_at, pair.id
+           for update of pair skip locked
+           limit ${take}
+        `;
+        const recovered = [];
+        for (const pair of readyOrphans) {
+          const updated = (await tx`
+            update submissions_v2.candidate_role_pairs
+               set workflow_state='interested', state_version=state_version+1
+             where id=${pair.id} and state_version=${pair.state_version}
+             returning *
+          `)[0];
+          if (!updated) continue;
+          await pairEvent(tx, updated, {
+            actorType: 'worker', actorId, source: 'resume_generation',
+            eventType: 'resume_ready_recovered', expectedVersion: Number(pair.state_version), previous: pair,
+            idempotencyKey: `pair:resume-ready-recovered:${pair.id}:${pair.state_version}`,
+            metadata: { current_artifact_id: pair.current_artifact_id, recovery: 'terminal_refresh' },
+          });
+          recovered.push({
+            generation_id: null, pair_id: pair.id, routed_to_review: false,
+            reused_current_artifact: true,
+          });
+        }
         const expired = await tx`
           select generation.*
             from submissions_v2.resume_generations generation
@@ -3207,9 +3273,8 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
              )
            order by generation.deadline_at, generation.id
            for update skip locked
-           limit ${take}
+           limit ${Math.max(0, take - readyOrphans.length)}
         `;
-        const recovered = [];
         for (const generation of expired) {
           const pair = (await tx`
             select * from submissions_v2.candidate_role_pairs

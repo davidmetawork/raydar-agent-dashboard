@@ -23,6 +23,14 @@ pair-scoped sources. It opens no dialog and requires no supplemental evidence me
 becomes the existing reduced-motion-safe spinner while the immutable replacement is built, and the
 prior validated resume remains downloadable until atomic promotion.
 
+Review resolution and retry recovery preserve that same atomic-ready contract. Resolving a candidate
+as Interested reuses an already validated current PDF/ATS/manifest set instead of putting the row back
+into preparation. A recruiter-triggered retry may reuse deterministic source collection and evidence
+checkpoints, but it always rebuilds the model strategy and downstream validation/rendering work so a
+failed draft cannot be replayed as the new attempt. The worker recovery loop also returns a row with a
+validated current artifact from `preparing_resume` to `interested` after all refresh work is terminal;
+it does not cross an open Review blocker or a live generation/job fence.
+
 ## End-to-end flow
 
 1. A versioned Master Inbox event, curated-list observation, or deliberate teammate action creates immutable source evidence.
