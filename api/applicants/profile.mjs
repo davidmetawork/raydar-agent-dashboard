@@ -32,6 +32,7 @@ import { readActivePublication, readPublishedArtifacts } from "./_lib/generation
 import { richBindingsForSnapshot, richProfileReadyMatches } from "./_lib/rich-profile.mjs";
 import { richProfileForRules } from "./_lib/rich-rule-facts.mjs";
 import { applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
+import { pagedReadsEnabled, readApplicantDetail } from './_lib/paged.mjs';
 
 export const config = { maxDuration: 60 };
 
@@ -134,12 +135,25 @@ function mapEducation(row, ranks) {
 export function createProfileHandler({
   corsHandler = cors, authHandler = requireAuth, kvReady = kvConfigured,
   readJson = getJson, readMany = hashGetMany, now = Date.now,
+  pagedEnabled = pagedReadsEnabled, readPaged = readApplicantDetail,
 } = {}) {
 return async function handler(req, res) {
   if (corsHandler(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
   if (!(await authHandler(req, res))) return;
   if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
+  if (pagedEnabled()) {
+    if (!req.query?.applicationId || !req.query?.generationId || !req.query?.generationDigest || !req.query?.rowDigest) {
+      return res.status(400).json({ ok: false, error: 'applicant_profile_identity_required' });
+    }
+    try {
+      const result = await readPaged(req.query);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json({ ok: true, ...result.profile, row: result.row, generation: result.generation });
+    } catch {
+      return res.status(409).json({ ok: false, error: 'applicant_profile_changed_refresh_required' });
+    }
+  }
 
   const cu = String(req.query?.cu || "").trim();
   if (!PROFILE_KEY_RE.test(cu)) return res.status(400).json({ ok: false, error: "invalid_cu" });

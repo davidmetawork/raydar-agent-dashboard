@@ -7,7 +7,8 @@
 import { cors, requireAuth } from "./_lib/core.mjs";
 import { gzipSync } from "node:zlib";
 import { readActivePublication, readPublishedArtifacts, verifyGeneration } from "./_lib/generation.mjs";
-import { getJson, hashGetAllJson, K, kvConfigured } from "./_lib/kv.mjs";
+import { getJson, hashGetAllJson, hashGetMany, K, kvConfigured } from "./_lib/kv.mjs";
+import { pagedReadsEnabled, readApplicantPage, readApplicantManifest, pagedFeedResponse } from './_lib/paged.mjs';
 import { sourceCardsOnly } from "./_lib/rich-profile.mjs";
 import { applicantProblemsV2, applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
 import {
@@ -102,6 +103,10 @@ export function createFeedHandler({
   now = Date.now,
   readActive = () => readActivePublication({ readJson }),
   readArtifacts = (pointer) => readPublishedArtifacts(pointer, { readJson }),
+  pagedEnabled = pagedReadsEnabled,
+  readPaged = readApplicantPage,
+  readPagedManifest = readApplicantManifest,
+  readMany = hashGetMany,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -109,6 +114,17 @@ export function createFeedHandler({
     if (!(await authHandler(req, res))) return;
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
     try {
+      if (pagedEnabled()) {
+        if (req.query?.manifestOnly === '1') {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.status(200).json({ ok: true, paged: true, manifest: await readPagedManifest() });
+        }
+        const data = await readPaged(req.query || {});
+        const keys = data.applicants.map(applicant => applicant.row.key);
+        const [decisions, acks] = await Promise.all([readMany(K.decisions, keys), readMany(K.acks, keys)]);
+        res.setHeader('Cache-Control', 'no-store');
+        return respondApplicantFeed(req, res, pagedFeedResponse(data, { decisions, acks }));
+      }
       // The pointer is deliberately read first. Never merge legacy/split keys
       // when the active generation is missing or incomplete: a mixed feed can
       // make a browser action against the wrong applicant revision.

@@ -6,7 +6,7 @@ const applicants = await readFile(new URL("../applicants.html", import.meta.url)
 
 test("Applicants installs the complete compact-card index from the feed", () => {
   assert.match(applicants, /STATE\.cards = body\.cards \|\| \{\}/);
-  assert.match(applicants, /fetch\("\/api\/applicants\/feed"/);
+  assert.match(applicants, /fetch\(["']\/api\/applicants\/feed(?:\?["']\s*\+\s*applicantPageQuery\(\)|["'])/);
   assert.doesNotMatch(applicants, /\/api\/applicants\/cards\?cus=/);
 });
 
