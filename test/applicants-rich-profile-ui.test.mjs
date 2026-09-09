@@ -136,6 +136,33 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
   return { card: rendered.historyHtml(row), modal: profileCard.innerHTML };
 }
 
+test('actual stored-profile reconstruction never renders conflicting source careers in card or modal', async () => {
+  const fixtures = JSON.parse(await readFile(new URL('./fixtures/historical-source-attribution-pins.json', import.meta.url)));
+  for (const name of ['conflicting_native_shape', 'safe_provider', 'safe_resume', 'legacy_resume']) {
+    const input = fixtures.cases[name];
+    const projected = projectPagedDocument({ current: true, source: input.source,
+      profile: input.paraform, resume: input.resume,
+      row: { id: 'row-attribution', application_id: input.pins.application.applicationId,
+        monitor_key: 'core:attribution', row_revision: 7, row_digest: 'a'.repeat(64),
+        source_observation_id: input.pins.application.sourceObservationId,
+        source_status: 'held', partition: 'ready', view_states: ['ready'],
+        role_title: 'Target Role', company: 'Target Company',
+        fact_set_digest: input.pins.factSetDigest,
+        index_payload: { profilePins: input.pins, interviewAllowed: true,
+          interviewWhenReadyAllowed: true }, problems: [] } });
+    const rendered = renderHarness({ card: projected.card, profile: projected.profile,
+      projected: projected.profileV2, rowOverrides: projected.row });
+    for (const html of [rendered.card, rendered.modal]) {
+      assert.doesNotMatch(html, /Archived Source (Title|Employer|School)|Copied Wrong/);
+      assert.doesNotMatch(html, /data-rule-fact-kind=/);
+    }
+    if (name === 'safe_provider') {
+      assert.match(rendered.modal, /Verified Provider Title|Verified Provider Employer/);
+    }
+    if (name.includes('resume')) assert.match(rendered.modal, /Independent Resume School/);
+  }
+});
+
 test("selected list history remains available in detail while its read is pending or fails", () => {
   const facts = {
     name: { value: "Selected Applicant", source: "application_source", freshness: "current", state: "fallback" },

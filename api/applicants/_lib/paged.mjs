@@ -119,18 +119,22 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
   }
   const profileKey = `application:${raw.application_id}:${raw.id}`;
   const facts = profileV2?.profile?.facts;
+  const problems = profileV2?.problems || raw.problems || [];
+  const sourceAttributionConflict = problems.some(problem =>
+    problem.code === 'historical_v4_source_identity_conflict');
   const reviewProfileUsable = hasUsableApplicantProfileV2(profileV2);
   const viewStates = [...new Set([
     ...(Array.isArray(raw.view_states) ? raw.view_states : []).filter((state) =>
       reviewProfileUsable || state !== 'ready'),
     ...(!reviewProfileUsable ? ['preparing'] : []),
+    ...(sourceAttributionConflict ? ['preparing', 'problems'] : []),
   ])].sort();
   const name = string(facts?.name?.value) || string(source.name) || string(source.contact?.name)
     || string(source.context_snapshot?.candidate_detail?.name) || string(source.applicant?.name)
     || string(source.fullName)
     || string([source.firstName, source.lastName].filter(Boolean).join(' ')) || string(captured.candidateName);
   const actionability = profileV2?.actionability;
-  const viewAuthority = raw.source_observation_id && raw.fact_set_digest ? {
+  const viewAuthority = !sourceAttributionConflict && raw.source_observation_id && raw.fact_set_digest ? {
     version: PAGED_DECISION_AUTHORITY_VERSION, applicationId: raw.application_id,
     rowVersionId: raw.id, rowRevision: Number(raw.row_revision), rowDigest: raw.row_digest,
     sourceObservationId: raw.source_observation_id, profileBindingId: raw.profile_binding_id,
@@ -153,15 +157,15 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
     interviewWhenReadyAllowed: current && index.interviewWhenReadyAllowed === true
       && actionability?.canCreateApproval === true,
     linkedin: facts?.linkedin?.value || null, tier: index.tier || null,
-    reason: raw.problems?.[0]?.code || (!reviewProfileUsable
+    reason: problems[0]?.code || (!reviewProfileUsable
       ? 'profile_review_content_unavailable' : raw.partition === 'preparing' ? 'profile_preparing' : null),
-    problems: raw.problems || [], viewAuthority, viewStates,
+    problems, viewAuthority, viewStates,
     decisionAt: raw.decision_at, decisionAction: raw.decision_action,
     savedDecisionRequestId: index.decisionRequestId || null,
     rowDigest: raw.row_digest,
-    profileUpdatePending: !current,
+    profileUpdatePending: !current || sourceAttributionConflict,
     factsCurrent: profileV2?.factsCurrent === true,
-    rowCurrent: current,
+    rowCurrent: current && !sourceAttributionConflict,
   };
   const profile = { name, title: facts?.title?.value || null, location: facts?.location?.value || null,
     imageSrc: profileV2?.profile?.photo || null, linkedin: row.linkedin, profileV2,
