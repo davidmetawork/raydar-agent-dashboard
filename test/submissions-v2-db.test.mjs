@@ -348,8 +348,11 @@ test("authoritative submission proof may persist while resume preparation remain
         kind: "prepare_resume",
         requiredControl: "generation",
         checkpoint: { trigger_kind: "retry" },
+        priority: 50,
       });
       assert.ok(retry.job_id);
+      const [retryJob] = await tx`select priority from submissions_v2.jobs where id=${retry.job_id}`;
+      assert.equal(Number(retryJob.priority), 50, "a retried build queues at the fresh-build priority, not the 100 default");
       assert.equal((await repository.pair(pairId)).submission_status, "proven");
 
       const regeneratingPairId = randomUUID();
