@@ -59,10 +59,13 @@ export function hasExactApplicantProfileScope(candidate, application, { resume =
     && left.tenantScopeId === right.tenantScopeId && left.personId === right.personId);
 }
 
-function factMetadata(candidate, source, state) {
+function factMetadata(candidate, source, state, key = null) {
+  const provenance = key ? object(candidate?.facts?.provenance?.[key]) : null;
+  const fieldSource = ["application_source", "selected_resume"].includes(provenance?.source)
+    ? provenance.source : source;
   return {
-    source,
-    observedAt: iso(candidate?.observedAt),
+    source: fieldSource,
+    observedAt: iso(provenance?.observedAt) || iso(candidate?.observedAt),
     factVersion: text(candidate?.factVersion),
     freshness: ["current", "stale", "unknown"].includes(candidate?.freshness)
       ? candidate.freshness : "unknown",
@@ -103,8 +106,8 @@ function nullFact() {
   });
 }
 
-function selectedFact(value, candidate, source, state) {
-  return Object.freeze({ value, ...factMetadata(candidate, source, state) });
+function selectedFact(value, candidate, source, state, key) {
+  return Object.freeze({ value, ...factMetadata(candidate, source, state, key) });
 }
 
 // Logos are a provider record attribute, never a name lookup. Requiring the
@@ -132,16 +135,16 @@ function scalar(value) {
 function selectScalar(key, provider, providerValidity, resume, resumeValidity) {
   if (providerValidity === "usable" && own(provider.facts, key)) {
     const value = scalar(provider.facts[key]);
-    if (value !== null) return selectedFact(value, provider, PROFILE_SOURCE, "verified");
+    if (value !== null) return selectedFact(value, provider, PROFILE_SOURCE, "verified", key);
   }
   if (resumeValidity === "usable" && own(resume.facts, key)) {
     const value = scalar(resume.facts[key]);
-    if (value !== null) return selectedFact(value, resume, RESUME_SOURCE, "fallback");
+    if (value !== null) return selectedFact(value, resume, RESUME_SOURCE, "fallback", key);
   }
   return nullFact();
 }
 
-function experience(entry, candidate, source, state) {
+function experience(entry, candidate, source, state, key = "experiences") {
   const row = object(entry) ?? {};
   const companyId = id(row.companyId);
   // These fields always come from this one record.  Never fill a blank field
@@ -153,21 +156,16 @@ function experience(entry, candidate, source, state) {
     roleTitle: text(row.roleTitle, 500),
     start: text(row.start, 64),
     end: text(row.end, 64),
-    current: row.current === true,
+    current: typeof row.current === "boolean" ? row.current : null,
     location: text(row.location, 500),
     description: text(row.description, 8_000),
     industry: text(row.industry, 500),
     logo: safeEntityLogo(row.logo, companyId),
-    source,
-    observedAt: iso(candidate?.observedAt),
-    factVersion: text(candidate?.factVersion),
-    freshness: ["current", "stale", "unknown"].includes(candidate?.freshness)
-      ? candidate.freshness : "unknown",
-    state,
+    ...factMetadata(candidate, source, state, key),
   });
 }
 
-function education(entry, candidate, source, state) {
+function education(entry, candidate, source, state, key = "education") {
   const row = object(entry) ?? {};
   const schoolId = id(row.schoolId);
   return Object.freeze({
@@ -181,26 +179,21 @@ function education(entry, candidate, source, state) {
     schoolWebsite: text(row.schoolWebsite, 1_500),
     description: text(row.description, 8_000),
     logo: safeEntityLogo(row.logo, schoolId),
-    source,
-    observedAt: iso(candidate?.observedAt),
-    factVersion: text(candidate?.factVersion),
-    freshness: ["current", "stale", "unknown"].includes(candidate?.freshness)
-      ? candidate.freshness : "unknown",
-    state,
+    ...factMetadata(candidate, source, state, key),
   });
 }
 
 function selectHistory(key, map, provider, providerValidity, resume, resumeValidity) {
   if (providerValidity === "usable" && Array.isArray(provider.facts?.[key])) {
     return Object.freeze({
-      entries: provider.facts[key].map((entry) => map(entry, provider, PROFILE_SOURCE, "verified")),
-      ...factMetadata(provider, PROFILE_SOURCE, "verified"),
+      entries: provider.facts[key].map((entry) => map(entry, provider, PROFILE_SOURCE, "verified", key)),
+      ...factMetadata(provider, PROFILE_SOURCE, "verified", key),
     });
   }
   if (resumeValidity === "usable" && Array.isArray(resume.facts?.[key])) {
     return Object.freeze({
-      entries: resume.facts[key].map((entry) => map(entry, resume, RESUME_SOURCE, "fallback")),
-      ...factMetadata(resume, RESUME_SOURCE, "fallback"),
+      entries: resume.facts[key].map((entry) => map(entry, resume, RESUME_SOURCE, "fallback", key)),
+      ...factMetadata(resume, RESUME_SOURCE, "fallback", key),
     });
   }
   return Object.freeze({

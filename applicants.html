@@ -744,7 +744,9 @@ function applicantFact(row, name) {
   return fact && (typeof fact.value === "string" || typeof fact.value === "number") ? fact : null;
 }
 function v2ProvenanceLabel(source) {
-  return source === "paraform_linkedin" ? "Cached LinkedIn profile" : source === "resume" ? "Resume fallback" : "";
+  return source === "paraform_linkedin" ? "Cached LinkedIn profile" : source === "resume" ? "Resume fallback"
+    : source === "application_source" ? "Application source"
+    : source === "selected_resume" ? "Selected resume fallback" : "";
 }
 function v2CardProvenanceHtml(row) {
   const fields = [["Headline", applicantFact(row, "title")], ["Location", applicantFact(row, "location")]]
