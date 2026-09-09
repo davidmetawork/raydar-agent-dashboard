@@ -78,6 +78,14 @@ test("evaluator preserves Core row pins and fail-closes a missing projection", (
   assert.equal(responseDigest, pagedRuleDigest(material));
 });
 
+test("evaluator records an unavailable pinned fact set as a per-row skip", () => {
+  const item = { ...evaluatorItem(), projectionUnavailableReason: "profile_v2_fact_set_unavailable" };
+  const result = evaluatePagedRulePage(evaluatorRequest([item]));
+  assert.equal(result.items[0].outcome, "no_match");
+  assert.equal(result.items[0].skipReason, "profile_v2_fact_set_unavailable");
+  assert.deepEqual(result.items[0].evidence, { watchingMatches: [] });
+});
+
 test("evaluator refuses any page above the server-owned 500-row bound", () => {
   const rows = Array.from({ length: PAGED_RULE_EVALUATOR_BATCH_MAX + 1 }, evaluatorItem);
   assert.throws(() => evaluatePagedRulePage(evaluatorRequest(rows)), /paged_rule_evaluator_request_invalid/);

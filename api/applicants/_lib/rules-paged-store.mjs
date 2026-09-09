@@ -47,7 +47,7 @@ export async function readPagedRulePreviewResults(id, { after = 0, limit = 8 } =
     || !Number.isSafeInteger(size) || size < 1 || size > 200) {
     throw new Error("paged_rule_preview_results_invalid");
   }
-  return read(`SELECT position,application_id AS "applicationId",monitor_key AS "monitorKey",
+  return read(`SELECT item_position AS position,application_id AS "applicationId",monitor_key AS "monitorKey",
       outcome,rule_id AS "ruleId",rule_version AS "ruleVersion",evidence,skip_reason AS "skipReason"
     FROM applicant_core.read_graph_rule_preview_results($1::uuid,$2::bigint,$3::integer)`,
   [operationId(id), position, size]);

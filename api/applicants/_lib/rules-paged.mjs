@@ -55,9 +55,14 @@ export function evaluatePagedRulePage(request,{fundedEmployerSnapshots={}}={}){
     ||!request.items.length||request.items.length>PAGED_RULE_EVALUATOR_BATCH_MAX)throw new Error("paged_rule_evaluator_request_invalid");
   const requestDigest=pagedRuleDigest(request),clock=Date.parse(request.evaluatedAt);if(!Number.isFinite(clock))throw new Error("paged_rule_evaluator_request_invalid");
   const items=request.items.map(item=>{
+    if(item.projectionUnavailableReason!=null&&item.projectionUnavailableReason!=="profile_v2_fact_set_unavailable"){
+      throw new Error("paged_rule_evaluator_request_invalid");
+    }
     const authority={applicationId:item.applicationId,rowVersionId:item.rowVersionId,rowRevision:Number(item.rowRevision),monitorKey:item.monitorKey,
       inputRevision:item.inputRevision,readinessRevision:item.readinessRevision??null,
       factSetDigest:item.factSetDigest,decisionRevision:Number(item.decisionRevision)};
+    if(item.projectionUnavailableReason)return {...authority,outcome:"no_match",ruleId:null,ruleVersion:null,
+      evidence:{watchingMatches:[]},skipReason:item.projectionUnavailableReason};
     const row=item.row||{...item.indexPayload,key:item.monitorKey,inputRevision:item.inputRevision,decisionRevision:Number(item.decisionRevision)};
     const base=ruleSubjectFromApplicantV2(row,item.projection,{now:clock});
     const subject=base?{...base,fundedEmployerSnapshots}:null;
