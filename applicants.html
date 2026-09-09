@@ -460,7 +460,7 @@
       <button class="view-pill" id="pillRules" onclick="setView('rules')">Rules <span class="n" id="rulesCount"></span><span class="paused-flag" id="rulesPausedFlag">Paused</span></button>
       <span class="spacer"></span>
       <span id="toolbarFilters" style="display:contents">
-      <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;resetVirtualLists();renderLists()"><option value="all">All roles</option></select>
+      <select id="roleFilter" aria-label="Filter by role" onchange="STATE.role=this.value;applicantFiltersChanged()"><option value="all">All roles</option></select>
       <select id="sortOrder" aria-label="Sort by application date" onchange="setSortOrder(this.value)">
         <option value="newest">Newest to oldest</option>
         <option value="oldest">Oldest to newest</option>
@@ -473,7 +473,7 @@
         <option value="emailed">Emailed</option>
         <option value="blocked">Blocked</option>
       </select>
-      <input id="searchInput" type="text" placeholder="Search name, role, or job…" autocomplete="off" oninput="STATE.query=this.value;resetVirtualLists();renderLists()" />
+      <input id="searchInput" type="text" placeholder="Search name, role, or job…" autocomplete="off" oninput="STATE.query=this.value;applicantFiltersChanged(true)" />
       </span>
     </div>
 
@@ -510,6 +510,10 @@
     <button class="ghost" onclick="clearChecked()">Clear</button>
   </div>
 
+  <div id="pagedFooter" style="display:none;text-align:center;padding:16px" aria-live="polite">
+    <span id="pagedCount"></span> <button class="ghost" id="pagedMore" onclick="loadMoreApplicants(true)">Load more applicants</button>
+    <button class="ghost" id="pagedUpdates" onclick="loadFeed(true)" hidden>Show updates</button>
+  </div>
   <div id="profileModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="profileName">
     <div class="modal-card" id="profileCard"></div>
   </div>
@@ -542,8 +546,11 @@ const STATE = {
   checked: new Set(), busy: new Set(),
   modal: null,                        // { cu, key, row, source }
   loaded: false,
+  paged: false,
   feedUnavailable: null,              // fail closed: never keep rendering an unverified snapshot
 };
+const APPLICANT_PAGE = { sequence: 0, loading: false, nextCursor: null, manifest: null,
+  updates: false, error: null, loaded: 0, checking: false };
 // Rich Paraform history is intentionally absent from the feed: thousands of
 // compact overlays would put the response over the function body cap. Keep it
 // in a generation-scoped viewport cache instead. A response can only paint if
@@ -574,6 +581,7 @@ function setSortOrder(value) {
   $("sortOrder").value = STATE.sort;
   try { localStorage.setItem(SORT_KEY, STATE.sort); } catch {}
   resetVirtualLists();
+  if (STATE.paged) { loadFeed(true); return; }
   renderLists();
 }
 
@@ -743,6 +751,7 @@ function v2CardProvenanceHtml(row) {
     .filter(([, value]) => value?.source)
     .map(([label, value]) => label + ": " + v2ProvenanceLabel(value.source)
       + (value.freshness && value.freshness !== "current" ? " (" + value.freshness + ")" : ""));
+  if (row?.profileUpdatePending) fields.unshift('Profile update pending; showing saved facts');
   return fields.length ? '<div class="v2-provenance">' + esc(fields.join(" · ")) + "</div>" : "";
 }
 function appliedRole(row) {
@@ -771,6 +780,7 @@ function cardFor(cu) {
   return rich ? { ...source, ...rich } : source;
 }
 function requestVisibleRichCards(rows) {
+  if (STATE.paged) return;
   const requestKey = syncRichGeneration();
   if (!requestKey || !rows?.length) return;
   const requestedAt = Date.now();
@@ -1053,6 +1063,7 @@ function sortByDecisionDate(rows) {
   });
 }
 function matchesFilters(row) {
+  if (STATE.paged) return true;
   if (STATE.role !== "all" && (row.roleTitle || "") !== STATE.role) return false;
   const q = STATE.query.trim().toLowerCase();
   if (q && !String(row.name || "").toLowerCase().includes(q)) return false;
@@ -1310,6 +1321,7 @@ function avatarHtml(row) {
 }
 
 function renderStats() {
+  if (STATE.paged && !STATE.feedUnavailable) { renderPagedStats(); return; }
   const counts = STATE.snapshot?.counts || {};
   const dayZone = counts.dayTimeZone === "America/Los_Angeles" ? "Pacific time" : counts.dayTimeZone || "UTC";
   $("statNew").title = "Applications first received by Raydar today (" + dayZone + ").";
@@ -1501,6 +1513,7 @@ function renderStats() {
 }
 
 function renderPills() {
+  if (STATE.paged) { renderPagedPills(); return; }
   $("reviewCount").textContent = STATE.snapshot ? String(pendingRows().length) : "";
   $("requestedCount").textContent = STATE.snapshot ? String(requestedRows().length) : "";
   $("emailedCount").textContent = STATE.snapshot ? String(emailedRows().length) : "";
@@ -1569,6 +1582,21 @@ function setPillDescription(id, label, text) {
 }
 
 function renderRoleFilter() {
+  if (STATE.paged) {
+    const select = $('roleFilter');
+    const roles = APPLICANT_PAGE.manifest?.roles || [];
+    const options = new Map();
+    for (const role of roles) {
+      const value = role.roleId ? 'role:' + role.roleId : 'job:' + role.sourceJobId;
+      options.set(value, [role.title || 'Unknown role', role.company].filter(Boolean).join(' @ '));
+    }
+    select.innerHTML = '<option value="all">All roles</option>' + [...options].map(([value, label]) =>
+      '<option value="' + esc(value) + '">' + esc(label) + '</option>').join('');
+    select.value = options.has(STATE.role) ? STATE.role : 'all';
+    STATE.role = select.value;
+    renderSortControl();
+    return;
+  }
   const roles = [...new Set([...queueRows(), ...streamRows(), ...profilePreparingRows()]
     .map((r) => r.roleTitle).filter(Boolean))].sort();
   const select = $("roleFilter"), current = STATE.role;
@@ -1602,6 +1630,10 @@ function currentInvitationFor(key, decision) {
 }
 function decisionStatus(key, decision) {
   const ack = ackFor(key);
+  if (STATE.paged && decision?.action === 'pass') {
+    const row = applicantListRow(key);
+    if (row?.decisionAction === 'pass' && row.savedDecisionRequestId === decision.requestId) return 'passed';
+  }
   if (decision?.action === "pass" && (!decision.requestId || ack?.reason==='human_pass')) return "passed";
   if (decision?.action === "interview" && SENT_ACK_STATUSES.has(String(ack?.status || ""))) return "emailed";
   const invitation = currentInvitationFor(key, decision);
@@ -1616,6 +1648,7 @@ function decisionStatus(key, decision) {
 function setDecisionFilter(value) {
   STATE.decisionStatus = ["passed", "queued", "emailed", "blocked"].includes(value) ? value : "all";
   resetVirtualLists();
+  if (STATE.paged) { loadFeed(true); return; }
   renderLists();
 }
 function renderDecisionFilter(decidedMode) {
@@ -1624,7 +1657,8 @@ function renderDecisionFilter(decidedMode) {
   select.disabled = !decidedMode;
   select.value = STATE.decisionStatus;
   const counts = { passed: 0, queued: 0, emailed: 0, blocked: 0 };
-  for (const row of decidedRows()) counts[decisionStatus(row.key, effectiveDecision(row.key))] += 1;
+  if (STATE.paged) for (const key of Object.keys(counts)) counts[key] = APPLICANT_PAGE.manifest?.counts?.['decided_' + key] || 0;
+  else for (const row of decidedRows()) counts[decisionStatus(row.key, effectiveDecision(row.key))] += 1;
   const labels = { passed: "Passed", queued: "Interview requested", emailed: "Emailed", blocked: "Held / blocked" };
   select.options[0].textContent = "All decisions (" + decidedRows().length + ")";
   for (const [status, label] of Object.entries(labels)) {
@@ -1896,6 +1930,8 @@ function patchRow(cu) {
  *  the modal's advance-to-next both read it, so they can never disagree. */
 function reviewListRows() {
   const decidedMode = STATE.chip === "decided";
+  if (STATE.paged) return { rows: queueRows().filter(row => decidedMode
+    || STATE.view !== 'review' || !STATE.local[row.key]), decidedMode };
   let rows;
   if (decidedMode) {
     rows = sortByDecisionDate(decidedRows());
@@ -2060,9 +2096,10 @@ function renderVirtual(el) {
     "</div></div>";
   tuneVirtualRowHeight(el);
   if (spec.requestRichCards !== false) requestVisibleRichCards(shown);
+  if (spec.onNearEnd && el.clientHeight > 0 && end >= spec.rows.length - 3) queueMicrotask(spec.onNearEnd);
 }
-function paintList(el, rows, build, { requestRichCards = true } = {}) {
-  el._virtual = { rows, build, requestRichCards };
+function paintList(el, rows, build, { requestRichCards = true, onNearEnd = null } = {}) {
+  el._virtual = { rows, build, requestRichCards, onNearEnd };
   if (!el._virtualBound) {
     el._virtualBound = true;
     el.addEventListener("scroll", () => {
@@ -2099,7 +2136,8 @@ function renderReview() {
     else if (!queueRows().length || !pendingRows().length) list.innerHTML = '<div class="empty"><div class="big">Queue cleared 🎉</div>Every applicant in the published review queue has been reviewed. New ones appear as they apply.</div>';
     else list.innerHTML = '<div class="empty">Nothing in this bucket right now.</div>';
   } else {
-    paintList(list, filtered, (r) => reviewRowHtml(r, effectiveDecision(r.key)));
+    paintList(list, filtered, (r) => reviewRowHtml(r, effectiveDecision(r.key)),
+      { onNearEnd: STATE.paged ? loadMoreApplicants : null });
   }
   renderBulk();
 }
@@ -2119,14 +2157,14 @@ function renderStream() {
     list.innerHTML = '<div class="empty"><div class="big">Waiting for the first sync</div>Applicants will appear after the first verified sync.</div>';
     return;
   }
-  const rows = sortByApplicationDate(streamRows());
-  const filtered = rows.filter(matchesFilters);
+  const rows = STATE.paged ? streamRows() : sortByApplicationDate(streamRows());
+  const filtered = STATE.paged ? rows : rows.filter(matchesFilters);
   if (!filtered.length) {
     list._virtual = null;
     const hasFilters = STATE.query.trim() || STATE.role !== "all";
     list.innerHTML = '<div class="empty">' + (hasFilters ? "No applicants match the current filters." : "No S/A/B applicants in the last 30 days.") + "</div>";
   } else {
-    paintList(list, filtered, streamRowHtml);
+    paintList(list, filtered, streamRowHtml, { onNearEnd: STATE.paged ? loadMoreApplicants : null });
   }
 }
 
@@ -2246,11 +2284,13 @@ function renderProcessing() {
     return;
   }
   const rows = profilePreparingRows().filter((row) => {
+    if (STATE.paged) return true;
     if (STATE.role !== "all" && (row.roleTitle || "") !== STATE.role) return false;
     const q = STATE.query.trim().toLowerCase();
     return !q || [row.name, row.roleTitle, row.company, row.sourceJobId]
       .some((value) => String(value || "").toLowerCase().includes(q));
   }).sort((a, b) => {
+    if (STATE.paged) return 0;
     const aAt = parseDate(a.addedAt || a.appliedAt)?.getTime() || 0;
     const bAt = parseDate(b.addedAt || b.appliedAt)?.getTime() || 0;
     return bAt - aAt || String(a.key || a.profileKey || "").localeCompare(String(b.key || b.profileKey || ""));
@@ -2266,7 +2306,7 @@ function renderProcessing() {
       : 'No profiles are preparing.') + '</div>';
     return;
   }
-  paintList(list, rows, processingRowHtml, { requestRichCards: false });
+  paintList(list, rows, processingRowHtml, { requestRichCards: false, onNearEnd: STATE.paged ? loadMoreApplicants : null });
 }
 
 function affectedProblemApplications(problems, applicantRowsV2 = STATE.applicantRowsV2) {
@@ -2335,9 +2375,9 @@ function renderProblems() {
   if (STATE.feedUnavailable) { list._virtual = null; list.innerHTML = '<div class="empty">Problems are unavailable until the next verified Applicant generation.</div>'; return; }
   const rows = STATE.problems.filter((problem) => problem.state !== "resolved");
   if (!rows.length) { list._virtual = null; list.innerHTML = '<div class="empty"><div class="big">No active problems</div>Applicant Problems stay here for review; this tab does not send alerts.</div>'; return; }
-  paintList(list, rows, problemRowHtml, { requestRichCards: false });
+  paintList(list, rows, problemRowHtml, { requestRichCards: false, onNearEnd: STATE.paged ? loadMoreApplicants : null });
 }
-function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); renderProcessing(); renderProblems(); postCounts(); }
+function renderLists() { renderPills(); renderSortControl(); renderReview(); renderStream(); renderProcessing(); renderProblems(); postCounts(); if (STATE.paged) renderPagedFooter(); }
 function renderAll() {
   renderStats(); renderRoleFilter(); renderLists();
   // Rules can load before the applicant feed. Refresh its visible pending count
@@ -2349,7 +2389,8 @@ function renderAll() {
 }
 function postCounts() {
   if (window.parent === window) return;
-  window.parent.postMessage({ type: "raydar-applicants-counts", review: STATE.snapshot ? pendingRows().length : 0 }, location.origin);
+  window.parent.postMessage({ type: "raydar-applicants-counts", review: STATE.paged
+    ? (APPLICANT_PAGE.manifest?.counts?.ready || 0) : STATE.snapshot ? pendingRows().length : 0 }, location.origin);
 }
 
 /* ---- view + chip switching ---- */
@@ -2370,16 +2411,18 @@ function setView(view) {
   $("problemsView").style.display = view === "problems" ? "" : "none";
   $("rulesView").style.display = view === "rules" ? "" : "none";
   // Processing is read-only Core work, so it carries none of the review filters.
-  $("toolbarFilters").style.display = ['rules', 'processing', 'problems'].includes(view) ? "none" : "contents";
+  $("toolbarFilters").style.display = (STATE.paged ? view === 'rules' : ['rules', 'processing', 'problems'].includes(view)) ? "none" : "contents";
   const hash = "#" + view;
   if (location.hash !== hash) history.replaceState(null, "", hash);
   if (view === "rules" && window.RaydarRules) { window.RaydarRules.show(); return; }
+  if (STATE.paged) { loadFeed(true); return; }
   renderLists();
 }
 function setChip(chip) {
   STATE.chip = STATE.chip === chip ? "" : chip;   // click the active chip again -> whole pending queue
   resetVirtualLists();
   clearChecked(false);
+  if (STATE.paged) { loadFeed(true); return; }
   renderLists();
 }
 
@@ -2440,6 +2483,7 @@ async function decide(key, action, row, silent = false, { retryOfRequestId = nul
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ key, action, requestId, generationId: STATE.generation?.generationId,
         generationDigest: STATE.generation?.digest,
+        ...(row?.viewAuthority ? { viewAuthority: row.viewAuthority } : {}),
         inputRevision:v2?.inputRevision || row?.inputRevision,
         readinessRevision:v2?.actionability?.readinessRevision || row?.readinessRevision,
         decisionRevision:v2?.decisionRevision ?? row?.decisionRevision,
@@ -2511,7 +2555,12 @@ async function fetchProfile(cu) {
   // feed may describe a revised application under the same candidate id.
   const generationKey = richGenerationKey();
   try {
-    const response = await fetch("/api/applicants/profile?cu=" + encodeURIComponent(cu), { credentials: "same-origin" });
+    const displayedRow = STATE.paged ? rowByCu(cu) : null;
+    const profileQuery = STATE.paged ? new URLSearchParams({ applicationId: displayedRow?.applicationId || '',
+      generationId: STATE.generation?.generationId || '', generationDigest: STATE.generation?.digest || '',
+      rowDigest: displayedRow?.viewAuthority?.rowDigest || displayedRow?.rowDigest || '' }).toString()
+      : 'cu=' + encodeURIComponent(cu);
+    const response = await fetch('/api/applicants/profile?' + profileQuery, { credentials: 'same-origin' });
     if (response.status === 401 || response.status === 403) { showGate(); throw new Error("auth"); }
     if (!response.ok) throw new Error("Profile fetch failed");
     const body = await response.json();
@@ -2944,6 +2993,7 @@ function setRefreshBusy(seconds) {
 }
 
 async function requestRefresh() {
+  if (STATE.paged) { await loadFeed(true); return; }
   if (REFRESH.running) return;   // a second click rides the first
   const before = parseDate(STATE.snapshot?.generatedAt)?.getTime() || 0;
   try {
@@ -2997,6 +3047,135 @@ function endRefreshWatch(ok) {
 }
 
 /* ---- feed ---- */
+function applicantPageView() {
+  if (STATE.view === 'review') return STATE.chip === 'decided' ? 'decided' : 'ready';
+  if (STATE.view === 'processing') return 'preparing';
+  return STATE.view === 'rules' ? 'ready' : STATE.view;
+}
+function applicantPageQuery({ append = false } = {}) {
+  const view = applicantPageView();
+  const query = new URLSearchParams({ view, sort: ['requested','decided'].includes(view) ? 'actioned' : STATE.sort, limit: '50' });
+  if (STATE.role.startsWith('role:')) query.set('roleId', STATE.role.slice(5));
+  if (STATE.role.startsWith('job:')) query.set('sourceJobId', STATE.role.slice(4));
+  if (STATE.query.trim()) query.set('query', STATE.query.trim());
+  if (STATE.view === 'review' && STATE.chip && STATE.chip !== 'decided') query.set('chip', STATE.chip);
+  if (view === 'decided' && STATE.decisionStatus !== 'all') query.set('decisionStatus', STATE.decisionStatus);
+  if (append) {
+    query.set('generationId', STATE.generation.generationId);
+    query.set('generationDigest', STATE.generation.digest);
+    query.set('cursor', APPLICANT_PAGE.nextCursor);
+  }
+  return query;
+}
+function applicantFiltersChanged(debounce = false) {
+  resetVirtualLists();
+  if (!STATE.paged) { renderLists(); return; }
+  clearTimeout(applicantFiltersChanged.timer);
+  if (debounce) applicantFiltersChanged.timer = setTimeout(() => loadFeed(true), 250);
+  else loadFeed(true);
+}
+function renderPagedStats() {
+  const manifest = APPLICANT_PAGE.manifest;
+  const counts = manifest?.counts || {};
+  $('statNew').textContent = counts.newToday ?? '–';
+  $('statQueue').textContent = counts.ready ?? '–';
+  $('statEmailed').textContent = counts.emailedToday ?? '–';
+  $('statNew').title = 'Applications first received by Raydar today (Pacific time).';
+  $('statEmailed').title = 'Applications with a verified email send timestamp today (Pacific time).';
+  for (const id of ['generationBanner','countsBanner','rulesPausedBanner','trimBanner','cacheBanner','staleBanner']) $(id).classList.remove('on');
+  $('updatedChip').classList.remove('amber','red');
+  $('updatedText').textContent = APPLICANT_PAGE.updates ? 'Updates available'
+    : manifest?.publishedAt ? 'Updated ' + relTime(manifest.publishedAt) : 'Preparing applicant list';
+  if (APPLICANT_PAGE.error) $('updatedText').textContent = 'Refresh interrupted · saved list retained';
+}
+function renderPagedPills() {
+  const counts = APPLICANT_PAGE.manifest?.counts || {};
+  for (const [id, key] of Object.entries({ reviewCount:'ready',requestedCount:'requested',emailedCount:'emailed',
+    deliveryCount:'delivery',streamCount:'stream',processingCount:'preparing',problemsCount:'problems',
+    chipCountC:'ctier',chipCountU:'unrated',chipCountNoLinkedin:'noLinkedin',chipCountNoHistory:'noHistory',chipCountD:'decided' })) {
+    $(id).textContent = String(counts[key] || 0);
+  }
+  document.querySelectorAll('[data-chip]').forEach(el => el.classList.toggle('active', el.dataset.chip === STATE.chip));
+  $('chipHint').textContent = STATE.chip === 'decided' ? 'All retained decisions' : '';
+  setPillDescription('pillRequested','Interview requested','Saved Interview approvals whose invitation is waiting, queued, or held.');
+  setPillDescription('pillEmailed','Already emailed','Applications with retained provider send evidence or a verified prior send.');
+  setPillDescription('pillDelivery','Delivery review','Applications whose delivery requires an explained next step.');
+}
+function renderPagedFooter() {
+  const footer = $('pagedFooter');
+  footer.style.display = STATE.view === 'rules' ? 'none' : '';
+  $('pagedCount').textContent = APPLICANT_PAGE.error || APPLICANT_PAGE.loaded.toLocaleString() + ' applicants loaded';
+  $('pagedMore').hidden = !APPLICANT_PAGE.nextCursor;
+  $('pagedMore').disabled = APPLICANT_PAGE.loading;
+  $('pagedMore').textContent = APPLICANT_PAGE.loading ? 'Loading…' : 'Load more applicants';
+  $('pagedUpdates').hidden = !APPLICANT_PAGE.updates;
+}
+function applyPagedFeed(body, { append = false } = {}) {
+  if (append && (body.generation?.generationId !== STATE.generation?.generationId
+    || body.generation?.digest !== STATE.generation?.digest)) {
+    throw new Error('The applicant list changed while loading. Refresh to retry.');
+  }
+  const previousGeneration = richGenerationKey();
+  const priorRows = append ? [...queueRows(), ...streamRows(), ...profilePreparingRows()] : [];
+  const incomingRows = [...(body.snapshot?.queue || []), ...(body.snapshot?.stream || []), ...(body.profilePreparingRows || [])];
+  const ids = new Set(priorRows.map(row => row.applicationId));
+  for (const row of incomingRows) {
+    if (!row.applicationId || ids.has(row.applicationId)) throw new Error('The applicant page repeated an application. Refresh to retry.');
+    ids.add(row.applicationId);
+  }
+  STATE.paged = true;
+  STATE.feedUnavailable = null;
+  STATE.snapshot = { ...body.snapshot, queue: append ? [...queueRows(), ...(body.snapshot?.queue || [])] : body.snapshot?.queue || [],
+    stream: append ? [...streamRows(), ...(body.snapshot?.stream || [])] : body.snapshot?.stream || [] };
+  STATE.profilePreparingRows = append ? [...STATE.profilePreparingRows, ...(body.profilePreparingRows || [])] : body.profilePreparingRows || [];
+  for (const field of ['decisions','acks','photos','cards','applicantRowsV2']) STATE[field] = append ? { ...STATE[field], ...body[field] } : body[field] || {};
+  STATE.problems = append ? [...STATE.problems, ...(body.problems || [])] : body.problems || [];
+  STATE.counts = body.counts;
+  STATE.generation = body.generation;
+  APPLICANT_PAGE.manifest = body.manifest;
+  APPLICANT_PAGE.nextCursor = body.nextCursor || null;
+  APPLICANT_PAGE.loaded = ids.size;
+  APPLICANT_PAGE.error = null;
+  if (!append) APPLICANT_PAGE.updates = false;
+  if (previousGeneration !== richGenerationKey()) { STATE.profiles = {}; PROFILE_RETRY_AT.clear(); resetRichCards(); }
+  STATE.loaded = true;
+  reconcileLocal();
+  renderAll();
+}
+async function loadMoreApplicants(manual = false) {
+  if (!STATE.paged || STATE.modal || APPLICANT_PAGE.loading || !APPLICANT_PAGE.nextCursor
+    || (APPLICANT_PAGE.error && !manual)) return;
+  if (manual) APPLICANT_PAGE.error = null;
+  const sequence = APPLICANT_PAGE.sequence;
+  APPLICANT_PAGE.loading = true;
+  renderPagedFooter();
+  try {
+    const response = await fetch('/api/applicants/feed?' + applicantPageQuery({ append: true }), { credentials:'same-origin',cache:'no-store' });
+    const body = await response.json();
+    if (!response.ok || body.ok !== true || body.paged !== true) throw new Error('Could not load more applicants. Try again.');
+    if (sequence !== APPLICANT_PAGE.sequence) return;
+    applyPagedFeed(body, { append: true });
+  } catch (error) { if (sequence === APPLICANT_PAGE.sequence) APPLICANT_PAGE.error = error.message; }
+  finally { if (sequence === APPLICANT_PAGE.sequence) { APPLICANT_PAGE.loading = false; renderPagedFooter(); } }
+}
+async function checkPagedUpdates() {
+  if (APPLICANT_PAGE.checking || APPLICANT_PAGE.loading) return;
+  APPLICANT_PAGE.checking = true;
+  try {
+    const response = await fetch('/api/applicants/feed?manifestOnly=1', { credentials:'same-origin',cache:'no-store' });
+    const body = await response.json();
+    if (!response.ok || !body.manifest) throw new Error('Could not check for applicant updates.');
+    if (body.manifest.generationId !== STATE.generation?.generationId) {
+      const browsing = STATE.modal || STATE.checked.size > 0 || ['reviewList','streamList','processingList','problemsList']
+        .some(id => $(id).clientHeight > 0 && $(id).scrollTop > 0);
+      if (!browsing) { await loadFeed(false, { force: true }); return; }
+      APPLICANT_PAGE.updates = true;
+    }
+    APPLICANT_PAGE.error = null;
+    renderPagedStats(); renderPagedFooter();
+  } catch (error) { APPLICANT_PAGE.error = error.message; renderPagedStats(); renderPagedFooter(); }
+  finally { APPLICANT_PAGE.checking = false; }
+}
 function markFeedUnavailable(error) {
   STATE.feedUnavailable = {
     status: Number(error?.status) || 0,
@@ -3025,17 +3204,22 @@ function markFeedUnavailable(error) {
   resetVirtualLists();
 }
 
-async function loadFeed(manual = false) {
+async function loadFeed(manual = false, { force = false } = {}) {
+  if (STATE.paged && !manual && !force) return checkPagedUpdates();
+  const sequence = ++APPLICANT_PAGE.sequence;
+  APPLICANT_PAGE.loading = true;
   try {
-    const response = await fetch("/api/applicants/feed", { credentials: "same-origin", cache: "no-store" });
+    const response = await fetch('/api/applicants/feed?' + applicantPageQuery(), { credentials: 'same-origin', cache: 'no-store' });
     if (response.status === 401 || response.status === 403) { showGate(); return; }
     const body = await response.json().catch(() => null);
+    if (sequence !== APPLICANT_PAGE.sequence) return;
     if (!response.ok || body?.ok !== true) {
       const error = new Error(body?.error || "Feed failed");
       error.status = response.status;
       error.reason = body?.reason || body?.error || null;
       throw error;
     }
+    if (body.paged) { applyPagedFeed(body); if (manual) toast('Refreshed.'); return; }
     const previousGenerationKey = richGenerationKey();
     STATE.feedUnavailable = null;
     STATE.snapshot = body.snapshot || null;
@@ -3063,10 +3247,19 @@ async function loadFeed(manual = false) {
     renderAll();
     if (manual) toast("Refreshed.");
   } catch (error) {
+    if (sequence !== APPLICANT_PAGE.sequence) return;
+    if (STATE.paged && STATE.snapshot) {
+      APPLICANT_PAGE.error = error.message || 'Could not refresh applicants.';
+      renderPagedStats(); renderPagedFooter();
+      if (manual) toast(APPLICANT_PAGE.error, true);
+      return;
+    }
     markFeedUnavailable(error);
     STATE.loaded = true;
     renderAll();
     if (manual) toast(error.message || "Could not refresh the feed.", true);
+  } finally {
+    if (sequence === APPLICANT_PAGE.sequence) { APPLICANT_PAGE.loading = false; if (STATE.paged) renderPagedFooter(); }
   }
 }
 

@@ -156,7 +156,7 @@ test("Applicants V2 UI keeps the existing virtualized shell and adds Ready, Prep
   assert.match(page, /Issue start time is unavailable/);
   assert.match(page, /Shared incident affecting/);
   assert.match(page, /applicantRowsV2: \{\}/);
-  assert.match(page, /fetch\("\/api\/applicants\/feed"/);
+  assert.match(page, /fetch\(["']\/api\/applicants\/feed(?:\?["']\s*\+\s*applicantPageQuery\(\)|["'])/);
   assert.doesNotMatch(page, /candidateUser\.getLinkedInCandidate/);
   assert.match(page, /const v2RuleFactsReady = modal\.source === "queue" && Boolean\(projected\?\.factSetDigest\)/);
   assert.match(page, /data-rule-fact-source="v2"/);

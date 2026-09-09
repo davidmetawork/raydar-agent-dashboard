@@ -16,6 +16,7 @@ import {
   verifyGeneration,
 } from "./_lib/generation.mjs";
 import { applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
+import { pagedReadsEnabled, readApplicantAuthority } from './_lib/paged.mjs';
 import {
   getJson,
   hashGetJson,
@@ -45,6 +46,8 @@ export function createDecisionHandler({
   readArtifacts = (pointer) => readPublishedArtifacts(pointer, { readJson }),
   writeDecision = (key, record, options = {}) => saveApplicantRequest(key,record,{allowRejected:true,...options}),
   now = () => new Date().toISOString(),
+  pagedEnabled = pagedReadsEnabled,
+  readPagedAuthority = readApplicantAuthority,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -74,10 +77,21 @@ export function createDecisionHandler({
       if (action === "undo") {
         return res.status(409).json({ok:false,error:'request_may_already_be_processing'});
       }
-      const generation = await readActive();
-      if (!generation) return res.status(503).json({ ok: false, error: "generation_unavailable" });
-      const artifacts = await readArtifacts(generation);
-      if (!artifacts || !verifyGeneration(artifacts).ok) {
+      let generation, artifacts, paged = null;
+      const pagedRequest = { ...body, monitorKey: key, rowDigest: body.viewAuthority?.rowDigest };
+      if (pagedEnabled()) {
+        try { paged = await readPagedAuthority(pagedRequest); }
+        catch { return res.status(409).json({ ok: false, error: 'applicant_changed_refresh_required' }); }
+        generation = { generationId: paged.generation.generationId,
+          digest: paged.generation.generationDigest, publishedAt: paged.generation.publishedAt };
+        artifacts = { queue: { rows: [paged.row], generatedAt: generation.publishedAt },
+          snapshot: { applicantRowsV2: { [key]: paged.profileV2 }, generatedAt: generation.publishedAt } };
+      } else {
+        generation = await readActive();
+        if (!generation) return res.status(503).json({ ok: false, error: 'generation_unavailable' });
+        artifacts = await readArtifacts(generation);
+      }
+      if (!artifacts || (!paged && !verifyGeneration(artifacts).ok)) {
         return res.status(503).json({ ok: false, error: "generation_unavailable" });
       }
       if (String(body.generationId || "") !== generation.generationId
@@ -186,6 +200,7 @@ export function createDecisionHandler({
         } : {}),
         generationId: generation.generationId,
         generationDigest: generation.digest,
+        ...(paged ? { viewAuthority: paged.row.viewAuthority } : {}),
         ...(action === "interview" ? actionability : {}),
         ...(retryRequested ? {recovery:{
           kind:retryAck.reason === SOURCE_STALE_INTERVIEW_FAILURE
@@ -206,7 +221,10 @@ export function createDecisionHandler({
       // The immutable row and its revisions were checked above, but the
       // publisher may still have advanced the active pointer while the
       // request was being assembled. Refuse a write against that stale page.
-      const currentGeneration = await readActive();
+      const currentGeneration = paged
+        ? await readPagedAuthority(pagedRequest).then(result => ({ generationId: result.generation.generationId,
+          digest: result.generation.generationDigest }))
+        : await readActive();
       if (!currentGeneration
         || currentGeneration.generationId !== generation.generationId
         || currentGeneration.digest !== generation.digest) {
