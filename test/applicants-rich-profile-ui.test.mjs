@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { projectPagedDocument } from "../api/applicants/_lib/paged.mjs";
+import { projectApplicantProfileV2 } from "../api/applicants/_lib/paged-core/applicant-profile-contract.mjs";
+import { pagedProfilePins } from "../api/applicants/_lib/paged-core/paged-profile-contract.mjs";
+import { applicationSourceFactsFromNormalized } from "../api/applicants/_lib/paged-core/application-source-facts.mjs";
+import { payloadHash } from "../api/applicants/_lib/paged-core/stable-json.mjs";
 
 const applicants = await readFile(new URL("../applicants.html", import.meta.url), "utf8");
 const start = applicants.indexOf("const PARAFORM_TIERS");
@@ -157,6 +162,53 @@ test("selected list history remains available in detail while its read is pendin
   }
   const unavailable = renderHarness({ card: {}, profileState: "failed" });
   assert.match(unavailable.modal, /Profile unavailable right now/);
+});
+
+test("the same retained document labels saved facts without changing current action authority", () => {
+  const applicationId = "11111111-1111-4111-8111-111111111111";
+  const observationId = "22222222-2222-4222-8222-222222222222";
+  const source = { contact: { name: "Stored Applicant" }, context_snapshot: { candidate_detail: {
+    headline: "Stored headline", experience_entries: [
+      { id: "work-one", company: "First Employer", title: "Engineer" },
+      { id: "work-two", company: "Second Employer", title: "Senior Engineer" },
+    ], education_entries: [] } } };
+  const normalizedHash = payloadHash(source);
+  const application = { applicationId, tenantScopeId: "tenant-one", personId: "person-one",
+    sourceObservationId: observationId, rowRevision: observationId };
+  const selected = { ...projectApplicantProfileV2({ application,
+    applicationSource: { applicationId, sourceProvider: "workable",
+      scope: { tenantScopeId: "tenant-one", personId: "person-one" },
+      sourceObservationId: observationId, normalizedHash, factVersion: normalizedHash,
+      state: "verified", observedAt: "2026-09-09T12:00:00Z", freshness: "current",
+      facts: applicationSourceFactsFromNormalized(source, { provider: "workable",
+        observedAt: "2026-09-09T12:00:00.000Z" }) },
+    actionability: { eligibility: "ready", canCreateApproval: true } }),
+    factsCurrent: true, inputRevision: "input-one", decisionRevision: 0 };
+  const document = { source, profile: null, resume: null,
+    row: { id: "33333333-3333-4333-8333-333333333333", application_id: applicationId,
+      row_revision: 7, row_digest: "a".repeat(64), monitor_key: "candidate:role",
+      source_observation_id: observationId, fact_set_digest: selected.factSetDigest,
+      source_status: "current", partition: "ready", view_states: ["ready"], problems: [],
+      input_revision: "input-one", decision_revision: 0,
+      index_payload: { profilePins: pagedProfilePins(selected), interviewAllowed: true,
+        interviewWhenReadyAllowed: true } } };
+  const material = JSON.stringify(document);
+  for (const current of [false, true]) {
+    const projected = projectPagedDocument({ ...document, current });
+    const before = JSON.stringify(projected);
+    assert.equal(projected.profileV2.profile.facts.title.freshness, "current",
+      "retained field metadata is unchanged even when row authority is no longer current");
+    const rendered = renderHarness({ card: {}, profile: projected.profile,
+      rowOverrides: projected.row, projected: projected.profileV2 });
+    assert.match(rendered.modal, current ? /Application source · current/ : /Application source · saved version/);
+    if (!current) assert.doesNotMatch(rendered.modal, /Application source · current/);
+    for (const employer of ["First Employer", "Second Employer"]) assert.ok(rendered.modal.includes(employer));
+    assert.equal(rendered.modal.includes('data-rule-fact-kind="experience"'), current);
+    assert.equal(projected.row.interviewAllowed, current);
+    assert.equal(projected.row.interviewWhenReadyAllowed, false);
+    assert.equal(JSON.stringify(projected), before, "rendering cannot change facts or action gates");
+  }
+  assert.equal(JSON.stringify(document), material, "both reads use the same retained source and pins");
 });
 
 test("profile detail preserves the exact applied-to company and labels an unknown source", () => {
