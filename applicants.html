@@ -1491,7 +1491,11 @@ function renderPills() {
   $("deliveryCount").textContent = STATE.snapshot ? String(deliveryRows().length) : "";
   $("streamCount").textContent = STATE.snapshot ? String(streamRows().length) : "";
   $("processingCount").textContent = STATE.snapshot ? String(profilePreparingRows().length) : "";
-  $("problemsCount").textContent = STATE.snapshot ? String(STATE.problems.length) : "";
+  // The badge answers "how many applicants need attention?". One applicant
+  // can have several distinct issue records, all of which remain visible in
+  // the Problems list below.
+  $("problemsCount").textContent = STATE.snapshot
+    ? String(affectedProblemApplications(STATE.problems).length) : "";
   const pendingC = pendingRows().filter((r) => r.tier === "C").length;
   const pendingU = pendingRows().filter((r) => r.tier !== "C").length;
   const pendingNoLinkedin = pendingRows().filter(hasNoLinkedin).length;
@@ -2248,8 +2252,29 @@ function renderProcessing() {
   paintList(list, rows, processingRowHtml, { requestRichCards: false });
 }
 
+function affectedProblemApplications(problems, applicantRowsV2 = STATE.applicantRowsV2) {
+  const groups = new Map();
+  for (const problem of problems.filter((item) => item?.state !== "resolved")) {
+    const projectedApplicationId = problem.key
+      ? applicantRowsV2?.[problem.key]?.application?.applicationId : null;
+    const applicationId = problem.applicationId || projectedApplicationId;
+    const applicationIdentity = applicationId || problem.key;
+    if (!applicationIdentity) continue;
+    const identity = (applicationId ? "application:" : "key:") + applicationIdentity;
+    const group = groups.get(identity) || { applicationId: applicationId || null, key: problem.key || null, issues: [] };
+    group.issues.push(problem);
+    if (!group.key && problem.key) group.key = problem.key;
+    groups.set(identity, group);
+  }
+  return [...groups.values()];
+}
 function problemReason(problem) {
   return problem.reason || String(problem.code || "problem").replace(/[_-]+/g, " ");
+}
+function problemDistinction(problem) {
+  const field = problem.fieldPath || problem.field || problem.fact;
+  const version = problem.factVersion || problem.version || problem.inputRevision;
+  return [field ? "Field: " + field : "", version ? "Version: " + version : ""].filter(Boolean).join(" · ");
 }
 function problemRowHtml(problem) {
   const linked = problem.key && (queueRows().some((row) => row.key === problem.key) || streamRows().some((row) => row.key === problem.key));
@@ -2257,10 +2282,12 @@ function problemRowHtml(problem) {
   const ownership = problem.owner ? "Owner: " + problem.owner : "Owner: unassigned";
   const shared = problem.affectedCount && problem.affectedCount > 1
     ? "Shared incident affecting " + problem.affectedCount + " applicants" : "";
+  const distinction = problemDistinction(problem);
   return '<div class="row problem-row"><div class="rc-main"><div class="rc-id">' +
     '<div class="who"><span class="name"><span>' + esc(problem.domain || "Applicant") + " problem</span></span>" +
     (linked ? '<a class="rc-more" href="' + esc(RaydarNav.href(problem.key)) + '" data-open="' + esc(problem.key) + '">Open applicant</a>' : "") + "</div>" +
     '<div class="problem-code">' + esc(problemReason(problem)) + "</div>" +
+    (distinction ? '<div class="problem-meta">' + esc(distinction) + "</div>" : "") +
     '<div class="problem-meta">' + esc(ownership) + " · " + esc(next) + "</div>" +
     (shared ? '<div class="problem-meta">' + esc(shared) + "</div>" : "") +
     (problem.ageSeconds != null ? '<div class="problem-meta">Open for ' + esc(typeof invitationAgeText === "function" ? invitationAgeText(problem.ageSeconds) : String(problem.ageSeconds) + "s") + "</div>" : problem.observedAt ? '<div class="problem-meta">Observed ' + esc(relTime(parseDate(problem.observedAt))) + "</div>" : "") +

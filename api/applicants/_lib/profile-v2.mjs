@@ -196,6 +196,9 @@ export function normalizeApplicantProblem(value, { applicationId = null, key = n
     code, state: ["open", "resolved"].includes(raw.state) ? raw.state : "open",
     applicationId: id(raw.applicationId ?? applicationId), key: id(raw.key ?? key),
     domain: text(raw.domain, 120) || "application", reason: text(raw.reason, 500),
+    field: text(raw.field, 500), fieldPath: text(raw.fieldPath, 500), fact: text(raw.fact, 500),
+    factVersion: text(raw.factVersion, 180), version: text(raw.version, 180),
+    inputRevision: text(raw.inputRevision, 180),
     nextAction: text(raw.nextAction, 500), sharedIncidentId: id(raw.sharedIncidentId),
     affectedCount: Number.isSafeInteger(Number(raw.affectedCount)) && Number(raw.affectedCount) > 0
       ? Math.min(Number(raw.affectedCount), 1_000_000) : null,
@@ -210,13 +213,33 @@ export function applicantProblemsV2(rows, explicit = null) {
     ...list(explicit).map((problem) => normalizeApplicantProblem(problem)),
     ...Object.values(rows || {}).flatMap((row) => row?.problems || []).map((problem) => normalizeApplicantProblem(problem)),
   ].filter(Boolean);
-  const seen = new Set();
-  return Object.freeze(combined.filter((problem) => {
-    const identity = [problem.applicationId || "", problem.key || "", problem.code, problem.state].join("|");
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
-  }));
+  const selected = new Map();
+  for (const problem of combined) {
+    // Match Core's semantic identity exactly. Once an application id exists,
+    // its legacy display key is not a second issue identity. Field/version
+    // dimensions remain distinct so two unavailable facts on one applicant
+    // are both visible in Problems.
+    const identity = JSON.stringify([
+      problem.applicationId || "", problem.applicationId ? "" : problem.key || "",
+      problem.domain || "application", problem.code, problem.state,
+      problem.field || "", problem.fieldPath || "", problem.fact || "",
+      problem.factVersion || "", problem.version || "", problem.inputRevision || "",
+      problem.sharedIncidentId || "",
+    ]);
+    const prior = selected.get(identity);
+    if (!prior) selected.set(identity, problem);
+    else {
+      // Normalization represents missing optional values as null. Let the
+      // later twin fill those gaps while retaining every populated value from
+      // the first (global) record.
+      const enriched = { ...problem };
+      for (const [field, value] of Object.entries(prior)) {
+        if (value != null && value !== "") enriched[field] = value;
+      }
+      selected.set(identity, Object.freeze(enriched));
+    }
+  }
+  return Object.freeze([...selected.values()]);
 }
 
 export function applicantRowsV2FromSnapshot(snapshot) {

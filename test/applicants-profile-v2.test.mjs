@@ -92,7 +92,35 @@ test("Problems endpoint is read-only and returns the same deduplicated projectio
   assert.equal(res.body.problems.length, 2);
   assert.equal(res.body.generation.generationId, "gen-fixture-0001");
   const rows = applicantRowsV2FromSnapshot({ applicantRowsV2: { [KEY]: v2 } });
-  assert.equal(applicantProblemsV2(rows, [{ code: "applied_hiring_company_unknown", applicationId: "application-v2" }]).length, 1);
+  assert.equal(applicantProblemsV2(rows, [{ code: "applied_hiring_company_unknown", domain: "application",
+    applicationId: "application-v2", sharedIncidentId: "incident-v2" }]).length, 1);
+});
+
+test("Problems dedupe embedded and global records without collapsing distinct field versions", () => {
+  const problemRow = {
+    ...v2,
+    problems: [
+      { code: "profile_fact_unavailable", domain: "profile", fieldPath: "profile.facts.title",
+        factVersion: "title-v3", reason: "Current title is unavailable" },
+      { code: "profile_fact_unavailable", domain: "profile", fieldPath: "profile.facts.location",
+        factVersion: "location-v2", reason: "Current location is unavailable" },
+    ],
+  };
+  const rows = applicantRowsV2FromSnapshot({ applicantRowsV2: { [KEY]: problemRow } });
+  const problems = applicantProblemsV2(rows, [
+    { code: "profile_fact_unavailable", domain: "profile", applicationId: "application-v2",
+      key: "a-different-display-key", fieldPath: "profile.facts.title", factVersion: "title-v3",
+      owner: "Applicant Core" },
+    { code: "profile_fact_unavailable", domain: "profile", applicationId: "application-v2",
+      fieldPath: "profile.facts.location", factVersion: "location-v2", nextAction: "Refresh stored facts" },
+  ]);
+  assert.equal(problems.length, 2);
+  assert.deepEqual(problems.map((problem) => [problem.fieldPath, problem.factVersion, problem.reason]), [
+    ["profile.facts.title", "title-v3", "Current title is unavailable"],
+    ["profile.facts.location", "location-v2", "Current location is unavailable"],
+  ]);
+  assert.equal(problems[0].owner, "Applicant Core", "global metadata enriches its embedded twin");
+  assert.equal(problems[1].nextAction, "Refresh stored facts");
 });
 
 
@@ -122,6 +150,9 @@ test("Applicants V2 UI keeps the existing virtualized shell and adds Ready, Prep
   assert.match(page, /eligibility === "waiting"[\s\S]*label: "Interview when ready", enabled: true/);
   assert.match(page, /if \(actionability\) return \{ label: "Preparing", enabled: false/);
   assert.match(page, /function renderProblems\(\)/);
+  assert.match(page, /affectedProblemApplications\(STATE\.problems\)\.length/);
+  assert.match(page, /Field: /);
+  assert.match(page, /Version: /);
   assert.match(page, /Owner: unassigned/);
   assert.match(page, /Shared incident affecting/);
   assert.match(page, /applicantRowsV2: \{\}/);
@@ -133,4 +164,19 @@ test("Applicants V2 UI keeps the existing virtualized shell and adds Ready, Prep
   assert.match(page, /hasV2Projection && !v2RuleFactsReady/);
   assert.match(page, /const projectedTitle = applicantFact\(row, "title"\)\?\.value/);
   assert.match(page, /projectedTitle \|\| display\.title \|\| card\?\.title/);
+
+  const start = page.indexOf("function affectedProblemApplications(");
+  const end = page.indexOf("function problemReason(", start);
+  const affectedProblemApplications = new Function(
+    `${page.slice(start, end)}; return affectedProblemApplications;`,
+  )();
+  const projections = { legacy: { application: { applicationId: "application-one" } } };
+  const groups = affectedProblemApplications([
+    { applicationId: "application-one", code: "company_unknown", state: "open" },
+    { key: "legacy", code: "profile_unavailable", state: "open" },
+    { key: "legacy", code: "old_problem", state: "resolved" },
+    { key: "second", code: "invitation_overdue", state: "open" },
+  ], projections);
+  assert.equal(groups.length, 2, "the badge groups active issues by canonical application identity");
+  assert.equal(groups[0].issues.length, 2, "distinct reasons remain attached to the affected applicant");
 });
