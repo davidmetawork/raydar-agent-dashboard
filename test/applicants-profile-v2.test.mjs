@@ -8,6 +8,7 @@ import { createProfileHandler } from "../api/applicants/profile.mjs";
 import { createProblemsHandler } from "../api/applicants/problems.mjs";
 import { publishInto, sourceReceiptsFor } from "./helpers/applicant-generation.mjs";
 import { K } from "../api/applicants/_lib/kv.mjs";
+import { ruleSubjectFromApplicantV2 } from "../api/applicants/_lib/rule-run-v2.mjs";
 
 const AT = "2026-09-07T12:00:00.000Z";
 const KEY = "candidatev2:rolev2";
@@ -193,4 +194,51 @@ test("missing problem and invitation ages stay unknown across repeated normaliza
   for (const age of [0, 7200, "301"]) {
     assert.equal(normalizeApplicantProblem({ code: "profile_preparing", ageSeconds: age }).ageSeconds, Number(age));
   }
+});
+
+
+test("application and selected-resume provenance survives display and manual Rules with unknown current work", () => {
+  const input = structuredClone(v2);
+  input.application.applicationId = "44444444-4444-4444-8444-444444444444";
+  input.factsCurrent = true;
+  input.inputRevision = "selected-resume-input";
+  input.decisionRevision = 0;
+  input.profile.facts.title.source = "application_source";
+  input.profile.facts.title.state = "fallback";
+  input.profile.facts.location.source = "selected_resume";
+  input.profile.facts.experiences.source = "application_source";
+  input.profile.facts.experiences.state = "fallback";
+  const job = input.profile.facts.experiences.entries[0];
+  job.source = "application_source";
+  job.state = "fallback";
+  delete job.current;
+  const normalized = applicantRowsV2FromSnapshot({ applicantRowsV2: { [KEY]: input } })[KEY];
+  assert.equal(normalized.profile.facts.title.source, "application_source");
+  assert.equal(normalized.profile.facts.location.source, "selected_resume");
+  assert.equal(normalized.profile.facts.experiences.source, "application_source");
+  assert.equal(normalized.profile.facts.experiences.entries[0].source, "application_source");
+  assert.equal(normalized.profile.facts.experiences.entries[0].current, null);
+  const subject = ruleSubjectFromApplicantV2({ ...queueRow,
+    inputRevision: input.inputRevision, decisionRevision: 0 }, normalized);
+  assert.ok(subject);
+  assert.equal(subject.facts.jobs[0].current, null);
+  assert.equal(subject.facts.jobs[0].source, "application_source");
+  assert.equal(subject.facts.provenance.title, "application_source");
+  assert.equal(subject.facts.provenance.location, "resume");
+  assert.equal(subject.facts.currentCompanyId, null);
+});
+
+
+test("display preserves the same 60 jobs and 30 schools available to the Rules evaluator", () => {
+  const input = structuredClone(v2);
+  input.profile.facts.experiences.entries = Array.from({ length: 60 }, (_, i) => ({
+    ...v2.profile.facts.experiences.entries[0], recordId: `job-${i}`, companyName: `Employer ${i}`,
+  }));
+  input.profile.facts.education.entries = Array.from({ length: 30 }, (_, i) => ({
+    ...v2.profile.facts.education.entries[0], recordId: `school-${i}`, school: `School ${i}`,
+  }));
+  const row = applicantRowsV2FromSnapshot({ applicantRowsV2: { [KEY]: input } })[KEY];
+  assert.equal(row.profile.facts.experiences.entries.length, 60);
+  assert.equal(row.profile.facts.experiences.entries[59].companyName, "Employer 59");
+  assert.equal(row.profile.facts.education.entries.length, 30);
 });

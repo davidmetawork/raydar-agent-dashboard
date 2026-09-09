@@ -76,7 +76,8 @@ export function ruleSubjectFromApplicantV2(row, projection, { now = Date.now() }
   };
   const facts = factsFromProfile(profile, { now, preserveUnknownCurrent: true });
   const sourceFor = (entry) => entry?.source === "paraform_linkedin" ? "paraform"
-    : entry?.source === "resume" ? "resume" : "profile_v2";
+    : ["resume", "selected_resume"].includes(entry?.source) ? "resume"
+    : entry?.source === "application_source" ? "application_source" : "profile_v2";
   facts.schools = facts.schools.map((school, index) => ({
     ...school, source: sourceFor(selected.education?.entries?.[index]),
   }));

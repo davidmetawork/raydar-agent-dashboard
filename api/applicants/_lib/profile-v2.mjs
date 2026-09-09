@@ -37,7 +37,7 @@ function fact(value) {
     ? raw.value : null;
   return Object.freeze({
     value: scalar,
-    source: ["paraform_linkedin", "resume"].includes(raw.source) ? raw.source : null,
+    source: ["paraform_linkedin", "resume", "application_source", "selected_resume"].includes(raw.source) ? raw.source : null,
     observedAt: text(raw.observedAt, 64),
     factVersion: text(raw.factVersion, 180),
     freshness: validFreshness(raw.freshness),
@@ -49,7 +49,7 @@ function historyRow(value, kind) {
   const raw = object(value) ?? {};
   const shared = {
     recordId: id(raw.recordId),
-    source: ["paraform_linkedin", "resume"].includes(raw.source) ? raw.source : null,
+    source: ["paraform_linkedin", "resume", "application_source", "selected_resume"].includes(raw.source) ? raw.source : null,
     observedAt: text(raw.observedAt, 64),
     factVersion: text(raw.factVersion, 180),
     freshness: validFreshness(raw.freshness),
@@ -59,7 +59,7 @@ function historyRow(value, kind) {
   return Object.freeze(kind === "experience" ? {
     ...shared, companyId: entityId, companyName: text(raw.companyName, 500),
     roleTitle: text(raw.roleTitle, 500), start: text(raw.start, 64), end: text(raw.end, 64),
-    current: raw.current === true, location: text(raw.location, 500), industry: text(raw.industry, 500),
+    current: typeof raw.current === "boolean" ? raw.current : null, location: text(raw.location, 500), industry: text(raw.industry, 500),
     description: text(raw.description, 8_000), logo: safeEntityLogo(raw.logo, entityId),
   } : {
     ...shared, schoolId: entityId, school: text(raw.school, 500), degree: text(raw.degree, 500),
@@ -75,11 +75,11 @@ function history(value, kind) {
   // Treat a history entry denied by the producer as absent. Its surrounding
   // history envelope may still report why it is unavailable, but no title,
   // company, school, description, or logo reaches the card/detail renderer.
-  const entries = state === "unavailable" ? [] : list(raw.entries).slice(0, 50)
+  const entries = state === "unavailable" ? [] : list(raw.entries).slice(0, kind === "experience" ? 60 : 30)
     .map((entry) => historyRow(entry, kind)).filter((entry) => entry.state !== "unavailable");
   return Object.freeze({
     entries: Object.freeze(entries),
-    source: ["paraform_linkedin", "resume"].includes(raw.source) ? raw.source : null,
+    source: ["paraform_linkedin", "resume", "application_source", "selected_resume"].includes(raw.source) ? raw.source : null,
     observedAt: text(raw.observedAt, 64), factVersion: text(raw.factVersion, 180),
     freshness: validFreshness(raw.freshness), state,
   });
