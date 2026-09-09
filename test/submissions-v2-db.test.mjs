@@ -64,6 +64,53 @@ async function preparingPair({ candidate = `candidate-${randomUUID()}`, role = `
   return { id, signal, candidate, role };
 }
 
+async function attachCurrentResume({ pairId, signalId, artifactVersion = 1 }) {
+  const generationId = randomUUID();
+  const artifactId = randomUUID();
+  const atsArtifactId = randomUUID();
+  const manifestArtifactId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, deadline_at, completed_at
+    ) values (
+      ${generationId}, ${pairId}, ${artifactVersion}, 'initial', ${`generation:${generationId}`},
+      'succeeded', 'complete', 1, ${signalId}, 'primary-test', 'fallback-test',
+      'validator-test', 'prompt-test', 'template-test', clock_timestamp(), clock_timestamp()
+    )
+  `;
+  await sql`
+    insert into submissions_v2.resume_artifacts(
+      id, pair_id, generation_id, artifact_version, kind, private_object_key,
+      digest, size_bytes, page_count, validation_status, archive_readback_at,
+      archived_at, current_state
+    ) values
+    (
+      ${artifactId}, ${pairId}, ${generationId}, ${artifactVersion}, 'pdf',
+      ${`submissions/resumes/v2/pdf/${artifactId}`}, ${digest(`artifact:${artifactId}`)},
+      100, 1, 'passed', clock_timestamp(), clock_timestamp(), 'current'
+    ),
+    (
+      ${atsArtifactId}, ${pairId}, ${generationId}, ${artifactVersion}, 'ats',
+      ${`submissions/resumes/v2/ats/${atsArtifactId}`}, ${digest(`artifact:${atsArtifactId}`)},
+      100, null, 'passed', clock_timestamp(), clock_timestamp(), 'current'
+    ),
+    (
+      ${manifestArtifactId}, ${pairId}, ${generationId}, ${artifactVersion}, 'manifest',
+      ${`submissions/resumes/v2/manifest/${manifestArtifactId}`}, ${digest(`artifact:${manifestArtifactId}`)},
+      100, null, 'passed', clock_timestamp(), clock_timestamp(), 'current'
+    )
+  `;
+  await sql`
+    update submissions_v2.candidate_role_pairs
+       set current_artifact_id=${artifactId}, resume_ready_at=clock_timestamp(),
+           state_version=state_version+1
+     where id=${pairId}
+  `;
+  return { generationId, artifactId };
+}
+
 before(async () => {
   await runMigrations({ databaseUrl, logger: { info() {} } });
   sql = createDatabase({ databaseUrl, max: 8 });
@@ -3635,6 +3682,114 @@ test("a classifier role-unclear pair can be resolved only with an active exact s
   } finally {
     await setRuntimeControls({
       actorEmail: "admin@raydar.xyz", reason: "Restore controls after exact classifier role-unclear resolution regression",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+});
+
+test("resolving an Interested review reuses a validated current resume instead of re-preparing it", async () => {
+  const prior = await readRuntimeControls(sql);
+  const candidateId = `ready-review-candidate-${randomUUID()}`;
+  const roleId = `ready-review-role-${randomUUID()}`;
+  const pairId = randomUUID();
+  const idempotencyKey = randomUUID();
+  const signalId = await sourceEvent();
+  let artifact;
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable ready-review resolution regression",
+      ui: true, ingestion: prior.ingestion_enabled, generation: true,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+    await sql.begin(async (tx) => {
+      await tx`
+        insert into submissions_v2.candidate_role_pairs(
+          id, candidate_user_id, role_id, first_signal_id, intent_state,
+          workflow_state, original_signal_at, role_state
+        ) values (
+          ${pairId}, ${candidateId}, ${roleId}, ${signalId}, 'unclear',
+          'needs_review', clock_timestamp(), 'active'
+        )
+      `;
+      await tx`
+        insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+        values (${pairId}, 'reply_unclear_or_conditional', 'A recruiter decision is required.')
+      `;
+    });
+    artifact = await attachCurrentResume({ pairId, signalId });
+    const apiDatabase = {
+      begin: (work) => sql.begin(async (apiSql) => {
+        await apiSql.unsafe("set local role submissions_v2_api");
+        return work(apiSql);
+      }),
+    };
+    const repository = createRepository({ sql: apiDatabase });
+    const resolved = await repository.transition({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey, pairId,
+      expectedVersion: 2, destination: "interested",
+      note: "Candidate confirmed interest.", action: "resolve_review",
+    });
+    assert.deepEqual(resolved, { case_id: pairId, state: "interested", state_version: 3 });
+    assert.deepEqual((await sql`
+      select intent_state, workflow_state, state_version, current_artifact_id
+        from submissions_v2.candidate_role_pairs where id=${pairId}
+    `)[0], {
+      intent_state: "interested", workflow_state: "interested", state_version: "3",
+      current_artifact_id: artifact.artifactId,
+    });
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.jobs
+       where subject_id=${pairId}::text and kind='prepare_resume'
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.review_items
+       where pair_id=${pairId} and action_state='open'
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select metadata->>'reused_current_artifact' as reused
+        from submissions_v2.pair_events
+       where pair_id=${pairId} and event_type='classification_corrected'
+       order by created_at desc limit 1
+    `)[0].reused, "true");
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore ready-review resolution regression controls",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+});
+
+test("resume recovery restores a ready pair after its refresh becomes terminal", async () => {
+  const prior = await readRuntimeControls(sql);
+  const pair = await preparingPair();
+  let artifact;
+  try {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Enable terminal-refresh recovery regression",
+      ui: true, ingestion: prior.ingestion_enabled, generation: true,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+    artifact = await attachCurrentResume({ pairId: pair.id, signalId: pair.signal });
+    const recovered = await createRepository({ sql }).recoverExpiredResumeGenerations();
+    assert.ok(recovered.recovered.some((row) => row.pair_id === pair.id
+      && row.reused_current_artifact === true
+      && row.routed_to_review === false));
+    assert.deepEqual((await sql`
+      select intent_state, workflow_state, state_version, current_artifact_id
+        from submissions_v2.candidate_role_pairs where id=${pair.id}
+    `)[0], {
+      intent_state: "interested", workflow_state: "interested", state_version: "3",
+      current_artifact_id: artifact.artifactId,
+    });
+    assert.equal((await sql`
+      select event_type from submissions_v2.pair_events
+       where pair_id=${pair.id} order by created_at desc limit 1
+    `)[0].event_type, "resume_ready_recovered");
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore terminal-refresh recovery regression controls",
       ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
       masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
     }, sql);

@@ -126,7 +126,16 @@ export function createResumePipelineStore({
          limit 1
       `;
       const pipeline = rows[0]?.pipeline;
-      return pipeline && typeof pipeline === "object" ? pipeline : null;
+      if (!pipeline || typeof pipeline !== "object") return null;
+      // A recruiter-triggered retry is a new bounded attempt, not a replay of
+      // the model/layout decision that just failed. Reuse the deterministic
+      // source collection and evidence ledger, then build a fresh strategy and
+      // every downstream artifact from them.
+      const stages = Object.fromEntries(Object.entries(pipeline.stages || {})
+        .filter(([stage]) => stage === "collect" || stage === "evidence"));
+      return Object.keys(stages).length
+        ? { schema_version: "raydar.submissions-v2.resume-pipeline-checkpoint.v1", stages }
+        : null;
     },
 
     async saveCheckpoint({ generationId, stage, value, executionFence }) {

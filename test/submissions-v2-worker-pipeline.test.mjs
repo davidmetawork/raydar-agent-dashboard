@@ -529,8 +529,18 @@ test("initial generation blocks only on a missing candidate-original resume and 
   assert.ok(updates.some((row) => row.stage === "collect"));
 });
 
-test("retry preparation reads the latest reusable pipeline for the exact pair", async () => {
-  const reusable = { active_stage: "archive", stages: { render: { key: "render-checkpoint" } } };
+test("retry preparation reuses only deterministic source and evidence stages for the exact pair", async () => {
+  const reusable = {
+    active_stage: "archive",
+    promoted: false,
+    stages: {
+      collect: { key: "collect-checkpoint" },
+      evidence: { key: "evidence-checkpoint" },
+      strategy: { key: "strategy-checkpoint" },
+      validate: { key: "validate-checkpoint" },
+      render: { key: "render-checkpoint" },
+    },
+  };
   let queryValues;
   const sql = fakeSql(async (query, values) => {
     assert.match(query, /kind='prepare_resume'/u);
@@ -539,8 +549,26 @@ test("retry preparation reads the latest reusable pipeline for the exact pair", 
     return [{ pipeline: reusable }];
   });
   const store = createResumePipelineStore({ sql, repository: {} });
-  assert.deepEqual(await store.loadRetryPipeline({ pairId: "pair-1", excludingJobId: "00000000-0000-0000-0000-000000000001" }), reusable);
+  assert.deepEqual(
+    await store.loadRetryPipeline({ pairId: "pair-1", excludingJobId: "00000000-0000-0000-0000-000000000001" }),
+    {
+      schema_version: "raydar.submissions-v2.resume-pipeline-checkpoint.v1",
+      stages: {
+        collect: { key: "collect-checkpoint" },
+        evidence: { key: "evidence-checkpoint" },
+      },
+    },
+  );
   assert.deepEqual(queryValues, ["pair-1", "00000000-0000-0000-0000-000000000001"]);
+});
+
+test("retry preparation starts clean when the prior job has no deterministic stages", async () => {
+  const sql = fakeSql(async () => [{ pipeline: { stages: { strategy: { key: "strategy-checkpoint" } } } }]);
+  const store = createResumePipelineStore({ sql, repository: {} });
+  assert.equal(await store.loadRetryPipeline({
+    pairId: "pair-1",
+    excludingJobId: "00000000-0000-0000-0000-000000000001",
+  }), null);
 });
 
 test("resume failure settlement preserves an existing resume on regeneration", async () => {
