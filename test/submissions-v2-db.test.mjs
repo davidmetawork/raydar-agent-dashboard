@@ -2297,7 +2297,13 @@ test("first recruiter addition queues one exact admission notification and later
       ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
     )
   `;
-  const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+  const apiDatabase = {
+    begin: (work) => sql.begin(async (tx) => {
+      await tx.unsafe("set local role submissions_v2_api");
+      return work(tx);
+    }),
+  };
+  const repository = createRepository({ sql: apiDatabase, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
   const first = await repository.addCandidate({
     actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), candidateId, roleId,
   });
