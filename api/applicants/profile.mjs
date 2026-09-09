@@ -44,6 +44,34 @@ const str = (value) => {
   return s || null;
 };
 
+const PAGED_PROFILE_REFUSALS = new Set([
+  'APPLICANT_VIEW_GENERATION_UNAVAILABLE','APPLICANT_VIEW_ROW_UNAVAILABLE',
+  'APPLICANT_VIEW_PAGE_CURSOR_STALE','APPLICANT_PAGED_PROFILE_REFERENCE_MISSING',
+  'APPLICANT_PAGED_PROFILE_REFERENCE_SCOPE_CHANGED','APPLICANT_PAGED_PROFILE_PAYLOAD_UNAVAILABLE',
+  'APPLICANT_PAGED_PROFILE_APPLICATION_SOURCE_DIGEST_MISMATCH','APPLICANT_PAGED_PROFILE_PINS_INVALID',
+  'APPLICANT_PAGED_PROFILE_DIGEST_MISMATCH','APPLICANT_PROFILE_V2_APPLICATION_SCOPE_REQUIRED',
+  'applicant_row_unavailable',
+]);
+const PAGED_PROFILE_TEMPORARY = new Set([
+  '57014','53300','57P01','57P02','57P03','08000','08001','08003','08004','08006','08P01',
+  'ECONNRESET','ECONNREFUSED','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','ENOTFOUND',
+  'CONNECT_TIMEOUT','CONNECTION_CLOSED','CONNECTION_ENDED','CONNECTION_DESTROYED',
+]);
+// Only known transport/database availability errors may preserve a displayed
+// selection. Row/identity/privacy refusals and unknown failures require refresh.
+export function pagedProfileReadFailure(error) {
+  const code=String(error?.code || '');
+  const message=String(error?.message || '');
+  if(PAGED_PROFILE_REFUSALS.has(code)||PAGED_PROFILE_REFUSALS.has(message))
+    return {status:409,error:'applicant_profile_changed_refresh_required'};
+  if(['22023','22P02','22007','22008'].includes(code)||code==='APPLICANT_VIEW_FILTER_INVALID'
+    ||message==='APPLICANT_VIEW_FILTER_INVALID')
+    return {status:400,error:'applicant_profile_identity_required'};
+  if(PAGED_PROFILE_TEMPORARY.has(code))
+    return {status:503,error:'applicant_profile_read_temporarily_unavailable',retryable:true};
+  return {status:500,error:'applicant_profile_read_failed_refresh_required'};
+}
+
 function profileV2ForArtifacts(artifacts, profileKey, sourceObservationId = null) {
   if (!artifacts?.snapshot) return null;
   const sourceRows = [
@@ -143,15 +171,19 @@ return async function handler(req, res) {
   if (!(await authHandler(req, res))) return;
   if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
   if (pagedEnabled()) {
+    res.setHeader('Cache-Control', 'no-store');
     if (!req.query?.applicationId || !req.query?.generationId || !req.query?.generationDigest || !req.query?.rowDigest) {
       return res.status(400).json({ ok: false, error: 'applicant_profile_identity_required' });
     }
     try {
       const result = await readPaged(req.query);
-      res.setHeader('Cache-Control', 'no-store');
+      if(result.profile?.source==='profile_reconstruction_pending')
+        return res.status(409).json({ok:false,error:'applicant_profile_changed_refresh_required'});
       return res.status(200).json({ ok: true, ...result.profile, row: result.row, generation: result.generation });
-    } catch {
-      return res.status(409).json({ ok: false, error: 'applicant_profile_changed_refresh_required' });
+    } catch (error) {
+      const {status,...body}=pagedProfileReadFailure(error);
+      if(status===503)res.setHeader('Retry-After','60');
+      return res.status(status).json({ok:false,...body});
     }
   }
 

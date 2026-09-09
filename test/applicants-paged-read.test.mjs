@@ -50,7 +50,7 @@ test('profile opening requires the exact application and stored generation witho
   const res=response();await handler({method:'GET',query},res);
   assert.equal(res.statusCode,200);assert.equal(res.body.profileV2.factSetDigest,digest);assert.equal(reads,1);
   const denied=response();await createProfileHandler({...deps,readJson:failLegacy,
-    readPaged:async()=>{throw new Error('Privacy restricted');}})({method:'GET',query},denied);
+    readPaged:async()=>{throw Object.assign(new Error('APPLICANT_VIEW_ROW_UNAVAILABLE'),{code:'55000'});}})({method:'GET',query},denied);
   assert.equal(denied.statusCode,409);
 });
 
@@ -100,12 +100,24 @@ function pagingUi() {
   const page={sequence:1,nextCursor:'next',loaded:1,error:null,loading:false,checking:false};
   const context={STATE:state,APPLICANT_PAGE:page,URLSearchParams,Set,PROFILE_RETRY_AT:new Map(),
     queueRows:()=>state.snapshot.queue,streamRows:()=>state.snapshot.stream,profilePreparingRows:()=>state.profilePreparingRows,
-    richGenerationKey:()=>state.generation?.generationId,resetRichCards(){},reconcileLocal(){},renderAll(){},
+    profileId:row=>row?.profileKey||row?.cuId||'',richGenerationKey:()=>state.generation?.generationId,resetRichCards(){},reconcileLocal(){},renderAll(){},
     document:{querySelectorAll:()=>[]},$:()=>({clientHeight:100,scrollTop:150,classList:{remove(){},toggle(){}},style:{}}),
     relTime:()=>'',setPillDescription(){},loadFeed:async()=>{throw new Error('Unexpected list reset');}};
   vm.createContext(context);vm.runInContext(code,context);
   return {context,state,page};
 }
+
+test('only a successfully read matching feed row clears its profile refusal',()=>{
+  const {context,state}=pagingUi();
+  state.profileReadRefusals={one:true,absent:true};
+  state.snapshot.queue[0].profileReadRefused=true;
+  const fresh={key:'one',applicationId:id(2),profileKey:'application:one:row'};
+  state.modal={key:'one',row:state.snapshot.queue[0]};
+  context.applyPagedFeed({generation:{generationId:id(1),digest},snapshot:{queue:[fresh],stream:[]},
+    manifest:{generationId:id(1)},profilePreparingRows:[],applicantRowsV2:{one:{factsCurrent:true}}});
+  assert.equal(state.profileReadRefusals.one,undefined);assert.equal(state.profileReadRefusals.absent,true);
+  assert.equal(state.modal.row,fresh);assert.equal(state.modal.row.profileReadRefused,undefined);
+});
 
 test('append preserves selection, modal and loaded rows and rejects generation/duplicate corruption before mutation',()=>{
   const {context,state,page}=pagingUi();
