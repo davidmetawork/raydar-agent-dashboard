@@ -27,7 +27,10 @@ function documentFor(pins, selectedSource = source, patch = {}) {
   const value = { current: true, source: selectedSource, profile: null, resume: null,
     row: { id: "33333333-3333-4333-8333-333333333333", application_id: applicationId,
       row_revision: 7, row_digest: "a".repeat(64), monitor_key: "candidate:role",
-      index_payload: { profilePins: pins, appliedAt: "2026-09-09T12:00:00Z" },
+      role_id: "role-one", role_title: "Staff Platform Engineer",
+      source_job_id: "workable-job-789", company: "Context Works",
+      application_date: "2026-09-08",
+      index_payload: { profilePins: pins, appliedAt: "2026-09-09T12:00:00Z", tier: "A" },
       source_observation_id: observationId, fact_set_digest: pins.factSetDigest,
       source_status: "current", partition: "ready", view_states: ["ready"], problems: [],
       decision_revision: 0, created_at: "2026-09-09T12:00:00Z" } };
@@ -109,8 +112,7 @@ test("one malformed legacy profile is contained without hiding its healthy sibli
     payloadState: "available", freshness: "current", payload: { title: "Provider Engineer" },
   }, row: { monitor_key: "legacy:role", decision_action: "interview",
     decision_at: "2026-09-09T12:00:10Z", decision_revision: 4,
-    index_payload: { profilePins: malformedPins, appliedAt: "2026-09-09T11:00:00Z",
-      decisionRequestId: "saved-request" } } });
+    index_payload: { profilePins: malformedPins, tier: "A", decisionRequestId: "saved-request" } } });
   assert.throws(() => projectPinnedApplicantProfile({ pins: malformedPins,
     source, paraform: malformed.profile, current: true }),
   /REFERENCE_SCOPE_CHANGED/u, "the pure legacy scope check remains strict");
@@ -156,7 +158,11 @@ test("one malformed legacy profile is contained without hiding its healthy sibli
   const contained = result.applicants[0];
   assert.equal(contained.row.applicationId, applicationId);
   assert.equal(contained.row.rowVersionId, malformed.row.id);
-  assert.equal(contained.row.roleTitle, malformed.row.role_title);
+  assert.equal(contained.row.roleTitle, "Staff Platform Engineer");
+  assert.equal(contained.row.company, "Context Works");
+  assert.equal(contained.row.sourceJobId, "workable-job-789");
+  assert.equal(contained.row.appliedAt, "2026-09-08");
+  assert.equal(contained.row.tier, null);
   assert.equal(contained.row.decisionAction, "interview");
   assert.equal(contained.row.savedDecisionRequestId, "saved-request");
   assert.equal(contained.row.inputRevision, null);
@@ -183,5 +189,5 @@ test("one malformed legacy profile is contained without hiding its healthy sibli
     "Stored profile evidence no longer matches this retained applicant row.");
   assert.equal(response.problems[0].owner, "Applicant Core");
   assert.equal(response.problems[0].nextAction,
-    "Rematerialize this applicant from its current identity and source records.");
+    "Refresh this applicant’s stored profile from current identity and source records.");
 });

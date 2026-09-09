@@ -24,12 +24,12 @@ const PROFILE_RECONSTRUCTION_PROBLEMS = Object.freeze({
   APPLICANT_PAGED_PROFILE_REFERENCE_MISSING: Object.freeze({
     code: 'paged_profile_reference_missing',
     reason: 'Stored profile evidence is unavailable for this retained applicant row.',
-    nextAction: 'Rematerialize this applicant from its current retained source records.',
+    nextAction: 'Refresh this applicant’s stored profile from current retained source records.',
   }),
   APPLICANT_PAGED_PROFILE_REFERENCE_SCOPE_CHANGED: Object.freeze({
     code: 'paged_profile_reference_scope_changed',
     reason: 'Stored profile evidence no longer matches this retained applicant row.',
-    nextAction: 'Rematerialize this applicant from its current identity and source records.',
+    nextAction: 'Refresh this applicant’s stored profile from current identity and source records.',
   }),
   APPLICANT_PAGED_PROFILE_PAYLOAD_UNAVAILABLE: Object.freeze({
     code: 'paged_profile_payload_unavailable',
@@ -44,12 +44,12 @@ const PROFILE_RECONSTRUCTION_PROBLEMS = Object.freeze({
   APPLICANT_PAGED_PROFILE_PINS_INVALID: Object.freeze({
     code: 'paged_profile_pins_invalid',
     reason: 'This retained row uses an unsupported profile reference.',
-    nextAction: 'Rematerialize this applicant with the current profile contract.',
+    nextAction: 'Refresh this applicant’s stored profile from current source records using the supported format.',
   }),
   APPLICANT_PAGED_PROFILE_DIGEST_MISMATCH: Object.freeze({
     code: 'paged_profile_digest_mismatch',
     reason: 'The retained profile facts do not match their recorded digest.',
-    nextAction: 'Rematerialize this applicant from its exact retained profile evidence.',
+    nextAction: 'Refresh this applicant’s stored profile from the exact current retained profile records.',
   }),
 });
 const retainedAge = (createdAt, now) => {
@@ -83,7 +83,7 @@ function containedPagedDocument(document, failure, now) {
     inputRevision: null, readinessRevision: null,
     decisionRevision: Number(raw.decision_revision || 0),
     interviewAllowed: false, interviewWhenReadyAllowed: false, linkedin: null,
-    tier: index.tier || null, reason: problem.reason, owner: problem.owner,
+    tier: null, reason: problem.reason, owner: problem.owner,
     nextAction: problem.nextAction, problems: [problem, ...(raw.problems || [])],
     viewAuthority: null, viewStates, decisionAt: raw.decision_at,
     decisionAction: raw.decision_action, savedDecisionRequestId: index.decisionRequestId || null,
