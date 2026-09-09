@@ -2614,6 +2614,14 @@ async function fetchProfile(cu) {
   const expectedRow = displayedRow ? { key: displayedRow.key, applicationId: displayedRow.applicationId,
     sourceObservationId: displayedRow.sourceObservationId,
     rowDigest: displayedRow.viewAuthority?.rowDigest || displayedRow.rowDigest || '' } : null;
+  const matchingRefusalRow = () => {
+    if (!paged) return displayedRow;
+    const current = rowByCu(cu) || (STATE.modal?.cu === cu ? STATE.modal.row : null);
+    return expectedRow && current?.key === expectedRow.key && current?.profileKey === cu
+      && current.applicationId === expectedRow.applicationId
+      && current.sourceObservationId === expectedRow.sourceObservationId
+      && (current.viewAuthority?.rowDigest || current.rowDigest || '') === expectedRow.rowDigest ? current : null;
+  };
   let requestSent = false, responseReceived = false;
   try {
     const profileQuery = paged ? new URLSearchParams({ applicationId: displayedRow?.applicationId || '',
@@ -2624,7 +2632,8 @@ async function fetchProfile(cu) {
     const response = await fetch('/api/applicants/profile?' + profileQuery, { credentials: 'same-origin' });
     responseReceived = true;
     if (response.status === 401 || response.status === 403) {
-      if (richGenerationKey() === generationKey && (!paged || !displayedRow || rowByCu(cu) === displayedRow)) invalidateProfileSelection(cu, displayedRow);
+      const refusedRow = matchingRefusalRow();
+      if (richGenerationKey() === generationKey && refusedRow) invalidateProfileSelection(cu, refusedRow);
       if (typeof AUTH !== "undefined") AUTH.authenticated = false;
       showGate(); throw new Error("auth");
     }
@@ -2662,9 +2671,12 @@ async function fetchProfile(cu) {
     // Record the miss so the modal leaves its loading state ("unavailable"
     // instead of a forever-spinner); a reopen retries after the shared bound.
     if (richGenerationKey() === generationKey) {
-      const rowStillSelected = !paged || !displayedRow || rowByCu(cu) === displayedRow;
+      // A feed can finish before privacy changes, then this read can refuse
+      // after it. Rehydrating the same immutable row cannot cancel that refusal.
+      const refusedRow = matchingRefusalRow();
+      if (paged && !refusedRow) throw err;
       const temporary = err.profileReadTemporary === true || (requestSent && !responseReceived);
-      if (paged && rowStillSelected && !temporary) invalidateProfileSelection(cu, displayedRow);
+      if (paged && refusedRow && !temporary) invalidateProfileSelection(cu, refusedRow);
       if (!Object.prototype.hasOwnProperty.call(STATE.profiles, cu)) STATE.profiles[cu] = null;
       PROFILE_RETRY_AT.set(cu, Date.now() + RICH_RETRY_MS);
     }

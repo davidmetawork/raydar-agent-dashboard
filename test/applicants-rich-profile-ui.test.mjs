@@ -522,14 +522,43 @@ test("a validated paged detail replaces selected facts, while malformed or conta
   }
 });
 
-test("a stale detail refusal cannot invalidate a newly read row in the same generation",async()=>{
+test("a refusal invalidates the same immutable selection even after a feed replaces its row object",async()=>{
+  for(const status of [401,403,409]){
+    const h=profileFetchHarness({paged:true,projected:selectedProjection()});
+    const request=h.helpers.fetchProfile(h.row.profileKey);
+    const freshRow={...h.row};h.STATE.snapshot.queue=[freshRow];
+    h.requests[0].resolve({status,ok:false});await assert.rejects(request);
+    assert.equal(h.STATE.applicantRowsV2[h.row.key],undefined);
+    assert.equal(freshRow.profileReadRefused,true);
+    assert.equal(h.STATE.profileReadRefusals[h.row.key],true);
+    assert.equal(h.helpers.interviewControl(freshRow).enabled,false);
+    assert.equal(h.STATE.cards.sibling.sentinel,true);
+  }
+});
+
+test("a prior refusal cannot invalidate a different row version or generation",async()=>{
+  for(const changed of ['rowDigest','sourceObservationId','generation']){
+    const selected=selectedProjection(),h=profileFetchHarness({paged:true,projected:selected});
+    const request=h.helpers.fetchProfile(h.row.profileKey);
+    const freshRow={...h.row};h.STATE.snapshot.queue=[freshRow];
+    if(changed==='generation')h.STATE.generation={generationId:'generation-two',digest:'digest-two'};
+    else freshRow[changed]='new-value';
+    h.requests[0].resolve({status:409,ok:false});await assert.rejects(request);
+    assert.equal(h.STATE.applicantRowsV2[h.row.key],selected);
+    assert.equal(freshRow.profileReadRefused,undefined);
+    assert.equal(h.STATE.profileReadRefusals?.[h.row.key],undefined);
+    assert.equal(Object.hasOwn(h.STATE.profiles,h.row.profileKey),false);
+  }
+});
+
+test("an older success cannot replace facts from a completed feed read of the same immutable row",async()=>{
   const selected=selectedProjection(),h=profileFetchHarness({paged:true,projected:selected});
   const request=h.helpers.fetchProfile(h.row.profileKey);
-  const freshRow={...h.row};h.STATE.snapshot.queue=[freshRow];
-  h.requests[0].resolve({status:409,ok:false});await assert.rejects(request);
+  h.STATE.snapshot.queue=[{...h.row}];
+  const body={ok:true,application:{applicationId:h.row.applicationId},profileV2:{...selected,factsCurrent:false},
+    row:{...h.row},generation:{generationId:'generation-one',generationDigest:'digest-one'}};
+  h.requests[0].resolve(profileResponse(body));assert.equal(await request,null);
   assert.equal(h.STATE.applicantRowsV2[h.row.key],selected);
-  assert.equal(freshRow.profileReadRefused,undefined);
-  assert.equal(h.STATE.profileReadRefusals?.[h.row.key],undefined);
 });
 
 function profileResponse(profile) {
