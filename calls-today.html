@@ -29,6 +29,8 @@
   .row .links{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
   .row .links a{font-size:11.5px;font-weight:750;color:var(--violet);text-decoration:none;white-space:nowrap}
   .row .links a:hover{text-decoration:underline}
+  .row .links .no-fix{font-size:11.5px;color:var(--ink3);white-space:nowrap}
+  .row .what .working{display:block;color:var(--violet);font-weight:650;margin-top:3px}
   .pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;font-size:12px;font-weight:650;white-space:nowrap}
   .pill .d{width:7px;height:7px;border-radius:50%;flex:none}
   .pill.good{background:var(--goodbg);color:var(--good)}.pill.good .d{background:var(--good)}
@@ -72,6 +74,14 @@
   .lookup-or{display:flex;align-items:center;gap:9px;color:var(--ink3);font-size:11px}
   .lookup-or:before,.lookup-or:after{content:"";height:1px;background:var(--line);flex:1}
   .search-state{display:none;color:var(--ink2);font-size:11.5px;font-weight:700}.search-state.on{display:block}
+  /* Preferences are guessed for us now, so the fields are an option behind a
+     disclosure rather than the question the row is asking. */
+  .optional-fields{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+  .optional-fields>summary{cursor:pointer;font-size:12px;font-weight:800;color:var(--ink2);list-style:none}
+  .optional-fields>summary::-webkit-details-marker{display:none}
+  .optional-fields>summary:before{content:"▸ ";color:var(--ink3)}
+  .optional-fields[open]>summary:before{content:"▾ "}
+  .optional-fields .control-block{margin-top:12px}
   .review-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:18px}
   .toast{position:fixed;right:20px;bottom:20px;max-width:420px;background:var(--ink);color:#fff;border-radius:11px;padding:11px 14px;box-shadow:var(--shadow);z-index:50}
   .toast[hidden]{display:none}.toast.bad{background:var(--bad)}
@@ -113,7 +123,12 @@ const params=new URLSearchParams(location.search);if(params.has("embed"))documen
 // panelOpen holds the reviewId of the one open fix panel. While it is set the
 // 30s refresh is paused: re-rendering the lists under David mid-edit would
 // throw away whatever he had typed.
-const STATE={config:null,actor:null,refreshTimer:null,generatedAt:null,calls:[],panelOpen:null,panelItem:null,panelBusy:false,identityQuery:"",panelDraft:null};
+// STATE.watch holds the rows this page is following through to the sent email:
+// callId -> {active,tone,label,detail,note,bucket}. While one is active the
+// 30s refresh is paused for the same reason an open panel pauses it — the row
+// underneath must not be swapped out while it is telling David what is
+// happening to it.
+const STATE={config:null,actor:null,refreshTimer:null,generatedAt:null,calls:[],panelOpen:null,panelItem:null,panelBusy:false,identityQuery:"",panelDraft:null,watch:{}};
 const RC=window.RaydarReviewControls;
 const PACIFIC="America/Los_Angeles";
 const esc=(value)=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -169,28 +184,145 @@ function resultPill(call){
   return `<span class="pill ${tone}"><span class="d"></span>${esc(result.label)}</span>`;
 }
 
-// A call is fixable from this tab when it is parked in review: it has a review
-// id and its result is anything other than the green "sent" tone.
-function isFixable(call){return Boolean(call.reviewId)&&call.result?.tone!=="good"}
+// A call is fixable from this tab only when it is parked waiting on a person:
+// bucket in_review (the "Needs you" pill). A no-show has nothing to correct and
+// sends no email, a delivered follow-up is done, and a still_working row is the
+// system's turn — offering Fix on any of those is the dead end David hit, a
+// button that opens a panel with nothing in it.
+function isFixable(call){const bucket=bucketOf(call);return Boolean(call.reviewId)&&(bucket?bucket==="in_review":call.result?.tone==="warn")}
+function bucketOf(call){return String(call.result?.bucket||"")}
+// The one row-state the page states in words instead of a button.
+function isNoShow(call){return bucketOf(call)==="no_show"||(!call.result?.bucket&&call.result?.tone==="bad")}
+
+// The sentence tonight's epoch switch left on every row it relabelled ("The
+// follow-up workflow needs a system repair"). It is the dead end David hit, and
+// it is not true of those rows — the panel can still ask the real question.
+// This is freeform backend prose (outcome.detail.why, passed through by the
+// proxy), so there is no token to key off; the match is on the phrase rather
+// than the whole sentence so a reworded preamble does not silently put the dead
+// end back on the row. The swap only fires on a row that is genuinely parked on
+// a person (in_review = the row that has the Fix button), so "Open Fix" is
+// never printed next to a row with no Fix to open.
+const RELABEL_DETAIL=/needs a system repair/i;
+function rowDetail(call){const detail=call.result?.detail||"";return bucketOf(call)==="in_review"&&RELABEL_DETAIL.test(detail)?"Open Fix to see what this needs":detail}
+
+// The status cell for one row: the feed's own pill, unless this row is being
+// watched through to the send, in which case the watch says where it has got to.
+function whatHtml(call){
+  const watch=STATE.watch[call.id];
+  const pill=watch?`<span class="pill ${esc(watch.tone)}"><span class="d"></span>${esc(watch.label)}</span>`:resultPill(call);
+  const detail=watch?watch.detail:rowDetail(call);
+  return `${pill}${detail?`<span class="detail">${esc(detail)}</span>`:""}${watch&&watch.note?`<span class="working">${esc(watch.note)}</span>`:""}`;
+}
 
 function callRow(call){
   const name=call.candidateName||"Candidate";
   const recruiter=call.assignedRecruiter?`<span class="sub" title="Assigned recruiter of record — not necessarily who hosted the call">Assigned: ${esc(call.assignedRecruiter)}</span>`:"";
-  const detail=call.result?.detail?`<span class="detail">${esc(call.result.detail)}</span>`:"";
   const paraformUrl=paraformCallUrl(call.meetingId);
   const fixable=isFixable(call),open=fixable&&STATE.panelOpen===call.reviewId;
   const links=[
     paraformUrl?`<a href="${esc(paraformUrl)}" target="_blank" rel="noopener noreferrer">Paraform call ↗</a>`:"",
     fixable?`<button class="button ghost small" data-fix="${esc(call.reviewId)}" aria-expanded="${open}">${open?"Close":"Fix"}</button>`:"",
-    !fixable&&call.reviewId?`<a href="/#review" target="_blank" rel="noopener noreferrer" title="Open the Review board (no direct deep link to this item yet)">Review board ↗</a>`:"",
+    !fixable&&isNoShow(call)?`<span class="no-fix">No email for a no-show</span>`:"",
+    !fixable&&!isNoShow(call)&&call.reviewId?`<a href="/#review" target="_blank" rel="noopener noreferrer" title="Open the Review board (no direct deep link to this item yet)">Review board ↗</a>`:"",
   ].filter(Boolean).join("");
-  return `<div class="row">
+  return `<div class="row" id="row-${esc(call.id)}">
     <div class="who">${esc(name)}${recruiter}</div>
     <div class="when">${esc(pacificTime(call.callTimeIso))}</div>
     <div class="type">${esc(callTypeLabel(call))}</div>
-    <div class="what">${resultPill(call)}${detail}</div>
+    <div class="what">${whatHtml(call)}</div>
     <div class="links">${links||'<span class="sub" style="color:var(--ink3)">—</span>'}</div>
   </div>${open?`<div class="row-panel" id="row-panel">${panelHtml()}</div>`:""}`;
+}
+
+// ---- Watching one row through to the sent email ------------------------
+// David's ask: "I should be able to click Fix, make the update, then this email
+// should go out." The action only unblocks the workflow; the rest (identity,
+// profile, preferences, Talent Network, matching, calibration, routing, the
+// Mailroom send) runs on its own afterwards. So the row keeps saying what is
+// happening to it until the email is actually sent, and nothing else on the
+// page moves while it does — a panel open on another row stays untouched.
+const WATCH_EVERY_MS=10000;          // one poll every 10 seconds
+const WATCH_LIMIT_MS=15*60*1000;     // stop after 15 minutes
+const WATCH_NOTE="We're finishing the follow-up; this usually takes a few minutes.";
+const WATCH_QUEUED="Queued, sends at 5:00 AM PT";
+// "Finished, waiting for the 05:00 PT window" is a machine fact upstream (the
+// still_working step waiting_send_window); api/post-call/calls-summary.mjs
+// flags it as result.queuedForSendWindow so this page never has to recognise
+// the English sentence it happens to print beside it.
+const isQueuedForSendWindow=(call)=>call?.result?.queuedForSendWindow===true;
+const sleep=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
+
+function watching(){return Object.values(STATE.watch).some(row=>row.active)}
+function paintRow(callId){
+  const call=STATE.calls.find(row=>row.id===callId),row=document.getElementById(`row-${callId}`);
+  const what=row&&row.querySelector(".what");
+  if(call&&what)what.innerHTML=whatHtml(call);
+}
+function setWatch(callId,patch){STATE.watch[callId]={...(STATE.watch[callId]||{}),...patch};paintRow(callId)}
+function stopWatch(callId,final){
+  if(final)STATE.watch[callId]={...final,active:false};
+  else delete STATE.watch[callId];
+  paintRow(callId);
+  if(!watching()&&!STATE.panelOpen)$("ftxt").textContent="Up to date · refreshes every 30s";
+  reportHeight();
+}
+// A finished watch keeps its plainer wording on the row until the feed itself
+// moves that call to a different state; then the feed is the truth again.
+function pruneWatch(){
+  for(const [callId,row] of Object.entries(STATE.watch)){
+    if(row.active)continue;
+    const call=STATE.calls.find(item=>item.id===callId);
+    if(!call||bucketOf(call)!==row.bucket)delete STATE.watch[callId];
+  }
+}
+// Reads the same feed the page reads but repaints nothing: only the watched
+// row is redrawn, by its caller.
+async function fetchCall(callId){
+  const to=new Date(),from=new Date(to.getTime()-4*24*60*60*1000);
+  const {status,body}=await api(`/api/post-call/calls-summary?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&limit=200`);
+  if(status!==200||body.ok!==true||!Array.isArray(body.calls))return null;
+  STATE.generatedAt=body.generatedAt||STATE.generatedAt;
+  STATE.calls=STATE.calls.map(row=>body.calls.find(fresh=>fresh.id===row.id)||row);
+  return body.calls.find(row=>row.id===callId)||null;
+}
+
+async function watchRowUntilSent(callId,reviewId){
+  if(!callId)return reportHeight();
+  const deadline=Date.now()+WATCH_LIMIT_MS;
+  setWatch(callId,{active:true,tone:"violet",label:"Working on it…",detail:"",note:WATCH_NOTE,bucket:null});
+  $("ftxt").textContent="Paused while this follow-up finishes";
+  reportHeight();
+  while(STATE.watch[callId]&&STATE.watch[callId].active){
+    if(Date.now()>=deadline)return stopWatch(callId,{tone:"muted",label:"Still working",detail:"",note:"This is taking longer than usual. Nothing for you to do; it keeps updating on its own, and the Review board has it if it never moves.",bucket:null});
+    await sleep(WATCH_EVERY_MS);
+    if(!STATE.watch[callId]||!STATE.watch[callId].active)return;
+    let call=null;
+    try{call=await fetchCall(callId)}catch(error){if(error.status===401)return showGate();continue}
+    if(!call||!call.result)continue;
+    const bucket=bucketOf(call),detail=call.result.detail||"",label=call.result.label||"";
+    if(bucket==="sent")return stopWatch(callId,{tone:"good",label:label||"Follow-up sent",detail,note:"",bucket});
+    if(bucket==="still_working"){
+      // The Mailroom only sends 05:00-19:30 PT. Out of hours the follow-up is
+      // finished and simply waiting for the morning, so this stops watching
+      // and says when it goes instead of spinning for fifteen minutes.
+      if(isQueuedForSendWindow(call))return stopWatch(callId,{tone:"muted",label:WATCH_QUEUED,detail:"",note:"",bucket});
+      setWatch(callId,{tone:"violet",label:"Working on it…",detail,note:WATCH_NOTE});
+      continue;
+    }
+    if(bucket==="in_review"){stopWatch(callId,null);return reopenOnNewBlocker(call.reviewId||reviewId)}
+    return stopWatch(callId,{tone:call.result.tone||"muted",label,detail,note:"",bucket});
+  }
+}
+
+// The follow-up parked again on a different question: put that question in
+// front of David rather than leaving him to hunt for it.
+async function reopenOnNewBlocker(reviewId){
+  let next=null;
+  try{next=(await RC.fetchItem(reviewId)).item}catch{next=null}
+  const stillListed=STATE.calls.some(call=>call.reviewId===reviewId);
+  if(next&&stillListed&&next.status==="open"&&(next.allowedActions||[]).length)return openPanel(reviewId,next);
+  renderCalls();reportHeight();
 }
 
 // ---- The inline fix panel ----------------------------------------------
@@ -214,7 +346,7 @@ function bindPanel(){
 // A redraw (a profile search, a reload of the candidate list) rebuilds the
 // whole panel, so anything already typed into a field on this row is put back
 // afterwards instead of being silently thrown away.
-function renderPanelOnly(){const root=$("row-panel");if(!root)return;const draft=STATE.panelDraft;root.innerHTML=panelHtml();bindPanel();if(draft)RC.applyChanges($("row-panel"),draft)}
+function renderPanelOnly(){const root=$("row-panel");if(!root)return;const draft=STATE.panelDraft;root.innerHTML=panelHtml();bindPanel();if(draft){RC.applyChanges(root,draft);RC.syncPrimary(root)}}
 
 function openPanel(reviewId,presetItem=null){
   if(STATE.panelOpen===reviewId)return closePanel();
@@ -284,7 +416,7 @@ async function doAction(action,overrideChanges=null){
     const {cancelled,approveSend}=await RC.runAction({item,action,changes,actor:STATE.actor});
     if(cancelled)return;
     toast(approveSend?"Email approved, Mailroom is sending it":"Saved, the follow-up is continuing");
-    await afterAction(reviewId);
+    afterAction(reviewId);
   }catch(error){await actionFailed(error)}
   finally{setPanelBusy(false)}
 }
@@ -296,22 +428,22 @@ async function doAttachResume(){
   try{
     await RC.attachResume(item,file);
     toast("Saved, the follow-up is continuing");
-    await afterAction(reviewId);
+    afterAction(reviewId);
   }catch(error){await actionFailed(error)}
   finally{setPanelBusy(false)}
 }
 
-// The action already resumed the workflow, so the row's pill can change
-// immediately. If the obligation parks again on a different blocker, reopen the
-// panel on that new blocker rather than leaving David to hunt for it.
-async function afterAction(reviewId){
+// The action already resumed the workflow, so the panel closes and the row
+// takes over the story: "Working on it…" until the email is sent, it parks
+// again on a new blocker (the panel reopens on that question), or it turns out
+// to be queued for the morning send window.
+function afterAction(reviewId){
+  const call=STATE.calls.find(row=>row.reviewId===reviewId);
   STATE.panelOpen=null;STATE.panelItem=null;STATE.identityQuery="";STATE.panelDraft=null;
-  await load();
-  let next=null;
-  try{next=(await RC.fetchItem(reviewId)).item}catch{next=null}
-  const stillListed=STATE.calls.some(call=>call.reviewId===reviewId);
-  if(next&&stillListed&&next.status==="open"&&(next.allowedActions||[]).length)openPanel(reviewId,next);
-  else reportHeight();
+  renderCalls();reportHeight();
+  // Deliberately not awaited: this runs for minutes, and the click that
+  // started it is finished.
+  watchRowUntilSent(call&&call.id,reviewId);
 }
 
 async function actionFailed(error){
@@ -357,6 +489,7 @@ function renderList(elId,rows,emptyText){
 // refetching, and so a background refresh can update STATE without touching
 // the DOM the operator is typing into.
 function renderCalls(){
+  pruneWatch();
   const todayKey=pacificDateKey(new Date().toISOString());
   const today=[],earlier=[];
   for(const call of STATE.calls)(pacificDateKey(call.callTimeIso)===todayKey?today:earlier).push(call);
@@ -421,9 +554,10 @@ async function loadUpcoming(){
 }
 
 async function load(){
-  // A panel open means someone is mid-correction; the lists stay exactly as
-  // they are until it closes, so nothing typed is ever lost to a refresh.
-  if(STATE.panelOpen)return;
+  // A panel open means someone is mid-correction, and a watched row is
+  // mid-sentence about its own progress; the lists stay exactly as they are
+  // until both are done, so nothing typed and nothing being said is lost.
+  if(STATE.panelOpen||watching())return;
   clearBanner();
   $("ftxt").textContent="Refreshing…";
   const [callsState,upcomingOk]=await Promise.all([loadCalls(),loadUpcoming()]);
@@ -452,7 +586,9 @@ async function init(){
   await load();
   startRefresh();
 }
-$("refresh").onclick=()=>{if(STATE.panelOpen)return closePanel();load()};
+// A manual refresh is David saying "show me what is really there": it drops
+// every row watch rather than leaving the page paused behind one.
+$("refresh").onclick=()=>{if(STATE.panelOpen)return closePanel();STATE.watch={};load()};
 window.addEventListener("resize",reportHeight);
 init();
 </script>

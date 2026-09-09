@@ -145,16 +145,35 @@ function detailSentenceFor(bucket, detail) {
   return reasonSentence(detail.reason);
 }
 
+// `bucket` is passed through (narrowed to the known enum, "other" otherwise)
+// because the page has to tell four states apart that the tone collapses into
+// two: in_review and no_send are both "warn", still_working and other are both
+// "muted". The Fit tab only offers a Fix button on a row that can actually be
+// fixed, and after an action it watches that row until the follow-up is sent —
+// both of which are lies if they are inferred from a colour. It is a fixed
+// vocabulary of six display tokens, no free text and no identifiers, so it
+// carries nothing the tone beside it does not already imply.
 function sanitizeResult(outcome) {
   if (!outcome || typeof outcome !== "object") return null;
   const label = safeText(outcome.label, 120);
   if (!label) return null;
-  const bucket = String(outcome.bucket || "").toLowerCase();
+  const raw = String(outcome.bucket || "").toLowerCase();
+  const bucket = Object.hasOwn(BUCKET_TONES, raw) ? raw : "other";
   const tone = RESULT_TONES.has(BUCKET_TONES[bucket]) ? BUCKET_TONES[bucket] : "muted";
+  // The Mailroom only sends 05:00-19:30 PT, so a follow-up that is finished and
+  // simply waiting for the morning is not "still working" in any sense David
+  // should watch for fifteen minutes. That is a machine fact here (the
+  // waiting_send_window step); the page used to recognise it by string-matching
+  // the English sentence STEP_WORDS prints for it, which a reword would have
+  // silently broken into a spinner that never stops. It is a boolean, present
+  // only when true, so it adds no token and no free text to the payload.
+  const queuedForSendWindow = bucket === "still_working" && String(outcome.detail?.step || "") === "waiting_send_window";
   return {
     label,
-    detail: detailSentenceFor(bucket, outcome.detail),
+    detail: detailSentenceFor(raw, outcome.detail),
     tone,
+    bucket,
+    ...(queuedForSendWindow ? { queuedForSendWindow: true } : {}),
   };
 }
 
