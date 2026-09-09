@@ -39,6 +39,12 @@ import {
   ruleSubjectFromApplicantV2,
 } from "./_lib/rule-run-v2.mjs";
 import { validateProfileV2RuleSeed } from "./_lib/profile-v2-rule-seed.mjs";
+import { buildPagedRulePreviewCommand } from "./_lib/rules-paged.mjs";
+import {
+  readPagedApplicantManifest,
+  readPagedRuleOperationStatus,
+  readPagedRulePreviewResults,
+} from "./_lib/rules-paged-store.mjs";
 import {
   MAX_RULES,
   MAX_VERSIONS,
@@ -76,6 +82,10 @@ export function createRulesHandler({
   newId = () => `rule-${randomUUID()}`,
   readMembershipSnapshots = (rules) => loadFundedEmployerSnapshots(rules, { readJson }),
   readMembershipCatalog = () => readFundedEmployerCatalog({ readJson }),
+  pagedRulesEnabled = () => process.env.APPLICANT_CORE_PAGED_READS === "true",
+  readPagedManifest = readPagedApplicantManifest,
+  readPagedOperation = readPagedRuleOperationStatus,
+  readPagedResults = readPagedRulePreviewResults,
 } = {}) {
   const loadRules = () => readRules({ readJson });
   const saveRules = (doc) => writeRules(doc, { writeJson });
@@ -215,8 +225,35 @@ export function createRulesHandler({
       const op = clean(body.op);
       const by = clean(req.authedEmail).toLowerCase() || "unknown";
 
+      if (op === "pagedRuleStatus") {
+        if (!pagedRulesEnabled()) return res.status(404).json({ ok: false, error: "paged_rules_unavailable" });
+        const operation = await readPagedOperation(body.operationId);
+        if (!operation) return res.status(404).json({ ok: false, error: "rule_operation_not_found" });
+        const rows = operation.kind === "preview" && ["ready", "run_requested", "running", "complete"].includes(operation.state)
+          ? await readPagedResults(operation.id, { limit: PREVIEW_SAMPLES }) : [];
+        const samples = rows.map((row) => ({ key: row.monitorKey,
+          evidence: row.evidence?.winner || row.evidence || {} }));
+        return res.status(200).json({ ok: true, operation, samples });
+      }
+
       // ── preview: never touches stored state ──────────────────────────────
       if (op === "preview") {
+        if (pagedRulesEnabled()) {
+          const manifest = await readPagedManifest({ generationId: body.generationId,
+            generationDigest: body.generationDigest });
+          if (!manifest) return res.status(503).json({ ok: false, error: "generation_unavailable" });
+          const normalized = normalizeRule(body.rule, { now, by });
+          if (!normalized.ok) return res.status(400).json({ ok: false, error: "rule_invalid", detail: normalized.error });
+          const command = buildPagedRulePreviewCommand({ rules: [{ ...normalized.rule, state: "live" }], authorizerId: by,
+            authenticatedAt: now(), evaluatedAt: now(), generation: {
+              generationId: manifest.generationId, digest: manifest.generationDigest,
+              sequence: Number(manifest.viewSequence),
+            } });
+          await writeHash(K.ruleRunCommands, { [command.operationId]: command });
+          return res.status(202).json({ ok: true, paged: true, pending: true,
+            operationId: command.operationId, state: "queued",
+            generationId: manifest.generationId, generationDigest: manifest.generationDigest });
+        }
         const publication = await readActive();
         if (!publication) return res.status(503).json({ ok: false, error: "generation_unavailable" });
         if (String(body.generationId || "") !== publication.generationId

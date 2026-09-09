@@ -179,7 +179,7 @@ test("Processing is read-only and never requests cards or exposes actions", () =
   assert.match(applicants, /profilePreparingRows\(\)\.filter\(\(row\) =>/);
   assert.match(applicants, /\[row\.name, row\.roleTitle, row\.company, row\.sourceJobId\]/);
   assert.match(applicants, /No preparing applicants match the current filters/);
-  assert.match(applicants, /paintList\(list, rows, processingRowHtml, \{ requestRichCards: false \}\)/);
+  assert.match(applicants, /paintList\(list, rows, processingRowHtml, \{ requestRichCards: false, onNearEnd: STATE\.paged \? loadMoreApplicants : null \}\)/);
   const processing = applicants.slice(applicants.indexOf("function processingRowHtml"), applicants.indexOf("function renderLists"));
   assert.doesNotMatch(processing, /data-act=|openProfile\(|rowCardHtml\(|requestVisibleRichCards\(|Source observation:|Profile key:/);
 });

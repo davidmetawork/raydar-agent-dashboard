@@ -73,6 +73,15 @@ import {
   requireApplicantMutation,
   saveApplicantRequest,
 } from './_lib/request-safety.mjs';
+import {
+  buildPagedRulePreviewCommand,
+  buildPagedRuleRunCommand,
+  pagedRuleDigest,
+} from "./_lib/rules-paged.mjs";
+import {
+  readPagedApplicantManifest,
+  readPagedRuleOperationStatus,
+} from "./_lib/rules-paged-store.mjs";
 
 export const config = { maxDuration: 120 };
 
@@ -120,6 +129,9 @@ export function createTickHandler({
   saveRequest = saveApplicantRequest,
   now = () => Date.now(),
   readMembershipSnapshots = (rules) => loadFundedEmployerSnapshots(rules, { readJson }),
+  pagedRulesEnabled = () => process.env.APPLICANT_CORE_PAGED_READS === "true",
+  readPagedManifest = readPagedApplicantManifest,
+  readPagedOperation = readPagedRuleOperationStatus,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -133,6 +145,58 @@ export function createTickHandler({
       let body;
       try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }
       catch { return res.status(400).json({ ok: false, error: "invalid_json" }); }
+
+      if (pagedRulesEnabled()) {
+        const manifest = await readPagedManifest({ generationId: body.generationId,
+          generationDigest: body.generationDigest });
+        if (!manifest) return res.status(503).json({ ok: false, error: "generation_unavailable" });
+        const doc = await readRules({ readJson });
+        const rules = [...armedRules(doc), ...watchingRules(doc)];
+        const actor = String(req.applicantActor?.email || req.authedEmail || "unknown").trim().toLowerCase();
+        if (doc.pausedAll) return res.status(200).json({ ok: true, paged: true,
+          parked: "all_rules_paused", decided: 0, generationId: manifest.generationId,
+          generationDigest: manifest.generationDigest });
+        if (!rules.length) return res.status(200).json({ ok: true, paged: true,
+          parked: "no_active_rules", decided: 0, generationId: manifest.generationId,
+          generationDigest: manifest.generationDigest });
+        if (!body.previewId) {
+          const command = buildPagedRulePreviewCommand({ rules, authorizerId: actor,
+            authenticatedAt: startedAt, evaluatedAt: startedAt, generation: {
+              generationId: manifest.generationId, digest: manifest.generationDigest,
+              sequence: Number(manifest.viewSequence),
+            } });
+          const reservedRunId = randomUUID();
+          await writeHash(K.ruleRunCommands, { [command.operationId]: command });
+          return res.status(202).json({ ok: true, paged: true, phase: "preview",
+            operationId: command.operationId, previewId: command.operationId,
+            runId: reservedRunId, state: "queued", generationId: manifest.generationId,
+            generationDigest: manifest.generationDigest });
+        }
+        const preview = await readPagedOperation(body.previewId);
+        if (!preview || preview.kind !== "preview"
+          || preview.generationId !== manifest.generationId
+          || preview.generationDigest !== manifest.generationDigest
+          || preview.rulesetDigest !== pagedRuleDigest(rules)
+          || preview.authorizerId !== actor) {
+          return res.status(409).json({ ok: false, error: "rules_preview_changed_refresh_required" });
+        }
+        if (["queued", "evaluating"].includes(preview.state)) {
+          return res.status(202).json({ ok: true, paged: true, phase: "preview",
+            operationId: preview.id, previewId: preview.id, runId: body.runId,
+            state: preview.state, generationId: manifest.generationId,
+            generationDigest: manifest.generationDigest });
+        }
+        if (preview.state !== "ready") {
+          return res.status(409).json({ ok: false, error: "rules_preview_not_runnable", state: preview.state });
+        }
+        const command = buildPagedRuleRunCommand({ runId: body.runId, preview,
+          authorizerId: actor, authenticatedAt: preview.authenticatedAt });
+        await writeHash(K.ruleRunCommands, { [command.operationId]: command });
+        return res.status(202).json({ ok: true, paged: true, phase: "run",
+          operationId: command.operationId, previewId: preview.id, runId: command.operationId,
+          state: "run_requested", generationId: manifest.generationId,
+          generationDigest: manifest.generationDigest });
+      }
 
       // Rules are a button-only write path, but the button is not permission
       // to act on whatever happens to be in KV when the request arrives. It

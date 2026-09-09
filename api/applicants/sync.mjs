@@ -110,7 +110,7 @@ const ACK_STATUSES = new Set([
   "invited",
   "blocked",
 ]);
-import {saveApplicantAck} from './_lib/request-safety.mjs';
+import {saveApplicantAck,saveApplicantRequest} from './_lib/request-safety.mjs';
 import { sourceProfileDigest } from "./_lib/source-profile-digest.mjs";
 import {
   normalizeRichProfile, richBindingsForSnapshot, richCardFromProfile,
@@ -701,6 +701,7 @@ export function createSyncHandler({
   // is one: a test must be able to exercise the ack branch without a live KV.
   // Production always gets saveApplicantAck.
   saveAck = saveApplicantAck,
+  saveRequest = saveApplicantRequest,
   now = () => new Date().toISOString(),
 } = {}) {
   return async function handler(req, res) {
@@ -777,9 +778,13 @@ export function createSyncHandler({
             return res.status(503).json({ ok: false, error: "rule_run_commands_unavailable" });
           }
           const pending = Object.values(commands)
-            .filter((command) => command && typeof command === "object"
-              && commandAcks[command.runId]?.commandDigest !== command.commandDigest)
-            .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")))
+            .filter((command) => {
+              const id = command?.operationId || command?.runId;
+              return command && typeof command === "object"
+                && commandAcks[id]?.commandDigest !== command.commandDigest;
+            })
+            .sort((left, right) => String(left.createdAt || left.authenticatedAt || "")
+              .localeCompare(String(right.createdAt || right.authenticatedAt || "")))
             .slice(0, 32);
           return res.status(200).json({ ok: true, ruleRunCommands: pending });
         }
@@ -916,20 +921,54 @@ export function createSyncHandler({
         const accepted = {};
         for (const [runId, ack] of Object.entries(body.ruleRunAcks)) {
           const command = commands?.[runId];
-          if (!/^[0-9a-f-]{36}$/iu.test(runId) || ack?.status !== "sealed"
-            || ack.runId !== runId || ack.commandDigest !== command?.commandDigest
-            || ack.manifestDigest !== command?.manifestDigest
-            || ack.previewDigest !== command?.manifest?.previewDigest) {
+          const pagedPreview = command?.version === "applicant-monitor-paged-rule-preview-command-v1";
+          const pagedRun = command?.version === "applicant-monitor-paged-rule-run-command-v1";
+          const paged = pagedPreview || pagedRun;
+          const validPaged = paged && ack?.operationId === runId
+            && ack.status === (pagedPreview ? "preview_queued" : "run_requested")
+            && (!pagedRun || (ack.runId === runId && ack.previewId === command.previewId));
+          const validLegacy = !paged && ack?.status === "sealed" && ack.runId === runId
+            && ack.manifestDigest === command?.manifestDigest
+            && ack.previewDigest === command?.manifest?.previewDigest;
+          if (!/^[0-9a-f-]{36}$/iu.test(runId) || ack?.commandDigest !== command?.commandDigest
+            || (!validPaged && !validLegacy)) {
             return res.status(409).json({ ok: false, error: "rule_run_ack_mismatch", runId });
           }
-          accepted[runId] = {
-            status: "sealed", runId, commandDigest: ack.commandDigest,
-            manifestDigest: ack.manifestDigest, previewDigest: ack.previewDigest,
-            acknowledgedAt: now(),
-          };
+          accepted[runId] = paged ? {
+            status: ack.status, operationId: runId,
+            ...(pagedRun ? { runId, previewId: ack.previewId } : {}),
+            commandDigest: ack.commandDigest, acknowledgedAt: now(),
+          } : { status: "sealed", runId, commandDigest: ack.commandDigest,
+            manifestDigest: ack.manifestDigest, previewDigest: ack.previewDigest, acknowledgedAt: now() };
         }
         if (Object.keys(accepted).length) await writeHash(K.ruleRunAcks, accepted);
         return res.status(200).json({ ok: true, acks: accepted });
+      }
+
+      if (own(body, "pagedRuleDecisions")) {
+        const rows = body.pagedRuleDecisions;
+        if (Object.keys(body).length !== 1 || !Array.isArray(rows)
+          || !rows.length || rows.length > 32) {
+          return res.status(400).json({ ok: false, error: "invalid_paged_rule_decisions" });
+        }
+        for (const row of rows) {
+          const request = row?.request;
+          if (!Number.isSafeInteger(Number(row?.outboxId)) || Number(row.outboxId) < 1
+            || row?.requestId !== request?.requestId || !validKey(request?.key)
+            || request?.actorType !== "rule"
+            || request?.ruleRun?.version !== "applicant-core-paged-rule-run-v1"
+            || request?.viewAuthority?.version !== "applicant-paged-decision-authority-v1") {
+            return res.status(400).json({ ok: false, error: "invalid_paged_rule_decision" });
+          }
+        }
+        const receipts = [];
+        for (const row of rows) {
+          const request = row.request;
+          const stored = await saveRequest(request.key, request, { rejectSentAck: true });
+          receipts.push({ outboxId: Number(row.outboxId), requestId: row.requestId,
+            disposition: stored === true ? "stored" : "conceded" });
+        }
+        return res.status(200).json({ ok: true, receipts });
       }
 
       // The existing publisher may derive compact facts from retained caches.
