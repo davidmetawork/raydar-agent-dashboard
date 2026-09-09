@@ -2055,7 +2055,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
       }));
     },
 
-    async enqueuePairAction({ actorEmail, idempotencyKey, pairId, expectedVersion, action, kind, requiredControl = "generation", checkpoint = {} }) {
+    async enqueuePairAction({ actorEmail, idempotencyKey, pairId, expectedVersion, action, kind, requiredControl = "generation", checkpoint = {}, priority = 100 }) {
       return sql.begin(async (tx) => command(tx, {
         actorEmail, action, idempotencyKey, expectedVersion, pairId,
         input: { pairId, expectedVersion, checkpoint },
@@ -2088,7 +2088,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
         }
         const job = await enqueue(tx, {
           kind, subjectType: "pair", subjectId: pairId, commandId: commandRow.id,
-          idempotencyKey: `${kind}:${commandRow.id}`, requiredControl,
+          idempotencyKey: `${kind}:${commandRow.id}`, requiredControl, priority,
           checkpoint: { ...checkpoint, expected_pair_version: Number(expectedVersion) },
         });
         await pairEvent(tx, current, { actorId: actorEmail, source: action, eventType: `${action}_requested`, idempotencyKey: `pair:${commandRow.id}`, metadata: { job_id: job?.id || null } });
