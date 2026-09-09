@@ -79,7 +79,7 @@ export function activeSourceProfileReceiptMismatches(snapshot, receipts, { now =
  * It does not filter or recount active rows; `profilePreparing` is Core's
  * immutable partition count and is the only withheld population reported.
  */
-export function profileCacheSummary(snapshot) {
+export function profileCacheSummary(snapshot, { publishedSnapshot = snapshot } = {}) {
   const rawStream = rows(snapshot?.stream);
   const rawQueue = rows(snapshot?.queue);
   const all = [...rawQueue, ...rawStream];
@@ -89,6 +89,22 @@ export function profileCacheSummary(snapshot) {
   const activeRows = all.length;
   const activeCandidates = candidateIds.size;
   const generatedDay = String(snapshot?.generatedAt || "").slice(0, 10);
+  // The read-time receipt partition turns profilePreparing into a number and
+  // may move ready rows there. Use the raw published sections for this count;
+  // profileKey is application-scoped, while cuId can identify one shared person.
+  const publishedRows = [
+    ...rows(publishedSnapshot?.stream),
+    ...rows(publishedSnapshot?.queue),
+    ...rows(publishedSnapshot?.profilePreparing),
+  ];
+  const publishedCounts = publishedSnapshot?.counts;
+  const ownsDailyCounts = typeof publishedCounts?.dayTimeZone === "string"
+    && Number.isSafeInteger(publishedCounts.newToday) && publishedCounts.newToday >= 0
+    && Number.isSafeInteger(publishedCounts.emailedToday) && publishedCounts.emailedToday >= 0;
+  const newTodayApplications = new Set(publishedRows
+    .filter((row) => String(row?.addedAt || "").slice(0, 10) === generatedDay)
+    .map((row) => row?.profileKey || row?.key || null)
+    .filter(Boolean));
   const stream = rawStream;
   const queue = rawQueue;
   return {
@@ -123,9 +139,10 @@ export function profileCacheSummary(snapshot) {
       stream: stream.length,
       queue: queue.length,
       unrated: queue.filter((row) => row?.tier === "unrated").length,
-      emailedToday: stream.filter((row) =>
+      emailedToday: ownsDailyCounts ? publishedCounts.emailedToday : stream.filter((row) =>
         row?.status === "emailed" && String(row?.addedAt || "").slice(0, 10) === generatedDay).length,
-      newToday: stream.filter((row) => String(row?.addedAt || "").slice(0, 10) === generatedDay).length,
+      newToday: ownsDailyCounts ? publishedCounts.newToday : newTodayApplications.size,
+      dayTimeZone: ownsDailyCounts ? publishedCounts.dayTimeZone : "UTC",
     },
   };
 }

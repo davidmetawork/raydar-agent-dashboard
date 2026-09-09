@@ -118,6 +118,8 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
     initials: () => "SA", avatarImg: () => "<img>",
     preferredLinkedinProfileUrl: () => "", liAnchor: () => "", pfAnchor: () => "", tierPill: () => "",
     monthYear: () => "September 2026", shortDate: () => "September 1", relTime: () => "now",
+    applicationMomentText: (value) => value?.appliedAt ? "Applied September 1" : "",
+    DISPLAY_ONLY_SOURCE_HOLD_CODES: new Set(["source_held", "display_only_source_held"]),
     duration: () => "", effectiveDecision: () => null, interviewHold: () => "", alreadyEmailed: () => false,
     ALREADY_EMAILED_ACTION_TITLE: "", $: (id) => id === "profileCard" ? profileCard : null,
   };
@@ -192,7 +194,7 @@ test("the page offers verified rich facts and source facts with separate provena
   assert.match(applicants, /const providerHistory = hasProviderHistory\(provider\);/);
   assert.match(applicants, /const primaryProfile = providerHistory \? provider : p;/);
   assert.match(applicants, /historySectionsHtml\(primaryProfile, \{ allowRuleFacts: canUseFact\(providerHistory \? "paraform" : "source"\), isParaformProfile: providerHistory \}\)/);
-  assert.match(applicants, /historySectionsHtml\(p, \{ allowRuleFacts: modal\.source === "queue" \}\)/);
+  assert.match(applicants, /historySectionsHtml\(p, \{ allowRuleFacts: canUseFact\("source"\) \}\)/);
   assert.match(applicants, /provider\?\.ruleFactsEligible === true/);
   assert.doesNotMatch(applicants.slice(start, end), /paraformProfile\?\./);
 });

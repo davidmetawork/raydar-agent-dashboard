@@ -606,7 +606,7 @@ test("feed keeps every published row even when no compact card is cached", async
     missingProfileKeys: [], missingCuIds: [], upgradeCuIds: [], warmCuIds: [],
     queue: { total: 2, ready: 2, withheld: 0, unidentified: 0 },
     stream: { total: 2, ready: 2, withheld: 0, unidentified: 0 },
-    counts: { stream: 2, queue: 2, unrated: 1, emailedToday: 0, newToday: 0 },
+    counts: { stream: 2, queue: 2, unrated: 1, emailedToday: 0, newToday: 0, dayTimeZone: "UTC" },
   });
 });
 
