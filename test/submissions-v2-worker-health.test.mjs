@@ -16,10 +16,10 @@ test("worker startup has a bounded grace period and cannot remain green without 
   assert.equal(health.snapshot().status, "loop_not_started");
 });
 
-test("a legitimate five-minute job stays live but an unresponsive cycle becomes unhealthy", () => {
+test("a legitimate twenty-minute cycle stays live but an unresponsive cycle becomes unhealthy", () => {
   const time = clock(); const health = createWorkerHealth({ now: time.now });
   health.beginCycle();
-  time.advance(295_000);
+  time.advance(1_195_000);
   assert.equal(health.snapshot().ok, true);
   time.advance(65_001);
   assert.equal(health.snapshot().status, "cycle_stalled");

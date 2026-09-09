@@ -1,6 +1,9 @@
 import { ResumeContractError, canonicalJson, sha256 } from "./source-bundle.mjs";
 
-export const GENERATION_DEADLINE_MS = 5 * 60_000;
+// Ten minutes since 2026-09-09: measured builds spend two to four minutes in the
+// strategist stage alone, and about half of the 2026-09-09 backlog hit the old
+// five-minute deadline with healthy jobs. The two-dollar cost ceiling is unchanged.
+export const GENERATION_DEADLINE_MS = 10 * 60_000;
 export const GENERATION_BUDGET_CENTS = 200;
 
 const DEFAULT_RATES = Object.freeze({
@@ -116,7 +119,7 @@ export function createGenerationBudget({
 
   function assertTime(minimumRemainingMs = 1) {
     if (!Number.isFinite(deadline) || now() + Math.max(1, minimumRemainingMs) > deadline) {
-      throw new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its five-minute deadline.", {
+      throw new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its ten-minute deadline.", {
         retryable: true,
       });
     }
