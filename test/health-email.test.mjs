@@ -15,6 +15,12 @@ import {
   EVALUATORS,
 } from "../api/health/_lib/evaluators.mjs";
 import { CATALOG, GROUPS, DAVID_MAILBOX_BEAT_LANES, byId } from "../api/health/_lib/catalog.mjs";
+import {
+  deriveCampaignMailboxAccounts,
+  monitoredParaformRoster,
+  readParaformMailboxSnapshot,
+  representativeCampaigns,
+} from "../api/health/mailboxes.mjs";
 
 const iso = (deltaMs) => new Date(Date.now() + deltaMs).toISOString();
 const MIN = 60_000;
@@ -241,6 +247,104 @@ test("paraform mailboxes: david@ in ERROR is DOWN; a few alias errors DEGRADED; 
   });
   assert.equal(statusless.state, "UNKNOWN");
   assert.match(statusless.reason, /no gmail_status/);
+
+  const partial = paraformMailboxes({
+    status: 200,
+    body: { ok: true, paraform: "live", counts: { total: 27, gmailActive: 26, gmailError: 0, other: 1 }, davidGmailStatus: "ACTIVE" },
+  });
+  assert.equal(partial.state, "DEGRADED");
+  assert.match(partial.reason, /1\/27/);
+});
+
+test("paraform mailbox endpoint: chooses one enabled representative per owner", () => {
+  const representatives = representativeCampaigns([
+    { id: "owner-a-old", enabled: false, user: { email: "owner-a@example.test" } },
+    { id: "owner-a-live", enabled: true, user: { email: "OWNER-A@example.test" } },
+    { id: "owner-b", enabled: false, user: { id: "owner-b" } },
+    { id: "missing-owner", enabled: true, user: {} },
+  ]);
+  assert.deepEqual(representatives.map((row) => row.id), ["owner-a-live", "owner-b"]);
+});
+
+test("paraform mailbox endpoint: joins roster to full-campaign gmail_status and never lets Outlook rescue Gmail", () => {
+  const accounts = deriveCampaignMailboxAccounts(
+    [
+      { email: "david@raydar.xyz" },
+      { email: "alias@heyraydar.com" },
+      { email: "unmapped@raydarcareers.com" },
+    ],
+    [{
+      user: {
+        accounts: [
+          { email: "david@raydar.xyz", gmail_status: "ACTIVE", outlook_status: "ACTIVE" },
+          { email: "alias@heyraydar.com", gmail_status: "ACTIVE", outlook_status: "ACTIVE" },
+        ],
+      },
+      campaign_to_accounts: [{
+        account: { email: "ALIAS@heyraydar.com", gmail_status: "ERROR", outlook_status: "ACTIVE" },
+      }],
+    }],
+  );
+  assert.deepEqual(accounts, [
+    { email: "david@raydar.xyz", gmailStatus: "ACTIVE", outlookStatus: "ACTIVE" },
+    { email: "alias@heyraydar.com", gmailStatus: "ERROR", outlookStatus: "ACTIVE" },
+    { email: "unmapped@raydarcareers.com", gmailStatus: "UNKNOWN", outlookStatus: null },
+  ]);
+});
+
+test("paraform mailbox endpoint: excludes the separate persona fleet from the sending-fleet tile", () => {
+  const monitored = monitoredParaformRoster([
+    { email: "david@raydar.xyz" },
+    { email: "david@heyraydar.com" },
+    { email: "noah@chatraydar.com" },
+    { email: "persona@unrelated-mailbox.test" },
+    { email: "david@persona-domain.test" },
+  ]);
+  assert.deepEqual(monitored.map((row) => row.email), [
+    "david@raydar.xyz",
+    "david@heyraydar.com",
+    "noah@chatraydar.com",
+  ]);
+});
+
+test("paraform mailbox endpoint: refreshes roster/list plus one full campaign per owner", async () => {
+  const calls = [];
+  const get = async (procedure, input) => {
+    calls.push({ procedure, input });
+    if (procedure === "gmail.getActiveUserGmailAccounts") {
+      return [
+        { email: "david@heyraydar.com" },
+        { email: "david@raydarcareers.com" },
+        { email: "persona@unrelated-mailbox.test" },
+      ];
+    }
+    if (procedure === "campaigns.getListOfCampaignsOptimized") {
+      return [
+        { id: "campaign-one", enabled: true, user: { email: "owner-one@example.test" } },
+        { id: "campaign-two", enabled: true, user: { email: "owner-two@example.test" } },
+        { id: "campaign-one-old", enabled: false, user: { email: "owner-one@example.test" } },
+      ];
+    }
+    const email = input.campaign_id === "campaign-one"
+      ? "david@heyraydar.com"
+      : "david@raydarcareers.com";
+    return { user: { accounts: [{ email, gmail_status: "ACTIVE" }] } };
+  };
+
+  const snapshot = await readParaformMailboxSnapshot({ get });
+  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.campaignCount, 3);
+  assert.equal(snapshot.campaignOwnersRead, 2);
+  assert.equal(snapshot.paraformRosterCount, 3);
+  assert.equal(snapshot.accounts.length, 2);
+  assert.equal(snapshot.accounts.every((row) => row.gmailStatus === "ACTIVE"), true);
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls.map((call) => call.procedure), [
+    "gmail.getActiveUserGmailAccounts",
+    "campaigns.getListOfCampaignsOptimized",
+    "campaigns.getCampaign",
+    "campaigns.getCampaign",
+  ]);
 });
 
 test("paraform sequences: a fully blind tick is UNKNOWN — an UNKNOWN inbox result is not an observation", () => {
