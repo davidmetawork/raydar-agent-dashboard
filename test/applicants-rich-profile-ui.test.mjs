@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
-import { projectPagedDocument } from "../api/applicants/_lib/paged.mjs";
+import { pagedFeedResponse, projectPagedDocument } from "../api/applicants/_lib/paged.mjs";
 import { projectApplicantProfileV2 } from "../api/applicants/_lib/paged-core/applicant-profile-contract.mjs";
 import { pagedProfilePins } from "../api/applicants/_lib/paged-core/paged-profile-contract.mjs";
 import { applicationSourceFactsFromNormalized } from "../api/applicants/_lib/paged-core/application-source-facts.mjs";
@@ -106,7 +106,7 @@ test("the compact overlay is used only for meaningful provider content", () => {
 const modalEnd = applicants.indexOf("/* ---- event delegation", start);
 assert.ok(modalEnd > start, "modal rendering helpers are extractable from the shipped page");
 
-function renderHarness({ card, profile, provider = null, source = "queue", rowOverrides = {}, projected = null, profileState = "available" }) {
+function renderHarness({ card, profile, provider = null, source = "queue", rowOverrides = {}, projected = null, profileState = "available", feed = null }) {
   const profileCard = { innerHTML: "" };
   const row = { key: "row-one", profileKey: "core:one", cuId: "candidate-one", name: "Source Applicant", roleTitle: "Engineer", company: "Example Co", roleId: "role-one", ...rowOverrides };
   const STATE = {
@@ -116,7 +116,9 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
     applicantRowsV2: projected ? { [row.key]: projected } : {},
     modal: { cu: row.profileKey, key: row.key, row, source },
     busy: new Set(),
+    ...(feed ? { snapshot: feed.snapshot, profilePreparingRows: feed.profilePreparingRows } : {}),
   };
+  let detailFetches = 0;
   const context = {
     STATE, esc,
     profileId: (value) => value?.profileKey || value?.cuId || "",
@@ -128,13 +130,57 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
     applicationMomentText: (value) => value?.appliedAt ? "Applied September 1" : "",
     DISPLAY_ONLY_SOURCE_HOLD_CODES: new Set(["source_held", "display_only_source_held"]),
     duration: () => "", effectiveDecision: () => null, interviewHold: () => "", alreadyEmailed: () => false,
-    ALREADY_EMAILED_ACTION_TITLE: "", $: (id) => id === "profileCard" ? profileCard : null,
+    ALREADY_EMAILED_ACTION_TITLE: "", $: (id) => id === "profileCard" ? profileCard : { classList: { add() {} } },
+    ensureRoom() {}, placeModal() {}, lockOuterScroll() {}, closeProfile() {}, applyAvatar() {},
+    RaydarNav: { open() {} }, fetchProfile: () => { detailFetches++; return Promise.resolve(); },
+    testFetchProfile: () => { detailFetches++; return Promise.resolve(); },
   };
   const selectedHelpers = applicants.slice(applicants.indexOf("function profileSelectionRefused("), applicants.indexOf("function richGenerationKey("));
-  const rendered = runInNewContext(`${selectedHelpers}\n${applicants.slice(start, modalEnd)}; ({ historyHtml, renderModal })`, context);
-  rendered.renderModal();
-  return { card: rendered.historyHtml(row), modal: profileCard.innerHTML };
+  const listHelpers = applicants.slice(applicants.indexOf("function queueRows("), applicants.indexOf("function profileSelectionRefused("));
+  const openHelper = applicants.slice(applicants.indexOf("function openProfile("), applicants.indexOf("function restoreProfileFocus("));
+  const companyHelper = applicants.slice(applicants.indexOf("function appliedCompany("), applicants.indexOf("function invitationAgeText("));
+  const rendered = runInNewContext(`${listHelpers}\n${selectedHelpers}\n${companyHelper}\n${openHelper}\n${applicants.slice(start, modalEnd)};
+    ensureRoom = () => {}; placeModal = () => {}; lockOuterScroll = () => {};
+    fetchProfile = testFetchProfile; applyAvatar = () => {};
+    ({ historyHtml, renderModal, openProfile })`, context);
+  if (feed) rendered.openProfile(row.key);
+  else rendered.renderModal();
+  return { card: rendered.historyHtml(row), modal: profileCard.innerHTML,
+    source: STATE.modal.source, detailFetches };
 }
+
+test('actual stored-profile reconstruction never renders conflicting source careers in card or modal', async () => {
+  const fixtures = JSON.parse(await readFile(new URL('./fixtures/historical-source-attribution-pins.json', import.meta.url)));
+  for (const name of ['conflicting_native_shape', 'safe_provider', 'safe_resume', 'legacy_resume']) {
+    const input = fixtures.cases[name];
+    const projected = projectPagedDocument({ current: true, source: input.source,
+      profile: input.paraform, resume: input.resume,
+      row: { id: 'row-attribution', application_id: input.pins.application.applicationId,
+        monitor_key: 'core:attribution', row_revision: 7, row_digest: 'a'.repeat(64),
+        source_observation_id: input.pins.application.sourceObservationId,
+        source_status: 'held', partition: 'ready', view_states: ['ready'],
+        role_title: 'Target Role', company: 'Target Company',
+        fact_set_digest: input.pins.factSetDigest,
+        index_payload: { profilePins: input.pins, interviewAllowed: true,
+          interviewWhenReadyAllowed: true }, problems: [] } });
+    const feed = pagedFeedResponse({ manifest: { generationId: 'generation-one',
+      generationDigest: 'a'.repeat(64), rowCount: 1, counts: {} }, page: {},
+      view: 'all', applicants: [projected] });
+    const rendered = renderHarness({ card: projected.card, profile: projected.profile,
+      projected: projected.profileV2, rowOverrides: projected.row, feed });
+    const independentFallback = name !== 'conflicting_native_shape';
+    assert.equal(rendered.source, independentFallback ? 'queue' : 'preparing');
+    assert.equal(rendered.detailFetches, independentFallback ? 1 : 0);
+    for (const html of [rendered.card, rendered.modal]) {
+      assert.doesNotMatch(html, /Archived Source (Title|Employer|School)|Copied Wrong/);
+      assert.doesNotMatch(html, /data-rule-fact-kind=/);
+    }
+    if (name === 'safe_provider') {
+      assert.match(rendered.modal, /Verified Provider Title|Verified Provider Employer/);
+    }
+    if (name.includes('resume')) assert.match(rendered.modal, /Independent Resume School/);
+  }
+});
 
 test("selected list history remains available in detail while its read is pending or fails", () => {
   const facts = {

@@ -1,3 +1,5 @@
+import { historicalV4SourceAttribution } from './historical-source-attribution.mjs';
+
 export const APPLICATION_SOURCE_FACTS_VERSION = "applicant-core-application-source-facts-v1";
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -77,6 +79,7 @@ function sourceEducation(entry, index) {
  * observation. Missing values stay missing. This function never reads a
  * resume, calls a provider, or guesses structured facts from document text. */
 export function applicationSourceFactsFromNormalized(normalized, { provider, observedAt } = {}) {
+  if (historicalV4SourceAttribution(normalized, { provider })) return Object.freeze({});
   const source = object(normalized) ?? {};
   const sourceContext = object(source.sourceContext) ?? object(source.source_context) ?? {};
   const detail = object(source.context_snapshot?.candidate_detail) ?? {};

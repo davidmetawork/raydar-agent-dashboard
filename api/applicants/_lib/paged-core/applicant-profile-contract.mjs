@@ -93,7 +93,8 @@ function candidateValidity(candidate, application, {
       const normalizedHash = text(source.normalizedHash);
       if (!/^[a-f0-9]{64}$/u.test(normalizedHash || "")
         || source.factVersion !== normalizedHash) return "source_digest_mismatch";
-      if (source.state !== "verified") return "unavailable";
+      if (source.state !== "verified") return source.state === "conflict"
+        ? "attribution_conflict" : "unavailable";
     } else if (!id(source.artifact?.id) || !text(source.artifact?.digest) || !text(source.parserVersion)) {
       return "resume_unusable";
     }

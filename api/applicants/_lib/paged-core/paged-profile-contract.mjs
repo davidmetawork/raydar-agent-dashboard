@@ -6,6 +6,8 @@ import {
   projectApplicantProfileV2,
 } from './applicant-profile-contract.mjs';
 import { applicationSourceFactsFromNormalized } from './application-source-facts.mjs';
+import { historicalV4SourceAttribution, historicalV4SourceAttributionProblem,
+  withoutApplicationSourceFacts } from './historical-source-attribution.mjs';
 import { payloadHash } from './stable-json.mjs';
 
 export const PAGED_PROFILE_PINS_V1_VERSION = 'applicant-paged-profile-pins-v1';
@@ -77,9 +79,11 @@ function selectedPayload(pins, record, kind) {
   };
 }
 
-function selectedApplicationSource(pins, source) {
+function selectedApplicationSource(pins, source, { attributionConflict = false } = {}) {
   const summary = pins.applicationSource;
-  if (summary?.validity !== 'usable') return { candidate: null, summary, changed: false };
+  if (!['usable', 'attribution_conflict'].includes(summary?.validity)) {
+    return { candidate: null, summary, changed: false };
+  }
   const normalized = object(source);
   if (!normalized) throw failure('APPLICANT_PAGED_PROFILE_REFERENCE_MISSING');
   if (!/^[0-9a-f]{64}$/u.test(summary.normalizedHash || '')
@@ -88,19 +92,22 @@ function selectedApplicationSource(pins, source) {
     throw failure('APPLICANT_PAGED_PROFILE_APPLICATION_SOURCE_DIGEST_MISMATCH');
   }
   const app = pins.application;
+  const selectedSummary = attributionConflict
+    ? { ...summary, state: 'unavailable', validity: 'attribution_conflict' } : summary;
   return {
     candidate: {
       applicationId: app.applicationId,
       scope: { tenantScopeId: app.tenantScopeId, personId: app.personId },
       sourceObservationId: app.sourceObservationId,
       normalizedHash: summary.normalizedHash,
-      state: 'verified', observedAt: summary.observedAt,
+      state: attributionConflict ? 'conflict' : 'verified', observedAt: summary.observedAt,
       factVersion: summary.factVersion, freshness: summary.freshness,
       facts: applicationSourceFactsFromNormalized(normalized, {
         provider: summary.provider, observedAt: summary.observedAt,
       }),
     },
-    summary, changed: false,
+    summary: selectedSummary,
+    changed: attributionConflict && summary.validity !== 'attribution_conflict',
   };
 }
 
@@ -115,11 +122,20 @@ export function projectPinnedApplicantProfile({ pins, source = null, paraform = 
     || pins.factSetVersion !== APPLICANT_PROFILE_V2_FACT_SET_VERSION)) {
     throw failure('APPLICANT_PAGED_PROFILE_PINS_INVALID');
   }
+  const sourceAttributionConflict = Boolean(historicalV4SourceAttribution(source, {
+    provider: pins.applicationSource?.provider,
+  }));
   const providerSelection = selectedPayload(pins, paraform, 'paraform');
   const applicationSelection = legacy
     ? { candidate: null, summary: null, changed: false }
-    : selectedApplicationSource(pins, source);
+    : selectedApplicationSource(pins, source, { attributionConflict: sourceAttributionConflict });
   const resumeSelection = selectedPayload(pins, resume, 'resume');
+  let resumeSourceChanged = false;
+  if (sourceAttributionConflict && resumeSelection.candidate) {
+    const filtered = withoutApplicationSourceFacts(resumeSelection.candidate.facts);
+    resumeSourceChanged = filtered.changed;
+    resumeSelection.candidate = { ...resumeSelection.candidate, facts: filtered.facts };
+  }
   const selected = (legacy ? projectApplicantProfileV1 : projectApplicantProfileV2)({
     application: pins.application,
     paraformProfile: providerSelection.candidate,
@@ -142,12 +158,13 @@ export function projectPinnedApplicantProfile({ pins, source = null, paraform = 
       ? { paraform: profile.paraform, resume: profile.resume }
       : { paraform: profile.paraform, applicationSource: profile.applicationSource, resume: profile.resume },
   });
-  const selectionChanged = providerSelection.changed || applicationSelection.changed || resumeSelection.changed;
+  const attributionSelectionChanged = applicationSelection.changed || resumeSourceChanged;
+  const selectionChanged = providerSelection.changed || attributionSelectionChanged || resumeSelection.changed;
   if (!selectionChanged && digest !== pins.factSetDigest) throw failure('APPLICANT_PAGED_PROFILE_DIGEST_MISMATCH');
   // Clock-based freshness/retention changes affect displayed facts and Rules.
   // They do not revoke an exact source/readiness authorization for a human.
   const privacyRestricted = providerSelection.privacyRestricted || resumeSelection.privacyRestricted;
-  const authorityCurrent = current === true && !privacyRestricted;
+  const authorityCurrent = current === true && !privacyRestricted && !sourceAttributionConflict;
   // V1 pins remain readable during the bounded rematerialization but can never
   // become Rules authority under the V2 fact contract.
   const factsCurrent = !legacy && authorityCurrent && !selectionChanged && pins.factsCurrent === true;
@@ -156,12 +173,16 @@ export function projectPinnedApplicantProfile({ pins, source = null, paraform = 
     factSetVersion: selected.factSetVersion,
     application: clone(pins.application), profile: Object.freeze(profile),
     actionability: authorityCurrent ? clone(pins.actionability) : {
-      eligibility: 'unknown', reasons: [privacyRestricted ? 'privacy_restricted' : 'profile_version_changed'],
+      eligibility: sourceAttributionConflict && !privacyRestricted ? 'hard_hold' : 'unknown',
+      reasons: [privacyRestricted ? 'privacy_restricted'
+        : sourceAttributionConflict ? 'historical_v4_source_identity_conflict' : 'profile_version_changed'],
       readinessRevision: null, canCreateApproval: false, approvalState: 'unavailable',
     },
     invitation: clone(pins.invitation), inputRevision: pins.inputRevision,
     decisionRevision: pins.decisionRevision, factsCurrent,
     factSetDigest: digest, expectedFactSetDigest: pins.factSetDigest,
-    problems: clone(problems),
+    problems: sourceAttributionConflict ? [historicalV4SourceAttributionProblem(),
+      ...clone(problems).filter(problem => problem.code !== 'historical_v4_source_identity_conflict')]
+      : clone(problems),
   });
 }

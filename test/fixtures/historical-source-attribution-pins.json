@@ -1,0 +1,2060 @@
+{
+  "version": "frozen-e318-attribution-pins-v1",
+  "baseCommit": "e318513b6da28f1216af7db3a86a611a1702666e",
+  "cases": {
+    "conflicting_source": {
+      "pins": {
+        "version": "applicant-paged-profile-pins-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "applicationSource": {
+          "source": "application_source",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable",
+          "normalizedHash": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+          "provider": "linkedin_applications"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "selectedResume": null,
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "invitation": null,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "1a71a5c44d689285cb4ce12426638ef6285a2eec7f15301100babb841afb02ee"
+      },
+      "source": {
+        "source_type": "linkedin_applications",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "https://www.linkedin.com/in/another-person",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "sourceContext": {
+          "historical_v4": {
+            "version": "applicant-hub-linkedin-v4-evidence-v1"
+          }
+        },
+        "context_snapshot": {
+          "candidate_detail": {
+            "headline": "Archived Source Title",
+            "experience_entries": [
+              {
+                "id": "source-job",
+                "company": "Archived Source Employer",
+                "title": "Archived Source Role"
+              }
+            ],
+            "education_entries": [
+              {
+                "id": "source-school",
+                "school": "Archived Source School"
+              }
+            ]
+          }
+        }
+      },
+      "paraform": null,
+      "resume": null,
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": "Declared Person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "title": {
+              "value": "Archived Source Title",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "linkedin": {
+              "value": "https://www.linkedin.com/in/declared-person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "source-job",
+                  "companyId": null,
+                  "companyName": "Archived Source Employer",
+                  "roleTitle": "Archived Source Role",
+                  "start": null,
+                  "end": null,
+                  "current": null,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "source-school",
+                  "schoolId": null,
+                  "school": "Archived Source School",
+                  "degree": null,
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "applicationSource": {
+            "source": "application_source",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable",
+            "normalizedHash": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+            "provider": "linkedin_applications"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "selectedResume": null
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [],
+        "factSetDigest": "1a71a5c44d689285cb4ce12426638ef6285a2eec7f15301100babb841afb02ee",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    },
+    "safe_provider": {
+      "pins": {
+        "version": "applicant-paged-profile-pins-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "provider-version",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable"
+        },
+        "applicationSource": {
+          "source": "application_source",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable",
+          "normalizedHash": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+          "provider": "linkedin_applications"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "selectedResume": null,
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "invitation": null,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "2b99cac05b3d7327239ab2cf577bdc41c2d7f4884ffba175d5548fc364ae094a"
+      },
+      "source": {
+        "source_type": "linkedin_applications",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "https://www.linkedin.com/in/another-person",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "sourceContext": {
+          "historical_v4": {
+            "version": "applicant-hub-linkedin-v4-evidence-v1"
+          }
+        },
+        "context_snapshot": {
+          "candidate_detail": {
+            "headline": "Archived Source Title",
+            "experience_entries": [
+              {
+                "id": "source-job",
+                "company": "Archived Source Employer",
+                "title": "Archived Source Role"
+              }
+            ],
+            "education_entries": [
+              {
+                "id": "source-school",
+                "school": "Archived Source School"
+              }
+            ]
+          }
+        }
+      },
+      "paraform": {
+        "tenantScopeId": "provider-tenant",
+        "personId": "person-attribution",
+        "sourceObservationId": "source-attribution",
+        "observedAt": "2026-09-08T00:00:00.000Z",
+        "factVersion": "provider-version",
+        "payloadState": "available",
+        "payload": {
+          "name": "Verified Person",
+          "title": "Verified Provider Title",
+          "experiences": [
+            {
+              "recordId": "provider-job",
+              "companyId": "provider-company",
+              "companyName": "Verified Provider Employer",
+              "roleTitle": "Verified Provider Role"
+            }
+          ]
+        }
+      },
+      "resume": null,
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": "Verified Person",
+              "source": "paraform_linkedin",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "provider-version",
+              "freshness": "current",
+              "state": "verified"
+            },
+            "title": {
+              "value": "Verified Provider Title",
+              "source": "paraform_linkedin",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "provider-version",
+              "freshness": "current",
+              "state": "verified"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "linkedin": {
+              "value": "https://www.linkedin.com/in/declared-person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "provider-job",
+                  "companyId": "provider-company",
+                  "companyName": "Verified Provider Employer",
+                  "roleTitle": "Verified Provider Role",
+                  "start": null,
+                  "end": null,
+                  "current": null,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "paraform_linkedin",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "provider-version",
+                  "freshness": "current",
+                  "state": "verified"
+                }
+              ],
+              "source": "paraform_linkedin",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "provider-version",
+              "freshness": "current",
+              "state": "verified"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "source-school",
+                  "schoolId": null,
+                  "school": "Archived Source School",
+                  "degree": null,
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "provider-version",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable"
+          },
+          "applicationSource": {
+            "source": "application_source",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable",
+            "normalizedHash": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+            "provider": "linkedin_applications"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "selectedResume": null
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [],
+        "factSetDigest": "2b99cac05b3d7327239ab2cf577bdc41c2d7f4884ffba175d5548fc364ae094a",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    },
+    "safe_resume": {
+      "pins": {
+        "version": "applicant-paged-profile-pins-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": null,
+              "source": null,
+              "observedAt": null,
+              "version": null,
+              "state": "unknown"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "applicationSource": {
+          "source": "application_source",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable",
+          "normalizedHash": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+          "provider": "linkedin_applications"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "resume-version",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable"
+        },
+        "selectedResume": {
+          "artifactId": "resume-attribution",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "parserVersion": "resume-parser",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "resume-version",
+          "state": "available"
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "invitation": null,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "bd1ff6a6b0dfd6a7baaed2b1a9d747ad3309a2a44b5151435c62d5338bad3f97"
+      },
+      "source": {
+        "source_type": "linkedin_applications",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "https://www.linkedin.com/in/another-person",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "sourceContext": {
+          "historical_v4": {
+            "version": "applicant-hub-linkedin-v4-evidence-v1"
+          }
+        },
+        "context_snapshot": {
+          "candidate_detail": {
+            "headline": "Archived Source Title",
+            "experience_entries": [
+              {
+                "id": "source-job",
+                "company": "Archived Source Employer",
+                "title": "Archived Source Role"
+              }
+            ],
+            "education_entries": [
+              {
+                "id": "source-school",
+                "school": "Archived Source School"
+              }
+            ]
+          }
+        }
+      },
+      "paraform": null,
+      "resume": {
+        "tenantScopeId": "source-tenant",
+        "personId": "person-attribution",
+        "sourceObservationId": "source-attribution",
+        "observedAt": "2026-09-08T00:00:00.000Z",
+        "factVersion": "resume-version",
+        "payloadState": "available",
+        "payload": {
+          "title": "Copied Wrong Title",
+          "about": "Resume text excerpt:\nIndependently selected resume content",
+          "experiences": [
+            {
+              "recordId": "copied-job",
+              "companyName": "Copied Wrong Employer",
+              "roleTitle": "Copied Wrong Role"
+            }
+          ],
+          "provenance": {
+            "title": {
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            },
+            "experiences": {
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            },
+            "about": {
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            },
+            "education": {
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            }
+          },
+          "education": [
+            {
+              "recordId": "resume-school-independent",
+              "school": "Independent Resume School",
+              "degree": "BS"
+            }
+          ]
+        },
+        "applicationId": "application-attribution",
+        "artifactId": "resume-attribution",
+        "artifactDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parserVersion": "resume-parser"
+      },
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": null,
+              "source": null,
+              "observedAt": null,
+              "version": null,
+              "state": "unknown"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": "Declared Person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "title": {
+              "value": "Archived Source Title",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": "Resume text excerpt:\nIndependently selected resume content",
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "resume-version",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "linkedin": {
+              "value": "https://www.linkedin.com/in/declared-person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "source-job",
+                  "companyId": null,
+                  "companyName": "Archived Source Employer",
+                  "roleTitle": "Archived Source Role",
+                  "start": null,
+                  "end": null,
+                  "current": null,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "source-school",
+                  "schoolId": null,
+                  "school": "Archived Source School",
+                  "degree": null,
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "applicationSource": {
+            "source": "application_source",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable",
+            "normalizedHash": "e4134517b0d1d099853a55540f6f99e2c0948633bf9d7cc9c879640f88fc471f",
+            "provider": "linkedin_applications"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "resume-version",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable"
+          },
+          "selectedResume": {
+            "artifactId": "resume-attribution",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "parserVersion": "resume-parser",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "resume-version",
+            "state": "available"
+          }
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [
+          {
+            "code": "applied_hiring_company_unknown",
+            "state": "open",
+            "applicationId": "application-attribution",
+            "domain": "application"
+          }
+        ],
+        "factSetDigest": "bd1ff6a6b0dfd6a7baaed2b1a9d747ad3309a2a44b5151435c62d5338bad3f97",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    },
+    "legacy_resume": {
+      "pins": {
+        "version": "applicant-paged-profile-pins-v1",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "resume-version",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable"
+        },
+        "selectedResume": {
+          "artifactId": "resume-attribution",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "parserVersion": "resume-parser",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "resume-version",
+          "state": "available"
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "ae3782a9e139d540e557e8962e8113187fa82c78bac924db682b34180b296fa7"
+      },
+      "source": {
+        "source_type": "linkedin_applications",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "https://www.linkedin.com/in/another-person",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "sourceContext": {
+          "historical_v4": {
+            "version": "applicant-hub-linkedin-v4-evidence-v1"
+          }
+        },
+        "context_snapshot": {
+          "candidate_detail": {
+            "headline": "Archived Source Title",
+            "experience_entries": [
+              {
+                "id": "source-job",
+                "company": "Archived Source Employer",
+                "title": "Archived Source Role"
+              }
+            ],
+            "education_entries": [
+              {
+                "id": "source-school",
+                "school": "Archived Source School"
+              }
+            ]
+          }
+        }
+      },
+      "paraform": null,
+      "resume": {
+        "tenantScopeId": "source-tenant",
+        "personId": "person-attribution",
+        "sourceObservationId": "source-attribution",
+        "observedAt": "2026-09-08T00:00:00.000Z",
+        "factVersion": "resume-version",
+        "payloadState": "available",
+        "payload": {
+          "title": "Copied Wrong Title",
+          "about": "Resume text excerpt:\nIndependently selected resume content",
+          "experiences": [
+            {
+              "recordId": "copied-job",
+              "companyName": "Copied Wrong Employer",
+              "roleTitle": "Copied Wrong Role"
+            }
+          ],
+          "provenance": {
+            "title": {
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            },
+            "experiences": {
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            },
+            "about": {
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            },
+            "education": {
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z"
+            }
+          },
+          "education": [
+            {
+              "recordId": "resume-school-independent",
+              "school": "Independent Resume School",
+              "degree": "BS"
+            }
+          ]
+        },
+        "applicationId": "application-attribution",
+        "artifactId": "resume-attribution",
+        "artifactDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parserVersion": "resume-parser"
+      },
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v1",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": null,
+              "source": null,
+              "observedAt": null,
+              "version": null,
+              "state": "unknown"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "title": {
+              "value": "Copied Wrong Title",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "resume-version",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": "Resume text excerpt:\nIndependently selected resume content",
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "resume-version",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "linkedin": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "copied-job",
+                  "companyId": null,
+                  "companyName": "Copied Wrong Employer",
+                  "roleTitle": "Copied Wrong Role",
+                  "start": null,
+                  "end": null,
+                  "current": null,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "resume-version",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "resume-version",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "resume-school-independent",
+                  "schoolId": null,
+                  "school": "Independent Resume School",
+                  "degree": "BS",
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "selected_resume",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "resume-version",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "selected_resume",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "resume-version",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "resume-version",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable"
+          },
+          "selectedResume": {
+            "artifactId": "resume-attribution",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "parserVersion": "resume-parser",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "resume-version",
+            "state": "available"
+          }
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [
+          {
+            "code": "applied_hiring_company_unknown",
+            "state": "open",
+            "applicationId": "application-attribution",
+            "domain": "application"
+          }
+        ],
+        "factSetDigest": "ae3782a9e139d540e557e8962e8113187fa82c78bac924db682b34180b296fa7",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    },
+    "valid_v4": {
+      "pins": {
+        "version": "applicant-paged-profile-pins-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "applicationSource": {
+          "source": "application_source",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable",
+          "normalizedHash": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+          "provider": "linkedin_applications"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "selectedResume": null,
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "invitation": null,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "ff0b3ac31b43da2ab2fe366e52c97b4494e9c29701007b342942f1907be3ec19"
+      },
+      "source": {
+        "source_type": "linkedin_applications",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "http://uk.linkedin.com/in/declared-person/?trk=fixture",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "sourceContext": {
+          "historical_v4": {
+            "version": "applicant-hub-linkedin-v4-evidence-v1"
+          }
+        },
+        "context_snapshot": {
+          "candidate_detail": {
+            "headline": "Archived Source Title",
+            "experience_entries": [
+              {
+                "id": "source-job",
+                "company": "Archived Source Employer",
+                "title": "Archived Source Role"
+              }
+            ],
+            "education_entries": [
+              {
+                "id": "source-school",
+                "school": "Archived Source School"
+              }
+            ]
+          }
+        }
+      },
+      "paraform": null,
+      "resume": null,
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": "Declared Person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "title": {
+              "value": "Archived Source Title",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "linkedin": {
+              "value": "https://www.linkedin.com/in/declared-person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "source-job",
+                  "companyId": null,
+                  "companyName": "Archived Source Employer",
+                  "roleTitle": "Archived Source Role",
+                  "start": null,
+                  "end": null,
+                  "current": null,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "source-school",
+                  "schoolId": null,
+                  "school": "Archived Source School",
+                  "degree": null,
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "applicationSource": {
+            "source": "application_source",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable",
+            "normalizedHash": "2d56a5893d01b75b14c2584790cde054d7f46f816756a061fb61f1ab4eed00f4",
+            "provider": "linkedin_applications"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "selectedResume": null
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [],
+        "factSetDigest": "ff0b3ac31b43da2ab2fe366e52c97b4494e9c29701007b342942f1907be3ec19",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    },
+    "workable_unchanged": {
+      "pins": {
+        "version": "applicant-paged-profile-pins-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "applicationSource": {
+          "source": "application_source",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable",
+          "normalizedHash": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+          "provider": "workable"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "selectedResume": null,
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "invitation": null,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "8bbe81fe387e48a488c96aa8e2d7b1a38a899da855f8633826c221e862a66c32"
+      },
+      "source": {
+        "source_type": "workable",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "https://www.linkedin.com/in/another-person",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "sourceContext": {},
+        "context_snapshot": {
+          "candidate_detail": {
+            "headline": "Archived Source Title",
+            "experience_entries": [
+              {
+                "id": "source-job",
+                "company": "Archived Source Employer",
+                "title": "Archived Source Role"
+              }
+            ],
+            "education_entries": [
+              {
+                "id": "source-school",
+                "school": "Archived Source School"
+              }
+            ]
+          }
+        }
+      },
+      "paraform": null,
+      "resume": null,
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": "Target Company",
+              "source": "role_version",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "version": "role-version-attribution",
+              "state": "verified"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": "Declared Person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "title": {
+              "value": "Archived Source Title",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "linkedin": {
+              "value": "https://www.linkedin.com/in/declared-person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "source-job",
+                  "companyId": null,
+                  "companyName": "Archived Source Employer",
+                  "roleTitle": "Archived Source Role",
+                  "start": null,
+                  "end": null,
+                  "current": null,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "source-school",
+                  "schoolId": null,
+                  "school": "Archived Source School",
+                  "degree": null,
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "applicationSource": {
+            "source": "application_source",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable",
+            "normalizedHash": "338501a3f2f8f5c17f2839dc4a1302991ee53ff90228c445d7caeb851a206018",
+            "provider": "workable"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "selectedResume": null
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [],
+        "factSetDigest": "8bbe81fe387e48a488c96aa8e2d7b1a38a899da855f8633826c221e862a66c32",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    },
+    "conflicting_native_shape": {
+      "source": {
+        "schema_version": "applicant-hub-linkedin-v4-evidence-v1",
+        "source_type": "linkedin_applications",
+        "applicant": {
+          "name": "Declared Person",
+          "linkedin_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "application": {
+          "job_title": "Target Role"
+        },
+        "raw_xlsx_row": {
+          "Profile URL": "https://www.linkedin.com/in/another-person",
+          "Current Title": "Archived Source Title",
+          "Current Company": "Archived Source Employer",
+          "Education Institution": "Archived Source School"
+        },
+        "selected_evidence": {
+          "rawXlsxRow": {
+            "Profile URL": "https://www.linkedin.com/in/another-person",
+            "Current Title": "Archived Source Title",
+            "Current Company": "Archived Source Employer",
+            "Education Institution": "Archived Source School"
+          }
+        },
+        "name": "Declared Person",
+        "candidate": {
+          "name": "Declared Person"
+        },
+        "contact": {
+          "name": "Declared Person"
+        },
+        "linkedin": {
+          "status": "valid",
+          "canonical_url": "https://www.linkedin.com/in/declared-person"
+        },
+        "context_snapshot": {
+          "candidate_detail": {
+            "name": "Declared Person",
+            "headline": null,
+            "address": null,
+            "summary": null,
+            "experience_entries": [],
+            "education_entries": []
+          }
+        }
+      },
+      "pins": {
+        "version": "applicant-paged-profile-pins-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": null,
+              "source": null,
+              "observedAt": null,
+              "version": null,
+              "state": "unknown"
+            },
+            "roleContext": null
+          }
+        },
+        "paraform": {
+          "source": "paraform_linkedin",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "applicationSource": {
+          "source": "application_source",
+          "observedAt": "2026-09-08T00:00:00.000Z",
+          "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+          "freshness": "current",
+          "state": "available",
+          "validity": "usable",
+          "normalizedHash": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+          "provider": "linkedin_applications"
+        },
+        "resume": {
+          "source": "resume",
+          "observedAt": null,
+          "factVersion": null,
+          "freshness": "unknown",
+          "state": "unavailable",
+          "validity": "missing"
+        },
+        "selectedResume": null,
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "invitation": null,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0,
+        "factsCurrent": true,
+        "factSetDigest": "6608f941da8be6b52a8718d399c885be2607253054d278316036426164eef769"
+      },
+      "paraform": null,
+      "resume": null,
+      "expectedBefore": {
+        "contractVersion": "applicant-profile-v2",
+        "factSetVersion": "applicant-profile-v2-fact-set-v2",
+        "application": {
+          "applicationId": "application-attribution",
+          "tenantScopeId": "source-tenant",
+          "providerTenantScopeId": "provider-tenant",
+          "personId": "person-attribution",
+          "sourceObservationId": "source-attribution",
+          "rowRevision": "source-attribution",
+          "appliedTo": {
+            "roleVersionId": "role-version-attribution",
+            "roleId": "role-attribution",
+            "title": "Target Role",
+            "hiringCompany": {
+              "name": null,
+              "source": null,
+              "observedAt": null,
+              "version": null,
+              "state": "unknown"
+            },
+            "roleContext": null
+          }
+        },
+        "profile": {
+          "facts": {
+            "name": {
+              "value": "Declared Person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "title": {
+              "value": "Archived Source Title",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "location": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "about": {
+              "value": null,
+              "source": null,
+              "observedAt": null,
+              "factVersion": null,
+              "freshness": "unknown",
+              "state": "unavailable"
+            },
+            "linkedin": {
+              "value": "https://www.linkedin.com/in/declared-person",
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "experiences": {
+              "entries": [
+                {
+                  "recordId": "source-experience:0",
+                  "companyId": null,
+                  "companyName": "Archived Source Employer",
+                  "roleTitle": "Archived Source Title",
+                  "start": null,
+                  "end": null,
+                  "current": true,
+                  "location": null,
+                  "description": null,
+                  "industry": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+              "freshness": "current",
+              "state": "fallback"
+            },
+            "education": {
+              "entries": [
+                {
+                  "recordId": "source-education:0",
+                  "schoolId": null,
+                  "school": "Archived Source School",
+                  "degree": null,
+                  "start": null,
+                  "end": null,
+                  "schoolLocation": null,
+                  "schoolWebsite": null,
+                  "description": null,
+                  "logo": null,
+                  "source": "application_source",
+                  "observedAt": "2026-09-08T00:00:00.000Z",
+                  "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+                  "freshness": "current",
+                  "state": "fallback"
+                }
+              ],
+              "source": "application_source",
+              "observedAt": "2026-09-08T00:00:00.000Z",
+              "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+              "freshness": "current",
+              "state": "fallback"
+            }
+          },
+          "photo": null,
+          "paraform": {
+            "source": "paraform_linkedin",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "applicationSource": {
+            "source": "application_source",
+            "observedAt": "2026-09-08T00:00:00.000Z",
+            "factVersion": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+            "freshness": "current",
+            "state": "available",
+            "validity": "usable",
+            "normalizedHash": "9487f6b2afc81490ffc2989c84662603c443453781873e79083a8121abdadfbe",
+            "provider": "linkedin_applications"
+          },
+          "resume": {
+            "source": "resume",
+            "observedAt": null,
+            "factVersion": null,
+            "freshness": "unknown",
+            "state": "unavailable",
+            "validity": "missing"
+          },
+          "selectedResume": null
+        },
+        "actionability": {
+          "eligibility": "waiting",
+          "reasons": [
+            "source_preparing"
+          ],
+          "readinessRevision": "readiness-attribution",
+          "canCreateApproval": true,
+          "approvalState": "required"
+        },
+        "problems": [
+          {
+            "code": "applied_hiring_company_unknown",
+            "state": "open",
+            "applicationId": "application-attribution",
+            "domain": "application"
+          }
+        ],
+        "factSetDigest": "6608f941da8be6b52a8718d399c885be2607253054d278316036426164eef769",
+        "factsCurrent": true,
+        "inputRevision": "input-attribution",
+        "decisionRevision": 0
+      }
+    }
+  }
+}
