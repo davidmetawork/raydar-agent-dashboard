@@ -2,6 +2,7 @@ import {
   APPLICANT_PROFILE_V1_FACT_SET_VERSION,
   APPLICANT_PROFILE_V2_FACT_SET_VERSION,
   applicantProfileFactSetDigest,
+  hasUsableApplicantProfileV2,
   projectApplicantProfileV1,
   projectApplicantProfileV2,
 } from './applicant-profile-contract.mjs';
@@ -165,6 +166,17 @@ export function projectPinnedApplicantProfile({ pins, source = null, paraform = 
   // They do not revoke an exact source/readiness authorization for a human.
   const privacyRestricted = providerSelection.privacyRestricted || resumeSelection.privacyRestricted;
   const authorityCurrent = current === true && !privacyRestricted && !sourceAttributionConflict;
+  // An already-interpreted conflict can retain exact human Pass metadata. The
+  // raw resume may still contain copied fields that are removed on every read,
+  // so compare the resulting digest with the stored interpreted selection.
+  // Old pins, changed payload selection and unusable profiles never qualify.
+  const passMetadataCurrent = sourceAttributionConflict && !legacy && current === true
+    && !privacyRestricted && pins.applicationSource?.validity === 'attribution_conflict'
+    && digest === pins.factSetDigest && hasUsableApplicantProfileV2({ profile })
+    && typeof pins.inputRevision === 'string' && Boolean(pins.inputRevision.trim())
+    && Number.isSafeInteger(pins.decisionRevision) && pins.decisionRevision >= 0
+    && typeof pins.actionability?.readinessRevision === 'string'
+    && Boolean(pins.actionability.readinessRevision.trim());
   // V1 pins remain readable during the bounded rematerialization but can never
   // become Rules authority under the V2 fact contract.
   const factsCurrent = !legacy && authorityCurrent && !selectionChanged && pins.factsCurrent === true;
@@ -176,10 +188,12 @@ export function projectPinnedApplicantProfile({ pins, source = null, paraform = 
       eligibility: sourceAttributionConflict && !privacyRestricted ? 'hard_hold' : 'unknown',
       reasons: [privacyRestricted ? 'privacy_restricted'
         : sourceAttributionConflict ? 'historical_v4_source_identity_conflict' : 'profile_version_changed'],
-      readinessRevision: null, canCreateApproval: false, approvalState: 'unavailable',
+      readinessRevision: passMetadataCurrent ? pins.actionability.readinessRevision : null,
+      canCreateApproval: false, approvalState: 'unavailable',
     },
     invitation: clone(pins.invitation), inputRevision: pins.inputRevision,
     decisionRevision: pins.decisionRevision, factsCurrent,
+    ...(sourceAttributionConflict ? { passMetadataCurrent } : {}),
     factSetDigest: digest, expectedFactSetDigest: pins.factSetDigest,
     problems: sourceAttributionConflict ? [historicalV4SourceAttributionProblem(),
       ...clone(problems).filter(problem => problem.code !== 'historical_v4_source_identity_conflict')]

@@ -30,10 +30,29 @@ import {
   retryableInterviewRequest,
   SOURCE_STALE_INTERVIEW_FAILURE,
 } from './_lib/request-safety.mjs';
+import { normalizePagedDecisionAuthority } from './_lib/paged-core/paged-decision-authority.mjs';
 
 export const config = { maxDuration: 30 };
 
 const ACTIONS = new Set(["pass", "interview", "undo"]);
+
+function samePagedAuthority(left, right) {
+  try {
+    const first = normalizePagedDecisionAuthority(left);
+    const second = normalizePagedDecisionAuthority(right);
+    return Boolean(first && second && JSON.stringify(first) === JSON.stringify(second));
+  } catch { return false; }
+}
+
+function sameConflictPassSelection(first, next) {
+  return next?.row?.passAllowed === true
+    && next.row.key === first.row.key
+    && samePagedAuthority(first.row.viewAuthority, next.row.viewAuthority)
+    && next.profileV2?.inputRevision === first.profileV2?.inputRevision
+    && next.profileV2?.actionability?.readinessRevision === first.profileV2?.actionability?.readinessRevision
+    && next.profileV2?.decisionRevision === first.profileV2?.decisionRevision
+    && next.profileV2?.application?.rowRevision === first.profileV2?.application?.rowRevision;
+}
 
 export function createDecisionHandler({
   corsHandler = cors,
@@ -99,6 +118,10 @@ export function createDecisionHandler({
         return res.status(409).json({ ok: false, error: "applicant_changed_refresh_required" });
       }
       const row = (Array.isArray(artifacts.queue?.rows) ? artifacts.queue.rows : []).find((item) => item?.key === key);
+      if (action === 'pass' && paged && (row?.passAllowed === false
+        || (row?.passAllowed === true && !samePagedAuthority(body.viewAuthority, row.viewAuthority)))) {
+        return res.status(409).json({ ok: false, error: 'applicant_changed_refresh_required' });
+      }
       const profileKey = row?.profileKey || row?.cuId;
       if (!profileKey) {
         return res.status(409).json({ ok: false, error: "applicant_not_in_current_review_queue" });
@@ -221,9 +244,14 @@ export function createDecisionHandler({
       // The immutable row and its revisions were checked above, but the
       // publisher may still have advanced the active pointer while the
       // request was being assembled. Refuse a write against that stale page.
+      const currentPaged = paged ? await readPagedAuthority(pagedRequest) : null;
+      if (action === 'pass' && (currentPaged?.row?.passAllowed === false
+        || (paged && row.passAllowed === true && !sameConflictPassSelection(paged, currentPaged)))) {
+        return res.status(409).json({ ok: false, error: 'applicant_changed_refresh_required' });
+      }
       const currentGeneration = paged
-        ? await readPagedAuthority(pagedRequest).then(result => ({ generationId: result.generation.generationId,
-          digest: result.generation.generationDigest }))
+        ? currentPaged?.generation ? { generationId: currentPaged.generation.generationId,
+          digest: currentPaged.generation.generationDigest } : null
         : await readActive();
       if (!currentGeneration
         || currentGeneration.generationId !== generation.generationId

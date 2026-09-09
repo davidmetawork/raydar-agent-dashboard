@@ -740,6 +740,10 @@ function applicantListRow(key, applicationId = null) {
 }
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
 function profileSelectionRefused(row) { return row?.profileReadRefused === true || Boolean(STATE.profileReadRefusals?.[row?.key]); }
+function passControl(row) {
+  const enabled = !profileSelectionRefused(row) && row?.passAllowed !== false;
+  return { enabled, title: enabled ? "Pass applicant" : "Refresh Applicants before passing this changed profile." };
+}
 function applicantRowV2(row) { return profileSelectionRefused(row) ? null : STATE.applicantRowsV2?.[row?.key] || null; }
 function applicantFact(row, name) {
   const fact = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.profile?.facts?.[name];
@@ -1879,18 +1883,19 @@ function rowCardHtml(row, mode, decision) {
   const interviewReady = !hold;
   const sentAlready = !decision && interviewReady && alreadyEmailed(row);
   const control = interviewControl(row);
+  const pass = passControl(row);
   const right = mode === "stream"
     ? statusPill(row)
     : (decision
       ? decidedStatusHtml(key, decision) + retryInterviewButtonHtml(row, decision, busy)
       : '<div class="actions">' +
-        '<button class="ghost" data-act="pass" data-key="' + esc(key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
+        '<button class="ghost" data-act="pass" data-key="' + esc(key) + '" title="' + esc(pass.title) + '"' + (busy || !pass.enabled ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(key) + '" title="' +
           esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? (displayOnlySource ? "Interview unavailable: " : "Interview held: ") + holdReason : control.title) + '"' +
           (busy || !interviewReady || sentAlready || !control.enabled ? " disabled" : "") + ">" +
           (sentAlready ? "Already emailed" : !interviewReady ? (displayOnlySource ? "Interview unavailable" : "Interview held") : control.label) + "</button></div>");
   const check = mode === "review" && !decision
-    ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + ' onclick="event.stopPropagation()" />'
+    ? '<input type="checkbox" data-check="' + esc(key) + '"' + (STATE.checked.has(key) ? " checked" : "") + (pass.enabled ? "" : " disabled") + ' onclick="event.stopPropagation()" />'
     : "";
   /* THE AGE COMES FROM addedAt WHEN WE HAVE IT, because appliedAt is a DATE.
      The source gives no clock time, so relTime(appliedAt) measures from local
@@ -2478,7 +2483,7 @@ async function bulkPass() {
   try {
     for (const key of keys) {
       const row = queueRows().find((r) => r.key === key);
-      if (!row || effectiveDecision(key)) continue;
+      if (!row || effectiveDecision(key) || !passControl(row).enabled) continue;
       await decide(key, "pass", row, true);
       done++;
     }
@@ -2491,6 +2496,11 @@ async function bulkPass() {
 
 /* ---- decisions (optimistic write-through) ---- */
 async function decide(key, action, row, silent = false, { retryOfRequestId = null } = {}) {
+  if (action === 'pass' && !passControl(row).enabled) {
+    const error = new Error(passControl(row).title);
+    if (silent) throw error;
+    toast(error.message, true); return;
+  }
   if (row?.profileReadRefused || STATE.profileReadRefusals?.[key]) {
     const error = new Error("Refresh Applicants before acting on this profile.");
     if (silent) throw error;
@@ -2978,13 +2988,14 @@ function renderModal() {
     // way a person reaches this button.
     const sentAlready = !decision && !hold && alreadyEmailed(row);
     const control = interviewControl(row);
+    const pass = passControl(row);
     parts.push('<div class="p-actions">' +
       '<button class="ghost" data-act="make-rule" data-cu="' + esc(modal.cu) + '" data-key="' + esc(modal.key) + '" style="margin-right:auto"' +
         (hasV2Projection && !v2RuleFactsReady ? ' disabled title="This profile fact version changed. Refresh Applicants before creating a rule."'
           : displayOnlySource && !hasV2Projection ? ' disabled title="This source profile is for review only and cannot create Rules."' : "") + '>Create rule from profile</button>' +
       (decision ? '<span class="p-decided">' + decidedStatusHtml(modal.key, decision) + "</span>" : "") +
       (decision ? retryInterviewButtonHtml(row, decision, busy) :
-        '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '"' + (busy ? " disabled" : "") + ">Pass</button>" +
+        '<button class="ghost" data-act="pass" data-key="' + esc(modal.key) + '" title="' + esc(pass.title) + '"' + (busy || !pass.enabled ? " disabled" : "") + ">Pass</button>" +
         '<button class="primary" data-act="interview" data-key="' + esc(modal.key) + '" title="' +
           esc(sentAlready ? ALREADY_EMAILED_ACTION_TITLE : hold ? (displayOnlySource ? "Interview unavailable: " : "Interview held: ") + holdReason : control.title) + '"' +
           (busy || hold || sentAlready || !control.enabled ? " disabled" : "") + ">" +

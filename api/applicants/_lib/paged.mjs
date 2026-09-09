@@ -2,7 +2,7 @@ import postgres from 'postgres';
 import { pgCompatibleReadClient } from './read-pool-adapter.mjs';
 import { projectPinnedApplicantProfile } from './paged-core/paged-profile-contract.mjs';
 import { hasUsableApplicantProfileV2 } from './paged-core/applicant-profile-contract.mjs';
-import { PAGED_DECISION_AUTHORITY_VERSION } from './paged-core/paged-decision-authority.mjs';
+import { PAGED_DECISION_AUTHORITY_VERSION, normalizePagedDecisionAuthority } from './paged-core/paged-decision-authority.mjs';
 import { readActivePagedViewManifest, readActivePagedViewPage, readPagedViewDetail,
   readActivePagedViewAuthority } from './paged-core/paged-view-read.mjs';
 
@@ -123,6 +123,15 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
   const sourceAttributionConflict = problems.some(problem =>
     problem.code === 'historical_v4_source_identity_conflict');
   const reviewProfileUsable = hasUsableApplicantProfileV2(profileV2);
+  let currentConflictPass = sourceAttributionConflict && current && reviewProfileUsable
+    && raw.partition === 'ready' && profileV2?.passMetadataCurrent === true
+    && raw.application_id === profileV2.application.applicationId
+    && raw.source_observation_id === profileV2.application.sourceObservationId
+    && raw.fact_set_digest === profileV2.factSetDigest
+    && raw.fact_set_digest === profileV2.expectedFactSetDigest
+    && raw.input_revision === profileV2.inputRevision
+    && raw.readiness_revision === profileV2.actionability.readinessRevision
+    && Number(raw.decision_revision) === profileV2.decisionRevision;
   const viewStates = [...new Set([
     ...(Array.isArray(raw.view_states) ? raw.view_states : []).filter((state) =>
       reviewProfileUsable || state !== 'ready'),
@@ -134,13 +143,18 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
     || string(source.fullName)
     || string([source.firstName, source.lastName].filter(Boolean).join(' ')) || string(captured.candidateName);
   const actionability = profileV2?.actionability;
-  const viewAuthority = !sourceAttributionConflict && raw.source_observation_id && raw.fact_set_digest ? {
+  let viewAuthority = (!sourceAttributionConflict || currentConflictPass)
+    && raw.source_observation_id && raw.fact_set_digest ? {
     version: PAGED_DECISION_AUTHORITY_VERSION, applicationId: raw.application_id,
     rowVersionId: raw.id, rowRevision: Number(raw.row_revision), rowDigest: raw.row_digest,
     sourceObservationId: raw.source_observation_id, profileBindingId: raw.profile_binding_id,
     profileVersionId: raw.profile_version_id, resumeFactVersionId: raw.resume_fact_version_id,
     factSetDigest: raw.fact_set_digest,
   } : null;
+  if (currentConflictPass) {
+    try { viewAuthority = normalizePagedDecisionAuthority(viewAuthority); }
+    catch { currentConflictPass = false; viewAuthority = null; }
+  }
   const row = {
     key: raw.monitor_key, applicationId: raw.application_id, profileKey,
     cuId: current ? document.connectionCandidateUserId || null : null,
@@ -163,9 +177,10 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
     decisionAt: raw.decision_at, decisionAction: raw.decision_action,
     savedDecisionRequestId: index.decisionRequestId || null,
     rowDigest: raw.row_digest,
-    profileUpdatePending: !current || sourceAttributionConflict,
+    profileUpdatePending: !current || (sourceAttributionConflict && !currentConflictPass),
     factsCurrent: profileV2?.factsCurrent === true,
-    rowCurrent: current && !sourceAttributionConflict,
+    rowCurrent: current && (!sourceAttributionConflict || currentConflictPass),
+    ...(sourceAttributionConflict ? { passAllowed: currentConflictPass } : {}),
   };
   const profile = { name, title: facts?.title?.value || null, location: facts?.location?.value || null,
     imageSrc: profileV2?.profile?.photo || null, linkedin: row.linkedin, profileV2,
