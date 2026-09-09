@@ -713,6 +713,22 @@ function effectiveDecision(key) {
 function queueRows() { return STATE.snapshot?.queue || []; }
 function streamRows() { return STATE.snapshot?.stream || []; }
 function profilePreparingRows() { return Array.isArray(STATE.profilePreparingRows) ? STATE.profilePreparingRows : []; }
+function applicantListRow(key, applicationId = null) {
+  const queue = STATE.snapshot?.queue, stream = STATE.snapshot?.stream;
+  const preparing = STATE.profilePreparingRows, projections = STATE.applicantRowsV2;
+  let cache = applicantListRow.cache;
+  if (!cache || cache.queue !== queue || cache.stream !== stream || cache.preparing !== preparing || cache.projections !== projections) {
+    cache = { queue, stream, preparing, projections, keys: new Map(), applications: new Map() };
+    for (const row of [...(queue || []), ...(stream || []), ...(preparing || [])]) {
+      const rowKey = row.key || row.profileKey;
+      if (rowKey && !cache.keys.has(rowKey)) cache.keys.set(rowKey, row);
+      const rowApplicationId = projections?.[rowKey]?.application?.applicationId || row.applicationId || row.application?.applicationId;
+      if (rowApplicationId && !cache.applications.has(rowApplicationId)) cache.applications.set(rowApplicationId, row);
+    }
+    applicantListRow.cache = cache;
+  }
+  return (applicationId ? cache.applications.get(applicationId) : cache.keys.get(key)) || null;
+}
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
 function applicantRowV2(row) { return STATE.applicantRowsV2?.[row?.key] || null; }
 function applicantFact(row, name) {
@@ -2205,6 +2221,7 @@ function processingRowHtml(row) {
   return '<div class="row processing-row" data-processing-key="' + esc(row.key || row.profileKey || "") + '">' +
     '<div class="rc-main"><div class="rc-id">' +
       '<div class="who"><span class="name"><span>' + esc(row.name || "Applicant identity pending") + '</span></span>' +
+        ((row.key || row.profileKey) ? '<a class="rc-more" href="' + esc(RaydarNav.href(row.key || row.profileKey)) + '" data-open="' + esc(row.key || row.profileKey) + '">Open applicant</a>' : '') +
         '<span class="processing-state' + (display.needsAttention ? ' needs-attention' : '') + '">' + esc(display.label) + '</span></div>' +
       '<div class="processing-job">Applied to <b>' + esc(role) + "</b>" + company + "</div>" +
       '<div class="processing-meta">' + esc(applicationDate || "Application date is unavailable in the current source record.") + "</div>" +
@@ -2268,8 +2285,23 @@ function affectedProblemApplications(problems, applicantRowsV2 = STATE.applicant
   }
   return [...groups.values()];
 }
+const PROBLEM_GUIDANCE = Object.freeze({
+  applied_hiring_company_unknown: { reason: "The current application source does not identify a verified hiring company.", owner: "Raydar source review", next: "Check this application's exact job metadata and resolve the hiring company." },
+  applied_hiring_company_conflict: { reason: "The source records disagree about this application's hiring company.", owner: "Raydar source review", next: "Resolve the conflicting job metadata before using the company." },
+  profile_preparing: { reason: "The verified profile is still being prepared. Available application details remain visible.", owner: "Raydar profile preparation", next: "Complete profile preparation from the current stored source and verified provider records." },
+  profile_projection_unavailable: { reason: "The current application does not yet have a usable profile projection.", owner: "Raydar profile preparation", next: "Check source and identity evidence, then rebuild the profile." },
+  profile_cache_retention_expired: { reason: "The cached provider profile has expired and needs a fresh verified copy.", owner: "Raydar profile preparation", next: "Refresh the verified provider profile; retained application facts remain separately labeled." },
+  profile_scope_tombstoned: { reason: "This person's profile is restricted by a recorded privacy instruction.", owner: "Raydar privacy review", next: "Honor the recorded restriction; do not restore or reuse the removed profile." },
+  profile_payload_tombstoned: { reason: "This profile's stored content was removed under a recorded privacy instruction.", owner: "Raydar privacy review", next: "Honor the recorded restriction; do not restore the removed content." },
+  resume_scope_tombstoned: { reason: "This application's resume is restricted by a recorded privacy instruction.", owner: "Raydar privacy review", next: "Honor the recorded resume restriction." },
+  resume_payload_tombstoned: { reason: "The stored resume content was removed under a recorded privacy instruction.", owner: "Raydar privacy review", next: "Honor the recorded restriction; do not restore the removed resume." },
+});
 function problemReason(problem) {
-  return problem.reason || String(problem.code || "problem").replace(/[_-]+/g, " ");
+  return problem.reason || PROBLEM_GUIDANCE[problem.code]?.reason
+    || "This application needs review: " + String(problem.code || "unclassified issue").replace(/[_-]+/g, " ");
+}
+function problemApplicantRow(problem) {
+  return applicantListRow(problem.key, problem.applicationId);
 }
 function problemDistinction(problem) {
   const field = problem.fieldPath || problem.field || problem.fact;
@@ -2277,20 +2309,24 @@ function problemDistinction(problem) {
   return [field ? "Field: " + field : "", version ? "Version: " + version : ""].filter(Boolean).join(" · ");
 }
 function problemRowHtml(problem) {
-  const linked = problem.key && (queueRows().some((row) => row.key === problem.key) || streamRows().some((row) => row.key === problem.key));
-  const next = problem.nextAction || (problem.nextAt ? "Retry after " + shortDate(problem.nextAt) : "Next action is being determined");
-  const ownership = problem.owner ? "Owner: " + problem.owner : "Owner: unassigned";
+  const applicant = problemApplicantRow(problem);
+  const key = applicant?.key || applicant?.profileKey;
+  const guidance = PROBLEM_GUIDANCE[problem.code];
+  const next = problem.nextAction || (problem.nextAt ? "Retry after " + shortDate(problem.nextAt) : guidance?.next || "Inspect the current application evidence and resolve the reported issue.");
+  const ownership = "Owner: " + (problem.owner || guidance?.owner || "Raydar application review");
   const shared = problem.affectedCount && problem.affectedCount > 1
     ? "Shared incident affecting " + problem.affectedCount + " applicants" : "";
   const distinction = problemDistinction(problem);
   return '<div class="row problem-row"><div class="rc-main"><div class="rc-id">' +
-    '<div class="who"><span class="name"><span>' + esc(problem.domain || "Applicant") + " problem</span></span>" +
-    (linked ? '<a class="rc-more" href="' + esc(RaydarNav.href(problem.key)) + '" data-open="' + esc(problem.key) + '">Open applicant</a>' : "") + "</div>" +
+    '<div class="who"><span class="name"><span>' + esc(applicant?.name || "Applicant details pending") + "</span></span>" +
+    (key ? '<a class="rc-more" href="' + esc(RaydarNav.href(key)) + '" data-open="' + esc(key) + '">Open applicant</a>' : "") + "</div>" +
+    (applicant ? '<div class="processing-job">Applied to <b>' + esc(appliedRole(applicant)) + "</b> @ " + esc(appliedCompany(applicant)) + "</div>" +
+      '<div class="problem-meta">' + esc(applicationMomentText(applicant) || "Application date is unavailable in the current source record.") + "</div>" : "") +
     '<div class="problem-code">' + esc(problemReason(problem)) + "</div>" +
     (distinction ? '<div class="problem-meta">' + esc(distinction) + "</div>" : "") +
     '<div class="problem-meta">' + esc(ownership) + " · " + esc(next) + "</div>" +
     (shared ? '<div class="problem-meta">' + esc(shared) + "</div>" : "") +
-    (problem.ageSeconds != null ? '<div class="problem-meta">Open for ' + esc(typeof invitationAgeText === "function" ? invitationAgeText(problem.ageSeconds) : String(problem.ageSeconds) + "s") + "</div>" : problem.observedAt ? '<div class="problem-meta">Observed ' + esc(relTime(parseDate(problem.observedAt))) + "</div>" : "") +
+    (problem.ageSeconds != null ? '<div class="problem-meta">Open for ' + esc(typeof invitationAgeText === "function" ? invitationAgeText(problem.ageSeconds) : String(problem.ageSeconds) + "s") + "</div>" : problem.observedAt ? '<div class="problem-meta">Observed ' + esc(relTime(parseDate(problem.observedAt))) + "</div>" : '<div class="problem-meta">Issue start time is unavailable.</div>') +
     "</div></div></div>";
 }
 function renderProblems() {
@@ -2566,13 +2602,14 @@ function lockOuterScroll(on) {
   } catch { /* shell not reachable — the in-frame lock above still applies */ }
 }
 function openProfile(key, { restoreFocus = false } = {}) {
-  const row = queueRows().find((r) => r.key === key) || streamRows().find((r) => r.key === key);
+  const row = applicantListRow(key);
   if (!row) return;
   const id = profileId(row);
   // The virtualizer may replace the link node while the profile is open. Keep
   // only its opaque application key and find the current node when closing;
   // retaining an HTMLElement here would strand keyboard focus on <body>.
-  STATE.modal = { cu: id, key, row, source: queueRows().some((r) => r.key === key) ? "queue" : "stream", returnFocusKey: restoreFocus ? key : null };
+  STATE.modal = { cu: id, key, row, source: queueRows().some((r) => r.key === key) ? "queue"
+    : streamRows().some((r) => r.key === key) ? "stream" : "preparing", returnFocusKey: restoreFocus ? key : null };
   ensureRoom();
   placeModal();
   $("profileModal").classList.add("open");
@@ -2580,6 +2617,7 @@ function openProfile(key, { restoreFocus = false } = {}) {
   $("profileCard").scrollTop = 0;
   RaydarNav.open("profile", closeProfile, key);   // one screen back, and addressable
   renderModal();
+  if (STATE.modal.source === "preparing") return;
   fetchProfile(id).then(() => { if (STATE.modal && STATE.modal.cu === id) { renderModal(); applyAvatar(id); } })
     .catch(() => { if (STATE.modal && STATE.modal.cu === id) renderModal(); });
 }
@@ -2692,6 +2730,14 @@ function renderModal() {
   const modal = STATE.modal;
   if (!modal) return;
   const row = modal.row;
+  if (modal.source === "preparing") {
+    const display = processingDisplay(row);
+    $("profileCard").innerHTML = '<div class="p-head"><div class="p-id"><h2 id="profileName">' + esc(row.name || "Applicant identity pending") + '</h2></div><button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>' +
+      '<div class="p-applied">Applied to <b>' + esc(appliedRole(row)) + '</b> @ ' + esc(appliedCompany(row)) + ' · ' + esc(applicationMomentText(row) || "Application date unavailable") + '</div>' +
+      '<div class="p-source"><div class="p-source-body"><div class="p-source-title">' + esc(display.label) + '</div><p>' + esc(display.reason) + '</p><p>Owner: ' + esc(display.owner) + '</p><p>' + esc(display.next) + '</p></div></div>' +
+      processingSourceDetailsHtml(row.sourceDetails);
+    return;
+  }
   const profile = STATE.profiles[modal.cu];
   const loading = !(modal.cu in STATE.profiles);
   const p = profile || {};
