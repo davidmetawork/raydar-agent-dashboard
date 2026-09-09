@@ -104,10 +104,15 @@ function profile(value) {
   const source = (candidate) => {
     const input = object(candidate) ?? {};
     return Object.freeze({
-      source: ["paraform_linkedin", "resume"].includes(input.source) ? input.source : null,
+      source: ["paraform_linkedin", "application_source", "resume"].includes(input.source) ? input.source : null,
       observedAt: text(input.observedAt, 64), factVersion: text(input.factVersion, 180),
       freshness: validFreshness(input.freshness), state: validState(input.state),
       validity: text(input.validity, 120) || "missing",
+      ...(input.source === "application_source" ? {
+        normalizedHash: /^[a-f0-9]{64}$/iu.test(String(input.normalizedHash || ""))
+          ? String(input.normalizedHash).toLowerCase() : null,
+        provider: text(input.provider, 100),
+      } : {}),
     });
   };
   const selected = object(raw.selectedResume);
@@ -117,7 +122,7 @@ function profile(value) {
       about: fact(raw.facts?.about), linkedin: fact(raw.facts?.linkedin),
       experiences: history(raw.facts?.experiences, "experience"), education: history(raw.facts?.education, "education"),
     }),
-    paraform: source(raw.paraform), resume: source(raw.resume),
+    paraform: source(raw.paraform), applicationSource: source(raw.applicationSource), resume: source(raw.resume),
     selectedResume: selected ? Object.freeze({ artifactId: id(selected.artifactId), digest: text(selected.digest, 180),
       parserVersion: text(selected.parserVersion, 180), observedAt: text(selected.observedAt, 64),
       factVersion: text(selected.factVersion, 180), state: validState(selected.state) }) : null,
@@ -172,6 +177,8 @@ export function normalizeApplicantRowV2(value, { key = null } = {}) {
     profile: profile(raw.profile), actionability: actionability(raw.actionability), invitation: invitation(raw.invitation),
     problems: Object.freeze(list(raw.problems).map((problem) => normalizeApplicantProblem(problem, { applicationId: application.applicationId })).filter(Boolean)),
     factSetDigest: /^[a-f0-9]{64}$/i.test(String(raw.factSetDigest || "")) ? String(raw.factSetDigest).toLowerCase() : null,
+    factSetVersion: ["applicant-profile-v2-fact-set-v1", "applicant-profile-v2-fact-set-v2"]
+      .includes(raw.factSetVersion) ? raw.factSetVersion : null,
     // Core sets these only when this fact digest belongs to the exact current
     // evaluation revision. Rules consumes them as a fence; display ignores
     // them.

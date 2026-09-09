@@ -16,7 +16,9 @@ import {
 import { createPagedRuleEvaluatorHandler } from "../api/applicants/rules-evaluate-page.mjs";
 import { createTickHandler } from "../api/applicants/rules-tick.mjs";
 import { createSyncHandler } from "../api/applicants/sync.mjs";
+import { compileFundedEmployerSnapshot } from "../api/applicants/_lib/funded-employers.mjs";
 import { K } from "../api/applicants/_lib/kv.mjs";
+import { projectApplicantProfileV2 } from "../api/applicants/_lib/paged-core/applicant-profile-contract.mjs";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
@@ -24,11 +26,12 @@ const GENERATION_ID = "33333333-3333-4333-8333-333333333333";
 const APP_ID = "44444444-4444-4444-8444-444444444444";
 const ROW_ID = "55555555-5555-4555-8555-555555555555";
 const AT = "2026-09-08T18:00:00.000Z";
+const SOURCE_OBSERVATION_ID = "source-observation-current";
+const FUNDED_SNAPSHOT_ID = "funded-us-gb-ca-2026-09-05";
 const rule = { id: "rule-one", version: 3, name: "Tier C", state: "live", action: "pass",
   scope: { roleIds: [] }, conditions: [{ field: "application.tier", op: "any_of", value: ["C"] }] };
 
-function evaluatorRequest(items = [evaluatorItem()]) {
-  const rules = [rule];
+function evaluatorRequest(items = [evaluatorItem()], rules = [rule]) {
   return { version: PAGED_RULE_EVALUATOR_REQUEST_VERSION, previewId: PREVIEW_ID,
     batchNumber: 1, evaluatorVersion: PAGED_RULE_EVALUATOR_VERSION,
     generationId: GENERATION_ID, generationDigest: "a".repeat(64), evaluatedAt: AT,
@@ -40,6 +43,50 @@ function evaluatorItem() {
     monitorKey: "candidate:role", inputRevision: "input-7", readinessRevision: "ready-7",
     factSetDigest: "b".repeat(64), decisionRevision: 0,
     indexPayload: { tier: "C" }, projection: null };
+}
+
+function fundedSnapshot() {
+  return compileFundedEmployerSnapshot({
+    snapshotId: FUNDED_SNAPSHOT_ID,
+    generatedAt: "2026-09-05T10:00:00.000Z",
+    criteria: {
+      headquartersCountryCodes: ["US", "GB", "CA"], minimumTotalFundingUsd: 1_000_000,
+      qualifyingFundingRoundTypes: ["seed", "series_a", "series_b", "series_c", "series_d"],
+      qualifyingRoundAnnouncedOnOrAfter: "2011-09-05",
+      qualifyingRoundAnnouncedOnOrBefore: "2026-09-05",
+    },
+    provenance: { sources: [{ id: "cb-us-2026-09-05", kind: "crunchbase_query_export",
+      exportedAt: "2026-09-05T09:00:00.000Z", sourceFileSha256: "c".repeat(64),
+      qualifyingSearch: { entity: "organizations", filters: { fundingRoundTypes: ["seed"] } },
+      queryEvidenceSha256: "d".repeat(64) }] },
+    entries: [{ orgId: "org-funded", name: "Funded Co", countryCode: "US",
+      domain: "https://funded.example", sourceRef: "cb-us-2026-09-05",
+      paraformCompanyIds: ["pf-funded"], fundingProof: { totalFundingUsd: 2_500_000,
+        sourceRowId: "org-funded", qualification: { kind: "query_cohort", sourceRef: "cb-us-2026-09-05" } } }],
+  }).snapshot;
+}
+
+function fundedV2Item() {
+  const selected = projectApplicantProfileV2({
+    application: { applicationId: APP_ID, tenantScopeId: "tenant-one", personId: "person-one",
+      sourceObservationId: SOURCE_OBSERVATION_ID, rowRevision: "row-7",
+      appliedTo: { roleVersionId: "role-version-one", roleId: "role-one", title: "Engineer",
+        hiringCompany: { roleVersion: { name: "Client Co", observedAt: AT, version: "role-version-one" } } } },
+    applicationSource: { applicationId: APP_ID, sourceProvider: "workable",
+      scope: { tenantScopeId: "tenant-one", personId: "person-one" },
+      sourceObservationId: SOURCE_OBSERVATION_ID, state: "verified", observedAt: AT,
+      normalizedHash: "f".repeat(64), factVersion: "f".repeat(64), freshness: "current", facts: {
+        name: "Candidate", title: "Engineer", location: "Austin",
+        provenance: { experiences: { source: "application_source", observedAt: AT } },
+        experiences: [{ recordId: "experience-funded", companyId: "pf-funded",
+          companyName: "Funded Co", roleTitle: "Engineer" }], education: [],
+      } },
+    actionability: { eligibility: "ready" },
+  });
+  const projection = { ...selected, key: "candidate:role", inputRevision: "input-7",
+    decisionRevision: 0, factsCurrent: true };
+  return { ...evaluatorItem(), factSetDigest: projection.factSetDigest,
+    sourceObservationId: SOURCE_OBSERVATION_ID, projection };
 }
 
 function response() {
@@ -84,6 +131,88 @@ test("evaluator records an unavailable pinned fact set as a per-row skip", () =>
   assert.equal(result.items[0].outcome, "no_match");
   assert.equal(result.items[0].skipReason, "profile_v2_fact_set_unavailable");
   assert.deepEqual(result.items[0].evidence, { watchingMatches: [] });
+});
+
+test("funded-employer evaluation accepts exact current V2 evidence and keeps fact-set identity distinct", () => {
+  const fundedRule = { id: "rule-funded", version: 4, name: "Funded employer", state: "live",
+    action: "interview", scope: { roleIds: [] }, conditions: [
+      { field: "employment.fundedEmployerSnapshot", op: "member_of", value: FUNDED_SNAPSHOT_ID },
+    ] };
+  const item = fundedV2Item();
+  const result = evaluatePagedRulePage(evaluatorRequest([item], [fundedRule]), {
+    fundedEmployerSnapshots: { [FUNDED_SNAPSHOT_ID]: fundedSnapshot() },
+  }).items[0];
+
+  assert.equal(result.outcome, "interview");
+  assert.equal(result.ruleId, fundedRule.id);
+  assert.equal(result.skipReason, null);
+  assert.deepEqual(result.evidence.winner, [{
+    field: "employment.fundedEmployerSnapshot", op: "member_of", source: "application_source",
+    matched: "Funded Co", organizationId: "org-funded", paraformCompanyId: "pf-funded",
+    identityBasis: "paraform_company_id", sourceObservationId: SOURCE_OBSERVATION_ID,
+    factSetVersion: "applicant-profile-v2-fact-set-v2", factSetDigest: item.factSetDigest,
+    snapshotId: FUNDED_SNAPSHOT_ID,
+  }]);
+  assert.equal(Object.hasOwn(result.evidence.winner[0], "sourcePayloadDigest"), false,
+    "a Profile V2 fact-set digest must never impersonate a legacy source-payload digest");
+});
+
+test("funded-employer evaluation skips mismatched, stale, unknown, and unbound V2 history evidence", () => {
+  const fundedRule = { id: "rule-funded", version: 4, name: "Funded employer", state: "live",
+    action: "interview", scope: { roleIds: [] }, conditions: [
+      { field: "employment.fundedEmployerSnapshot", op: "member_of", value: FUNDED_SNAPSHOT_ID },
+    ] };
+  const snapshots = { [FUNDED_SNAPSHOT_ID]: fundedSnapshot() };
+  const cases = [
+    ["mismatched entry version", (projection) => {
+      projection.profile.facts.experiences.entries[0].factVersion = "another-version";
+    }, "employment_facts_source_mismatch"],
+    ["stale history", (projection) => {
+      projection.profile.facts.experiences.freshness = "stale";
+      projection.profile.facts.experiences.entries[0].freshness = "stale";
+    }, "employment_facts_source_mismatch"],
+    ["unknown history", (projection) => {
+      projection.profile.facts.experiences.freshness = "unknown";
+      projection.profile.facts.experiences.entries[0].freshness = "unknown";
+    }, "employment_facts_source_mismatch"],
+    ["missing history version", (projection) => {
+      projection.profile.facts.experiences.factVersion = null;
+      projection.profile.facts.experiences.entries[0].factVersion = null;
+    }, "employment_facts_source_unbound"],
+  ];
+
+  for (const [name, mutate, expectedSkip] of cases) {
+    const item = fundedV2Item();
+    const projection = structuredClone(item.projection);
+    mutate(projection);
+    const result = evaluatePagedRulePage(evaluatorRequest([{ ...item, projection }], [fundedRule]), {
+      fundedEmployerSnapshots: snapshots,
+    }).items[0];
+    assert.equal(result.outcome, "no_match", name);
+    assert.equal(result.ruleId, null, name);
+    assert.equal(result.skipReason, expectedSkip, name);
+    assert.deepEqual(result.evidence, { watchingMatches: [] }, name);
+  }
+});
+
+test("funded-employer V2 evaluation rejects authority outside the exact paged row", () => {
+  const fundedRule = { id: "rule-funded", version: 4, name: "Funded employer", state: "live",
+    action: "interview", scope: { roleIds: [] }, conditions: [
+      { field: "employment.fundedEmployerSnapshot", op: "member_of", value: FUNDED_SNAPSHOT_ID },
+    ] };
+  const cases = [
+    ["source observation", { sourceObservationId: "source-observation-other" }],
+    ["fact set", { factSetDigest: "e".repeat(64) }],
+    ["application", { applicationId: "66666666-6666-4666-8666-666666666666" }],
+  ];
+  for (const [name, mismatch] of cases) {
+    const item = { ...fundedV2Item(), ...mismatch };
+    const result = evaluatePagedRulePage(evaluatorRequest([item], [fundedRule]), {
+      fundedEmployerSnapshots: { [FUNDED_SNAPSHOT_ID]: fundedSnapshot() },
+    }).items[0];
+    assert.equal(result.outcome, "no_match", name);
+    assert.equal(result.skipReason, "profile_v2_fact_set_missing", name);
+  }
 });
 
 test("evaluator refuses any page above the server-owned 500-row bound", () => {

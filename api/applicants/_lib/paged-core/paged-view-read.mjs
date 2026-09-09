@@ -45,7 +45,7 @@ export async function readActivePagedViewPage({ pool, generationId, generationDi
     try {
       if (typeof cursor !== 'string' || cursor.length > 2_048) throw new Error();
       const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-      if (parsed.version !== 2 || parsed.generationId !== generationId
+      if (parsed.version !== 3 || parsed.generationId !== generationId
         || parsed.generationDigest !== generationDigest || parsed.filterDigest !== filterDigest
         || typeof parsed.after?.primary !== 'string' || typeof parsed.after?.secondary !== 'string'
         || typeof parsed.after?.key !== 'string' || parsed.after.key.length > 1_024) throw new Error();
@@ -55,7 +55,7 @@ export async function readActivePagedViewPage({ pool, generationId, generationDi
   const result = await read(pool, 'page', { generationId, generationDigest, ...filter, ...(after ? { after } : {}) });
   return Object.freeze({ generation: result.generation, documents: result.documents,
     rows: result.documents.map(document => ({ ...document.row, row_version_id: document.row.id })),
-    nextCursor: result.after ? encode({ version: 2, generationId: result.generation.generationId,
+    nextCursor: result.after ? encode({ version: 3, generationId: result.generation.generationId,
       generationDigest: result.generation.generationDigest, filterDigest, after: result.after }) : null });
 }
 

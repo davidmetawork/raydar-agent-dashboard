@@ -2,9 +2,13 @@ import { createHash } from "node:crypto";
 
 import { factsFromProfile } from "./facts.mjs";
 import { normalizeApplicantRowsV2 } from "./profile-v2.mjs";
+import {
+  PROFILE_V2_FACT_SET_VERSION,
+  employmentEvidenceFromApplicantV2,
+} from "./profile-v2-employment-evidence.mjs";
 
 export const GRAPH_RULE_RUN_VERSION = "applicant-core-graph-rule-run-v2";
-export const GRAPH_RULE_FACT_SET_VERSION = "applicant-profile-v2-fact-set-v1";
+export const GRAPH_RULE_FACT_SET_VERSION = PROFILE_V2_FACT_SET_VERSION;
 export const GRAPH_RULE_EVALUATOR_VERSION = "raydar-monitor-applicant-rules-v1";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -32,12 +36,28 @@ function value(fact) {
   return fact && fact.state !== "unavailable" ? fact.value ?? null : null;
 }
 
+function exactPagedAuthority(projection, authority) {
+  if (!authority) return true;
+  return projection.key === authority.monitorKey
+    && String(projection.application?.applicationId || "").toLowerCase()
+      === String(authority.applicationId || "").toLowerCase()
+    && projection.application?.sourceObservationId === authority.sourceObservationId
+    && String(projection.factSetDigest || "").toLowerCase()
+      === String(authority.factSetDigest || "").toLowerCase()
+    && projection.inputRevision === authority.inputRevision
+    && projection.decisionRevision === Number(authority.decisionRevision);
+}
+
 /** Convert only the values selected by Core's immutable Profile V2 projection
  * into the long-standing Rules evaluator shape. Preview and Run call this same
  * function, so neither can silently fall back to a different profile cache. */
-export function ruleSubjectFromApplicantV2(row, projection, { now = Date.now() } = {}) {
+export function ruleSubjectFromApplicantV2(row, projection, { now = Date.now(), authority = null } = {}) {
   if (!projection || projection.key !== row?.key
+    || !exactPagedAuthority(projection, authority)
     || !UUID.test(String(projection.application?.applicationId || ""))
+    || !String(projection.application?.sourceObservationId || "")
+    || (row?.sourceObservationId != null
+      && projection.application.sourceObservationId !== row.sourceObservationId)
     || !SHA256.test(String(projection.factSetDigest || ""))
     || !String(row?.inputRevision || "")
     || !Number.isSafeInteger(Number(row?.decisionRevision))
@@ -108,6 +128,7 @@ export function ruleSubjectFromApplicantV2(row, projection, { now = Date.now() }
     facts: Object.freeze(facts),
     profileFactsPending: false,
     profileReceipt: null,
+    employmentFactsEvidence: employmentEvidenceFromApplicantV2(projection),
     applicationId: projection.application.applicationId.toLowerCase(),
     factSetDigest: projection.factSetDigest,
   });

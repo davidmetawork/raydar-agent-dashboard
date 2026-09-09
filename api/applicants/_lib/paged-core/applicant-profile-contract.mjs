@@ -8,9 +8,11 @@ import { createHash } from "node:crypto";
  * this module only selects what a read model may display and records why.
  */
 export const APPLICANT_PROFILE_V2_CONTRACT_VERSION = "applicant-profile-v2";
-export const APPLICANT_PROFILE_V2_FACT_SET_VERSION = "applicant-profile-v2-fact-set-v1";
+export const APPLICANT_PROFILE_V1_FACT_SET_VERSION = "applicant-profile-v2-fact-set-v1";
+export const APPLICANT_PROFILE_V2_FACT_SET_VERSION = "applicant-profile-v2-fact-set-v2";
 
 const PROFILE_SOURCE = "paraform_linkedin";
+const APPLICATION_SOURCE = "application_source";
 const RESUME_SOURCE = "resume";
 const EMPTY = Object.freeze([]);
 const ENTITY_LOGO_PREFIX = "https://storage.googleapis.com/paraform-company-logo-urls/company-logos/";
@@ -48,10 +50,12 @@ function scope(value) {
 
 /** Exact tenant/person scope comparison. Paraform data uses the separately
  * verified provider tenant; resume data stays in the application's tenant. */
-export function hasExactApplicantProfileScope(candidate, application, { resume = false } = {}) {
+export function hasExactApplicantProfileScope(candidate, application, {
+  resume = false, applicationSource = false,
+} = {}) {
   const left = scope(candidate?.scope);
   const right = scope({
-    tenantScopeId: resume ? application?.tenantScopeId
+    tenantScopeId: resume || applicationSource ? application?.tenantScopeId
       : application?.providerTenantScopeId ?? application?.tenantScopeId,
     personId: application?.personId,
   });
@@ -59,9 +63,11 @@ export function hasExactApplicantProfileScope(candidate, application, { resume =
     && left.tenantScopeId === right.tenantScopeId && left.personId === right.personId);
 }
 
-function factMetadata(candidate, source, state, key = null) {
+function factMetadata(candidate, source, state, key = null, { legacyResumeSource = false } = {}) {
   const provenance = key ? object(candidate?.facts?.provenance?.[key]) : null;
-  const fieldSource = ["application_source", "selected_resume"].includes(provenance?.source)
+  const fieldSource = source === RESUME_SOURCE
+    && (provenance?.source === "selected_resume"
+      || (legacyResumeSource && provenance?.source === APPLICATION_SOURCE))
     ? provenance.source : source;
   return {
     source: fieldSource,
@@ -73,15 +79,22 @@ function factMetadata(candidate, source, state, key = null) {
   };
 }
 
-function candidateValidity(candidate, application, { resume = false } = {}) {
+function candidateValidity(candidate, application, {
+  resume = false, applicationSource = false,
+} = {}) {
   const source = object(candidate);
   if (!source || Object.keys(source).length === 0) return "missing";
-  if (!hasExactApplicantProfileScope(source, application, { resume })) return "scope_mismatch";
+  if (!hasExactApplicantProfileScope(source, application, { resume, applicationSource })) return "scope_mismatch";
   if (text(source.sourceObservationId) !== application.sourceObservationId) return "source_mismatch";
   if (!text(source.factVersion)) return "version_missing";
-  if (resume) {
+  if (resume || applicationSource) {
     if (id(source.applicationId) !== application.applicationId) return "application_mismatch";
-    if (!id(source.artifact?.id) || !text(source.artifact?.digest) || !text(source.parserVersion)) {
+    if (applicationSource) {
+      const normalizedHash = text(source.normalizedHash);
+      if (!/^[a-f0-9]{64}$/u.test(normalizedHash || "")
+        || source.factVersion !== normalizedHash) return "source_digest_mismatch";
+      if (source.state !== "verified") return "unavailable";
+    } else if (!id(source.artifact?.id) || !text(source.artifact?.digest) || !text(source.parserVersion)) {
       return "resume_unusable";
     }
   } else if (source.state !== "verified") {
@@ -92,7 +105,18 @@ function candidateValidity(candidate, application, { resume = false } = {}) {
 
 function sourceSummary(candidate, validity, source) {
   const meta = factMetadata(candidate, source, validity === "usable" ? "available" : "unavailable");
-  return { ...meta, validity };
+  return { ...meta, validity,
+    ...(source === APPLICATION_SOURCE ? {
+      normalizedHash: text(candidate?.normalizedHash),
+      provider: text(candidate?.sourceProvider, 100),
+    } : {}) };
+}
+
+function ownsSelectedField(candidate, key, source, { legacyResumeSource = false } = {}) {
+  const provenanceSource = object(candidate?.facts?.provenance?.[key])?.source;
+  if (source === APPLICATION_SOURCE) return provenanceSource === APPLICATION_SOURCE;
+  if (source === PROFILE_SOURCE) return ![APPLICATION_SOURCE, "selected_resume"].includes(provenanceSource);
+  return legacyResumeSource || provenanceSource !== APPLICATION_SOURCE;
 }
 
 function nullFact() {
@@ -106,8 +130,8 @@ function nullFact() {
   });
 }
 
-function selectedFact(value, candidate, source, state, key) {
-  return Object.freeze({ value, ...factMetadata(candidate, source, state, key) });
+function selectedFact(value, candidate, source, state, key, options = {}) {
+  return Object.freeze({ value, ...factMetadata(candidate, source, state, key, options) });
 }
 
 // Logos are a provider record attribute, never a name lookup. Requiring the
@@ -132,19 +156,27 @@ function scalar(value) {
   return null;
 }
 
-function selectScalar(key, provider, providerValidity, resume, resumeValidity) {
-  if (providerValidity === "usable" && own(provider.facts, key)) {
+function selectScalar(key, provider, providerValidity, applicationSource, applicationSourceValidity,
+  resume, resumeValidity, options) {
+  if (providerValidity === "usable" && own(provider.facts, key)
+    && ownsSelectedField(provider, key, PROFILE_SOURCE)) {
     const value = scalar(provider.facts[key]);
     if (value !== null) return selectedFact(value, provider, PROFILE_SOURCE, "verified", key);
   }
-  if (resumeValidity === "usable" && own(resume.facts, key)) {
+  if (applicationSourceValidity === "usable" && own(applicationSource.facts, key)
+    && ownsSelectedField(applicationSource, key, APPLICATION_SOURCE)) {
+    const value = scalar(applicationSource.facts[key]);
+    if (value !== null) return selectedFact(value, applicationSource, APPLICATION_SOURCE, "fallback", key);
+  }
+  if (resumeValidity === "usable" && own(resume.facts, key)
+    && ownsSelectedField(resume, key, RESUME_SOURCE, options)) {
     const value = scalar(resume.facts[key]);
-    if (value !== null) return selectedFact(value, resume, RESUME_SOURCE, "fallback", key);
+    if (value !== null) return selectedFact(value, resume, RESUME_SOURCE, "fallback", key, options);
   }
   return nullFact();
 }
 
-function experience(entry, candidate, source, state, key = "experiences") {
+function experience(entry, candidate, source, state, key = "experiences", options = {}) {
   const row = object(entry) ?? {};
   const companyId = id(row.companyId);
   // These fields always come from this one record.  Never fill a blank field
@@ -161,11 +193,11 @@ function experience(entry, candidate, source, state, key = "experiences") {
     description: text(row.description, 8_000),
     industry: text(row.industry, 500),
     logo: safeEntityLogo(row.logo, companyId),
-    ...factMetadata(candidate, source, state, key),
+    ...factMetadata(candidate, source, state, key, options),
   });
 }
 
-function education(entry, candidate, source, state, key = "education") {
+function education(entry, candidate, source, state, key = "education", options = {}) {
   const row = object(entry) ?? {};
   const schoolId = id(row.schoolId);
   return Object.freeze({
@@ -179,21 +211,32 @@ function education(entry, candidate, source, state, key = "education") {
     schoolWebsite: text(row.schoolWebsite, 1_500),
     description: text(row.description, 8_000),
     logo: safeEntityLogo(row.logo, schoolId),
-    ...factMetadata(candidate, source, state, key),
+    ...factMetadata(candidate, source, state, key, options),
   });
 }
 
-function selectHistory(key, map, provider, providerValidity, resume, resumeValidity) {
-  if (providerValidity === "usable" && Array.isArray(provider.facts?.[key])) {
+function selectHistory(key, map, provider, providerValidity, applicationSource,
+  applicationSourceValidity, resume, resumeValidity, options) {
+  if (providerValidity === "usable" && Array.isArray(provider.facts?.[key])
+    && ownsSelectedField(provider, key, PROFILE_SOURCE)) {
     return Object.freeze({
       entries: provider.facts[key].map((entry) => map(entry, provider, PROFILE_SOURCE, "verified", key)),
       ...factMetadata(provider, PROFILE_SOURCE, "verified", key),
     });
   }
-  if (resumeValidity === "usable" && Array.isArray(resume.facts?.[key])) {
+  if (applicationSourceValidity === "usable" && Array.isArray(applicationSource.facts?.[key])
+    && ownsSelectedField(applicationSource, key, APPLICATION_SOURCE)) {
     return Object.freeze({
-      entries: resume.facts[key].map((entry) => map(entry, resume, RESUME_SOURCE, "fallback", key)),
-      ...factMetadata(resume, RESUME_SOURCE, "fallback", key),
+      entries: applicationSource.facts[key]
+        .map((entry) => map(entry, applicationSource, APPLICATION_SOURCE, "fallback", key)),
+      ...factMetadata(applicationSource, APPLICATION_SOURCE, "fallback", key),
+    });
+  }
+  if (resumeValidity === "usable" && Array.isArray(resume.facts?.[key])
+    && ownsSelectedField(resume, key, RESUME_SOURCE, options)) {
+    return Object.freeze({
+      entries: resume.facts[key].map((entry) => map(entry, resume, RESUME_SOURCE, "fallback", key, options)),
+      ...factMetadata(resume, RESUME_SOURCE, "fallback", key, options),
     });
   }
   return Object.freeze({
@@ -303,15 +346,22 @@ function applicationIdentity(input) {
  * Builds a stable read-model payload. Missing application identity is a caller
  * error because it would make a display selection cross-tenant ambiguous.
  */
-export function projectApplicantProfileV2({ application, paraformProfile = null, resume = null, actionability: rawActionability = null } = {}) {
+function projectApplicantProfile({ application, paraformProfile = null, applicationSource = null,
+  resume = null, actionability: rawActionability = null }, {
+  includeApplicationSource, factSetVersion, legacyResumeSource = false,
+}) {
   const app = applicationIdentity(application);
   if (!app.applicationId || !app.tenantScopeId || !app.personId || !app.sourceObservationId) {
     throw new Error("APPLICANT_PROFILE_V2_APPLICATION_SCOPE_REQUIRED");
   }
   const provider = object(paraformProfile) ?? {};
+  const exactApplicationSource = includeApplicationSource ? object(applicationSource) ?? {} : {};
   const selectedResume = object(resume) ?? {};
   const providerValidity = candidateValidity(provider, app);
+  const applicationSourceValidity = includeApplicationSource
+    ? candidateValidity(exactApplicationSource, app, { applicationSource: true }) : "missing";
   const resumeValidity = candidateValidity(selectedResume, app, { resume: true });
+  const selectionOptions = { legacyResumeSource };
   const exactAppliedTo = appliedTo(application);
   const problems = exactAppliedTo.problem ? [Object.freeze({
     code: exactAppliedTo.problem,
@@ -320,19 +370,29 @@ export function projectApplicantProfileV2({ application, paraformProfile = null,
     domain: "application",
   })] : EMPTY;
   const facts = Object.freeze({
-    name: selectScalar("name", provider, providerValidity, selectedResume, resumeValidity),
-    title: selectScalar("title", provider, providerValidity, selectedResume, resumeValidity),
-    location: selectScalar("location", provider, providerValidity, selectedResume, resumeValidity),
-    about: selectScalar("about", provider, providerValidity, selectedResume, resumeValidity),
-    linkedin: selectScalar("linkedin", provider, providerValidity, selectedResume, resumeValidity),
-    experiences: selectHistory("experiences", experience, provider, providerValidity, selectedResume, resumeValidity),
-    education: selectHistory("education", education, provider, providerValidity, selectedResume, resumeValidity),
+    name: selectScalar("name", provider, providerValidity, exactApplicationSource,
+      applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
+    title: selectScalar("title", provider, providerValidity, exactApplicationSource,
+      applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
+    location: selectScalar("location", provider, providerValidity, exactApplicationSource,
+      applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
+    about: selectScalar("about", provider, providerValidity, exactApplicationSource,
+      applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
+    linkedin: selectScalar("linkedin", provider, providerValidity, exactApplicationSource,
+      applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
+    experiences: selectHistory("experiences", experience, provider, providerValidity,
+      exactApplicationSource, applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
+    education: selectHistory("education", education, provider, providerValidity,
+      exactApplicationSource, applicationSourceValidity, selectedResume, resumeValidity, selectionOptions),
   });
   const profile = Object.freeze({
     facts,
     photo: providerValidity === "usable" ? text(provider.facts?.photo)
       : resumeValidity === "usable" ? text(selectedResume.facts?.photo) : null,
     paraform: Object.freeze(sourceSummary(provider, providerValidity, PROFILE_SOURCE)),
+    ...(includeApplicationSource ? { applicationSource: Object.freeze(sourceSummary(
+      exactApplicationSource, applicationSourceValidity, APPLICATION_SOURCE,
+    )) } : {}),
     resume: Object.freeze(sourceSummary(selectedResume, resumeValidity, RESUME_SOURCE)),
     selectedResume: resumeValidity === "usable" ? Object.freeze({
       artifactId: id(selectedResume.artifact.id),
@@ -345,18 +405,51 @@ export function projectApplicantProfileV2({ application, paraformProfile = null,
   });
   const action = actionability(rawActionability);
   const factSet = {
-    version: APPLICANT_PROFILE_V2_FACT_SET_VERSION,
+    version: factSetVersion,
     application: app,
     appliedTo: exactAppliedTo.value,
     facts,
-    sources: { paraform: profile.paraform, resume: profile.resume },
+    sources: includeApplicationSource
+      ? { paraform: profile.paraform, applicationSource: profile.applicationSource, resume: profile.resume }
+      : { paraform: profile.paraform, resume: profile.resume },
   };
   return Object.freeze({
     contractVersion: APPLICANT_PROFILE_V2_CONTRACT_VERSION,
+    factSetVersion,
     application: Object.freeze({ ...app, appliedTo: exactAppliedTo.value }),
     profile,
     actionability: action,
     problems: Object.freeze(problems),
     factSetDigest: applicantProfileFactSetDigest(factSet),
   });
+}
+
+/** Current contract. Exact application-source facts are independent of resume
+ * parsing and are selected between provider facts and selected-resume facts. */
+export function projectApplicantProfileV2(input = {}) {
+  return projectApplicantProfile(input, {
+    includeApplicationSource: true,
+    factSetVersion: APPLICANT_PROFILE_V2_FACT_SET_VERSION,
+  });
+}
+
+/** Read/evaluation compatibility for already-persisted v1 fact-set digests.
+ * New publications never write these pins, and Monitor refuses them as Rules
+ * authority until the bounded v2 rematerialization replaces the row. */
+export function projectApplicantProfileV1(input = {}) {
+  return projectApplicantProfile(input, {
+    includeApplicationSource: false,
+    factSetVersion: APPLICANT_PROFILE_V1_FACT_SET_VERSION,
+    legacyResumeSource: true,
+  });
+}
+
+/** A review profile needs actual career or resume content. Identity-only facts
+ * remain discoverable, but cannot make a row Ready by themselves. */
+export function hasUsableApplicantProfileV2(value) {
+  const facts = object(value?.profile?.facts);
+  if (!facts) return false;
+  if (["title", "about"].some((key) => scalar(facts[key]?.value) !== null)) return true;
+  return [facts.experiences, facts.education]
+    .some((history) => object(history) && Array.isArray(history.entries) && history.entries.length > 0);
 }

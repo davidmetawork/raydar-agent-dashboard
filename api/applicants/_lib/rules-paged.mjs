@@ -63,8 +63,10 @@ export function evaluatePagedRulePage(request,{fundedEmployerSnapshots={}}={}){
       factSetDigest:item.factSetDigest,decisionRevision:Number(item.decisionRevision)};
     if(item.projectionUnavailableReason)return {...authority,outcome:"no_match",ruleId:null,ruleVersion:null,
       evidence:{watchingMatches:[]},skipReason:item.projectionUnavailableReason};
-    const row=item.row||{...item.indexPayload,key:item.monitorKey,inputRevision:item.inputRevision,decisionRevision:Number(item.decisionRevision)};
-    const base=ruleSubjectFromApplicantV2(row,item.projection,{now:clock});
+    const row=item.row||{...item.indexPayload,key:item.monitorKey,inputRevision:item.inputRevision,
+      decisionRevision:Number(item.decisionRevision),sourceObservationId:item.sourceObservationId};
+    const base=ruleSubjectFromApplicantV2(row,item.projection,{now:clock,
+      authority:{...authority,sourceObservationId:item.sourceObservationId}});
     const subject=base?{...base,fundedEmployerSnapshots}:null;
     const result=subject?decide(request.rules,subject,clock):{outcome:"no_match",ruleId:null,ruleVersion:null,evidence:{},skipReason:"profile_v2_fact_set_missing"};
     return {...authority,...result};
