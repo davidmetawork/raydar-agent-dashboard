@@ -119,6 +119,16 @@ export async function workerCycle({
   if (!kinds.length) return { ok: true, held: "all_controls_disabled", control_epoch: controls.control_epoch, jobs: [] };
   if (typeof scheduleJobs === "function") await scheduleJobs();
   const jobs = await claimJobs({ workerId, kinds, limit, leaseSeconds: 300, controlEpoch: controls.control_epoch });
+  // Resume builds carry the lowest claim precedence (priority 50) while the tick
+  // re-queues proof, health and index jobs every five minutes at 15-40. With one
+  // claim per cycle a throttled provider keeps the slot busy and builds starve:
+  // on 2026-09-09 nothing built for 40 minutes with 100 jobs queued. Reserve one
+  // build per cycle whenever generation is enabled and the general claim did not
+  // already pick a build; handlers still run sequentially.
+  if (kinds.includes("prepare_resume") && !jobs.some((job) => job.kind === "prepare_resume")) {
+    const reserved = await claimJobs({ workerId, kinds: ["prepare_resume"], limit: 1, leaseSeconds: 300, controlEpoch: controls.control_epoch });
+    jobs.push(...(reserved || []));
+  }
   const results = [];
   for (const job of jobs) results.push(await runClaimedJob(job, { workerId, controlEpoch: controls.control_epoch, handlers, completeJob, failJob, checkpointJob, heartbeatJob }));
   return { ok: results.every((row) => row.state === "succeeded"), control_epoch: controls.control_epoch, jobs: results };

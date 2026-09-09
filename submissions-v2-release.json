@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "5f0c9527f1b3bffdc71b34b0a5ea4f1f6950b95c6702a4387a149cd2284e7407",
+  "digest": "dde2b1f8f72fd0e34d8c56a75abc611425517677a028e7f288ac743449831d34",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -387,7 +387,7 @@
     },
     {
       "path": "submissions-v2-worker/runner.mjs",
-      "sha256": "afff28888023473ee86cac9bdf4bb7752ae9e6eb466dd08999f433f1fed61fa0"
+      "sha256": "4da338d738268b7c0a08bb4bb8bf114f1b5483e974a085dcb01c73a8b63d1303"
     },
     {
       "path": "submissions-v2-worker/sequence-inbox-broker-client.mjs",
