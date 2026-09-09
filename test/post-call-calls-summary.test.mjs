@@ -184,9 +184,51 @@ test("calls-summary whitelists call fields and drops anything unexpected from th
   assert.equal(call.resumeUrl, undefined);
   assert.equal(call.rawEvidence, undefined);
   assert.equal(call.cookie, undefined);
-  assert.deepEqual(Object.keys(call.result).sort(), ["detail", "label", "tone"]);
+  // `bucket` is the only field the page cannot infer from `tone` (in_review
+  // and no_send share "warn"; still_working and other share "muted"), and the
+  // Fix gate and the send-progress poller both turn on that difference. It
+  // stays a closed vocabulary of display tokens.
+  assert.deepEqual(Object.keys(call.result).sort(), ["bucket", "detail", "label", "tone"]);
   assert.equal(call.result.tone, "good");
+  assert.equal(call.result.bucket, "sent");
   assert.equal(call.result.detail, "2 roles in email");
+});
+
+// The Fit tab stops watching a row that is finished and only waiting for the
+// 05:00 PT Mailroom window. That has to be a machine fact, not a match on the
+// English sentence this file prints for it — a reword would leave the row
+// spinning for fifteen minutes on a follow-up that is already done.
+test("calls-summary flags a follow-up that is only waiting for the send window", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: true,
+    generatedAt: "2026-09-07T12:00:00.000Z",
+    calls: [{
+      callId: "call-window",
+      meetingId: "meet-window",
+      callMode: "agent",
+      endedAt: "2026-09-07T10:20:00.000Z",
+      candidate: { displayName: "Ada Example" },
+      outcome: { bucket: "still_working", label: "Working on it", detail: { step: "waiting_send_window" } },
+    }, {
+      callId: "call-matching",
+      meetingId: "meet-matching",
+      callMode: "agent",
+      endedAt: "2026-09-07T10:25:00.000Z",
+      candidate: { displayName: "Grace Example" },
+      outcome: { bucket: "still_working", label: "Working on it", detail: { step: "matches_generating" } },
+    }],
+  }), { status: 200 });
+  const req = authedRequest();
+  const res = response();
+  await handler(req, res);
+  assert.equal(res.statusCode, 200);
+  const [queued, working] = res.body.calls;
+  assert.equal(queued.result.queuedForSendWindow, true);
+  assert.equal(queued.result.detail, "Waiting for the send window");
+  // Every other still_working row carries no flag at all, so the key never
+  // becomes a state token the page has to interpret.
+  assert.equal(working.result.queuedForSendWindow, undefined);
+  assert.deepEqual(Object.keys(working.result).sort(), ["bucket", "detail", "label", "tone"]);
 });
 
 test("calls-summary fails loudly (not an empty success) when every row fails to sanitize", async () => {

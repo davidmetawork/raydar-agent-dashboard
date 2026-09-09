@@ -54,6 +54,18 @@
     ACTIVATION_REVOKED:"the Paraform session had expired",
     WORKFLOW_ERROR:"the workflow hit an error",
   };
+  // A relabelled park says one thing in blockedState and another in
+  // technicalEvidence.obligationState (see effectiveState below). The server's
+  // own summary for those rows is the dead end David hit — "The follow-up
+  // workflow needs a system repair" — so the panel asks the real question
+  // instead. review_preferences uses this copy whether or not it was
+  // relabelled: the backend guesses missing preferences itself now, so the
+  // honest instruction is "press Continue", not "type these five things".
+  const STATE_COPY={
+    review_identity:{headline:"Which Paraform profile is this call attached to?",body:"Search Paraform or paste the profile link, then continue."},
+    review_preferences:{headline:"Ready to continue",body:"Missing preferences are filled in automatically now; press Continue and the follow-up carries on."},
+    review_profile:{headline:"Some candidate details are missing",body:"Fill in what you know and continue."},
+  };
   // Paraform's location enum, mirrored from api/paraai/_lib/extract.mjs
   // (PARAAI_LOCATIONS). The backend validates locations against exactly this
   // lowercase snake_case set, so the control has to be a picker: typed prose
@@ -81,6 +93,30 @@
   function technical(item){return (item&&(item.technicalEvidence?.evidence||item.evidence))||{}}
   function blockedState(item){return item?.technicalEvidence?.blockedState||""}
   function reasonCode(item){return technical(item).reasonCode||item?.technicalEvidence?.reasonCode||""}
+
+  // THE SECOND LIVE DEFECT this module fixes. An epoch switch relabelled 34
+  // open reviews: their reasonCode became ACTIVATION_REVOKED and their
+  // blockedState became "review_profile", while the obligation's real state
+  // stayed in technicalEvidence.obligationState (review_identity /
+  // review_preferences / review_profile) — and the server kept sending the
+  // allowedActions and allowedFields of that REAL state. Rendering off the
+  // relabelled blockedState gave David a "system repair" headline with no
+  // working control; rendering off obligationState gives him the question the
+  // server is actually still willing to answer. Only a machine reasonCode can
+  // relabel a row, so a genuine human-decision park is never second-guessed.
+  function obligationState(item){return String(item?.technicalEvidence?.obligationState||"")}
+  function effectiveState(item){
+    const declared=blockedState(item),real=obligationState(item);
+    if(!SYSTEM_REASON.test(String(reasonCode(item)||"")))return declared;
+    return real.startsWith("review_")&&real!==declared?real:declared;
+  }
+  // Whether the epoch switch wrote over this row's labels at all. Wider than
+  // "the two states disagree" on purpose: a third of the relabelled rows are
+  // review_profile in both fields, and those carry the same useless summary
+  // ("The follow-up workflow needs a system repair") that sent David looking
+  // for an engineer. What marks them is a machine reasonCode sitting on top of
+  // a real, still-answerable obligation state.
+  function isRelabelled(item){return SYSTEM_REASON.test(String(reasonCode(item)||""))&&obligationState(item).startsWith("review_")}
   function canWrite(actor){return Boolean(actor?.capabilities?.reviewWrite)}
   function can(actor,action){const c=actor?.capabilities||{};if(["select_profile","confirm_absent","abandon"].includes(action))return Boolean(c.reviewIdentityOverride);if(action==="approve_send")return Boolean(c.reviewSendApproval);return Boolean(c.reviewWrite)}
   function isContinuing(item){return CONTINUING.includes(String(item?.status||""))}
@@ -95,9 +131,14 @@
   // resume — so the row had no working button and identity-picker copy. When
   // the reason is SCREAMING_CASE and the server still allows resume, the
   // honest primary is "Try again".
+  // A true provider stall carries no obligationState at all — the workflow
+  // never got far enough to have one. A relabelled row does, so it keeps its
+  // picker and its lookup instead of being reduced to "Try again", which on
+  // those rows would resume straight back into the same question.
   function isSystemIdentityStall(item){
     return blockedState(item)==="review_identity"
       && SYSTEM_REASON.test(String(reasonCode(item)||""))
+      && !obligationState(item).startsWith("review_")
       && (item?.allowedActions||[]).includes("resume");
   }
   function systemProblemSentence(code){
@@ -108,7 +149,7 @@
   // One plain-English sentence for one blocker. Never invents an action: a
   // park with allowedActions=[] says so out loud, because the server 403s
   // anything a human clicks on it.
-  function blockerCopy(item){
+  function blockerCopy(item,actor){
     const allowed=item?.allowedActions||[],status=String(item?.status||"open");
     if(isContinuing(item))return {headline:"This follow-up is continuing",body:"Your change was saved. It leaves this list as soon as the workflow moves on."};
     if(status==="resolved")return {headline:"This follow-up is done",body:"Nothing is blocked here any more.",noAction:true};
@@ -118,17 +159,53 @@
         ? {headline:"This one needs a system repair",body:"Nothing you can click here would work; it needs a system repair before it can move.",noAction:true}
         : {headline:"Nothing for you to do here yet, the system is retrying this itself",body:"No button is hidden from you; there is genuinely nothing to press on this one right now.",noAction:true};
     }
+    // A send-approval park has no field and no picker: the whole panel is one
+    // button that releases a written email. The generic fallback below tells
+    // David to "fix what is asked below" with nothing below to fix — the least
+    // useful copy on the highest-stakes action here.
+    if(reasonCode(item)==="send_approval_required"&&allowed.includes("resume")){
+      return canWrite(actor)&&!can(actor,"approve_send")
+        ? {headline:"This candidate's email is ready to send",body:"Releasing it needs send approval, which this account does not have."}
+        : {headline:"This candidate's email is ready to send",body:"Nothing else needs fixing — press Approve and send to release it."};
+    }
+    // A relabelled row's own summary is the useless one ("needs a system
+    // repair"), and every preferences park now has the same one-button answer,
+    // so both take our copy for the state the server is really in.
+    const state=effectiveState(item),stated=STATE_COPY[state];
+    // A relabelled IDENTITY row is held, not offered. Until the service restores
+    // the row's real state, any action on it would resume the workflow at the
+    // wrong step (past the profile readback that proves the person is the right
+    // one). The service repairs these itself on its next pass; the picker comes
+    // back with the real question and nothing wrong can be sent meanwhile.
+    if(isRelabelled(item)&&state==="review_identity"){
+      return {headline:"Being restored automatically",body:"An earlier system switch mislabelled this one. It comes back with its real question within a few minutes; nothing to press yet.",noAction:true};
+    }
+    if(stated&&(isRelabelled(item)||state==="review_preferences")){
+      // Some relabelled rows have no field to fill and no profile to pick —
+      // the server left them only retry/resume. Asking for details that have
+      // no box would be the same dead end in nicer words.
+      if(state!=="review_identity"&&!normalizedFields(item).length&&!allowed.includes("attach_resume")){
+        return {headline:"Ready to continue",body:"Nothing here needs your input; press Continue and the follow-up carries on."};
+      }
+      return {...stated};
+    }
     // summary/nextStep are freeform backend prose, so they go through the same
     // plain-English guard as everything else: a field name or an obligation id
     // is replaced by copy David can act on rather than shown to him raw.
     return {headline:plainText(item?.summary,"Review required"),body:plainText(item?.nextStep,"Fix what is asked below and this follow-up carries on by itself.")};
   }
 
-  function profileCards(item,actor){
+  function profileCards(item,actor,options={}){
     const rows=profiles(item);
-    if(blockedState(item)!=="review_identity")return "";
+    if(effectiveState(item)!=="review_identity")return "";
     if(!rows.length){
       const unavailable=item.identityCandidatesStatus==="unavailable";
+      // A search that came back empty is not a search that worked: the server
+      // only enriches identityCandidates when it labelled the row
+      // review_identity itself, so on a relabelled row it always returns
+      // nothing. Say that plainly and point at the path that does work.
+      if(options.identityQuery)return `<div class="control-block"><p class="hint">Search is unavailable for this row; paste the Paraform profile link instead.</p></div>`;
+      if(isRelabelled(item))return "";
       return `<div class="control-block"><p class="hint">${esc(plainText(item.identityCandidatesMessage,"No Paraform profile was found for this call."))}</p>${unavailable?'<button class="button ghost small" data-role="reload-profiles">Try loading profiles again</button>':""}</div>`;
     }
     const attached=rows.filter(profile=>profile.currentCallAttached===true);
@@ -146,7 +223,7 @@
 
   function profileLookup(item,actor,options={}){
     const allowed=new Set(item?.allowedActions||[]);
-    if(blockedState(item)!=="review_identity"||!allowed.has("select_profile")||!can(actor,"select_profile"))return "";
+    if(effectiveState(item)!=="review_identity"||!allowed.has("select_profile")||!can(actor,"select_profile"))return "";
     return `<div class="control-block lookup"><div class="lookup-row"><label class="sr-only" for="fix-profile-search">Search Paraform</label><input id="fix-profile-search" data-role="profile-search" type="search" value="${esc(options.identityQuery||"")}" placeholder="Search Paraform by name, email, or LinkedIn" autocomplete="off"><button class="button ghost" data-role="profile-search-button">Search</button></div><div class="search-state" data-role="profile-search-status" role="status" aria-live="polite"></div><div class="lookup-or">or</div><div class="lookup-row"><label class="sr-only" for="fix-profile-link">Paraform profile link</label><input id="fix-profile-link" data-role="profile-link" type="url" placeholder="Paste Paraform profile link" autocomplete="off"><button class="button ghost" data-role="profile-link-button">Use link and continue</button></div></div>`;
   }
 
@@ -176,7 +253,7 @@
         return `<div class="field"><label for="fix-field-${esc(name)}">${esc(title)}</label><select id="fix-field-${esc(name)}" data-field="${esc(name)}" ${multiple?'data-kind="array" multiple size="4"':""} ${readonly}>${multiple?"":'<option value="">Choose…</option>'}${options.map(option=>`<option value="${esc(option)}" ${values.includes(String(option))?"selected":""}>${esc(optionCopy(option))}</option>`).join("")}</select>${multiple?'<p class="hint">Select every option that applies.</p>':""}</div>`;
       }
       const list=ARRAY_FIELDS.has(name),transcript=/transcript/i.test(name);
-      return `<div class="field"><label for="fix-field-${esc(name)}">${esc(title)}</label>${transcript?`<textarea id="fix-field-${esc(name)}" data-field="${esc(name)}" placeholder="Paste the transcript with speaker names" ${readonly}>${esc(raw)}</textarea>`:`<input id="fix-field-${esc(name)}" data-field="${esc(name)}" ${list?'data-kind="array"':''} ${name==="minimumBaseSalary"?'type="number" min="1" step="1000"':name==="linkedinUrl"?'type="url" placeholder="https://www.linkedin.com/in/…"':'type="text"'} value="${esc(Array.isArray(raw)?raw.join(", "):raw)}" autocomplete="off" ${readonly} />`}${list?'<p class="hint">Separate multiple values with commas.</p>':""}</div>`;
+      return `<div class="field"><label for="fix-field-${esc(name)}">${esc(title)}</label>${transcript?`<textarea id="fix-field-${esc(name)}" data-field="${esc(name)}" maxlength="8000" placeholder="Paste the transcript with speaker names" ${readonly}>${esc(raw)}</textarea>`:`<input id="fix-field-${esc(name)}" data-field="${esc(name)}" ${list?'data-kind="array"':''} ${name==="minimumBaseSalary"?'type="number" min="1" step="1000"':name==="linkedinUrl"?'type="url" placeholder="https://www.linkedin.com/in/…"':'type="text"'} value="${esc(Array.isArray(raw)?raw.join(", "):raw)}" autocomplete="off" ${readonly} />`}${list?'<p class="hint">Separate multiple values with commas.</p>':transcript?'<p class="hint">Up to 8,000 characters — the service silently drops anything past that, so the box stops there too.</p>':""}</div>`;
     }).join("")}</div></div>`;
   }
 
@@ -193,19 +270,30 @@
     if(!canWrite(actor))return "";
     const allowed=new Set(item?.allowedActions||[]);
     const rows=profiles(item);
-    const identity=blockedState(item)==="review_identity";
+    const identity=effectiveState(item)==="review_identity";
     const identityChoice=identity&&allowed.has("select_profile");
     const uncertainIdentity=identityChoice&&reasonCode(item)==="external_effect_outcome_unknown";
     const identityUnavailable=identityChoice&&item.identityCandidatesStatus==="unavailable";
     const sendApproval=reasonCode(item)==="send_approval_required";
+    // Preferences are guessed by the backend now, so the honest primary on a
+    // preferences park is a plain resume: nothing has to be typed. The fields
+    // stay on screen under a disclosure, and bindPanel flips this same button
+    // to set_field the moment one of them is edited, so an answer David does
+    // type is never dropped on the floor by a "Continue" that sends {}.
+    const guessedPreferences=effectiveState(item)==="review_preferences"&&allowed.has("resume");
     const buttons=[];
-    const push=(action,text,kind)=>{if(!buttons.some(row=>row[0]===action))buttons.push([action,text,kind||(buttons.length?"ghost":"primary")])};
+    const push=(action,text,kind,extra)=>{if(!buttons.some(row=>row[0]===action))buttons.push([action,text,kind||(buttons.length?"ghost":"primary"),extra||""])};
     if(isSystemIdentityStall(item))push("resume","Try again");
     if(allowed.has("select_profile")&&rows.length&&can(actor,"select_profile")&&!isSystemIdentityStall(item))push("select_profile","Use this profile and continue");
-    if(allowed.has("set_field")&&normalizedFields(item).length)push("set_field","Save and continue");
+    if(guessedPreferences)push("resume","Continue","primary",normalizedFields(item).length&&allowed.has("set_field")?'data-base-action="resume" data-base-label="Continue" data-alt-action="set_field" data-alt-label="Save and continue"':"");
+    if(allowed.has("set_field")&&normalizedFields(item).length&&!guessedPreferences)push("set_field","Save and continue");
     if(allowed.has("set_call_outcome"))push("set_call_outcome","Save and continue");
     if(allowed.has("set_role_verdict"))push("set_role_verdict","Save and continue");
     if(allowed.has("attach_resume"))push("attach_resume","Upload résumé and continue");
+    // A relabelled row with nothing to correct did not fail — it was mislabelled
+    // while it waited. "Try again" would read as "that went wrong"; the honest
+    // word for letting the workflow carry on is Continue.
+    if(isRelabelled(item)&&!buttons.length&&!sendApproval&&allowed.has("resume")&&!identityChoice)push("resume","Continue");
     // retry and resume are the fallback for a row with nothing to correct. When
     // a control is on screen its save button already resumes the workflow in
     // the same POST, so a second "Continue" beside it would only be a way to
@@ -214,14 +302,21 @@
     if(!buttons.length&&allowed.has("retry")&&!identityChoice)push("retry","Try again");
     if(!buttons.length&&allowed.has("resume")&&!identityChoice&&(!sendApproval||can(actor,"approve_send")))push("resume",sendApproval?"Approve and send":"Continue");
     if(allowed.has("confirm_absent")&&can(actor,"confirm_absent")&&identity&&!identityUnavailable&&!uncertainIdentity&&!isSystemIdentityStall(item))push("confirm_absent",rows.length?"None of these profiles":"No Paraform profile exists","warn");
-    if(!buttons.length)return `<p class="hint">There is nothing to press on this one from here; the Review board has the rest.</p>`;
-    return `<div class="review-actions">${buttons.map(([action,text,kind])=>`<button class="button ${kind}" data-action="${action}">${esc(text)}</button>`).join("")}</div>`;
+    // A send approval this account cannot give is not a broken row and not an
+    // empty one: whatever else is on it (a retry, say) will not release the
+    // email, so the panel says so instead of leaving David to guess whether he
+    // pressed the wrong thing or the row is stuck.
+    const approvalGap=sendApproval&&!can(actor,"approve_send")
+      ? `<p class="hint">Nothing here sends it. Ask for send approval, or hand this one to someone who has it on the Review board.</p>`
+      : "";
+    if(!buttons.length)return approvalGap||`<p class="hint">There is nothing to press on this one from here; the Review board has the rest.</p>`;
+    return `<div class="review-actions">${buttons.map(([action,text,kind,extra])=>`<button class="button ${kind}" data-action="${action}"${extra?` ${extra}`:""}>${esc(text)}</button>`).join("")}</div>${approvalGap}`;
   }
 
   // The whole panel for one parked follow-up, as an HTML string.
   function renderPanel(item,actor,options={}){
     if(!item)return `<div class="fix"><p class="fix-copy">This follow-up could not be loaded.</p></div>`;
-    const copy=blockerCopy(item);
+    const copy=blockerCopy(item,actor);
     const head=`<div class="fix-kicker">${isContinuing(item)?"In progress":"What needs to happen"}</div><h3 class="fix-title">${esc(copy.headline)}</h3>${copy.body?`<p class="fix-copy">${esc(copy.body)}</p>`:""}`;
     if(isContinuing(item)||copy.noAction)return `<div class="fix">${head}</div>`;
     if(!canWrite(actor))return `<div class="fix">${head}<p class="hint">You have read-only access, so nothing here can be changed.</p></div>`;
@@ -229,7 +324,12 @@
     // only put a question in front of David that nobody asked, and while the
     // provider is down the search fails the same way the workflow did.
     if(copy.system)return `<div class="fix">${head}${actionButtons(item,actor)}</div>`;
-    return `<div class="fix">${head}${profileLookup(item,actor,options)}${profileCards(item,actor)}${fieldControls(item,actor)}${resumeInput(item)}${actionButtons(item,actor)}</div>`;
+    // On a preferences park the fields are an option, not the task: the
+    // backend fills the gaps itself, so they go behind a disclosure and
+    // Continue is the whole job.
+    const fields=fieldControls(item,actor);
+    const optional=fields&&effectiveState(item)==="review_preferences"&&(item?.allowedActions||[]).includes("resume");
+    return `<div class="fix">${head}${profileLookup(item,actor,options)}${profileCards(item,actor,options)}${optional?`<details class="optional-fields"><summary>Adjust preferences first (optional)</summary>${fields}</details>`:fields}${resumeInput(item)}${actionButtons(item,actor)}</div>`;
   }
 
   // What gets POSTed is scoped to the action that was clicked. The backend
@@ -241,6 +341,12 @@
   // an unscoped read would smuggle candidateUserId into a "Try again" click,
   // which is exactly the one-click recovery a system stall depends on.
   const FIELD_ACTIONS=new Set(["set_field","set_call_outcome","set_role_verdict"]);
+  // One shared field block renders every field the server allowlisted, so a row
+  // that allows two set_* actions at once (a call outcome AND an interview
+  // result) draws two save buttons over the same controls. Each save carries
+  // only its own answer: the other action's field is dropped rather than
+  // forwarded upstream as a change nobody asked for.
+  const ACTION_OWN_FIELD={set_call_outcome:"callOutcome",set_role_verdict:"roleVerdict"};
   function fieldValues(root){
     const scope=root||document,changes={};
     scope.querySelectorAll("[data-field]").forEach(el=>{
@@ -259,7 +365,12 @@
       return selected?{candidateUserId:selected.dataset.profile}:{};
     }
     if(action&&!FIELD_ACTIONS.has(action))return {};
-    return fieldValues(scope);
+    const values=fieldValues(scope);
+    if(!action)return values; // no action = a draft snapshot for a redraw, which keeps everything
+    for(const owner of Object.keys(ACTION_OWN_FIELD)){
+      if(owner!==action)delete values[ACTION_OWN_FIELD[owner]];
+    }
+    return values;
   }
   // Puts already-typed values back after a re-render (a profile search redraws
   // the whole panel), so switching to the lookup never silently discards a
@@ -285,6 +396,17 @@
       el.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();choose()}};
     });
     root.querySelectorAll("[data-action]").forEach(el=>{el.onclick=()=>handlers.onAction&&handlers.onAction(el.dataset.action)});
+    // "Continue" on a preferences park sends nothing and lets the backend
+    // guess; the same button becomes "Save and continue" (set_field) as soon
+    // as a field differs from what it was rendered with, so a value David
+    // typed can never be silently discarded by the one-click path.
+    const swap=root.querySelector("[data-alt-action]");
+    if(swap){
+      swap.dataset.baseline=JSON.stringify(fieldValues(root));
+      const sync=()=>syncPrimary(root);
+      root.querySelectorAll("[data-field]").forEach(el=>{el.oninput=sync;el.onchange=sync});
+      sync();
+    }
     const search=root.querySelector('[data-role="profile-search-button"]'),input=root.querySelector('[data-role="profile-search"]');
     if(search)search.onclick=()=>handlers.onSearch&&handlers.onSearch();
     if(input)input.onkeydown=event=>{if(event.key==="Enter"){event.preventDefault();handlers.onSearch&&handlers.onSearch()}};
@@ -292,6 +414,16 @@
     if(link)link.onclick=()=>handlers.onProfileLink&&handlers.onProfileLink();
     const reload=root.querySelector('[data-role="reload-profiles"]');
     if(reload)reload.onclick=()=>handlers.onReload&&handlers.onReload();
+  }
+
+  // Called on every edit and again after a redraw restores a draft, so the one
+  // button always says what it will actually do.
+  function syncPrimary(root){
+    const swap=root&&root.querySelector("[data-alt-action]");
+    if(!swap)return;
+    const now=JSON.stringify(fieldValues(root)),edited=now!==swap.dataset.baseline&&now!=="{}";
+    swap.dataset.action=edited?swap.dataset.altAction:swap.dataset.baseAction;
+    swap.textContent=edited?swap.dataset.altLabel:swap.dataset.baseLabel;
   }
 
   function setBusy(root,busy){
@@ -318,6 +450,17 @@
   // the product, so it is set here and only behind an explicit confirm.
   async function runAction({item,action,changes,actor,reason}){
     if(!item)throw new Error("Nothing to act on.");
+    // A save with nothing in it is rejected upstream every time
+    // (REVIEW_VALUE_INVALID), and that comes back as a bare token, which
+    // plainError can only render as the generic "that didn't work" — the exact
+    // dead end this module exists to remove. Ordinary route in: the only
+    // missing field on the row is empty by definition, or a Choose… select was
+    // never touched. Say what to do instead of posting it.
+    if(FIELD_ACTIONS.has(action)&&!Object.keys(changes||{}).length){
+      throw new Error(action==="set_field"
+        ? "Fill in at least one field above, then press Save and continue."
+        : "Choose an option above first, then press Save and continue.");
+    }
     const needsApproval=action==="resume"&&reasonCode(item)==="send_approval_required"&&can(actor,"approve_send");
     if(needsApproval&&!confirm("Approve and send this candidate's prepared post-call email now?"))return {ok:false,cancelled:true};
     const payload={reviewId:item.id,version:item.version,action,changes:changes||{},reason:reason||`Review action: ${label(action)}`};
@@ -359,9 +502,10 @@
 
   window.RaydarReviewControls=Object.freeze({
     esc,label,can,canWrite,technical,blockedState,reasonCode,profiles,normalizedFields,
+    obligationState,effectiveState,isRelabelled,
     isSystemIdentityStall,blockerCopy,isContinuing,
     plainText,plainError,
-    renderPanel,bindPanel,setBusy,collectChanges,applyChanges,
+    renderPanel,bindPanel,setBusy,syncPrimary,collectChanges,applyChanges,
     runAction,attachResume,fetchItem,profileIdFromLink,
   });
 })();
