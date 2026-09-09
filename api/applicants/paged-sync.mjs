@@ -24,7 +24,7 @@ export async function storePagedAcknowledgements(acks, { kvImpl = kv } = {}) {
       local old=oldRaw and cjson.decode(oldRaw) or nil
       if current and current.requestId and current.requestId~=item.requestId then
         state='superseded'
-      elseif old and old.requestId==item.requestId and delivery[old.status] then
+      elseif old and delivery[old.status] then
         state='preserved_delivery'
       else
         local ack=item.ackPayload
