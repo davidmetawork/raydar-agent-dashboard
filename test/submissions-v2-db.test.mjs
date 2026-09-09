@@ -22,6 +22,7 @@ import {
 } from "../api/submissions-v2/_lib/state.mjs";
 import { runMigrations } from "../scripts/migrate-submissions-v2.mjs";
 import { createRepository, repositoryInternals } from "../api/submissions-v2/_lib/repository.mjs";
+import { rowDto } from "../api/submissions-v2/_lib/presentation.mjs";
 import { createService } from "../api/submissions-v2/_lib/service.mjs";
 import { createResumePipelineStore } from "../api/submissions-v2/_lib/resume/pipeline-store.mjs";
 import { omissionDecisions } from "../api/submissions-v2/_lib/omission-prepass.mjs";
@@ -2326,6 +2327,530 @@ test("first recruiter addition queues one exact admission notification and later
     ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
     masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
   }, sql);
+});
+
+async function rearmControls(run) {
+  const prior = await readRuntimeControls(sql);
+  await setRuntimeControls({
+    actorEmail: "admin@raydar.xyz", reason: "Enable resume re-arm regression",
+    ui: true, ingestion: true, generation: true,
+    masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+  }, sql);
+  try {
+    return await run();
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "admin@raydar.xyz", reason: "Restore resume re-arm regression controls",
+      ui: prior.ui_enabled, ingestion: prior.ingestion_enabled, generation: prior.generation_enabled,
+      masterInbox: prior.master_inbox_enabled, curated: prior.curated_enabled,
+    }, sql);
+  }
+}
+
+async function indexedCandidateRole(label) {
+  const candidateId = `${label}-candidate-${randomUUID()}`;
+  const roleId = `${label}-role-${randomUUID()}`;
+  await sql`
+    insert into submissions_v2.candidate_index(
+      candidate_user_id, display_name, normalized_name, search_key, active,
+      paraform_profile_url, last_confirmed_at, source_digest
+    ) values (
+      ${candidateId}, 'Rearm Candidate', 'rearm candidate', ${`rearm candidate ${candidateId}`}, true,
+      ${`https://www.paraform.com/candidates?candidate_profile_id=${candidateId}`}, clock_timestamp(), ${digest(candidateId)}
+    )
+  `;
+  await sql`
+    insert into submissions_v2.role_index(
+      role_id, company_name, role_title, search_key, active,
+      destination_url, last_confirmed_at, source_digest
+    ) values (
+      ${roleId}, 'Rearm Company', 'Rearm Engineer', ${`rearm company rearm engineer ${roleId}`}, true,
+      ${`https://www.paraform.com/browse?role=${roleId}`}, clock_timestamp(), ${digest(roleId)}
+    )
+  `;
+  return { candidateId, roleId };
+}
+
+// The exact production shape this repair exists for: Paraform proved the
+// application, which resolved every open preparation blocker, so the pair sits
+// in Needs Review with a proven submission and no resume to show.
+async function provenPairWithoutResume({ candidateId, roleId, intent = "interested" }) {
+  const signal = await sourceEvent();
+  const id = randomUUID();
+  const applicationId = `application-${randomUUID()}`;
+  const evidence = digest(`rearm-proof:${id}`);
+  await sql.begin(async (tx) => {
+    await tx`
+      insert into submissions_v2.candidate_role_pairs(
+        id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+        original_signal_at, role_state, role_checked_at, submission_status, submission_proven_at,
+        submission_application_id, submission_authoritative_path, submission_evidence_digest
+      ) values (
+        ${id}, ${candidateId}, ${roleId}, ${signal}, ${intent}, 'needs_review',
+        clock_timestamp(), 'active', clock_timestamp(), 'proven', clock_timestamp(),
+        ${applicationId}, 'application.getRecruiterApplicationData', ${evidence}
+      )
+    `;
+    await tx`
+      insert into submissions_v2.submission_proofs(
+        pair_id, application_id, authoritative_path, evidence_digest, observed_at, source_checked_at
+      ) values (
+        ${id}, ${applicationId}, 'application.getRecruiterApplicationData', ${evidence},
+        clock_timestamp(), clock_timestamp()
+      )
+    `;
+  });
+  return { id, signal };
+}
+
+async function failedResumeGeneration(pair) {
+  const generationId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, safe_failure_code, safe_failure_detail,
+      spent_cents, deadline_at, completed_at
+    ) values (
+      ${generationId}, ${pair.id}, 1, 'initial', ${`resume-job:${generationId}:attempt:1`}, 'failed', 'budget_exhausted',
+      1, ${pair.signal}, 'opus-test', 'opus-fallback-test', 'validator-test', 'prompt-test', 'template-test',
+      'resume_preparation_failed', 'Resume preparation reached its two-dollar model-cost ceiling.',
+      200, clock_timestamp() + interval '5 minutes', clock_timestamp()
+    )
+  `;
+  return generationId;
+}
+
+async function readyInterestedPair({ candidateId, roleId }) {
+  const signal = await sourceEvent();
+  const id = randomUUID();
+  const generationId = randomUUID();
+  await sql`
+    insert into submissions_v2.candidate_role_pairs(
+      id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+      original_signal_at, role_state, role_checked_at
+    ) values (
+      ${id}, ${candidateId}, ${roleId}, ${signal}, 'interested', 'preparing_resume',
+      clock_timestamp(), 'active', clock_timestamp()
+    )
+  `;
+  await sql`
+    insert into submissions_v2.resume_generations(
+      id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+      expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+      validator_model_pin, prompt_pin, template_pin, deadline_at, completed_at
+    ) values (
+      ${generationId}, ${id}, 1, 'initial', ${`generation:${generationId}`}, 'succeeded', 'complete',
+      1, ${signal}, 'opus-test', 'opus-fallback-test', 'validator-test', 'prompt-test', 'template-test',
+      clock_timestamp() + interval '5 minutes', clock_timestamp()
+    )
+  `;
+  const artifactId = randomUUID();
+  const atsArtifactId = randomUUID();
+  const manifestArtifactId = randomUUID();
+  await sql`
+    insert into submissions_v2.resume_artifacts(
+      id, pair_id, generation_id, artifact_version, kind, private_object_key,
+      digest, size_bytes, page_count, validation_status, archive_readback_at, archived_at, current_state
+    ) values (
+      ${artifactId}, ${id}, ${generationId}, 1, 'pdf',
+      ${`submissions/resumes/v2/pdf/${artifactId}`}, ${digest(`rearm-pdf:${artifactId}`)}, 100, 1,
+      'passed', clock_timestamp(), clock_timestamp(), 'current'
+    ), (
+      ${atsArtifactId}, ${id}, ${generationId}, 1, 'ats',
+      ${`submissions/resumes/v2/ats/${atsArtifactId}`}, ${digest(`rearm-ats:${atsArtifactId}`)}, 100, null,
+      'passed', clock_timestamp(), clock_timestamp(), 'current'
+    ), (
+      ${manifestArtifactId}, ${id}, ${generationId}, 1, 'manifest',
+      ${`submissions/resumes/v2/manifests/${manifestArtifactId}`}, ${digest(`rearm-manifest:${manifestArtifactId}`)}, 100, null,
+      'passed', clock_timestamp(), clock_timestamp(), 'current'
+    )
+  `;
+  await sql`
+    update submissions_v2.candidate_role_pairs
+       set workflow_state='interested', current_artifact_id=${artifactId},
+           resume_ready_at=clock_timestamp(), state_version=state_version+1
+     where id=${id}
+  `;
+  return { id, signal, artifactId };
+}
+
+const preparationJobs = (pairId) => sql`
+  select id, state, checkpoint, priority, required_control, command_id
+    from submissions_v2.jobs
+   where kind='prepare_resume' and subject_type='pair' and subject_id=${pairId}
+   order by created_at, id
+`;
+
+const pairFacts = async (pairId) => (await sql`
+  select intent_state, workflow_state, submission_status, state_version::integer as state_version
+    from submissions_v2.candidate_role_pairs where id=${pairId}
+`)[0];
+
+test("re-adding a proven candidate with no resume re-arms preparation and announces nothing new", async () => {
+  await rearmControls(async () => {
+    const { candidateId, roleId } = await indexedCandidateRole("rearm-proven");
+    const pair = await provenPairWithoutResume({ candidateId, roleId });
+    await failedResumeGeneration(pair);
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+    const listed = (await repository.list({ page: "interested" })).rows.find((row) => row.pair_id === pair.id);
+    assert.equal(listed.intent_state, "interested", "the list must carry intent so capabilities can be decided");
+    assert.equal(rowDto(listed).capabilities.can_prepare_resume, true);
+    assert.equal(rowDto(listed).capabilities.can_regenerate, false);
+    const result = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), candidateId, roleId,
+    });
+    assert.equal(result.existing, true);
+    assert.equal(result.case_id, pair.id);
+    assert.equal(result.rearm, "queued");
+    assert.equal(result.resume_queued, true);
+    assert.equal(result.resume_ready, false);
+    assert.equal(result.preparing, false);
+    assert.equal(result.state, "preparing_resume");
+    assert.equal(result.state_version, 2);
+    assert.deepEqual(await pairFacts(pair.id), {
+      intent_state: "interested", workflow_state: "preparing_resume",
+      submission_status: "proven", state_version: 2,
+    });
+    const jobs = await preparationJobs(pair.id);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].id, result.job_id);
+    assert.equal(jobs[0].state, "queued");
+    assert.equal(jobs[0].required_control, "generation");
+    assert.equal(jobs[0].priority, 50);
+    assert.deepEqual(jobs[0].checkpoint, {
+      trigger_kind: "retry", expected_pair_version: 2, rearmed: true, rearm_source: "add_candidate",
+    });
+    const events = await sql`
+      select from_intent_state, to_intent_state, from_workflow_state, to_workflow_state,
+             expected_version::integer as expected_version, new_version::integer as new_version, metadata
+        from submissions_v2.pair_events where pair_id=${pair.id} and event_type='preparation_rearmed'
+    `;
+    assert.equal(events.length, 1);
+    assert.equal(events[0].from_workflow_state, "needs_review");
+    assert.equal(events[0].to_workflow_state, "preparing_resume");
+    assert.equal(events[0].expected_version, 1);
+    assert.equal(events[0].new_version, 2);
+    assert.equal(events[0].metadata.job_id, result.job_id);
+    assert.equal(events[0].metadata.submission_status, "proven");
+    assert.equal(events[0].metadata.resolved_review_count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.notification_outbox where pair_id=${pair.id}
+    `)[0].count, 0, "a re-arm is not a new entry and must never announce itself");
+  });
+});
+
+test("re-adding a candidate whose resume is ready or already preparing changes nothing", async () => {
+  await rearmControls(async () => {
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+
+    const ready = await indexedCandidateRole("rearm-ready");
+    const readyPair = await readyInterestedPair(ready);
+    const readyResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: ready.candidateId, roleId: ready.roleId,
+    });
+    assert.equal(readyResult.existing, true);
+    assert.equal(readyResult.rearm, "resume_ready");
+    assert.equal(readyResult.resume_ready, true);
+    assert.equal(readyResult.resume_queued, false);
+    assert.equal(readyResult.job_id, null);
+    assert.equal(readyResult.state, "interested");
+    assert.equal(readyResult.state_version, 2);
+    assert.deepEqual(await pairFacts(readyPair.id), {
+      intent_state: "interested", workflow_state: "interested",
+      submission_status: "none", state_version: 2,
+    });
+    assert.equal((await preparationJobs(readyPair.id)).length, 0);
+
+    const busy = await indexedCandidateRole("rearm-busy");
+    const busyPair = await provenPairWithoutResume(busy);
+    const controls = await readRuntimeControls(sql);
+    const queuedJobId = randomUUID();
+    await sql`
+      insert into submissions_v2.jobs(
+        id, kind, subject_type, subject_id, idempotency_key, required_control,
+        control_epoch, state, priority
+      ) values (
+        ${queuedJobId}, 'prepare_resume', 'pair', ${busyPair.id}, ${`resume-fixture:${queuedJobId}`},
+        'generation', ${controls.control_epoch}, 'queued', 50
+      )
+    `;
+    const busyResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: busy.candidateId, roleId: busy.roleId,
+    });
+    assert.equal(busyResult.existing, true);
+    assert.equal(busyResult.rearm, "preparing");
+    assert.equal(busyResult.preparing, true);
+    assert.equal(busyResult.resume_queued, false);
+    assert.equal(busyResult.job_id, null);
+    assert.equal(busyResult.state_version, 1);
+    assert.deepEqual(await pairFacts(busyPair.id), {
+      intent_state: "interested", workflow_state: "needs_review",
+      submission_status: "proven", state_version: 1,
+    });
+    const busyJobs = await preparationJobs(busyPair.id);
+    assert.equal(busyJobs.length, 1, "a queued preparation job is never doubled");
+    assert.equal(busyJobs[0].id, queuedJobId);
+  });
+});
+
+test("the recruiter's re-add is the interest decision for an unclear proven pair but never for a decline", async () => {
+  await rearmControls(async () => {
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+
+    const unclear = await indexedCandidateRole("rearm-unclear");
+    const unclearPair = await provenPairWithoutResume({ ...unclear, intent: "unclear" });
+    const unclearResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: unclear.candidateId, roleId: unclear.roleId,
+    });
+    assert.equal(unclearResult.rearm, "queued");
+    assert.deepEqual(await pairFacts(unclearPair.id), {
+      intent_state: "interested", workflow_state: "preparing_resume",
+      submission_status: "proven", state_version: 2,
+    });
+    const unclearEvent = (await sql`
+      select metadata from submissions_v2.pair_events
+       where pair_id=${unclearPair.id} and event_type='preparation_rearmed'
+    `)[0];
+    assert.equal(unclearEvent.metadata.prior_intent_state, "unclear");
+
+    const classifying = await indexedCandidateRole("rearm-classifying");
+    const classifyingSignal = await sourceEvent();
+    const classifyingId = randomUUID();
+    await sql`
+      insert into submissions_v2.candidate_role_pairs(
+        id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+        original_signal_at, role_state
+      ) values (
+        ${classifyingId}, ${classifying.candidateId}, ${classifying.roleId}, ${classifyingSignal},
+        'unknown', 'classifying', clock_timestamp(), 'active'
+      )
+    `;
+    const classifyingResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: classifying.candidateId, roleId: classifying.roleId,
+    });
+    assert.equal(classifyingResult.rearm, "review_required", "an unclassified reply is not yet an interest decision");
+    assert.equal(classifyingResult.job_id, null);
+    assert.deepEqual(await pairFacts(classifyingId), {
+      intent_state: "unknown", workflow_state: "classifying",
+      submission_status: "none", state_version: 1,
+    });
+
+    const declined = await indexedCandidateRole("rearm-declined");
+    const declinedSignal = await sourceEvent();
+    const declinedId = randomUUID();
+    await sql`
+      insert into submissions_v2.candidate_role_pairs(
+        id, candidate_user_id, role_id, first_signal_id, intent_state, workflow_state,
+        original_signal_at, role_state, role_checked_at
+      ) values (
+        ${declinedId}, ${declined.candidateId}, ${declined.roleId}, ${declinedSignal},
+        'not_interested', 'not_interested', clock_timestamp(), 'active', clock_timestamp()
+      )
+    `;
+    const declinedResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: declined.candidateId, roleId: declined.roleId,
+    });
+    assert.equal(declinedResult.rearm, "not_interested");
+    assert.equal(declinedResult.resume_queued, false);
+    assert.equal(declinedResult.job_id, null);
+    assert.equal(declinedResult.state, "not_interested");
+    assert.deepEqual(await pairFacts(declinedId), {
+      intent_state: "not_interested", workflow_state: "not_interested",
+      submission_status: "none", state_version: 1,
+    });
+    assert.equal((await preparationJobs(declinedId)).length, 0);
+  });
+});
+
+test("re-arming clears only resume blockers and defers to every other open Review reason", async () => {
+  await rearmControls(async () => {
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+
+    const blocked = await indexedCandidateRole("rearm-blocked");
+    const blockedPair = await provenPairWithoutResume(blocked);
+    await sql`
+      insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+      values (${blockedPair.id}, 'role_unavailable', 'The exact role is no longer active.')
+    `;
+    const blockedResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: blocked.candidateId, roleId: blocked.roleId,
+    });
+    assert.equal(blockedResult.rearm, "review_required");
+    assert.equal(blockedResult.resume_queued, false);
+    assert.equal(blockedResult.job_id, null);
+    assert.deepEqual(await pairFacts(blockedPair.id), {
+      intent_state: "interested", workflow_state: "needs_review",
+      submission_status: "proven", state_version: 1,
+    });
+    assert.equal((await preparationJobs(blockedPair.id)).length, 0);
+    assert.equal((await sql`
+      select action_state from submissions_v2.review_items where pair_id=${blockedPair.id}
+    `)[0].action_state, "open");
+
+    const resumable = await indexedCandidateRole("rearm-resume-blocker");
+    const resumablePair = await provenPairWithoutResume(resumable);
+    await failedResumeGeneration(resumablePair);
+    await sql`
+      insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+      values (${resumablePair.id}, 'resume_preparation_failed', 'Resume preparation exhausted safe recovery.')
+    `;
+    const resumableResult = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      candidateId: resumable.candidateId, roleId: resumable.roleId,
+    });
+    assert.equal(resumableResult.rearm, "queued");
+    assert.deepEqual(await pairFacts(resumablePair.id), {
+      intent_state: "interested", workflow_state: "preparing_resume",
+      submission_status: "proven", state_version: 2,
+    });
+    const resolved = (await sql`
+      select action_state, resolved_by, resolution_note from submissions_v2.review_items
+       where pair_id=${resumablePair.id}
+    `)[0];
+    assert.equal(resolved.action_state, "resolved");
+    assert.equal(resolved.resolved_by, "recruiter@raydar.xyz");
+    assert.equal(resolved.resolution_note, "Recruiter re-added the candidate; resume preparation re-armed.");
+    const resolvedEvent = (await sql`
+      select metadata from submissions_v2.pair_events
+       where pair_id=${resumablePair.id} and event_type='preparation_rearmed'
+    `)[0];
+    assert.equal(resolvedEvent.metadata.resolved_review_count, 1);
+  });
+});
+
+test("the Generate resume command re-arms one exact fenced pair and refuses every other state", async () => {
+  await rearmControls(async () => {
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+
+    const stranded = await indexedCandidateRole("prepare-command");
+    const strandedPair = await provenPairWithoutResume(stranded);
+    await failedResumeGeneration(strandedPair);
+    await assert.rejects(
+      repository.prepareResume({
+        actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+        pairId: strandedPair.id, expectedVersion: 7,
+      }),
+      (error) => error.code === "stale_pair_version" && error.status === 409,
+    );
+    const prepared = await repository.prepareResume({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+      pairId: strandedPair.id, expectedVersion: 1,
+    });
+    assert.equal(prepared.case_id, strandedPair.id);
+    assert.equal(prepared.state, "preparing_resume");
+    assert.equal(prepared.state_version, 2);
+    assert.equal(prepared.resume_queued, true);
+    const jobs = await preparationJobs(strandedPair.id);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].id, prepared.job_id);
+    assert.equal(jobs[0].checkpoint.rearm_source, "prepare_resume");
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.notification_outbox where pair_id=${strandedPair.id}
+    `)[0].count, 0);
+    await assert.rejects(
+      repository.prepareResume({
+        actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+        pairId: strandedPair.id, expectedVersion: 2,
+      }),
+      (error) => error.code === "resume_preparation_in_progress" && error.status === 409,
+    );
+
+    const ready = await indexedCandidateRole("prepare-ready");
+    const readyPair = await readyInterestedPair(ready);
+    await assert.rejects(
+      repository.prepareResume({
+        actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(),
+        pairId: readyPair.id, expectedVersion: 2,
+      }),
+      (error) => error.code === "resume_already_ready" && error.status === 409
+        && error.current.case_id === readyPair.id,
+    );
+  });
+});
+
+test("a re-armed pair passes the worker's retry claim guard on its new version", async () => {
+  await rearmControls(async () => {
+    const { candidateId, roleId } = await indexedCandidateRole("rearm-claim");
+    const pair = await provenPairWithoutResume({ candidateId, roleId });
+    await failedResumeGeneration(pair);
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+    const rearmed = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), candidateId, roleId,
+    });
+    assert.equal(rearmed.rearm, "queued");
+    const controls = await readRuntimeControls(sql);
+    await sql`
+      update submissions_v2.jobs
+         set state='running', lease_owner='rearm-resume-worker',
+             lease_expires_at=clock_timestamp() + interval '2 minutes',
+             fencing_token=1, control_epoch=${controls.control_epoch},
+             attempt_count=1, started_at=clock_timestamp()
+       where id=${rearmed.job_id}
+    `;
+    const generation = await repository.startResumeGeneration({
+      pairId: pair.id, triggerKind: "retry", idempotencyKey: `resume-job:${rearmed.job_id}:attempt:1`,
+      expectedPairVersion: rearmed.state_version,
+      primaryModelPin: "claude-opus-5", fallbackModelPin: "claude-opus-4.8",
+      validatorModelPin: "gpt-5.4", promptPin: "test", templatePin: "test",
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      executionFence: {
+        jobId: rearmed.job_id, workerId: "rearm-resume-worker",
+        fencingToken: 1, controlEpoch: Number(controls.control_epoch),
+      },
+    });
+    assert.equal(generation.pair_id, pair.id);
+    assert.equal(generation.trigger_kind, "retry");
+    assert.equal(Number(generation.expected_pair_version), 2);
+    assert.equal(generation.status, "queued");
+  });
+});
+
+test("re-adding a soft-deleted case leaves the hidden pair and its restore point untouched", async () => {
+  await rearmControls(async () => {
+    const { candidateId, roleId } = await indexedCandidateRole("rearm-hidden");
+    const pair = await provenPairWithoutResume({ candidateId, roleId });
+    await failedResumeGeneration(pair);
+    await sql`
+      insert into submissions_v2.review_items(pair_id, reason_code, safe_detail)
+      values (${pair.id}, 'resume_preparation_failed', 'Resume preparation did not finish.')
+    `;
+    // A soft delete hides the pair and pins the recovery manifest to this state_version;
+    // Add Candidate is the one path that can still see the row, so it must write nothing.
+    await sql`
+      update submissions_v2.candidate_role_pairs
+         set case_hidden_at=clock_timestamp(), state_version=state_version+1
+       where id=${pair.id}
+    `;
+    const before = await pairFacts(pair.id);
+    const repository = createRepository({ sql, env: { SUBMISSIONS_V2_SLACK_CHANNEL_ID: "C123TEST" } });
+    const result = await repository.addCandidate({
+      actorEmail: "recruiter@raydar.xyz", idempotencyKey: randomUUID(), candidateId, roleId,
+    });
+    assert.equal(result.existing, true);
+    assert.equal(result.rearm, "review_required");
+    assert.equal(result.resume_queued, false);
+    assert.equal(result.job_id, null);
+    assert.deepEqual(await pairFacts(pair.id), before, "a hidden case must keep its restore version");
+    assert.ok((await sql`
+      select case_hidden_at from submissions_v2.candidate_role_pairs where id=${pair.id}
+    `)[0].case_hidden_at, "the deletion must survive the re-add");
+    assert.equal((await preparationJobs(pair.id)).length, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.pair_events
+       where pair_id=${pair.id} and event_type='preparation_rearmed'
+    `)[0].count, 0);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.review_items
+       where pair_id=${pair.id} and action_state='open'
+    `)[0].count, 1, "the resume blocker stays open for the restore");
+  });
 });
 
 test("scheduler queues every due reconciliation, index, proof, notification, digest, health, and purge lane", async () => {

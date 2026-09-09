@@ -63,7 +63,10 @@ test("dialogs are modal, focus-managed, and expose their labels", () => {
 });
 
 test("forbidden resume and Paraform controls do not exist", () => {
-  assert.doesNotMatch(surface, /\bGenerate Resume\b/i);
+  // "Generate resume" (exact case) is the legitimate prepare_resume rearm control added
+  // 2026-09-08 for a proven-but-unresumed pair; strip it before guarding against any other
+  // casing of the phrase (e.g. a reintroduced preview/editor control).
+  assert.doesNotMatch(surface.replaceAll("Generate resume", ""), /\bGenerate Resume\b/i);
   assert.doesNotMatch(surface, /resume[-_ ]preview|Preview Resume/i);
   assert.doesNotMatch(surface, /contenteditable|resume[-_ ]editor|Edit Resume/i);
   assert.match(js, /async function autoDownloadResume\(row\)/);

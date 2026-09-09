@@ -15,6 +15,7 @@ test("row DTO rejects unsafe Signal destinations", () => {
     can_duplicate: false,
     can_download: false,
     can_regenerate: false,
+    can_prepare_resume: false,
     can_submit: false,
     can_mark_submitted: false,
     can_unmark_submitted: false,
@@ -106,6 +107,7 @@ test("Interested preparation rows expose safe progress without artifact actions"
     can_duplicate: true,
     can_download: false,
     can_regenerate: false,
+    can_prepare_resume: false,
     can_submit: false,
     can_mark_submitted: false,
     can_unmark_submitted: false,
@@ -161,6 +163,33 @@ test("Submitted history preserves downloads while regeneration still requires po
   assert.equal(unclear.capabilities.can_regenerate, false);
   assert.equal(unclear.capabilities.can_submit, false);
   assert.equal(rowDto({ ...row, intent_state: "interested", generation_status: "strategizing" }).capabilities.can_regenerate, false);
+});
+
+test("a proven submission with no resume offers preparation instead of an unreachable regeneration", () => {
+  const stranded = {
+    pair_id: "pair-1", candidate_user_id: "candidate-1", role_id: "role-1",
+    workflow_state: "needs_review", submission_status: "proven", generation_status: "failed",
+    preparation_error_code: "resume_preparation_failed", artifact_ready: false, review_reasons: [],
+  };
+  const interested = rowDto({ ...stranded, intent_state: "interested" });
+  assert.equal(interested.capabilities.can_prepare_resume, true);
+  assert.equal(interested.capabilities.can_regenerate, false, "there is no artifact to regenerate from");
+  assert.equal(interested.capabilities.can_download, false);
+
+  assert.equal(rowDto({ ...stranded, intent_state: "unclear" }).capabilities.can_prepare_resume, true);
+  assert.equal(rowDto({ ...stranded, intent_state: "unknown" }).capabilities.can_prepare_resume, false);
+  assert.equal(rowDto({
+    ...stranded, intent_state: "interested", artifact_ready: true, current_artifact_id: "artifact-1",
+  }).capabilities.can_prepare_resume, false, "a ready resume needs no preparation");
+  assert.equal(rowDto({
+    ...stranded, intent_state: "interested", generation_status: "strategizing",
+  }).capabilities.can_prepare_resume, false, "a live generation is already preparing it");
+  assert.equal(rowDto({
+    ...stranded, intent_state: "not_interested", workflow_state: "not_interested",
+  }).capabilities.can_prepare_resume, false);
+  assert.equal(rowDto({
+    ...stranded, intent_state: "interested", submission_status: "none",
+  }).capabilities.can_prepare_resume, false, "an unproven preparing item keeps Retry preparation");
 });
 
 test("a manual submission mark replaces the ready actions until Paraform confirms or the mark is undone", () => {

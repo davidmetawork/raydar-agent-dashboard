@@ -24,7 +24,7 @@ test("repository exposes the complete API and worker persistence boundary", () =
   const expected = [
     "list", "counts", "health", "searchCandidates", "searchRoles", "pair", "jobs", "sourceForReview",
     "recordEmailSource", "applyClassifiedSignal", "routeClassificationFailure", "bindUnresolvedSignal", "dismissUnresolvedSignal",
-    "addCandidate", "transition", "keepReview", "enqueuePairAction", "enqueueSignalAction",
+    "addCandidate", "transition", "keepReview", "enqueuePairAction", "prepareResume", "enqueueSignalAction",
     "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "markSubmitted", "unmarkSubmitted", "archive",
     "upsertCandidateIndex", "upsertRoleIndex", "curatedSnapshots", "applyCuratedObservations",
     "resumeWorkInput", "startResumeGeneration", "resumeGeneration", "updateResumeGeneration",
