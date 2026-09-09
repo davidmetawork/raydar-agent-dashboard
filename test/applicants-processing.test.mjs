@@ -213,6 +213,7 @@ test("Preparing renders Workable guidance and applies typed role or job filters 
     role: "all", query: "job:one" };
   const context = {
     STATE, $: () => list, profilePreparingRows: () => rows, appliedCompany: () => "Unknown company",
+    RaydarNav: { href: (key) => "/applicants#profile=" + key },
     esc: (value) => String(value ?? ""), hasClockTime: () => true,
     parseDate: (value) => new Date(value), shortDate: () => "Sep 8", invitationAgeText: () => "3h",
     monthYear: (value) => String(value || ""), applicationMomentText: () => "Added Sep 8",

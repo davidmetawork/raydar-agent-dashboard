@@ -135,7 +135,9 @@ function invitation(value) {
     requestId: id(raw.requestId), decisionEventId: id(raw.decisionEventId),
     currentDecision: raw.currentDecision === true, updatedAt: text(raw.updatedAt, 64),
     requestedAt: text(raw.requestedAt, 64),
-    ageSeconds: Number.isSafeInteger(Number(raw.ageSeconds)) && Number(raw.ageSeconds) >= 0
+    ageSeconds: raw.ageSeconds != null && raw.ageSeconds !== ""
+      && typeof raw.ageSeconds !== "boolean"
+      && Number.isSafeInteger(Number(raw.ageSeconds)) && Number(raw.ageSeconds) >= 0
       ? Math.min(Number(raw.ageSeconds), 31_536_000) : null,
     nextAttemptAt: text(raw.nextAttemptAt, 64), providerAcceptedAt: text(raw.providerAcceptedAt, 64),
   });
@@ -203,7 +205,9 @@ export function normalizeApplicantProblem(value, { applicationId = null, key = n
     affectedCount: Number.isSafeInteger(Number(raw.affectedCount)) && Number(raw.affectedCount) > 0
       ? Math.min(Number(raw.affectedCount), 1_000_000) : null,
     observedAt: text(raw.observedAt ?? raw.createdAt, 64), nextAt: text(raw.nextAt ?? raw.retryAt, 64),
-    ageSeconds: Number.isSafeInteger(Number(raw.ageSeconds)) && Number(raw.ageSeconds) >= 0
+    ageSeconds: raw.ageSeconds != null && raw.ageSeconds !== ""
+      && typeof raw.ageSeconds !== "boolean"
+      && Number.isSafeInteger(Number(raw.ageSeconds)) && Number(raw.ageSeconds) >= 0
       ? Math.min(Number(raw.ageSeconds), 31_536_000) : null, owner: text(raw.owner, 120),
   });
 }

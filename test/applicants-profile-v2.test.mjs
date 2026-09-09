@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 
-import { applicantProblemsV2, applicantRowsV2FromSnapshot } from "../api/applicants/_lib/profile-v2.mjs";
+import { applicantProblemsV2, applicantRowsV2FromSnapshot, normalizeApplicantProblem } from "../api/applicants/_lib/profile-v2.mjs";
 import { createFeedHandler } from "../api/applicants/feed.mjs";
 import { createProfileHandler } from "../api/applicants/profile.mjs";
 import { createProblemsHandler } from "../api/applicants/problems.mjs";
@@ -153,7 +153,7 @@ test("Applicants V2 UI keeps the existing virtualized shell and adds Ready, Prep
   assert.match(page, /affectedProblemApplications\(STATE\.problems\)\.length/);
   assert.match(page, /Field: /);
   assert.match(page, /Version: /);
-  assert.match(page, /Owner: unassigned/);
+  assert.match(page, /Issue start time is unavailable/);
   assert.match(page, /Shared incident affecting/);
   assert.match(page, /applicantRowsV2: \{\}/);
   assert.match(page, /fetch\("\/api\/applicants\/feed"/);
@@ -179,4 +179,18 @@ test("Applicants V2 UI keeps the existing virtualized shell and adds Ready, Prep
   ], projections);
   assert.equal(groups.length, 2, "the badge groups active issues by canonical application identity");
   assert.equal(groups[0].issues.length, 2, "distinct reasons remain attached to the affected applicant");
+});
+
+
+test("missing problem and invitation ages stay unknown across repeated normalization", () => {
+  for (const missing of [undefined, null, "", false, true, -1, NaN]) {
+    const problem = normalizeApplicantProblem({ code: "profile_preparing", ageSeconds: missing });
+    assert.equal(problem.ageSeconds, null);
+    assert.equal(normalizeApplicantProblem(problem).ageSeconds, null);
+    const rows = applicantRowsV2FromSnapshot({ applicantRowsV2: { [KEY]: { ...v2, invitation: { ...v2.invitation, ageSeconds: missing } } } });
+    assert.equal(rows[KEY].invitation.ageSeconds, null);
+  }
+  for (const age of [0, 7200, "301"]) {
+    assert.equal(normalizeApplicantProblem({ code: "profile_preparing", ageSeconds: age }).ageSeconds, Number(age));
+  }
 });
