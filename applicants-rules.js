@@ -469,7 +469,7 @@
     const factsPending = Math.max(0, Number(preview.profileFactsCoverage?.pending || preview.projectionPending || 0))
       + Number(preview.skipped?.profile_history_incomplete || 0);
     const behavior = state.draft.state === 'off' ? 'This rule is Off and will be skipped when you run rules.' : state.draft.state === 'watching' ? 'Preview only counts these matches when you run rules; it makes no decisions.' : (state.draft.action === 'interview' ? 'These applicants would get an interview request when you run rules.' : 'These applicants would be passed when you run rules.');
-    const words = { already_emailed: 'already emailed for this role', profile_v2_fact_set_unavailable: 'profile facts are no longer available', profile_history_incomplete: 'Some work or education history is still being prepared',
+    const words = { already_emailed: 'already emailed for this role', needs_attention: 'skipped because facts or eligibility need attention', profile_history_incomplete: 'Some work or education history is still being prepared',
     rich_profile_facts_changed: 'Profile facts changed during the run',
     rich_profile_facts_pending: 'waiting for verified profile facts', no_profile_history: 'missing work or education history', no_facts_yet: 'waiting for profile data', facts_version_stale: 'waiting for updated profile data', school_country_unverified: 'school country is not verified', employment_history_not_refreshed: 'waiting for full employer history refresh', no_employment_history: 'missing employment history', employment_facts_source_unbound: 'waiting for source-bound employer facts', employment_facts_source_mismatch: 'employer facts belong to another source revision', employment_company_id_missing: 'employer has no reviewed identity', membership_snapshot_missing: 'verified employer snapshot unavailable' };
     return '<div class="preview" role="status"><div class="preview-heading"><span class="n">' + Number(preview.matched).toLocaleString() + '</span><span>matching applicant' + (preview.matched === 1 ? '' : 's') + '</span></div>' +
@@ -510,7 +510,7 @@
           pending: Number(completed.operation.scopeCount || 0),
           considered: Number(completed.operation.evaluatedCount || 0),
           matched: Number(completed.operation.matchedCount || 0),
-          skipped: { profile_v2_fact_set_unavailable: Number(completed.operation.skippedCount || 0) },
+          skipped: { needs_attention: Number(completed.operation.skippedCount || 0) },
           profileFactsCoverage: { pending: 0 },
           samples: completed.samples || [],
         };
