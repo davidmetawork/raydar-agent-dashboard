@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "5ff0896e59ddeac357c7adae75b3df02283644279ef882842acbc1c202855974",
+  "digest": "63c65670222602a381405c54a93a5444a4f2ffa61eda6db1b79621f95d0b59dc",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -135,7 +135,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/presentation.mjs",
-      "sha256": "5c9f85268bd38e60957707b7a08c1091975470d2ea3f9ebd6338725d17ea8b10"
+      "sha256": "9f14c9a3a040d2b6ac6f32da9fc8be141053cd0f04b90d6cbd436828f9454c5a"
     },
     {
       "path": "api/submissions-v2/_lib/private-data.mjs",
@@ -143,7 +143,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "894d54c0e4d0f5220662bd45691688c3bbbda6c0fc62b86c14a441f3a456aca9"
+      "sha256": "e1bdb1048a1e221c2a32f8b1940b03a44c8c97885b4e702d86f6c20d023bfbbc"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -203,7 +203,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
-      "sha256": "03e9467e249e3cb995f73d310ba403753de05846e8893f673ec226ddaf3d4b62"
+      "sha256": "af48c8f1e9451676a61d8f4555ec62bdef15a3d88ed75b495bf326a73e666d05"
     },
     {
       "path": "api/submissions-v2/_lib/sourcing-role-mappings.mjs",
@@ -415,7 +415,7 @@
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "d7b9357b2efb2f7a3d137259ce5a5fba88c814586a0432da86bdc8d1e051028a"
+      "sha256": "234c69376dc41087132d1481fe0831e07ddb232c166a3fd6def481f2078f2a7e"
     },
     {
       "path": "vercel.json",
