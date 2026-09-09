@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { projectPagedDocument } from '../api/applicants/_lib/paged.mjs';
+import { pagedFeedResponse, projectPagedDocument } from '../api/applicants/_lib/paged.mjs';
 
 const fixtures = JSON.parse(await readFile(new URL('./fixtures/historical-source-attribution-pins.json', import.meta.url)));
 const documentFor = input => ({ current: true, source: input.source,
@@ -37,7 +37,12 @@ test('retained conflicting source pins become an explicit preparation problem wi
     assert.equal(result.row.viewAuthority, null);
     assert.equal(result.row.interviewAllowed, false);
     assert.equal(result.row.interviewWhenReadyAllowed, false);
-    assert.ok(result.row.viewStates.includes('preparing'));
+    const independentFallback = ['safe_provider', 'safe_resume', 'legacy_resume'].includes(name);
+    assert.equal(result.row.viewStates.includes('preparing'), !independentFallback);
+    const feed = pagedFeedResponse({ manifest: { generationId: 'generation-one',
+      generationDigest: 'a'.repeat(64), rowCount: 1, counts: {} }, page: {}, view: 'all', applicants: [result] });
+    assert.equal(feed.profilePreparingRows.length, independentFallback ? 0 : 1);
+    assert.equal(feed.snapshot.queue.length, independentFallback ? 1 : 0);
     assert.ok(result.row.viewStates.includes('problems'));
     assert.equal(JSON.stringify(document), before, 'retained evidence and decisions are immutable');
     if (name === 'safe_provider') assert.equal(result.profile.title, 'Verified Provider Title');

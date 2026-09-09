@@ -127,7 +127,7 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
     ...(Array.isArray(raw.view_states) ? raw.view_states : []).filter((state) =>
       reviewProfileUsable || state !== 'ready'),
     ...(!reviewProfileUsable ? ['preparing'] : []),
-    ...(sourceAttributionConflict ? ['preparing', 'problems'] : []),
+    ...(sourceAttributionConflict ? ['problems'] : []),
   ])].sort();
   const name = string(facts?.name?.value) || string(source.name) || string(source.contact?.name)
     || string(source.context_snapshot?.candidate_detail?.name) || string(source.applicant?.name)
