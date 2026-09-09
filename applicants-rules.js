@@ -189,7 +189,9 @@
     const pending = pageState()?.snapshot && typeof pendingRows === "function" ? pendingRows().length : null;
     const result = state.lastRun;
     const skipped = Object.values(result?.skipped || {}).reduce((sum, n) => sum + Number(n || 0), 0);
-    const resultText = !result ? "" : result.parked
+    const resultText = !result ? "" : result.pending
+      ? (result.phase === "run" ? "Recording matched decisions…" : "Checking all awaiting-review applicants…")
+      : result.parked
       ? "No decisions made: " + result.parked.replaceAll("_", " ") + "."
       : Number(result.considered ?? result.pending ?? 0).toLocaleString() + " applicants checked · " + Number(result.decided || 0).toLocaleString() + " decisions · " + skipped.toLocaleString() + " rule checks skipped";
     host.innerHTML = '<div class="rules-head"><div class="grow"><div class="rules-eyebrow">Manual only</div>' +
@@ -498,7 +500,21 @@
     const request = { op: 'preview', rule: preparedDraft(draft), ...applicantGeneration(),
       ...(draft.profileFactSeed ? { profileFactSeed: draft.profileFactSeed } : {}) };
     try {
-      const preview = await api(request);
+      let preview = await api(request);
+      if (preview.paged && preview.operationId) {
+        const completed = await pollPagedRuleOperation(preview.operationId,
+          () => serial === state.previewSerial && state.draft === draft);
+        if (!completed) return;
+        preview = {
+          ok: true, paged: true,
+          pending: Number(completed.operation.scopeCount || 0),
+          considered: Number(completed.operation.evaluatedCount || 0),
+          matched: Number(completed.operation.matchedCount || 0),
+          skipped: { unavailable: Number(completed.operation.skippedCount || 0) },
+          profileFactsCoverage: { pending: 0 },
+          samples: completed.samples || [],
+        };
+      }
       if (serial !== state.previewSerial || state.draft !== draft) return;
       state.preview = preview;
     } catch (error) {
@@ -507,6 +523,20 @@
         ? 'The applicant list changed; close this editor, refresh Applicants, and try again.' : error.message;
     }
     if (serial === state.previewSerial && state.draft === draft) { state.previewing = false; repaintPreview(); }
+  }
+
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function pollPagedRuleOperation(operationId, stillCurrent = () => true) {
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (stillCurrent() && Date.now() < deadline) {
+      const status = await api({ op: "pagedRuleStatus", operationId });
+      const operation = status.operation || {};
+      if (["ready", "complete"].includes(operation.state)) return status;
+      if (operation.state === "failed") throw new Error(operation.error || "Rule operation failed.");
+      await pause(1000);
+    }
+    if (!stillCurrent()) return null;
+    throw new Error("Rule operation is still running. Refresh Rules to check it again.");
   }
   function repaintPreview() {
     const host = el("ruleEditorCard");
@@ -690,18 +720,39 @@
     state.lastRun = null;
     render();
     try {
-      const response = await fetch("/api/applicants/rules-tick", {
+      const postRun = async (body) => {
+        const response = await fetch("/api/applicants/rules-tick", {
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(applicantGeneration()),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (response.status === 401 || response.status === 403) {
-        if (typeof showGate === "function") showGate();
-        throw new Error("Signed out — sign in and run again.");
+        body: JSON.stringify(body),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401 || response.status === 403) {
+          if (typeof showGate === "function") showGate();
+          throw new Error("Signed out — sign in and run again.");
+        }
+        if (!response.ok || payload.ok === false) throw new Error(payload.detail || payload.error || "Rule run failed.");
+        return payload;
+      };
+      let payload = await postRun(applicantGeneration());
+      if (payload.paged && payload.phase === "preview") {
+        state.lastRun = { ...payload, pending: true };
+        render();
+        await pollPagedRuleOperation(payload.previewId);
+        payload = await postRun({ ...applicantGeneration(), previewId: payload.previewId, runId: payload.runId });
       }
-      if (!response.ok || payload.ok === false) throw new Error(payload.detail || payload.error || "Rule run failed.");
+      if (payload.paged && payload.phase === "run") {
+        state.lastRun = { ...payload, pending: true };
+        render();
+        const completed = await pollPagedRuleOperation(payload.runId);
+        payload = { ok: true, paged: true,
+          considered: Number(completed.operation.sealedCount || 0),
+          decided: Number(completed.operation.decisionCount || completed.operation.eligibleCount || 0),
+          skipped: { changed: Number(completed.operation.changedCount || 0),
+            human_precedence: Number(completed.operation.humanPrecedenceCount || 0) },
+        };
+      }
       state.lastRun = payload;
       if (typeof loadFeed === "function") await loadFeed();
       await load();
