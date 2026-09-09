@@ -410,3 +410,45 @@ test("a relabelled identity row is held until the service restores it", async ()
   assert.match(controls, /Being restored automatically/);
   assert.match(controls, /nothing to press yet/);
 });
+
+// ---- Live case 2026-09-09: a saved identity choice Paraform could not read back ----
+// David pasted a Paraform profile link, select_profile was accepted, and the
+// workflow's readback of that saved choice failed because another Raydar job
+// had tripped the shared Paraform request ceiling (post-call circuit
+// open/volume, 15-minute cooldown). The row came back reasonCode
+// reviewer_selected_profile_unreadable — lower snake_case, so neither
+// isSystemIdentityStall nor isRelabelled caught it — and the panel showed the
+// plain identity picker again with no sign his choice had been saved.
+test("a saved choice Paraform could not read back offers Try again, not a blank picker", () => {
+  assert.match(controls, /function isProviderBusyStall\(item\)/);
+  assert.match(controls, /PROVIDER_CIRCUIT_CODE=\/\^PROVIDER_\[A-Z0-9_\]\*CIRCUIT\[A-Z0-9_\]\*\$\//);
+  assert.match(controls, /_unreadable\$\|_unavailable\$/);
+  assert.match(controls, /Paraform was busy when we checked your choice/);
+  assert.match(controls, /Your choice is saved\. Try again in a few minutes and this follow-up continues from there; another Raydar job was using Paraform at the limit\./);
+  assert.match(controls, /if\(isProviderBusyStall\(item\)\)return \{\.\.\.PROVIDER_BUSY_COPY\}/);
+  // Unlike a true system stall, this is never `system:true`: the picker and
+  // paste-link stay on screen underneath as a secondary path.
+  assert.doesNotMatch(controls, /isProviderBusyStall\(item\)\)return \{[^}]*system:true/);
+  // Try again is pushed before select_profile, so push()'s dedup makes it the
+  // primary and anything else allowed renders as a ghost secondary.
+  const busyPush = controls.indexOf('if(isProviderBusyStall(item))push("resume","Try again")');
+  const selectPush = controls.indexOf('if(allowed.has("select_profile")&&rows.length&&can(actor,"select_profile")&&!isSystemIdentityStall(item))push("select_profile"');
+  assert.ok(busyPush > -1 && selectPush > busyPush);
+  // The identity search hint says the same busy-Paraform sentence instead of
+  // the generic "search unavailable" copy, ahead of it in the source.
+  assert.match(controls, /Paraform is busy right now \(another Raydar job is using it\)\. Search comes back in a few minutes; pasting the profile link still works\./);
+  const busyHint = controls.indexOf("Paraform is busy right now");
+  const genericSearchHint = controls.indexOf("Search is unavailable for this row; paste the Paraform profile link instead.");
+  assert.ok(busyHint > -1 && genericSearchHint > busyHint);
+  assert.match(controls, /identityCandidatesErrorCode/);
+  // Generalised past identity: any review_* park with resume allowed and a
+  // matching reasonCode/errorCode gets the same treatment.
+  assert.match(controls, /if\(!state\.startsWith\("review_"\)\|\|!\(item\?\.allowedActions\|\|\[\]\)\.includes\("resume"\)\)return false;/);
+  // The Review board gets the same branch, minimally.
+  assert.match(review, /function isProviderBusyStall\(item\)/);
+  assert.match(review, /Paraform was busy when we checked your choice/);
+  assert.match(review, /Your choice is saved\. Try again in a few minutes and this follow-up continues from there; another Raydar job was using Paraform at the limit\./);
+  assert.match(review, /isProviderBusyStall\(item\)\?providerBusyCopy\(\):item\.nextStep/);
+  assert.match(review, /isProviderBusyStall\(item\)&&!buttons\.some\(button=>button\[0\]==="resume"\)\)buttons\.push\(\["resume","Try again","primary"\]\)/);
+  assert.match(review, /Paraform is busy right now \(another Raydar job is using it\)\./);
+});

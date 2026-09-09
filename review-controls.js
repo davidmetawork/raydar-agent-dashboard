@@ -146,6 +146,34 @@
     return `The system hit a problem here (${why}), nothing about the candidate is wrong. Try again to pick this call back up.`;
   }
 
+  // THE FOURTH LIVE DEFECT this module fixes: David pasted a Paraform profile
+  // link, select_profile was accepted, and then the workflow's readback of
+  // that saved choice failed because another Raydar job had tripped the
+  // shared Paraform request ceiling (evidence.errorCode PROVIDER_CIRCUIT_OPEN,
+  // reasonCode reviewer_selected_profile_unreadable — lower snake_case, so
+  // neither isSystemIdentityStall nor isRelabelled catch it, and the panel
+  // fell through to the plain identity picker again with no sign his choice
+  // had been saved. Unlike isSystemIdentityStall this is not SCREAMING_CASE
+  // and it does carry a real obligation state — the row is genuinely in
+  // review_identity (or another review_* park), just unable to read Paraform
+  // back right now. reasonCode suffixed _unreadable/_unavailable, or an
+  // errorCode naming a provider circuit breaker, both mean the same thing:
+  // nothing about the candidate is wrong, Paraform was busy. Generalised
+  // to any review_* park (not just identity) so the same sentence covers a
+  // profile, preferences, or delivery row hitting the same ceiling.
+  const PROVIDER_CIRCUIT_CODE=/^PROVIDER_[A-Z0-9_]*CIRCUIT[A-Z0-9_]*$/;
+  function isProviderCircuitReason(code){return /_unreadable$|_unavailable$/.test(String(code||""))}
+  function isProviderBusyStall(item){
+    const state=effectiveState(item);
+    if(!state.startsWith("review_")||!(item?.allowedActions||[]).includes("resume"))return false;
+    if(isProviderCircuitReason(reasonCode(item)))return true;
+    const evidence=technical(item);
+    if(PROVIDER_CIRCUIT_CODE.test(String(evidence.errorCode||"")))return true;
+    if(PROVIDER_CIRCUIT_CODE.test(String(item?.identityCandidatesErrorCode||"")))return true;
+    return false;
+  }
+  const PROVIDER_BUSY_COPY={headline:"Paraform was busy when we checked your choice",body:"Your choice is saved. Try again in a few minutes and this follow-up continues from there; another Raydar job was using Paraform at the limit."};
+
   // One plain-English sentence for one blocker. Never invents an action: a
   // park with allowedActions=[] says so out loud, because the server 403s
   // anything a human clicks on it.
@@ -154,6 +182,12 @@
     if(isContinuing(item))return {headline:"This follow-up is continuing",body:"Your change was saved. It leaves this list as soon as the workflow moves on."};
     if(status==="resolved")return {headline:"This follow-up is done",body:"Nothing is blocked here any more.",noAction:true};
     if(isSystemIdentityStall(item))return {headline:plainText(item?.summary,"The system could not look this call up"),body:systemProblemSentence(reasonCode(item)),system:true};
+    // Unlike isSystemIdentityStall this is never `system:true`: the row keeps
+    // its normal render (picker, fields, whatever else is allowed) with Try
+    // again simply pushed to the front as the primary button, because a real
+    // choice or answer is sitting on this row and it stays available as a
+    // secondary path rather than being hidden.
+    if(isProviderBusyStall(item))return {...PROVIDER_BUSY_COPY};
     if(!allowed.length){
       return status==="failed"
         ? {headline:"This one needs a system repair",body:"Nothing you can click here would work; it needs a system repair before it can move.",noAction:true}
@@ -200,6 +234,10 @@
     if(effectiveState(item)!=="review_identity")return "";
     if(!rows.length){
       const unavailable=item.identityCandidatesStatus==="unavailable";
+      // The same provider circuit that blocked the readback also blocks a
+      // fresh candidate search — say that plainly, ahead of the generic
+      // "search unavailable" copy below, so it never reads as a dead lookup.
+      if(unavailable&&PROVIDER_CIRCUIT_CODE.test(String(item?.identityCandidatesErrorCode||"")))return `<div class="control-block"><p class="hint">Paraform is busy right now (another Raydar job is using it). Search comes back in a few minutes; pasting the profile link still works.</p></div>`;
       // A search that came back empty is not a search that worked: the server
       // only enriches identityCandidates when it labelled the row
       // review_identity itself, so on a relabelled row it always returns
@@ -284,6 +322,11 @@
     const buttons=[];
     const push=(action,text,kind,extra)=>{if(!buttons.some(row=>row[0]===action))buttons.push([action,text,kind||(buttons.length?"ghost":"primary"),extra||""])};
     if(isSystemIdentityStall(item))push("resume","Try again");
+    // Pushed first so it is the primary button; select_profile/confirm_absent
+    // below still render underneath (push() makes anything after the first
+    // call a ghost), which is what keeps the picker as a secondary path
+    // rather than hiding it the way a true system stall does.
+    if(isProviderBusyStall(item))push("resume","Try again");
     if(allowed.has("select_profile")&&rows.length&&can(actor,"select_profile")&&!isSystemIdentityStall(item))push("select_profile","Use this profile and continue");
     if(guessedPreferences)push("resume","Continue","primary",normalizedFields(item).length&&allowed.has("set_field")?'data-base-action="resume" data-base-label="Continue" data-alt-action="set_field" data-alt-label="Save and continue"':"");
     if(allowed.has("set_field")&&normalizedFields(item).length&&!guessedPreferences)push("set_field","Save and continue");
@@ -503,7 +546,7 @@
   window.RaydarReviewControls=Object.freeze({
     esc,label,can,canWrite,technical,blockedState,reasonCode,profiles,normalizedFields,
     obligationState,effectiveState,isRelabelled,
-    isSystemIdentityStall,blockerCopy,isContinuing,
+    isSystemIdentityStall,isProviderBusyStall,blockerCopy,isContinuing,
     plainText,plainError,
     renderPanel,bindPanel,setBusy,syncPrimary,collectChanges,applyChanges,
     runAction,attachResume,fetchItem,profileIdFromLink,
