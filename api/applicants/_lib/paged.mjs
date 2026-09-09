@@ -20,16 +20,103 @@ export function applicantReadPool() {
 }
 
 const string = value => typeof value === 'string' && value.trim() ? value.trim() : null;
-export function projectPagedDocument(document) {
+const PROFILE_RECONSTRUCTION_PROBLEMS = Object.freeze({
+  APPLICANT_PAGED_PROFILE_REFERENCE_MISSING: Object.freeze({
+    code: 'paged_profile_reference_missing',
+    reason: 'Stored profile evidence is unavailable for this retained applicant row.',
+    nextAction: 'Rematerialize this applicant from its current retained source records.',
+  }),
+  APPLICANT_PAGED_PROFILE_REFERENCE_SCOPE_CHANGED: Object.freeze({
+    code: 'paged_profile_reference_scope_changed',
+    reason: 'Stored profile evidence no longer matches this retained applicant row.',
+    nextAction: 'Rematerialize this applicant from its current identity and source records.',
+  }),
+  APPLICANT_PAGED_PROFILE_PAYLOAD_UNAVAILABLE: Object.freeze({
+    code: 'paged_profile_payload_unavailable',
+    reason: 'Stored profile evidence cannot be read for this retained applicant row.',
+    nextAction: 'Recover or replace the unavailable stored profile evidence.',
+  }),
+  APPLICANT_PAGED_PROFILE_APPLICATION_SOURCE_DIGEST_MISMATCH: Object.freeze({
+    code: 'paged_profile_application_source_digest_mismatch',
+    reason: 'The retained application source does not match its recorded digest.',
+    nextAction: 'Investigate and recover the exact application source observation.',
+  }),
+  APPLICANT_PAGED_PROFILE_PINS_INVALID: Object.freeze({
+    code: 'paged_profile_pins_invalid',
+    reason: 'This retained row uses an unsupported profile reference.',
+    nextAction: 'Rematerialize this applicant with the current profile contract.',
+  }),
+  APPLICANT_PAGED_PROFILE_DIGEST_MISMATCH: Object.freeze({
+    code: 'paged_profile_digest_mismatch',
+    reason: 'The retained profile facts do not match their recorded digest.',
+    nextAction: 'Rematerialize this applicant from its exact retained profile evidence.',
+  }),
+});
+const retainedAge = (createdAt, now) => {
+  const at = Date.parse(createdAt || '');
+  const measured = now instanceof Date ? now.getTime() : Number(now);
+  return Number.isFinite(at) && Number.isFinite(measured)
+    ? Math.max(0, Math.floor((measured - at) / 1_000)) : null;
+};
+function containedPagedDocument(document, failure, now) {
+  const raw = document.row;
+  const index = raw.index_payload || {};
+  const profileKey = `application:${raw.application_id}:${raw.id}`;
+  const retainedAt = string(raw.created_at);
+  const detail = PROFILE_RECONSTRUCTION_PROBLEMS[failure.code];
+  const problem = Object.freeze({ ...detail, domain: 'profile', state: 'open', owner: 'Applicant Core',
+    firstObservedAt: retainedAt, ageSeconds: retainedAge(retainedAt, now) });
+  const viewStates = [...new Set([
+    ...(Array.isArray(raw.view_states) ? raw.view_states : []).filter(state => state !== 'ready'),
+    'preparing', 'problems',
+  ])].sort();
+  const row = {
+    key: raw.monitor_key, applicationId: raw.application_id, rowVersionId: raw.id, profileKey,
+    cuId: null, name: 'Applicant', roleId: raw.role_id, roleTitle: raw.role_title,
+    sourceJobId: raw.source_job_id, company: raw.company,
+    appliedAt: index.appliedAt || raw.application_date,
+    appliedAtIso: /T\d{2}:\d{2}/.test(index.appliedAt || '') ? index.appliedAt : null,
+    addedAt: raw.source_arrival_at, receivedAt: raw.source_arrival_at,
+    sourceObservationId: raw.source_observation_id, sourceStatus: raw.source_status,
+    state: 'profile_preparing', status: raw.invitation_state === 'externally_committed'
+      ? 'emailed' : raw.source_status,
+    inputRevision: null, readinessRevision: null,
+    decisionRevision: Number(raw.decision_revision || 0),
+    interviewAllowed: false, interviewWhenReadyAllowed: false, linkedin: null,
+    tier: index.tier || null, reason: problem.reason, owner: problem.owner,
+    nextAction: problem.nextAction, problems: [problem, ...(raw.problems || [])],
+    viewAuthority: null, viewStates, decisionAt: raw.decision_at,
+    decisionAction: raw.decision_action, savedDecisionRequestId: index.decisionRequestId || null,
+    rowDigest: raw.row_digest, retainedRowCreatedAt: retainedAt,
+    profileUpdatePending: true, factsCurrent: false, rowCurrent: false,
+  };
+  const profile = { name: 'Applicant', title: null, location: null, imageSrc: null,
+    linkedin: null, profileV2: null, application: { applicationId: row.applicationId },
+    source: 'profile_reconstruction_pending' };
+  return { row, profileV2: null, profile, photo: null,
+    card: { name: 'Applicant', title: null, location: null, imageSrc: null, profileKey },
+    decision: raw.decision_action ? { action: raw.decision_action, at: raw.decision_at,
+      requestId: index.decisionRequestId || null, status: 'recorded',
+      deliveryState: raw.invitation_state || null } : null };
+}
+export function projectPagedDocument(document, { now = Date.now() } = {}) {
   if (!document?.row) throw new Error('applicant_row_unavailable');
   const raw = document.row;
   const index = raw.index_payload || {};
   const source = document.source || {};
   const captured = document.captured || {};
   const current = document.current === true;
-  const profileV2 = index.profilePins ? projectPinnedApplicantProfile({ pins: index.profilePins,
-    source: document.source, paraform: document.profile, resume: document.resume,
-    current, problems: raw.problems || [] }) : null;
+  let profileV2 = null;
+  try {
+    profileV2 = index.profilePins ? projectPinnedApplicantProfile({ pins: index.profilePins,
+      source: document.source, paraform: document.profile, resume: document.resume,
+      current, problems: raw.problems || [] }) : null;
+  } catch (error) {
+    if (PROFILE_RECONSTRUCTION_PROBLEMS[error?.code]) {
+      return containedPagedDocument(document, error, now);
+    }
+    throw error;
+  }
   const profileKey = `application:${raw.application_id}:${raw.id}`;
   const facts = profileV2?.profile?.facts;
   const reviewProfileUsable = hasUsableApplicantProfileV2(profileV2);
@@ -92,7 +179,8 @@ export async function readApplicantPage(request = {}, { pool = applicantReadPool
     ...(request.generationId ? { generationId: request.generationId, generationDigest: request.generationDigest } : {}) });
   const page = await readActivePagedViewPage({ ...request, pool,
     generationId: manifest.generationId, generationDigest: manifest.generationDigest });
-  return { manifest, page, view: request.view || 'ready', applicants: page.documents.map(projectPagedDocument) };
+  return { manifest, page, view: request.view || 'ready',
+    applicants: page.documents.map(document => projectPagedDocument(document)) };
 }
 export async function readApplicantManifest(request = {}, { pool = applicantReadPool() } = {}) {
   return readActivePagedViewManifest({ pool, ...request });
