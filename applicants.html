@@ -1583,17 +1583,44 @@ function setPillDescription(id, label, text) {
   pill.setAttribute("aria-label", label + ". " + text);
 }
 
+function pagedRoleFilterOptions(roles) {
+  const jobLabels = new Map();
+  const labelKey = role => JSON.stringify([role.title || null, role.company || null]);
+  for (const role of roles) {
+    if (!role.sourceJobId) continue;
+    if (!jobLabels.has(role.sourceJobId)) jobLabels.set(role.sourceJobId, new Set());
+    jobLabels.get(role.sourceJobId).add(labelKey(role));
+  }
+  const options = new Map();
+  for (const role of roles) {
+    if (!role.roleId && !role.sourceJobId) continue;
+    const label = [role.title || 'Unknown role', role.company].filter(Boolean).join(' @ ');
+    if (role.sourceJobId && jobLabels.get(role.sourceJobId).size === 1) {
+      // A canonical role binding can arrive after the application. One exact
+      // source job must include both bound and still-unbound applications.
+      options.set('job:' + role.sourceJobId, { label, sourceJobId: role.sourceJobId });
+    } else if (role.sourceJobId) {
+      // Keep conflicting retained source labels separately inspectable. Both
+      // identifiers remain in scope when a role binding is available.
+      const value = 'scope:' + encodeURIComponent(JSON.stringify([
+        role.sourceJobId, role.roleId || null, role.title || null, role.company || null,
+      ]));
+      options.set(value, { label: label + ' (conflicting source details)',
+        sourceJobId: role.sourceJobId, roleId: role.roleId || null });
+    } else {
+      options.set('role:' + role.roleId, { label, roleId: role.roleId });
+    }
+  }
+  return options;
+}
+
 function renderRoleFilter() {
   if (STATE.paged) {
     const select = $('roleFilter');
     const roles = APPLICANT_PAGE.manifest?.roles || [];
-    const options = new Map();
-    for (const role of roles) {
-      const value = role.roleId ? 'role:' + role.roleId : 'job:' + role.sourceJobId;
-      options.set(value, [role.title || 'Unknown role', role.company].filter(Boolean).join(' @ '));
-    }
-    select.innerHTML = '<option value="all">All roles</option>' + [...options].map(([value, label]) =>
-      '<option value="' + esc(value) + '">' + esc(label) + '</option>').join('');
+    const options = pagedRoleFilterOptions(roles);
+    select.innerHTML = '<option value="all">All roles</option>' + [...options].map(([value, option]) =>
+      '<option value="' + esc(value) + '">' + esc(option.label) + '</option>').join('');
     select.value = options.has(STATE.role) ? STATE.role : 'all';
     STATE.role = select.value;
     renderSortControl();
@@ -3059,6 +3086,12 @@ function applicantPageQuery({ append = false } = {}) {
   const query = new URLSearchParams({ view, sort: ['requested','decided'].includes(view) ? 'actioned' : STATE.sort, limit: '50' });
   if (STATE.role.startsWith('role:')) query.set('roleId', STATE.role.slice(5));
   if (STATE.role.startsWith('job:')) query.set('sourceJobId', STATE.role.slice(4));
+  if (STATE.role.startsWith('scope:')) {
+    const selected = pagedRoleFilterOptions(APPLICANT_PAGE.manifest?.roles || []).get(STATE.role);
+    if (!selected) throw new Error('The selected role details changed. Refresh the applicant list.');
+    if (selected.roleId) query.set('roleId', selected.roleId);
+    if (selected.sourceJobId) query.set('sourceJobId', selected.sourceJobId);
+  }
   if (STATE.query.trim()) query.set('query', STATE.query.trim());
   if (STATE.view === 'review' && STATE.chip && STATE.chip !== 'decided') query.set('chip', STATE.chip);
   if (view === 'decided' && STATE.decisionStatus !== 'all') query.set('decisionStatus', STATE.decisionStatus);
