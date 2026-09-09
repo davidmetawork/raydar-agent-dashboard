@@ -2638,7 +2638,7 @@ async function fetchProfile(cu) {
       showGate(); throw new Error("auth");
     }
     if (!response.ok) throw Object.assign(new Error("Profile fetch failed"),
-      { profileReadTemporary: response.status === 503 || !paged });
+      { profileReadTemporary: [502,503,504].includes(response.status) || !paged });
     const body = await response.json();
     const profile = body.profile || body;
     if (richGenerationKey() !== generationKey) return null;

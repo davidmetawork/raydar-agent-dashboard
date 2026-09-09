@@ -468,12 +468,12 @@ const selectedProjection = () => ({
     education: { source: "application_source", state: "fallback", freshness: "current", entries: [{ school: "Stored University" }] } } },
 });
 
-test("paged transport and temporary 503 failures preserve exact selected facts", async () => {
-  for (const failure of ["transport",503]) {
+test("paged transport and known gateway or temporary 503 failures preserve exact selected facts", async () => {
+  for (const failure of ["transport",502,503,504]) {
     const selected=selectedProjection(),h=profileFetchHarness({paged:true,projected:selected});
     const request=h.helpers.fetchProfile(h.row.profileKey);
     if(failure==="transport")h.requests[0].reject(new TypeError("network unavailable"));
-    else h.requests[0].resolve({status:503,ok:false});
+    else h.requests[0].resolve({status:failure,ok:false});
     await assert.rejects(request);
     assert.equal(h.STATE.applicantRowsV2[h.row.key],selected);
     assert.equal(h.row.profileReadRefused,undefined);
