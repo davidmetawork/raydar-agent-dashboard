@@ -539,6 +539,7 @@ const STATE = {
   problems: [],                        // V2 Problems are visible here only; they do not alert or mutate work
   local: loadLocal(),                 // optimistic overlay: key -> decision, or {action:"undo"} tombstone
   profiles: {},                       // cuId -> profile object | null (null = fetch failed, don't retry)
+  profileReadRefusals: {},             // exact row keys withheld until a verified feed reads them again
   photos: {},                         // cuId -> photo URL (bulk-prewarmed, from the feed's photos hash)
   cards: {},                          // complete cuId -> compact card index from the feed
   view: "review", chip: "",           // chip: "" = all pending, "ctier" | "unrated" | "no-linkedin" | "decided"
@@ -738,7 +739,8 @@ function applicantListRow(key, applicationId = null) {
   return (applicationId ? cache.applications.get(applicationId) : cache.keys.get(key)) || null;
 }
 function profileId(row) { return row?.profileKey || row?.cuId || ""; }
-function applicantRowV2(row) { return STATE.applicantRowsV2?.[row?.key] || null; }
+function profileSelectionRefused(row) { return row?.profileReadRefused === true || Boolean(STATE.profileReadRefusals?.[row?.key]); }
+function applicantRowV2(row) { return profileSelectionRefused(row) ? null : STATE.applicantRowsV2?.[row?.key] || null; }
 function applicantFact(row, name) {
   const fact = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.profile?.facts?.[name];
   return fact && (typeof fact.value === "string" || typeof fact.value === "number") ? fact : null;
@@ -1849,6 +1851,8 @@ function invitationStatusHtml(row) {
 }
 
 function interviewControl(row) {
+  if (row?.profileReadRefused) return { label: "Refresh required", enabled: false,
+    title: "Refresh Applicants before acting on this profile." };
   const actionability = (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null)?.actionability;
   const eligibility = actionability?.eligibility;
   if (eligibility === "waiting" && actionability?.canCreateApproval === true && actionability?.approvalState === "required") return { label: "Interview when ready", enabled: true,
@@ -1864,6 +1868,7 @@ function interviewControl(row) {
 
 function rowCardHtml(row, mode, decision) {
   const key = row.key;
+  if (profileSelectionRefused(row)) return '<div class="row" data-row="' + esc(key) + '"><div class="rc-main"><div class="rc-id"><strong>Applicant needs refresh</strong><div class="rc-none">This profile changed or is no longer available. Refresh Applicants before viewing it or taking action.</div></div><button class="ghost" onclick="requestRefresh()">Refresh Applicants</button></div></div>';
   const busy = STATE.busy.has(key);
   const id = profileId(row);
   const card = cardFor(id);
@@ -2486,6 +2491,11 @@ async function bulkPass() {
 
 /* ---- decisions (optimistic write-through) ---- */
 async function decide(key, action, row, silent = false, { retryOfRequestId = null } = {}) {
+  if (row?.profileReadRefused || STATE.profileReadRefusals?.[key]) {
+    const error = new Error("Refresh Applicants before acting on this profile.");
+    if (silent) throw error;
+    toast(error.message, true); return;
+  }
   if (STATE.busy.has(key)) return;
   if (retryOfRequestId && !retryableInterviewRequest(row, effectiveDecision(key), retryOfRequestId)) {
     const error = new Error("Retry is no longer available — refresh and check this applicant.");
@@ -2574,7 +2584,23 @@ function applyAvatar(cu) {
   document.querySelectorAll('[data-avatar="' + CSS.escape(cu) + '"]')
     .forEach((el) => { el.innerHTML = avatarImg(src, name); });
 }
+function invalidateProfileSelection(cu, row) {
+  STATE.profiles[cu] = null;
+  if (!row?.key) return;
+  (STATE.profileReadRefusals ||= {})[row.key] = true;
+  row.profileReadRefused = true;
+  if (STATE.applicantRowsV2) delete STATE.applicantRowsV2[row.key];
+  if (STATE.cards) delete STATE.cards[cu];
+  if (STATE.photos) delete STATE.photos[cu];
+  if (typeof RICH_CARDS !== "undefined") delete RICH_CARDS.cards[cu];
+  STATE.checked?.delete(row.key);
+  if (STATE.modal?.key === row.key) window.RaydarRuleFacts?.close?.();
+  if (typeof renderLists === "function") renderLists();
+}
 async function fetchProfile(cu) {
+  const displayedRow = typeof rowByCu === "function" ? rowByCu(cu)
+    || (STATE.modal?.cu === cu ? STATE.modal.row : null) : null;
+  if (typeof profileSelectionRefused === "function" && profileSelectionRefused(displayedRow)) return null;
   const cached = STATE.profiles[cu];
   if (hasProviderHistory(richProfile(cached?.paraformProfile))) return cached;
   if (Object.prototype.hasOwnProperty.call(STATE.profiles, cu)
@@ -2583,18 +2609,51 @@ async function fetchProfile(cu) {
   // the immutable feed identity captured before the request begins. A newer
   // feed may describe a revised application under the same candidate id.
   const generationKey = richGenerationKey();
+  const paged = STATE.paged === true;
+  const expectedGeneration = { id: STATE.generation?.generationId, digest: STATE.generation?.digest };
+  const expectedRow = displayedRow ? { key: displayedRow.key, applicationId: displayedRow.applicationId,
+    sourceObservationId: displayedRow.sourceObservationId,
+    rowDigest: displayedRow.viewAuthority?.rowDigest || displayedRow.rowDigest || '' } : null;
+  let requestSent = false, responseReceived = false;
   try {
-    const displayedRow = STATE.paged ? rowByCu(cu) : null;
-    const profileQuery = STATE.paged ? new URLSearchParams({ applicationId: displayedRow?.applicationId || '',
+    const profileQuery = paged ? new URLSearchParams({ applicationId: displayedRow?.applicationId || '',
       generationId: STATE.generation?.generationId || '', generationDigest: STATE.generation?.digest || '',
       rowDigest: displayedRow?.viewAuthority?.rowDigest || displayedRow?.rowDigest || '' }).toString()
       : 'cu=' + encodeURIComponent(cu);
+    requestSent = true;
     const response = await fetch('/api/applicants/profile?' + profileQuery, { credentials: 'same-origin' });
-    if (response.status === 401 || response.status === 403) { showGate(); throw new Error("auth"); }
-    if (!response.ok) throw new Error("Profile fetch failed");
+    responseReceived = true;
+    if (response.status === 401 || response.status === 403) {
+      if (richGenerationKey() === generationKey && (!paged || !displayedRow || rowByCu(cu) === displayedRow)) invalidateProfileSelection(cu, displayedRow);
+      if (typeof AUTH !== "undefined") AUTH.authenticated = false;
+      showGate(); throw new Error("auth");
+    }
+    if (!response.ok) throw Object.assign(new Error("Profile fetch failed"),
+      { profileReadTemporary: response.status === 503 || !paged });
     const body = await response.json();
     const profile = body.profile || body;
     if (richGenerationKey() !== generationKey) return null;
+    if (paged) {
+      if (body.ok === false || !expectedRow || profile.source === 'profile_reconstruction_pending'
+        || body.generation?.generationId !== expectedGeneration.id
+        || body.generation?.generationDigest !== expectedGeneration.digest
+        || body.row?.applicationId !== expectedRow.applicationId || body.row?.key !== expectedRow.key
+        || body.row?.profileKey !== cu || body.row?.rowDigest !== expectedRow.rowDigest
+        || body.row?.sourceObservationId !== expectedRow.sourceObservationId
+        || profile.application?.applicationId !== expectedRow.applicationId
+        || (profile.profileV2 && (profile.profileV2.application?.applicationId !== expectedRow.applicationId
+          || profile.profileV2.application?.sourceObservationId !== expectedRow.sourceObservationId)))
+        throw new Error('Profile response changed. Refresh Applicants.');
+      // A fresh feed can revalidate the same generation while this request is
+      // in flight. Its new row object, not the older request, then owns display.
+      if (rowByCu(cu) !== displayedRow) return null;
+      STATE.applicantRowsV2[expectedRow.key] = profile.profileV2 || null;
+      Object.assign(displayedRow, body.row);
+      STATE.cards[cu] = { name: profile.name, title: profile.title, location: profile.location,
+        imageSrc: profile.imageSrc, profileKey: cu };
+      if (profile.imageSrc) STATE.photos[cu] = profile.imageSrc; else delete STATE.photos[cu];
+      if (typeof RICH_CARDS !== "undefined") delete RICH_CARDS.cards[cu];
+    }
     STATE.profiles[cu] = profile;
     if (hasProviderHistory(richProfile(profile?.paraformProfile))) PROFILE_RETRY_AT.delete(cu);
     else PROFILE_RETRY_AT.set(cu, Date.now() + RICH_RETRY_MS);
@@ -2603,6 +2662,9 @@ async function fetchProfile(cu) {
     // Record the miss so the modal leaves its loading state ("unavailable"
     // instead of a forever-spinner); a reopen retries after the shared bound.
     if (richGenerationKey() === generationKey) {
+      const rowStillSelected = !paged || !displayedRow || rowByCu(cu) === displayedRow;
+      const temporary = err.profileReadTemporary === true || (requestSent && !responseReceived);
+      if (paged && rowStillSelected && !temporary) invalidateProfileSelection(cu, displayedRow);
       if (!Object.prototype.hasOwnProperty.call(STATE.profiles, cu)) STATE.profiles[cu] = null;
       PROFILE_RETRY_AT.set(cu, Date.now() + RICH_RETRY_MS);
     }
@@ -2808,6 +2870,10 @@ function renderModal() {
   const modal = STATE.modal;
   if (!modal) return;
   const row = modal.row;
+  if (profileSelectionRefused(row) || STATE.feedUnavailable) {
+    $("profileCard").innerHTML = '<div class="p-head"><div class="p-id"><h2 id="profileName">Applicant needs refresh</h2></div><button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div><div class="p-loading">This profile changed or is no longer available. Refresh Applicants before viewing it or taking action.</div><button class="ghost" onclick="requestRefresh()">Refresh Applicants</button>';
+    return;
+  }
   if (modal.source === "preparing") {
     const display = processingDisplay(row);
     $("profileCard").innerHTML = '<div class="p-head"><div class="p-id"><h2 id="profileName">' + esc(row.name || "Applicant identity pending") + '</h2></div><button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>' +
@@ -2863,9 +2929,11 @@ function renderModal() {
     parts.push('<div class="p-degraded"><div>●</div><div><strong>Paraform needs to reconnect.</strong> ' +
       (providerContent ? "Showing cached LinkedIn data. Reconnect Paraform to refresh profiles." : "Showing application details. Reconnect Paraform to refresh profiles.") + "</div></div>");
   }
-  if (loading) {
+  // The selected facts already shown in the list remain the modal's profile
+  // while the stored-detail read is pending or unavailable.
+  if (loading && !projected) {
     parts.push('<div class="p-loading">Pulling the LinkedIn profile…</div>');
-  } else if (!profile) {
+  } else if (!profile && !projected) {
     parts.push('<div class="p-loading">Profile unavailable right now — LinkedIn and resume links above still work.</div>');
   } else {
     parts.push(profileFactsHtml(provider));
@@ -2915,6 +2983,7 @@ function renderModal() {
 /* ---- event delegation: decision buttons, row opens, checkboxes, expanders ---- */
 function makeRuleFrom(cu, key) {
   const row = queueRows().find((r) => r.key === key) || (STATE.modal && STATE.modal.row) || null;
+  if (profileSelectionRefused(row || {key})) { toast("Refresh Applicants before creating a rule from this profile.", true); return; }
   if (window.RaydarRules) window.RaydarRules.fromApplicant(cu, row);
 }
 document.addEventListener("click", async (event) => {
@@ -3167,6 +3236,12 @@ function applyPagedFeed(body, { append = false } = {}) {
   STATE.problems = append ? [...STATE.problems, ...(body.problems || [])] : body.problems || [];
   STATE.counts = body.counts;
   STATE.generation = body.generation;
+  for (const row of incomingRows) {
+    if (STATE.profileReadRefusals) delete STATE.profileReadRefusals[row.key];
+    const cu = profileId(row);
+    delete STATE.profiles[cu]; PROFILE_RETRY_AT.delete(cu);
+    if (STATE.modal?.key === row.key && STATE.modal.row?.applicationId === row.applicationId) STATE.modal.row = row;
+  }
   APPLICANT_PAGE.manifest = body.manifest;
   APPLICANT_PAGE.nextCursor = body.nextCursor || null;
   APPLICANT_PAGE.loaded = ids.size;

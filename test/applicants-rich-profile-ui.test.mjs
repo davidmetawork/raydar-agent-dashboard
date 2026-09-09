@@ -101,19 +101,21 @@ test("the compact overlay is used only for meaningful provider content", () => {
 const modalEnd = applicants.indexOf("/* ---- event delegation", start);
 assert.ok(modalEnd > start, "modal rendering helpers are extractable from the shipped page");
 
-function renderHarness({ card, profile, provider = null, source = "queue", rowOverrides = {} }) {
+function renderHarness({ card, profile, provider = null, source = "queue", rowOverrides = {}, projected = null, profileState = "available" }) {
   const profileCard = { innerHTML: "" };
   const row = { key: "row-one", profileKey: "core:one", cuId: "candidate-one", name: "Source Applicant", roleTitle: "Engineer", company: "Example Co", roleId: "role-one", ...rowOverrides };
   const STATE = {
     cards: { [row.profileKey]: card },
     photos: {},
-    profiles: { [row.profileKey]: { ...profile, ...(provider ? { paraformProfile: provider } : {}) } },
+    profiles: profileState === "pending" ? {} : { [row.profileKey]: profileState === "failed" ? null : { ...profile, ...(provider ? { paraformProfile: provider } : {}) } },
+    applicantRowsV2: projected ? { [row.key]: projected } : {},
     modal: { cu: row.profileKey, key: row.key, row, source },
     busy: new Set(),
   };
   const context = {
     STATE, esc,
     profileId: (value) => value?.profileKey || value?.cuId || "",
+    applicantRowV2: (value) => STATE.applicantRowsV2?.[value?.key] || null,
     cardFor: (cu) => STATE.cards[cu] || null,
     initials: () => "SA", avatarImg: () => "<img>",
     preferredLinkedinProfileUrl: () => "", liAnchor: () => "", pfAnchor: () => "", tierPill: () => "",
@@ -123,10 +125,39 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
     duration: () => "", effectiveDecision: () => null, interviewHold: () => "", alreadyEmailed: () => false,
     ALREADY_EMAILED_ACTION_TITLE: "", $: (id) => id === "profileCard" ? profileCard : null,
   };
-  const rendered = runInNewContext(`${applicants.slice(start, modalEnd)}; ({ historyHtml, renderModal })`, context);
+  const selectedHelpers = applicants.slice(applicants.indexOf("function profileSelectionRefused("), applicants.indexOf("function richGenerationKey("));
+  const rendered = runInNewContext(`${selectedHelpers}\n${applicants.slice(start, modalEnd)}; ({ historyHtml, renderModal })`, context);
   rendered.renderModal();
   return { card: rendered.historyHtml(row), modal: profileCard.innerHTML };
 }
+
+test("selected list history remains available in detail while its read is pending or fails", () => {
+  const facts = {
+    name: { value: "Selected Applicant", source: "application_source", freshness: "current", state: "fallback" },
+    title: { value: "Selected headline", source: "application_source", freshness: "current", state: "fallback" },
+    experiences: { entries: [{ roleTitle: "Selected engineer", companyName: "Selected Company", description: "Stored role description" }], source: "application_source", freshness: "current", state: "fallback" },
+    education: { entries: [{ school: "Selected University", degree: "Computer Science" }], source: "application_source", freshness: "current", state: "fallback" },
+  };
+  for (const profileState of ["pending", "failed"]) {
+    for (const factsCurrent of [true, false]) {
+      const result = renderHarness({ card: {}, profileState,
+        rowOverrides: { inputRevision: "input-one", decisionRevision: 0 },
+        projected: { profile: { facts }, factSetDigest: "a".repeat(64), factsCurrent,
+          inputRevision: "input-one", decisionRevision: 0 } });
+      for (const value of ["Selected engineer", "Selected Company", "Selected University"]) {
+        assert.ok(result.card.includes(value), value + " is present in the list");
+        assert.ok(result.modal.includes(value), value + " remains present in the modal");
+      }
+      assert.match(result.modal, /Stored role description/);
+      assert.match(result.modal, /Application source/);
+      assert.doesNotMatch(result.modal, /Pulling the LinkedIn profile|Profile unavailable right now/);
+      assert.equal(result.modal.includes('data-rule-fact-kind="experience"'), factsCurrent,
+        "a failed detail read does not change the selected fact version's Rule authority");
+    }
+  }
+  const unavailable = renderHarness({ card: {}, profileState: "failed" });
+  assert.match(unavailable.modal, /Profile unavailable right now/);
+});
 
 test("profile detail preserves the exact applied-to company and labels an unknown source", () => {
   const known = renderHarness({ card: {}, profile: {}, rowOverrides: { company: "  Applied Co  " } }).modal;
@@ -220,9 +251,9 @@ const richEnd = applicants.indexOf("function pendingRows", richStart);
 assert.ok(richStart >= 0 && richEnd > richStart, "viewport rich-card helpers are extractable from the shipped page");
 
 function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function settle() {
   for (let index = 0; index < 10; index += 1) await Promise.resolve();
@@ -383,33 +414,123 @@ test("a transient rich-card error keeps source data and retries no faster than t
   assert.equal(h.requests.length, 2);
 });
 
-const profileFetchStart = applicants.indexOf("async function fetchProfile");
+const profileFetchStart = applicants.indexOf("function invalidateProfileSelection");
 const profileFetchEnd = applicants.indexOf("/* ---- profile modal", profileFetchStart);
 assert.ok(profileFetchStart >= 0 && profileFetchEnd > profileFetchStart, "profile fetch helper is extractable from the shipped page");
 
-function profileFetchHarness() {
+function profileFetchHarness({ paged = false, projected = null } = {}) {
   const requests = [];
   let now = Date.parse("2026-09-07T00:00:00Z");
-  const STATE = { profiles: {}, generation: { generationId: "generation-one", digest: "digest-one" } };
+  const row = { key: "row-one", applicationId: "application-one", sourceObservationId: "observation-one",
+    profileKey: "application:one:row", rowDigest: "d".repeat(64), name: "Selected Applicant",
+    inputRevision: "input-one", decisionRevision: 0 };
+  const STATE = { profiles: {}, generation: { generationId: "generation-one", digest: "digest-one" }, paged,
+    snapshot: { queue: [row], stream: [] }, applicantRowsV2: { [row.key]: projected, sibling: { sentinel: true } },
+    cards: { [row.profileKey]: { title: "Old selected headline" }, sibling: { sentinel: true } },
+    photos: { [row.profileKey]: "old-photo", sibling: "sibling-photo" }, checked: new Set([row.key]), busy: new Set(), local: {} };
+  let gates=0,ruleActions=0;
   const context = {
     STATE,
     Date: { now: () => now },
     encodeURIComponent,
+    URLSearchParams,
+    rowByCu: (cu) => STATE.snapshot.queue.find(candidate=>candidate.profileKey===cu),
+    queueRows: () => STATE.snapshot.queue,
+    window: { RaydarRuleFacts: { close() {} }, RaydarRules: { fromApplicant() { ruleActions++; } } },
+    renderLists() {}, toast() {},
     richGenerationKey: () => `${STATE.generation.generationId}:${STATE.generation.digest}`,
     richProfile: (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null,
     hasProviderHistory: (provider) => Boolean(provider && [provider.exp, provider.edu, provider.experiences, provider.education]
       .some((items) => Array.isArray(items) && items.length > 0)),
-    showGate: () => { throw new Error("unexpected auth gate"); },
+    showGate: () => { gates++; },
     fetch: (url, options) => {
       const request = deferred();
       requests.push({ url, options, ...request });
       return request.promise;
     },
   };
-  const source = `const RICH_RETRY_MS = 60_000; const PROFILE_RETRY_AT = new Map(); ${applicants.slice(profileFetchStart, profileFetchEnd)}; ({ fetchProfile, PROFILE_RETRY_AT })`;
+  const selectedHelpers = applicants.slice(applicants.indexOf("function profileSelectionRefused("), applicants.indexOf("function richGenerationKey("));
+  const control = applicants.slice(applicants.indexOf("function interviewControl("), applicants.indexOf("function rowCardHtml("));
+  const decide = applicants.slice(applicants.indexOf("async function decide("), applicants.indexOf("/* ---- visible shell band"));
+  const rule = applicants.slice(applicants.indexOf("function makeRuleFrom("), applicants.indexOf('document.addEventListener("click", async (event)', applicants.indexOf("function makeRuleFrom(")));
+  const source = `const RICH_RETRY_MS = 60_000; const PROFILE_RETRY_AT = new Map(); ${selectedHelpers}\n${control}\n${decide}\n${rule}\n${applicants.slice(profileFetchStart, profileFetchEnd)}; ({ fetchProfile, PROFILE_RETRY_AT, interviewControl, decide, makeRuleFrom })`;
   const extracted = runInNewContext(source, context);
-  return { STATE, requests, helpers: extracted, advance: (milliseconds) => { now += milliseconds; } };
+  return { STATE, row, requests, helpers: extracted, gates:()=>gates, ruleActions:()=>ruleActions,
+    advance: (milliseconds) => { now += milliseconds; } };
 }
+
+const selectedProjection = () => ({
+  application: { applicationId: "application-one", sourceObservationId: "observation-one" },
+  factSetDigest: "a".repeat(64), inputRevision: "input-one", decisionRevision: 0, factsCurrent: true,
+  actionability: { eligibility: "ready" },
+  profile: { facts: { experiences: { source: "application_source", state: "fallback", freshness: "current",
+    entries: [{ roleTitle: "Stored engineer", companyName: "Stored Company" }] },
+    education: { source: "application_source", state: "fallback", freshness: "current", entries: [{ school: "Stored University" }] } } },
+});
+
+test("paged transport and temporary 503 failures preserve exact selected facts", async () => {
+  for (const failure of ["transport",503]) {
+    const selected=selectedProjection(),h=profileFetchHarness({paged:true,projected:selected});
+    const request=h.helpers.fetchProfile(h.row.profileKey);
+    if(failure==="transport")h.requests[0].reject(new TypeError("network unavailable"));
+    else h.requests[0].resolve({status:503,ok:false});
+    await assert.rejects(request);
+    assert.equal(h.STATE.applicantRowsV2[h.row.key],selected);
+    assert.equal(h.row.profileReadRefused,undefined);
+    const rendered=renderHarness({card:{},profileState:"failed",projected:selected,rowOverrides:h.row});
+    assert.match(rendered.modal,/Stored Company/);assert.match(rendered.modal,/Stored University/);
+    assert.equal(h.helpers.interviewControl(h.row).enabled,true);
+  }
+});
+
+test("paged authoritative refusals erase only the exact cached selection and block actions until a fresh feed", async () => {
+  for (const status of [400,401,403,404,409,500]) {
+    const h=profileFetchHarness({paged:true,projected:selectedProjection()});
+    const request=h.helpers.fetchProfile(h.row.profileKey);
+    h.requests[0].resolve({status,ok:false});await assert.rejects(request);
+    assert.equal(h.STATE.applicantRowsV2[h.row.key],undefined);
+    assert.equal(h.STATE.cards[h.row.profileKey],undefined);assert.equal(h.STATE.photos[h.row.profileKey],undefined);
+    assert.equal(h.STATE.applicantRowsV2.sibling.sentinel,true);assert.equal(h.STATE.cards.sibling.sentinel,true);
+    assert.equal(h.STATE.photos.sibling,"sibling-photo");assert.equal(h.STATE.checked.has(h.row.key),false);
+    assert.equal(h.helpers.interviewControl(h.row).enabled,false);
+    await assert.rejects(h.helpers.decide(h.row.key,"pass",h.row,true),/Refresh Applicants/);
+    h.helpers.makeRuleFrom(h.row.profileKey,h.row.key);assert.equal(h.ruleActions(),0);
+    const rendered=renderHarness({card:{},profileState:"failed",rowOverrides:h.row});
+    assert.match(rendered.modal,/Applicant needs refresh/);
+    assert.doesNotMatch(rendered.modal,/Selected Applicant|Stored Company|Stored University|data-act=|data-rule-fact-kind=/);
+    h.advance(120_000);await h.helpers.fetchProfile(h.row.profileKey);
+    assert.equal(h.requests.length,1,"a timer cannot restore refused authority");
+    assert.equal(h.gates(),[401,403].includes(status)?1:0);
+  }
+});
+
+test("a validated paged detail replaces selected facts, while malformed or contained success cannot revive them",async()=>{
+  for(const malformed of [false,'identity','contained']){
+    const selected=selectedProjection(),h=profileFetchHarness({paged:true,projected:selected});
+    const refreshed={...selected,factsCurrent:false,actionability:{eligibility:'unknown'},
+      profile:{facts:{experiences:{entries:[],state:'unavailable'},education:{entries:[],state:'unavailable'}}}};
+    const body={ok:true,name:'Selected Applicant',application:{applicationId:h.row.applicationId},profileV2:refreshed,
+      row:{...h.row,factsCurrent:false,rowCurrent:false},
+      generation:{generationId:'generation-one',generationDigest:'digest-one'}};
+    if(malformed==='identity')body.row.applicationId='different-application';
+    if(malformed==='contained')body.source='profile_reconstruction_pending';
+    const request=h.helpers.fetchProfile(h.row.profileKey);h.requests[0].resolve(profileResponse(body));
+    if(malformed){await assert.rejects(request);assert.equal(h.row.profileReadRefused,true);}
+    else{await request;assert.equal(h.STATE.applicantRowsV2[h.row.key],refreshed);
+      assert.equal(h.helpers.interviewControl(h.row).enabled,false);
+      assert.equal(h.STATE.cards[h.row.profileKey].experiences,undefined);}
+  }
+});
+
+test("a stale detail refusal cannot invalidate a newly read row in the same generation",async()=>{
+  const selected=selectedProjection(),h=profileFetchHarness({paged:true,projected:selected});
+  const request=h.helpers.fetchProfile(h.row.profileKey);
+  const freshRow={...h.row};h.STATE.snapshot.queue=[freshRow];
+  h.requests[0].resolve({status:409,ok:false});await assert.rejects(request);
+  assert.equal(h.STATE.applicantRowsV2[h.row.key],selected);
+  assert.equal(freshRow.profileReadRefused,undefined);
+  assert.equal(h.STATE.profileReadRefusals?.[h.row.key],undefined);
+});
 
 function profileResponse(profile) {
   return { status: 200, ok: true, json: async () => profile };
