@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "dde2b1f8f72fd0e34d8c56a75abc611425517677a028e7f288ac743449831d34",
+  "digest": "4b593b6e83b5e6cc8b828037b06e8d2e8573135dcf13eb83a724521b86ae1f00",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -167,7 +167,7 @@
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-runtime.mjs",
-      "sha256": "17b60cc225535f93821de847b541b4b6a68fdad790bb520f83eba1e4dc22d60e"
+      "sha256": "006fd1f6d79283b4e7b109665398f71958084e123c07c607e72d279d3d8095e1"
     },
     {
       "path": "api/submissions-v2/_lib/resume/pipeline-store.mjs",
@@ -375,7 +375,7 @@
     },
     {
       "path": "submissions-v2-worker/health.mjs",
-      "sha256": "057f77518d1032795d75b34b39ada8091c54b7df7849fbdf3a36455eb1f7a9ea"
+      "sha256": "fd0dd8d738a13f626a703330846811db23ecc144157b21bc918a871daedd9290"
     },
     {
       "path": "submissions-v2-worker/proof-reader.mjs",
@@ -387,7 +387,7 @@
     },
     {
       "path": "submissions-v2-worker/runner.mjs",
-      "sha256": "4da338d738268b7c0a08bb4bb8bf114f1b5483e974a085dcb01c73a8b63d1303"
+      "sha256": "a4aa8ed59e2336fb09a7093c75c38da89c3b1b2bc74d81ef4749d359fb07c183"
     },
     {
       "path": "submissions-v2-worker/sequence-inbox-broker-client.mjs",

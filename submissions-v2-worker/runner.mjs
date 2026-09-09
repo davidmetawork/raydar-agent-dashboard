@@ -31,7 +31,7 @@ export async function runClaimedJob(job, {
   failJob,
   checkpointJob,
   heartbeatJob = null,
-  timeoutMs = 295_000,
+  timeoutMs = 595_000,
   heartbeatMs = 60_000,
   scheduleHeartbeat = setInterval,
   cancelHeartbeat = clearInterval,
@@ -46,7 +46,7 @@ export async function runClaimedJob(job, {
   let heartbeatFailure = null;
   const heartbeat = typeof heartbeatJob === "function" ? scheduleHeartbeat(async () => {
     try {
-      const current = await heartbeatJob({ jobId: job.id, workerId, fencingToken: job.fencing_token, controlEpoch, leaseSeconds: 300 });
+      const current = await heartbeatJob({ jobId: job.id, workerId, fencingToken: job.fencing_token, controlEpoch, leaseSeconds: 600 });
       if (current === null) {
         heartbeatFailure = Object.assign(new Error("Worker lease or runtime control changed."), { code: "execution_fence_lost", retryable: false });
         controller.abort(heartbeatFailure);
@@ -118,7 +118,7 @@ export async function workerCycle({
   const kinds = enabledKinds(controls);
   if (!kinds.length) return { ok: true, held: "all_controls_disabled", control_epoch: controls.control_epoch, jobs: [] };
   if (typeof scheduleJobs === "function") await scheduleJobs();
-  const jobs = await claimJobs({ workerId, kinds, limit, leaseSeconds: 300, controlEpoch: controls.control_epoch });
+  const jobs = await claimJobs({ workerId, kinds, limit, leaseSeconds: 600, controlEpoch: controls.control_epoch });
   // Resume builds carry the lowest claim precedence (priority 50) while the tick
   // re-queues proof, health and index jobs every five minutes at 15-40. With one
   // claim per cycle a throttled provider keeps the slot busy and builds starve:
@@ -126,7 +126,7 @@ export async function workerCycle({
   // build per cycle whenever generation is enabled and the general claim did not
   // already pick a build; handlers still run sequentially.
   if (kinds.includes("prepare_resume") && !jobs.some((job) => job.kind === "prepare_resume")) {
-    const reserved = await claimJobs({ workerId, kinds: ["prepare_resume"], limit: 1, leaseSeconds: 300, controlEpoch: controls.control_epoch });
+    const reserved = await claimJobs({ workerId, kinds: ["prepare_resume"], limit: 1, leaseSeconds: 600, controlEpoch: controls.control_epoch });
     jobs.push(...(reserved || []));
   }
   const results = [];

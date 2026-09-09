@@ -791,7 +791,7 @@ test("resume worker never completes a terminal job when no generation was durabl
 
 test("resume worker closes only the timed-out generation before an automatic retry", async () => {
   const failure = Object.assign(
-    new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its five-minute deadline.", { retryable: true }),
+    new ResumePipelineError("generation_deadline_exhausted", "Resume preparation reached its ten-minute deadline.", { retryable: true }),
     { details: { generationId: "generation-timeout", triggerKind: "retry", priorArtifactId: null } },
   );
   const abandoned = [];
@@ -1273,7 +1273,7 @@ test("runner renews a long job lease with the same control epoch and fence", asy
     workerId: "worker-lease",
     fencingToken: 14,
     controlEpoch: 22,
-    leaseSeconds: 300,
+    leaseSeconds: 600,
   });
   assert.equal(cancelled, true);
 });

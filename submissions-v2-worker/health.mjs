@@ -3,7 +3,9 @@
 export function createWorkerHealth({
   now = Date.now,
   startupGraceMs = 30_000,
-  maxCycleMs = 360_000,
+  // A cycle runs one general job and one reserved resume build sequentially,
+  // each leased for ten minutes (2026-09-09), so a healthy cycle can take twenty.
+  maxCycleMs = 1_260_000,
   maxIdleMs = 30_000,
 } = {}) {
   const startedAt = now();
