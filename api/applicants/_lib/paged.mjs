@@ -1,4 +1,5 @@
 import postgres from 'postgres';
+import { pgCompatibleReadClient } from './read-pool-adapter.mjs';
 import { projectPinnedApplicantProfile } from './paged-core/paged-profile-contract.mjs';
 import { hasUsableApplicantProfileV2 } from './paged-core/applicant-profile-contract.mjs';
 import { PAGED_DECISION_AUTHORITY_VERSION } from './paged-core/paged-decision-authority.mjs';
@@ -14,8 +15,7 @@ export function applicantReadPool() {
     connection: { application_name: 'monitor-applicant-read', default_transaction_read_only: 'on' } });
   return { async connect() {
     const reserved = await connection.reserve();
-    return { async query(statement, parameters = []) { return { rows: await reserved.unsafe(statement, parameters) }; },
-      release() { return reserved.release(); } };
+    return pgCompatibleReadClient(reserved);
   } };
 }
 
