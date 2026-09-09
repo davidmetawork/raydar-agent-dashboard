@@ -2899,6 +2899,8 @@ function renderModal() {
   const p = profile || {};
   const projected = p.profileV2 || (typeof applicantRowV2 === "function" ? applicantRowV2(row) : null);
   const projectedFacts = projected?.profile?.facts || {};
+  const displayedFreshness = row?.rowCurrent === false || row?.profileUpdatePending === true
+    || projected?.factsCurrent === false ? "saved version" : projectedFacts.title?.freshness || "unknown freshness";
   const modalHold = interviewHold(row);
   const displayOnlySource = DISPLAY_ONLY_SOURCE_HOLD_CODES.has(modalHold);
   const provider = richProfile(p.paraformProfile);
@@ -2931,7 +2933,7 @@ function renderModal() {
     '<span class="links">' + liAnchor(linkedin) + pfAnchor(row.cuId) + "</span>" +
     (p.resumeUrl ? '<a href="' + esc(p.resumeUrl) + '" target="_blank" rel="noopener">Resume ↗</a>' : "") +
     tierPill(row.tier) + "</div>" +
-    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(projectedFacts.title.freshness || "unknown freshness") + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">' + (displayOnlySource ? "Application profile · current source as of " : "Application profile as of ") + esc(monthYear(p.updatedAt)) + "</div>" : "") +
+    (projectedFacts.title?.source ? '<div class="p-asof">' + esc(typeof v2ProvenanceLabel === "function" ? v2ProvenanceLabel(projectedFacts.title.source) : "Profile facts") + ' · ' + esc(displayedFreshness) + "</div>" : providerContent && (provider?.paraformUpdatedAt || provider?.updatedAt) ? '<div class="p-asof">Cached LinkedIn profile · as of ' + esc(monthYear(provider.paraformUpdatedAt || provider.updatedAt)) + "</div>" : p.updatedAt ? '<div class="p-asof">' + (displayOnlySource ? "Application profile · current source as of " : "Application profile as of ") + esc(monthYear(p.updatedAt)) + "</div>" : "") +
     "</div>" +
     '<button class="p-close" onclick="dismissProfile()" aria-label="Close">✕</button></div>');
   parts.push('<div class="p-applied">Applied to <b>' + esc(typeof appliedRole === "function" ? appliedRole(row) : (row.roleTitle || "Unknown role")) + "</b> @ " + esc(appliedCompany(row)) +
