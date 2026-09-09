@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "6bd67595d01769169ea7ca2517ce47f93f0be75aba74356c734d32e079195986",
+  "digest": "6abd595d2be544c2ccf781e4bb05105b929a3c9cd49bdc8499e82460be7fad2e",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -204,7 +204,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
-      "sha256": "cb0fdf98dff05e2fdd321622674a8201bb73048d4a80722647d274bb12189816"
+      "sha256": "be04cf902b63e220bce5bd4ee84431ae5ee9fc46262329f8ba60e05a3267c438"
     },
     {
       "path": "api/submissions-v2/_lib/sourcing-role-mappings.mjs",

@@ -452,7 +452,7 @@ export function createService({
           // A retried build must queue like a fresh build (50). The enqueue default of
           // 100 sat behind every fresh build and every five-minute tick job, so on
           // 2026-09-09 195 retries waited more than four hours while the worker was busy.
-          priority: action === "retry_preparation" ? 50 : 100,
+          ...(action === "retry_preparation" ? { priority: 50 } : {}),
           checkpoint: roleRecheck
             ? { target: "role" }
             : { trigger_kind: action === "retry_preparation" ? "retry" : undefined },
