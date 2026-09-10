@@ -122,3 +122,37 @@ test('an attachment download relays the service bytes and never invents a 502', 
   assert.doesNotMatch(download, /redirect=1/);
   assert.match(download, /url\.protocol !== "https:"/);
 });
+
+test('the page states coverage from the store and never composes a freshness claim of its own', async () => {
+  const page = await readFile(new URL('../master-inbox.mjs', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8');
+  // Slice 1's trust surfaces, kept: one route module owns every claim.
+  assert.match(page, /ROUTE\.coverageSummary\(state\.coverage/);
+  assert.match(page, /ROUTE\.emptyStateText\(state\.coverage\)/);
+  assert.match(page, /ROUTE\.searchNotice\(state\.parsed\)/);
+  assert.match(page, /state\.parsed = data\.query \|\| null/);
+  assert.match(page, /state\.coverage = data\.coverage \|\| null/);
+  assert.match(page, /const ROUTE = window\.MasterInboxRoute/);
+  assert.doesNotMatch(page, /'Shared store current'|"Shared store current"/);
+  assert.match(html, /<script src="\/master-inbox-route\.js"><\/script>/);
+  assert.match(html, /id="status"/);
+  assert.match(html, /id="searchNotice"/);
+  // Counts carry their unit, and say what the unit means.
+  assert.match(page, /unread \${unread === 1 \? 'message' : 'messages'}/);
+  assert.match(page, /retained message copies in the shared store/);
+});
+
+test('the standalone page gates on a Raydar session before it reads any mail', async () => {
+  const page = await readFile(new URL('../master-inbox.mjs', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8');
+  assert.match(html, /id="gate"/);
+  assert.match(html, /id="gsi"/);
+  assert.match(page, /window\.RaydarAuth\?\.session\(\)/);
+  assert.match(page, /if \(session\?\.authenticated\) return boot\(\)/);
+  assert.match(page, /google\.accounts\.id\.renderButton/);
+  // The Google script is fetched only when the gate is shown: inside the shell
+  // iframe the session already exists, so a static tag would be a third-party
+  // request on every page view that can never be used.
+  assert.doesNotMatch(html, /accounts\.google\.com/);
+  assert.match(page, /script\.src = 'https:\/\/accounts\.google\.com\/gsi\/client'/);
+});

@@ -15,7 +15,7 @@ const date = value => { const item = new Date(value); return value && Number.isF
 const shortDate = value => { const item = new Date(value); if (!value || !Number.isFinite(item.valueOf())) return '—'; const today = new Date(); return item.toDateString() === today.toDateString() ? item.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : item.toLocaleDateString([], { month: 'short', day: 'numeric', ...(item.getFullYear() !== today.getFullYear() ? { year: 'numeric' } : {}) }); };
 const number = value => value === null || value === undefined ? '—' : Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
 let savedScope = {}; try { savedScope = JSON.parse(localStorage.getItem('raydar-master-inbox-scope') || '{}'); } catch {}
-const state = { route: normalizedRoute({ ...savedScope, ...Object.fromEntries(new URLSearchParams(location.search)), ...ROUTE.parseRoute(String(location.hash || '').replace(/^#/, '')) }), rows: [], boxes: [], selected: new Set(), thread: null, cursor: null, hasMore: false, coverage: null, counts: null, negativeEvidence: null, loaded: false, loading: false, restorePages: 1, currentScreen: '', screenSequence: 0, listScroll: 0, listFocus: null, refreshAt: null, actionBusy: false };
+const state = { route: normalizedRoute({ ...savedScope, ...Object.fromEntries(new URLSearchParams(location.search)), ...ROUTE.parseRoute(String(location.hash || '').replace(/^#/, '')) }), rows: [], boxes: [], selected: new Set(), thread: null, cursor: null, hasMore: false, coverage: null, parsed: null, negativeEvidence: null, loaded: false, loading: false, restorePages: 1, currentScreen: '', screenSequence: 0, listScroll: 0, listFocus: null, refreshAt: null, actionBusy: false };
 const gates = { feed: requestGate(), thread: requestGate() };
 const box = id => state.boxes.find(item => item.id === id);
 const boxLabel = id => box(id)?.principal || box(id)?.visible_addresses?.[0] || id || 'All mailboxes';
@@ -79,7 +79,7 @@ function navigate(input, { push = true, restoreScroll = false } = {}) {
   state.route = next;
   if (push) { const name = 'master-inbox-screen-' + (++state.screenSequence); state.currentScreen = name; RaydarNav.open(name, () => { state.currentScreen = oldScreen; state.listScroll = scroll; navigate(previous, { push: false, restoreScroll: true }); if (focusID) restoreRowFocus(focusID); }, routeAddress(next)); }
   clearNotice(); renderScope();
-  if (changedQuery) { gates.feed.cancel(); state.rows = []; state.cursor = null; state.hasMore = false; state.selected.clear(); state.counts = null; state.loaded = false; state.listScroll = 0; state.restorePages = 1; }
+  if (changedQuery) { gates.feed.cancel(); state.rows = []; state.cursor = null; state.hasMore = false; state.selected.clear(); state.loaded = false; state.listScroll = 0; state.restorePages = 1; }
   if (changedID || changedQuery) { gates.thread.cancel(); state.thread = null; if (!next.id) $('reader').replaceChildren(); }
   if (changedQuery || !state.loaded) loadFeed(); else renderList();
   if (next.id && (changedID || changedQuery || !state.thread)) loadThread(next.id);
@@ -90,7 +90,11 @@ function backToList() { const id = state.route.id; const scroll = state.listScro
 
 function renderList() {
   const host = $('conversationList'); host.replaceChildren(); host.setAttribute('aria-busy', String(state.loading));
-  if (!state.rows.length) empty(host, 'No matching conversations', state.negativeEvidence?.status === 'none_through_watermark' ? 'No matches were found through the mailbox observation times shown below.' : 'No matches in the retained records. Check mailbox coverage before concluding that no email exists.');
+  // The empty state is a claim about absence, so it is written by the route
+  // module from the store's negativeEvidence and cross-checked against the
+  // per-mailbox history floor: "no conversations match, through 14:05" only
+  // when every mailbox in scope is current AND fully imported.
+  if (!state.rows.length && !state.loading) { const evidence = ROUTE.emptyStateText(state.coverage); const node = el('div', 'empty ' + evidence.tone); node.append(el('strong', '', evidence.headline), el('span', '', evidence.detail)); host.replaceChildren(node); }
   for (const row of state.rows) {
     const item = el('div', 'inbox-row' + (row.unread ? ' unread' : '') + (state.route.id === row.id ? ' active' : '')); const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.checked = state.selected.has(row.id); checkbox.setAttribute('aria-label', 'Select ' + displayText(row.subject || 'conversation')); checkbox.addEventListener('change', () => { if (checkbox.checked && state.selected.size >= 25) { checkbox.checked = false; return toast('Select up to 25 conversations for one bulk action.'); } checkbox.checked ? state.selected.add(row.id) : state.selected.delete(row.id); renderBulk(); });
     const star = btn(row.starred ? '★' : '☆', 'star-button', () => action(row.starred ? 'unstar' : 'star', rowTargets(row))); star.setAttribute('aria-label', row.starred ? 'Remove star' : 'Add star'); star.setAttribute('aria-pressed', String(Boolean(row.starred))); star.disabled = !rowTargets(row).length || state.actionBusy;
@@ -100,30 +104,79 @@ function renderList() {
     if (Number(row.message_copy_count) > Number(row.message_count)) facts.title = `${row.message_count} messages · ${row.message_copy_count} retained mailbox copies`;
     link.append(participant, copy, when, facts); item.append(checkbox, star, link); host.append(item);
   }
-  $('loadMore').classList.toggle('hidden', !state.hasMore); $('loadMore').disabled = state.loading; const total = state.counts?.total; $('listSummary').textContent = state.rows.length ? `${number(state.rows.length)}${total !== null && total !== undefined ? ' of ' + number(total) : ''} conversations · ${scopeLabel()}` : '0 matching conversations'; renderBulk();
+  $('loadMore').classList.toggle('hidden', !state.hasMore); $('loadMore').disabled = state.loading; $('listSummary').textContent = state.rows.length ? `${number(state.rows.length)} ${state.rows.length === 1 ? 'conversation' : 'conversations'} loaded${state.hasMore ? ' · more available' : ''} · ${scopeLabel()}` : '0 matching conversations'; renderBulk();
 }
 function renderBulk() { $('bulkToolbar').classList.toggle('hidden', !state.selected.size); $('selectedCount').textContent = `${state.selected.size} selected`; $('bulkRead').disabled = state.actionBusy; $('bulkArchive').disabled = state.actionBusy; }
 async function loadFeed(append = false, restorePosition = null) {
   if (!append && state.loaded) state.listScroll = $('listScroll').scrollTop; const listPosition = restorePosition ?? (append ? $('listScroll').scrollTop : state.listScroll); const ticket = gates.feed.begin(); state.loading = true; $('conversationList').setAttribute('aria-busy', 'true'); $('loadMore').disabled = true; $('listSummary').textContent = append ? 'Loading more conversations…' : 'Updating conversations…'; if (!state.rows.length) empty($('conversationList'), 'Loading mail…', 'Reading retained messages and mailbox coverage.');
   try { const data = await api('feed?' + feedQuery(state.route, append ? state.cursor : null), { signal: ticket.signal }); if (!ticket.current()) return;
-    const known = new Set(state.rows.map(row => row.id)); state.rows = append ? [...state.rows, ...(data.rows || []).filter(row => !known.has(row.id))] : data.rows || []; state.cursor = data.cursor || null; state.hasMore = Boolean(data.hasMore && state.cursor); state.boxes = data.mailboxStatus === 'unavailable' ? state.boxes : data.mailboxes || state.boxes; state.coverage = data.coverage || null; state.counts = data.counts || null; state.negativeEvidence = data.negativeEvidence || data.coverage?.negativeEvidence || null; state.refreshAt = new Date(); state.loaded = true; state.loading = false; clearNotice(); renderAccounts(); renderScope(); renderList(); renderCoverage();
+    const known = new Set(state.rows.map(row => row.id)); state.rows = append ? [...state.rows, ...(data.rows || []).filter(row => !known.has(row.id))] : data.rows || []; state.cursor = data.cursor || null; state.hasMore = Boolean(data.hasMore && state.cursor); state.boxes = data.mailboxStatus === 'unavailable' ? state.boxes : data.mailboxes || state.boxes; state.coverage = data.coverage || null; state.parsed = data.query || null; state.negativeEvidence = data.coverage?.negativeEvidence || null; state.refreshAt = new Date(); state.loaded = true; state.loading = false; clearNotice(); renderAccounts(); renderScope(); renderCounts(); renderList(); renderStatus(); renderSearchNotice(); renderCoverage();
     if (data.mailboxStatus === 'unavailable') notice('Messages loaded, but account settings and coverage could not be refreshed. Sending identities may be unavailable.', () => loadFeed());
     if (state.restorePages > 1 && state.hasMore) { state.restorePages--; await loadFeed(true, listPosition); } else { state.restorePages = 1; $('listScroll').scrollTop = listPosition; }
     // These counts are retained unread mailbox copies, not conversations or work.
     const unread = state.boxes.reduce((sum, mailbox) => sum + Number(mailbox.unread_count || 0), 0); parent.postMessage({ type: 'raydar-master-inbox-counts', unread, unit: 'retained_message_copies' }, location.origin);
-  } catch (error) { if (!ticket.current() || error.name === 'AbortError') return; state.loading = false; $('conversationList').setAttribute('aria-busy', 'false'); $('loadMore').disabled = false; $('freshness').textContent = state.loaded ? 'Refresh failed · earlier records remain visible' : 'Mail could not be loaded'; const searchError = String(error.code).startsWith('search_'); if (searchError) { state.rows = []; state.cursor = null; state.hasMore = false; $('loadMore').classList.add('hidden'); empty($('conversationList'), 'Search needs attention', errorMessage(error)); } else if (!state.rows.length) empty($('conversationList'), 'Mail is unavailable', 'This is a loading failure, not an empty mailbox.', () => loadFeed()); notice(errorMessage(error) + (state.rows.length ? ' Previously loaded records remain visible.' : ''), searchError ? null : () => loadFeed(append), error); $('listSummary').textContent = searchError ? 'Search not applied' : 'Refresh not confirmed'; }
+  } catch (error) { if (!ticket.current() || error.name === 'AbortError') return; state.loading = false; $('conversationList').setAttribute('aria-busy', 'false'); $('loadMore').disabled = false; const pill = $('status'); pill.className = 'status unknown'; pill.textContent = state.loaded ? 'Not refreshed · earlier records remain visible' : 'Coverage unknown · mail could not be loaded'; pill.title = 'This read did not complete, so nothing on screen can be treated as current.'; const searchError = String(error.code).startsWith('search_'); if (searchError) { state.rows = []; state.cursor = null; state.hasMore = false; $('loadMore').classList.add('hidden'); empty($('conversationList'), 'Search needs attention', errorMessage(error)); } else if (!state.rows.length) empty($('conversationList'), 'Mail is unavailable', 'This is a loading failure, not an empty mailbox.', () => loadFeed()); notice(errorMessage(error) + (state.rows.length ? ' Previously loaded records remain visible.' : ''), searchError ? null : () => loadFeed(append), error); $('listSummary').textContent = searchError ? 'Search not applied' : 'Refresh not confirmed'; }
+}
+// The status pill, the empty state and the search notice are all derived from
+// the store's own coverage object by master-inbox-route.js. Nothing on this
+// page is allowed to compose a freshness sentence of its own: "current" is a
+// claim, and only the store can make it.
+function renderStatus() {
+  const summary = ROUTE.coverageSummary(state.coverage, { label: boxLabel });
+  const pill = $('status');
+  pill.className = 'status ' + summary.tone;
+  pill.textContent = summary.text;
+  pill.title = summary.detail;
+}
+function renderCounts() {
+  const shown = state.route.mailbox ? state.boxes.filter(mailbox => mailbox.id === state.route.mailbox) : state.boxes;
+  const unread = shown.reduce((sum, mailbox) => sum + Number(mailbox.unread_count || 0), 0);
+  const inbox = shown.reduce((sum, mailbox) => sum + Number(mailbox.inbox_count || 0), 0);
+  // Units, always: these are retained MESSAGE COPIES in the store, not
+  // conversations and not work remaining. An unlabelled 153,480 reads as a
+  // backlog; "153,480 unread messages" reads as what it is.
+  const reportsInbox = shown.some(mailbox => mailbox.inbox_count !== null && mailbox.inbox_count !== undefined);
+  const parts = shown.length ? [`${number(unread)} unread ${unread === 1 ? 'message' : 'messages'}`] : [];
+  if (reportsInbox) parts.push(`${number(inbox)} retained inbox ${inbox === 1 ? 'message' : 'messages'}`);
+  if (shown.length) parts.push(`${shown.length} ${shown.length === 1 ? 'mailbox' : 'mailboxes'}`);
+  const host = $('scopeCounts');
+  host.textContent = parts.join(' · ');
+  host.title = 'Counts are retained message copies in the shared store, not conversations and not unfinished work.';
 }
 function renderCoverage() {
-  const coverage = state.coverage; const mailboxes = coverage?.mailboxes || []; const shown = state.route.mailbox ? mailboxes.filter(item => item.id === state.route.mailbox) : mailboxes;
-  const limited = !shown.length || shown.some(item => item.sync?.state !== 'current' && item.sync?.state !== 'healthy' || item.history?.state !== 'complete');
-  $('freshness').textContent = 'Loaded ' + state.refreshAt?.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + (limited ? ' · coverage limited' : ' · see mailbox coverage');
-  $('coverageSummary').textContent = `Mailbox coverage · ${shown.length || state.boxes.length} accounts${limited ? ' · limitations recorded' : ''}`;
+  const coverage = state.coverage;
+  const scoped = ROUTE.scopedMailboxes(coverage);
+  const incomplete = ROUTE.incompleteHistory(coverage);
+  $('coverageSummary').textContent = coverage
+    ? `Mailbox coverage · ${scoped.length} in scope${incomplete.length ? ` · ${incomplete.length} still importing history` : ''}`
+    : 'Mailbox coverage · not reported with this result';
   const host = $('coverageDetails'); host.replaceChildren();
-  host.append(el('p', '', 'Recent sync, full-history imports, and attachment availability are separate facts. A successful refresh does not prove complete history. Unread counts are retained mailbox copies.'));
-  if (!shown.length) { host.append(el('p', '', 'Per-mailbox observation details are unavailable. Mailbox freshness and historical completeness are unknown.')); return; }
-  const table = el('table', 'coverage-table'); const header = el('tr'); for (const label of ['Mailbox', 'Recent sync', 'History', 'Files', 'Outgoing history']) header.append(el('th', '', label)); const head = el('thead'); head.append(header); table.append(head); const body = el('tbody');
-  for (const item of shown) { const row = el('tr'); const account = el('td', '', boxLabel(item.id)); const sync = el('td', '', displayText(String(item.sync?.state || 'unknown').replaceAll('_', ' '))); sync.append(el('small', '', 'Last completed sync ' + date(item.sync?.completedAt || item.sync?.through))); if (item.sync?.error) sync.append(el('small', '', 'A sync error is recorded.')); const history = el('td', '', displayText(String(item.history?.state || 'unknown').replaceAll('_', ' '))); if (item.history?.earliestRetainedAt) history.append(el('small', '', 'Retained since ' + date(item.history.earliestRetainedAt))); const files = el('td', '', `${number(item.attachments?.available)} available · ${number(item.attachments?.pending)} importing`); files.append(el('small', '', `${number(item.attachments?.blocked)} blocked · ${number(item.attachments?.failed)} unavailable`)); const outgoing = el('td', '', String(item.outgoing?.state || 'unknown').replaceAll('_', ' ')); for (const note of item.outgoing?.notes || []) outgoing.append(el('small', '', typeof note === 'string' ? note : note.message || 'Coverage is limited.')); row.append(account, sync, history, files, outgoing); body.append(row); }
-  table.append(body); host.append(table); if (coverage.outgoing) { host.append(el('p', '', 'Mailroom source coverage: ' + String(coverage.outgoing.state || 'unknown').replaceAll('_', ' ') + ' · ' + number(coverage.outgoing.retainedRecords) + ' retained outgoing records across all senders.')); for (const note of coverage.outgoing.notes || []) host.append(el('p', '', note)); } if (state.negativeEvidence?.reasons?.length) host.append(el('p', '', 'Search boundary: ' + state.negativeEvidence.reasons.map(value => typeof value === 'string' ? value.replaceAll('_', ' ') : value.message || 'Some coverage is unknown').join('; ')));
+  host.append(el('p', '', 'Recent sync and full-history import are separate facts. A mailbox synced a minute ago can still be missing years of older mail, so an empty result is only ever as strong as the weaker of the two.'));
+  if (!scoped.length) { host.append(el('p', '', 'The store reported no per-mailbox coverage with this result, so mailbox freshness and historical completeness are unknown.')); return; }
+  const table = el('table', 'coverage-table'); const header = el('tr');
+  for (const label of ['Mailbox', 'Status', 'Synced through', 'Behind by', 'History import', 'Oldest retained']) header.append(el('th', '', label));
+  const head = el('thead'); head.append(header); table.append(head);
+  const body = el('tbody');
+  for (const mailbox of scoped) {
+    const row = el('tr');
+    const account = el('td', '', mailbox.principal || boxLabel(mailbox.id));
+    const status = el('td', '', displayText(String(mailbox.status || 'unknown').replaceAll('_', ' ')));
+    if (mailbox.lastErrorClass) status.append(el('small', '', 'Last error: ' + String(mailbox.lastErrorClass).replaceAll('_', ' ')));
+    const synced = el('td', '', mailbox.syncedThrough ? date(mailbox.syncedThrough) : 'Never completed a sync');
+    const lag = el('td', '', mailbox.lagSeconds === null || mailbox.lagSeconds === undefined ? 'Unknown' : `${number(mailbox.lagSeconds)} seconds`);
+    const history = el('td', '', ({ complete: 'Complete', partial: 'Partial', none: 'Not started' })[mailbox.history?.importState] || 'Unreported');
+    const oldest = el('td', '', mailbox.history?.oldestAt ? date(mailbox.history.oldestAt) : 'Not recorded');
+    row.append(account, status, synced, lag, history, oldest); body.append(row);
+  }
+  table.append(body); const scroll = el('div', 'coverage-scroll'); scroll.append(table); host.append(scroll);
+  const evidence = coverage?.negativeEvidence;
+  if (evidence?.reason) host.append(el('p', 'coverage-evidence', 'What an empty result would mean here: ' + evidence.reason));
+}
+function renderSearchNotice() {
+  const text = ROUTE.searchNotice(state.parsed);
+  const host = $('searchNotice');
+  host.textContent = text;
+  host.classList.toggle('hidden', !text);
 }
 
 function safePreviewHTML(value) {
@@ -149,7 +202,7 @@ function readToolbar(thread) {
 function renderThread() {
   const thread = state.thread; if (!thread) return; const host = $('reader'); host.replaceChildren(readToolbar(thread)); const content = el('div', 'reader-content'); content.append(el('h2', 'message-subject', displayText(thread.subject || '(No subject)'))); const messages = logicalMessages(thread.messages || []); content.append(el('p', 'thread-context', `${messages.length} known messages · ${(thread.messages || []).length} retained copies · ${scopeLabel()}`));
   if (thread.incomplete || Number(thread.missing_parent_count)) content.append(el('p', 'thread-warning', Number(thread.missing_parent_count) ? `${thread.missing_parent_count} referenced earlier message${Number(thread.missing_parent_count) === 1 ? ' is' : 's are'} not present. The known messages remain available.` : 'Some conversation history is missing or still being imported.'));
-  if (state.coverage?.mailboxes?.some(item => item.history?.state !== 'complete' && (thread.messages || []).some(message => message.mailbox_id === item.id))) content.append(el('p', 'thread-warning', 'One or more mailboxes in this conversation has an unfinished history import. See mailbox coverage below.'));
+  if (state.coverage?.mailboxes?.some(item => item.history?.importState !== 'complete' && (thread.messages || []).some(message => message.mailbox_id === item.id))) content.append(el('p', 'thread-warning', 'One or more mailboxes in this conversation has an unfinished history import. See mailbox coverage below.'));
   const tags = el('div'); for (const entry of thread.userState || []) if (entry.kind === 'tag') tags.append(el('span', 'tag-chip', entry.value)); else if (entry.kind === 'snooze' && new Date(entry.due_at) > new Date()) tags.append(el('span', 'tag-chip', 'Snoozed until ' + date(entry.due_at))); content.append(tags);
   messages.forEach((message, index) => { const wrapper = el(index === messages.length - 1 ? 'section' : 'details', 'thread-message'); const heading = el(index === messages.length - 1 ? 'div' : 'summary'); const top = el('div', 'message-top'); const sender = firstContact(message.from_json) || {}; const label = el('strong', 'message-sender', fullContacts(message.from_json) || 'Sender not recorded'); const direction = messageDirection(message); label.append(el('small', '', direction + ' · ' + [...new Set(message.copies.map(copy => boxLabel(copy.mailbox_id)))].join(' · ') + (message.delivery_status && !['held', 'queued', 'releasing', 'failed', 'parked', 'pending', 'scheduled', 'cancelled', 'draft'].includes(message.delivery_status) ? ' · ' + String(message.delivery_status).replaceAll('_', ' ') : ''))); top.append(el('span', 'avatar', contactLabel([sender]).slice(0, 1).toUpperCase()), label, el('time', '', shortDate(message.internal_date))); top.title = date(message.internal_date); heading.append(top); wrapper.append(heading);
     const addresses = el('dl', 'message-addresses'); pair(addresses, 'From', fullContacts(message.from_json)); pair(addresses, 'To', fullContacts(message.to_json)); if (contacts(message.cc_json).length) pair(addresses, 'Cc', fullContacts(message.cc_json)); if (contacts(message.bcc_json).length) pair(addresses, 'Bcc', fullContacts(message.bcc_json)); if (contacts(message.reply_to_json).length) pair(addresses, 'Reply-To', fullContacts(message.reply_to_json)); pair(addresses, 'Date', date(message.internal_date)); wrapper.append(addresses, messageBody(message));
@@ -193,4 +246,40 @@ $('reportProblem').onclick = () => { organizeKind = 'report'; $('organizeTitle')
 document.addEventListener('keydown', event => { if (document.querySelector('dialog[open]')) return; const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName); if (typing) return; if (event.key === '/' && !event.metaKey && !event.ctrlKey) { event.preventDefault(); $('search').focus(); } if (event.key === 'Escape' && state.route.id) { event.preventDefault(); backToList(); } if (['ArrowDown', 'ArrowUp'].includes(event.key) && document.activeElement?.classList.contains('conversation-link')) { const links = [...document.querySelectorAll('.conversation-link')]; const index = links.indexOf(document.activeElement); const next = links[index + (event.key === 'ArrowDown' ? 1 : -1)]; if (next) { event.preventDefault(); next.focus(); } } });
 $('dateHint').textContent = 'Company and role names search stored message text. Dates are calendar days (YYYY-MM-DD) read by the store in UTC, not in ' + Intl.DateTimeFormat().resolvedOptions().timeZone + '.';
 window.addEventListener('pagehide', rememberList);
-let restored = false; RaydarNav.restore(address => { restored = true; const target = ROUTE.parseRoute(address); state.route = { ...target, id: '' }; recoverListPosition(target); renderScope(); navigate(target); }); if (!restored) { recoverListPosition(state.route); renderScope(); loadFeed(); if (state.route.id) loadThread(state.route.id); }
+function boot() {
+  let restored = false;
+  RaydarNav.restore(address => { restored = true; const target = ROUTE.parseRoute(address); state.route = { ...target, id: '' }; recoverListPosition(target); renderScope(); navigate(target); });
+  if (!restored) { recoverListPosition(state.route); renderScope(); loadFeed(); if (state.route.id) loadThread(state.route.id); }
+}
+// Fail closed, and say why. Inside the shell iframe the durable session is
+// already there and the gate never appears; at a bookmarked or copied
+// conversation link this is what stands between an employee and a feed request
+// that would only fail with a 401 further down.
+function showGate(message) { $('gate').classList.remove('hidden'); $('gateError').textContent = message || ''; }
+async function start() {
+  let config = {};
+  try { config = await fetch('/api/seq/config', { cache: 'no-store' }).then(response => response.json()); } catch {}
+  if (!config.authRequired) return showGate('Google sign-in is not configured, so Master Inbox is fail-closed.');
+  const session = await window.RaydarAuth?.session().catch(() => null);
+  if (session?.authenticated) return boot();
+  showGate('');
+  // Google's script is loaded ONLY when the gate is actually shown. Every
+  // employee loads this page inside the shell iframe, where the session
+  // already exists, so a static <script src="accounts.google.com"> would be a
+  // third-party fetch on every page view that can never be used.
+  const render = () => {
+    if (!(window.google && google.accounts?.id)) return setTimeout(render, 150);
+    google.accounts.id.initialize({ client_id: config.googleClientId, callback: async response => {
+      try { await window.RaydarAuth.signIn(response.credential); $('gate').classList.add('hidden'); boot(); }
+      catch { $('gateError').textContent = 'Sign-in failed — try again.'; }
+    } });
+    google.accounts.id.renderButton($('gsi'), { theme: 'filled_black', size: 'large', text: 'signin_with', shape: 'pill' });
+  };
+  const script = document.createElement('script');
+  script.src = 'https://accounts.google.com/gsi/client';
+  script.async = true;
+  script.onerror = () => { $('gateError').textContent = 'The Google sign-in script could not be loaded. Open monitor.raydar.xyz and sign in there, then reload this page.'; };
+  script.onload = render;
+  document.head.append(script);
+}
+start();

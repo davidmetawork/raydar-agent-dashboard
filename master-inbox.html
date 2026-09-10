@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Master Inbox — Raydar</title>
 <link rel="stylesheet" href="/fonts/pp-grafier.css"><link rel="stylesheet" href="/mailroom.css"><link rel="stylesheet" href="/master-inbox.css">
 <script src="/auth-session.js"></script><script src="/nav-history.js"></script><script src="/master-inbox-route.js"></script>
@@ -9,12 +9,17 @@
 <script type="module" src="/master-inbox.mjs"></script>
 </head>
 <body>
+<!-- Standalone sign-in gate. Inside the shell iframe the durable session is
+     already present and this never shows; at a bookmarked or copied
+     conversation link it is the difference between a Google button and a
+     failed feed load. -->
+<div class="gate hidden" id="gate"><div class="gatebox"><h2>Master Inbox</h2><p>Sign in with your Raydar Google account to use connected mailboxes.</p><div id="gsi"></div><p class="gate-error" id="gateError"></p></div></div>
 <main class="app">
-<header class="topbar"><div class="heading"><span class="eyebrow">MONITOR / EMAIL</span><h1>Master Inbox</h1><p>Your team's mailboxes, in one place.</p></div><span id="freshness" role="status">Connecting…</span><button class="button" id="refresh" type="button">↻ Refresh</button><button class="compose-button" id="compose" type="button">＋ Compose</button></header>
+<header class="topbar"><div class="heading"><span class="eyebrow">MONITOR / EMAIL</span><h1>Master Inbox</h1><p>Your team's mailboxes, in one place.</p></div><div class="status unknown" id="status" role="status" title="Coverage has not been read yet.">Loading shared store…</div><button class="button" id="refresh" type="button">↻ Refresh</button><button class="compose-button" id="compose" type="button">＋ Compose</button></header>
 <section class="workspace" aria-label="Master Inbox">
 <nav class="rail" aria-label="Mailbox folders"><p class="rail-title">MAIL</p><div id="folders"></div><div class="rail-footer">Shared mailbox access<p>Read and send through the connected identities. Counts describe retained mail, not work remaining.</p><button class="text-button" id="reportProblem" type="button">Report a problem</button></div></nav>
 <div class="main-area">
-<div class="scopebar"><button class="button drawer-toggle" id="openAccounts" type="button" aria-label="Choose account and folder">☰ Accounts & folders</button><label class="account-control" for="mailbox">Account <select id="mailbox"><option value="">All mailboxes</option></select></label><button class="scope-pill" id="unreadShortcut" type="button" aria-pressed="false">Unread</button><span id="scopeDescription">Inbox · All mailboxes</span></div>
+<div class="scopebar"><button class="button drawer-toggle" id="openAccounts" type="button" aria-label="Choose account and folder">☰ Accounts & folders</button><label class="account-control" for="mailbox">Account <select id="mailbox"><option value="">All mailboxes</option></select></label><button class="scope-pill" id="unreadShortcut" type="button" aria-pressed="false">Unread</button><span id="scopeDescription">Inbox · All mailboxes</span><span id="scopeCounts" class="scope-counts"></span></div>
 <form id="searchForm" class="searchbar" role="search"><span class="search-icon" aria-hidden="true">⌕</span><label class="sr-only" for="search">Search retained mail</label><input id="search" type="search" placeholder="Search people, subjects, or message text…" autocomplete="off"><button class="filter-toggle" id="filterToggle" type="button" aria-expanded="false" aria-controls="filters">Filters <span id="filterCount" class="hidden"></span></button><div class="filter-chips hidden" id="filterChips" aria-label="Active filters"></div></form>
 <section class="filters hidden" id="filters" aria-label="Search filters"><label>From<input id="filter-from" placeholder="Name or exact email"></label><label>To<input id="filter-to" placeholder="Name or exact email"></label><label>On or after<input id="filter-after" type="date"></label><label>Before<input id="filter-before" type="date"></label><label class="filter-check"><input id="filter-hasAttachment" type="checkbox"> Has an attachment</label><button class="text-button" id="clearFilters" type="button">Clear filters</button><p class="filter-hint" id="dateHint">Company and role names search stored message text.</p><p class="filter-hint">Subject and filename filters are not available yet. The store has no subject: or filename: operator; those words are searched as message text until the robot API lands.</p><details class="search-help"><summary>Supported search syntax</summary><p>The store reads <code>from:</code>, <code>to:</code>, <code>after:</code>, <code>before:</code>, <code>in:</code>, <code>mailbox:</code>, <code>label:</code> and <code>has:attachment</code>. Dates are YYYY-MM-DD. Anything else, including <code>subject:</code>, <code>filename:</code>, <code>cc:</code> and <code>is:unread</code>, is searched as ordinary message text; when that happens the search box says so underneath.</p></details></section>
 <p id="searchNotice" class="search-notice hidden" role="status"></p><div id="notice" class="notice hidden" role="status"></div><div id="sendReceipt" class="send-receipt hidden" role="status"></div>

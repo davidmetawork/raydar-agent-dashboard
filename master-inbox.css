@@ -3,3 +3,33 @@
 @media(max-width:1200px){.reading .mail-panes{grid-template-columns:minmax(270px,.85fr) minmax(340px,1.15fr)}.workspace{grid-template-columns:145px minmax(0,1fr)}.rail .view-button{padding:10px 7px;font-size:10px}.reading .reader-content{padding:20px}.reading .conversation-link .participant{font-size:11px}.conversation-link{grid-template-columns:minmax(110px,155px) minmax(0,1fr) 72px}.account-control select{max-width:240px}}
 @media(max-width:980px){.reading .mail-panes{display:block}.reading .message-list{display:none}.reading .reader{height:100%}.topbar #freshness{max-width:170px}.conversation-link{grid-template-columns:minmax(0,1fr) auto;gap:3px 10px}.conversation-copy{grid-column:1/-1;grid-row:2}.conversation-copy .subject,.conversation-copy .snippet{display:block;margin:0}.row-facts{grid-column:1/-1;grid-row:3}.conversation-link .row-time{grid-column:2;grid-row:1}.reader-content{max-width:900px;margin:auto}}
 @media(max-width:700px){.workspace{display:flex}.rail{display:none}.scopebar{padding:10px 12px 0;gap:7px;flex-wrap:wrap}.drawer-toggle{display:block;font-size:10px;padding:7px 9px}.account-control{display:none}#scopeDescription{font-size:9px;flex-basis:100%;margin:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.topbar{flex-wrap:wrap;gap:7px}.topbar .heading{flex-basis:60%}.topbar #freshness{font-size:9px;max-width:none;order:4;flex-basis:100%;margin-top:4px}.topbar #refresh{font-size:0;padding:8px}.topbar #refresh::before{content:'↻';font-size:15px}.compose-button{font-size:10px;padding:8px 10px}.filters{max-height:42vh}.inbox-row,.reading .inbox-row{padding:13px 12px;grid-template-columns:16px 18px minmax(0,1fr);gap:5px}.participant{font-size:12px}.reading .reader-content{padding:18px 15px}.reader-content .message-subject{font-size:23px}.read-toolbar{padding:11px 14px}.message-top{gap:7px}.message-top .message-sender{font-size:10px}.message-top time{font-size:9px}.message-addresses{font-size:10px}.composer{width:calc(100% - 14px);max-height:calc(100dvh - 14px)}.dialog-heading{padding:12px 15px}.dialog-heading h2{font-size:21px}.composer fieldset{padding:12px 13px}.compose-field{gap:7px}.compose-field>label{width:34px;font-size:10px}.compose-field input,.compose-field select,.compose-field textarea{font-size:12px;padding:8px}.identity-note,.timezone-note{margin-left:41px;font-size:9px}.compose-footer{padding:11px;gap:8px}.compose-footer .button{font-size:10px;padding:7px}.compose-footer>div{font-size:9px}.coverage-table{font-size:9px;min-width:570px}.coverage>div{overflow:auto}.send-receipt{font-size:10px}.bulk-toolbar{padding:9px;font-size:10px;gap:5px}.bulk-toolbar .button{font-size:9px;padding:6px}.toast{font-size:11px;right:15px;bottom:15px}}
+
+/* Trust surfaces (slice 1's, kept exactly): the status pill's tone is the
+   store's coverage verdict, the empty state's tone is what an absence is
+   allowed to claim, and the search notice is what the store did not honour.
+   Every tone below is a real colour pair, never colour alone: the pill also
+   carries its claim as text, and the empty state its headline. */
+.status{margin-left:auto;max-width:44ch;border:1px solid #cde6d9;background:#e8f5ee;color:#15613f;border-radius:999px;padding:7px 11px;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:7px}
+.status::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:#1e8055;flex-shrink:0}
+.status.stale{border-color:#ead3aa;background:#fff3df;color:#6c4917}.status.stale::before{background:#b87b1f}
+.status.unknown{border-color:#d9d3c6;background:#f1ece1;color:#544e45}.status.unknown::before{background:#7a7368}
+.search-notice{margin:9px 20px 0;padding:9px 12px;border:1px solid #e2d9c6;background:#fbf7ec;border-radius:8px;font-size:11px;line-height:1.7;color:#5b5346}
+#conversationList .empty{padding:46px 24px;text-align:center;color:#5b5346;font-size:12px;line-height:1.8}
+#conversationList .empty strong{display:block;margin-bottom:6px;font-size:13px;color:var(--ink)}
+#conversationList .empty.unknown strong{color:#7d5216}
+.scope-counts{font-size:11px;color:#5f594f;flex-basis:100%;order:5}
+.filter-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.filter-chip{border:1px solid #d7cef2;background:var(--violet-soft);color:#4b3aa8;border-radius:20px;padding:5px 10px;font-size:11px;white-space:nowrap}
+.filter-chip:hover{background:#e6dffa}
+.filter-check{display:flex;align-items:center;gap:8px;font-size:11px}
+.filter-check input{width:15px;height:15px;accent-color:var(--violet)}
+.coverage-scroll{overflow-x:auto}
+.coverage-evidence{margin-top:10px;font-size:11px;line-height:1.7;color:#5b5346}
+.discard-controls{display:flex;gap:12px;flex-wrap:wrap}
+.forward-file{font-size:11px;color:#5f594f;margin:5px 0}
+.gate{position:fixed;inset:0;display:grid;place-items:center;background:var(--cream);z-index:40}
+.gatebox{background:white;border:1px solid var(--line);border-radius:18px;padding:30px;text-align:center;max-width:410px}
+.gatebox h2{font:600 24px "PP Grafier Display",Georgia,serif;margin:0 0 8px}
+.gatebox p{color:#5f594f;font-size:12px;line-height:1.7}
+.gatebox #gsi{display:grid;place-items:center;margin:18px 0 6px}
+.gate-error{color:#8c2f22;font-size:11px}
