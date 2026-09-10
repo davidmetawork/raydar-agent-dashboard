@@ -106,8 +106,31 @@ test("the default clock renders a real time without an injected formatter", () =
   assert.equal(R.clockTime(null), "");
 });
 
-test("an empty list only claims absence when coverage proves it", () => {
-  const confirmed = R.emptyStateText({ negativeEvidence: { kind: "none_through_watermark", watermark: "2026-09-10T16:15:00.000Z" } }, { clock });
+function coverageFor(states, extra) {
+  const ids = states.map((_, index) => "m" + index);
+  return Object.assign({
+    mailboxes: states.map((importState, index) => ({ id: ids[index], history: { importState, oldestAt: null, generation: 1 } })),
+    scope: { mailboxIds: ids },
+    summary: { mailboxes: ids.length, current: ids.length, stale: [], unknown: [], watermark: "2026-09-10T16:15:00.000Z" },
+    negativeEvidence: { kind: "none_through_watermark", watermark: "2026-09-10T16:15:00.000Z" }
+  }, extra || {});
+}
+
+test("a summary that does not add up is unknown, not current", () => {
+  const result = R.coverageSummary({ summary: { mailboxes: 10, current: 8, stale: [], unknown: [], watermark: "2026-09-10T16:15:00.000Z" } }, { clock });
+  assert.equal(result.tone, "unknown");
+  assert.match(result.text, /^Coverage does not add up: 8 of 10 mailboxes current/);
+});
+
+test("the status pill says when the coverage claim was read", () => {
+  const result = R.coverageSummary({ asOf: "2026-09-10T16:20:00.000Z", summary: { mailboxes: 1, current: 1, stale: [], unknown: [], watermark: "2026-09-10T16:15:00.000Z" } }, { clock });
+  assert.equal(result.tone, "current");
+  assert.equal(result.detail.endsWith("· Read at 09:15 AM"), true);
+  assert.equal(R.coverageSummary({ summary: { mailboxes: 1, current: 1, stale: [], unknown: [] } }, { clock }).detail.includes("Read at"), false);
+});
+
+test("an empty list only claims absence when every in-scope mailbox is synced AND fully imported", () => {
+  const confirmed = R.emptyStateText(coverageFor(["complete", "complete"]), { clock });
   assert.equal(confirmed.tone, "confirmed");
   assert.equal(confirmed.headline, "No conversations match, through 09:15 AM");
 
@@ -120,6 +143,46 @@ test("an empty list only claims absence when coverage proves it", () => {
     assert.equal(fallback.tone, "unknown");
     assert.match(fallback.headline, /^Result unknown: /);
   }
+});
+
+test("a watermark-synced mailbox with an unfinished backfill cannot prove absence", () => {
+  for (const state of ["partial", "none"]) {
+    const result = R.emptyStateText(coverageFor(["complete", state]), { clock });
+    assert.equal(result.tone, "unknown");
+    assert.equal(result.headline, "Result unknown: historical import is not complete for 1 mailbox");
+    assert.match(result.detail, /newest edge of coverage/);
+  }
+  const both = R.emptyStateText(coverageFor(["partial", "none"]), { clock });
+  assert.equal(both.headline, "Result unknown: historical import is not complete for 2 mailboxes");
+});
+
+test("an out-of-scope mailbox's unfinished backfill does not downgrade a confirmed absence", () => {
+  const coverage = coverageFor(["complete", "partial"]);
+  coverage.scope.mailboxIds = ["m0"];
+  coverage.summary = { mailboxes: 1, current: 1, stale: [], unknown: [], watermark: "2026-09-10T16:15:00.000Z" };
+  assert.equal(R.emptyStateText(coverage, { clock }).tone, "confirmed");
+});
+
+test("a confirmed kind is cross-checked against the summary it arrived with", () => {
+  const stale = coverageFor(["complete", "complete"], { summary: { mailboxes: 2, current: 0, stale: ["m0", "m1"], unknown: [], watermark: "2026-09-10T16:15:00.000Z" } });
+  const result = R.emptyStateText(stale, { clock });
+  assert.equal(result.tone, "unknown");
+  assert.equal(result.headline, "Result unknown: the store reported 2 mailboxes behind or unreported alongside this claim");
+
+  const never = coverageFor(["complete"], { summary: { mailboxes: 1, current: 0, stale: [], unknown: ["m0"], watermark: null } });
+  assert.equal(R.emptyStateText(never, { clock }).tone, "unknown");
+
+  const noSummary = coverageFor(["complete"]);
+  delete noSummary.summary;
+  assert.equal(R.emptyStateText(noSummary, { clock }).tone, "unknown");
+});
+
+test("a claim with no per-mailbox history reported is unknown, never confirmed", () => {
+  const coverage = coverageFor([]);
+  coverage.summary = { mailboxes: 0, current: 0, stale: [], unknown: [], watermark: "2026-09-10T16:15:00.000Z" };
+  const result = R.emptyStateText(coverage, { clock });
+  assert.equal(result.tone, "unknown");
+  assert.match(result.headline, /did not report per-mailbox history/);
 });
 
 test("the search box admits the fields the store ignored", () => {

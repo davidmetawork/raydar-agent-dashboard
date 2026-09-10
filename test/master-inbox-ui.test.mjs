@@ -89,8 +89,16 @@ test("Master Inbox keeps the chosen account when the folder changes", () => {
 test("Master Inbox rows are addressable links and drill-in goes through RaydarNav", () => {
   assert.match(source, /window\.RaydarNav\?\.href\(address\)/);
   assert.match(source, /<a class="rowlink" href=/);
-  assert.match(source, /window\.RaydarNav\.open\(screen,\(\)=>\{STATE\.screen=previous;closeReader\(\);\},ROUTE\.serializeRoute/);
-  assert.match(source, /\$\("backList"\)\.onclick=\(\)=>\{if\(!\(window\.RaydarNav&&window\.RaydarNav\.back\(STATE\.screen\)\)\)closeReader\(\);\};/);
+  assert.match(source, /STATE\.screens\.push\(screen\);window\.RaydarNav\.open\(screen,\(\)=>\{const index=STATE\.screens\.indexOf\(screen\);if\(index>=0\)STATE\.screens\.length=index;closeReader\(\);\},ROUTE\.serializeRoute/);
+  // The in-app Back button unwinds the WHOLE stack from the outermost screen,
+  // so a chain of conversations does not leave dangling history entries.
+  assert.match(source, /window\.RaydarNav\.back\(STATE\.screens\[0\]\)/);
+  // closeReader must not clear the screen stack; each screen's closer owns it.
+  assert.doesNotMatch(source, /function closeReader\(\)\{[^}]*STATE\.screens\.length=0/);
+  // The row's Enter handler is scoped to the row, so activating the anchor
+  // inside it cannot open the same conversation twice.
+  assert.match(source, /item\.onkeydown=event=>\{if\(event\.target!==item\)return;/);
+  assert.match(source, /<meta name="referrer" content="strict-origin-when-cross-origin" \/>/);
   assert.match(source, /window\.RaydarNav\?\.restore\(address=>\{const route=ROUTE\.parseRoute\(address\)/);
   assert.doesNotMatch(source, /#conversation=\$\{row\.id\}/);
 });

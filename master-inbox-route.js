@@ -85,67 +85,121 @@
     return (ids || []).map(function (id) { return label(id); }).filter(Boolean).join(", ");
   }
 
+  // The mailboxes this response actually claims to cover. coverage.mailboxes
+  // always lists the whole store, so the scope filter is what makes any claim
+  // about "every mailbox in scope" true rather than approximately true.
+  function scopedMailboxes(coverage) {
+    var all = (coverage && coverage.mailboxes) || [];
+    var scope = coverage && coverage.scope && coverage.scope.mailboxIds;
+    if (!Array.isArray(scope) || !scope.length) return all.filter(Boolean);
+    return all.filter(function (mailbox) { return mailbox && scope.indexOf(mailbox.id) >= 0; });
+  }
+
+  // Mailboxes whose historical import has not finished. The sync watermark
+  // bounds the NEWEST edge of coverage only; a mailbox synced to the head can
+  // still be missing years of older mail, so these mailboxes make any claim of
+  // absence over old mail false.
+  function incompleteHistory(coverage) {
+    return scopedMailboxes(coverage).filter(function (mailbox) {
+      return !mailbox.history || mailbox.history.importState !== "complete";
+    });
+  }
+
+  function plural(count, word) {
+    return count + " " + word + (count === 1 ? "" : word === "mailbox" ? "es" : "s");
+  }
+
   // The status pill. tone drives the colour; text is the whole claim; detail is
-  // the hover, which names the mailboxes behind a summary number.
+  // the hover, which names the mailboxes behind a summary number and says when
+  // the claim was read, so a page left open does not look freshly true.
   function coverageSummary(coverage, options) {
     var settings = options || {};
     var label = settings.label || function (id) { return id; };
     var clock = settings.clock || clockTime;
+    var readAt = clock(coverage && coverage.asOf);
+    function done(result) {
+      if (readAt) result.detail = result.detail + " · Read at " + readAt;
+      return result;
+    }
     var summary = coverage && coverage.summary;
     if (!summary) {
-      return { tone: "unknown", text: "Coverage unknown", detail: "The store did not report per-mailbox coverage with this result." };
+      return done({ tone: "unknown", text: "Coverage unknown", detail: "The store did not report per-mailbox coverage with this result." });
     }
     var unknown = (summary.unknown || []).filter(Boolean);
     var stale = (summary.stale || []).filter(function (id) { return id && unknown.indexOf(id) < 0; });
     var total = Number(summary.mailboxes || 0);
     var current = Number(summary.current || 0);
     var at = clock(summary.watermark);
-    if (!total) return { tone: "unknown", text: "No mailboxes in scope", detail: "This query covers no mailbox, so it can prove nothing." };
+    if (!total) return done({ tone: "unknown", text: "No mailboxes in scope", detail: "This query covers no mailbox, so it can prove nothing." });
     if (unknown.length) {
-      return {
+      return done({
         tone: "unknown",
         text: "Unknown for " + labelList(unknown, label),
         detail: "These mailboxes never reported a completed sync, so mail could exist that this list cannot show."
-      };
+      });
     }
     if (stale.length) {
-      return {
+      return done({
         tone: "stale",
         text: "Stale: " + stale.length + " mailbox" + (stale.length === 1 ? "" : "es") + " behind, oldest " + (at || "an unreported time"),
         detail: labelList(stale, label) + " — behind by more than 15 minutes or not active."
-      };
+      });
     }
-    return {
+    // A summary that does not add up is itself unknown coverage: nothing is
+    // reported behind, yet fewer mailboxes are current than are in scope.
+    if (current !== total) {
+      return done({
+        tone: "unknown",
+        text: "Coverage does not add up: " + current + " of " + plural(total, "mailbox") + " current, none reported behind",
+        detail: "The store reported no stale or unreported mailbox and still counted fewer current mailboxes than are in scope, so this coverage cannot be trusted."
+      });
+    }
+    return done({
       tone: "current",
       text: "Current through " + (at || "an unreported time") + " (" + current + " of " + total + " mailbox" + (total === 1 ? "" : "es") + ")",
       detail: "Every mailbox in scope reported a completed sync at or after that time."
-    };
+    });
   }
 
-  // What an empty list is allowed to claim.
+  // What an empty list is allowed to claim. The service's negativeEvidence.kind
+  // is derived from staleness and the watermark alone, so this cross-checks it
+  // against the summary it arrived with AND against per-mailbox history: an
+  // in-scope mailbox whose backfill is "partial" or "none" means older mail may
+  // simply never have been imported, and absence there proves nothing.
   function emptyStateText(coverage, options) {
     var clock = (options || {}).clock || clockTime;
     var evidence = (coverage && coverage.negativeEvidence) || null;
     var kind = evidence && evidence.kind;
+    var summary = (coverage && coverage.summary) || null;
+    var impaired = summary ? ((summary.stale || []).filter(Boolean).length + (summary.unknown || []).filter(Boolean).length) : 0;
+    var scoped = scopedMailboxes(coverage);
+    var incomplete = incompleteHistory(coverage);
+    var historyDetail = false;
+    var reason = "";
     if (kind === "none_through_watermark") {
+      if (!summary) reason = "the store did not report coverage alongside this claim";
+      else if (impaired) reason = "the store reported " + plural(impaired, "mailbox") + " behind or unreported alongside this claim";
+      else if (!scoped.length) reason = "the store did not report per-mailbox history with this result";
+      else if (incomplete.length) { reason = "historical import is not complete for " + plural(incomplete.length, "mailbox"); historyDetail = true; }
+    } else if (kind === "unknown") {
+      reason = (evidence && evidence.reason) || "coverage was not confirmed";
+    } else {
+      reason = "coverage was not reported";
+    }
+    if (!reason) {
       var at = clock(evidence.watermark);
       return {
         tone: "confirmed",
         headline: at ? "No conversations match, through " + at : "No conversations match",
-        detail: "Every mailbox in scope is synced through that time, so this empty result is a confirmed absence."
-      };
-    }
-    if (kind === "unknown") {
-      return {
-        tone: "unknown",
-        headline: "Result unknown: " + (evidence.reason || "coverage was not confirmed"),
-        detail: "A mailbox in scope is behind or unreported, so matching mail may exist that this list cannot show."
+        detail: "Every mailbox in scope is synced through that time and has its full history imported, so this empty result is a confirmed absence."
       };
     }
     return {
       tone: "unknown",
-      headline: "Result unknown: coverage was not reported",
-      detail: "Without per-mailbox coverage an empty list cannot be told apart from a sync failure."
+      headline: "Result unknown: " + reason,
+      detail: historyDetail
+        ? "The synced-through time bounds only the newest edge of coverage; older mail that has never been imported would not appear here."
+        : "A mailbox in scope is behind or unreported, so matching mail may exist that this list cannot show."
     };
   }
 
@@ -196,6 +250,8 @@
     coverageSummary: coverageSummary,
     emptyStateText: emptyStateText,
     searchNotice: searchNotice,
+    scopedMailboxes: scopedMailboxes,
+    incompleteHistory: incompleteHistory,
     badgeCopy: badgeCopy,
     viewTitle: viewTitle
   };
