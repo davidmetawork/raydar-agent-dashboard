@@ -78,6 +78,21 @@ export function displayText(value) { return String(value ?? '').replace(/&(#x[0-
 export const contactLabel = value => { const person = firstContact(value); return displayText(person?.name || person?.address || 'Unknown participant'); };
 export const fullContacts = value => contacts(value).map(person => person.name && person.address ? `${/[,;"]/u.test(person.name) ? '"' + String(person.name).replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"' : person.name} <${person.address}>` : person.address || person.name).filter(Boolean).join(', ');
 export const mailboxAddresses = box => [...new Set([box?.principal, ...(box?.visible_addresses || [])].filter(Boolean).map(addressKey))];
+/* Who this conversation is WITH, for a folder where the sender is always us.
+
+   BEST EFFORT, and deliberately labelled as such: the feed has no counterparty
+   field, so this takes every participant recorded on the row and removes the
+   addresses that belong to the company's own mailboxes. The first address left
+   is treated as the outside person. It is wrong for a purely internal thread
+   (there is no outside person, and the recorded label is used instead) and it
+   can pick the wrong person when several outsiders are on one thread. When the
+   store learns a counterparty field, this function is what it replaces. */
+export function externalParticipant(row, ownAddresses = []) {
+  const own = new Set([...ownAddresses].map(addressKey).filter(Boolean));
+  const people = [...contacts(row?.latest_to), ...contacts(row?.latest_from), ...contacts(row?.participant_text)];
+  const outside = people.find(person => person.address && !own.has(addressKey(person.address)));
+  return outside ? displayText(outside.name || outside.address) : '';
+}
 export function rowParticipant(row) { if (row.display_participant) return displayText(row.display_participant); const people = row.last_direction === 'outbound' ? row.latest_to : row.latest_from; return contacts(people).length ? contactLabel(people) : contactLabel(row.participant_text); }
 export function logicalMessages(messages) {
   const groups = new Map();

@@ -1,4 +1,4 @@
-import { FILTER_FIELDS, parseFilters, composeQuery, feedQuery, contacts, firstContact, chooseReplyMessage, fullContacts, contactLabel, displayText, mailboxAddresses, logicalMessages, rowParticipant, attachmentStatus, attachmentReason, messageDirection, splitQuotedText, errorMessage, requestGate, EMAIL_CSP } from './master-inbox-model.mjs';
+import { FILTER_FIELDS, parseFilters, composeQuery, feedQuery, externalParticipant, contacts, firstContact, chooseReplyMessage, fullContacts, contactLabel, displayText, mailboxAddresses, logicalMessages, rowParticipant, attachmentStatus, attachmentReason, messageDirection, splitQuotedText, errorMessage, requestGate, EMAIL_CSP } from './master-inbox-model.mjs';
 import { createComposer } from './master-inbox-composer.mjs';
 /* The route contract and every trust sentence come from master-inbox-route.js,
    the classic script the shell loads before this module. It is shared with the
@@ -30,7 +30,9 @@ async function api(path, options = {}) {
   if (!response.ok || data.ok === false) { const error = new Error(data.error || 'request_failed'); error.code = data.error; error.detail = data.detail; error.draftId = data.draftId; error.status = response.status; throw error; }
   return data;
 }
-function toast(message, label, handler, duration = 7000) { $('toastText').textContent = message; $('toastAction').textContent = label || ''; $('toastAction').classList.toggle('hidden', !label); $('toastAction').onclick = handler || null; $('toast').classList.remove('hidden'); clearTimeout(window.__inboxToast); if (duration) window.__inboxToast = setTimeout(() => $('toast').classList.add('hidden'), duration); }
+// A toast with an action is sticky: the undo hold is ten seconds and a
+// seven-second dismissal would take the control away mid-hold.
+function toast(message, label, handler, duration = label ? 0 : 7000) { $('toastText').textContent = message; $('toastAction').textContent = label || ''; $('toastAction').classList.toggle('hidden', !label); $('toastAction').onclick = handler || null; $('toast').classList.remove('hidden'); clearTimeout(window.__inboxToast); if (duration) window.__inboxToast = setTimeout(() => $('toast').classList.add('hidden'), duration); }
 function notice(message, retry, error) { const host = $('notice'); host.replaceChildren(el('span', '', message)); host.className = 'notice' + (error ? ' error' : ''); if (retry) host.append(btn('Try again', 'button', retry)); if (error?.status === 401 || error?.status === 403) { const link = el('a', 'button', 'Sign in'); link.href = '/login?return_to=' + encodeURIComponent(location.origin + '/master-inbox#' + routeAddress(state.route)); link.target = '_top'; host.append(link); } }
 const clearNotice = () => $('notice').classList.add('hidden');
 function empty(host, title, detail, retry) { const node = el('div', 'empty-state'); node.append(el('h3', '', title), el('p', '', detail)); if (retry) node.append(btn('Try again', 'button', retry)); host.replaceChildren(node); }
@@ -89,20 +91,39 @@ function restoreRowFocus(id) { requestAnimationFrame(() => { const link = Array.
 function backToList() { const id = state.route.id; const scroll = state.listScroll; if (!RaydarNav.back(state.currentScreen)) navigate({ ...state.route, id: '' }, { push: false }); requestAnimationFrame(() => { $('listScroll').scrollTop = scroll; restoreRowFocus(id); }); }
 
 function renderList() {
-  const host = $('conversationList'); host.replaceChildren(); host.setAttribute('aria-busy', String(state.loading));
+  const host = $('conversationList'); host.replaceChildren(); host.setAttribute('aria-busy', String(state.loading)); host.setAttribute('role', 'list'); host.setAttribute('aria-label', ROUTE.viewTitle(state.route.folder, state.route.mailbox ? scopeLabel() : ''));
   // The empty state is a claim about absence, so it is written by the route
   // module from the store's negativeEvidence and cross-checked against the
   // per-mailbox history floor: "no conversations match, through 14:05" only
   // when every mailbox in scope is current AND fully imported.
   if (!state.rows.length && !state.loading) { const evidence = ROUTE.emptyStateText(state.coverage); const node = el('div', 'empty ' + evidence.tone); node.append(el('strong', '', evidence.headline), el('span', '', evidence.detail)); host.replaceChildren(node); }
+  // The mailboxes this store can send as. Used to work out who a Sent row is
+  // WITH, since every Sent row's sender is one of us.
+  const own = state.boxes.flatMap(mailbox => [mailbox.principal, ...(mailbox.visible_addresses || [])]).filter(Boolean);
+  const outboundFolder = ['sent', 'drafts'].includes(state.route.folder);
   for (const row of state.rows) {
-    const item = el('div', 'inbox-row' + (row.unread ? ' unread' : '') + (state.route.id === row.id ? ' active' : '')); const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.checked = state.selected.has(row.id); checkbox.setAttribute('aria-label', 'Select ' + displayText(row.subject || 'conversation')); checkbox.addEventListener('change', () => { if (checkbox.checked && state.selected.size >= 25) { checkbox.checked = false; return toast('Select up to 25 conversations for one bulk action.'); } checkbox.checked ? state.selected.add(row.id) : state.selected.delete(row.id); renderBulk(); });
+    const item = el('div', 'inbox-row' + (row.unread ? ' unread' : '') + (state.route.id === row.id ? ' active' : '')); item.setAttribute('role', 'listitem'); const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.checked = state.selected.has(row.id); checkbox.setAttribute('aria-label', 'Select ' + displayText(row.subject || 'conversation')); checkbox.addEventListener('change', () => { if (checkbox.checked && state.selected.size >= 25) { checkbox.checked = false; return toast('Select up to 25 conversations for one bulk action.'); } checkbox.checked ? state.selected.add(row.id) : state.selected.delete(row.id); renderBulk(); });
     const star = btn(row.starred ? '★' : '☆', 'star-button', () => action(row.starred ? 'unstar' : 'star', rowTargets(row))); star.setAttribute('aria-label', row.starred ? 'Remove star' : 'Add star'); star.setAttribute('aria-pressed', String(Boolean(row.starred))); star.disabled = !rowTargets(row).length || state.actionBusy;
-    const link = makeLink(el('a', 'conversation-link'), { ...state.route, id: row.id }); link.dataset.id = row.id; if (state.route.id === row.id) link.setAttribute('aria-current', 'true'); const participant = el('span', 'participant', rowParticipant(row)); participant.title = fullContacts(row.last_direction === 'outbound' ? row.latest_to : row.latest_from) || rowParticipant(row); const copy = el('span', 'conversation-copy'); copy.append(el('span', 'subject', displayText(row.subject || '(No subject)') + (Number(row.message_count) > 1 ? ' · ' + row.message_count : '')), el('span', 'snippet', displayText(row.snippet || 'No preview available')));
-    const when = el('time', 'row-time', shortDate(row.newest_at)); when.title = date(row.newest_at); const facts = el('span', 'row-facts'); const ids = row.matching_mailbox_ids?.length ? row.matching_mailbox_ids : row.mailbox_ids || []; const mailbox = el('span', 'row-mailbox', ids.map(boxLabel).join(' · ') || 'Mailbox not recorded'); mailbox.title = ids.map(boxLabel).join(', '); facts.append(el('span', 'direction ' + (row.last_direction || ''), messageDirection({ ...row, direction: row.last_direction })), mailbox);
-    if (row.has_attachment) { const available = Number(row.attachments?.available || 0); facts.append(el('span', 'attachment-fact', available ? 'File available' : 'Attachment recorded')); }
+    // In Sent and Drafts the person who matters is the one outside the company.
+    const outside = outboundFolder || row.last_direction === 'outbound' ? externalParticipant(row, own) : '';
+    const who = outside || rowParticipant(row);
+    const link = makeLink(el('a', 'conversation-link'), { ...state.route, id: row.id }); link.dataset.id = row.id; if (state.route.id === row.id) link.setAttribute('aria-current', 'true');
+    const participant = el('span', 'participant', who); participant.title = fullContacts(row.last_direction === 'outbound' ? row.latest_to : row.latest_from) || who;
+    const copy = el('span', 'conversation-copy'); copy.append(el('span', 'subject', displayText(row.subject || '(No subject)') + (Number(row.message_count) > 1 ? ' · ' + row.message_count : '')), el('span', 'snippet', displayText(row.snippet || 'No preview available')));
+    const when = el('time', 'row-time', shortDate(row.newest_at)); when.title = date(row.newest_at); const facts = el('span', 'row-facts'); const ids = row.matching_mailbox_ids?.length ? row.matching_mailbox_ids : row.mailbox_ids || []; const mailbox = el('span', 'row-mailbox', ids.map(boxLabel).join(' · ') || 'Mailbox not recorded'); mailbox.title = ids.map(boxLabel).join(', ');
+    // The direction chip is rendered ONLY when the feed reports a direction.
+    // The deployed feed does not, and a chip that says "Conversation" on every
+    // row is noise dressed as information.
+    const direction = row.last_direction || row.send_state ? messageDirection({ ...row, direction: row.last_direction }) : '';
+    if (direction) facts.append(el('span', 'direction ' + (row.last_direction || ''), direction));
+    facts.append(mailbox);
+    if (row.has_attachment) facts.append(el('span', 'attachment-fact', Number(row.attachments?.available) > 0 ? 'File available' : 'Attachment recorded'));
     if (Number(row.message_copy_count) > Number(row.message_count)) facts.title = `${row.message_count} messages · ${row.message_copy_count} retained mailbox copies`;
-    link.append(participant, copy, when, facts); item.append(checkbox, star, link); host.append(item);
+    link.append(participant, copy, when, facts);
+    // One accessible name per row, in reading order, so a screen reader hears
+    // who, what, when and where without walking four spans.
+    link.setAttribute('aria-label', [row.unread ? 'Unread' : '', who, displayText(row.subject || '(No subject)'), direction, date(row.newest_at), ids.map(boxLabel).join(', ')].filter(Boolean).join(' · '));
+    item.append(checkbox, star, link); host.append(item);
   }
   $('loadMore').classList.toggle('hidden', !state.hasMore); $('loadMore').disabled = state.loading; $('listSummary').textContent = state.rows.length ? `${number(state.rows.length)} ${state.rows.length === 1 ? 'conversation' : 'conversations'} loaded${state.hasMore ? ' · more available' : ''} · ${scopeLabel()}` : '0 matching conversations'; renderBulk();
 }

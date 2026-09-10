@@ -1,13 +1,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { contacts, contactLabel, displayText, logicalMessages, replyDefaults, parseFilters, composeQuery, feedQuery, rowParticipant, splitQuotedText, attachmentStatus, createSaveQueue, createSendRequest, requestGate } from '../master-inbox-model.mjs';
+import { readFileSync } from 'node:fs';
+import { contacts, contactLabel, displayText, logicalMessages, replyDefaults, parseFilters, composeQuery, feedQuery, rowParticipant, externalParticipant, splitQuotedText, attachmentStatus, createSaveQueue, createSendRequest, requestGate } from '../master-inbox-model.mjs';
+
+/* EVERY file this suite reads from source is named in THIS block and nowhere
+   else. When the page moves again, only these constants move; the assertions
+   below keep pointing at whatever they name. (Slice 1's rule, carried through
+   the split: the one-file page became five files, so the constant became a
+   block.) */
+const PAGE_SOURCE = '../master-inbox.mjs';
+const SHELL_SOURCE = '../master-inbox.html';
+const STYLE_SOURCE = '../master-inbox.css';
+const COMPOSER_SOURCE = '../master-inbox-composer.mjs';
+const MODEL_SOURCE = '../master-inbox-model.mjs';
+const ROUTE_SOURCE = '../master-inbox-route.js';
+const DASHBOARD_SHELL_SOURCE = '../index.html';
+const FEED_PROXY_SOURCE = '../api/master-inbox/feed.mjs';
+const DOWNLOAD_PROXY_SOURCE = '../api/master-inbox/_lib/download.mjs';
+const DRAFT_ATTACHMENT_PROXY_SOURCE = '../api/master-inbox/draft-attachment.mjs';
+
+const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
+const page = read(PAGE_SOURCE);
+const shell = read(SHELL_SOURCE);
+const style = read(STYLE_SOURCE);
+const composer = read(COMPOSER_SOURCE);
+const model = read(MODEL_SOURCE);
+const route = read(ROUTE_SOURCE);
+const dashboard = read(DASHBOARD_SHELL_SOURCE);
+const feedProxy = read(FEED_PROXY_SOURCE);
+const download = read(DOWNLOAD_PROXY_SOURCE);
+const draftAttachmentProxy = read(DRAFT_ATTACHMENT_PROXY_SOURCE);
+
+// ---------------------------------------------------------------- behaviour
 
 test('participant parsing keeps provider JSON out of labels and decodes text safely', () => {
   assert.deepEqual(contacts('{"name":"Alex Example","address":"alex@example.test"}'), [{ name: 'Alex Example', address: 'alex@example.test' }]);
   assert.equal(contactLabel('[{"name":"Alex &amp; Team","address":"alex@example.test"}]'), 'Alex & Team');
   assert.equal(displayText('&lt;script&gt;'), '<script>');
   assert.equal(rowParticipant({ last_direction: 'outbound', latest_to: [{ name: 'Candidate', address: 'candidate@example.test' }], participant_text: 'David' }), 'Candidate');
+});
+
+test('a Sent row names the person outside the company, and says nothing when there is none', () => {
+  const own = ['david@example.test', 'recruiting@example.test', 'noah@example.test'];
+  const row = { last_direction: 'outbound', latest_from: [{ address: 'recruiting@example.test' }], latest_to: [{ name: 'Alex Example', address: 'alex@example.test' }], participant_text: '[{"address":"david@example.test"}]' };
+  assert.equal(externalParticipant(row, own), 'Alex Example');
+  // Best effort, and honest about it: an internal-only thread has no outside
+  // person, so the caller falls back to the recorded label.
+  assert.equal(externalParticipant({ latest_to: [{ address: 'NOAH@example.test' }], participant_text: '' }, own), '');
 });
 
 test('every filter is written as an operator the store parses, and survives the round trip', () => {
@@ -62,7 +101,7 @@ test('replying to an outbound last message targets the original recipients, not 
 
 test('quoted history remains recoverable and attachment presence is separate from readiness', () => {
   const original = 'Thanks, Tuesday works.\n\nOn Monday David wrote:\n> Older text\n> More'; const parts = splitQuotedText(original); assert.equal(parts.body + '\n' + parts.quoted, original);
-  assert.equal(attachmentStatus({ state: 'pending' }), 'Importing'); assert.equal(attachmentStatus({ state: 'available', downloadAvailable: false }), 'Unavailable'); assert.equal(attachmentStatus({ state: 'available', downloadAvailable: true }), 'Available');
+  assert.equal(attachmentStatus({ state: 'pending' }), 'Importing'); assert.equal(attachmentStatus({ state: 'blocked' }), 'Blocked'); assert.equal(attachmentStatus({ state: 'available', downloadAvailable: false }), 'Unavailable'); assert.equal(attachmentStatus({ state: 'available', downloadAvailable: true }), 'Available');
 });
 
 test('superseded search and thread reads cannot update the current result', () => { const gate = requestGate(); const old = gate.begin(); const next = gate.begin(); assert.equal(old.current(), false); assert.equal(old.signal.aborted, true); assert.equal(next.current(), true); gate.cancel(); assert.equal(next.current(), false); });
@@ -70,11 +109,6 @@ test('superseded search and thread reads cannot update the current result', () =
 test('draft save queue serializes revision updates and recovers after a failed save', async () => {
   const events = []; let revision = 0; const enqueue = createSaveQueue(async operation => { events.push('start:' + operation); const current = revision; await Promise.resolve(); if (operation === 'fail') throw new Error('conflict'); revision = current + 1; events.push('saved:' + revision); return revision; });
   const first = enqueue('a'); const second = enqueue('b'); assert.deepEqual(await Promise.all([first, second]), [1, 2]); await assert.rejects(enqueue('fail')); assert.equal(await enqueue('c'), 3); assert.deepEqual(events.slice(0, 4), ['start:a', 'saved:1', 'start:b', 'saved:2']);
-});
-
-test('mailbox UI uses an inert sandbox preview and preserves explicitly excluded workflows', async () => {
-  const source = await readFile(new URL('../master-inbox.mjs', import.meta.url), 'utf8'); const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8'); const composer = await readFile(new URL('../master-inbox-composer.mjs', import.meta.url), 'utf8');
-  assert.match(source, /document\.createElement\('template'\)/); assert.match(source, /frame\.setAttribute\('sandbox', ''\)/); assert.doesNotMatch(source, /history\.replaceState/); assert.match(source, /RaydarNav\.open/); assert.match(html, /id="accountDrawer"/); assert.match(composer, /clientKey: state\.clientKey/); assert.match(composer, /await persist\(true\)/); assert.doesNotMatch(html, /Assigned to me|Add internal comment|Complete conversation/);
 });
 
 test('an uncertain send repeats the exact saved revision and key without another draft save', async () => {
@@ -96,15 +130,63 @@ test('a malformed success response keeps the send key for confirmation', async (
   await assert.rejects(request.run(), error => error.code === 'send_response_unconfirmed'); assert.equal(request.pending.idempotencyKey, 'fixed-key');
 });
 
-test('the composer can always be dismissed and offers no route the service does not implement', async () => {
-  const composer = await readFile(new URL('../master-inbox-composer.mjs', import.meta.url), 'utf8');
-  const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8');
-  const proxy = await readFile(new URL('../api/master-inbox/draft-attachment.mjs', import.meta.url), 'utf8');
+// ------------------------------------------------------------ page contract
+
+test('mailbox UI uses an inert sandbox preview and preserves explicitly excluded workflows', () => {
+  assert.match(page, /document\.createElement\('template'\)/);
+  assert.match(page, /frame\.setAttribute\('sandbox', ''\)/);
+  assert.doesNotMatch(page, /history\.replaceState/);
+  assert.match(page, /RaydarNav\.open/);
+  assert.match(shell, /id="accountDrawer"/);
+  assert.match(composer, /clientKey: state\.clientKey/);
+  assert.match(composer, /await persist\(true\)/);
+  assert.doesNotMatch(shell, /Assigned to me|Add internal comment|Complete conversation/);
+});
+
+test('the page states coverage from the store and never composes a freshness claim of its own', () => {
+  assert.match(page, /ROUTE\.coverageSummary\(state\.coverage/);
+  assert.match(page, /ROUTE\.emptyStateText\(state\.coverage\)/);
+  assert.match(page, /ROUTE\.searchNotice\(state\.parsed\)/);
+  assert.match(page, /state\.parsed = data\.query \|\| null/);
+  assert.match(page, /state\.coverage = data\.coverage \|\| null/);
+  assert.doesNotMatch(page, /'Shared store current'|"Shared store current"/);
+  assert.match(shell, /id="status"/);
+  assert.match(shell, /id="searchNotice"/);
+  // Counts carry their unit, and say what the unit means.
+  assert.match(page, /unread \$\{unread === 1 \? 'message' : 'messages'\}/);
+  assert.match(page, /retained message copies in the shared store/);
+});
+
+test('routing has exactly one implementation, and the page loads it before it runs', () => {
+  assert.match(shell, /<script src="\/master-inbox-route\.js"><\/script>/);
+  assert.ok(shell.indexOf('src="/master-inbox-route.js"') < shell.indexOf('src="/master-inbox.mjs"'), 'the route module must be loaded before the page module');
+  assert.match(page, /const ROUTE = window\.MasterInboxRoute/);
+  assert.match(route, /window\.MasterInboxRoute = api/);
+  assert.match(route, /globalThis\.MasterInboxRoute = api/);
+  assert.match(route, /module\.exports = api/);
+  // The model must not grow a second route parser.
+  assert.doesNotMatch(model, /export function (?:parseRoute|routeAddress|normalizedRoute)/);
+});
+
+test('the standalone page gates on a Raydar session before it reads any mail', () => {
+  assert.match(shell, /id="gate"/);
+  assert.match(shell, /id="gsi"/);
+  assert.match(page, /window\.RaydarAuth\?\.session\(\)/);
+  assert.match(page, /if \(session\?\.authenticated\) return boot\(\)/);
+  assert.match(page, /google\.accounts\.id\.renderButton/);
+  // The Google script is fetched only when the gate is shown: inside the shell
+  // iframe the session already exists, so a static tag would be a third-party
+  // request on every page view that can never be used.
+  assert.doesNotMatch(shell, /accounts\.google\.com/);
+  assert.match(page, /script\.src = 'https:\/\/accounts\.google\.com\/gsi\/client'/);
+});
+
+test('the composer can always be dismissed and offers no route the service does not implement', () => {
   // Main's dropped assertion 4, restored in behavioural form: leaving is
   // unconditional, so a draft that cannot be saved (no verified From) still
   // has a way out.
-  assert.match(html, /id="discardDraft"/);
-  assert.match(html, /id="keepEditing"/);
+  assert.match(shell, /id="discardDraft"/);
+  assert.match(shell, /id="keepEditing"/);
   assert.match(composer, /function discard\(\)/);
   assert.match(composer, /\$\('discardDraft'\)\.onclick = discard/);
   assert.match(composer, /return offerDiscard\('This draft cannot be saved without a sending address\.'\)/);
@@ -112,47 +194,72 @@ test('the composer can always be dismissed and offers no route the service does 
   assert.doesNotMatch(composer, /action: 'copy'/);
   assert.doesNotMatch(composer, /action: 'remove'/);
   assert.doesNotMatch(composer, /draft-attachment\?id=/);
-  assert.match(proxy, /if \(req\.method !== "POST"\)/);
+  assert.match(draftAttachmentProxy, /if \(req\.method !== "POST"\)/);
 });
 
-test('an attachment download relays the service bytes and never invents a 502', async () => {
-  const download = await readFile(new URL('../api/master-inbox/_lib/download.mjs', import.meta.url), 'utf8');
+test('an attachment download relays the service bytes and never invents a 502', () => {
   assert.match(download, /res\.status\(200\)\.send\(Buffer\.from\(await response\.arrayBuffer\(\)\)\)/);
   assert.doesNotMatch(download, /response\.ok \? 502/);
   assert.doesNotMatch(download, /redirect=1/);
   assert.match(download, /url\.protocol !== "https:"/);
 });
 
-test('the page states coverage from the store and never composes a freshness claim of its own', async () => {
-  const page = await readFile(new URL('../master-inbox.mjs', import.meta.url), 'utf8');
-  const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8');
-  // Slice 1's trust surfaces, kept: one route module owns every claim.
-  assert.match(page, /ROUTE\.coverageSummary\(state\.coverage/);
-  assert.match(page, /ROUTE\.emptyStateText\(state\.coverage\)/);
-  assert.match(page, /ROUTE\.searchNotice\(state\.parsed\)/);
-  assert.match(page, /state\.parsed = data\.query \|\| null/);
-  assert.match(page, /state\.coverage = data\.coverage \|\| null/);
-  assert.match(page, /const ROUTE = window\.MasterInboxRoute/);
-  assert.doesNotMatch(page, /'Shared store current'|"Shared store current"/);
-  assert.match(html, /<script src="\/master-inbox-route\.js"><\/script>/);
-  assert.match(html, /id="status"/);
-  assert.match(html, /id="searchNotice"/);
-  // Counts carry their unit, and say what the unit means.
-  assert.match(page, /unread \${unread === 1 \? 'message' : 'messages'}/);
-  assert.match(page, /retained message copies in the shared store/);
+test('the feed proxy keeps an explicit allowlist and passes coverage through untouched', () => {
+  assert.match(feedProxy, /const FEED_PARAMS = \["q", "mailbox", "folder", "cursor", "limit"\];/);
+  assert.match(feedProxy, /params\.set\("strict", "1"\)/);
+  assert.match(feedProxy, /\{ \.\.\.feed\.body, configured: true/);
+  assert.doesNotMatch(feedProxy, /coverage:/);
 });
 
-test('the standalone page gates on a Raydar session before it reads any mail', async () => {
-  const page = await readFile(new URL('../master-inbox.mjs', import.meta.url), 'utf8');
-  const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8');
-  assert.match(html, /id="gate"/);
-  assert.match(html, /id="gsi"/);
-  assert.match(page, /window\.RaydarAuth\?\.session\(\)/);
-  assert.match(page, /if \(session\?\.authenticated\) return boot\(\)/);
-  assert.match(page, /google\.accounts\.id\.renderButton/);
-  // The Google script is fetched only when the gate is shown: inside the shell
-  // iframe the session already exists, so a static tag would be a third-party
-  // request on every page view that can never be used.
-  assert.doesNotMatch(html, /accounts\.google\.com/);
-  assert.match(page, /script\.src = 'https:\/\/accounts\.google\.com\/gsi\/client'/);
+test('the undo control outlives the hold it belongs to', () => {
+  // A seven-second toast must never dismiss the control for a ten-second hold.
+  assert.match(page, /function toast\(message, label, handler, duration = label \? 0 : 7000\)/);
+  assert.match(page, /Send held · \$\{left\}s remaining to undo/);
+  assert.match(page, /receiptTimer = setInterval\(tick, 250\)/);
+  // The hold instant is the service's, never a number this page picked.
+  assert.match(page, /Date\.parse\(data\.undoUntil \|\| data\.holdUntil \|\| ''\)/);
+  assert.match(composer, /Immediate sends include a 10-second undo hold/);
+  assert.match(shell, /id="scheduleTimezone"/);
+  assert.match(composer, /'Scheduling time zone: ' \+ zone/);
+});
+
+// ------------------------------------------------------------------- layout
+
+test('rows are bounded, non-overlapping and reachable, and the list is a real list', () => {
+  // The modern equivalents of main's four layout guards: a three-column row
+  // grid whose middle column can shrink, a single-pane collapse, and the
+  // embedded full-height app.
+  assert.match(style, /\.conversation-link\{[^}]*display:grid/);
+  assert.match(style, /\.conversation-copy\{min-width:0\}/);
+  assert.match(style, /\.participant\{[^}]*text-overflow:ellipsis/);
+  assert.match(style, /@media\(max-width:980px\)\{\.reading \.mail-panes\{display:block\}\.reading \.message-list\{display:none\}/);
+  assert.match(style, /\.mail-panes\{display:block/);
+  assert.match(style, /\.reading \.mail-panes\{display:grid/);
+  // Semantics: a screen reader gets a list of rows with one name each.
+  assert.match(page, /host\.setAttribute\('role', 'list'\)/);
+  assert.match(page, /item\.setAttribute\('role', 'listitem'\)/);
+  assert.match(page, /link\.setAttribute\('aria-label'/);
+});
+
+test('the phone layout keeps the account controls reachable at 390px', () => {
+  assert.match(style, /@media\(max-width:700px\)\{[^@]*\.drawer-toggle\{display:block/);
+  assert.match(style, /\.account-drawer\{width:min\(340px,calc\(100% - 20px\)\)/);
+  assert.match(shell, /id="openAccounts"/);
+  assert.match(shell, /id="drawerMailbox"/);
+});
+
+test('no metadata is rendered below the contrast or size floor', () => {
+  // Every text colour is a token, and the tokens are the ones measured.
+  assert.match(style, /--mi-meta:#5f594f/);
+  assert.doesNotMatch(style, /#9b9185|#968b80|#b6a8c9|#89769d|#9b8a78|#978674/);
+  assert.doesNotMatch(style, /font-size:9px/);
+  assert.match(style, /\.conversation-link:focus-visible\{outline:2px solid var\(--violet\)/);
+});
+
+test('the dashboard shell keeps its newer routes and points at the rebuilt inbox', () => {
+  assert.match(dashboard, /id="tab-status-v2"/);
+  assert.match(dashboard, /frameSrc\("\/submissions-v2","submissions"\)/);
+  assert.match(dashboard, /frameSrc\("\/review","review"\)/);
+  assert.match(dashboard, /id="master-inbox-frame"[^>]*height:calc\(100vh - 24px\)/);
+  assert.match(dashboard, /frameSrc\("\/master-inbox","master-inbox"\)\+"&v=20260910-slice4"/);
 });
