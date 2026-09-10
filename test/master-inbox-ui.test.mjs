@@ -263,3 +263,17 @@ test('the dashboard shell keeps its newer routes and points at the rebuilt inbox
   assert.match(dashboard, /id="master-inbox-frame"[^>]*height:calc\(100vh - 24px\)/);
   assert.match(dashboard, /frameSrc\("\/master-inbox","master-inbox"\)\+"&v=20260910-slice4"/);
 });
+
+test('the reader keeps the stable control ids the QA contract addresses', () => {
+  // qa/selector-map.json's forbidden_on_real_mail list names these ids: a
+  // scripted run avoids them so it cannot archive, export or cancel real mail.
+  // A rebuild that drops the ids disarms that guard silently, so the ids are
+  // asserted here rather than trusted.
+  for (const id of ['backList', 'reply', 'replyAll', 'editDraft', 'continueDraft', 'cancelScheduled', 'archiveAction', 'forward', 'print']) {
+    assert.match(page, new RegExp(`, '${id}'\\)`), `the reader toolbar must keep #${id}`);
+  }
+  assert.match(page, /download\.id = 'exportMessage'/);
+  for (const id of ['bulkRead', 'bulkArchive', 'saveDraft', 'send', 'schedule', 'reportProblem', 'compose', 'refresh', 'search', 'loadMore']) {
+    assert.ok(shell.includes(`id="${id}"`), `the shell must keep #${id}`);
+  }
+});
