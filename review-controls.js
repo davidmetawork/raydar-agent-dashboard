@@ -118,11 +118,54 @@
   // a real, still-answerable obligation state.
   function isRelabelled(item){return SYSTEM_REASON.test(String(reasonCode(item)||""))&&obligationState(item).startsWith("review_")}
   function canWrite(actor){return Boolean(actor?.capabilities?.reviewWrite)}
-  function can(actor,action){const c=actor?.capabilities||{};if(["select_profile","confirm_absent","abandon"].includes(action))return Boolean(c.reviewIdentityOverride);if(action==="approve_send")return Boolean(c.reviewSendApproval);return Boolean(c.reviewWrite)}
+  function can(actor,action){const c=actor?.capabilities||{};if(["select_profile","select_send_address","confirm_absent","abandon"].includes(action))return Boolean(c.reviewIdentityOverride);if(action==="approve_send")return Boolean(c.reviewSendApproval);return Boolean(c.reviewWrite)}
   function isContinuing(item){return CONTINUING.includes(String(item?.status||""))}
   function profiles(item){const raw=item?.identityCandidates||technical(item).profiles||technical(item).candidateProfiles||[];return (Array.isArray(raw)?raw:[]).sort((a,b)=>Number(b.currentCallAttached)-Number(a.currentCallAttached))}
   function paraformProfileUrl(id){return `https://www.paraform.com/candidates?candidate_profile_id=${encodeURIComponent(String(id||""))}`}
   function profileId(profile){return profile.candidateUserId||profile.id||profile.profileId}
+
+  // THE SEND-ADDRESS QUESTION (reasonCode send_address_choice_required).
+  // Paraform holds this person's email on a DIFFERENT record from the one the
+  // call is attached to, so the follow-up has nowhere to go until a human says
+  // "yes, that other record is the same person — send to its address". The
+  // answer is a pick from a list the server wrote, never a typed address:
+  // select_send_address takes exactly one key, sendAddressCandidateUserId, and
+  // 400s on anything else (an "email" key included).
+  //
+  // THE RENDERING RULE: the gate is the PRESENCE of this evidence list, not
+  // allowedActions. REVIEW_POLICIES is keyed by state, so select_send_address
+  // is listed on every review_profile park — including plain
+  // profile_readiness_missing rows that have no candidates to offer — and
+  // rendering off allowedActions would put an empty picker on all of them.
+  const SEND_ADDRESS_SOURCE={alternative_record:"another Paraform record of this person",reviewer_selected_record:"the record you picked"};
+  const SEND_ADDRESS_COPY={
+    headline:"Paraform has this person's email on another record",
+    body:"Confirm that record is the same person and the follow-up goes to its address; nothing is written into Paraform.",
+  };
+  function sendAddressChoices(item){
+    const raw=technical(item).sendAddressCandidates;
+    return (Array.isArray(raw)?raw:[]).filter(row=>row&&row.candidateUserId);
+  }
+  // The server masks these already. Re-masking here means an upstream
+  // regression still cannot print a candidate's real address into the panel,
+  // and it is idempotent on an address that arrives masked.
+  function maskEmail(value){
+    const text=String(value||"").trim();
+    const at=text.lastIndexOf("@");
+    if(at<1)return text;
+    return `${text.slice(0,1)}***${text.slice(at)}`;
+  }
+  function sendAddressCards(item,actor){
+    const rows=sendAddressChoices(item);
+    if(!rows.length)return "";
+    const readonly=!canWrite(actor);
+    return `<div class="control-block"><div class="send-addresses" role="radiogroup" aria-label="Which record's address the follow-up goes to">${rows.map((row,index)=>{
+      const id=String(row.candidateUserId);
+      const where=SEND_ADDRESS_SOURCE[String(row.source||"")]||SEND_ADDRESS_SOURCE.alternative_record;
+      const name=row.displayName?String(row.displayName):`Paraform record ${index+1}`;
+      return `<div class="send-address" data-send-address="${esc(id)}" role="radio" tabindex="${readonly?"-1":"0"}" aria-checked="false" aria-disabled="${readonly}"><b>${esc(name)}</b><span class="send-address-email">${esc(maskEmail(row.maskedEmail))}</span><span>This is ${esc(where)}.</span></div>`;
+    }).join("")}</div><p class="hint">Pick the record this person's email should go to. Nothing is written into Paraform.</p></div>`;
+  }
 
   // THE LIVE DEFECT this module fixes: three calls parked on
   // blockedState=review_identity with reasonCode=PROVIDER_AUTH_CIRCUIT_OPEN (a
@@ -201,6 +244,16 @@
       return canWrite(actor)&&!can(actor,"approve_send")
         ? {headline:"This candidate's email is ready to send",body:"Releasing it needs send approval, which this account does not have."}
         : {headline:"This candidate's email is ready to send",body:"Nothing else needs fixing — press Approve and send to release it."};
+    }
+    // The send-address question is asked by the evidence list, not by the
+    // state: a review_profile park that carries candidates is not "some details
+    // are missing", it is one yes/no about where this person's email lives. The
+    // server's own sentences for it are already plain English, so they are
+    // preferred and only fall back to ours.
+    if(sendAddressChoices(item).length){
+      return can(actor,"select_send_address")
+        ? {headline:plainText(item?.summary,SEND_ADDRESS_COPY.headline),body:plainText(item?.nextStep,SEND_ADDRESS_COPY.body)}
+        : {headline:SEND_ADDRESS_COPY.headline,body:"Answering this one needs the identity permission this account does not have; the Review board has the rest.",noAction:true};
     }
     // A relabelled row's own summary is the useless one ("needs a system
     // repair"), and every preferences park now has the same one-button answer,
@@ -327,6 +380,15 @@
     // call a ghost), which is what keeps the picker as a secondary path
     // rather than hiding it the way a true system stall does.
     if(isProviderBusyStall(item))push("resume","Try again");
+    // Gated on the evidence list, never on allowedActions (see
+    // sendAddressChoices): the action is listed on every review_profile park.
+    const sendAddressChoice=sendAddressChoices(item).length>0&&can(actor,"select_send_address");
+    if(sendAddressChoice)push("select_send_address","Use this record's address and continue");
+    // Unlike a set_* control, answering is not the only honest move here: if
+    // neither record is this person, re-running the tick is, so Try again stays
+    // beside the choice as a quiet secondary instead of being suppressed the
+    // way it is under a field the row is waiting on.
+    if(sendAddressChoice&&allowed.has("retry")&&!isProviderBusyStall(item))push("retry","Try again");
     if(allowed.has("select_profile")&&rows.length&&can(actor,"select_profile")&&!isSystemIdentityStall(item))push("select_profile","Use this profile and continue");
     if(guessedPreferences)push("resume","Continue","primary",normalizedFields(item).length&&allowed.has("set_field")?'data-base-action="resume" data-base-label="Continue" data-alt-action="set_field" data-alt-label="Save and continue"':"");
     if(allowed.has("set_field")&&normalizedFields(item).length&&!guessedPreferences)push("set_field","Save and continue");
@@ -372,7 +434,7 @@
     // Continue is the whole job.
     const fields=fieldControls(item,actor);
     const optional=fields&&effectiveState(item)==="review_preferences"&&(item?.allowedActions||[]).includes("resume");
-    return `<div class="fix">${head}${profileLookup(item,actor,options)}${profileCards(item,actor,options)}${optional?`<details class="optional-fields"><summary>Adjust preferences first (optional)</summary>${fields}</details>`:fields}${resumeInput(item)}${actionButtons(item,actor)}</div>`;
+    return `<div class="fix">${head}${sendAddressCards(item,actor)}${profileLookup(item,actor,options)}${profileCards(item,actor,options)}${optional?`<details class="optional-fields"><summary>Adjust preferences first (optional)</summary>${fields}</details>`:fields}${resumeInput(item)}${actionButtons(item,actor)}</div>`;
   }
 
   // What gets POSTed is scoped to the action that was clicked. The backend
@@ -407,6 +469,13 @@
       const selected=scope.querySelector(".profile.selected");
       return selected?{candidateUserId:selected.dataset.profile}:{};
     }
+    // select_send_address takes exactly one key. Anything else — a typed email
+    // most of all — is a 400 upstream, and this action never accepts an
+    // address: the answer is which listed record, never what the address is.
+    if(action==="select_send_address"){
+      const chosen=scope.querySelector(".send-address.selected");
+      return chosen?{sendAddressCandidateUserId:chosen.dataset.sendAddress}:{};
+    }
     if(action&&!FIELD_ACTIONS.has(action))return {};
     const values=fieldValues(scope);
     if(!action)return values; // no action = a draft snapshot for a redraw, which keeps everything
@@ -436,6 +505,11 @@
     root.querySelectorAll(".profile").forEach(el=>{
       const choose=()=>{if(el.getAttribute("aria-disabled")==="true")return;root.querySelectorAll(".profile").forEach(other=>{other.classList.remove("selected");other.setAttribute("aria-pressed","false")});el.classList.add("selected");el.setAttribute("aria-pressed","true")};
       el.onclick=event=>{if(event.target.closest(".paraform-link"))return;choose()};
+      el.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();choose()}};
+    });
+    root.querySelectorAll(".send-address").forEach(el=>{
+      const choose=()=>{if(el.getAttribute("aria-disabled")==="true")return;root.querySelectorAll(".send-address").forEach(other=>{other.classList.remove("selected");other.setAttribute("aria-checked","false")});el.classList.add("selected");el.setAttribute("aria-checked","true")};
+      el.onclick=choose;
       el.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();choose()}};
     });
     root.querySelectorAll("[data-action]").forEach(el=>{el.onclick=()=>handlers.onAction&&handlers.onAction(el.dataset.action)});
@@ -504,6 +578,12 @@
         ? "Fill in at least one field above, then press Save and continue."
         : "Choose an option above first, then press Save and continue.");
     }
+    // The same dead end for the send-address pick: an unanswered list posts
+    // {}, which comes back as REVIEW_VALUE_INVALID — a bare token plainError
+    // can only render as "that didn't work".
+    if(action==="select_send_address"&&!changes?.sendAddressCandidateUserId){
+      throw new Error("Choose which record's address to use above, then press the button again.");
+    }
     const needsApproval=action==="resume"&&reasonCode(item)==="send_approval_required"&&can(actor,"approve_send");
     if(needsApproval&&!confirm("Approve and send this candidate's prepared post-call email now?"))return {ok:false,cancelled:true};
     const payload={reviewId:item.id,version:item.version,action,changes:changes||{},reason:reason||`Review action: ${label(action)}`};
@@ -545,6 +625,7 @@
 
   window.RaydarReviewControls=Object.freeze({
     esc,label,can,canWrite,technical,blockedState,reasonCode,profiles,normalizedFields,
+    sendAddressChoices,maskEmail,
     obligationState,effectiveState,isRelabelled,
     isSystemIdentityStall,isProviderBusyStall,blockerCopy,isContinuing,
     plainText,plainError,

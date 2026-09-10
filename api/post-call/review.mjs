@@ -6,7 +6,7 @@ import { issueReviewAssertion } from "../_lib/review-assertion.mjs";
 const READ_TIMEOUT_MS = 12_000;
 const ACTION_TIMEOUT_MS = 55_000;
 const ACTIONS = new Set([
-  "select_profile", "confirm_absent", "set_field", "set_call_outcome",
+  "select_profile", "select_send_address", "confirm_absent", "set_field", "set_call_outcome",
   "set_role_verdict", "attach_resume", "retry", "resume", "abandon", "assign", "set_priority",
 ]);
 const OUTCOMES = new Set(["open", "continuing", "resolved", "failed", "all"]);
@@ -90,6 +90,15 @@ function validStringList(value, allowed = null, maxLength = 160) {
 
 function validateChanges(action, changes) {
   if (action === "select_profile") return Boolean(changes?.candidateUserId && /^[a-zA-Z0-9_-]{3,160}$/.test(changes.candidateUserId));
+  // send_address_choice_required: the reviewer picks WHICH listed Paraform
+  // record the follow-up is addressed from. The service takes exactly one key
+  // and never an address, so a typed "email" riding along is stopped here
+  // rather than becoming a REVIEW_VALUE_INVALID after the click.
+  if (action === "select_send_address") {
+    return Boolean(changes && Object.keys(changes).length === 1
+      && typeof changes.sendAddressCandidateUserId === "string"
+      && /^[a-zA-Z0-9_-]{3,160}$/.test(changes.sendAddressCandidateUserId));
+  }
   if (action === "set_call_outcome") return Boolean(changes && CALL_OUTCOMES.has(changes.callOutcome));
   if (action === "set_role_verdict") return Boolean(changes && ["good", "bad"].includes(changes.roleVerdict));
   if (action === "assign") return Boolean(changes && ["user", "team"].includes(changes.ownerType || "user")
@@ -232,7 +241,7 @@ export default async function handler(req, res) {
     }
 
     if (!ACTIONS.has(action)) return res.status(400).json({ ok: false, error: "review_action_not_allowed" });
-    if (["select_profile", "confirm_absent", "abandon"].includes(action) && !access.capabilities.reviewIdentityOverride) {
+    if (["select_profile", "select_send_address", "confirm_absent", "abandon"].includes(action) && !access.capabilities.reviewIdentityOverride) {
       return res.status(403).json({ ok: false, error: "review_admin_required" });
     }
     if (action === "set_priority" && !access.capabilities.reviewPriority) return res.status(403).json({ ok: false, error: "review_admin_required" });
@@ -250,6 +259,9 @@ export default async function handler(req, res) {
     }
     if (action === "select_profile" && !changes?.candidateUserId) {
       return res.status(400).json({ ok: false, error: "candidate_user_id_required" });
+    }
+    if (action === "select_send_address" && !changes?.sendAddressCandidateUserId) {
+      return res.status(400).json({ ok: false, error: "send_address_candidate_required" });
     }
     if (!validateChanges(action, changes)) return res.status(400).json({ ok: false, error: "review_value_invalid" });
     if (changes && Object.keys(changes).length) bodyOut.changes = changes;

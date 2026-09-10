@@ -452,3 +452,192 @@ test("a saved choice Paraform could not read back offers Try again, not a blank 
   assert.match(review, /isProviderBusyStall\(item\)&&!buttons\.some\(button=>button\[0\]==="resume"\)\)buttons\.push\(\["resume","Try again","primary"\]\)/);
   assert.match(review, /Paraform is busy right now \(another Raydar job is using it\)\./);
 });
+
+// ---- The send-address question (reasonCode send_address_choice_required) ----
+// Paraform holds this person's email on a DIFFERENT record from the one the
+// call is attached to, so the follow-up has nowhere to go until a human says
+// "that record is the same person — send to its address". The answer is a pick
+// from a server-written list, never a typed address.
+//
+// renderPanel is a pure (item, actor) -> HTML string and collectChanges only
+// reads through querySelector, so both are exercised for real here in a vm
+// with nothing but a `window`, rather than being asserted as source text.
+const { createContext, runInContext } = await import("node:vm");
+
+function loadControls() {
+  const sandbox = { window: {}, console };
+  const context = createContext(sandbox);
+  runInContext(controls, context, { filename: "review-controls.js" });
+  return { RC: sandbox.window.RaydarReviewControls, sandbox };
+}
+
+const WRITER = { email: "operator@example.invalid", capabilities: { reviewRead: true, reviewWrite: true, reviewIdentityOverride: true, reviewSendApproval: true, resumeUpload: true } };
+const SEND_ADDRESS_CANDIDATES = [
+  { candidateUserId: "cmtkev2aaa", globalCandidateIdHash: `candidate-global_${"a".repeat(32)}`, maskedEmail: "j***@example.com", source: "alternative_record", displayName: "Jane Doe" },
+  { candidateUserId: "cmtkev2bbb", globalCandidateIdHash: null, maskedEmail: "q***@example.org", source: "reviewer_selected_record" },
+];
+// review_profile lists select_send_address in allowedActions on EVERY park
+// (REVIEW_POLICIES is keyed by state), which is exactly why the evidence list
+// is the gate — see the "nothing to offer" test below.
+function sendAddressItem(evidence = {}) {
+  return {
+    id: "rev_1", version: 9, status: "open",
+    summary: "Paraform has this person's email on another record",
+    nextStep: "Confirm that record is the same person and the follow-up goes to its address; nothing is written into Paraform.",
+    allowedActions: ["select_send_address", "set_field", "retry", "resume", "abandon"],
+    allowedFields: ["fullName", "email", "sendAddressCandidateUserId"],
+    technicalEvidence: {
+      blockedState: "review_profile", obligationState: "review_profile", reasonCode: "send_address_choice_required",
+      evidence: { reasonCode: "send_address_choice_required", missing: ["email"], sendAddressCandidates: SEND_ADDRESS_CANDIDATES, ...evidence },
+    },
+  };
+}
+
+// A root that answers the two DOM reads collectChanges makes. The field list is
+// deliberately non-empty: an unscoped read would smuggle a typed email into an
+// action that never accepts an address (400 REVIEW_VALUE_INVALID upstream).
+function fakeRoot(selectedId) {
+  const chosen = selectedId ? { classList: { contains: () => true }, dataset: { sendAddress: selectedId } } : null;
+  return {
+    querySelector: (selector) => (selector === ".send-address.selected" ? chosen : null),
+    querySelectorAll: (selector) => (selector === "[data-field]" ? [{ dataset: { field: "email" }, type: "text", value: "typed@example.invalid" }] : []),
+  };
+}
+
+test("a send-address park renders one row per listed record, masked, and says which record each is", () => {
+  const { RC } = loadControls();
+  const html = RC.renderPanel(sendAddressItem(), WRITER);
+  // The question, in the server's own plain English.
+  assert.match(html, /Paraform has this person&#39;s email on another record/);
+  assert.match(html, /Confirm that record is the same person and the follow-up goes to its address; nothing is written into Paraform\./);
+  // One selectable row per candidate, carrying the id that gets posted back.
+  assert.match(html, /<div class="send-addresses" role="radiogroup"/);
+  assert.match(html, /data-send-address="cmtkev2aaa"[^>]*role="radio"[^>]*aria-checked="false"/);
+  assert.match(html, /data-send-address="cmtkev2bbb"/);
+  // displayName when there is one; a plain label, never a raw id, when there is not.
+  assert.match(html, /<b>Jane Doe<\/b>/);
+  assert.match(html, /<b>Paraform record 2<\/b>/);
+  assert.ok(!/>cmtkev2/.test(html), "a candidate id is rendered as visible text");
+  // The masked address only — never a real one.
+  assert.match(html, /j\*\*\*@example\.com/);
+  assert.match(html, /q\*\*\*@example\.org/);
+  // Which record each one is, in words.
+  assert.match(html, /This is another Paraform record of this person\./);
+  assert.match(html, /This is the record you picked\./);
+  assert.match(html, /Nothing is written into Paraform\./);
+  // The primary button, plus the controls that were already on the row.
+  assert.match(html, /<button class="button primary" data-action="select_send_address">Use this record&#39;s address and continue<\/button>/);
+  assert.match(html, /data-action="retry">Try again</);
+  assert.match(html, /data-action="set_field">Save and continue</);
+  // No address is ever typed into this question.
+  assert.ok(!/data-field="sendAddress/i.test(html), "the send address is offered as a text field");
+});
+
+test("the send-address control is gated on the evidence list, not on allowedActions", () => {
+  const { RC } = loadControls();
+  // Same state, same allowedActions (select_send_address is listed on every
+  // review_profile park), but no candidates: a plain readiness park must not
+  // grow an empty picker or a button that has nothing to send.
+  const readiness = sendAddressItem();
+  readiness.summary = "Some details are missing";
+  readiness.nextStep = "Fill in what you know and continue.";
+  readiness.technicalEvidence.reasonCode = "profile_readiness_missing";
+  readiness.technicalEvidence.evidence = { reasonCode: "profile_readiness_missing", missing: ["email"] };
+  const html = RC.renderPanel(readiness, WRITER);
+  assert.ok(readiness.allowedActions.includes("select_send_address"));
+  assert.doesNotMatch(html, /send-address/);
+  assert.doesNotMatch(html, /data-action="select_send_address"/);
+  assert.doesNotMatch(html, /Paraform has this person/);
+  assert.match(html, /data-action="set_field"/);
+  // An empty list is the same as no list at all.
+  const empty = sendAddressItem({ sendAddressCandidates: [] });
+  assert.doesNotMatch(RC.renderPanel(empty, WRITER), /send-address/);
+  assert.equal(RC.sendAddressChoices(empty).length, 0);
+});
+
+test("the send-address answer posts exactly one key, and never an address", async () => {
+  const { RC, sandbox } = loadControls();
+  const calls = [];
+  sandbox.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ ok: true, item: { id: "rev_1", version: 10, status: "continuing" } }) };
+  };
+  const item = sendAddressItem();
+  const changes = RC.collectChanges(fakeRoot("cmtkev2aaa"), "select_send_address");
+  // Scoped: the typed email on the same panel is not forwarded.
+  // (structuredClone/JSON: `changes` is built inside the vm realm, so its
+  // prototype is not this realm's Object.prototype.)
+  assert.deepEqual(JSON.parse(JSON.stringify(changes)), { sendAddressCandidateUserId: "cmtkev2aaa" });
+  assert.deepEqual(Object.keys(changes), ["sendAddressCandidateUserId"]);
+
+  const { ok } = await RC.runAction({ item, action: "select_send_address", changes, actor: WRITER });
+  assert.equal(ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/post-call/review");
+  assert.equal(calls[0].options.method, "POST");
+  const posted = JSON.parse(calls[0].options.body);
+  assert.deepEqual(posted, {
+    reviewId: "rev_1",
+    version: 9,
+    action: "select_send_address",
+    changes: { sendAddressCandidateUserId: "cmtkev2aaa" },
+    reason: "Review action: Select Send Address",
+  });
+  assert.ok(posted.reason.length >= 3);
+  assert.equal(posted.approveSend, undefined);
+  assert.ok(!JSON.stringify(posted.changes).includes("@"), "an address reached the send-address action");
+
+  // Nothing chosen is stopped here, not sent as {} to come back as a token.
+  await assert.rejects(
+    () => RC.runAction({ item, action: "select_send_address", changes: RC.collectChanges(fakeRoot(null), "select_send_address"), actor: WRITER }),
+    /Choose which record's address to use above, then press the button again\./,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("the proxy lets the send-address action through with that one key only", () => {
+  assert.match(reviewProxy, /"select_profile", "select_send_address", "confirm_absent"/);
+  assert.match(reviewProxy, /if \(action === "select_send_address"\) \{/);
+  assert.match(reviewProxy, /Object\.keys\(changes\)\.length === 1/);
+  assert.match(reviewProxy, /typeof changes\.sendAddressCandidateUserId === "string"/);
+  assert.match(reviewProxy, /send_address_candidate_required/);
+  // Same identity-grade gate as picking the profile itself.
+  assert.match(reviewProxy, /\["select_profile", "select_send_address", "confirm_absent", "abandon"\]\.includes\(action\) && !access\.capabilities\.reviewIdentityOverride/);
+  assert.match(controls, /\["select_profile","select_send_address","confirm_absent","abandon"\]\.includes\(action\)/);
+});
+
+test("a refused send-address answer says which of the two things happened", () => {
+  // 409 SEND_ADDRESS_CANDIDATE_NOT_LISTED: nothing was written and the row is
+  // still parked, so the honest move is to redraw the list.
+  assert.match(callsToday, /function serverCode\(error\)/);
+  assert.match(callsToday, /SEND_ADDRESS_CANDIDATE_NOT_LISTED/);
+  assert.match(callsToday, /That record isn't one of the choices on this follow-up any more; refreshing the list\./);
+  assert.match(callsToday, /if\(STATE\.panelOpen\)await loadPanelItem\(STATE\.panelOpen\)/);
+  // 403 REVIEW_FIELD_FORBIDDEN: parked before the field existed, re-parks itself.
+  assert.match(callsToday, /REVIEW_FIELD_FORBIDDEN/);
+  assert.match(callsToday, /This one was parked before this choice existed; it comes back with the button in a few minutes\./);
+  // The code is read from the error body, never from the sentence beside it.
+  assert.match(callsToday, /error\?\.body\?\.error/);
+  // The click-time guard is on the host too, so nothing empty is ever posted.
+  assert.match(callsToday, /action==="select_send_address"&&!changes\.sendAddressCandidateUserId/);
+});
+
+test("picking a record is a selection, not a text box, and is bound like the profile cards", () => {
+  assert.match(controls, /function sendAddressChoices\(item\)/);
+  assert.match(controls, /technical\(item\)\.sendAddressCandidates/);
+  assert.match(controls, /if\(action==="select_send_address"\)\{/);
+  assert.match(controls, /\{sendAddressCandidateUserId:chosen\.dataset\.sendAddress\}/);
+  assert.match(controls, /root\.querySelectorAll\("\.send-address"\)\.forEach/);
+  assert.match(controls, /aria-checked/);
+  assert.match(controls, /event\.key==="Enter"\|\|event\.key===" "/);
+  // The masked address is re-masked here, so an upstream regression still
+  // cannot print a real address into the panel.
+  assert.match(controls, /function maskEmail\(value\)/);
+  const { RC } = loadControls();
+  assert.equal(RC.maskEmail("j***@example.com"), "j***@example.com");
+  assert.equal(RC.maskEmail("jane.doe@example.com"), "j***@example.com");
+  assert.equal(RC.maskEmail(""), "");
+  // The Fit tab styles the rows it renders.
+  assert.match(callsToday, /\.send-addresses\{/);
+  assert.match(callsToday, /\.send-address\.selected/);
+});
