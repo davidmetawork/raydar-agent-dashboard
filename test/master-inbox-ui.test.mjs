@@ -76,3 +76,30 @@ test('a malformed success response keeps the send key for confirmation', async (
   const request = createSendRequest({ prepare: async () => ({ id: 'draft-one', revision: 1 }), makeKey: () => 'fixed-key', submit: async () => ({}) });
   await assert.rejects(request.run(), error => error.code === 'send_response_unconfirmed'); assert.equal(request.pending.idempotencyKey, 'fixed-key');
 });
+
+test('the composer can always be dismissed and offers no route the service does not implement', async () => {
+  const composer = await readFile(new URL('../master-inbox-composer.mjs', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../master-inbox.html', import.meta.url), 'utf8');
+  const proxy = await readFile(new URL('../api/master-inbox/draft-attachment.mjs', import.meta.url), 'utf8');
+  // Main's dropped assertion 4, restored in behavioural form: leaving is
+  // unconditional, so a draft that cannot be saved (no verified From) still
+  // has a way out.
+  assert.match(html, /id="discardDraft"/);
+  assert.match(html, /id="keepEditing"/);
+  assert.match(composer, /function discard\(\)/);
+  assert.match(composer, /\$\('discardDraft'\)\.onclick = discard/);
+  assert.match(composer, /return offerDiscard\('This draft cannot be saved without a sending address\.'\)/);
+  // The service supports prepare and commit only, over POST only.
+  assert.doesNotMatch(composer, /action: 'copy'/);
+  assert.doesNotMatch(composer, /action: 'remove'/);
+  assert.doesNotMatch(composer, /draft-attachment\?id=/);
+  assert.match(proxy, /if \(req\.method !== "POST"\)/);
+});
+
+test('an attachment download relays the service bytes and never invents a 502', async () => {
+  const download = await readFile(new URL('../api/master-inbox/_lib/download.mjs', import.meta.url), 'utf8');
+  assert.match(download, /res\.status\(200\)\.send\(Buffer\.from\(await response\.arrayBuffer\(\)\)\)/);
+  assert.doesNotMatch(download, /response\.ok \? 502/);
+  assert.doesNotMatch(download, /redirect=1/);
+  assert.match(download, /url\.protocol !== "https:"/);
+});
