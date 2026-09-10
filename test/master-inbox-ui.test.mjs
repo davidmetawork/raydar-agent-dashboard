@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { contacts, contactLabel, displayText, logicalMessages, replyDefaults, normalizedRoute, routeAddress, parseRoute, feedQuery, rowParticipant, splitQuotedText, attachmentStatus, createSaveQueue, createSendRequest, requestGate } from '../master-inbox-model.mjs';
+import { contacts, contactLabel, displayText, logicalMessages, replyDefaults, parseFilters, composeQuery, feedQuery, rowParticipant, splitQuotedText, attachmentStatus, createSaveQueue, createSendRequest, requestGate } from '../master-inbox-model.mjs';
 
 test('participant parsing keeps provider JSON out of labels and decodes text safely', () => {
   assert.deepEqual(contacts('{"name":"Alex Example","address":"alex@example.test"}'), [{ name: 'Alex Example', address: 'alex@example.test' }]);
@@ -10,14 +10,33 @@ test('participant parsing keeps provider JSON out of labels and decodes text saf
   assert.equal(rowParticipant({ last_direction: 'outbound', latest_to: [{ name: 'Candidate', address: 'candidate@example.test' }], participant_text: 'David' }), 'Candidate');
 });
 
-test('account, folder, filters and selected conversation survive route serialization', () => {
-  const route = normalizedRoute({ folder: 'sent', mailbox: 'noah', q: 'subject:"Role & team"', subject: 'Interview', id: 'id-opaque', after: '2026-09-01', read: 'unread' });
-  assert.deepEqual(parseRoute(routeAddress(route)), route);
-  const nextFolder = normalizedRoute({ ...route, folder: 'drafts', id: '' });
-  assert.equal(nextFolder.mailbox, 'noah');
-  assert.equal(feedQuery(nextFolder).get('mailbox'), 'noah');
-  assert.equal(feedQuery(nextFolder).get('subject'), 'Interview');
-  assert.equal(parseRoute('conversation=legacy-id').id, 'legacy-id');
+test('every filter is written as an operator the store parses, and survives the round trip', () => {
+  const query = 'from:"Alex Example" to:david@example.test after:2026-09-01 before:2026-09-09 label:unread has:attachment interview notes';
+  const filters = parseFilters(query);
+  assert.equal(filters.from, 'Alex Example');
+  assert.equal(filters.to, 'david@example.test');
+  assert.equal(filters.after, '2026-09-01');
+  assert.equal(filters.unread, true);
+  assert.equal(filters.hasAttachment, true);
+  assert.equal(filters.text, 'interview notes');
+  assert.equal(composeQuery(filters), query);
+  assert.deepEqual(parseFilters(composeQuery(filters)), filters);
+});
+
+test('the panel never owns an operator the store does not have, and never invents a parameter', () => {
+  // subject: and filename: are not operators in the store; they stay in the
+  // text so the search notice can say they were searched as text.
+  const filters = parseFilters('subject:Role filename:resume.pdf cc:someone@example.test from:alex@example.test');
+  assert.equal(filters.text, 'subject:Role filename:resume.pdf cc:someone@example.test');
+  assert.equal(filters.from, 'alex@example.test');
+  // A malformed date is not a filter; it is left in the text for the store to
+  // report rather than silently dropped.
+  assert.equal(parseFilters('after:last-tuesday').after, '');
+  assert.equal(parseFilters('after:last-tuesday').text, 'after:last-tuesday');
+  // The feed request carries only the five parameters the store parses.
+  const params = feedQuery({ folder: 'sent', mailbox: 'noah', q: 'from:alex@example.test' }, 'cursor-value');
+  assert.deepEqual([...params.keys()].sort(), ['cursor', 'folder', 'limit', 'mailbox', 'q']);
+  assert.equal(params.get('q'), 'from:alex@example.test');
 });
 
 test('RFC-identical copies are grouped for reading while preserving every copy', () => {

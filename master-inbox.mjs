@@ -1,5 +1,13 @@
-import { FOLDERS, FILTER_KEYS, EMPTY_ROUTE, normalizedRoute, routeAddress, parseRoute, feedQuery, contacts, firstContact, chooseReplyMessage, fullContacts, contactLabel, displayText, mailboxAddresses, logicalMessages, rowParticipant, attachmentStatus, attachmentReason, messageDirection, splitQuotedText, errorMessage, requestGate, EMAIL_CSP } from './master-inbox-model.mjs';
+import { FILTER_FIELDS, parseFilters, composeQuery, feedQuery, contacts, firstContact, chooseReplyMessage, fullContacts, contactLabel, displayText, mailboxAddresses, logicalMessages, rowParticipant, attachmentStatus, attachmentReason, messageDirection, splitQuotedText, errorMessage, requestGate, EMAIL_CSP } from './master-inbox-model.mjs';
 import { createComposer } from './master-inbox-composer.mjs';
+/* The route contract and every trust sentence come from master-inbox-route.js,
+   the classic script the shell loads before this module. It is shared with the
+   scripted employee tests and with slice 1's unit tests, so this page must not
+   grow a second copy of either. */
+const ROUTE = window.MasterInboxRoute;
+const normalizedRoute = input => ROUTE.normalizeRoute(input);
+const routeAddress = input => ROUTE.serializeRoute(input);
+const folderLabel = folder => ROUTE.FOLDER_LABELS[folder] || folder;
 const $ = id => document.getElementById(id);
 const el = (tag, className = '', text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = String(text); return node; };
 const btn = (label, className, action) => { const node = el('button', className, label); node.type = 'button'; node.addEventListener('click', action); return node; };
@@ -7,7 +15,7 @@ const date = value => { const item = new Date(value); return value && Number.isF
 const shortDate = value => { const item = new Date(value); if (!value || !Number.isFinite(item.valueOf())) return '—'; const today = new Date(); return item.toDateString() === today.toDateString() ? item.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : item.toLocaleDateString([], { month: 'short', day: 'numeric', ...(item.getFullYear() !== today.getFullYear() ? { year: 'numeric' } : {}) }); };
 const number = value => value === null || value === undefined ? '—' : Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
 let savedScope = {}; try { savedScope = JSON.parse(localStorage.getItem('raydar-master-inbox-scope') || '{}'); } catch {}
-const state = { route: normalizedRoute({ ...savedScope, ...Object.fromEntries(new URLSearchParams(location.search)) }), rows: [], boxes: [], selected: new Set(), thread: null, cursor: null, hasMore: false, coverage: null, counts: null, negativeEvidence: null, loaded: false, loading: false, restorePages: 1, currentScreen: '', screenSequence: 0, listScroll: 0, listFocus: null, refreshAt: null, actionBusy: false };
+const state = { route: normalizedRoute({ ...savedScope, ...Object.fromEntries(new URLSearchParams(location.search)), ...ROUTE.parseRoute(String(location.hash || '').replace(/^#/, '')) }), rows: [], boxes: [], selected: new Set(), thread: null, cursor: null, hasMore: false, coverage: null, counts: null, negativeEvidence: null, loaded: false, loading: false, restorePages: 1, currentScreen: '', screenSequence: 0, listScroll: 0, listFocus: null, refreshAt: null, actionBusy: false };
 const gates = { feed: requestGate(), thread: requestGate() };
 const box = id => state.boxes.find(item => item.id === id);
 const boxLabel = id => box(id)?.principal || box(id)?.visible_addresses?.[0] || id || 'All mailboxes';
@@ -27,9 +35,43 @@ function notice(message, retry, error) { const host = $('notice'); host.replaceC
 const clearNotice = () => $('notice').classList.add('hidden');
 function empty(host, title, detail, retry) { const node = el('div', 'empty-state'); node.append(el('h3', '', title), el('p', '', detail)); if (retry) node.append(btn('Try again', 'button', retry)); host.replaceChildren(node); }
 function makeLink(node, route) { node.href = RaydarNav.href(routeAddress(route)); node.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button) return; event.preventDefault(); state.listFocus = document.activeElement; state.listScroll = $('listScroll').scrollTop; rememberList(); navigate(route); }); return node; }
-function renderFolders() { for (const host of [$('folders'), $('drawerFolders')]) { host.replaceChildren(); for (const [id, label] of Object.entries(FOLDERS)) { const node = btn(label, 'view-button', () => { navigate({ ...state.route, folder: id, id: '' }); $('accountDrawer').close(); }); node.dataset.folder = id; if (state.route.folder === id) { node.classList.add('active'); node.setAttribute('aria-current', 'page'); } host.append(node); } } }
+// "All Mail" is the one folder the store does not scope: no provider label
+// matches it, so the rows include spam and trash and skip the snooze
+// exclusion. The rail says so rather than letting the name imply otherwise.
+const FOLDER_NOTES = { 'all-mail': 'Everything retained, including spam and trash.', all: 'Inbox mail across every mailbox in scope.', snoozed: 'Conversations you snoozed in Raydar, still due.' };
+function renderFolders() { for (const host of [$('folders'), $('drawerFolders')]) { host.replaceChildren(); for (const id of ROUTE.FOLDERS) { const node = btn(folderLabel(id), 'view-button', () => { navigate({ ...state.route, folder: id, id: '' }); $('accountDrawer').close(); }); node.dataset.folder = id; if (FOLDER_NOTES[id]) node.title = FOLDER_NOTES[id]; if (state.route.folder === id) { node.classList.add('active'); node.setAttribute('aria-current', 'page'); } host.append(node); } } }
 function renderAccounts() { for (const host of [$('mailbox'), $('drawerMailbox')]) { host.replaceChildren(); const all = el('option', '', 'All mailboxes'); all.value = ''; host.append(all); for (const mailbox of state.boxes) { const option = el('option', '', boxLabel(mailbox.id)); option.value = mailbox.id; host.append(option); } if (state.route.mailbox && !state.boxes.some(mailbox => mailbox.id === state.route.mailbox)) { const option = el('option', '', state.route.mailbox + ' (unavailable)'); option.value = state.route.mailbox; host.append(option); } host.value = state.route.mailbox; } composer.updateIdentities(); }
-function renderScope() { renderFolders(); $('viewTitle').textContent = FOLDERS[state.route.folder]; $('scopeDescription').textContent = FOLDERS[state.route.folder] + ' · ' + scopeLabel(); $('search').value = state.route.q; for (const key of FILTER_KEYS) $('filter-' + key).value = state.route[key]; $('mailbox').value = state.route.mailbox; $('drawerMailbox').value = state.route.mailbox; $('unreadShortcut').setAttribute('aria-pressed', String(state.route.read === 'unread')); const count = FILTER_KEYS.filter(key => state.route[key]).length; $('filterCount').textContent = String(count); $('filterCount').classList.toggle('hidden', !count); if (count) { $('filters').classList.remove('hidden'); $('filterToggle').setAttribute('aria-expanded', 'true'); } document.body.classList.toggle('reading', Boolean(state.route.id)); try { localStorage.setItem('raydar-master-inbox-scope', JSON.stringify({ folder: state.route.folder, mailbox: state.route.mailbox })); } catch {} }
+// The filter panel is a writer for the query string: every control below
+// round-trips through `q`, so the address bar, the search box and the store
+// all see the same query and no filter can be silently dropped.
+const filters = () => parseFilters(state.route.q);
+const withFilters = changes => ({ ...state.route, q: composeQuery({ ...filters(), ...changes }), id: '' });
+function renderScope() {
+  renderFolders();
+  const active = filters();
+  $('viewTitle').textContent = ROUTE.viewTitle(state.route.folder, state.route.mailbox ? scopeLabel() : '');
+  $('scopeDescription').textContent = folderLabel(state.route.folder) + ' · ' + scopeLabel() + (FOLDER_NOTES[state.route.folder] ? ' · ' + FOLDER_NOTES[state.route.folder] : '');
+  $('search').value = state.route.q;
+  for (const key of FILTER_FIELDS) $('filter-' + key).value = active[key];
+  $('filter-hasAttachment').checked = active.hasAttachment;
+  $('mailbox').value = state.route.mailbox; $('drawerMailbox').value = state.route.mailbox;
+  $('unreadShortcut').setAttribute('aria-pressed', String(active.unread));
+  renderChips(active);
+  document.body.classList.toggle('reading', Boolean(state.route.id));
+  try { localStorage.setItem('raydar-master-inbox-scope', JSON.stringify({ folder: state.route.folder, mailbox: state.route.mailbox })); } catch {}
+}
+// One chip per active filter, beside the search box, each removable.
+const CHIP_LABELS = { from: 'From', to: 'To', after: 'On or after', before: 'Before' };
+function renderChips(active) {
+  const host = $('filterChips'); host.replaceChildren();
+  const chips = [];
+  for (const key of FILTER_FIELDS) if (active[key]) chips.push([CHIP_LABELS[key] + ' ' + active[key], () => navigate(withFilters({ [key]: '' }))]);
+  if (active.unread) chips.push(['Unread only', () => navigate(withFilters({ unread: false }))]);
+  if (active.hasAttachment) chips.push(['Has attachment', () => navigate(withFilters({ hasAttachment: false }))]);
+  for (const [label, clear] of chips) { const chip = btn(label + ' ×', 'filter-chip', clear); chip.setAttribute('aria-label', 'Remove filter ' + label); host.append(chip); }
+  host.classList.toggle('hidden', !chips.length);
+  $('filterCount').textContent = String(chips.length); $('filterCount').classList.toggle('hidden', !chips.length);
+}
 function navigate(input, { push = true, restoreScroll = false } = {}) {
   const next = normalizedRoute(input); const previous = { ...state.route }; const oldScreen = state.currentScreen; const scroll = $('listScroll').scrollTop; const focusID = state.route.id;
   const changedQuery = routeAddress({ ...next, id: '' }) !== routeAddress({ ...previous, id: '' }); const changedID = next.id !== previous.id;
@@ -141,13 +183,14 @@ function showSendReceipt(data) {
 for (const host of [$('mailbox'), $('drawerMailbox')]) host.addEventListener('change', () => { navigate({ ...state.route, mailbox: host.value, id: '' }); if ($('accountDrawer').open) $('accountDrawer').close(); });
 $('openAccounts').onclick = () => { $('accountDrawer').showModal(); $('drawerMailbox').focus(); }; $('closeAccounts').onclick = () => $('accountDrawer').close();
 $('filterToggle').onclick = () => { const open = $('filterToggle').getAttribute('aria-expanded') !== 'true'; $('filterToggle').setAttribute('aria-expanded', String(open)); $('filters').classList.toggle('hidden', !open); };
-for (const key of FILTER_KEYS) $('filter-' + key).addEventListener('change', () => navigate({ ...state.route, [key]: $('filter-' + key).value, id: '' }));
-$('clearFilters').onclick = () => navigate({ ...state.route, ...Object.fromEntries(FILTER_KEYS.map(key => [key, ''])), id: '' });
-$('unreadShortcut').onclick = () => navigate({ ...state.route, read: state.route.read === 'unread' ? '' : 'unread', id: '' });
+for (const key of FILTER_FIELDS) $('filter-' + key).addEventListener('change', () => navigate(withFilters({ [key]: $('filter-' + key).value.trim() })));
+$('filter-hasAttachment').addEventListener('change', () => navigate(withFilters({ hasAttachment: $('filter-hasAttachment').checked })));
+$('clearFilters').onclick = () => navigate(withFilters({ from: '', to: '', after: '', before: '', unread: false, hasAttachment: false }));
+$('unreadShortcut').onclick = () => navigate(withFilters({ unread: !filters().unread }));
 let searchTimer; const search = () => { clearTimeout(searchTimer); navigate({ ...state.route, q: $('search').value.trim(), id: '' }); }; $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(search, 400); }); $('searchForm').onsubmit = event => { event.preventDefault(); search(); };
 $('refresh').onclick = () => { loadFeed(); if (state.route.id) loadThread(state.route.id); }; $('loadMore').onclick = () => { if (!state.loading) loadFeed(true); }; $('compose').onclick = () => composer.open('new'); $('bulkRead').onclick = () => bulk('read'); $('bulkArchive').onclick = () => bulk('archive'); $('clearSelection').onclick = () => { state.selected.clear(); renderList(); }; $('toastClose').onclick = () => $('toast').classList.add('hidden'); $('closeOrganize').onclick = () => $('organizeDialog').close();
 $('reportProblem').onclick = () => { organizeKind = 'report'; $('organizeTitle').textContent = 'Report a problem'; $('organizeLabel').textContent = 'What looked wrong?'; $('organizeValue').type = 'text'; $('organizeValue').value = ''; $('organizeNote').textContent = 'The report includes the current mailbox, folder, search, and conversation reference.'; $('organizeDialog').showModal(); $('organizeValue').focus(); };
 document.addEventListener('keydown', event => { if (document.querySelector('dialog[open]')) return; const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName); if (typing) return; if (event.key === '/' && !event.metaKey && !event.ctrlKey) { event.preventDefault(); $('search').focus(); } if (event.key === 'Escape' && state.route.id) { event.preventDefault(); backToList(); } if (['ArrowDown', 'ArrowUp'].includes(event.key) && document.activeElement?.classList.contains('conversation-link')) { const links = [...document.querySelectorAll('.conversation-link')]; const index = links.indexOf(document.activeElement); const next = links[index + (event.key === 'ArrowDown' ? 1 : -1)]; if (next) { event.preventDefault(); next.focus(); } } });
-$('dateHint').textContent = 'Company and role names search stored message text. Dates use ' + Intl.DateTimeFormat().resolvedOptions().timeZone + ': on or after midnight, and before midnight on the end date.';
+$('dateHint').textContent = 'Company and role names search stored message text. Dates are calendar days (YYYY-MM-DD) read by the store in UTC, not in ' + Intl.DateTimeFormat().resolvedOptions().timeZone + '.';
 window.addEventListener('pagehide', rememberList);
-let restored = false; RaydarNav.restore(address => { restored = true; const target = parseRoute(address); state.route = { ...target, id: '' }; recoverListPosition(target); renderScope(); navigate(target); }); if (!restored) { recoverListPosition(state.route); renderScope(); loadFeed(); if (state.route.id) loadThread(state.route.id); }
+let restored = false; RaydarNav.restore(address => { restored = true; const target = ROUTE.parseRoute(address); state.route = { ...target, id: '' }; recoverListPosition(target); renderScope(); navigate(target); }); if (!restored) { recoverListPosition(state.route); renderScope(); loadFeed(); if (state.route.id) loadThread(state.route.id); }

@@ -10,14 +10,18 @@ test('Master Inbox proxy preserves exact filters and private authenticated file 
   Object.assign(process.env,{GOOGLE_CLIENT_ID:'test-only',AUTH_SESSION_SECRET:'local-test-only-hmac-key-longer-than-32-chars',MASTER_INBOX_BASE:'https://inbox.invalid',MASTER_INBOX_SERVICE_KEY:'test-only-service-key'});
   t.after(()=>{globalThis.fetch=priorFetch;for(const key of Object.keys(process.env))if(!(key in original))delete process.env[key];Object.assign(process.env,original);});
   const headers={cookie:`${SESSION_COOKIE}=${createSessionToken({email:'test@raydar.xyz'})}`};
-  await t.test('all supported structured filters reach the service unchanged',async()=>{
-    const queries={q:'subject:"Interview Request"',mailbox:'box-a',folder:'all-mail',from:'candidate@example.com',cc:'reviewer@example.com',subject:'role',filename:'.pdf',after:'2026-09-01',before:'2026-09-09',read:'unread',starred:'true',hasAttachment:'false',label:'important'};
-    let called;globalThis.fetch=async(url,init)=>{assert.equal(init.headers['x-raydar-actor'],'test@raydar.xyz');if(url.includes('/conversations?')){called=new URL(url);return Response.json({ok:true,rows:[],coverage:{observedAt:'test'}});}return Response.json({ok:true,rows:[{id:'box-a'}]});};
-    const res=response();await feed({method:'GET',query:queries,headers},res);assert.equal(res.statusCode,200);for(const [key,value]of Object.entries(queries))assert.equal(called.searchParams.get(key),value);
+  // The store reads exactly five parameters. Anything else the page might
+  // invent must die at the proxy rather than be silently discarded by the
+  // service, which is what turns an ignored filter into a wrong answer.
+  await t.test('only the five parameters the store parses reach it',async()=>{
+    const queries={q:'from:candidate@example.test after:2026-09-01 has:attachment',mailbox:'box-a',folder:'sent',cursor:'opaque',limit:'50',subject:'role',filename:'.pdf',read:'unread',hasAttachment:'false',starred:'true',cc:'someone@example.test'};
+    let called;globalThis.fetch=async(url,init)=>{assert.equal(init.headers['x-raydar-actor'],'test@raydar.xyz');if(url.includes('/conversations?')){called=new URL(url);return Response.json({ok:true,rows:[],coverage:{asOf:'test'}});}return Response.json({ok:true,rows:[{id:'box-a'}]});};
+    const res=response();await feed({method:'GET',query:queries,headers},res);assert.equal(res.statusCode,200);
+    assert.deepEqual([...called.searchParams.keys()].sort(),['cursor','folder','limit','mailbox','q']);
+    assert.equal(called.searchParams.get('q'),queries.q);assert.equal(called.searchParams.get('folder'),'sent');
   });
-  await t.test('repeated filters and unauthenticated reads make no service call',async()=>{
+  await t.test('an unauthenticated read makes no service call',async()=>{
     let calls=0;globalThis.fetch=async()=>{calls++;throw Error('unexpected');};
-    const repeated=response();await feed({method:'GET',query:{from:['a@example.com','b@example.com']},headers},repeated);assert.equal(repeated.statusCode,400);
     const unauthorized=response();await feed({method:'GET',query:{},headers:{}},unauthorized);assert.equal(unauthorized.statusCode,401);assert.equal(calls,0);
   });
   // The deployed service answers a download with 200 and the bytes. This is

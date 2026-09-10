@@ -256,6 +256,10 @@
     viewTitle: viewTitle
   };
 
+  // Registered on the global in BOTH runtimes: the browser reads
+  // window.MasterInboxRoute, and a Node test that require()s this file gets the
+  // same object on globalThis, so page code and tests share one route contract.
   if (typeof window !== "undefined") window.MasterInboxRoute = api;
+  if (typeof globalThis !== "undefined") globalThis.MasterInboxRoute = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

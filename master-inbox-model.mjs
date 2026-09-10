@@ -1,6 +1,66 @@
-export const FOLDERS = { inbox: 'Inbox', sent: 'Sent', drafts: 'Drafts', starred: 'Starred', snoozed: 'Snoozed', 'all-mail': 'All mail', anywhere: 'All folders', spam: 'Spam', trash: 'Trash' };
-export const FILTER_KEYS = ['from', 'to', 'subject', 'filename', 'after', 'before', 'read', 'hasAttachment'];
-export const EMPTY_ROUTE = { folder: 'inbox', mailbox: '', q: '', id: '', from: '', to: '', subject: '', filename: '', after: '', before: '', read: '', hasAttachment: '' };
+/* Pure model for the Master Inbox page. No DOM, no fetch, no routing.
+
+   ROUTING LIVES IN master-inbox-route.js, not here. That file is the one
+   route contract for this page (browse?folder&mailbox&q&id, folder omitted
+   only for the page default) and it is also what the shell's deep links and
+   the scripted employee tests are written against, so this module never
+   parses or serializes an address.
+
+   SEARCH: the deployed store parses exactly these operators
+   (master-inbox/lib/search.mjs): from:, to:, before:, after:, in:, mailbox:,
+   label:, and the bare token has:attachment. Everything else — subject:,
+   filename:, cc:, bcc:, is:unread — falls through into full-text terms
+   silently. So every filter control on this page is a writer for one of the
+   operators above, expressed inside `q`; the page sends the store nothing
+   else. A control that cannot be written as a supported operator is not
+   offered, because a filter that is silently ignored produces a confident
+   wrong "no such email".
+*/
+export const FILTER_FIELDS = ['from', 'to', 'after', 'before'];
+const CALENDAR_DAY = /^\d{4}-\d{2}-\d{2}$/;
+// The store's own tokenizer, so what the panel writes is what the store reads.
+export function tokenizeQuery(input) { return String(input || '').match(/(?:[^\s"]+:"[^"]*"|"[^"]*"|\S+)/g) || []; }
+const unquote = value => String(value).replace(/^"|"$/g, '').trim();
+const quote = value => /[\s"]/.test(value) ? '"' + String(value).replaceAll('"', '') + '"' : String(value);
+/** The filter panel's view of a query string. Anything the panel cannot own stays in `text` verbatim. */
+export function parseFilters(query) {
+  const filters = { from: '', to: '', after: '', before: '', unread: false, hasAttachment: false, text: '' };
+  const rest = [];
+  for (const raw of tokenizeQuery(query)) {
+    const lower = raw.toLowerCase();
+    if (lower === 'has:attachment') { filters.hasAttachment = true; continue; }
+    if (lower === 'label:unread' || lower === 'label:"unread"') { filters.unread = true; continue; }
+    const separator = raw.indexOf(':');
+    if (separator > 0) {
+      const field = raw.slice(0, separator).toLowerCase();
+      const value = unquote(raw.slice(separator + 1));
+      // Only the FIRST occurrence of a field belongs to the panel; a second
+      // from: is a deliberate query the person typed, and it stays in the text.
+      if (value && FILTER_FIELDS.includes(field) && !filters[field] && (!['after', 'before'].includes(field) || CALENDAR_DAY.test(value))) { filters[field] = value; continue; }
+    }
+    rest.push(raw);
+  }
+  filters.text = rest.join(' ');
+  return filters;
+}
+/** The inverse: what the panel writes back into `q`. Dates are YYYY-MM-DD, the only form the store parses. */
+export function composeQuery(filters) {
+  const parts = [];
+  for (const field of FILTER_FIELDS) { const value = String(filters?.[field] || '').trim(); if (value && (!['after', 'before'].includes(field) || CALENDAR_DAY.test(value))) parts.push(field + ':' + quote(value)); }
+  if (filters?.unread) parts.push('label:unread');
+  if (filters?.hasAttachment) parts.push('has:attachment');
+  const text = String(filters?.text || '').trim();
+  if (text) parts.push(text);
+  return parts.join(' ');
+}
+/** The five parameters the feed proxy forwards, and nothing else. */
+export function feedQuery(route, cursor) {
+  const params = new URLSearchParams({ folder: String(route?.folder || 'all'), limit: '50' });
+  if (route?.mailbox) params.set('mailbox', route.mailbox);
+  if (route?.q) params.set('q', route.q);
+  if (cursor) params.set('cursor', cursor);
+  return params;
+}
 export const EMAIL_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 export function contacts(value) {
   if (Array.isArray(value)) return value.map(item => typeof item === 'string' ? { address: item } : item).filter(Boolean);
@@ -18,11 +78,6 @@ export function displayText(value) { return String(value ?? '').replace(/&(#x[0-
 export const contactLabel = value => { const person = firstContact(value); return displayText(person?.name || person?.address || 'Unknown participant'); };
 export const fullContacts = value => contacts(value).map(person => person.name && person.address ? `${/[,;"]/u.test(person.name) ? '"' + String(person.name).replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"' : person.name} <${person.address}>` : person.address || person.name).filter(Boolean).join(', ');
 export const mailboxAddresses = box => [...new Set([box?.principal, ...(box?.visible_addresses || [])].filter(Boolean).map(addressKey))];
-export function normalizedRoute(input = {}) { const result = { ...EMPTY_ROUTE }; result.folder = input.folder === 'all' ? 'inbox' : Object.hasOwn(FOLDERS, input.folder) ? input.folder : 'inbox'; for (const key of ['mailbox', 'q', 'id', ...FILTER_KEYS]) result[key] = String(input[key] || '').slice(0, key === 'q' ? 1000 : 300); if (!['read', 'unread'].includes(result.read)) result.read = ''; if (!['true', 'false'].includes(result.hasAttachment)) result.hasAttachment = ''; return result; }
-export function routeAddress(input) { const route = normalizedRoute(input); const params = new URLSearchParams(); for (const [key, value] of Object.entries(route)) if (value && (key !== 'folder' || value !== 'inbox')) params.set(key, value); return 'browse' + (params.size ? '?' + params : ''); }
-export function parseRoute(address) { if (!address || address === 'browse') return { ...EMPTY_ROUTE }; if (address.startsWith('conversation=')) return normalizedRoute({ id: address.slice(13) }); if (!address.includes('?') && /^[\w-]+$/.test(address) && address !== 'browse') return normalizedRoute({ id: address }); return normalizedRoute(Object.fromEntries(new URLSearchParams(address.startsWith('browse?') ? address.slice(7) : address.replace(/^\?/, '')))); }
-export function localDayStart(value) { if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return value; const [year, month, day] = value.split('-').map(Number); const checked = new Date(Date.UTC(year, month - 1, day)); if (checked.getUTCFullYear() !== year || checked.getUTCMonth() !== month - 1 || checked.getUTCDate() !== day) return value; return new Date(year, month - 1, day).toISOString(); }
-export function feedQuery(route, cursor) { const value = normalizedRoute(route); const params = new URLSearchParams({ folder: value.folder, limit: '50' }); for (const key of ['mailbox', 'q', ...FILTER_KEYS]) if (value[key]) params.set(key, ['after', 'before'].includes(key) ? localDayStart(value[key]) : value[key]); if (cursor) params.set('cursor', cursor); return params; }
 export function rowParticipant(row) { if (row.display_participant) return displayText(row.display_participant); const people = row.last_direction === 'outbound' ? row.latest_to : row.latest_from; return contacts(people).length ? contactLabel(people) : contactLabel(row.participant_text); }
 export function logicalMessages(messages) {
   const groups = new Map();
