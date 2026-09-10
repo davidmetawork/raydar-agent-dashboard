@@ -213,3 +213,24 @@ test("the list title names the folder, and the account when one is scoped", () =
   assert.equal(R.viewTitle("all-mail", ""), "All Mail");
   assert.equal(R.viewTitle("nonsense", ""), "All inboxes");
 });
+
+/* Every folder name this page sends must be one the store scopes, or a
+   deliberate, documented exception. master-inbox/lib/search.mjs recognises
+   FOLDER_LABELS = {all, inbox, sent, drafts, spam, trash, starred} and handles
+   "snoozed" in its own branch; anything else adds no label clause AND skips
+   both the snooze exclusion and the snoozed inclusion, so it quietly becomes an
+   unscoped query over everything retained. "all-mail" is that case today and is
+   labelled as such in the rail title and in the visible scope line. This test
+   exists so the NEXT folder added cannot repeat it silently. */
+const STORE_FOLDERS = new Set(["all", "inbox", "sent", "drafts", "spam", "trash", "starred", "snoozed"]);
+const KNOWN_UNSCOPED = ["all-mail"];
+
+test("every folder the page can send is scoped by the store, or a known exception", () => {
+  const unmapped = R.FOLDERS.filter(folder => !STORE_FOLDERS.has(folder));
+  assert.deepEqual(
+    unmapped,
+    KNOWN_UNSCOPED,
+    `folders the store has no mapping for: ${unmapped.join(", ")}. An unmapped folder is not a narrower view — it drops the label clause and both snooze clauses, so it returns everything retained including spam and trash. Map it in master-inbox/lib/search.mjs, or add it here with the visible warning the rail already carries for all-mail.`
+  );
+  for (const folder of R.FOLDERS) assert.ok(R.FOLDER_LABELS[folder], `${folder} needs a human label`);
+});

@@ -195,6 +195,11 @@ test('the composer can always be dismissed and offers no route the service does 
   assert.doesNotMatch(composer, /action: 'remove'/);
   assert.doesNotMatch(composer, /draft-attachment\?id=/);
   assert.match(draftAttachmentProxy, /if \(req\.method !== "POST"\)/);
+  // The READER is the other call site: it must not build a draft-attachment
+  // URL either, or the two drift apart again (the composer link was removed
+  // once while fileView kept constructing one).
+  assert.doesNotMatch(page, /draft-attachment/);
+  assert.match(page, /'\/api\/master-inbox\/attachment\?id='/);
 });
 
 test('an attachment download relays the service bytes and never invents a 502', () => {
@@ -276,4 +281,15 @@ test('the reader keeps the stable control ids the QA contract addresses', () => 
   for (const id of ['bulkRead', 'bulkArchive', 'saveDraft', 'send', 'schedule', 'reportProblem', 'compose', 'refresh', 'search', 'loadMore']) {
     assert.ok(shell.includes(`id="${id}"`), `the shell must keep #${id}`);
   }
+});
+
+test('the list announces its one-sentence summary, not all fifty rows', () => {
+  // A polite live region wrapping #conversationList makes a screen reader read
+  // every row's participant, subject, snippet, time and mailbox after each
+  // feed load, refresh, filter change and Load more. #listSummary already
+  // holds the sentence a reader actually wants, so that is the live region.
+  assert.doesNotMatch(shell, /id="conversationList"[^>]*aria-live/);
+  assert.match(shell, /id="listSummary" role="status"/);
+  assert.match(shell, /id="conversationList"[^>]*aria-busy/);
+  assert.match(page, /setAttribute\('role', 'list'\)/);
 });
