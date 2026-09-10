@@ -203,6 +203,16 @@
     };
   }
 
+  // The store reports some warnings as machine codes (lib/search.mjs pushes
+  // "date_invalid:before"). Those are for consumers, not for a person reading a
+  // search box, so the known ones are translated and anything else is passed
+  // through unchanged rather than hidden.
+  function warningText(message) {
+    var machine = /^([a-z_]+):([a-z_]+)$/.exec(message);
+    if (machine && machine[1] === "date_invalid") return machine[2] + ": needs a calendar date like 2026-09-01, so that filter was ignored";
+    return message;
+  }
+
   // What the search box quietly did with the query it was given.
   function searchNotice(parsed) {
     var notes = [];
@@ -218,7 +228,7 @@
     for (var j = 0; j < warnings.length; j++) {
       var warning = warnings[j];
       var message = typeof warning === "string" ? warning : (warning && warning.message);
-      if (message) notes.push(String(message));
+      if (message) notes.push(warningText(String(message)));
     }
     return notes.join(" · ");
   }
@@ -256,6 +266,10 @@
     viewTitle: viewTitle
   };
 
+  // Registered on the global in BOTH runtimes: the browser reads
+  // window.MasterInboxRoute, and a Node test that require()s this file gets the
+  // same object on globalThis, so page code and tests share one route contract.
   if (typeof window !== "undefined") window.MasterInboxRoute = api;
+  if (typeof globalThis !== "undefined") globalThis.MasterInboxRoute = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
