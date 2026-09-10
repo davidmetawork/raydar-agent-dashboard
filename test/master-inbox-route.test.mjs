@@ -189,6 +189,11 @@ test("the search box admits the fields the store ignored", () => {
   assert.equal(R.searchNotice({ unsupported: ["subject"] }), "subject: is not supported; searched as text");
   assert.equal(R.searchNotice({ unsupported: [{ field: "filename", searchedAs: "text" }, "is"] }), "filename: is not supported; searched as text · is: is not supported; searched as text");
   assert.equal(R.searchNotice({ warnings: ["before: needs YYYY-MM-DD, so the date filter was dropped"] }), "before: needs YYYY-MM-DD, so the date filter was dropped");
+  // The store reports malformed dates as a machine code; a person reading the
+  // search box gets a sentence, and an unknown code is passed through as-is.
+  assert.equal(R.searchNotice({ warnings: ["date_invalid:after"] }), "after: needs a calendar date like 2026-09-01, so that filter was ignored");
+  assert.equal(R.searchNotice({ unsupported: ["subject"], warnings: ["date_invalid:before"] }), "subject: is not supported; searched as text · before: needs a calendar date like 2026-09-01, so that filter was ignored");
+  assert.equal(R.searchNotice({ warnings: ["something_else:happened"] }), "something_else:happened");
   assert.equal(R.searchNotice({}), "");
   assert.equal(R.searchNotice(null), "");
   assert.equal(R.searchNotice({ unsupported: [null, {}, ""] }), "");
