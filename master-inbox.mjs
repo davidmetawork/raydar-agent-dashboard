@@ -213,7 +213,27 @@ function messageBody(message) {
   if (message.safe_html) { const preview = el('div', 'html-host hidden'); const toggle = btn('Show isolated HTML preview', 'text-button', () => { const opening = preview.classList.contains('hidden'); preview.classList.toggle('hidden', !opening); toggle.textContent = opening ? 'Hide HTML preview' : 'Show isolated HTML preview'; if (opening && !preview.children.length) { const frame = el('iframe'); frame.title = 'Isolated email preview'; frame.setAttribute('sandbox', ''); frame.referrerPolicy = 'no-referrer'; frame.srcdoc = safePreviewHTML(message.safe_html); preview.append(frame, el('p', 'body-note', 'Remote images, links, and active content are disabled.')); } }); host.append(toggle, preview); }
   return host;
 }
-function fileView(file, source = 'gmail') { const status = attachmentStatus(file); const ready = status === 'Available' && file.id; const node = el(ready ? 'a' : 'div', 'message-file'); if (ready) { node.href = file.downloadPath?.startsWith('/api/master-inbox/') ? file.downloadPath : '/api/master-inbox/' + (['draft', 'local_draft', 'local_send'].includes(source) ? 'draft-attachment' : 'attachment') + '?id=' + encodeURIComponent(file.id); node.target = '_blank'; node.rel = 'noopener'; } const name = el('span', '', file.filename || 'Attachment'); name.append(el('small', '', [file.size_bytes || file.sizeBytes ? number(Math.ceil((file.size_bytes || file.sizeBytes) / 1024)) + ' KB' : '', attachmentReason(file) || (status === 'Importing' ? 'The file is still being copied into the shared store.' : status === 'Available' ? 'Stored file available' : 'A downloadable file is not available.')].filter(Boolean).join(' · '))); node.append(name, el('span', 'badge ' + (ready ? 'delivered' : 'queued'), status)); return node; }
+/* Only provider messages have a working download GET. The service's draft
+   attachment route is POST-only (prepare and commit), and the dashboard proxy
+   refuses a GET on it with 405, so a draft/local record's file is shown as a
+   plain row with no link rather than a link that always fails. If the service
+   ever hands back a real downloadPath under /api/master-inbox/, that is used
+   for either source. */
+function fileView(file, source = 'gmail') {
+  const status = attachmentStatus(file);
+  const stored = typeof file.downloadPath === 'string' && file.downloadPath.startsWith('/api/master-inbox/') ? file.downloadPath : null;
+  const draftRecord = ['draft', 'local_draft', 'local_send'].includes(source);
+  const href = stored || (draftRecord || !file.id ? null : '/api/master-inbox/attachment?id=' + encodeURIComponent(file.id));
+  const ready = status === 'Available' && Boolean(file.id) && Boolean(href);
+  const node = el(ready ? 'a' : 'div', 'message-file');
+  if (ready) { node.href = href; node.target = '_blank'; node.rel = 'noopener'; }
+  const name = el('span', '', file.filename || 'Attachment');
+  const size = file.size_bytes || file.sizeBytes ? number(Math.ceil((file.size_bytes || file.sizeBytes) / 1024)) + ' KB' : '';
+  const note = attachmentReason(file) || (status === 'Importing' ? 'The file is still being copied into the shared store.' : status === 'Available' ? (ready ? 'Stored file available' : 'This file is attached to a draft record and cannot be downloaded here yet.') : 'A downloadable file is not available.');
+  name.append(el('small', '', [size, note].filter(Boolean).join(' · ')));
+  node.append(name, el('span', 'badge ' + (ready ? 'delivered' : 'queued'), status));
+  return node;
+}
 function readToolbar(thread) {
   const bar = el('div', 'read-toolbar'); bar.append(btn('← Back', 'back-button', backToList, 'backList')); const targets = threadTargets(); const normal = !thread.recordType && Boolean(chooseReplyMessage(thread, state.route.mailbox));
   if (normal) { bar.append(btn('Reply', 'compose-button', () => composer.open('reply'), 'reply'), btn('Reply all', 'button', () => composer.open('reply-all'), 'replyAll')); }
