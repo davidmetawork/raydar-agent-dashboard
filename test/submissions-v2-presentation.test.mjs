@@ -19,6 +19,8 @@ test("row DTO rejects unsafe Signal destinations", () => {
     can_submit: false,
     can_mark_submitted: false,
     can_unmark_submitted: false,
+    can_mark_bad_fit: false,
+    can_clear_bad_fit: false,
   });
 });
 
@@ -111,6 +113,8 @@ test("Interested preparation rows expose safe progress without artifact actions"
     can_submit: false,
     can_mark_submitted: false,
     can_unmark_submitted: false,
+    can_mark_bad_fit: true,
+    can_clear_bad_fit: false,
   });
 });
 

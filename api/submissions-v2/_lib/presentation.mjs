@@ -95,6 +95,9 @@ export function rowDto(row) {
   const unresolvedMultipleRoles = !row.pair_id && !row.case_id && offeredRoleCount > 1;
   const submissionMarkedAt = safeInstant(row.submission_marked_at);
   const manuallyMarked = Boolean(submissionMarkedAt) && submissionStatus !== "proven";
+  const badFitAt = safeInstant(row.bad_fit_at);
+  const badFit = Boolean(badFitAt);
+  const badFitWorkflow = ["interested", "preparing_resume"].includes(workflowState);
   return {
     case_id: row.pair_id || row.case_id || null,
     signal_id: row.signal_id || null,
@@ -137,6 +140,10 @@ export function rowDto(row) {
     submission_marked_at: submissionMarkedAt,
     submission_marked_by: text(row.submission_marked_by, 320) || null,
     submitted_manually: manuallyMarked,
+    bad_fit: badFit,
+    bad_fit_at: badFitAt,
+    bad_fit_by: badFit ? text(row.bad_fit_by, 320) || null : null,
+    bad_fit_note: badFit ? text(row.bad_fit_note, 500) || null : null,
     negative_reason: text(row.negative_reason, 500) || null,
     corrected_destination: row.corrected_destination || null,
     role_active: row.role_active === true,
@@ -152,6 +159,8 @@ export function rowDto(row) {
       can_submit: readyWorkflow && artifactReady && row.role_active === true && submissionStatus !== "proven" && !manuallyMarked,
       can_mark_submitted: readyWorkflow && submissionStatus !== "proven" && !manuallyMarked,
       can_unmark_submitted: manuallyMarked,
+      can_mark_bad_fit: identifiedPair && !badFit && badFitWorkflow && submissionStatus !== "proven" && !manuallyMarked,
+      can_clear_bad_fit: identifiedPair && badFit,
     },
   };
 }

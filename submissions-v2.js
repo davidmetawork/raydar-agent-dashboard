@@ -1,17 +1,19 @@
 "use strict";
 
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, manualMarkPresentation, preparationFailurePresentation, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, submissionGroup, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, badFitPresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, listEntityNoun, listPageReset, listRenderKey, healthCoverageDetails, manualMarkPresentation, preparationFailurePresentation, listFailureDisposition, listRenderDisposition, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, submissionGroup, tabPageFromKey } from "/submissions-v2-ui-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 const PAGE_LABELS = Object.freeze({
   interested: "Interested",
   needs_review: "Needs Review",
   not_interested: "Not Interested",
+  bad_fit: "Bad Fit",
 });
 const EMPTY = Object.freeze({
   interested: "No interested candidates right now",
   needs_review: "No candidates need review",
   not_interested: "No not-interested candidates right now",
+  bad_fit: "No candidates are marked a bad fit",
 });
 const PAGE_ORDER = Object.freeze(Object.keys(PAGE_LABELS));
 const STATE_PAGE_ALIASES = Object.freeze({ preparing_resume: "interested" });
@@ -45,7 +47,7 @@ function persistPendingDownloads() {
 const STATE = {
   page: "interested", query: "", rows: [], nextCursor: null, loading: false,
   totalCount: null, listSequence: 0, listRequest: null, countsRequest: null,
-  counts: { interested: 0, needs_review: 0, not_interested: 0, actionable: 0 },
+  counts: { interested: 0, interested_ready: 0, bad_fit: 0, needs_review: 0, not_interested: 0, actionable: 0 },
   session: null, authConfig: null, csrf: "", active: null, searchTimer: null, pollTimer: null,
   searchRequests: new Map(), generating: new Set(), dialogReturnFocus: null,
   pendingDownloads: pendingDownloadsFromSession(), downloadsInFlight: new Set(),
@@ -219,6 +221,11 @@ function interestedActions(row) {
   const canDuplicate = rowCapability(row, "can_duplicate", Boolean(row.candidate_id));
   const canMark = rowCapability(row, "can_mark_submitted", false);
   const canUnmark = rowCapability(row, "can_unmark_submitted", false);
+  const canBadFit = rowCapability(row, "can_mark_bad_fit", false);
+  const badFitting = rowActionPending(id, "bad-fit");
+  const badFit = canBadFit || badFitting
+    ? `<button class="button text bad-fit mark-bad-fit" data-id="${esc(id)}" type="button" ${!canBadFit || badFitting ? "disabled" : ""} title="Move this candidate-role pair to Bad Fit">${badFitting ? "Moving…" : "Bad Fit"}</button>`
+    : "";
   const manual = manualMarkPresentation(row);
   const historyLabel = submitted
     ? `<span class="submitted-state"><span class="submitted-label">${esc(manual?.label || "SUBMITTED")}</span>${manual?.detail ? `<small class="submitted-detail">${esc(manual.detail)}</small>` : ""}</span>`
@@ -241,7 +248,16 @@ function interestedActions(row) {
         : "";
     return `${historyLabel}${unmark}${generateResume}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>`;
   }
-  return `${historyLabel}${unmark}${submit}${mark}<button class="button secondary download" data-id="${esc(id)}" type="button" ${!canDownload || downloading ? "disabled" : ""} title="${!canDownload ? "Resume is still being prepared" : ""}">${downloading ? "Downloading…" : "Download Resume"}</button>${cautionButton(row)}${regenerate}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>${correct}`;
+  return `${historyLabel}${unmark}${submit}${mark}<button class="button secondary download" data-id="${esc(id)}" type="button" ${!canDownload || downloading ? "disabled" : ""} title="${!canDownload ? "Resume is still being prepared" : ""}">${downloading ? "Downloading…" : "Download Resume"}</button>${cautionButton(row)}${regenerate}<button class="button secondary duplicate" data-id="${esc(id)}" type="button" ${canDuplicate ? "" : "disabled"}>Duplicate</button>${correct}${badFit}`;
+}
+
+function badFitActions(row) {
+  const id = String(row.case_id || "");
+  const canClear = rowCapability(row, "can_clear_bad_fit", true);
+  const clearing = rowActionPending(id, "bad-fit");
+  const marked = badFitPresentation(row);
+  const label = `<span class="bad-fit-state"><span class="bad-fit-label">${esc(marked.label || "BAD FIT")}</span>${marked.detail ? `<small class="bad-fit-detail">${esc(marked.detail)}</small>` : ""}</span>`;
+  return `${label}<button class="button secondary clear-bad-fit" data-id="${esc(id)}" type="button" ${!canClear || clearing ? "disabled" : ""}>${clearing ? "Restoring…" : "Restore to Interested"}</button>`;
 }
 
 function reviewActions(row) {
@@ -293,7 +309,10 @@ function rowHtml(row) {
   const role = row.company && row.role_title ? `${row.company} · ${row.role_title}` : row.role_label || (row.offered_role_count > 1 ? "Multiple offered roles" : "Role not identified");
   const signal = admissionSourceHtml(row);
   const reason = STATE.page === "not_interested" ? `<div class="reason-line">${esc(row.negative_reason || "No reason provided")}</div>` : "";
-  const actions = STATE.page === "interested" ? interestedActions(row) : STATE.page === "needs_review" ? reviewActions(row) : negativeActions(row);
+  const actions = STATE.page === "interested" ? interestedActions(row)
+    : STATE.page === "needs_review" ? reviewActions(row)
+      : STATE.page === "bad_fit" ? badFitActions(row)
+        : negativeActions(row);
   const progress = STATE.page === "interested" ? resumeProgressHtml(row) : "";
   return `<article class="submission-row${submissionGroup(row) === "submitted" ? " submitted" : ""}" data-id="${esc(row.case_id || row.signal_id)}">${rowIdentity(row)}<div class="role-cell"><div class="role-title">${esc(role)}</div>${reviewSummaryHtml(row)}${progress}${reason}</div><div class="signal-cell">${signal}</div><time class="time-cell" datetime="${esc(row.signal_at || "")}">${esc(fmtWhen(row.signal_at))}</time><div class="row-actions">${actions}</div></article>`;
 }
@@ -306,6 +325,8 @@ function bindRows() {
   document.querySelectorAll(".submit").forEach((node) => { node.onclick = () => openSubmit(node.dataset.id); });
   document.querySelectorAll(".mark-submitted").forEach((node) => { node.onclick = () => markSubmitted(node.dataset.id); });
   document.querySelectorAll(".unmark-submitted").forEach((node) => { node.onclick = () => unmarkSubmitted(node.dataset.id); });
+  document.querySelectorAll(".mark-bad-fit").forEach((node) => { node.onclick = () => markBadFit(node.dataset.id); });
+  document.querySelectorAll(".clear-bad-fit").forEach((node) => { node.onclick = () => clearBadFit(node.dataset.id); });
   document.querySelectorAll(".prepare-resume").forEach((node) => { node.onclick = () => prepareResume(node.dataset.id); });
   document.querySelectorAll(".review-action").forEach((node) => { node.onclick = () => openReview(node.dataset.id); });
   document.querySelectorAll(".caution").forEach(bindPopoverButton);
@@ -326,7 +347,7 @@ function focusedRowDescendant() {
   const row = node.closest("#rows .submission-row");
   const id = row?.dataset.id;
   if (!id) return null;
-  const action = ["download", "regenerate", "duplicate", "correct", "submit", "mark-submitted", "unmark-submitted", "prepare-resume", "review-action", "caution"]
+  const action = ["download", "regenerate", "duplicate", "correct", "submit", "mark-submitted", "unmark-submitted", "mark-bad-fit", "clear-bad-fit", "prepare-resume", "review-action", "caution"]
     .find((name) => node.classList.contains(name));
   if (action) return { id, selector: `.${action}[data-id]` };
   if (node.matches(".candidate-name")) return { id, selector: ".candidate-name" };
@@ -399,9 +420,11 @@ function rowGroupHtml(key, label, rows) {
 }
 
 function renderCounts() {
-  $("count-interested").textContent = STATE.counts.interested || 0;
+  $("count-interested").textContent = STATE.counts.interested_ready || 0;
+  $("count-interested").title = `${STATE.counts.interested_ready || 0} ready to submit of ${STATE.counts.interested || 0} interested`;
   $("count-needs-review").textContent = STATE.counts.needs_review || 0;
   $("count-not-interested").textContent = STATE.counts.not_interested || 0;
+  $("count-bad-fit").textContent = STATE.counts.bad_fit || 0;
   if (window.parent !== window) window.parent.postMessage({ type: "raydar-submissions-v2-counts", count: STATE.counts.actionable || 0 }, location.origin);
 }
 
@@ -1148,6 +1171,30 @@ async function unmarkSubmitted(id) {
       await command("unmark_submitted", { case_id: id, expected_version: row.state_version });
       toast("Submission mark removed.");
       await loadRows({ refresh: true });
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+async function markBadFit(id) {
+  const row = rowFor(id); if (!row) return;
+  if (!rowCapability(row, "can_mark_bad_fit", false)) return;
+  return withRowAction(id, "bad-fit", async () => {
+    try {
+      await command("mark_bad_fit", { case_id: id, expected_version: row.state_version });
+      toast("Moved to Bad Fit. Restore it there if this was wrong.");
+      await Promise.all([loadCounts(), loadRows({ refresh: true })]);
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+async function clearBadFit(id) {
+  const row = rowFor(id); if (!row) return;
+  if (!rowCapability(row, "can_clear_bad_fit", false)) return;
+  return withRowAction(id, "bad-fit", async () => {
+    try {
+      await command("clear_bad_fit", { case_id: id, expected_version: row.state_version });
+      toast("Restored to Interested.");
+      await Promise.all([loadCounts(), loadRows({ refresh: true })]);
     } catch (error) { toast(error.message, true); }
   });
 }

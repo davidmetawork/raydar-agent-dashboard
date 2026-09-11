@@ -4387,3 +4387,208 @@ test("a human submission mark opens Paraform proof reconciliation and stays reve
     }, sql);
   }
 });
+
+test("a Bad Fit mark holds a pair out of Interested without changing its pipeline state", async () => {
+  const repository = createRepository({ sql });
+  const priorControls = await readRuntimeControls(sql);
+  const enabled = await setRuntimeControls({
+    actorEmail: "test@raydar.xyz", reason: "Enable UI and ingestion for the Bad Fit regression",
+    ui: true, ingestion: true, generation: priorControls.generation_enabled,
+    masterInbox: priorControls.master_inbox_enabled, curated: priorControls.curated_enabled,
+  }, sql);
+  const readyPair = async () => {
+    const pair = await preparingPair();
+    const generationId = randomUUID();
+    await sql`
+      insert into submissions_v2.resume_generations(
+        id, pair_id, generation_version, trigger_kind, idempotency_key, status, stage,
+        expected_pair_version, first_signal_id, primary_model_pin, fallback_model_pin,
+        validator_model_pin, prompt_pin, template_pin, deadline_at, completed_at
+      ) values (
+        ${generationId}, ${pair.id}, 1, 'initial', ${`bad-fit-generation:${generationId}`}, 'succeeded', 'complete',
+        1, ${pair.signal}, 'primary-test', 'fallback-test', 'validator-test',
+        'prompt-test', 'template-test', clock_timestamp(), clock_timestamp()
+      )
+    `;
+    let pdfId;
+    for (const kind of ["pdf", "ats", "manifest"]) {
+      const artifactId = randomUUID();
+      if (kind === "pdf") pdfId = artifactId;
+      await sql`
+        insert into submissions_v2.resume_artifacts(
+          id, pair_id, generation_id, artifact_version, kind, private_object_key, digest,
+          size_bytes, page_count, text_digest, validation_status, archive_readback_at, archived_at, current_state
+        ) values (
+          ${artifactId}, ${pair.id}, ${generationId}, 1, ${kind},
+          ${`submissions/resumes/v2/${pair.id}/${kind}`}, ${digest(`${pair.id}:${kind}`)}, 500,
+          ${kind === "pdf" ? 1 : null}, ${digest(`${pair.id}:${kind}-text`)}, 'passed',
+          clock_timestamp(), clock_timestamp(), 'current'
+        )
+      `;
+    }
+    await sql`
+      update submissions_v2.candidate_role_pairs
+         set workflow_state='interested', current_artifact_id=${pdfId},
+             resume_ready_at=clock_timestamp(), state_version=state_version+1
+       where id=${pair.id}
+    `;
+    return { ...pair, artifactId: pdfId, version: 2 };
+  };
+  const badFitEvents = async (pairId) => sql`
+    select event_type, actor_id, source, expected_version, new_version, metadata
+      from submissions_v2.pair_events
+     where pair_id=${pairId} and event_type in ('bad_fit_marked','bad_fit_cleared')
+     order by created_at, id
+  `;
+  const listed = async (page, pairId) => (await repository.list({ page })).rows.find((row) => row.pair_id === pairId) || null;
+  try {
+    const pair = await readyPair();
+    const before = await repository.counts();
+    assert.ok(await listed("interested", pair.id), "a ready pair starts on Interested");
+    assert.equal(await listed("bad_fit", pair.id), null);
+
+    const marked = await repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit:${pair.id}`, pairId: pair.id, expectedVersion: pair.version,
+    });
+    assert.equal(marked.case_id, pair.id);
+    assert.equal(marked.state_version, 3);
+    assert.equal(marked.bad_fit.marked_by, "david@raydar.xyz");
+    assert.match(marked.bad_fit.marked_at, /^\d{4}-\d{2}-\d{2}T/u);
+
+    const markedRow = (await sql`
+      select workflow_state, intent_state, submission_status, submission_opened_at, state_version
+        from submissions_v2.candidate_role_pairs where id=${pair.id}
+    `)[0];
+    assert.equal(markedRow.workflow_state, "interested", "a Bad Fit mark never rewrites the workflow state");
+    assert.equal(markedRow.intent_state, "interested");
+    assert.equal(markedRow.submission_status, "none", "a Bad Fit mark never opens a Paraform submission window");
+    assert.equal(markedRow.submission_opened_at, null);
+    assert.equal(Number(markedRow.state_version), 3);
+    assert.equal((await sql`
+      select count(*)::integer as count from submissions_v2.jobs
+       where subject_type='pair' and subject_id=${pair.id}::text and kind='proof_reconcile'
+    `)[0].count, 0, "a Bad Fit mark queues no proof work");
+
+    const events = await badFitEvents(pair.id);
+    assert.equal(events.length, 1);
+    assert.deepEqual(
+      { ...events[0], metadata: events[0].metadata.marked_by },
+      {
+        event_type: "bad_fit_marked", actor_id: "david@raydar.xyz", source: "mark_bad_fit",
+        expected_version: "2", new_version: "3", metadata: "david@raydar.xyz",
+      },
+    );
+
+    assert.equal(await listed("interested", pair.id), null, "a bad fit leaves the Interested page");
+    const onBadFit = await listed("bad_fit", pair.id);
+    assert.ok(onBadFit, "a bad fit appears on its own page");
+    assert.equal(onBadFit.bad_fit_by, "david@raydar.xyz");
+    assert.equal(new Date(onBadFit.bad_fit_at).toISOString(), marked.bad_fit.marked_at);
+    assert.equal(rowDto(onBadFit).capabilities.can_clear_bad_fit, true);
+    assert.equal(rowDto(onBadFit).capabilities.can_mark_bad_fit, false);
+    const detail = await repository.pair(pair.id);
+    assert.equal(detail.bad_fit_by, "david@raydar.xyz");
+
+    const after = await repository.counts();
+    assert.equal(Number(after.interested), Number(before.interested) - 1);
+    assert.equal(Number(after.interested_ready), Number(before.interested_ready) - 1);
+    assert.equal(Number(after.bad_fit), Number(before.bad_fit) + 1);
+    assert.equal(Number(after.actionable), Number(before.actionable) - 1);
+
+    const replay = await repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit:${pair.id}`, pairId: pair.id, expectedVersion: pair.version,
+    });
+    assert.equal(replay.replay, true);
+    assert.equal((await badFitEvents(pair.id)).length, 1);
+
+    await assert.rejects(() => repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-stale:${pair.id}`, pairId: pair.id, expectedVersion: pair.version,
+    }), (error) => error.code === "stale_pair_version" && error.status === 409);
+
+    const again = await repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-again:${pair.id}`, pairId: pair.id, expectedVersion: 3,
+    });
+    assert.equal(again.already_marked, true);
+    assert.equal(again.state_version, 3);
+    assert.equal((await badFitEvents(pair.id)).length, 1);
+
+    const cleared = await repository.clearBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-clear:${pair.id}`, pairId: pair.id, expectedVersion: 3,
+    });
+    assert.equal(cleared.state_version, 4);
+    assert.equal(cleared.bad_fit, null);
+    assert.ok(await listed("interested", pair.id), "restoring returns the pair to Interested");
+    assert.equal(await listed("bad_fit", pair.id), null);
+    assert.deepEqual((await badFitEvents(pair.id)).map((event) => event.event_type), ["bad_fit_marked", "bad_fit_cleared"]);
+    const restored = await repository.counts();
+    assert.equal(Number(restored.interested), Number(before.interested));
+    assert.equal(Number(restored.interested_ready), Number(before.interested_ready));
+    assert.equal(Number(restored.bad_fit), Number(before.bad_fit));
+
+    await assert.rejects(() => repository.clearBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-clear-twice:${pair.id}`, pairId: pair.id, expectedVersion: 4,
+    }), (error) => error.code === "pair_not_bad_fit" && error.status === 409);
+
+    const markedSubmitted = await repository.markSubmitted({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-submitted:${pair.id}`, pairId: pair.id, expectedVersion: 4,
+    });
+    assert.equal(markedSubmitted.state_version, 5);
+    const submittedCounts = await repository.counts();
+    assert.equal(Number(submittedCounts.interested), Number(before.interested),
+      "a manual submission mark keeps the pair on the Interested page");
+    assert.equal(Number(submittedCounts.interested_ready), Number(before.interested_ready) - 1,
+      "a manual submission mark leaves the ready-to-submit count");
+    assert.equal(Number(submittedCounts.actionable), Number(before.actionable) - 1);
+    await assert.rejects(() => repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-after-mark:${pair.id}`, pairId: pair.id, expectedVersion: 5,
+    }), (error) => error.code === "pair_already_submitted" && error.status === 409);
+
+    const provenPair = await readyPair();
+    const provenBadFit = await repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-before-proof:${provenPair.id}`, pairId: provenPair.id, expectedVersion: provenPair.version,
+    });
+    assert.ok(await listed("bad_fit", provenPair.id), "the pair is held on Bad Fit before proof lands");
+    const proofJobId = randomUUID();
+    await sql`
+      insert into submissions_v2.jobs(
+        id, kind, subject_type, subject_id, idempotency_key, required_control, control_epoch,
+        state, lease_owner, lease_expires_at, fencing_token, attempt_count, started_at
+      ) values (
+        ${proofJobId}, 'proof_reconcile', 'source', 'submission_proof', ${`bad-fit-proof:${proofJobId}`}, 'ingestion',
+        ${enabled.control_epoch}, 'running', 'bad-fit-proof-worker', clock_timestamp() + interval '2 minutes', 1, 1, clock_timestamp()
+      )
+    `;
+    const proven = await repository.applySubmissionProof({
+      pairId: provenPair.id, applicationId: `bad-fit-application-${provenPair.id}`,
+      authoritativePath: "application.getRecruiterApplicationData", evidenceDigest: digest(`bad-fit-proof:${provenPair.id}`),
+      observedAt: new Date().toISOString(), checkedAt: new Date().toISOString(),
+      executionFence: { jobId: proofJobId, workerId: "bad-fit-proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
+    });
+    assert.equal(proven.submission_status, "proven");
+    assert.equal(await listed("bad_fit", provenPair.id), null, "Paraform proof outranks a human Bad Fit mark");
+    assert.ok(await listed("interested", provenPair.id), "a proven submission returns to Interested history");
+    assert.equal(Number(provenBadFit.state_version), Number(provenPair.version) + 1);
+    await assert.rejects(() => repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-proven:${provenPair.id}`, pairId: provenPair.id, expectedVersion: Number(proven.state_version),
+    }), (error) => error.code === "proven_pair_immutable" && error.status === 409);
+
+    const reviewPair = await preparingPair();
+    await sql.begin(async (tx) => {
+      await tx`
+        update submissions_v2.candidate_role_pairs
+           set workflow_state='needs_review', state_version=state_version+1 where id=${reviewPair.id}
+      `;
+      await tx`insert into submissions_v2.review_items(pair_id, reason_code) values (${reviewPair.id}, 'candidate_question')`;
+    });
+    await assert.rejects(() => repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-review:${reviewPair.id}`, pairId: reviewPair.id, expectedVersion: 2,
+    }), (error) => error.code === "pair_not_bad_fit_ready" && error.status === 409);
+    assert.equal((await badFitEvents(reviewPair.id)).length, 0);
+  } finally {
+    await setRuntimeControls({
+      actorEmail: "test@raydar.xyz", reason: "Restore controls after the Bad Fit regression",
+      ui: priorControls.ui_enabled, ingestion: priorControls.ingestion_enabled, generation: priorControls.generation_enabled,
+      masterInbox: priorControls.master_inbox_enabled, curated: priorControls.curated_enabled,
+    }, sql);
+  }
+});

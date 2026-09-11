@@ -111,6 +111,8 @@ function safeFilename({ candidateName, companyName, roleTitle, createdAt, artifa
 function normalizeCounts(row = {}) {
   return {
     interested: Number(row.interested || 0),
+    interested_ready: Number(row.interested_ready || 0),
+    bad_fit: Number(row.bad_fit || 0),
     needs_review: Number(row.needs_review || 0),
     not_interested: Number(row.not_interested || 0),
     actionable: Number(row.actionable || 0),
@@ -499,6 +501,15 @@ export function createService({
       }
       if (action === "unmark_submitted") {
         return repository.unmarkSubmitted({ actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100), expectedVersion: expectedVersion(body.expected_version) });
+      }
+      if (action === "mark_bad_fit") {
+        return repository.markBadFit({
+          actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100),
+          expectedVersion: expectedVersion(body.expected_version), note: clean(body.note, 500) || null,
+        });
+      }
+      if (action === "clear_bad_fit") {
+        return repository.clearBadFit({ actorEmail, idempotencyKey, pairId: required(body.case_id, "case_id", 100), expectedVersion: expectedVersion(body.expected_version) });
       }
       throw problem("action_not_supported", "This Submissions V2 action is not supported.", 400);
     },

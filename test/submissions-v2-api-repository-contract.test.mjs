@@ -25,7 +25,8 @@ test("repository exposes the complete API and worker persistence boundary", () =
     "list", "counts", "health", "searchCandidates", "searchRoles", "pair", "jobs", "sourceForReview",
     "recordEmailSource", "applyClassifiedSignal", "routeClassificationFailure", "bindUnresolvedSignal", "dismissUnresolvedSignal",
     "addCandidate", "transition", "keepReview", "enqueuePairAction", "prepareResume", "enqueueSignalAction",
-    "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "markSubmitted", "unmarkSubmitted", "archive",
+    "addSupplement", "regenerate", "issueDownload", "downloadableArtifact", "openSubmit", "markSubmitted", "unmarkSubmitted",
+    "markBadFit", "clearBadFit", "archive",
     "upsertCandidateIndex", "upsertRoleIndex", "curatedSnapshots", "applyCuratedObservations",
     "resumeWorkInput", "startResumeGeneration", "resumeGeneration", "updateResumeGeneration",
     "startResumeStageRun", "finishResumeStageRun", "persistResumeSources", "persistResumeClaims",
@@ -107,4 +108,10 @@ test("API repository and worker share only canonical job kinds", async () => {
     "list capabilities must be grounded in a validated current artifact");
   assert.match(repository, /workflow_state in \('preparing_resume','interested'\) and submission_status <> 'proven'/,
     "preparing positives must remain represented in the actionable count");
+  assert.match(repository, /\(coalesce\(bad_fit\.event_type,''\) = 'bad_fit_marked' and p\.submission_status <> 'proven'\) = \$\{page === "bad_fit"\}/,
+    "one query must serve Interested and Bad Fit, and Paraform proof must outrank a human Bad Fit mark");
+  assert.match(repository, /where workflow_state='interested' and submission_status <> 'proven' and not submitted_manually and not bad_fit\)::bigint as interested_ready/,
+    "the Interested badge must count only pairs that are still ready to submit");
+  assert.match(repository, /and not submitted_manually and not bad_fit\)\n\s*\+ \(select count\(\*\) from visible where workflow_state='needs_review'/,
+    "a submitted or bad-fit pair must leave the actionable count the Monitor shell renders");
 });

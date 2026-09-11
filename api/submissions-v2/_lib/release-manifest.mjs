@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "6abd595d2be544c2ccf781e4bb05105b929a3c9cd49bdc8499e82460be7fad2e",
+  "digest": "9ad6dd17467f77ea4b43e8d29a77138962a696c3959eecbb47c8290a40a52a50",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -136,7 +136,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/presentation.mjs",
-      "sha256": "9f14c9a3a040d2b6ac6f32da9fc8be141053cd0f04b90d6cbd436828f9454c5a"
+      "sha256": "fcbb1e46d1c17af167b8cc28a9169f368c2e8e796d1b6766fb3e58270b4627d2"
     },
     {
       "path": "api/submissions-v2/_lib/private-data.mjs",
@@ -144,7 +144,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/repository.mjs",
-      "sha256": "f6ccffd5cae444a6fec2fe1c7f239772b4d208fdde745c553d281735ecb80bc9"
+      "sha256": "122b0128f9ee69a69e6daef654c49630ed9736fbd8095748966fbc739feecf4e"
     },
     {
       "path": "api/submissions-v2/_lib/resume/claim-extractor.mjs",
@@ -204,7 +204,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/service.mjs",
-      "sha256": "be04cf902b63e220bce5bd4ee84431ae5ee9fc46262329f8ba60e05a3267c438"
+      "sha256": "ed5893e73919e3df80a7ae6e18011cda6625d833bf5444afc15c87673de53366"
     },
     {
       "path": "api/submissions-v2/_lib/sourcing-role-mappings.mjs",
@@ -356,7 +356,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2-ui-state.mjs",
-      "sha256": "8be251b527760847fa9750593c52e062635e423f290e0043e04b1c3200e61587"
+      "sha256": "f97180cc2e903742f7a936840c2c97a4e141059a2891f97d027ffc39280b6041"
     },
     {
       "path": "submissions-v2-worker/Dockerfile",
@@ -408,15 +408,15 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "submissions-v2.css",
-      "sha256": "23377316956b42067f1dec0f250ec2b6894a0f7fd2d11d83f358c990f3d88221"
+      "sha256": "6bd018be750346f0b4507c06f8064b46dcb9a00b6a598ee89d7f8652f380b592"
     },
     {
       "path": "submissions-v2.html",
-      "sha256": "a56e615569c314c6df80869bef02486b20d2a04b91a45db0b4b3d4ef2a5f50ef"
+      "sha256": "e2a9183e71a62e9f861647fb73ca9eff03aac73e9cafcc0426f9263563d1bb65"
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "234c69376dc41087132d1481fe0831e07ddb232c166a3fd6def481f2078f2a7e"
+      "sha256": "5bb5f44cbf51252a15abd84599be0408c3d5d4e490ff4f4a590f5469f14ab355"
     },
     {
       "path": "vercel.json",

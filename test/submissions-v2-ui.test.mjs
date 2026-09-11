@@ -305,7 +305,7 @@ test("Generate resume is withheld while can_prepare_resume is false or a generat
 
 test("prepareResume commands prepare_resume with the row's expected version and refreshes on success", () => {
   assert.match(js, /document\.querySelectorAll\("\.prepare-resume"\)\.forEach\(\(node\) => \{ node\.onclick = \(\) => prepareResume\(node\.dataset\.id\); \}\)/);
-  assert.match(js, /"mark-submitted", "unmark-submitted", "prepare-resume", "review-action", "caution"/);
+  assert.match(js, /"mark-submitted", "unmark-submitted", "mark-bad-fit", "clear-bad-fit", "prepare-resume", "review-action", "caution"/);
   const prepareFn = between(js, "async function prepareResume(id)", "async function command(");
   assert.match(prepareFn, /rowCapability\(row, "can_prepare_resume", false\)/);
   assert.match(prepareFn, /withRowAction\(id, "prepare-resume", async \(\) => \{/);
@@ -335,4 +335,35 @@ test("source health distinguishes reported delays from committed Gmail and Seque
   assert.match(js, /Cache confirmed through/);
   assert.match(js, /source\.safeErrorDetail/);
   assert.match(css, /\.source-health-details\{/);
+});
+
+test("Bad Fit moves an Interested pair to its own page and keeps the restore in one click", () => {
+  const interestedFn = between(js, "function interestedActions(row)", "function badFitActions(row)");
+  assert.match(interestedFn, /rowCapability\(row, "can_mark_bad_fit", false\)/);
+  assert.match(interestedFn, /class="button text bad-fit mark-bad-fit"/);
+  assert.match(interestedFn, /\$\{correct\}\$\{badFit\}`;/);
+  const badFitFn = between(js, "function badFitActions(row)", "function reviewActions(row)");
+  assert.match(badFitFn, /rowCapability\(row, "can_clear_bad_fit", true\)/);
+  assert.match(badFitFn, /class="button secondary clear-bad-fit"/);
+  assert.match(badFitFn, /Restore to Interested/);
+  assert.doesNotMatch(badFitFn, /class="button primary submit"|download|duplicate/,
+    "a bad-fit row offers no submission path until it is restored");
+  assert.match(js, /document\.querySelectorAll\("\.mark-bad-fit"\)\.forEach\(\(node\) => \{ node\.onclick = \(\) => markBadFit\(node\.dataset\.id\); \}\)/);
+  assert.match(js, /document\.querySelectorAll\("\.clear-bad-fit"\)\.forEach\(\(node\) => \{ node\.onclick = \(\) => clearBadFit\(node\.dataset\.id\); \}\)/);
+  const markFn = between(js, "async function markBadFit(id)", "async function clearBadFit(id)");
+  assert.match(markFn, /withRowAction\(id, "bad-fit", async \(\) => \{/);
+  assert.match(markFn, /command\("mark_bad_fit", \{ case_id: id, expected_version: row\.state_version \}\)/);
+  assert.match(markFn, /Promise\.all\(\[loadCounts\(\), loadRows\(\{ refresh: true \}\)\]\)/);
+  const clearFn = between(js, "async function clearBadFit(id)", "async function prepareResume(id)");
+  assert.match(clearFn, /command\("clear_bad_fit", \{ case_id: id, expected_version: row\.state_version \}\)/);
+  assert.match(clearFn, /Promise\.all\(\[loadCounts\(\), loadRows\(\{ refresh: true \}\)\]\)/);
+  assert.match(js, /STATE\.page === "bad_fit" \? badFitActions\(row\)/);
+});
+
+test("the Interested tab badge counts only the candidates that are ready to submit", () => {
+  const renderCountsFn = between(js, "function renderCounts()", "function freshnessFact(");
+  assert.match(renderCountsFn, /\$\("count-interested"\)\.textContent = STATE\.counts\.interested_ready \|\| 0;/);
+  assert.doesNotMatch(renderCountsFn, /\$\("count-interested"\)\.textContent = STATE\.counts\.interested \|\| 0;/);
+  assert.match(renderCountsFn, /\$\("count-bad-fit"\)\.textContent = STATE\.counts\.bad_fit \|\| 0;/);
+  assert.match(renderCountsFn, /ready to submit of \$\{STATE\.counts\.interested \|\| 0\} interested/);
 });

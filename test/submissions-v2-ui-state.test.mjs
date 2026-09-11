@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { admissionSourcePresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, manualMarkPresentation, preparationFailurePresentation, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, submissionGroup, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
+import { admissionSourcePresentation, badFitPresentation, commandConflictResolution, commandSuccessMessage, displayListTotal, embeddedModalViewport, healthCoverageDetails, listEntityNoun, listFailureDisposition, listPageReset, listRenderDisposition, listRenderKey, manualMarkPresentation, preparationFailurePresentation, listScopeIsCurrent, navigateSubmitPopup, reconcileListPages, reviewContextCanRender, reviewContextPresentation, reviewProgressPresentation, reviewRowPresentation, resumeUiState, submissionGroup, tabPageFromKey } from "../submissions-v2-ui-state.mjs";
 
 test("only stale pair versions refresh into the retry guidance", () => {
   assert.deepEqual(commandConflictResolution({ status: 409, code: "stale_pair_version" }), {
@@ -267,4 +267,15 @@ test("manual mark presentation names who marked it and flags the pending Parafor
   });
   assert.equal(manualMarkPresentation({ submission_status: "opened" }), null);
   assert.equal(manualMarkPresentation({ submission_status: "none" }), null);
+});
+
+test("a Bad Fit row names who held it back and carries any reason", () => {
+  assert.deepEqual(badFitPresentation({}), { marked: false, label: "", detail: "" });
+  assert.deepEqual(badFitPresentation({ bad_fit: true, bad_fit_by: "david@raydar.xyz" }), {
+    marked: true, label: "BAD FIT", detail: "Marked by David",
+  });
+  assert.deepEqual(badFitPresentation({ bad_fit: true, bad_fit_by: "david@raydar.xyz", bad_fit_note: "  Too junior  " }), {
+    marked: true, label: "BAD FIT", detail: "Marked by David · Too junior",
+  });
+  assert.equal(badFitPresentation({ bad_fit: true }).detail, "Marked by the team");
 });

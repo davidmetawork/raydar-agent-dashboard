@@ -24,11 +24,13 @@ function between(source, start, end) {
   return source.slice(from, to);
 }
 
-test("Submissions V2 ships the three-page searchable Activity-style shell", () => {
+test("Submissions V2 ships the four-page searchable Activity-style shell", () => {
   assert.match(html, /<title>Raydar · Submissions V2<\/title>/);
   assert.match(html, /data-page="interested"/);
   assert.match(html, /data-page="needs_review"/);
   assert.match(html, /data-page="not_interested"/);
+  assert.match(html, /data-page="bad_fit"/);
+  assert.match(html, /id="count-bad-fit"/);
   assert.match(html, /id="candidate-search"[^>]+placeholder="Search candidate name"/);
   assert.match(html, /id="display-count"/);
   assert.match(html, /id="load-more"/);
