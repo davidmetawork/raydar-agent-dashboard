@@ -6,7 +6,8 @@ import { gmailSignalUrl } from "./presentation.mjs";
 import { isParaformCuratedListUrl } from "./paraform-links.mjs";
 import { OMISSION_EVIDENCE_KIND, OMISSION_GROUNDED_REASON } from "./omission-prepass.mjs";
 
-const PAGE_STATES = new Set(["interested", "needs_review", "not_interested"]);
+const PAGE_STATES = new Set(["interested", "needs_review", "not_interested", "bad_fit"]);
+const BAD_FIT_WORKFLOW_STATES = new Set(["interested", "preparing_resume"]);
 const REVIEW_REASONS = new Set([
   "candidate_not_found", "candidate_ambiguous", "reply_unclear_or_conditional",
   "candidate_question", "role_unclear", "role_unavailable",
@@ -327,6 +328,17 @@ async function latestManualMark(tx, pairId) {
   const latest = rows[0];
   if (latest?.event_type !== "submission_marked") return null;
   return { marked_at: instant(latest.created_at), marked_by: latest.actor_id };
+}
+
+async function latestBadFit(tx, pairId) {
+  const rows = await tx`
+    select event_type, actor_id, created_at, note from submissions_v2.pair_events
+     where pair_id=${pairId} and event_type in ('bad_fit_marked','bad_fit_cleared')
+     order by created_at desc, id desc limit 1
+  `;
+  const latest = rows[0];
+  if (latest?.event_type !== "bad_fit_marked") return null;
+  return { marked_at: instant(latest.created_at), marked_by: latest.actor_id, note: latest.note || null };
 }
 
 async function queueResume(tx, pair, commandRow, triggerKind = "initial") {
@@ -847,6 +859,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
             p.submission_status,
             case when mark.event_type='submission_marked' then mark.created_at end as submission_marked_at,
             case when mark.event_type='submission_marked' then mark.actor_id end as submission_marked_by,
+            case when bad_fit.event_type='bad_fit_marked' then bad_fit.created_at end as bad_fit_at,
+            case when bad_fit.event_type='bad_fit_marked' then bad_fit.actor_id end as bad_fit_by,
+            case when bad_fit.event_type='bad_fit_marked' then bad_fit.note end as bad_fit_note,
             current_artifact.id as current_artifact_id, current_artifact.artifact_version,
             (current_artifact.id is not null) as artifact_ready, r.active as role_active,
             null::text as negative_reason, null::text as corrected_destination,
@@ -917,7 +932,13 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
              where e.pair_id=p.id and e.event_type in ('submission_marked','submission_unmarked')
              order by e.created_at desc, e.id desc limit 1
           ) mark on true
+          left join lateral (
+            select e.event_type, e.created_at, e.actor_id, e.note from submissions_v2.pair_events e
+             where e.pair_id=p.id and e.event_type in ('bad_fit_marked','bad_fit_cleared')
+             order by e.created_at desc, e.id desc limit 1
+          ) bad_fit on true
             where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
+              and (coalesce(bad_fit.event_type,'') = 'bad_fit_marked') = ${page === "bad_fit"}
               and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
           ) select * from scoped
             where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
@@ -934,17 +955,44 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
     },
 
     async counts() {
+      // Every count reads the same visible pairs with their two human flags resolved once:
+      // a manual submission mark and a Bad Fit mark are both the latest append-only event.
       const rows = await sql`
+        with visible as (
+          select p.id, p.workflow_state, p.submission_status,
+                 coalesce(mark.event_type,'') = 'submission_marked' as submitted_manually,
+                 coalesce(bad_fit.event_type,'') = 'bad_fit_marked' as bad_fit
+            from submissions_v2.candidate_role_pairs p
+            left join lateral (
+              select e.event_type from submissions_v2.pair_events e
+               where e.pair_id=p.id and e.event_type in ('submission_marked','submission_unmarked')
+               order by e.created_at desc, e.id desc limit 1
+            ) mark on true
+            left join lateral (
+              select e.event_type from submissions_v2.pair_events e
+               where e.pair_id=p.id and e.event_type in ('bad_fit_marked','bad_fit_cleared')
+               order by e.created_at desc, e.id desc limit 1
+            ) bad_fit on true
+           where p.case_hidden_at is null
+             and (p.workflow_state in ('preparing_resume','interested','needs_review') or p.submission_status='proven')
+        ), open_signals as (
+          select count(distinct unresolved_signal_id)::bigint as total
+            from submissions_v2.review_items review
+            join submissions_v2.source_events source on source.id=review.unresolved_signal_id
+           where review.action_state='open' and source.processing_state not in ('resolved','ignored_later','ignored_machine')
+        )
         select
-          (select count(*) from submissions_v2.candidate_role_pairs where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and case_hidden_at is null)::bigint as interested,
-          ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and submission_status<>'proven' and case_hidden_at is null)
-           + (select count(distinct unresolved_signal_id) from submissions_v2.review_items review join submissions_v2.source_events source on source.id=review.unresolved_signal_id where review.action_state='open' and source.processing_state not in ('resolved','ignored_later','ignored_machine')))::bigint as needs_review,
+          (select count(*) from visible where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and not bad_fit)::bigint as interested,
+          (select count(*) from visible where workflow_state='interested' and submission_status <> 'proven' and not submitted_manually and not bad_fit)::bigint as interested_ready,
+          (select count(*) from visible where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and bad_fit)::bigint as bad_fit,
+          ((select count(*) from visible where workflow_state='needs_review' and submission_status<>'proven')
+           + (select total from open_signals))::bigint as needs_review,
           (select count(*) from submissions_v2.not_interested_entries ni join submissions_v2.candidate_role_pairs p on p.id=ni.pair_id where p.case_hidden_at is null)::bigint as not_interested,
-          ((select count(*) from submissions_v2.candidate_role_pairs where workflow_state in ('preparing_resume','interested') and submission_status <> 'proven' and case_hidden_at is null)
-           + (select count(*) from submissions_v2.candidate_role_pairs where workflow_state='needs_review' and submission_status<>'proven' and case_hidden_at is null)
-           + (select count(distinct unresolved_signal_id) from submissions_v2.review_items review join submissions_v2.source_events source on source.id=review.unresolved_signal_id where review.action_state='open' and source.processing_state not in ('resolved','ignored_later','ignored_machine')))::bigint as actionable
+          ((select count(*) from visible where workflow_state in ('preparing_resume','interested') and submission_status <> 'proven' and not submitted_manually and not bad_fit)
+           + (select count(*) from visible where workflow_state='needs_review' and submission_status<>'proven')
+           + (select total from open_signals))::bigint as actionable
       `;
-      return rows[0] || { interested: 0, needs_review: 0, not_interested: 0, actionable: 0 };
+      return rows[0] || { interested: 0, interested_ready: 0, bad_fit: 0, needs_review: 0, not_interested: 0, actionable: 0 };
     },
 
     async health() {
@@ -1029,7 +1077,10 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
                a.artifact_version, a.validation_status as artifact_validation_status,
                (a.id is not null) as artifact_ready,
                case when mark.event_type='submission_marked' then mark.created_at end as submission_marked_at,
-               case when mark.event_type='submission_marked' then mark.actor_id end as submission_marked_by
+               case when mark.event_type='submission_marked' then mark.actor_id end as submission_marked_by,
+               case when bad_fit.event_type='bad_fit_marked' then bad_fit.created_at end as bad_fit_at,
+               case when bad_fit.event_type='bad_fit_marked' then bad_fit.actor_id end as bad_fit_by,
+               case when bad_fit.event_type='bad_fit_marked' then bad_fit.note end as bad_fit_note
           from submissions_v2.candidate_role_pairs p
           left join submissions_v2.candidate_index c on c.candidate_user_id=p.candidate_user_id
           left join submissions_v2.role_index r on r.role_id=p.role_id
@@ -1042,6 +1093,11 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
              where e.pair_id=p.id and e.event_type in ('submission_marked','submission_unmarked')
              order by e.created_at desc, e.id desc limit 1
           ) mark on true
+          left join lateral (
+            select e.event_type, e.created_at, e.actor_id, e.note from submissions_v2.pair_events e
+             where e.pair_id=p.id and e.event_type in ('bad_fit_marked','bad_fit_cleared')
+             order by e.created_at desc, e.id desc limit 1
+          ) bad_fit on true
          where p.id=${pairId} and p.case_hidden_at is null
       `;
       return rows[0] || null;
@@ -2577,6 +2633,51 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
           case_id: pairId, state_version: Number(updated.state_version),
           submission_status: updated.submission_status, manual_mark: null,
         };
+      }));
+    },
+
+    async markBadFit({ actorEmail, idempotencyKey, pairId, expectedVersion, note = null }) {
+      return sql.begin(async (tx) => command(tx, {
+        actorEmail, action: "mark_bad_fit", idempotencyKey, expectedVersion, pairId,
+        input: { pairId, expectedVersion, note },
+      }, async (commandRow) => {
+        const current = await lockPair(tx, pairId, expectedVersion);
+        if (current.submission_status === "proven") throw problem("proven_pair_immutable", "Paraform already confirmed this submission; it cannot be marked a bad fit.", 409, pairCurrent(current));
+        if (await latestManualMark(tx, pairId)) throw problem("pair_already_submitted", "This candidate-role item is already marked as submitted; undo that first.", 409, pairCurrent(current));
+        if (!BAD_FIT_WORKFLOW_STATES.has(current.workflow_state)) throw problem("pair_not_bad_fit_ready", "Only an Interested candidate-role item can be marked a bad fit.", 409, pairCurrent(current));
+        // A Bad Fit mark is a recruiter judgement, not a candidate signal: intent,
+        // workflow, and submission state stay exactly where the pipeline left them so
+        // the mark stays reversible and no worker scope changes.
+        const existing = await latestBadFit(tx, pairId);
+        if (existing) {
+          return { case_id: pairId, state_version: Number(current.state_version), bad_fit: existing, already_marked: true };
+        }
+        const updated = (await tx`
+          update submissions_v2.candidate_role_pairs
+             set state_version=state_version+1
+           where id=${pairId} and state_version=${expectedVersion} returning *
+        `)[0];
+        if (!updated) throw problem("stale_pair_version", "The candidate-role item changed before this action was committed.", 409, pairCurrent(current));
+        await pairEvent(tx, updated, { actorId: actorEmail, source: "mark_bad_fit", eventType: "bad_fit_marked", expectedVersion, previous: current, note, idempotencyKey: `pair:${commandRow.id}`, metadata: { marked_by: actorEmail, role_id: current.role_id } });
+        return { case_id: pairId, state_version: Number(updated.state_version), bad_fit: await latestBadFit(tx, pairId) };
+      }));
+    },
+
+    async clearBadFit({ actorEmail, idempotencyKey, pairId, expectedVersion }) {
+      return sql.begin(async (tx) => command(tx, {
+        actorEmail, action: "clear_bad_fit", idempotencyKey, expectedVersion, pairId,
+        input: { pairId, expectedVersion },
+      }, async (commandRow) => {
+        const current = await lockPair(tx, pairId, expectedVersion);
+        if (!(await latestBadFit(tx, pairId))) throw problem("pair_not_bad_fit", "This candidate-role item is not marked a bad fit.", 409, pairCurrent(current));
+        const updated = (await tx`
+          update submissions_v2.candidate_role_pairs
+             set state_version=state_version+1
+           where id=${pairId} and state_version=${expectedVersion} returning *
+        `)[0];
+        if (!updated) throw problem("stale_pair_version", "The candidate-role item changed before this action was committed.", 409, pairCurrent(current));
+        await pairEvent(tx, updated, { actorId: actorEmail, source: "clear_bad_fit", eventType: "bad_fit_cleared", expectedVersion, previous: current, idempotencyKey: `pair:${commandRow.id}`, metadata: { cleared_by: actorEmail } });
+        return { case_id: pairId, state_version: Number(updated.state_version), bad_fit: null };
       }));
     },
 

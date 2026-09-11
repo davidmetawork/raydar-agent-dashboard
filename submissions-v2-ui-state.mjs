@@ -313,6 +313,13 @@ export function manualMarkPresentation(row = {}) {
   return null;
 }
 
+export function badFitPresentation(row = {}) {
+  if (!row.bad_fit) return { marked: false, label: "", detail: "" };
+  const by = row.bad_fit_by ? `Marked by ${markedByName(row.bad_fit_by)}` : "Marked by the team";
+  const note = typeof row.bad_fit_note === "string" ? row.bad_fit_note.trim().slice(0, 300) : "";
+  return { marked: true, label: "BAD FIT", detail: note ? `${by} · ${note}` : by };
+}
+
 export function navigateSubmitPopup(popup, url) {
   if (!popup || !url) {
     popup?.close();
