@@ -256,7 +256,7 @@ function badFitActions(row) {
   const canClear = rowCapability(row, "can_clear_bad_fit", true);
   const clearing = rowActionPending(id, "bad-fit");
   const marked = badFitPresentation(row);
-  const label = `<span class="bad-fit-state"><span class="bad-fit-label">BAD FIT</span>${marked.detail ? `<small class="bad-fit-detail">${esc(marked.detail)}</small>` : ""}</span>`;
+  const label = `<span class="bad-fit-state"><span class="bad-fit-label">${esc(marked.label || "BAD FIT")}</span>${marked.detail ? `<small class="bad-fit-detail">${esc(marked.detail)}</small>` : ""}</span>`;
   return `${label}<button class="button secondary clear-bad-fit" data-id="${esc(id)}" type="button" ${!canClear || clearing ? "disabled" : ""}>${clearing ? "Restoring…" : "Restore to Interested"}</button>`;
 }
 

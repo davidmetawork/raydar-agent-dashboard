@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 104,
-  "digest": "d3ef63a3fdd4fe9664e099c100b904862208b7fa9e48c790b9d1d63b89571fd8",
+  "digest": "9ad6dd17467f77ea4b43e8d29a77138962a696c3959eecbb47c8290a40a52a50",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -415,7 +415,7 @@
     },
     {
       "path": "submissions-v2.js",
-      "sha256": "a34a018e24a2d177344a18f8bdd055b18c556a6027b0050ee9436549e2ed311b"
+      "sha256": "5bb5f44cbf51252a15abd84599be0408c3d5d4e490ff4f4a590f5469f14ab355"
     },
     {
       "path": "vercel.json",
