@@ -4544,6 +4544,10 @@ test("a Bad Fit mark holds a pair out of Interested without changing its pipelin
     }), (error) => error.code === "pair_already_submitted" && error.status === 409);
 
     const provenPair = await readyPair();
+    const provenBadFit = await repository.markBadFit({
+      actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-before-proof:${provenPair.id}`, pairId: provenPair.id, expectedVersion: provenPair.version,
+    });
+    assert.ok(await listed("bad_fit", provenPair.id), "the pair is held on Bad Fit before proof lands");
     const proofJobId = randomUUID();
     await sql`
       insert into submissions_v2.jobs(
@@ -4561,6 +4565,9 @@ test("a Bad Fit mark holds a pair out of Interested without changing its pipelin
       executionFence: { jobId: proofJobId, workerId: "bad-fit-proof-worker", fencingToken: 1, controlEpoch: Number(enabled.control_epoch) },
     });
     assert.equal(proven.submission_status, "proven");
+    assert.equal(await listed("bad_fit", provenPair.id), null, "Paraform proof outranks a human Bad Fit mark");
+    assert.ok(await listed("interested", provenPair.id), "a proven submission returns to Interested history");
+    assert.equal(Number(provenBadFit.state_version), Number(provenPair.version) + 1);
     await assert.rejects(() => repository.markBadFit({
       actorEmail: "david@raydar.xyz", idempotencyKey: `bad-fit-proven:${provenPair.id}`, pairId: provenPair.id, expectedVersion: Number(proven.state_version),
     }), (error) => error.code === "proven_pair_immutable" && error.status === 409);

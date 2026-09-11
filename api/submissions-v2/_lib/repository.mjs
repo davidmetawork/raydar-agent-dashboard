@@ -938,7 +938,7 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
              order by e.created_at desc, e.id desc limit 1
           ) bad_fit on true
             where (p.workflow_state in ('preparing_resume','interested') or p.submission_status='proven') and p.case_hidden_at is null
-              and (coalesce(bad_fit.event_type,'') = 'bad_fit_marked') = ${page === "bad_fit"}
+              and (coalesce(bad_fit.event_type,'') = 'bad_fit_marked' and p.submission_status <> 'proven') = ${page === "bad_fit"}
               and (${needle}='' or coalesce(c.search_key,'') like ${pattern} escape '\\')
           ) select * from scoped
             where (${after?.at || null}::timestamptz is null or (sort_at, sort_id) < (${after?.at || null}::timestamptz, ${after?.id || null}::uuid))
@@ -982,9 +982,9 @@ export function createRepository({ sql = database(), env = process.env } = {}) {
            where review.action_state='open' and source.processing_state not in ('resolved','ignored_later','ignored_machine')
         )
         select
-          (select count(*) from visible where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and not bad_fit)::bigint as interested,
+          (select count(*) from visible where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and not (bad_fit and submission_status <> 'proven'))::bigint as interested,
           (select count(*) from visible where workflow_state='interested' and submission_status <> 'proven' and not submitted_manually and not bad_fit)::bigint as interested_ready,
-          (select count(*) from visible where (workflow_state in ('preparing_resume','interested') or submission_status='proven') and bad_fit)::bigint as bad_fit,
+          (select count(*) from visible where workflow_state in ('preparing_resume','interested') and submission_status <> 'proven' and bad_fit)::bigint as bad_fit,
           ((select count(*) from visible where workflow_state='needs_review' and submission_status<>'proven')
            + (select total from open_signals))::bigint as needs_review,
           (select count(*) from submissions_v2.not_interested_entries ni join submissions_v2.candidate_role_pairs p on p.id=ni.pair_id where p.case_hidden_at is null)::bigint as not_interested,
