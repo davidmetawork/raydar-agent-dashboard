@@ -56,6 +56,7 @@ import {
   storeConfigured,
   takeAlertSlot,
 } from "./_lib/store.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 async function alertWorkerFailure(error, {
   lane,
@@ -339,10 +340,20 @@ export async function runAutomationCycle({
   };
 }
 
-export default async function handler(req, res) {
+export async function handleParaaiWorker(req, res, {
+  pauseState = () => paraformBackgroundPauseState("paraaiWorker"),
+} = {}) {
   res.setHeader("Cache-Control", "no-store");
   if (!["GET", "POST"].includes(req.method)) return res.status(405).json({ ok: false, error: "GET_or_POST_only" });
   if (!authorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+
+  // This must precede store configuration, request dispatch, the Paraform auth
+  // probe, every outreach lane, and recovery.  A failed control-plane read is
+  // intentionally a no-op response so cron/Fly do not retry into provider IO.
+  const backgroundPause = await pauseState().catch(() => ({ paused: true }));
+  if (backgroundPause?.paused) {
+    return res.status(200).json({ ok: true, paused: true, reason: "paraai_worker_paused" });
+  }
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
   const body = requestBody(req);
@@ -1034,4 +1045,8 @@ export default async function handler(req, res) {
       detail: String(error?.message || error).slice(0, 240),
     });
   }
+}
+
+export default async function handler(req, res) {
+  return handleParaaiWorker(req, res);
 }

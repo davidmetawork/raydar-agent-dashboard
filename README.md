@@ -33,3 +33,21 @@ Master Inbox's browser receives no Gmail credential and persists no message cont
 serverless proxy requires `MASTER_INBOX_BASE`, `MASTER_INBOX_SERVICE_KEY`, and the same
 `MASTER_INBOX_SESSION_ASSERTION_KEY` as the mailbox service, and every live deployment/navigation
 change requires the separately approved Master Inbox launch manifest.
+
+## Temporary ParaAI background pause
+
+The operator-owned KV key `ops:paraform-background-pause:v1:paraai-worker`
+accepts the exact record shape `{"pauseId":"incident-id","paused":true}`.
+It stops every authenticated `/api/paraai/worker` mode before dispatch, including
+the Fly tick and Vercel recovery cron, and suppresses Paraform health probes.
+Health reports paused/non-ready; Fly may remain running and receive successful
+no-op responses. Webhook ingestion and durable queued jobs are not removed.
+A missing key preserves normal behavior; unreadable/malformed control state
+fails closed. Independent manual ParaAI action routes are outside this brake.
+
+Capture raw key state before changing it. To restore an originally absent key,
+atomically compare the exact owned record and delete only if unchanged; do not
+reset feature approvals or consume queued work manually. The September 16
+incident's authority is the main Raydar repo task
+`pause-paraform-background-systems` and restore manifest
+`docs/runs/2026-09-16-paraform-background-pause.json`.

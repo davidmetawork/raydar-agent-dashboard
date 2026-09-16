@@ -13,6 +13,7 @@ import {
 } from "./_lib/phase3-shadow-policy.mjs";
 import { getAutoQueueStats, kv, storeConfigured } from "./_lib/store.mjs";
 import { dailySubmitBudget, submitBudgetState } from "./_lib/submit-budget.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 export const config = { maxDuration: 30 };
 
@@ -22,7 +23,9 @@ function envEnabled(name) {
   );
 }
 
-export default async function handler(req, res) {
+export async function handleParaaiHealth(req, res, {
+  pauseState = () => paraformBackgroundPauseState("paraaiWorker"),
+} = {}) {
   if (cors(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
   const config = paraAIConfig();
@@ -128,6 +131,19 @@ export default async function handler(req, res) {
     },
     outreach: await outreachHealth(),
   };
+  // The health tick otherwise performs three live Paraform reads. Treat an
+  // unreadable brake as paused and report no fresh provider/readiness claim.
+  const backgroundPause = await pauseState().catch(() => ({ paused: true }));
+  if (backgroundPause?.paused) {
+    health.paused = true;
+    health.paraform = "paused";
+    health.submitReady = false;
+    health.enrollmentReady = false;
+    health.matchShadowReady = false;
+    health.automation.ready = false;
+    health.outreach.executionReady = false;
+    return res.status(200).json(health);
+  }
   if (!(await hasParaformCookie())) {
     health.paraform = "no_cookie";
     return res.status(200).json(health);
@@ -204,4 +220,8 @@ export default async function handler(req, res) {
     health.error = String(error?.message || error).slice(0, 220);
     return res.status(200).json(health);
   }
+}
+
+export default async function handler(req, res) {
+  return handleParaaiHealth(req, res);
 }
