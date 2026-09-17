@@ -11,15 +11,31 @@ import { buildFeed, FEED_KEY } from "./_lib/feed.mjs";
 import { hasCookie, sessionState } from "./_lib/paraform.mjs";
 import { hgetallJson } from "./_lib/kv.mjs";
 import { applyTriage } from "./feed.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 const TRIAGE_KEY = "activity:v1:triage";
 const DAY_KEY = () => `activity:v1:digest:${new Date().toISOString().slice(0, 10)}`;
 
-export default async function handler(req, res) {
-  const cron = cronAuth(req);
+export async function handleActivityDigest(req, res, {
+  pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
+  cronAuthorize = cronAuth,
+  cookiePresent = hasCookie,
+} = {}) {
+  const cron = cronAuthorize(req);
   if (!cron.ok) { res.status(401).json({ ok: false, error: "cron_auth_required" }); return; }
 
-  if (!hasCookie()) { res.status(200).json({ ok: false, degraded: "no_cookie" }); return; }
+  const backgroundPause = await pauseState()
+    .catch(() => ({ paused: true, state: "unreadable" }));
+  if (backgroundPause?.paused) {
+    res.setHeader("Retry-After", "300");
+    return res.status(503).json({
+      ok: false,
+      paused: true,
+      error: "paraform_background_paused",
+      controlState: backgroundPause.state || "unreadable",
+    });
+  }
+  if (!cookiePresent()) { res.status(200).json({ ok: false, degraded: "no_cookie" }); return; }
 
   try {
     const already = await getJson(DAY_KEY());
@@ -61,4 +77,8 @@ export default async function handler(req, res) {
   } catch (e) {
     res.status(200).json({ ok: false, error: String(e?.message || e).slice(0, 200) });
   }
+}
+
+export default async function handler(req, res) {
+  return handleActivityDigest(req, res);
 }

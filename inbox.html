@@ -642,6 +642,7 @@ async function loadHealth(){
     const response=await fetch("/api/inbox/health",{cache:"no-store"});
     const health=await response.json();
     if(!health.authRequired){setHealth("bad","Sign-in unavailable");showBanner("bad","Inbox is disabled because the Google sign-in gate is not configured.");}
+    else if(health.paraform==="paused"){setHealth("warn","Background reads paused");showBanner("warn","Automatic Paraform reads are temporarily paused. The retained Inbox snapshot remains available.");}
     else if(health.paraform==="expired"){setHealth("bad","Session expired");showBanner("bad","The Paraform session expired. Refresh the dashboard’s Paraform session before using Inbox.");}
     else if(health.paraform!=="live"){setHealth("bad","Paraform unavailable");showBanner("bad","Inbox cannot reach Paraform right now.");}
     else if(!(health.stateStoreConfigured??health.cacheConfigured)){setHealth("bad","State unavailable");showBanner("bad","Inbox is disabled because its durable triage store is not configured.");}
@@ -727,7 +728,10 @@ async function syncFeed(){
     await loadFeed();
     if(STATE.snapshotState==="seeding"&&STATE.seedPasses<6)queueInboxSync(1000);
   }catch(error){
-    if(error.code==="paraform_auth_expired"){
+    if(error.code==="paraform_background_paused"){
+      setHealth("warn","Background reads paused");
+      showBanner("warn","Automatic Paraform reads are temporarily paused. Showing the retained Inbox snapshot.");
+    }else if(error.code==="paraform_auth_expired"){
       setHealth("bad","Session expired");
       showBanner("bad","The Paraform session expired. Existing Inbox replies remain available from the reliable snapshot.");
     }else{

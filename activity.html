@@ -422,8 +422,15 @@ function wireLists(){
 function applyFeed(data,{updating}={}){
   $("banner-auth").style.display="none";$("banner-warn").style.display="none";
   FEED=data;
-  $("health-pill").className="pill good";
-  $("health-pill").textContent=updating?"live · updating…":"live";
+  if(data.paused){
+    $("health-pill").className="pill warn";
+    $("health-pill").textContent="paused · cached";
+    $("banner-warn").textContent="Automatic Paraform reads are temporarily paused. Showing the retained Activity snapshot.";
+    $("banner-warn").style.display="block";
+  }else{
+    $("health-pill").className="pill good";
+    $("health-pill").textContent=updating?"live · updating…":"live";
+  }
   const age=Math.round((Date.now()-Date.parse(data.generatedAt))/60000);
   $("freshness").textContent=`Updated ${age<=1?"just now":age+"m ago"}${data.counts.unreadable?` · ${data.counts.unreadable} thread(s) unreadable`:""}`;
   renderReply();renderQuiet();counts();

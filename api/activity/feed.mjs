@@ -6,6 +6,7 @@ import { cors, requireAuth, cronAuth } from "../seq/_lib/core.mjs";
 import { getJson, setJson, hgetallJson, acquireLock, releaseLock } from "./_lib/kv.mjs";
 import { buildFeed, FEED_KEY, FEED_FRESH_SECONDS, FEED_LOCK_KEY } from "./_lib/feed.mjs";
 import { hasCookie, sessionState, transportStats } from "./_lib/paraform.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 export const TRIAGE_KEY = "activity:v1:triage";
 
@@ -30,22 +31,51 @@ export function applyTriage(feed, triage) {
   };
 }
 
-export default async function handler(req, res) {
+export async function handleActivityFeed(req, res, {
+  pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
+  getJsonImpl = getJson,
+  hgetallJsonImpl = hgetallJson,
+} = {}) {
   if (cors(req, res)) return;
   if (req.method !== "GET") { res.status(405).json({ ok: false, error: "method_not_allowed" }); return; }
   const isCron = cronAuth(req).ok;
   if (!isCron && !(await requireAuth(req, res))) return;
-  if (!hasCookie()) { res.status(200).json({ ok: false, degraded: "no_cookie" }); return; }
 
   // A cron hit is always a rebuild (the 10-minute warmer); humans get the
   // durable cache instantly with a staleness flag and refresh in background.
   const force = isCron || String(req.query?.refresh || "") === "1";
   try {
+    const backgroundPause = await pauseState()
+      .catch(() => ({ paused: true, state: "unreadable" }));
+    if (backgroundPause?.paused) {
+      const cached = await getJsonImpl(FEED_KEY).catch(() => null);
+      if (!cached) {
+        res.setHeader("Retry-After", "300");
+        return res.status(503).json({
+          ok: false,
+          paused: true,
+          error: "paraform_background_paused",
+          controlState: backgroundPause.state || "unreadable",
+        });
+      }
+      const triage = await hgetallJsonImpl(TRIAGE_KEY).catch(() => ({}));
+      return res.status(200).json({
+        ...applyTriage(cached, triage),
+        ok: true,
+        cached: true,
+        stale: true,
+        paused: true,
+        controlState: backgroundPause.state || "unreadable",
+      });
+    }
+    if (!hasCookie()) {
+      return res.status(200).json({ ok: false, degraded: "no_cookie" });
+    }
     if (!force) {
-      const cached = await getJson(FEED_KEY);
+      const cached = await getJsonImpl(FEED_KEY);
       if (cached) {
         const ageSeconds = (Date.now() - Date.parse(cached.generatedAt || 0)) / 1000;
-        const triage = await hgetallJson(TRIAGE_KEY).catch(() => ({}));
+        const triage = await hgetallJsonImpl(TRIAGE_KEY).catch(() => ({}));
         res.status(200).json({
           ok: true, cached: true,
           stale: !(ageSeconds < FEED_FRESH_SECONDS),
@@ -83,4 +113,8 @@ export default async function handler(req, res) {
       transport: transportStats(),
     });
   }
+}
+
+export default async function handler(req, res) {
+  return handleActivityFeed(req, res);
 }

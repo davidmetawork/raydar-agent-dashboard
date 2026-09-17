@@ -7,7 +7,7 @@ import {
   canonicalBackgroundPauseRecord,
 } from "../_lib/paraform-background-pause.mjs";
 
-const KEY = PARAFORM_BACKGROUND_PAUSE_KEYS.paraaiWorker;
+const DEFAULT_SCOPE = "paraaiWorker";
 
 const PAUSE_SCRIPT = `
   local inserted = redis.call('SET', KEYS[1], ARGV[1], 'NX')
@@ -45,6 +45,14 @@ function bodyOf(req) {
   return req.body && typeof req.body === "object" ? req.body : {};
 }
 
+function requestedScope(req, body = null) {
+  const raw = req.method === "GET" ? req.query?.scope : body?.scope;
+  const scope = typeof raw === "string" && raw ? raw : DEFAULT_SCOPE;
+  return Object.prototype.hasOwnProperty.call(PARAFORM_BACKGROUND_PAUSE_KEYS, scope)
+    ? scope
+    : null;
+}
+
 function statusPayload(raw) {
   const state = backgroundPauseStatusFromRaw(raw);
   if (state.state === "absent") {
@@ -72,8 +80,13 @@ export async function handleBackgroundPause(req, res, {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
   if (req.method === "GET") {
+    const scope = requestedScope(req);
+    if (!scope) return res.status(400).json({ ok: false, error: "invalid_scope" });
     try {
-      const raw = await controlImpl(["GET", KEY], { env, fetchImpl });
+      const raw = await controlImpl([
+        "GET",
+        PARAFORM_BACKGROUND_PAUSE_KEYS[scope],
+      ], { env, fetchImpl });
       return res.status(200).json({ ok: true, ...statusPayload(raw) });
     } catch {
       return res.status(503).json({ ok: false, error: "pause_control_unavailable" });
@@ -83,6 +96,8 @@ export async function handleBackgroundPause(req, res, {
     return res.status(405).json({ ok: false, error: "GET_or_POST_only" });
   }
   const body = bodyOf(req);
+  const scope = requestedScope(req, body);
+  if (!scope) return res.status(400).json({ ok: false, error: "invalid_scope" });
   const action = body.action;
   const expected = canonicalBackgroundPauseRecord(body.pauseId);
   if (!expected || !["pause", "resume"].includes(action)) {
@@ -90,7 +105,13 @@ export async function handleBackgroundPause(req, res, {
   }
   const script = action === "pause" ? PAUSE_SCRIPT : RESUME_SCRIPT;
   try {
-    const result = Number(await controlImpl(["EVAL", script, 1, KEY, expected], { env, fetchImpl }));
+    const result = Number(await controlImpl([
+      "EVAL",
+      script,
+      1,
+      PARAFORM_BACKGROUND_PAUSE_KEYS[scope],
+      expected,
+    ], { env, fetchImpl }));
     if (result === 3 || ![1, 2].includes(result)) {
       return res.status(409).json({ ok: false, error: "pause_state_conflict" });
     }

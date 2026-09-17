@@ -9,6 +9,7 @@ import { createService } from "./service.mjs";
 import { authorizeBlobBroker, issueWorkerBlobCapability } from "./blob-capabilities.mjs";
 import { authorizeNotificationBroker, postSafeNotification } from "./notifications.mjs";
 import { readSequenceInboxBrokerBatch } from "./sequence-inbox-broker.mjs";
+import { handleSubmissionsV2BackgroundPause } from "./background-pause.mjs";
 
 function routeSegments(req) {
   const captured = req.query?.route;
@@ -85,6 +86,7 @@ export async function routeSubmissionsV2(req, res) {
   const route = routeSegments(req);
   const key = route.join("/");
   try {
+    if (key === "background-pause") return await handleSubmissionsV2BackgroundPause(req, res);
     if (key === "session") return sessionRoute(req, res);
     if (key === "intake/master-inbox") return intakeRoute(req, res);
     if (key === "internal/blob-capability") {

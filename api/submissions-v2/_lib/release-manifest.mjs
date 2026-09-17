@@ -2,8 +2,8 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 104,
-  "digest": "9ad6dd17467f77ea4b43e8d29a77138962a696c3959eecbb47c8290a40a52a50",
+  "file_count": 105,
+  "digest": "194a37ce904b58abda7f25712eb66fe4cc88ee83ee69d61e835ecdfe072e6ac1",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -36,7 +36,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/seq/_lib/core.mjs",
-      "sha256": "8d7e8a49d8ea9e0be0782e36c0c3d6d5d33aecb70da43e9faa383581c0e92a71"
+      "sha256": "76e12a56ec4e3a9ab8ad683ebb5e97c96bd1bd3645c99d10b32aaf2860dcaf81"
     },
     {
       "path": "api/seq/_lib/scheduling-links.mjs",
@@ -49,6 +49,10 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     {
       "path": "api/submissions-v2-dispatch.mjs",
       "sha256": "dbcb8b72be283f177d50d3e4fd71b5f634a758c10ff0b9f7dfb3c221af65e01f"
+    },
+    {
+      "path": "api/submissions-v2/_lib/background-pause.mjs",
+      "sha256": "20d2ce84fd9e69508e0ac7e6631001ee1e13e704bab9cb18f16224aeb494eab8"
     },
     {
       "path": "api/submissions-v2/_lib/blob-capabilities.mjs",
@@ -192,7 +196,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/router.mjs",
-      "sha256": "4c8b1120c2187bb49119e7fe263300f35312cd83ee3484be74b5c48d1097e050"
+      "sha256": "5e1514fe43bb19b37f2971d88ba11daa5e3d316a58d6719b3165d4aa31ee7ac8"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",

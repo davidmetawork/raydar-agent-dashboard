@@ -7,6 +7,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { sessionConfig, sessionFromRequest, verifyGoogleCredential } from "../../auth/_lib/session.mjs";
+import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import {
   AGENT_SCHEDULING_URL,
   HUMAN_SCHEDULING_URL,
@@ -228,7 +229,18 @@ async function trpcPostWithMetaRaw(proc, json, values = {}, tries = 3) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- health ----------
-export async function paraformHealth() {
+export async function paraformHealth({
+  pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
+} = {}) {
+  const backgroundPause = await pauseState()
+    .catch(() => ({ paused: true, state: "unreadable" }));
+  if (backgroundPause?.paused) {
+    return {
+      paraform: "paused",
+      paused: true,
+      pauseControlState: backgroundPause.state || "unreadable",
+    };
+  }
   if (!hasCookie()) return { paraform: "no_cookie" };
   try {
     const seqs = await trpcGet("campaigns.getListOfCampaignsOptimized", {});

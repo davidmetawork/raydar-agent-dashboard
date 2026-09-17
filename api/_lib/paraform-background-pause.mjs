@@ -4,6 +4,7 @@
 // cannot turn an intended pause into more provider traffic.
 export const PARAFORM_BACKGROUND_PAUSE_KEYS = Object.freeze({
   paraaiWorker: "ops:paraform-background-pause:v1:paraai-worker",
+  dashboardReaders: "ops:paraform-background-pause:v1:dashboard-readers",
 });
 
 const PAUSE_ID = /^[A-Za-z0-9._:-]{1,128}$/;

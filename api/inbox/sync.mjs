@@ -8,6 +8,7 @@ import {
   requireInboxAuth,
   writeInboxRefreshState,
 } from "./_lib/core.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 export function createInboxSyncHandler({
   corsHandler = cors,
@@ -18,6 +19,7 @@ export function createInboxSyncHandler({
   writeState = writeInboxRefreshState,
   releaseLock = releaseInboxSyncLock,
   assembleFeed = assembleInboxSnapshotFeed,
+  pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -36,6 +38,19 @@ export function createInboxSyncHandler({
       });
     }
     if (!(await authHandler(req, res))) return;
+
+    const backgroundPause = await pauseState()
+      .catch(() => ({ paused: true, state: "unreadable" }));
+    if (backgroundPause?.paused) {
+      res.setHeader("Retry-After", "300");
+      return res.status(503).json({
+        ok: false,
+        paused: true,
+        error: "paraform_background_paused",
+        control_state: backgroundPause.state || "unreadable",
+        retry_after_seconds: 300,
+      });
+    }
 
     const lock = await acquireLock();
     if (lock.status === "busy") {
