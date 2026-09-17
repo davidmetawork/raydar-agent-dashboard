@@ -8,11 +8,24 @@ export const PARAFORM_BACKGROUND_PAUSE_KEYS = Object.freeze({
 
 const PAUSE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
+function controlUnavailable() {
+  const error = new Error("background pause control unavailable");
+  error.code = "BACKGROUND_PAUSE_CONTROL_UNAVAILABLE";
+  return error;
+}
+
 function unavailable() {
   return { paused: true, state: "unreadable" };
 }
 
-function parseRecord(raw) {
+export function canonicalBackgroundPauseRecord(pauseId) {
+  if (typeof pauseId !== "string") return null;
+  const value = pauseId;
+  if (!PAUSE_ID.test(value)) return null;
+  return JSON.stringify({ pauseId: value, paused: true });
+}
+
+export function backgroundPauseStatusFromRaw(raw) {
   if (raw === null || raw === undefined) return { paused: false, state: "absent" };
   if (typeof raw !== "string") return unavailable();
   try {
@@ -22,13 +35,44 @@ function parseRecord(raw) {
       || typeof record !== "object"
       || Array.isArray(record)
       || Object.keys(record).length !== 2
-      || typeof record.paused !== "boolean"
+      || record.paused !== true
       || typeof record.pauseId !== "string"
       || !PAUSE_ID.test(record.pauseId)
     ) return unavailable();
-    return { paused: record.paused, state: "configured" };
+    return { paused: true, state: "configured", pauseId: record.pauseId };
   } catch {
     return unavailable();
+  }
+}
+
+export async function backgroundPauseKvCommand(command, {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  const baseUrl = String(env.KV_REST_API_URL || "").replace(/\/+$/, "");
+  const token = String(env.KV_REST_API_TOKEN || "");
+  if (!baseUrl || !token || typeof fetchImpl !== "function") {
+    throw controlUnavailable();
+  }
+  try {
+    const response = await fetchImpl(baseUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(command),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) throw controlUnavailable();
+    const body = await response.json();
+    if (body?.error || !Object.prototype.hasOwnProperty.call(body || {}, "result")) {
+      throw controlUnavailable();
+    }
+    return body.result;
+  } catch (error) {
+    if (error?.code === "BACKGROUND_PAUSE_CONTROL_UNAVAILABLE") throw error;
+    throw controlUnavailable();
   }
 }
 
@@ -37,23 +81,11 @@ export async function paraformBackgroundPauseState(scope, {
   fetchImpl = globalThis.fetch,
 } = {}) {
   const key = PARAFORM_BACKGROUND_PAUSE_KEYS[scope];
-  const baseUrl = String(env.KV_REST_API_URL || "").replace(/\/+$/, "");
-  const token = String(env.KV_REST_API_TOKEN || "");
-  if (!key || !baseUrl || !token || typeof fetchImpl !== "function") return unavailable();
+  if (!key) return unavailable();
   try {
-    const response = await fetchImpl(baseUrl, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(["GET", key]),
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) return unavailable();
-    const body = await response.json();
-    if (!Object.prototype.hasOwnProperty.call(body || {}, "result")) return unavailable();
-    return parseRecord(body.result);
+    return backgroundPauseStatusFromRaw(
+      await backgroundPauseKvCommand(["GET", key], { env, fetchImpl }),
+    );
   } catch {
     return unavailable();
   }

@@ -42,7 +42,11 @@ test("background pause accepts only the two-field operator record and preserves 
       result: JSON.stringify({ pauseId: "incident-2026-09-16", paused: true }),
     })),
   });
-  assert.deepEqual(paused, { paused: true, state: "configured" });
+  assert.deepEqual(paused, {
+    paused: true,
+    state: "configured",
+    pauseId: "incident-2026-09-16",
+  });
 });
 
 test("background pause fails closed for missing control configuration and malformed records", async () => {

@@ -45,8 +45,17 @@ no-op responses. Webhook ingestion and durable queued jobs are not removed.
 A missing key preserves normal behavior; unreadable/malformed control state
 fails closed. Independent manual ParaAI action routes are outside this brake.
 
-Capture raw key state before changing it. To restore an originally absent key,
-atomically compare the exact owned record and delete only if unchanged; do not
+Use `GET /api/paraai/background-pause` with `PARAAI_AUTOMATION_RUNNER_KEY`
+Bearer authentication to verify the serving service's own store. Only that
+runner key can operate this control; cron authentication is not accepted.
+`POST {"action":"pause","pauseId":"incident-id"}` atomically inserts the
+record only when absent (or returns idempotent success for the exact owned
+record). Restore with `POST {"action":"resume","pauseId":"incident-id"}`;
+it atomically compares and deletes only that exact record. Another operator's
+or malformed record returns 409, and unavailable state returns 503. Do not use
+local webview KV credentials: that is a different store.
+
+Capture the production key's before-state before changing it. Do not
 reset feature approvals or consume queued work manually. The September 16
 incident's authority is the main Raydar repo task
 `pause-paraform-background-systems` and restore manifest
