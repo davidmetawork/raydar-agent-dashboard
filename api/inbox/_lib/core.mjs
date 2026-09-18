@@ -18,6 +18,7 @@ import {
   storeConfigured,
 } from "../../sourcing/_lib/store.mjs";
 import { OUTCOME_SEQUENCE_RULES } from "../../roster/_lib/outcome-sequences.mjs";
+import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 
 export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
 
@@ -211,6 +212,7 @@ export async function inboxTrpcGet(
   sleepImpl = sleep,
   randomImpl = Math.random,
 ) {
+  const observedFetch = telemetryFetch(fetchImpl, "dashboard-inbox");
   const input = {
     json,
     meta: { values: {}, v: 1 },
@@ -220,7 +222,7 @@ export async function inboxTrpcGet(
   const attempts = Math.max(1, Number(tries) || 1);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetchImpl(url, {
+      const response = await observedFetch(url, {
         headers: headers(),
         signal: AbortSignal.timeout(timeoutMs),
       });

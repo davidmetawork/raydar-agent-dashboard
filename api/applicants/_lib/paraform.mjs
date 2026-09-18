@@ -6,6 +6,8 @@
 // a seq-side transport change can never silently alter this surface. Reads
 // only — this tree performs no Paraform writes.
 
+import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
+
 const BASE = "https://www.paraform.com/api";
 const COOKIE = process.env.PARAFORM_COOKIE || "";          // browser session cookie value (env, never logged)
 
@@ -91,10 +93,11 @@ export async function trpcGet(proc, json, tries = 3) {
 }
 
 async function trpcGetRaw(proc, json, tries = 3) {
+  const observedFetch = telemetryFetch(fetch, "dashboard-applicants");
   const url = `${BASE}/trpc/${proc}?input=` + encodeURIComponent(JSON.stringify(env(json)));
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       // A 5xx/429 body is usually HTML; classify it before the JSON parse so
       // the failure stays retryable instead of an opaque parse error.

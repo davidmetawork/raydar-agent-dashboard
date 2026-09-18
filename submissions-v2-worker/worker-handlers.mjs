@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { claimSourceCursor, commitSourceCursor, database, releaseSourceCursor } from "../api/submissions-v2/_lib/db.mjs";
 import { createRepository } from "../api/submissions-v2/_lib/repository.mjs";
+import { withParaformTelemetrySource } from "../api/_lib/paraform-telemetry-context.mjs";
 import { createService } from "../api/submissions-v2/_lib/service.mjs";
 import { exactCuratedListSource, readActiveRoleIndex, readCandidateIndexPage, readCuratedCandidate, readCuratedPopulation, readCuratedRoleList, readExactRole } from "../api/submissions-v2/_lib/paraform-sources.mjs";
 import { paraformCuratedListUrl } from "../api/submissions-v2/_lib/paraform-links.mjs";
@@ -856,7 +857,10 @@ export function createWorkerHandlers({
     } };
   };
 
-  return result;
+  return Object.fromEntries(Object.entries(result).map(([kind, handler]) => [
+    kind,
+    (context) => withParaformTelemetrySource("submissions-v2", () => handler(context)),
+  ]));
 }
 
 let defaults = null;

@@ -8,6 +8,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { sessionConfig, sessionFromRequest, verifyGoogleCredential } from "../../auth/_lib/session.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
+import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 import {
   AGENT_SCHEDULING_URL,
   HUMAN_SCHEDULING_URL,
@@ -177,10 +178,11 @@ export async function trpcGet(proc, json, tries = 3) {
 }
 
 async function trpcGetRaw(proc, json, tries = 3) {
+  const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
   const url = `${BASE}/trpc/${proc}?input=` + encodeURIComponent(JSON.stringify(env(json)));
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       // A 5xx/429 body is usually HTML, so without this the failure surfaced as
       // an opaque JSON parse error that nothing could classify as retryable.
@@ -196,9 +198,10 @@ export async function trpcPost(proc, json, tries = 3) {
 }
 
 async function trpcPostRaw(proc, json, tries = 3) {
+  const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
@@ -215,9 +218,10 @@ export async function trpcPostWithMeta(proc, json, values = {}, tries = 3) {
 }
 
 async function trpcPostWithMetaRaw(proc, json, values = {}, tries = 3) {
+  const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await fetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();

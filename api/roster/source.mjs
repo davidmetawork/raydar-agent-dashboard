@@ -22,6 +22,7 @@
 // server-side candidate search (every search param is silently stripped), so
 // we page 6×1000 rows (~12s cold) and cache in module memory ~10 min.
 import { cors, requireAuth, hasCookie, CONFIG, headers, BASE } from "../seq/_lib/core.mjs";
+import { telemetryFetch } from "../_lib/paraform-telemetry-context.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -42,7 +43,7 @@ async function crmByName() {
     };
     const url = `${BASE}/trpc/candidateUser.getCRMExternalCandidates?input=` +
       encodeURIComponent(JSON.stringify({ json: input, meta: { values: { project_id: ["undefined"], role_specific_id: ["undefined"] }, v: 1 } }));
-    const r = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(25000) });
+    const r = await telemetryFetch(fetch, "dashboard-manual")(url, { headers: headers(), signal: AbortSignal.timeout(25000) });
     if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
     const j = (await r.json())?.result?.data?.json || {};
     const items = j.items || [];

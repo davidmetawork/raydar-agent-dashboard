@@ -20,6 +20,7 @@ import {
 } from "./store.mjs";
 import { codedError } from "./path-a.mjs";
 import { createPacedReader } from "./sync.mjs";
+import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 
 const PARAFORM_BASE = "https://www.paraform.com/api";
 const RESUME_BUCKET = "paraform-resumes-new";
@@ -234,7 +235,7 @@ export async function downloadResumeFile(resumeId, {
 } = {}) {
   if (!resumeId) return null;
   const cookie = await cookieImpl();
-  const response = await fetchImpl(
+  const response = await telemetryFetch(fetchImpl, "submissions-v1")(
     `${PARAFORM_BASE}/resumeUpload/signedURL?resume_id=${encodeURIComponent(resumeId)}`,
     {
       headers: { cookie: `${cookieNameImpl(cookie)}=${cookie}` },

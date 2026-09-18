@@ -34,6 +34,7 @@
 // a comment post is not idempotent and recovery is read-back, never resend.
 
 import { getJson, setJson, kvConfigured } from "./kv.mjs";
+import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 
 export const BASE = "https://www.paraform.com/api";
 const TIMEOUT_MS = 20_000;
@@ -172,6 +173,7 @@ export const READ_PROCEDURES = new Set([
 export const WRITE_PROCEDURES = new Set(["consolidatedMessaging.send"]);
 
 export async function trpcGet(proc, json, { tries = 4 } = {}) {
+  const observedFetch = telemetryFetch(fetch, "dashboard-activity");
   if (!READ_PROCEDURES.has(proc)) throw new Error(`PROCEDURE_NOT_ALLOWED:${proc}`);
   const url = `${BASE}/trpc/${proc}?input=` +
     encodeURIComponent(JSON.stringify({ json, meta: { values: {}, v: 1 } }));
@@ -184,7 +186,7 @@ export async function trpcGet(proc, json, { tries = 4 } = {}) {
       calls++;
       // Headers rebuilt per attempt: a 401 carrying a rotated cookie means the
       // next attempt succeeds with the new credential.
-      const r = await fetch(url, { headers: await headers(), signal: AbortSignal.timeout(TIMEOUT_MS) });
+      const r = await observedFetch(url, { headers: await headers(), signal: AbortSignal.timeout(TIMEOUT_MS) });
       await absorbRotation(r);
       if (r.status === 401 || r.status === 403) { auth401++; throw new AuthExpired(); }
       await persistSeedIfProven();
@@ -208,9 +210,10 @@ export async function trpcGet(proc, json, { tries = 4 } = {}) {
 // landed; a blind retry is a double-post at a hiring manager. Recovery is
 // read-back reconciliation in the caller, never a retry here.
 export async function trpcPost(proc, json) {
+  const observedFetch = telemetryFetch(fetch, "dashboard-activity");
   if (!WRITE_PROCEDURES.has(proc)) throw new Error(`PROCEDURE_NOT_ALLOWED:${proc}`);
   calls++;
-  const r = await fetch(`${BASE}/trpc/${proc}`, {
+  const r = await observedFetch(`${BASE}/trpc/${proc}`, {
     method: "POST",
     headers: await headers(),
     body: JSON.stringify({ json, meta: { values: {}, v: 1 } }),

@@ -1,11 +1,12 @@
 import { cors, requirePrepAuth, storeConfigured, hasCookie } from "./_lib/core.mjs";
 import { BASE, headers, trpcGet } from "../seq/_lib/core.mjs";
+import { telemetryFetch } from "../_lib/paraform-telemetry-context.mjs";
 import { searchCandidates } from "./_lib/candidate-search-core.mjs";
 
 // Authed Paraform REST GET (not tRPC) — the active role pipeline lives at
 // /role/{id}/user_applications, a plain REST route on the same origin/cookie.
 async function restGet(path) {
-  const r = await fetch(`${BASE}${path}`, { headers: headers(), signal: AbortSignal.timeout(20000) });
+  const r = await telemetryFetch(fetch, "dashboard-manual")(`${BASE}${path}`, { headers: headers(), signal: AbortSignal.timeout(20000) });
   if (r.status === 401) { const e = new Error("AUTH_EXPIRED"); e.code = "AUTH_EXPIRED"; throw e; }
   if (!r.ok) throw new Error(`rest ${r.status}`);
   return r.json();
