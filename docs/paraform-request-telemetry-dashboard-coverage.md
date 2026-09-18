@@ -47,20 +47,39 @@ release seal does not prove collector ingestion or a deployed runtime revision.
 
 ## September 18 implementation state
 
-- **Done:** the reviewed shared emitter is vendored byte-for-byte and the listed
-  transport owners call it at the actual Paraform fetch boundary. Booking sweep,
-  booking membership refresh, sequence health, and mailbox health bind their
-  fixed source contexts. Vercel Node serverless attempts schedule bounded flushes
-  through `@vercel/functions` `waitUntil`; Fly and local runtimes retain the
-  emitter's automatic flush. The V2 release manifest was regenerated.
-- **Next:** production owner must set the collector credentials, deploy the
-  reviewed dashboard and worker artifacts, and independently read back
-  collector receipt and source freshness without issuing a provider probe.
-- **Root review correction:** ParaAI remains its own default source; all V1
-  HTTP routes and the V2 router now bind explicit versioned source contexts.
-  Both new emitter modules are included in the V2 release seal. The three
-  production pause controls were successfully read back unchanged using the
-  exact `.env` parse (an inherited stale process variable caused the prior 401).
-- **Coverage note:** booking-adjacent webhook and canary endpoints that do not
-  perform their own provider read retain `dashboard-sequences`; this is an
-  explicit source classification, not a pause or behavior change.
+### Done
+
+- The reviewed shared emitter is vendored byte-for-byte at SHA-256
+  `fcebf8c7ad24bbe2077dc76f7a5f2755250849a9909f24dce15252d04aaf0949`,
+  and the listed transport owners call it at the actual Paraform fetch boundary.
+  Booking sweep, booking membership refresh, sequence health, and mailbox health
+  bind their fixed source contexts. ParaAI remains its own default source; all
+  V1 HTTP routes and the V2 router bind explicit versioned source contexts.
+- Warm Node runtimes now retain one bounded reporter per fetch identity, source,
+  and deployment telemetry configuration. The production-default explicit
+  `process.env` form reuses the same reporter; injected environments or collector
+  implementations remain uncached. The cache retains only the existing bounded
+  metadata reporter and never provider inputs, bodies, candidate identifiers,
+  URLs, response objects, or raw errors. Collector delivery may retry once, but
+  the provider attempt is never replayed.
+- Source commit `08b7d4f70632aeddeeb900310e9bd6bf332c8d97` includes the
+  corrected release fixture and seal. Focused context plus release tests pass
+  14/14; full and deployment seal checks match digest
+  `bb16e7443265f30cbbc18a51742f5711acb4ae9ad9cc117d18343db0ba5c5554`.
+- Booking-adjacent webhook and canary endpoints that perform no provider read
+  retain `dashboard-sequences`; this is an explicit source classification, not
+  a pause or behavior change. Existing production pause controls are unchanged.
+
+### Next
+
+- The production owner installs the collector values, deploys the reviewed
+  dashboard artifact, and independently reads back collector receipt and source
+  freshness without issuing a provider probe. The exact Fly V2 artifact remains
+  a separate root-owned deployment from its own sealed branch.
+
+### Blocked / not live
+
+- This commit and passing seal are source evidence only. They do not prove a
+  deployed dashboard revision, collector acceptance, reporting completeness, or
+  provider-wide health. No deploy, environment change, pause change, queue
+  replay, candidate mutation, or provider request was performed here.
