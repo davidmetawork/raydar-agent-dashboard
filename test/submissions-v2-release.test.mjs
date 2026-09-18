@@ -21,6 +21,7 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   await Promise.all([
     seed(root, "package.json"), seed(root, "package-lock.json"), seed(root, ".vercelignore"), seed(root, "scripts/submissions-release.mjs"),
+    seed(root, "api/_lib/paraform-telemetry.mjs"), seed(root, "api/_lib/paraform-telemetry-context.mjs"),
     seed(root, "api/inbox/_lib/core.mjs"), seed(root, "api/inbox/health.mjs"), seed(root, "api/paraai/_lib/core.mjs"), seed(root, "api/paraai/submission-notify.mjs"), seed(root, "api/auth/_lib/session.mjs"),
     seed(root, "api/seq/_lib/core.mjs"), seed(root, "api/seq/_lib/scheduling-links.mjs"), seed(root, "api/sourcing/_lib/store.mjs"), seed(root, "api/roster/_lib/outcome-sequences.mjs"),
     seed(root, "submissions-v2.html"), seed(root, "submissions-v2.css"), seed(root, "submissions-v2.js"), seed(root, "submissions-v2-ui-state.mjs"),

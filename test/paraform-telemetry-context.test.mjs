@@ -13,6 +13,16 @@ const env = {
   PARAFORM_TELEMETRY_DISPATCH_TOKEN: "dispatch-token",
 };
 
+test("warm-runtime callers retain one reporter per fetch and source", () => {
+  const provider = async () => { throw new Error("must not run"); };
+  const first = telemetryFetch(provider, "dashboard-booking");
+  assert.equal(telemetryFetch(provider, "dashboard-booking"), first);
+  assert.equal(telemetryFetch(provider, "dashboard-booking", { env: process.env }), first);
+  assert.notEqual(telemetryFetch(provider, "dashboard-health"), first);
+  assert.notEqual(telemetryFetch(provider, "dashboard-booking", { env }), first);
+});
+
+
 test("source context overrides the transport default without changing fetch", async () => {
   const observed = withParaformTelemetrySource("dashboard-booking", () => telemetryFetch(
     async () => new Response(JSON.stringify({ result: { data: { json: {} } } }), { status: 200 }),

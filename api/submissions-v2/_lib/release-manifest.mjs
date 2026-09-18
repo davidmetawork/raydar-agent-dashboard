@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 107,
-  "digest": "32ca7574b5c0d7936b41d37ec2bb8fff8e50cbda3c239b38efb5b9ff3cae865d",
+  "digest": "bb16e7443265f30cbbc18a51742f5711acb4ae9ad9cc117d18343db0ba5c5554",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -12,11 +12,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/_lib/paraform-telemetry-context.mjs",
-      "sha256": "e6d24c080970a9e08b6c1e759202f74f7945310c421856459f97dccb40e99e65"
+      "sha256": "a6d4b423ac81710aa3a6d0d80f439c63bf056d0c9a739a1b95d46de0162dea28"
     },
     {
       "path": "api/_lib/paraform-telemetry.mjs",
-      "sha256": "e02854600642d4a3aca90ff7fc9f0797ccc6162ec16b854dfac1c47eb6999bdf"
+      "sha256": "fcebf8c7ad24bbe2077dc76f7a5f2755250849a9909f24dce15252d04aaf0949"
     },
     {
       "path": "api/auth/_lib/session.mjs",

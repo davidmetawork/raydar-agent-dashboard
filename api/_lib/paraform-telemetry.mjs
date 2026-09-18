@@ -13,10 +13,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const MAX_QUEUE_EVENTS = 160;
 const MAX_BATCH_EVENTS = 32;
 const MAX_FLUSH_ROUNDS = 2;
+const FLUSH_BUDGET_MS = 5_000;
 const MAX_ENDPOINT_LENGTH = 120;
 const MAX_INSPECTION_BYTES = 64 * 1024;
 const INSPECTION_TIMEOUT_MS = 150;
-const COLLECTOR_TIMEOUT_MS = 750;
+const COLLECTOR_TIMEOUT_MS = 2_500;
 const AUTO_FLUSH_DELAY_MS = 250;
 const MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60;
 
@@ -402,11 +403,14 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
     scheduleFlush();
   }
 
-  async function sendBatch(events, heartbeat) {
+  async function sendBatch(events, heartbeat, deadline) {
     let response;
     try {
       const sentAt = readNow(now);
       if (sentAt == null) return false;
+      const remaining = Math.max(0, deadline - Date.now());
+      if (remaining <= 0) return false;
+      const timeoutMs = Math.min(COLLECTOR_TIMEOUT_MS, remaining);
       const payload = {
         schemaVersion: SCHEMA_VERSION,
         sourceId: config.sourceId,
@@ -424,7 +428,7 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
         },
         body: JSON.stringify(payload),
         redirect: "error",
-        signal: AbortSignal.timeout(COLLECTOR_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch {
       return false;
@@ -432,15 +436,26 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
     return Boolean(response?.ok);
   }
 
+  async function sendBatchWithRetry(events, heartbeat, deadline) {
+    let failures = 0;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (Date.now() >= deadline) return { ok: false, failures };
+      if (await sendBatch(events, heartbeat, deadline)) return { ok: true, failures };
+      failures += 1;
+    }
+    return { ok: false, failures };
+  }
+
   async function runFlush() {
     if (!enabled) return snapshot();
+    const deadline = Date.now() + FLUSH_BUDGET_MS;
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;
     }
     if (queue.length === 0) {
-      const ok = await sendBatch([], { state: heartbeatState, dropped });
-      if (!ok) collectorFailures += 1;
+      const result = await sendBatchWithRetry([], { state: heartbeatState, dropped }, deadline);
+      collectorFailures += result.failures;
       return snapshot();
     }
 
@@ -453,16 +468,21 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
       for (let i = 0; i < pending.length; i += MAX_BATCH_EVENTS) {
         batches.push(pending.slice(i, i + MAX_BATCH_EVENTS));
       }
-      const results = await Promise.all(batches.map((events) => sendBatch(
+      const results = await Promise.all(batches.map((events) => sendBatchWithRetry(
         events,
         { state: heartbeatState, dropped },
+        deadline,
       )));
       for (let i = 0; i < results.length; i += 1) {
-        if (results[i]) continue;
-        collectorFailures += 1;
-        dropped += batches[i].length;
+        collectorFailures += results[i].failures;
+        if (!results[i].ok) dropped += batches[i].length;
       }
+      if (Date.now() >= deadline) break;
       await Promise.resolve();
+    }
+    if (queue.length > 0 && Date.now() >= deadline) {
+      dropped += queue.length;
+      queue.length = 0;
     }
     return snapshot();
   }
