@@ -1,5 +1,7 @@
 const SCHEMA_VERSION = 1;
-const PARAFORM_HOSTS = new Set(["www.paraform.com"]);
+const PARAFORM_HOSTS = new Set(["www.paraform.com", "paraform.com", "api.paraform.com"]);
+const COLLECTOR_ORIGIN = "https://raydar-paraform-traffic.david183940.chatgpt.site";
+const COLLECTOR_PATH = "/api/ingest";
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 const HEARTBEAT_STATES = new Set(["active", "paused", "idle", "unknown"]);
 const SOURCE_RE = /^[a-z0-9][a-z0-9._-]{0,95}$/u;
@@ -10,6 +12,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 // stays below its forty-event admission ceiling with headroom for bookkeeping.
 const MAX_QUEUE_EVENTS = 160;
 const MAX_BATCH_EVENTS = 32;
+const MAX_FLUSH_ROUNDS = 2;
+const MAX_ENDPOINT_LENGTH = 120;
 const MAX_INSPECTION_BYTES = 64 * 1024;
 const INSPECTION_TIMEOUT_MS = 150;
 const COLLECTOR_TIMEOUT_MS = 750;
@@ -45,7 +49,9 @@ function cleanSourceId(value) {
 }
 
 function collectorConfig(env, explicitSourceId) {
-  const sourceId = cleanSourceId(explicitSourceId ?? env?.PARAFORM_TELEMETRY_SOURCE);
+  // A shared helper can have a safe code default, but the owning deployment's
+  // explicit environment label must win so one helper is not misattributed.
+  const sourceId = cleanSourceId(env?.PARAFORM_TELEMETRY_SOURCE ?? explicitSourceId);
   const url = String(env?.PARAFORM_TELEMETRY_URL ?? "").trim();
   const sourceToken = String(env?.PARAFORM_TELEMETRY_TOKEN ?? "").trim();
   const dispatchToken = String(env?.PARAFORM_TELEMETRY_DISPATCH_TOKEN ?? "").trim();
@@ -56,7 +62,12 @@ function collectorConfig(env, explicitSourceId) {
     return null;
   }
   if (
-    parsed.protocol !== "https:"
+    parsed.origin !== COLLECTOR_ORIGIN
+    || parsed.pathname !== COLLECTOR_PATH
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || parsed.username !== ""
+    || parsed.password !== ""
     || !sourceId
     || !sourceToken
     || !dispatchToken
@@ -84,7 +95,7 @@ function requestFacts(input, init) {
       } catch {
         procedure = "";
       }
-      if (PROCEDURE_RE.test(procedure)) endpoint = procedure;
+      if (procedure.length <= MAX_ENDPOINT_LENGTH && PROCEDURE_RE.test(procedure)) endpoint = procedure;
       else if (procedure.includes(",")) endpoint = "trpc.batch";
       else endpoint = "trpc.unknown";
       trpc = true;
@@ -191,39 +202,43 @@ async function boundedResponseText(response) {
   if (!clone.body?.getReader) return { state: "unavailable" };
 
   const reader = clone.body.getReader();
-  const chunks = [];
-  let total = 0;
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try { void reader.cancel(); } catch { /* best effort */ }
-  }, INSPECTION_TIMEOUT_MS);
-  timer.unref?.();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (timedOut) return { state: "timeout" };
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_INSPECTION_BYTES) {
-        try { void reader.cancel(); } catch { /* best effort */ }
-        return { state: "too_large" };
+  const readPromise = (async () => {
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_INSPECTION_BYTES) {
+          try { void Promise.resolve(reader.cancel()).catch(() => {}); } catch { /* best effort */ }
+          return { state: "too_large" };
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+    } catch {
+      return { state: "unavailable" };
     }
-  } catch {
-    return { state: timedOut ? "timeout" : "unavailable" };
-  } finally {
-    clearTimeout(timer);
-  }
 
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { state: "complete", text: new TextDecoder().decode(bytes) };
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return { state: "complete", text: new TextDecoder().decode(bytes) };
+  })();
+  let timer;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      try { void Promise.resolve(reader.cancel()).catch(() => {}); } catch { /* best effort */ }
+      resolve({ state: "timeout" });
+    }, INSPECTION_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  const result = await Promise.race([readPromise, timeoutPromise]);
+  clearTimeout(timer);
+  return result;
 }
 
 async function classifyResponse(response, { endpoint, trpc, nowMs }) {
@@ -367,7 +382,6 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
       flushTimer = null;
       void flush();
     }, AUTO_FLUSH_DELAY_MS);
-    flushTimer.unref?.();
   }
 
   function enqueue(event) {
@@ -422,21 +436,26 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
       return snapshot();
     }
 
-    const pending = queue.splice(0, MAX_QUEUE_EVENTS);
-    const batches = [];
-    for (let i = 0; i < pending.length; i += MAX_BATCH_EVENTS) {
-      batches.push(pending.slice(i, i + MAX_BATCH_EVENTS));
+    // A second bounded round catches outcomes queued while the first collector
+    // POST is in flight. Anything arriving during round two remains queued and
+    // is scheduled by flush()'s finalizer; explicit flush never waits forever.
+    for (let round = 0; round < MAX_FLUSH_ROUNDS && queue.length > 0; round += 1) {
+      const pending = queue.splice(0, MAX_QUEUE_EVENTS);
+      const batches = [];
+      for (let i = 0; i < pending.length; i += MAX_BATCH_EVENTS) {
+        batches.push(pending.slice(i, i + MAX_BATCH_EVENTS));
+      }
+      const results = await Promise.all(batches.map((events) => sendBatch(
+        events,
+        { state: heartbeatState, dropped },
+      )));
+      for (let i = 0; i < results.length; i += 1) {
+        if (results[i]) continue;
+        collectorFailures += 1;
+        dropped += batches[i].length;
+      }
+      await Promise.resolve();
     }
-    const results = await Promise.all(batches.map((events) => sendBatch(
-      events,
-      { state: heartbeatState, dropped },
-    )));
-    for (let i = 0; i < results.length; i += 1) {
-      if (results[i]) continue;
-      collectorFailures += 1;
-      dropped += batches[i].length;
-    }
-    if (queue.length > 0) scheduleFlush();
     return snapshot();
   }
 
@@ -447,7 +466,10 @@ function createReporter({ config, telemetryFetchImpl, now, instanceId }) {
         collectorFailures += 1;
         return snapshot();
       })
-      .finally(() => { flushPromise = null; });
+      .finally(() => {
+        flushPromise = null;
+        if (queue.length > 0) scheduleFlush();
+      });
     return flushPromise;
   }
 

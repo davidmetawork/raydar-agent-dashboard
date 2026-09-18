@@ -44,3 +44,17 @@ Run the focused pause, throttle, Inbox, booking, Submissions V2 worker, resume
 collector, and release-manifest tests after wiring. The V2 release manifest must
 be regenerated and checked for any sealed source change. A passing local test or
 release seal does not prove collector ingestion or a deployed runtime revision.
+
+## September 18 implementation state
+
+- **Done:** the reviewed shared emitter is vendored byte-for-byte and the listed
+  transport owners call it at the actual Paraform fetch boundary. The V2 release
+  manifest was regenerated after its sealed worker and collector changes.
+- **Next:** production owner must set the collector credentials, deploy the
+  reviewed dashboard and worker artifacts, and independently read back
+  collector receipt and source freshness without issuing a provider probe.
+- **Blocked:** these legacy Node serverless handlers expose neither a common
+  `waitUntil` nor a response-lifecycle hook at their shared transport boundary.
+  The emitter's bounded automatic terminal flush is installed, but a durable
+  serverless finalizer adapter must be selected before claiming loss-resistant
+  delivery under process teardown. This does not affect provider behavior.
