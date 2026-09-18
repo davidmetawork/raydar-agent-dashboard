@@ -11,6 +11,7 @@ import {
   normalizeSourceBundle,
   normalizeEvidenceText,
 } from "./source-bundle.mjs";
+import { telemetryFetch } from "../../../_lib/paraform-telemetry-context.mjs";
 
 const PARAFORM_API = "https://www.paraform.com/api";
 const MAX_RESUME_BYTES = 15 * 1024 * 1024;
@@ -269,7 +270,7 @@ export async function downloadCandidateResume(resumeId, {
 } = {}) {
   if (!resumeId) return null;
   const cookie = await cookieImpl();
-  const response = await fetchImpl(`${PARAFORM_API}/resumeUpload/signedURL?resume_id=${encodeURIComponent(resumeId)}`, {
+  const response = await telemetryFetch(fetchImpl, "submissions-v2", { env })(`${PARAFORM_API}/resumeUpload/signedURL?resume_id=${encodeURIComponent(resumeId)}`, {
     headers: { cookie: `${cookieNameImpl(cookie)}=${cookie}` },
     signal: AbortSignal.timeout(30_000),
   });

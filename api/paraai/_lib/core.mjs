@@ -3,6 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import { authConfig, cors, requireAuth } from "../../seq/_lib/core.mjs";
+import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 
 export { authConfig, cors, requireAuth };
 
@@ -250,10 +251,11 @@ export async function trpcGet(proc, json = {}, tries = 3) {
 }
 
 export async function trpcGetRaw(proc, json = {}, tries = 3) {
+  const observedFetch = telemetryFetch(fetch, "paraai");
   const url = `${PARAFORM_BASE}/trpc/${proc}?input=${encodeURIComponent(JSON.stringify(envelope(json)))}`;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
-      const response = await fetch(url, {
+      const response = await observedFetch(url, {
         headers: await paraformHeaders(),
         signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
       });
@@ -280,10 +282,11 @@ export async function trpcPostWithDates(proc, json = {}, dateFields = []) {
 }
 
 async function trpcPostRaw(proc, json = {}, dateFields = []) {
+  const observedFetch = telemetryFetch(fetch, "paraai");
   // No transport retry: a timeout has no authoritative write verdict and a
   // replay can duplicate a non-idempotent mutation. classifyThrottle may call
   // this again only after an explicit 401, which Paraform refused pre-write.
-  const response = await fetch(`${PARAFORM_BASE}/trpc/${proc}`, {
+  const response = await observedFetch(`${PARAFORM_BASE}/trpc/${proc}`, {
     method: "POST",
     headers: await paraformHeaders(),
     body: JSON.stringify(superjsonEnvelope(json, dateFields)),
@@ -319,6 +322,7 @@ async function paraformRestRaw(
     fetchImpl = fetch,
   } = {},
 ) {
+  const observedFetch = telemetryFetch(fetchImpl, "paraai");
   const verb = String(method || "GET").toUpperCase();
   const url = new URL(String(path || ""), PARAFORM_ORIGIN);
   if (url.origin !== PARAFORM_ORIGIN || !url.pathname.startsWith("/api/")) {
@@ -327,7 +331,7 @@ async function paraformRestRaw(
   const attempts = Math.max(1, Number(tries) || 1);
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const response = await fetchImpl(url, {
+      const response = await observedFetch(url, {
         method: verb,
         headers: await paraformHeaders(),
         ...(json === undefined ? {} : { body: JSON.stringify(json) }),
@@ -742,11 +746,12 @@ export async function candidateProfileInfo(
   candidateUserId,
   { fetchImpl = fetch } = {},
 ) {
+  const observedFetch = telemetryFetch(fetchImpl, "paraai");
   const id = String(candidateUserId || "").trim();
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(id)) {
     throw new Error("CANDIDATE_PROFILE_ID_INVALID");
   }
-  const response = await fetchImpl(
+  const response = await observedFetch(
     `${PARAFORM_BASE}/candidates/profile/${encodeURIComponent(id)}/info`,
     {
       headers: await paraformHeaders(),
