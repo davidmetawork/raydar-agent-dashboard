@@ -28,6 +28,7 @@ import {
   runBookingMembershipRefresh,
 } from "./_lib/booking-membership-snapshot.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -77,7 +78,7 @@ async function warnOnCronRejection(cron) {
   }
 }
 
-export default async function handler(req, res) {
+async function handleBookingMembershipRefresh(req, res) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) {
@@ -154,4 +155,8 @@ export default async function handler(req, res) {
       ranAt: new Date().toISOString(),
     });
   }
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("dashboard-booking", () => handleBookingMembershipRefresh(req, res));
 }

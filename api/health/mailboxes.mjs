@@ -16,6 +16,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { hGet, hSet } from "./_lib/kv.mjs";
 import { hasCookie, trpcGet } from "../seq/_lib/core.mjs";
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
 const CACHE_KEY = "hlth:mailboxes:cache";
 const CACHE_FRESH_MS = 25 * 60 * 1000;
@@ -57,7 +58,7 @@ function summarize(accounts, fetchedAt) {
   };
 }
 
-export default async function handler(req, res) {
+async function handleMailboxes(req, res) {
   res.setHeader("cache-control", "no-store");
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "method" });
   if (!authed(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
@@ -103,4 +104,8 @@ export default async function handler(req, res) {
     // Cache write failure only costs the next caller a fresh read.
   }
   return res.status(200).json(summarize(accounts, fetchedAt));
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("dashboard-health", () => handleMailboxes(req, res));
 }

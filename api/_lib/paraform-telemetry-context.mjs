@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { waitUntil } from "@vercel/functions";
 import { createTelemetryFetch } from "./paraform-telemetry.mjs";
 
 export const PARAFORM_TELEMETRY_SOURCE_IDS = Object.freeze([
@@ -42,10 +43,23 @@ export function paraformTelemetrySource(fallbackSource) {
  */
 export function telemetryFetch(fetchImpl = globalThis.fetch, fallbackSource, options = {}) {
   if (typeof fetchImpl !== "function") throw new Error("PARAFORM_TELEMETRY_FETCH_REQUIRED");
-  return createTelemetryFetch({
+  const wrapped = createTelemetryFetch({
     fetchImpl,
     sourceId: paraformTelemetrySource(fallbackSource),
     env: options.env || process.env,
     ...(options.telemetryFetchImpl ? { telemetryFetchImpl: options.telemetryFetchImpl } : {}),
   });
+  const observed = (...args) => {
+    const attempt = wrapped(...args);
+    if (process.env.VERCEL === "1") {
+      try { waitUntil(Promise.resolve(attempt).then(() => wrapped.flush(), () => wrapped.flush()).catch(() => {})); } catch { /* automatic flush remains */ }
+    }
+    return attempt;
+  };
+  Object.defineProperties(observed, {
+    flush: { value: wrapped.flush, enumerable: false },
+    heartbeat: { value: wrapped.heartbeat, enumerable: false },
+    snapshot: { value: wrapped.snapshot, enumerable: false },
+  });
+  return observed;
 }

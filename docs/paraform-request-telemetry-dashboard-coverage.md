@@ -48,18 +48,14 @@ release seal does not prove collector ingestion or a deployed runtime revision.
 ## September 18 implementation state
 
 - **Done:** the reviewed shared emitter is vendored byte-for-byte and the listed
-  transport owners call it at the actual Paraform fetch boundary. The V2 release
-  manifest was regenerated after its sealed worker and collector changes.
+  transport owners call it at the actual Paraform fetch boundary. Booking sweep,
+  booking membership refresh, sequence health, and mailbox health bind their
+  fixed source contexts. Vercel Node serverless attempts schedule bounded flushes
+  through `@vercel/functions` `waitUntil`; Fly and local runtimes retain the
+  emitter's automatic flush. The V2 release manifest was regenerated.
 - **Next:** production owner must set the collector credentials, deploy the
   reviewed dashboard and worker artifacts, and independently read back
   collector receipt and source freshness without issuing a provider probe.
-- **Blocked:** these legacy Node serverless handlers expose neither a common
-  `waitUntil` nor a response-lifecycle hook at their shared transport boundary.
-  The emitter's bounded automatic terminal flush is installed, but a durable
-  serverless finalizer adapter must be selected before claiming loss-resistant
-  delivery under process teardown. This does not affect provider behavior.
-- **Blocked:** `dashboard-booking` and `dashboard-health` are registered
-  context labels, but their route-entry wrappers are not yet installed. Those
-  requests currently retain the safe `dashboard-sequences` default rather than
-  being misattributed; bind the route context before treating per-source
-  booking or health counts as complete.
+- **Coverage note:** booking-adjacent webhook and canary endpoints that do not
+  perform their own provider read retain `dashboard-sequences`; this is an
+  explicit source classification, not a pause or behavior change.

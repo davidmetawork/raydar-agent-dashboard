@@ -30,6 +30,7 @@ import {
   calendlyConfigured,
 } from "./_lib/booking-stop.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -44,7 +45,7 @@ async function warnOnCronRejection(cron) {
   }
 }
 
-export default async function handler(req, res) {
+async function handleBookingSweep(req, res) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
@@ -224,4 +225,8 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({ ok: false, error: expired ? "expired" : "error", detail: String(e?.message || e).slice(0, 200) });
   }
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("dashboard-booking", () => handleBookingSweep(req, res));
 }

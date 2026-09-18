@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 105,
-  "digest": "9275a0e09018598c2c460ece613c7dff81ec0114fd7258a19443b48efed4e717",
+  "digest": "9d82e319db4e33b628fd4c2ebb0204ae4b5bd55995604c5b22ff4de3a710c213",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
@@ -288,11 +288,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "package-lock.json",
-      "sha256": "b7089f5e7b687acc3ac98a23173b6278543b6072aea4a31840e1a28b7aa9add6"
+      "sha256": "439d1046311854f598bee99e2287cd0f02a1c497f4f904c24ab133f249fc8d23"
     },
     {
       "path": "package.json",
-      "sha256": "35090c55e1420eb8b5d4baedbc17cc849f545c77bf594aafe52b59a2830a692e"
+      "sha256": "93ff124c7ba0c708fb9bd44da25310c14e8f9ea6260a088d43f956d40b8401f4"
     },
     {
       "path": "resume-renderer-v2/Dockerfile",

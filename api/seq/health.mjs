@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { cors, hasCookie, paraformHealth } from "./_lib/core.mjs";
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import {
   raydarWebhookProofStatus,
   sweepStaleness,
@@ -60,7 +61,7 @@ export function authenticatedSchedulerHealthFields(
   };
 }
 
-export default async function handler(req, res) {
+async function handleSequenceHealth(req, res) {
   if (cors(req, res)) return; // health is open so the page can show status
   // Booking-stop liveness is reported HERE, on the one unauthenticated endpoint,
   // deliberately. The sweep's own staleness alarm lives inside the sweep — which
@@ -179,4 +180,8 @@ export default async function handler(req, res) {
   } catch (e) {
     res.status(200).json({ ok: false, cookieSet: hasCookie(), paraform: "error", detail: String(e.message || e).slice(0, 160), bookingStop });
   }
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("dashboard-health", () => handleSequenceHealth(req, res));
 }
