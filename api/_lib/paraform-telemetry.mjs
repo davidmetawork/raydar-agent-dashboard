@@ -18,6 +18,7 @@ const MAX_INSPECTION_BYTES = 64 * 1024;
 const INSPECTION_TIMEOUT_MS = 150;
 const COLLECTOR_TIMEOUT_MS = 750;
 const AUTO_FLUSH_DELAY_MS = 250;
+const MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60;
 
 const REST_ALIASES = new Map([
   ["/api/user", "rest.user"],
@@ -115,10 +116,13 @@ function retryAfterSeconds(response, nowMs) {
   }
   if (value == null || String(value).trim() === "") return null;
   const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric >= 0) return numeric;
+  if (Number.isFinite(numeric)) {
+    return numeric >= 0 && numeric <= MAX_RETRY_AFTER_SECONDS ? numeric : null;
+  }
   const at = Date.parse(String(value));
   if (!Number.isFinite(at)) return null;
-  return Math.max(0, (at - nowMs) / 1000);
+  const seconds = Math.max(0, (at - nowMs) / 1000);
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : null;
 }
 
 function transportErrorClass(error) {
@@ -179,7 +183,11 @@ function bodyRetryAfterSeconds(value, depth = 0, budget = { remaining: 24 }) {
   for (const key of ["retryAfterSeconds", "retry_after_seconds", "retryAfter", "retry_after"]) {
     if (!Object.hasOwn(value, key)) continue;
     const numeric = Number(value[key]);
-    if (Number.isFinite(numeric) && numeric >= 0) return numeric;
+    if (
+      Number.isFinite(numeric)
+      && numeric >= 0
+      && numeric <= MAX_RETRY_AFTER_SECONDS
+    ) return numeric;
   }
   for (const key of ["data", "json"]) {
     const nested = bodyRetryAfterSeconds(value[key], depth + 1, budget);
