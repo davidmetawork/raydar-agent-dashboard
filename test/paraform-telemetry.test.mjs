@@ -305,11 +305,19 @@ test("malformed and over-limit tRPC bodies are not reported as successful", asyn
 
 test("collector failure is swallowed and counted as telemetry loss", async () => {
   const providerResponse = new Response(JSON.stringify({ result: { data: { json: true } } }));
+  let providerCalls = 0;
+  let collectorCalls = 0;
   const wrapped = createTelemetryFetch({
-    fetchImpl: async () => providerResponse,
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return providerResponse;
+    },
     sourceId: "fail-open",
     env: ENV,
-    telemetryFetchImpl: async () => { throw new Error("collector unavailable"); },
+    telemetryFetchImpl: async () => {
+      collectorCalls += 1;
+      throw new Error("collector unavailable");
+    },
     uuidImpl: uuidSequence(),
   });
   assert.equal(
@@ -317,7 +325,9 @@ test("collector failure is swallowed and counted as telemetry loss", async () =>
     providerResponse,
   );
   const state = await wrapped.flush();
-  assert.equal(state.collectorFailures, 1);
+  assert.equal(providerCalls, 1);
+  assert.equal(collectorCalls, 2);
+  assert.equal(state.collectorFailures, 2);
   assert.equal(state.dropped, 2);
   assert.equal(state.queued, 0);
 });

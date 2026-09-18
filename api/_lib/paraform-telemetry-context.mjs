@@ -18,6 +18,9 @@ export const PARAFORM_TELEMETRY_SOURCE_IDS = Object.freeze([
 
 const SOURCES = new Set(PARAFORM_TELEMETRY_SOURCE_IDS);
 const sourceContext = new AsyncLocalStorage();
+// Retain the bounded reporter across warm-runtime calls so a failed delivery's
+// dropped count is included in the next successful heartbeat for this source.
+const reportersByFetch = new WeakMap();
 
 function source(value, fallback) {
   const selected = String(value || fallback || "");
@@ -41,9 +44,20 @@ export function paraformTelemetrySource(fallbackSource) {
 // delayed for collector delivery.
 export function telemetryFetch(fetchImpl = globalThis.fetch, fallbackSource, options = {}) {
   if (typeof fetchImpl !== "function") throw new Error("PARAFORM_TELEMETRY_FETCH_REQUIRED");
+  const sourceId = paraformTelemetrySource(fallbackSource);
+  const optionKeys = Object.keys(options);
+  const cacheable = !options.telemetryFetchImpl
+    && (!options.env || options.env === process.env)
+    && optionKeys.every((key) => key === "env");
+  const cacheKey = cacheable ? JSON.stringify([sourceId, ...[
+    "PARAFORM_TELEMETRY_SOURCE", "PARAFORM_TELEMETRY_URL",
+    "PARAFORM_TELEMETRY_TOKEN", "PARAFORM_TELEMETRY_DISPATCH_TOKEN",
+  ].map(key => process.env[key] || "")]) : null;
+  let cache = cacheable ? reportersByFetch.get(fetchImpl) : null;
+  if (cache?.has(cacheKey)) return cache.get(cacheKey);
   const wrapped = createTelemetryFetch({
     fetchImpl,
-    sourceId: paraformTelemetrySource(fallbackSource),
+    sourceId,
     env: options.env || process.env,
     ...(options.telemetryFetchImpl ? { telemetryFetchImpl: options.telemetryFetchImpl } : {}),
   });
@@ -59,5 +73,12 @@ export function telemetryFetch(fetchImpl = globalThis.fetch, fallbackSource, opt
     heartbeat: { value: wrapped.heartbeat, enumerable: false },
     snapshot: { value: wrapped.snapshot, enumerable: false },
   });
+  if (cacheable) {
+    if (!cache) { cache = new Map(); reportersByFetch.set(fetchImpl, cache); }
+    // Credentials can change only at deployment in normal operation; keep a
+    // bounded fallback for unusual in-process environment replacement.
+    if (cache.size >= 32) cache.clear();
+    cache.set(cacheKey, observed);
+  }
   return observed;
 }

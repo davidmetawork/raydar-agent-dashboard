@@ -14,6 +14,16 @@ const env = {
   PARAFORM_TELEMETRY_DISPATCH_TOKEN: "dispatch-token",
 };
 
+test("warm-runtime callers retain one reporter per fetch and source", () => {
+  const provider = async () => { throw new Error("must not run"); };
+  const first = telemetryFetch(provider, "dashboard-booking");
+  assert.equal(telemetryFetch(provider, "dashboard-booking"), first);
+  assert.equal(telemetryFetch(provider, "dashboard-booking", { env: process.env }), first);
+  assert.notEqual(telemetryFetch(provider, "dashboard-health"), first);
+  assert.notEqual(telemetryFetch(provider, "dashboard-booking", { env }), first);
+});
+
+
 test("V2 source is present in the shared registered collector source set", () => {
   assert.ok(PARAFORM_TELEMETRY_SOURCE_IDS.includes("submissions-v2"));
   assert.equal(paraformTelemetrySource("submissions-v2"), "submissions-v2");
