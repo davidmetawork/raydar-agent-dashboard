@@ -1,3 +1,4 @@
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import { syncPathARows } from "./_lib/sync.mjs";
 import { requireCron, requireHuman, sendError } from "./_lib/http.mjs";
 import { storeConfigured } from "./_lib/store.mjs";
@@ -39,6 +40,10 @@ export async function handleSubmissionsRefresh(req, res, {
   }
 }
 
-export default async function handler(req, res) {
+async function handleRequest(req, res) {
   return handleSubmissionsRefresh(req, res);
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("submissions-v1", () => handleRequest(req, res));
 }

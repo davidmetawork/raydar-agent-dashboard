@@ -1,9 +1,10 @@
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import { readRowsSnapshot, storeConfigured } from "./_lib/store.mjs";
 import { requireHuman, sendError } from "./_lib/http.mjs";
 
 export const config = { maxDuration: 30 };
 
-export default async function handler(req, res) {
+async function handleRequest(req, res) {
   if (!(await requireHuman(req, res))) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET_only" });
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
@@ -16,3 +17,7 @@ export default async function handler(req, res) {
   }
 }
 
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("submissions-v1", () => handleRequest(req, res));
+}

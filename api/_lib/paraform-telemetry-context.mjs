@@ -3,6 +3,7 @@ import { waitUntil } from "@vercel/functions";
 import { createTelemetryFetch } from "./paraform-telemetry.mjs";
 
 export const PARAFORM_TELEMETRY_SOURCE_IDS = Object.freeze([
+  "paraai",
   "dashboard-sequences",
   "dashboard-booking",
   "dashboard-health",

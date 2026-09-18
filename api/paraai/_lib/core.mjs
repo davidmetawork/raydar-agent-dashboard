@@ -251,7 +251,7 @@ export async function trpcGet(proc, json = {}, tries = 3) {
 }
 
 export async function trpcGetRaw(proc, json = {}, tries = 3) {
-  const observedFetch = telemetryFetch(fetch, "submissions-v1");
+  const observedFetch = telemetryFetch(fetch, "paraai");
   const url = `${PARAFORM_BASE}/trpc/${proc}?input=${encodeURIComponent(JSON.stringify(envelope(json)))}`;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
@@ -282,7 +282,7 @@ export async function trpcPostWithDates(proc, json = {}, dateFields = []) {
 }
 
 async function trpcPostRaw(proc, json = {}, dateFields = []) {
-  const observedFetch = telemetryFetch(fetch, "submissions-v1");
+  const observedFetch = telemetryFetch(fetch, "paraai");
   // No transport retry: a timeout has no authoritative write verdict and a
   // replay can duplicate a non-idempotent mutation. classifyThrottle may call
   // this again only after an explicit 401, which Paraform refused pre-write.
@@ -322,7 +322,7 @@ async function paraformRestRaw(
     fetchImpl = fetch,
   } = {},
 ) {
-  const observedFetch = telemetryFetch(fetchImpl, "submissions-v1");
+  const observedFetch = telemetryFetch(fetchImpl, "paraai");
   const verb = String(method || "GET").toUpperCase();
   const url = new URL(String(path || ""), PARAFORM_ORIGIN);
   if (url.origin !== PARAFORM_ORIGIN || !url.pathname.startsWith("/api/")) {
@@ -746,7 +746,7 @@ export async function candidateProfileInfo(
   candidateUserId,
   { fetchImpl = fetch } = {},
 ) {
-  const observedFetch = telemetryFetch(fetchImpl, "submissions-v1");
+  const observedFetch = telemetryFetch(fetchImpl, "paraai");
   const id = String(candidateUserId || "").trim();
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(id)) {
     throw new Error("CANDIDATE_PROFILE_ID_INVALID");

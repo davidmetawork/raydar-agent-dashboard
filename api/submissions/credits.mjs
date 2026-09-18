@@ -1,3 +1,4 @@
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import { readSubmissionCredits } from "../paraai/_lib/interest.mjs";
 import { requireHuman, sendError } from "./_lib/http.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
@@ -29,6 +30,10 @@ export async function handleSubmissionCredits(req, res, {
   }
 }
 
-export default async function handler(req, res) {
+async function handleRequest(req, res) {
   return handleSubmissionCredits(req, res);
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("submissions-v1", () => handleRequest(req, res));
 }

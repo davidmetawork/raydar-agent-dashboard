@@ -1,3 +1,4 @@
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 // Machine-owned source bridge for facts that live in the Raydar repo/runtime,
 // not in the dashboard deployment: interview follow-up promises and the
 // match-watch reply ladder. APPHUB_SYNC_KEY already authenticates the hourly
@@ -62,7 +63,7 @@ export function normalizeExternalSources(body = {}) {
   };
 }
 
-export default async function handler(req, res) {
+async function handleRequest(req, res) {
   res.setHeader("Cache-Control", "no-store");
   if (!sourceBridgeAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
@@ -95,4 +96,8 @@ export default async function handler(req, res) {
       matchWatch: source.matchWatch.length,
     },
   });
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("submissions-v1", () => handleRequest(req, res));
 }

@@ -2,13 +2,21 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 105,
-  "digest": "9d82e319db4e33b628fd4c2ebb0204ae4b5bd55995604c5b22ff4de3a710c213",
+  "file_count": 107,
+  "digest": "32ca7574b5c0d7936b41d37ec2bb8fff8e50cbda3c239b38efb5b9ff3cae865d",
   "vercel_json_canonical_sha256": "f58b262ffe4f97f293a1288785c262582039e66f917654ee2c49f5549ac1b967",
   "files": [
     {
       "path": ".vercelignore",
       "sha256": "e8189a6e58b3035f98b39daab3448c36a1bdb92884f55cd2a005472ebb907c20"
+    },
+    {
+      "path": "api/_lib/paraform-telemetry-context.mjs",
+      "sha256": "e6d24c080970a9e08b6c1e759202f74f7945310c421856459f97dccb40e99e65"
+    },
+    {
+      "path": "api/_lib/paraform-telemetry.mjs",
+      "sha256": "e02854600642d4a3aca90ff7fc9f0797ccc6162ec16b854dfac1c47eb6999bdf"
     },
     {
       "path": "api/auth/_lib/session.mjs",
@@ -24,7 +32,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/paraai/_lib/core.mjs",
-      "sha256": "d46d253ae55906d9ca81cd819bfcbda30a7c57bc868b69225c342636781be6ff"
+      "sha256": "a18d89e3500f6c83f94b83e4eb0d0073640eb336a98382a4dd887cb074a739ec"
     },
     {
       "path": "api/paraai/submission-notify.mjs",
@@ -196,7 +204,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/router.mjs",
-      "sha256": "5e1514fe43bb19b37f2971d88ba11daa5e3d316a58d6719b3165d4aa31ee7ac8"
+      "sha256": "211473f195524f6c8297cc963fa3fab9507af3ead897ac298354685d6b281cc9"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",
@@ -340,7 +348,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "242df5d60e2848426d5fc90d0ee838504fb4a6a7addd0a0bbf04ab3d4ebc768c"
+      "sha256": "c2193a2196530436894a1a7c3d1f0530efc87a14448a9aa4bcfc533ce9bfd200"
     },
     {
       "path": "submissions-v2-purge/Dockerfile",

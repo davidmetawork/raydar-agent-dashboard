@@ -56,6 +56,11 @@ release seal does not prove collector ingestion or a deployed runtime revision.
 - **Next:** production owner must set the collector credentials, deploy the
   reviewed dashboard and worker artifacts, and independently read back
   collector receipt and source freshness without issuing a provider probe.
+- **Root review correction:** ParaAI remains its own default source; all V1
+  HTTP routes and the V2 router now bind explicit versioned source contexts.
+  Both new emitter modules are included in the V2 release seal. The three
+  production pause controls were successfully read back unchanged using the
+  exact `.env` parse (an inherited stale process variable caused the prior 401).
 - **Coverage note:** booking-adjacent webhook and canary endpoints that do not
   perform their own provider read retain `dashboard-sequences`; this is an
   explicit source classification, not a pause or behavior change.

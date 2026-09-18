@@ -1,3 +1,4 @@
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import {
   attachResume,
   generateResume,
@@ -8,7 +9,7 @@ import { bodyOf, requireHuman, sendError } from "./_lib/http.mjs";
 
 export const config = { maxDuration: 300 };
 
-export default async function handler(req, res) {
+async function handleRequest(req, res) {
   if (!(await requireHuman(req, res))) return;
   try {
     if (req.method === "GET") {
@@ -36,4 +37,8 @@ export default async function handler(req, res) {
   } catch (error) {
     return sendError(res, error);
   }
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("submissions-v1", () => handleRequest(req, res));
 }

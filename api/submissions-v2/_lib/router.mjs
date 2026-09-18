@@ -1,3 +1,4 @@
+import { withParaformTelemetrySource } from "../../_lib/paraform-telemetry-context.mjs";
 import { sessionConfig } from "../../auth/_lib/session.mjs";
 import { effectiveControls, serviceConfig } from "./config.mjs";
 import { readRuntimeControls } from "./db.mjs";
@@ -82,7 +83,7 @@ async function intakeRoute(req, res) {
   return res.status(202).json({ ok: true, ...(await createService().intakeMasterInbox(body)) });
 }
 
-export async function routeSubmissionsV2(req, res) {
+async function routeSubmissionsV2Inner(req, res) {
   const route = routeSegments(req);
   const key = route.join("/");
   try {
@@ -233,3 +234,7 @@ export async function routeSubmissionsV2(req, res) {
 }
 
 export const routerInternals = Object.freeze({ routeSegments, queryWithoutRoute, eventIdentity });
+
+export function routeSubmissionsV2(req, res) {
+  return withParaformTelemetrySource("submissions-v2", () => routeSubmissionsV2Inner(req, res));
+}

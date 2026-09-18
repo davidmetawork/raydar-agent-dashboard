@@ -1,10 +1,11 @@
+import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import { previewPathA, submitPathA } from "./_lib/path-a.mjs";
 import { previewPathB, submitPathB } from "./_lib/path-b.mjs";
 import { bodyOf, requireHuman, sendError } from "./_lib/http.mjs";
 
 export const config = { maxDuration: 300 };
 
-export default async function handler(req, res) {
+async function handleRequest(req, res) {
   if (!(await requireHuman(req, res))) return;
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST_only" });
   const body = bodyOf(req);
@@ -22,4 +23,8 @@ export default async function handler(req, res) {
   } catch (error) {
     return sendError(res, error);
   }
+}
+
+export default function handler(req, res) {
+  return withParaformTelemetrySource("submissions-v1", () => handleRequest(req, res));
 }
