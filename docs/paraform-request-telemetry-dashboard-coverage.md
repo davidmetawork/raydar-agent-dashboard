@@ -58,3 +58,8 @@ release seal does not prove collector ingestion or a deployed runtime revision.
   The emitter's bounded automatic terminal flush is installed, but a durable
   serverless finalizer adapter must be selected before claiming loss-resistant
   delivery under process teardown. This does not affect provider behavior.
+- **Blocked:** `dashboard-booking` and `dashboard-health` are registered
+  context labels, but their route-entry wrappers are not yet installed. Those
+  requests currently retain the safe `dashboard-sequences` default rather than
+  being misattributed; bind the route context before treating per-source
+  booking or health counts as complete.
