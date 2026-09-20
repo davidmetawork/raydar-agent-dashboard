@@ -517,6 +517,7 @@ export function paraformMailboxes({ body, status, keyMissing }) {
   const total = Number(c.total) || 0;
   const errors = Number(c.gmailError) || 0;
   const active = Number(c.gmailActive) || 0;
+  const unknown = Math.max(0, total - active - errors);
   if (!total) return UNK("roster returned zero accounts", metrics);
   // The ERROR statuses observed on 2026-08-04 came from a per-SEQUENCE
   // readback; whether the account roster carries gmail_status too is
@@ -530,6 +531,7 @@ export function paraformMailboxes({ body, status, keyMissing }) {
   }
   if (errors >= total * 0.3) return DOWN(`${errors}/${total} sending accounts in ERROR`, metrics);
   if (errors > 0) return DEG(`${errors}/${total} sending accounts in ERROR`, metrics);
+  if (unknown > 0) return DEG(`${unknown}/${total} sending accounts have no Gmail status`, metrics);
   return OK(null, metrics);
 }
 

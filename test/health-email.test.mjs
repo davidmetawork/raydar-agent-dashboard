@@ -243,6 +243,29 @@ test("paraform mailboxes: david@ in ERROR is DOWN; a few alias errors DEGRADED; 
   assert.match(statusless.reason, /no gmail_status/);
 });
 
+test("paraform mailboxes: incomplete reported coverage cannot score healthy", () => {
+  const evaluate = (counts) => paraformMailboxes({
+    status: 200,
+    body: { ok: true, paraform: "live", counts, davidGmailStatus: "ACTIVE" },
+  });
+  const partial = evaluate({ total: 27, gmailActive: 26, gmailError: 0, other: 1 });
+  assert.equal(partial.state, "DEGRADED");
+  assert.match(partial.reason, /1\/27/);
+
+  // Coverage comes from the reported total, even when `other` is omitted.
+  const mostlyUnknown = evaluate({ total: 27, gmailActive: 1, gmailError: 0 });
+  assert.equal(mostlyUnknown.state, "DEGRADED");
+  assert.match(mostlyUnknown.reason, /26\/27/);
+  assert.equal(evaluate({ total: 27, gmailActive: 27, gmailError: 0 }).state, "OK");
+  assert.equal(evaluate({ total: 27, gmailActive: 0, gmailError: 0 }).state, "UNKNOWN");
+
+  // Missing coverage does not override stronger observed failure evidence.
+  const withError = evaluate({ total: 27, gmailActive: 25, gmailError: 1 });
+  assert.equal(withError.state, "DEGRADED");
+  assert.match(withError.reason, /1\/27 sending accounts in ERROR/);
+  assert.equal(evaluate({ total: 27, gmailActive: 17, gmailError: 9 }).state, "DOWN");
+});
+
 test("paraform sequences: a fully blind tick is UNKNOWN — an UNKNOWN inbox result is not an observation", () => {
   const v = paraformSequencesEmail({
     results: { "inbox-health": { state: "UNKNOWN", reason: "offline" } },
