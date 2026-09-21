@@ -34,6 +34,8 @@
   .pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.warn .dot{background:var(--warn)}
   .pill.bad{background:var(--bad-bg);color:var(--bad)}.pill.bad .dot{background:var(--bad)}
   .header-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}
+  .refresh-action{min-width:104px}
+  .refresh-action:disabled{cursor:wait;opacity:.62}
   .banner{padding:12px 14px;border-radius:11px;margin-bottom:14px;font-size:13px;border:1px solid transparent}
   .banner.good{background:var(--good-bg);color:#176B4D;border-color:#C7E6D6}
   .banner.bad{background:var(--bad-bg);color:#7A2A2D;border-color:#F3C9CB}
@@ -185,6 +187,7 @@
       <div><h1>Inbox</h1><div class="sub">Every Paraform sequence reply, triaged in one place</div></div>
     </div>
     <div class="header-actions">
+      <button id="manualRefresh" class="btn ghost refresh-action hidden" type="button">Refresh now</button>
       <span id="health" class="pill warn"><span class="dot"></span><span id="healthText">checking…</span></span>
     </div>
   </header>
@@ -231,7 +234,7 @@
 const $=(id)=>document.getElementById(id);
 let AUTH={required:false,authenticated:false,clientId:null,token:null,email:"",domains:["raydar.xyz","raydargroup.com"]};
 const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
-const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,syncing:false,snapshotState:"unseeded",seedPasses:0,triaging:new Set(),triageRevision:0};
+const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,syncing:false,manualRefreshing:false,snapshotState:"unseeded",seedPasses:0,triaging:new Set(),triageRevision:0};
 if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
 
 function setHealth(kind,label){
@@ -641,6 +644,7 @@ async function loadHealth(){
   try{
     const response=await fetch("/api/inbox/health",{cache:"no-store"});
     const health=await response.json();
+    $("manualRefresh").classList.toggle("hidden",!(health.paraform==="paused"&&health.pauseControlState==="configured"));
     if(!health.authRequired){setHealth("bad","Sign-in unavailable");showBanner("bad","Inbox is disabled because the Google sign-in gate is not configured.");}
     else if(health.paraform==="paused"){setHealth("warn","Background reads paused");showBanner("warn","Automatic Paraform reads are temporarily paused. The retained Inbox snapshot remains available.");}
     else if(health.paraform==="expired"){setHealth("bad","Session expired");showBanner("bad","The Paraform session expired. Refresh the dashboard’s Paraform session before using Inbox.");}
@@ -648,7 +652,7 @@ async function loadHealth(){
     else if(!(health.stateStoreConfigured??health.cacheConfigured)){setHealth("bad","State unavailable");showBanner("bad","Inbox is disabled because its durable triage store is not configured.");}
     else setHealth("live","Paraform · live");
     return health;
-  }catch(error){setHealth("bad","Backend unreachable");showBanner("bad","Inbox could not reach its backend.");return null;}
+  }catch(error){$("manualRefresh").classList.add("hidden");setHealth("bad","Backend unreachable");showBanner("bad","Inbox could not reach its backend.");return null;}
 }
 async function loadFeed(){
   if(STATE.loading)return;
@@ -709,7 +713,7 @@ function queueInboxSync(delay=0){
   },delay);
 }
 async function syncFeed(){
-  if(STATE.syncing)return;
+  if(STATE.syncing||STATE.manualRefreshing)return;
   STATE.syncing=true;
   try{
     const response=await fetch("/api/inbox/sync",{
@@ -740,6 +744,62 @@ async function syncFeed(){
     }
   }finally{STATE.syncing=false;}
 }
+function waitForManualRefresh(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+async function manualRefreshFeed(){
+  if(STATE.manualRefreshing)return;
+  STATE.manualRefreshing=true;
+  const button=$("manualRefresh");
+  const runStartedAt=new Date().toISOString();
+  button.disabled=true;button.textContent="Starting…";
+  try{
+    for(let pass=0;pass<40;pass+=1){
+      const response=await fetch("/api/inbox/manual-sync",{
+        method:"POST",
+        headers:{...authHeaders(),"content-type":"application/json"},
+        body:JSON.stringify({run_started_at:runStartedAt}),
+        cache:"no-store",
+      });
+      const data=await response.json().catch(()=>({}));
+      if(response.status===202&&data.status==="in_progress"){
+        button.textContent="Waiting…";
+        await waitForManualRefresh(Math.max(5,Number(data.retry_after_seconds)||15)*1000);
+        continue;
+      }
+      if(!response.ok||!data.ok){
+        const error=new Error(data.error||"Manual refresh unavailable");
+        error.code=data.error;error.data=data;throw error;
+      }
+      const progress=data.progress||{};
+      const refreshed=Number(progress.ui_campaigns_refreshed)||0;
+      const targeted=Number(progress.ui_campaigns_targeted)||0;
+      button.textContent="Refreshing "+refreshed+"/"+targeted+"…";
+      showBanner("warn","Manual Inbox refresh: "+refreshed+" of "+targeted+" sequences updated. Background readers remain paused.","manual");
+      if(data.complete){
+        await loadFeed();
+        showBanner("good","Inbox refreshed across all "+targeted+" sequences. Background readers remain paused.","manual");
+        return;
+      }
+      await waitForManualRefresh(750);
+    }
+    throw new Error("Manual refresh exceeded its bounded pass limit");
+  }catch(error){
+    await loadFeed();
+    const progress=error.data?.progress||{};
+    const remaining=Number(progress.ui_campaigns_remaining);
+    const saved=Number.isFinite(remaining)
+      ?" "+remaining+" sequence"+(remaining===1?" remains":"s remain")+" on the retained snapshot."
+      :" Successful sequence reads were retained.";
+    const reason=error.code==="paraform_provider_refusal"
+      ?"Paraform declined a read, so the manual refresh stopped immediately."
+      :error.code==="paraform_auth_expired"
+        ?"The Paraform session expired during the manual refresh."
+        :"The manual refresh stopped before full coverage.";
+    showBanner("warn",reason+saved+" Background readers remain paused.","manual");
+  }finally{
+    STATE.manualRefreshing=false;
+    button.disabled=false;button.textContent="Refresh now";
+  }
+}
 function startApp(){
   loadHealth();
   loadFeed().then(()=>queueInboxSync());
@@ -747,6 +807,7 @@ function startApp(){
 }
 
 $("search").addEventListener("input",event=>{STATE.query=event.target.value;renderList();selectFirstVisible();});
+$("manualRefresh").addEventListener("click",manualRefreshFeed);
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{
   STATE.filter=button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach(item=>{

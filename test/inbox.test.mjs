@@ -42,6 +42,11 @@ import {
 import {
   createInboxHealthHandler,
 } from "../api/inbox/health.mjs";
+import {
+  createManualInboxSyncHandler,
+  createPacedManualInboxGet,
+  manualInboxProgress,
+} from "../api/inbox/manual-sync.mjs";
 
 function mockResponse() {
   return {
@@ -973,6 +978,183 @@ test("sync selection prioritizes unseeded and changed sequences without starvati
   ]);
 });
 
+test("manual sweep selection visits every snapshot older than its stable run start", () => {
+  const runStartedAtMs = Date.parse("2026-09-21T15:00:00.000Z");
+  const previous = emptyInboxSnapshotState();
+  previous.snapshots = new Map([
+    ["old-a", { refreshed_at: "2026-09-21T14:59:00.000Z" }],
+    ["old-b", { refreshed_at: "2026-09-20T12:00:00.000Z" }],
+    ["current", { refreshed_at: "2026-09-21T15:00:01.000Z" }],
+  ]);
+  const selected = selectInboxCampaigns([
+    { id: "current" },
+    { id: "missing" },
+    { id: "old-a" },
+    { id: "old-b" },
+  ], previous, [{ sequence_id: "current" }], {
+    nowMs: Date.parse("2026-09-21T15:03:00.000Z"),
+    batchSize: 3,
+    forceRefreshAfterMs: runStartedAtMs,
+  });
+  assert.deepEqual(selected.map(({ id }) => id), ["missing", "old-b", "old-a"]);
+});
+
+test("manual Inbox pacing serializes calls and stops after the first provider refusal", async () => {
+  const calls = [];
+  const get = createPacedManualInboxGet({
+    intervalMs: 0,
+    get: async (procedure, _input, tries) => {
+      calls.push([procedure, tries]);
+      if (procedure === "second") {
+        const error = new Error("throttled");
+        error.code = "PARAFORM_THROTTLED";
+        throw error;
+      }
+      return procedure;
+    },
+  });
+  const first = get("first", {});
+  const second = get("second", {});
+  const third = get("third", {});
+  assert.equal(await first, "first");
+  await assert.rejects(second, { code: "PARAFORM_THROTTLED" });
+  await assert.rejects(third, { code: "STOPPED_AFTER_FIRST_PROVIDER_REFUSAL" });
+  assert.deepEqual(calls, [["first", 1], ["second", 1]]);
+  assert.deepEqual(get.stats(), {
+    calls_started: 2,
+    calls_succeeded: 1,
+    first_refusal: {
+      code: "PARAFORM_THROTTLED",
+      after_calls_started: 2,
+      after_calls_succeeded: 1,
+    },
+  });
+});
+
+test("manual Inbox progress separates represented UI sequences from retained broker-only targets", () => {
+  const state = emptyInboxSnapshotState();
+  state.catalog = {
+    targets: [
+      { id: "ui-old", ui_admitted: true },
+      { id: "ui-new", ui_admitted: true },
+      { id: "broker-new", ui_admitted: false },
+    ],
+  };
+  state.snapshots = new Map([
+    ["ui-old", { refreshed_at: "2026-09-21T14:59:00.000Z" }],
+    ["ui-new", { refreshed_at: "2026-09-21T15:01:00.000Z" }],
+    ["broker-new", { refreshed_at: "2026-09-21T15:02:00.000Z" }],
+  ]);
+  assert.deepEqual(manualInboxProgress(
+    state,
+    Date.parse("2026-09-21T15:00:00.000Z"),
+  ), {
+    campaigns_targeted: 3,
+    campaigns_refreshed: 2,
+    campaigns_remaining: 1,
+    ui_campaigns_targeted: 2,
+    ui_campaigns_refreshed: 1,
+    ui_campaigns_remaining: 1,
+  });
+});
+
+test("manual sync requires an owned background pause before any provider work", async () => {
+  let builds = 0;
+  const handler = createManualInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: false, state: "absent" }),
+    buildRefresh: async () => { builds += 1; },
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.error, "manual_refresh_requires_background_pause");
+  assert.equal(builds, 0);
+});
+
+test("manual sync refreshes one serial batch and proves the pause stayed owned", async () => {
+  const runStartedAt = "2026-09-21T15:00:00.000Z";
+  const previous = emptyInboxSnapshotState();
+  const next = emptyInboxSnapshotState();
+  next.catalog = {
+    targets: [
+      { id: "sequence-a", ui_admitted: true },
+      { id: "sequence-b", ui_admitted: true },
+    ],
+  };
+  next.snapshots = new Map([
+    ["sequence-a", { refreshed_at: "2026-09-21T15:00:03.000Z" }],
+    ["sequence-b", { refreshed_at: "2026-09-21T15:00:06.000Z" }],
+  ]);
+  let pauseReads = 0;
+  let released = "";
+  const pacedGet = async () => [];
+  pacedGet.stats = () => ({
+    calls_started: 4,
+    calls_succeeded: 4,
+    first_refusal: null,
+  });
+  const refresh = {
+    generated_at: "2026-09-21T15:00:06.000Z",
+    scan: {
+      campaigns_failed: 0,
+      recent_failed: false,
+    },
+  };
+  const handler = createManualInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    now: () => new Date("2026-09-21T15:00:10.000Z"),
+    pauseState: async () => {
+      pauseReads += 1;
+      return { paused: true, state: "configured", pauseId: "owned-pause" };
+    },
+    acquireLock: async () => ({ status: "acquired", token: "manual-token" }),
+    readState: async () => ({ status: "ready", value: previous }),
+    pacedGetFactory: () => pacedGet,
+    buildRefresh: async (options) => {
+      assert.equal(options.previousState, previous);
+      assert.equal(options.get, pacedGet);
+      assert.equal(options.concurrency, 1);
+      assert.equal(options.batchSize, 18);
+      assert.equal(options.forceRefreshAfterMs, Date.parse(runStartedAt));
+      return refresh;
+    },
+    writeState: async (state, value) => {
+      assert.equal(state, previous);
+      assert.equal(value, refresh);
+      return next;
+    },
+    assembleFeed: () => ({
+      counts: { total: 42 },
+      freshness: { state: "ready" },
+    }),
+    releaseLock: async (token) => {
+      released = token;
+      return true;
+    },
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: { run_started_at: runStartedAt },
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.complete, true);
+  assert.equal(response.body.status, "manual_refresh_complete");
+  assert.equal(response.body.progress.ui_campaigns_refreshed, 2);
+  assert.equal(response.body.counts.total, 42);
+  assert.equal(pauseReads, 3);
+  assert.equal(released, "manual-token");
+});
+
 test("snapshot persistence writes only successful shards with no expiry", async () => {
   const previous = emptyInboxSnapshotState();
   previous.snapshots = new Map([
@@ -1547,6 +1729,9 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /RaydarAuth\.signIn\(/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/feed"/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/sync"/);
+  assert.match(inboxHtml, /id="manualRefresh"/);
+  assert.match(inboxHtml, /fetch\("\/api\/inbox\/manual-sync"/);
+  assert.match(inboxHtml, /Background readers remain paused/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/message\?gmail_id="/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
   assert.match(inboxHtml, /data-filter="archived"/);

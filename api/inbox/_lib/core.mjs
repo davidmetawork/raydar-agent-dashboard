@@ -633,6 +633,7 @@ export function selectInboxCampaigns(
     nowMs = Date.now(),
     batchSize = INBOX_SYNC_BATCH_SIZE,
     staleMs = INBOX_SEQUENCE_STALE_MS,
+    forceRefreshAfterMs = 0,
   } = {},
 ) {
   const snapshots = previousState?.snapshots instanceof Map
@@ -648,6 +649,17 @@ export function selectInboxCampaigns(
   for (const campaign of arrayValue(campaigns)) {
     const id = stringValue(campaign?.id);
     const snapshot = snapshots.get(id);
+    if (forceRefreshAfterMs > 0) {
+      if (snapshot && snapshotTime(snapshot) >= forceRefreshAfterMs) continue;
+      const lastAttempt = Date.parse(attempts[id] || "");
+      eligible.push({
+        campaign,
+        priority: snapshot ? 1 : 0,
+        attemptedAt: Number.isFinite(lastAttempt) ? lastAttempt : 0,
+        snapshotAt: snapshotTime(snapshot),
+      });
+      continue;
+    }
     const currentCount = Number(campaign?.email_replies);
     const storedCount = Number(snapshot?.email_replies);
     const countChanged = snapshot
@@ -693,6 +705,7 @@ export async function buildInboxRefresh({
   now = () => new Date(),
   budgetMs = INBOX_BUILD_BUDGET_MS,
   batchSize = INBOX_SYNC_BATCH_SIZE,
+  forceRefreshAfterMs = 0,
   previousState = emptyInboxSnapshotState(),
 } = {}) {
   const deadline = Date.now() + Math.max(1_000, budgetMs);
@@ -745,6 +758,7 @@ export async function buildInboxRefresh({
   const selected = selectInboxCampaigns(targets, previousState, recentReplies, {
     nowMs: Date.now(),
     batchSize,
+    forceRefreshAfterMs,
   });
 
   const results = await mapWithConcurrency(selected, concurrency, async (campaign) => {
