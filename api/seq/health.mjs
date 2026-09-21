@@ -6,6 +6,7 @@ import {
   raydarWebhookProofStatus,
   sweepStaleness,
 } from "./_lib/booking-stop.mjs";
+import { parseBookingStopColdExclusions } from "./_lib/booking-stop-policy.mjs";
 import {
   raydarSchedulerBookingStopEnabled,
   raydarSchedulerIndexConfigured,
@@ -13,6 +14,31 @@ import {
 
 const HEALTH_READ_KEY_PATTERN = /^\S{32,}$/u;
 const CONTRACT_REVISION_PATTERN = /^[a-f0-9]{40}$/iu;
+
+export function bookingStopPolicyConfigStatus(env = process.env) {
+  try {
+    const policy = parseBookingStopColdExclusions(
+      env?.BOOKING_STOP_COLD_EXCLUSIONS_JSON ?? "",
+    );
+    return {
+      valid: true,
+      active: policy.active,
+      schema: policy.schema,
+      mode: policy.mode,
+      policyDigest: policy.policyDigest,
+      configuredCampaigns: policy.campaigns.length,
+    };
+  } catch {
+    return {
+      valid: false,
+      active: false,
+      schema: null,
+      mode: null,
+      policyDigest: null,
+      configuredCampaigns: null,
+    };
+  }
+}
 
 /**
  * The scheduler may bind cutover evidence to this exact deployed dashboard
@@ -58,11 +84,13 @@ export function authenticatedSchedulerHealthFields(
   return {
     authenticated: true,
     contractRevision: revision.toLowerCase(),
+    currentBookingStopPolicy: bookingStopPolicyConfigStatus(env),
   };
 }
 
 async function handleSequenceHealth(req, res) {
   if (cors(req, res)) return; // health is open so the page can show status
+  const currentBookingStopPolicy = bookingStopPolicyConfigStatus();
   // Booking-stop liveness is reported HERE, on the one unauthenticated endpoint,
   // deliberately. The sweep's own staleness alarm lives inside the sweep — which
   // is no use at all if the sweep stops being invoked, and that is precisely the
@@ -75,6 +103,7 @@ async function handleSequenceHealth(req, res) {
       raydarWebhookProofStatus(),
     ]);
     bookingStop = {
+      currentBookingStopPolicy,
       lastSuccessfulSweep: s.lastAt,
       ageMinutes: s.ageMs == null ? null : Math.round(s.ageMs / 60000),
       stale: s.stale,
@@ -115,6 +144,14 @@ async function handleSequenceHealth(req, res) {
       profileCoverage: s.profileCoverage ?? null,
       profileRotorOf: s.profileRotorOf ?? null,
       lastPassLegMs: s.legMs ?? null,
+      latestScopeClassification: s.latestScopeClassification == null
+        ? null
+        : {
+          ...s.latestScopeClassification,
+          ageMinutes: Math.round(
+            s.latestScopeClassification.ageMs / 60000,
+          ),
+        },
       raydarScheduler: {
         enabled: raydarSchedulerBookingStopEnabled(),
         applyEnabled: process.env.BOOKING_STOP_APPLY !== "0",
@@ -148,10 +185,13 @@ async function handleSequenceHealth(req, res) {
         lastSweepScopeCatalogFloor: s.scopeCatalogFloor ?? null,
         lastSweepSequenceCatalogCount: s.sequenceCatalogCount ?? null,
         lastSweepSequenceScopeScanned: s.sequenceScopeScanned ?? null,
+        lastSweepDefinitionSequencesRead:
+          s.definitionSequencesRead ?? null,
         lastSweepLinkSequences: s.linkSequences ?? null,
         lastSweepEnabledLinkSequences: s.enabledLinkSequences ?? null,
         lastSweepCoveredEnabledLinkSequences:
           s.coveredEnabledLinkSequences ?? null,
+        lastSweepBookingStopPolicy: s.bookingStopPolicy ?? null,
         lastSweepLinkScopeComplete: s.linkScopeComplete ?? false,
         latestSweepAttemptAt: s.latestAttemptAt ?? null,
         latestSweepAttemptAgeMinutes: s.latestAttemptAgeMs == null
@@ -159,6 +199,8 @@ async function handleSequenceHealth(req, res) {
           : Math.round(s.latestAttemptAgeMs / 60000),
         latestSweepAttemptStatus: s.latestAttemptStatus ?? null,
         latestSweepAttemptError: s.latestAttemptError ?? null,
+        latestSweepAttemptBookingStopPolicy:
+          s.latestAttemptBookingStopPolicy ?? null,
         latestSweepAttemptCurrent: s.latestAttemptCurrent ?? false,
         lastSweepMembershipSnapshotGeneration:
           s.lastSweepMembershipSnapshotGeneration ?? null,
@@ -172,7 +214,9 @@ async function handleSequenceHealth(req, res) {
         ...authenticatedSchedulerHealthFields(req),
       },
     };
-  } catch { bookingStop = { error: "unavailable" }; }
+  } catch {
+    bookingStop = { error: "unavailable", currentBookingStopPolicy };
+  }
 
   try {
     const h = await paraformHealth();

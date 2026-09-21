@@ -33,8 +33,12 @@ function codedError(code) {
 const clean = (value) => String(value ?? "").trim();
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
-async function loadCurrentMembershipSnapshot() {
-  const current = await kvGet(K.membershipCurrent);
+export async function loadCurrentMembershipSnapshot({
+  read = kvGet,
+  readMany = kvGetMany,
+  now = Date.now(),
+} = {}) {
+  const current = await read(K.membershipCurrent);
   const binding = current?.scope;
   if (
     !binding
@@ -53,11 +57,19 @@ async function loadCurrentMembershipSnapshot() {
     linkSequences: binding.linkSequenceCount,
     enabledLinkSequences: binding.enabledLinkSequenceCount,
     coveredEnabledLinkSequences: binding.coveredEnabledLinkSequenceCount,
+    ...(binding.bookingStopPolicy ? {
+      definitionSequencesRead: binding.definitionSequenceReadCount,
+      excludedColdSequences: binding.excludedColdSequenceCount,
+      excludedColdEnabledLinkSequences:
+        binding.excludedColdEnabledLinkSequenceCount,
+      bookingStopPolicy: { ...binding.bookingStopPolicy },
+    } : {}),
   };
   return loadPublishedBookingMembershipSnapshot({
     scope,
-    read: kvGet,
-    readMany: kvGetMany,
+    read,
+    readMany,
+    now,
   });
 }
 

@@ -1,5 +1,9 @@
 export const BOOKING_STOP_SCOPE_SCHEMA =
   "raydar-booking-stop-scope-v2";
+export const BOOKING_STOP_SCOPE_SCHEMA_V3 =
+  "raydar-booking-stop-scope-v3";
+export const BOOKING_STOP_COLD_EXCLUSION_SCHEMA =
+  "raydar-booking-stop-cold-exclusions-v1";
 export const BOOKING_STOP_LEAD_INDEX_SCHEMA =
   "raydar-booking-lead-index-v2";
 export const BOOKING_STOP_ATTEMPT_SCHEMA =

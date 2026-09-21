@@ -131,6 +131,7 @@ async function handleBookingMembershipRefresh(req, res) {
       scopeDigest: result.scopeDigest || null,
       catalogSequenceCount: result.catalogSequenceCount ?? null,
       selectedSequenceCount: result.selectedSequenceCount ?? null,
+      bookingStopPolicy: result.bookingStopPolicy ?? null,
       completedSequenceCount: result.completedSequenceCount ?? null,
       shardCount: result.shardCount ?? null,
       leadCount: result.leadCount ?? null,
