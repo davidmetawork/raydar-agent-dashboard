@@ -8,8 +8,11 @@ import {
   BOOKING_MEMBERSHIP_SHARD_SCHEMA,
   BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
   BOOKING_STOP_LEAD_INDEX_SCHEMA,
+  BOOKING_STOP_COLD_EXCLUSION_SCHEMA,
   BOOKING_STOP_SCOPE_SCHEMA,
+  BOOKING_STOP_SCOPE_SCHEMA_V3,
 } from "./booking-stop-contract.mjs";
+import { bookingStopPolicyHealthValid } from "./booking-stop-policy.mjs";
 
 const DIGEST = /^[a-f0-9]{64}$/u;
 const GENERATION = /^[a-f0-9]{32}$/u;
@@ -91,11 +94,44 @@ function canonicalSequences(scope) {
 
 export function assertBookingMembershipScope(scope) {
   const ids = selectedSequenceIds(scope);
+  const v2 = scope?.schema === BOOKING_STOP_SCOPE_SCHEMA;
+  const v3 = scope?.schema === BOOKING_STOP_SCOPE_SCHEMA_V3;
+  const policy = scope?.bookingStopPolicy;
+  const policyKeys = policy && typeof policy === "object" && !Array.isArray(policy)
+    ? Object.keys(policy).sort().join("\0")
+    : "";
+  const expectedPolicyKeys = [
+    "schema", "mode", "policyDigest", "excludedSequences",
+    "excludedEnabledLinkSequences", "nameDriftProtectedSequences",
+    "missingCatalogEntries",
+  ].sort().join("\0");
+  const v3PolicyValid = Boolean(
+    v3
+    && policyKeys === expectedPolicyKeys
+    && policy.schema === BOOKING_STOP_COLD_EXCLUSION_SCHEMA
+    && policy.mode === "exclude_cold_outreach"
+    && DIGEST.test(String(policy.policyDigest || ""))
+    && [
+      policy.excludedSequences,
+      policy.excludedEnabledLinkSequences,
+      policy.nameDriftProtectedSequences,
+      policy.missingCatalogEntries,
+    ].every((value) => Number.isInteger(value) && value >= 0)
+    && policy.excludedEnabledLinkSequences <= policy.excludedSequences
+    && scope.excludedColdSequences === policy.excludedSequences
+    && scope.excludedColdEnabledLinkSequences
+      === policy.excludedEnabledLinkSequences
+    && scope.coveredEnabledLinkSequences
+      + policy.excludedEnabledLinkSequences === scope.enabledLinkSequences
+    && Number.isInteger(scope.definitionSequencesRead)
+    && scope.definitionSequencesRead
+      === scope.catalogSequences - policy.excludedSequences
+  );
   if (
     !scope
     || typeof scope !== "object"
     || Array.isArray(scope)
-    || scope.schema !== BOOKING_STOP_SCOPE_SCHEMA
+    || (!v2 && !v3)
     || !DIGEST.test(String(scope.scopeDigest || ""))
     || !Number.isInteger(scope.catalogFloor)
     || scope.catalogFloor < 1
@@ -109,7 +145,9 @@ export function assertBookingMembershipScope(scope) {
     || scope.linkSequences < 0
     || !Number.isInteger(scope.enabledLinkSequences)
     || scope.enabledLinkSequences < 0
-    || scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences
+    || (v2 && (scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences
+      || scope.bookingStopPolicy != null))
+    || (v3 && !v3PolicyValid)
     || ids.some((id) => !id)
     || new Set(ids).size !== ids.length
   ) {
@@ -130,11 +168,66 @@ function scopeBinding(scope) {
     linkSequenceCount: scope.linkSequences,
     enabledLinkSequenceCount: scope.enabledLinkSequences,
     coveredEnabledLinkSequenceCount: scope.coveredEnabledLinkSequences,
+    ...(scope.schema === BOOKING_STOP_SCOPE_SCHEMA_V3 ? {
+      definitionSequenceReadCount: scope.definitionSequencesRead,
+      excludedColdSequenceCount: scope.excludedColdSequences,
+      excludedColdEnabledLinkSequenceCount:
+        scope.excludedColdEnabledLinkSequences,
+      bookingStopPolicy: { ...scope.bookingStopPolicy },
+    } : {}),
   };
 }
 
 function sameScope(left, right) {
   return exactValue(scopeBinding(left), scopeBinding(right));
+}
+
+export function bookingMembershipStoredScopeBindingValid(binding) {
+  if (binding?.schema === BOOKING_STOP_SCOPE_SCHEMA) {
+    return binding.bookingStopPolicy == null
+      && binding.coveredEnabledLinkSequenceCount
+        === binding.enabledLinkSequenceCount;
+  }
+  const policy = binding?.bookingStopPolicy;
+  const selectedIds = binding?.selectedSequenceIds;
+  const v3Keys = [
+    "schema", "digest", "catalogFloor", "catalogSequenceCount",
+    "selectedSequenceIds", "selectedSequenceCount", "linkSequenceCount",
+    "enabledLinkSequenceCount", "coveredEnabledLinkSequenceCount",
+    "definitionSequenceReadCount", "excludedColdSequenceCount",
+    "excludedColdEnabledLinkSequenceCount", "bookingStopPolicy",
+  ].sort().join("\0");
+  return Boolean(
+    binding?.schema === BOOKING_STOP_SCOPE_SCHEMA_V3
+    && Object.keys(binding).sort().join("\0") === v3Keys
+    && bookingStopPolicyHealthValid(policy)
+    && DIGEST.test(String(binding.digest || ""))
+    && Number.isInteger(binding.catalogFloor)
+    && binding.catalogFloor >= 1
+    && Number.isInteger(binding.catalogSequenceCount)
+    && binding.catalogSequenceCount >= binding.catalogFloor
+    && Array.isArray(selectedIds)
+    && selectedIds.every((id) => typeof id === "string" && id)
+    && new Set(selectedIds).size === selectedIds.length
+    && exactValue(selectedIds, [...selectedIds].sort())
+    && binding.selectedSequenceCount === selectedIds.length
+    && [
+      binding?.linkSequenceCount,
+      binding?.enabledLinkSequenceCount,
+      binding?.coveredEnabledLinkSequenceCount,
+      binding?.definitionSequenceReadCount,
+      binding?.excludedColdSequenceCount,
+      binding?.excludedColdEnabledLinkSequenceCount,
+    ].every((value) => Number.isInteger(value) && value >= 0)
+    && binding.excludedColdSequenceCount === policy.excludedSequences
+    && binding.excludedColdEnabledLinkSequenceCount
+      === policy.excludedEnabledLinkSequences
+    && binding.definitionSequenceReadCount
+      === binding.catalogSequenceCount - policy.excludedSequences
+    && binding.coveredEnabledLinkSequenceCount
+      + policy.excludedEnabledLinkSequences
+      === binding.enabledLinkSequenceCount
+  );
 }
 
 function validGeneration(value) {
@@ -285,6 +378,9 @@ export function bookingMembershipLeadIndex({
     scopeSchema: scope.schema,
     scopeDigest: scope.scopeDigest,
     scopeCatalogFloor: scope.catalogFloor,
+    ...(scope.schema === BOOKING_STOP_SCOPE_SCHEMA_V3 ? {
+      scopePolicyDigest: scope.bookingStopPolicy.policyDigest,
+    } : {}),
     builtAt,
     byEmail,
   };
@@ -807,6 +903,7 @@ export async function runBookingMembershipRefresh({
     scopeDigest: manifest.scope.digest,
     catalogSequenceCount: manifest.scope.catalogSequenceCount,
     selectedSequenceCount: manifest.scope.selectedSequenceCount,
+    bookingStopPolicy: manifest.scope.bookingStopPolicy ?? null,
     shardCount: manifest.shardCount,
     leadCount: manifest.leadCount,
     indexedEmails: Object.keys(leadIndex.byEmail).length,
@@ -1080,7 +1177,7 @@ export async function bookingMembershipSnapshotHealth({
     && exactValue(manifest.scope, current.scope)
     && manifest.oldestFetchedAt === current.oldestFetchedAt
     && manifest.builtAt === current.publishedAt
-    && manifest.scope?.schema === BOOKING_STOP_SCOPE_SCHEMA
+    && bookingMembershipStoredScopeBindingValid(manifest.scope)
     && DIGEST.test(String(manifest.scope?.digest || ""))
     && Number.isInteger(manifest.scope?.catalogFloor)
     && manifest.scope.catalogFloor >= 1

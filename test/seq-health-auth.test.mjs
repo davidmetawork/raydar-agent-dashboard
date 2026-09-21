@@ -13,6 +13,7 @@ const ENV_NAMES = [
   "RAYDAR_SCHEDULER_INTEGRATION_URL",
   "RAYDAR_SCHEDULER_WEBHOOK_SECRET",
   "RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT",
+  "BOOKING_STOP_COLD_EXCLUSIONS_JSON",
 ];
 const SAVED_ENV = Object.fromEntries(
   ENV_NAMES.map((name) => [name, process.env[name]]),
@@ -21,6 +22,7 @@ for (const name of ENV_NAMES) delete process.env[name];
 
 const {
   authenticatedSchedulerHealthFields,
+  bookingStopPolicyConfigStatus,
   default: healthHandler,
 } = await import("../api/seq/health.mjs");
 
@@ -98,6 +100,14 @@ test("authenticated scheduler health proof requires an exact bearer and valid de
     {
       authenticated: true,
       contractRevision: REVISION,
+      currentBookingStopPolicy: {
+        valid: true,
+        active: false,
+        schema: null,
+        mode: null,
+        policyDigest: null,
+        configuredCampaigns: 0,
+      },
     },
   );
 
@@ -111,6 +121,14 @@ test("authenticated scheduler health proof requires an exact bearer and valid de
   assert.deepEqual(lower, {
     authenticated: true,
     contractRevision: REVISION,
+    currentBookingStopPolicy: {
+      valid: true,
+      active: false,
+      schema: null,
+      mode: null,
+      policyDigest: null,
+      configuredCampaigns: 0,
+    },
   });
 
   const upperRevision = REVISION.toUpperCase();
@@ -125,6 +143,14 @@ test("authenticated scheduler health proof requires an exact bearer and valid de
     {
       authenticated: true,
       contractRevision: REVISION,
+      currentBookingStopPolicy: {
+        valid: true,
+        active: false,
+        schema: null,
+        mode: null,
+        policyDigest: null,
+        configuredCampaigns: 0,
+      },
     },
   );
 
@@ -229,6 +255,84 @@ test("authenticated scheduler health proof requires an exact bearer and valid de
   }
 });
 
+test("authenticated health reports current cold exclusion config without campaign metadata", () => {
+  const base = {
+    SCHEDULER_DASHBOARD_HEALTH_READ_KEY: KEY,
+    VERCEL_GIT_COMMIT_SHA: REVISION,
+  };
+  const active = authenticatedSchedulerHealthFields(
+    request(`Bearer ${KEY}`),
+    {
+      ...base,
+      BOOKING_STOP_COLD_EXCLUSIONS_JSON: JSON.stringify({
+        schema: "raydar-booking-stop-cold-exclusions-v1",
+        campaigns: [{
+          id: "cold0001",
+          catalogNameSha256: "a".repeat(64),
+          definitionSha256: "b".repeat(64),
+        }],
+      }),
+    },
+  );
+  assert.equal(active.currentBookingStopPolicy.valid, true);
+  assert.equal(active.currentBookingStopPolicy.active, true);
+  assert.equal(active.currentBookingStopPolicy.configuredCampaigns, 1);
+  assert.match(active.currentBookingStopPolicy.policyDigest, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(Object.keys(active.currentBookingStopPolicy), [
+    "valid", "active", "schema", "mode", "policyDigest",
+    "configuredCampaigns",
+  ]);
+
+  const invalid = authenticatedSchedulerHealthFields(
+    request(`Bearer ${KEY}`),
+    { ...base, BOOKING_STOP_COLD_EXCLUSIONS_JSON: "{" },
+  );
+  assert.deepEqual(invalid.currentBookingStopPolicy, {
+    valid: false,
+    active: false,
+    schema: null,
+    mode: null,
+    policyDigest: null,
+    configuredCampaigns: null,
+  });
+});
+
+test("public policy status is redacted and malformed config is visibly invalid", async () => {
+  const raw = JSON.stringify({
+    schema: "raydar-booking-stop-cold-exclusions-v1",
+    campaigns: [{
+      id: "cold0001",
+      catalogNameSha256: "a".repeat(64),
+      definitionSha256: "b".repeat(64),
+    }],
+  });
+  process.env.BOOKING_STOP_COLD_EXCLUSIONS_JSON = raw;
+  const activeBody = await readHealth(request());
+  const active = activeBody.bookingStop.currentBookingStopPolicy;
+  assert.equal(active.valid, true);
+  assert.equal(active.active, true);
+  assert.equal(active.configuredCampaigns, 1);
+  assert.match(active.policyDigest, /^[a-f0-9]{64}$/u);
+  assert.equal(JSON.stringify(active).includes("cold0001"), false);
+  assert.equal(JSON.stringify(active).includes("a".repeat(64)), false);
+  assert.equal(JSON.stringify(active).includes("b".repeat(64)), false);
+
+  process.env.BOOKING_STOP_COLD_EXCLUSIONS_JSON = "{";
+  const invalidBody = await readHealth(request());
+  assert.deepEqual(invalidBody.bookingStop.currentBookingStopPolicy, {
+    valid: false,
+    active: false,
+    schema: null,
+    mode: null,
+    policyDigest: null,
+    configuredCampaigns: null,
+  });
+  assert.deepEqual(bookingStopPolicyConfigStatus({
+    BOOKING_STOP_COLD_EXCLUSIONS_JSON: "{",
+  }), invalidBody.bookingStop.currentBookingStopPolicy);
+  delete process.env.BOOKING_STOP_COLD_EXCLUSIONS_JSON;
+});
+
 test("public, missing-auth, wrong-auth, and invalid-config responses keep the exact redacted shape", async () => {
   setProofEnv({ key: undefined, revision: undefined });
   const publicBody = await readHealth(request());
@@ -275,9 +379,17 @@ test("valid authenticated health adds only normalized revision proof and never r
   const scheduler = body.bookingStop.raydarScheduler;
   assert.equal(scheduler.authenticated, true);
   assert.equal(scheduler.contractRevision, REVISION);
+  assert.deepEqual(scheduler.currentBookingStopPolicy, {
+    valid: true,
+    active: false,
+    schema: null,
+    mode: null,
+    policyDigest: null,
+    configuredCampaigns: 0,
+  });
   assert.deepEqual(
-    Object.keys(scheduler).slice(-2),
-    ["authenticated", "contractRevision"],
+    Object.keys(scheduler).slice(-3),
+    ["authenticated", "contractRevision", "currentBookingStopPolicy"],
   );
 
   const serialized = JSON.stringify(body);

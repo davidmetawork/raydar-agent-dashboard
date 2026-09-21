@@ -58,11 +58,20 @@ import {
   BOOKING_STOP_LEAD_INDEX_SCHEMA,
   BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   BOOKING_STOP_SCOPE_SCHEMA,
+  BOOKING_STOP_SCOPE_SCHEMA_V3,
 } from "./booking-stop-contract.mjs";
+import {
+  bookingStopPolicyHealthValid,
+  bookingStopPolicyHealth,
+  coldExclusionDisposition,
+  parseBookingStopColdExclusions,
+  scopeMatchesColdExclusionPolicy,
+} from "./booking-stop-policy.mjs";
 import {
   BOOKING_MEMBERSHIP_KEYS,
   BOOKING_MEMBERSHIP_MAX_SHARDS,
   bookingMembershipHash,
+  bookingMembershipStoredScopeBindingValid,
   bookingMembershipSnapshotHealth,
   loadPublishedBookingMembershipSnapshot,
 } from "./booking-membership-snapshot.mjs";
@@ -74,10 +83,12 @@ export {
   BOOKING_STOP_LEAD_INDEX_SCHEMA,
   BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   BOOKING_STOP_SCOPE_SCHEMA,
+  BOOKING_STOP_SCOPE_SCHEMA_V3,
 };
 
 export function bookingStopScopeDigest(entries, {
   catalogFloor = BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
 } = {}) {
   const normalized = (entries || [])
     .map((entry) => ({
@@ -86,6 +97,10 @@ export function bookingStopScopeDigest(entries, {
       linkBearing: Boolean(entry?.linkBearing),
       nudgeBearing: Boolean(entry?.nudgeBearing),
       selected: Boolean(entry?.selected),
+      ...(coldExclusionPolicy.active ? {
+        excludedCold: Boolean(entry?.excludedCold),
+        definitionRead: Boolean(entry?.definitionRead),
+      } : {}),
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
   if (
@@ -99,8 +114,12 @@ export function bookingStopScopeDigest(entries, {
   }
   return createHash("sha256")
     .update(JSON.stringify({
-      schema: BOOKING_STOP_SCOPE_SCHEMA,
+      schema: coldExclusionPolicy.scopeSchema,
       catalogFloor,
+      ...(coldExclusionPolicy.active ? {
+        policySchema: coldExclusionPolicy.schema,
+        policyDigest: coldExclusionPolicy.policyDigest,
+      } : {}),
       entries: normalized,
     }))
     .digest("hex");
@@ -130,6 +149,10 @@ export function seqKeys() {
   const raw = process.env.BOOKING_STOP_SEQ_KEYS;
   if (!raw) return DEFAULT_SEQ_KEYS;
   return raw.split("|").map((s) => s.trim()).filter(Boolean);
+}
+
+export function bookingStopColdExclusionProtectionKeys(keys = seqKeys()) {
+  return [...new Set([...DEFAULT_SEQ_KEYS, ...(keys || [])])];
 }
 
 export function isNudgeSequence(seq, keys = seqKeys()) {
@@ -261,6 +284,7 @@ export async function durableKvSetAndReadback(key, value, ttlSeconds) {
 export const K = {
   lastSweep: "seqguard:lastsweep",
   lastAttempt: "seqguard:lastattempt:v3",
+  scopeClassification: "seqguard:booking-stop-scope-classification:v1",
   leadIndex: BOOKING_MEMBERSHIP_KEYS.leadIndex,
   membershipCurrent: BOOKING_MEMBERSHIP_KEYS.current,
   membershipCheckpoint: BOOKING_MEMBERSHIP_KEYS.checkpoint,
@@ -889,20 +913,30 @@ export function decideLead({ lead, seq, booking, relStatus, now = Date.now() }) 
  * time would re-read a 211-lead membership 150 times (~750 page requests) and
  * reintroduce exactly the runtime blowup that killed the predecessor.
  */
-export async function applyDecisions(decisions, { concurrency = 2 } = {}) {
+export async function applyDecisions(decisions, {
+  concurrency = 2,
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
+  keys = seqKeys(),
+} = {}) {
   const out = {
     paused: 0,
     pausedCcuIds: [],
     pauseErrors: [],
     throttled: 0,
   };
-  if (!decisions.length) return out;
+  const permitted = decisions.filter((decision) =>
+    coldExclusionDisposition({
+      id: decision?.sequenceId,
+      name: decision?.sequence,
+    }, coldExclusionPolicy,
+    bookingStopColdExclusionProtectionKeys(keys)) !== "excluded_cold");
+  if (!permitted.length) return out;
 
   const attempted = [];
   let i = 0;
   const worker = async () => {
-    while (i < decisions.length) {
-      const d = decisions[i++];
+    while (i < permitted.length) {
+      const d = permitted[i++];
       try {
         await withThrottleRetry(
           () => trpcPost("campaigns.updateCandidatePauseStatus", { campaign_to_candidate_user_id: d.ccuId, is_paused: true }, 1),
@@ -985,6 +1019,11 @@ export async function discoverBookingStopSequences({
     process.env.BOOKING_STOP_SCOPE_CATALOG_FLOOR
       || BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   ),
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
+  sequenceKeys = seqKeys(),
+  classificationRecorder = (receipt) =>
+    kvSet(K.scopeClassification, receipt, 24 * 3600),
+  clock = Date.now,
 } = {}) {
   const all = await listSequences();
   if (
@@ -1016,11 +1055,57 @@ export async function discoverBookingStopSequences({
     seen.add(sequence.id);
   }
 
+  const keys = sequenceKeys;
+  const exclusionProtectionKeys =
+    bookingStopColdExclusionProtectionKeys(keys);
+  const selectionKeys = coldExclusionPolicy.active
+    ? exclusionProtectionKeys
+    : keys;
+  const dispositions = new Map(all.map((sequence) => [
+    sequence.id,
+    coldExclusionDisposition(
+      sequence,
+      coldExclusionPolicy,
+      exclusionProtectionKeys,
+    ),
+  ]));
+  const excludedIds = new Set(
+    all.filter((sequence) => dispositions.get(sequence.id) === "excluded_cold")
+      .map((sequence) => sequence.id),
+  );
+  const nameDriftProtectedSequences = all.filter((sequence) =>
+    dispositions.get(sequence.id) === "name_drift_protected").length;
+  const missingCatalogEntries = coldExclusionPolicy.active
+    ? coldExclusionPolicy.campaigns.filter((entry) => !seen.has(entry.id)).length
+    : 0;
+  if (coldExclusionPolicy.active) {
+    try {
+      const receipt = {
+        schema: "raydar-booking-stop-classification-receipt-v1",
+        state: "classification_only",
+        at: new Date(Number(clock())).toISOString(),
+        policyDigest: coldExclusionPolicy.policyDigest,
+        catalogSequences: all.length,
+        excludedColdSequences: excludedIds.size,
+        plannedDefinitionReads: all.length - excludedIds.size,
+        plannedProtectedNamedSequences: all.filter((sequence) =>
+          isNudgeSequence(sequence, exclusionProtectionKeys)).length,
+        nameDriftProtectedSequences,
+        missingCatalogEntries,
+      };
+      await classificationRecorder(receipt);
+    } catch {
+      // Observability is not authorization. A KV logging failure must never
+      // broaden the exclusion or stop protected definition reads.
+    }
+  }
+
   const inspected = new Map();
   let cursor = 0;
   const worker = async () => {
     while (cursor < all.length) {
       const sequence = all[cursor++];
+      if (excludedIds.has(sequence.id)) continue;
       const campaign = await readCampaign(sequence.id);
       if (
         !campaign
@@ -1038,40 +1123,68 @@ export async function discoverBookingStopSequences({
     }
   };
   await Promise.all(Array.from({ length: concurrency }, worker));
-  if (inspected.size !== all.length) {
+  if (inspected.size + excludedIds.size !== all.length) {
     const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
     throw error;
   }
 
-  const linkSequences = all.filter((sequence) => inspected.get(sequence.id));
+  // Every policy entry was sealed from the reviewed protected-scope census.
+  // Exact id + exact catalog-name hash is therefore enough to classify it as
+  // an intentionally excluded link-bearing campaign without re-reading its
+  // definition. Name drift and custom/default family matches are read and stay
+  // protected under the pre-existing selector.
+  const linkSequences = all.filter((sequence) =>
+    excludedIds.has(sequence.id) || inspected.get(sequence.id));
   const enabledLinkSequences = linkSequences.filter((sequence) =>
     Boolean(sequence.enabled));
   const sequences = all.filter((sequence) =>
-    isNudgeSequence(sequence)
-    || (Boolean(sequence.enabled) && inspected.get(sequence.id)));
+    !excludedIds.has(sequence.id)
+    && (isNudgeSequence(sequence, selectionKeys)
+      || (Boolean(sequence.enabled) && inspected.get(sequence.id))));
+  const excludedEnabledLinkSequences = linkSequences.filter((sequence) =>
+    excludedIds.has(sequence.id) && Boolean(sequence.enabled)).length;
+  const coveredEnabledLinkSequences = enabledLinkSequences.length
+    - excludedEnabledLinkSequences;
+  const bookingStopPolicy = bookingStopPolicyHealth(coldExclusionPolicy, {
+    excludedSequences: excludedIds.size,
+    excludedEnabledLinkSequences,
+    nameDriftProtectedSequences,
+    missingCatalogEntries,
+  });
   const scopeDigest = bookingStopScopeDigest(all.map((sequence) => ({
     id: sequence.id,
     enabled: sequence.enabled,
-    linkBearing: inspected.get(sequence.id),
-    nudgeBearing: isNudgeSequence(sequence),
+    linkBearing: excludedIds.has(sequence.id) || inspected.get(sequence.id),
+    nudgeBearing: isNudgeSequence(sequence, selectionKeys),
     selected: sequences.some((selected) => selected.id === sequence.id),
-  })), { catalogFloor: minimumCatalogCount });
+    excludedCold: excludedIds.has(sequence.id),
+    definitionRead: inspected.has(sequence.id),
+  })), {
+    catalogFloor: minimumCatalogCount,
+    coldExclusionPolicy,
+  });
   if (!scopeDigest) {
     const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
     throw error;
   }
   return {
-    schema: BOOKING_STOP_SCOPE_SCHEMA,
+    schema: coldExclusionPolicy.scopeSchema,
     scopeDigest,
     catalogFloor: minimumCatalogCount,
+    ...(bookingStopPolicy ? { bookingStopPolicy } : {}),
     sequences,
     catalogSequences: all.length,
-    scannedSequences: inspected.size,
+    scannedSequences: all.length,
     linkSequences: linkSequences.length,
     enabledLinkSequences: enabledLinkSequences.length,
-    coveredEnabledLinkSequences: enabledLinkSequences.length,
+    coveredEnabledLinkSequences,
+    ...(coldExclusionPolicy.active ? {
+      definitionSequencesRead: inspected.size,
+      excludedColdSequences: excludedIds.size,
+      excludedColdEnabledLinkSequences: excludedEnabledLinkSequences,
+    } : {}),
     complete: true,
   };
 }
@@ -1120,6 +1233,7 @@ export async function runBookingSweep({
   profileLoader = cachedRelationshipStatus,
   decisionApplier = applyDecisions,
   onDecision = null,
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
 } = {}) {
   const startedAt = Date.now();
   const deadline = startedAt + budgetMs;
@@ -1153,9 +1267,13 @@ export async function runBookingSweep({
     membershipSnapshotCurrent: false,
     sequenceCatalogCount: 0,
     sequenceScopeScanned: 0,
+    definitionSequencesRead: 0,
     linkSequences: 0,
     enabledLinkSequences: 0,
     coveredEnabledLinkSequences: 0,
+    excludedColdSequences: 0,
+    excludedColdEnabledLinkSequences: 0,
+    bookingStopPolicy: null,
     linkScopeComplete: false,
     activeLeads: 0,
     calendlyEvents: 0,
@@ -1204,7 +1322,7 @@ export async function runBookingSweep({
   try {
     scope = await timeLeg(
       "scope",
-      () => sequenceScopeLoader({ deadline }),
+      () => sequenceScopeLoader({ deadline, coldExclusionPolicy }),
     );
   } catch {
     result.error = "membership_snapshot_unavailable";
@@ -1214,7 +1332,7 @@ export async function runBookingSweep({
   }
   if (overBudget()) return stopForBudget("scope");
   if (
-    scope?.schema !== BOOKING_STOP_SCOPE_SCHEMA
+    !scopeMatchesColdExclusionPolicy(scope, coldExclusionPolicy)
     || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
     || !Number.isInteger(scope?.catalogFloor)
     || scope.catalogFloor < 1
@@ -1225,7 +1343,20 @@ export async function runBookingSweep({
     || scope.scannedSequences !== scope.catalogSequences
     || !Number.isInteger(scope?.enabledLinkSequences)
     || !Number.isInteger(scope?.coveredEnabledLinkSequences)
-    || scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences
+    || (!coldExclusionPolicy.active
+      && scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences)
+    || (coldExclusionPolicy.active && (
+      !Number.isInteger(scope?.excludedColdSequences)
+      || !Number.isInteger(scope?.excludedColdEnabledLinkSequences)
+      || scope.excludedColdSequences < 0
+      || scope.excludedColdEnabledLinkSequences < 0
+      || scope.coveredEnabledLinkSequences
+        + scope.excludedColdEnabledLinkSequences !== scope.enabledLinkSequences
+      || scope.bookingStopPolicy?.excludedSequences
+        !== scope.excludedColdSequences
+      || scope.bookingStopPolicy?.excludedEnabledLinkSequences
+        !== scope.excludedColdEnabledLinkSequences
+    ))
   ) {
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_incomplete";
@@ -1239,9 +1370,15 @@ export async function runBookingSweep({
   result.sequences = seqs.length;
   result.sequenceCatalogCount = scope.catalogSequences;
   result.sequenceScopeScanned = scope.scannedSequences;
+  result.definitionSequencesRead = scope.definitionSequencesRead
+    ?? scope.scannedSequences;
   result.linkSequences = scope.linkSequences;
   result.enabledLinkSequences = scope.enabledLinkSequences;
   result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
+  result.excludedColdSequences = scope.excludedColdSequences ?? 0;
+  result.excludedColdEnabledLinkSequences =
+    scope.excludedColdEnabledLinkSequences ?? 0;
+  result.bookingStopPolicy = scope.bookingStopPolicy ?? null;
   result.linkScopeComplete = true;
 
   // The measured ~171 second, ~200-call membership walk belongs exclusively to
@@ -1464,6 +1601,16 @@ export async function runBookingSweep({
   const profilesProcessed = Math.min(j, pending.length);
   result.profileCoverage = `${profilesProcessed}/${active.length - matched.size}`;
 
+  // Defense in depth: even a synthetically injected/stale membership row cannot
+  // authorize a pause for an exact reviewed cold-outreach campaign. Name drift
+  // and named-family matches remain protected.
+  result.decisions = result.decisions.filter((decision) =>
+    coldExclusionDisposition({
+      id: decision?.sequenceId,
+      name: decision?.sequence,
+    }, coldExclusionPolicy,
+    bookingStopColdExclusionProtectionKeys()) !== "excluded_cold");
+
   // Fence mutations against a generation rollover that happened while the
   // booking sources and bounded profile reads were in flight.
   const currentBeforeMutation = await membershipCurrentLoader();
@@ -1500,7 +1647,10 @@ export async function runBookingSweep({
 
   // Apply
   if (apply && result.decisions.length) {
-    const applied = await timeLeg("apply", () => decisionApplier(result.decisions));
+    const applied = await timeLeg("apply", () => decisionApplier(
+      result.decisions,
+      { coldExclusionPolicy, keys: seqKeys() },
+    ));
     result.paused = applied.paused;
     result.pausedCcuIds = applied.pausedCcuIds;
     result.pauseErrors.push(...applied.pauseErrors);
@@ -1541,6 +1691,7 @@ export function bookingLeadIndexUsable(
   idx,
   currentMembership,
   now = Date.now(),
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
 ) {
   const builtAt = idx?.builtAt ? Date.parse(idx.builtAt) : null;
   const oldestFetchedAt = currentMembership?.oldestFetchedAt
@@ -1558,7 +1709,7 @@ export function bookingLeadIndexUsable(
     && idx?.snapshotSchema === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
     && /^[a-f0-9]{32}$/u.test(String(idx?.generation || ""))
     && /^[a-f0-9]{64}$/u.test(String(idx?.manifestHash || ""))
-    && idx?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && idx?.scopeSchema === coldExclusionPolicy.scopeSchema
     && /^[a-f0-9]{64}$/u.test(String(idx?.scopeDigest || ""))
     && currentMembership?.schema === BOOKING_MEMBERSHIP_CURRENT_SCHEMA
     && currentMembership?.snapshotSchema
@@ -1570,6 +1721,14 @@ export function bookingLeadIndexUsable(
     && idx.builtAt === currentMembership.publishedAt
     && currentMembership?.scope?.schema === idx.scopeSchema
     && currentMembership?.scope?.digest === idx.scopeDigest
+    && (!coldExclusionPolicy.active || (
+      idx?.scopePolicyDigest === coldExclusionPolicy.policyDigest
+      && bookingMembershipStoredScopeBindingValid(currentMembership?.scope)
+      && bookingStopPolicyHealthValid(
+        currentMembership?.scope?.bookingStopPolicy,
+        coldExclusionPolicy,
+      )
+    ))
     && idx?.byEmail
     && typeof idx.byEmail === "object"
     && !Array.isArray(idx.byEmail)
@@ -1594,6 +1753,12 @@ export async function pauseForBooking({
   eventName = null,
   source = "calendly",
   apply = true,
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
+  now = Date.now(),
+  leadIndexLoader = () => kvGet(K.leadIndex),
+  membershipCurrentLoader = () => kvGet(K.membershipCurrent),
+  deferredWriter = (key, value, ttlSeconds) => kvSet(key, value, ttlSeconds),
+  decisionApplier = applyDecisions,
 }) {
   const target = normEmail(email);
   const at = typeof bookedAt === "number" ? bookedAt : Date.parse(bookedAt);
@@ -1601,16 +1766,21 @@ export async function pauseForBooking({
   if (!target || !Number.isFinite(at)) return out;
 
   const [idx, currentMembership] = await Promise.all([
-    kvGet(K.leadIndex),
-    kvGet(K.membershipCurrent),
+    leadIndexLoader(),
+    membershipCurrentLoader(),
   ]);
-  const indexStatus = bookingLeadIndexUsable(idx, currentMembership);
+  const indexStatus = bookingLeadIndexUsable(
+    idx,
+    currentMembership,
+    now,
+    coldExclusionPolicy,
+  );
   out.indexAgeMs = indexStatus.ageMs;
 
   if (!indexStatus.usable) {
     out.deferred = true;
-    await kvSet(K.deferred(target), {
-      at: new Date().toISOString(),
+    await deferredWriter(K.deferred(target), {
+      at: new Date(now).toISOString(),
       bookedAt: new Date(at).toISOString(),
       reason: idx ? "index_stale_or_scope_mismatch" : "index_missing",
     }, 7 * 24 * 3600);
@@ -1626,6 +1796,9 @@ export async function pauseForBooking({
     source: source === "raydar_scheduler" ? "raydar_scheduler" : "calendly",
   };
   for (const e of entries) {
+    if (coldExclusionDisposition({ id: e.s, name: e.sn },
+      coldExclusionPolicy,
+      bookingStopColdExclusionProtectionKeys()) === "excluded_cold") continue;
     const d = decideLead({
       lead: { ccu_id: e.ccu, cu_id: e.cu, name: e.n || null, to_use_email: target, created_at: e.t, is_paused: false, is_archived: false },
       seq: { id: e.s, name: e.sn },
@@ -1635,7 +1808,10 @@ export async function pauseForBooking({
     if (d) out.decisions.push(d);
   }
   if (apply && out.decisions.length) {
-    const applied = await applyDecisions(out.decisions);
+    const applied = await decisionApplier(out.decisions, {
+      coldExclusionPolicy,
+      keys: seqKeys(),
+    });
     out.paused = applied.paused;
     out.pauseErrors.push(...applied.pauseErrors);
   }
@@ -1752,13 +1928,65 @@ export async function sweepStaleness(now = Date.now(), {
   read = kvGet,
   readMany = kvGetMany,
   snapshotHealthLoader = bookingMembershipSnapshotHealth,
+  coldExclusionPolicy = parseBookingStopColdExclusions(),
 } = {}) {
-  const [last, attempt, leadIndex, membershipSnapshot] = await Promise.all([
+  const [
+    last,
+    attempt,
+    leadIndex,
+    classificationReceipt,
+    membershipSnapshot,
+  ] = await Promise.all([
     read(K.lastSweep),
     read(K.lastAttempt),
     read(K.leadIndex),
+    read(K.scopeClassification),
     snapshotHealthLoader({ read, readMany, now }),
   ]);
+  const classificationAtMs = Date.parse(
+    String(classificationReceipt?.at || ""),
+  );
+  const classificationCountsValid = [
+    classificationReceipt?.catalogSequences,
+    classificationReceipt?.excludedColdSequences,
+    classificationReceipt?.plannedDefinitionReads,
+    classificationReceipt?.plannedProtectedNamedSequences,
+    classificationReceipt?.nameDriftProtectedSequences,
+    classificationReceipt?.missingCatalogEntries,
+  ].every((value) => Number.isInteger(value) && value >= 0);
+  const classificationValid = Boolean(
+    classificationReceipt?.schema
+      === "raydar-booking-stop-classification-receipt-v1"
+    && classificationReceipt?.state === "classification_only"
+    && Number.isFinite(classificationAtMs)
+    && classificationAtMs <= Number(now)
+    && /^[a-f0-9]{64}$/u.test(
+      String(classificationReceipt?.policyDigest || ""),
+    )
+    && classificationCountsValid
+    && classificationReceipt.excludedColdSequences
+      + classificationReceipt.plannedDefinitionReads
+      === classificationReceipt.catalogSequences
+  );
+  const latestScopeClassification = classificationValid ? {
+    state: "classification_only",
+    at: new Date(classificationAtMs).toISOString(),
+    ageMs: Number(now) - classificationAtMs,
+    policyDigest: classificationReceipt.policyDigest,
+    current: Boolean(
+      coldExclusionPolicy.active
+      && classificationReceipt.policyDigest
+        === coldExclusionPolicy.policyDigest
+    ),
+    catalogSequences: classificationReceipt.catalogSequences,
+    excludedColdSequences: classificationReceipt.excludedColdSequences,
+    plannedDefinitionReads: classificationReceipt.plannedDefinitionReads,
+    plannedProtectedNamedSequences:
+      classificationReceipt.plannedProtectedNamedSequences,
+    nameDriftProtectedSequences:
+      classificationReceipt.nameDriftProtectedSequences,
+    missingCatalogEntries: classificationReceipt.missingCatalogEntries,
+  } : null;
   const attemptAtMs = Date.parse(String(attempt?.at || ""));
   const attemptAgeMs = Number.isFinite(attemptAtMs)
     ? Math.max(0, now - attemptAtMs)
@@ -1775,6 +2003,11 @@ export async function sweepStaleness(now = Date.now(), {
     latestAttemptError:
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
         ? attempt.error
+        : null,
+    latestAttemptBookingStopPolicy:
+      attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
+      && bookingStopPolicyHealthValid(attempt?.bookingStopPolicy)
+        ? attempt.bookingStopPolicy
         : null,
   };
   const snapshotBase = {
@@ -1809,6 +2042,7 @@ export async function sweepStaleness(now = Date.now(), {
       lastAt: null,
       ageMs: null,
       calendlyComplete: false,
+      latestScopeClassification,
       ...attemptBase,
       ...snapshotBase,
       latestAttemptCurrent: false,
@@ -1822,10 +2056,14 @@ export async function sweepStaleness(now = Date.now(), {
     };
   }
   const ageMs = now - Date.parse(last.at);
+  const lastPolicyCurrent = scopeMatchesColdExclusionPolicy({
+    schema: last.scopeSchema,
+    bookingStopPolicy: last.bookingStopPolicy ?? null,
+  }, coldExclusionPolicy);
   const latestAttemptCurrent = Boolean(
     attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
     && attempt.status === "success"
-    && attempt.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && attempt.scopeSchema === last.scopeSchema
     && attempt.scopeDigest === last.scopeDigest
     && attempt.membershipSnapshotGeneration
       === last.membershipSnapshotGeneration
@@ -1849,8 +2087,10 @@ export async function sweepStaleness(now = Date.now(), {
     && /^[a-f0-9]{64}$/u.test(String(leadIndex?.manifestHash || ""))
     && bookingMembershipHash(leadIndex)
       === membershipSnapshot.leadIndexHash
-    && leadIndex.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && leadIndex.scopeSchema === coldExclusionPolicy.scopeSchema
     && leadIndex.scopeDigest === membershipSnapshot.scopeDigest
+    && (!coldExclusionPolicy.active
+      || leadIndex.scopePolicyDigest === coldExclusionPolicy.policyDigest)
     && leadIndexAgeMs != null
     && leadIndexAgeMs >= 0
     && leadIndexAgeMs <= LEAD_INDEX_MAX_AGE_MS
@@ -1860,6 +2100,7 @@ export async function sweepStaleness(now = Date.now(), {
       !Number.isFinite(ageMs)
       || ageMs < 0
       || ageMs > SWEEP_STALE_AFTER_MS
+      || !lastPolicyCurrent
       || !latestAttemptCurrent
       || membershipSnapshot.current !== true
       || membershipSnapshot.complete !== true
@@ -1878,15 +2119,24 @@ export async function sweepStaleness(now = Date.now(), {
     raydarBookings: last.raydarBookings ?? null,
     sequenceCatalogCount: last.sequenceCatalogCount ?? null,
     sequenceScopeScanned: last.sequenceScopeScanned ?? null,
+    definitionSequencesRead: last.definitionSequencesRead ?? null,
     linkSequences: last.linkSequences ?? null,
     enabledLinkSequences: last.enabledLinkSequences ?? null,
     coveredEnabledLinkSequences: last.coveredEnabledLinkSequences ?? null,
+    excludedColdSequences: last.excludedColdSequences ?? 0,
+    excludedColdEnabledLinkSequences:
+      last.excludedColdEnabledLinkSequences ?? 0,
+    bookingStopPolicy: last.bookingStopPolicy ?? null,
+    bookingStopPolicyCurrent: lastPolicyCurrent,
+    latestScopeClassification,
     scopeSchema: last.scopeSchema ?? null,
     scopeDigest: last.scopeDigest ?? null,
     scopeCatalogFloor: last.scopeCatalogFloor ?? null,
     linkScopeComplete: Boolean(
-      last.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+      [BOOKING_STOP_SCOPE_SCHEMA, BOOKING_STOP_SCOPE_SCHEMA_V3]
+        .includes(last.scopeSchema)
       && /^[a-f0-9]{64}$/u.test(String(last.scopeDigest || ""))
+      && lastPolicyCurrent
       && last.linkScopeComplete
     ),
     ...attemptBase,
@@ -1956,23 +2206,39 @@ export async function recordSweepAttempt({
       )
         ? result.membershipSnapshotGeneration
         : null,
+    bookingStopPolicy: bookingStopPolicyHealthValid(result?.bookingStopPolicy)
+      ? { ...result.bookingStopPolicy }
+      : null,
   };
   await durableKvSetAndReadback(K.lastAttempt, payload, 6 * 3600);
 }
 
 export async function recordSuccessfulSweep(result, now = Date.now()) {
+  const v2Scope = result?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA
+    && result?.bookingStopPolicy == null
+    && result?.coveredEnabledLinkSequences === result?.enabledLinkSequences;
+  const v3Scope = result?.scopeSchema === BOOKING_STOP_SCOPE_SCHEMA_V3
+    && bookingStopPolicyHealthValid(result?.bookingStopPolicy)
+    && result.bookingStopPolicy.nameDriftProtectedSequences === 0
+    && result.bookingStopPolicy.missingCatalogEntries === 0
+    && result?.excludedColdSequences
+      === result.bookingStopPolicy.excludedSequences
+    && result?.excludedColdEnabledLinkSequences
+      === result.bookingStopPolicy.excludedEnabledLinkSequences
+    && result?.coveredEnabledLinkSequences
+      + result.excludedColdEnabledLinkSequences
+      === result?.enabledLinkSequences;
   if (
     result?.ok !== true
     || result?.calendlyTruncated !== false
     || (result?.pauseErrors?.length || 0) !== 0
-    || result?.scopeSchema !== BOOKING_STOP_SCOPE_SCHEMA
+    || (!v2Scope && !v3Scope)
     || !/^[a-f0-9]{64}$/u.test(String(result?.scopeDigest || ""))
     || !Number.isInteger(result?.scopeCatalogFloor)
     || result.scopeCatalogFloor < 1
     || result?.sequenceCatalogCount < result.scopeCatalogFloor
     || result?.linkScopeComplete !== true
     || result?.sequenceScopeScanned !== result?.sequenceCatalogCount
-    || result?.coveredEnabledLinkSequences !== result?.enabledLinkSequences
     || result?.membershipSnapshotSchema
       !== BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
     || !/^[a-f0-9]{32}$/u.test(
@@ -2021,9 +2287,14 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     raydarBookings: result.raydarBookings ?? 0,
     sequenceCatalogCount: result.sequenceCatalogCount ?? 0,
     sequenceScopeScanned: result.sequenceScopeScanned ?? 0,
+    definitionSequencesRead: result.definitionSequencesRead ?? 0,
     linkSequences: result.linkSequences ?? 0,
     enabledLinkSequences: result.enabledLinkSequences ?? 0,
     coveredEnabledLinkSequences: result.coveredEnabledLinkSequences ?? 0,
+    excludedColdSequences: result.excludedColdSequences ?? 0,
+    excludedColdEnabledLinkSequences:
+      result.excludedColdEnabledLinkSequences ?? 0,
+    bookingStopPolicy: result.bookingStopPolicy ?? null,
     linkScopeComplete: Boolean(result.linkScopeComplete),
   }, 6 * 3600);
 }
