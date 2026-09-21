@@ -999,6 +999,41 @@ test("manual sweep selection visits every snapshot older than its stable run sta
   assert.deepEqual(selected.map(({ id }) => id), ["missing", "old-b", "old-a"]);
 });
 
+test("a failed recent window retains every still-live target from the prior catalog", async () => {
+  const previous = emptyInboxSnapshotState();
+  previous.catalog = {
+    version: 3,
+    refreshed_at: "2026-09-21T14:00:00.000Z",
+    campaigns_total: 1,
+    targets: [{
+      id: "unlinked-reply-target",
+      name: "Retained target",
+      ui_admitted: false,
+    }],
+  };
+  const refresh = await buildInboxRefresh({
+    previousState: previous,
+    concurrency: 1,
+    get: async (procedure) => {
+      if (procedure === "campaigns.getListOfCampaignsOptimized") {
+        return [{ id: "unlinked-reply-target", name: "Still live" }];
+      }
+      if (procedure === "campaigns.getRecentReplies") {
+        const error = new Error("recent unavailable");
+        error.code = "PARAFORM_READ_FAILED";
+        throw error;
+      }
+      assert.equal(procedure, "campaigns.getCampaignInboxData");
+      return { campaign_emails: [], campaign_to_candidate_users: [] };
+    },
+  });
+  assert.deepEqual(refresh.target_sequence_ids, ["unlinked-reply-target"]);
+  assert.deepEqual(refresh.selected_sequence_ids, ["unlinked-reply-target"]);
+  assert.equal(refresh.scan.campaigns_succeeded, 1);
+  assert.equal(refresh.scan.recent_failed, true);
+  assert.equal(refresh.recent, null);
+});
+
 test("manual Inbox pacing serializes calls and stops after the first provider refusal", async () => {
   const calls = [];
   const get = createPacedManualInboxGet({
@@ -1103,7 +1138,7 @@ test("manual sync refreshes one serial batch and proves the pause stayed owned",
     generated_at: "2026-09-21T15:00:06.000Z",
     scan: {
       campaigns_failed: 0,
-      recent_failed: false,
+      recent_failed: true,
     },
   };
   const handler = createManualInboxSyncHandler({
@@ -1149,6 +1184,7 @@ test("manual sync refreshes one serial batch and proves the pause stayed owned",
   assert.equal(response.body.ok, true);
   assert.equal(response.body.complete, true);
   assert.equal(response.body.status, "manual_refresh_complete");
+  assert.equal(response.body.recent_window_refreshed, false);
   assert.equal(response.body.progress.ui_campaigns_refreshed, 2);
   assert.equal(response.body.counts.total, 42);
   assert.equal(pauseReads, 3);
@@ -1732,6 +1768,7 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /id="manualRefresh"/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/manual-sync"/);
   assert.match(inboxHtml, /Background readers remain paused/);
+  assert.match(inboxHtml, /bounded recent-replies cross-check remains on its last-known-good snapshot/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/message\?gmail_id="/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/triage"/);
   assert.match(inboxHtml, /data-filter="archived"/);

@@ -339,6 +339,26 @@ export function campaignsToScan(campaigns, recentReplies = []) {
   ));
 }
 
+function retainPreviousTargetsWhenRecentFails(campaigns, currentTargets, previousState) {
+  const targetIds = new Set(arrayValue(currentTargets)
+    .map((campaign) => stringValue(campaign?.id)).filter(Boolean));
+  const liveById = new Map(arrayValue(campaigns)
+    .map((campaign) => [stringValue(campaign?.id), campaign])
+    .filter(([sequenceId]) => sequenceId));
+  const retained = [...arrayValue(currentTargets)];
+  for (const previous of arrayValue(previousState?.catalog?.targets)) {
+    const sequenceId = stringValue(previous?.id);
+    const live = liveById.get(sequenceId);
+    if (!sequenceId || targetIds.has(sequenceId) || !live) continue;
+    // The recent window is only a bounded discovery cross-check.  If it is
+    // unavailable, do not let that one failed read prune a still-live target
+    // (or its last-known-good replies) from the durable catalog.
+    retained.push({ ...previous, ...live });
+    targetIds.add(sequenceId);
+  }
+  return retained;
+}
+
 function candidateEmail(lead) {
   const direct = stringValue(lead?.candidate_email);
   if (direct) return direct;
@@ -736,7 +756,10 @@ export async function buildInboxRefresh({
   const recentRepliesRaw = recentResult.status === "fulfilled"
     ? arrayValue(recentResult.value)
     : [];
-  const targets = campaignsToScan(campaigns, recentRepliesRaw);
+  const currentTargets = campaignsToScan(campaigns, recentRepliesRaw);
+  const targets = recentError
+    ? retainPreviousTargetsWhenRecentFails(campaigns, currentTargets, previousState)
+    : currentTargets;
   const uiTargets = targets.filter(isAdmittedInboxCampaign);
   const targetIds = new Set(
     targets.map((campaign) => stringValue(campaign?.id)).filter(Boolean),
@@ -813,7 +836,7 @@ export async function buildInboxRefresh({
         },
     scan: {
       campaigns_total: campaigns.length,
-      campaigns_excluded: campaigns.length - targets.length,
+      campaigns_excluded: Math.max(0, campaigns.length - targets.length),
       campaigns_targeted: targets.length,
       campaigns_attempted: selected.length,
       campaigns_deferred: Math.max(0, targets.length - selected.length),
