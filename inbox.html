@@ -234,7 +234,7 @@
 const $=(id)=>document.getElementById(id);
 let AUTH={required:false,authenticated:false,clientId:null,token:null,email:"",domains:["raydar.xyz","raydargroup.com"]};
 const authHeaders=()=>AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{};
-const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,syncing:false,manualRefreshing:false,snapshotState:"unseeded",seedPasses:0,triaging:new Set(),triageRevision:0};
+const STATE={replies:[],filter:"all",query:"",selectedId:"",messages:new Map(),loading:false,syncing:false,manualRefreshing:false,manualRunStartedAt:"",snapshotState:"unseeded",seedPasses:0,triaging:new Set(),triageRevision:0};
 if(new URLSearchParams(location.search).has("embed"))document.body.classList.add("embed");
 
 function setHealth(kind,label){
@@ -749,7 +749,8 @@ async function manualRefreshFeed(){
   if(STATE.manualRefreshing)return;
   STATE.manualRefreshing=true;
   const button=$("manualRefresh");
-  const runStartedAt=new Date().toISOString();
+  const runStartedAt=STATE.manualRunStartedAt||new Date().toISOString();
+  STATE.manualRunStartedAt=runStartedAt;
   button.disabled=true;button.textContent="Starting…";
   try{
     for(let pass=0;pass<40;pass+=1){
@@ -775,6 +776,7 @@ async function manualRefreshFeed(){
       button.textContent="Refreshing "+refreshed+"/"+targeted+"…";
       showBanner("warn","Manual Inbox refresh: "+refreshed+" of "+targeted+" sequences updated. Background readers remain paused.","manual");
       if(data.complete){
+        STATE.manualRunStartedAt="";
         await loadFeed();
         const recentNote=data.recent_window_refreshed
           ?""
@@ -786,6 +788,7 @@ async function manualRefreshFeed(){
     }
     throw new Error("Manual refresh exceeded its bounded pass limit");
   }catch(error){
+    if(error.code!=="paraform_provider_refusal")STATE.manualRunStartedAt="";
     await loadFeed();
     const progress=error.data?.progress||{};
     const remaining=Number(progress.ui_campaigns_remaining);
@@ -793,7 +796,7 @@ async function manualRefreshFeed(){
       ?" "+remaining+" sequence"+(remaining===1?" remains":"s remain")+" on the retained snapshot."
       :" Successful sequence reads were retained.";
     const reason=error.code==="paraform_provider_refusal"
-      ?"Paraform declined a read, so the manual refresh stopped immediately."
+      ?"Paraform declined a read, so the manual refresh stopped immediately. Resume after the five-minute cooldown to continue this same sweep."
       :error.code==="paraform_auth_expired"
         ?"The Paraform session expired during the manual refresh."
         :"The manual refresh stopped before full coverage.";
