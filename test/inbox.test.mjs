@@ -45,6 +45,7 @@ import {
 import {
   createManualInboxSyncHandler,
   createPacedManualInboxGet,
+  MANUAL_INBOX_MAX_RUN_AGE_MS,
   MANUAL_INBOX_MIN_INTERVAL_MS,
   manualInboxProgress,
 } from "../api/inbox/manual-sync.mjs";
@@ -1037,6 +1038,7 @@ test("a failed recent window retains every still-live target from the prior cata
 
 test("manual Inbox pacing serializes calls and stops after the first provider refusal", async () => {
   assert.equal(MANUAL_INBOX_MIN_INTERVAL_MS, 5_000);
+  assert.equal(MANUAL_INBOX_MAX_RUN_AGE_MS, 6 * 60 * 60 * 1_000);
   const calls = [];
   const get = createPacedManualInboxGet({
     intervalMs: 0,
@@ -1769,6 +1771,8 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/sync"/);
   assert.match(inboxHtml, /id="manualRefresh"/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/manual-sync"/);
+  assert.match(inboxHtml, /STATE\.manualRunStartedAt\|\|new Date\(\)\.toISOString\(\)/);
+  assert.match(inboxHtml, /Resume after the five-minute cooldown to continue this same sweep/);
   assert.match(inboxHtml, /Background readers remain paused/);
   assert.match(inboxHtml, /bounded recent-replies cross-check remains on its last-known-good snapshot/);
   assert.match(inboxHtml, /fetch\("\/api\/inbox\/message\?gmail_id="/);
