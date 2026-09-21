@@ -776,7 +776,10 @@ async function manualRefreshFeed(){
       showBanner("warn","Manual Inbox refresh: "+refreshed+" of "+targeted+" sequences updated. Background readers remain paused.","manual");
       if(data.complete){
         await loadFeed();
-        showBanner("good","Inbox refreshed across all "+targeted+" sequences. Background readers remain paused.","manual");
+        const recentNote=data.recent_window_refreshed
+          ?""
+          :" The bounded recent-replies cross-check remains on its last-known-good snapshot.";
+        showBanner("good","Inbox refreshed across all "+targeted+" sequences."+recentNote+" Background readers remain paused.","manual");
         return;
       }
       await waitForManualRefresh(750);

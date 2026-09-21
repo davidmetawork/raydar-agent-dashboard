@@ -226,12 +226,10 @@ export function createManualInboxSyncHandler({
       const provider = pacedGet.stats();
       const complete = progress.campaigns_remaining === 0
         && refresh.scan.campaigns_failed === 0
-        && refresh.scan.recent_failed === false
         && !provider.first_refusal;
       const payload = {
         ok: complete || (
           refresh.scan.campaigns_failed === 0
-          && refresh.scan.recent_failed === false
           && !provider.first_refusal
         ),
         status: complete ? "manual_refresh_complete" : "manual_refresh_progress",
@@ -241,6 +239,7 @@ export function createManualInboxSyncHandler({
         progress,
         counts: feed.counts,
         freshness: feed.freshness,
+        recent_window_refreshed: refresh.scan.recent_failed === false,
         scan: refresh.scan,
         provider,
       };
@@ -253,7 +252,7 @@ export function createManualInboxSyncHandler({
           retry_after_seconds: 300,
         });
       }
-      if (refresh.scan.campaigns_failed > 0 || refresh.scan.recent_failed) {
+      if (refresh.scan.campaigns_failed > 0) {
         return res.status(502).json({
           ...payload,
           ok: false,
