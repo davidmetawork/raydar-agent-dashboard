@@ -45,6 +45,7 @@ import {
 import {
   createManualInboxSyncHandler,
   createPacedManualInboxGet,
+  MANUAL_INBOX_MIN_INTERVAL_MS,
   manualInboxProgress,
 } from "../api/inbox/manual-sync.mjs";
 
@@ -1035,6 +1036,7 @@ test("a failed recent window retains every still-live target from the prior cata
 });
 
 test("manual Inbox pacing serializes calls and stops after the first provider refusal", async () => {
+  assert.equal(MANUAL_INBOX_MIN_INTERVAL_MS, 5_000);
   const calls = [];
   const get = createPacedManualInboxGet({
     intervalMs: 0,

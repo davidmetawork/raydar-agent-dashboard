@@ -12,7 +12,7 @@ import {
 } from "./_lib/core.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
-export const MANUAL_INBOX_MIN_INTERVAL_MS = 3_000;
+export const MANUAL_INBOX_MIN_INTERVAL_MS = 5_000;
 export const MANUAL_INBOX_MAX_RUN_AGE_MS = 30 * 60 * 1_000;
 
 const REFUSAL_CODES = new Set([
