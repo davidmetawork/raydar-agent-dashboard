@@ -10,7 +10,7 @@ export const config = {
 };
 
 function allowedDomains(): string[] {
-  return (process.env.ALLOWED_DOMAINS || 'raydar.xyz,raydargroup.com,davidphillips.world')
+  return (process.env.ALLOWED_DOMAINS || 'raydar.xyz,raydargroup.com,davidphillips.world,meta.work')
     .split(',')
     .map((domain) => domain.trim().toLowerCase())
     .filter(Boolean);
