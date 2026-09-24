@@ -178,6 +178,19 @@ export async function runTick({ now = Date.now() } = {}) {
     }
   });
 
+  // C6 (2026-09-24 Paraform reduction pass): the screener-feed probe already
+  // pays for one webview /api/status read per tick. Persist its
+  // upcoming-calls array here so calls-today.html's Upcoming panel can read
+  // this cache instead of every open tab polling webview directly every
+  // 30s — zero new outbound calls, this is the health tick's own existing
+  // fetch, just kept a moment longer.
+  const screenerFeedUpcoming = results["screener-feed"]?.raw?.upcoming;
+  if (Array.isArray(screenerFeedUpcoming)) {
+    try {
+      await hSet(K.upcoming, { fetchedAt: nowIso, upcoming: screenerFeedUpcoming }, 600);
+    } catch { /* the next tick retries; a stale cache beats a missing one */ }
+  }
+
   // ---- 4. Beat lanes
   for (const check of active.filter((c) => c.kind === "beat")) {
     try {

@@ -14,6 +14,7 @@
 import { cronAuth } from "../seq/_lib/core.mjs";
 import { buildActivity } from "./_lib/activity.mjs";
 import { kvConfigured, writeActivity } from "./_lib/store.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -23,6 +24,7 @@ export function createRefreshHandler({
   build = buildActivity,
   persist = writeActivity,
   now = () => new Date(),
+  pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
 } = {}) {
   return async function handler(req, res) {
     const authed = auth(req);
@@ -30,6 +32,24 @@ export function createRefreshHandler({
       return res.status(authed.reason === "no_cron_secret" ? 503 : 401).json({ ok: false, error: authed.reason });
     }
     if (!kvReady()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
+
+    // C4 (2026-09-24 Paraform reduction pass): this was the one D11 cron
+    // that ignored the operator brake entirely. It never made a direct
+    // Paraform call (build() hits webview's own cache), but it still hits
+    // webview on the same cadence, so it now sits under the same
+    // dashboardReaders control as every other D11 reader for consistency.
+    // A skip is not a failure: the last-good payload stays in KV and
+    // summary.mjs's own 15-min stale-cache fallback covers the gap.
+    const backgroundPause = await pauseState()
+      .catch(() => ({ paused: true, state: "unreadable" }));
+    if (backgroundPause?.paused) {
+      return res.status(200).json({
+        ok: true,
+        persisted: false,
+        skipped: "paused",
+        controlState: backgroundPause.state || "unreadable",
+      });
+    }
 
     const at = now();
     try {

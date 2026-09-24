@@ -270,10 +270,12 @@ test("the warmer refuses an unauthenticated caller", async () => {
   assert.equal(res.statusCode, 401);
 });
 
+const notPaused = async () => ({ paused: false, state: "absent" });
+
 test("a double source failure never overwrites the last-good payload", async () => {
   let persisted = 0;
   const handler = createRefreshHandler({
-    auth: () => ({ ok: true }), kvReady: () => true,
+    auth: () => ({ ok: true }), kvReady: () => true, pauseState: notPaused,
     build: async () => ({ ok: false, errors: [{ source: "paraform" }, { source: "calls" }] }),
     persist: async () => { persisted += 1; },
   });
@@ -286,7 +288,7 @@ test("a double source failure never overwrites the last-good payload", async () 
 test("a partial success is still worth persisting", async () => {
   let persisted = 0;
   const handler = createRefreshHandler({
-    auth: () => ({ ok: true }), kvReady: () => true,
+    auth: () => ({ ok: true }), kvReady: () => true, pauseState: notPaused,
     build: async () => ({ ok: true, paraform: {}, calls: null, errors: [{ source: "calls" }] }),
     persist: async () => { persisted += 1; },
     now: () => new Date("2026-08-14T18:00:00Z"),
@@ -296,6 +298,30 @@ test("a partial success is still worth persisting", async () => {
   assert.equal(persisted, 1);
   assert.equal(res.body.ok, true);
   assert.equal(res.body.calls, false);
+});
+
+// C4 (2026-09-24 Paraform reduction pass): this cron used to ignore the
+// operator brake entirely, unlike every other D11 reader.
+test("a paused dashboardReaders control stops the warmer before build or persist", async () => {
+  let built = 0;
+  let persisted = 0;
+  const handler = createRefreshHandler({
+    auth: () => ({ ok: true }), kvReady: () => true,
+    pauseState: async () => ({ paused: true, state: "configured", pauseId: "incident-x" }),
+    build: async () => { built += 1; return { ok: true }; },
+    persist: async () => { persisted += 1; },
+  });
+  const res = mockRes();
+  await handler(req(), res);
+  assert.equal(built, 0, "a paused control must stop before webview is ever hit");
+  assert.equal(persisted, 0);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    ok: true,
+    persisted: false,
+    skipped: "paused",
+    controlState: "configured",
+  });
 });
 
 // ── the NaN defect (2026-08-17) ──────────────────────────────────────────────

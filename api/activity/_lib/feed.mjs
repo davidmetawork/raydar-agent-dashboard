@@ -31,8 +31,9 @@ import { crmPage, getInbox, getThread, resolveApplicationThread, whoAmI } from "
 
 export const FEED_KEY = "activity:v1:feed";
 // The cached feed is DURABLE and always served instantly; freshness is a
-// flag, not a gate. A 10-minute warming cron plus client-side
-// stale-while-revalidate keep it current — page open never waits on a build.
+// flag, not a gate. An hourly warming cron (see vercel.json) plus
+// client-side stale-while-revalidate keep it current — page open never
+// waits on a build.
 export const FEED_FRESH_SECONDS = 180;
 export const FEED_LOCK_KEY = "activity:v1:feed:lock";
 const THREAD_KEY = (threadId) => `activity:v1:thread:${threadId}`;

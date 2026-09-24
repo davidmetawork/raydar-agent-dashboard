@@ -730,7 +730,13 @@ async function syncFeed(){
     if(!response.ok||!data.ok){const error=new Error(data.error||"Sync unavailable");error.code=data.error;throw error;}
     STATE.seedPasses+=1;
     await loadFeed();
-    if(STATE.snapshotState==="seeding"&&STATE.seedPasses<6)queueInboxSync(1000);
+    // C5 (2026-09-24 Paraform reduction pass): cold-start burst spacing
+    // widened from 1s to 12s. Six passes back-to-back at 1s could fan out to
+    // ~120 Paraform calls in under 10 seconds if several operators cold-open
+    // Inbox together — uncomfortably close to the measured 900-1,000 req/min
+    // rate-limit ceiling. 12s spacing keeps the same six-pass coverage while
+    // pacing the burst.
+    if(STATE.snapshotState==="seeding"&&STATE.seedPasses<6)queueInboxSync(12000);
   }catch(error){
     if(error.code==="paraform_background_paused"){
       setHealth("warn","Background reads paused");
@@ -809,7 +815,11 @@ async function manualRefreshFeed(){
 function startApp(){
   loadHealth();
   loadFeed().then(()=>queueInboxSync());
-  if(!window.__inboxPoll)window.__inboxPoll=setInterval(()=>queueInboxSync(),180000);
+  // C5 (2026-09-24 Paraform reduction pass, David-approved number): steady
+  // -state poll widened from 3 min to 15 min. Inbox is a reply-triage
+  // action surface, not a pure status tile, so it stays tighter than the
+  // Monitor-wide "check-in data can be an hour old" default.
+  if(!window.__inboxPoll)window.__inboxPoll=setInterval(()=>queueInboxSync(),900000);
 }
 
 $("search").addEventListener("input",event=>{STATE.query=event.target.value;renderList();selectFirstVisible();});
