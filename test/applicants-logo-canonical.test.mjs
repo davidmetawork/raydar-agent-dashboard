@@ -23,7 +23,9 @@ const ESCAPES = [
   `${PREFIX}../../paraform-company-logo-urls-look-alike/company-logos/x.png`,
 ];
 // Non-canonical but still inside the folder: the browser refuses these too
-// (the rule is "already canonical"); the server normalises them.
+// (the rule is "already canonical"). profile.mjs's richProfileLogo stores the
+// resolved link; profile-v2's safeEntityLogo keeps the raw string, which is
+// safe, and Core only ever stores canonical logos there (measured 2026-09-24).
 const IN_FOLDER_NON_CANONICAL = [`${PREFIX}sub/../x.png`, `${PREFIX}./x.png`];
 const LOOK_ALIKES = [
   "https://storage.googleapis.com/paraform-company-logo-urls-look-alike/company-logos/x.png",
