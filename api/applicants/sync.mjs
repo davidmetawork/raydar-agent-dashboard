@@ -112,6 +112,7 @@ const ACK_STATUSES = new Set([
 ]);
 import {saveApplicantAck,saveApplicantRequest} from './_lib/request-safety.mjs';
 import { sourceProfileDigest } from "./_lib/source-profile-digest.mjs";
+import { allowedPhotoUrl } from "./_lib/photo-url.mjs";
 import {
   normalizeRichProfile, richBindingsForSnapshot, richCardFromProfile,
   richProfileMatches, RICH_PROFILE_RETENTION_SECONDS,
@@ -186,50 +187,9 @@ export const CU_RE = /^[a-z0-9]{10,40}$/i;
 export const PROFILE_KEY_RE = /^(?:[a-z0-9]{10,40}|core:[a-z0-9]{10,64})$/i;
 export const MAX_PROFILE_BYTES = 30_000;
 export const MAX_SOURCE_PROFILE_RECEIPT_QUERY_KEYS = 2_000;
-// THE PHOTO ALLOWLIST. Positive, exact-prefix, and deliberately short.
-//
-//   [0] Paraform's own public bucket. Paraform's copy of the picture, obtained
-//       by its enrichment vendor, served unsigned to the recruiter who is
-//       already permitted to see that candidate.
-//   [1] The Workable CloudFront uploads path. The candidate uploaded this to
-//       the employer's ATS as part of their own application to a job we
-//       operate; it is already in Raydar's Hub. MEASURED 2026-09-05 over all
-//       1,244 distinct URLs in that corpus: one host, no query strings, no
-//       fragments, anonymous HTTP 200.
-//
-// DO NOT WIDEN THIS LIST. About 17% of Paraform's image_src values are
-// media.licdn.com signed URLs (every one sampled had already expired) and ~6%
-// are a 42-byte 1x1 transparent GIF; adding either "to fix the missing photos"
-// puts a direct LinkedIn CDN request in the reviewer's browser, or renders an
-// invisible avatar instead of falling back to initials. A photo that is not on
-// this list is not a bug — it is a card that shows initials, which is correct.
-const PHOTO_URL_PREFIXES = [
-  "https://storage.googleapis.com/paraform-images/",
-  "https://dvz3vrza543jw.cloudfront.net/uploads/",
-];
-// startsWith on the FULL prefix including the trailing slash, so a look-alike
-// host ("https://storage.googleapis.com/paraform-images.example.com/x") can
-// never satisfy it. Query strings and fragments are refused outright: every
-// signed, expiring URL we have measured carries one.
-//
-// The link must also already be in the canonical form the browser will
-// request. startsWith reads the raw string, but <img src> resolves the path
-// first, so ".../paraform-images/../another-bucket/x.jpg" (or %2e%2e, or a
-// backslash) loads from a different public bucket on the same host. The same
-// rule as applicant-core/lib/candidate-photos.mjs in the Raydar repo. MEASURED
-// 2026-09-24 over the links the Raydar CRM uses: all 1,141 Workable links and
-// the 719 Paraform photos in Core's cache are canonical.
-export function allowedPhotoUrl(value) {
-  const url = typeof value === "string" ? value.trim() : "";
-  if (!url || url.length > 512 || !url.startsWith("https://")) return null;
-  if (url.includes("?") || url.includes("#")) return null;
-  if (!PHOTO_URL_PREFIXES.some((prefix) => url.startsWith(prefix))) return null;
-  try {
-    return new URL(url).href === url ? url : null;
-  } catch {
-    return null;
-  }
-}
+// THE PHOTO ALLOWLIST lives in _lib/photo-url.mjs (with its rationale) so the
+// paged and profile read paths share it. Re-exported here for existing callers.
+export { allowedPhotoUrl };
 
 function own(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -387,8 +347,12 @@ export function normalizeProfiles(input) {
       || Buffer.byteLength(JSON.stringify(profile)) > MAX_PROFILE_BYTES) {
       return { ok: false, badCu: cu || null };
     }
-    profiles[cu] = profile;
     const photo = allowedPhotoUrl(profile.imageSrc);
+    // The stored apphub:profile is what profile.mjs serves back as the avatar
+    // fallback, so it keeps only an allowlisted photo too. The Raydar repo's
+    // publish.mjs sends Paraform's raw image_src, signed LinkedIn links and the
+    // 1x1 data: GIF included; this is the one place its profiles are stored.
+    profiles[cu] = own(profile, "imageSrc") ? { ...profile, imageSrc: photo } : profile;
     if (photo) photos[cu] = photo;
   }
   return { ok: true, profiles, photos };

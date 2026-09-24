@@ -125,6 +125,8 @@ function renderHarness({ card, profile, provider = null, source = "queue", rowOv
     applicantRowV2: (value) => STATE.applicantRowsV2?.[value?.key] || null,
     cardFor: (cu) => STATE.cards[cu] || null,
     initials: () => "SA", avatarImg: () => "<img>",
+    // The allowlist itself is tested in applicants-photo-allowlist-paths.
+    firstAllowedPhoto: (...values) => values.find(Boolean) || "",
     preferredLinkedinProfileUrl: () => "", liAnchor: () => "", pfAnchor: () => "", tierPill: () => "",
     monthYear: () => "September 2026", shortDate: () => "September 1", relTime: () => "now",
     applicationMomentText: (value) => value?.appliedAt ? "Applied September 1" : "",
@@ -530,6 +532,7 @@ function profileFetchHarness({ paged = false, projected = null } = {}) {
   const context = {
     STATE,
     Date: { now: () => now },
+    URL,
     encodeURIComponent,
     URLSearchParams,
     rowByCu: (cu) => STATE.snapshot.queue.find(candidate=>candidate.profileKey===cu),
@@ -551,7 +554,9 @@ function profileFetchHarness({ paged = false, projected = null } = {}) {
   const control = applicants.slice(applicants.indexOf("function interviewControl("), applicants.indexOf("function rowCardHtml("));
   const decide = applicants.slice(applicants.indexOf("async function decide("), applicants.indexOf("/* ---- visible shell band"));
   const rule = applicants.slice(applicants.indexOf("function makeRuleFrom("), applicants.indexOf('document.addEventListener("click", async (event)', applicants.indexOf("function makeRuleFrom(")));
-  const source = `const RICH_RETRY_MS = 60_000; const PROFILE_RETRY_AT = new Map(); ${selectedHelpers}\n${control}\n${decide}\n${rule}\n${applicants.slice(profileFetchStart, profileFetchEnd)}; ({ fetchProfile, PROFILE_RETRY_AT, interviewControl, decide, makeRuleFrom })`;
+  // fetchProfile stores only an allowlisted photo; run the page's own helper.
+  const photoAllowlist = applicants.slice(applicants.indexOf("const PHOTO_URL_PREFIXES"), applicants.indexOf("// A card's picture comes"));
+  const source = `const RICH_RETRY_MS = 60_000; const PROFILE_RETRY_AT = new Map(); ${photoAllowlist}\n${selectedHelpers}\n${control}\n${decide}\n${rule}\n${applicants.slice(profileFetchStart, profileFetchEnd)}; ({ fetchProfile, PROFILE_RETRY_AT, interviewControl, decide, makeRuleFrom })`;
   const extracted = runInNewContext(source, context);
   return { STATE, row, requests, helpers: extracted, gates:()=>gates, ruleActions:()=>ruleActions,
     advance: (milliseconds) => { now += milliseconds; } };

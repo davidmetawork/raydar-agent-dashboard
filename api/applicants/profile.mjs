@@ -28,6 +28,7 @@ import {
 } from "./_lib/kv.mjs";
 import { hasCookie, isParaformAuthError, sleep, trpcGet } from "./_lib/paraform.mjs";
 import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
+import { allowedPhotoUrl } from "./_lib/photo-url.mjs";
 import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
 import { richBindingsForSnapshot, richProfileReadyMatches } from "./_lib/rich-profile.mjs";
 import { richProfileForRules } from "./_lib/rich-rule-facts.mjs";
@@ -43,6 +44,18 @@ const str = (value) => {
   const s = value == null ? "" : String(value).trim();
   return s || null;
 };
+
+// Every branch below returns imageSrc, which the Applicants tab uses as the
+// avatar fallback, so each one goes through the photo allowlist. Paraform's raw
+// image_src is a signed LinkedIn link or a 1x1 data: GIF often enough that a
+// cached or stored copy is never trusted as-is. A key the object never had
+// stays absent.
+function withAllowedPhoto(profile) {
+  if (!profile || typeof profile !== "object" || !Object.prototype.hasOwnProperty.call(profile, "imageSrc")) {
+    return profile;
+  }
+  return { ...profile, imageSrc: allowedPhotoUrl(profile.imageSrc) };
+}
 
 const PAGED_PROFILE_REFUSALS = new Set([
   'APPLICANT_VIEW_GENERATION_UNAVAILABLE','APPLICANT_VIEW_ROW_UNAVAILABLE',
@@ -164,6 +177,7 @@ export function createProfileHandler({
   corsHandler = cors, authHandler = requireAuth, kvReady = kvConfigured,
   readJson = getJson, readMany = hashGetMany, now = Date.now,
   pagedEnabled = pagedReadsEnabled, readPaged = readApplicantDetail,
+  cookieReady = hasCookie, readParaform = trpcGet, writeJson = setJson,
 } = {}) {
 return async function handler(req, res) {
   if (corsHandler(req, res)) return;
@@ -179,7 +193,7 @@ return async function handler(req, res) {
       const result = await readPaged(req.query);
       if(result.profile?.source==='profile_reconstruction_pending')
         return res.status(409).json({ok:false,error:'applicant_profile_changed_refresh_required'});
-      return res.status(200).json({ ok: true, ...result.profile, row: result.row, generation: result.generation });
+      return res.status(200).json({ ok: true, ...withAllowedPhoto(result.profile), row: result.row, generation: result.generation });
     } catch (error) {
       const {status,...body}=pagedProfileReadFailure(error);
       if(status===503)res.setHeader('Retry-After','60');
@@ -215,18 +229,18 @@ return async function handler(req, res) {
           }
         }
       } catch { /* Optional provider state cannot prevent opening the source profile. */ }
-      return res.status(200).json({ ok: true, ...sourceProfile, ...(paraformProfile ? { paraformProfile } : {}), ...(profileV2 ? { profileV2 } : {}) });
+      return res.status(200).json({ ok: true, ...withAllowedPhoto(sourceProfile), ...(paraformProfile ? { paraformProfile } : {}), ...(profileV2 ? { profileV2 } : {}) });
     }
     const cached = await readJson(K.profile(cu)).catch(() => null);
-    if (cached) return res.status(200).json({ ok: true, ...cached });
+    if (cached) return res.status(200).json({ ok: true, ...withAllowedPhoto(cached) });
 
     if (!CU_RE.test(cu)) return res.status(404).json({ ok: false, error: "profile_cache_miss" });
 
-    if (!hasCookie()) return res.status(200).json({ ok: true, degraded: "paraform_auth" });
+    if (!cookieReady()) return res.status(200).json({ ok: true, degraded: "paraform_auth" });
 
     let record;
     try {
-      record = await trpcGet("candidateUser.getLinkedInCandidate", { candidateUserId: cu });
+      record = await readParaform("candidateUser.getLinkedInCandidate", { candidateUserId: cu });
     } catch (error) {
       if (isParaformAuthError(error)) {
         return res.status(200).json({ ok: true, degraded: "paraform_auth" });
@@ -238,7 +252,7 @@ return async function handler(req, res) {
     }
 
     // Resume absence is normal (many applicants never attach one) — best-effort.
-    const resume = await trpcGet("candidateUser.getMostRecentResume", { candidate_user_id: cu })
+    const resume = await readParaform("candidateUser.getMostRecentResume", { candidate_user_id: cu })
       .catch(() => null);
 
     const experienceRows = Array.isArray(record.experiences) ? record.experiences : [];
@@ -257,7 +271,8 @@ return async function handler(req, res) {
       title: str(record.title ?? record.one_liner ?? record.headline),
       location: str(record.location),
       about: str(record.about ?? record.summary),
-      imageSrc: str(record.image_src ?? record.imageSrc ?? record.profile_pic_url ?? record.profile_picture_url),
+      // Allowlisted before it is cached or returned (see withAllowedPhoto).
+      imageSrc: allowedPhotoUrl(record.image_src ?? record.imageSrc ?? record.profile_pic_url ?? record.profile_picture_url),
       linkedin: str(record.linkedin_user ?? record.public_identifier),
       updatedAt: record.updated_at ?? null,
       // The number behind the S/A/B/C letter, and Paraform's own fake-profile
@@ -274,7 +289,7 @@ return async function handler(req, res) {
 
     // A degraded walk is served but not cached: caching it would pin missing
     // ranks for six hours after the cookie comes back.
-    if (!degraded) await setJson(K.profile(cu), profile, PROFILE_TTL_SECONDS).catch(() => {});
+    if (!degraded) await writeJson(K.profile(cu), profile, PROFILE_TTL_SECONDS).catch(() => {});
     return res.status(200).json({
       ok: true,
       ...(degraded ? { degraded: "paraform_auth" } : {}),

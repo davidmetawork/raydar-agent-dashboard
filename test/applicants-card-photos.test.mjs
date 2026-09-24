@@ -215,6 +215,7 @@ test("a dead photo falls back to initials instead of a broken-image glyph", () =
   assert.match(applicants, /loading="lazy" decoding="async"/);
   assert.match(applicants, /referrerpolicy="no-referrer"/);
   // Core rows are keyed core:<id>, so the CARD channel is the one that carries
-  // their photo; the cuId-keyed photos hash can never hold them.
-  assert.match(applicants, /STATE\.photos\[id\] \|\| STATE\.cards\[id\]\?\.photo/);
+  // their photo; the cuId-keyed photos hash can never hold them. Each candidate
+  // goes through the allowlist (test/applicants-photo-allowlist-paths.test.mjs).
+  assert.match(applicants, /firstAllowedPhoto\(STATE\.photos\[id\], STATE\.cards\[id\]\?\.photo/);
 });

@@ -409,7 +409,8 @@ test("sync stores profiles under TTL'd keys and writes only bucket photos to the
   assert.deepEqual(ok.body.stored, { snapshot: false, queue: false, acks: 0, facts: 3, profiles: 3 });
   assert.deepEqual(calls.writeJson, [
     ["apphub:profile:cutestsynthetic0000000001", withPhoto, PROFILE_TTL_SECONDS],
-    ["apphub:profile:cmqvf861b00040aksj38cyiwp", foreignPhoto, PROFILE_TTL_SECONDS],
+    // The stored profile is the avatar fallback, so a foreign host is not kept.
+    ["apphub:profile:cmqvf861b00040aksj38cyiwp", { ...foreignPhoto, imageSrc: null }, PROFILE_TTL_SECONDS],
     ["apphub:profile:abcdef1234", noPhoto, PROFILE_TTL_SECONDS],
   ]);
   // Only the paraform-images bucket URL made the photos hash; the foreign

@@ -2,6 +2,7 @@ import postgres from 'postgres';
 import { pgCompatibleReadClient } from './read-pool-adapter.mjs';
 import { projectPinnedApplicantProfile } from './paged-core/paged-profile-contract.mjs';
 import { hasUsableApplicantProfileV2 } from './paged-core/applicant-profile-contract.mjs';
+import { allowedPhotoUrl } from './photo-url.mjs';
 import { PAGED_DECISION_AUTHORITY_VERSION } from './paged-core/paged-decision-authority.mjs';
 import { readActivePagedViewManifest, readActivePagedViewPage, readPagedViewDetail,
   readActivePagedViewAuthority } from './paged-core/paged-view-read.mjs';
@@ -116,6 +117,15 @@ export function projectPagedDocument(document, { now = Date.now() } = {}) {
       return containedPagedDocument(document, error, now);
     }
     throw error;
+  }
+  // Core stores the provider photo as Paraform's raw image_src (MEASURED
+  // 2026-09-24 over the 2,592 bound profile facts: 356 signed media.licdn.com
+  // links, 96 1x1 data: GIFs, 24 crustdata-media S3 links, 1,733 on the
+  // Paraform bucket). Allowlist it once, here, so imageSrc, the photos hash,
+  // the card and the profileV2 sent to the browser all carry the same value.
+  // profile.photo is outside factSetDigest, so the digests are unchanged.
+  if (profileV2?.profile && 'photo' in profileV2.profile) {
+    profileV2 = { ...profileV2, profile: { ...profileV2.profile, photo: allowedPhotoUrl(profileV2.profile.photo) } };
   }
   const profileKey = `application:${raw.application_id}:${raw.id}`;
   const facts = profileV2?.profile?.facts;

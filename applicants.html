@@ -1215,6 +1215,36 @@ function nameLinks(row) {
 function initials(name) {
   return String(name || "").split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
 }
+// THE PHOTO ALLOWLIST, browser copy of api/applicants/_lib/photo-url.mjs (the
+// rationale lives there; test/applicants-photo-allowlist-paths.test.mjs runs
+// both on the same inputs). The server already filters every path. This is the
+// last check before <img src>, so a stale cache or a new server path that
+// forgets the rule still shows initials, never a LinkedIn or data: link.
+// DO NOT WIDEN THIS LIST here or on the server without the other.
+const PHOTO_URL_PREFIXES = [
+  "https://storage.googleapis.com/paraform-images/",
+  "https://dvz3vrza543jw.cloudfront.net/uploads/",
+];
+function allowedPhotoUrl(value) {
+  const url = typeof value === "string" ? value.trim() : "";
+  if (!url || url.length > 512 || !url.startsWith("https://")) return null;
+  if (url.includes("?") || url.includes("#")) return null;
+  if (!PHOTO_URL_PREFIXES.some((prefix) => url.startsWith(prefix))) return null;
+  try {
+    return new URL(url).href === url ? url : null;
+  } catch {
+    return null;
+  }
+}
+// The first candidate that passes, so a refused photos-hash entry cannot hide
+// an allowed card photo behind it. "" when none does.
+function firstAllowedPhoto(...values) {
+  for (const value of values) {
+    const url = allowedPhotoUrl(value);
+    if (url) return url;
+  }
+  return "";
+}
 // A card's picture comes from someone else's CDN and can be withdrawn, moved
 // or 403'd at any moment. Every avatar image therefore carries the initials it
 // would have shown, and restores them on error: a broken-image glyph on a card
@@ -1225,7 +1255,9 @@ function initials(name) {
 // Amazon's logs on every card render. Workable photo URLs carry candidate-chosen
 // filenames, so they are PII: never log one, never paste one anywhere.
 function avatarImg(src, name) {
-  return '<img src="' + esc(src) + '" alt="" loading="lazy" decoding="async"'
+  const url = allowedPhotoUrl(src);
+  if (!url) return esc(initials(name));
+  return '<img src="' + esc(url) + '" alt="" loading="lazy" decoding="async"'
     + ' referrerpolicy="no-referrer" data-initials="' + esc(initials(name)) + '"'
     + ' onerror="avatarFallback(this)" />';
 }
@@ -1319,7 +1351,7 @@ function avatarHtml(row) {
   const p = STATE.profiles[id];
   // Core rows are keyed core:<id>, which the photos hash can never hold; the
   // card channel is the one that carries their picture.
-  const src = STATE.photos[id] || STATE.cards[id]?.photo || (p && p.imageSrc) || "";
+  const src = firstAllowedPhoto(STATE.photos[id], STATE.cards[id]?.photo, p && p.imageSrc);
   const img = src ? avatarImg(src, row.name) : esc(initials(row.name));
   return '<span class="avatar" data-avatar="' + esc(id) + '" data-cu="' + esc(id) + '">' + img + "</span>";
 }
@@ -2578,7 +2610,7 @@ function viewBand() {
 }
 
 function applyAvatar(cu) {
-  const src = STATE.photos[cu] || STATE.cards[cu]?.photo || STATE.profiles[cu]?.imageSrc || "";
+  const src = firstAllowedPhoto(STATE.photos[cu], STATE.cards[cu]?.photo, STATE.profiles[cu]?.imageSrc);
   if (!src) return;
   const name = rowByCu(cu)?.name || "";
   document.querySelectorAll('[data-avatar="' + CSS.escape(cu) + '"]')
@@ -2658,9 +2690,10 @@ async function fetchProfile(cu) {
       if (rowByCu(cu) !== displayedRow) return null;
       STATE.applicantRowsV2[expectedRow.key] = profile.profileV2 || null;
       Object.assign(displayedRow, body.row);
+      const photo = allowedPhotoUrl(profile.imageSrc);
       STATE.cards[cu] = { name: profile.name, title: profile.title, location: profile.location,
-        imageSrc: profile.imageSrc, profileKey: cu };
-      if (profile.imageSrc) STATE.photos[cu] = profile.imageSrc; else delete STATE.photos[cu];
+        imageSrc: photo, profileKey: cu };
+      if (photo) STATE.photos[cu] = photo; else delete STATE.photos[cu];
       if (typeof RICH_CARDS !== "undefined") delete RICH_CARDS.cards[cu];
     }
     STATE.profiles[cu] = profile;
