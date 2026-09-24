@@ -33,7 +33,7 @@
   <p>Use an approved Google account to access Raydar’s internal tools, documentation, and training corpus.</p>
   <div id="gsi"></div>
   <div id="status" role="alert"></div>
-  <div class="domains">Allowed: @raydar.xyz · @raydargroup.com · @davidphillips.world</div>
+  <div class="domains">Allowed: @raydar.xyz · @raydargroup.com · @davidphillips.world · @meta.work</div>
 </main>
 <script>
   const statusEl = document.getElementById("status");
@@ -58,7 +58,7 @@
       location.replace(returnTo);
     } catch (error) {
       statusEl.textContent = error.code === "forbidden"
-        ? "Use a @raydar.xyz, @raydargroup.com, or @davidphillips.world Google account."
+        ? "Use a @raydar.xyz, @raydargroup.com, @davidphillips.world, or @meta.work Google account."
         : "Sign-in failed. Please try again.";
     }
   }

@@ -6,7 +6,7 @@ export const SESSION_COOKIE_DOMAIN = "raydar.xyz";
 
 const GOOGLE_CLIENT_ID = () => process.env.GOOGLE_CLIENT_ID || "";
 const SESSION_SECRET = () => process.env.AUTH_SESSION_SECRET || "";
-const allowedDomains = () => (process.env.ALLOWED_DOMAINS || "raydar.xyz,raydargroup.com,davidphillips.world")
+const allowedDomains = () => (process.env.ALLOWED_DOMAINS || "raydar.xyz,raydargroup.com,davidphillips.world,meta.work")
   .split(",").map((domain) => domain.trim().toLowerCase()).filter(Boolean);
 
 function authError(code, message) {
