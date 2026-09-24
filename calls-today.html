@@ -564,14 +564,22 @@ async function loadCalls(){
 }
 
 async function loadUpcoming(){
+  // C6 (2026-09-24 Paraform reduction pass): reads this dashboard's own
+  // cached copy (populated by the 2-min health tick's existing screener-feed
+  // probe) instead of polling webview-lake.vercel.app directly from every
+  // open tab every 30s.
   try{
-    const response=await fetch("https://webview-lake.vercel.app/api/status",{cache:"no-store"});
-    const body=await response.json().catch(()=>({}));
+    const {status,body}=await api("/api/health/upcoming");
+    if(status!==200||body.ok!==true){
+      renderList("upcoming",[],"Couldn't load upcoming calls; retrying automatically.");
+      return false;
+    }
     const rows=(Array.isArray(body.upcoming)?body.upcoming:[]).slice().sort((a,b)=>Date.parse(a.join_at||0)-Date.parse(b.join_at||0)).slice(0,100);
     renderList("upcoming",rows.map(upcomingRow),"No upcoming calls scheduled.");
     $("upcoming-count").textContent=rows.length?`${rows.length} scheduled`:"";
     return true;
   }catch(error){
+    if(error.status===401)return false;
     renderList("upcoming",[],"Couldn't load upcoming calls; retrying automatically.");
     return false;
   }

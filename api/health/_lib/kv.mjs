@@ -123,6 +123,10 @@ export async function lRangeMany(keys, stop = 49) {
 
 export const K = {
   state: "hlth:state",
+  // C6 (2026-09-24 Paraform reduction pass): the screener-feed probe's
+  // upcoming-calls array, cached here so calls-today.html reads this instead
+  // of polling webview-lake.vercel.app directly from every open tab.
+  upcoming: "hlth:upcoming:cache",
   samples: (id) => `hlth:samples:${id}`,
   trans: (id) => `hlth:trans:${id}`,
   beat: (lane) => `hlth:beat:${lane}`,
