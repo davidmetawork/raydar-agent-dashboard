@@ -217,7 +217,8 @@ const PHOTO_URL_PREFIXES = [
 // first, so ".../paraform-images/../another-bucket/x.jpg" (or %2e%2e, or a
 // backslash) loads from a different public bucket on the same host. The same
 // rule as applicant-core/lib/candidate-photos.mjs in the Raydar repo. MEASURED
-// 2026-09-24: all 1,141 Workable and 719 Paraform links in use are canonical.
+// 2026-09-24 over the links the Raydar CRM uses: all 1,141 Workable links and
+// the 719 Paraform photos in Core's cache are canonical.
 export function allowedPhotoUrl(value) {
   const url = typeof value === "string" ? value.trim() : "";
   if (!url || url.length > 512 || !url.startsWith("https://")) return null;

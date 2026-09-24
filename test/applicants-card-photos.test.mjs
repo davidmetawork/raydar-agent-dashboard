@@ -86,14 +86,24 @@ test("a link whose path leaves the allowlisted folder once the browser resolves 
     "https://storage.googleapis.com/paraform-images/.%2e/attacker-bucket/x.jpg",
     "https://storage.googleapis.com/paraform-images/..\\attacker-bucket/x.jpg",
     "https://storage.googleapis.com/paraform-images/a/../../attacker-bucket/x.jpg",
+    // This copy has no whitespace check of its own: the parser drops a tab or
+    // newline, so ".\t." becomes ".." and only href === url catches it.
+    "https://storage.googleapis.com/paraform-images/.\t./attacker-bucket/x.jpg",
+    "https://storage.googleapis.com/paraform-images/.\n./attacker-bucket/x.jpg",
     "https://dvz3vrza543jw.cloudfront.net/uploads/../private/x.jpg",
-    "https://dvz3vrza543jw.cloudfront.net/uploads/./a.jpg",
   ];
   for (const escape of escapes) {
-    assert.notEqual(new URL(escape).href, escape, `fixture really is rewritten: ${escape}`);
+    const prefix = ["https://storage.googleapis.com/paraform-images/", "https://dvz3vrza543jw.cloudfront.net/uploads/"]
+      .find((p) => escape.startsWith(p));
+    assert.equal(new URL(escape).href.startsWith(prefix), false, `fixture really leaves its folder: ${JSON.stringify(escape)}`);
     assert.equal(allowedPhotoUrl(escape), null, escape);
     assert.equal(cardFromProfile({ imageSrc: escape }).photo, null, escape);
   }
+  // Not an escape, but not the link the browser would request either: refused
+  // too, because the check is "canonical", not "inside the folder".
+  const rewritten = "https://dvz3vrza543jw.cloudfront.net/uploads/./a.jpg";
+  assert.notEqual(new URL(rewritten).href, rewritten);
+  assert.equal(allowedPhotoUrl(rewritten), null);
   const result = normalizeProfiles({
     abcdef1234: { name: "A", imageSrc: PARAFORM },
     bcdefa2345: { name: "B", imageSrc: escapes[1] },
