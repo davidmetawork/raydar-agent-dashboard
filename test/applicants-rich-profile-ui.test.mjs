@@ -18,7 +18,7 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
 }[character]));
 const helpers = runInNewContext(
   `${applicants.slice(start, end)}; ({ explicitParaformTier, paraformScore, formatParaformScore, allowedParaformLogo, entityLogoHtml, entityLogoFallback, entityTierHtml, richProfile, presentText, hasProviderProfile, hasProviderHistory, hasProviderContent, paraformRatingText, visibleCardProfile, profileFactsHtml })`,
-  { esc },
+  { esc, URL },
 );
 
 test("rich profile tiers are explicit provider letters; numbers never become a letter", () => {

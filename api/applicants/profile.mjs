@@ -30,7 +30,7 @@ import { hasCookie, isParaformAuthError, sleep, trpcGet } from "./_lib/paraform.
 import { CU_RE, PROFILE_KEY_RE } from "./sync.mjs";
 import { allowedPhotoUrl } from "./_lib/photo-url.mjs";
 import { readActivePublication, readPublishedArtifacts } from "./_lib/generation.mjs";
-import { richBindingsForSnapshot, richProfileReadyMatches } from "./_lib/rich-profile.mjs";
+import { richBindingsForSnapshot, richProfileLogo, richProfileReadyMatches } from "./_lib/rich-profile.mjs";
 import { richProfileForRules } from "./_lib/rich-rule-facts.mjs";
 import { applicantRowsV2FromSnapshot } from "./_lib/profile-v2.mjs";
 import { pagedReadsEnabled, readApplicantDetail } from './_lib/paged.mjs';
@@ -126,7 +126,7 @@ async function talentRanks(companyIds) {
   return { ranks, degraded };
 }
 
-function mapExperience(row, ranks) {
+export function mapExperience(row, ranks) {
   const companyId = row?.company_id ?? row?.company?.id ?? null;
   return {
     // The stable Paraform id. Added 2026-08-20 for Applicant Decision Rules:
@@ -144,17 +144,19 @@ function mapExperience(row, ranks) {
     description: str(row?.description),
     location: str(row?.location),
     // Verified against a captured payload (2026-08-09): industry/ai_tags/logo
-    // live on the nested company object, not the experience row.
+    // live on the nested company object, not the experience row. The logo is
+    // cached and rendered as <img src>, so only a link whose resolved path
+    // stays in Paraform's company-logos folder is kept (richProfileLogo).
     industry: str(row?.company?.industry ?? row?.industry ?? row?.company_industry),
     aiTags: (Array.isArray(row?.company?.ai_tags) ? row.company.ai_tags
       : Array.isArray(row?.ai_tags) ? row.ai_tags : Array.isArray(row?.aiTags) ? row.aiTags : [])
       .map((tag) => str(tag?.name ?? tag)).filter(Boolean).slice(0, 2),
-    logo: str(row?.company?.logo_src),
+    logo: richProfileLogo(str(row?.company?.logo_src)),
     talentRank: companyId != null ? ranks.get(String(companyId)) ?? null : null,
   };
 }
 
-function mapEducation(row, ranks) {
+export function mapEducation(row, ranks) {
   const schoolId = row?.school?.id ?? row?.school_id ?? null;
   return {
     schoolId: schoolId == null ? null : String(schoolId),   // see mapExperience
@@ -162,7 +164,7 @@ function mapEducation(row, ranks) {
     degree: str(row?.degree ?? row?.degree_name),
     start: row?.start_date ?? null,
     end: row?.end_date ?? null,
-    logo: str(row?.school?.logo_src),
+    logo: richProfileLogo(str(row?.school?.logo_src)),   // see mapExperience
     // Where the school is, and its site. Added 2026-08-25 so a rule can ask
     // whether a degree is American — the applicant's own location answers a
     // different question (see _lib/school-us.mjs). Both ride the nested
