@@ -98,6 +98,102 @@ test("protected APIs accept the shared session without another Google lookup", a
   }
 });
 
+test("protected APIs fail closed before cookies, bearer tokens, or Google lookups when auth is not configured", async () => {
+  const old = {
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    secret: process.env.AUTH_SESSION_SECRET,
+    domains: process.env.ALLOWED_DOMAINS,
+    fetch: globalThis.fetch,
+  };
+  delete process.env.GOOGLE_CLIENT_ID;
+  process.env.AUTH_SESSION_SECRET = SECRET;
+  process.env.ALLOWED_DOMAINS = "raydar.xyz";
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    throw new Error("unconfigured auth must not contact Google");
+  };
+  try {
+    const token = createSessionToken({ email: "david@raydar.xyz", domain: "raydar.xyz" });
+    const requests = [
+      { headers: {} },
+      { headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(token)}` } },
+      { headers: { authorization: "Bearer google-id-token" } },
+    ];
+    for (const req of requests) {
+      const res = responseRecorder();
+      assert.equal(await requireAuth(req, res), false);
+      assert.equal(res.statusCode, 503);
+      assert.deepEqual(res.body, { ok: false, error: "auth_not_configured" });
+      assert.equal(req.authedEmail, undefined);
+    }
+    const forgedReq = { headers: {}, authedEmail: "david@raydar.xyz" };
+    const forgedRes = responseRecorder();
+    assert.equal(await requireAuth(forgedReq, forgedRes), false);
+    assert.equal(forgedRes.statusCode, 503);
+    assert.deepEqual(forgedRes.body, { ok: false, error: "auth_not_configured" });
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = old.fetch;
+    if (old.clientId === undefined) delete process.env.GOOGLE_CLIENT_ID;
+    else process.env.GOOGLE_CLIENT_ID = old.clientId;
+    if (old.secret === undefined) delete process.env.AUTH_SESSION_SECRET;
+    else process.env.AUTH_SESSION_SECRET = old.secret;
+    if (old.domains === undefined) delete process.env.ALLOWED_DOMAINS;
+    else process.env.ALLOWED_DOMAINS = old.domains;
+  }
+});
+
+test("protected APIs retain verified bearer fallback when durable sessions are not configured", async () => {
+  const old = {
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    secret: process.env.AUTH_SESSION_SECRET,
+    domains: process.env.ALLOWED_DOMAINS,
+    fetch: globalThis.fetch,
+  };
+  process.env.GOOGLE_CLIENT_ID = "google-client-id";
+  delete process.env.AUTH_SESSION_SECRET;
+  process.env.ALLOWED_DOMAINS = "raydar.xyz";
+  let fetches = 0;
+  globalThis.fetch = async (url) => {
+    fetches += 1;
+    const credential = new URL(url).searchParams.get("id_token");
+    return new Response(JSON.stringify({
+      aud: credential === "google-id-token" ? "google-client-id" : "wrong-client-id",
+      email: "david@raydar.xyz",
+      email_verified: "true",
+      hd: "raydar.xyz",
+      exp: String(Math.floor(Date.now() / 1000) + 3600),
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const req = { headers: { authorization: "Bearer google-id-token" } };
+    const res = { status() { throw new Error("verified bearer should not write an error response"); } };
+    assert.equal(await requireAuth(req, res), true);
+    assert.equal(req.authedEmail, "david@raydar.xyz");
+
+    const invalidReq = { headers: { authorization: "Bearer invalid-google-id-token" } };
+    const invalidRes = responseRecorder();
+    assert.equal(await requireAuth(invalidReq, invalidRes), false);
+    assert.equal(invalidRes.statusCode, 403);
+    assert.deepEqual(invalidRes.body, {
+      ok: false,
+      error: "forbidden",
+      detail: "must sign in with a raydar.xyz Google account",
+    });
+    assert.equal(invalidReq.authedEmail, undefined);
+    assert.equal(fetches, 2);
+  } finally {
+    globalThis.fetch = old.fetch;
+    if (old.clientId === undefined) delete process.env.GOOGLE_CLIENT_ID;
+    else process.env.GOOGLE_CLIENT_ID = old.clientId;
+    if (old.secret === undefined) delete process.env.AUTH_SESSION_SECRET;
+    else process.env.AUTH_SESSION_SECRET = old.secret;
+    if (old.domains === undefined) delete process.env.ALLOWED_DOMAINS;
+    else process.env.ALLOWED_DOMAINS = old.domains;
+  }
+});
+
 test("Google exchange, restore, rolling renewal, and logout form one complete cookie flow", async () => {
   const old = {
     clientId: process.env.GOOGLE_CLIENT_ID,
