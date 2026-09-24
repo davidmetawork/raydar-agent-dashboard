@@ -233,6 +233,65 @@ async function trpcPostWithMetaRaw(proc, json, values = {}, tries = 3) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- health ----------
+// C1 (2026-09-24 Paraform reduction pass): seq-health and inbox-health (and
+// enrich-health, which re-exports the same function) are three separate
+// catalog rows that all call this exact function on the same 2-minute tick —
+// every unpaused tick used to read campaigns.getListOfCampaignsOptimized up
+// to three times for no reason. Same cache-with-TTL shape as
+// api/health/mailboxes.mjs's CACHE_FRESH_MS, owned by this module's own KV
+// key (seq:* namespace) rather than reaching into health's hlth:* one, so a
+// dedupe here can never race with the health tick's own writes. TTL sits
+// under the 2-min tick interval so a cached read is never older than one
+// tick, and only a successful read is cached — an error should not paper
+// over a second caller's chance at a fresh read within the window.
+const PARAFORM_HEALTH_CACHE_KEY = "seq:v1:paraform-health:cache";
+const PARAFORM_HEALTH_CACHE_FRESH_MS = 90 * 1000;
+const PARAFORM_HEALTH_CACHE_TTL_SECONDS = 300;
+
+async function paraformHealthKvCommand(command) {
+  const baseUrl = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
+  const token = String(process.env.KV_REST_API_TOKEN || "");
+  if (!baseUrl || !token) return null;
+  const r = await fetch(baseUrl, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(command),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!r.ok) throw new Error(`kv ${r.status}`);
+  const body = await r.json().catch(() => null);
+  return body?.result ?? null;
+}
+
+async function readParaformHealthCache() {
+  try {
+    const raw = await paraformHealthKvCommand(["GET", PARAFORM_HEALTH_CACHE_KEY]);
+    if (raw == null) return null;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== "object" || !parsed.fetchedAt || !parsed.result) return null;
+    const age = Date.now() - Date.parse(parsed.fetchedAt);
+    if (!(age >= 0) || age >= PARAFORM_HEALTH_CACHE_FRESH_MS) return null;
+    return parsed.result;
+  } catch {
+    return null;
+  }
+}
+
+async function writeParaformHealthCache(result) {
+  try {
+    await paraformHealthKvCommand([
+      "SET",
+      PARAFORM_HEALTH_CACHE_KEY,
+      JSON.stringify({ fetchedAt: new Date().toISOString(), result }),
+      "EX",
+      String(PARAFORM_HEALTH_CACHE_TTL_SECONDS),
+    ]);
+  } catch {
+    // A cache-write failure only costs the next caller within the window a
+    // fresh read of its own — never a reason to fail the current one.
+  }
+}
+
 export async function paraformHealth({
   pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
 } = {}) {
@@ -246,9 +305,15 @@ export async function paraformHealth({
     };
   }
   if (!hasCookie()) return { paraform: "no_cookie" };
+
+  const cached = await readParaformHealthCache();
+  if (cached) return cached;
+
   try {
     const seqs = await trpcGet("campaigns.getListOfCampaignsOptimized", {});
-    return { paraform: "live", sequenceCount: Array.isArray(seqs) ? seqs.length : 0 };
+    const result = { paraform: "live", sequenceCount: Array.isArray(seqs) ? seqs.length : 0 };
+    await writeParaformHealthCache(result);
+    return result;
   } catch (e) {
     return { paraform: e.code === "AUTH_EXPIRED" ? "expired" : "error", detail: String(e.message || e).slice(0, 120) };
   }
