@@ -58,6 +58,15 @@ export default async function handler(req, res) {
 
     // Actionable alert only — a protected sequence that was live/sending is a
     // process failure the team should know about; a fully-contained state is silent.
+    // NOTE (notify-channel restart audit, 2026-09-24): unlike n8n-watchdog.mjs
+    // this call has NO rate-limiting (no shouldAlert/takeAlertSlot) — it can
+    // re-fire on every cron tick while a protected sequence still has unpaused
+    // leads. It also resolves through notifySlack()'s SLACK_CHANNEL_ID_ALERTS
+    // fallback, the same shared channel n8n-watchdog.mjs uses — there is no
+    // SURGE-only gate anywhere in this repo. Do not assume this is safe to
+    // carry into #notify if SLACK_CHANNEL_ID_ALERTS is ever repointed there;
+    // see docs-site/src/content/docs/reference/notify-channel-restart.md in
+    // the raydar repo for the open decision.
     if (apply && actions.length) {
       const lines = actions.map((a) => `• ${a.name} — ${a.recruiter} (${a.disabled ? "disabled" : "already off"}, paused ${a.pausedLeads}/${a.totalLeads})`);
       await notifySlack(`🛑 Protected-recruiter guardian stopped ${actions.length} sequence(s):\n${lines.join("\n")}`).catch(() => {});
