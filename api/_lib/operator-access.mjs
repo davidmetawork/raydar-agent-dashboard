@@ -94,8 +94,6 @@ export const operatorAccessInternals = { emails, mutationOrigins };
 
 export async function requireOperator(req, res, capability) {
   if (!(await requireAuth(req, res))) return null;
-  // requireAuth intentionally supports an open pre-auth bootstrap mode for old
-  // surfaces. These PII/action proxies are newer and always fail closed.
   if (!req.authedEmail) {
     res.status(503).json({ ok: false, error: "operator_auth_not_configured" });
     return null;
