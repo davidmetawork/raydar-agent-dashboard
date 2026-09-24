@@ -123,6 +123,14 @@ export default async function handler(req, res) {
       if (!streaks.some((s) => s.workflowId === id)) delete alerted[id];
     }
 
+    // NOTE (notify-channel restart audit, 2026-09-24): shouldAlert() here is a
+    // takeAlertSlot-equivalent dedupe (SET NX EX under a different name in
+    // api/seq/_lib/booking-stop.mjs) — this alert IS rate-limited, unlike
+    // guardian.mjs's "stopped N sequence(s)" alert. It still resolves through
+    // notifySlack()'s SLACK_CHANNEL_ID_ALERTS fallback, not a separate
+    // channel, and there is no SURGE-only gate anywhere in this repo. See
+    // docs-site/src/content/docs/reference/notify-channel-restart.md in the
+    // raydar repo for the open decision on repointing that shared var.
     if (fresh.length && (await shouldAlert("n8n-failures", 3600))) {
       const lines = fresh.map((s) => {
         const nm = names.get(s.workflowId)?.name || s.workflowId;
