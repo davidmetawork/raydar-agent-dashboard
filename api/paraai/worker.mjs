@@ -30,9 +30,6 @@ import {
   PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
 } from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
-import { replyHealth, runReplyTick } from "./_lib/reply.mjs";
-import { expiredHealth, runExpiredTick } from "./_lib/expired.mjs";
-import { interestStatus, runInterestTick } from "./_lib/interest.mjs";
 import {
   runPhase4SourceCaptureTick,
 } from "./_lib/source-capture-coordinator.mjs";
@@ -525,9 +522,6 @@ export async function handleParaaiWorker(req, res, {
         config: automationConfig(),
         queue: await getAutoQueueStats(),
         outreach: await outreachHealth(),
-        reply: await replyHealth(),
-        expired: await expiredHealth(),
-        interest: await interestStatus(),
       });
     }
     if (mode === "enqueue") {
@@ -795,65 +789,15 @@ export async function handleParaaiWorker(req, res, {
         message: (code) => `🚨 Para AI outreach worker failed (${code}). Direct-submit queue processing continued.`,
       });
     }
-    // Reply actioning runs after outreach and is isolated the same way: a
-    // classifier or Paraform failure here must never stop direct submission.
-    let reply = null;
-    let replyError = null;
-    try {
-      reply = await runReplyTick();
-    } catch (error) {
-      replyError = {
-        error: String(error?.code || "reply_failed"),
-        detail: String(error?.message || error).slice(0, 180),
-      };
-      await alertWorkerFailure(error, {
-        lane: "paraai_reply",
-        slot: "reply-worker-failed",
-        message: (code) => `🚨 Para AI reply actioning failed (${code}). Direct-submit and outreach processing continued.`,
-      });
-    }
-    // ORDER IS A CONTRACT: expired-match actioning runs AFTER reply actioning,
-    // never before. A candidate can answer on day 6 and the request expire on
-    // day 7, and whichever lane runs first takes the shared per-request claim.
-    // The reply lane must get that classification pass, because a request its
-    // candidate answered has a truthful outcome that "Candidate didn't get
-    // back" would contradict in front of a hiring manager. Isolated the same
-    // way: a Paraform failure here must never stop direct submission.
-    // Covered by test/paraai-expired-worker-order.test.mjs.
-    let expired = null;
-    let expiredError = null;
-    try {
-      expired = await runExpiredTick();
-    } catch (error) {
-      expiredError = {
-        error: String(error?.code || "expired_failed"),
-        detail: String(error?.message || error).slice(0, 180),
-      };
-      await alertWorkerFailure(error, {
-        lane: "paraai_expired",
-        slot: "expired-worker-failed",
-        message: (code) => `🚨 Para AI expired-match actioning failed (${code}). Direct-submit, outreach and reply processing continued.`,
-      });
-    }
-    // Curated-interest detection is the final normal actioning lane. Its own
-    // durable sweep lease self-paces the expensive population read, while each
-    // worker tick can still resume a previously detected submission job.
-    // Failures remain isolated from every established lane.
-    let interest = null;
-    let interestError = null;
-    try {
-      interest = await runInterestTick();
-    } catch (error) {
-      interestError = {
-        error: String(error?.code || "interest_failed"),
-        detail: String(error?.message || error).slice(0, 180),
-      };
-      await alertWorkerFailure(error, {
-        lane: "paraai_interest",
-        slot: "interest-worker-failed",
-        message: (code) => `🚨 Para AI curated-interest worker failed (${code}). Direct-submit, outreach, reply and expired-match processing continued.`,
-      });
-    }
+    // Reply actioning, expired-match actioning and curated-interest detection
+    // were retired from this dispatch loop 2026-09-24 (D06, Paraform
+    // reduction pass): all three write gates had defaulted closed since
+    // launch (never armed), so retiring them changed zero candidate-facing
+    // behavior. Their handlers (reply.mjs, expired.mjs, interest.mjs and
+    // their _lib modules) are untouched and still reachable as standalone
+    // manual routes — only the automatic tick call from this worker loop was
+    // removed. See docs-site products/paraai-{reply,expired}-actioning.md and
+    // paraai-curated-interest.md (status: deprecated).
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -877,9 +821,6 @@ export async function handleParaaiWorker(req, res, {
         recoveryError
         || resumeSweepError
         || outreachError
-        || replyError
-        || expiredError
-        || interestError
         || remainderError
         || remainder?.ok === false
         || resumeOnlyBackfillError
@@ -895,12 +836,6 @@ export async function handleParaaiWorker(req, res, {
       resumeSweepError,
       outreach,
       outreachError,
-      reply,
-      replyError,
-      expired,
-      expiredError,
-      interest,
-      interestError,
       tick,
       remainder,
       remainderError,
