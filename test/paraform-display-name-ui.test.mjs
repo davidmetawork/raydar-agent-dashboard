@@ -70,35 +70,6 @@ function callsEnrichmentHarness({ fetchImpl, setTimeoutImpl = setTimeout, clearT
   return { ctx, labels };
 }
 
-function callPageEnrichmentHarness({ fetchImpl, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout }) {
-  const label = { textContent: "Booking Alias" };
-  const displayNameSource = between(
-    callHtml,
-    "  const displayName = ",
-    ";\n  function toast",
-  );
-  const enrichmentSource = between(
-    callHtml,
-    "  async function enrichDisplayName",
-    "  async function load()",
-  );
-  const ctx = vm.createContext({
-    AbortController,
-    URLSearchParams,
-    fetch: fetchImpl,
-    setTimeout: setTimeoutImpl,
-    clearTimeout: clearTimeoutImpl,
-  });
-  ctx.document = { getElementById: (id) => id === "candidate-name" ? label : null };
-  vm.runInContext(`
-    const displayName = ${displayNameSource};
-    const DISPLAY_NAMES_API = "https://webview-lake.vercel.app/api/paraform-display-names";
-    async function enrichDisplayName${enrichmentSource}
-    globalThis.enrich = enrichDisplayName;
-  `, ctx);
-  return { ctx, label };
-}
-
 test("display identity preserves Paraform's exact non-empty string and falls back safely", () => {
   const ctx = displayHelpers();
   const exact = `  Zoë "Ace" O'Neil & <Lead>  `;
@@ -226,31 +197,18 @@ test("Calls display bridge failure, empty data, and timeout leave the operationa
   assert.equal(timeoutHarness.labels.get("cv-name-1-0").textContent, "Booking Alias");
 });
 
-test("canonical call page renders the Calls alias first and enriches only its visible heading", () => {
+// C7 (2026-09-24 Paraform reduction pass): call.html's DISPLAY_NAMES_API
+// enrichment fetch was the last live remnant of D15 (webview display-name
+// sync, already retired/off since 09-16/17) — the sync job that used to
+// populate that endpoint stopped writing long ago, so this was a dead
+// fetch on every call-detail page open. The heading now renders straight
+// from the operational Calls alias, same as the existing fallback path.
+test("canonical call page renders the Calls alias and makes no display-name enrichment call", () => {
   const load = between(callHtml, "  async function load(){", "  load();");
   assert.match(callHtml, /id="candidate-name">\$\{esc\(displayName\(\{ candidate:c\.fullName \}\)\)\}/);
-  assert.match(callHtml, /DISPLAY_NAMES_API\+"\?"\+params/);
-  assert.match(callHtml, /params\.append\("id",id\)/);
-  assert.match(callHtml, /label\.textContent=displayName\(\{ paraformName:payload\?\.names\?\.\[id\], candidate:operationalName \}\)/);
-  assert.ok(load.indexOf("render(j)") < load.indexOf("void enrichDisplayName(id,j.candidate.fullName)"));
-  assert.doesNotMatch(load, /await enrichDisplayName/);
+  assert.doesNotMatch(callHtml, /DISPLAY_NAMES_API/);
+  assert.doesNotMatch(callHtml, /paraform-display-names/);
+  assert.doesNotMatch(callHtml, /enrichDisplayName/);
   assert.match(load, /CALLS_API \+ "\/api\/call\?bot=" \+ encodeURIComponent\(id\)/);
-});
-
-test("canonical call page preserves its operational heading on bridge failure and applies an exact success", async () => {
-  const responses = [
-    { ok: false, json: async () => ({ error: "unavailable" }) },
-    { ok: true, json: async () => ({ names: {} }) },
-    { ok: true, json: async () => ({ names: { "bot-1": `  Zoë "Ace" O'Neil & <Lead>  ` } }) },
-  ];
-  const { ctx, label } = callPageEnrichmentHarness({
-    fetchImpl: async () => responses.shift(),
-  });
-
-  await ctx.enrich("bot-1", "Booking Alias");
-  assert.equal(label.textContent, "Booking Alias");
-  await ctx.enrich("bot-1", "Booking Alias");
-  assert.equal(label.textContent, "Booking Alias");
-  await ctx.enrich("bot-1", "Booking Alias");
-  assert.equal(label.textContent, `  Zoë "Ace" O'Neil & <Lead>  `);
+  assert.match(load, /render\(j\)/);
 });
