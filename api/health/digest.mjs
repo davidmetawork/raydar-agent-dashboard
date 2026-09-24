@@ -76,7 +76,14 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, skipped: "all_clear" });
   }
   const text = await buildDigest(state, transitionsById);
-  const delivered = process.env.HEALTH_ALERTS_ENABLED === "true" ? await sendSlack(text) : false;
+  // David 2026-09-24: #notify pages only for critical breakage, so the daily
+  // digest no longer shares the alert channel. It posts only when its own
+  // HEALTH_DIGEST_SLACK_CHANNEL is set; unset means no daily post.
+  const digestChannel = process.env.HEALTH_DIGEST_SLACK_CHANNEL || "";
+  if (!digestChannel) {
+    return res.status(200).json({ ok: true, delivered: false, skipped: "digest_channel_unset", preview: text.slice(0, 400) });
+  }
+  const delivered = process.env.HEALTH_ALERTS_ENABLED === "true" ? await sendSlack(text, { channel: digestChannel }) : false;
   await hSet(K.digestSent(new Date().toISOString().slice(0, 10)), { at: new Date().toISOString(), delivered });
   return res.status(200).json({ ok: true, delivered, preview: text.slice(0, 400) });
 }

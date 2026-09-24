@@ -81,3 +81,23 @@ test("no config at all: fails closed, never throws, and records the failure for 
     assert.equal(fetchCalled, false, "an unconfigured pager must not attempt a request at all");
   });
 });
+
+test("an explicit channel override (the daily digest's own channel) beats HEALTH_SLACK_CHANNEL", async () => {
+  await withEnv({ SLACK_BOT_TOKEN: "xoxb-test", HEALTH_SLACK_CHANNEL: "C_NOTIFY" }, async () => {
+    let posted = null;
+    globalThis.fetch = async (url, init) => {
+      posted = { url, body: JSON.parse(init.body) };
+      return { ok: true, json: async () => ({ ok: true }) };
+    };
+    const delivered = await sendSlack("daily digest", { channel: "C_DIGEST" });
+    assert.equal(delivered, true);
+    assert.equal(posted.body.channel, "C_DIGEST");
+  });
+});
+
+test("the daily digest never posts into the alert channel when HEALTH_DIGEST_SLACK_CHANNEL is unset", async () => {
+  const src = await import("node:fs").then((fs) => fs.readFileSync(new URL("../api/health/digest.mjs", import.meta.url), "utf8"));
+  assert.match(src, /HEALTH_DIGEST_SLACK_CHANNEL/);
+  assert.match(src, /skipped: "digest_channel_unset"/);
+  assert.match(src, /sendSlack\(text, \{ channel: digestChannel \}\)/);
+});

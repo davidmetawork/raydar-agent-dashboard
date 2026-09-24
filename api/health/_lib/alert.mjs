@@ -14,9 +14,11 @@ import { hGet, hSet, hSetNx, K } from "./kv.mjs";
 
 const RE_PAGE_SECONDS = 60 * 60;
 
-export async function sendSlack(text) {
+// `channel` overrides the alert channel (the daily digest passes its own, so
+// routine summaries never land in the critical-only #notify channel).
+export async function sendSlack(text, { channel: channelOverride = "" } = {}) {
   const token = process.env.SLACK_BOT_TOKEN || "";
-  const channel = process.env.HEALTH_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS || "";
+  const channel = channelOverride || process.env.HEALTH_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS || "";
   const webhook = process.env.SLACK_WEBHOOK_URL || "";
   if (!webhook && !(token && channel)) {
     console.error("health_alert_undeliverable", { reason: "no slack config" });
