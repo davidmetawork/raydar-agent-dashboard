@@ -185,10 +185,6 @@
       "schedule": "7 * * * *"
     },
     {
-      "path": "/api/submissions/refresh",
-      "schedule": "3,18,33,48 * * * *"
-    },
-    {
       "path": "/api/health/tick",
       "schedule": "*/2 * * * *"
     },
@@ -206,11 +202,11 @@
     },
     {
       "path": "/api/activity/feed",
-      "schedule": "4,14,24,34,44,54 * * * *"
+      "schedule": "4 * * * *"
     },
     {
       "path": "/api/revenue/refresh",
-      "schedule": "*/5 * * * *"
+      "schedule": "9 * * * *"
     },
     {
       "path": "/api/health/gmail-quota",

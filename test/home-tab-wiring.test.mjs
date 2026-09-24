@@ -83,7 +83,11 @@ test("Submissions is wired through all five dashboard registries", () => {
   assert.match(index, /\{name:"submissions",label:"Submissions",group:"People"\}/);
   assert.ok(vercel.rewrites.some((row) => row.source === "/submissions" && row.destination === "/submissions.html"));
   assert.ok(vercel.functions["api/submissions/*.mjs"]);
-  assert.ok(vercel.crons.some((row) => row.path === "/api/submissions/refresh" && row.schedule === "3,18,33,48 * * * *"));
+  // D12 (2026-09-24 Paraform reduction pass): the background cron is retired
+  // — V1 stays a dormant manual backup, so handleSubmissionsRefresh itself
+  // still supports a human-triggered POST (requireHuman branch, exercised in
+  // dashboard-reader-pause.test.mjs), but nothing schedules it automatically.
+  assert.ok(!vercel.crons.some((row) => row.path === "/api/submissions/refresh"));
 });
 
 test("Submissions is team-gated, cache-rendered, and never auto-submits from the page", () => {
@@ -102,7 +106,10 @@ test("Submissions is team-gated, cache-rendered, and never auto-submits from the
 test("the activity warmer cron is registered so the page never waits on Paraform", () => {
   const cron = vercel.crons.find((c) => c.path === "/api/revenue/refresh");
   assert.ok(cron, "missing the revenue refresh cron");
-  assert.equal(cron.schedule, "*/5 * * * *");
+  // C4 (2026-09-24 Paraform reduction pass): slowed from every 5 min to
+  // hourly, now gated behind the same dashboardReaders pause as every other
+  // D11 reader; summary.mjs's own 15-min stale-cache fallback covers the gap.
+  assert.equal(cron.schedule, "9 * * * *");
 });
 
 test("home.html renders inside the shell iframe and behind the Google gate", () => {
