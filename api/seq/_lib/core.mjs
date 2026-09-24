@@ -247,6 +247,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PARAFORM_HEALTH_CACHE_KEY = "seq:v1:paraform-health:cache";
 const PARAFORM_HEALTH_CACHE_FRESH_MS = 90 * 1000;
 const PARAFORM_HEALTH_CACHE_TTL_SECONDS = 300;
+// C1 follow-up (2026-09-24 review): seq-health, inbox-health and
+// enrich-health are three SEPARATE serverless invocations (each its own
+// fetch to monitor.raydar.xyz, api/health/_lib/engine.mjs:155-157,
+// Promise.allSettled with no stagger) — a cache miss alone does not mean
+// this caller should be the one to hit Paraform live, because all three can
+// miss the KV cache in the same instant, before any of them has written a
+// fresh entry. This lock makes only the first miss do the live read; the
+// rest wait briefly for its write and reuse it instead of each issuing
+// their own live Paraform call.
+const PARAFORM_HEALTH_LOCK_KEY = "seq:v1:paraform-health:lock";
+const PARAFORM_HEALTH_LOCK_TTL_SECONDS = 30;
+const PARAFORM_HEALTH_LOCK_WAIT_ATTEMPTS = 4;
+const PARAFORM_HEALTH_LOCK_WAIT_MS = 250;
 
 async function paraformHealthKvCommand(command) {
   const baseUrl = String(process.env.KV_REST_API_URL || "").replace(/\/+$/, "");
@@ -292,6 +305,26 @@ async function writeParaformHealthCache(result) {
   }
 }
 
+// Returns a truthy token when this caller won the right to do the live read.
+// Any failure to coordinate (KV unreachable, contended and no NX support)
+// fails OPEN — the caller falls straight through to its own live read rather
+// than ever risk blocking a health probe on lock plumbing.
+async function acquireParaformHealthLock() {
+  try {
+    const raw = await paraformHealthKvCommand([
+      "SET",
+      PARAFORM_HEALTH_LOCK_KEY,
+      String(Date.now()),
+      "NX",
+      "EX",
+      String(PARAFORM_HEALTH_LOCK_TTL_SECONDS),
+    ]);
+    return raw === "OK" ? true : null;
+  } catch {
+    return "unlockable";
+  }
+}
+
 export async function paraformHealth({
   pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
 } = {}) {
@@ -308,6 +341,19 @@ export async function paraformHealth({
 
   const cached = await readParaformHealthCache();
   if (cached) return cached;
+
+  const wonLock = await acquireParaformHealthLock();
+  if (!wonLock) {
+    // Someone else is already fetching live for this window — wait briefly
+    // for their write instead of piling on a second (or third) live call.
+    for (let attempt = 0; attempt < PARAFORM_HEALTH_LOCK_WAIT_ATTEMPTS; attempt++) {
+      await sleep(PARAFORM_HEALTH_LOCK_WAIT_MS);
+      const waited = await readParaformHealthCache();
+      if (waited) return waited;
+    }
+    // The lock holder never wrote in time (slow/failed live call) — fall
+    // back to a live read of our own rather than block indefinitely.
+  }
 
   try {
     const seqs = await trpcGet("campaigns.getListOfCampaignsOptimized", {});

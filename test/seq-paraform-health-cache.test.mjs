@@ -11,7 +11,7 @@ import { paraformHealth } from "../api/seq/_lib/core.mjs";
 
 const KV_URL = "https://control.example.test";
 
-function fakeParaform() {
+function fakeParaform({ paraformDelayMs = 0 } = {}) {
   const store = new Map();
   let paraformCalls = 0;
   const fetchImpl = async (url, init) => {
@@ -23,12 +23,18 @@ function fakeParaform() {
         return { ok: true, json: async () => ({ result: store.has(key) ? store.get(key) : null }) };
       }
       if (op === "SET") {
-        store.set(key, command[2]);
+        const value = command[2];
+        const opts = command.slice(3);
+        if (opts.includes("NX") && store.has(key)) {
+          return { ok: true, json: async () => ({ result: null }) };
+        }
+        store.set(key, value);
         return { ok: true, json: async () => ({ result: "OK" }) };
       }
       return { ok: true, json: async () => ({ result: null }) };
     }
     paraformCalls += 1;
+    if (paraformDelayMs) await new Promise((r) => setTimeout(r, paraformDelayMs));
     return {
       status: 200,
       json: async () => ({
@@ -71,6 +77,36 @@ test("two paraformHealth calls in the same window share one live Paraform read",
       assert.equal(first.sequenceCount, 3);
       assert.deepEqual(second, first);
       assert.equal(calls(), 1, "the second call must be served from cache, not a fresh trpc read");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("concurrent paraformHealth calls (the real seq/inbox/enrich fan-out) share one live Paraform read", async () => {
+  // seq-health, inbox-health and enrich-health are three separate
+  // serverless invocations fired by the same 2-minute tick
+  // (api/health/_lib/engine.mjs, Promise.allSettled with no stagger) — they
+  // can all miss the KV cache in the same instant. Sequential awaits (as in
+  // the test above) never exercise that race; Promise.all here does.
+  await withEnv({
+    KV_REST_API_URL: KV_URL,
+    KV_REST_API_TOKEN: "test-token",
+    PARAFORM_SESSION_COOKIE: "test-cookie",
+  }, async () => {
+    const { fetchImpl, calls } = fakeParaform({ paraformDelayMs: 20 });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      const [a, b, c] = await Promise.all([
+        paraformHealth({ pauseState: notPaused }),
+        paraformHealth({ pauseState: notPaused }),
+        paraformHealth({ pauseState: notPaused }),
+      ]);
+      assert.equal(a.paraform, "live");
+      assert.deepEqual(b, a);
+      assert.deepEqual(c, a);
+      assert.equal(calls(), 1, "three concurrent misses must produce exactly one live Paraform read");
     } finally {
       globalThis.fetch = originalFetch;
     }

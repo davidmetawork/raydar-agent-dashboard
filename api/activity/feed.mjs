@@ -41,7 +41,7 @@ export async function handleActivityFeed(req, res, {
   const isCron = cronAuth(req).ok;
   if (!isCron && !(await requireAuth(req, res))) return;
 
-  // A cron hit is always a rebuild (the 10-minute warmer); humans get the
+  // A cron hit is always a rebuild (the hourly warmer, see vercel.json); humans get the
   // durable cache instantly with a staleness flag and refresh in background.
   const force = isCron || String(req.query?.refresh || "") === "1";
   try {
