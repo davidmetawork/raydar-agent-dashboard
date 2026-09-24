@@ -211,11 +211,23 @@ const PHOTO_URL_PREFIXES = [
 // host ("https://storage.googleapis.com/paraform-images.example.com/x") can
 // never satisfy it. Query strings and fragments are refused outright: every
 // signed, expiring URL we have measured carries one.
+//
+// The link must also already be in the canonical form the browser will
+// request. startsWith reads the raw string, but <img src> resolves the path
+// first, so ".../paraform-images/../another-bucket/x.jpg" (or %2e%2e, or a
+// backslash) loads from a different public bucket on the same host. The same
+// rule as applicant-core/lib/candidate-photos.mjs in the Raydar repo. MEASURED
+// 2026-09-24: all 1,141 Workable and 719 Paraform links in use are canonical.
 export function allowedPhotoUrl(value) {
   const url = typeof value === "string" ? value.trim() : "";
   if (!url || url.length > 512 || !url.startsWith("https://")) return null;
   if (url.includes("?") || url.includes("#")) return null;
-  return PHOTO_URL_PREFIXES.some((prefix) => url.startsWith(prefix)) ? url : null;
+  if (!PHOTO_URL_PREFIXES.some((prefix) => url.startsWith(prefix))) return null;
+  try {
+    return new URL(url).href === url ? url : null;
+  } catch {
+    return null;
+  }
 }
 
 function own(value, key) {

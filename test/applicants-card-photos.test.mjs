@@ -75,6 +75,37 @@ test("the photo allowlist admits exactly two hosts and refuses every measured al
   }
 });
 
+test("a link whose path leaves the allowlisted folder once the browser resolves it is refused", () => {
+  // startsWith reads the raw string; <img src> resolves the path first. Each
+  // of these starts with an allowlisted prefix yet loads from somewhere else,
+  // typically another public bucket on the same host.
+  const escapes = [
+    "https://storage.googleapis.com/paraform-images/../attacker-bucket/x.jpg",
+    "https://storage.googleapis.com/paraform-images/%2e%2e/attacker-bucket/x.jpg",
+    "https://storage.googleapis.com/paraform-images/%2E%2E/attacker-bucket/x.jpg",
+    "https://storage.googleapis.com/paraform-images/.%2e/attacker-bucket/x.jpg",
+    "https://storage.googleapis.com/paraform-images/..\\attacker-bucket/x.jpg",
+    "https://storage.googleapis.com/paraform-images/a/../../attacker-bucket/x.jpg",
+    "https://dvz3vrza543jw.cloudfront.net/uploads/../private/x.jpg",
+    "https://dvz3vrza543jw.cloudfront.net/uploads/./a.jpg",
+  ];
+  for (const escape of escapes) {
+    assert.notEqual(new URL(escape).href, escape, `fixture really is rewritten: ${escape}`);
+    assert.equal(allowedPhotoUrl(escape), null, escape);
+    assert.equal(cardFromProfile({ imageSrc: escape }).photo, null, escape);
+  }
+  const result = normalizeProfiles({
+    abcdef1234: { name: "A", imageSrc: PARAFORM },
+    bcdefa2345: { name: "B", imageSrc: escapes[1] },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.photos, { abcdef1234: PARAFORM });
+  // Canonical links still pass, and a dotted filename is not a path step.
+  assert.equal(allowedPhotoUrl(` ${WORKABLE} `), WORKABLE);
+  const dotted = "https://storage.googleapis.com/paraform-images/a.../b..jpg";
+  assert.equal(allowedPhotoUrl(dotted), dotted);
+});
+
 test("a card takes its photo from either host, and an over-long URL is refused not truncated", () => {
   assert.equal(cardFromProfile({ imageSrc: PARAFORM }).photo, PARAFORM);
   assert.equal(cardFromProfile({ imageSrc: WORKABLE }).photo, WORKABLE);
