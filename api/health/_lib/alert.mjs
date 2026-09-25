@@ -17,14 +17,21 @@ const RE_PAGE_SECONDS = 60 * 60;
 
 // `channel` overrides the alert channel (the daily digest passes its own, so
 // routine summaries never land in the critical-only #notify channel).
-// `botTokenFirst` (the #notify switch, 2026-09-25): when a bot token and a
-// channel are both present, post by token to that channel even if
-// SLACK_WEBHOOK_URL is set. A webhook's channel is fixed by the webhook, so
-// without this an override would silently land wherever the webhook points.
+// `botTokenFirst` (the #notify switch, 2026-09-25): post by bot token to that
+// channel even if SLACK_WEBHOOK_URL is set, and NEVER fall back to the
+// webhook. A webhook's channel is fixed by the webhook, so a fallback would
+// silently land #notify pages wherever the webhook points; with no token (or
+// no channel) the send fails and is recorded undeliverable instead, which the
+// slack-transport tile shows and pageNotify's slot release retries.
 export async function sendSlack(text, { channel: channelOverride = "", botTokenFirst = false } = {}) {
   const token = process.env.SLACK_BOT_TOKEN || "";
   const channel = channelOverride || process.env.HEALTH_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS || "";
-  const webhook = botTokenFirst && token && channel ? "" : process.env.SLACK_WEBHOOK_URL || "";
+  if (botTokenFirst && !(token && channel)) {
+    console.error("health_alert_undeliverable", { reason: token ? "no channel for bot-token send" : "SLACK_BOT_TOKEN unset" });
+    await hSet(K.lastDelivered, { at: new Date().toISOString(), failed: true, reason: "no_bot_token" }).catch(() => {});
+    return false;
+  }
+  const webhook = botTokenFirst ? "" : process.env.SLACK_WEBHOOK_URL || "";
   if (!webhook && !(token && channel)) {
     console.error("health_alert_undeliverable", { reason: "no slack config" });
     await hSet(K.lastDelivered, { at: new Date().toISOString(), failed: true, reason: "unconfigured" });

@@ -848,3 +848,91 @@ test("#notify switch on: a WRITE-layer 401 still pages #notify once (the tile ca
   assert.equal(pages.length, 1, "no daily reminder in #notify");
   assert.deepEqual(notify.messages, [], "the legacy channel is untouched");
 });
+
+// PR 230 review round 2: with the switch on, the write-layer page is the
+// ONLY post (reminders are silent), so a failed send must be retried.
+const writeDownProbe = async () => ({
+  healthy: false,
+  reason: "write_auth_expired",
+  evidence: { code: "AUTH_EXPIRED", mode: "write", lane: "paraai_outreach", stage: "digest_mutation" },
+});
+
+// A pageNotify stand-in with its real slot semantics: a held key answers
+// ok:true skipped:"duplicate", and a failed send releases the key.
+function pageRecorder() {
+  const slots = new Set();
+  const pages = [];
+  let ok = true;
+  const pageImpl = async (text, { key } = {}) => {
+    if (key && slots.has(key)) return { ok: true, via: "notify", skipped: "duplicate", key };
+    if (key) slots.add(key);
+    if (!ok) {
+      if (key) slots.delete(key);
+      return { ok: false, via: "notify", key };
+    }
+    pages.push({ text, key });
+    return { ok: true, via: "notify", key };
+  };
+  return { pageImpl, pages, slots, setOk: (value) => { ok = value; } };
+}
+
+test("#notify switch on: a WRITE-layer page that fails to send is retried on the next tick, then stops", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  page.setOk(false);
+  const opened = await runAuthProbeTick({ now: NOW }, deps);
+  assert.equal(opened.opened, true);
+  assert.equal(opened.alertDelivered, false);
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, false);
+  const stillFailing = await runAuthProbeTick({ now: NOW + 5 * 60_000 }, deps);
+  assert.equal(stillFailing.alertRetried, true);
+  assert.equal(stillFailing.alertDelivered, false);
+  page.setOk(true);
+  const retried = await runAuthProbeTick({ now: NOW + 10 * 60_000 }, deps);
+  assert.equal(retried.alertRetried, true);
+  assert.equal(retried.alertDelivered, true);
+  assert.equal(page.pages.length, 1);
+  assert.match(page.pages[0].text, /mutation returned 401/);
+  const flag = JSON.parse(kv.store.get(AUTH_FLAG_KEY));
+  assert.equal(flag.alert.delivered, true);
+  assert.equal(flag.alert.via, "notify");
+  const later = await runAuthProbeTick({ now: NOW + 26 * 3600_000 }, deps);
+  assert.equal(later.alertRetried, undefined, "delivered: no more sends");
+  assert.equal(page.pages.length, 1, "one post per episode");
+  assert.deepEqual(notify.messages, [], "the legacy channel is untouched");
+});
+
+test("#notify switch flipped mid-episode: a write-layer outage posted to the legacy channel reaches #notify once", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const off = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => false, pageImpl: page.pageImpl };
+  const opened = await runAuthProbeTick({ now: NOW }, off);
+  assert.equal(opened.alertDelivered, true);
+  assert.equal(notify.messages.length, 1, "switch off: the legacy post, as before");
+  assert.equal(page.pages.length, 0);
+  const on = { ...off, healthOwnsSession: () => true };
+  const flipped = await runAuthProbeTick({ now: NOW + 3600_000 }, on);
+  assert.equal(flipped.alertRetried, true);
+  assert.equal(page.pages.length, 1);
+  await runAuthProbeTick({ now: NOW + 2 * 3600_000 }, on);
+  assert.equal(page.pages.length, 1, "once, not every tick");
+});
+
+test("#notify switch on: a READ-layer episode never takes the write-layer retry (the tile owns it)", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const deps = { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  await runAuthProbeTick({ now: NOW }, deps);
+  const opened = await runAuthProbeTick({ now: NOW + CONFIRMATION_MS }, deps);
+  assert.equal(opened.opened, true);
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.layer, "read");
+  // A mutation 401 later joins the same (read-layer) episode.
+  const joined = await runAuthProbeTick({ now: NOW + CONFIRMATION_MS + 600_000 }, { ...deps, probeImpl: writeDownProbe });
+  assert.equal(joined.alertRetried, undefined);
+  assert.equal(page.pages.length, 0);
+  assert.deepEqual(notify.messages, []);
+});

@@ -78,6 +78,10 @@ const n8nWatchdog = (await import("../api/ops/n8n-watchdog.mjs")).default;
 const { warnOnCronRejection } = await import("../api/seq/guardian.mjs");
 const { sendSlack, alertOnTransitions } = await import("../api/health/_lib/alert.mjs");
 const { paraformSession } = await import("../api/health/_lib/evaluators.mjs");
+const { handleSequenceHealth, SEQ_HEALTH_LIVE_READ_BUDGET_MS } = await import("../api/seq/health.mjs");
+const { SESSION_WITNESS_KEY } = await import("../api/health/_lib/engine.mjs");
+const { CATALOG } = await import("../api/health/_lib/catalog.mjs");
+const { readFileSync } = await import("node:fs");
 const { pageNotify, systemHealthOwns } = await import("../api/_lib/notify.mjs");
 const { pageOutreachFailure } = await import("../api/paraai/_lib/outreach.mjs");
 
@@ -322,4 +326,108 @@ test("outreach switch off: a failed post releases the 6h slot so the next failur
   assert.equal(held.size, 0, "slot released");
   deps.page = async () => ({ ok: true });
   assert.equal((await pageOutreachFailure("GMAIL_AUTH_FAILED", deps)).paged, true);
+});
+
+
+// ── PR 230 review round 2: a dead cookie must page even when the health
+//    probes that carry the witness time out ──────────────────────────────────
+
+const ON = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" };
+const WITNESS_AT = "2026-09-25T01:00:00.000Z";
+const never = () => new Promise(() => {}); // a live read stuck on the throttle ladder
+const healthReq = () => ({ method: "GET", url: "/api/seq/health", headers: {} });
+
+test("the health engine reads the sweep's witness key itself and hands it to the tile", () => {
+  assert.equal(SESSION_WITNESS_KEY, K.sessionExpiredWitness);
+  const engineSource = readFileSync(new URL("../api/health/_lib/engine.mjs", import.meta.url), "utf8");
+  assert.match(engineSource, /hGet\(SESSION_WITNESS_KEY\)/);
+  assert.match(engineSource, /gmailBackoffUntil, sessionWitness,/);
+});
+
+test("tile: both health probes timed out (raw null) + the KV witness -> DOWN once the switch is on", () => {
+  const blind = { "seq-guardian": { raw: null }, "paraai-lane": { raw: null } };
+  const v = paraformSession({ results: blind, sessionWitness: { at: WITNESS_AT }, env: ON });
+  assert.equal(v.state, "DOWN");
+  assert.match(v.reason, /confirmed by the booking sweep/);
+  assert.equal(paraformSession({ results: blind, sessionWitness: { at: WITNESS_AT }, env: {} }).state, "UNKNOWN", "switch off: unchanged");
+  assert.equal(paraformSession({ results: blind, sessionWitness: null, env: ON }).state, "UNKNOWN");
+});
+
+test("tile: a live seq read made AFTER the witness wins (recapture, then a non-auth sweep failure)", () => {
+  const live = (checkedAt) => ({
+    "seq-guardian": { raw: { cookieSet: true, paraform: "live", checkedAt, bookingStop: { sessionExpiredConfirmedAt: WITNESS_AT } } },
+    "paraai-lane": { raw: { paraform: "live" } },
+  });
+  assert.equal(paraformSession({ results: live("2026-09-25T02:00:00.000Z"), sessionWitness: { at: WITNESS_AT }, env: ON }).state, "OK");
+  assert.equal(
+    paraformSession({ results: live("2026-09-25T00:59:00.000Z"), sessionWitness: { at: WITNESS_AT }, env: ON }).state,
+    "DOWN",
+    "a cached live read older than the witness proves nothing",
+  );
+});
+
+test("seq health answers inside the probe timeout while the live read is stuck, and reports the witness", async () => {
+  const seqProbe = CATALOG.find((c) => c.id === "seq-guardian").probe;
+  assert.ok(SEQ_HEALTH_LIVE_READ_BUDGET_MS < seqProbe.timeoutMs - 2000, "the cap leaves room for the KV reads and the network");
+  reset();
+  switchOn();
+  store.set(K.sessionExpiredWitness, JSON.stringify({ at: WITNESS_AT }));
+  const res = fakeRes();
+  const t0 = Date.now();
+  await handleSequenceHealth(healthReq(), res, { healthReader: never, liveReadBudgetMs: 80 });
+  assert.ok(Date.now() - t0 < 1000, `answered in ${Date.now() - t0} ms`);
+  assert.equal(res.body.paraform, "expired");
+  assert.equal(res.body.liveRead, "timeout");
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.bookingStop.sessionExpiredConfirmedAt, WITNESS_AT);
+  assert.equal(paraformSession({ results: { "seq-guardian": { raw: res.body } }, env: ON }).state, "DOWN");
+
+  switchOff();
+  const off = fakeRes();
+  await handleSequenceHealth(healthReq(), off, { healthReader: never, liveReadBudgetMs: 80 });
+  assert.equal(off.body.paraform, "timeout", "switch off: the witness does not rewrite the answer");
+  assert.equal(store.has(K.sessionExpiredWitness), true, "a timeout never clears the witness");
+});
+
+test("seq health: a live read made after the witness clears it; an older cached one does not", async () => {
+  reset();
+  switchOn();
+  store.set(K.sessionExpiredWitness, JSON.stringify({ at: WITNESS_AT }));
+  const stale = fakeRes();
+  await handleSequenceHealth(healthReq(), stale, {
+    healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: "2026-09-25T00:59:00.000Z" }),
+  });
+  assert.equal(stale.body.paraform, "expired");
+  assert.equal(store.has(K.sessionExpiredWitness), true);
+
+  const fresh = fakeRes();
+  await handleSequenceHealth(healthReq(), fresh, {
+    healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: "2026-09-25T02:00:00.000Z" }),
+  });
+  assert.equal(fresh.body.paraform, "live");
+  assert.equal(fresh.body.ok, true);
+  assert.equal(fresh.body.bookingStop.sessionExpiredConfirmedAt, null);
+  assert.equal(store.has(K.sessionExpiredWitness), false, "witness cleared: the stale page is the sweep's again");
+});
+
+test("sendSlack botTokenFirst without SLACK_BOT_TOKEN fails closed: it never falls back to the webhook", async () => {
+  reset();
+  const savedToken = process.env.SLACK_BOT_TOKEN;
+  delete process.env.SLACK_BOT_TOKEN;
+  process.env.SLACK_WEBHOOK_URL = "https://hooks.slack.test.invalid/x";
+  const seen = [];
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (input, init) => { seen.push(String(input?.url || input)); return inner(input, init); };
+  try {
+    assert.equal(await sendSlack("page", { channel: "C_NOTIFY", botTokenFirst: true }), false);
+    assert.equal(seen.some((u) => u.startsWith("https://hooks.slack")), false, "no webhook call");
+    assert.deepEqual(posts, []);
+    const receipt = JSON.parse(store.get("hlth:alert:lastDelivered") ?? "null");
+    assert.equal(receipt?.failed, true, "the failure is recorded for the slack-transport tile");
+    assert.equal(receipt?.reason, "no_bot_token");
+  } finally {
+    globalThis.fetch = inner;
+    process.env.SLACK_BOT_TOKEN = savedToken;
+    delete process.env.SLACK_WEBHOOK_URL;
+  }
 });

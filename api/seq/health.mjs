@@ -3,9 +3,11 @@ import { timingSafeEqual } from "node:crypto";
 import { cors, hasCookie, paraformHealth } from "./_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import {
+  clearSessionExpiredWitness,
   raydarWebhookProofStatus,
   sweepStaleness,
 } from "./_lib/booking-stop.mjs";
+import { notifySwitchOn } from "../_lib/notify-switch.mjs";
 import { parseBookingStopColdExclusions } from "./_lib/booking-stop-policy.mjs";
 import {
   raydarSchedulerBookingStopEnabled,
@@ -88,8 +90,71 @@ export function authenticatedSchedulerHealthFields(
   };
 }
 
-async function handleSequenceHealth(req, res) {
+// System Health probes this endpoint with a 12 s timeout (seq-guardian in
+// api/health/_lib/catalog.mjs). On a dead cookie paraformHealth() rides the
+// full throttle ladder plus serial expiry probes (measured 42.5 s against a
+// 401 stub, 2026-09-25 review), so the probe timed out, the engine recorded
+// raw:null, and the paraform-session tile could not see the booking sweep's
+// expiry witness in this payload. The live read now starts first, overlaps
+// the KV reads, and is capped under the probe timeout; past the cap the
+// response says paraform:"timeout" (not live, never a verdict of expired).
+export const SEQ_HEALTH_LIVE_READ_BUDGET_MS = 9000;
+
+function cappedLiveRead(read, budgetMs) {
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({
+      paraform: "timeout",
+      detail: `live Paraform read took longer than ${Math.round(budgetMs / 1000)}s`,
+    }), budgetMs);
+    timer.unref?.();
+  });
+  const live = Promise.resolve()
+    .then(() => read())
+    .catch((e) => ({ paraform: "error", detail: String(e?.message || e).slice(0, 160) }));
+  return Promise.race([live, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The sweep's confirmed-expiry witness against this tick's live read.
+ *  - A live read made AFTER the witness proves the session is back (a
+ *    recapture whose next sweeps failed for a non-auth reason used to leave
+ *    the witness up for its whole 6 h TTL): clear it, report no witness.
+ *  - Otherwise, with the #notify switch on, the witness is the answer:
+ *    paraform:"expired" whatever the capped live read said (it is slow,
+ *    paused, or a cached read older than the witness). Switch off: the
+ *    live read is reported as before.
+ */
+async function reconcileWitness(h, bookingStop, { clearWitness, switchOn }) {
+  const witnessAt = bookingStop?.sessionExpiredConfirmedAt;
+  const witnessMs = Date.parse(String(witnessAt || ""));
+  if (!Number.isFinite(witnessMs)) return h;
+  const checkedMs = Date.parse(String(h?.checkedAt || ""));
+  if (h?.paraform === "live" && Number.isFinite(checkedMs) && checkedMs > witnessMs) {
+    await Promise.resolve().then(() => clearWitness()).catch(() => {});
+    bookingStop.sessionExpiredConfirmedAt = null;
+    return h;
+  }
+  if (!switchOn) return h;
+  return {
+    ...h,
+    paraform: "expired",
+    expiredSource: "booking-sweep-witness",
+    liveRead: h?.paraform ?? null,
+  };
+}
+
+export async function handleSequenceHealth(req, res, {
+  healthReader = paraformHealth,
+  staleness = sweepStaleness,
+  webhookProof = raydarWebhookProofStatus,
+  clearWitness = clearSessionExpiredWitness,
+  liveReadBudgetMs = SEQ_HEALTH_LIVE_READ_BUDGET_MS,
+  env = process.env,
+} = {}) {
   if (cors(req, res)) return; // health is open so the page can show status
+  // Started before the KV reads so the two overlap (see the budget above).
+  const liveRead = cappedLiveRead(healthReader, liveReadBudgetMs);
   const currentBookingStopPolicy = bookingStopPolicyConfigStatus();
   // Booking-stop liveness is reported HERE, on the one unauthenticated endpoint,
   // deliberately. The sweep's own staleness alarm lives inside the sweep — which
@@ -99,13 +164,14 @@ async function handleSequenceHealth(req, res) {
   let bookingStop = null;
   try {
     const [s, webhook] = await Promise.all([
-      sweepStaleness(),
-      raydarWebhookProofStatus(),
+      staleness(),
+      webhookProof(),
     ]);
     bookingStop = {
       currentBookingStopPolicy,
       // Set only while the booking sweep's CONFIRMED Paraform-session expiry
-      // stands (spaced probes, not one 401; cleared by a good pass). System Health's paraform-session
+      // stands (spaced probes, not one 401; cleared by a good pass, or below
+      // by a live read made after it). System Health's paraform-session
       // tile reads it once the #notify switch is on. Additive (2026-09-25).
       sessionExpiredConfirmedAt: s.sessionExpiredConfirmedAt ?? null,
       lastSuccessfulSweep: s.lastAt,
@@ -222,12 +288,11 @@ async function handleSequenceHealth(req, res) {
     bookingStop = { error: "unavailable", currentBookingStopPolicy };
   }
 
-  try {
-    const h = await paraformHealth();
-    res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop });
-  } catch (e) {
-    res.status(200).json({ ok: false, cookieSet: hasCookie(), paraform: "error", detail: String(e.message || e).slice(0, 160), bookingStop });
-  }
+  const h = await reconcileWitness(await liveRead, bookingStop, {
+    clearWitness,
+    switchOn: notifySwitchOn(env),
+  });
+  res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop });
 }
 
 export default function handler(req, res) {

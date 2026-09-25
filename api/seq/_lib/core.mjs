@@ -357,7 +357,14 @@ export async function paraformHealth({
 
   try {
     const seqs = await trpcGet("campaigns.getListOfCampaignsOptimized", {});
-    const result = { paraform: "live", sequenceCount: Array.isArray(seqs) ? seqs.length : 0 };
+    // checkedAt: when Paraform actually answered. A cached result keeps it,
+    // so seq health can tell a read made AFTER the booking sweep's expiry
+    // witness (proof the session is live again) from an older cached one.
+    const result = {
+      paraform: "live",
+      sequenceCount: Array.isArray(seqs) ? seqs.length : 0,
+      checkedAt: new Date().toISOString(),
+    };
     await writeParaformHealthCache(result);
     return result;
   } catch (e) {

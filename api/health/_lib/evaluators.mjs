@@ -97,6 +97,25 @@ export function webviewStatus({ body, status }) {
   return OK();
 }
 
+/**
+ * The sweep's confirmed-expiry witness, from the engine's own KV read
+ * (`sessionWitness`, so a timed-out seq/paraai probe cannot blind the tile:
+ * both health endpoints ride Paraform's throttle ladder on a dead cookie) or
+ * from seq health's bookingStop field. Null when a live seq read made AFTER
+ * the witness proves the session is back (a recapture whose next sweeps fail
+ * for a non-auth reason leaves the witness up; seq health also clears it).
+ */
+function confirmedExpiryWitness(seq, sessionWitness) {
+  const candidates = [sessionWitness?.at, seq?.bookingStop?.sessionExpiredConfirmedAt]
+    .map((value) => Date.parse(String(value || "")))
+    .filter(Number.isFinite);
+  if (!candidates.length) return null;
+  const witnessMs = Math.max(...candidates);
+  const liveMs = Date.parse(String(seq?.checkedAt || ""));
+  if (String(seq?.paraform || "") === "live" && Number.isFinite(liveMs) && liveMs > witnessMs) return null;
+  return new Date(witnessMs).toISOString();
+}
+
 /** Derived: Paraform cookie liveness, read from two lanes that already know.
  *
  * With the #notify switch on (NOTIFY_SLACK_CHANNEL set and HEALTH_ALERTS_ENABLED=true, 2026-09-25) this tile
@@ -108,15 +127,17 @@ export function webviewStatus({ body, status }) {
  * read answering expired/no_cookie/invalid (the paraai source is often
  * "paused", so seq must count on its own), and UNKNOWN instead of OK when
  * both sources are paused and there is no witness. Switch off: unchanged.
+ * The witness comes from the engine's own KV read as well as seq health, so
+ * the tile pages even when both health probes time out (2026-09-25 review).
  * (The engine still needs two consecutive DOWN ticks before it pages.)
  */
-export function paraformSession({ results, env = process.env }) {
+export function paraformSession({ results, sessionWitness = null, env = process.env }) {
   const seq = results["seq-guardian"]?.raw;
   const paraai = results["paraai-lane"]?.raw;
   const switchOn = notifySwitchOn(env);
   if (switchOn) {
-    const witness = seq?.bookingStop?.sessionExpiredConfirmedAt;
-    if (witness && Number.isFinite(Date.parse(String(witness)))) {
+    const witness = confirmedExpiryWitness(seq, sessionWitness);
+    if (witness) {
       return DOWN(`Paraform session expired — confirmed by the booking sweep at ${witness}. Recapture the cookie`, { witness });
     }
     if (seq && seq.cookieSet === false) {

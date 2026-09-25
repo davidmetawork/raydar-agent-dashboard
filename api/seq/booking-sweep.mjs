@@ -43,7 +43,9 @@ export const config = { maxDuration: 300 };
 //   - the stale page ("has not completed a full pass"), the ONE persistent
 //     signal: cleared by the next successful pass, and skipped only while the
 //     sweep's confirmed-expiry witness stands (System Health's
-//     paraform-session tile is DOWN on exactly that witness, so it pages);
+//     paraform-session tile is DOWN on exactly that witness, so it pages; the
+//     health engine reads the witness key from KV itself, so a timed-out
+//     seq/paraai health probe cannot blind the tile, 2026-09-25 review);
 //   - booked leads it failed to pause (slot cleared by a clean pass).
 // No-cookie and AUTH_EXPIRED are left to System Health's paraform-session
 // tile, and the per-pass failure lines (no Calendly, zero leads, budget,
@@ -266,8 +268,8 @@ export async function handleBookingSweep(req, res, {
       return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform rate-limited this pass; session verified live. Next run retries.", ranAt: new Date().toISOString() });
     }
     if (expired) {
-      // The confirmed-expiry witness System Health's paraform-session tile
-      // reads through /api/seq/health (additive, 2026-09-25).
+      // The paraform-session tile reads this witness from KV each tick;
+      // seq health clears it on a later live read (2026-09-25).
       await recordSessionExpiredWitness().catch(() => {});
     }
     if (expired) {
