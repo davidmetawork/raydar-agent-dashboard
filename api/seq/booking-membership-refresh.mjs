@@ -13,7 +13,8 @@ import {
 } from "./_lib/core.mjs";
 import {
   atomicPublishMembershipSnapshot,
-  discoverBookingStopSequences,
+  createRefreshScopeLoader,
+  definitionCacheAlert,
   durableKvSetAndReadback,
   kvConfigured,
   kvGet,
@@ -27,6 +28,7 @@ import {
   bookingMembershipAttempt,
   runBookingMembershipRefresh,
 } from "./_lib/booking-membership-snapshot.mjs";
+import { BOOKING_MEMBERSHIP_BUILD_BUDGET_MS } from "./_lib/booking-stop-contract.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
@@ -56,11 +58,13 @@ function includeConfiguredPauseCanary(lead) {
 async function recordAttempt(status, {
   result = null,
   error = null,
+  definitionCache = null,
 } = {}) {
   const payload = bookingMembershipAttempt({
     status,
     result,
     error,
+    definitionCache,
   });
   await durableKvSetAndReadback(
     BOOKING_MEMBERSHIP_KEYS.attempt,
@@ -95,10 +99,25 @@ async function handleBookingMembershipRefresh(req, res) {
     return res.status(200).json({ ok: false, error: "no_kv" });
   }
 
+  // Shared overlay, rotor on the first load only, and this invocation's
+  // deadline passed into the scope load (see createRefreshScopeLoader).
+  const {
+    scopeLoader,
+    definitionCache: definitionCacheSummary,
+  } = createRefreshScopeLoader({
+    deadline: Date.now() + BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
+  });
+  const alertOnDefinitionCache = async () => {
+    const cacheAlert = definitionCacheAlert(definitionCacheSummary());
+    if (cacheAlert && (await shouldAlert(cacheAlert.key, 3600))) {
+      await notifySlack(cacheAlert.message).catch(() => {});
+    }
+  };
+
   try {
     await recordAttempt("running");
     const result = await runBookingMembershipRefresh({
-      scopeLoader: discoverBookingStopSequences,
+      scopeLoader,
       membershipLoader: completeCampaignLeads,
       store,
       concurrency: Number(
@@ -110,7 +129,11 @@ async function handleBookingMembershipRefresh(req, res) {
       // webhook→pause cycle after every immutable membership refresh.
       includePausedLead: includeConfiguredPauseCanary,
     });
-    await recordAttempt(result.ok ? "success" : "failure", { result });
+    await recordAttempt(result.ok ? "success" : "failure", {
+      result,
+      definitionCache: definitionCacheSummary(),
+    });
+    await alertOnDefinitionCache();
     if (!result.ok && (await shouldAlert(
       `membership-refresh-${result.error}`,
       3600,
@@ -136,6 +159,7 @@ async function handleBookingMembershipRefresh(req, res) {
       shardCount: result.shardCount ?? null,
       leadCount: result.leadCount ?? null,
       indexedEmails: result.indexedEmails ?? null,
+      definitionCache: definitionCacheSummary(),
       durationMs: result.durationMs,
       ranAt: new Date().toISOString(),
     });
@@ -143,7 +167,11 @@ async function handleBookingMembershipRefresh(req, res) {
     const code = String(
       error?.code || error?.message || "membership_refresh_error",
     ).slice(0, 120);
-    await recordAttempt("failure", { error: code }).catch(() => {});
+    await recordAttempt("failure", {
+      error: code,
+      definitionCache: definitionCacheSummary(),
+    }).catch(() => {});
+    await alertOnDefinitionCache().catch(() => {});
     if (await shouldAlert(`membership-refresh-${code}`, 3600)) {
       await notifySlack(
         `:rotating_light: Booking membership refresh failed before publication (${code}). No incomplete generation was made current.`,
@@ -153,6 +181,7 @@ async function handleBookingMembershipRefresh(req, res) {
       ok: false,
       complete: false,
       error: code,
+      definitionCache: definitionCacheSummary(),
       ranAt: new Date().toISOString(),
     });
   }

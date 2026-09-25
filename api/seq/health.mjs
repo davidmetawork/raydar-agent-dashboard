@@ -188,6 +188,8 @@ async function handleSequenceHealth(req, res) {
         lastSweepDefinitionSequencesRead:
           s.definitionSequencesRead ?? null,
         lastSweepDangerClassSequences: s.dangerClassSequences ?? null,
+        lastSweepDefinitionFreshReads: s.definitionFreshReads ?? null,
+        lastSweepDefinitionCache: s.definitionCache ?? null,
         lastSweepLinkSequences: s.linkSequences ?? null,
         lastSweepEnabledLinkSequences: s.enabledLinkSequences ?? null,
         lastSweepCoveredEnabledLinkSequences:

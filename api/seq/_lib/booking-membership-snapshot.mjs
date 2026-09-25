@@ -1323,6 +1323,7 @@ export function bookingMembershipAttempt({
   status,
   result = null,
   error = null,
+  definitionCache = null,
   now = Date.now(),
 }) {
   if (!["running", "failure", "success"].includes(status)) {
@@ -1338,5 +1339,39 @@ export function bookingMembershipAttempt({
     generation: validGeneration(result?.generation)
       ? result.generation
       : null,
+    // Counts-only definition-cache telemetry for this invocation's scope
+    // loads (booking-stop-definition-cache.mjs); never part of any binding.
+    ...(definitionCacheAttemptTelemetry(definitionCache)
+      ? { definitionCache: definitionCacheAttemptTelemetry(definitionCache) }
+      : {}),
+  };
+}
+
+function definitionCacheAttemptTelemetry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const count = (key) => (Number.isInteger(value[key]) && value[key] >= 0
+    ? value[key]
+    : 0);
+  const age = (key) => (Number.isFinite(value[key]) && value[key] >= 0
+    ? Math.round(value[key])
+    : null);
+  const labels = (key) => (Array.isArray(value[key])
+    ? value[key].slice(0, 4).map((label) =>
+      (typeof label === "string" ? label.slice(0, 24) : null))
+    : []);
+  return {
+    loads: count("loads"),
+    states: labels("states"),
+    writes: labels("writes"),
+    freshReads: count("freshReads"),
+    requiredReads: count("requiredReads"),
+    rotorReads: count("rotorReads"),
+    rotorPlanned: count("rotorPlanned"),
+    rotorFailures: count("rotorFailures"),
+    cacheHits: count("cacheHits"),
+    staleFalseCorrections: count("staleFalseCorrections"),
+    staleFalseCorrectionMaxAgeMs: age("staleFalseCorrectionMaxAgeMs"),
+    oldestDangerClassAgeMs: age("oldestDangerClassAgeMs"),
+    oldestOtherAgeMs: age("oldestOtherAgeMs"),
   };
 }

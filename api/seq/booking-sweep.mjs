@@ -25,6 +25,7 @@ import {
   sweepErrorLabel,
   sweepStaleness,
   shouldAlert,
+  definitionCacheAlert,
   isSessionActuallyExpired,
   kvConfigured,
   calendlyConfigured,
@@ -97,6 +98,13 @@ async function handleBookingSweep(req, res) {
         error: sweepAttemptErrorLabel(result),
       });
       staleness = await sweepStaleness();
+    }
+
+    // Before any early return: a stale-false correction usually also makes
+    // this pass's scope differ from the published snapshot's.
+    const cacheAlert = definitionCacheAlert(result.definitionCache);
+    if (cacheAlert && (await shouldAlert(cacheAlert.key, 3600))) {
+      await notifySlack(cacheAlert.message).catch(() => {});
     }
 
     // A pass that sees zero active leads is a FAILURE, not a clean run. Two
@@ -181,6 +189,9 @@ async function handleBookingSweep(req, res) {
       sequenceScopeScanned: result.sequenceScopeScanned,
       definitionSequencesRead: result.definitionSequencesRead,
       dangerClassSequences: result.dangerClassSequences,
+      definitionFreshReads: result.definitionFreshReads,
+      definitionCacheHits: result.definitionCacheHits,
+      definitionCache: result.definitionCache,
       linkSequences: result.linkSequences,
       enabledLinkSequences: result.enabledLinkSequences,
       coveredEnabledLinkSequences: result.coveredEnabledLinkSequences,

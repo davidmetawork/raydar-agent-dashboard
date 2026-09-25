@@ -59,8 +59,24 @@ import {
   BOOKING_STOP_REVIEWED_CATALOG_FLOOR,
   BOOKING_STOP_SCOPE_SCHEMA,
   BOOKING_STOP_SCOPE_SCHEMA_V3,
+  BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS,
+  BOOKING_STOP_DEFINITION_MAX_AGE_MS,
+  BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS,
 } from "./booking-stop-contract.mjs";
 import {
+  bookingStopDefinitionCacheRevision,
+  buildDefinitionCacheDocument,
+  definitionCacheDecision,
+  definitionCacheEntryWellFormed,
+  definitionCacheTelemetry,
+  mergeDefinitionEntries,
+  nextDefinitionEntry,
+  readDefinitionCacheDocument,
+  selectDefinitionRotorReads,
+  summarizeDefinitionCacheTelemetry,
+} from "./booking-stop-definition-cache.mjs";
+import {
+  bookingStopCatalogNameSha256,
   bookingStopPolicyHealthValid,
   bookingStopPolicyHealth,
   coldExclusionDisposition,
@@ -77,6 +93,11 @@ import {
   loadPublishedBookingMembershipSnapshot,
 } from "./booking-membership-snapshot.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
+export {
+  bookingStopDefinitionCacheRevision,
+  definitionCacheAlert,
+  summarizeDefinitionCacheTelemetry,
+} from "./booking-stop-definition-cache.mjs";
 export {
   BOOKING_MEMBERSHIP_CURRENT_SCHEMA,
   BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
@@ -286,6 +307,7 @@ export const K = {
   lastSweep: "seqguard:lastsweep",
   lastAttempt: "seqguard:lastattempt:v3",
   scopeClassification: "seqguard:booking-stop-scope-classification:v1",
+  definitionCache: "seqguard:booking-stop-definition-cache:v1",
   leadIndex: BOOKING_MEMBERSHIP_KEYS.leadIndex,
   membershipCurrent: BOOKING_MEMBERSHIP_KEYS.current,
   membershipCheckpoint: BOOKING_MEMBERSHIP_KEYS.checkpoint,
@@ -1012,9 +1034,13 @@ export async function discoverBookingStopSequences({
   listSequences = async () =>
     withThrottleRetry(() =>
       trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1), { deadline }),
-  readCampaign = async (id) =>
+  // The optional second argument lets the proactive rotor pass its own,
+  // shorter phase deadline; required reads keep the caller's deadline.
+  readCampaign = async (id, { deadline: readDeadline = deadline } = {}) =>
     withThrottleRetry(() =>
-      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1), { deadline }),
+      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1), {
+      deadline: readDeadline,
+    }),
   concurrency = Number(process.env.BOOKING_STOP_SCOPE_CONCURRENCY || 2),
   minimumCatalogCount = Number(
     process.env.BOOKING_STOP_SCOPE_CATALOG_FLOOR
@@ -1025,6 +1051,28 @@ export async function discoverBookingStopSequences({
   classificationRecorder = (receipt) =>
     kvSet(K.scopeClassification, receipt, 24 * 3600),
   clock = Date.now,
+  // Definition cache (see booking-stop-definition-cache.mjs). A null revision
+  // disables it: no KV read or write, every definition read, as before.
+  definitionCacheRevision = bookingStopDefinitionCacheRevision(),
+  definitionCacheReader = () => kvGet(K.definitionCache),
+  definitionCacheWriter = async (doc) => {
+    const written = await kvSet(
+      K.definitionCache,
+      doc,
+      BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS,
+    );
+    // kvSet swallows transport errors; report them as a failed write.
+    if (written !== "OK" && written !== true) {
+      throw new Error("BOOKING_STOP_DEFINITION_CACHE_WRITE_FAILED");
+    }
+  },
+  // In-run overlay: a Map shared by the loads of ONE refresh invocation, so
+  // its second (drift-check) load reuses the first load's real reads even if
+  // the KV write did not land.
+  definitionOverlay = null,
+  // Proactive re-reads of the oldest cached answers. Only the refresh's first
+  // load turns this on; the sweep never does.
+  definitionRotor = false,
 } = {}) {
   const all = await listSequences();
   if (
@@ -1101,33 +1149,281 @@ export async function discoverBookingStopSequences({
     }
   }
 
-  const inspected = new Map();
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < all.length) {
-      const sequence = all[cursor++];
-      if (excludedIds.has(sequence.id)) continue;
-      const campaign = await readCampaign(sequence.id);
-      if (
-        !campaign
-        || typeof campaign !== "object"
-        || !Array.isArray(campaign.steps)
-      ) {
-        const error = new Error("BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID");
-        error.code = "BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID";
-        throw error;
-      }
-      inspected.set(
+  // ── Definition answers: cached where provably still trustworthy, read
+  // otherwise. See booking-stop-definition-cache.mjs for the safety argument.
+  const cacheRevision = typeof definitionCacheRevision === "string"
+    && definitionCacheRevision
+    ? definitionCacheRevision
+    : null;
+  const telemetry = {
+    state: cacheRevision ? "missing" : "disabled",
+    write: cacheRevision ? "not_needed" : "disabled",
+    freshReads: 0,
+    requiredReads: 0,
+    rotorReads: 0,
+    rotorPlanned: 0,
+    rotorFailures: 0,
+    cacheHits: 0,
+    staleFalseCorrections: 0,
+    staleFalseCorrectionMaxAgeMs: null,
+    oldestDangerClassAgeMs: null,
+    oldestOtherAgeMs: null,
+  };
+  const overlay = definitionOverlay instanceof Map ? definitionOverlay : null;
+  let cached = new Map();
+  if (cacheRevision) {
+    try {
+      const parsed = readDefinitionCacheDocument(
+        await definitionCacheReader(),
+        { revision: cacheRevision, nowMs: Number(clock()) },
+      );
+      telemetry.state = parsed.state;
+      cached = parsed.entries;
+    } catch {
+      telemetry.state = "read_error";
+    }
+    if (overlay) {
+      const loadNowMs = Number(clock());
+      cached = mergeDefinitionEntries(cached, new Map(
+        [...overlay].filter(([, entry]) =>
+          definitionCacheEntryWellFormed(entry, loadNowMs)),
+      ));
+    }
+  }
+  const catalogById = new Map(all.map((sequence) => [sequence.id, sequence]));
+  const nameHashes = new Map();
+  const nameHashOf = (sequence) => {
+    if (!nameHashes.has(sequence.id)) {
+      nameHashes.set(
         sequence.id,
-        campaignHasCandidateSchedulingLink(campaign),
+        bookingStopCatalogNameSha256(sequence.name),
       );
     }
+    return nameHashes.get(sequence.id);
   };
-  await Promise.all(Array.from({ length: concurrency }, worker));
+  const decidesSelection = (sequence, linkBearing) =>
+    !linkBearing
+    && Boolean(sequence.enabled)
+    && !isNudgeSequence(sequence, selectionKeys);
+
+  const inspected = new Map();
+  const fresh = new Map();
+  const hits = new Map();
+  const required = [];
+  const classifyNowMs = Number(clock());
+  for (const sequence of all) {
+    if (excludedIds.has(sequence.id)) continue;
+    if (!cacheRevision) {
+      required.push(sequence);
+      continue;
+    }
+    const entry = cached.get(sequence.id) ?? null;
+    const decision = definitionCacheDecision(entry, {
+      nameSha256: nameHashOf(sequence),
+      enabled: sequence.enabled,
+      nudge: isNudgeSequence(sequence, selectionKeys),
+      nowMs: classifyNowMs,
+    });
+    if (decision.use) {
+      inspected.set(sequence.id, entry.l);
+      hits.set(sequence.id, entry);
+    } else {
+      required.push(sequence);
+    }
+  }
+
+  const readDefinition = async (sequence, options) => {
+    const readAtMs = Number(clock());
+    const campaign = options
+      ? await readCampaign(sequence.id, options)
+      : await readCampaign(sequence.id);
+    if (
+      !campaign
+      || typeof campaign !== "object"
+      || !Array.isArray(campaign.steps)
+    ) {
+      const error = new Error("BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID");
+      error.code = "BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID";
+      throw error;
+    }
+    const linkBearing = campaignHasCandidateSchedulingLink(campaign);
+    const prior = cached.get(sequence.id);
+    if (
+      linkBearing
+      && prior
+      && prior.l === false
+      && prior.n === nameHashOf(sequence)
+      && prior.e === Boolean(sequence.enabled)
+      && decidesSelection(sequence, false)
+    ) {
+      // The measured protection gap: the cache said "no link" on a
+      // selection-deciding row and a real read now finds one.
+      telemetry.staleFalseCorrections += 1;
+      telemetry.staleFalseCorrectionMaxAgeMs = Math.max(
+        telemetry.staleFalseCorrectionMaxAgeMs ?? 0,
+        readAtMs - prior.r,
+      );
+    }
+    inspected.set(sequence.id, linkBearing);
+    fresh.set(sequence.id, { linkBearing, readAtMs });
+    hits.delete(sequence.id);
+    telemetry.freshReads += 1;
+  };
+
+  // Persist every VALID read this load completed, even when a later read
+  // threw: each came from a real read, so the next run needs fewer. Nothing
+  // invalid ever reaches `fresh`. A write failure costs re-reads later, never
+  // protection, and never lengthens a trust window (r only comes from reads).
+  const persistDefinitions = async () => {
+    if (!cacheRevision || !fresh.size) return;
+    const nowMs = Number(clock());
+    const catalogIds = new Set(all
+      .filter((sequence) => !excludedIds.has(sequence.id))
+      .map((sequence) => sequence.id));
+    const ours = new Map();
+    for (const sequence of all) {
+      if (!catalogIds.has(sequence.id)) continue;
+      const prior = cached.get(sequence.id) ?? null;
+      const read = fresh.get(sequence.id);
+      if (read) {
+        ours.set(sequence.id, nextDefinitionEntry(prior, {
+          nameSha256: nameHashOf(sequence),
+          enabled: sequence.enabled,
+          linkBearing: read.linkBearing,
+          readAtMs: read.readAtMs,
+        }));
+      } else if (
+        prior
+        && definitionCacheEntryWellFormed(prior, nowMs)
+        && nowMs - prior.r < BOOKING_STOP_DEFINITION_MAX_AGE_MS
+      ) {
+        ours.set(sequence.id, prior);
+      }
+    }
+    if (overlay) {
+      for (const [id, entry] of mergeDefinitionEntries(overlay, ours)) {
+        overlay.set(id, entry);
+      }
+    }
+    try {
+      // Merge-on-write: keep a racing writer's newer real reads.
+      let latest = new Map();
+      try {
+        const parsed = readDefinitionCacheDocument(
+          await definitionCacheReader(),
+          { revision: cacheRevision, nowMs },
+        );
+        latest = parsed.entries;
+      } catch {
+        latest = new Map();
+      }
+      const merged = new Map(
+        [...mergeDefinitionEntries(ours, latest)].filter(([id, entry]) =>
+          catalogIds.has(id)
+          && nowMs - entry.r < BOOKING_STOP_DEFINITION_MAX_AGE_MS),
+      );
+      const doc = buildDefinitionCacheDocument({
+        revision: cacheRevision,
+        nowMs,
+        entries: merged,
+      });
+      if (!doc) {
+        telemetry.write = "oversize";
+        return;
+      }
+      await definitionCacheWriter(doc);
+      telemetry.write = "written";
+    } catch {
+      telemetry.write = "failed";
+    }
+  };
+
+  try {
+    // Required reads: any failure fails the whole load, exactly as before.
+    let cursor = 0;
+    let failed = false;
+    const worker = async () => {
+      while (!failed && cursor < required.length) {
+        const sequence = required[cursor++];
+        try {
+          await readDefinition(sequence);
+          telemetry.requiredReads += 1;
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
+
+    // Rotor: re-read the oldest cached answers before they expire, so
+    // expiries never bunch into bursts. A rotor failure keeps the still-valid
+    // cached answer, stops the rotor for this run and lets the load succeed.
+    if (cacheRevision && definitionRotor && hits.size) {
+      const rotorNowMs = Number(clock());
+      const rotorDeadline = Math.min(
+        rotorNowMs + BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS,
+        deadline == null ? Infinity : Number(deadline),
+      );
+      let dangerClassCount = 0;
+      let otherCount = 0;
+      for (const sequence of all) {
+        if (excludedIds.has(sequence.id)) continue;
+        if (decidesSelection(sequence, inspected.get(sequence.id))) {
+          dangerClassCount += 1;
+        } else {
+          otherCount += 1;
+        }
+      }
+      const rotorIds = selectDefinitionRotorReads(
+        [...hits].map(([id, entry]) => ({
+          id,
+          r: entry.r,
+          dangerClass: decidesSelection(catalogById.get(id), entry.l),
+        })),
+        { nowMs: rotorNowMs, dangerClassCount, otherCount },
+      );
+      telemetry.rotorPlanned = rotorIds.length;
+      let rotorCursor = 0;
+      let rotorStopped = false;
+      const rotorWorker = async () => {
+        while (!rotorStopped && rotorCursor < rotorIds.length) {
+          if (Number(clock()) >= rotorDeadline) {
+            rotorStopped = true;
+            return;
+          }
+          const sequence = catalogById.get(rotorIds[rotorCursor++]);
+          try {
+            await readDefinition(sequence, { deadline: rotorDeadline });
+            telemetry.rotorReads += 1;
+          } catch {
+            rotorStopped = true;
+            telemetry.rotorFailures += 1;
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: concurrency }, rotorWorker));
+    }
+  } finally {
+    // Never lets a persistence fault replace the load's own outcome.
+    await persistDefinitions().catch(() => {
+      telemetry.write = "failed";
+    });
+  }
   if (inspected.size + excludedIds.size !== all.length) {
     const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
     throw error;
+  }
+  telemetry.cacheHits = hits.size;
+  {
+    const nowMs = Number(clock());
+    for (const [id, entry] of hits) {
+      const key = decidesSelection(catalogById.get(id), entry.l)
+        ? "oldestDangerClassAgeMs"
+        : "oldestOtherAgeMs";
+      telemetry[key] = Math.max(telemetry[key] ?? 0, nowMs - entry.r);
+    }
   }
 
   // Every policy entry was sealed from the reviewed protected-scope census.
@@ -1191,12 +1487,52 @@ export async function discoverBookingStopSequences({
     enabledLinkSequences: enabledLinkSequences.length,
     coveredEnabledLinkSequences,
     dangerClassSequences,
+    // Unbound telemetry. definitionSequencesRead (below, v3) keeps meaning
+    // "definitions classified" = catalog minus cold exclusions, fresh or
+    // cached; definitionFreshReads is the honest Paraform read count.
+    definitionFreshReads: telemetry.freshReads,
+    definitionCacheHits: telemetry.cacheHits,
+    definitionCache: definitionCacheTelemetry(telemetry),
     ...(coldExclusionPolicy.active ? {
       definitionSequencesRead: inspected.size,
       excludedColdSequences: excludedIds.size,
       excludedColdEnabledLinkSequences: excludedEnabledLinkSequences,
     } : {}),
     complete: true,
+  };
+}
+
+/**
+ * The scope loader for ONE booking-membership-refresh invocation. A refresh
+ * does up to two scope loads (before the membership walk, and after it for
+ * drift detection when it publishes). They share an in-memory overlay so the
+ * second load reuses the first one's real definition reads without depending
+ * on a KV write landing (the settle rule still re-checks a brand-new "no
+ * link"), only the first load runs the proactive rotor, and both carry the
+ * invocation's deadline so retries stop inside the build budget.
+ */
+export function createRefreshScopeLoader({
+  deadline = null,
+  loader = discoverBookingStopSequences,
+  loaderOptions = {},
+} = {}) {
+  const definitionOverlay = new Map();
+  const loads = [];
+  let calls = 0;
+  return {
+    scopeLoader: async () => {
+      const first = calls === 0;
+      calls += 1;
+      const scope = await loader({
+        ...loaderOptions,
+        deadline,
+        definitionOverlay,
+        definitionRotor: first,
+      });
+      loads.push(scope?.definitionCache ?? null);
+      return scope;
+    },
+    definitionCache: () => summarizeDefinitionCacheTelemetry(loads),
   };
 }
 
@@ -1284,6 +1620,9 @@ export async function runBookingSweep({
     sequenceScopeScanned: 0,
     definitionSequencesRead: 0,
     dangerClassSequences: null,
+    definitionFreshReads: null,
+    definitionCacheHits: null,
+    definitionCache: null,
     linkSequences: 0,
     enabledLinkSequences: 0,
     coveredEnabledLinkSequences: 0,
@@ -1416,6 +1755,13 @@ export async function runBookingSweep({
   result.dangerClassSequences = Number.isInteger(scope.dangerClassSequences)
     ? scope.dangerClassSequences
     : null;
+  result.definitionFreshReads = Number.isInteger(scope.definitionFreshReads)
+    ? scope.definitionFreshReads
+    : null;
+  result.definitionCacheHits = Number.isInteger(scope.definitionCacheHits)
+    ? scope.definitionCacheHits
+    : null;
+  result.definitionCache = definitionCacheTelemetry(scope.definitionCache);
   result.linkSequences = scope.linkSequences;
   result.enabledLinkSequences = scope.enabledLinkSequences;
   result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
@@ -2167,6 +2513,10 @@ export async function sweepStaleness(now = Date.now(), {
     dangerClassSequences: Number.isInteger(last.dangerClassSequences)
       ? last.dangerClassSequences
       : null,
+    definitionFreshReads: Number.isInteger(last.definitionFreshReads)
+      ? last.definitionFreshReads
+      : null,
+    definitionCache: definitionCacheTelemetry(last.definitionCache),
     linkSequences: last.linkSequences ?? null,
     enabledLinkSequences: last.enabledLinkSequences ?? null,
     coveredEnabledLinkSequences: last.coveredEnabledLinkSequences ?? null,
@@ -2338,6 +2688,10 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     dangerClassSequences: Number.isInteger(result.dangerClassSequences)
       ? result.dangerClassSequences
       : null,
+    definitionFreshReads: Number.isInteger(result.definitionFreshReads)
+      ? result.definitionFreshReads
+      : null,
+    definitionCache: definitionCacheTelemetry(result.definitionCache),
     linkSequences: result.linkSequences ?? 0,
     enabledLinkSequences: result.enabledLinkSequences ?? 0,
     coveredEnabledLinkSequences: result.coveredEnabledLinkSequences ?? 0,
