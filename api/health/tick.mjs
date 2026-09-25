@@ -13,11 +13,13 @@ export default async function handler(req, res) {
       .json({ ok: false, error: auth.reason });
   }
   try {
-    const { state, transitions, kvOk } = await runTick({});
+    const { state, transitions, kvOk, downTicks } = await runTick({});
     let alerts = [];
     if (process.env.HEALTH_ALERTS_ENABLED === "true") {
-      // DOWN pages only: no recovery notice and no hourly STILL DOWN re-page
-      // (one post per incident, David 2026-09-24/25).
+      // One page per tier-1 DOWN incident: no recovery notice and no hourly
+      // STILL DOWN re-page (David 2026-09-24/25). The pass reads the tile
+      // state, so an incident whose page failed, was acked, or began before
+      // alerts were enabled still posts once (see alert.mjs).
       alerts = await alertOnTransitions(transitions, state);
     }
     return res.status(200).json({
@@ -27,6 +29,9 @@ export default async function handler(req, res) {
       counts: state.counts,
       transitions: transitions.length,
       alerts: alerts.length,
+      // What HEALTH_DOWN_TICKS_OVERRIDES actually did: accepted tile ids and
+      // tick counts, and any rejected keys with the reason.
+      downTicks,
       kvOk,
     });
   } catch (e) {

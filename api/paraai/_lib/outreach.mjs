@@ -2428,9 +2428,10 @@ export async function sweepStaleOutreachExceptions({
 // diagnosed yet: a pending, un-emailed request with NO exception at all is
 // warned about too, where the exception-driven ladder could not have seen it.
 //
-// Alerting is unchanged in volume: escalateNearExpiry claims one alert per
-// (request, rung) with a 30-day TTL, so a request that also fails during the
-// tick cannot produce two lines for the same rung.
+// Nothing here posts to Slack any more (2026-09-25, one-channel rule): a
+// blocked candidate's deadline is a recruiting work item, not a breakage.
+// escalateNearExpiry still claims each (request, rung) once with a 30-day TTL,
+// and `escalated` lists the rungs claimed this tick (recorded, not posted).
 export async function sweepExpiryEscalations({
   history = [],
   states = [],
@@ -2471,7 +2472,7 @@ export async function sweepExpiryEscalations({
     ) continue;
     const result = await escalateImpl(request, codeByRequest.get(requestId) || null, { now })
       .catch(() => null);
-    if (result?.notified) {
+    if (result && result.rung != null) {
       escalated.push({ requestId, rung: result.rung, code: codeByRequest.get(requestId) || null });
     }
   }
