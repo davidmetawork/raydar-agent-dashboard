@@ -34,7 +34,9 @@
 // TWO DOCUMENTS, two readers:
 //   - The mutable cache document is the REFRESH's working memory between
 //     runs (merge-on-write, best effort). Nothing binds to it; losing it or a
-//     racing writer only costs re-reads.
+//     racing writer only costs re-reads. It is read strictly (a KV failure
+//     is "unreadable", never "absent"), and a load whose merge re-read fails
+//     skips its write instead of overwriting with a partial view.
 //   - The published answers document is write-once per scope digest and
 //     holds exactly the answers that produced that digest. The refresh
 //     writes it and reads it back (a transport failure or an absent readback
@@ -43,6 +45,11 @@
 //     names. Any document under key D carries D's link answers, so a served
 //     answer can never disagree with the published binding, and no other
 //     writer (a slow sweep, a second refresh) can change what the sweep sees.
+//   - The sweep binds BOTH legs to one pointer object: the scope leg serves
+//     that pointer's digest and the snapshot leg is handed the same object.
+//     Pointer reads are strict and retried once; when the pointer moved
+//     during the scope leg, the scope is re-run once against the new digest
+//     (same catalog, KV reads plus the live rows only) before binding.
 // Entries hold no step text, no PII and no secrets: {n, e, l, r} per id.
 // ─────────────────────────────────────────────────────────────────────────────
 

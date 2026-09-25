@@ -975,18 +975,24 @@ async function readShardBatch(descriptors, readMany) {
   }
 }
 
+// `pointer`: the current pointer the caller already read (the sweep binds its
+// scope leg and this leg to ONE pointer read). Omitted (undefined): read it
+// here, as before. Either way it gets the same validation below.
 export async function loadPublishedBookingMembershipSnapshot({
   scope,
   read,
   readMany,
   now = Date.now(),
+  pointer = undefined,
 } = {}) {
   try {
     assertBookingMembershipScope(scope);
     if (typeof read !== "function") {
       return snapshotUnavailable("reader_missing");
     }
-    const current = await read(BOOKING_MEMBERSHIP_KEYS.current);
+    const current = pointer === undefined
+      ? await read(BOOKING_MEMBERSHIP_KEYS.current)
+      : pointer;
     if (
       current?.schema !== BOOKING_MEMBERSHIP_CURRENT_SCHEMA
       || current.snapshotSchema !== BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA

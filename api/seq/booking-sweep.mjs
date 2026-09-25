@@ -185,6 +185,7 @@ async function handleBookingSweep(req, res) {
           ? null
           : Math.round(result.membershipSnapshotAgeMs / 60000),
       membershipSnapshotCurrent: result.membershipSnapshotCurrent,
+      scopeReloadedForPointer: result.scopeReloadedForPointer,
       sequenceCatalogCount: result.sequenceCatalogCount,
       sequenceScopeScanned: result.sequenceScopeScanned,
       definitionSequencesRead: result.definitionSequencesRead,

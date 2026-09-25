@@ -54,6 +54,8 @@ function sweepHarness(precheckValues) {
         if (next instanceof Error) throw next;
         return structuredClone(next);
       },
+      // No refresh lock (an unreadable lock waits; see the review tests).
+      membershipLockPrecheckLoader: async () => null,
       sequenceScopeLoader: async () => {
         calls.push("scope");
         throw new Error("scope unavailable in this test");
@@ -119,16 +121,17 @@ test("precheck race: a fresh generation on the re-read takes the normal path", a
 });
 
 test("missing, malformed, exactly-60-minute, fresh pointers and KV errors keep today's path", async () => {
-  for (const value of [
-    null,
-    { schema: "x", oldestFetchedAt: "2000-01-01T00:00:00Z" },
-    pointer(BOOKING_MEMBERSHIP_MAX_AGE_MS),
-    pointer(MIN),
-    new Error("kv down"),
+  for (const [value, calls] of [
+    // Absent or unreadable: retried ONCE (strict read), then the normal path.
+    [null, ["precheck", "precheck", "scope"]],
+    [{ schema: "x", oldestFetchedAt: "2000-01-01T00:00:00Z" }, ["precheck", "scope"]],
+    [pointer(BOOKING_MEMBERSHIP_MAX_AGE_MS), ["precheck", "scope"]],
+    [pointer(MIN), ["precheck", "scope"]],
+    [new Error("kv down"), ["precheck", "precheck", "scope"]],
   ]) {
     const h = sweepHarness([value]);
     const result = await h.run();
-    assert.deepEqual(h.calls, ["precheck", "scope"], String(value?.message || JSON.stringify(value)));
+    assert.deepEqual(h.calls, calls, String(value?.message || JSON.stringify(value)));
     assert.equal(result.membershipSnapshotError, "live_scope_unavailable");
     assert.equal(result.membershipSnapshotPrecheck, false);
     assert.equal(result.paused, 0);

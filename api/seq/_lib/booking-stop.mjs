@@ -1070,6 +1070,19 @@ export async function applyDecisions(decisions, {
 // ---------- the sweep ----------
 const DEFINITION_ROTOR_MIN_READ_MS = 2000;
 
+// The catalog rows each scope load listed, keyed by the scope object it
+// returned (never serialised, never part of any binding). The sweep reuses
+// them when it must re-run its scope load against a pointer that moved, so
+// the re-run costs KV reads plus the live (selection-deciding) definition
+// reads only, and classifies the same catalog the first load did.
+const scopeCatalogs = new WeakMap();
+export function bookingStopScopeCatalog(scope) {
+  const rows = scope && typeof scope === "object"
+    ? scopeCatalogs.get(scope)
+    : null;
+  return Array.isArray(rows) ? structuredClone(rows) : null;
+}
+
 function newDefinitionCacheTelemetry() {
   return {
     state: "disabled",
@@ -1109,6 +1122,9 @@ export async function discoverBookingStopSequences(options = {}) {
 
 async function discoverBookingStopScope(telemetry, {
   deadline = null,
+  // A catalog this pass already listed (bookingStopScopeCatalog). When given,
+  // listSequences is not called; the rows get the same validation below.
+  listedCatalog = null,
   listSequences = async () =>
     withThrottleRetry(() =>
       trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1), { deadline }),
@@ -1151,7 +1167,8 @@ async function discoverBookingStopScope(telemetry, {
       throw new Error("BOOKING_STOP_DEFINITION_ANSWERS_WRITE_FAILED");
     }
   },
-  definitionCacheReader = () => kvGet(K.definitionCache),
+  // Strict: a KV failure throws (state read_error), never reads as "missing".
+  definitionCacheReader = () => kvGetStrict(K.definitionCache),
   definitionCacheWriter = async (doc) => {
     const written = await kvSet(
       K.definitionCache,
@@ -1178,7 +1195,10 @@ async function discoverBookingStopScope(telemetry, {
   // served any cached answer (see publishDefinitionAnswers).
   definitionDurableAnswers = false,
 } = {}) {
-  const all = await listSequences();
+  const all = Array.isArray(listedCatalog)
+    ? structuredClone(listedCatalog)
+    : await listSequences();
+  const listed = Array.isArray(all) ? structuredClone(all) : null;
   if (
     !Array.isArray(all)
     || !Number.isInteger(minimumCatalogCount)
@@ -1452,15 +1472,19 @@ async function discoverBookingStopScope(telemetry, {
     }
     telemetry.writeAttempts += 1;
     const writeNowMs = Number(clock());
-    // Merge-on-write: keep a racing writer's newer real reads.
-    let latest = new Map();
+    // Merge-on-write: keep a racing writer's newer real reads. When that
+    // read fails we cannot know what a racing writer stored, so we do not
+    // write at all (the next load re-reads what it needs) rather than
+    // overwrite the document with a partial view.
+    let latest;
     try {
       latest = readDefinitionCacheDocument(
         await definitionCacheReader(),
         { revision: cacheRevision, nowMs: writeNowMs },
       ).entries;
     } catch {
-      latest = new Map();
+      telemetry.write = "failed";
+      return;
     }
     const merged = new Map(
       [...mergeDefinitionEntries(ours, latest)].filter(([id, entry]) =>
@@ -1690,7 +1714,7 @@ async function discoverBookingStopScope(telemetry, {
     && Boolean(sequence.enabled)
     && !isNudgeSequence(sequence, selectionKeys)
     && !inspected.get(sequence.id)).length;
-  return {
+  const loaded = {
     schema: coldExclusionPolicy.scopeSchema,
     scopeDigest,
     catalogFloor: minimumCatalogCount,
@@ -1715,6 +1739,8 @@ async function discoverBookingStopScope(telemetry, {
     } : {}),
     complete: true,
   };
+  scopeCatalogs.set(loaded, listed);
+  return loaded;
 }
 
 /**
@@ -1792,20 +1818,25 @@ export async function runBookingSweep({
   raydarConfigured = raydarSchedulerIndexConfigured(),
   raydarIndexLoader = fetchRaydarBookingIndex,
   sequenceScopeLoader = discoverBookingStopSequences,
-  membershipSnapshotLoader = ({ scope, now: snapshotNow }) =>
+  membershipSnapshotLoader = ({ scope, now: snapshotNow, pointer }) =>
     loadPublishedBookingMembershipSnapshot({
       scope,
       now: snapshotNow,
       read: kvGet,
       readMany: kvGetMany,
+      pointer,
     }),
   membershipCurrentLoader = () => kvGet(K.membershipCurrent),
   // Separate from membershipCurrentLoader on purpose: that one is the
   // pre-mutation generation re-check and must stay untouched by the precheck.
-  membershipCurrentPrecheckLoader = () => kvGet(K.membershipCurrent),
+  // This one is STRICT (throws on a KV failure; the sweep retries it once):
+  // it supplies the precheck, the scope leg's answers digest, and the
+  // pointer object the snapshot leg binds to.
+  membershipCurrentPrecheckLoader = () => kvGetStrict(K.membershipCurrent),
   // The refresh lock, read only when the pointer is already provably stale,
-  // to tell whether a refresh is in flight and worth waiting for.
-  membershipLockPrecheckLoader = () => kvGet(K.membershipLock),
+  // to tell whether a refresh is in flight and worth waiting for. Strict: an
+  // unreadable lock waits (KV reads only) instead of skipping.
+  membershipLockPrecheckLoader = () => kvGetStrict(K.membershipLock),
   precheckSleep = sleep,
   profileLoader = cachedRelationshipStatus,
   decisionApplier = applyDecisions,
@@ -1843,6 +1874,7 @@ export async function runBookingSweep({
     membershipSnapshotAgeMs: null,
     membershipSnapshotCurrent: false,
     membershipSnapshotPrecheck: false,
+    scopeReloadedForPointer: false,
     sequenceCatalogCount: 0,
     sequenceScopeScanned: 0,
     definitionSequencesRead: 0,
@@ -1912,19 +1944,43 @@ export async function runBookingSweep({
   // scope load, shard writes and publish. So a refresh that is running now
   // can still write a pointer, after `now`, that this pass would accept.
   // When the refresh lock shows one in flight (started at or before `now`),
-  // the precheck waits for it with KV reads only, for at most the time the
-  // pre-cache live scope leg used to take; otherwise it re-reads once, which
-  // closes the race with a refresh that has just published.
-  const readPrecheck = async (loader) => {
-    try {
-      return await loader();
-    } catch {
-      return null;
+  // or the lock cannot be read, the precheck waits for it with KV reads
+  // only, for at most the time the pre-cache live scope leg used to take;
+  // otherwise it re-reads once, which closes the race with a refresh that
+  // has just published.
+  //
+  // Every pointer read here is strict (a KV failure throws instead of
+  // reading as "absent") and retried once, so one KV blip can neither drop
+  // the published digest (which would make the pass read every definition
+  // live and then fail against a binding that served a cached answer) nor
+  // replace positive stale evidence (which would end the wait and pay the
+  // full scope read only to fail closed). A read that fails twice keeps the
+  // last positive evidence: it never replaces a pointer with "unknown".
+  const readPointer = async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const value = await membershipCurrentPrecheckLoader();
+        if (value != null) return value;
+      } catch {
+        // retried once, then reported as unknown (null)
+      }
     }
+    return null;
   };
-  let precheckCurrent = await readPrecheck(membershipCurrentPrecheckLoader);
-  if (bookingMembershipCurrentProvablyStale(precheckCurrent, now)) {
-    const lock = await readPrecheck(membershipLockPrecheckLoader);
+  const readLock = async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return { known: true, value: await membershipLockPrecheckLoader() };
+      } catch {
+        // retried once, then unknown
+      }
+    }
+    return { known: false, value: null };
+  };
+  let pinnedPointer = await readPointer();
+  if (bookingMembershipCurrentProvablyStale(pinnedPointer, now)) {
+    const lockRead = await readLock();
+    const lock = lockRead.value;
     const lockAtMs = Date.parse(String(lock?.at || ""));
     const nowMs = Number(now);
     const precheckStartMs = Number(clock());
@@ -1934,23 +1990,35 @@ export async function runBookingSweep({
       && lockAtMs <= nowMs
       && nowMs - lockAtMs
         <= BOOKING_MEMBERSHIP_BUILD_BUDGET_MS + BOOKING_STOP_PRECHECK_POLL_MS * 12;
-    const waitUntilMs = refreshInFlight
-      ? Math.min(
+    let waitUntilMs = -Infinity;
+    if (refreshInFlight) {
+      waitUntilMs = Math.min(
         lockAtMs + BOOKING_MEMBERSHIP_BUILD_BUDGET_MS
           + BOOKING_STOP_PRECHECK_POLL_MS * 12,
         precheckStartMs + BOOKING_STOP_PRECHECK_MAX_WAIT_MS,
         deadline,
-      )
-      : -Infinity;
-    precheckCurrent = await readPrecheck(membershipCurrentPrecheckLoader);
+      );
+    } else if (!lockRead.known) {
+      // An unreadable lock may hide a refresh in flight: wait the full bound
+      // (KV reads only) rather than skip a pass the pre-cache sweep binds.
+      waitUntilMs = Math.min(
+        precheckStartMs + BOOKING_STOP_PRECHECK_MAX_WAIT_MS,
+        deadline,
+      );
+    }
+    const reread = async () => {
+      const next = await readPointer();
+      if (next != null) pinnedPointer = next;
+    };
+    await reread();
     while (
-      bookingMembershipCurrentProvablyStale(precheckCurrent, now)
+      bookingMembershipCurrentProvablyStale(pinnedPointer, now)
       && Number(clock()) + BOOKING_STOP_PRECHECK_POLL_MS <= waitUntilMs
     ) {
       await precheckSleep(BOOKING_STOP_PRECHECK_POLL_MS);
-      precheckCurrent = await readPrecheck(membershipCurrentPrecheckLoader);
+      await reread();
     }
-    if (bookingMembershipCurrentProvablyStale(precheckCurrent, now)) {
+    if (bookingMembershipCurrentProvablyStale(pinnedPointer, now)) {
       result.error = "membership_snapshot_unavailable";
       result.membershipSnapshotError = "snapshot_stale_before_scope";
       result.membershipSnapshotPrecheck = true;
@@ -1959,67 +2027,112 @@ export async function runBookingSweep({
     }
   }
   // The sweep serves cached definition answers ONLY from the write-once
-  // answers document of the digest this pointer publishes (see
-  // booking-stop-definition-cache.mjs), so a served answer always equals the
-  // published binding's. No usable pointer: every definition is read live.
-  const publishedScopeDigest = typeof precheckCurrent?.scope?.digest === "string"
-    ? precheckCurrent.scope.digest
-    : null;
-
-  let scope = null;
-  try {
-    scope = await timeLeg(
-      "scope",
-      () => sequenceScopeLoader({
-        deadline,
-        coldExclusionPolicy,
-        // Serve only the answers the published scope was built from (never
-        // the mutable cache document); selection-deciding rows, and any row
-        // whose name or enabled flag moved, are read live.
-        definitionSource: "published",
-        definitionAnswersDigest: publishedScopeDigest,
-        definitionMaxAgeMs: BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
-      }),
-    );
-  } catch (error) {
+  // answers document of the digest a pointer publishes (see
+  // booking-stop-definition-cache.mjs), and binds its membership snapshot to
+  // that SAME pointer object, so a served answer always equals the binding's.
+  // No usable pointer: every definition is read live, as before the cache.
+  const digestOf = (pointer) =>
+    (typeof pointer?.scope?.digest === "string" ? pointer.scope.digest : null);
+  const loadScope = (answersDigest, extra = {}) => timeLeg(
+    "scope",
+    () => sequenceScopeLoader({
+      deadline,
+      coldExclusionPolicy,
+      // Serve only the answers the published scope was built from (never
+      // the mutable cache document); selection-deciding rows, and any row
+      // whose name or enabled flag moved, are read live.
+      definitionSource: "published",
+      definitionAnswersDigest: answersDigest,
+      definitionMaxAgeMs: BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
+      ...extra,
+    }),
+  );
+  const scopeInvalid = (candidate) => (
+    !scopeMatchesColdExclusionPolicy(candidate, coldExclusionPolicy)
+    || !/^[a-f0-9]{64}$/u.test(String(candidate?.scopeDigest || ""))
+    || !Number.isInteger(candidate?.catalogFloor)
+    || candidate.catalogFloor < 1
+    || candidate?.complete !== true
+    || !Array.isArray(candidate?.sequences)
+    || !Number.isInteger(candidate?.catalogSequences)
+    || candidate.catalogSequences < 1
+    || candidate.scannedSequences !== candidate.catalogSequences
+    || !Number.isInteger(candidate?.enabledLinkSequences)
+    || !Number.isInteger(candidate?.coveredEnabledLinkSequences)
+    || (!coldExclusionPolicy.active
+      && candidate.coveredEnabledLinkSequences !== candidate.enabledLinkSequences)
+    || (coldExclusionPolicy.active && (
+      !Number.isInteger(candidate?.excludedColdSequences)
+      || !Number.isInteger(candidate?.excludedColdEnabledLinkSequences)
+      || candidate.excludedColdSequences < 0
+      || candidate.excludedColdEnabledLinkSequences < 0
+      || candidate.coveredEnabledLinkSequences
+        + candidate.excludedColdEnabledLinkSequences
+        !== candidate.enabledLinkSequences
+      || candidate.bookingStopPolicy?.excludedSequences
+        !== candidate.excludedColdSequences
+      || candidate.bookingStopPolicy?.excludedEnabledLinkSequences
+        !== candidate.excludedColdEnabledLinkSequences
+    ))
+  );
+  const scopeUnavailable = (error) => {
     result.definitionCache = definitionCacheTelemetry(error?.definitionCache);
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_unavailable";
     result.durationMs = Date.now() - startedAt;
     return result;
-  }
-  if (overBudget()) return stopForBudget("scope");
-  if (
-    !scopeMatchesColdExclusionPolicy(scope, coldExclusionPolicy)
-    || !/^[a-f0-9]{64}$/u.test(String(scope?.scopeDigest || ""))
-    || !Number.isInteger(scope?.catalogFloor)
-    || scope.catalogFloor < 1
-    || scope?.complete !== true
-    || !Array.isArray(scope?.sequences)
-    || !Number.isInteger(scope?.catalogSequences)
-    || scope.catalogSequences < 1
-    || scope.scannedSequences !== scope.catalogSequences
-    || !Number.isInteger(scope?.enabledLinkSequences)
-    || !Number.isInteger(scope?.coveredEnabledLinkSequences)
-    || (!coldExclusionPolicy.active
-      && scope.coveredEnabledLinkSequences !== scope.enabledLinkSequences)
-    || (coldExclusionPolicy.active && (
-      !Number.isInteger(scope?.excludedColdSequences)
-      || !Number.isInteger(scope?.excludedColdEnabledLinkSequences)
-      || scope.excludedColdSequences < 0
-      || scope.excludedColdEnabledLinkSequences < 0
-      || scope.coveredEnabledLinkSequences
-        + scope.excludedColdEnabledLinkSequences !== scope.enabledLinkSequences
-      || scope.bookingStopPolicy?.excludedSequences
-        !== scope.excludedColdSequences
-      || scope.bookingStopPolicy?.excludedEnabledLinkSequences
-        !== scope.excludedColdEnabledLinkSequences
-    ))
-  ) {
+  };
+  const scopeIncomplete = () => {
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_incomplete";
     result.durationMs = Date.now() - startedAt;
     return result;
+  };
+
+  const servedDigest = digestOf(pinnedPointer);
+  let scope = null;
+  try {
+    scope = await loadScope(servedDigest);
+  } catch (error) {
+    return scopeUnavailable(error);
+  }
+  if (overBudget()) return stopForBudget("scope");
+  if (scopeInvalid(scope)) return scopeIncomplete();
+
+  // The snapshot leg binds to the pointer as it is NOW, as the pre-cache
+  // sweep's loader did: binding the precheck's pointer after a refresh has
+  // published would fail the pre-mutation generation fence where the
+  // pre-cache sweep binds. One strict, retried read; a failed read keeps the
+  // precheck's pointer (positive evidence), and with no pointer at all the
+  // loader reads it itself, exactly as before the cache.
+  const bindPointer = (await readPointer()) ?? pinnedPointer;
+  const bindDigest = digestOf(bindPointer);
+  let definitionCacheFirstLoad = null;
+  if (
+    bindDigest
+    && bindDigest !== servedDigest
+    && bindDigest !== scope.scopeDigest
+    // A load that served no cached answer read everything live: it is the
+    // pre-cache scope and needs no re-run.
+    && scope.definitionCacheHits !== 0
+  ) {
+    // A refresh published between the two reads, and this scope may carry
+    // cached answers of the old digest that the new binding contradicts.
+    // Re-run the scope load ONCE against the new digest, reusing this pass's
+    // catalog: KV reads plus the live (selection-deciding) definition reads.
+    result.scopeReloadedForPointer = true;
+    definitionCacheFirstLoad = scope.definitionCache ?? null;
+    const listedCatalog = bookingStopScopeCatalog(scope);
+    try {
+      scope = await loadScope(
+        bindDigest,
+        listedCatalog ? { listedCatalog } : {},
+      );
+    } catch (error) {
+      return scopeUnavailable(error);
+    }
+    if (overBudget()) return stopForBudget("scope");
+    if (scopeInvalid(scope)) return scopeIncomplete();
   }
   const seqs = scope.sequences;
   result.scopeSchema = scope.schema;
@@ -2033,13 +2146,24 @@ export async function runBookingSweep({
   result.dangerClassSequences = Number.isInteger(scope.dangerClassSequences)
     ? scope.dangerClassSequences
     : null;
-  result.definitionFreshReads = Number.isInteger(scope.definitionFreshReads)
-    ? scope.definitionFreshReads
-    : null;
   result.definitionCacheHits = Number.isInteger(scope.definitionCacheHits)
     ? scope.definitionCacheHits
     : null;
-  result.definitionCache = definitionCacheTelemetry(scope.definitionCache);
+  {
+    // A re-run's reads are real Paraform reads too: report both loads.
+    const first = definitionCacheTelemetry(definitionCacheFirstLoad);
+    const last = definitionCacheTelemetry(scope.definitionCache);
+    result.definitionFreshReads = Number.isInteger(scope.definitionFreshReads)
+      ? scope.definitionFreshReads + (first?.freshReads ?? 0)
+      : null;
+    result.definitionCache = last && first
+      ? {
+        ...last,
+        freshReads: last.freshReads + first.freshReads,
+        requiredReads: last.requiredReads + first.requiredReads,
+      }
+      : last;
+  }
   result.linkSequences = scope.linkSequences;
   result.enabledLinkSequences = scope.enabledLinkSequences;
   result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
@@ -2057,7 +2181,13 @@ export async function runBookingSweep({
   try {
     membership = await timeLeg(
       "membership_snapshot",
-      () => membershipSnapshotLoader({ scope, now }),
+      // `pointer` is the object the scope leg's answers digest came from
+      // (undefined when no pointer could be read: the loader reads it).
+      () => membershipSnapshotLoader({
+        scope,
+        now,
+        pointer: bindPointer ?? undefined,
+      }),
     );
   } catch (error) {
     result.error = "membership_snapshot_unavailable";

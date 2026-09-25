@@ -1174,14 +1174,16 @@ test("telemetry projection is counts-only and drops anything else", () => {
   ]).durable, false);
 });
 
-test("default KV reader/writer: an unconfigured store reads everything and reports the write as failed", async () => {
+test("default KV reader/writer: an unconfigured store reads everything, reports read_error (strict reader), and skips the write", async () => {
   const h = harness();
   const { definitionCacheReader, definitionCacheWriter, ...rest } = h.options();
   assert.equal(typeof definitionCacheReader, "function");
   assert.equal(typeof definitionCacheWriter, "function");
   const scope = await discoverBookingStopSequences(rest); // defaults, no KV env in tests
   assert.equal(scope.definitionFreshReads, 5);
-  assert.equal(scope.definitionCache.state, "missing");
+  // Strict: "unreachable" is never mistaken for "absent".
+  assert.equal(scope.definitionCache.state, "read_error");
+  // The merge re-read fails too, so nothing is written.
   assert.equal(scope.definitionCache.write, "failed");
 });
 
