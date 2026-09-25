@@ -24,6 +24,7 @@ import {
   raydarSchedulerBookingStopEnabled,
 } from "./_lib/raydar-booking-index.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
+import { systemHealthOwns } from "../_lib/notify.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -56,6 +57,7 @@ export async function handleRaydarBookingWebhook(request, {
   pause = pauseForBooking,
   alert = notifySlack,
   alertAllowed = shouldAlert,
+  healthOwnsSession = systemHealthOwns,
   nowMs = Date.now(),
 } = {}) {
   if (request.method !== "POST") return json({ ok: false, error: "POST_only" }, 405);
@@ -159,7 +161,8 @@ export async function handleRaydarBookingWebhook(request, {
     });
   } catch (error) {
     const expired = error?.code === "AUTH_EXPIRED";
-    if (expired && (await alertAllowed("raydar-booking-auth-expired"))) {
+    // Switch on: the paraform-session tile owns a dead session (2026-09-25).
+    if (expired && !healthOwnsSession() && (await alertAllowed("raydar-booking-auth-expired"))) {
       await alert(":rotating_light: Raydar booking stop could not pause a booked candidate — the Paraform session cookie is expired.").catch(() => {});
     }
     return json({ ok: false, error: expired ? "expired" : "error" }, 503);

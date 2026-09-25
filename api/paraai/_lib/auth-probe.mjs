@@ -33,6 +33,7 @@
 //   helpers and never logs or stores the cookie value anywhere.
 
 import { notifySlack, trpcGetRaw } from "./core.mjs";
+import { notifySlotDelivered, notifySlotKey, pageNotify, systemHealthOwns } from "../../_lib/notify.mjs";
 import { kv } from "./store.mjs";
 
 export const AUTH_FLAG_KEY = "auth:paraform:down";
@@ -44,6 +45,10 @@ export const AUTH_PROBE_CADENCE_KEY = "auth:paraform:probe:cadence";
 export const AUTH_READ_SUSPECT_KEY = "auth:paraform:read-suspect";
 export const AUTH_READ_RECOVERY_KEY = "auth:paraform:read-recovery";
 const OPEN_ALERT_TTL_SECONDS = 30 * 24 * 60 * 60;
+// The write-layer page's in-flight claim: covers one send (up to ~31 s of
+// Slack retries) with room to spare, then lapses if nothing marked it
+// delivered, so an orphaned claim delays the page minutes, never the episode.
+const WRITE_OPEN_CLAIM_TTL_SECONDS = 15 * 60;
 const REMINDER_TTL_SECONDS = 24 * 60 * 60;
 const LAST_PROBE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const READ_CONFIRMATION_TTL_SECONDS = 30 * 60;
@@ -326,11 +331,63 @@ export function paraformAuthState({ flag = null, lastProbe = null } = {}) {
   };
 }
 
+/** The circuit's open alert. With the switch on no daily reminder follows. */
+export function authOpenAlertText(probe, switchOn) {
+  const evidence = probe.reason === "write_auth_expired"
+    ? `a Paraform mutation returned 401 at ${probe.evidence?.lane || "unknown"}:${probe.evidence?.stage || "unknown"} while read canaries may still be green`
+    : `independently paced checks both saw repeated 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}`;
+  return `🚨 Paraform auth circuit OPEN — the shared session cookie is rejected (${evidence}). Every cookie-consuming lane can fail with AUTH_EXPIRED until it is recaptured — ${RECAPTURE_RUNBOOK}. A write-layer outage stays latched until a later mutation succeeds; green reads alone cannot close it.${switchOn ? "" : " One daily reminder follows while it stays down."} Observe-only: no lane is held by this flag yet.`;
+}
+
 export async function runAuthProbeTick(
   { now = Date.now() } = {},
-  { probeImpl = probeParaformAuth, kvImpl = kv, notifyImpl = notifySlack } = {},
+  {
+    probeImpl = probeParaformAuth,
+    kvImpl = kv,
+    notifyImpl = notifySlack,
+    healthOwnsSession = systemHealthOwns,
+    pageImpl = pageNotify,
+  } = {},
 ) {
   const at = new Date(now).toISOString();
+  // Once the #notify switch is on, System Health's paraform-session tile owns
+  // a dead READ session (the sweep witness, seq/paraai health), so the
+  // circuit's read-layer OPEN and every daily reminder are recorded but not
+  // posted (2026-09-25): one incident, one post. The tile cannot see a
+  // WRITE-layer outage (a mutation 401 while reads stay green), so that OPEN
+  // still posts, once, through pageNotify to #notify. The flag, slots and the
+  // ops endpoint behave exactly as before.
+  const switchOn = healthOwnsSession();
+  const post = switchOn ? async () => false : notifyImpl;
+  // The write-layer page, keyed per episode so overlapping ticks (cron, Fly,
+  // a mutation 401's report tick) send it once. The key is the value of the
+  // atomic open slot (AUTH_OPEN_ALERT_KEY, the NX winner's openedAt stamp),
+  // never a tick's local `since`: two ticks that both found no flag each
+  // took their own `since` and paged under two keys (PR 230 review 4). The
+  // claim is short (WRITE_OPEN_CLAIM_TTL_SECONDS) and only a landed page
+  // turns it into a "delivered:<iso>" slot that lives as long as the open
+  // slot (30 d, refreshed each tick below), so a lost delivered:true record
+  // cannot re-page a weekend-long outage (review 4), and a claim orphaned by
+  // a killed function or a failed release lapses in minutes and a later tick
+  // sends the page instead of losing it (review 5).
+  // A held slot not yet marked delivered means another tick's send is still
+  // in flight and may yet fail: it is NOT counted as delivered, the caller
+  // leaves record.alert alone and a later tick retries (review 3).
+  // Answers "sent" | "delivered" (held, and marked delivered) | "held" |
+  // "failed".
+  const writeOpenKey = (episodeStamp) => `paraform-auth-write-open:${episodeStamp}`;
+  const pageWriteOpen = async (text, episodeStamp) => {
+    const result = await pageImpl(text, {
+      key: writeOpenKey(episodeStamp),
+      ttlSeconds: WRITE_OPEN_CLAIM_TTL_SECONDS,
+      deliveredTtlSeconds: OPEN_ALERT_TTL_SECONDS,
+    }).catch(() => null);
+    if (result?.ok !== true) return "failed";
+    if (result.skipped !== "duplicate") return "sent";
+    const slotRaw = await Promise.resolve(kvImpl(["GET", notifySlotKey(writeOpenKey(episodeStamp))]))
+      .catch(() => null);
+    return notifySlotDelivered(slotRaw) ? "delivered" : "held";
+  };
   const observed = await probeImpl();
   const writeFailure = parse(await kvImpl(["GET", AUTH_WRITE_FAILURE_KEY]));
   // A green GET cannot clear a mutation-layer 401. Keep the outage latched
@@ -483,19 +540,25 @@ export async function runAuthProbeTick(
     await kvImpl([
       "SET", AUTH_REMINDER_ALERT_KEY, at, "EX", REMINDER_TTL_SECONDS,
     ]);
-    const evidence = probe.reason === "write_auth_expired"
-      ? `a Paraform mutation returned 401 at ${probe.evidence?.lane || "unknown"}:${probe.evidence?.stage || "unknown"} while read canaries may still be green`
-      : `independently paced checks both saw repeated 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}`;
-    const delivered = await notifyImpl(
-      `🚨 Paraform auth circuit OPEN — the shared session cookie is rejected (${evidence}). Every cookie-consuming lane can fail with AUTH_EXPIRED until it is recaptured — ${RECAPTURE_RUNBOOK}. A write-layer outage stays latched until a later mutation succeeds; green reads alone cannot close it. One daily reminder follows while it stays down. Observe-only: no lane is held by this flag yet.`,
-    ).catch(() => false);
-    record.alert = { openedAt: at, delivered: delivered === true };
+    const openText = authOpenAlertText(probe, switchOn);
+    const layer = probe.reason === "write_auth_expired" ? "write" : "read";
+    let delivered;
+    let via;
+    if (switchOn && layer === "write") {
+      const outcome = await pageWriteOpen(openText, at);
+      delivered = outcome === "sent" || outcome === "delivered";
+      via = "notify";
+    } else {
+      delivered = (await post(openText).catch(() => false)) === true;
+      via = switchOn ? "none" : "legacy";
+    }
+    record.alert = { openedAt: at, delivered, via, layer };
     await kvImpl(["SET", AUTH_FLAG_KEY, JSON.stringify(record)]);
     return {
       status: "down",
       down: true,
       opened: true,
-      alertDelivered: delivered === true,
+      alertDelivered: delivered,
     };
   }
 
@@ -516,7 +579,52 @@ export async function runAuthProbeTick(
     await kvImpl([
       "SET", AUTH_OPEN_ALERT_KEY, openedAtRaw, "XX", "EX", OPEN_ALERT_TTL_SECONDS,
     ]);
+    // The write-layer #notify slot for this episode rides the same refresh
+    // (same KV, XX only), so it dedupes for the whole episode however long.
+    // Only a slot marked delivered: an in-flight claim keeps its short TTL,
+    // so an orphaned one still lapses and the page is retried (review 5).
+    if (switchOn) {
+      const pageSlot = notifySlotKey(writeOpenKey(openedAtRaw));
+      const pageSlotRaw = await Promise.resolve(kvImpl(["GET", pageSlot])).catch(() => null);
+      if (notifySlotDelivered(pageSlotRaw)) {
+        await Promise.resolve(kvImpl([
+          "SET", pageSlot, pageSlotRaw, "XX", "EX", OPEN_ALERT_TTL_SECONDS,
+        ])).catch(() => null);
+      }
+    }
   }
+  // Switch on, write layer: the one #notify page must actually land. The
+  // open slot above is 30 days and reminders are silent once the switch is
+  // on, so without this a failed send (a Slack blip, the bot not yet in
+  // #notify) left a write-layer outage silent until recapture. The same path
+  // carries an episode opened before the switch was flipped (its post went to
+  // the legacy channel) into #notify once. A read-layer episode stays the
+  // paraform-session tile's (layer "read").
+  if (
+    switchOn
+    && probe.reason === "write_auth_expired"
+    && record.alert?.layer !== "read"
+    && !(record.alert?.via === "notify" && record.alert?.delivered === true)
+  ) {
+    const outcome = await pageWriteOpen(authOpenAlertText(probe, true), openedAtRaw ?? since);
+    if (outcome === "held") {
+      // Another tick holds this episode's slot: its own record write says
+      // whether it landed. Writing delivered:true here could overwrite its
+      // delivered:false and stop the retries for good.
+      return { status: "down", down: true, alertRetried: true, alertDelivered: false, alertPending: true };
+    }
+    const delivered = outcome === "sent" || outcome === "delivered";
+    record.alert = {
+      openedAt: record.alert?.openedAt || at,
+      delivered,
+      via: "notify",
+      layer: "write",
+      retriedAt: at,
+    };
+    await kvImpl(["SET", AUTH_FLAG_KEY, JSON.stringify(record)]);
+    return { status: "down", down: true, alertRetried: true, alertDelivered: delivered };
+  }
+
   const openedAtMs = Date.parse(String(openedAtRaw ?? ""));
   if (Number.isFinite(openedAtMs) && now - openedAtMs < REMINDER_AFTER_OPEN_GRACE_MS) {
     return { status: "down", down: true };
@@ -531,7 +639,7 @@ export async function runAuthProbeTick(
     const day = Number.isFinite(sinceMs)
       ? Math.max(1, Math.floor((now - sinceMs) / 86_400_000) + 1)
       : 1;
-    await notifyImpl(
+    await post(
       `⏳ Paraform auth circuit still OPEN (day ${day}) — cookie still rejected since ${since}. ${RECAPTURE_RUNBOOK}.`,
     ).catch(() => false);
     return { status: "down", down: true, reminded: true, day };

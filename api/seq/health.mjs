@@ -3,9 +3,11 @@ import { timingSafeEqual } from "node:crypto";
 import { cors, hasCookie, paraformHealth } from "./_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import {
+  recordSessionLiveProof,
   raydarWebhookProofStatus,
   sweepStaleness,
 } from "./_lib/booking-stop.mjs";
+import { notifySwitchOn } from "../_lib/notify-switch.mjs";
 import { parseBookingStopColdExclusions } from "./_lib/booking-stop-policy.mjs";
 import {
   raydarSchedulerBookingStopEnabled,
@@ -88,8 +90,82 @@ export function authenticatedSchedulerHealthFields(
   };
 }
 
-async function handleSequenceHealth(req, res) {
+// System Health probes this endpoint with a 12 s timeout (seq-guardian in
+// api/health/_lib/catalog.mjs). On a dead cookie paraformHealth() rides the
+// full throttle ladder plus serial expiry probes (measured 42.5 s against a
+// 401 stub, 2026-09-25 review), so the probe timed out, the engine recorded
+// raw:null, and the paraform-session tile could not see the booking sweep's
+// expiry witness in this payload. The live read now starts first, overlaps
+// the KV reads, and is capped under the probe timeout; past the cap the
+// response says paraform:"timeout" (not live, never a verdict of expired).
+// The cap applies only with the #notify switch on: switch off, a slow but
+// healthy 9 to 12 s read still answers live, as before (PR 230 review 3).
+export const SEQ_HEALTH_LIVE_READ_BUDGET_MS = 9000;
+
+function cappedLiveRead(read, budgetMs) {
+  const live = Promise.resolve()
+    .then(() => read())
+    .catch((e) => ({ paraform: "error", detail: String(e?.message || e).slice(0, 160) }));
+  if (!(Number(budgetMs) > 0)) return live;
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({
+      paraform: "timeout",
+      detail: `live Paraform read took longer than ${Math.round(budgetMs / 1000)}s`,
+    }), budgetMs);
+    timer.unref?.();
+  });
+  return Promise.race([live, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The sweep's confirmed-expiry witness against this tick's live read.
+ *  - A live read made AFTER the witness proves the session is back (a
+ *    recapture whose next sweeps failed for a non-auth reason used to leave
+ *    the tile DOWN for the witness's whole 6 h TTL): record that live proof
+ *    beside the witness, once. The witness itself is the sweep's to retire:
+ *    deleting it here (review 2) let the next pass's pre-sweep stale check
+ *    re-page the same dead-cookie incident on recovery (review 3). The tile
+ *    and the sweep's stale check both read the proof.
+ *  - A proof already recorded after the witness: the session is back.
+ *  - Otherwise, with the #notify switch on, the witness is the answer:
+ *    paraform:"expired" whatever the capped live read said (it is slow,
+ *    paused, or a cached read older than the witness). Switch off: the
+ *    live read is reported as before.
+ */
+async function reconcileWitness(h, bookingStop, { recordLiveProof, switchOn }) {
+  const witnessAt = bookingStop?.sessionExpiredConfirmedAt;
+  const witnessMs = Date.parse(String(witnessAt || ""));
+  if (!Number.isFinite(witnessMs)) return h;
+  const checkedMs = Date.parse(String(h?.checkedAt || ""));
+  if (h?.paraform === "live" && Number.isFinite(checkedMs) && checkedMs > witnessMs) {
+    if (!bookingStop.sessionLiveSinceWitnessAt) {
+      await Promise.resolve().then(() => recordLiveProof(h.checkedAt)).catch(() => {});
+      bookingStop.sessionLiveSinceWitnessAt = new Date(checkedMs).toISOString();
+    }
+    return h;
+  }
+  if (bookingStop.sessionLiveSinceWitnessAt) return h;
+  if (!switchOn) return h;
+  return {
+    ...h,
+    paraform: "expired",
+    expiredSource: "booking-sweep-witness",
+    liveRead: h?.paraform ?? null,
+  };
+}
+
+export async function handleSequenceHealth(req, res, {
+  healthReader = paraformHealth,
+  staleness = sweepStaleness,
+  webhookProof = raydarWebhookProofStatus,
+  recordLiveProof = recordSessionLiveProof,
+  env = process.env,
+  liveReadBudgetMs = notifySwitchOn(env) ? SEQ_HEALTH_LIVE_READ_BUDGET_MS : null,
+} = {}) {
   if (cors(req, res)) return; // health is open so the page can show status
+  // Started before the KV reads so the two overlap (see the budget above).
+  const liveRead = cappedLiveRead(healthReader, liveReadBudgetMs);
   const currentBookingStopPolicy = bookingStopPolicyConfigStatus();
   // Booking-stop liveness is reported HERE, on the one unauthenticated endpoint,
   // deliberately. The sweep's own staleness alarm lives inside the sweep — which
@@ -99,11 +175,20 @@ async function handleSequenceHealth(req, res) {
   let bookingStop = null;
   try {
     const [s, webhook] = await Promise.all([
-      sweepStaleness(),
-      raydarWebhookProofStatus(),
+      staleness(),
+      webhookProof(),
     ]);
     bookingStop = {
       currentBookingStopPolicy,
+      // Set only while the booking sweep's CONFIRMED Paraform-session expiry
+      // stands (spaced probes, not one 401; cleared only by a good pass, a
+      // live-session throttle records a live proof instead). System Health's
+      // paraform-session tile reads it once the #notify switch is on.
+      // Additive (2026-09-25).
+      sessionExpiredConfirmedAt: s.sessionExpiredConfirmedAt ?? null,
+      // The first live read seen AFTER that witness (recapture): the tile
+      // yields to it (set below on this tick's read, or from KV).
+      sessionLiveSinceWitnessAt: s.sessionLiveSinceWitnessAt ?? null,
       lastSuccessfulSweep: s.lastAt,
       ageMinutes: s.ageMs == null ? null : Math.round(s.ageMs / 60000),
       stale: s.stale,
@@ -218,12 +303,11 @@ async function handleSequenceHealth(req, res) {
     bookingStop = { error: "unavailable", currentBookingStopPolicy };
   }
 
-  try {
-    const h = await paraformHealth();
-    res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop });
-  } catch (e) {
-    res.status(200).json({ ok: false, cookieSet: hasCookie(), paraform: "error", detail: String(e.message || e).slice(0, 160), bookingStop });
-  }
+  const h = await reconcileWitness(await liveRead, bookingStop, {
+    recordLiveProof,
+    switchOn: notifySwitchOn(env),
+  });
+  res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop });
 }
 
 export default function handler(req, res) {

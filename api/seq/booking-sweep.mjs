@@ -24,28 +24,105 @@ import {
   sweepAttemptErrorLabel,
   sweepErrorLabel,
   sweepStaleness,
+  SWEEP_STALE_AFTER_MS,
   shouldAlert,
-  isSessionActuallyExpired,
+  sessionProbeVerdict,
+  recordSessionExpiredWitness,
+  recordSessionLiveProof,
+  clearSessionExpiredWitness,
   kvConfigured,
   calendlyConfigured,
 } from "./_lib/booking-stop.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
+import { clearNotifySlot, pageNotify, systemHealthOwns } from "../_lib/notify.mjs";
 
 export const config = { maxDuration: 300 };
 
+// #notify switch (dashboard PR 2, 2026-09-25; api/_lib/notify-switch.mjs). Switch off,
+// every line below behaves exactly as before (shouldAlert + notifySlack). With
+// it set, the sweep posts two things to #notify, each once per incident:
+//   - the stale page ("has not completed a full pass"), the ONE persistent
+//     signal: cleared by the next successful pass, and skipped only while the
+//     sweep's confirmed-expiry witness stands (System Health's
+//     paraform-session tile is DOWN on exactly that witness, so it pages; the
+//     health engine reads the witness key from KV itself, so a timed-out
+//     seq/paraai health probe cannot blind the tile, 2026-09-25 review), and
+//     after a recapture until the sweep has gone the usual 3 h without a
+//     full pass counted from that recapture (only the sweep retires the
+//     witness; seq health records a live proof beside it, so a recovery
+//     never re-pages the dead-cookie incident, reviews 3 and 4);
+//   - booked leads it failed to pause (slot cleared by a clean pass).
+// No-cookie and AUTH_EXPIRED are left to System Health's paraform-session
+// tile, and the per-pass failure lines (no Calendly, zero leads, budget,
+// incomplete membership, snapshot rejected, Calendly truncated, Raydar index,
+// generic error) are left to the stale page.
+const STALE_KEY = "booking-sweep-stale";
+const PAUSE_ERRORS_KEY = "booking-sweep-pause-errors";
 
+/**
+ * Pure: does the paraform-session tile already page this stale incident?
+ * Only when the sweep's CONFIRMED expiry witness stands, since the tile is DOWN
+ * on exactly that. Never decided from the attempt's error label: a substring
+ * match on "auth" also caught CALENDLY_AUTH, and an unconfirmed AUTH_EXPIRED
+ * (throttling on a live session) leaves the tile OK, so both went silent.
+ * (No cookie never reaches the stale check: the handler returns first, and the
+ * tile pages cookieSet:false.)
+ */
+export function staleOwnedBySessionTile(staleness, {
+  switchOn = systemHealthOwns(),
+  now = Date.now(),
+  staleAfterMs = SWEEP_STALE_AFTER_MS,
+} = {}) {
+  if (!switchOn) return false;
+  if (!Number.isFinite(Date.parse(String(staleness?.sessionExpiredConfirmedAt || "")))) return false;
+  // Recapture (PR 230 reviews 3 and 4): once seq health has seen a live read
+  // after the witness, the tile yields, but the failed attempts that make
+  // this sweep stale are still the incident the tile already paged. So are
+  // the first passes after the recapture: a long outage also starved the
+  // membership refresh, so a pass that runs before the next refresh fails
+  // membership_snapshot_unavailable on the new cookie. Staleness is therefore
+  // measured from the recapture, not from the first failure after it: the
+  // stale incident stays the tile's until the sweep has gone the same 3 h
+  // without a full pass counted from max(last good pass, live proof); past
+  // that it is a new problem and pages. A good pass clears both keys first.
+  const liveMs = Date.parse(String(staleness?.sessionLiveSinceWitnessAt || ""));
+  if (!Number.isFinite(liveMs)) return true;
+  const lastMs = Date.parse(String(staleness?.lastAt || ""));
+  const fromMs = Number.isFinite(lastMs) ? Math.max(lastMs, liveMs) : liveMs;
+  return Number(now) - fromMs <= staleAfterMs;
+}
+
+/** A legacy-only line: posted as before while the switch is off, silent once on. */
+async function legacyOnly(slot, ttlSeconds, text) {
+  if (systemHealthOwns()) return;
+  if (await shouldAlert(slot, ttlSeconds)) await notifySlack(text).catch(() => {});
+}
+
+/** A critical line: legacy dedupe while off, the 24h #notify slot once on. */
+async function critical(slot, ttlSeconds, text, key) {
+  if (systemHealthOwns()) {
+    await pageNotify(text, { key }).catch(() => {});
+    return;
+  }
+  if (await shouldAlert(slot, ttlSeconds)) await pageNotify(text, { key }).catch(() => {});
+}
 
 // A request carrying the cron header but no valid bearer is either an intruder
 // or our own assumption about Vercel being wrong. Both must be visible fast.
 async function warnOnCronRejection(cron) {
   if (cron.ok || !cron.headerPresent) return;
-  if (await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
-    await notifySlack(`:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`).catch(() => {});
-  }
+  await critical(`cron-auth-${cron.reason}`, 3600, `:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`, "cron-auth");
 }
 
-async function handleBookingSweep(req, res) {
+export async function handleBookingSweep(req, res, {
+  sweep = runBookingSweep,
+  staleness: readStaleness = sweepStaleness,
+  // "expired" | "live" | "unknown" (a boolean from a test stub means
+  // expired / live).
+  confirmExpired = sessionProbeVerdict,
+  clock = Date.now,
+} = {}) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
@@ -61,9 +138,8 @@ async function handleBookingSweep(req, res) {
         error: "no_cookie",
       }).catch(() => {});
     }
-    if (await shouldAlert("no-cookie")) {
-      await notifySlack(":rotating_light: Booking sweep cannot run — PARAFORM_COOKIE is not configured. Booked candidates are receiving sequence nudges.").catch(() => {});
-    }
+    // Switch on: the paraform-session tile pages cookieSet:false.
+    await legacyOnly("no-cookie", undefined, ":rotating_light: Booking sweep cannot run — PARAFORM_COOKIE is not configured. Booked candidates are receiving sequence nudges.");
     return res.status(200).json({ ok: false, error: "no_cookie" });
   }
   if (!calendlyConfigured()) {
@@ -73,30 +149,28 @@ async function handleBookingSweep(req, res) {
         error: "no_calendly_token",
       }).catch(() => {});
     }
-    if (await shouldAlert("no-calendly")) {
-      await notifySlack(":rotating_light: Booking sweep cannot run — no Calendly token configured. Calendly bookings will not stop sequence nudges.").catch(() => {});
-    }
+    await legacyOnly("no-calendly", undefined, ":rotating_light: Booking sweep cannot run — no Calendly token configured. Calendly bookings will not stop sequence nudges.");
     return res.status(200).json({ ok: false, error: "no_calendly_token" });
   }
 
   // Staleness check runs BEFORE the sweep so a run that is itself about to fail
   // still surfaces that nothing has succeeded recently.
-  let staleness = await sweepStaleness();
-  if (staleness.stale && kvConfigured() && (await shouldAlert("sweep-stale"))) {
+  let staleness = await readStaleness();
+  if (staleness.stale && kvConfigured() && !staleOwnedBySessionTile(staleness, { now: clock() })) {
     const since = staleness.lastAt ? `since ${staleness.lastAt}` : "ever";
-    await notifySlack(`:rotating_light: Booking sweep has not completed a full pass ${since}. Candidates who book are not being removed from sequences. Check monitor.raydar.xyz/api/seq/booking-sweep.`).catch(() => {});
+    await critical("sweep-stale", undefined, `:rotating_light: Booking sweep has not completed a full pass ${since}. Candidates who book are not being removed from sequences. Check monitor.raydar.xyz/api/seq/booking-sweep.`, STALE_KEY);
   }
 
   try {
     if (apply) await recordSweepAttempt({ status: "running" });
-    const result = await runBookingSweep({ apply });
+    const result = await sweep({ apply });
     if (apply && !result.ok) {
       await recordSweepAttempt({
         status: "failure",
         result,
         error: sweepAttemptErrorLabel(result),
       });
-      staleness = await sweepStaleness();
+      staleness = await readStaleness();
     }
 
     // A pass that sees zero active leads is a FAILURE, not a clean run. Two
@@ -104,9 +178,7 @@ async function handleBookingSweep(req, res) {
     // Paraform API change had silently emptied the membership read, and a naive
     // is-it-green alert would have passed both.
     if (!result.ok && result.error === "zero_active_leads") {
-      if (await shouldAlert("zero-leads")) {
-        await notifySlack(":rotating_light: Booking sweep read ZERO active leads across every sequence — that is a broken membership read, not an empty pipeline. Not recording this pass as successful.").catch(() => {});
-      }
+      await legacyOnly("zero-leads", undefined, ":rotating_light: Booking sweep read ZERO active leads across every sequence — that is a broken membership read, not an empty pipeline. Not recording this pass as successful.");
       return res.status(200).json({ ...result, staleness });
     }
     // A pass that ran out of its own budget is the loud version of the failure
@@ -114,34 +186,33 @@ async function handleBookingSweep(req, res) {
     // mid-flight, the attempt record stayed "running" forever, and health could
     // not tell a dead pass from one still in progress. Someone has to act — the
     // pass is not going to get faster on its own.
-    if (result.budgetExceeded && (await shouldAlert("sweep-budget", 3600))) {
-      await notifySlack(`:rotating_light: Booking sweep ran out of its ${Math.round(result.budgetMs / 1000)}s budget during the *${result.budgetExceededIn}* stage and stopped itself. Booked candidates may still be receiving sequence email. This does not recover on its own — the pass needs less work per run.`).catch(() => {});
+    if (result.budgetExceeded) {
+      await legacyOnly("sweep-budget", 3600, `:rotating_light: Booking sweep ran out of its ${Math.round(result.budgetMs / 1000)}s budget during the *${result.budgetExceededIn}* stage and stopped itself. Booked candidates may still be receiving sequence email. This does not recover on its own — the pass needs less work per run.`);
     }
 
     if (!result.ok && result.error === "incomplete_membership") {
-      if (await shouldAlert("incomplete-membership", 3600)) {
-        await notifySlack(":rotating_light: Booking sweep could not prove complete membership for every covered scheduling-link sequence. No partial lead index was published and the pass was not recorded healthy.").catch(() => {});
-      }
+      await legacyOnly("incomplete-membership", 3600, ":rotating_light: Booking sweep could not prove complete membership for every covered scheduling-link sequence. No partial lead index was published and the pass was not recorded healthy.");
       return res.status(200).json({ ...result, staleness });
     }
 
     if (!result.ok && result.error === "membership_snapshot_unavailable") {
-      if (await shouldAlert("membership-snapshot-unavailable", 3600)) {
-        await notifySlack(":rotating_light: Booking sweep rejected the immutable Paraform membership snapshot (missing, stale, drifted, or incomplete). It made zero pauses and recorded no successful pass.").catch(() => {});
-      }
+      await legacyOnly("membership-snapshot-unavailable", 3600, ":rotating_light: Booking sweep rejected the immutable Paraform membership snapshot (missing, stale, drifted, or incomplete). It made zero pauses and recorded no successful pass.");
       return res.status(200).json({ ...result, staleness });
     }
 
-    if (result.calendlyTruncated && (await shouldAlert("calendly-truncated"))) {
-      await notifySlack(":warning: Booking sweep hit the Calendly pagination ceiling — some bookings may not have been read this pass.").catch(() => {});
+    if (result.calendlyTruncated) {
+      await legacyOnly("calendly-truncated", undefined, ":warning: Booking sweep hit the Calendly pagination ceiling — some bookings may not have been read this pass.");
     }
 
-    if (result.raydarError && (await shouldAlert("raydar-booking-index", 3600))) {
-      await notifySlack(":rotating_light: Booking sweep could not prove a complete Raydar scheduler booking index. The pass is unhealthy and native bookings may not stop sequence mail until the source recovers.").catch(() => {});
+    if (result.raydarError) {
+      await legacyOnly("raydar-booking-index", 3600, ":rotating_light: Booking sweep could not prove a complete Raydar scheduler booking index. The pass is unhealthy and native bookings may not stop sequence mail until the source recovers.");
     }
 
-    if (apply && result.pauseErrors.length && (await shouldAlert("pause-errors", 3600))) {
-      await notifySlack(`:warning: Booking sweep failed to pause ${result.pauseErrors.length} booked lead(s). They are still receiving sequence email.`).catch(() => {});
+    if (apply && result.pauseErrors.length) {
+      await critical("pause-errors", 3600, `:warning: Booking sweep failed to pause ${result.pauseErrors.length} booked lead(s). They are still receiving sequence email.`, PAUSE_ERRORS_KEY);
+    } else if (apply && result.ok && systemHealthOwns()) {
+      // A clean pass ends the pause-error incident: the next one pages again.
+      await clearNotifySlot(PAUSE_ERRORS_KEY).catch(() => {});
     }
 
     // A pass that paused booked candidates is the control WORKING: a success,
@@ -151,7 +222,11 @@ async function handleBookingSweep(req, res) {
     if (result.ok && apply) {
       await recordSuccessfulSweep(result);
       await recordSweepAttempt({ status: "success", result });
-      staleness = await sweepStaleness();
+      staleness = await readStaleness();
+      // The stale incident is over: the next one pages again. A good pass
+      // also proves the Paraform session is live.
+      await clearSessionExpiredWitness().catch(() => {});
+      if (systemHealthOwns()) await clearNotifySlot(STALE_KEY).catch(() => {});
     }
 
     // Never return candidate detail in an HTTP response — counts only.
@@ -214,14 +289,37 @@ async function handleBookingSweep(req, res) {
     // Never report (or alert) an expiry on the strength of one 401: Paraform
     // answers 401 to bursts. Confirm with spaced probes first, or a busy pass
     // cries wolf about the cookie and the real alarm stops being believed.
-    const expired = e?.code === "AUTH_EXPIRED" && (await isSessionActuallyExpired());
-    if (e?.code === "AUTH_EXPIRED" && !expired) {
+    let verdict = null;
+    if (e?.code === "AUTH_EXPIRED") {
+      verdict = await confirmExpired();
+      if (verdict === true) verdict = "expired";
+      else if (verdict === false) verdict = "live";
+    }
+    const expired = verdict === "expired";
+    if (verdict === "live") {
+      // Throttling on a session a probe verified live. The witness stays: only
+      // a good pass retires it (PR 230 review 5). Deleting it here let the
+      // next still-failing pass re-page the incident the tile already paged
+      // (after a recapture, or mid-outage on one lucky probe). The live proof
+      // moves the stale page to the 3 h-from-recapture rule instead.
+      await recordSessionLiveProof(new Date(clock()).toISOString()).catch(() => {});
       return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform rate-limited this pass; session verified live. Next run retries.", ranAt: new Date().toISOString() });
     }
-    if (expired && (await shouldAlert("auth-expired"))) {
-      await notifySlack(":rotating_light: Booking sweep hit AUTH_EXPIRED — the Paraform session cookie needs recapture. Booked candidates are unprotected until then.").catch(() => {});
-    } else if (!expired && (await shouldAlert("sweep-error", 3600))) {
-      await notifySlack(`:rotating_light: Booking sweep failed: ${String(e?.message || e).slice(0, 160)}`).catch(() => {});
+    if (verdict !== null && !expired) {
+      // The confirm probe got no 401 and no 200 (network error, timeout,
+      // 5xx/429, a 403 trpc error): it proves nothing about the cookie, so
+      // any witness is left exactly as it is.
+      return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform did not answer the session probe; session state unknown. Next run retries.", ranAt: new Date().toISOString() });
+    }
+    if (expired) {
+      // The paraform-session tile reads this witness from KV each tick and
+      // yields to a live read seq health records after it (2026-09-25).
+      await recordSessionExpiredWitness().catch(() => {});
+    }
+    if (expired) {
+      await legacyOnly("auth-expired", undefined, ":rotating_light: Booking sweep hit AUTH_EXPIRED — the Paraform session cookie needs recapture. Booked candidates are unprotected until then.");
+    } else {
+      await legacyOnly("sweep-error", 3600, `:rotating_light: Booking sweep failed: ${String(e?.message || e).slice(0, 160)}`);
     }
     return res.status(200).json({ ok: false, error: expired ? "expired" : "error", detail: String(e?.message || e).slice(0, 200) });
   }

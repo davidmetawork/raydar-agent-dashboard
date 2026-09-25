@@ -17,12 +17,59 @@
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import { kvGet, kvSet, shouldAlert, kvConfigured } from "../seq/_lib/booking-stop.mjs";
 import { cronAuth } from "../seq/_lib/core.mjs";
+import { clearNotifySlot, pageNotify, systemHealthOwns } from "../_lib/notify.mjs";
 
 export const config = { maxDuration: 60 };
 
 const STATE_KEY = "seqguard:n8nwatch";
 // A workflow that fails this many consecutive scheduled runs is broken, not flaky.
 const CONSECUTIVE_FAILURES_TO_ALERT = Number(process.env.N8N_WATCH_FAIL_STREAK || 2);
+
+// Once the #notify switch is on, only these workflows page (#notify plan,
+// 2026-09-25): the screener dispatch trio (wf01 auto-dispatch, wf02
+// reconciliation, wf04 Fyxer backfill guardian), the Alzen agent-call-failure
+// DM and the candidate auto-reply relay. Any other failing workflow shows on
+// System Health's tier-2 n8n-workflows tile, which reads this same state.
+export const DEFAULT_CRITICAL_N8N_WORKFLOWS = Object.freeze([
+  "QTkhrJajgqX5O1h6",
+  "1986DPFGQ1GQQLAg",
+  "BzxNViQBTQJjf3mR",
+  "MnDm7iQjRpw6vWRc",
+  "FPRENGDKOAjJK0Oi",
+]);
+
+export function criticalN8nWorkflows(env = process.env) {
+  const configured = String(env?.N8N_WATCH_CRITICAL_IDS || "")
+    .split(",").map((id) => id.trim()).filter(Boolean);
+  return new Set(configured.length ? configured : DEFAULT_CRITICAL_N8N_WORKFLOWS);
+}
+
+// The #notify slot for a failing critical workflow. Cleared when the workflow
+// recovers, so the TTL is only a leak guard: an outage that outlasts it posts
+// once more, a week later.
+export const N8N_FAILING_SLOT_TTL_SECONDS = 7 * 24 * 3600;
+
+/**
+ * Which firing workflows to page now. Pure. -> { page, silent }
+ * Switch off: a workflow re-pages only when its streak grows past what was
+ * last paged (alerted[]).
+ * Switch on: EVERY firing critical workflow is offered to pageNotify, whose
+ * per-workflow `n8n-failing:<id>` slot (cleared on recovery) is the once-per-
+ * incident dedupe. alerted[] is not consulted, so an outage already recorded
+ * there in legacy mode still reaches #notify on the first switch-on tick.
+ * A non-critical workflow never pages (`silent`, recorded so it stays quiet).
+ * (If KV is down the slot cannot be taken and pageNotify posts anyway, so a
+ * critical outage re-posts each hourly tick until KV returns: louder, never
+ * silent.)
+ */
+export function n8nWatchPlan({ firing, alerted = {}, switchOn = false, critical = new Set() }) {
+  const worse = firing.filter((s) => (alerted[s.workflowId] || 0) < s.streak);
+  if (!switchOn) return { page: worse, silent: [] };
+  return {
+    page: firing.filter((s) => critical.has(s.workflowId)),
+    silent: worse.filter((s) => !critical.has(s.workflowId)),
+  };
+}
 
 
 
@@ -71,8 +118,8 @@ export function failureStreaks(executions) {
 // or our own assumption about Vercel being wrong. Both must be visible fast.
 async function warnOnCronRejection(cron) {
   if (cron.ok || !cron.headerPresent) return;
-  if (await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
-    await notifySlack(`:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`).catch(() => {});
+  if (systemHealthOwns() || await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
+    await pageNotify(`:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`, { key: "cron-auth" }).catch(() => {});
   }
 }
 
@@ -110,37 +157,60 @@ export default async function handler(req, res) {
     const alerted = { ...(prev.alerted || {}) };
     const firing = streaks.filter((s) => s.streak >= CONSECUTIVE_FAILURES_TO_ALERT);
 
+    const switchOn = systemHealthOwns();
+    const plan = n8nWatchPlan({ firing, alerted, switchOn, critical: criticalN8nWorkflows() });
+    const describe = (s) => {
+      const nm = names.get(s.workflowId)?.name || s.workflowId;
+      const since = s.lastSuccessAt ? `last success ${String(s.lastSuccessAt).slice(0, 16)}Z` : "no success on record";
+      return `• *${nm}* — ${s.streak} consecutive failures (${since})`;
+    };
+    // A non-critical failure is recorded (it stays on the tier-2 tile) and
+    // never pages once the switch is on.
+    for (const s of plan.silent) alerted[s.workflowId] = s.streak;
     const fresh = [];
-    for (const s of firing) {
-      // Re-alert only when it gets worse, so a long outage does not spam — but a
-      // recovery followed by a new break does alert again.
-      if ((alerted[s.workflowId] || 0) >= s.streak) continue;
-      alerted[s.workflowId] = s.streak;
-      fresh.push(s);
+    if (plan.page.length && switchOn) {
+      // One #notify post per workflow incident; the slot clears on recovery.
+      for (const s of plan.page) {
+        const sent = await pageNotify(`:rotating_light: n8n workflow is failing repeatedly:\n${describe(s)}`, {
+          key: `n8n-failing:${s.workflowId}`,
+          ttlSeconds: N8N_FAILING_SLOT_TTL_SECONDS,
+        }).catch(() => ({ ok: false }));
+        if (sent.ok) {
+          alerted[s.workflowId] = Math.max(alerted[s.workflowId] || 0, s.streak);
+          if (!sent.skipped) fresh.push(s);
+        }
+      }
+    } else if (plan.page.length && (await shouldAlert("n8n-failures", 3600))) {
+      // alerted[] moves only after a won slot AND a delivered post (fixed
+      // 2026-09-25: it used to move first, so a streak that grew inside the
+      // hourly throttle was marked alerted and never posted).
+      const delivered = await notifySlack(`:rotating_light: n8n workflows are failing repeatedly:\n${plan.page.map(describe).join("\n")}`).catch(() => false);
+      if (delivered) for (const s of plan.page) { alerted[s.workflowId] = s.streak; fresh.push(s); }
     }
+    // The watchdog read n8n this tick: an earlier "could not read" incident is
+    // over, so the next one pages again.
+    if (switchOn) await clearNotifySlot("n8n-unreadable").catch(() => {});
     // Clear state for anything that recovered, so a future break re-alerts.
     for (const id of Object.keys(alerted)) {
-      if (!streaks.some((s) => s.workflowId === id)) delete alerted[id];
+      if (!streaks.some((s) => s.workflowId === id)) {
+        delete alerted[id];
+        if (switchOn) await clearNotifySlot(`n8n-failing:${id}`).catch(() => {});
+      }
     }
 
-    // NOTE (notify-channel restart audit, 2026-09-24): shouldAlert() here is a
-    // takeAlertSlot-equivalent dedupe (SET NX EX under a different name in
-    // api/seq/_lib/booking-stop.mjs) — this alert IS rate-limited, unlike
-    // guardian.mjs's "stopped N sequence(s)" alert. It still resolves through
-    // notifySlack()'s SLACK_CHANNEL_ID_ALERTS fallback, not a separate
-    // channel, and there is no SURGE-only gate anywhere in this repo. See
-    // docs-site/src/content/docs/reference/notify-channel-restart.md in the
-    // raydar repo for the open decision on repointing that shared var.
-    if (fresh.length && (await shouldAlert("n8n-failures", 3600))) {
-      const lines = fresh.map((s) => {
-        const nm = names.get(s.workflowId)?.name || s.workflowId;
-        const since = s.lastSuccessAt ? `last success ${String(s.lastSuccessAt).slice(0, 16)}Z` : "no success on record";
-        return `• *${nm}* — ${s.streak} consecutive failures (${since})`;
+    // `streaks` carries every firing workflow for System Health's tier-2 tile,
+    // whether or not it paged (the tile already accepts this richer shape).
+    if (kvConfigured()) {
+      await kvSet(STATE_KEY, {
+        alerted,
+        streaks: firing.map((s) => ({
+          workflowId: s.workflowId,
+          workflowName: names.get(s.workflowId)?.name || null,
+          streak: s.streak,
+        })),
+        checkedAt: new Date().toISOString(),
       });
-      await notifySlack(`:rotating_light: n8n workflows are failing repeatedly:\n${lines.join("\n")}`).catch(() => {});
     }
-
-    if (kvConfigured()) await kvSet(STATE_KEY, { alerted, checkedAt: new Date().toISOString() });
 
     return res.status(200).json({
       ok: true,
@@ -154,8 +224,8 @@ export default async function handler(req, res) {
   } catch (e) {
     // The watchdog going quiet is the failure mode it exists to prevent, so its
     // own breakage is loud.
-    if (await shouldAlert("n8n-watchdog-error", 6 * 3600)) {
-      await notifySlack(`:rotating_light: n8n watchdog could not read execution history: ${String(e?.message || e).slice(0, 140)}. n8n failures are currently unmonitored.`).catch(() => {});
+    if (systemHealthOwns() || await shouldAlert("n8n-watchdog-error", 6 * 3600)) {
+      await pageNotify(`:rotating_light: n8n watchdog could not read execution history: ${String(e?.message || e).slice(0, 140)}. n8n failures are currently unmonitored.`, { key: "n8n-unreadable" }).catch(() => {});
     }
     return res.status(200).json({ ok: false, error: String(e?.message || e).slice(0, 200) });
   }

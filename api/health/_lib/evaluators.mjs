@@ -8,6 +8,8 @@
 // Guiding rule from the 2026-08-06/07 outage: report what is TRUE, never what
 // is convenient. A tile that cannot tell must say UNKNOWN, not OK.
 
+import { notifySwitchOn } from "../../_lib/notify-switch.mjs";
+
 const OK = (reason = null, metrics) => ({ state: "OK", reason, metrics });
 const DEG = (reason, metrics) => ({ state: "DEGRADED", reason, metrics });
 const DOWN = (reason, metrics) => ({ state: "DOWN", reason, metrics });
@@ -95,10 +97,64 @@ export function webviewStatus({ body, status }) {
   return OK();
 }
 
-/** Derived: Paraform cookie liveness, read from two lanes that already know. */
-export function paraformSession({ results }) {
+/**
+ * The sweep's confirmed-expiry witness, from the engine's own KV read
+ * (`sessionWitness`, so a timed-out seq/paraai probe cannot blind the tile:
+ * both health endpoints ride Paraform's throttle ladder on a dead cookie) or
+ * from seq health's bookingStop field. Null when a live seq read made AFTER
+ * the witness proves the session is back (a recapture whose next sweeps fail
+ * for a non-auth reason leaves the witness up): this tick's read, or the
+ * live proof seq health recorded beside the witness (engine KV read as
+ * `sessionWitness.liveAt`, or bookingStop.sessionLiveSinceWitnessAt), so a
+ * probe that times out after a recapture does not hold the tile DOWN.
+ */
+function confirmedExpiryWitness(seq, sessionWitness) {
+  const candidates = [sessionWitness?.at, seq?.bookingStop?.sessionExpiredConfirmedAt]
+    .map((value) => Date.parse(String(value || "")))
+    .filter(Number.isFinite);
+  if (!candidates.length) return null;
+  const witnessMs = Math.max(...candidates);
+  const liveMs = Date.parse(String(seq?.checkedAt || ""));
+  if (String(seq?.paraform || "") === "live" && Number.isFinite(liveMs) && liveMs > witnessMs) return null;
+  const proofs = [sessionWitness?.liveAt, seq?.bookingStop?.sessionLiveSinceWitnessAt]
+    .map((value) => Date.parse(String(value || "")))
+    .filter(Number.isFinite);
+  if (proofs.some((ms) => ms > witnessMs)) return null;
+  return new Date(witnessMs).toISOString();
+}
+
+/** Derived: Paraform cookie liveness, read from two lanes that already know.
+ *
+ * With the #notify switch on (NOTIFY_SLACK_CHANNEL set and HEALTH_ALERTS_ENABLED=true, 2026-09-25) this tile
+ * is the ONE owner of "the Paraform login is dead", so it must not go green
+ * while blind: during the 2026-09-17 reader pause both sources answer
+ * "paused", which used to read as OK. With the switch on it reports DOWN on
+ * the booking sweep's confirmed-expiry witness (the sweep keeps probing
+ * through the pause), on cookieSet:false, or on seq health's own Paraform
+ * read answering expired/no_cookie/invalid (the paraai source is often
+ * "paused", so seq must count on its own), and UNKNOWN instead of OK when
+ * both sources are paused and there is no witness. Switch off: unchanged.
+ * The witness comes from the engine's own KV read as well as seq health, so
+ * the tile pages even when both health probes time out (2026-09-25 review).
+ * (The engine still needs two consecutive DOWN ticks before it pages.)
+ */
+export function paraformSession({ results, sessionWitness = null, env = process.env }) {
   const seq = results["seq-guardian"]?.raw;
   const paraai = results["paraai-lane"]?.raw;
+  const switchOn = notifySwitchOn(env);
+  if (switchOn) {
+    const witness = confirmedExpiryWitness(seq, sessionWitness);
+    if (witness) {
+      return DOWN(`Paraform session expired — confirmed by the booking sweep at ${witness}. Recapture the cookie`, { witness });
+    }
+    if (seq && seq.cookieSet === false) {
+      return DOWN("PARAFORM_COOKIE is not configured on the dashboard — every Paraform lane is blind", { cookieSet: false });
+    }
+    const seqParaform = String(seq?.paraform?.status || seq?.paraform || "");
+    if (/expired|no_cookie|invalid/i.test(seqParaform)) {
+      return DOWN(`Paraform session ${seqParaform} (seq health read) — every Paraform lane is blind. Recapture the cookie`, { seq: seqParaform });
+    }
+  }
   if (!seq && !paraai) return UNK("no seq/paraai health available this tick");
   const paraformState = String(paraai?.paraform?.status || paraai?.paraform || "");
   const metrics = { paraai: paraformState || null };
@@ -112,6 +168,9 @@ export function paraformSession({ results }) {
   );
   if (/throttl/i.test(throttled)) return DEG(`Paraform throttling: ${throttled}`, metrics);
   if (!paraformState && seqCookie === undefined) return UNK("health payloads lack a session field", metrics);
+  if (switchOn && /paused/i.test(paraformState) && /paused/i.test(String(seq?.paraform || ""))) {
+    return UNK("both sources are paused and the booking sweep has not confirmed an expiry — the session is unverified", metrics);
+  }
   return OK(null, metrics);
 }
 
@@ -200,6 +259,11 @@ export function seqHealth({ body }) {
     sweepStale: bs.stale,
     latestAttemptError: bs.latestAttemptError || null,
   };
+  // A live read that ran past seq health's cap (switch on only) is not an
+  // answer: UNKNOWN, as the probe timeout it replaced read (PR 230 review 3).
+  if (body.ok === false && body.paraform === "timeout") {
+    return UNK(String(body.detail || "live Paraform read timed out"), metrics);
+  }
   if (body.ok === false) return DOWN(String(body.error || "seq health ok:false"), metrics);
   if (bs.stale === true) {
     return DEG(`booking-stop sweep stale${bs.latestAttemptError ? `: ${bs.latestAttemptError}` : ""}`, metrics);

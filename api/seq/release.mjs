@@ -8,7 +8,7 @@ import { cors, requireAuth, hasCookie, cronAuth, listDelayProjects, projectMembe
 import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
 import { protectedRecruiterForRoleTitle } from "./_lib/protected.mjs";
 import { shouldAlert } from "./_lib/booking-stop.mjs";
-import { notifySlack } from "../paraai/_lib/core.mjs";
+import { pageNotify, systemHealthOwns } from "../_lib/notify.mjs";
 
 export const config = { maxDuration: 300 };
 
@@ -20,8 +20,8 @@ export default async function handler(req, res) {
   // not a credential (Vercel does not strip it from inbound traffic).
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) {
-    if (cron.headerPresent && (await shouldAlert(`cron-auth-${cron.reason}`, 3600))) {
-      await notifySlack(`:warning: A request to /api/seq/release carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}).`).catch(() => {});
+    if (cron.headerPresent && (systemHealthOwns() || await shouldAlert(`cron-auth-${cron.reason}`, 3600))) {
+      await pageNotify(`:warning: A request to /api/seq/release carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}).`, { key: "cron-auth" }).catch(() => {});
     }
     return;
   }

@@ -17,6 +17,10 @@ const TRANS_CAP = 200;
 const INCIDENT_CAP = 300;
 const TRANS_TTL = 31 * 24 * 3600;
 const STATE_ORDER = { OK: 0, PAUSED: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
+/** The booking sweep's confirmed-expiry witness (seqguard:*, read-only here). */
+export const SESSION_WITNESS_KEY = "seqguard:session-expired-witness:v1";
+/** Seq health's live read made after that witness (seqguard:*, read-only here). */
+export const SESSION_LIVE_PROOF_KEY = "seqguard:session-live-proof:v1";
 /** States that must be seen twice in a row before they stick. */
 const DEBOUNCED = new Set(["UNKNOWN", "DOWN"]);
 /** Ticks a debounced state must be seen in a row, unless overridden below. */
@@ -265,7 +269,7 @@ export async function runTick({ now = Date.now() } = {}) {
     : { tiles: {} };
   const beatKeys = CATALOG.filter((c) => c.kind === "beat").map((c) => K.beat(c.probe.lane));
   const ackKeys = CATALOG.map((c) => K.ack(c.id));
-  const [beatVals, ackVals, watchdog, lastDelivered, gmailBackoffUntil] = await Promise.all([
+  const [beatVals, ackVals, watchdog, lastDelivered, gmailBackoffUntil, witnessRecord, liveProof] = await Promise.all([
     hGetMany(beatKeys),
     hGetMany(ackKeys),
     hGet("seqguard:n8nwatch"), // READ-ONLY: owned by /api/ops/n8n-watchdog
@@ -274,7 +278,19 @@ export async function runTick({ now = Date.now() } = {}) {
     // while the fleet Gmail breaker is armed — i.e. an outreach pass actually
     // observed a 429 on david@raydar.xyz within the last ~20 minutes.
     hGet("paraai:outreach:gmail-backoff"),
+    // READ-ONLY: owned by api/seq/booking-sweep.mjs (booking-stop.mjs K.
+    // sessionExpiredWitness). The sweep's CONFIRMED Paraform-session expiry,
+    // read here directly so the paraform-session tile still sees it when the
+    // seq and Para AI health probes time out (both ride Paraform's throttle
+    // ladder on a dead cookie). 2026-09-25 PR 230 review.
+    hGet(SESSION_WITNESS_KEY),
+    // READ-ONLY: owned by api/seq/health.mjs. The first live read after that
+    // witness (a recapture): the tile yields to it (PR 230 review 3).
+    hGet(SESSION_LIVE_PROOF_KEY),
   ]);
+  const sessionWitness = witnessRecord && typeof witnessRecord === "object"
+    ? { ...witnessRecord, liveAt: liveProof?.at ?? null }
+    : null;
   const beats = {};
   CATALOG.filter((c) => c.kind === "beat").forEach((c, i) => { beats[c.probe.lane] = beatVals[i]; });
   const acks = {};
@@ -363,7 +379,7 @@ export async function runTick({ now = Date.now() } = {}) {
     }
     try {
       results[check.id] = evaluate({
-        results, watchdog, kvOk, lastDelivered, laneStates, beats, gmailBackoffUntil,
+        results, watchdog, kvOk, lastDelivered, laneStates, beats, gmailBackoffUntil, sessionWitness,
         probe: check.probe, check,
       });
     } catch (e) {

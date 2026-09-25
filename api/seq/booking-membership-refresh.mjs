@@ -27,7 +27,9 @@ import {
   bookingMembershipAttempt,
   runBookingMembershipRefresh,
 } from "./_lib/booking-membership-snapshot.mjs";
-import { notifySlack } from "../paraai/_lib/core.mjs";
+import { pageNotify, systemHealthOwns } from "../_lib/notify.mjs";
+
+const pageNotifyCronAuth = (text) => pageNotify(text, { key: "cron-auth" });
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
 export const config = { maxDuration: 300 };
@@ -71,8 +73,8 @@ async function recordAttempt(status, {
 
 async function warnOnCronRejection(cron) {
   if (cron.ok || !cron.headerPresent) return;
-  if (await shouldAlert(`membership-cron-auth-${cron.reason}`, 3600)) {
-    await notifySlack(
+  if (systemHealthOwns() || await shouldAlert(`membership-cron-auth-${cron.reason}`, 3600)) {
+    await pageNotifyCronAuth(
       `:warning: Booking membership refresh received a cron-marked request without a valid CRON_SECRET bearer (${cron.reason}). The immutable membership snapshot will age out if scheduled refreshes cannot authenticate.`,
     ).catch(() => {});
   }

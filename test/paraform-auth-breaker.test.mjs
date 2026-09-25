@@ -25,6 +25,7 @@ import {
   runScheduledAuthProbeTick,
 } from "../api/paraai/_lib/auth-probe.mjs";
 import opsHandler from "../api/ops/paraform-auth.mjs";
+import { notifySlotKey, pageNotify } from "../api/_lib/notify.mjs";
 
 // ---------------------------------------------------------------------------
 // Offline stubs. No live Paraform call is ever made: the tRPC layer is
@@ -800,4 +801,349 @@ test("the probe stays out of the frozen worker response", () => {
   assert.equal(workerSource.includes("authProbe:"), false);
   assert.equal((workerSource.match(/runScheduledAuthProbeTick/g) || []).length, 2,
     "one import, one guarded call — nothing feeds the response");
+});
+
+test("#notify switch on: the circuit still opens and latches, but System Health owns the page", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const owns = () => true;
+  const suspected = await runAuthProbeTick(
+    { now: NOW },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: owns },
+  );
+  assert.equal(suspected.status, "suspected");
+  const opened = await runAuthProbeTick(
+    { now: NOW + CONFIRMATION_MS },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: owns },
+  );
+  assert.equal(opened.opened, true);
+  assert.equal(opened.alertDelivered, false);
+  assert.ok(kv.store.has(AUTH_FLAG_KEY), "the flag and the ops endpoint behave as before");
+  const dayLater = await runAuthProbeTick(
+    { now: NOW + CONFIRMATION_MS + 26 * 3600_000 },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: owns },
+  );
+  assert.equal(dayLater.down, true);
+  assert.deepEqual(notify.messages, [], "no OPEN and no daily reminder once the tile owns the session");
+});
+
+test("#notify switch on: a WRITE-layer 401 still pages #notify once (the tile cannot see it)", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const pages = [];
+  const pageImpl = async (text, options) => { pages.push({ text, options }); return { ok: true, via: "notify" }; };
+  const writeDown = async () => ({
+    healthy: false,
+    reason: "write_auth_expired",
+    evidence: { code: "AUTH_EXPIRED", mode: "write", lane: "paraai_outreach", stage: "digest_mutation" },
+  });
+  const deps = { probeImpl: writeDown, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl };
+  const opened = await runAuthProbeTick({ now: NOW }, deps);
+  assert.equal(opened.opened, true);
+  assert.equal(opened.alertDelivered, true);
+  assert.equal(pages.length, 1);
+  assert.match(pages[0].text, /mutation returned 401/);
+  assert.doesNotMatch(pages[0].text, /daily reminder/, "no reminder follows once the switch is on");
+  const dayLater = await runAuthProbeTick({ now: NOW + 26 * 3600_000 }, deps);
+  assert.equal(dayLater.down, true);
+  assert.equal(pages.length, 1, "no daily reminder in #notify");
+  assert.deepEqual(notify.messages, [], "the legacy channel is untouched");
+});
+
+// PR 230 review round 2: with the switch on, the write-layer page is the
+// ONLY post (reminders are silent), so a failed send must be retried.
+const writeDownProbe = async () => ({
+  healthy: false,
+  reason: "write_auth_expired",
+  evidence: { code: "AUTH_EXPIRED", mode: "write", lane: "paraai_outreach", stage: "digest_mutation" },
+});
+
+// A pageNotify stand-in with its real slot semantics: a held key answers
+// ok:true skipped:"duplicate", and a failed send releases the key.
+function pageRecorder() {
+  const slots = new Set();
+  const pages = [];
+  let ok = true;
+  const pageImpl = async (text, { key } = {}) => {
+    if (key && slots.has(key)) return { ok: true, via: "notify", skipped: "duplicate", key };
+    if (key) slots.add(key);
+    if (!ok) {
+      if (key) slots.delete(key);
+      return { ok: false, via: "notify", key };
+    }
+    pages.push({ text, key });
+    return { ok: true, via: "notify", key };
+  };
+  return { pageImpl, pages, slots, setOk: (value) => { ok = value; } };
+}
+
+test("#notify switch on: a WRITE-layer page that fails to send is retried on the next tick, then stops", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  page.setOk(false);
+  const opened = await runAuthProbeTick({ now: NOW }, deps);
+  assert.equal(opened.opened, true);
+  assert.equal(opened.alertDelivered, false);
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, false);
+  const stillFailing = await runAuthProbeTick({ now: NOW + 5 * 60_000 }, deps);
+  assert.equal(stillFailing.alertRetried, true);
+  assert.equal(stillFailing.alertDelivered, false);
+  page.setOk(true);
+  const retried = await runAuthProbeTick({ now: NOW + 10 * 60_000 }, deps);
+  assert.equal(retried.alertRetried, true);
+  assert.equal(retried.alertDelivered, true);
+  assert.equal(page.pages.length, 1);
+  assert.match(page.pages[0].text, /mutation returned 401/);
+  const flag = JSON.parse(kv.store.get(AUTH_FLAG_KEY));
+  assert.equal(flag.alert.delivered, true);
+  assert.equal(flag.alert.via, "notify");
+  const later = await runAuthProbeTick({ now: NOW + 26 * 3600_000 }, deps);
+  assert.equal(later.alertRetried, undefined, "delivered: no more sends");
+  assert.equal(page.pages.length, 1, "one post per episode");
+  assert.deepEqual(notify.messages, [], "the legacy channel is untouched");
+});
+
+test("#notify switch on: a tick that finds the episode slot HELD by an in-flight send does not mark it delivered (review 3)", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const keys = [];
+  const pageImpl = async (text, opts = {}) => { keys.push(opts.key); return page.pageImpl(text, opts); };
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl };
+  page.setOk(false);
+  await runAuthProbeTick({ now: NOW }, deps); // opens; the send fails, the slot is released
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, false);
+  // Tick A (cron) claims the episode slot and is still sending when tick B (Fly) runs.
+  const key = keys[0];
+  assert.match(key, /^paraform-auth-write-open:/);
+  page.slots.add(key);
+  const before = JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert;
+  const b = await runAuthProbeTick({ now: NOW + 5 * 60_000 }, deps);
+  assert.equal(b.alertDelivered, false, "a held slot is not a delivery");
+  assert.equal(b.alertPending, true);
+  assert.deepEqual(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert, before, "B leaves record.alert for A to write");
+  // A's send fails: pageNotify releases the slot and A records delivered:false.
+  page.slots.delete(key);
+  page.setOk(true);
+  const c = await runAuthProbeTick({ now: NOW + 10 * 60_000 }, deps);
+  assert.equal(c.alertDelivered, true, "the next tick still retries and lands it");
+  assert.equal(page.pages.length, 1);
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, true);
+});
+
+test("#notify switch flipped mid-episode: a write-layer outage posted to the legacy channel reaches #notify once", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const off = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => false, pageImpl: page.pageImpl };
+  const opened = await runAuthProbeTick({ now: NOW }, off);
+  assert.equal(opened.alertDelivered, true);
+  assert.equal(notify.messages.length, 1, "switch off: the legacy post, as before");
+  assert.equal(page.pages.length, 0);
+  const on = { ...off, healthOwnsSession: () => true };
+  const flipped = await runAuthProbeTick({ now: NOW + 3600_000 }, on);
+  assert.equal(flipped.alertRetried, true);
+  assert.equal(page.pages.length, 1);
+  await runAuthProbeTick({ now: NOW + 2 * 3600_000 }, on);
+  assert.equal(page.pages.length, 1, "once, not every tick");
+});
+
+test("#notify switch on: a READ-layer episode never takes the write-layer retry (the tile owns it)", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const deps = { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  await runAuthProbeTick({ now: NOW }, deps);
+  const opened = await runAuthProbeTick({ now: NOW + CONFIRMATION_MS }, deps);
+  assert.equal(opened.opened, true);
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.layer, "read");
+  // A mutation 401 later joins the same (read-layer) episode.
+  const joined = await runAuthProbeTick({ now: NOW + CONFIRMATION_MS + 600_000 }, { ...deps, probeImpl: writeDownProbe });
+  assert.equal(joined.alertRetried, undefined);
+  assert.equal(page.pages.length, 0);
+  assert.deepEqual(notify.messages, []);
+});
+
+// PR 230 review rounds 4 and 5: the write-layer page key comes from the atomic
+// open slot. The real pageNotify runs over a KV fake that honours EX against
+// a test clock: the claim is short (it covers one in-flight send), and only a
+// landed page becomes a "delivered:" slot that lives (and is refreshed) as
+// long as the episode.
+function ttlKv(clock, seed = {}) {
+  const inner = fakeKv(seed);
+  const expiry = new Map();
+  const lapse = (key) => {
+    const at = expiry.get(key);
+    if (at != null && at <= clock.now) { inner.store.delete(key); expiry.delete(key); }
+  };
+  const impl = async (args) => {
+    const [command, key, ...rest] = args;
+    if (clock.failDel && command === "DEL" && String(key).startsWith("notify:")) {
+      clock.failDel = false;
+      throw new Error("KV_HTTP_503");
+    }
+    if (key != null) lapse(key);
+    const result = await inner(args);
+    if (command === "SET" && result === "OK") {
+      const flags = rest.slice(1).map((v) => String(v).toUpperCase());
+      const ex = flags.indexOf("EX");
+      if (ex >= 0) expiry.set(key, clock.now + Number(flags[ex + 1]) * 1000);
+      else expiry.delete(key);
+    }
+    if (command === "DEL") expiry.delete(key);
+    return result;
+  };
+  impl.store = inner.store;
+  impl.calls = inner.calls;
+  impl.expiry = expiry;
+  return impl;
+}
+
+// The real pageNotify, switch on, over `kv`. clock.gate holds a send open,
+// clock.hang never finishes it (the function was killed mid-send), and
+// clock.sendOk=false makes Slack refuse it.
+function ttlPageRecorder(clock, kv) {
+  const pages = [];
+  const env = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" };
+  const recorder = { pages, inFlight: 0 };
+  recorder.pageImpl = (text, opts = {}) => pageNotify(text, {
+    ...opts,
+    env,
+    kv: (command) => kv(command),
+    notifySend: async (t) => {
+      recorder.inFlight += 1;
+      if (clock.hang) return new Promise(() => {});
+      if (clock.gate) await clock.gate;
+      if (clock.sendOk === false) return false;
+      pages.push({ text: t, key: opts.key });
+      return true;
+    },
+  });
+  return recorder;
+}
+
+test("R4 refuter B: two overlapping FIRST ticks of one write-layer outage page #notify once", async () => {
+  const clock = { now: NOW };
+  const kv = ttlKv(clock);
+  const page = ttlPageRecorder(clock, kv);
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notifyRecorder(true), healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  await Promise.all([
+    runAuthProbeTick({ now: NOW }, deps),
+    runAuthProbeTick({ now: NOW + 40 }, deps),
+  ]);
+  assert.equal(page.pages.length, 1, `pages: ${JSON.stringify(page.pages.map((p) => p.key))}`);
+  assert.equal(page.pages[0].key, `paraform-auth-write-open:${kv.store.get(AUTH_OPEN_ALERT_KEY)}`, "keyed on the open slot");
+});
+
+test("R4 refuter C: a lost delivered record never re-pages the episode, even past 24 h", async () => {
+  const clock = { now: NOW };
+  const kv = ttlKv(clock);
+  const page = ttlPageRecorder(clock, kv);
+  let releaseA; clock.gate = new Promise((r) => { releaseA = r; });
+  const depsA = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notifyRecorder(true), healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  const a = runAuthProbeTick({ now: NOW }, depsA);
+  while (!page.inFlight) await new Promise((r) => setImmediate(r)); // A is mid-send
+  // Tick B read the flag during A's send; its top-of-tick flag SET lands after A's record.
+  let releaseB; const bGate = new Promise((r) => { releaseB = r; });
+  const kvB = async (args) => {
+    if (args[0] === "SET" && args[1] === AUTH_FLAG_KEY) await bGate;
+    return kv(args);
+  };
+  const b = runAuthProbeTick({ now: NOW + 1000 }, { ...depsA, kvImpl: kvB });
+  await new Promise((r) => setTimeout(r, 10));
+  clock.gate = null; releaseA(); await a;
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, true, "A recorded its delivery");
+  releaseB(); await b;
+  assert.equal(page.pages.length, 1);
+  // The outage stays down over a weekend: ticks every 5 min for 25 h.
+  for (let t = 5; t <= 25 * 60; t += 5) {
+    clock.now = NOW + t * 60_000;
+    await runAuthProbeTick({ now: clock.now }, depsA);
+  }
+  assert.equal(page.pages.length, 1, `episode paged ${page.pages.length} times`);
+  // Review 5 minor: the delivered slot restores the lost record.
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, true, "the ops endpoint shows the page landed");
+});
+
+test("R4/R5: the write-layer claim is short, a landed page becomes a 30 d delivered slot refreshed each tick", async () => {
+  const clock = { now: NOW };
+  const kv = ttlKv(clock);
+  const page = ttlPageRecorder(clock, kv);
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notifyRecorder(true), healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  await runAuthProbeTick({ now: NOW }, deps);
+  const slot = notifySlotKey(`paraform-auth-write-open:${kv.store.get(AUTH_OPEN_ALERT_KEY)}`);
+  const thirtyDays = String(30 * 24 * 60 * 60);
+  const claim = kv.calls.find((c) => c[0] === "SET" && c[1] === slot && c.includes("NX"));
+  assert.equal(claim[claim.indexOf("EX") + 1], String(15 * 60), "the in-flight claim covers one send");
+  assert.match(kv.store.get(slot), /^delivered:/, "a landed page marks the slot delivered");
+  assert.equal(kv.expiry.get(slot), NOW + 30 * 24 * 3600_000, "delivered for 30 d");
+  // Lose the delivered record; a day later the slot is still there, is
+  // refreshed with the open slot, and restores the record without a send.
+  const flag = JSON.parse(kv.store.get(AUTH_FLAG_KEY));
+  kv.store.set(AUTH_FLAG_KEY, JSON.stringify({ ...flag, alert: null }));
+  clock.now = NOW + 26 * 3600_000;
+  const later = await runAuthProbeTick({ now: clock.now }, deps);
+  assert.equal(later.alertDelivered, true);
+  const refresh = kv.calls.find((c) => c[0] === "SET" && c[1] === slot && c.includes("XX"));
+  assert.ok(refresh, "the page slot is refreshed with the open slot");
+  assert.equal(refresh[refresh.indexOf("EX") + 1], thirtyDays);
+  assert.equal(page.pages.length, 1, "one #notify post for the episode");
+});
+
+test("R4: a new write-layer episode after a close pages again under its own key", async () => {
+  const clock = { now: NOW };
+  const kv = ttlKv(clock);
+  const page = ttlPageRecorder(clock, kv);
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notifyRecorder(true), healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  await runAuthProbeTick({ now: NOW }, deps);
+  assert.equal(page.pages.length, 1);
+  // A later mutation succeeded (no write latch here), so a green read closes it.
+  clock.now = NOW + 3600_000 + 1000;
+  const closed = await runAuthProbeTick({ now: clock.now }, { ...deps, probeImpl: greenProbe });
+  assert.equal(closed.resumed, true);
+  clock.now = NOW + 2 * 3600_000;
+  await runAuthProbeTick({ now: clock.now }, deps);
+  assert.equal(page.pages.length, 2, "the next outage is a new incident");
+  assert.notEqual(page.pages[0].key, page.pages[1].key);
+});
+
+// Review 5 refuters: an orphaned in-flight claim must delay the page, never
+// lose it. Ticks every 5 min for 25 h; the page lands once, within minutes.
+async function tickFor(clock, deps, fromMin, toMin) {
+  for (let t = fromMin; t <= toMin; t += 5) {
+    clock.now = NOW + t * 60_000;
+    await runAuthProbeTick({ now: clock.now }, deps);
+  }
+}
+
+test("R5-A: a function killed mid-send orphans the claim; a later tick still pages, once", async () => {
+  const clock = { now: NOW, hang: true };
+  const kv = ttlKv(clock);
+  const page = ttlPageRecorder(clock, kv);
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notifyRecorder(true), healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  void runAuthProbeTick({ now: NOW }, deps); // opens, claims, then dies inside sendSlack
+  while (!page.inFlight) await new Promise((r) => setImmediate(r));
+  clock.hang = false;
+  await tickFor(clock, deps, 5, 30);
+  assert.equal(page.pages.length, 1, "the orphaned claim lapsed and the retry paged");
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, true);
+  await tickFor(clock, deps, 35, 25 * 60);
+  assert.equal(page.pages.length, 1, "and never again this episode");
+});
+
+test("R5-B: a failed send whose slot release hits a KV blip still pages on a later tick, once", async () => {
+  const clock = { now: NOW, sendOk: false, failDel: true };
+  const kv = ttlKv(clock);
+  const page = ttlPageRecorder(clock, kv);
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notifyRecorder(true), healthOwnsSession: () => true, pageImpl: page.pageImpl };
+  const opened = await runAuthProbeTick({ now: NOW }, deps);
+  assert.equal(opened.alertDelivered, false);
+  assert.equal(clock.failDel, false, "the release DEL failed");
+  clock.sendOk = true;
+  await tickFor(clock, deps, 5, 30);
+  assert.equal(page.pages.length, 1, "the orphaned claim lapsed and the retry paged");
+  await tickFor(clock, deps, 35, 25 * 60);
+  assert.equal(page.pages.length, 1, "and never again this episode");
 });

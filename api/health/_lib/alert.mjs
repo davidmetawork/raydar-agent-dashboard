@@ -11,15 +11,27 @@
 // Standing directive (docs/agent-memory/feedback_notify_only_actionable.md):
 // alert only when a human must act; routine self-healing stays silent.
 import { hDel, hGet, hSet, hSetNx, K } from "./kv.mjs";
+import { notifyChannel, notifySwitchOn } from "../../_lib/notify-switch.mjs";
 
 const RE_PAGE_SECONDS = 60 * 60;
 
 // `channel` overrides the alert channel (the daily digest passes its own, so
 // routine summaries never land in the critical-only #notify channel).
-export async function sendSlack(text, { channel: channelOverride = "" } = {}) {
+// `botTokenFirst` (the #notify switch, 2026-09-25): post by bot token to that
+// channel even if SLACK_WEBHOOK_URL is set, and NEVER fall back to the
+// webhook. A webhook's channel is fixed by the webhook, so a fallback would
+// silently land #notify pages wherever the webhook points; with no token (or
+// no channel) the send fails and is recorded undeliverable instead, which the
+// slack-transport tile shows and pageNotify's slot release retries.
+export async function sendSlack(text, { channel: channelOverride = "", botTokenFirst = false } = {}) {
   const token = process.env.SLACK_BOT_TOKEN || "";
   const channel = channelOverride || process.env.HEALTH_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS || "";
-  const webhook = process.env.SLACK_WEBHOOK_URL || "";
+  if (botTokenFirst && !(token && channel)) {
+    console.error("health_alert_undeliverable", { reason: token ? "no channel for bot-token send" : "SLACK_BOT_TOKEN unset" });
+    await hSet(K.lastDelivered, { at: new Date().toISOString(), failed: true, reason: "no_bot_token" }).catch(() => {});
+    return false;
+  }
+  const webhook = botTokenFirst ? "" : process.env.SLACK_WEBHOOK_URL || "";
   if (!webhook && !(token && channel)) {
     console.error("health_alert_undeliverable", { reason: "no slack config" });
     await hSet(K.lastDelivered, { at: new Date().toISOString(), failed: true, reason: "unconfigured" });
@@ -125,14 +137,23 @@ const legacySlotPagedThisEpisode = (holder, incident) => {
  *
  * `transitions` is kept for the call shape; the tile state carries everything
  * the page needs. `send` and `store` are test seams.
+ *
+ * With the #notify switch on (api/_lib/notify-switch.mjs) the page goes to
+ * NOTIFY_SLACK_CHANNEL by bot token, the same channel as every other critical
+ * sender, whatever HEALTH_SLACK_CHANNEL says. Switch off: unchanged.
  */
 export async function alertOnTransitions(
   transitions,
   state,
-  { send = sendSlack, store = { get: hGet, setNx: hSetNx, set: hSet, del: hDel } } = {},
+  {
+    env = process.env,
+    send = sendSlack,
+    store = { get: hGet, setNx: hSetNx, set: hSet, del: hDel },
+  } = {},
 ) {
   void transitions;
   const sent = [];
+  const route = notifySwitchOn(env) ? [{ channel: notifyChannel(env), botTokenFirst: true }] : [];
   for (const [id, tile] of Object.entries(state?.tiles || {})) {
     if (tile?.state !== "DOWN" || tile.tier !== 1) continue;
     if (tile.ackUntil) continue; // acknowledged: page after the ack, if still DOWN
@@ -166,6 +187,7 @@ export async function alertOnTransitions(
     const delivered = await send(
       `🔴 DOWN: ${tile.name || id} — ${tile.reason || "no reason given"}\n`
       + `since ${tile.since || at} · https://monitor.raydar.xyz/health`,
+      ...route,
     );
     if (delivered === false) {
       // Not delivered: release both so the next tick tries again. The

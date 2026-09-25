@@ -59,15 +59,15 @@ export function findStuckJobs(jobs = [], { now = Date.now(), thresholdMs = stuck
 
 const hours = (ms) => (ms / 3_600_000).toFixed(1);
 
+// No candidate names (2026-09-25, #notify plan: no PII in #notify). The
+// Para AI tab lists the stuck jobs; the page says how many, where and how long.
 export function stuckAlertMessage(stuck = [], { requeued = 0 } = {}) {
   if (!stuck.length) return null;
   const worst = stuck[0];
   const states = [...new Set(stuck.map((row) => row.state))].sort().join(", ");
-  const names = stuck.slice(0, 3).map((row) => row.name).join(", ");
-  const more = stuck.length > 3 ? ` +${stuck.length - 3} more` : "";
   return `🚨 Para AI: ${stuck.length} job(s) stuck before submission for over `
-    + `${hours(worst.stalledMs)}h — states: ${states}. Oldest: ${worst.name} `
-    + `(${worst.state}, ${hours(worst.stalledMs)}h). Affected: ${names}${more}. `
+    + `${hours(worst.stalledMs)}h — states: ${states}. Oldest: `
+    + `${worst.state}, ${hours(worst.stalledMs)}h. `
     + `No new candidate is reaching the Talent Network while this holds. `
     + (requeued ? `Re-queued ${requeued} with no queue entry. ` : "")
     + `Review https://monitor.raydar.xyz/paraai`;
@@ -125,6 +125,8 @@ export async function runStuckWatchdogTick({
 
   const took = await alertSlotImpl(stuckAlertSlotKey(stuck), 3 * 3600).catch(() => false);
   if (!took) return { ok: true, stuck: stuck.length, alerted: false, requeued };
-  await notifyImpl(stuckAlertMessage(stuck, { requeued })).catch(() => {});
+  // The bucket key also names the #notify slot (pageNotify ignores it while
+  // the switch is off; notifySlack ignores the second argument).
+  await notifyImpl(stuckAlertMessage(stuck, { requeued }), { key: stuckAlertSlotKey(stuck) }).catch(() => {});
   return { ok: true, stuck: stuck.length, alerted: true, requeued, oldest: stuck[0] };
 }

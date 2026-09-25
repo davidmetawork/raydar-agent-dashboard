@@ -40,7 +40,7 @@ import {
   trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
   // These three moved into core.mjs so the launcher's dedup and
   // enrolled-elsewhere scans get the same protection this module needed.
-  withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads, campaignLeadBySearch,
+  withThrottleRetry, isSessionActuallyExpired, sessionProbeVerdict, completeCampaignLeads, campaignLeadBySearch,
 } from "./core.mjs";
 import {
   fetchRaydarBookingIndex,
@@ -75,7 +75,7 @@ import {
   bookingMembershipSnapshotHealth,
   loadPublishedBookingMembershipSnapshot,
 } from "./booking-membership-snapshot.mjs";
-export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
+export { withThrottleRetry, isSessionActuallyExpired, sessionProbeVerdict, completeCampaignLeads };
 export {
   BOOKING_MEMBERSHIP_CURRENT_SCHEMA,
   BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
@@ -307,7 +307,51 @@ export const K = {
   profile: (cuId) => `seqguard:prof2:${cuId}`,
   alert: (key) => `seqguard:alert:${key}`,
   rotor: "seqguard:rotor",
+  // The booking sweep's confirmed Paraform-session expiry (#notify plan,
+  // 2026-09-25). Its own key, not a field on the attempt record: each pass
+  // stamps a "running" attempt first, which would hide the witness mid-pass
+  // and make System Health's paraform-session tile flap.
+  sessionExpiredWitness: "seqguard:session-expired-witness:v1",
+  // The first live Paraform read seq health saw AFTER that witness (a
+  // recapture, or a throttle-induced false witness). Its own key so the
+  // witness is never rewritten or deleted outside the sweep: the sweep's
+  // stale page keys off both (PR 230 review 3, 2026-09-25).
+  sessionLiveProof: "seqguard:session-live-proof:v1",
 };
+
+const SESSION_WITNESS_TTL_SECONDS = 6 * 3600;
+
+/**
+ * Written only after isSessionActuallyExpired() proved the session dead with
+ * spaced probes (never on one 401). Cleared only by a successful pass: a
+ * later AUTH_EXPIRED that a probe finds live records a live proof beside it
+ * instead (PR 230 review 5). The TTL bounds a witness nobody clears (the
+ * sweep stops running).
+ */
+export async function recordSessionExpiredWitness(now = Date.now()) {
+  const at = new Date(now).toISOString();
+  await kvSet(K.sessionExpiredWitness, { at }, SESSION_WITNESS_TTL_SECONDS);
+  return at;
+}
+
+export async function clearSessionExpiredWitness() {
+  await kv(["DEL", K.sessionExpiredWitness]);
+  await kv(["DEL", K.sessionLiveProof]).catch(() => {});
+}
+
+/**
+ * Seq health only: a live read made after the witness. The witness itself
+ * stays (only the sweep retires it), so the sweep can tell "session back,
+ * no pass tried since" (the stale incident is still the one the tile paged)
+ * from "session back and a later pass failed too" (a new problem, page it).
+ */
+export async function recordSessionLiveProof(checkedAt) {
+  const ms = Date.parse(String(checkedAt || ""));
+  if (!Number.isFinite(ms)) return null;
+  const at = new Date(ms).toISOString();
+  await kvSet(K.sessionLiveProof, { at }, SESSION_WITNESS_TTL_SECONDS);
+  return at;
+}
 
 /**
  * Publish the immutable generation pointer and the webhook's existing by-email
@@ -483,6 +527,13 @@ function secureKeyFragment(value) {
 }
 
 /** Alert at most once per `key` per `windowSeconds`. Returns true if the caller should alert. */
+/** Release a shouldAlert slot (a post that failed, so the next run retries). */
+export async function releaseAlert(key) {
+  if (!kvConfigured()) return false;
+  await kv(["DEL", K.alert(key)]);
+  return true;
+}
+
 export async function shouldAlert(key, windowSeconds = 12 * 3600) {
   if (!kvConfigured()) return true; // no store -> never suppress a real alert
   try {
@@ -1324,7 +1375,13 @@ export async function runBookingSweep({
       "scope",
       () => sequenceScopeLoader({ deadline, coldExclusionPolicy }),
     );
-  } catch {
+  } catch (e) {
+    // A Paraform AUTH_EXPIRED is not a snapshot problem: rethrow it so the
+    // handler confirms it with spaced probes and, if the session really is
+    // dead, records the expiry witness System Health's paraform-session tile
+    // pages on (2026-09-25). Folding it in here hid a dead cookie behind
+    // "membership snapshot unavailable" and never wrote the witness.
+    if (e?.code === "AUTH_EXPIRED") throw e;
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_unavailable";
     result.durationMs = Date.now() - startedAt;
@@ -1936,13 +1993,19 @@ export async function sweepStaleness(now = Date.now(), {
     leadIndex,
     classificationReceipt,
     membershipSnapshot,
+    sessionWitness,
+    sessionLiveProof,
   ] = await Promise.all([
     read(K.lastSweep),
     read(K.lastAttempt),
     read(K.leadIndex),
     read(K.scopeClassification),
     snapshotHealthLoader({ read, readMany, now }),
+    Promise.resolve(read(K.sessionExpiredWitness)).catch(() => null),
+    Promise.resolve(read(K.sessionLiveProof)).catch(() => null),
   ]);
+  const witnessAtMs = Date.parse(String(sessionWitness?.at || ""));
+  const liveProofAtMs = Date.parse(String(sessionLiveProof?.at || ""));
   const classificationAtMs = Date.parse(
     String(classificationReceipt?.at || ""),
   );
@@ -2003,6 +2066,15 @@ export async function sweepStaleness(now = Date.now(), {
     latestAttemptError:
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
         ? attempt.error
+        : null,
+    sessionExpiredConfirmedAt:
+      Number.isFinite(witnessAtMs)
+        ? new Date(witnessAtMs).toISOString()
+        : null,
+    // Set only when a live read proved the session back AFTER that witness.
+    sessionLiveSinceWitnessAt:
+      Number.isFinite(witnessAtMs) && Number.isFinite(liveProofAtMs) && liveProofAtMs > witnessAtMs
+        ? new Date(liveProofAtMs).toISOString()
         : null,
     latestAttemptBookingStopPolicy:
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
