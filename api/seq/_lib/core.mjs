@@ -177,12 +177,23 @@ export async function trpcGet(proc, json, tries = 3) {
   return classifyThrottle(() => trpcGetRaw(proc, json, tries));
 }
 
-async function trpcGetRaw(proc, json, tries = 3) {
+// ONE request, no throttle ladder, no session-expiry probe, caller-bounded
+// timeout. For OPTIONAL reads only (the booking-stop definition rotor): a 401
+// throws PARAFORM_THROTTLED at once and the caller simply stops. Never use it
+// for a read whose failure must be classified as throttle versus expiry.
+export async function trpcGetOnce(proc, json, { timeoutMs = 20000 } = {}) {
+  const bounded = Number.isFinite(timeoutMs)
+    ? Math.max(1, Math.min(20000, Math.floor(timeoutMs)))
+    : 20000;
+  return trpcGetRaw(proc, json, 1, bounded);
+}
+
+async function trpcGetRaw(proc, json, tries = 3, timeoutMs = 20000) {
   const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
   const url = `${BASE}/trpc/${proc}?input=` + encodeURIComponent(JSON.stringify(env(json)));
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await observedFetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(url, { headers: headers(), signal: AbortSignal.timeout(timeoutMs) });
       if (r.status === 401) throw throttled();
       // A 5xx/429 body is usually HTML, so without this the failure surfaced as
       // an opaque JSON parse error that nothing could classify as retryable.

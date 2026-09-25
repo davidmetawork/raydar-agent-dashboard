@@ -100,8 +100,8 @@ async function handleBookingSweep(req, res) {
       staleness = await sweepStaleness();
     }
 
-    // Before any early return: a stale-false correction usually also makes
-    // this pass's scope differ from the published snapshot's.
+    // Before any early return: the definition cache's only alert (its
+    // document outgrew the size cap, so every run reads every definition).
     const cacheAlert = definitionCacheAlert(result.definitionCache);
     if (cacheAlert && (await shouldAlert(cacheAlert.key, 3600))) {
       await notifySlack(cacheAlert.message).catch(() => {});

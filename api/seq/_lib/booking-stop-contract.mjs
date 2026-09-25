@@ -33,32 +33,42 @@ export const BOOKING_MEMBERSHIP_BUILD_BUDGET_MS = 240 * 1000;
 // (BOOKING_STOP_DEFINITION_CACHE=off restores a full read on every load) but
 // can never lengthen how long a cached answer is trusted.
 //
-// The only protection gap the cache introduces: a scheduling link added to an
-// EXISTING sequence that is enabled, name-unmatched and not cold-excluded,
-// with no rename and no enable flip, is invisible in the catalog. A cached
-// "no link" for such a row is trusted for at most NO_LINK_MAX_AGE (today the
-// gap is one refresh interval, about 10 minutes). Choosing that number is a
-// review decision.
+// The cache never serves a "no link" answer on a row where that answer
+// decides selection (enabled, name-unmatched, not cold-excluded). Those rows
+// are read live on EVERY scope load, exactly as before the cache, because the
+// catalog carries no change signal (no updated_at, version or step count:
+// verified field set in the raydar repo's Paraform API reference) and a
+// scheduling link added to such a row moves nothing in the catalog. Every
+// answer the cache does serve can only keep a row in scope or cannot change
+// selection, so a stale cached answer can never shrink protection.
 export const BOOKING_STOP_DEFINITION_CACHE_SCHEMA =
-  "raydar-booking-stop-definition-cache-v1";
-// Cached "no link" on a row where that answer decides selection.
-export const BOOKING_STOP_DEFINITION_NO_LINK_MAX_AGE_MS = 30 * 60 * 1000;
-// Every other cached answer (a cached "has link" only ever widens scope; a
-// disabled or name-matched row's link answer never changes selection).
+  "raydar-booking-stop-definition-cache-v2";
+// Bump whenever campaignHasCandidateSchedulingLink, hasCandidateSchedulingLink
+// or the scheduling-link rules they use change meaning. The cache revision is
+// this version plus a fingerprint of the matcher functions' source, so a
+// matcher change always starts from an empty cache; a deploy that does not
+// touch the matcher keeps it. test/booking-stop-definition-cache.test.mjs
+// pins the matcher files' hash to this version.
+export const BOOKING_STOP_DEFINITION_MATCHER_VERSION = 1;
+// How long the refresh trusts a cached answer it may use (a cached "has link"
+// only ever widens scope; a disabled or name-matched row's link answer never
+// changes selection).
 export const BOOKING_STOP_DEFINITION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
-// A selection-deciding "no link" is trusted only once a read at least this
-// long after the state was first seen confirms it. Covers new ids, renames,
-// enable flips, link removals and getCampaign's tens-of-seconds eventual
-// consistency after updateSequenceSteps.
-export const BOOKING_STOP_DEFINITION_SETTLE_MS = 5 * 60 * 1000;
-// The refresh re-reads the oldest entries of each class before they expire so
-// expiries never bunch into bursts: per run, per class,
-// ceil(count * HORIZON / (maxAge - HORIZON)) reads, at most ROTOR_MAX_READS in
-// total, inside a ROTOR_PHASE_MS time budget.
+// The sweep trusts the same answers one snapshot lifetime longer, so it never
+// re-reads (and disagrees with) an answer the published snapshot was built
+// from. Rows the sweep reads live are unaffected. Also the retention bound:
+// an entry older than this is dropped on write.
+export const BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS =
+  BOOKING_STOP_DEFINITION_MAX_AGE_MS + BOOKING_MEMBERSHIP_MAX_AGE_MS;
+// The refresh re-reads the oldest cached answers before they expire so
+// expiries never bunch into bursts: per run
+// ceil(count * HORIZON / (MAX_AGE - HORIZON)) reads, at most ROTOR_MAX_READS,
+// inside ROTOR_PHASE_MS. Rotor reads are single-shot (no throttle ladder, no
+// session-expiry probe): the first failure stops the rotor for that run.
 export const BOOKING_STOP_DEFINITION_ROTOR_HORIZON_MS = 10 * 60 * 1000;
 export const BOOKING_STOP_DEFINITION_ROTOR_MAX_READS = 64;
-export const BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS = 45 * 1000;
+export const BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS = 20 * 1000;
 // A document past either cap is neither trusted nor written.
 export const BOOKING_STOP_DEFINITION_CACHE_MAX_ENTRIES = 1024;
 export const BOOKING_STOP_DEFINITION_CACHE_MAX_BYTES = 512 * 1024;
-export const BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS = 7 * 60 * 60;
+export const BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS = 8 * 60 * 60;

@@ -37,7 +37,7 @@
 
 import { createHash, createHmac } from "node:crypto";
 import {
-  trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
+  trpcGet, trpcGetOnce, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
   // These three moved into core.mjs so the launcher's dedup and
   // enrolled-elsewhere scans get the same protection this module needed.
   withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads, campaignLeadBySearch,
@@ -62,13 +62,17 @@ import {
   BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS,
   BOOKING_STOP_DEFINITION_MAX_AGE_MS,
   BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS,
+  BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
 } from "./booking-stop-contract.mjs";
 import {
-  bookingStopDefinitionCacheRevision,
+  bookingStopDefinitionCacheRevision as bookingStopDefinitionCacheRevisionFor,
   buildDefinitionCacheDocument,
+  definitionAnswerDecidesSelection,
+  definitionAnswersContradicted,
   definitionCacheDecision,
   definitionCacheEntryWellFormed,
   definitionCacheTelemetry,
+  definitionMatcherFingerprint,
   mergeDefinitionEntries,
   nextDefinitionEntry,
   readDefinitionCacheDocument,
@@ -94,7 +98,6 @@ import {
 } from "./booking-membership-snapshot.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
 export {
-  bookingStopDefinitionCacheRevision,
   definitionCacheAlert,
   summarizeDefinitionCacheTelemetry,
 } from "./booking-stop-definition-cache.mjs";
@@ -187,6 +190,21 @@ export function campaignHasCandidateSchedulingLink(campaign) {
   return campaign.steps.some((step) =>
     ["subject", "body"].some((field) =>
       hasCandidateSchedulingLink(step?.[field])));
+}
+
+// The definition cache stores exactly this matcher's answer, so its revision
+// is keyed to the matcher (see BOOKING_STOP_DEFINITION_MATCHER_VERSION).
+export function bookingStopDefinitionMatcherFingerprint() {
+  return definitionMatcherFingerprint([
+    campaignHasCandidateSchedulingLink,
+    hasCandidateSchedulingLink,
+  ]);
+}
+
+export function bookingStopDefinitionCacheRevision(env = process.env) {
+  return bookingStopDefinitionCacheRevisionFor(env, {
+    matcherFingerprint: bookingStopDefinitionMatcherFingerprint(),
+  });
 }
 
 // ---------- tiny KV (Upstash REST), namespace seqguard:* ----------
@@ -1029,18 +1047,55 @@ export async function applyDecisions(decisions, {
 }
 
 // ---------- the sweep ----------
-export async function discoverBookingStopSequences({
+const DEFINITION_ROTOR_MIN_READ_MS = 2000;
+
+function newDefinitionCacheTelemetry() {
+  return {
+    state: "disabled",
+    write: "disabled",
+    durable: null,
+    freshReads: 0,
+    requiredReads: 0,
+    rotorReads: 0,
+    rotorPlanned: 0,
+    rotorFailures: 0,
+    cacheHits: 0,
+    writeAttempts: 0,
+    oldestHitAgeMs: null,
+  };
+}
+
+/**
+ * The booking-stop scope: which sequences protection must cover. A thrown
+ * error carries `error.definitionCache` (counts only) so a failed load still
+ * reports the definition reads it spent.
+ */
+export async function discoverBookingStopSequences(options = {}) {
+  const telemetry = newDefinitionCacheTelemetry();
+  try {
+    return await discoverBookingStopScope(telemetry, options);
+  } catch (error) {
+    if (error && typeof error === "object" && error.definitionCache == null) {
+      try {
+        error.definitionCache = definitionCacheTelemetry(telemetry);
+      } catch {
+        // A frozen error keeps its own shape; telemetry is best effort.
+      }
+    }
+    throw error;
+  }
+}
+
+async function discoverBookingStopScope(telemetry, {
   deadline = null,
   listSequences = async () =>
     withThrottleRetry(() =>
       trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1), { deadline }),
-  // The optional second argument lets the proactive rotor pass its own,
-  // shorter phase deadline; required reads keep the caller's deadline.
-  readCampaign = async (id, { deadline: readDeadline = deadline } = {}) =>
-    withThrottleRetry(() =>
-      trpcGet("campaigns.getCampaign", { campaign_id: id }, 1), {
-      deadline: readDeadline,
-    }),
+  // Required definition reads. Omitted: getCampaign on the throttle ladder
+  // under the caller's deadline, exactly as before the cache.
+  readCampaign = null,
+  // Optional single-shot reads for the proactive rotor (see below).
+  readCampaignOnce = null,
   concurrency = Number(process.env.BOOKING_STOP_SCOPE_CONCURRENCY || 2),
   minimumCatalogCount = Number(
     process.env.BOOKING_STOP_SCOPE_CATALOG_FLOOR
@@ -1067,12 +1122,18 @@ export async function discoverBookingStopSequences({
     }
   },
   // In-run overlay: a Map shared by the loads of ONE refresh invocation, so
-  // its second (drift-check) load reuses the first load's real reads even if
-  // the KV write did not land.
+  // its second (drift-check) load reuses the first load's real reads.
+  // Selection-deciding rows are read live on every load regardless.
   definitionOverlay = null,
   // Proactive re-reads of the oldest cached answers. Only the refresh's first
   // load turns this on; the sweep never does.
   definitionRotor = false,
+  // How long a servable cached answer is trusted: MAX_AGE for the refresh,
+  // SWEEP_MAX_AGE for the sweep. Capped at SWEEP_MAX_AGE.
+  definitionMaxAgeMs = BOOKING_STOP_DEFINITION_MAX_AGE_MS,
+  // Refresh only: fail the load unless the stored document agrees with every
+  // link answer this load used (see persistDefinitions).
+  definitionDurableAnswers = false,
 } = {}) {
   const all = await listSequences();
   if (
@@ -1149,26 +1210,35 @@ export async function discoverBookingStopSequences({
     }
   }
 
-  // ── Definition answers: cached where provably still trustworthy, read
-  // otherwise. See booking-stop-definition-cache.mjs for the safety argument.
+  // ── Definition answers. See booking-stop-definition-cache.mjs for the
+  // safety argument: a "no link" answer that decides selection is never
+  // served from cache, so those rows are read live on every load, as before.
   const cacheRevision = typeof definitionCacheRevision === "string"
     && definitionCacheRevision
     ? definitionCacheRevision
     : null;
-  const telemetry = {
-    state: cacheRevision ? "missing" : "disabled",
-    write: cacheRevision ? "not_needed" : "disabled",
-    freshReads: 0,
-    requiredReads: 0,
-    rotorReads: 0,
-    rotorPlanned: 0,
-    rotorFailures: 0,
-    cacheHits: 0,
-    staleFalseCorrections: 0,
-    staleFalseCorrectionMaxAgeMs: null,
-    oldestDangerClassAgeMs: null,
-    oldestOtherAgeMs: null,
-  };
+  // Never trusted longer than the sweep bound, whatever a caller passes.
+  const trustMs = Number.isFinite(definitionMaxAgeMs)
+    && definitionMaxAgeMs > 0
+    && definitionMaxAgeMs <= BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS
+    ? definitionMaxAgeMs
+    : BOOKING_STOP_DEFINITION_MAX_AGE_MS;
+  telemetry.state = cacheRevision ? "missing" : "disabled";
+  telemetry.write = cacheRevision ? "not_needed" : "disabled";
+  const readRequired = typeof readCampaign === "function"
+    ? readCampaign
+    : async (id) =>
+      withThrottleRetry(() =>
+        trpcGet("campaigns.getCampaign", { campaign_id: id }, 1), { deadline });
+  // Rotor reads are optional: single-shot, no throttle ladder, no
+  // session-expiry probe. An injected readCampaign (tests, scripts) is reused
+  // so an injected load never reaches the network through the rotor.
+  const readRotor = typeof readCampaignOnce === "function"
+    ? readCampaignOnce
+    : typeof readCampaign === "function"
+      ? (id) => readCampaign(id)
+      : async (id, { timeoutMs } = {}) =>
+        trpcGetOnce("campaigns.getCampaign", { campaign_id: id }, { timeoutMs });
   const overlay = definitionOverlay instanceof Map ? definitionOverlay : null;
   let cached = new Map();
   if (cacheRevision) {
@@ -1202,9 +1272,11 @@ export async function discoverBookingStopSequences({
     return nameHashes.get(sequence.id);
   };
   const decidesSelection = (sequence, linkBearing) =>
-    !linkBearing
-    && Boolean(sequence.enabled)
-    && !isNudgeSequence(sequence, selectionKeys);
+    definitionAnswerDecidesSelection({
+      enabled: sequence.enabled,
+      nudge: isNudgeSequence(sequence, selectionKeys),
+      linkBearing,
+    });
 
   const inspected = new Map();
   const fresh = new Map();
@@ -1223,6 +1295,7 @@ export async function discoverBookingStopSequences({
       enabled: sequence.enabled,
       nudge: isNudgeSequence(sequence, selectionKeys),
       nowMs: classifyNowMs,
+      maxAgeMs: trustMs,
     });
     if (decision.use) {
       inspected.set(sequence.id, entry.l);
@@ -1232,11 +1305,11 @@ export async function discoverBookingStopSequences({
     }
   }
 
-  const readDefinition = async (sequence, options) => {
+  const readDefinition = async (sequence, reader, options) => {
     const readAtMs = Number(clock());
     const campaign = options
-      ? await readCampaign(sequence.id, options)
-      : await readCampaign(sequence.id);
+      ? await reader(sequence.id, options)
+      : await reader(sequence.id);
     if (
       !campaign
       || typeof campaign !== "object"
@@ -1247,23 +1320,6 @@ export async function discoverBookingStopSequences({
       throw error;
     }
     const linkBearing = campaignHasCandidateSchedulingLink(campaign);
-    const prior = cached.get(sequence.id);
-    if (
-      linkBearing
-      && prior
-      && prior.l === false
-      && prior.n === nameHashOf(sequence)
-      && prior.e === Boolean(sequence.enabled)
-      && decidesSelection(sequence, false)
-    ) {
-      // The measured protection gap: the cache said "no link" on a
-      // selection-deciding row and a real read now finds one.
-      telemetry.staleFalseCorrections += 1;
-      telemetry.staleFalseCorrectionMaxAgeMs = Math.max(
-        telemetry.staleFalseCorrectionMaxAgeMs ?? 0,
-        readAtMs - prior.r,
-      );
-    }
     inspected.set(sequence.id, linkBearing);
     fresh.set(sequence.id, { linkBearing, readAtMs });
     hits.delete(sequence.id);
@@ -1272,32 +1328,46 @@ export async function discoverBookingStopSequences({
 
   // Persist every VALID read this load completed, even when a later read
   // threw: each came from a real read, so the next run needs fewer. Nothing
-  // invalid ever reaches `fresh`. A write failure costs re-reads later, never
-  // protection, and never lengthens a trust window (r only comes from reads).
+  // invalid ever reaches `fresh`. r only ever comes from a real read.
+  //
+  // A refresh (definitionDurableAnswers) must not publish a scope whose link
+  // answers the stored document would contradict for the sweep: that makes
+  // every sweep fail closed on a scope mismatch. So it re-reads the document
+  // after writing, retries once, and otherwise fails the load (the previous
+  // published snapshot stays current, and the sweep keeps agreeing with it).
+  let durabilityFailed = false;
   const persistDefinitions = async () => {
     if (!cacheRevision || !fresh.size) return;
     const nowMs = Number(clock());
     const catalogIds = new Set(all
       .filter((sequence) => !excludedIds.has(sequence.id))
       .map((sequence) => sequence.id));
+    const retained = (entry, atMs) =>
+      atMs - entry.r < BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS;
     const ours = new Map();
+    const answers = new Map();
     for (const sequence of all) {
       if (!catalogIds.has(sequence.id)) continue;
       const prior = cached.get(sequence.id) ?? null;
       const read = fresh.get(sequence.id);
       if (read) {
-        ours.set(sequence.id, nextDefinitionEntry(prior, {
+        const entry = nextDefinitionEntry({
           nameSha256: nameHashOf(sequence),
           enabled: sequence.enabled,
           linkBearing: read.linkBearing,
           readAtMs: read.readAtMs,
-        }));
-      } else if (
-        prior
-        && definitionCacheEntryWellFormed(prior, nowMs)
-        && nowMs - prior.r < BOOKING_STOP_DEFINITION_MAX_AGE_MS
-      ) {
-        ours.set(sequence.id, prior);
+        });
+        ours.set(sequence.id, entry);
+        answers.set(sequence.id, entry);
+      } else {
+        if (hits.has(sequence.id)) answers.set(sequence.id, hits.get(sequence.id));
+        if (
+          prior
+          && definitionCacheEntryWellFormed(prior, nowMs)
+          && retained(prior, nowMs)
+        ) {
+          ours.set(sequence.id, prior);
+        }
       }
     }
     if (overlay) {
@@ -1305,39 +1375,67 @@ export async function discoverBookingStopSequences({
         overlay.set(id, entry);
       }
     }
-    try {
+    const readStored = async (atMs) => readDefinitionCacheDocument(
+      await definitionCacheReader(),
+      { revision: cacheRevision, nowMs: atMs },
+    ).entries;
+    const wouldServe = (atMs) => (id, entry) => {
+      const sequence = catalogById.get(id);
+      return Boolean(sequence)
+        && !decidesSelection(sequence, entry.l)
+        && retained(entry, atMs);
+    };
+    const attempts = definitionDurableAnswers ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      telemetry.writeAttempts += 1;
+      const writeNowMs = Number(clock());
       // Merge-on-write: keep a racing writer's newer real reads.
       let latest = new Map();
       try {
-        const parsed = readDefinitionCacheDocument(
-          await definitionCacheReader(),
-          { revision: cacheRevision, nowMs },
-        );
-        latest = parsed.entries;
+        latest = await readStored(writeNowMs);
       } catch {
         latest = new Map();
       }
       const merged = new Map(
         [...mergeDefinitionEntries(ours, latest)].filter(([id, entry]) =>
-          catalogIds.has(id)
-          && nowMs - entry.r < BOOKING_STOP_DEFINITION_MAX_AGE_MS),
+          catalogIds.has(id) && retained(entry, writeNowMs)),
       );
       const doc = buildDefinitionCacheDocument({
         revision: cacheRevision,
-        nowMs,
+        nowMs: writeNowMs,
         entries: merged,
       });
       if (!doc) {
         telemetry.write = "oversize";
-        return;
+      } else {
+        try {
+          await definitionCacheWriter(doc);
+          telemetry.write = "written";
+        } catch {
+          telemetry.write = "failed";
+        }
       }
-      await definitionCacheWriter(doc);
-      telemetry.write = "written";
-    } catch {
-      telemetry.write = "failed";
+      if (!definitionDurableAnswers) return;
+      try {
+        const checkNowMs = Number(clock());
+        const stored = await readStored(checkNowMs);
+        if (!definitionAnswersContradicted(answers, stored, {
+          wouldServe: wouldServe(checkNowMs),
+        }).length) {
+          telemetry.durable = true;
+          if (telemetry.write === "written") telemetry.write = "verified";
+          return;
+        }
+      } catch {
+        // Unverifiable counts as not durable.
+      }
     }
+    telemetry.durable = false;
+    telemetry.write = telemetry.write === "oversize" ? "oversize" : "not_durable";
+    durabilityFailed = true;
   };
 
+  let loadError = null;
   try {
     // Required reads: any failure fails the whole load, exactly as before.
     let cursor = 0;
@@ -1346,7 +1444,7 @@ export async function discoverBookingStopSequences({
       while (!failed && cursor < required.length) {
         const sequence = required[cursor++];
         try {
-          await readDefinition(sequence);
+          await readDefinition(sequence, readRequired);
           telemetry.requiredReads += 1;
         } catch (error) {
           failed = true;
@@ -1357,58 +1455,64 @@ export async function discoverBookingStopSequences({
     await Promise.all(Array.from({ length: concurrency }, worker));
 
     // Rotor: re-read the oldest cached answers before they expire, so
-    // expiries never bunch into bursts. A rotor failure keeps the still-valid
-    // cached answer, stops the rotor for this run and lets the load succeed.
+    // expiries never bunch into bursts. Every cached answer is one that may
+    // be served (never a selection-deciding "no link"), so a rotor failure
+    // keeps a still-valid answer: it stops the rotor and the load succeeds.
+    // A badly shaped definition is an API break and fails the load, as a
+    // required read does.
     if (cacheRevision && definitionRotor && hits.size) {
       const rotorNowMs = Number(clock());
       const rotorDeadline = Math.min(
         rotorNowMs + BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS,
         deadline == null ? Infinity : Number(deadline),
       );
-      let dangerClassCount = 0;
-      let otherCount = 0;
-      for (const sequence of all) {
-        if (excludedIds.has(sequence.id)) continue;
-        if (decidesSelection(sequence, inspected.get(sequence.id))) {
-          dangerClassCount += 1;
-        } else {
-          otherCount += 1;
-        }
-      }
+      const servable = all.filter((sequence) =>
+        !excludedIds.has(sequence.id)
+        && !decidesSelection(sequence, inspected.get(sequence.id))).length;
       const rotorIds = selectDefinitionRotorReads(
-        [...hits].map(([id, entry]) => ({
-          id,
-          r: entry.r,
-          dangerClass: decidesSelection(catalogById.get(id), entry.l),
-        })),
-        { nowMs: rotorNowMs, dangerClassCount, otherCount },
+        [...hits].map(([id, entry]) => ({ id, r: entry.r })),
+        { nowMs: rotorNowMs, count: servable },
       );
       telemetry.rotorPlanned = rotorIds.length;
       let rotorCursor = 0;
       let rotorStopped = false;
       const rotorWorker = async () => {
         while (!rotorStopped && rotorCursor < rotorIds.length) {
-          if (Number(clock()) >= rotorDeadline) {
+          const remainingMs = rotorDeadline - Number(clock());
+          if (!(remainingMs >= DEFINITION_ROTOR_MIN_READ_MS)) {
             rotorStopped = true;
             return;
           }
           const sequence = catalogById.get(rotorIds[rotorCursor++]);
           try {
-            await readDefinition(sequence, { deadline: rotorDeadline });
+            await readDefinition(sequence, readRotor, {
+              timeoutMs: Math.min(20000, remainingMs),
+            });
             telemetry.rotorReads += 1;
-          } catch {
+          } catch (error) {
             rotorStopped = true;
+            if (error?.code === "BOOKING_STOP_SEQUENCE_CAMPAIGN_INVALID") {
+              throw error;
+            }
             telemetry.rotorFailures += 1;
           }
         }
       };
       await Promise.all(Array.from({ length: concurrency }, rotorWorker));
     }
-  } finally {
-    // Never lets a persistence fault replace the load's own outcome.
-    await persistDefinitions().catch(() => {
-      telemetry.write = "failed";
-    });
+  } catch (error) {
+    loadError = error;
+  }
+  // A persistence fault never replaces the load's own outcome.
+  await persistDefinitions().catch(() => {
+    telemetry.write = "failed";
+    if (definitionDurableAnswers) durabilityFailed = true;
+  });
+  if (loadError) throw loadError;
+  if (durabilityFailed) {
+    const error = new Error("BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
+    error.code = "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE";
+    throw error;
   }
   if (inspected.size + excludedIds.size !== all.length) {
     const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
@@ -1418,11 +1522,11 @@ export async function discoverBookingStopSequences({
   telemetry.cacheHits = hits.size;
   {
     const nowMs = Number(clock());
-    for (const [id, entry] of hits) {
-      const key = decidesSelection(catalogById.get(id), entry.l)
-        ? "oldestDangerClassAgeMs"
-        : "oldestOtherAgeMs";
-      telemetry[key] = Math.max(telemetry[key] ?? 0, nowMs - entry.r);
+    for (const entry of hits.values()) {
+      telemetry.oldestHitAgeMs = Math.max(
+        telemetry.oldestHitAgeMs ?? 0,
+        nowMs - entry.r,
+      );
     }
   }
 
@@ -1469,7 +1573,8 @@ export async function discoverBookingStopSequences({
   // Telemetry only, deliberately outside scopeDigest and scopeBinding: the
   // enabled, name-unmatched, not-excluded sequences whose definition carries
   // no scheduling link. They are the only rows where the link answer decides
-  // selection, so their count sizes any definition-read saving honestly.
+  // selection, so the cache never serves them and every load reads them live:
+  // this count is the per-load definition-read floor.
   const dangerClassSequences = all.filter((sequence) =>
     !excludedIds.has(sequence.id)
     && Boolean(sequence.enabled)
@@ -1506,10 +1611,11 @@ export async function discoverBookingStopSequences({
  * The scope loader for ONE booking-membership-refresh invocation. A refresh
  * does up to two scope loads (before the membership walk, and after it for
  * drift detection when it publishes). They share an in-memory overlay so the
- * second load reuses the first one's real definition reads without depending
- * on a KV write landing (the settle rule still re-checks a brand-new "no
- * link"), only the first load runs the proactive rotor, and both carry the
- * invocation's deadline so retries stop inside the build budget.
+ * second load reuses the first one's servable reads (selection-deciding rows
+ * are read live by both, so drift in them is still detected), only the first
+ * load runs the proactive rotor, both require durable answers, and both carry
+ * the invocation's deadline so retries stop inside the build budget. Failed
+ * loads report their reads too (error.definitionCache).
  */
 export function createRefreshScopeLoader({
   deadline = null,
@@ -1523,14 +1629,20 @@ export function createRefreshScopeLoader({
     scopeLoader: async () => {
       const first = calls === 0;
       calls += 1;
-      const scope = await loader({
-        ...loaderOptions,
-        deadline,
-        definitionOverlay,
-        definitionRotor: first,
-      });
-      loads.push(scope?.definitionCache ?? null);
-      return scope;
+      try {
+        const scope = await loader({
+          ...loaderOptions,
+          deadline,
+          definitionOverlay,
+          definitionRotor: first,
+          definitionDurableAnswers: true,
+        });
+        loads.push(scope?.definitionCache ?? null);
+        return scope;
+      } catch (error) {
+        loads.push(error?.definitionCache ?? null);
+        throw error;
+      }
     },
     definitionCache: () => summarizeDefinitionCacheTelemetry(loads),
   };
@@ -1679,7 +1791,11 @@ export async function runBookingSweep({
   // 01:23-03:52 UTC, every sweep paid the full scope load, then failed
   // closed). It skips ONLY on positive evidence, re-read once to close the
   // race with a refresh publishing right now. A missing, malformed or fresh
-  // pointer, or a KV error, takes the normal path unchanged.
+  // pointer, or a KV error, takes the normal path unchanged. Waiting longer
+  // for a refresh to publish would gain nothing: this pass evaluates the
+  // snapshot at its own start time `now`, and loadPublishedBookingMembership-
+  // Snapshot rejects any generation built or published after `now`
+  // (snapshot_stale_or_future), with or without the precheck.
   const readPrecheckCurrent = async () => {
     try {
       return await membershipCurrentPrecheckLoader();
@@ -1702,9 +1818,16 @@ export async function runBookingSweep({
   try {
     scope = await timeLeg(
       "scope",
-      () => sequenceScopeLoader({ deadline, coldExclusionPolicy }),
+      () => sequenceScopeLoader({
+        deadline,
+        coldExclusionPolicy,
+        // Never re-read (and so never disagree with) an answer the published
+        // snapshot was built from; selection-deciding rows are read live.
+        definitionMaxAgeMs: BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
+      }),
     );
-  } catch {
+  } catch (error) {
+    result.definitionCache = definitionCacheTelemetry(error?.definitionCache);
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_unavailable";
     result.durationMs = Date.now() - startedAt;
@@ -2399,6 +2522,10 @@ export async function sweepStaleness(now = Date.now(), {
       && bookingStopPolicyHealthValid(attempt?.bookingStopPolicy)
         ? attempt.bookingStopPolicy
         : null,
+    latestAttemptDefinitionCache:
+      attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
+        ? definitionCacheTelemetry(attempt?.definitionCache)
+        : null,
   };
   const snapshotBase = {
     membershipSnapshotSchema: membershipSnapshot.schema,
@@ -2421,6 +2548,8 @@ export async function sweepStaleness(now = Date.now(), {
       membershipSnapshot.latestAttemptStatus,
     membershipSnapshotLatestAttemptError:
       membershipSnapshot.latestAttemptError,
+    membershipSnapshotLatestAttemptDefinitionCache:
+      membershipSnapshot.latestAttemptDefinitionCache ?? null,
   };
   const leadIndexAtMs = Date.parse(String(leadIndex?.builtAt || ""));
   const leadIndexAgeMs = Number.isFinite(leadIndexAtMs)
@@ -2606,6 +2735,8 @@ export async function recordSweepAttempt({
     bookingStopPolicy: bookingStopPolicyHealthValid(result?.bookingStopPolicy)
       ? { ...result.bookingStopPolicy }
       : null,
+    // Counts only: the scope load's definition reads, failed passes included.
+    definitionCache: definitionCacheTelemetry(result?.definitionCache),
   };
   await durableKvSetAndReadback(K.lastAttempt, payload, 6 * 3600);
 }

@@ -134,6 +134,8 @@ async function handleSequenceHealth(req, res) {
           s.membershipSnapshotLatestAttemptStatus ?? null,
         latestAttemptError:
           s.membershipSnapshotLatestAttemptError ?? null,
+        latestAttemptDefinitionCache:
+          s.membershipSnapshotLatestAttemptDefinitionCache ?? null,
       },
       // Enough to tune BOOKING_STOP_PROFILE_BUDGET from outside the auth path.
       // durationMs against the budget shows headroom; profileCutShort says the
@@ -204,6 +206,8 @@ async function handleSequenceHealth(req, res) {
         latestSweepAttemptError: s.latestAttemptError ?? null,
         latestSweepAttemptBookingStopPolicy:
           s.latestAttemptBookingStopPolicy ?? null,
+        latestSweepAttemptDefinitionCache:
+          s.latestAttemptDefinitionCache ?? null,
         latestSweepAttemptCurrent: s.latestAttemptCurrent ?? false,
         lastSweepMembershipSnapshotGeneration:
           s.lastSweepMembershipSnapshotGeneration ?? null,

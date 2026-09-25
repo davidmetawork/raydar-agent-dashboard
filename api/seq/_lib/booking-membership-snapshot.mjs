@@ -1150,6 +1150,7 @@ export async function bookingMembershipSnapshotHealth({
     latestAttemptAt: null,
     latestAttemptStatus: null,
     latestAttemptError: null,
+    latestAttemptDefinitionCache: null,
   };
   if (typeof read !== "function") return empty;
   const [current, attempt] = await Promise.all([
@@ -1170,6 +1171,11 @@ export async function bookingMembershipSnapshotHealth({
     latestAttemptError:
       attempt?.schema === BOOKING_MEMBERSHIP_ATTEMPT_SCHEMA
         ? attempt.error
+        : null,
+    // Counts only: this refresh attempt's definition reads (rotor included).
+    latestAttemptDefinitionCache:
+      attempt?.schema === BOOKING_MEMBERSHIP_ATTEMPT_SCHEMA
+        ? definitionCacheAttemptTelemetry(attempt.definitionCache)
         : null,
   };
   if (
@@ -1363,15 +1369,14 @@ function definitionCacheAttemptTelemetry(value) {
     loads: count("loads"),
     states: labels("states"),
     writes: labels("writes"),
+    durable: typeof value.durable === "boolean" ? value.durable : null,
     freshReads: count("freshReads"),
     requiredReads: count("requiredReads"),
     rotorReads: count("rotorReads"),
     rotorPlanned: count("rotorPlanned"),
     rotorFailures: count("rotorFailures"),
     cacheHits: count("cacheHits"),
-    staleFalseCorrections: count("staleFalseCorrections"),
-    staleFalseCorrectionMaxAgeMs: age("staleFalseCorrectionMaxAgeMs"),
-    oldestDangerClassAgeMs: age("oldestDangerClassAgeMs"),
-    oldestOtherAgeMs: age("oldestOtherAgeMs"),
+    writeAttempts: count("writeAttempts"),
+    oldestHitAgeMs: age("oldestHitAgeMs"),
   };
 }
