@@ -10,7 +10,7 @@
 //    can lengthen the DOWN debounce for named tiles (see downTicksOverrides).
 import { CATALOG, byId } from "./catalog.mjs";
 import { EVALUATORS } from "./evaluators.mjs";
-import { hGet, hGetMany, hSet, K, kvConfigured } from "./kv.mjs";
+import { hGet, hGetChecked, hGetMany, hSet, K, kvConfigured } from "./kv.mjs";
 
 const SAMPLE_CAP = 720; // 24h at 2-min ticks
 const TRANS_CAP = 200;
@@ -99,6 +99,45 @@ export function holdForDebounce(before, raw, needTicks, nowIso) {
     metrics: raw.metrics || before.metrics || null,
     lastCheckedAt: nowIso,
   };
+}
+
+/**
+ * How long a tile may stay out of DOWN (in DEGRADED or UNKNOWN) and still
+ * rejoin the same DOWN episode when it goes red again. Equal to the pager's
+ * one-hour flap slot (RE_PAGE_SECONDS in alert.mjs).
+ */
+export const DOWN_EPISODE_REJOIN_MS = 60 * 60 * 1000;
+
+/**
+ * The DOWN-episode fields for a tile's next record. The tier-1 pager posts once
+ * per episode (alert.mjs pageIncidentKey), so the episode must be narrower
+ * than the incident: `incidentAt` survives DEGRADED and UNKNOWN until the tile
+ * reads OK, which would let one page cover a DOWN, then hours of DEGRADED,
+ * then a new DOWN with a different reason. (PR 229 review, round 2.)
+ *
+ *  - Entering DOWN starts a new episode (`downEpisodeAt` = now), unless the
+ *    tile left DOWN less than DOWN_EPISODE_REJOIN_MS ago: a short
+ *    DOWN/DEGRADED flap stays one episode, so it pages once.
+ *  - Staying DOWN keeps the episode. A tile already DOWN when this shipped has
+ *    no `downEpisodeAt`; its `since` (the time it entered DOWN) stands in.
+ *  - Leaving DOWN for DEGRADED or UNKNOWN stamps `downLeftAt` and keeps the
+ *    episode, so a quick return can rejoin it.
+ *  - OK (or PAUSED) ends the episode, exactly as it closes the incident.
+ */
+export function nextDownEpisode(before, state, nowIso) {
+  if (state !== "DOWN" && state !== "DEGRADED" && state !== "UNKNOWN") return {};
+  const wasDown = before?.state === "DOWN";
+  const carried = before?.downEpisodeAt || (wasDown ? before?.since : null) || null;
+  if (state === "DOWN") {
+    if (wasDown) return { downEpisodeAt: carried || nowIso };
+    const leftMs = Date.parse(before?.downLeftAt || "");
+    const rejoin = Boolean(carried) && Number.isFinite(leftMs)
+      && Date.parse(nowIso) - leftMs < DOWN_EPISODE_REJOIN_MS;
+    return { downEpisodeAt: rejoin ? carried : nowIso };
+  }
+  if (wasDown) return { downEpisodeAt: carried || nowIso, downLeftAt: nowIso };
+  if (carried && before?.downLeftAt) return { downEpisodeAt: carried, downLeftAt: before.downLeftAt };
+  return {};
 }
 
 export const worst = (states) =>
@@ -196,7 +235,7 @@ async function runPull(check) {
 
 /**
  * @param {object} deps injectable for tests: fetchers and clock
- * @returns {{state: object, transitions: Array, kvOk: boolean}}
+ * @returns {{state: object, transitions: Array, kvOk: boolean, stateLoaded: boolean}}
  */
 export async function runTick({ now = Date.now() } = {}) {
   const nowIso = new Date(now).toISOString();
@@ -213,7 +252,19 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 2. Load prior state, beats, acks, and the n8n watchdog's state
-  const prev = (await hGet(K.state)) || { tiles: {} };
+  // A FAILED read of hlth:state is not an empty state. Treating it as one
+  // would make every tile a first observation (fresh `since`, no incident or
+  // DOWN-episode pointer), and persisting that would hand the pager a new key
+  // for an ongoing outage: a duplicate #notify page. So a failed read skips
+  // persistence and alerting for this tick (stateLoaded=false); the next tick
+  // picks up from the last good state. A genuinely missing key (first tick
+  // ever) reads as ok with no value and proceeds normally.
+  const prevRead = await hGetChecked(K.state);
+  const stateLoaded = prevRead.ok;
+  if (!stateLoaded) console.warn("health_state_unreadable", { kvOk });
+  const prev = (prevRead.ok && prevRead.value && typeof prevRead.value === "object")
+    ? prevRead.value
+    : { tiles: {} };
   const beatKeys = CATALOG.filter((c) => c.kind === "beat").map((c) => K.beat(c.probe.lane));
   const ackKeys = CATALOG.map((c) => K.ack(c.id));
   const [beatVals, ackVals, watchdog, lastDelivered, gmailBackoffUntil, sessionWitness] = await Promise.all([
@@ -416,6 +467,8 @@ export async function runTick({ now = Date.now() } = {}) {
       group: check.group,
       name: check.name,
       ...(incidentAt ? { incidentAt, incidentWorst } : {}),
+      // The pager's key: one page per DOWN episode (see nextDownEpisode).
+      ...nextDownEpisode(before, state, nowIso),
     };
     // A first observation counts as a transition, so a check whose very first
     // result is DOWN is recorded like any other (the 2026-08-07 pager drill
@@ -451,8 +504,9 @@ export async function runTick({ now = Date.now() } = {}) {
     schema: "raydar-health-state-v1", checkedAt: nowIso, overall, criticalDown, counts, tiles,
   };
 
-  // ---- 9. Persist (best effort; a KV failure must not throw the tick away)
-  if (kvOk) {
+  // ---- 9. Persist (best effort; a KV failure must not throw the tick away).
+  // Never persist a tick computed from an unreadable prior state (step 2).
+  if (kvOk && stateLoaded) {
     const writes = [hSet(K.state, state)];
     const minute = Math.floor(now / 60000);
     for (const check of CATALOG) {
@@ -486,5 +540,7 @@ export async function runTick({ now = Date.now() } = {}) {
     await Promise.allSettled(writes);
   }
 
-  return { state, transitions, incidents: incidentOps.map((o) => o.record), kvOk, downTicks };
+  return {
+    state, transitions, incidents: incidentOps.map((o) => o.record), kvOk, stateLoaded, downTicks,
+  };
 }

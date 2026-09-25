@@ -10,7 +10,9 @@ import { readFile } from "node:fs/promises";
 
 import { alertOnTransitions, pageIncidentKey } from "../api/health/_lib/alert.mjs";
 import { CATALOG } from "../api/health/_lib/catalog.mjs";
-import { readDownTicksOverrides } from "../api/health/_lib/engine.mjs";
+import {
+  DOWN_EPISODE_REJOIN_MS, nextDownEpisode, readDownTicksOverrides,
+} from "../api/health/_lib/engine.mjs";
 
 const MIN = 60_000;
 
@@ -189,9 +191,90 @@ test("a tile born DOWN (no incident pointer) is keyed on its since", () => {
   assert.equal(pageIncidentKey({ state: "DOWN", since: "t1", incidentAt: "t0" }), "t0");
 });
 
+test("the page key is the DOWN episode, not the whole away-from-OK incident", () => {
+  assert.equal(
+    pageIncidentKey({ state: "DOWN", since: "t2", incidentAt: "t0", downEpisodeAt: "t2" }),
+    "t2",
+  );
+});
+
+test("nextDownEpisode: a long stay out of DOWN starts a new episode, a short one rejoins", () => {
+  const t = (m) => new Date(Date.UTC(2026, 8, 25, 10, 0) + m * MIN).toISOString();
+  // Born DOWN, and a tile already DOWN when this shipped (no downEpisodeAt yet).
+  assert.deepEqual(nextDownEpisode({}, "DOWN", t(0)), { downEpisodeAt: t(0) });
+  assert.deepEqual(nextDownEpisode({ state: "DOWN", since: t(-30) }, "DOWN", t(0)), { downEpisodeAt: t(-30) });
+  // DOWN -> DEGRADED keeps the episode and stamps when it left.
+  const left = nextDownEpisode({ state: "DOWN", since: t(0), downEpisodeAt: t(0) }, "DEGRADED", t(10));
+  assert.deepEqual(left, { downEpisodeAt: t(0), downLeftAt: t(10) });
+  // Carried unchanged through further DEGRADED/UNKNOWN ticks.
+  assert.deepEqual(nextDownEpisode({ state: "DEGRADED", ...left }, "UNKNOWN", t(20)), left);
+  // Back to DOWN inside the rejoin window: same episode (no new page).
+  assert.deepEqual(nextDownEpisode({ state: "DEGRADED", ...left }, "DOWN", t(40)), { downEpisodeAt: t(0) });
+  // Back to DOWN after 6h of DEGRADED: a new episode (a new page).
+  assert.deepEqual(nextDownEpisode({ state: "DEGRADED", ...left }, "DOWN", t(370)), { downEpisodeAt: t(370) });
+  assert.equal(DOWN_EPISODE_REJOIN_MS, 60 * MIN);
+  // OK ends the episode.
+  assert.deepEqual(nextDownEpisode({ state: "DEGRADED", ...left }, "OK", t(30)), {});
+  assert.deepEqual(nextDownEpisode({ state: "OK" }, "DEGRADED", t(30)), {});
+});
+
+test("DOWN, six hours DEGRADED, then DOWN again posts twice (one page per DOWN episode)", async () => {
+  const env = fakeStore();
+  const { posts, send } = recorder();
+  const tile = (state, downEpisodeAt, reason) => ({
+    tiles: {
+      "booking-door": {
+        state, tier: 1, name: "Agent booking door", reason, since: downEpisodeAt,
+        incidentAt: "10:00", downEpisodeAt,
+      },
+    },
+  });
+  await tick(env, tile("DOWN", "10:00", "holds refused: 503"), send);
+  for (let m = 10; m <= 370; m += 10) {
+    env.clock.now = m * MIN;
+    await tick(env, tile("DEGRADED", "10:00", "hold probe rate-limited"), send);
+  }
+  for (let m = 380; m <= 380 + 18 * 60; m += 10) {
+    env.clock.now = m * MIN;
+    await tick(env, tile("DOWN", "16:20", "booking gates off: 403"), send);
+  }
+  assert.equal(posts.length, 2, "the second outage must reach #notify");
+  assert.match(posts[1], /booking gates off: 403/);
+});
+
+test("deploy day: a tile the old pager already paged this DOWN stretch is not paged again", async () => {
+  const env = fakeStore();
+  const { posts, send } = recorder();
+  const since = "2026-09-25T09:00:00.000Z";
+  // The pre-#notify pager's slot: {at} only, written during this DOWN stretch.
+  await env.store.setNx("hlth:alert:sent:booking-door:DOWN", { at: "2026-09-25T09:40:00.000Z" }, 60 * 60);
+  for (let m = 0; m <= 240; m += 2) {
+    env.clock.now = m * MIN;
+    await tick(env, down(since, { downEpisodeAt: since }), send);
+  }
+  assert.equal(posts.length, 0, "the old pager's page for this stretch is adopted");
+});
+
+test("deploy day: an old-pager slot from an EARLIER stretch still defers, then pages once", async () => {
+  const env = fakeStore();
+  const { posts, send } = recorder();
+  const since = "2026-09-25T09:50:00.000Z";
+  await env.store.setNx("hlth:alert:sent:booking-door:DOWN", { at: "2026-09-25T09:20:00.000Z" }, 60 * 60);
+  const pagesAt = [];
+  for (let m = 0; m <= 240; m += 2) {
+    env.clock.now = m * MIN;
+    const sent = await tick(env, down(since, { downEpisodeAt: since }), send);
+    if (sent.length) pagesAt.push(m);
+  }
+  assert.equal(posts.length, 1);
+  assert.deepEqual(pagesAt, [60]);
+});
+
 test("the tick passes the tile state to the pager and echoes the override report", async () => {
   const tick = await readFile(new URL("../api/health/tick.mjs", import.meta.url), "utf8");
   assert.match(tick, /alertOnTransitions\(transitions, state\)/);
+  // A tick that could not read hlth:state never pages (engine step 2).
+  assert.match(tick, /HEALTH_ALERTS_ENABLED === "true" && stateLoaded\)/);
   assert.match(tick, /downTicks,/);
   const engine = await readFile(new URL("../api/health/_lib/engine.mjs", import.meta.url), "utf8");
   // runTick reads the overrides against the catalog and feeds them to the debounce.

@@ -83,10 +83,24 @@ const PAGED_TTL_SECONDS = 31 * 24 * 3600;
 
 const claimed = (result) => result === "OK" || result === true;
 
-/** The incident a DOWN tile belongs to. The engine keeps `incidentAt` on the
- *  tile for as long as it is away from OK; a tile born DOWN has no incident
- *  pointer, so its `since` stands in (constant while it stays DOWN). */
-export const pageIncidentKey = (tile) => tile?.incidentAt || tile?.since || "unknown";
+/** The DOWN episode a DOWN tile belongs to: one page per episode. The engine
+ *  stamps `downEpisodeAt` when the tile enters DOWN and keeps it only across a
+ *  short (< 1h) stay in DEGRADED or UNKNOWN (engine.mjs nextDownEpisode), so a
+ *  new outage after a long yellow or grey stretch pages again. `incidentAt`
+ *  alone would not: it lasts until OK. The fallbacks cover a tile record
+ *  written before the engine stamped episodes. */
+export const pageIncidentKey = (tile) =>
+  tile?.downEpisodeAt || tile?.incidentAt || tile?.since || "unknown";
+
+/** A flap slot written by the pre-#notify pager ({at} only, no `incident`)
+ *  that it wrote during this episode: the old pager already paged it (it paged
+ *  on entering DOWN and re-paged hourly while DOWN). */
+const legacySlotPagedThisEpisode = (holder, incident) => {
+  if (!holder || holder.incident !== undefined) return false;
+  const pagedMs = Date.parse(holder.at || "");
+  const startMs = Date.parse(incident || "");
+  return Number.isFinite(pagedMs) && Number.isFinite(startMs) && pagedMs >= startMs;
+};
 
 /**
  * Pages tier-1 DOWN incidents: exactly one delivered post per incident.
@@ -114,6 +128,12 @@ export const pageIncidentKey = (tile) => tile?.incidentAt || tile?.since || "unk
  * Flap window: at most one page per tile per hour (the 1h NX slot). A new
  * incident inside that hour is DEFERRED, not dropped: if it is still DOWN
  * when the hour runs out it pages then, and if it clears first it never posts.
+ *
+ * "Incident" here is the DOWN episode (pageIncidentKey): DOWN, an hour or
+ * more of DEGRADED or UNKNOWN, then DOWN again is two episodes and two pages;
+ * a shorter dip out of DOWN rejoins the first episode and does not re-page.
+ * Tiles already paged by the pre-#notify pager when this deploys are not
+ * paged again (legacySlotPagedThisEpisode).
  *
  * `transitions` is kept for the call shape; the tile state carries everything
  * the page needs. `send` and `store` are test seams.
@@ -148,6 +168,17 @@ export async function alertOnTransitions(
       // before it could release it: carry on and send. Otherwise this tile
       // paged a different incident less than an hour ago: defer, retry later.
       const holder = await store.get(slotKey);
+      if (legacySlotPagedThisEpisode(holder, incident)) {
+        // Deploy day: the old pager's slot shows it already paged this DOWN
+        // stretch. Adopt that page instead of posting the incident again when
+        // the slot runs out (PR 229 review, round 2).
+        try {
+          await store.set(pagedKey, { at, status: "delivered", adopted: "legacy-slot" }, PAGED_TTL_SECONDS);
+        } catch (e) {
+          console.error("health_page_mark_failed", { id, error: String(e?.message || e) });
+        }
+        continue;
+      }
       if (holder?.incident !== incident) {
         await store.del(pagedKey);
         continue;
