@@ -25,6 +25,7 @@ import {
   shouldAlert,
 } from "./_lib/booking-stop.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
+import { systemHealthOwns } from "../_lib/notify.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -37,6 +38,7 @@ export async function handleCalendlyWebhook(request, {
   alert = notifySlack,
   hasParaformCookie = hasCookie,
   apply = process.env.BOOKING_STOP_APPLY !== "0",
+  healthOwnsSession = systemHealthOwns,
 } = {}) {
   if (request.method !== "POST") return json({ ok: false, error: "POST_only" }, 405);
 
@@ -91,7 +93,9 @@ export async function handleCalendlyWebhook(request, {
     });
   } catch (error) {
     const expired = error?.code === "AUTH_EXPIRED";
-    if (expired && (await shouldAlert("auth-expired"))) {
+    // Once the #notify switch is on, System Health's paraform-session tile
+    // owns a dead Paraform session: one incident, one post (2026-09-25).
+    if (expired && !healthOwnsSession() && (await shouldAlert("auth-expired"))) {
       await alert(":rotating_light: Booking stop could not pause a booked candidate — the Paraform session cookie is expired. Recapture it; sequence nudges are unprotected until then.").catch(() => {});
     }
     return json({ ok: false, error: expired ? "expired" : "error" }, 503);

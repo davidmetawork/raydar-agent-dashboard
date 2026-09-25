@@ -286,28 +286,43 @@ for (const [file, pattern] of REMOVED) {
   });
 }
 
-// Every file under api/ that can still reach Slack, with its number of
-// references to a Slack sender (a call, or a sender passed as a default or
-// injected seam). A new sender, or a restored one, fails here and has to be
-// classified on purpose. PR 2 tightens this into "every caller goes through
-// pageNotify, the health pager or the test page".
+// Every file under api/ that can still reach Slack directly, with its number
+// of references to a Slack sender (a call, or a sender passed as a default or
+// injected seam). PR 2 (the #notify switch) moved every critical sender onto
+// pageNotify (api/_lib/notify.mjs). What still references notifySlack or
+// sendSlack directly is the switch itself, the System Health pager and drill,
+// a legacy path that is silent once NOTIFY_SLACK_CHANNEL is set (each of those
+// files is checked below for a systemHealthOwns() guard), or dead code.
 const EXPECTED_SENDERS = {
+  "api/_lib/notify.mjs": 2, // the switch: legacy notifySlack, or sendSlack to #notify
   "api/health/_lib/alert.mjs": 1, // the tier-1 DOWN page
   "api/health/digest.mjs": 1, // off: posts only when HEALTH_DIGEST_SLACK_CHANNEL is set
   "api/health/test-page.mjs": 1, // the manual #notify drill
-  "api/ops/n8n-watchdog.mjs": 3, // failing-repeatedly, unreadable, cron-auth
-  "api/paraai/_lib/auth-probe.mjs": 4, // circuit OPEN + daily reminder, via notifyImpl seams
+  "api/ops/n8n-watchdog.mjs": 1, // legacy path, switch off only
+  "api/paraai/_lib/auth-probe.mjs": 4, // circuit OPEN + reminder seams; silent once the switch is on
   "api/paraai/_lib/curated-fit-deadman.mjs": 1, // module kept; the worker no longer calls it
-  "api/paraai/_lib/outreach.mjs": 2, // PR 2 narrows these to Gmail/auth codes
   "api/paraai/submission-notify.mjs": 1, // retired route; sealed by the Submissions V2 manifest
-  "api/paraai/worker.mjs": 2, // outreach worker failed + the stuck-watchdog seam
-  "api/seq/booking-membership-refresh.mjs": 1, // cron-auth warning
-  "api/seq/booking-sweep.mjs": 13,
-  "api/seq/calendly-hook.mjs": 1, // the alert seam: cookie expired only
-  "api/seq/guardian.mjs": 2, // protected-recruiter stop + cron-auth
-  "api/seq/raydar-booking-hook.mjs": 1, // the alert seam: cookie expired only
-  "api/seq/release.mjs": 1, // cron-auth warning
+  "api/seq/booking-sweep.mjs": 1, // legacyOnly(): silent once the switch is on
+  "api/seq/calendly-hook.mjs": 1, // alert seam: cookie expired, switch off only
+  "api/seq/raydar-booking-hook.mjs": 1, // alert seam: cookie expired, switch off only
 };
+const SWITCH_AWARE_LEGACY = [
+  "api/ops/n8n-watchdog.mjs",
+  "api/paraai/_lib/auth-probe.mjs",
+  "api/seq/booking-sweep.mjs",
+  "api/seq/calendly-hook.mjs",
+  "api/seq/raydar-booking-hook.mjs",
+];
+// Critical senders that page through pageNotify (one post per incident).
+const PAGE_NOTIFY_CALLERS = [
+  "api/ops/n8n-watchdog.mjs",
+  "api/paraai/_lib/outreach.mjs",
+  "api/paraai/worker.mjs",
+  "api/seq/booking-membership-refresh.mjs",
+  "api/seq/booking-sweep.mjs",
+  "api/seq/guardian.mjs",
+  "api/seq/release.mjs",
+];
 
 async function walk(dir) {
   const out = [];
@@ -337,4 +352,21 @@ test("the set of Slack senders under api/ is exactly the classified list", async
     if (refs > 0) found[rel] = refs;
   }
   assert.deepEqual(found, EXPECTED_SENDERS);
+});
+
+test("every legacy direct sender is switch-aware (silent once NOTIFY_SLACK_CHANNEL is set)", async () => {
+  for (const rel of SWITCH_AWARE_LEGACY) {
+    assert.match(await source(rel), /systemHealthOwns|healthOwnsSession/, rel);
+  }
+});
+
+test("the critical senders page through pageNotify", async () => {
+  const callers = [];
+  for (const full of await walk(join(ROOT, "api"))) {
+    const rel = full.slice(ROOT.length);
+    if (rel === "api/_lib/notify.mjs") continue;
+    // A call, or pageNotify injected as a default seam (page = pageNotify).
+    if (/\bpageNotify\s*\(|=\s*pageNotify\b/.test(code(await readFile(full, "utf8")))) callers.push(rel);
+  }
+  assert.deepEqual(callers.sort(), [...PAGE_NOTIFY_CALLERS].sort());
 });

@@ -23,7 +23,7 @@ import {
   runScheduledAuthProbeTick,
 } from "./_lib/auth-probe.mjs";
 import { runStuckWatchdogTick } from "./_lib/stuck-watchdog.mjs";
-import { notifySlack } from "./_lib/core.mjs";
+import { pageNotify, systemHealthOwns } from "../_lib/notify.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import {
   runPhase4SourceCaptureTick,
@@ -60,8 +60,10 @@ async function alertWorkerFailure(error, {
     await reportParaformReadAuthFailure({ lane, stage: "worker" }).catch(() => {});
     return false;
   }
-  if (!(await takeAlertSlot(slot, 3600).catch(() => false))) return false;
-  await notifySlack(message(code)).catch(() => {});
+  // "Outreach worker failed" means candidate outreach email stopped: the one
+  // worker line kept, through the #notify switch (2026-09-25).
+  if (!systemHealthOwns() && !(await takeAlertSlot(slot, 3600).catch(() => false))) return false;
+  await pageNotify(message(code), { key: `paraai:${slot}` }).catch(() => {});
   return true;
 }
 
@@ -667,7 +669,7 @@ export async function handleParaaiWorker(req, res, {
       await runStuckWatchdogTick({
         listJobsImpl: listJobs,
         alertSlotImpl: takeAlertSlot,
-        notifyImpl: notifySlack,
+        notifyImpl: (text, options) => pageNotify(text, options),
         enqueueImpl: enqueueAutoJob,
       });
     } catch { /* observe-only */ }

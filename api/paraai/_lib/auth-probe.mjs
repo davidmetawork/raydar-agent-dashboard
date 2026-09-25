@@ -33,6 +33,7 @@
 //   helpers and never logs or stores the cookie value anywhere.
 
 import { notifySlack, trpcGetRaw } from "./core.mjs";
+import { systemHealthOwns } from "../../_lib/notify.mjs";
 import { kv } from "./store.mjs";
 
 export const AUTH_FLAG_KEY = "auth:paraform:down";
@@ -328,9 +329,19 @@ export function paraformAuthState({ flag = null, lastProbe = null } = {}) {
 
 export async function runAuthProbeTick(
   { now = Date.now() } = {},
-  { probeImpl = probeParaformAuth, kvImpl = kv, notifyImpl = notifySlack } = {},
+  {
+    probeImpl = probeParaformAuth,
+    kvImpl = kv,
+    notifyImpl = notifySlack,
+    healthOwnsSession = systemHealthOwns,
+  } = {},
 ) {
   const at = new Date(now).toISOString();
+  // Once the #notify switch is on, System Health's paraform-session tile owns
+  // a dead session, so the circuit's OPEN and daily reminder are recorded but
+  // not posted (2026-09-25): one incident, one post. The flag, slots and the
+  // ops endpoint behave exactly as before.
+  const post = healthOwnsSession() ? async () => false : notifyImpl;
   const observed = await probeImpl();
   const writeFailure = parse(await kvImpl(["GET", AUTH_WRITE_FAILURE_KEY]));
   // A green GET cannot clear a mutation-layer 401. Keep the outage latched
@@ -486,7 +497,7 @@ export async function runAuthProbeTick(
     const evidence = probe.reason === "write_auth_expired"
       ? `a Paraform mutation returned 401 at ${probe.evidence?.lane || "unknown"}:${probe.evidence?.stage || "unknown"} while read canaries may still be green`
       : `independently paced checks both saw repeated 401s on ${PROBE_READS.map((read) => read.proc).join(" + ")}`;
-    const delivered = await notifyImpl(
+    const delivered = await post(
       `🚨 Paraform auth circuit OPEN — the shared session cookie is rejected (${evidence}). Every cookie-consuming lane can fail with AUTH_EXPIRED until it is recaptured — ${RECAPTURE_RUNBOOK}. A write-layer outage stays latched until a later mutation succeeds; green reads alone cannot close it. One daily reminder follows while it stays down. Observe-only: no lane is held by this flag yet.`,
     ).catch(() => false);
     record.alert = { openedAt: at, delivered: delivered === true };
@@ -531,7 +542,7 @@ export async function runAuthProbeTick(
     const day = Number.isFinite(sinceMs)
       ? Math.max(1, Math.floor((now - sinceMs) / 86_400_000) + 1)
       : 1;
-    await notifyImpl(
+    await post(
       `⏳ Paraform auth circuit still OPEN (day ${day}) — cookie still rejected since ${since}. ${RECAPTURE_RUNBOOK}.`,
     ).catch(() => false);
     return { status: "down", down: true, reminded: true, day };

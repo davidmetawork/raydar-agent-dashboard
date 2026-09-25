@@ -2004,6 +2004,11 @@ export async function sweepStaleness(now = Date.now(), {
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
         ? attempt.error
         : null,
+    latestAttemptSessionExpiredConfirmedAt:
+      attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
+      && Number.isFinite(Date.parse(String(attempt?.sessionExpiredConfirmedAt || "")))
+        ? attempt.sessionExpiredConfirmedAt
+        : null,
     latestAttemptBookingStopPolicy:
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
       && bookingStopPolicyHealthValid(attempt?.bookingStopPolicy)
@@ -2183,6 +2188,7 @@ export async function recordSweepAttempt({
   status,
   result = null,
   error = null,
+  sessionExpiredConfirmedAt = null,
 }, now = Date.now()) {
   if (!["failure", "running", "success"].includes(status)) {
     const invalid = new Error("BOOKING_STOP_ATTEMPT_INVALID");
@@ -2210,6 +2216,14 @@ export async function recordSweepAttempt({
       ? { ...result.bookingStopPolicy }
       : null,
   };
+  // The confirmed-expiry witness (#notify plan, 2026-09-25): set only after
+  // isSessionActuallyExpired() proved the Paraform session dead with spaced
+  // probes. Additive and optional: the attempt schema is unchanged, and the
+  // System Health paraform-session tile reads it through /api/seq/health.
+  const witnessMs = Date.parse(String(sessionExpiredConfirmedAt || ""));
+  if (status === "failure" && Number.isFinite(witnessMs)) {
+    payload.sessionExpiredConfirmedAt = new Date(witnessMs).toISOString();
+  }
   await durableKvSetAndReadback(K.lastAttempt, payload, 6 * 3600);
 }
 

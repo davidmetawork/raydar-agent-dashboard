@@ -104,6 +104,10 @@ async function handleSequenceHealth(req, res) {
     ]);
     bookingStop = {
       currentBookingStopPolicy,
+      // Set only when the latest sweep attempt CONFIRMED the Paraform session
+      // is dead (spaced probes, not one 401). System Health's paraform-session
+      // tile reads it once the #notify switch is on. Additive (2026-09-25).
+      sessionExpiredConfirmedAt: s.latestAttemptSessionExpiredConfirmedAt ?? null,
       lastSuccessfulSweep: s.lastAt,
       ageMinutes: s.ageMs == null ? null : Math.round(s.ageMs / 60000),
       stale: s.stale,

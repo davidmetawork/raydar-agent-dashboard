@@ -801,3 +801,27 @@ test("the probe stays out of the frozen worker response", () => {
   assert.equal((workerSource.match(/runScheduledAuthProbeTick/g) || []).length, 2,
     "one import, one guarded call — nothing feeds the response");
 });
+
+test("#notify switch on: the circuit still opens and latches, but System Health owns the page", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const owns = () => true;
+  const suspected = await runAuthProbeTick(
+    { now: NOW },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: owns },
+  );
+  assert.equal(suspected.status, "suspected");
+  const opened = await runAuthProbeTick(
+    { now: NOW + CONFIRMATION_MS },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: owns },
+  );
+  assert.equal(opened.opened, true);
+  assert.equal(opened.alertDelivered, false);
+  assert.ok(kv.store.has(AUTH_FLAG_KEY), "the flag and the ops endpoint behave as before");
+  const dayLater = await runAuthProbeTick(
+    { now: NOW + CONFIRMATION_MS + 26 * 3600_000 },
+    { probeImpl: downProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: owns },
+  );
+  assert.equal(dayLater.down, true);
+  assert.deepEqual(notify.messages, [], "no OPEN and no daily reminder once the tile owns the session");
+});

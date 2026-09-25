@@ -55,7 +55,10 @@ test("the alert names the impact, not just a count", () => {
     { id: "b", state: "resolving_identity", candidate: { fullName: "Collin Socha" }, updatedAt: ago(13 * 3600_000) },
   ], { now: NOW }));
   assert.match(message, /2 job\(s\) stuck before submission/u);
-  assert.match(message, /Yang An/u);
+  // No candidate names in Slack (2026-09-25, #notify plan): the impact is the
+  // count, the states and the age; the Para AI tab lists who.
+  assert.doesNotMatch(message, /Yang An|Collin Socha/u);
+  assert.match(message, /resolving_identity/u);
   assert.match(message, /No new candidate is reaching the Talent Network/u);
   assert.equal(stuckAlertMessage([]), null);
 });

@@ -1,7 +1,6 @@
 import {
   firstEmail,
   normalizeEmail,
-  notifySlack,
   trpcGet,
   trpcPost,
 } from "./core.mjs";
@@ -9,6 +8,7 @@ import {
   reportParaformWriteAuthFailure,
   reportParaformWriteAuthSuccess,
 } from "./auth-probe.mjs";
+import { pageNotify, systemHealthOwns } from "../../_lib/notify.mjs";
 import {
   additionalMatchCopy,
   followupCopy,
@@ -2543,7 +2543,6 @@ export async function handleOutreachFailure(
 ) {
   const code = clean(error?.code || "OUTREACH_FAILED");
   // One observed Gmail 429 stands the whole lane down (see armGmailBackoff).
-  // Alert at most once per 6h so the stand-down is visible without spamming.
   // The stand-down is self-healing ("requests stay queued; nothing is lost"),
   // so it is not posted to Slack (2026-09-25, one-channel rule). A mailbox
   // that stays locked out is the email-inbox-david health tile's to page.
@@ -2563,11 +2562,7 @@ export async function handleOutreachFailure(
     "GMAIL_AUTH_FAILED",
   ]);
   if (!request?.id) {
-    if (tracked.has(code)) {
-      await notifySlack(
-        `🚨 Para AI outreach: ${code} for a scheduled follow-up. No duplicate email will be attempted; review the outreach ledger.`,
-      ).catch(() => {});
-    }
+    if (tracked.has(code)) await pageOutreachFailure(code);
     return;
   }
   // A lock race is expected concurrency, not an attempt failure. The request
@@ -2614,10 +2609,33 @@ export async function handleOutreachFailure(
   // AUTH_EXPIRED alerting is owned by the global auth latch. It deduplicates
   // the outage across all requests and carries the recapture runbook.
   if (code === "AUTH_EXPIRED") return { ...record, escalation };
-  await notifySlack(
-    `🚨 Para AI outreach: ${code} for ${request?.id || "scheduled follow-up"}. No duplicate email will be attempted; review the outreach ledger.`,
-  ).catch(() => {});
+  await pageOutreachFailure(code);
   return { ...record, escalation };
+}
+
+// Only these outreach failures mean outreach email has STOPPED (2026-09-25,
+// #notify plan): Gmail refused our credentials, or a send's outcome is
+// unknown. Every other code is recorded on the exceptions ledger and the Para
+// AI tab, and the Gmail 429 stand-down is self-healing. One page per code:
+// 6h while the #notify switch is off (this line had no dedupe at all and
+// posted on every failed request), and the 24h #notify slot once it is on.
+export const OUTREACH_PAGE_CODES = Object.freeze(new Set(["GMAIL_AUTH_FAILED", "GMAIL_SEND_UNKNOWN"]));
+
+export async function pageOutreachFailure(code, {
+  owns = systemHealthOwns,
+  claim = claimOutreachExceptionAlert,
+  page = pageNotify,
+} = {}) {
+  if (!OUTREACH_PAGE_CODES.has(code)) return { paged: false, reason: "not_critical" };
+  if (!owns()) {
+    const claimed = await claim(`page:${code}`, { ttlSeconds: 6 * 3600 }).catch(() => true);
+    if (!claimed) return { paged: false, reason: "deduped" };
+  }
+  const sent = await page(
+    `🚨 Para AI outreach: ${code}. Candidate outreach email is not going out; no duplicate email will be attempted. Review the outreach ledger.`,
+    { key: `paraai-outreach:${code}` },
+  ).catch(() => ({ ok: false }));
+  return { paged: Boolean(sent?.ok), reason: sent?.skipped || null };
 }
 
 export async function runOutreachTick({
