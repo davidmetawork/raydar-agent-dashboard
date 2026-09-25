@@ -180,6 +180,7 @@ async function handleBookingSweep(req, res) {
       sequenceCatalogCount: result.sequenceCatalogCount,
       sequenceScopeScanned: result.sequenceScopeScanned,
       definitionSequencesRead: result.definitionSequencesRead,
+      dangerClassSequences: result.dangerClassSequences,
       linkSequences: result.linkSequences,
       enabledLinkSequences: result.enabledLinkSequences,
       coveredEnabledLinkSequences: result.coveredEnabledLinkSequences,

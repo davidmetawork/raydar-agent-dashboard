@@ -187,6 +187,7 @@ async function handleSequenceHealth(req, res) {
         lastSweepSequenceScopeScanned: s.sequenceScopeScanned ?? null,
         lastSweepDefinitionSequencesRead:
           s.definitionSequencesRead ?? null,
+        lastSweepDangerClassSequences: s.dangerClassSequences ?? null,
         lastSweepLinkSequences: s.linkSequences ?? null,
         lastSweepEnabledLinkSequences: s.enabledLinkSequences ?? null,
         lastSweepCoveredEnabledLinkSequences:

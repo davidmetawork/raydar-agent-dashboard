@@ -234,6 +234,30 @@ function validGeneration(value) {
   return GENERATION.test(String(value || ""));
 }
 
+// True ONLY for a well-formed current pointer whose oldest membership fetch is
+// already past the same 60-minute limit loadPublishedBookingMembershipSnapshot
+// enforces (same constant, same strict comparison). Such a pointer is rejected
+// after any live scope read, whatever that read finds, so the sweep may skip
+// the read. Missing, malformed, future-dated or fresh pointers return false
+// and keep the normal path.
+export function bookingMembershipCurrentProvablyStale(current, now) {
+  const nowMs = Number(now);
+  const oldestFetchedAtMs = timestamp(current?.oldestFetchedAt);
+  return Boolean(
+    current
+    && typeof current === "object"
+    && !Array.isArray(current)
+    && current.schema === BOOKING_MEMBERSHIP_CURRENT_SCHEMA
+    && current.snapshotSchema === BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA
+    && current.complete === true
+    && validGeneration(current.generation)
+    && Number.isFinite(nowMs)
+    && oldestFetchedAtMs != null
+    && oldestFetchedAtMs <= nowMs
+    && nowMs - oldestFetchedAtMs > BOOKING_MEMBERSHIP_MAX_AGE_MS
+  );
+}
+
 function validLeadProjection(lead, notAfterMs) {
   const createdAtMs = timestamp(lead?.created_at);
   return Boolean(

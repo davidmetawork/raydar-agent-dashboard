@@ -73,6 +73,7 @@ import {
   bookingMembershipHash,
   bookingMembershipStoredScopeBindingValid,
   bookingMembershipSnapshotHealth,
+  bookingMembershipCurrentProvablyStale,
   loadPublishedBookingMembershipSnapshot,
 } from "./booking-membership-snapshot.mjs";
 export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
@@ -1169,6 +1170,15 @@ export async function discoverBookingStopSequences({
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
     throw error;
   }
+  // Telemetry only, deliberately outside scopeDigest and scopeBinding: the
+  // enabled, name-unmatched, not-excluded sequences whose definition carries
+  // no scheduling link. They are the only rows where the link answer decides
+  // selection, so their count sizes any definition-read saving honestly.
+  const dangerClassSequences = all.filter((sequence) =>
+    !excludedIds.has(sequence.id)
+    && Boolean(sequence.enabled)
+    && !isNudgeSequence(sequence, selectionKeys)
+    && !inspected.get(sequence.id)).length;
   return {
     schema: coldExclusionPolicy.scopeSchema,
     scopeDigest,
@@ -1180,6 +1190,7 @@ export async function discoverBookingStopSequences({
     linkSequences: linkSequences.length,
     enabledLinkSequences: enabledLinkSequences.length,
     coveredEnabledLinkSequences,
+    dangerClassSequences,
     ...(coldExclusionPolicy.active ? {
       definitionSequencesRead: inspected.size,
       excludedColdSequences: excludedIds.size,
@@ -1230,6 +1241,9 @@ export async function runBookingSweep({
       readMany: kvGetMany,
     }),
   membershipCurrentLoader = () => kvGet(K.membershipCurrent),
+  // Separate from membershipCurrentLoader on purpose: that one is the
+  // pre-mutation generation re-check and must stay untouched by the precheck.
+  membershipCurrentPrecheckLoader = () => kvGet(K.membershipCurrent),
   profileLoader = cachedRelationshipStatus,
   decisionApplier = applyDecisions,
   onDecision = null,
@@ -1265,9 +1279,11 @@ export async function runBookingSweep({
     membershipSnapshotOldestFetchedAt: null,
     membershipSnapshotAgeMs: null,
     membershipSnapshotCurrent: false,
+    membershipSnapshotPrecheck: false,
     sequenceCatalogCount: 0,
     sequenceScopeScanned: 0,
     definitionSequencesRead: 0,
+    dangerClassSequences: null,
     linkSequences: 0,
     enabledLinkSequences: 0,
     coveredEnabledLinkSequences: 0,
@@ -1317,6 +1333,31 @@ export async function runBookingSweep({
     result.legMs = legMs;
     return result;
   };
+
+  // KV-only precheck. A published pointer already past the snapshot contract
+  // is rejected after the live scope read whatever that read finds, so a
+  // stale-snapshot pass must not pay Paraform for it (measured 2026-09-25:
+  // 01:23-03:52 UTC, every sweep paid the full scope load, then failed
+  // closed). It skips ONLY on positive evidence, re-read once to close the
+  // race with a refresh publishing right now. A missing, malformed or fresh
+  // pointer, or a KV error, takes the normal path unchanged.
+  const readPrecheckCurrent = async () => {
+    try {
+      return await membershipCurrentPrecheckLoader();
+    } catch {
+      return null;
+    }
+  };
+  if (
+    bookingMembershipCurrentProvablyStale(await readPrecheckCurrent(), now)
+    && bookingMembershipCurrentProvablyStale(await readPrecheckCurrent(), now)
+  ) {
+    result.error = "membership_snapshot_unavailable";
+    result.membershipSnapshotError = "snapshot_stale_before_scope";
+    result.membershipSnapshotPrecheck = true;
+    result.durationMs = Date.now() - startedAt;
+    return result;
+  }
 
   let scope = null;
   try {
@@ -1372,6 +1413,9 @@ export async function runBookingSweep({
   result.sequenceScopeScanned = scope.scannedSequences;
   result.definitionSequencesRead = scope.definitionSequencesRead
     ?? scope.scannedSequences;
+  result.dangerClassSequences = Number.isInteger(scope.dangerClassSequences)
+    ? scope.dangerClassSequences
+    : null;
   result.linkSequences = scope.linkSequences;
   result.enabledLinkSequences = scope.enabledLinkSequences;
   result.coveredEnabledLinkSequences = scope.coveredEnabledLinkSequences;
@@ -2120,6 +2164,9 @@ export async function sweepStaleness(now = Date.now(), {
     sequenceCatalogCount: last.sequenceCatalogCount ?? null,
     sequenceScopeScanned: last.sequenceScopeScanned ?? null,
     definitionSequencesRead: last.definitionSequencesRead ?? null,
+    dangerClassSequences: Number.isInteger(last.dangerClassSequences)
+      ? last.dangerClassSequences
+      : null,
     linkSequences: last.linkSequences ?? null,
     enabledLinkSequences: last.enabledLinkSequences ?? null,
     coveredEnabledLinkSequences: last.coveredEnabledLinkSequences ?? null,
@@ -2288,6 +2335,9 @@ export async function recordSuccessfulSweep(result, now = Date.now()) {
     sequenceCatalogCount: result.sequenceCatalogCount ?? 0,
     sequenceScopeScanned: result.sequenceScopeScanned ?? 0,
     definitionSequencesRead: result.definitionSequencesRead ?? 0,
+    dangerClassSequences: Number.isInteger(result.dangerClassSequences)
+      ? result.dangerClassSequences
+      : null,
     linkSequences: result.linkSequences ?? 0,
     enabledLinkSequences: result.enabledLinkSequences ?? 0,
     coveredEnabledLinkSequences: result.coveredEnabledLinkSequences ?? 0,
