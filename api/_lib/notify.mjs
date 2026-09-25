@@ -56,7 +56,9 @@ async function defaultKv(command, env = process.env) {
   return body?.result ?? null;
 }
 
-const slotKey = (key) => `notify:${String(key).slice(0, 160)}`;
+/** The KV key behind a pageNotify slot (for callers that refresh its TTL). */
+export const notifySlotKey = (key) => `notify:${String(key).slice(0, 160)}`;
+const slotKey = notifySlotKey;
 
 /** "won" | "held" | "unavailable" */
 export async function claimNotifySlot(key, ttlSeconds = NOTIFY_TTL_SECONDS, {

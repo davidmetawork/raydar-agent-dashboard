@@ -24,6 +24,7 @@ import {
   sweepAttemptErrorLabel,
   sweepErrorLabel,
   sweepStaleness,
+  SWEEP_STALE_AFTER_MS,
   shouldAlert,
   isSessionActuallyExpired,
   recordSessionExpiredWitness,
@@ -46,9 +47,10 @@ export const config = { maxDuration: 300 };
 //     paraform-session tile is DOWN on exactly that witness, so it pages; the
 //     health engine reads the witness key from KV itself, so a timed-out
 //     seq/paraai health probe cannot blind the tile, 2026-09-25 review), and
-//     after a recapture until a sweep attempt made since has failed too (only
-//     the sweep retires the witness; seq health records a live proof beside
-//     it, so a recovery never re-pages the dead-cookie incident, review 3);
+//     after a recapture until the sweep has gone the usual 3 h without a
+//     full pass counted from that recapture (only the sweep retires the
+//     witness; seq health records a live proof beside it, so a recovery
+//     never re-pages the dead-cookie incident, reviews 3 and 4);
 //   - booked leads it failed to pause (slot cleared by a clean pass).
 // No-cookie and AUTH_EXPIRED are left to System Health's paraform-session
 // tile, and the per-pass failure lines (no Calendly, zero leads, budget,
@@ -66,18 +68,28 @@ const PAUSE_ERRORS_KEY = "booking-sweep-pause-errors";
  * (No cookie never reaches the stale check: the handler returns first, and the
  * tile pages cookieSet:false.)
  */
-export function staleOwnedBySessionTile(staleness, { switchOn = systemHealthOwns() } = {}) {
+export function staleOwnedBySessionTile(staleness, {
+  switchOn = systemHealthOwns(),
+  now = Date.now(),
+  staleAfterMs = SWEEP_STALE_AFTER_MS,
+} = {}) {
   if (!switchOn) return false;
   if (!Number.isFinite(Date.parse(String(staleness?.sessionExpiredConfirmedAt || "")))) return false;
-  // Recapture (PR 230 review 3): once seq health has seen a live read after
-  // the witness, the tile yields, but the failed attempts that make this
-  // sweep stale are still the incident the tile already paged. The stale page
-  // stays the tile's until a sweep attempt made AFTER that live read has
-  // failed too (a new problem: page it). A good pass clears both keys first.
+  // Recapture (PR 230 reviews 3 and 4): once seq health has seen a live read
+  // after the witness, the tile yields, but the failed attempts that make
+  // this sweep stale are still the incident the tile already paged. So are
+  // the first passes after the recapture: a long outage also starved the
+  // membership refresh, so a pass that runs before the next refresh fails
+  // membership_snapshot_unavailable on the new cookie. Staleness is therefore
+  // measured from the recapture, not from the first failure after it: the
+  // stale incident stays the tile's until the sweep has gone the same 3 h
+  // without a full pass counted from max(last good pass, live proof); past
+  // that it is a new problem and pages. A good pass clears both keys first.
   const liveMs = Date.parse(String(staleness?.sessionLiveSinceWitnessAt || ""));
   if (!Number.isFinite(liveMs)) return true;
-  const attemptMs = Date.parse(String(staleness?.latestAttemptAt || ""));
-  return !(Number.isFinite(attemptMs) && attemptMs > liveMs);
+  const lastMs = Date.parse(String(staleness?.lastAt || ""));
+  const fromMs = Number.isFinite(lastMs) ? Math.max(lastMs, liveMs) : liveMs;
+  return Number(now) - fromMs <= staleAfterMs;
 }
 
 /** A legacy-only line: posted as before while the switch is off, silent once on. */
@@ -106,6 +118,7 @@ export async function handleBookingSweep(req, res, {
   sweep = runBookingSweep,
   staleness: readStaleness = sweepStaleness,
   confirmExpired = isSessionActuallyExpired,
+  clock = Date.now,
 } = {}) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
@@ -140,7 +153,7 @@ export async function handleBookingSweep(req, res, {
   // Staleness check runs BEFORE the sweep so a run that is itself about to fail
   // still surfaces that nothing has succeeded recently.
   let staleness = await readStaleness();
-  if (staleness.stale && kvConfigured() && !staleOwnedBySessionTile(staleness)) {
+  if (staleness.stale && kvConfigured() && !staleOwnedBySessionTile(staleness, { now: clock() })) {
     const since = staleness.lastAt ? `since ${staleness.lastAt}` : "ever";
     await critical("sweep-stale", undefined, `:rotating_light: Booking sweep has not completed a full pass ${since}. Candidates who book are not being removed from sequences. Check monitor.raydar.xyz/api/seq/booking-sweep.`, STALE_KEY);
   }

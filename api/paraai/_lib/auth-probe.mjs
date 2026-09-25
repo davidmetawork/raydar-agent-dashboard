@@ -33,7 +33,7 @@
 //   helpers and never logs or stores the cookie value anywhere.
 
 import { notifySlack, trpcGetRaw } from "./core.mjs";
-import { pageNotify, systemHealthOwns } from "../../_lib/notify.mjs";
+import { notifySlotKey, pageNotify, systemHealthOwns } from "../../_lib/notify.mjs";
 import { kv } from "./store.mjs";
 
 export const AUTH_FLAG_KEY = "auth:paraform:down";
@@ -355,16 +355,26 @@ export async function runAuthProbeTick(
   // ops endpoint behave exactly as before.
   const switchOn = healthOwnsSession();
   const post = switchOn ? async () => false : notifyImpl;
-  // The write-layer page, keyed per episode (`since`) so overlapping ticks
-  // (cron + Fly) send it once. pageNotify releases the slot when a send
-  // fails, so a slot found held means another tick's send landed OR is still
-  // in flight and may yet fail (then it releases the slot and records
-  // delivered:false). A held slot is therefore NOT counted as delivered: the
-  // caller leaves record.alert alone and a later tick retries, where the held
-  // slot dedupes it (PR 230 review 3). Answers "sent" | "held" | "failed".
-  const pageWriteOpen = async (text, episodeSince) => {
-    const result = await pageImpl(text, { key: `paraform-auth-write-open:${episodeSince}` })
-      .catch(() => null);
+  // The write-layer page, keyed per episode so overlapping ticks (cron, Fly,
+  // a mutation 401's report tick) send it once. The key is the value of the
+  // atomic open slot (AUTH_OPEN_ALERT_KEY, the NX winner's openedAt stamp),
+  // never a tick's local `since`: two ticks that both found no flag each
+  // took their own `since` and paged under two keys (PR 230 review 4). The
+  // slot lives as long as the open slot (30 d, refreshed each tick below),
+  // not pageNotify's 24 h default, so a lost delivered:true record cannot
+  // re-page a weekend-long outage when a 24 h slot lapses (review 4).
+  // pageNotify releases the slot when a send fails, so a slot found held
+  // means another tick's send landed OR is still in flight and may yet fail
+  // (then it releases the slot and records delivered:false). A held slot is
+  // therefore NOT counted as delivered: the caller leaves record.alert alone
+  // and a later tick retries, where the held slot dedupes it (review 3).
+  // Answers "sent" | "held" | "failed".
+  const writeOpenKey = (episodeStamp) => `paraform-auth-write-open:${episodeStamp}`;
+  const pageWriteOpen = async (text, episodeStamp) => {
+    const result = await pageImpl(text, {
+      key: writeOpenKey(episodeStamp),
+      ttlSeconds: OPEN_ALERT_TTL_SECONDS,
+    }).catch(() => null);
     if (result?.ok !== true) return "failed";
     return result.skipped === "duplicate" ? "held" : "sent";
   };
@@ -525,7 +535,7 @@ export async function runAuthProbeTick(
     let delivered;
     let via;
     if (switchOn && layer === "write") {
-      delivered = (await pageWriteOpen(openText, since)) === "sent";
+      delivered = (await pageWriteOpen(openText, at)) === "sent";
       via = "notify";
     } else {
       delivered = (await post(openText).catch(() => false)) === true;
@@ -558,6 +568,17 @@ export async function runAuthProbeTick(
     await kvImpl([
       "SET", AUTH_OPEN_ALERT_KEY, openedAtRaw, "XX", "EX", OPEN_ALERT_TTL_SECONDS,
     ]);
+    // The write-layer #notify slot for this episode rides the same refresh
+    // (same KV, XX only), so it dedupes for the whole episode however long.
+    if (switchOn) {
+      const pageSlot = notifySlotKey(writeOpenKey(openedAtRaw));
+      const pageSlotRaw = await Promise.resolve(kvImpl(["GET", pageSlot])).catch(() => null);
+      if (pageSlotRaw != null) {
+        await Promise.resolve(kvImpl([
+          "SET", pageSlot, pageSlotRaw, "XX", "EX", OPEN_ALERT_TTL_SECONDS,
+        ])).catch(() => null);
+      }
+    }
   }
   // Switch on, write layer: the one #notify page must actually land. The
   // open slot above is 30 days and reminders are silent once the switch is
@@ -572,7 +593,7 @@ export async function runAuthProbeTick(
     && record.alert?.layer !== "read"
     && !(record.alert?.via === "notify" && record.alert?.delivered === true)
   ) {
-    const outcome = await pageWriteOpen(authOpenAlertText(probe, true), since);
+    const outcome = await pageWriteOpen(authOpenAlertText(probe, true), openedAtRaw ?? since);
     if (outcome === "held") {
       // Another tick holds this episode's slot: its own record write says
       // whether it landed. Writing delivered:true here could overwrite its

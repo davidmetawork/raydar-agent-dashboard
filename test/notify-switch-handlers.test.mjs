@@ -73,7 +73,7 @@ globalThis.fetch = async (input, init = {}) => {
 test.after(() => { globalThis.fetch = realFetch; });
 
 const { handleBookingSweep, staleOwnedBySessionTile } = await import("../api/seq/booking-sweep.mjs");
-const { K, runBookingSweep, clearSessionExpiredWitness } = await import("../api/seq/_lib/booking-stop.mjs");
+const { K, runBookingSweep, clearSessionExpiredWitness, SWEEP_STALE_AFTER_MS } = await import("../api/seq/_lib/booking-stop.mjs");
 const n8nWatchdog = (await import("../api/ops/n8n-watchdog.mjs")).default;
 const { warnOnCronRejection } = await import("../api/seq/guardian.mjs");
 const { sendSlack, alertOnTransitions } = await import("../api/health/_lib/alert.mjs");
@@ -335,6 +335,7 @@ test("outreach switch off: a failed post releases the 6h slot so the next failur
 const ON = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" };
 const WITNESS_AT = "2026-09-25T01:00:00.000Z";
 const never = () => new Promise(() => {}); // a live read stuck on the throttle ladder
+const tick = () => new Promise((r) => setTimeout(r, 5));
 const healthReq = () => ({ method: "GET", url: "/api/seq/health", headers: {} });
 
 test("the health engine reads the sweep's witness key itself and hands it to the tile", () => {
@@ -497,7 +498,7 @@ test("R3 refuter: dead cookie then recapture pages #notify once (tile only), not
   assert.equal(store.has(K.sessionLiveProof), false);
 });
 
-test("R3: recapture, then the next pass fails for a non-auth reason -> the stale page fires once, on the pass after", async () => {
+test("R3/R4: recapture, then passes keep failing for a non-auth reason -> the stale page fires once, 3 h after the recapture", async () => {
   reset();
   switchOn();
   await handleBookingSweep(cronReq(), fakeRes(), {
@@ -509,27 +510,82 @@ test("R3: recapture, then the next pass fails for a non-auth reason -> the stale
   await handleSequenceHealth(healthReq(), fakeRes(), {
     healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: new Date().toISOString() }),
   });
+  const proofMs = Date.parse(JSON.parse(store.get(K.sessionLiveProof)).at);
   await new Promise((r) => setTimeout(r, 5));
-  const brokenPass = {
+  const brokenPass = (offsetMs = 0) => ({
     sweep: async () => ({ ok: false, error: "membership_snapshot_unavailable", pauseErrors: [], decisions: [] }),
     confirmExpired: async () => { throw new Error("must not confirm"); },
-  };
-  // Pass A: no attempt since the recapture yet, so the stale incident is still the tile's.
-  await handleBookingSweep(cronReq(), fakeRes(), brokenPass);
-  assert.equal(stalePosts().length, 0);
-  // Pass B: pass A (made after the live proof) failed too: a new problem, paged once.
+    clock: () => Date.now() + offsetMs,
+  });
+  // Passes right after the recapture fail too (review 4: a starved membership
+  // snapshot is the same outage), so the stale incident is still the tile's.
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass());
   await new Promise((r) => setTimeout(r, 5));
-  await handleBookingSweep(cronReq(), fakeRes(), brokenPass);
-  await handleBookingSweep(cronReq(), fakeRes(), brokenPass);
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass());
+  assert.equal(stalePosts().length, 0, "post-recapture failures inside 3 h stay the tile's");
+  // Just inside 3 h of the recapture: still the tile's.
+  const within = proofMs + SWEEP_STALE_AFTER_MS - 60_000 - Date.now();
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass(within));
+  assert.equal(stalePosts().length, 0);
+  // Past 3 h since the recapture with no full pass: a new problem, paged once.
+  const past = proofMs + SWEEP_STALE_AFTER_MS + 60_000 - Date.now();
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass(past));
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass(past + 600_000));
   assert.equal(stalePosts().length, 1, "paged once, not per pass");
   assert.equal(stalePosts()[0].channel, "C_NOTIFY");
 });
 
-test("R3: staleOwnedBySessionTile yields only after a sweep attempt made since the live proof", () => {
+test("R4: staleOwnedBySessionTile measures staleness from the recapture, not from the first failure after it", () => {
   const witnessed = { sessionExpiredConfirmedAt: "2026-09-25T01:00:00.000Z", sessionLiveSinceWitnessAt: "2026-09-25T02:00:00.000Z" };
-  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T01:30:00.000Z" }), { switchOn: true }), true);
-  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T02:10:00.000Z" }), { switchOn: true }), false);
-  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: null }), { switchOn: true }), true);
+  const at = (iso) => ({ switchOn: true, now: Date.parse(iso) });
+  // Failed attempts before or after the proof do not matter; the clock does.
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T01:30:00.000Z" }), at("2026-09-25T02:10:00.000Z")), true);
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T02:10:00.000Z" }), at("2026-09-25T02:20:00.000Z")), true);
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T04:50:00.000Z" }), at("2026-09-25T04:59:00.000Z")), true);
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T05:00:00.000Z" }), at("2026-09-25T05:01:00.000Z")), false);
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: null }), at("2026-09-25T05:01:00.000Z")), false);
+  // A last good pass newer than the proof counts from itself (max of the two).
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, lastAt: "2026-09-25T03:00:00.000Z" }), at("2026-09-25T05:30:00.000Z")), true);
+  // Without a proof the witness owns it outright, whatever the clock says.
+  assert.equal(staleOwnedBySessionTile(STALE({ sessionExpiredConfirmedAt: "2026-09-25T01:00:00.000Z" }), at("2026-09-26T01:00:00.000Z")), true);
+});
+
+// R4 refuter A (regression). A dead cookie that lasts > 3 h (stale) also
+// starves the membership refresh (cron :x1, it walks Paraform), so the
+// snapshot is past its 1 h max age when David recaptures. Recapture lands
+// between :x1 and :x8: the health tick records the live proof, then the :x8
+// pass runs BEFORE the next refresh and fails membership_snapshot_unavailable
+// (the same outage). The :x18 pass (fresh snapshot, will succeed) must not
+// page "has not completed a full pass since <outage start>" on recovery.
+test("R4 refuter A: recapture before the membership refresh does not re-page the dead-cookie incident as 'sweep stale'", async () => {
+  reset();
+  switchOn();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    staleness: async () => ({ stale: false }),
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  assert.equal(stalePosts().length, 0);
+  await tick();
+  await handleSequenceHealth(healthReq(), fakeRes(), {
+    healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: new Date().toISOString() }),
+  });
+  await tick();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => ({ ok: false, error: "membership_snapshot_unavailable", membershipSnapshotError: "invalid", pauseErrors: [], decisions: [] }),
+    confirmExpired: async () => { throw new Error("must not confirm"); },
+  });
+  await tick();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => ({ ok: true, apply: true, pauseErrors: [], decisions: [], paused: 0 }),
+    confirmExpired: async () => { throw new Error("no"); },
+  });
+  assert.equal(stalePosts().length, 0, `recovery re-paged the dead-cookie incident: ${JSON.stringify(stalePosts())}`);
+  assert.deepEqual(posts, [], "the tile's page was the one page");
 });
 
 test("R3: seqHealth reads a capped live-read timeout as UNKNOWN, not DOWN", () => {
