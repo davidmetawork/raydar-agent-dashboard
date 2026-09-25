@@ -53,6 +53,7 @@ import {
   markExpiredRun,
   readExpiredLastRun,
 } from "./expired-store.mjs";
+import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 
 const bool = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -207,11 +208,17 @@ export async function runExpiredTick({
   ignoreArmingPin = false,
   force = false,
   env = process.env,
+  pauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
 } = {}) {
   const config = expiredConfig(env);
   if (!expiredDetectionEnabled(config)) {
     return { ok: true, ran: false, reason: config.approved ? "store_not_configured" : "not_approved" };
   }
+  // Shares the interview-request lanes' brake with candidate outreach
+  // (2026-09-25). Unreadable fails closed, and the brake stops the backfill
+  // and manual tick too, since they spend the same writes.
+  const lanePause = await pauseState().catch(() => ({ paused: true }));
+  if (lanePause?.paused) return { ok: true, ran: false, reason: "request_lanes_paused" };
 
   const slot = await acquireExpiredPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!slot && mode === "organic") return { ok: true, ran: false, reason: "poll_not_due" };

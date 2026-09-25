@@ -5,6 +5,11 @@
 export const PARAFORM_BACKGROUND_PAUSE_KEYS = Object.freeze({
   paraaiWorker: "ops:paraform-background-pause:v1:paraai-worker",
   dashboardReaders: "ops:paraform-background-pause:v1:dashboard-readers",
+  // The two Para AI interview-request lanes (candidate outreach email and
+  // expired-match actioning). David turned them back on 2026-09-25 while the
+  // rest of the worker stays under `paraaiWorker`, so they answer to this key
+  // instead, in both worker states.
+  paraaiRequestLanes: "ops:paraform-background-pause:v1:paraai-request-lanes",
 });
 
 const PAUSE_ID = /^[A-Za-z0-9._:-]{1,128}$/;

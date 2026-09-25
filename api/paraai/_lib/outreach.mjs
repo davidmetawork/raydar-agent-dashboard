@@ -61,6 +61,7 @@ import {
   mailroomReliefConfig,
 } from "./outreach-mailroom.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
+import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import {
   acquireOutreachLock,
   acquireOutreachPollSlot,
@@ -366,6 +367,19 @@ export async function readSubmissionRequestHistory() {
   return rows.map(normalizeSubmissionRequest).filter(
     (request) => request.id && request.candidateUserId && request.roleId,
   );
+}
+
+// requestId -> status for every request Paraform shows with a known status
+// that is no longer open (expired, dismissed, submitted, ...). A row with no
+// status is left out, so only positive evidence closes a request.
+export function closedRequestStatuses(history) {
+  const closed = new Map();
+  for (const request of history || []) {
+    const id = clean(request?.id);
+    const status = lower(request?.status);
+    if (id && status && !REQUEST_STATUSES.has(status)) closed.set(id, status);
+  }
+  return closed;
 }
 
 export function requestOrdinal(request, history) {
@@ -2116,6 +2130,7 @@ export async function processDueFollowup(
   {
     config = outreachConfig(),
     now = Date.now(),
+    closedRequests = null,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: the halt must close this path on its
@@ -2153,6 +2168,24 @@ export async function processDueFollowup(
         latestMatchId: state.latestMatchId,
       }), state.revision);
       return { action: "canceled", state };
+    }
+    // A nudge only makes sense while its interview request is still open
+    // (2026-09-25). Every follow-up queued when the 2026-09-16 background pause
+    // began was days past a request Paraform had since expired, so resuming
+    // would have chased candidates about roles the hiring manager can no
+    // longer act on. Positive evidence only: Paraform showing the request as no
+    // longer pending cancels the nudge; a request missing from the history
+    // read keeps the old behaviour.
+    const closedStatus = closedRequests?.get(clean(followup.ownerMatchId));
+    if (closedStatus) {
+      state = await saveOutreachState(appendOutreachJournal({
+        ...state,
+        followup: null,
+      }, "followup_canceled_request_closed", {
+        ownerMatchId: followup.ownerMatchId,
+        requestStatus: closedStatus,
+      }), state.revision);
+      return { action: "canceled_request_closed", state };
     }
     if (!state.threadId) {
       const error = new Error("follow-up has no Gmail thread");
@@ -2643,6 +2676,7 @@ export async function handleOutreachFailure(
 export async function runOutreachTick({
   config = outreachConfig(),
   now = Date.now(),
+  pauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
 } = {}) {
   if (!outreachExecutionEnabled(config)) {
     return {
@@ -2651,6 +2685,11 @@ export async function runOutreachTick({
       reason: "outreach_gates_closed",
     };
   }
+  // This lane and expired-match actioning answer to their own brake
+  // (2026-09-25), in both worker states. Unreadable fails closed, like every
+  // other background brake.
+  const lanePause = await pauseState().catch(() => ({ paused: true }));
+  if (lanePause?.paused) return { enabled: true, processed: 0, reason: "request_lanes_paused" };
   const pollToken = await acquireOutreachPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!pollToken) return { enabled: true, processed: 0, reason: "poll_not_due" };
   // Gmail-429 breaker (2026-08-10): while armed, run no Gmail work at all.
@@ -2695,17 +2734,24 @@ export async function runOutreachTick({
     const remaining = Math.max(0, config.batchSize - results.length);
     if (remaining > 0) {
       const refreshedStates = await listOutreachStates();
-      const due = refreshedStates
+      const closedRequests = closedRequestStatuses(history);
+      const isClosed = (state) => closedRequests.has(clean(state.followup.ownerMatchId));
+      const dueAll = refreshedStates
         .filter((state) => (
           state?.followup &&
           finiteDate(state.followup.dueAt) <= now &&
           !candidatesWithNewMatch.has(state.candidateUserId)
         ))
-        .sort((left, right) => finiteDate(left.followup.dueAt) - finiteDate(right.followup.dueAt))
-        .slice(0, remaining);
+        .sort((left, right) => finiteDate(left.followup.dueAt) - finiteDate(right.followup.dueAt));
+      // Cancelling a closed request's nudge sends nothing, so it does not spend
+      // a batch slot that an open request's follow-up could use.
+      const due = [
+        ...dueAll.filter(isClosed),
+        ...dueAll.filter((state) => !isClosed(state)).slice(0, remaining),
+      ];
       for (const state of due) {
         try {
-          const result = await processDueFollowup(state.candidateUserId, { config, now });
+          const result = await processDueFollowup(state.candidateUserId, { config, now, closedRequests });
           results.push({ action: result.action, followup: true });
         } catch (error) {
           await handleOutreachFailure(error, null, { config }).catch(() => {});
