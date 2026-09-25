@@ -429,7 +429,12 @@ const rawRow = (overrides = {}) => ({
 const noReplies = new Map();
 const now = Date.parse("2026-09-25T21:00:00.000Z");
 
-async function evidenceFor(row, { state, search = async () => [], thread = async () => ({ messages: [] }) } = {}) {
+async function evidenceFor(row, {
+  state,
+  search = async () => [],
+  thread = async () => ({ messages: [] }),
+  email = async () => "",
+} = {}) {
   return gatherContactEvidence(normalizeExpiredRow(row), {
     config: armed(),
     replyRecordsByCandidate: noReplies,
@@ -437,6 +442,7 @@ async function evidenceFor(row, { state, search = async () => [], thread = async
     stateImpl: async () => state,
     searchImpl: search,
     threadImpl: thread,
+    emailImpl: email,
   });
 }
 
@@ -471,7 +477,7 @@ test("any message from the candidate anywhere in the mailbox since creation bloc
     state,
     search: async (mailbox, query) => { queries.push([mailbox, query]); return [{ id: "reply-thread" }]; },
   });
-  assert.deepEqual(queries, [["david@raydar.xyz", `from:x@example.test after:${Math.floor(Date.parse(createdIso) / 1000)}`]]);
+  assert.deepEqual(queries, [["david@raydar.xyz", `from:"x@example.test" in:anywhere after:${Math.floor(Date.parse(createdIso) / 1000)}`]]);
   assert.equal(evidence.mailboxReplies, 1);
   const plan = planExpiredRow(normalizeExpiredRow(rawRow()), evidence, { config: armed(), now, claim: null });
   assert.equal(plan.action, "review");
@@ -536,4 +542,47 @@ test("health reports outreach readiness from the request-lanes brake while the w
     }
   }
   assert.deepEqual(providerCalls, [], "health under the pause makes no provider call");
+});
+
+test("a hand-sent reach-out is judged by a mailbox search on the Paraform address, or goes to review", async () => {
+  // Paraform says reached out (not its premark) and Raydar never emailed this
+  // candidate: the address comes from Paraform and the whole mailbox is searched.
+  const lookups = [];
+  const queries = [];
+  const searched = await evidenceFor(rawRow(), {
+    state: null,
+    email: async (candidateUserId) => { lookups.push(candidateUserId); return "hand@example.test"; },
+    search: async (_mailbox, query) => { queries.push(query); return []; },
+  });
+  assert.deepEqual(lookups, ["candidate-x"]);
+  assert.match(queries[0], /^from:"hand@example\.test" in:anywhere after:\d+$/);
+  assert.equal(searched.mailboxReplies, 0);
+  assert.equal(planExpiredRow(normalizeExpiredRow(rawRow()), searched, { config: armed(), now, claim: null }).action, "dismiss");
+
+  // No address anywhere: the search cannot run, so the reason is unproven.
+  const blind = await evidenceFor(rawRow(), { state: null, email: async () => "" });
+  assert.equal(blind.mailboxReplies, null);
+  const plan = planExpiredRow(normalizeExpiredRow(rawRow()), blind, { config: armed(), now, claim: null });
+  assert.equal(plan.action, "review");
+  assert.equal(plan.resolution, "reply_not_observable");
+
+  // A failed Paraform address read holds rather than deciding.
+  const failed = await evidenceFor(rawRow(), {
+    state: null,
+    email: async () => { throw Object.assign(new Error("401"), { code: "AUTH_EXPIRED" }); },
+  });
+  assert.equal(planExpiredRow(normalizeExpiredRow(rawRow()), failed, { config: armed(), now, claim: null }).action, "hold");
+});
+
+test("a paused Para AI matching status raises the matching-paused alert; an active one does not", async () => {
+  for (const [matchingPaused, expected] of [[true, 1], [false, 0], [null, 0]]) {
+    const alerts = [];
+    await runRequestLanes({
+      outreachImpl: async () => ({ enabled: true, processed: 0 }),
+      expiredImpl: async () => ({ ok: true, ran: true, matchingPaused, expiredCount: 3 }),
+      alertImpl: async () => true,
+      pausedAlertImpl: async (expired) => { alerts.push(expired.expiredCount); return true; },
+    });
+    assert.equal(alerts.length, expected, String(matchingPaused));
+  }
 });

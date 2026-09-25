@@ -338,15 +338,31 @@ export async function runAutomationCycle({
   };
 }
 
+// Three unresolved expired matches pause new Para AI matches. The expired lane
+// clears only the ones it can truthfully explain, so the rest need a person,
+// and review items no longer post anywhere. One line a day while paused.
+async function alertMatchingPaused(expired) {
+  if (!(await takeAlertSlot("expired-matching-paused", 24 * 3600).catch(() => false))) return false;
+  await notifySlack(
+    `🚨 Para AI matching is paused (${expired?.paraAi?.matchingStatus || "not active"}): Paraform shows `
+    + `${expired?.expiredCount ?? "several"} unresolved expired matches. The automatic lane only clears `
+    + "ones with no reply; add a reason to the rest on paraform.com/home.",
+  ).catch(() => {});
+  return true;
+}
+
 // Expired-match actioning, isolated like outreach: a failure here never stops
 // any other lane. It always runs AFTER outreach, so a request emailed this
 // tick is already marked reached out before its expiry is judged.
 async function runExpiredLane({
   expiredImpl = runExpiredTick,
   alertImpl = alertWorkerFailure,
+  pausedAlertImpl = alertMatchingPaused,
 } = {}) {
   try {
-    return { expired: await expiredImpl(), expiredError: null };
+    const expired = await expiredImpl();
+    if (expired?.matchingPaused === true) await pausedAlertImpl(expired).catch(() => {});
+    return { expired, expiredError: null };
   } catch (error) {
     await alertImpl(error, {
       lane: "paraai_expired",
@@ -372,6 +388,7 @@ export async function runRequestLanes({
   outreachImpl = runOutreachTick,
   expiredImpl = runExpiredTick,
   alertImpl = alertWorkerFailure,
+  pausedAlertImpl = alertMatchingPaused,
 } = {}) {
   let outreach = null;
   let outreachError = null;
@@ -388,7 +405,7 @@ export async function runRequestLanes({
       message: (code) => `🚨 Para AI outreach worker failed (${code}). Direct-submit queue processing continued.`,
     });
   }
-  const { expired, expiredError } = await runExpiredLane({ expiredImpl, alertImpl });
+  const { expired, expiredError } = await runExpiredLane({ expiredImpl, alertImpl, pausedAlertImpl });
   return { outreach, outreachError, expired, expiredError };
 }
 

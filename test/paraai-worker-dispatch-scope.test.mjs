@@ -40,11 +40,11 @@ test("expired-match actioning is dispatched again, after outreach, in both worke
   // Paused worker: the request-lanes helper runs the same two lanes in the
   // same order (behaviour pinned in paraai-request-lanes.test.mjs).
   const helperOutreach = source.indexOf("outreach = await outreachImpl();");
-  const helperExpired = source.indexOf("await runExpiredLane({ expiredImpl, alertImpl })");
+  const helperExpired = source.indexOf("await runExpiredLane({ expiredImpl, alertImpl, pausedAlertImpl })");
   assert.ok(helperOutreach > 0 && helperExpired > helperOutreach);
   assert.match(
     source,
-    /expired: await expiredImpl\(\)[\s\S]*?slot: "expired-worker-failed"/,
+    /const expired = await expiredImpl\(\);[\s\S]*?slot: "expired-worker-failed"/,
     "the expired lane's failure must alert on its own slot",
   );
 });
