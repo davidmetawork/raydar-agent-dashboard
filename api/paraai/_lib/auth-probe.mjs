@@ -357,12 +357,16 @@ export async function runAuthProbeTick(
   const post = switchOn ? async () => false : notifyImpl;
   // The write-layer page, keyed per episode (`since`) so overlapping ticks
   // (cron + Fly) send it once. pageNotify releases the slot when a send
-  // fails, so a slot found held means a send landed (or is landing): it
-  // answers ok:true, skipped:"duplicate", and counts as delivered here.
+  // fails, so a slot found held means another tick's send landed OR is still
+  // in flight and may yet fail (then it releases the slot and records
+  // delivered:false). A held slot is therefore NOT counted as delivered: the
+  // caller leaves record.alert alone and a later tick retries, where the held
+  // slot dedupes it (PR 230 review 3). Answers "sent" | "held" | "failed".
   const pageWriteOpen = async (text, episodeSince) => {
     const result = await pageImpl(text, { key: `paraform-auth-write-open:${episodeSince}` })
       .catch(() => null);
-    return result?.ok === true;
+    if (result?.ok !== true) return "failed";
+    return result.skipped === "duplicate" ? "held" : "sent";
   };
   const observed = await probeImpl();
   const writeFailure = parse(await kvImpl(["GET", AUTH_WRITE_FAILURE_KEY]));
@@ -521,7 +525,7 @@ export async function runAuthProbeTick(
     let delivered;
     let via;
     if (switchOn && layer === "write") {
-      delivered = await pageWriteOpen(openText, since);
+      delivered = (await pageWriteOpen(openText, since)) === "sent";
       via = "notify";
     } else {
       delivered = (await post(openText).catch(() => false)) === true;
@@ -568,7 +572,14 @@ export async function runAuthProbeTick(
     && record.alert?.layer !== "read"
     && !(record.alert?.via === "notify" && record.alert?.delivered === true)
   ) {
-    const delivered = await pageWriteOpen(authOpenAlertText(probe, true), since);
+    const outcome = await pageWriteOpen(authOpenAlertText(probe, true), since);
+    if (outcome === "held") {
+      // Another tick holds this episode's slot: its own record write says
+      // whether it landed. Writing delivered:true here could overwrite its
+      // delivered:false and stop the retries for good.
+      return { status: "down", down: true, alertRetried: true, alertDelivered: false, alertPending: true };
+    }
+    const delivered = outcome === "sent";
     record.alert = {
       openedAt: record.alert?.openedAt || at,
       delivered,

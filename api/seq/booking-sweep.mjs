@@ -45,7 +45,10 @@ export const config = { maxDuration: 300 };
 //     sweep's confirmed-expiry witness stands (System Health's
 //     paraform-session tile is DOWN on exactly that witness, so it pages; the
 //     health engine reads the witness key from KV itself, so a timed-out
-//     seq/paraai health probe cannot blind the tile, 2026-09-25 review);
+//     seq/paraai health probe cannot blind the tile, 2026-09-25 review), and
+//     after a recapture until a sweep attempt made since has failed too (only
+//     the sweep retires the witness; seq health records a live proof beside
+//     it, so a recovery never re-pages the dead-cookie incident, review 3);
 //   - booked leads it failed to pause (slot cleared by a clean pass).
 // No-cookie and AUTH_EXPIRED are left to System Health's paraform-session
 // tile, and the per-pass failure lines (no Calendly, zero leads, budget,
@@ -65,7 +68,16 @@ const PAUSE_ERRORS_KEY = "booking-sweep-pause-errors";
  */
 export function staleOwnedBySessionTile(staleness, { switchOn = systemHealthOwns() } = {}) {
   if (!switchOn) return false;
-  return Number.isFinite(Date.parse(String(staleness?.sessionExpiredConfirmedAt || "")));
+  if (!Number.isFinite(Date.parse(String(staleness?.sessionExpiredConfirmedAt || "")))) return false;
+  // Recapture (PR 230 review 3): once seq health has seen a live read after
+  // the witness, the tile yields, but the failed attempts that make this
+  // sweep stale are still the incident the tile already paged. The stale page
+  // stays the tile's until a sweep attempt made AFTER that live read has
+  // failed too (a new problem: page it). A good pass clears both keys first.
+  const liveMs = Date.parse(String(staleness?.sessionLiveSinceWitnessAt || ""));
+  if (!Number.isFinite(liveMs)) return true;
+  const attemptMs = Date.parse(String(staleness?.latestAttemptAt || ""));
+  return !(Number.isFinite(attemptMs) && attemptMs > liveMs);
 }
 
 /** A legacy-only line: posted as before while the switch is off, silent once on. */
@@ -268,8 +280,8 @@ export async function handleBookingSweep(req, res, {
       return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform rate-limited this pass; session verified live. Next run retries.", ranAt: new Date().toISOString() });
     }
     if (expired) {
-      // The paraform-session tile reads this witness from KV each tick;
-      // seq health clears it on a later live read (2026-09-25).
+      // The paraform-session tile reads this witness from KV each tick and
+      // yields to a live read seq health records after it (2026-09-25).
       await recordSessionExpiredWitness().catch(() => {});
     }
     if (expired) {

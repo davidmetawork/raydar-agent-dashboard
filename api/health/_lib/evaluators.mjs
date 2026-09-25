@@ -103,7 +103,10 @@ export function webviewStatus({ body, status }) {
  * both health endpoints ride Paraform's throttle ladder on a dead cookie) or
  * from seq health's bookingStop field. Null when a live seq read made AFTER
  * the witness proves the session is back (a recapture whose next sweeps fail
- * for a non-auth reason leaves the witness up; seq health also clears it).
+ * for a non-auth reason leaves the witness up): this tick's read, or the
+ * live proof seq health recorded beside the witness (engine KV read as
+ * `sessionWitness.liveAt`, or bookingStop.sessionLiveSinceWitnessAt), so a
+ * probe that times out after a recapture does not hold the tile DOWN.
  */
 function confirmedExpiryWitness(seq, sessionWitness) {
   const candidates = [sessionWitness?.at, seq?.bookingStop?.sessionExpiredConfirmedAt]
@@ -113,6 +116,10 @@ function confirmedExpiryWitness(seq, sessionWitness) {
   const witnessMs = Math.max(...candidates);
   const liveMs = Date.parse(String(seq?.checkedAt || ""));
   if (String(seq?.paraform || "") === "live" && Number.isFinite(liveMs) && liveMs > witnessMs) return null;
+  const proofs = [sessionWitness?.liveAt, seq?.bookingStop?.sessionLiveSinceWitnessAt]
+    .map((value) => Date.parse(String(value || "")))
+    .filter(Number.isFinite);
+  if (proofs.some((ms) => ms > witnessMs)) return null;
   return new Date(witnessMs).toISOString();
 }
 
@@ -252,6 +259,11 @@ export function seqHealth({ body }) {
     sweepStale: bs.stale,
     latestAttemptError: bs.latestAttemptError || null,
   };
+  // A live read that ran past seq health's cap (switch on only) is not an
+  // answer: UNKNOWN, as the probe timeout it replaced read (PR 230 review 3).
+  if (body.ok === false && body.paraform === "timeout") {
+    return UNK(String(body.detail || "live Paraform read timed out"), metrics);
+  }
   if (body.ok === false) return DOWN(String(body.error || "seq health ok:false"), metrics);
   if (bs.stale === true) {
     return DEG(`booking-stop sweep stale${bs.latestAttemptError ? `: ${bs.latestAttemptError}` : ""}`, metrics);

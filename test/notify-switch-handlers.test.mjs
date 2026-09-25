@@ -73,13 +73,13 @@ globalThis.fetch = async (input, init = {}) => {
 test.after(() => { globalThis.fetch = realFetch; });
 
 const { handleBookingSweep, staleOwnedBySessionTile } = await import("../api/seq/booking-sweep.mjs");
-const { K, runBookingSweep } = await import("../api/seq/_lib/booking-stop.mjs");
+const { K, runBookingSweep, clearSessionExpiredWitness } = await import("../api/seq/_lib/booking-stop.mjs");
 const n8nWatchdog = (await import("../api/ops/n8n-watchdog.mjs")).default;
 const { warnOnCronRejection } = await import("../api/seq/guardian.mjs");
 const { sendSlack, alertOnTransitions } = await import("../api/health/_lib/alert.mjs");
-const { paraformSession } = await import("../api/health/_lib/evaluators.mjs");
+const { paraformSession, seqHealth } = await import("../api/health/_lib/evaluators.mjs");
 const { handleSequenceHealth, SEQ_HEALTH_LIVE_READ_BUDGET_MS } = await import("../api/seq/health.mjs");
-const { SESSION_WITNESS_KEY } = await import("../api/health/_lib/engine.mjs");
+const { SESSION_WITNESS_KEY, SESSION_LIVE_PROOF_KEY } = await import("../api/health/_lib/engine.mjs");
 const { CATALOG } = await import("../api/health/_lib/catalog.mjs");
 const { readFileSync } = await import("node:fs");
 const { pageNotify, systemHealthOwns } = await import("../api/_lib/notify.mjs");
@@ -342,6 +342,8 @@ test("the health engine reads the sweep's witness key itself and hands it to the
   const engineSource = readFileSync(new URL("../api/health/_lib/engine.mjs", import.meta.url), "utf8");
   assert.match(engineSource, /hGet\(SESSION_WITNESS_KEY\)/);
   assert.match(engineSource, /gmailBackoffUntil, sessionWitness,/);
+  assert.equal(SESSION_LIVE_PROOF_KEY, K.sessionLiveProof);
+  assert.match(engineSource, /hGet\(SESSION_LIVE_PROOF_KEY\)/);
 });
 
 test("tile: both health probes timed out (raw null) + the KV witness -> DOWN once the switch is on", () => {
@@ -389,7 +391,7 @@ test("seq health answers inside the probe timeout while the live read is stuck, 
   assert.equal(store.has(K.sessionExpiredWitness), true, "a timeout never clears the witness");
 });
 
-test("seq health: a live read made after the witness clears it; an older cached one does not", async () => {
+test("seq health: a live read made after the witness records a live proof (once); an older cached one does not", async () => {
   reset();
   switchOn();
   store.set(K.sessionExpiredWitness, JSON.stringify({ at: WITNESS_AT }));
@@ -406,8 +408,24 @@ test("seq health: a live read made after the witness clears it; an older cached 
   });
   assert.equal(fresh.body.paraform, "live");
   assert.equal(fresh.body.ok, true);
-  assert.equal(fresh.body.bookingStop.sessionExpiredConfirmedAt, null);
-  assert.equal(store.has(K.sessionExpiredWitness), false, "witness cleared: the stale page is the sweep's again");
+  assert.equal(fresh.body.bookingStop.sessionExpiredConfirmedAt, WITNESS_AT);
+  assert.equal(fresh.body.bookingStop.sessionLiveSinceWitnessAt, "2026-09-25T02:00:00.000Z");
+  assert.equal(store.has(K.sessionExpiredWitness), true, "the witness is the sweep's to retire");
+  assert.deepEqual(JSON.parse(store.get(K.sessionLiveProof)), { at: "2026-09-25T02:00:00.000Z" });
+  assert.notEqual(paraformSession({ results: { "seq-guardian": { raw: fresh.body } }, env: ON }).state, "DOWN");
+  assert.notEqual(
+    paraformSession({ results: { "seq-guardian": { raw: null } }, sessionWitness: { at: WITNESS_AT, liveAt: "2026-09-25T02:00:00.000Z" }, env: ON }).state,
+    "DOWN",
+    "the engine's KV read of the proof makes the tile yield with the probe timed out",
+  );
+
+  // A later tick whose read is slow: the recorded proof still stands, the
+  // first proof is kept, and the answer is not rewritten to expired.
+  const later = fakeRes();
+  await handleSequenceHealth(healthReq(), later, { healthReader: never, liveReadBudgetMs: 50 });
+  assert.equal(later.body.paraform, "timeout");
+  assert.equal(later.body.bookingStop.sessionLiveSinceWitnessAt, "2026-09-25T02:00:00.000Z");
+  assert.deepEqual(JSON.parse(store.get(K.sessionLiveProof)), { at: "2026-09-25T02:00:00.000Z" });
 });
 
 test("sendSlack botTokenFirst without SLACK_BOT_TOKEN fails closed: it never falls back to the webhook", async () => {
@@ -430,4 +448,103 @@ test("sendSlack botTokenFirst without SLACK_BOT_TOKEN fails closed: it never fal
     process.env.SLACK_BOT_TOKEN = savedToken;
     delete process.env.SLACK_WEBHOOK_URL;
   }
+});
+
+// ── round-3 refuter: recapture must not page the same dead-cookie incident twice
+test("R3 refuter: dead cookie then recapture pages #notify once (tile only), not again as 'sweep stale'", async () => {
+  reset();
+  switchOn();
+  // Pass 1: the cookie just died. The previous pass was good, so not stale yet.
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    staleness: async () => ({ stale: false }),
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  assert.ok(store.has(K.sessionExpiredWitness), "witness recorded");
+  // The tile is DOWN on the KV witness: that is the ONE page for this incident.
+  const witness = JSON.parse(store.get(K.sessionExpiredWitness));
+  assert.equal(paraformSession({ results: {}, sessionWitness: witness, env: process.env }).state, "DOWN");
+  // Pass 2: still dead. Real sweepStaleness: stale (last attempt failed) but the witness stands -> no stale page.
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  assert.equal(stalePosts().length, 0, "witness stands: the tile owns it");
+  // David recaptures. The 2-minute health tick hits seq health first; its live read is after the witness.
+  await new Promise((r) => setTimeout(r, 5));
+  const h = fakeRes();
+  await handleSequenceHealth(healthReq(), h, {
+    healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: new Date().toISOString() }),
+  });
+  assert.equal(store.has(K.sessionExpiredWitness), true, "only the sweep retires the witness");
+  assert.ok(store.has(K.sessionLiveProof), "seq health recorded the live proof beside it");
+  assert.equal(h.body.paraform, "live");
+  // The tile yields to the proof even when the next seq probe times out.
+  const tileWitness = { ...JSON.parse(store.get(K.sessionExpiredWitness)), liveAt: JSON.parse(store.get(K.sessionLiveProof)).at };
+  assert.equal(paraformSession({ results: {}, sessionWitness: tileWitness, env: process.env }).state, "UNKNOWN");
+  // Pass 3 (next 10-minute cron): the session is live and this pass will succeed,
+  // but the stale check runs BEFORE the sweep, on the failed attempts of the outage.
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => ({ ok: true, apply: true, pauseErrors: [], decisions: [], paused: 0 }),
+    confirmExpired: async () => { throw new Error("no"); },
+  });
+  assert.equal(stalePosts().length, 0, `recovery re-paged the incident: ${JSON.stringify(stalePosts())}`);
+  assert.deepEqual(posts, [], "the sweep posted nothing: the tile's page was the one page");
+  // (This fixture's pass is not a recordable success; the sweep's good-pass
+  // path calls clearSessionExpiredWitness, which retires both keys.)
+  await clearSessionExpiredWitness();
+  assert.equal(store.has(K.sessionExpiredWitness), false);
+  assert.equal(store.has(K.sessionLiveProof), false);
+});
+
+test("R3: recapture, then the next pass fails for a non-auth reason -> the stale page fires once, on the pass after", async () => {
+  reset();
+  switchOn();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    staleness: async () => ({ stale: false }),
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  await new Promise((r) => setTimeout(r, 5));
+  await handleSequenceHealth(healthReq(), fakeRes(), {
+    healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: new Date().toISOString() }),
+  });
+  await new Promise((r) => setTimeout(r, 5));
+  const brokenPass = {
+    sweep: async () => ({ ok: false, error: "membership_snapshot_unavailable", pauseErrors: [], decisions: [] }),
+    confirmExpired: async () => { throw new Error("must not confirm"); },
+  };
+  // Pass A: no attempt since the recapture yet, so the stale incident is still the tile's.
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass);
+  assert.equal(stalePosts().length, 0);
+  // Pass B: pass A (made after the live proof) failed too: a new problem, paged once.
+  await new Promise((r) => setTimeout(r, 5));
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass);
+  await handleBookingSweep(cronReq(), fakeRes(), brokenPass);
+  assert.equal(stalePosts().length, 1, "paged once, not per pass");
+  assert.equal(stalePosts()[0].channel, "C_NOTIFY");
+});
+
+test("R3: staleOwnedBySessionTile yields only after a sweep attempt made since the live proof", () => {
+  const witnessed = { sessionExpiredConfirmedAt: "2026-09-25T01:00:00.000Z", sessionLiveSinceWitnessAt: "2026-09-25T02:00:00.000Z" };
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T01:30:00.000Z" }), { switchOn: true }), true);
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: "2026-09-25T02:10:00.000Z" }), { switchOn: true }), false);
+  assert.equal(staleOwnedBySessionTile(STALE({ ...witnessed, latestAttemptAt: null }), { switchOn: true }), true);
+});
+
+test("R3: seqHealth reads a capped live-read timeout as UNKNOWN, not DOWN", () => {
+  const v = seqHealth({ body: { ok: false, paraform: "timeout", detail: "live Paraform read took longer than 9s", bookingStop: { stale: false } } });
+  assert.equal(v.state, "UNKNOWN");
+  assert.equal(seqHealth({ body: { ok: false, paraform: "expired", bookingStop: {} } }).state, "DOWN");
+});
+
+test("R3: switch off, seq health does not cap the live read (a slow healthy read still answers live)", async () => {
+  reset();
+  const res = fakeRes();
+  await handleSequenceHealth(healthReq(), res, {
+    healthReader: () => new Promise((r) => setTimeout(() => r({ paraform: "live", sequenceCount: 3, checkedAt: new Date().toISOString() }), 60)),
+    env: {},
+  });
+  assert.equal(res.body.paraform, "live");
+  assert.equal(res.body.ok, true);
 });

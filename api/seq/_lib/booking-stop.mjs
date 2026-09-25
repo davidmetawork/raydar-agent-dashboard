@@ -312,6 +312,11 @@ export const K = {
   // stamps a "running" attempt first, which would hide the witness mid-pass
   // and make System Health's paraform-session tile flap.
   sessionExpiredWitness: "seqguard:session-expired-witness:v1",
+  // The first live Paraform read seq health saw AFTER that witness (a
+  // recapture, or a throttle-induced false witness). Its own key so the
+  // witness is never rewritten or deleted outside the sweep: the sweep's
+  // stale page keys off both (PR 230 review 3, 2026-09-25).
+  sessionLiveProof: "seqguard:session-live-proof:v1",
 };
 
 const SESSION_WITNESS_TTL_SECONDS = 6 * 3600;
@@ -330,6 +335,21 @@ export async function recordSessionExpiredWitness(now = Date.now()) {
 
 export async function clearSessionExpiredWitness() {
   await kv(["DEL", K.sessionExpiredWitness]);
+  await kv(["DEL", K.sessionLiveProof]).catch(() => {});
+}
+
+/**
+ * Seq health only: a live read made after the witness. The witness itself
+ * stays (only the sweep retires it), so the sweep can tell "session back,
+ * no pass tried since" (the stale incident is still the one the tile paged)
+ * from "session back and a later pass failed too" (a new problem, page it).
+ */
+export async function recordSessionLiveProof(checkedAt) {
+  const ms = Date.parse(String(checkedAt || ""));
+  if (!Number.isFinite(ms)) return null;
+  const at = new Date(ms).toISOString();
+  await kvSet(K.sessionLiveProof, { at }, SESSION_WITNESS_TTL_SECONDS);
+  return at;
 }
 
 /**
@@ -1973,6 +1993,7 @@ export async function sweepStaleness(now = Date.now(), {
     classificationReceipt,
     membershipSnapshot,
     sessionWitness,
+    sessionLiveProof,
   ] = await Promise.all([
     read(K.lastSweep),
     read(K.lastAttempt),
@@ -1980,7 +2001,10 @@ export async function sweepStaleness(now = Date.now(), {
     read(K.scopeClassification),
     snapshotHealthLoader({ read, readMany, now }),
     Promise.resolve(read(K.sessionExpiredWitness)).catch(() => null),
+    Promise.resolve(read(K.sessionLiveProof)).catch(() => null),
   ]);
+  const witnessAtMs = Date.parse(String(sessionWitness?.at || ""));
+  const liveProofAtMs = Date.parse(String(sessionLiveProof?.at || ""));
   const classificationAtMs = Date.parse(
     String(classificationReceipt?.at || ""),
   );
@@ -2043,8 +2067,13 @@ export async function sweepStaleness(now = Date.now(), {
         ? attempt.error
         : null,
     sessionExpiredConfirmedAt:
-      Number.isFinite(Date.parse(String(sessionWitness?.at || "")))
-        ? new Date(Date.parse(sessionWitness.at)).toISOString()
+      Number.isFinite(witnessAtMs)
+        ? new Date(witnessAtMs).toISOString()
+        : null,
+    // Set only when a live read proved the session back AFTER that witness.
+    sessionLiveSinceWitnessAt:
+      Number.isFinite(witnessAtMs) && Number.isFinite(liveProofAtMs) && liveProofAtMs > witnessAtMs
+        ? new Date(liveProofAtMs).toISOString()
         : null,
     latestAttemptBookingStopPolicy:
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA

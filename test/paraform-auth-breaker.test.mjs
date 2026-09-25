@@ -904,6 +904,34 @@ test("#notify switch on: a WRITE-layer page that fails to send is retried on the
   assert.deepEqual(notify.messages, [], "the legacy channel is untouched");
 });
 
+test("#notify switch on: a tick that finds the episode slot HELD by an in-flight send does not mark it delivered (review 3)", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const page = pageRecorder();
+  const keys = [];
+  const pageImpl = async (text, opts = {}) => { keys.push(opts.key); return page.pageImpl(text, opts); };
+  const deps = { probeImpl: writeDownProbe, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl };
+  page.setOk(false);
+  await runAuthProbeTick({ now: NOW }, deps); // opens; the send fails, the slot is released
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, false);
+  // Tick A (cron) claims the episode slot and is still sending when tick B (Fly) runs.
+  const key = keys[0];
+  assert.match(key, /^paraform-auth-write-open:/);
+  page.slots.add(key);
+  const before = JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert;
+  const b = await runAuthProbeTick({ now: NOW + 5 * 60_000 }, deps);
+  assert.equal(b.alertDelivered, false, "a held slot is not a delivery");
+  assert.equal(b.alertPending, true);
+  assert.deepEqual(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert, before, "B leaves record.alert for A to write");
+  // A's send fails: pageNotify releases the slot and A records delivered:false.
+  page.slots.delete(key);
+  page.setOk(true);
+  const c = await runAuthProbeTick({ now: NOW + 10 * 60_000 }, deps);
+  assert.equal(c.alertDelivered, true, "the next tick still retries and lands it");
+  assert.equal(page.pages.length, 1);
+  assert.equal(JSON.parse(kv.store.get(AUTH_FLAG_KEY)).alert.delivered, true);
+});
+
 test("#notify switch flipped mid-episode: a write-layer outage posted to the legacy channel reaches #notify once", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
