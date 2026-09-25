@@ -201,3 +201,30 @@ test("Calendly hook: an expired session posts only while the switch is off", asy
   assert.deepEqual(await run(true), []);
   assert.equal((await run(false)).length, 1);
 });
+
+test("the sweep's confirmed-expiry witness has its own key and reaches seq health's staleness view", async () => {
+  const { K, sweepStaleness } = await import("../api/seq/_lib/booking-stop.mjs");
+  assert.equal(K.sessionExpiredWitness, "seqguard:session-expired-witness:v1");
+  const at = "2026-09-25T01:00:00.000Z";
+  const read = async (key) => (key === K.sessionExpiredWitness ? { at } : null);
+  const stale = await sweepStaleness(Date.parse("2026-09-25T02:00:00Z"), {
+    read,
+    readMany: async (keys) => keys.map(() => null),
+    snapshotHealthLoader: async () => ({}),
+  });
+  assert.equal(stale.sessionExpiredConfirmedAt, at);
+  const none = await sweepStaleness(Date.parse("2026-09-25T02:00:00Z"), {
+    read: async () => null,
+    readMany: async (keys) => keys.map(() => null),
+    snapshotHealthLoader: async () => ({}),
+  });
+  assert.equal(none.sessionExpiredConfirmedAt, null);
+});
+
+test("booking sweep: the witness is written on a confirmed expiry and cleared by a good pass or a live session", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../api/seq/booking-sweep.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(expired\) \{[\s\S]{0,200}recordSessionExpiredWitness\(\)/);
+  assert.match(src, /AUTH_EXPIRED" && !expired\) \{[\s\S]{0,200}clearSessionExpiredWitness\(\)/);
+  assert.match(src, /recordSweepAttempt\(\{ status: "success", result \}\);[\s\S]{0,300}clearSessionExpiredWitness\(\)/);
+});

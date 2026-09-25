@@ -26,6 +26,8 @@ import {
   sweepStaleness,
   shouldAlert,
   isSessionActuallyExpired,
+  recordSessionExpiredWitness,
+  clearSessionExpiredWitness,
   kvConfigured,
   calendlyConfigured,
 } from "./_lib/booking-stop.mjs";
@@ -169,7 +171,9 @@ async function handleBookingSweep(req, res) {
       await recordSuccessfulSweep(result);
       await recordSweepAttempt({ status: "success", result });
       staleness = await sweepStaleness();
-      // The stale incident is over: the next one pages again.
+      // The stale incident is over: the next one pages again. A good pass
+      // also proves the Paraform session is live.
+      await clearSessionExpiredWitness().catch(() => {});
       if (systemHealthOwns()) await clearNotifySlot(STALE_KEY).catch(() => {});
     }
 
@@ -235,15 +239,14 @@ async function handleBookingSweep(req, res) {
     // cries wolf about the cookie and the real alarm stops being believed.
     const expired = e?.code === "AUTH_EXPIRED" && (await isSessionActuallyExpired());
     if (e?.code === "AUTH_EXPIRED" && !expired) {
+      // Throttling on a session verified live: any old witness is wrong now.
+      await clearSessionExpiredWitness().catch(() => {});
       return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform rate-limited this pass; session verified live. Next run retries.", ranAt: new Date().toISOString() });
     }
-    if (expired && apply) {
-      // The confirmed-expiry witness the paraform-session tile reads.
-      await recordSweepAttempt({
-        status: "failure",
-        error: sweepErrorLabel(e),
-        sessionExpiredConfirmedAt: new Date().toISOString(),
-      }).catch(() => {});
+    if (expired) {
+      // The confirmed-expiry witness System Health's paraform-session tile
+      // reads through /api/seq/health (additive, 2026-09-25).
+      await recordSessionExpiredWitness().catch(() => {});
     }
     if (expired) {
       await legacyOnly("auth-expired", undefined, ":rotating_light: Booking sweep hit AUTH_EXPIRED — the Paraform session cookie needs recapture. Booked candidates are unprotected until then.");

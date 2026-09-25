@@ -307,7 +307,30 @@ export const K = {
   profile: (cuId) => `seqguard:prof2:${cuId}`,
   alert: (key) => `seqguard:alert:${key}`,
   rotor: "seqguard:rotor",
+  // The booking sweep's confirmed Paraform-session expiry (#notify plan,
+  // 2026-09-25). Its own key, not a field on the attempt record: each pass
+  // stamps a "running" attempt first, which would hide the witness mid-pass
+  // and make System Health's paraform-session tile flap.
+  sessionExpiredWitness: "seqguard:session-expired-witness:v1",
 };
+
+const SESSION_WITNESS_TTL_SECONDS = 6 * 3600;
+
+/**
+ * Written only after isSessionActuallyExpired() proved the session dead with
+ * spaced probes (never on one 401). Cleared by a successful pass, or when a
+ * later AUTH_EXPIRED turns out to be throttling on a live session. The TTL
+ * bounds a witness nobody clears (the sweep stops running).
+ */
+export async function recordSessionExpiredWitness(now = Date.now()) {
+  const at = new Date(now).toISOString();
+  await kvSet(K.sessionExpiredWitness, { at }, SESSION_WITNESS_TTL_SECONDS);
+  return at;
+}
+
+export async function clearSessionExpiredWitness() {
+  await kv(["DEL", K.sessionExpiredWitness]);
+}
 
 /**
  * Publish the immutable generation pointer and the webhook's existing by-email
@@ -1936,12 +1959,14 @@ export async function sweepStaleness(now = Date.now(), {
     leadIndex,
     classificationReceipt,
     membershipSnapshot,
+    sessionWitness,
   ] = await Promise.all([
     read(K.lastSweep),
     read(K.lastAttempt),
     read(K.leadIndex),
     read(K.scopeClassification),
     snapshotHealthLoader({ read, readMany, now }),
+    Promise.resolve(read(K.sessionExpiredWitness)).catch(() => null),
   ]);
   const classificationAtMs = Date.parse(
     String(classificationReceipt?.at || ""),
@@ -2004,10 +2029,9 @@ export async function sweepStaleness(now = Date.now(), {
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
         ? attempt.error
         : null,
-    latestAttemptSessionExpiredConfirmedAt:
-      attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
-      && Number.isFinite(Date.parse(String(attempt?.sessionExpiredConfirmedAt || "")))
-        ? attempt.sessionExpiredConfirmedAt
+    sessionExpiredConfirmedAt:
+      Number.isFinite(Date.parse(String(sessionWitness?.at || "")))
+        ? new Date(Date.parse(sessionWitness.at)).toISOString()
         : null,
     latestAttemptBookingStopPolicy:
       attempt?.schema === BOOKING_STOP_ATTEMPT_SCHEMA
@@ -2188,7 +2212,6 @@ export async function recordSweepAttempt({
   status,
   result = null,
   error = null,
-  sessionExpiredConfirmedAt = null,
 }, now = Date.now()) {
   if (!["failure", "running", "success"].includes(status)) {
     const invalid = new Error("BOOKING_STOP_ATTEMPT_INVALID");
@@ -2216,14 +2239,6 @@ export async function recordSweepAttempt({
       ? { ...result.bookingStopPolicy }
       : null,
   };
-  // The confirmed-expiry witness (#notify plan, 2026-09-25): set only after
-  // isSessionActuallyExpired() proved the Paraform session dead with spaced
-  // probes. Additive and optional: the attempt schema is unchanged, and the
-  // System Health paraform-session tile reads it through /api/seq/health.
-  const witnessMs = Date.parse(String(sessionExpiredConfirmedAt || ""));
-  if (status === "failure" && Number.isFinite(witnessMs)) {
-    payload.sessionExpiredConfirmedAt = new Date(witnessMs).toISOString();
-  }
   await durableKvSetAndReadback(K.lastAttempt, payload, 6 * 3600);
 }
 
