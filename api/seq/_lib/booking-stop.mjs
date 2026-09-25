@@ -63,18 +63,25 @@ import {
   BOOKING_STOP_DEFINITION_MAX_AGE_MS,
   BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS,
   BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
+  BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
+  BOOKING_STOP_PRECHECK_MAX_WAIT_MS,
+  BOOKING_STOP_PRECHECK_POLL_MS,
 } from "./booking-stop-contract.mjs";
 import {
   bookingStopDefinitionCacheRevision as bookingStopDefinitionCacheRevisionFor,
   buildDefinitionCacheDocument,
   definitionAnswerDecidesSelection,
-  definitionAnswersContradicted,
+  buildDefinitionAnswersDocument,
+  definitionAnswersDigestValid,
+  definitionAnswersDurable,
   definitionCacheDecision,
+  definitionCacheFits,
   definitionCacheEntryWellFormed,
   definitionCacheTelemetry,
   definitionMatcherFingerprint,
   mergeDefinitionEntries,
   nextDefinitionEntry,
+  readDefinitionAnswersDocument,
   readDefinitionCacheDocument,
   selectDefinitionRotorReads,
   summarizeDefinitionCacheTelemetry,
@@ -242,6 +249,18 @@ export const kvGet = async (key) => {
   if (raw == null) return null;
   try { return JSON.parse(raw); } catch { return raw; }
 };
+/** GET that THROWS KV_UNAVAILABLE on a transport failure, a non-2xx, or an
+ *  unconfigured store, so "unreachable" is never mistaken for "absent". */
+export const kvGetStrict = async (key) => {
+  if (!kvConfigured()) {
+    const error = new Error("KV_UNAVAILABLE");
+    error.code = "KV_UNAVAILABLE";
+    throw error;
+  }
+  const raw = await kv(["GET", key], { throwOnTransport: true });
+  if (raw == null) return null;
+  try { return JSON.parse(raw); } catch { return raw; }
+};
 export function parseKvMgetResult(raw, expectedCount) {
   if (
     !Number.isInteger(expectedCount)
@@ -326,6 +345,8 @@ export const K = {
   lastAttempt: "seqguard:lastattempt:v3",
   scopeClassification: "seqguard:booking-stop-scope-classification:v1",
   definitionCache: "seqguard:booking-stop-definition-cache:v1",
+  definitionAnswers: (scopeDigest) =>
+    `seqguard:booking-stop-definition-answers:v1:${scopeDigest}`,
   leadIndex: BOOKING_MEMBERSHIP_KEYS.leadIndex,
   membershipCurrent: BOOKING_MEMBERSHIP_KEYS.current,
   membershipCheckpoint: BOOKING_MEMBERSHIP_KEYS.checkpoint,
@@ -1109,6 +1130,27 @@ async function discoverBookingStopScope(telemetry, {
   // Definition cache (see booking-stop-definition-cache.mjs). A null revision
   // disables it: no KV read or write, every definition read, as before.
   definitionCacheRevision = bookingStopDefinitionCacheRevision(),
+  // Where cached answers come from. "cache" (the refresh, scripts): the
+  // mutable cache document, with overlay, rotor and a best-effort write.
+  // "published" (the sweep): ONLY the write-once answers document of
+  // `definitionAnswersDigest`, the digest the current pointer publishes;
+  // it reads no mutable document and writes nothing.
+  definitionSource = "cache",
+  definitionAnswersDigest = null,
+  definitionAnswersReader = (digest) =>
+    kvGetStrict(K.definitionAnswers(digest)),
+  definitionAnswersWriter = async (digest, doc) => {
+    const written = await kv([
+      "SET",
+      K.definitionAnswers(digest),
+      JSON.stringify(doc),
+      "EX",
+      String(BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS),
+    ], { throwOnTransport: true });
+    if (written !== "OK") {
+      throw new Error("BOOKING_STOP_DEFINITION_ANSWERS_WRITE_FAILED");
+    }
+  },
   definitionCacheReader = () => kvGet(K.definitionCache),
   definitionCacheWriter = async (doc) => {
     const written = await kvSet(
@@ -1131,8 +1173,9 @@ async function discoverBookingStopScope(telemetry, {
   // How long a servable cached answer is trusted: MAX_AGE for the refresh,
   // SWEEP_MAX_AGE for the sweep. Capped at SWEEP_MAX_AGE.
   definitionMaxAgeMs = BOOKING_STOP_DEFINITION_MAX_AGE_MS,
-  // Refresh only: fail the load unless the stored document agrees with every
-  // link answer this load used (see persistDefinitions).
+  // Refresh only: publish this load's answers under its scope digest and read
+  // them back; fail the load when that cannot be made durable and the load
+  // served any cached answer (see publishDefinitionAnswers).
   definitionDurableAnswers = false,
 } = {}) {
   const all = await listSequences();
@@ -1213,9 +1256,24 @@ async function discoverBookingStopScope(telemetry, {
   // ── Definition answers. See booking-stop-definition-cache.mjs for the
   // safety argument: a "no link" answer that decides selection is never
   // served from cache, so those rows are read live on every load, as before.
-  const cacheRevision = typeof definitionCacheRevision === "string"
+  const configuredRevision = typeof definitionCacheRevision === "string"
     && definitionCacheRevision
     ? definitionCacheRevision
+    : null;
+  const publishedSource = definitionSource === "published";
+  // A catalog too big for the size caps switches the cache off for this load:
+  // nothing is served (so an older, smaller document is never trusted past
+  // the point it can be rewritten) and nothing is written. Every definition
+  // is then read, exactly as before the cache.
+  const cacheFits = !configuredRevision || definitionCacheFits({
+    revision: configuredRevision,
+    ids: all
+      .filter((sequence) => !excludedIds.has(sequence.id))
+      .map((sequence) => sequence.id),
+    nowMs: Number(clock()),
+  });
+  const cacheRevision = configuredRevision && cacheFits
+    ? configuredRevision
     : null;
   // Never trusted longer than the sweep bound, whatever a caller passes.
   const trustMs = Number.isFinite(definitionMaxAgeMs)
@@ -1223,8 +1281,9 @@ async function discoverBookingStopScope(telemetry, {
     && definitionMaxAgeMs <= BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS
     ? definitionMaxAgeMs
     : BOOKING_STOP_DEFINITION_MAX_AGE_MS;
-  telemetry.state = cacheRevision ? "missing" : "disabled";
-  telemetry.write = cacheRevision ? "not_needed" : "disabled";
+  const offState = configuredRevision ? "oversize" : "disabled";
+  telemetry.state = cacheRevision ? "missing" : offState;
+  telemetry.write = cacheRevision ? "not_needed" : offState;
   const readRequired = typeof readCampaign === "function"
     ? readCampaign
     : async (id) =>
@@ -1239,9 +1298,35 @@ async function discoverBookingStopScope(telemetry, {
       ? (id) => readCampaign(id)
       : async (id, { timeoutMs } = {}) =>
         trpcGetOnce("campaigns.getCampaign", { campaign_id: id }, { timeoutMs });
-  const overlay = definitionOverlay instanceof Map ? definitionOverlay : null;
+  const overlay = !publishedSource && definitionOverlay instanceof Map
+    ? definitionOverlay
+    : null;
   let cached = new Map();
-  if (cacheRevision) {
+  if (cacheRevision && publishedSource) {
+    // The sweep: only the answers that produced the published digest. A
+    // missing, foreign or unreadable document serves nothing, so every
+    // definition is read live (as before the cache). One retry absorbs a
+    // single KV blip.
+    if (definitionAnswersDigestValid(definitionAnswersDigest)) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const parsed = readDefinitionAnswersDocument(
+            await definitionAnswersReader(definitionAnswersDigest),
+            {
+              revision: cacheRevision,
+              digest: definitionAnswersDigest,
+              nowMs: Number(clock()),
+            },
+          );
+          telemetry.state = parsed.state;
+          cached = parsed.entries;
+          break;
+        } catch {
+          telemetry.state = "read_error";
+        }
+      }
+    }
+  } else if (cacheRevision) {
     try {
       const parsed = readDefinitionCacheDocument(
         await definitionCacheReader(),
@@ -1326,18 +1411,14 @@ async function discoverBookingStopScope(telemetry, {
     telemetry.freshReads += 1;
   };
 
-  // Persist every VALID read this load completed, even when a later read
-  // threw: each came from a real read, so the next run needs fewer. Nothing
-  // invalid ever reaches `fresh`. r only ever comes from a real read.
-  //
-  // A refresh (definitionDurableAnswers) must not publish a scope whose link
-  // answers the stored document would contradict for the sweep: that makes
-  // every sweep fail closed on a scope mismatch. So it re-reads the document
-  // after writing, retries once, and otherwise fails the load (the previous
-  // published snapshot stays current, and the sweep keeps agreeing with it).
-  let durabilityFailed = false;
+  // Persist every VALID read this load completed to the refresh's mutable
+  // cache document, even when a later read threw: each came from a real
+  // read, so the next run needs fewer. Nothing invalid ever reaches `fresh`.
+  // r only ever comes from a real read. Best effort: nothing binds to this
+  // document (the sweep serves only the write-once published answers), so a
+  // failed, lost or clobbered write costs re-reads, never a scope mismatch.
   const persistDefinitions = async () => {
-    if (!cacheRevision || !fresh.size) return;
+    if (!cacheRevision || publishedSource || !fresh.size) return;
     const nowMs = Number(clock());
     const catalogIds = new Set(all
       .filter((sequence) => !excludedIds.has(sequence.id))
@@ -1345,29 +1426,23 @@ async function discoverBookingStopScope(telemetry, {
     const retained = (entry, atMs) =>
       atMs - entry.r < BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS;
     const ours = new Map();
-    const answers = new Map();
     for (const sequence of all) {
       if (!catalogIds.has(sequence.id)) continue;
       const prior = cached.get(sequence.id) ?? null;
       const read = fresh.get(sequence.id);
       if (read) {
-        const entry = nextDefinitionEntry({
+        ours.set(sequence.id, nextDefinitionEntry({
           nameSha256: nameHashOf(sequence),
           enabled: sequence.enabled,
           linkBearing: read.linkBearing,
           readAtMs: read.readAtMs,
-        });
-        ours.set(sequence.id, entry);
-        answers.set(sequence.id, entry);
-      } else {
-        if (hits.has(sequence.id)) answers.set(sequence.id, hits.get(sequence.id));
-        if (
-          prior
-          && definitionCacheEntryWellFormed(prior, nowMs)
-          && retained(prior, nowMs)
-        ) {
-          ours.set(sequence.id, prior);
-        }
+        }));
+      } else if (
+        prior
+        && definitionCacheEntryWellFormed(prior, nowMs)
+        && retained(prior, nowMs)
+      ) {
+        ours.set(sequence.id, prior);
       }
     }
     if (overlay) {
@@ -1375,64 +1450,104 @@ async function discoverBookingStopScope(telemetry, {
         overlay.set(id, entry);
       }
     }
-    const readStored = async (atMs) => readDefinitionCacheDocument(
-      await definitionCacheReader(),
-      { revision: cacheRevision, nowMs: atMs },
-    ).entries;
-    const wouldServe = (atMs) => (id, entry) => {
-      const sequence = catalogById.get(id);
-      return Boolean(sequence)
-        && !decidesSelection(sequence, entry.l)
-        && retained(entry, atMs);
-    };
-    const attempts = definitionDurableAnswers ? 2 : 1;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      telemetry.writeAttempts += 1;
-      const writeNowMs = Number(clock());
-      // Merge-on-write: keep a racing writer's newer real reads.
-      let latest = new Map();
-      try {
-        latest = await readStored(writeNowMs);
-      } catch {
-        latest = new Map();
-      }
-      const merged = new Map(
-        [...mergeDefinitionEntries(ours, latest)].filter(([id, entry]) =>
-          catalogIds.has(id) && retained(entry, writeNowMs)),
-      );
-      const doc = buildDefinitionCacheDocument({
+    telemetry.writeAttempts += 1;
+    const writeNowMs = Number(clock());
+    // Merge-on-write: keep a racing writer's newer real reads.
+    let latest = new Map();
+    try {
+      latest = readDefinitionCacheDocument(
+        await definitionCacheReader(),
+        { revision: cacheRevision, nowMs: writeNowMs },
+      ).entries;
+    } catch {
+      latest = new Map();
+    }
+    const merged = new Map(
+      [...mergeDefinitionEntries(ours, latest)].filter(([id, entry]) =>
+        catalogIds.has(id) && retained(entry, writeNowMs)),
+    );
+    const doc = buildDefinitionCacheDocument({
+      revision: cacheRevision,
+      nowMs: writeNowMs,
+      entries: merged,
+    });
+    if (!doc) {
+      telemetry.write = "oversize";
+      return;
+    }
+    try {
+      await definitionCacheWriter(doc);
+      telemetry.write = "written";
+    } catch {
+      telemetry.write = "failed";
+    }
+  };
+
+  // The refresh's published answers: exactly the {n, e, l, r} this load
+  // used, under its scope digest, written and then READ BACK with a reader
+  // that throws on a transport failure. Only a positive read-back holding
+  // every answer counts as durable. When this load served any cached answer
+  // and the answers cannot be made durable, the load fails: the sweep could
+  // not reproduce that answer, so publishing would make it fail closed. A
+  // load that served nothing is published regardless (the sweep then reads
+  // live and agrees, as before the cache).
+  const publishDefinitionAnswers = async (scopeDigest) => {
+    if (!cacheRevision || publishedSource || !definitionDurableAnswers) return;
+    const answers = new Map();
+    for (const sequence of all) {
+      if (excludedIds.has(sequence.id)) continue;
+      const read = fresh.get(sequence.id);
+      const entry = read
+        ? nextDefinitionEntry({
+          nameSha256: nameHashOf(sequence),
+          enabled: sequence.enabled,
+          linkBearing: read.linkBearing,
+          readAtMs: read.readAtMs,
+        })
+        : hits.get(sequence.id);
+      if (entry) answers.set(sequence.id, entry);
+    }
+    let durable = false;
+    for (let attempt = 0; attempt < 2 && !durable; attempt += 1) {
+      const doc = buildDefinitionAnswersDocument({
         revision: cacheRevision,
-        nowMs: writeNowMs,
-        entries: merged,
+        digest: scopeDigest,
+        nowMs: Number(clock()),
+        entries: answers,
       });
-      if (!doc) {
-        telemetry.write = "oversize";
-      } else {
-        try {
-          await definitionCacheWriter(doc);
-          telemetry.write = "written";
-        } catch {
-          telemetry.write = "failed";
-        }
-      }
-      if (!definitionDurableAnswers) return;
+      if (!doc) break;
+      telemetry.writeAttempts += 1;
       try {
-        const checkNowMs = Number(clock());
-        const stored = await readStored(checkNowMs);
-        if (!definitionAnswersContradicted(answers, stored, {
-          wouldServe: wouldServe(checkNowMs),
-        }).length) {
-          telemetry.durable = true;
-          if (telemetry.write === "written") telemetry.write = "verified";
-          return;
-        }
+        await definitionAnswersWriter(scopeDigest, doc);
       } catch {
-        // Unverifiable counts as not durable.
+        // A write can land although its response was lost: the read-back
+        // below is the only judge.
+      }
+      try {
+        durable = definitionAnswersDurable(
+          answers,
+          readDefinitionAnswersDocument(
+            await definitionAnswersReader(scopeDigest),
+            {
+              revision: cacheRevision,
+              digest: scopeDigest,
+              nowMs: Number(clock()),
+            },
+          ),
+        );
+      } catch {
+        durable = false; // unreachable is not durable
       }
     }
+    if (durable) {
+      telemetry.durable = true;
+      return;
+    }
+    if (!hits.size) return; // nothing served: the sweep reads live and agrees
     telemetry.durable = false;
-    telemetry.write = telemetry.write === "oversize" ? "oversize" : "not_durable";
-    durabilityFailed = true;
+    const error = new Error("BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
+    error.code = "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE";
+    throw error;
   };
 
   let loadError = null;
@@ -1460,7 +1575,7 @@ async function discoverBookingStopScope(telemetry, {
     // keeps a still-valid answer: it stops the rotor and the load succeeds.
     // A badly shaped definition is an API break and fails the load, as a
     // required read does.
-    if (cacheRevision && definitionRotor && hits.size) {
+    if (cacheRevision && !publishedSource && definitionRotor && hits.size) {
       const rotorNowMs = Number(clock());
       const rotorDeadline = Math.min(
         rotorNowMs + BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS,
@@ -1506,14 +1621,8 @@ async function discoverBookingStopScope(telemetry, {
   // A persistence fault never replaces the load's own outcome.
   await persistDefinitions().catch(() => {
     telemetry.write = "failed";
-    if (definitionDurableAnswers) durabilityFailed = true;
   });
   if (loadError) throw loadError;
-  if (durabilityFailed) {
-    const error = new Error("BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
-    error.code = "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE";
-    throw error;
-  }
   if (inspected.size + excludedIds.size !== all.length) {
     const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
@@ -1570,6 +1679,7 @@ async function discoverBookingStopScope(telemetry, {
     error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
     throw error;
   }
+  await publishDefinitionAnswers(scopeDigest);
   // Telemetry only, deliberately outside scopeDigest and scopeBinding: the
   // enabled, name-unmatched, not-excluded sequences whose definition carries
   // no scheduling link. They are the only rows where the link answer decides
@@ -1613,7 +1723,8 @@ async function discoverBookingStopScope(telemetry, {
  * drift detection when it publishes). They share an in-memory overlay so the
  * second load reuses the first one's servable reads (selection-deciding rows
  * are read live by both, so drift in them is still detected), only the first
- * load runs the proactive rotor, both require durable answers, and both carry
+ * load runs the proactive rotor, both publish their answers under their scope
+ * digest (read back before the scope can be published), and both carry
  * the invocation's deadline so retries stop inside the build budget. Failed
  * loads report their reads too (error.definitionCache).
  */
@@ -1692,6 +1803,10 @@ export async function runBookingSweep({
   // Separate from membershipCurrentLoader on purpose: that one is the
   // pre-mutation generation re-check and must stay untouched by the precheck.
   membershipCurrentPrecheckLoader = () => kvGet(K.membershipCurrent),
+  // The refresh lock, read only when the pointer is already provably stale,
+  // to tell whether a refresh is in flight and worth waiting for.
+  membershipLockPrecheckLoader = () => kvGet(K.membershipLock),
+  precheckSleep = sleep,
   profileLoader = cachedRelationshipStatus,
   decisionApplier = applyDecisions,
   onDecision = null,
@@ -1786,33 +1901,70 @@ export async function runBookingSweep({
   };
 
   // KV-only precheck. A published pointer already past the snapshot contract
-  // is rejected after the live scope read whatever that read finds, so a
+  // is rejected after the scope read whatever that read finds, so a
   // stale-snapshot pass must not pay Paraform for it (measured 2026-09-25:
   // 01:23-03:52 UTC, every sweep paid the full scope load, then failed
-  // closed). It skips ONLY on positive evidence, re-read once to close the
-  // race with a refresh publishing right now. A missing, malformed or fresh
-  // pointer, or a KV error, takes the normal path unchanged. Waiting longer
-  // for a refresh to publish would gain nothing: this pass evaluates the
-  // snapshot at its own start time `now`, and loadPublishedBookingMembership-
-  // Snapshot rejects any generation built or published after `now`
-  // (snapshot_stale_or_future), with or without the precheck.
-  const readPrecheckCurrent = async () => {
+  // closed). It skips ONLY on positive evidence. A missing, malformed or
+  // fresh pointer, or a KV error, takes the normal path unchanged.
+  //
+  // The loader judges a generation by its builtAt/publishedAt, which is the
+  // refresh's newest MEMBERSHIP FETCH time, set before the refresh's second
+  // scope load, shard writes and publish. So a refresh that is running now
+  // can still write a pointer, after `now`, that this pass would accept.
+  // When the refresh lock shows one in flight (started at or before `now`),
+  // the precheck waits for it with KV reads only, for at most the time the
+  // pre-cache live scope leg used to take; otherwise it re-reads once, which
+  // closes the race with a refresh that has just published.
+  const readPrecheck = async (loader) => {
     try {
-      return await membershipCurrentPrecheckLoader();
+      return await loader();
     } catch {
       return null;
     }
   };
-  if (
-    bookingMembershipCurrentProvablyStale(await readPrecheckCurrent(), now)
-    && bookingMembershipCurrentProvablyStale(await readPrecheckCurrent(), now)
-  ) {
-    result.error = "membership_snapshot_unavailable";
-    result.membershipSnapshotError = "snapshot_stale_before_scope";
-    result.membershipSnapshotPrecheck = true;
-    result.durationMs = Date.now() - startedAt;
-    return result;
+  let precheckCurrent = await readPrecheck(membershipCurrentPrecheckLoader);
+  if (bookingMembershipCurrentProvablyStale(precheckCurrent, now)) {
+    const lock = await readPrecheck(membershipLockPrecheckLoader);
+    const lockAtMs = Date.parse(String(lock?.at || ""));
+    const nowMs = Number(now);
+    const precheckStartMs = Number(clock());
+    const refreshInFlight = lock?.schema === "raydar-booking-membership-lock-v1"
+      && Number.isFinite(lockAtMs)
+      && Number.isFinite(nowMs)
+      && lockAtMs <= nowMs
+      && nowMs - lockAtMs
+        <= BOOKING_MEMBERSHIP_BUILD_BUDGET_MS + BOOKING_STOP_PRECHECK_POLL_MS * 12;
+    const waitUntilMs = refreshInFlight
+      ? Math.min(
+        lockAtMs + BOOKING_MEMBERSHIP_BUILD_BUDGET_MS
+          + BOOKING_STOP_PRECHECK_POLL_MS * 12,
+        precheckStartMs + BOOKING_STOP_PRECHECK_MAX_WAIT_MS,
+        deadline,
+      )
+      : -Infinity;
+    precheckCurrent = await readPrecheck(membershipCurrentPrecheckLoader);
+    while (
+      bookingMembershipCurrentProvablyStale(precheckCurrent, now)
+      && Number(clock()) + BOOKING_STOP_PRECHECK_POLL_MS <= waitUntilMs
+    ) {
+      await precheckSleep(BOOKING_STOP_PRECHECK_POLL_MS);
+      precheckCurrent = await readPrecheck(membershipCurrentPrecheckLoader);
+    }
+    if (bookingMembershipCurrentProvablyStale(precheckCurrent, now)) {
+      result.error = "membership_snapshot_unavailable";
+      result.membershipSnapshotError = "snapshot_stale_before_scope";
+      result.membershipSnapshotPrecheck = true;
+      result.durationMs = Date.now() - startedAt;
+      return result;
+    }
   }
+  // The sweep serves cached definition answers ONLY from the write-once
+  // answers document of the digest this pointer publishes (see
+  // booking-stop-definition-cache.mjs), so a served answer always equals the
+  // published binding's. No usable pointer: every definition is read live.
+  const publishedScopeDigest = typeof precheckCurrent?.scope?.digest === "string"
+    ? precheckCurrent.scope.digest
+    : null;
 
   let scope = null;
   try {
@@ -1821,8 +1973,11 @@ export async function runBookingSweep({
       () => sequenceScopeLoader({
         deadline,
         coldExclusionPolicy,
-        // Never re-read (and so never disagree with) an answer the published
-        // snapshot was built from; selection-deciding rows are read live.
+        // Serve only the answers the published scope was built from (never
+        // the mutable cache document); selection-deciding rows, and any row
+        // whose name or enabled flag moved, are read live.
+        definitionSource: "published",
+        definitionAnswersDigest: publishedScopeDigest,
         definitionMaxAgeMs: BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
       }),
     );

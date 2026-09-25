@@ -26,12 +26,29 @@
 //     fingerprint), so a matcher change forces fresh reads.
 //   - r (read time) only ever comes from a real read. Merging and racing
 //     writers can cost re-reads but can never lengthen a trust window.
-//   - Anything malformed, future-dated, foreign or oversized is a miss.
+//   - Anything malformed, future-dated, foreign or oversized is a miss. A
+//     catalog too big for the caps switches the cache off for that load
+//     (serve nothing, write nothing), so an older under-cap document is
+//     never served past the point it can be rewritten.
+//
+// TWO DOCUMENTS, two readers:
+//   - The mutable cache document is the REFRESH's working memory between
+//     runs (merge-on-write, best effort). Nothing binds to it; losing it or a
+//     racing writer only costs re-reads.
+//   - The published answers document is write-once per scope digest and
+//     holds exactly the answers that produced that digest. The refresh
+//     writes it and reads it back (a transport failure or an absent readback
+//     is NOT durable) before its scope can be published, and the SWEEP
+//     serves only from the document of the digest the current pointer
+//     names. Any document under key D carries D's link answers, so a served
+//     answer can never disagree with the published binding, and no other
+//     writer (a slow sweep, a second refresh) can change what the sweep sees.
 // Entries hold no step text, no PII and no secrets: {n, e, l, r} per id.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
 import {
+  BOOKING_STOP_DEFINITION_ANSWERS_SCHEMA,
   BOOKING_STOP_DEFINITION_CACHE_MAX_BYTES,
   BOOKING_STOP_DEFINITION_CACHE_MAX_ENTRIES,
   BOOKING_STOP_DEFINITION_CACHE_SCHEMA,
@@ -43,6 +60,12 @@ import {
 
 const NAME_HASH = /^[a-f0-9]{64}$/u;
 const FINGERPRINT = /^[a-f0-9]{16,64}$/u;
+const SCOPE_DIGEST = /^[a-f0-9]{64}$/u;
+
+/** True for a string shaped like a booking-stop scope digest. */
+export function definitionAnswersDigestValid(digest) {
+  return typeof digest === "string" && SCOPE_DIGEST.test(digest);
+}
 
 /** sha256 of the given functions' source text: the matcher fingerprint. */
 export function definitionMatcherFingerprint(functions) {
@@ -273,34 +296,108 @@ export function buildDefinitionCacheDocument({ revision, nowMs, entries }) {
 }
 
 /**
- * Which of this load's answers the stored document would contradict for a
- * later reader. A later load re-reads any row whose stored entry is absent,
- * or whose n/e no longer match; it reads a selection-deciding row live anyway.
- * What remains is a stored entry that would be SERVED with a different link
- * answer than this load used and is not a newer real read: that would make
- * the sweep's scope disagree with the scope this refresh publishes.
- * `answers` is Map id -> {n, e, l, r}; `stored` is the parsed entries Map;
- * `wouldServe(id, entry)` says whether a later load would serve that stored
- * entry instead of reading (default: assume it would).
+ * Whether a document holding one entry for every id in `ids` could ever break
+ * a size cap (worst-case entry and digest sizes). When it could, the cache is
+ * off for that load: nothing is served (so an older, smaller document is
+ * never trusted) and nothing is written.
  */
-export function definitionAnswersContradicted(answers, stored, {
-  wouldServe = () => true,
-} = {}) {
-  const contradicted = [];
+export function definitionCacheFits({ revision, ids, nowMs }) {
+  const list = [...(ids || [])];
+  if (list.length > BOOKING_STOP_DEFINITION_CACHE_MAX_ENTRIES) return false;
+  const worst = {
+    n: "f".repeat(64),
+    e: false,
+    l: false,
+    r: Math.max(Number(nowMs) || 0, 9_999_999_999_999),
+  };
+  return buildDefinitionAnswersDocument({
+    revision: String(revision || ""),
+    digest: "f".repeat(64),
+    nowMs: Number.isFinite(nowMs) ? nowMs : 0,
+    entries: new Map(list.map((id) => [id, worst])),
+  }) != null;
+}
+
+/** Build the write-once answers document for one scope digest, or null. */
+export function buildDefinitionAnswersDocument({
+  revision,
+  digest,
+  nowMs,
+  entries,
+}) {
+  if (entries.size > BOOKING_STOP_DEFINITION_CACHE_MAX_ENTRIES) return null;
+  const doc = {
+    schema: BOOKING_STOP_DEFINITION_ANSWERS_SCHEMA,
+    revision,
+    digest,
+    at: new Date(nowMs).toISOString(),
+    entries: Object.fromEntries(
+      [...entries].map(([id, entry]) => [id, plainEntry(entry)]),
+    ),
+  };
+  return Buffer.byteLength(JSON.stringify(doc), "utf8")
+    > BOOKING_STOP_DEFINITION_CACHE_MAX_BYTES
+    ? null
+    : doc;
+}
+
+/**
+ * Parse a published answers document for `digest`. Same result shape and
+ * states as readDefinitionCacheDocument; a document for another digest is
+ * "foreign_revision".
+ */
+export function readDefinitionAnswersDocument(doc, { revision, digest, nowMs }) {
+  const empty = (state) => ({ state, entries: new Map() });
+  if (doc == null) return empty("missing");
+  if (
+    typeof doc !== "object"
+    || Array.isArray(doc)
+    || doc.schema !== BOOKING_STOP_DEFINITION_ANSWERS_SCHEMA
+    || !doc.entries
+    || typeof doc.entries !== "object"
+    || Array.isArray(doc.entries)
+  ) {
+    return empty("invalid");
+  }
+  if (
+    typeof revision !== "string"
+    || !revision
+    || doc.revision !== revision
+    || !definitionAnswersDigestValid(digest)
+    || doc.digest !== digest
+  ) {
+    return empty("foreign_revision");
+  }
+  return readDefinitionCacheDocument(
+    {
+      schema: BOOKING_STOP_DEFINITION_CACHE_SCHEMA,
+      revision,
+      entries: doc.entries,
+    },
+    { revision, nowMs },
+  );
+}
+
+/**
+ * True only when the read-back answers document is warm and holds, for every
+ * answer this load used, the identical {n, e, l, r}. An absent, foreign,
+ * malformed or partial read-back is NOT durable.
+ */
+export function definitionAnswersDurable(answers, parsed) {
+  if (!parsed || parsed.state !== "warm") return false;
   for (const [id, answer] of answers) {
-    const entry = stored.get(id);
+    const entry = parsed.entries.get(id);
     if (
-      entry
-      && entry.n === answer.n
-      && entry.e === answer.e
-      && entry.l !== answer.l
-      && entry.r <= answer.r
-      && wouldServe(id, entry)
+      !entry
+      || entry.n !== answer.n
+      || entry.e !== answer.e
+      || entry.l !== answer.l
+      || entry.r !== answer.r
     ) {
-      contradicted.push(id);
+      return false;
     }
   }
-  return contradicted;
+  return true;
 }
 
 const TELEMETRY_COUNTS = [
@@ -333,9 +430,10 @@ export function definitionCacheTelemetry(value) {
   const out = {
     state: TELEMETRY_STATES.has(value.state) ? value.state : null,
     write: TELEMETRY_WRITES.has(value.write) ? value.write : null,
-    // Refresh only: true when the stored document was read back and agrees
-    // with every link answer the load used; false when it could not be made
-    // to (the load then failed); null when not checked.
+    // Refresh only: true when the published answers document for this
+    // load's scope digest was read back holding every answer the load used;
+    // false when it could not be made durable and the load served a cached
+    // answer (the load then failed); null when not checked or not required.
     durable: typeof value.durable === "boolean" ? value.durable : null,
   };
   for (const key of TELEMETRY_COUNTS) {
@@ -375,8 +473,9 @@ export function summarizeDefinitionCacheTelemetry(loads) {
 }
 
 /**
- * The one alert this cache raises, or null: the document outgrew its size cap,
- * so the cache is off (safe, but no saving).
+ * The one alert this cache raises, or null: the catalog outgrew the cache's
+ * size cap, so the cache is switched off (nothing served, nothing written;
+ * safe, but no saving).
  */
 export function definitionCacheAlert(telemetry) {
   // Accepts one load's telemetry or a summarizeDefinitionCacheTelemetry sum.
@@ -387,7 +486,7 @@ export function definitionCacheAlert(telemetry) {
   if (oversize) {
     return {
       key: "definition-cache-oversize",
-      message: ":warning: Booking protection definition cache exceeded its size cap, so it is not being used and every run reads every sequence definition (safe, but no Paraform read saving). The sequence catalog has grown past the cache's design limit.",
+      message: ":warning: The sequence catalog has grown past the booking protection definition cache's size cap, so the cache is switched off: no cached answer is served or written and every run reads every sequence definition (safe, the same as before the cache, but no Paraform read saving).",
     };
   }
   return null;

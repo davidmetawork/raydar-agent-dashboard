@@ -72,3 +72,17 @@ export const BOOKING_STOP_DEFINITION_ROTOR_PHASE_MS = 20 * 1000;
 export const BOOKING_STOP_DEFINITION_CACHE_MAX_ENTRIES = 1024;
 export const BOOKING_STOP_DEFINITION_CACHE_MAX_BYTES = 512 * 1024;
 export const BOOKING_STOP_DEFINITION_CACHE_TTL_SECONDS = 8 * 60 * 60;
+// The refresh's PUBLISHED answers: one write-once document per scope digest
+// (seqguard:booking-stop-definition-answers:v1:<scopeDigest>) holding the
+// link answers {n, e, l, r} that produced that digest. The sweep serves only
+// from the document of the digest the current pointer publishes, so a served
+// answer always equals the published binding's, whatever the mutable cache
+// document holds. Same caps and TTL as the cache document.
+export const BOOKING_STOP_DEFINITION_ANSWERS_SCHEMA =
+  "raydar-booking-stop-definition-answers-v1";
+// How long the sweep waits (KV reads only) for a refresh that is running
+// right now to publish, when the current pointer is already provably stale.
+// Before the definition cache the sweep's live scope leg took about this
+// long, so a generation published inside it was consumed; waiting keeps that.
+export const BOOKING_STOP_PRECHECK_MAX_WAIT_MS = 90 * 1000;
+export const BOOKING_STOP_PRECHECK_POLL_MS = 5 * 1000;

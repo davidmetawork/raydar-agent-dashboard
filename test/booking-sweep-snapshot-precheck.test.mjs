@@ -13,9 +13,12 @@ import {
   bookingMembershipCurrentProvablyStale,
 } from "../api/seq/_lib/booking-membership-snapshot.mjs";
 import {
+  BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
   BOOKING_MEMBERSHIP_CURRENT_SCHEMA,
   BOOKING_MEMBERSHIP_MAX_AGE_MS,
   BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
+  BOOKING_STOP_PRECHECK_MAX_WAIT_MS,
+  BOOKING_STOP_PRECHECK_POLL_MS,
 } from "../api/seq/_lib/booking-stop-contract.mjs";
 import {
   bookingStopCatalogNameSha256,
@@ -193,4 +196,110 @@ test("dangerClassSequences counts enabled, unnamed, not-excluded no-link rows an
   await assert.rejects(() => recordSuccessfulSweep(sweep, NOW), {
     code: "KV_CORRECTNESS_WRITE_FAILED",
   });
+});
+
+// ─── Review regression: a refresh in flight can publish a generation this
+// pass would accept (its builtAt is its membership-fetch time, BEFORE the
+// pointer write), so a provably stale pointer waits for it instead of exiting.
+
+function waitingHarness({ pointers, lock, clockStart = NOW }) {
+  const calls = [];
+  const queue = [...pointers];
+  let clockMs = clockStart;
+  const scopeArgs = [];
+  return {
+    calls,
+    scopeArgs,
+    run: () => runBookingSweep({
+      apply: true,
+      now: NOW,
+      clock: () => clockMs,
+      membershipCurrentPrecheckLoader: async () => {
+        calls.push("precheck");
+        const next = queue.length > 1 ? queue.shift() : queue[0];
+        return structuredClone(next);
+      },
+      membershipLockPrecheckLoader: async () => {
+        calls.push("lock");
+        return structuredClone(lock);
+      },
+      precheckSleep: async (ms) => {
+        calls.push("sleep");
+        clockMs += ms;
+      },
+      sequenceScopeLoader: async (args) => {
+        calls.push("scope");
+        scopeArgs.push(args);
+        throw new Error("scope unavailable in this test");
+      },
+      membershipSnapshotLoader: async () => { throw new Error("must not run"); },
+      membershipCurrentLoader: async () => { throw new Error("must not run"); },
+      calendlyIndexLoader: async () => { throw new Error("must not run"); },
+      decisionApplier: async () => { throw new Error("must not run"); },
+    }),
+  };
+}
+
+const lockAt = (ms) => ({
+  schema: "raydar-booking-membership-lock-v1",
+  token: "t".repeat(32),
+  at: new Date(ms).toISOString(),
+});
+
+test("review: a stale pointer with a refresh in flight waits for its publish and takes the normal path", async () => {
+  const stale = pointer(2 * BOOKING_MEMBERSHIP_MAX_AGE_MS);
+  const fresh = pointer(30 * 1000, { scope: { digest: "c".repeat(64) } });
+  const h = waitingHarness({
+    pointers: [stale, stale, stale, stale, fresh],
+    lock: lockAt(NOW - 60 * 1000),
+  });
+  const result = await h.run();
+  assert.deepEqual(h.calls, [
+    "precheck", "lock", "precheck", "sleep", "precheck", "sleep", "precheck", "sleep", "precheck", "scope",
+  ]);
+  assert.equal(result.membershipSnapshotPrecheck, false);
+  assert.equal(result.membershipSnapshotError, "live_scope_unavailable");
+  // The sweep serves only the answers of the digest it is about to bind.
+  assert.equal(h.scopeArgs[0].definitionSource, "published");
+  assert.equal(h.scopeArgs[0].definitionAnswersDigest, "c".repeat(64));
+});
+
+test("review: the in-flight wait is bounded by the pre-cache scope-leg time, then the pass skips", async () => {
+  const stale = pointer(2 * BOOKING_MEMBERSHIP_MAX_AGE_MS);
+  const h = waitingHarness({ pointers: [stale], lock: lockAt(NOW - 10 * 1000) });
+  const result = await h.run();
+  const sleeps = h.calls.filter((call) => call === "sleep").length;
+  assert.equal(sleeps, Math.floor(BOOKING_STOP_PRECHECK_MAX_WAIT_MS / BOOKING_STOP_PRECHECK_POLL_MS));
+  assert.equal(h.calls.includes("scope"), false);
+  assert.equal(result.membershipSnapshotError, "snapshot_stale_before_scope");
+  assert.equal(result.membershipSnapshotPrecheck, true);
+});
+
+test("review: no wait for a refresh that started after this pass, or one long past its build budget", async () => {
+  const stale = pointer(2 * BOOKING_MEMBERSHIP_MAX_AGE_MS);
+  for (const lock of [
+    lockAt(NOW + 1000), // its builtAt will be after `now`: the loader rejects it
+    lockAt(NOW - BOOKING_MEMBERSHIP_BUILD_BUDGET_MS - 10 * 60 * 1000),
+    { schema: "other", at: new Date(NOW).toISOString() },
+    null,
+  ]) {
+    const h = waitingHarness({ pointers: [stale], lock });
+    const result = await h.run();
+    assert.deepEqual(h.calls, ["precheck", "lock", "precheck"], JSON.stringify(lock));
+    assert.equal(result.membershipSnapshotError, "snapshot_stale_before_scope");
+  }
+});
+
+test("review: a fresh pointer passes its digest to the scope load; no pointer passes none", async () => {
+  const withDigest = waitingHarness({
+    pointers: [pointer(MIN, { scope: { digest: "b".repeat(64) } })],
+    lock: null,
+  });
+  await withDigest.run();
+  assert.deepEqual(withDigest.calls, ["precheck", "scope"]);
+  assert.equal(withDigest.scopeArgs[0].definitionAnswersDigest, "b".repeat(64));
+  const none = waitingHarness({ pointers: [null], lock: null });
+  await none.run();
+  assert.equal(none.scopeArgs[0].definitionAnswersDigest, null);
+  assert.equal(none.scopeArgs[0].definitionSource, "published");
 });
